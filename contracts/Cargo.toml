@@ -1,0 +1,11 @@
+# Contracts build for wasm32-unknown-unknown, so they live in a workspace of their own.
+[workspace]
+members = ["sdk", "sdk-macros", "examples/counter", "examples/proxy"]
+resolver = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

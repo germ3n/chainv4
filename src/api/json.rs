@@ -7,6 +7,7 @@ use {
     crate::structs::address::Address,
     crate::structs::amount::Amount,
     crate::structs::block::Block,
+    crate::structs::code::Code,
     crate::structs::hex::to_hex,
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
     serde_json::{Value, json},
@@ -72,10 +73,20 @@ pub fn tx(tx: &Tx) -> Value {
             "amount": decimal(amount),
             "data": data.iter().map(argument).collect::<Vec<_>>(),
         }),
-        Tx::Deploy { source } => json!({
-            "type": "deploy",
-            "source": source,
-        }),
+        Tx::Deploy { code } => {
+            let mut value = json!({
+                "type": "deploy",
+                "engine": code.engine().name(),
+                "code_size": code.bytes().len(),
+            });
+
+            // Source is worth showing; a module's bytes are not.
+            if let Code::Lua(source) = code {
+                value["source"] = source.as_str().into();
+            }
+
+            value
+        }
     }
 }
 
@@ -110,8 +121,10 @@ pub fn contract(address: &Address, record: &ContractRecord) -> Value {
     json!({
         "address": address.to_string(),
         "deployer": record.deployer.to_string(),
+        "engine": record.engine.name(),
         "functions": record.functions,
-        "bytecode_size": record.bytecode.len(),
+        "reentrant": record.reentrant,
+        "code_size": record.code.len(),
     })
 }
 

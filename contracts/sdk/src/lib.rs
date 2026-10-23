@@ -1,0 +1,183 @@
+//! Write chainv4 contracts in Rust. A contract is a `cdylib` built for `wasm32-unknown-unknown`;
+//! each function marked `#[export]` can be called by name from transactions and other contracts,
+//! whichever engine runs them.
+//!
+//! ```ignore
+//! use chainv4_sdk::{Value, export, input, output, storage};
+//!
+//! #[export]
+//! fn increment() {
+//!     let by = input().first().and_then(Value::as_i64).unwrap_or(1);
+//!     let count = storage::get_i64(b"count").unwrap_or(0) + by;
+//!     storage::set(b"count", &count.to_le_bytes());
+//!     output(&[Value::I64(count)]);
+//! }
+//! ```
+//!
+//! Every call runs in a fresh instance: nothing outside storage survives it. Floating-point
+//! instructions are refused by the node, so contracts work in integers.
+
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::{string::String, vec, vec::Vec};
+
+pub mod storage;
+pub mod sys;
+pub mod value;
+
+pub use chainv4_sdk_macros::export;
+pub use value::{Address, AddressKind, Amount, Value};
+
+/// The arguments the call was made with. Aborts if the node sent something unreadable, which
+/// it never does.
+pub fn input() -> Vec<Value> {
+    let mut bytes = vec![0; unsafe { sys::input_len() } as usize];
+    unsafe { sys::input_read(bytes.as_mut_ptr()) };
+
+    value::decode(&bytes).unwrap_or_else(|| abort("unreadable input"))
+}
+
+/// Sets what the call returns. The last call wins; a function that never calls it returns
+/// nothing.
+pub fn output(values: &[Value]) {
+    let bytes = value::encode(values);
+    unsafe { sys::output(bytes.as_ptr(), bytes.len() as u32) };
+}
+
+/// Who made the call: a transaction's sender, or the contract that called this one.
+pub fn sender() -> Address {
+    let mut bytes = [0; 33];
+    unsafe { sys::sender(bytes.as_mut_ptr()) };
+
+    Address::decode(&bytes).unwrap_or_else(|| abort("unreadable sender"))
+}
+
+/// This contract's own address.
+pub fn this() -> Address {
+    let mut bytes = [0; 33];
+    unsafe { sys::contract(bytes.as_mut_ptr()) };
+
+    Address::decode(&bytes).unwrap_or_else(|| abort("unreadable contract address"))
+}
+
+/// What the call sent, as a little-endian u256. Calls between contracts send nothing.
+pub fn value() -> [u8; 32] {
+    let mut bytes = [0; 32];
+    unsafe { sys::value(bytes.as_mut_ptr()) };
+
+    bytes
+}
+
+/// A hash algorithm the node computes for contracts. Each exists only when the node was built
+/// with it; all are by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Algorithm {
+    Sha256 = 0,
+    Blake3 = 1,
+    Blake2s = 2,
+    Blake2b = 3,
+    /// Not cryptographic: the hash contract calls name functions by.
+    Xxh3 = 4,
+    Keccak256 = 5,
+}
+
+/// Hashes data on the node: 32 bytes, or 8 big-endian bytes for XXH3.
+pub fn hash(algorithm: Algorithm, data: &[u8]) -> Vec<u8> {
+    let mut out = [0; 32];
+    let len = unsafe { sys::hash(algorithm as u32, data.as_ptr(), data.len() as u32, out.as_mut_ptr()) };
+
+    out[..len as usize].to_vec()
+}
+
+/// Calls an exported function on another contract, whichever engine runs it. Its writes are
+/// kept only if it succeeds; its fuel comes out of this call's.
+///
+/// Returns its return values, or its error.
+pub fn call(target: &Address, function: &str, args: &[Value]) -> Result<Vec<Value>, String> {
+    let address = target.encode();
+    let args = value::encode(args);
+    let status = unsafe {
+        sys::call(
+            address.as_ptr(),
+            function.as_ptr(),
+            function.len() as u32,
+            args.as_ptr(),
+            args.len() as u32,
+        )
+    };
+    let result = result();
+
+    match status {
+        0 => Ok(value::decode(&result).unwrap_or_else(|| abort("unreadable return values"))),
+        _ => Err(String::from_utf8_lossy(&result).into_owned()),
+    }
+}
+
+/// Stops the call with an error. Nothing it wrote is kept.
+pub fn abort(message: &str) -> ! {
+    unsafe { sys::abort(message.as_ptr(), message.len() as u32) }
+}
+
+/// The result buffer: what the last storage read or call left there.
+fn result() -> Vec<u8> {
+    let mut bytes = vec![0; unsafe { sys::result_len() } as usize];
+    unsafe { sys::result_read(bytes.as_mut_ptr()) };
+
+    bytes
+}
+
+/// Panics abort the call with their message.
+#[cfg(all(target_arch = "wasm32", feature = "panic-handler"))]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    abort(&alloc::format!("{}", info.message()))
+}
+
+/// Hands out memory from the end of the module's memory, growing it as needed, and never
+/// frees: every call starts from a fresh instance, so nothing lives long enough to need it.
+#[cfg(all(target_arch = "wasm32", feature = "allocator"))]
+mod bump {
+    use core::{
+        alloc::{GlobalAlloc, Layout},
+        arch::wasm32,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    const PAGE: usize = 64 * 1024;
+
+    struct Bump {
+        next: AtomicUsize,
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Bump = Bump {
+        next: AtomicUsize::new(0),
+    };
+
+    unsafe impl GlobalAlloc for Bump {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let mut next = self.next.load(Ordering::Relaxed);
+
+            if next == 0 {
+                next = wasm32::memory_size(0) * PAGE;
+            }
+
+            let start = (next + layout.align() - 1) & !(layout.align() - 1);
+            let end = start + layout.size();
+            let available = wasm32::memory_size(0) * PAGE;
+
+            if end > available && wasm32::memory_grow(0, (end - available).div_ceil(PAGE)) == usize::MAX {
+                return core::ptr::null_mut();
+            }
+
+            self.next.store(end, Ordering::Relaxed);
+
+            start as *mut u8
+        }
+
+        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    }
+}

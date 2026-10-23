@@ -14,6 +14,7 @@ pub mod net;
 pub mod node;
 pub mod registry;
 pub mod structs;
+#[cfg(feature = "vm")]
 pub mod vm;
 
 #[cfg(feature = "node")]
@@ -79,6 +80,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         "[node] chainv4 {} on network {network}, database {}",
         env!("CARGO_PKG_VERSION"),
         args.db.display()
+    );
+
+    log::info!(
+        "[node] contracts run on {}",
+        genesis.engines.iter().map(|engine| engine.name()).collect::<Vec<_>>().join(" and ")
     );
 
     if args.produce {

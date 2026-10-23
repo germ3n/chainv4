@@ -5,8 +5,9 @@ use crate::db::MemoryDb;
 use crate::registry::contracts::contract_address;
 use crate::registry::RegistryError;
 use crate::structs::amount::Amount;
+use crate::structs::code::{Code, Engine};
 use crate::structs::tx::{Tx, TxCallArgumentType};
-use crate::vm::lvm::selector;
+use crate::vm::selector;
 
 const SLOT: u64 = 2_000;
 
@@ -160,7 +161,7 @@ fn contracts_deploy_and_run_through_transactions() {
     let deployer = authority();
     let deploy = SignedTx::sign(
         Tx::Deploy {
-            source: COUNTER.to_string(),
+            code: Code::Lua(COUNTER.to_string()),
         },
         nonce(&chain, &deployer),
         &deployer,
@@ -241,4 +242,21 @@ fn a_block_with_an_invalid_transaction_changes_nothing() {
     assert_eq!(chain.tip().height, 0);
     assert_eq!(balance(&chain, &bob), u256::ZERO);
     assert_eq!(nonce(&chain, &authority()), 0);
+}
+
+#[test]
+fn deploys_for_engines_genesis_leaves_out_fail() {
+    let db = Arc::new(MemoryDb::default());
+    let lua_only = Genesis {
+        engines: vec![Engine::Lua],
+        ..genesis()
+    };
+    let mut chain = Chain::open(db, &lua_only).unwrap();
+    let module = vec![0, b'a', b's', b'm', 1, 0, 0, 0];
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Wasm(module) }, 0, &authority());
+    let (block, now) = next_block(&chain, vec![deploy]);
+    let receipts = chain.import(&block, &producer(), now).unwrap();
+
+    assert_eq!(receipts[0].result, Err(Failure::EngineNotAllowed(Engine::Wasm)));
+    assert_eq!(nonce(&chain, &authority()), 1);
 }

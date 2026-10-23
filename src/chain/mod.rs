@@ -10,10 +10,11 @@ use {
     crate::registry::Accounts,
     crate::structs::address::Address,
     crate::structs::block::{Block, BlockHeader},
+    crate::structs::code::Engine,
     crate::structs::hash::{Hash, HashType},
     crate::structs::tx::SignedTx,
     crate::structs::u256::{U256Le, u256},
-    crate::vm::lvm::Limits,
+    crate::vm::{Limits, Vm},
     r#macro::document,
     std::fmt,
     std::sync::Arc,
@@ -63,6 +64,8 @@ pub struct Genesis {
     pub slot_ms: u64,
     #[document(summary = "Who holds what from the start.")]
     pub allocations: Vec<Allocation>,
+    #[document(summary = "The engines contracts may be deployed for. A node built without one of them refuses to open the chain rather than fall out of step with it.")]
+    pub engines: Vec<Engine>,
 }
 
 impl Hashable for Genesis {}
@@ -70,7 +73,7 @@ impl Hashable for Genesis {}
 impl Genesis {
     #[document(
         parent = "Genesis",
-        summary = "A development chain: one block every two seconds, and a million coins at 18 decimals for the authority.",
+        summary = "A development chain: one block every two seconds, a million coins at 18 decimals for the authority, and every engine this node was built with. Nodes built with different engines are on different dev chains.",
         params = { authority = "The producing key, usually DevAuthority::dev_keypair." },
     )]
     pub fn dev(authority: PublicKey) -> Genesis {
@@ -82,6 +85,7 @@ impl Genesis {
                 address: authority.address(),
                 amount: u256::from(1_000_000u64) * u256::from(10u64).pow(18),
             }],
+            engines: Engine::compiled(),
         }
     }
 
@@ -186,6 +190,7 @@ impl fmt::Display for BlockError {
 pub struct Chain {
     db: Arc<dyn Database>,
     rules: Rules,
+    vm: Arc<Vm>,
     genesis: Hash,
     tip: BlockHeader,
 }
@@ -194,9 +199,10 @@ impl Chain {
     #[document(
         parent = "Chain",
         summary = "Opens the chain in a database, writing genesis on first use.",
-        returns = "The chain, or WrongGenesis when the database holds a different chain.",
+        returns = "The chain; WrongGenesis when the database holds a different chain, MissingEngine when this node lacks an engine genesis allows.",
     )]
     pub fn open(db: Arc<dyn Database>, genesis: &Genesis) -> Result<Chain, ChainError> {
+        let vm = Arc::new(Vm::new(&genesis.engines).map_err(ChainError::MissingEngine)?);
         let block = genesis.block();
         let id = block.id();
         let stored: Option<Hash> = read_value(&*db, Column::Heights, &0u64.to_be_bytes())?;
@@ -229,6 +235,7 @@ impl Chain {
         Ok(Chain {
             db,
             rules: genesis.rules(),
+            vm,
             genesis: id,
             tip: tip.header,
         })
@@ -326,7 +333,7 @@ impl Chain {
         let mut receipts = Vec::new();
 
         for (index, tx) in block.txs.iter().enumerate() {
-            match execute::execute(&state, tx, &self.rules) {
+            match execute::execute(&state, tx, &self.rules, &self.vm) {
                 Ok(receipt) => receipts.push(receipt),
                 Err(execute::ExecuteError::Db(err)) => return Err(ImportError::Db(err)),
                 Err(execute::ExecuteError::Invalid(error)) => {
@@ -355,6 +362,8 @@ pub enum ChainError {
     WrongGenesis { stored: Hash, expected: Hash },
     #[document(summary = "The genesis configuration cannot be applied, for example because allocations overflow.")]
     BadGenesis(String),
+    #[document(summary = "The chain allows contracts for an engine this node was built without.")]
+    MissingEngine(Engine),
 }
 
 impl From<DbError> for ChainError {
@@ -371,6 +380,15 @@ impl fmt::Display for ChainError {
                 write!(f, "the database holds genesis {stored}, not {expected}")
             }
             ChainError::BadGenesis(text) => write!(f, "bad genesis: {text}"),
+            ChainError::MissingEngine(engine) => write!(
+                f,
+                "the chain runs {} contracts; build the node with the {} feature",
+                engine.name(),
+                match engine {
+                    Engine::Lua => "lvm",
+                    Engine::Wasm => "wasm",
+                }
+            ),
         }
     }
 }

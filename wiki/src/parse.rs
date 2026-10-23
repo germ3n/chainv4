@@ -396,6 +396,7 @@ fn apply_flag(raw: &mut RawDoc, key: &str) -> Result<(), String> {
         "public" => set_access(raw, Access::Public),
         "rust" => set_lang(raw, Lang::Rust),
         "lua" => set_lang(raw, Lang::Lua),
+        "wasm" => set_lang(raw, Lang::Wasm),
         other => Err(format!("unknown field {other}")),
     }
 }
@@ -432,7 +433,8 @@ fn parse_lang(text: &str) -> Result<Lang, String> {
     match text {
         "rust" => Ok(Lang::Rust),
         "lua" => Ok(Lang::Lua),
-        other => Err(format!("unknown lang \"{other}\", expected \"rust\" or \"lua\"")),
+        "wasm" => Ok(Lang::Wasm),
+        other => Err(format!("unknown lang \"{other}\", expected \"rust\", \"lua\" or \"wasm\"")),
     }
 }
 

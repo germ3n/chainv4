@@ -1,95 +1,52 @@
 use {
-    crate::db::{Column, DbError, State, storage_key},
-    crate::structs::address::Address,
     crate::vm::lvm::charge,
+    crate::vm::{Host, MAX_KEY_LEN, MAX_VALUE_LEN, VmError, cost},
     mlua::{Error, Lua},
     r#macro::document,
-    std::sync::{Arc, Mutex},
 };
 
-/// Fuel for one read or write, plus one more for every 16 bytes moved. Writes cost more because
-/// every node keeps what they store.
-const READ_COST: u64 = 100;
-const WRITE_COST: u64 = 500;
-const BYTES_PER_FUEL: u64 = 16;
-pub const MAX_KEY_LEN: usize = 256;
-pub const MAX_VALUE_LEN: usize = 64 * 1024;
-
-/// What a running call's storage reads and writes go through. Set as app data for the call.
-pub struct StorageAccess {
-    state: Arc<State>,
-    contract: Address,
-    failure: Mutex<Option<DbError>>,
+fn host(lua: &Lua) -> mlua::Result<Host> {
+    lua.app_data_ref::<Host>()
+        .map(|host| host.clone())
+        .ok_or_else(|| Error::runtime("storage is only available inside a call"))
 }
 
-impl StorageAccess {
-    pub fn new(state: Arc<State>, contract: Address) -> StorageAccess {
-        StorageAccess {
-            state,
-            contract,
-            failure: Mutex::new(None),
-        }
-    }
-
-    /// A database failure seen during the call. Recorded here as well as raised, so a script
-    /// that catches the error with pcall cannot hide it from the node.
-    pub fn failure(&self) -> Option<DbError> {
-        self.failure.lock().expect("never poisoned").clone()
-    }
-
-    fn fail(&self, err: DbError) -> Error {
-        *self.failure.lock().expect("never poisoned") = Some(err.clone());
-
-        Error::external(err)
+/// A database failure is already recorded in the Host, so the script cannot hide it with pcall.
+fn refused(err: VmError) -> Error {
+    match err {
+        VmError::Storage(err) => Error::external(err),
+        other => Error::runtime(other.to_string()),
     }
 }
 
-fn check_key(key: &[u8]) -> mlua::Result<()> {
+fn storage_get(lua: &Lua, key: &[u8]) -> mlua::Result<Option<mlua::String>> {
+    let host = host(lua)?;
+
     if key.len() > MAX_KEY_LEN {
         return Err(Error::runtime(format!("storage keys are at most {MAX_KEY_LEN} bytes")));
     }
 
-    Ok(())
-}
+    charge(lua, cost::STORAGE_READ + key.len() as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
 
-fn storage_get(lua: &Lua, key: &[u8]) -> mlua::Result<Option<mlua::String>> {
-    let access = lua
-        .app_data_ref::<StorageAccess>()
-        .ok_or_else(|| Error::runtime("storage is only available inside a call"))?;
-    check_key(key)?;
-    charge(lua, READ_COST + key.len() as u64 / BYTES_PER_FUEL)?;
-    let value = access
-        .state
-        .get(Column::Storage, &storage_key(&access.contract, key))
-        .map_err(|err| access.fail(err))?;
-    let Some(value) = value else {
+    let Some(value) = host.storage_get(key).map_err(refused)? else {
         return Ok(None);
     };
-    charge(lua, value.len() as u64 / BYTES_PER_FUEL)?;
 
+    charge(lua, value.len() as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
     lua.create_string(&value).map(Some)
 }
 
 fn storage_set(lua: &Lua, key: &[u8], value: Option<&[u8]>) -> mlua::Result<()> {
-    let access = lua
-        .app_data_ref::<StorageAccess>()
-        .ok_or_else(|| Error::runtime("storage is only available inside a call"))?;
-    check_key(key)?;
+    let host = host(lua)?;
     let len = value.map_or(0, <[u8]>::len);
 
-    if len > MAX_VALUE_LEN {
-        return Err(Error::runtime(format!("storage values are at most {MAX_VALUE_LEN} bytes")));
+    if key.len() > MAX_KEY_LEN || len > MAX_VALUE_LEN {
+        // The Host words the error.
+        return host.storage_set(key, value).map_err(refused);
     }
 
-    charge(lua, WRITE_COST + (key.len() + len) as u64 / BYTES_PER_FUEL)?;
-    let key = storage_key(&access.contract, key);
-
-    match value {
-        Some(value) => access.state.put(Column::Storage, key, value.to_vec()),
-        None => access.state.delete(Column::Storage, key),
-    }
-
-    Ok(())
+    charge(lua, cost::STORAGE_WRITE + (key.len() + len) as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
+    host.storage_set(key, value).map_err(refused)
 }
 
 #[document(
@@ -158,14 +115,23 @@ pub fn register_storage_lib(lua: &Lua) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::MemoryDb;
+    use crate::db::{Column, MemoryDb, State, storage_key};
+    use crate::structs::address::Address;
+    use crate::structs::u256::u256;
+    use crate::vm::{CallContext, Vm};
+    use std::sync::Arc;
 
     fn setup(contract: Address) -> (Lua, Arc<State>) {
         let lua = Lua::new();
         lua.set_fuel(u64::MAX).unwrap();
         register_storage_lib(&lua);
         let state = Arc::new(State::new(Arc::new(MemoryDb::default())));
-        lua.set_app_data(StorageAccess::new(state.clone(), contract));
+        let context = CallContext {
+            sender: Address::Ed25519([0; 32]),
+            contract,
+            value: u256::ZERO,
+        };
+        lua.set_app_data(Host::root(state.clone(), context, 1 << 20, Arc::new(Vm::new(&[]).unwrap())));
 
         (lua, state)
     }

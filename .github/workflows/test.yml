@@ -20,11 +20,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          # The tests build the SDK's example contracts and run them on the chain.
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            contracts -> target
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --workspace --locked
+      - name: clippy (contracts)
+        run: cargo clippy --manifest-path contracts/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
+      # The SDK's own tests run on the host; contracts only ever build for wasm32.
+      - name: test (sdk)
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          cargo test --manifest-path contracts/Cargo.toml -p chainv4-sdk --locked --target "$host"
 
   # Every hash and key scheme sits behind a feature; these make sure each subset still builds,
   # lints clean and passes its tests.
@@ -39,6 +52,8 @@ jobs:
           - blake3,edblake
           - keccak256,blake2s,blake2b,ed25519
           - lvm,ed25519
+          - wasm,ed25519
+          - lvm,wasm,edblake
           - node,ed25519
           - http,edblake
     steps:
@@ -46,6 +61,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.features }}

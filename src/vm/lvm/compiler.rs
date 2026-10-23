@@ -4,7 +4,7 @@
 //! check bytecode: loading bytecode someone else made can corrupt memory.
 
 use {
-    super::LvmError,
+    crate::vm::VmError,
     mlua::Compiler,
     r#macro::document,
 };
@@ -26,9 +26,9 @@ pub const MAX_SOURCE_LEN: usize = 128 * 1024;
     returns = "The bytecode, or why it does not compile.",
     see_also = "Contract::from_bytecode",
 )]
-pub fn compile(source: &str) -> Result<Vec<u8>, LvmError> {
+pub fn compile(source: &str) -> Result<Vec<u8>, VmError> {
     if source.len() > MAX_SOURCE_LEN {
-        return Err(LvmError::Compile(format!(
+        return Err(VmError::Compile(format!(
             "source is {} bytes, more than the {MAX_SOURCE_LEN} allowed",
             source.len()
         )));
@@ -39,7 +39,7 @@ pub fn compile(source: &str) -> Result<Vec<u8>, LvmError> {
         .set_debug_level(DEBUG_LEVEL)
         .set_type_info_level(TYPE_INFO_LEVEL)
         .compile(source)
-        .map_err(|err| LvmError::Compile(err.to_string()))
+        .map_err(|err| VmError::Compile(err.to_string()))
 }
 
 #[cfg(test)]
@@ -58,7 +58,7 @@ mod tests {
     fn syntax_errors_and_huge_sources_are_rejected() {
         let huge = format!("return {{}} --{}", "x".repeat(MAX_SOURCE_LEN));
 
-        assert!(matches!(compile("local = 1"), Err(LvmError::Compile(_))));
-        assert!(matches!(compile(&huge), Err(LvmError::Compile(text)) if text.contains("allowed")));
+        assert!(matches!(compile("local = 1"), Err(VmError::Compile(_))));
+        assert!(matches!(compile(&huge), Err(VmError::Compile(text)) if text.contains("allowed")));
     }
 }

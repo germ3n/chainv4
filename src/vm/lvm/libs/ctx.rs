@@ -1,7 +1,7 @@
 use {
     super::address::LuaAddress,
     super::u256::LuaU256,
-    crate::vm::lvm::CallContext,
+    crate::vm::{CallContext, Host},
     mlua::{Error, Lua, UserData, UserDataFields},
     r#macro::document,
 };
@@ -19,8 +19,8 @@ impl UserData for LuaCtx {
 }
 
 fn current(lua: &Lua) -> mlua::Result<CallContext> {
-    lua.app_data_ref::<CallContext>()
-        .map(|context| *context)
+    lua.app_data_ref::<Host>()
+        .map(|host| *host.context())
         .ok_or_else(|| Error::runtime("ctx is only available inside a call"))
 }
 
@@ -29,7 +29,7 @@ fn current(lua: &Lua) -> mlua::Result<CallContext> {
     kind = "library",
     name = "ctx",
     category = "Chain",
-    summary = "The call being run: who made it, to which contract, and how much it sent. Only available inside an exported function, not while the script's top level loads.",
+    summary = "The call being run: who made it, to which contract, and how much it sent. Only available inside an exported function, not while the script's top level loads. When another contract calls this one, sender is that contract and value is zero.",
     example = "function M.deposit()\n    balances[ctx.sender:hex()] = ctx.value\nend",
 )]
 fn ctx_lib() {}
@@ -73,8 +73,11 @@ pub fn register_ctx_lib(lua: &Lua) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{MemoryDb, State};
+    use crate::vm::Vm;
     use crate::structs::address::Address;
     use crate::structs::u256::u256;
+    use std::sync::Arc;
 
     fn setup() -> Lua {
         let lua = Lua::new();
@@ -88,11 +91,13 @@ mod tests {
     #[test]
     fn fields_read_the_running_call() {
         let lua = setup();
-        lua.set_app_data(CallContext {
+        let context = CallContext {
             sender: Address::Ed25519([1; 32]),
             contract: Address::Ed25519([2; 32]),
             value: u256::new(7),
-        });
+        };
+        let state = Arc::new(State::new(Arc::new(MemoryDb::default())));
+        lua.set_app_data(Host::root(state, context, 1 << 20, Arc::new(Vm::new(&[]).unwrap())));
         let code = "return ctx.sender == address.from_bytes(string.rep('\\1', 32)), ctx.contract:hex(), tostring(ctx.value)";
         let (sender, contract, value): (bool, String, String) = lua.load(code).eval().unwrap();
 

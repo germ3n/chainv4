@@ -1,5 +1,5 @@
 use {
-    super::LvmError,
+    crate::vm::VmError,
     super::libs::address::LuaAddress,
     super::libs::u256::LuaU256,
     crate::structs::amount::Amount,
@@ -13,7 +13,7 @@ const MAX_EXACT: i128 = 1 << 53;
 
 /// Unsigned integers and amounts arrive as u256, so no value is ever rounded. Signed integers
 /// arrive as plain numbers and must fit one exactly.
-pub(super) fn to_lua(lua: &Lua, arg: &TxCallArgumentType) -> Result<Value, LvmError> {
+pub(super) fn to_lua(lua: &Lua, arg: &TxCallArgumentType) -> Result<Value, VmError> {
     let value = match arg {
         TxCallArgumentType::Address(address) => {
             Value::UserData(lua.create_userdata(LuaAddress(*address))?)
@@ -34,13 +34,13 @@ pub(super) fn to_lua(lua: &Lua, arg: &TxCallArgumentType) -> Result<Value, LvmEr
     Ok(value)
 }
 
-fn wide(lua: &Lua, number: u256) -> Result<Value, LvmError> {
+fn wide(lua: &Lua, number: u256) -> Result<Value, VmError> {
     Ok(Value::UserData(lua.create_userdata(LuaU256(number))?))
 }
 
-fn exact(number: i128) -> Result<Value, LvmError> {
+fn exact(number: i128) -> Result<Value, VmError> {
     if !(-MAX_EXACT..=MAX_EXACT).contains(&number) {
-        return Err(LvmError::BadArgument(format!(
+        return Err(VmError::BadArgument(format!(
             "{number} does not fit a Lua number exactly"
         )));
     }
@@ -49,7 +49,7 @@ fn exact(number: i128) -> Result<Value, LvmError> {
 }
 
 /// A string comes back as String when it is valid UTF-8 and as Bytes otherwise.
-pub(super) fn from_lua(value: Value) -> Result<TxCallArgumentType, LvmError> {
+pub(super) fn from_lua(value: Value) -> Result<TxCallArgumentType, VmError> {
     let arg = match value {
         Value::Boolean(flag) => TxCallArgumentType::Bool(flag),
         Value::Integer(number) => TxCallArgumentType::Number(f64::from(number)),
@@ -68,10 +68,10 @@ pub(super) fn from_lua(value: Value) -> Result<TxCallArgumentType, LvmError> {
             } else if let Ok(number) = data.borrow::<LuaU256>() {
                 TxCallArgumentType::U256(number.0)
             } else {
-                return Err(LvmError::BadReturn("this userdata".to_string()));
+                return Err(VmError::BadReturn("this userdata".to_string()));
             }
         }
-        other => return Err(LvmError::BadReturn(other.type_name().to_string())),
+        other => return Err(VmError::BadReturn(other.type_name().to_string())),
     };
 
     Ok(arg)

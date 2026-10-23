@@ -761,19 +761,21 @@ const TAIL: &str = r####"</script>
   var idx;
 
   var TITLE = "chainv4 Wiki";
-  var LANGS = ["rust", "lua"];
-  var LANG_LABELS = { rust: "Rust", lua: "Lua" };
+  var LANGS = ["rust", "lua", "wasm"];
+  var LANG_LABELS = { rust: "Rust", lua: "Lua", wasm: "WASM" };
   var REALM_NAMES = ["client", "server", "menu"];
   var CONTAINERS = { library: true, class: true, module: true, struct: true, enum: true, trait: true };
   /* Top-level pages without a category land in a section named after their kind. These come
      after every category, in this order. */
   var SECTION_OF = {
     rust: { module: "Modules", struct: "Types", enum: "Types", trait: "Types", type: "Types", function: "Functions", constant: "Constants" },
-    lua: { class: "Classes", library: "Libraries", function: "Functions" }
+    lua: { class: "Classes", library: "Libraries", function: "Functions" },
+    wasm: { library: "Imports", function: "Functions" }
   };
   var SECTION_ORDER = {
     rust: ["Modules", "Types", "Functions", "Constants"],
-    lua: ["Classes", "Libraries", "Functions"]
+    lua: ["Classes", "Libraries", "Functions"],
+    wasm: ["Imports", "Functions"]
   };
   var MEMBER_SECTIONS = [
     ["variant", "Variants"],
@@ -786,13 +788,15 @@ const TAIL: &str = r####"</script>
   ];
   var LEDES = {
     rust: "Rust reference for chainv4. Types are the structs, enums and traits the chain is built from. Modules group free functions and constants.",
-    lua: "Lua scripting reference. Classes are values you call with a colon. Libraries are tables of functions. Hooks are callbacks you put on an object."
+    lua: "Lua scripting reference. Classes are values you call with a colon. Libraries are tables of functions. Hooks are callbacks you put on an object.",
+    wasm: "WebAssembly contract reference: the host functions a module imports, with pointers and lengths as i32s into its exported memory. Write contracts in Rust with chainv4-sdk, which wraps every one of them."
   };
   var EMPTY = {
     rust: "Nothing is documented in Rust yet. Put <code>#[document(summary = \"…\")]</code> on an item.",
-    lua: "Nothing is documented in Lua yet. Write a <code>--[=[document … ]=]</code> block in a .lua file, or add <code>lua</code> to a <code>#[document]</code> on the Rust side of a binding."
+    lua: "Nothing is documented in Lua yet. Write a <code>--[=[document … ]=]</code> block in a .lua file, or add <code>lua</code> to a <code>#[document]</code> on the Rust side of a binding.",
+    wasm: "Nothing is documented for WebAssembly yet. Add <code>wasm</code> to a <code>#[document]</code> on the Rust side of a host function."
   };
-  var PANICS = { rust: "Panics", lua: "Errors" };
+  var PANICS = { rust: "Panics", lua: "Errors", wasm: "Traps" };
 
   var referrers = {};
   var realmState = loadRealms();
@@ -832,8 +836,21 @@ const TAIL: &str = r####"</script>
     return total;
   }
 
-  function otherLang() {
-    return lang === "rust" ? "lua" : "rust";
+  /* The other reference with the most matches for a search that found nothing here. */
+  function otherLang(q) {
+    var best = null;
+    var most = 0;
+
+    LANGS.forEach(function (name) {
+      var found = name === lang ? 0 : searchPages(q, name).length;
+
+      if (found > most) {
+        best = name;
+        most = found;
+      }
+    });
+
+    return best || (lang === "rust" ? "lua" : "rust");
   }
 
   /* The language picked last time, otherwise the first one with pages. A link to a page of the
@@ -1337,7 +1354,7 @@ const TAIL: &str = r####"</script>
     }
 
     if (!shownResults.length) {
-      var other = otherLang();
+      var other = otherLang(q);
       var elsewhere = searchPages(q, other).length;
       var where = usesRealms() ? " in the realms shown" : "";
       var hint = elsewhere ? ' <a href="#' + other + '">' + elsewhere + (elsewhere === 1 ? " match" : " matches") + " in " + LANG_LABELS[other] + "</a>" : "";
@@ -1491,7 +1508,7 @@ const TAIL: &str = r####"</script>
 
     for (itemIdx = 0; itemIdx < page.params.length; itemIdx++) {
       var param = page.params[itemIdx];
-      parts.push(page.lang === "rust" ? rustArg(param) : luaArg(param));
+      parts.push(page.lang === "lua" ? luaArg(param) : rustArg(param));
     }
 
     return parts.join(", ");
@@ -1516,7 +1533,21 @@ const TAIL: &str = r####"</script>
   }
 
   function signature(page) {
+    if (page.lang === "wasm") return wasmSignature(page);
+
     return page.lang === "rust" ? rustSignature(page) : luaSignature(page);
+  }
+
+  /* An import reads like the function it is: chain.storage_get(key: i32, key_len: i32) -> i32. */
+  function wasmSignature(page) {
+    if (page.kind === "library") return kw("module") + " " + esc(page.name);
+
+    var path = (page.parent ? esc(page.parent) + "." : "") + esc(page.name);
+    var ty = firstType(page);
+
+    if (page.kind === "field") return path + (ty ? ": " + ty : "");
+
+    return path + "(" + argList(page) + ")" + (ty ? " -&gt; " + ty : "");
   }
 
   function luaSignature(page) {
@@ -1830,7 +1861,7 @@ const TAIL: &str = r####"</script>
     html += returnTable(page);
 
     if (page.example) {
-      html += "<h3>Example</h3><div class='codewrap'><button type='button' class='copy' aria-label='Copy the example'>Copy</button><pre class='code'>" + highlight(page.example, page.lang) + "</pre></div>";
+      html += "<h3>Example</h3><div class='codewrap'><button type='button' class='copy' aria-label='Copy the example'>Copy</button><pre class='code'>" + highlight(page.example, page.lang === "lua" ? "lua" : "rust") + "</pre></div>";
     }
 
     if (page.panics) {

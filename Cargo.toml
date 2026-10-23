@@ -5,9 +5,11 @@ edition = "2024"
 
 [workspace]
 members = ["macro", "wiki"]
+# Contracts build for wasm32 and have a workspace of their own.
+exclude = ["contracts"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "lvm", "rocksdb", "node", "http"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "lvm", "wasm", "rocksdb", "node", "http"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -16,7 +18,9 @@ xxh3 = ["dep:xxhash-rust"]
 keccak256 = ["dep:sha3"]
 ed25519 = []
 edblake = ["dep:blake3", "dep:digest", "dep:curve25519-dalek", "ed25519-dalek/hazmat"]
-lvm = ["dep:mlua", "xxh3", "blake3"]
+vm = ["xxh3", "blake3"]
+lvm = ["vm", "dep:mlua"]
+wasm = ["vm", "dep:wasmi"]
 rocksdb = ["dep:rocksdb"]
 http = ["dep:axum", "dep:serde_json", "node"]
 node = ["dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "lvm", "blake3", "rocksdb"]
@@ -43,7 +47,12 @@ log = { version = "0.4.34", optional = true }
 env_logger = { version = "0.11.11", optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"], optional = true }
 serde_json = { version = "1.0.154", optional = true }
+# The interpreter is consensus: an upgrade can change what a module costs, so it is pinned.
+wasmi = { version = "=2.0.0", default-features = false, features = ["std", "validate", "stable", "auto-dispatch"], optional = true }
 mlua = { git = "https://github.com/germ3n/mlua", branch = "main", features = ["luau", "send"], optional = true }
+
+[dev-dependencies]
+wat = "1.262.0"
 
 [build-dependencies]
 wiki = { path = "wiki" }

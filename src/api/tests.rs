@@ -5,6 +5,7 @@ use crate::crypto::keypair::Keypair;
 use crate::db::MemoryDb;
 use crate::registry::contracts::contract_address;
 use crate::structs::amount::Amount;
+use crate::structs::code::Code;
 use crate::structs::tx::{SignedTx, Tx};
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -40,7 +41,7 @@ fn serve() -> Fixture {
         amount: Amount::U128(100),
     };
     let deploy = Tx::Deploy {
-        source: COUNTER.to_string(),
+        code: Code::Lua(COUNTER.to_string()),
     };
 
     for (nonce, tx) in [transfer, deploy].into_iter().enumerate() {
@@ -112,6 +113,8 @@ fn a_block_is_found_by_height_by_id_and_as_latest() {
 
     assert_eq!(latest["height"], 2);
     assert_eq!(latest["txs"][0]["tx"]["type"], "deploy");
+    assert_eq!(latest["txs"][0]["tx"]["engine"], "lua");
+    assert_eq!(latest["txs"][0]["tx"]["source"], COUNTER);
     assert_eq!(ok(fixture.address, "/blocks/0")["seal"], Value::Null);
 }
 
@@ -147,7 +150,8 @@ fn accounts_and_contracts_are_read_from_state() {
     assert_eq!(ok(fixture.address, &format!("/accounts/{authority}"))["nonce"], 2);
     assert_eq!(contract["deployer"], authority.to_string());
     assert_eq!(contract["functions"], json!(["increment"]));
-    assert!(contract["bytecode_size"].as_u64().unwrap() > 0);
+    assert_eq!(contract["engine"], "lua");
+    assert!(contract["code_size"].as_u64().unwrap() > 0);
 }
 
 #[test]

@@ -48,11 +48,13 @@ impl Kind {
     }
 
     /// Lua pages are libraries, classes and hooks; Rust pages are modules, types, variants and
-    /// constants. Functions, methods and fields belong to both.
+    /// constants; WebAssembly pages are libraries, the modules a contract imports from.
+    /// Functions, methods and fields belong to all.
     pub fn fits(self, lang: Lang) -> bool {
         match self {
             Kind::Function | Kind::Method | Kind::Field => true,
-            Kind::Library | Kind::Class | Kind::Hook => lang == Lang::Lua,
+            Kind::Library => lang != Lang::Rust,
+            Kind::Class | Kind::Hook => lang == Lang::Lua,
             Kind::Module
             | Kind::Struct
             | Kind::Enum
@@ -114,14 +116,15 @@ impl Realm {
     }
 }
 
-/// Which reference a page belongs to. The two are kept apart: each has its own ids, navigation,
-/// search and signature style.
+/// Which reference a page belongs to. They are kept apart: each has its own ids, navigation,
+/// search and signature style. Wasm is the host interface WebAssembly contracts import.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Lang {
     #[default]
     Rust,
     Lua,
+    Wasm,
 }
 
 impl Lang {
@@ -129,6 +132,7 @@ impl Lang {
         match self {
             Lang::Rust => "rust",
             Lang::Lua => "lua",
+            Lang::Wasm => "wasm",
         }
     }
 }
@@ -256,13 +260,16 @@ impl Shape {
         match (self, lang) {
             (Shape::Function { .. }, _) => default_kind(parent),
             (Shape::Module, Lang::Rust) => Kind::Module,
-            (Shape::Module, Lang::Lua) => Kind::Library,
+            (Shape::Module, Lang::Lua | Lang::Wasm) => Kind::Library,
             (Shape::Struct, Lang::Rust) => Kind::Struct,
             (Shape::Enum, Lang::Rust) => Kind::Enum,
             (Shape::Trait, Lang::Rust) => Kind::Trait,
             (Shape::Alias { .. }, Lang::Rust) => Kind::Type,
             (Shape::Struct | Shape::Enum | Shape::Trait | Shape::Alias { .. }, Lang::Lua) => {
                 Kind::Class
+            }
+            (Shape::Struct | Shape::Enum | Shape::Trait | Shape::Alias { .. }, Lang::Wasm) => {
+                Kind::Library
             }
             (Shape::Constant { .. }, Lang::Rust) => Kind::Constant,
             (Shape::Variant { .. }, Lang::Rust) => Kind::Variant,
@@ -473,12 +480,12 @@ fn page_id(lang: Lang, kind: Kind, parent: &str, name: &str) -> String {
 }
 
 /// How a member joins its parent: `Entity:spawn` and `ents.create` in Lua, `Tx::hash` in Rust,
-/// and `Tx.from` for a field in either.
+/// `chain.storage_get` for an import, and `Tx.from` for a field in any.
 fn separator(lang: Lang, kind: Kind) -> &'static str {
     match (lang, kind) {
         (_, Kind::Field) => ".",
         (Lang::Lua, Kind::Method | Kind::Hook) => ":",
-        (Lang::Lua, _) => ".",
+        (Lang::Lua | Lang::Wasm, _) => ".",
         (Lang::Rust, _) => "::",
     }
 }
@@ -496,6 +503,19 @@ fn syntax(
     match lang {
         Lang::Lua => lua_syntax(kind, &path, params, returns),
         Lang::Rust => rust_syntax(kind, &path, params, returns),
+        Lang::Wasm => wasm_syntax(kind, &path, params, returns),
+    }
+}
+
+/// Imports read like the functions they are: `chain.storage_get(key: i32, key_len: i32) -> i32`.
+fn wasm_syntax(kind: Kind, path: &str, params: &[Param], returns: &[Ret]) -> String {
+    match kind {
+        Kind::Library => format!("module {path}"),
+        Kind::Field => match first_type(returns) {
+            Some(ty) => format!("{path}: {ty}"),
+            None => path.to_string(),
+        },
+        _ => format!("{path}({}){}", rust_args(params), rust_returns(returns)),
     }
 }
 
@@ -726,12 +746,13 @@ fn inherit(pages: &mut [Page]) {
     }
 }
 
-/// Finds the page a see_also entry means, in the same reference unless it starts with `rust/`
-/// or `lua/`. `Thing.poke`, `Thing:poke` and `Thing::poke` all find whichever one exists.
+/// Finds the page a see_also entry means, in the same reference unless it starts with `rust/`,
+/// `lua/` or `wasm/`. `Thing.poke`, `Thing:poke` and `Thing::poke` all find whichever one exists.
 fn resolve_reference(known: &HashSet<String>, lang: Lang, target: &str) -> Option<String> {
     let (lang, target) = match target.split_once('/') {
         Some(("rust", rest)) => (Lang::Rust, rest),
         Some(("lua", rest)) => (Lang::Lua, rest),
+        Some(("wasm", rest)) => (Lang::Wasm, rest),
         _ => (lang, target),
     };
     let exact = key(lang, target);
@@ -764,7 +785,7 @@ fn parent_kind(pages: &[Page], lang: Lang, parent: &str) -> Kind {
 
     match lang {
         Lang::Lua if has(&[Kind::Method, Kind::Hook, Kind::Field]) => Kind::Class,
-        Lang::Lua => Kind::Library,
+        Lang::Lua | Lang::Wasm => Kind::Library,
         Lang::Rust if has(&[Kind::Variant]) => Kind::Enum,
         Lang::Rust if has(&[Kind::Method, Kind::Field]) => Kind::Struct,
         Lang::Rust => Kind::Module,

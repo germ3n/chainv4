@@ -35,3 +35,22 @@ jobs:
             target/release/chainv4
             target/wiki/index.html
           if-no-files-found: error
+
+  contracts:
+    name: example contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts -> target
+      - name: build
+        run: cargo build --manifest-path contracts/Cargo.toml --target wasm32-unknown-unknown --release --locked
+      - uses: actions/upload-artifact@v7
+        with:
+          name: example-contracts
+          path: contracts/target/wasm32-unknown-unknown/release/*.wasm
+          if-no-files-found: error

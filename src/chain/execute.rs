@@ -3,9 +3,10 @@ use {
     crate::db::{DbError, State},
     crate::registry::{Accounts, Contracts, RegistryError},
     crate::structs::address::Address,
+    crate::structs::code::Engine,
     crate::structs::hash::Hash,
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
-    crate::vm::lvm::{CallContext, Limits, LvmError},
+    crate::vm::{CallContext, Limits, Vm, VmError},
     r#macro::document,
     std::fmt,
     std::sync::Arc,
@@ -49,9 +50,11 @@ pub enum Failure {
     #[document(summary = "Moving funds or deploying failed, for example for lack of balance.")]
     Registry(RegistryError),
     #[document(summary = "The contract failed.")]
-    Contract(LvmError),
+    Contract(VmError),
     #[document(summary = "A mint from an address other than the minter.")]
     NotMinter,
+    #[document(summary = "A deploy for an engine this chain's genesis does not allow.")]
+    EngineNotAllowed(Engine),
 }
 
 #[document(
@@ -106,7 +109,7 @@ impl From<DbError> for ExecuteError {
 
 /// Runs one transaction on top of its block's state. The nonce is used up in the block's layer
 /// either way; everything else happens in a layer of its own that is kept only on success.
-pub(crate) fn execute(block: &Arc<State>, tx: &SignedTx, rules: &Rules) -> Result<Receipt, ExecuteError> {
+pub(crate) fn execute(block: &Arc<State>, tx: &SignedTx, rules: &Rules, vm: &Arc<Vm>) -> Result<Receipt, ExecuteError> {
     tx.verify().map_err(|err| ExecuteError::Invalid(TxError::Invalid(err)))?;
     let sender = tx.sender();
     let accounts = Accounts::new(block);
@@ -121,12 +124,13 @@ pub(crate) fn execute(block: &Arc<State>, tx: &SignedTx, rules: &Rules) -> Resul
 
     accounts.bump_nonce(&sender).map_err(node_fault)?;
     let layer = Arc::new(State::new(block.clone()));
-    let (fuel_used, result) = run(&layer, tx, sender, rules);
+    let (fuel_used, result) = run(&layer, tx, sender, rules, vm);
 
     // A failing database is the node's fault, never the transaction's.
     match &result {
         Err(Failure::Registry(RegistryError::Db(err)))
-        | Err(Failure::Contract(LvmError::Storage(err))) => return Err(ExecuteError::Db(err.clone())),
+        | Err(Failure::Contract(VmError::Storage(err)))
+        | Err(Failure::Registry(RegistryError::Vm(VmError::Storage(err)))) => return Err(ExecuteError::Db(err.clone())),
         Ok(_) => block.merge(layer.take_changes()),
         Err(_) => {}
     }
@@ -145,7 +149,13 @@ fn node_fault(err: RegistryError) -> ExecuteError {
     }
 }
 
-fn run(layer: &Arc<State>, signed: &SignedTx, sender: Address, rules: &Rules) -> (u64, Result<Effect, Failure>) {
+fn run(
+    layer: &Arc<State>,
+    signed: &SignedTx,
+    sender: Address,
+    rules: &Rules,
+    vm: &Arc<Vm>,
+) -> (u64, Result<Effect, Failure>) {
     let accounts = Accounts::new(layer);
 
     match &signed.tx {
@@ -176,7 +186,7 @@ fn run(layer: &Arc<State>, signed: &SignedTx, sender: Address, rules: &Rules) ->
                 value,
             };
 
-            match Contracts::new(layer).call(&context, func, data, rules.limits) {
+            match Contracts::new(layer).call(vm, &context, func, data, rules.limits) {
                 Ok(outcome) => (
                     outcome.fuel_used,
                     outcome.result.map(Effect::Returned).map_err(Failure::Contract),
@@ -184,8 +194,12 @@ fn run(layer: &Arc<State>, signed: &SignedTx, sender: Address, rules: &Rules) ->
                 Err(err) => (0, Err(Failure::Registry(err))),
             }
         }
-        Tx::Deploy { source } => {
-            let deployed = Contracts::new(layer).deploy(&sender, signed.nonce, source, rules.limits);
+        Tx::Deploy { code } => {
+            if vm.engine(code.engine()).is_none() {
+                return (0, Err(Failure::EngineNotAllowed(code.engine())));
+            }
+
+            let deployed = Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, rules.limits);
 
             (0, deployed.map(Effect::Deployed).map_err(Failure::Registry))
         }

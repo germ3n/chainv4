@@ -1,5 +1,13 @@
 use super::*;
+use crate::crypto::hasher::Hasher;
+use crate::db::{MemoryDb, State};
+use crate::structs::address::Address;
 use crate::structs::amount::Amount;
+use crate::structs::hash::HashType;
+use crate::structs::u256::u256;
+use crate::structs::code::Engine;
+use crate::vm::{CallContext, Vm};
+use std::sync::Arc;
 
 const LIMITS: Limits = Limits {
     fuel: 1_000_000,
@@ -76,8 +84,14 @@ fn func(name: &str) -> Hash {
     Hash::Xxh3_64(selector(name))
 }
 
+fn host() -> Host {
+    let vm = Arc::new(Vm::new(&[Engine::Lua]).unwrap());
+
+    Host::root(Arc::new(State::new(Arc::new(MemoryDb::default()))), context(), LIMITS.memory, vm)
+}
+
 fn call(name: &str, args: &[TxCallArgumentType]) -> Outcome {
-    contract().call(&context(), None, &func(name), args, LIMITS)
+    contract().call(&func(name), args, host(), LIMITS)
 }
 
 fn returns(name: &str, args: &[TxCallArgumentType]) -> Vec<TxCallArgumentType> {
@@ -97,15 +111,15 @@ fn calls_reach_exported_functions_by_hash() {
 
 #[test]
 fn unknown_functions_are_rejected() {
-    assert_eq!(call("nope", &[]).result.unwrap_err(), LvmError::NoSuchFunction);
+    assert_eq!(call("nope", &[]).result.unwrap_err(), VmError::NoSuchFunction);
 
     #[cfg(feature = "blake3")]
     {
         let wrong = Hasher::digest(HashType::Blake3_256, b"add");
 
         assert_eq!(
-            contract().call(&context(), None, &wrong, &[], LIMITS).result.unwrap_err(),
-            LvmError::NoSuchFunction
+            contract().call(&wrong, &[], host(), LIMITS).result.unwrap_err(),
+            VmError::NoSuchFunction
         );
     }
 }
@@ -115,7 +129,7 @@ fn every_call_starts_from_a_fresh_state() {
     let contract = contract();
 
     for _ in 0..2 {
-        let result = contract.call(&context(), None, &func("count"), &[], LIMITS).result.unwrap();
+        let result = contract.call(&func("count"), &[], host(), LIMITS).result.unwrap();
 
         assert!(matches!(result[..], [TxCallArgumentType::Number(n)] if n == 1.0));
     }
@@ -167,18 +181,18 @@ fn values_cross_into_lua_and_back() {
 fn integers_a_lua_number_would_round_are_refused() {
     let err = call("echo", &[TxCallArgumentType::I64(i64::MAX)]).result.unwrap_err();
 
-    assert!(matches!(err, LvmError::BadArgument(_)), "{err:?}");
+    assert!(matches!(err, VmError::BadArgument(_)), "{err:?}");
 }
 
 #[test]
 fn an_endless_loop_runs_out_of_fuel() {
     let outcome = call("spin", &[]);
 
-    assert_eq!(outcome.result.unwrap_err(), LvmError::OutOfFuel);
+    assert_eq!(outcome.result.unwrap_err(), VmError::OutOfFuel);
     assert!(outcome.fuel_used > LIMITS.fuel - MAX_INSTRUCTION_COST);
     assert!(matches!(
         Contract::load("while true do end", LIMITS),
-        Err(LvmError::Runtime(text)) if text.contains("out of fuel")
+        Err(VmError::Runtime(text)) if text.contains("out of fuel")
     ));
 }
 
@@ -186,13 +200,13 @@ fn an_endless_loop_runs_out_of_fuel() {
 fn raising_out_of_fuel_by_hand_is_just_an_error() {
     let outcome = call("fake_fuel", &[]);
 
-    assert!(matches!(outcome.result, Err(LvmError::Runtime(_))), "{outcome:?}");
+    assert!(matches!(outcome.result, Err(VmError::Runtime(_))), "{outcome:?}");
     assert!(outcome.fuel_used < LIMITS.fuel / 2);
 }
 
 #[test]
 fn memory_is_capped() {
-    assert_eq!(call("hog", &[]).result.unwrap_err(), LvmError::OutOfMemory);
+    assert_eq!(call("hog", &[]).result.unwrap_err(), VmError::OutOfMemory);
 }
 
 #[test]
@@ -200,15 +214,15 @@ fn errors_come_back_with_their_message() {
     let boom = call("boom", &[]).result.unwrap_err();
     let overflow = call("overflow", &[]).result.unwrap_err();
 
-    assert!(matches!(&boom, LvmError::Runtime(text) if text.contains("boom")), "{boom:?}");
-    assert!(matches!(&overflow, LvmError::Runtime(text) if text.contains("u256 overflow")), "{overflow:?}");
+    assert!(matches!(&boom, VmError::Runtime(text) if text.contains("boom")), "{boom:?}");
+    assert!(matches!(&overflow, VmError::Runtime(text) if text.contains("u256 overflow")), "{overflow:?}");
 }
 
 #[test]
 fn scripts_cannot_set_globals() {
     let err = call("leak", &[]).result.unwrap_err();
 
-    assert!(matches!(&err, LvmError::Runtime(text) if text.contains("readonly")), "{err:?}");
+    assert!(matches!(&err, VmError::Runtime(text) if text.contains("readonly")), "{err:?}");
 }
 
 #[test]
@@ -233,7 +247,7 @@ fn the_same_call_always_costs_the_same() {
 
 #[test]
 fn bad_scripts_do_not_load() {
-    assert!(matches!(Contract::load("local = 1", LIMITS), Err(LvmError::Compile(_))));
-    assert!(matches!(Contract::load("return 5", LIMITS), Err(LvmError::NotAModule)));
-    assert!(matches!(Contract::load("error('no')", LIMITS), Err(LvmError::Runtime(_))));
+    assert!(matches!(Contract::load("local = 1", LIMITS), Err(VmError::Compile(_))));
+    assert!(matches!(Contract::load("return 5", LIMITS), Err(VmError::NotAModule)));
+    assert!(matches!(Contract::load("error('no')", LIMITS), Err(VmError::Runtime(_))));
 }

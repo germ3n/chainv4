@@ -1,14 +1,11 @@
 use {
     crate::crypto::hasher::Hasher,
     crate::structs::hash::{Hash, HashType},
+    crate::vm::cost,
     crate::vm::lvm::{charge, to_hex},
     mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods},
     r#macro::document,
 };
-
-/// Fuel for one hash call, plus one more for every 64 bytes, a block of most of the algorithms.
-const BASE_COST: u64 = 20;
-const BYTES_PER_FUEL: u64 = 64;
 
 /// The algorithms a script can name, in the order the library lists them.
 const ALGORITHMS: &[(&str, HashType)] = &[
@@ -172,7 +169,7 @@ pub fn register_hash_lib(lua: &Lua) {
                 name,
                 lua.create_function(move |lua, data: mlua::String| {
                     let data = data.as_bytes();
-                    charge(lua, BASE_COST + data.len() as u64 / BYTES_PER_FUEL)?;
+                    charge(lua, cost::HASH + data.len() as u64 / cost::HASH_BYTES_PER_FUEL)?;
 
                     Ok(LuaHash(Hasher::digest(algorithm, &data)))
                 })

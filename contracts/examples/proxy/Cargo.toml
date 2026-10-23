@@ -1,0 +1,11 @@
+[package]
+name = "proxy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+chainv4-sdk = { path = "../../sdk" }

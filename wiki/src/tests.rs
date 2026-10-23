@@ -57,6 +57,36 @@ fn ents_create() {}
 }
 
 #[test]
+fn wasm_imports_read_like_functions() {
+    let pages = rust_pages(
+        r#"
+#[document(wasm, kind = "library", name = "chain", summary = "Host functions.")]
+fn chain() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "storage_get",
+    summary = "Reads storage.",
+    params = {
+        key = { ty = "i32", desc = "Where the key is." },
+        key_len = { ty = "i32", desc = "Its length." },
+    },
+    returns = { ty = "i32", desc = "The value's length, or -1." },
+)]
+fn chain_storage_get() {}
+"#,
+    );
+    let module = find(&pages, "wasm/chain");
+    let function = find(&pages, "wasm/chain.storage_get");
+
+    assert_eq!(module.kind, Kind::Library);
+    assert_eq!(module.syntax, "module chain");
+    assert_eq!(function.lang, Lang::Wasm);
+    assert_eq!(function.syntax, "chain.storage_get(key: i32, key_len: i32) -> i32");
+}
+
+#[test]
 fn rust_source_defaults_to_rust_pages() {
     let pages = rust_pages(
         "#[document(lang = \"rust\", parent = \"ents\", name = \"create\", summary = \"Creates.\")]\nfn ents_create() {}\n",

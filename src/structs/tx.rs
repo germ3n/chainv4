@@ -5,6 +5,7 @@ use {
     crate::crypto::verifiable::VerifyError,
     crate::structs::address::Address,
     crate::structs::amount::Amount,
+    crate::structs::code::Code,
     crate::structs::hash::Hash,
     crate::structs::u256::U256Le,
     crate::structs::u256::u256,
@@ -78,12 +79,12 @@ pub enum Tx {
         data: Vec<TxCallArgumentType>,
     },
     #[document(
-        summary = "Deploys a contract. Nodes compile the source themselves; the contract lands at an address derived from the sender and this transaction's nonce.",
-        params = { source = "The Luau source." },
-        see_also = "Contracts::deploy, contract_address",
+        summary = "Deploys a contract. Nodes compile or validate the code themselves; the contract lands at an address derived from the sender and this transaction's nonce.",
+        params = { code = "The contract, tagged with the engine that runs it." },
+        see_also = "Contracts::deploy, contract_address, Code",
     )]
     #[wincode(tag = 4)]
-    Deploy { source: String },
+    Deploy { code: Code },
 }
 
 #[document(

@@ -155,12 +155,17 @@ impl Net {
         swarm.behaviour_mut().gossipsub.subscribe(&txs).map_err(net_error)?;
 
         for address in &config.listen {
-            swarm.listen_on(address.clone()).map_err(net_error)?;
+            // Transport errors print nothing useful through Display, so show what is inside.
+            swarm
+                .listen_on(address.clone())
+                .map_err(|err| NetError(format!("cannot listen on {address}: {err:?}")))?;
         }
 
         for address in &config.peers {
             log::info!("[net] dialing {address}");
-            swarm.dial(address.clone()).map_err(net_error)?;
+            swarm
+                .dial(address.clone())
+                .map_err(|err| NetError(format!("cannot dial {address}: {err}")))?;
         }
 
         Ok(Net {

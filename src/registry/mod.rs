@@ -9,15 +9,15 @@ use {
     std::fmt,
 };
 
-#[cfg(feature = "lvm")]
-use crate::vm::lvm::LvmError;
+#[cfg(feature = "vm")]
+use crate::vm::VmError;
 
 pub mod accounts;
-#[cfg(feature = "lvm")]
+#[cfg(feature = "vm")]
 pub mod contracts;
 
 pub use accounts::Accounts;
-#[cfg(feature = "lvm")]
+#[cfg(feature = "vm")]
 pub use contracts::Contracts;
 
 #[document(
@@ -39,9 +39,9 @@ pub enum RegistryError {
     AlreadyDeployed(Address),
     #[document(summary = "No contract lives at the address.")]
     NoSuchContract(Address),
-    #[document(summary = "The contract would not compile or load.")]
-    #[cfg(feature = "lvm")]
-    Lvm(LvmError),
+    #[document(summary = "The contract would not load, or this node lacks its engine.")]
+    #[cfg(feature = "vm")]
+    Vm(VmError),
 }
 
 impl fmt::Display for RegistryError {
@@ -52,11 +52,11 @@ impl fmt::Display for RegistryError {
             RegistryError::BalanceOverflow => write!(f, "balance overflow"),
             RegistryError::NonceOverflow => write!(f, "nonce overflow"),
             RegistryError::AlreadyDeployed(address) => {
-                write!(f, "a contract already lives at {address:?}")
+                write!(f, "a contract already lives at {address}")
             }
-            RegistryError::NoSuchContract(address) => write!(f, "no contract at {address:?}"),
-            #[cfg(feature = "lvm")]
-            RegistryError::Lvm(err) => write!(f, "{err}"),
+            RegistryError::NoSuchContract(address) => write!(f, "no contract at {address}"),
+            #[cfg(feature = "vm")]
+            RegistryError::Vm(err) => write!(f, "{err}"),
         }
     }
 }
@@ -69,9 +69,9 @@ impl From<DbError> for RegistryError {
     }
 }
 
-#[cfg(feature = "lvm")]
-impl From<LvmError> for RegistryError {
-    fn from(err: LvmError) -> RegistryError {
-        RegistryError::Lvm(err)
+#[cfg(feature = "vm")]
+impl From<VmError> for RegistryError {
+    fn from(err: VmError) -> RegistryError {
+        RegistryError::Vm(err)
     }
 }
