@@ -9,6 +9,7 @@ use {
     crate::structs::hash::Hash,
     crate::structs::u256::U256Le,
     crate::structs::u256::u256,
+    crate::structs::vote::SignedVote,
     r#macro::document,
     wincode::SchemaRead,
     wincode::SchemaWrite,
@@ -95,6 +96,39 @@ pub enum Tx {
     )]
     #[wincode(tag = 5)]
     Upgrade { contract: Address, code: Code },
+    #[document(
+        summary = "Bonds funds from the sender to become a finality validator. The funds are locked, the voting key starts voting a few epochs later, and only the sender can unbond and withdraw.",
+        params = {
+            voter = "The key that will sign the validator's votes. It can stay on the validating node while the sender's key stays offline.",
+            amount = "How much to bond: at least the chain's min_bond. Votes weigh by bond.",
+        },
+        see_also = "Tx::Unbond, Tx::Withdraw, FinalityConfig",
+    )]
+    #[wincode(tag = 6)]
+    Bond { voter: PublicKey, amount: Amount },
+    #[document(
+        summary = "Stops a validator voting, a few epochs later. Its bond stays locked, and slashable, for withdrawal_delay epochs more.",
+        params = { voter = "The validator's voting key. Only the account that bonded may unbond it." },
+        see_also = "Tx::Withdraw",
+    )]
+    #[wincode(tag = 7)]
+    Unbond { voter: PublicKey },
+    #[document(
+        summary = "Pays an unbonded validator's bond back to the account that bonded it, once withdrawal_delay has passed, and forgets the validator.",
+        params = { voter = "The validator's voting key." },
+    )]
+    #[wincode(tag = 8)]
+    Withdraw { voter: PublicKey },
+    #[document(
+        summary = "Reports a validator that signed two conflicting votes. Its whole bond is taken: a share goes to the sender, the rest is burned.",
+        params = {
+            first = "One of the votes.",
+            second = "The other, by the same voter, conflicting with the first.",
+        },
+        see_also = "Vote::conflicts",
+    )]
+    #[wincode(tag = 9)]
+    Slash { first: Box<SignedVote>, second: Box<SignedVote> },
 }
 
 #[document(
@@ -186,6 +220,21 @@ impl Verifiable for Tx {
             }
             // Whether the source compiles is decided when the transaction runs.
             Tx::Deploy { .. } | Tx::Upgrade { .. } => Ok(()),
+            Tx::Bond { voter, amount } => {
+                voter.verify()?;
+                amount.verify()?;
+
+                nonzero(amount)
+            }
+            Tx::Unbond { voter } | Tx::Withdraw { voter } => voter.verify(),
+            // The signatures are checked when it runs, against the chain's genesis id.
+            Tx::Slash { first, second } => {
+                if !first.vote.conflicts(&second.vote) {
+                    return Err(VerifyError::NotConflicting);
+                }
+
+                Ok(())
+            }
         }
     }
 }
@@ -297,11 +346,11 @@ impl SignedTx {
 
     #[document(
         parent = "SignedTx",
-        summary = "The transaction's id: BLAKE3 of its whole encoding, signature included.",
+        summary = "The transaction's id: its whole encoding, signature included, hashed with the chain's hash.",
+        params = { hash = "The chain's hash, from genesis." },
     )]
-    #[cfg(feature = "blake3")]
-    pub fn id(&self) -> Hash {
-        self.hash_with_tag(crate::structs::hash::HashType::Blake3_256)
+    pub fn id(&self, hash: crate::structs::hash::HashType) -> Hash {
+        self.hash_with_tag(hash)
     }
 }
 

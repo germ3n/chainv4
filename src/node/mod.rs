@@ -2,17 +2,21 @@
 //! network on its own thread behind channels, and a loop that drains what arrived, produces a
 //! block when it may, and sleeps until the next slot or the next event. A producer that seals at
 //! once, like an authority, produces in the loop; a miner gets a template, and its seal arrives
-//! later as an event. Catching up with peers lives in sync.rs.
+//! later as an event. A validating node also votes on checkpoints as they get deep enough, and
+//! counts the votes it hears. Catching up with peers lives in sync.rs.
 
 use {
-    crate::chain::{Chain, ChainError, Genesis, ImportError, Imported},
+    crate::chain::{Chain, ChainError, FinalityError, FinalityUpdate, Genesis, ImportError, Imported},
     crate::consensus::Producer,
+    crate::crypto::keypair::Keypair,
     crate::db::{Database, DbError},
     crate::mempool::{Mempool, MempoolError},
-    crate::net::{MAX_SYNC_BLOCKS, NetCommand, NetEvent, NetLink, SyncRequest, SyncResponse},
+    crate::net::{MAX_SYNC_BLOCKS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, SyncRequest, SyncResponse},
     crate::structs::block::Block,
     crate::structs::hash::Hash,
+    crate::structs::hex::to_hex,
     crate::structs::tx::SignedTx,
+    crate::structs::vote::SignedVote,
     libp2p::PeerId,
     r#macro::document,
     std::collections::HashSet,
@@ -56,6 +60,8 @@ pub struct Node {
     peers: HashSet<PeerId>,
     sync: SyncState,
     reported: u64,
+    /// The voting key, on a node that validates.
+    validator: Option<Keypair>,
 }
 
 #[document(
@@ -176,7 +182,18 @@ impl Node {
             peers: HashSet::new(),
             sync: SyncState::default(),
             reported: 0,
+            validator: None,
         })
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Makes the node vote on finality with a validator's voting key. It votes only in epochs where that key is in the validator set, and never signs a vote that conflicts with one it signed before.",
+        params = { voter = "The voting key named in the validator's bond." },
+    )]
+    pub fn validate(mut self, voter: Keypair) -> Node {
+        self.validator = Some(voter);
+        self
     }
 
     #[document(parent = "Node", summary = "The chain this node follows.")]
@@ -232,6 +249,7 @@ impl Node {
         }
 
         self.produce_if_due(now)?;
+        self.vote_if_due()?;
         self.report_if_due(now);
 
         Ok(())
@@ -243,7 +261,7 @@ impl Node {
     )]
     pub fn submit(&mut self, tx: SignedTx) -> Result<(), MempoolError> {
         self.mempool.add(tx.clone(), &self.chain.state())?;
-        log::info!("[node] accepted transaction {} from {}", tx.id(), tx.sender());
+        log::info!("[node] accepted transaction {} from {}", tx.id(self.chain.hash()), tx.sender());
         self.send(NetCommand::PublishTx(tx));
 
         Ok(())
@@ -270,8 +288,13 @@ impl Node {
                 }
             }
             NetEvent::Sealed { block, seal } => self.sealed(block, seal, now)?,
+            NetEvent::Vote { from, vote } => match self.chain.add_vote(vote) {
+                Ok(update) => self.finality_changed(update, &format!("from {from}"))?,
+                Err(FinalityError::Db(err)) => return Err(NodeError::Db(err)),
+                Err(err) => log::debug!("[node] ignored a vote from {from}: {err}"),
+            },
             NetEvent::Tx { from, tx } => {
-                let id = tx.id();
+                let id = tx.id(self.chain.hash());
 
                 match self.mempool.add(tx, &self.chain.state()) {
                     Ok(()) => log::debug!("[node] queued transaction {id} from {from}"),
@@ -302,7 +325,7 @@ impl Node {
                 self.peer_failed(peer);
             }
             NetEvent::Submitted { tx, reply } => {
-                let id = tx.id();
+                let id = tx.id(self.chain.hash());
                 let verdict = self.submit(tx).map(|()| id);
 
                 if let Err(err) = &verdict {
@@ -325,6 +348,7 @@ impl Node {
                 tip: self.chain.tip().id(),
                 height: self.chain.tip().height,
                 work: self.chain.tip_work(),
+                justified: self.chain.justified().map_or(0, |justified| justified.epoch),
             },
             SyncRequest::Blocks { from, count } => {
                 let mut blocks = Vec::new();
@@ -338,9 +362,76 @@ impl Node {
 
                 SyncResponse::Blocks(blocks)
             }
+            SyncRequest::Justifications { from, count } => SyncResponse::Justifications(
+                self.chain
+                    .justifications_from(from, count.min(MAX_SYNC_JUSTIFICATIONS) as usize)?,
+            ),
         };
 
         Ok(response)
+    }
+
+    /// Logs what a vote or justification changed, and brings the mempool in line after a reorg.
+    fn finality_changed(&mut self, update: FinalityUpdate, source: &str) -> Result<(), NodeError> {
+        for checkpoint in &update.justified {
+            log::info!("[node] justified epoch {} {} {source}", checkpoint.epoch, checkpoint.block);
+        }
+
+        if let Some(finalized) = update.finalized {
+            log::info!("[node] finalized epoch {} {} {source}", finalized.epoch, finalized.block);
+        }
+
+        if let Some(evidence) = update.evidence {
+            let encode = |vote: &SignedVote| to_hex(&wincode::serialize(vote).expect("votes always encode"));
+            log::warn!(
+                "[node] validator {} signed conflicting votes; report it with: chainv4 send slash --first {} --second {}",
+                evidence.first.vote.voter,
+                encode(&evidence.first),
+                encode(&evidence.second)
+            );
+        }
+
+        if let Some((undone, applied)) = update.reorganized {
+            log::warn!(
+                "[node] followed a justified branch {source}: took off {} blocks, put on {}",
+                undone.len(),
+                applied.len()
+            );
+            let state = self.chain.state();
+
+            for tx in undone.into_iter().flat_map(|block| block.txs) {
+                let _ = self.mempool.add(tx, &state);
+            }
+
+            self.mempool.prune(&self.chain.state())?;
+        }
+
+        Ok(())
+    }
+
+    /// Signs and sends the vote this node's validator owes, if any.
+    fn vote_if_due(&mut self) -> Result<(), NodeError> {
+        let Some(keypair) = &self.validator else {
+            return Ok(());
+        };
+        let Some(vote) = self.chain.vote_for(&keypair.public())? else {
+            return Ok(());
+        };
+        // Remembered before it leaves, so a crash can never lead to a conflicting vote.
+        self.chain.record_own_vote(&vote)?;
+        let signed = SignedVote::sign(vote, keypair, &self.chain.genesis());
+        log::info!("[node] voting for epoch {} from epoch {}", vote.target.epoch, vote.source.epoch);
+        self.send(NetCommand::PublishVote(signed));
+
+        match self.chain.add_vote(signed) {
+            Ok(update) => self.finality_changed(update, "by this node's vote"),
+            Err(FinalityError::Db(err)) => Err(NodeError::Db(err)),
+            Err(err) => {
+                log::warn!("[node] could not count its own vote: {err}");
+
+                Ok(())
+            }
+        }
     }
 
     /// Logs what an import did and brings the mempool in line: transactions the main chain now
@@ -371,7 +462,12 @@ impl Node {
 
         self.mempool.prune(&self.chain.state())?;
 
-        Ok(())
+        // The main chain moved, so votes held back may count now.
+        match self.chain.retry_votes() {
+            Ok(update) => self.finality_changed(update, "after an import"),
+            Err(FinalityError::Db(err)) => Err(NodeError::Db(err)),
+            Err(_) => Ok(()),
+        }
     }
 
     /// Builds a block for the producer once it may produce, and starts sealing it. A miner keeps
@@ -394,7 +490,8 @@ impl Node {
         }
 
         let txs = self.mempool.select(&self.chain.state(), MAX_BLOCK_TXS)?;
-        let mut block = self.chain.build(txs, producer.address(), now);
+        let proofs = self.chain.unpaid_proofs()?;
+        let mut block = self.chain.build(txs, proofs, producer.address(), now);
 
         match producer.seal(&block.header) {
             Some(seal) => {
@@ -429,9 +526,20 @@ impl Node {
 
         match self.chain.import(&block, now) {
             Ok(Imported::Extended(receipts)) => {
-                log::info!("[node] produced block {height} {} ({} txs)", block.id(), receipts.len());
+                log::info!(
+                    "[node] produced block {height} {} ({} txs, {} proofs)",
+                    block.id(),
+                    receipts.len(),
+                    block.proofs.len()
+                );
                 self.mempool.prune(&self.chain.state())?;
                 self.send(NetCommand::PublishBlock(block));
+
+                match self.chain.retry_votes() {
+                    Ok(update) => self.finality_changed(update, "after its own block")?,
+                    Err(FinalityError::Db(err)) => return Err(NodeError::Db(err)),
+                    Err(_) => {}
+                }
             }
             Ok(other) => log::warn!("[node] its own block {height} did not extend the tip: {other:?}"),
             Err(ImportError::Db(err)) => return Err(NodeError::Db(err)),

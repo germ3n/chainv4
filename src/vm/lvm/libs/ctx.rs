@@ -73,6 +73,7 @@ pub fn register_ctx_lib(lua: &Lua) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structs::hash::HashType;
     use crate::db::{MemoryDb, State};
     use crate::vm::Vm;
     use crate::structs::address::Address;
@@ -97,7 +98,7 @@ mod tests {
             value: u256::new(7),
         };
         let state = Arc::new(State::new(Arc::new(MemoryDb::default())));
-        lua.set_app_data(Host::root(state, context, 1 << 20, Arc::new(Vm::new(&[]).unwrap())));
+        lua.set_app_data(Host::root(state, context, 1 << 20, Arc::new(Vm::new(&[], HashType::default_chain()).unwrap())));
         let code = "return ctx.sender == address.from_bytes(string.rep('\\1', 32)), ctx.contract:hex(), tostring(ctx.value)";
         let (sender, contract, value): (bool, String, String) = lua.load(code).eval().unwrap();
 

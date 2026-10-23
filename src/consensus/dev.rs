@@ -138,18 +138,20 @@ impl Producer for AuthorityProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structs::hash::HashType;
     use crate::structs::hash::Hash;
 
     const SLOT: u64 = 2_000;
 
     fn parent() -> BlockHeader {
         BlockHeader {
-            parent: Hash::Blake3_256([0; 32]),
+            parent: Hash::from_bytes(HashType::default_chain(), &[0; 32]).unwrap(),
             height: 0,
             timestamp: 10_000,
             producer: DevAuthority::dev_keypair().public().address(),
             difficulty: 0,
-            tx_root: Hash::Blake3_256([0; 32]),
+            tx_root: Hash::from_bytes(HashType::default_chain(), &[0; 32]).unwrap(),
+            proof_root: Hash::from_bytes(HashType::default_chain(), &[0; 32]).unwrap(),
         }
     }
 

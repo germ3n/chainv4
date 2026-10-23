@@ -81,7 +81,7 @@ impl<'a> Contracts<'a> {
         code: &Code,
         limits: Limits,
     ) -> Result<(Address, Hooked), RegistryError> {
-        let address = contract_address(deployer, nonce);
+        let address = contract_address(deployer, nonce, vm.hash());
 
         if self.get(&address)?.is_some() {
             return Err(RegistryError::AlreadyDeployed(address));
@@ -255,21 +255,27 @@ fn load(vm: &Vm, deployer: Address, code: &Code, limits: Limits) -> Result<Contr
 }
 
 #[document(
-    summary = "Where a deploy puts its contract: BLAKE3 of a domain tag, the deployer's address and their nonce. The same deployer and nonce always give the same address, and no key controls it.",
+    summary = "Where a deploy puts its contract: the chain hash of a domain tag, the deployer's address and their nonce. The same deployer and nonce always give the same address on a chain, and no key controls it.",
     category = "Registries",
+    params = {
+        deployer = "Who deploys.",
+        nonce = "The deploy's nonce.",
+        hash = "The chain's hash: any secure, 256-bit one.",
+    },
     see_also = "Contracts::deploy, Address::Contract",
 )]
-pub fn contract_address(deployer: &Address, nonce: u64) -> Address {
-    let mut hasher = Hasher::new(HashType::Blake3_256);
+pub fn contract_address(deployer: &Address, nonce: u64, hash: HashType) -> Address {
+    let mut hasher = Hasher::new(hash);
     hasher.update(ADDRESS_DOMAIN);
     hasher.update(&deployer.hashable_bytes_with_tag());
     hasher.update(&nonce.to_le_bytes());
+    let bytes: [u8; 32] = hasher
+        .finalize()
+        .to_bytes()
+        .try_into()
+        .expect("genesis only allows 256-bit chain hashes");
 
-    match hasher.finalize() {
-        Hash::Blake3_256(bytes) => Address::Contract(bytes),
-        #[allow(unreachable_patterns)]
-        _ => unreachable!("BLAKE3 always gives a BLAKE3 hash"),
-    }
+    Address::Contract(bytes)
 }
 
 #[cfg(all(test, feature = "lvm"))]
@@ -311,7 +317,7 @@ return M
     }
 
     fn vm() -> Arc<Vm> {
-        Arc::new(Vm::new(&[Engine::Lua]).unwrap())
+        Arc::new(Vm::new(&[Engine::Lua], HashType::default_chain()).unwrap())
     }
 
     fn context(contract: Address) -> CallContext {
@@ -393,10 +399,10 @@ return M
         let contracts = Contracts::new(&state);
         let address = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS).unwrap().0;
 
-        assert_eq!(address, contract_address(&DEPLOYER, 0));
+        assert_eq!(address, contract_address(&DEPLOYER, 0, HashType::default_chain()));
         assert!(matches!(address, Address::Contract(_)));
-        assert_ne!(address, contract_address(&DEPLOYER, 1));
-        assert_ne!(address, contract_address(&Address::Ed25519([8; 32]), 0));
+        assert_ne!(address, contract_address(&DEPLOYER, 1, HashType::default_chain()));
+        assert_ne!(address, contract_address(&Address::Ed25519([8; 32]), 0, HashType::default_chain()));
         assert_eq!(
             contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS).map(|(address, _)| address),
             Err(RegistryError::AlreadyDeployed(address))
@@ -407,7 +413,7 @@ return M
     fn bad_deploys_and_missing_contracts_fail() {
         let state = state();
         let contracts = Contracts::new(&state);
-        let nowhere = contract_address(&DEPLOYER, 99);
+        let nowhere = contract_address(&DEPLOYER, 99, HashType::default_chain());
         let func = Hash::Xxh3_64(selector("increment"));
 
         assert!(matches!(

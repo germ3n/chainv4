@@ -146,7 +146,7 @@ pub mod cost {
     category = "VM",
     see_also = "ScriptEngine::run, Host::call",
 )]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, wincode::SchemaWrite, wincode::SchemaRead)]
 pub struct Limits {
     #[document(summary = "Instruction budget, charged per instruction by the engine and per byte by host operations that do bulk work. A call to another contract spends from the caller's budget.")]
     pub fuel: u64,
@@ -249,16 +249,21 @@ pub trait ScriptEngine: Send + Sync {
 )]
 pub struct Vm {
     engines: Vec<(Engine, Box<dyn ScriptEngine>)>,
+    /// The chain's hash, which contract addresses are derived with.
+    hash: HashType,
 }
 
 impl Vm {
     #[document(
         parent = "Vm",
         summary = "Builds the engines a chain allows.",
-        params = { allowed = "The engines from the chain's genesis." },
+        params = {
+            allowed = "The engines from the chain's genesis.",
+            hash = "The chain's hash, from genesis, which contract addresses are derived with.",
+        },
         returns = "The Vm, or the first engine this node was built without.",
     )]
-    pub fn new(allowed: &[Engine]) -> Result<Vm, Engine> {
+    pub fn new(allowed: &[Engine], hash: HashType) -> Result<Vm, Engine> {
         let mut engines: Vec<(Engine, Box<dyn ScriptEngine>)> = Vec::new();
 
         for kind in allowed {
@@ -273,7 +278,12 @@ impl Vm {
             engines.push((*kind, engine));
         }
 
-        Ok(Vm { engines })
+        Ok(Vm { engines, hash })
+    }
+
+    #[document(parent = "Vm", summary = "The chain's hash.")]
+    pub fn hash(&self) -> HashType {
+        self.hash
     }
 
     #[document(

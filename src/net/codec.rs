@@ -79,6 +79,7 @@ impl Codec for SyncCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structs::hash::HashType;
     use crate::structs::hash::Hash;
     use libp2p::futures::executor::block_on;
     use libp2p::futures::io::Cursor;
@@ -90,10 +91,11 @@ mod tests {
         let mut codec = SyncCodec;
         let request = SyncRequest::Blocks { from: 7, count: 3 };
         let response = SyncResponse::Status {
-            genesis: Hash::Blake3_256([1; 32]),
-            tip: Hash::Blake3_256([2; 32]),
+            genesis: Hash::from_bytes(HashType::default_chain(), &[1; 32]).unwrap(),
+            tip: Hash::from_bytes(HashType::default_chain(), &[2; 32]).unwrap(),
             height: 9,
             work: crate::structs::u256::u256::new(7),
+            justified: 3,
         };
         let mut wire = Cursor::new(Vec::new());
         block_on(codec.write_request(&PROTOCOL, &mut wire, request.clone())).unwrap();

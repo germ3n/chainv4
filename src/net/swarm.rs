@@ -1,8 +1,10 @@
 use {
     super::codec::SyncCodec,
     super::{NetCommand, NetConfig, NetEvent, NetLink, SyncResponse},
+    crate::crypto::hasher::Hasher,
     crate::structs::block::Block,
     crate::structs::tx::SignedTx,
+    crate::structs::vote::SignedVote,
     libp2p::futures::StreamExt,
     libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     libp2p::{StreamProtocol, SwarmBuilder, gossipsub, identify, kad, mdns, request_response},
@@ -101,12 +103,14 @@ struct Net {
     swarm: Swarm<Behaviour>,
     blocks: gossipsub::IdentTopic,
     txs: gossipsub::IdentTopic,
+    votes: gossipsub::IdentTopic,
     channels: HashMap<u64, request_response::ResponseChannel<SyncResponse>>,
     next_id: u64,
 }
 
 impl Net {
     fn start(config: &NetConfig) -> Result<Net, NetError> {
+        let hash = config.hash;
         let mut swarm = SwarmBuilder::with_new_identity()
             .with_tokio()
             .with_quic()
@@ -115,8 +119,8 @@ impl Net {
                 let gossip_config = gossipsub::ConfigBuilder::default()
                     .max_transmit_size(MAX_GOSSIP)
                     // Ids by content, so the same block from two peers is one message.
-                    .message_id_fn(|message| {
-                        gossipsub::MessageId::from(blake3::hash(&message.data).as_bytes().to_vec())
+                    .message_id_fn(move |message| {
+                        gossipsub::MessageId::from(Hasher::digest(hash, &message.data).to_bytes())
                     })
                     .build()?;
                 let gossipsub = gossipsub::Behaviour::new(
@@ -153,8 +157,10 @@ impl Net {
             .build();
         let blocks = gossipsub::IdentTopic::new(format!("/chainv4/{}/blocks", config.network));
         let txs = gossipsub::IdentTopic::new(format!("/chainv4/{}/txs", config.network));
+        let votes = gossipsub::IdentTopic::new(format!("/chainv4/{}/votes", config.network));
         swarm.behaviour_mut().gossipsub.subscribe(&blocks).map_err(net_error)?;
         swarm.behaviour_mut().gossipsub.subscribe(&txs).map_err(net_error)?;
+        swarm.behaviour_mut().gossipsub.subscribe(&votes).map_err(net_error)?;
 
         for address in &config.listen {
             // Transport errors print nothing useful through Display, so show what is inside.
@@ -174,6 +180,7 @@ impl Net {
             swarm,
             blocks,
             txs,
+            votes,
             channels: HashMap::new(),
             next_id: 0,
         })
@@ -222,6 +229,15 @@ impl Net {
                         Ok(tx) => NetEvent::Tx { from, tx },
                         Err(err) => {
                             log::debug!("[net] undecodable transaction from {from}: {err}");
+
+                            return true;
+                        }
+                    }
+                } else if message.topic == self.votes.hash() {
+                    match wincode::deserialize::<SignedVote>(&message.data) {
+                        Ok(vote) => NetEvent::Vote { from, vote },
+                        Err(err) => {
+                            log::debug!("[net] undecodable vote from {from}: {err}");
 
                             return true;
                         }
@@ -326,6 +342,7 @@ impl Net {
         match command {
             NetCommand::PublishBlock(block) => self.publish(&self.blocks.clone(), &block),
             NetCommand::PublishTx(tx) => self.publish(&self.txs.clone(), &tx),
+            NetCommand::PublishVote(vote) => self.publish(&self.votes.clone(), &vote),
             NetCommand::Request { peer, request } => {
                 log::debug!("[net] asking {peer} for {request:?}");
                 self.swarm.behaviour_mut().sync.send_request(&peer, request);

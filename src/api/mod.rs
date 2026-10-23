@@ -3,14 +3,20 @@
 //! POST /txs, hands a signed transaction to the node through a Submitter.
 
 use {
-    crate::chain::{stored_block, stored_block_at, stored_receipt, stored_tip, stored_work},
+    crate::chain::{
+        FinalityConfig, Genesis, stored_block, stored_block_at, stored_evidence, stored_finality, stored_receipt, stored_tip,
+        stored_work,
+    },
+    crate::crypto::keypair::PublicKey,
+    crate::registry::validators::Validators,
+    crate::structs::vote::Checkpoint,
     crate::db::{DbError, Read, State},
     crate::mempool::MempoolError,
     crate::node::{SubmitError, Submitter},
     crate::registry::{Accounts, Contracts},
     crate::structs::address::Address,
     crate::structs::block::Block,
-    crate::structs::hash::Hash,
+    crate::structs::hash::{Hash, HashType},
     crate::structs::hex::from_hex,
     crate::structs::tx::SignedTx,
     axum::body::Bytes,
@@ -41,6 +47,10 @@ struct Api {
     db: Arc<dyn Read>,
     /// None when no node runs behind the API, so nothing can be submitted.
     submitter: Option<Submitter>,
+    /// The chain's finality settings, to tell which epoch a height is in.
+    finality: Option<Arc<FinalityConfig>>,
+    /// The chain's hash, which ids are read and written with.
+    hash: HashType,
 }
 
 #[document(
@@ -49,13 +59,21 @@ struct Api {
     params = {
         db = "The node's database. Start the API after Node::new, so genesis is in it.",
         submitter = "The running node's Submitter, for POST /txs; None to refuse submissions.",
+        genesis = "The chain's genesis: its hash, and its finality settings if it has finality.",
         address = "Where to listen.",
     },
     returns = "The address it listens on, which tells you the port when address asked for port 0.",
-    note = "Routes: GET /status; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, result and events once it is on the main chain, 404 before; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
+    note = "Routes: GET /status; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
     see_also = "Node, Address, Submitter",
 )]
-pub fn start(db: Arc<dyn Read>, submitter: Option<Submitter>, address: SocketAddr) -> std::io::Result<SocketAddr> {
+pub fn start(
+    db: Arc<dyn Read>,
+    submitter: Option<Submitter>,
+    genesis: &Genesis,
+    address: SocketAddr,
+) -> std::io::Result<SocketAddr> {
+    let finality = genesis.finality.clone().map(Arc::new);
+    let hash = genesis.hash;
     let listener = std::net::TcpListener::bind(address)?;
     listener.set_nonblocking(true)?;
     let local = listener.local_addr()?;
@@ -70,7 +88,7 @@ pub fn start(db: Arc<dyn Read>, submitter: Option<Submitter>, address: SocketAdd
                     Err(err) => return log::error!("[http] {err}"),
                 };
 
-                if let Err(err) = axum::serve(listener, router(Api { db, submitter })).await {
+                if let Err(err) = axum::serve(listener, router(Api { db, submitter, finality, hash })).await {
                     log::error!("[http] {err}");
                 }
             })
@@ -88,6 +106,9 @@ fn router(api: Api) -> Router {
         .route("/contracts/{address}", get(contract))
         .route("/txs", post(submit))
         .route("/txs/{id}", get(transaction))
+        .route("/validators", get(validators))
+        .route("/validators/{voter}", get(validator))
+        .route("/evidence", get(evidence))
         .fallback(async || ApiError::NotFound("no such route".to_string()))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(api)
@@ -131,11 +152,29 @@ impl IntoResponse for ApiError {
 type Answer = Result<Json<Value>, ApiError>;
 
 async fn status(Shared(api): Shared<Api>) -> Answer {
-    let db = api.db;
+    let db = api.db.clone();
     let genesis = at_height(&*db, 0)?;
     let tip = tip(&*db)?;
 
     let work = stored_work(&*db, &tip.id())?.unwrap_or_default();
+
+    let finality = match &api.finality {
+        Some(config) => {
+            let (justified, finalized) = stored_finality(&*db)?;
+            let start = Checkpoint {
+                epoch: 0,
+                block: genesis.id(),
+            };
+
+            json!({
+                "epoch": config.epoch_of(tip.header.height),
+                "checkpoint_interval": config.checkpoint_interval,
+                "justified": checkpoint_at(&*db, &justified.unwrap_or(start))?,
+                "finalized": checkpoint_at(&*db, &finalized.unwrap_or(start))?,
+            })
+        }
+        None => Value::Null,
+    };
 
     Ok(Json(json!({
         "genesis": genesis.id().to_string(),
@@ -144,21 +183,99 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "timestamp": tip.header.timestamp,
         "difficulty": tip.header.difficulty.to_string(),
         "work": work.to_string(),
+        "hash": api.hash.name(),
+        "finality": finality,
+    })))
+}
+
+/// A checkpoint with its block's height.
+fn checkpoint_at(db: &dyn Read, checkpoint: &Checkpoint) -> Result<Value, ApiError> {
+    let mut value = json::checkpoint(checkpoint);
+    value["height"] = stored_block(db, &checkpoint.block)?.map(|block| block.header.height).into();
+
+    Ok(value)
+}
+
+/// The height of the finalized checkpoint, 0 before anything past genesis is.
+fn finalized_height(db: &dyn Read) -> Result<u64, ApiError> {
+    let (_, finalized) = stored_finality(db)?;
+    let Some(finalized) = finalized else {
+        return Ok(0);
+    };
+
+    Ok(stored_block(db, &finalized.block)?.map_or(0, |block| block.header.height))
+}
+
+/// Every registered validator, and who votes in the tip's epoch.
+async fn validators(Shared(api): Shared<Api>) -> Answer {
+    let Some(config) = &api.finality else {
+        return Err(ApiError::NotFound("this chain has no finality".to_string()));
+    };
+    let db = api.db;
+    let epoch = config.epoch_of(tip(&*db)?.header.height);
+    let state = State::new(db);
+    let validators = Validators::new(&state);
+    let mut records = Vec::new();
+
+    for voter in validators.voters()? {
+        if let Some(record) = validators.get(&voter)? {
+            records.push(json::validator(&voter, &record));
+        }
+    }
+
+    let set = validators.set(epoch)?.unwrap_or_default();
+
+    Ok(Json(json!({
+        "epoch": epoch,
+        "validators": records,
+        "active": set.members.iter().map(|member| json!({
+            "voter": member.voter.to_string(),
+            "account": member.account.to_string(),
+            "weight": member.weight.to_string(),
+        })).collect::<Vec<_>>(),
+        "total_weight": set.total().to_string(),
+    })))
+}
+
+async fn validator(Shared(api): Shared<Api>, Path(voter): Path<String>) -> Answer {
+    let voter: PublicKey = voter
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("not a voting key: {voter}")))?;
+    let state = State::new(api.db);
+    let record = Validators::new(&state)
+        .get(&voter)?
+        .ok_or_else(|| ApiError::NotFound(format!("no validator has the voting key {voter}")))?;
+
+    Ok(Json(json::validator(&voter, &record)))
+}
+
+/// Conflicting votes this node has seen, ready for Tx::Slash.
+async fn evidence(Shared(api): Shared<Api>) -> Answer {
+    let evidence = stored_evidence(&*api.db)?;
+
+    Ok(Json(json!({
+        "evidence": evidence.iter().map(|evidence| json!({
+            "voter": evidence.first.vote.voter.to_string(),
+            "first": json::vote(&evidence.first),
+            "second": json::vote(&evidence.second),
+        })).collect::<Vec<_>>(),
     })))
 }
 
 /// A transaction's receipt, once it is on the main chain.
 async fn transaction(Shared(api): Shared<Api>, Path(id): Path<String>) -> Answer {
-    let db = api.db;
-    let id = block_id(&id)?;
+    let db = api.db.clone();
+    let id = block_id(&id, api.hash)?;
     let receipt = stored_receipt(&*db, &id)?
         .ok_or_else(|| ApiError::NotFound(format!("transaction {id} is not on the main chain, or not yet")))?;
     let block = stored_block(&*db, &receipt.block)?
         .ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("block {} is not stored", receipt.block))))?;
     let tip = tip(&*db)?.header.height;
     let confirmations = tip.saturating_sub(block.header.height) + 1;
+    let mut value = json::receipt(&id.to_string(), &receipt, block.header.height, confirmations);
+    value["final"] = (api.finality.is_some() && block.header.height <= finalized_height(&*db)?).into();
 
-    Ok(Json(json::receipt(&id.to_string(), &receipt, block.header.height, confirmations)))
+    Ok(Json(value))
 }
 
 /// Block summaries, newest first, below the height in ?before.
@@ -181,11 +298,11 @@ async fn blocks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
 }
 
 async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
-    let db = api.db;
+    let (db, hash) = (api.db, api.hash);
     let found = if block == "latest" {
         tip(&*db)?
     } else if block.starts_with("0x") {
-        let id = block_id(&block)?;
+        let id = block_id(&block, hash)?;
 
         stored_block(&*db, &id)?.ok_or_else(|| ApiError::NotFound(format!("no block {id}")))?
     } else {
@@ -202,10 +319,10 @@ async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
 
     for tx in &found.txs {
         // A side-branch block's transactions may sit elsewhere on the main chain, or nowhere.
-        receipts.push(stored_receipt(&*db, &tx.id())?.filter(|receipt| receipt.block == id));
+        receipts.push(stored_receipt(&*db, &tx.id(hash))?.filter(|receipt| receipt.block == id));
     }
 
-    Ok(Json(json::block(&found, &receipts)))
+    Ok(Json(json::block(&found, &receipts, hash)))
 }
 
 async fn account(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
@@ -279,11 +396,11 @@ fn number(query: &HashMap<String, String>, name: &str) -> Result<Option<u64>, Ap
 }
 
 /// A block or transaction id: both are BLAKE3.
-fn block_id(text: &str) -> Result<Hash, ApiError> {
+/// A block or transaction id, in the chain's hash.
+fn block_id(text: &str, hash: HashType) -> Result<Hash, ApiError> {
     from_hex(text)
-        .and_then(|bytes| bytes.try_into().ok())
-        .map(Hash::Blake3_256)
-        .ok_or_else(|| ApiError::BadRequest(format!("an id is 0x and 64 hex digits: {text}")))
+        .and_then(|bytes| Hash::from_bytes(hash, &bytes))
+        .ok_or_else(|| ApiError::BadRequest(format!("an id is 0x and {} hex digits: {text}", hash.digest_len() * 2)))
 }
 
 fn parse_address(text: &str) -> Result<Address, ApiError> {

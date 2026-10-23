@@ -19,13 +19,29 @@ compile_error!(
     "enable at least one hash feature: sha256, blake3, blake2s, blake2b, xxh3 or keccak256"
 );
 
+// Contracts and chains hash with a secure 256-bit algorithm the genesis picks; XXH3 alone
+// only names functions.
+#[cfg(all(
+    any(feature = "vm", feature = "node"),
+    not(any(
+        feature = "sha256",
+        feature = "blake3",
+        feature = "blake2s",
+        feature = "blake2b",
+        feature = "keccak256",
+    ))
+))]
+compile_error!(
+    "contracts and nodes need a secure hash: enable sha256, blake3, blake2s, blake2b or keccak256"
+);
+
 #[document(
     summary = "A digest, tagged with the algorithm that produced it.",
     category = "Crypto",
     see_also = "Hashable, HashType",
     note = "Each algorithm sits behind a cargo feature: sha256, blake3, blake2s, blake2b, xxh3 and keccak256, all on by default. Tags are pinned, so turning one off never changes how the others encode.",
 )]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, std::hash::Hash, SchemaWrite, SchemaRead)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, std::hash::Hash, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
 pub enum Hash {
     #[document(summary = "A SHA-256 digest.")]
@@ -160,10 +176,162 @@ pub enum HashType {
     Keccak256,
 }
 
+impl HashType {
+    #[document(
+        parent = "HashType",
+        summary = "Every algorithm this build has, in tag order.",
+    )]
+    pub const ALL: &'static [HashType] = &[
+        #[cfg(feature = "sha256")]
+        HashType::Sha256,
+        #[cfg(feature = "blake3")]
+        HashType::Blake3_256,
+        #[cfg(feature = "blake2s")]
+        HashType::Blake2s256,
+        #[cfg(feature = "blake2b")]
+        HashType::Blake2b256,
+        #[cfg(feature = "xxh3")]
+        HashType::Xxh3_64,
+        #[cfg(feature = "keccak256")]
+        HashType::Keccak256,
+    ];
+
+    #[document(
+        parent = "HashType",
+        summary = "The algorithm's short name, as genesis files, the API and the Lua hash library write it: sha256, blake3, blake2s, blake2b, xxh3 or keccak256.",
+    )]
+    pub fn name(self) -> &'static str {
+        match self {
+            #[cfg(feature = "sha256")]
+            HashType::Sha256 => "sha256",
+            #[cfg(feature = "blake3")]
+            HashType::Blake3_256 => "blake3",
+            #[cfg(feature = "blake2s")]
+            HashType::Blake2s256 => "blake2s",
+            #[cfg(feature = "blake2b")]
+            HashType::Blake2b256 => "blake2b",
+            #[cfg(feature = "xxh3")]
+            HashType::Xxh3_64 => "xxh3",
+            #[cfg(feature = "keccak256")]
+            HashType::Keccak256 => "keccak256",
+        }
+    }
+
+    #[document(
+        parent = "HashType",
+        summary = "How many bytes a digest has: 32, or 8 for XXH3.",
+    )]
+    pub fn digest_len(self) -> usize {
+        match self {
+            #[cfg(feature = "xxh3")]
+            HashType::Xxh3_64 => 8,
+            #[allow(unreachable_patterns)]
+            _ => 32,
+        }
+    }
+
+    #[document(
+        parent = "HashType",
+        summary = "Whether a chain can hash with it: 256 bits and cryptographic. Everything but XXH3.",
+        see_also = "Genesis",
+    )]
+    pub fn secure(self) -> bool {
+        self.digest_len() == 32
+    }
+
+    #[document(
+        parent = "HashType",
+        summary = "The chain hash development chains use: BLAKE3 when this build has it, otherwise the first other secure algorithm it has.",
+    )]
+    pub fn default_chain() -> HashType {
+        #[cfg(feature = "blake3")]
+        return HashType::Blake3_256;
+
+        #[cfg(not(feature = "blake3"))]
+        *HashType::ALL
+            .iter()
+            .find(|algorithm| algorithm.secure())
+            .expect("a build with a chain has a secure hash")
+    }
+}
+
+impl std::str::FromStr for HashType {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<HashType, String> {
+        HashType::ALL
+            .iter()
+            .copied()
+            .find(|algorithm| algorithm.name() == name)
+            .ok_or_else(|| {
+                let known: Vec<&str> = HashType::ALL.iter().map(|algorithm| algorithm.name()).collect();
+
+                format!("unknown hash {name}; this build has {}", known.join(", "))
+            })
+    }
+}
+
+impl Hash {
+    #[document(
+        parent = "Hash",
+        summary = "A digest made of zeros, the stand-in for the hash of nothing, such as genesis's parent.",
+    )]
+    pub fn zero(algorithm: HashType) -> Hash {
+        Hash::from_bytes(algorithm, &vec![0; algorithm.digest_len()]).expect("the right length")
+    }
+
+    #[document(
+        parent = "Hash",
+        summary = "A digest from its bytes, as to_bytes gives them.",
+        returns = "The hash, or None when the length does not fit the algorithm.",
+    )]
+    pub fn from_bytes(algorithm: HashType, bytes: &[u8]) -> Option<Hash> {
+        let hash = match algorithm {
+            #[cfg(feature = "sha256")]
+            HashType::Sha256 => Hash::Sha256(bytes.try_into().ok()?),
+            #[cfg(feature = "blake3")]
+            HashType::Blake3_256 => Hash::Blake3_256(bytes.try_into().ok()?),
+            #[cfg(feature = "blake2s")]
+            HashType::Blake2s256 => Hash::Blake2s256(bytes.try_into().ok()?),
+            #[cfg(feature = "blake2b")]
+            HashType::Blake2b256 => Hash::Blake2b256(bytes.try_into().ok()?),
+            #[cfg(feature = "xxh3")]
+            HashType::Xxh3_64 => Hash::Xxh3_64(u64::from_be_bytes(bytes.try_into().ok()?)),
+            #[cfg(feature = "keccak256")]
+            HashType::Keccak256 => Hash::Keccak256(bytes.try_into().ok()?),
+        };
+
+        Some(hash)
+    }
+}
+
 impl Hashable for Hash {
     const TAG_LEN: usize = 1;
 }
 
 impl Hashable for HashType {
     const TAG_LEN: usize = 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::hasher::Hasher;
+
+    #[test]
+    fn every_algorithm_round_trips_through_its_bytes_and_name() {
+        for &algorithm in HashType::ALL {
+            let digest = Hasher::digest(algorithm, b"abc");
+
+            assert_eq!(Hash::from_bytes(algorithm, &digest.to_bytes()), Some(digest));
+            assert_eq!(Hash::zero(algorithm).algorithm(), algorithm);
+            assert_eq!(algorithm.name().parse::<HashType>(), Ok(algorithm));
+            assert_eq!(digest.to_bytes().len(), algorithm.digest_len());
+        }
+
+        assert!(HashType::default_chain().secure());
+        assert!("md5".parse::<HashType>().unwrap_err().contains("unknown hash md5"));
+        #[cfg(feature = "xxh3")]
+        assert!(!HashType::Xxh3_64.secure());
+    }
 }

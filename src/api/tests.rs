@@ -49,12 +49,13 @@ fn serve() -> Fixture {
     for (nonce, tx) in [transfer, deploy].into_iter().enumerate() {
         let now = chain.tip().timestamp + SLOT;
         let signed = SignedTx::sign(tx, nonce as u64, &authority);
-        let mut block = chain.build(vec![signed], producer.address(), now);
+        let mut block = chain.build(vec![signed], Vec::new(), producer.address(), now);
         block.seal = producer.seal(&block.header).unwrap();
         chain.import(&block, now).unwrap();
     }
 
-    let address = start(db, Some(fake_node()), "127.0.0.1:0".parse().unwrap()).unwrap();
+    let genesis = Genesis::dev_authority(authority.public());
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
 
     Fixture { address, chain, bob }
 }
@@ -67,7 +68,7 @@ fn fake_node() -> Submitter {
     std::thread::spawn(move || {
         for event in events {
             if let NetEvent::Submitted { tx, reply } = event {
-                let verdict = if tx.nonce == 99 { Err(MempoolError::Stale) } else { Ok(tx.id()) };
+                let verdict = if tx.nonce == 99 { Err(MempoolError::Stale) } else { Ok(tx.id(HashType::default_chain())) };
                 let _ = reply.send(verdict);
             }
         }
@@ -175,7 +176,7 @@ fn accounts_and_contracts_are_read_from_state() {
     let fixture = serve();
     let authority = DevAuthority::dev_keypair().public().address();
     let bob = ok(fixture.address, &format!("/accounts/{}", fixture.bob));
-    let counter = contract_address(&authority, 1);
+    let counter = contract_address(&authority, 1, HashType::default_chain());
     let contract = ok(fixture.address, &format!("/contracts/{counter}"));
 
     assert_eq!(bob["balance"], "100");
@@ -234,7 +235,7 @@ fn transactions_are_submitted_as_hex() {
     let (status, body) = post_tx(fixture.address, &wincode::serialize(&tx).unwrap());
 
     assert_eq!(status, 202, "{body}");
-    assert_eq!(body["id"], tx.id().to_string());
+    assert_eq!(body["id"], tx.id(HashType::default_chain()).to_string());
 }
 
 #[test]
@@ -268,7 +269,8 @@ fn bad_or_refused_submissions_say_why() {
 fn an_api_without_a_node_takes_no_transactions() {
     let db = Arc::new(MemoryDb::default());
     Chain::open(db.clone(), &Genesis::dev_authority(DevAuthority::dev_keypair().public())).unwrap();
-    let address = start(db, None, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let genesis = Genesis::dev_authority(DevAuthority::dev_keypair().public());
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
     let (status, body) = post_tx(address, &wincode::serialize(&signed(0)).unwrap());
 
     assert_eq!(status, 503, "{body}");
@@ -296,4 +298,188 @@ fn transactions_are_looked_up_by_id_once_they_land() {
 
     assert_eq!(status, 404, "{body}");
     assert_eq!(get(fixture.address, "/txs/nope").0, 400);
+}
+
+// Finality: the dev authority chain, where the dev key is the one validator and epochs are 8
+// blocks long.
+
+struct Finalized {
+    address: SocketAddr,
+    chain: Chain,
+    newcomer: Keypair,
+}
+
+/// A dev chain 18 blocks long with a bond in block 1 and a transfer in block 12, where the dev key justified epochs 1 and 2,
+/// which finalized epoch 1, and signed one double vote.
+fn serve_finalized() -> Finalized {
+    use crate::structs::vote::{Checkpoint, SignedVote, Vote};
+
+    let authority = DevAuthority::dev_keypair();
+    let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let genesis = Genesis::dev_authority(authority.public());
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let newcomer = Keypair::generate(authority.public().key_type()).unwrap();
+    let bond = SignedTx::sign(
+        Tx::Bond {
+            voter: newcomer.public(),
+            amount: Amount::U128(10u128.pow(20)),
+        },
+        0,
+        &authority,
+    );
+    let transfer = SignedTx::sign(
+        Tx::Transfer {
+            from: authority.public().address(),
+            to: newcomer.public().address(),
+            amount: Amount::U128(1),
+        },
+        1,
+        &authority,
+    );
+
+    for height in 1..=18 {
+        let now = chain.tip().timestamp + SLOT;
+        let txs = match height {
+            1 => vec![bond.clone()],
+            12 => vec![transfer.clone()],
+            _ => Vec::new(),
+        };
+        let proofs = chain.unpaid_proofs().unwrap();
+        let mut block = chain.build(txs, proofs, producer.address(), now);
+        block.seal = producer.seal(&block.header).unwrap();
+        chain.import(&block, now).unwrap();
+
+        if let Some(vote) = chain.vote_for(&authority.public()).unwrap() {
+            chain.record_own_vote(&vote).unwrap();
+            chain.add_vote(SignedVote::sign(vote, &authority, &chain.genesis())).unwrap();
+        }
+    }
+
+    let double = Vote {
+        target: Checkpoint {
+            epoch: 2,
+            block: chain.block_at(1).unwrap().unwrap().id(),
+        },
+        ..chain.justification(&chain.justified().unwrap().block).unwrap().unwrap().votes[0].vote
+    };
+    chain.add_vote(SignedVote::sign(double, &authority, &chain.genesis())).unwrap();
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
+
+    Finalized { address, chain, newcomer }
+}
+
+#[test]
+fn status_tells_how_far_finality_has_come() {
+    let fixture = serve_finalized();
+    let finality = &ok(fixture.address, "/status")["finality"];
+
+    assert_eq!(finality["epoch"], 2);
+    assert_eq!(finality["checkpoint_interval"], 8);
+    assert_eq!(finality["justified"]["epoch"], 2);
+    assert_eq!(finality["justified"]["height"], 16);
+    assert_eq!(finality["justified"]["block"], fixture.chain.justified().unwrap().block.to_string());
+    assert_eq!(finality["finalized"]["epoch"], 1);
+    assert_eq!(finality["finalized"]["height"], 8);
+}
+
+#[test]
+fn receipts_say_whether_they_are_final() {
+    let fixture = serve_finalized();
+    let bond = ok(fixture.address, "/blocks/1")["txs"][0].clone();
+
+    assert_eq!(bond["tx"]["type"], "bond");
+    assert_eq!(bond["tx"]["voter"], fixture.newcomer.public().to_string());
+    assert_eq!(bond["tx"]["amount"], "100000000000000000000");
+    assert_eq!(ok(fixture.address, &format!("/txs/{}", bond["id"].as_str().unwrap()))["final"], true);
+
+    // Past the finalized checkpoint at height 8, so not final yet.
+    let transfer = ok(fixture.address, "/blocks/12")["txs"][0]["id"].as_str().unwrap().to_string();
+
+    assert_eq!(ok(fixture.address, &format!("/txs/{transfer}"))["final"], false);
+
+    let unvoted = serve();
+    let id = ok(unvoted.address, "/blocks/1")["txs"][0]["id"].as_str().unwrap().to_string();
+
+    assert_eq!(ok(unvoted.address, &format!("/txs/{id}"))["final"], false);
+}
+
+#[test]
+fn a_chain_without_finality_says_so() {
+    let authority = DevAuthority::dev_keypair();
+    let genesis = Genesis {
+        finality: None,
+        ..Genesis::dev_authority(authority.public())
+    };
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &genesis).unwrap();
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
+
+    assert_eq!(ok(address, "/status")["finality"], Value::Null);
+    assert_eq!(get(address, "/validators").0, 404);
+    assert_eq!(ok(address, "/evidence")["evidence"], json!([]));
+}
+
+#[test]
+fn proofs_show_in_the_blocks_that_pay_them() {
+    let fixture = serve_finalized();
+    let dev = DevAuthority::dev_keypair().public();
+    // The dev key voted for epoch 1 at height 10, and block 11 is the first that could pay it.
+    let paying = ok(fixture.address, "/blocks/11");
+
+    assert_eq!(paying["proofs"][0]["target"]["epoch"], 1);
+    assert_eq!(paying["proofs"][0]["source"]["epoch"], 0);
+    assert_eq!(paying["proofs"][0]["voters"], json!([dev.to_string()]));
+}
+
+#[test]
+fn validators_are_listed_with_who_votes_now() {
+    let fixture = serve_finalized();
+    let dev = DevAuthority::dev_keypair().public();
+    let listing = ok(fixture.address, "/validators");
+    let voters: Vec<&str> = listing["validators"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| record["voter"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(listing["epoch"], 2);
+    assert_eq!(voters.len(), 2);
+    assert!(voters.contains(&dev.to_string().as_str()));
+    assert!(voters.contains(&fixture.newcomer.public().to_string().as_str()));
+    // Bonded in epoch 0, the newcomer votes from epoch 3.
+    assert_eq!(listing["active"].as_array().unwrap().len(), 1);
+    assert_eq!(listing["active"][0]["voter"], dev.to_string());
+    assert_eq!(listing["total_weight"], listing["active"][0]["weight"]);
+
+    let newcomer = ok(fixture.address, &format!("/validators/{}", fixture.newcomer.public()));
+
+    assert_eq!(newcomer["bond"], "100000000000000000000");
+    assert_eq!(newcomer["active_from"], 3);
+    assert_eq!(newcomer["active_until"], Value::Null);
+    assert_eq!(newcomer["slashed"], false);
+
+    let stranger = Keypair::generate(dev.key_type()).unwrap().public();
+
+    assert_eq!(get(fixture.address, &format!("/validators/{stranger}")).0, 404);
+    assert_eq!(get(fixture.address, "/validators/nope").0, 400);
+}
+
+#[test]
+fn evidence_lists_conflicting_votes_ready_to_report() {
+    let fixture = serve_finalized();
+    let evidence = ok(fixture.address, "/evidence")["evidence"].clone();
+    let dev = DevAuthority::dev_keypair().public();
+
+    assert_eq!(evidence.as_array().unwrap().len(), 1);
+    assert_eq!(evidence[0]["voter"], dev.to_string());
+    assert_eq!(evidence[0]["first"]["target"]["epoch"], 2);
+    assert_eq!(evidence[0]["second"]["target"]["epoch"], 2);
+    assert_ne!(evidence[0]["first"]["target"]["block"], evidence[0]["second"]["target"]["block"]);
+
+    let encoded = crate::structs::hex::from_hex(evidence[0]["second"]["encoded"].as_str().unwrap()).unwrap();
+    let vote: crate::structs::vote::SignedVote = wincode::deserialize(&encoded).unwrap();
+
+    assert_eq!(vote.verify(&fixture.chain.genesis()), Ok(()));
 }

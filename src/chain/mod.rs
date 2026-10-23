@@ -1,12 +1,13 @@
 //! The chain this node follows: genesis, every block it accepted, and which branch is the main
-//! chain, the one with the most total work. A block that extends the tip is run and committed at
-//! once. One on a side branch is stored without running; if its branch comes to weigh more than
+//! chain: the one with the most total work among those holding the latest justified checkpoint,
+//! never leaving the finalized one (see finality.rs). A block that extends the tip is run and
+//! committed at once. One on a side branch is stored without running; if its branch comes to weigh more than
 //! the main chain, the main chain is rolled back to where they meet, using the undo record each
 //! block left, and the branch is run on top, all in one commit. A crash never leaves state from
 //! a block the main chain does not have.
 
 use {
-    crate::consensus::{Consensus, ConsensusConfig, ConsensusError, PowConfig, PowHash},
+    crate::consensus::{Consensus, ConsensusConfig, ConsensusError, PowConfig},
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::db::{Column, Database, DbError, Read, State},
@@ -17,6 +18,7 @@ use {
     crate::structs::hash::{Hash, HashType},
     crate::structs::tx::SignedTx,
     crate::structs::u256::{U256Le, u256},
+    crate::structs::vote::Justification,
     crate::vm::{Limits, Vm},
     r#macro::document,
     std::collections::HashSet,
@@ -26,20 +28,24 @@ use {
 };
 
 mod execute;
+mod finality;
 mod receipt;
 
-pub use execute::{Effect, Failure, Receipt, Rules, TxError};
+pub use execute::{Effect, Failure, FinalityRules, Receipt, Rules, TxError};
+pub use finality::{
+    Evidence, FinalityConfig, FinalityError, FinalityUpdate, GenesisValidator, stored_evidence, stored_finality,
+    stored_justification,
+};
 pub use receipt::{TxReceipt, TxStatus};
 
-/// What one deploy or contract call may use. Part of consensus: every node must enforce the same.
-pub const TX_LIMITS: Limits = Limits {
+/// The development chains' transaction limits: what one deploy or contract call may use.
+pub const DEV_TX_LIMITS: Limits = Limits {
     fuel: 10_000_000,
     memory: 32 * 1024 * 1024,
 };
 
-/// How far back the main chain may be rolled back. A branch that splits off deeper is never
-/// followed, however much work it holds, and undo records older than this are dropped.
-pub const MAX_REORG_DEPTH: u64 = 100;
+/// The development chains' reorg limit.
+pub const DEV_MAX_REORG_DEPTH: u64 = 100;
 
 const TIP_KEY: &[u8] = b"tip";
 
@@ -106,6 +112,8 @@ impl Reward {
 pub struct Genesis {
     #[document(summary = "The genesis block's timestamp, in milliseconds since the Unix epoch.")]
     pub timestamp: u64,
+    #[document(summary = "The chain's hash, for block and transaction ids, the roots blocks commit to and contract addresses: any secure algorithm this build has. Proof of work names its own.")]
+    pub hash: HashType,
     #[document(summary = "Which consensus the chain runs, and its parameters.")]
     pub consensus: ConsensusConfig,
     #[document(summary = "What each block mints for its producer.")]
@@ -116,6 +124,12 @@ pub struct Genesis {
     pub allocations: Vec<Allocation>,
     #[document(summary = "The engines contracts may be deployed for. A node built without one of them refuses to open the chain rather than fall out of step with it.")]
     pub engines: Vec<Engine>,
+    #[document(summary = "What one deploy, upgrade or contract call may use, called contracts included.")]
+    pub tx_limits: Limits,
+    #[document(summary = "How far back the main chain may be rolled back. A branch that splits off deeper is never followed, however much work it holds, and undo records older than this are dropped.")]
+    pub max_reorg_depth: u64,
+    #[document(summary = "Finality: who validates and every parameter of it, or None for a chain where only work decides.")]
+    pub finality: Option<FinalityConfig>,
 }
 
 impl Hashable for Genesis {}
@@ -128,12 +142,13 @@ fn dev_funds() -> u256 {
 impl Genesis {
     #[document(
         parent = "Genesis",
-        summary = "A development chain where one key produces a block every two seconds. That key holds a million coins at 18 decimals and may mint; there is no block reward. Allows every engine this node was built with, so nodes built with different engines are on different dev chains.",
+        summary = "A development chain where one key produces a block every two seconds. That key holds a million coins at 18 decimals, may mint, and is the one finality validator; there is no block reward. Allows every engine this node was built with, so nodes built with different engines are on different dev chains.",
         params = { authority = "The producing key, usually DevAuthority::dev_keypair." },
     )]
     pub fn dev_authority(authority: PublicKey) -> Genesis {
         Genesis {
             timestamp: 0,
+            hash: HashType::default_chain(),
             consensus: ConsensusConfig::Authority {
                 key: authority,
                 slot_ms: 2_000,
@@ -145,19 +160,23 @@ impl Genesis {
                 amount: dev_funds(),
             }],
             engines: Engine::compiled(),
+            tx_limits: DEV_TX_LIMITS,
+            max_reorg_depth: DEV_MAX_REORG_DEPTH,
+            finality: Some(FinalityConfig::dev(authority)),
         }
     }
 
     #[document(
         parent = "Genesis",
-        summary = "A development chain mined with proof of work on BLAKE3, aiming for a block every two seconds. Miners earn 50 coins a block, halving every 210,000 blocks. The development key holds a million coins and may mint, so the CLI works out of the box. Allows every engine this node was built with.",
+        summary = "A development chain mined with proof of work, aiming for a block every two seconds. It hashes with HashType::default_chain, BLAKE3 in a default build, for both its ids and its work. Miners earn 50 coins a block, halving every 210,000 blocks. The development key holds a million coins, may mint, and is the one finality validator, so the CLI works out of the box. Allows every engine this node was built with.",
         params = { dev = "The development key, usually DevAuthority::dev_keypair." },
     )]
     pub fn dev_pow(dev: PublicKey) -> Genesis {
         Genesis {
             timestamp: 0,
+            hash: HashType::default_chain(),
             consensus: ConsensusConfig::ProofOfWork(PowConfig {
-                hash: PowHash::Blake3,
+                hash: HashType::default_chain(),
                 target_block_ms: 2_000,
                 initial_difficulty: 100_000,
                 min_difficulty: 1_000,
@@ -172,6 +191,9 @@ impl Genesis {
                 amount: dev_funds(),
             }],
             engines: Engine::compiled(),
+            tx_limits: DEV_TX_LIMITS,
+            max_reorg_depth: DEV_MAX_REORG_DEPTH,
+            finality: Some(FinalityConfig::dev(dev)),
         }
     }
 
@@ -187,16 +209,33 @@ impl Genesis {
 
         Block {
             header: BlockHeader {
-                parent: Hash::Blake3_256([0; 32]),
+                parent: Hash::zero(self.hash),
                 height: 0,
                 timestamp: self.timestamp,
                 producer,
                 difficulty: 0,
-                tx_root: self.hash(HashType::Blake3_256),
+                tx_root: Hashable::hash(self, self.hash),
+                proof_root: Block::proof_root(self.hash, &[]),
             },
             txs: Vec::new(),
+            proofs: Vec::new(),
             seal: Seal::None,
         }
+    }
+
+    /// Settings no chain could run with.
+    fn problem(&self) -> Option<&'static str> {
+        if !self.hash.secure() {
+            return Some("the chain's hash must be a secure 256-bit one, not xxh3");
+        }
+
+        if let ConsensusConfig::ProofOfWork(pow) = &self.consensus
+            && !pow.hash.secure()
+        {
+            return Some("the proof-of-work hash must be a secure 256-bit one, not xxh3");
+        }
+
+        self.finality.as_ref().and_then(FinalityConfig::problem)
     }
 
     #[document(
@@ -205,8 +244,14 @@ impl Genesis {
     )]
     pub fn rules(&self) -> Rules {
         Rules {
+            hash: self.hash,
             minter: self.minter,
-            limits: TX_LIMITS,
+            limits: self.tx_limits,
+            finality: self.finality.as_ref().map(|config| FinalityRules {
+                staking: config.staking(),
+                checkpoint_interval: config.checkpoint_interval,
+                chain: self.block().id(),
+            }),
         }
     }
 }
@@ -262,6 +307,12 @@ pub enum BlockError {
     Reward,
     #[document(summary = "It, or a block it builds on, already failed to run.")]
     Bad,
+    #[document(summary = "The proof_root does not match the finality proofs.")]
+    ProofRoot,
+    #[document(summary = "A finality proof it carries does not check out.")]
+    Proof(String),
+    #[document(summary = "It is on a branch that leaves the finalized checkpoint.")]
+    ConflictsWithFinality,
 }
 
 impl fmt::Display for BlockError {
@@ -273,6 +324,9 @@ impl fmt::Display for BlockError {
             BlockError::Tx { index, error } => write!(f, "transaction {index}: {error}"),
             BlockError::Reward => write!(f, "the reward overflows the producer's balance"),
             BlockError::Bad => write!(f, "builds on a block that failed to run"),
+            BlockError::ProofRoot => write!(f, "proof_root does not match"),
+            BlockError::Proof(why) => write!(f, "bad finality proof: {why}"),
+            BlockError::ConflictsWithFinality => write!(f, "conflicts with the finalized checkpoint"),
         }
     }
 }
@@ -286,7 +340,7 @@ impl fmt::Display for BlockError {
 pub enum Imported {
     #[document(summary = "It extended the main chain. A receipt per transaction.")]
     Extended(Vec<Receipt>),
-    #[document(summary = "It is stored on a side branch, which holds no more work than the main chain, or split off further back than MAX_REORG_DEPTH.")]
+    #[document(summary = "It is stored on a side branch: one that holds no more work than the main chain, misses the latest justified checkpoint, or split off further back than max_reorg_depth.")]
     Side,
     #[document(summary = "Its branch outweighed the main chain, which now follows it. undone are the blocks taken off the main chain, newest first; applied the ones put on, oldest first.")]
     Reorganized { undone: Vec<Block>, applied: Vec<Block> },
@@ -300,15 +354,20 @@ pub enum Imported {
 pub struct Chain {
     db: Arc<dyn Database>,
     rules: Rules,
+    hash: HashType,
     vm: Arc<Vm>,
     consensus: Box<dyn Consensus>,
     reward: Reward,
     genesis: Hash,
     tip: BlockHeader,
     tip_work: u256,
+    max_reorg_depth: u64,
     /// Blocks that failed to run, and so their descendants too. Forgotten on restart, when the
     /// branch would fail again the same way.
     bad: HashSet<Hash>,
+    /// Stored blocks no stored block builds on yet, which a justification may move the chain to.
+    tips: HashSet<Hash>,
+    finality: Option<finality::FinalityState>,
 }
 
 impl Chain {
@@ -318,7 +377,11 @@ impl Chain {
         returns = "The chain; WrongGenesis when the database holds a different chain, MissingEngine when this node lacks an engine genesis allows.",
     )]
     pub fn open(db: Arc<dyn Database>, genesis: &Genesis) -> Result<Chain, ChainError> {
-        let vm = Arc::new(Vm::new(&genesis.engines).map_err(ChainError::MissingEngine)?);
+        if let Some(problem) = genesis.problem() {
+            return Err(ChainError::BadGenesis(problem.to_string()));
+        }
+
+        let vm = Arc::new(Vm::new(&genesis.engines, genesis.hash).map_err(ChainError::MissingEngine)?);
         let block = genesis.block();
         let id = block.id();
         let stored: Option<Hash> = read_value(&*db, Column::Heights, &0u64.to_be_bytes())?;
@@ -336,6 +399,10 @@ impl Chain {
                         .map_err(|err| ChainError::BadGenesis(err.to_string()))?;
                 }
 
+                if let Some(config) = &genesis.finality {
+                    finality::write_genesis(&state, config)?;
+                }
+
                 state.put_value(Column::Blocks, id_key(&id), &block);
                 state.put_value(Column::Work, id_key(&id), &WorkRecord { total: u256::ZERO });
                 state.put_value(Column::Heights, 0u64.to_be_bytes().to_vec(), &id);
@@ -351,18 +418,31 @@ impl Chain {
         let tip_id: Hash = read_value(&*db, Column::Meta, TIP_KEY)?.expect("genesis sets the tip");
         let tip: Block = read_value(&*db, Column::Blocks, &id_key(&tip_id))?.expect("the tip is stored");
         let tip_work = work_of(&*db, &tip_id)?;
+        let finality = match &genesis.finality {
+            Some(config) => Some(finality::FinalityState::load(config.clone(), &*db, id)?),
+            None => None,
+        };
 
         Ok(Chain {
             db,
             rules: genesis.rules(),
+            hash: genesis.hash,
             vm,
             consensus: genesis.consensus.rules(),
             reward: genesis.reward,
             genesis: id,
             tip: tip.header,
             tip_work,
+            max_reorg_depth: genesis.max_reorg_depth,
             bad: HashSet::new(),
+            tips: HashSet::from([tip_id]),
+            finality,
         })
+    }
+
+    #[document(parent = "Chain", summary = "How far back the main chain may be rolled back, from genesis.")]
+    pub fn max_reorg_depth(&self) -> u64 {
+        self.max_reorg_depth
     }
 
     #[document(parent = "Chain", summary = "The newest main-chain block's header.")]
@@ -373,6 +453,11 @@ impl Chain {
     #[document(parent = "Chain", summary = "The total work of the main chain.")]
     pub fn tip_work(&self) -> u256 {
         self.tip_work
+    }
+
+    #[document(parent = "Chain", summary = "The chain's hash, from genesis: what block and transaction ids, roots and contract addresses are hashed with.")]
+    pub fn hash(&self) -> HashType {
+        self.hash
     }
 
     #[document(parent = "Chain", summary = "The genesis block's id, which names the chain.")]
@@ -413,11 +498,12 @@ impl Chain {
         summary = "The next block on the tip, unsealed: the producer still has to seal it.",
         params = {
             txs = "The transactions, in order.",
+            proofs = "Finality proofs to carry, which pay their voters; unpaid_proofs gives them.",
             producer = "Who produces it; the reward goes here.",
             timestamp = "When it is made, which also sets its difficulty.",
         },
     )]
-    pub fn build(&self, txs: Vec<SignedTx>, producer: Address, timestamp: u64) -> Block {
+    pub fn build(&self, txs: Vec<SignedTx>, proofs: Vec<Justification>, producer: Address, timestamp: u64) -> Block {
         Block {
             header: BlockHeader {
                 parent: self.tip.id(),
@@ -425,9 +511,11 @@ impl Chain {
                 timestamp,
                 producer,
                 difficulty: self.consensus.difficulty(&self.tip, timestamp),
-                tx_root: Block::tx_root(&txs),
+                tx_root: Block::tx_root(self.hash, &txs),
+                proof_root: Block::proof_root(self.hash, &proofs),
             },
             txs,
+            proofs,
             seal: Seal::None,
         }
     }
@@ -467,8 +555,20 @@ impl Chain {
             return Err(ImportError::Invalid(BlockError::Height));
         }
 
-        if block.header.tx_root != Block::tx_root(&block.txs) {
+        if block.header.tx_root != Block::tx_root(self.hash, &block.txs) {
             return Err(ImportError::Invalid(BlockError::TxRoot));
+        }
+
+        if block.header.proof_root != Block::proof_root(self.hash, &block.proofs) {
+            return Err(ImportError::Invalid(BlockError::ProofRoot));
+        }
+
+        if let Some(finalized) = self.finality.as_ref().map(|finality| finality.finalized)
+            && let Some(config) = self.finality_config()
+            && block.header.height <= config.checkpoint_height(finalized.epoch)
+        {
+            // At or below the finalized checkpoint, only the main chain's blocks exist.
+            return Err(ImportError::Invalid(BlockError::ConflictsWithFinality));
         }
 
         self.consensus
@@ -478,6 +578,8 @@ impl Chain {
         let state = Arc::new(State::new(self.db.clone()));
         state.put_value(Column::Blocks, id_key(&id), block);
         state.put_value(Column::Work, id_key(&id), &WorkRecord { total: work });
+        self.tips.remove(&parent_id);
+        self.tips.insert(id);
 
         if parent_id == self.tip.id() {
             let receipts = match self.apply(&state, block) {
@@ -503,17 +605,19 @@ impl Chain {
             return Ok(Imported::Side);
         }
 
-        self.reorganize(block, work)
+        self.reorganize(block, work, false)
     }
 
-    /// Makes block, whose branch outweighs the main chain, the tip: rolls the main chain back to
-    /// where the branch splits off, then runs the branch, in one commit.
-    fn reorganize(&mut self, new_tip: &Block, work: u256) -> Result<Imported, ImportError> {
+    /// Makes new_tip the tip: rolls the main chain back to where its branch splits off, then runs
+    /// the branch, in one commit. A branch that outweighs the main chain is only followed when it
+    /// holds the latest justified checkpoint; a justified one (justified set) only needs to hold
+    /// the finalized one. Neither may split off deeper than max_reorg_depth.
+    fn reorganize(&mut self, new_tip: &Block, work: u256, justified: bool) -> Result<Imported, ImportError> {
         let mut branch = vec![new_tip.clone()];
         let mut fork = new_tip.header.parent;
 
         while !self.on_main_chain(&fork)? {
-            if branch.len() as u64 > MAX_REORG_DEPTH {
+            if branch.len() as u64 > self.max_reorg_depth {
                 break;
             }
 
@@ -524,13 +628,29 @@ impl Chain {
 
         let fork_height = self.block(&fork)?.ok_or_else(|| missing(&fork))?.header.height;
 
-        if !self.on_main_chain(&fork)? || self.tip.height - fork_height > MAX_REORG_DEPTH {
+        if !self.on_main_chain(&fork)? || self.tip.height - fork_height > self.max_reorg_depth {
             log::warn!(
-                "[chain] not following a heavier branch to {} that splits off more than {MAX_REORG_DEPTH} blocks back",
-                new_tip.id()
+                "[chain] not following a branch to {} that splits off more than {} blocks back",
+                new_tip.id(),
+                self.max_reorg_depth
             );
 
             return Ok(Imported::Side);
+        }
+
+        if let (Some(finality), Some(config)) = (&self.finality, self.finality_config()) {
+            let anchor = if justified { finality.finalized } else { finality.justified };
+
+            if fork_height < config.checkpoint_height(anchor.epoch) {
+                log::info!(
+                    "[chain] not following a branch to {} that leaves the {} checkpoint of epoch {}",
+                    new_tip.id(),
+                    if justified { "finalized" } else { "justified" },
+                    anchor.epoch
+                );
+
+                return Ok(Imported::Side);
+            }
         }
 
         let state = Arc::new(State::new(self.db.clone()));
@@ -574,7 +694,7 @@ impl Chain {
         let mut receipts = Vec::new();
 
         for (index, tx) in block.txs.iter().enumerate() {
-            match execute::execute(&layer, tx, &self.rules, &self.vm) {
+            match execute::execute(&layer, tx, &self.rules, &self.vm, height) {
                 Ok(receipt) => receipts.push(receipt),
                 Err(execute::ExecuteError::Db(err)) => return Err(ImportError::Db(err)),
                 Err(execute::ExecuteError::Invalid(error)) => {
@@ -594,9 +714,18 @@ impl Chain {
                 })?;
         }
 
+        finality::pay_proofs(self, &layer, block).map_err(|why| ImportError::Invalid(BlockError::Proof(why)))?;
+
+        // Each checkpoint fixes the validator set activation_delay epochs ahead.
+        if let Some(config) = self.finality_config()
+            && height.is_multiple_of(config.checkpoint_interval)
+        {
+            crate::registry::validators::Validators::new(&layer).fix_set(config.epoch_of(height) + config.activation_delay)?;
+        }
+
         for (index, (tx, receipt)) in block.txs.iter().zip(&receipts).enumerate() {
             let record = TxReceipt::new(id, index as u32, receipt);
-            layer.put_value(Column::Receipts, id_key(&tx.id()), &record);
+            layer.put_value(Column::Receipts, id_key(&tx.id(self.hash)), &record);
         }
 
         layer.put_value(Column::Heights, height.to_be_bytes().to_vec(), &id);
@@ -621,8 +750,8 @@ impl Chain {
         below.merge(changes);
         below.put_value(Column::Undo, id_key(&id), &Undo { entries });
 
-        // Nothing rolls back further than MAX_REORG_DEPTH, so older undo records go.
-        if let Some(old) = height.checked_sub(MAX_REORG_DEPTH + 1)
+        // Nothing rolls back further than max_reorg_depth, so older undo records go.
+        if let Some(old) = height.checked_sub(self.max_reorg_depth + 1)
             && let Some(old_id) = read_value::<Hash>(&**below, Column::Heights, &old.to_be_bytes())?
         {
             below.delete(Column::Undo, id_key(&old_id));
@@ -631,7 +760,7 @@ impl Chain {
         Ok(receipts)
     }
 
-    fn on_main_chain(&self, id: &Hash) -> Result<bool, DbError> {
+    pub(super) fn on_main_chain(&self, id: &Hash) -> Result<bool, DbError> {
         let Some(block) = self.block(id)? else {
             return Ok(false);
         };
@@ -778,15 +907,15 @@ pub fn stored_work(db: &dyn Read, id: &Hash) -> Result<Option<u256>, DbError> {
     Ok(read_value::<WorkRecord>(db, Column::Work, &id_key(id))?.map(|record| record.total))
 }
 
-fn work_of(db: &dyn Read, id: &Hash) -> Result<u256, DbError> {
+pub(super) fn work_of(db: &dyn Read, id: &Hash) -> Result<u256, DbError> {
     stored_work(db, id)?.ok_or_else(|| DbError::Corrupt(format!("no work recorded for {id}")))
 }
 
-fn id_key(id: &Hash) -> Vec<u8> {
+pub(super) fn id_key(id: &Hash) -> Vec<u8> {
     id.hashable_bytes_with_tag()
 }
 
-fn read_value<T>(db: &dyn Read, column: Column, key: &[u8]) -> Result<Option<T>, DbError>
+pub(super) fn read_value<T>(db: &dyn Read, column: Column, key: &[u8]) -> Result<Option<T>, DbError>
 where
     T: for<'de> wincode::SchemaRead<'de, wincode::config::DefaultConfig, Dst = T>,
 {
@@ -801,3 +930,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod finality_tests;

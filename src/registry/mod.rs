@@ -13,6 +13,7 @@ use {
 use crate::vm::VmError;
 
 pub mod accounts;
+pub mod validators;
 #[cfg(feature = "vm")]
 pub mod contracts;
 
@@ -41,6 +42,22 @@ pub enum RegistryError {
     NoSuchContract(Address),
     #[document(summary = "The contract does not let this address do that: it has no check_perms, or check_perms did not return true.")]
     NotPermitted,
+    #[document(summary = "A bond under the chain's minimum, which it carries.")]
+    BondTooSmall(crate::structs::u256::u256),
+    #[document(summary = "The voting key is already bonded.")]
+    AlreadyBonded,
+    #[document(summary = "No validator has this voting key.")]
+    NotBonded,
+    #[document(summary = "Only the account that bonded a validator may unbond or withdraw it.")]
+    NotYours,
+    #[document(summary = "The validator is already leaving.")]
+    AlreadyUnbonding,
+    #[document(summary = "The bond is still locked; it carries the epoch it unlocks in, if unbonding has started.")]
+    NotWithdrawable(Option<u64>),
+    #[document(summary = "The validator was slashed already.")]
+    AlreadySlashed,
+    #[document(summary = "The chain has as many validators as it allows.")]
+    TooManyValidators,
     #[document(summary = "The contract would not load, or this node lacks its engine.")]
     #[cfg(feature = "vm")]
     Vm(VmError),
@@ -58,6 +75,15 @@ impl fmt::Display for RegistryError {
             }
             RegistryError::NoSuchContract(address) => write!(f, "no contract at {address}"),
             RegistryError::NotPermitted => write!(f, "the contract does not permit it"),
+            RegistryError::BondTooSmall(min) => write!(f, "a bond must be at least {min}"),
+            RegistryError::AlreadyBonded => write!(f, "that voting key is already bonded"),
+            RegistryError::NotBonded => write!(f, "no validator has that voting key"),
+            RegistryError::NotYours => write!(f, "only the account that bonded it may do that"),
+            RegistryError::AlreadyUnbonding => write!(f, "the validator is already leaving"),
+            RegistryError::NotWithdrawable(Some(epoch)) => write!(f, "the bond unlocks in epoch {epoch}"),
+            RegistryError::NotWithdrawable(None) => write!(f, "the validator has not unbonded"),
+            RegistryError::AlreadySlashed => write!(f, "the validator was slashed already"),
+            RegistryError::TooManyValidators => write!(f, "the chain has as many validators as it allows"),
             #[cfg(feature = "vm")]
             RegistryError::Vm(err) => write!(f, "{err}"),
         }

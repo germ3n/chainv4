@@ -2,10 +2,13 @@ use {
     super::{CliResult, amount, deployed_at, parse_amount, parse_argument, signer},
     crate::structs::address::Address,
     crate::structs::code::Code,
-    crate::structs::hash::Hash,
+    crate::structs::hash::{Hash, HashType},
     crate::structs::hex::to_hex,
+    crate::crypto::keypair::PublicKey,
+    crate::structs::hex::from_hex,
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
     crate::structs::u256::u256,
+    crate::structs::vote::SignedVote,
     crate::vm::selector,
     serde_json::{Value, json},
     std::path::PathBuf,
@@ -34,6 +37,9 @@ pub struct SendArgs {
     /// than one guards against a proof-of-work fork taking it back off.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
     pub confirmations: u64,
+    /// Wait until the transaction's block is finalized, not just deep enough.
+    #[arg(long = "final", conflicts_with = "no_wait")]
+    pub finalized: bool,
     #[command(subcommand)]
     pub tx: TxArgs,
 }
@@ -85,6 +91,32 @@ pub enum TxArgs {
         #[arg(long)]
         wasm: Option<PathBuf>,
     },
+    /// Bonds funds from the signer to become a finality validator, voting with --voter.
+    Bond {
+        /// The voting key, such as the address `chainv4 keygen` prints for a validator key file.
+        #[arg(long)]
+        voter: PublicKey,
+        /// A whole amount, in the smallest unit; at least the chain's minimum bond.
+        #[arg(long, value_parser = parse_amount)]
+        amount: u256,
+    },
+    /// Stops a validator the signer bonded from voting.
+    Unbond {
+        #[arg(long)]
+        voter: PublicKey,
+    },
+    /// Pays an unbonded validator's bond back to the signer, once it unlocks.
+    Withdraw {
+        #[arg(long)]
+        voter: PublicKey,
+    },
+    /// Reports two conflicting votes by one validator, as hex from GET /evidence or the node's log.
+    Slash {
+        #[arg(long, value_parser = parse_vote)]
+        first: Box<SignedVote>,
+        #[arg(long, value_parser = parse_vote)]
+        second: Box<SignedVote>,
+    },
     /// Calls a function on a contract.
     Call {
         /// The contract, such as contract:0x….
@@ -129,15 +161,39 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     println!("submitted {id}");
 
     if deploys {
-        println!("contract {}", deployed_at(&sender, nonce));
+        // Contract addresses are derived with the chain's hash, which the node says.
+        let status = ok(agent.get(format!("{node}/status")).call())?;
+        let hash: HashType = status["hash"]
+            .as_str()
+            .ok_or("the node did not say its chain's hash")?
+            .parse()?;
+        println!("contract {}", deployed_at(&sender, nonce, hash));
     }
 
     if args.no_wait {
         return Ok(());
     }
 
-    let receipt = wait(&agent, node, id, args.confirmations, Duration::from_secs(args.timeout))?;
+    let wanted = Wanted {
+        confirmations: args.confirmations,
+        finalized: args.finalized,
+    };
+    let receipt = wait(&agent, node, id, wanted, Duration::from_secs(args.timeout))?;
     report(&receipt)
+}
+
+/// What a transaction's block must reach before send returns.
+#[derive(Clone, Copy)]
+struct Wanted {
+    confirmations: u64,
+    finalized: bool,
+}
+
+/// A signed vote, encoded in hex as GET /evidence shows it.
+fn parse_vote(text: &str) -> Result<Box<SignedVote>, String> {
+    let bytes = from_hex(text).ok_or_else(|| "a vote is hex".to_string())?;
+
+    wincode::deserialize(&bytes).map(Box::new).map_err(|_| "not an encoded vote".to_string())
 }
 
 /// Reads contract code from whichever file was given.
@@ -151,26 +207,30 @@ fn code(lua: Option<PathBuf>, wasm: Option<PathBuf>) -> CliResult<Code> {
     }
 }
 
-/// Asks the node about the transaction until enough blocks hold it or the time runs out.
-fn wait(agent: &Agent, node: &str, id: &str, confirmations: u64, timeout: Duration) -> CliResult<Value> {
+/// Asks the node about the transaction until its block is deep enough, or final when asked, or
+/// the time runs out.
+fn wait(agent: &Agent, node: &str, id: &str, wanted: Wanted, timeout: Duration) -> CliResult<Value> {
     let deadline = Instant::now() + timeout;
 
     loop {
         let (status, receipt) = fetch(agent.get(format!("{node}/txs/{id}")).call())?;
+        let deep = receipt["confirmations"].as_u64().unwrap_or(0) >= wanted.confirmations;
+        let finalized = !wanted.finalized || receipt["final"].as_bool() == Some(true);
 
         match status {
-            200 if receipt["confirmations"].as_u64().unwrap_or(0) >= confirmations => return Ok(receipt),
-            // 404 means not in a block yet; 200 means in one, but not deep enough.
+            200 if deep && finalized => return Ok(receipt),
+            // 404 means not in a block yet; 200 means in one, but not deep or final enough.
             200 | 404 => {}
             _ => return Err(refusal(status, &receipt)),
         }
 
         if Instant::now() >= deadline {
-            return Err(format!(
-                "{id} was not in a block with {confirmations} confirmations after {}s; it may still land",
-                timeout.as_secs()
-            )
-            .into());
+            let goal = match wanted.finalized {
+                true => "final".to_string(),
+                false => format!("in a block with {} confirmations", wanted.confirmations),
+            };
+
+            return Err(format!("{id} was not {goal} after {}s; it may still be", timeout.as_secs()).into());
         }
 
         std::thread::sleep(POLL);
@@ -182,10 +242,11 @@ fn report(receipt: &Value) -> CliResult<()> {
     let confirmations = receipt["confirmations"].as_u64().unwrap_or(0);
 
     println!(
-        "included in block {} {} ({confirmations} confirmation{})",
+        "included in block {} {} ({confirmations} confirmation{}{})",
         receipt["height"],
         receipt["block"].as_str().unwrap_or("?"),
-        if confirmations == 1 { "" } else { "s" }
+        if confirmations == 1 { "" } else { "s" },
+        if receipt["final"].as_bool() == Some(true) { ", final" } else { "" }
     );
 
     match receipt["status"].as_str() {
@@ -232,6 +293,10 @@ fn transaction(tx: TxArgs, sender: Address) -> CliResult<Tx> {
             contract,
             code: code(lua, wasm)?,
         },
+        TxArgs::Bond { voter, amount: value } => Tx::Bond { voter, amount: amount(value) },
+        TxArgs::Unbond { voter } => Tx::Unbond { voter },
+        TxArgs::Withdraw { voter } => Tx::Withdraw { voter },
+        TxArgs::Slash { first, second } => Tx::Slash { first, second },
         TxArgs::Call {
             to,
             function,

@@ -45,7 +45,7 @@ pub enum KeyType {
     category = "Keys",
     see_also = "Keypair, Signature",
 )]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, std::hash::Hash, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
 pub enum PublicKey {
     #[document(summary = "An Ed25519 public key.")]
@@ -148,6 +148,21 @@ impl fmt::Display for PublicKey {
     }
 }
 
+/// Reads the text Display writes. A contract address is not a key.
+impl std::str::FromStr for PublicKey {
+    type Err = crate::structs::address::ParseAddressError;
+
+    fn from_str(text: &str) -> Result<PublicKey, Self::Err> {
+        match text.parse::<Address>()? {
+            #[cfg(feature = "ed25519")]
+            Address::Ed25519(key) => Ok(PublicKey::Ed25519(key)),
+            #[cfg(feature = "edblake")]
+            Address::EdBlake(key) => Ok(PublicKey::EdBlake(key)),
+            _ => Err(crate::structs::address::ParseAddressError),
+        }
+    }
+}
+
 /// Both schemes put their keys on the same curve, and so does an address.
 pub(crate) fn curve_point(key: &[u8; 32]) -> Result<(), VerifyError> {
     match VerifyingKey::from_bytes(key) {
@@ -237,7 +252,7 @@ impl Drop for PrivateKey {
     category = "Keys",
     see_also = "PublicKey::verify_signature, Keypair::sign",
 )]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, std::hash::Hash, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
 pub enum Signature {
     #[document(summary = "An Ed25519 signature.")]

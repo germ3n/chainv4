@@ -56,6 +56,15 @@ pub enum Column {
     #[document(summary = "Where a transaction landed and what it did, by transaction id.")]
     #[wincode(tag = 8)]
     Receipts,
+    #[document(summary = "Finality validators by voting key: who bonded, how much, and when they vote.")]
+    #[wincode(tag = 9)]
+    Validators,
+    #[document(summary = "Per-epoch consensus records: each epoch's validator set, fixed two epochs ahead, and which checkpoints' voters have been paid.")]
+    #[wincode(tag = 10)]
+    Epochs,
+    #[document(summary = "What this node knows about finality and is not part of the chain's state: justifications it has seen, the latest justified and finalized checkpoints, its own votes, and evidence of cheating.")]
+    #[wincode(tag = 11)]
+    Finality,
 }
 
 impl Hashable for Column {
@@ -63,7 +72,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 9] = [
+    pub const ALL: [Column; 12] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -73,6 +82,9 @@ impl Column {
         Column::Work,
         Column::Undo,
         Column::Receipts,
+        Column::Validators,
+        Column::Epochs,
+        Column::Finality,
     ];
 
     #[document(
@@ -90,6 +102,9 @@ impl Column {
             Column::Work => "work",
             Column::Undo => "undo",
             Column::Receipts => "receipts",
+            Column::Validators => "validators",
+            Column::Epochs => "epochs",
+            Column::Finality => "finality",
         }
     }
 }

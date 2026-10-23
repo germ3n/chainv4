@@ -51,12 +51,13 @@ jobs:
           - sha256,ed25519
           - blake3,edblake
           - keccak256,blake2s,blake2b,ed25519
-          - lvm,ed25519
-          - wasm,ed25519
-          - lvm,wasm,edblake
-          - node,ed25519
-          - http,edblake
-          - client,edblake
+          # Contracts and nodes need a secure hash; these run on ones other than BLAKE3.
+          - lvm,sha256,ed25519
+          - wasm,keccak256,ed25519
+          - lvm,wasm,blake2s,edblake
+          - node,blake2b,ed25519
+          - http,sha256,edblake
+          - client,keccak256,edblake
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

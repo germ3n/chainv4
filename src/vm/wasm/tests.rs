@@ -1,4 +1,5 @@
 use super::*;
+use crate::crypto::hashable::Hashable;
 use crate::crypto::hasher::Hasher;
 use crate::db::{MemoryDb, State};
 use crate::structs::address::Address;
@@ -49,7 +50,7 @@ fn context() -> CallContext {
 }
 
 fn host(state: Arc<State>) -> Host {
-    Host::root(state, context(), LIMITS.memory, Arc::new(Vm::new(&[Kind::Wasm]).unwrap()))
+    Host::root(state, context(), LIMITS.memory, Arc::new(Vm::new(&[Kind::Wasm], HashType::default_chain()).unwrap()))
 }
 
 fn state() -> Arc<State> {
@@ -157,22 +158,28 @@ fn the_context_is_readable() {
 
 #[test]
 fn hashes_match_the_hasher() {
-    // BLAKE3 of "abc", returned as Bytes.
-    let body = r#"
+    // Every 32-byte algorithm this build has, by tag, hashing "abc" and returning it as Bytes.
+    for &algorithm in HashType::ALL.iter().filter(|algorithm| algorithm.secure()) {
+        let tag = algorithm.hashable_bytes_with_tag()[0];
+        let body = format!(
+            r#"
       (data (i32.const 100) "abc")
       (func (export "digest")
         (i64.store (i32.const 0) (i64.const 1))
         (i32.store8 (i32.const 8) (i32.const 2))
         (i64.store (i32.const 9) (i64.extend_i32_u
-          (call $hash (i32.const 1) (i32.const 100) (i32.const 3) (i32.const 17))))
+          (call $hash (i32.const {tag}) (i32.const 100) (i32.const 3) (i32.const 17))))
         (call $output (i32.const 0) (i32.const 49)))
-      (func (export "bad_algorithm")
-        (drop (call $hash (i32.const 99) (i32.const 100) (i32.const 3) (i32.const 17))))
-    "#;
-    let expected = Hasher::digest(HashType::Blake3_256, b"abc").to_bytes();
+    "#
+        );
+        let expected = Hasher::digest(algorithm, b"abc").to_bytes();
 
-    assert_eq!(run(body, "digest", &[]).result.unwrap(), [TxCallArgumentType::Bytes(expected)]);
-    assert!(matches!(run(body, "bad_algorithm", &[]).result, Err(VmError::Runtime(text)) if text.contains("algorithm")));
+        assert_eq!(run(&body, "digest", &[]).result.unwrap(), [TxCallArgumentType::Bytes(expected)], "{}", algorithm.name());
+    }
+
+    let bad = r#"(func (export "bad_algorithm") (drop (call $hash (i32.const 99) (i32.const 100) (i32.const 3) (i32.const 17))))"#;
+
+    assert!(matches!(run(bad, "bad_algorithm", &[]).result, Err(VmError::Runtime(text)) if text.contains("algorithm")));
 }
 
 #[test]

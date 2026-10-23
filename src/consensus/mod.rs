@@ -18,7 +18,7 @@ pub mod dev;
 pub mod pow;
 
 pub use dev::{AuthorityProducer, DevAuthority};
-pub use pow::{Miner, PowConfig, PowHash, ProofOfWork, meets, work_hash};
+pub use pow::{Miner, PowConfig, ProofOfWork, meets, work_hash};
 
 /// How far ahead of this node's clock a block's timestamp may be.
 pub const MAX_DRIFT_MS: u64 = 15_000;

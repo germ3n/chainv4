@@ -1,8 +1,9 @@
 # chainv4
 
 A blockchain node, and a command-line client for it, in one binary. Contracts run on Lua
-(Luau) or WebAssembly; blocks come from proof of work or a development authority; nodes talk
-over libp2p; a JSON HTTP API serves queries and takes transactions.
+(Luau) or WebAssembly; blocks come from proof of work or a development authority, and bonded
+validators finalize them by vote; nodes talk over libp2p; a JSON HTTP API serves queries and
+takes transactions.
 
 This page covers the `chainv4` command and how contracts live on the chain. The code reference
 is the wiki that every build writes to `target/wiki/index.html`, tokens follow the
@@ -56,10 +57,14 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--listen ADDR` | `/ip4/0.0.0.0/udp/0/quic-v1` | A libp2p address to listen on; repeat for several. Port 0 picks one; the log shows which. |
 | `--peer ADDR` | | A peer to dial at startup; repeat for several. Nodes on the same network also find each other through mDNS. |
 | `--consensus pow\|authority` | `pow` | Which development chain to run. |
+| `--genesis FILE` | | Run the chain a [genesis file](#your-own-chain) describes instead. |
 | `--mine` | | Mine blocks (pow). |
 | `--reward-to ADDR` | dev key | Where mining rewards go. |
 | `--mine-threads N` | `1` | How many threads to mine on. |
-| `--produce` | | Produce blocks with the development key (authority). |
+| `--produce` | | Produce blocks (authority). |
+| `--producer-key PATH` | dev key | The authority's key file, for `--produce`. |
+| `--validate` | | Vote on [finality](#finality). |
+| `--validator-key PATH` | dev key | The voting key file a validator bonded with, for `--validate`. |
 | `--http ADDR` | | Serve the HTTP API, such as `127.0.0.1:8080`. |
 
 Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
@@ -73,8 +78,9 @@ Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
 - **authority**: the development key produces a block every two seconds, with `--produce` on
   exactly one node. No rewards, no forks. Handy for tests and demos.
 
-Both give the development key a million coins and let it mint. Its seed is in the source, so
-never use either chain for anything of value. A dev chain also allows every contract engine the
+Both give the development key a million coins and let it mint, and make it the one finality
+validator, bonded with 10,000 coins: run one node with `--validate` and the chain finalizes
+every 8 blocks. Its seed is in the source, so never use either chain for anything of value. A dev chain also allows every contract engine the
 node was built with, so nodes built with different features are on different chains.
 
 ### Several nodes
@@ -88,7 +94,29 @@ chainv4 --db c.db --peer /ip4/127.0.0.1/udp/4001/quic-v1 --http 127.0.0.1:8081
 A node that starts late, or falls behind, catches up from its peers on its own.
 
 A database belongs to one chain: a node refuses to open a `chain.db` written for a different
-genesis. Delete it, or point `--db` elsewhere, after switching `--consensus` or features.
+genesis. Delete it, or point `--db` elsewhere, after switching `--consensus`, `--genesis` or
+features.
+
+### Your own chain
+
+Every parameter of a chain lives in its genesis: the consensus and its timing, the hash, block
+rewards, allocations, the minter, which engines run contracts, transaction limits, how deep a
+reorg may go, and every finality setting. `chainv4 genesis` writes the dev defaults as JSON to
+edit:
+
+```sh
+chainv4 genesis --consensus authority --out mychain.json   # or --no-finality
+chainv4 --genesis mychain.json --produce --producer-key me.key --http 127.0.0.1:8080
+```
+
+Every node on the chain needs the same file. Each field must be there and unknown ones are
+refused, so a misspelled parameter is an error, not a silent default; a node also refuses
+settings that cannot work, such as a checkpoint interval of 0.
+
+`hash` picks the chain's hash, used for block ids, transaction ids, roots and contract
+addresses: `blake3`, `sha256`, `keccak256`, `blake2s` or `blake2b`, whichever the build has. A
+pow chain picks its work hash separately, as `consensus.hash`. `xxh3` is fast but not secure,
+so neither takes it.
 
 ## Keys
 
@@ -103,7 +131,7 @@ only and is never overwritten, but it is not encrypted: guard it.
 ## Sending transactions
 
 ```sh
-chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call> …
+chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call|bond|unbond|withdraw|slash> …
 ```
 
 `send` looks up the signer's next nonce, signs, posts the transaction to a node, and waits until
@@ -117,6 +145,7 @@ transaction that landed but failed exits non-zero.
 | `--no-wait` | | Return as soon as the node takes the transaction. |
 | `--timeout SECS` | `60` | Give up waiting after this long. The transaction may still land. |
 | `--confirmations N` | `1` | Wait until N blocks hold it, its own included. On a pow chain, a few more guard against a fork taking it back off. |
+| `--final` | | Wait until its block is finalized, which no fork can take back. |
 
 ### transfer, mint, burn
 
@@ -295,18 +324,74 @@ chainv4 send call --to contract:0x9a1c… --function transfer address:ed25519:0x
 The deployer owns the example token: `init` gives them a million tokens, and only they may
 `mint` more or upgrade it.
 
+## Finality
+
+Blocks are final once two thirds of the bonded validators, by bond, vote for them, as in
+Casper FFG. Every `checkpoint_interval` blocks starts an epoch, and the block there is its
+checkpoint. A validator votes for a link from the newest justified checkpoint to the newest
+checkpoint; a link with two thirds behind it justifies its target, and when the target is the
+very next epoch, its source is finalized.
+
+Final blocks never come off: a node refuses any branch that forks at or below the finalized
+checkpoint, follows work only on branches that keep the justified checkpoint, and moves to a
+branch with a newer justified checkpoint even when it holds less work. Votes travel by gossip,
+and a node that falls behind fetches the justifications it lacks with the blocks.
+
+### Validating
+
+A validator is a voting key with a bond behind it. Make a key, bond to it from an account with
+funds, and run a node that votes with it:
+
+```sh
+chainv4 keygen --out vote.key
+# address ed25519:0x7c2e…
+chainv4 send --key alice.key bond --voter ed25519:0x7c2e… --amount 100000000000000000000
+chainv4 --peer … --validate --validator-key vote.key
+```
+
+The voting key only signs votes; the bond stays with the account that sent it, and only that
+account may unbond or withdraw it. A validator bonded in epoch k votes from epoch
+k + `activation_delay` + 1. A node votes `vote_depth` blocks after each checkpoint and remembers
+every vote it signs, so it never contradicts itself, even across restarts. Run each voting key
+on one node only: two nodes with the same key can sign conflicting votes, and lose the bond.
+
+```sh
+chainv4 send --key alice.key unbond --voter ed25519:0x7c2e…     # stops voting after activation_delay epochs
+chainv4 send --key alice.key withdraw --voter ed25519:0x7c2e…   # withdrawal_delay epochs after that
+```
+
+Each vote in a justification earns its validator's account `vote_reward`, paid when a block
+carries the justification; producers and miners add them on their own, and each epoch pays once.
+
+### Slashing
+
+Two votes by one key conflict when they target the same epoch, or when one surrounds the other.
+Nodes keep any they see, log them with the command to report them, and list them at
+`GET /evidence`. Anyone may report them:
+
+```sh
+chainv4 send slash --first 0x… --second 0x…
+```
+
+The validator's whole bond is gone at once, and it leaves the validator set the way an unbond
+does, `activation_delay` epochs on. The reporter gets 1/`reporter_divisor` of the bond, and the
+rest is burned.
+
 ## HTTP API
 
 Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "…"}`.
 
 | Route | Answers |
 | --- | --- |
-| `GET /status` | Genesis, tip, height, difficulty and total work. |
+| `GET /status` | Genesis, tip, height, difficulty, total work, the chain's hash, and the epoch with the justified and finalized checkpoints. |
 | `GET /blocks?before=H&limit=N` | Block summaries, newest first, with a `next` cursor. |
 | `GET /blocks/{latest\|height\|id}` | A block, its seal, and each transaction with its receipt. |
-| `GET /txs/{id}` | Where a transaction landed, its confirmations, result and events; 404 until it is on the main chain. |
+| `GET /txs/{id}` | Where a transaction landed, its confirmations, whether it is final, its result and events; 404 until it is on the main chain. |
 | `GET /accounts/{address}` | Nonce and balance. |
 | `GET /contracts/{address}` | Engine, deployer, exported functions, and whether it can be upgraded. |
+| `GET /validators` | Every bonded validator, and who votes in the current epoch with what weight. |
+| `GET /validators/{voter}` | One validator by voting key: its account, bond, the epochs it votes in, and whether it was slashed. |
+| `GET /evidence` | Conflicting votes this node has seen, each encoded ready for `send slash`. |
 | `POST /txs` | `{"tx": "0x…"}`, an encoded signed transaction; answers 202 with its id. |
 
 Amounts and large integers are decimal strings, hashes and bytes are `0x` hex, and addresses

@@ -14,6 +14,7 @@ use {
 // BLAKE3 and XXH3 keep large states. Boxing them would allocate on every hash, which is what this
 // type exists to avoid.
 #[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
 pub enum Hasher {
     #[cfg(feature = "sha256")]
     Sha256(sha2::Sha256),

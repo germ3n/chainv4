@@ -8,6 +8,7 @@ use {
     crate::structs::block::{Block, Seal},
     crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
+    crate::structs::vote::{Justification, SignedVote},
     libp2p::{Multiaddr, PeerId},
     r#macro::document,
     std::sync::mpsc,
@@ -23,6 +24,8 @@ pub use swarm::{NetError, spawn};
 
 /// The most blocks one sync response carries.
 pub const MAX_SYNC_BLOCKS: u32 = 128;
+/// The most justifications one sync response carries.
+pub const MAX_SYNC_JUSTIFICATIONS: u32 = 64;
 
 #[document(
     summary = "Something that arrived for the node: from a peer, or from a client of this node.",
@@ -35,6 +38,8 @@ pub enum NetEvent {
     Block { from: PeerId, block: Block },
     #[document(summary = "A transaction gossiped by a peer.")]
     Tx { from: PeerId, tx: SignedTx },
+    #[document(summary = "A finality vote gossiped by a peer.")]
+    Vote { from: PeerId, vote: SignedVote },
     #[document(summary = "A peer connected.")]
     PeerUp(PeerId),
     #[document(summary = "A peer's last connection closed.")]
@@ -65,6 +70,8 @@ pub enum NetCommand {
     PublishBlock(Block),
     #[document(summary = "Gossip a transaction to every peer.")]
     PublishTx(SignedTx),
+    #[document(summary = "Gossip a finality vote to every peer.")]
+    PublishVote(SignedVote),
     #[document(summary = "Ask one peer for something.")]
     Request { peer: PeerId, request: SyncRequest },
     #[document(summary = "Answer the request with this id.")]
@@ -85,6 +92,9 @@ pub enum SyncRequest {
     #[document(summary = "Consecutive blocks starting at a height, at most MAX_SYNC_BLOCKS.")]
     #[wincode(tag = 1)]
     Blocks { from: u64, count: u32 },
+    #[document(summary = "The justifications the peer holds for its main-chain checkpoints from an epoch on, at most MAX_SYNC_JUSTIFICATIONS.")]
+    #[wincode(tag = 2)]
+    Justifications { from: u64, count: u32 },
 }
 
 #[document(
@@ -95,7 +105,7 @@ pub enum SyncRequest {
 #[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
 pub enum SyncResponse {
-    #[document(summary = "The peer's genesis, tip, height and the total work of its main chain.")]
+    #[document(summary = "The peer's genesis, tip, height, the total work of its main chain, and the epoch of its latest justified checkpoint, 0 without finality.")]
     #[wincode(tag = 0)]
     Status {
         genesis: Hash,
@@ -103,10 +113,14 @@ pub enum SyncResponse {
         height: u64,
         #[wincode(with = "crate::structs::u256::U256Le")]
         work: crate::structs::u256::u256,
+        justified: u64,
     },
     #[document(summary = "The blocks asked for that the peer has, in height order.")]
     #[wincode(tag = 1)]
     Blocks(Vec<Block>),
+    #[document(summary = "The justifications asked for that the peer holds, oldest first.")]
+    #[wincode(tag = 2)]
+    Justifications(Vec<Justification>),
 }
 
 #[document(
@@ -120,6 +134,8 @@ pub struct NetConfig {
     pub listen: Vec<Multiaddr>,
     #[document(summary = "Peers to dial at startup.")]
     pub peers: Vec<Multiaddr>,
+    #[document(summary = "The chain's hash, which gossip messages are told apart by.")]
+    pub hash: crate::structs::hash::HashType,
     #[document(summary = "Names the network in gossip topics, so nodes on different chains ignore each other. Usually derived from the genesis id.")]
     pub network: String,
 }

@@ -15,6 +15,7 @@ use {
     std::path::{Path, PathBuf},
 };
 
+pub mod genesis;
 #[cfg(feature = "client")]
 mod send;
 
@@ -43,7 +44,7 @@ pub fn keygen(args: KeygenArgs) -> CliResult<()> {
     Ok(())
 }
 
-/// The key to sign with: a key file, or the development authority's when there is none.
+/// The key to sign with: a key file, or the development key when there is none.
 pub fn signer(key: Option<&Path>) -> CliResult<Keypair> {
     match key {
         Some(path) => read_key(path),
@@ -143,9 +144,9 @@ pub fn parse_argument(text: &str) -> Result<TxCallArgumentType, String> {
     Ok(argument)
 }
 
-/// Where the next deploy from an address lands.
-pub fn deployed_at(sender: &Address, nonce: u64) -> Address {
-    crate::registry::contracts::contract_address(sender, nonce)
+/// Where the next deploy from an address lands, on a chain with this hash.
+pub fn deployed_at(sender: &Address, nonce: u64, hash: crate::structs::hash::HashType) -> Address {
+    crate::registry::contracts::contract_address(sender, nonce, hash)
 }
 
 #[cfg(test)]

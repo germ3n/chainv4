@@ -3,6 +3,9 @@
 
 use {
     crate::chain::{TxReceipt, TxStatus},
+    crate::crypto::keypair::PublicKey,
+    crate::registry::validators::ValidatorRecord,
+    crate::structs::vote::{Checkpoint, Justification, SignedVote},
     crate::registry::contracts::ContractRecord,
     crate::structs::account::Account,
     crate::structs::address::Address,
@@ -10,6 +13,7 @@ use {
     crate::structs::block::{Block, Seal},
     crate::structs::event::Event,
     crate::structs::code::Code,
+    crate::structs::hash::HashType,
     crate::structs::hex::to_hex,
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
     serde_json::{Value, json},
@@ -28,12 +32,13 @@ pub fn summary(block: &Block) -> Value {
         "difficulty": header.difficulty.to_string(),
         "tx_root": header.tx_root.to_string(),
         "tx_count": block.txs.len(),
+        "proof_count": block.proofs.len(),
     })
 }
 
 /// The summary, the seal and every transaction, each with its receipt when the block is on the
 /// main chain.
-pub fn block(block: &Block, receipts: &[Option<TxReceipt>]) -> Value {
+pub fn block(block: &Block, receipts: &[Option<TxReceipt>], hash: HashType) -> Value {
     let mut value = summary(block);
     value["seal"] = seal(&block.seal);
     value["txs"] = block
@@ -41,12 +46,13 @@ pub fn block(block: &Block, receipts: &[Option<TxReceipt>]) -> Value {
         .iter()
         .enumerate()
         .map(|(index, tx)| {
-            let mut value = signed_tx(tx);
+            let mut value = signed_tx(tx, hash);
             value["receipt"] = receipts.get(index).and_then(Option::as_ref).map(outcome).into();
 
             value
         })
         .collect();
+    value["proofs"] = block.proofs.iter().map(proof).collect();
 
     value
 }
@@ -97,9 +103,9 @@ pub fn event(event: &Event) -> Value {
     })
 }
 
-pub fn signed_tx(signed: &SignedTx) -> Value {
+pub fn signed_tx(signed: &SignedTx, hash: HashType) -> Value {
     json!({
-        "id": signed.id().to_string(),
+        "id": signed.id(hash).to_string(),
         "sender": signed.sender().to_string(),
         "nonce": signed.nonce,
         "signer": signed.signer.to_string(),
@@ -151,7 +157,55 @@ pub fn tx(tx: &Tx) -> Value {
 
             value
         }
+        Tx::Bond { voter, amount } => json!({
+            "type": "bond",
+            "voter": voter.to_string(),
+            "amount": decimal(amount),
+        }),
+        Tx::Unbond { voter } => json!({ "type": "unbond", "voter": voter.to_string() }),
+        Tx::Withdraw { voter } => json!({ "type": "withdraw", "voter": voter.to_string() }),
+        Tx::Slash { first, second } => json!({
+            "type": "slash",
+            "voter": first.vote.voter.to_string(),
+            "first": vote(first),
+            "second": vote(second),
+        }),
     }
+}
+
+pub fn checkpoint(checkpoint: &Checkpoint) -> Value {
+    json!({ "epoch": checkpoint.epoch, "block": checkpoint.block.to_string() })
+}
+
+/// A signed vote, readable, with its encoding for Tx::Slash.
+pub fn vote(vote: &SignedVote) -> Value {
+    json!({
+        "voter": vote.vote.voter.to_string(),
+        "source": checkpoint(&vote.vote.source),
+        "target": checkpoint(&vote.vote.target),
+        "encoded": to_hex(&wincode::serialize(vote).expect("votes always encode")),
+    })
+}
+
+/// A justification, without its votes' signatures.
+pub fn proof(proof: &Justification) -> Value {
+    json!({
+        "source": checkpoint(&proof.source),
+        "target": checkpoint(&proof.target),
+        "voters": proof.votes.iter().map(|vote| vote.vote.voter.to_string()).collect::<Vec<_>>(),
+    })
+}
+
+pub fn validator(voter: &PublicKey, record: &ValidatorRecord) -> Value {
+    json!({
+        "voter": voter.to_string(),
+        "account": record.account.to_string(),
+        "bond": record.bond.to_string(),
+        "active_from": record.active_from,
+        "active_until": record.active_until,
+        "withdrawable_from": record.withdrawable_from,
+        "slashed": record.slashed,
+    })
 }
 
 /// A call argument as its type and value. Numbers are JSON numbers, or null when not finite.

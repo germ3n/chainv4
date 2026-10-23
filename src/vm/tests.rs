@@ -171,7 +171,7 @@ impl World {
     fn new() -> World {
         World {
             state: Arc::new(State::new(Arc::new(MemoryDb::default()))),
-            vm: Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm]).unwrap()),
+            vm: Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm], HashType::default_chain()).unwrap()),
             nonce: 0,
         }
     }

@@ -89,6 +89,16 @@ mod send {
     impl Running {
         /// A node on the dev authority chain, with blocks every 50 ms when it produces.
         fn start(produce: bool) -> Running {
+            Running::launch(produce, false)
+        }
+
+        /// A producing node that also votes with the dev key, the dev chain's one validator, so
+        /// it finalizes an epoch of 8 blocks about every 400 ms.
+        fn validating() -> Running {
+            Running::launch(true, true)
+        }
+
+        fn launch(produce: bool, validate: bool) -> Running {
             const SLOT: u64 = 50;
             let authority = DevAuthority::dev_keypair();
             let genesis = Genesis {
@@ -102,8 +112,13 @@ mod send {
             let producer = produce.then(|| Box::new(AuthorityProducer::new(authority, SLOT)) as Box<dyn Producer>);
             let db = Arc::new(MemoryDb::default());
             let (link, net) = NetLink::pair();
-            let node = Node::new(db.clone(), &genesis, producer, link).unwrap();
-            let api = crate::api::start(db, Some(node.submitter()), "127.0.0.1:0".parse().unwrap()).unwrap();
+            let mut node = Node::new(db.clone(), &genesis, producer, link).unwrap();
+
+            if validate {
+                node = node.validate(DevAuthority::dev_keypair());
+            }
+
+            let api = crate::api::start(db, Some(node.submitter()), &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
             let thread = std::thread::spawn({
                 let stop = stop.clone();
@@ -127,6 +142,7 @@ mod send {
                 node: format!("http://{}", self.api),
                 key: None,
                 no_wait: false,
+                finalized: false,
                 timeout: 10,
                 confirmations: 1,
                 tx,
@@ -196,5 +212,53 @@ mod send {
 
         assert!(waited.unwrap_err().to_string().contains("was not in a block"));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn final_waits_for_finality_not_just_a_block() {
+        let running = Running::validating();
+        let sent = send(SendArgs {
+            finalized: true,
+            ..running.args(TxArgs::Burn { amount: u256::new(1) })
+        });
+        let node = running.stop();
+
+        sent.unwrap();
+        // The burn is in block 1 or 2, final once epoch 1's checkpoint at height 8 is, which
+        // takes epoch 2 justified on top of it.
+        assert!(node.chain().finalized().unwrap().epoch >= 1);
+        assert!(node.chain().tip().height >= 18);
+    }
+
+    #[test]
+    fn final_gives_up_when_nothing_finalizes() {
+        let running = Running::start(true);
+        let waited = send(SendArgs {
+            finalized: true,
+            timeout: 1,
+            ..running.args(TxArgs::Burn { amount: u256::new(1) })
+        });
+        running.stop();
+
+        assert!(waited.unwrap_err().to_string().contains("was not final after 1s"));
+    }
+
+    #[test]
+    fn validators_bond_and_unbond_with_send() {
+        use crate::registry::validators::Validators;
+
+        let running = Running::start(true);
+        let voter = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap().public();
+        let bond = u256::new(10u128.pow(20));
+        send(running.args(TxArgs::Bond { voter, amount: bond })).unwrap();
+        send(running.args(TxArgs::Unbond { voter })).unwrap();
+        let early = send(running.args(TxArgs::Withdraw { voter }));
+        let node = running.stop();
+        let record = Validators::new(&node.chain().state()).get(&voter).unwrap().unwrap();
+
+        assert_eq!(record.account, DevAuthority::dev_keypair().public().address());
+        assert_eq!(record.bond, bond);
+        assert!(record.active_until.is_some());
+        assert!(early.unwrap_err().to_string().contains("the transaction failed"));
     }
 }

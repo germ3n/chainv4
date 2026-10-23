@@ -18,14 +18,14 @@ xxh3 = ["dep:xxhash-rust"]
 keccak256 = ["dep:sha3"]
 ed25519 = []
 edblake = ["dep:blake3", "dep:digest", "dep:curve25519-dalek", "ed25519-dalek/hazmat"]
-vm = ["xxh3", "blake3"]
+vm = ["xxh3"]
 lvm = ["vm", "dep:mlua"]
 wasm = ["vm", "dep:wasmi"]
 rocksdb = ["dep:rocksdb"]
 http = ["dep:axum", "dep:serde_json", "node"]
 # The client side of the CLI: chainv4 send talks to a node's HTTP API.
 client = ["dep:ureq", "dep:serde_json", "node"]
-node = ["dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "lvm", "blake3", "rocksdb"]
+node = ["dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "dep:serde_json", "lvm", "rocksdb"]
 
 [dependencies]
 rocksdb = { version = "0.25.0", optional = true }

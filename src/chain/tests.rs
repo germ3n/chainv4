@@ -45,7 +45,7 @@ fn open(db: &Arc<MemoryDb>) -> Chain {
 
 fn next_block(chain: &Chain, txs: Vec<SignedTx>) -> (Block, u64) {
     let now = chain.tip().timestamp + SLOT;
-    let mut block = chain.build(txs, producer().address(), now);
+    let mut block = chain.build(txs, Vec::new(), producer().address(), now);
     block.seal = producer().seal(&block.header).unwrap();
 
     (block, now)
@@ -180,7 +180,7 @@ fn contracts_deploy_and_run_through_transactions() {
         &deployer,
     );
     let receipts = advance(&mut chain, vec![deploy]);
-    let counter = contract_address(&deployer.public().address(), 0);
+    let counter = contract_address(&deployer.public().address(), 0, HashType::default_chain());
 
     assert_eq!(receipts[0].result, Ok(Effect::Deployed(counter)));
 
@@ -212,7 +212,7 @@ fn blocks_must_follow_the_rules() {
     let (block, now) = next_block(&chain, Vec::new());
     let (sibling, _) = next_block(&chain, vec![transfer(&chain, &authority(), &stranger().public().address(), 1)]);
     let mut bad_root = block.clone();
-    bad_root.header.tx_root = Hash::Blake3_256([9; 32]);
+    bad_root.header.tx_root = Hash::from_bytes(HashType::default_chain(), &[9; 32]).unwrap();
     let mut bad_height = block.clone();
     bad_height.header.height = 5;
 
@@ -228,7 +228,7 @@ fn blocks_must_follow_the_rules() {
     extended(chain.import(&block, now));
     let (grandchild, later) = next_block(&chain, Vec::new());
     let mut orphan = grandchild.clone();
-    orphan.header.parent = Hash::Blake3_256([7; 32]);
+    orphan.header.parent = Hash::from_bytes(HashType::default_chain(), &[7; 32]).unwrap();
 
     assert!(matches!(chain.import(&block, now), Err(ImportError::Known)));
     assert!(matches!(chain.import(&sibling, now), Ok(Imported::Side)));
@@ -292,7 +292,7 @@ return M
     let deployer = authority();
     let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(SPLITTER.to_string()) }, 0, &deployer);
     advance(&mut chain, vec![deploy]);
-    let splitter = contract_address(&deployer.public().address(), 0);
+    let splitter = contract_address(&deployer.public().address(), 0, HashType::default_chain());
     let (first, second) = (stranger().public().address(), stranger().public().address());
     let call = SignedTx::sign(
         Tx::ContractCall {
@@ -321,7 +321,7 @@ const LATER: u64 = 10_000_000;
 fn pow_genesis() -> Genesis {
     Genesis {
         consensus: ConsensusConfig::ProofOfWork(PowConfig {
-            hash: PowHash::Blake3,
+            hash: HashType::default_chain(),
             target_block_ms: 1_000,
             initial_difficulty: 1,
             min_difficulty: 1,
@@ -334,7 +334,8 @@ fn pow_genesis() -> Genesis {
     }
 }
 
-/// Mines a block on any stored block, one target after it.
+/// Mines a block on any stored block, one target after it, on a chain whose work hash is its
+/// chain hash, as every proof-of-work chain in these tests is.
 fn mine_on(chain: &Chain, parent: &Block, txs: Vec<SignedTx>, miner: Address) -> Block {
     let timestamp = parent.header.timestamp + 1_000;
     let header = BlockHeader {
@@ -343,15 +344,17 @@ fn mine_on(chain: &Chain, parent: &Block, txs: Vec<SignedTx>, miner: Address) ->
         timestamp,
         producer: miner,
         difficulty: chain.consensus().difficulty(&parent.header, timestamp),
-        tx_root: Block::tx_root(&txs),
+        tx_root: Block::tx_root(chain.hash(), &txs),
+        proof_root: Block::proof_root(chain.hash(), &[]),
     };
     let nonce = (0..)
-        .find(|nonce| meets(work_hash(PowHash::Blake3, &header.id(), *nonce), header.difficulty))
+        .find(|nonce| meets(work_hash(chain.hash(), &header.id(), *nonce), header.difficulty))
         .unwrap();
 
     Block {
         header,
         txs,
+        proofs: Vec::new(),
         seal: Seal::Work { nonce },
     }
 }
@@ -397,8 +400,8 @@ fn the_heavier_branch_wins_and_state_follows_it() {
     assert_eq!((balance(&chain, &bob), balance(&chain, &carol)), (u256::ZERO, u256::new(20)));
     // 100 for height 1, halved to 50 for height 2; nothing for the block that was taken off.
     assert_eq!((balance(&chain, &miner_a), balance(&chain, &miner_b)), (u256::ZERO, u256::new(150)));
-    assert_eq!(chain.receipt(&to_bob.id()).unwrap(), None);
-    assert_eq!(chain.receipt(&to_carol.id()).unwrap().unwrap().block, b1.id());
+    assert_eq!(chain.receipt(&to_bob.id(HashType::default_chain())).unwrap(), None);
+    assert_eq!(chain.receipt(&to_carol.id(HashType::default_chain())).unwrap().unwrap().block, b1.id());
 
     let a2 = mine_on(&chain, &a1, Vec::new(), miner_a);
     let a3 = mine_on(&chain, &a2, Vec::new(), miner_a);
@@ -407,8 +410,8 @@ fn the_heavier_branch_wins_and_state_follows_it() {
     assert!(matches!(chain.import(&a3, LATER), Ok(Imported::Reorganized { .. })));
     assert_eq!((balance(&chain, &bob), balance(&chain, &carol)), (u256::new(10), u256::ZERO));
     assert_eq!((balance(&chain, &miner_a), balance(&chain, &miner_b)), (u256::new(200), u256::ZERO));
-    assert_eq!(chain.receipt(&to_bob.id()).unwrap().unwrap().block, a1.id());
-    assert_eq!(chain.receipt(&to_carol.id()).unwrap(), None);
+    assert_eq!(chain.receipt(&to_bob.id(HashType::default_chain())).unwrap().unwrap().block, a1.id());
+    assert_eq!(chain.receipt(&to_carol.id(HashType::default_chain())).unwrap(), None);
     assert_eq!(chain.tip_work(), u256::new(3));
 }
 
@@ -442,7 +445,7 @@ fn branches_that_split_off_too_deep_are_never_followed() {
     let genesis = chain.block_at(0).unwrap().unwrap();
     let mut main = genesis.clone();
 
-    for _ in 0..MAX_REORG_DEPTH + 2 {
+    for _ in 0..DEV_MAX_REORG_DEPTH + 2 {
         main = mine_on(&chain, &main, Vec::new(), Address::Ed25519([1; 32]));
         extended(chain.import(&main, LATER));
     }
@@ -450,14 +453,14 @@ fn branches_that_split_off_too_deep_are_never_followed() {
     let first = chain.block_at(1).unwrap().unwrap();
     let second = chain.block_at(2).unwrap().unwrap();
 
-    // Undo records only reach back MAX_REORG_DEPTH blocks.
+    // Undo records only reach back DEV_MAX_REORG_DEPTH blocks.
     assert_eq!(db.read(Column::Undo, &id_key(&first.id())).unwrap(), None);
     assert!(db.read(Column::Undo, &id_key(&second.id())).unwrap().is_some());
 
     let mut side = genesis;
     let tip = chain.tip().id();
 
-    for _ in 0..MAX_REORG_DEPTH + 4 {
+    for _ in 0..DEV_MAX_REORG_DEPTH + 4 {
         side = mine_on(&chain, &side, Vec::new(), Address::Ed25519([2; 32]));
         assert!(matches!(chain.import(&side, LATER), Ok(Imported::Side)));
     }
@@ -510,7 +513,7 @@ return M
     let deployer = authority();
     let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, &deployer);
     advance(&mut chain, vec![deploy]);
-    let emitter = contract_address(&deployer.public().address(), 0);
+    let emitter = contract_address(&deployer.public().address(), 0, HashType::default_chain());
     let call = |function: &str, nonce: u64, data: Vec<TxCallArgumentType>| {
         let tx = Tx::ContractCall {
             to: emitter,
@@ -524,7 +527,7 @@ return M
     let ping = call("ping", 1, vec![TxCallArgumentType::I64(2)]);
     let failing = call("ping_then_fail", 2, Vec::new());
     advance(&mut chain, vec![ping.clone(), failing.clone()]);
-    let receipt = chain.receipt(&ping.id()).unwrap().unwrap();
+    let receipt = chain.receipt(&ping.id(HashType::default_chain())).unwrap().unwrap();
     let sender = TxCallArgumentType::Address(deployer.public().address());
 
     assert_eq!(receipt.block, chain.tip().id());
@@ -538,7 +541,7 @@ return M
         ]
     );
 
-    let failed = chain.receipt(&failing.id()).unwrap().unwrap();
+    let failed = chain.receipt(&failing.id(HashType::default_chain())).unwrap().unwrap();
 
     assert!(matches!(&failed.status, TxStatus::Failed(error) if error.contains("no")), "{failed:?}");
     assert!(failed.events.is_empty());
@@ -569,7 +572,7 @@ return M
     let owner = authority();
     let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(V1.to_string()) }, 0, &owner);
     let receipts = advance(&mut chain, vec![deploy]);
-    let contract = contract_address(&owner.public().address(), 0);
+    let contract = contract_address(&owner.public().address(), 0, HashType::default_chain());
 
     assert_eq!(receipts[0].result, Ok(Effect::Deployed(contract)));
     assert!(receipts[0].fuel_used > 0);
@@ -603,4 +606,78 @@ return M
 
     assert_eq!(receipts[0].result, Ok(Effect::Upgraded(contract)));
     assert_eq!(version(&mut chain, 4), Ok(Effect::Returned(vec![TxCallArgumentType::Number(2.0)])));
+}
+
+/// A proof-of-work chain that hashes everything, its work included, with one algorithm.
+fn hashed_with(algorithm: HashType) -> Genesis {
+    let mut genesis = pow_genesis();
+    genesis.hash = algorithm;
+
+    if let ConsensusConfig::ProofOfWork(pow) = &mut genesis.consensus {
+        pow.hash = algorithm;
+    }
+
+    genesis
+}
+
+#[test]
+fn every_secure_hash_can_run_a_chain() {
+    let secure: Vec<HashType> = HashType::ALL.iter().copied().filter(|algorithm| algorithm.secure()).collect();
+    let mut genesis_ids = HashSet::new();
+    let mut contracts = HashSet::new();
+
+    for &algorithm in &secure {
+        let mut chain = Chain::open(Arc::new(MemoryDb::default()), &hashed_with(algorithm)).unwrap();
+        let genesis = chain.block_at(0).unwrap().unwrap();
+        let bob = stranger().public().address();
+        let tx = send(&bob, 10, 0);
+        let block = mine_on(&chain, &genesis, vec![tx.clone()], Address::Ed25519([1; 32]));
+
+        assert_eq!(chain.genesis().algorithm(), algorithm, "{}", algorithm.name());
+        assert_eq!(block.id().algorithm(), algorithm);
+        assert_eq!(block.header.tx_root.algorithm(), algorithm);
+        extended(chain.import(&block, LATER));
+        assert_eq!(chain.receipt(&tx.id(algorithm)).unwrap().unwrap().block, block.id());
+        assert_eq!(balance(&chain, &bob), u256::new(10));
+
+        genesis_ids.insert(chain.genesis());
+        contracts.insert(contract_address(&authority().public().address(), 0, algorithm));
+    }
+
+    // Each algorithm makes its own chain, with its own ids and addresses.
+    assert_eq!(genesis_ids.len(), secure.len());
+    assert_eq!(contracts.len(), secure.len());
+}
+
+#[test]
+fn a_block_hashed_with_another_algorithm_never_connects() {
+    let secure: Vec<HashType> = HashType::ALL.iter().copied().filter(|algorithm| algorithm.secure()).collect();
+
+    let [first, second, ..] = secure[..] else {
+        return;
+    };
+
+    let mut chain = Chain::open(Arc::new(MemoryDb::default()), &hashed_with(first)).unwrap();
+    let other = Chain::open(Arc::new(MemoryDb::default()), &hashed_with(second)).unwrap();
+    let foreign = mine_on(&other, &other.block_at(0).unwrap().unwrap(), Vec::new(), Address::Ed25519([1; 32]));
+
+    assert!(matches!(chain.import(&foreign, LATER), Err(ImportError::UnknownParent(_))));
+}
+
+#[cfg(feature = "xxh3")]
+#[test]
+fn xxh3_is_never_a_chain_or_work_hash() {
+    let mut weak_chain = pow_genesis();
+    weak_chain.hash = HashType::Xxh3_64;
+    let mut weak_work = pow_genesis();
+
+    if let ConsensusConfig::ProofOfWork(pow) = &mut weak_work.consensus {
+        pow.hash = HashType::Xxh3_64;
+    }
+
+    for genesis in [weak_chain, weak_work] {
+        let err = Chain::open(Arc::new(MemoryDb::default()), &genesis).err().unwrap();
+
+        assert!(matches!(&err, ChainError::BadGenesis(why) if why.contains("xxh3")), "{err}");
+    }
 }

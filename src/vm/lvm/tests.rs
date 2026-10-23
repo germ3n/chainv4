@@ -85,7 +85,7 @@ fn func(name: &str) -> Hash {
 }
 
 fn host() -> Host {
-    let vm = Arc::new(Vm::new(&[Engine::Lua]).unwrap());
+    let vm = Arc::new(Vm::new(&[Engine::Lua], HashType::default_chain()).unwrap());
 
     Host::root(Arc::new(State::new(Arc::new(MemoryDb::default()))), context(), LIMITS.memory, vm)
 }
@@ -113,15 +113,13 @@ fn calls_reach_exported_functions_by_hash() {
 fn unknown_functions_are_rejected() {
     assert_eq!(call("nope", &[]).result.unwrap_err(), VmError::NoSuchFunction);
 
-    #[cfg(feature = "blake3")]
-    {
-        let wrong = Hasher::digest(HashType::Blake3_256, b"add");
+    // Only XXH3 names functions, so the right name under any other hash is no function at all.
+    let wrong = Hasher::digest(HashType::default_chain(), b"add");
 
-        assert_eq!(
-            contract().call(&wrong, &[], host(), LIMITS).result.unwrap_err(),
-            VmError::NoSuchFunction
-        );
-    }
+    assert_eq!(
+        contract().call(&wrong, &[], host(), LIMITS).result.unwrap_err(),
+        VmError::NoSuchFunction
+    );
 }
 
 #[test]

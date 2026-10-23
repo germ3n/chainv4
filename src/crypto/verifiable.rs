@@ -41,6 +41,10 @@ pub enum VerifyError {
     InvalidSignature,
     #[document(summary = "A transfer or burn taking from an address other than the signer's.")]
     NotSender,
+    #[document(summary = "A vote whose target does not come after its source.")]
+    BadVote,
+    #[document(summary = "Slashing evidence that is not two different, conflicting votes by the same voter.")]
+    NotConflicting,
 }
 
 impl fmt::Display for VerifyError {
@@ -54,6 +58,8 @@ impl fmt::Display for VerifyError {
             VerifyError::NonFiniteNumber => write!(f, "number argument must be finite"),
             VerifyError::InvalidSignature => write!(f, "signature does not match"),
             VerifyError::NotSender => write!(f, "only the sender's own funds can move"),
+            VerifyError::BadVote => write!(f, "a vote's target must come after its source"),
+            VerifyError::NotConflicting => write!(f, "the votes are not conflicting votes by one voter"),
         }
     }
 }

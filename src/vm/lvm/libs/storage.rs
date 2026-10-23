@@ -109,6 +109,7 @@ pub fn register_storage_lib(lua: &Lua) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structs::hash::HashType;
     use crate::db::{Column, MemoryDb, State, storage_key};
     use crate::structs::address::Address;
     use crate::structs::u256::u256;
@@ -125,7 +126,7 @@ mod tests {
             contract,
             value: u256::ZERO,
         };
-        lua.set_app_data(Host::root(state.clone(), context, 1 << 20, Arc::new(Vm::new(&[]).unwrap())));
+        lua.set_app_data(Host::root(state.clone(), context, 1 << 20, Arc::new(Vm::new(&[], HashType::default_chain()).unwrap())));
 
         (lua, state)
     }

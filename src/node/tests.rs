@@ -1,8 +1,9 @@
 use super::*;
 use crate::net::{MAX_SYNC_BLOCKS, SyncRequest, SyncResponse};
 use crate::chain::Reward;
-use crate::consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, Miner, PowConfig, PowHash, meets, work_hash};
+use crate::consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, Miner, PowConfig, meets, work_hash};
 use crate::structs::address::Address;
+use crate::structs::hash::{Hash, HashType};
 use crate::structs::block::{BlockHeader, Seal};
 use crate::crypto::keypair::Keypair;
 use crate::db::MemoryDb;
@@ -30,7 +31,7 @@ fn node(produce: bool) -> (Node, FakeNet) {
 fn easy_pow() -> Genesis {
     Genesis {
         consensus: ConsensusConfig::ProofOfWork(PowConfig {
-            hash: PowHash::Blake3,
+            hash: HashType::default_chain(),
             target_block_ms: 1_000,
             initial_difficulty: 1,
             min_difficulty: 1,
@@ -59,15 +60,17 @@ fn mine_on(node: &Node, parent: &BlockHeader, miner: u8) -> Block {
         timestamp,
         producer: Address::Ed25519([miner; 32]),
         difficulty: node.chain().consensus().difficulty(parent, timestamp),
-        tx_root: Block::tx_root(&[]),
+        tx_root: Block::tx_root(HashType::default_chain(), &[]),
+        proof_root: Block::proof_root(HashType::default_chain(), &[]),
     };
     let nonce = (0..)
-        .find(|nonce| meets(work_hash(PowHash::Blake3, &header.id(), *nonce), header.difficulty))
+        .find(|nonce| meets(work_hash(HashType::default_chain(), &header.id(), *nonce), header.difficulty))
         .unwrap();
 
     Block {
         header,
         txs: Vec::new(),
+        proofs: Vec::new(),
         seal: Seal::Work { nonce },
     }
 }
@@ -356,10 +359,11 @@ fn peers_on_another_chain_are_never_asked_for_blocks() {
         .send(NetEvent::Response {
             peer: stranger,
             response: SyncResponse::Status {
-                genesis: crate::structs::hash::Hash::Blake3_256([1; 32]),
-                tip: crate::structs::hash::Hash::Blake3_256([2; 32]),
+                genesis: Hash::from_bytes(HashType::default_chain(), &[1; 32]).unwrap(),
+                tip: Hash::from_bytes(HashType::default_chain(), &[2; 32]).unwrap(),
                 height: 50,
                 work: u256::new(50),
+                justified: 0,
             },
         })
         .unwrap();
@@ -394,7 +398,7 @@ fn submitted_transactions_are_queued_gossiped_and_answered() {
         node.step(SLOT).unwrap();
     }
 
-    assert_eq!(pending.join().unwrap(), Ok(tx.id()));
+    assert_eq!(pending.join().unwrap(), Ok(tx.id(HashType::default_chain())));
     assert!(sent(&mut net).iter().any(|command| matches!(command, NetCommand::PublishTx(gossiped) if *gossiped == tx)));
 
     let again = std::thread::spawn(move || {
@@ -416,7 +420,7 @@ fn submitted_transactions_are_queued_gossiped_and_answered() {
 fn a_miner_seals_on_its_own_threads_and_publishes() {
     let (link, mut net) = NetLink::pair();
     let events = net.events.clone();
-    let miner = Miner::new(Address::Ed25519([9; 32]), PowHash::Blake3, 1, move |block, seal| {
+    let miner = Miner::new(Address::Ed25519([9; 32]), HashType::default_chain(), 1, move |block, seal| {
         let _ = events.send(NetEvent::Sealed { block, seal });
     });
     let mut node = Node::new(Arc::new(MemoryDb::default()), &easy_pow(), Some(Box::new(miner)), link).unwrap();
@@ -472,4 +476,148 @@ fn forked_nodes_settle_on_the_heavier_chain() {
 
     assert_eq!(light.chain().tip().id(), heavy.chain().tip().id());
     assert_eq!(Accounts::new(&light.chain().state()).get(&Address::Ed25519([2; 32])).unwrap().balance, u256::ZERO);
+}
+
+// Finality: the dev chains have the dev key as their one validator, epochs of 8 blocks, and votes
+// two blocks behind the tip.
+
+const EPOCH: u64 = 8;
+
+fn votes(commands: &[NetCommand]) -> Vec<crate::structs::vote::SignedVote> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            NetCommand::PublishVote(vote) => Some(*vote),
+            _ => None,
+        })
+        .collect()
+}
+
+fn validating_producer() -> (Node, FakeNet) {
+    let (producer, net) = node(true);
+
+    (producer.validate(DevAuthority::dev_keypair()), net)
+}
+
+#[test]
+fn a_validating_producer_votes_once_per_epoch_and_finalizes() {
+    let (mut producer, mut net) = validating_producer();
+    let dev = DevAuthority::dev_keypair().public();
+    let funds = Accounts::new(&producer.chain().state()).get(&dev.address()).unwrap().balance;
+
+    for slot in 1..=EPOCH + 1 {
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    assert!(votes(&sent(&mut net)).is_empty(), "too close to the tip to vote yet");
+    assert_eq!(producer.chain().justified().unwrap().epoch, 0);
+
+    producer.step(SLOT * (EPOCH + 2)).unwrap();
+    let first = votes(&sent(&mut net));
+
+    assert_eq!(first.len(), 1);
+    assert_eq!((first[0].vote.source.epoch, first[0].vote.target.epoch), (0, 1));
+    assert_eq!(producer.chain().justified().unwrap().epoch, 1);
+
+    // The next block pays for the proof, and nothing more is owed until the next epoch.
+    producer.step(SLOT * (EPOCH + 3)).unwrap();
+    let paid = published_block(&mut net);
+
+    assert_eq!(paid.proofs.len(), 1);
+    assert_eq!(paid.proofs[0].target, first[0].vote.target);
+    assert_eq!(
+        Accounts::new(&producer.chain().state()).get(&dev.address()).unwrap().balance,
+        funds + producer.chain().finality_config().unwrap().vote_reward
+    );
+
+    for slot in EPOCH + 4..=2 * EPOCH + 2 {
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    let second = votes(&sent(&mut net));
+
+    assert_eq!(second.len(), 1);
+    assert_eq!((second[0].vote.source.epoch, second[0].vote.target.epoch), (1, 2));
+    assert_eq!(producer.chain().finalized().unwrap(), first[0].vote.target);
+}
+
+#[test]
+fn a_follower_counts_gossiped_votes() {
+    let (mut producer, mut producer_net) = validating_producer();
+    let (mut follower, mut follower_net) = node(false);
+    let peer = PeerId::random();
+
+    for slot in 1..=EPOCH + 2 {
+        producer.step(SLOT * slot).unwrap();
+
+        for command in sent(&mut producer_net) {
+            let event = match command {
+                NetCommand::PublishBlock(block) => NetEvent::Block { from: peer, block },
+                NetCommand::PublishVote(vote) => NetEvent::Vote { from: peer, vote },
+                _ => continue,
+            };
+            follower_net.events.send(event).unwrap();
+        }
+
+        follower.step(SLOT * slot).unwrap();
+    }
+
+    assert_eq!(follower.chain().justified(), producer.chain().justified());
+    assert_eq!(follower.chain().justified().unwrap().epoch, 1);
+    assert!(votes(&sent(&mut follower_net)).is_empty(), "a follower never votes");
+}
+
+#[test]
+fn a_late_node_syncs_justifications_with_the_blocks() {
+    let (mut producer, mut producer_net) = validating_producer();
+    let (mut late, mut late_net) = node(false);
+    let blocks = 3 * EPOCH + 2;
+
+    for slot in 1..=blocks {
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    sent(&mut producer_net);
+
+    assert_eq!(producer.chain().justified().unwrap().epoch, 3);
+
+    let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
+    late_net.events.send(NetEvent::PeerUp(producer_peer)).unwrap();
+    late.step(SLOT * blocks).unwrap();
+    relay(
+        Side { node: &mut late, net: &mut late_net, peer: late_peer },
+        Side { node: &mut producer, net: &mut producer_net, peer: producer_peer },
+        SLOT * blocks,
+    );
+
+    assert_eq!(late.chain().tip().id(), producer.chain().tip().id());
+    assert_eq!(late.chain().justified(), producer.chain().justified());
+    assert_eq!(late.chain().finalized(), producer.chain().finalized());
+}
+
+#[test]
+fn peers_get_justifications() {
+    let (mut producer, mut net) = validating_producer();
+
+    for slot in 1..=2 * EPOCH + 2 {
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    sent(&mut net);
+    net.events
+        .send(NetEvent::Request {
+            peer: PeerId::random(),
+            id: 7,
+            request: SyncRequest::Justifications { from: 1, count: 100 },
+        })
+        .unwrap();
+    producer.step(SLOT * (2 * EPOCH + 2) + 1).unwrap();
+
+    assert!(matches!(
+        &sent(&mut net)[..],
+        [NetCommand::Respond {
+            id: 7,
+            response: SyncResponse::Justifications(proofs),
+        }] if proofs.iter().map(|proof| proof.target.epoch).eq([1, 2])
+    ));
 }

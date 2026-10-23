@@ -1,6 +1,7 @@
 use {
     crate::crypto::verifiable::{Verifiable, VerifyError},
     crate::db::{DbError, State},
+    crate::registry::validators::{Staking, Validators},
     crate::registry::{Accounts, Contracts, RegistryError},
     crate::structs::address::Address,
     crate::structs::code::Engine,
@@ -20,10 +21,29 @@ use {
 )]
 #[derive(Clone, Copy, Debug)]
 pub struct Rules {
+    #[document(summary = "The chain's hash, which transaction ids use.")]
+    pub hash: crate::structs::hash::HashType,
     #[document(summary = "The one address allowed to mint, if any.")]
     pub minter: Option<Address>,
     #[document(summary = "What one deploy or contract call may use.")]
     pub limits: Limits,
+    #[document(summary = "What staking transactions run under, or None on a chain without finality, where they fail.")]
+    pub finality: Option<FinalityRules>,
+}
+
+#[document(
+    summary = "The finality settings staking transactions run under.",
+    category = "Chain",
+    see_also = "Rules, FinalityConfig",
+)]
+#[derive(Clone, Copy, Debug)]
+pub struct FinalityRules {
+    #[document(summary = "Bonds, delays and the slashing share.")]
+    pub staking: Staking,
+    #[document(summary = "Blocks per epoch, to tell which epoch a transaction runs in.")]
+    pub checkpoint_interval: u64,
+    #[document(summary = "The chain's genesis id, which votes are signed over.")]
+    pub chain: Hash,
 }
 
 #[document(
@@ -58,6 +78,10 @@ pub enum Failure {
     NotMinter,
     #[document(summary = "A deploy for an engine this chain's genesis does not allow.")]
     EngineNotAllowed(Engine),
+    #[document(summary = "A staking transaction on a chain without finality.")]
+    NoFinality,
+    #[document(summary = "Slashing evidence whose signatures do not check out.")]
+    BadEvidence,
 }
 
 impl fmt::Display for Failure {
@@ -67,6 +91,8 @@ impl fmt::Display for Failure {
             Failure::Contract(err) => write!(f, "{err}"),
             Failure::NotMinter => write!(f, "only the minter may mint"),
             Failure::EngineNotAllowed(engine) => write!(f, "this chain does not run {} contracts", engine.name()),
+            Failure::NoFinality => write!(f, "this chain has no finality"),
+            Failure::BadEvidence => write!(f, "the evidence's signatures do not check out"),
         }
     }
 }
@@ -125,7 +151,13 @@ impl From<DbError> for ExecuteError {
 
 /// Runs one transaction on top of its block's state. The nonce is used up in the block's layer
 /// either way; everything else happens in a layer of its own that is kept only on success.
-pub(crate) fn execute(block: &Arc<State>, tx: &SignedTx, rules: &Rules, vm: &Arc<Vm>) -> Result<Receipt, ExecuteError> {
+pub(crate) fn execute(
+    block: &Arc<State>,
+    tx: &SignedTx,
+    rules: &Rules,
+    vm: &Arc<Vm>,
+    height: u64,
+) -> Result<Receipt, ExecuteError> {
     tx.verify().map_err(|err| ExecuteError::Invalid(TxError::Invalid(err)))?;
     let sender = tx.sender();
     let accounts = Accounts::new(block);
@@ -140,7 +172,7 @@ pub(crate) fn execute(block: &Arc<State>, tx: &SignedTx, rules: &Rules, vm: &Arc
 
     accounts.bump_nonce(&sender).map_err(node_fault)?;
     let layer = Arc::new(State::new(block.clone()));
-    let (fuel_used, result, events) = run(&layer, tx, sender, rules, vm);
+    let (fuel_used, result, events) = run(&layer, tx, sender, rules, vm, height);
 
     // A failing database is the node's fault, never the transaction's.
     match &result {
@@ -154,7 +186,7 @@ pub(crate) fn execute(block: &Arc<State>, tx: &SignedTx, rules: &Rules, vm: &Arc
     let events = if result.is_ok() { events } else { Vec::new() };
 
     Ok(Receipt {
-        id: tx.id(),
+        id: tx.id(rules.hash),
         fuel_used,
         result,
         events,
@@ -174,8 +206,17 @@ fn run(
     sender: Address,
     rules: &Rules,
     vm: &Arc<Vm>,
+    height: u64,
 ) -> (u64, Result<Effect, Failure>, Vec<Event>) {
     let accounts = Accounts::new(layer);
+    let staking = |run: &dyn Fn(&Validators, &FinalityRules, u64) -> Result<(), RegistryError>| {
+        let Some(finality) = &rules.finality else {
+            return (0, Err(Failure::NoFinality), Vec::new());
+        };
+        let epoch = height / finality.checkpoint_interval.max(1);
+
+        (0, moved(run(&Validators::new(layer), finality, epoch)), Vec::new())
+    };
 
     match &signed.tx {
         Tx::Transfer { from, to, amount } => (0, moved(accounts.transfer(from, to, amount.to_u256())), Vec::new()),
@@ -233,6 +274,24 @@ fn run(
                 Ok(hooked) => (hooked.fuel_used, Ok(Effect::Upgraded(*contract)), hooked.events),
                 Err(err) => (0, Err(Failure::Registry(err)), Vec::new()),
             }
+        }
+        Tx::Bond { voter, amount } => staking(&|validators, finality, epoch| {
+            validators.bond(&sender, voter, amount.to_u256(), epoch, &finality.staking)
+        }),
+        Tx::Unbond { voter } => staking(&|validators, finality, epoch| {
+            validators.unbond(&sender, voter, epoch, &finality.staking)
+        }),
+        Tx::Withdraw { voter } => staking(&|validators, _, epoch| validators.withdraw(&sender, voter, epoch).map(|_| ())),
+        Tx::Slash { first, second } => {
+            if let Some(finality) = &rules.finality
+                && (first.verify(&finality.chain).is_err() || second.verify(&finality.chain).is_err())
+            {
+                return (0, Err(Failure::BadEvidence), Vec::new());
+            }
+
+            staking(&|validators, finality, epoch| {
+                validators.slash(&sender, &first.vote.voter, epoch, &finality.staking).map(|_| ())
+            })
         }
     }
 }

@@ -3,7 +3,8 @@ use {
     crate::crypto::hashable::Hashable,
     crate::structs::address::Address,
     crate::structs::block::{BlockHeader, Seal},
-    crate::structs::hash::Hash,
+    crate::crypto::hasher::Hasher,
+    crate::structs::hash::{Hash, HashType},
     crate::structs::u256::u256,
     r#macro::document,
     std::sync::{Arc, Condvar, Mutex},
@@ -21,31 +22,14 @@ const MAX_STEPS_DOWN: u64 = 32;
 const NONCES_PER_CHECK: u64 = 4_096;
 
 #[document(
-    summary = "The hash proof of work is measured with. Part of genesis; new algorithms, such as memory-hard ones, can join under new tags without touching chains that use the old ones.",
-    category = "Consensus",
-    see_also = "PowConfig",
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-#[wincode(tag_encoding = "u8")]
-pub enum PowHash {
-    #[document(summary = "BLAKE3 of a domain tag, the block id and the nonce.")]
-    #[wincode(tag = 0)]
-    Blake3,
-}
-
-impl Hashable for PowHash {
-    const TAG_LEN: usize = 1;
-}
-
-#[document(
     summary = "Proof-of-work parameters, from genesis.",
     category = "Consensus",
     see_also = "ProofOfWork, ConsensusConfig::ProofOfWork",
 )]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct PowConfig {
-    #[document(summary = "The work hash.")]
-    pub hash: PowHash,
+    #[document(summary = "The work hash: any secure algorithm this build has, such as blake3 or sha256. Independent of the chain's own hash.")]
+    pub hash: HashType,
     #[document(summary = "How far apart blocks should be, in milliseconds. Difficulty rises when they come faster and falls when they come slower.")]
     pub target_block_ms: u64,
     #[document(summary = "The first block's difficulty: the expected number of hashes to find its seal.")]
@@ -138,33 +122,35 @@ pub fn meets(work: u256, difficulty: u128) -> bool {
     category = "Consensus",
     see_also = "meets",
 )]
-pub fn work_hash(hash: PowHash, id: &Hash, nonce: u64) -> u256 {
+pub fn work_hash(hash: HashType, id: &Hash, nonce: u64) -> u256 {
     Search::new(hash, id).work(nonce)
 }
 
-/// The work hash of one block id, ready to try nonces against.
+/// The work hash of one block id, ready to try nonces against: the domain and id are hashed once,
+/// and each nonce continues from a copy.
 struct Search {
-    prefix: blake3::Hasher,
+    prefix: Hasher,
 }
 
 impl Search {
-    fn new(hash: PowHash, id: &Hash) -> Search {
-        match hash {
-            PowHash::Blake3 => {
-                let mut prefix = blake3::Hasher::new();
-                prefix.update(WORK_DOMAIN);
-                prefix.update(&id.to_bytes());
+    fn new(hash: HashType, id: &Hash) -> Search {
+        let mut prefix = Hasher::new(hash);
+        prefix.update(WORK_DOMAIN);
+        prefix.update(&id.to_bytes());
 
-                Search { prefix }
-            }
-        }
+        Search { prefix }
     }
 
     fn work(&self, nonce: u64) -> u256 {
         let mut hasher = self.prefix.clone();
         hasher.update(&nonce.to_le_bytes());
+        let digest: [u8; 32] = hasher
+            .finalize()
+            .to_bytes()
+            .try_into()
+            .expect("genesis only allows 256-bit work hashes");
 
-        u256::from_be_bytes(*hasher.finalize().as_bytes())
+        u256::from_be_bytes(digest)
     }
 }
 
@@ -210,7 +196,7 @@ impl Miner {
             found = "Called from a mining thread with the block id and its seal when a nonce is found.",
         },
     )]
-    pub fn new(address: Address, hash: PowHash, threads: usize, found: impl Fn(Hash, Seal) + Send + Sync + 'static) -> Miner {
+    pub fn new(address: Address, hash: HashType, threads: usize, found: impl Fn(Hash, Seal) + Send + Sync + 'static) -> Miner {
         let shared = Arc::new(Shared {
             job: Mutex::new(Job {
                 generation: 0,
@@ -274,7 +260,7 @@ impl Drop for Miner {
 
 /// One mining thread: tries nonces index, index + stride, … on the current job until it finds
 /// one, the job changes, or the miner stops.
-fn mine(shared: &Shared, hash: PowHash, index: u64, stride: u64, found: &(dyn Fn(Hash, Seal) + Send + Sync)) {
+fn mine(shared: &Shared, hash: HashType, index: u64, stride: u64, found: &(dyn Fn(Hash, Seal) + Send + Sync)) {
     let mut finished = 0;
 
     loop {
@@ -335,27 +321,32 @@ mod tests {
 
     fn rules(min: u128) -> ProofOfWork {
         ProofOfWork::new(PowConfig {
-            hash: PowHash::Blake3,
+            hash: HashType::default_chain(),
             target_block_ms: TARGET,
             initial_difficulty: 1_000,
             min_difficulty: min,
         })
     }
 
+    /// A header on a chain hashed with the build's default; its algorithm comes from the chain
+    /// and could be any secure one.
     fn header(height: u64, timestamp: u64, difficulty: u128) -> BlockHeader {
+        let chain = HashType::default_chain();
+
         BlockHeader {
-            parent: Hash::Blake3_256([height as u8; 32]),
+            parent: Hash::from_bytes(chain, &[height as u8; 32]).unwrap(),
             height,
             timestamp,
             producer: Address::Ed25519([1; 32]),
             difficulty,
-            tx_root: Hash::Blake3_256([0; 32]),
+            tx_root: Hash::zero(chain),
+            proof_root: Hash::zero(chain),
         }
     }
 
     /// Finds a nonce on this thread.
     fn solve(header: &BlockHeader) -> Seal {
-        let search = Search::new(PowHash::Blake3, &header.id());
+        let search = Search::new(HashType::default_chain(), &header.id());
 
         (0..)
             .find(|nonce| meets(search.work(*nonce), header.difficulty))
@@ -389,7 +380,7 @@ mod tests {
             .map(|offset| Seal::Work { nonce: nonce.wrapping_add(offset + 1) })
             .find(|candidate| {
                 let Seal::Work { nonce } = candidate else { unreachable!() };
-                !meets(Search::new(PowHash::Blake3, &child.id()).work(*nonce), child.difficulty)
+                !meets(Search::new(HashType::default_chain(), &child.id()).work(*nonce), child.difficulty)
             })
             .unwrap();
         let easy = BlockHeader { difficulty: 1, ..child.clone() };
@@ -406,7 +397,7 @@ mod tests {
     fn the_miner_finds_seals_and_moves_on_to_new_headers() {
         let (sender, found) = mpsc::channel();
         let sender = Mutex::new(sender);
-        let mut miner = Miner::new(Address::Ed25519([1; 32]), PowHash::Blake3, 2, move |id, seal| {
+        let mut miner = Miner::new(Address::Ed25519([1; 32]), HashType::default_chain(), 2, move |id, seal| {
             let _ = sender.lock().unwrap().send((id, seal));
         });
         let rules = rules(1);
@@ -423,7 +414,7 @@ mod tests {
 
             assert_eq!(id, child.id());
             assert!(matches!(rules.check(&child, &seal, &parent, timestamp), Ok(()) | Err(ConsensusError::WrongDifficulty { .. })));
-            assert!(meets(Search::new(PowHash::Blake3, &id).work(match seal {
+            assert!(meets(Search::new(HashType::default_chain(), &id).work(match seal {
                 Seal::Work { nonce } => nonce,
                 _ => unreachable!(),
             }), 500));
@@ -431,4 +422,33 @@ mod tests {
 
         drop(miner);
     }
+
+    #[test]
+    fn any_secure_work_hash_seals_and_checks() {
+        let parent = header(5, 10_000, 64);
+        let mut works = Vec::new();
+
+        for &algorithm in HashType::ALL.iter().filter(|algorithm| algorithm.secure()) {
+            let rules = ProofOfWork::new(PowConfig {
+                hash: algorithm,
+                target_block_ms: TARGET,
+                initial_difficulty: 1_000,
+                min_difficulty: 1,
+            });
+            let mut child = header(6, 10_100, 0);
+            child.parent = parent.id();
+            child.difficulty = rules.difficulty(&parent, child.timestamp);
+            let search = Search::new(algorithm, &child.id());
+            let nonce = (0..).find(|nonce| meets(search.work(*nonce), child.difficulty)).unwrap();
+
+            assert_eq!(rules.check(&child, &Seal::Work { nonce }, &parent, 10_100), Ok(()), "{}", algorithm.name());
+            assert_eq!(search.work(nonce), work_hash(algorithm, &child.id(), nonce));
+            works.push(search.work(0));
+        }
+
+        works.sort();
+        works.dedup();
+        assert_eq!(works.len(), HashType::ALL.iter().filter(|algorithm| algorithm.secure()).count());
+    }
 }
+

@@ -2,9 +2,9 @@
 
 ## Things to know
 
-- **Old `chain.db` files are refused.** Blocks now carry a difficulty and a seal enum, and genesis
-  names its consensus, so every dev genesis id changed. Delete the database, or the node stops
-  with `WrongGenesis`.
+- **Old `chain.db` files are refused.** Headers now commit to finality proofs, and genesis names
+  its hash, limits and finality settings, so every dev genesis id changed again. Delete the
+  database, or the node stops with `WrongGenesis`.
 - **There are two dev chains, and pow is the default.** `--consensus pow` (mine with `--mine`)
   or `--consensus authority` (produce with `--produce`). Each is its own genesis and network.
 - **The dev genesis depends on build features.** The dev chains allow every engine the node was
@@ -14,11 +14,29 @@
   transactions run, the chain credits `reward.at(height)` to the header's `producer`, and a
   reorg takes it back with the rest of the block. Rewards can be spent from the next block on;
   there is no maturity period.
-- **Reorgs reach back at most 100 blocks.** `MAX_REORG_DEPTH` bounds how far the main chain
-  rolls back; a heavier branch that splits off deeper is never followed, and undo records older
-  than that are dropped.
-- **The proof-of-work hash is named in genesis.** Only `PowHash::Blake3` exists; a memory-hard
-  algorithm can join under a new tag without touching chains that use BLAKE3.
+- **Reorgs reach back at most `max_reorg_depth` blocks**, 100 on the dev chains. It bounds how
+  far the main chain rolls back; a heavier branch that splits off deeper is never followed, and
+  undo records older than that are dropped. Finality bounds it further: nothing at or below the
+  finalized checkpoint comes off.
+- **Every chain parameter is in genesis.** Consensus and timing, hashes, rewards, allocations,
+  the minter, engines, transaction limits, the reorg depth and every finality setting.
+  `chainv4 genesis` writes the dev defaults as a JSON file and `--genesis FILE` runs it; files
+  must name every field and may not add any.
+- **Both dev chains have finality.** The dev key is the one validator, bonded with 10,000 coins,
+  with epochs of 8 blocks. Without a node running `--validate`, nothing finalizes, and the chain
+  runs as before.
+- **Genesis bonds are extra.** Genesis validators' bonds are locked on top of the allocations,
+  not taken from them.
+- **A voting key belongs on one node.** What a node has voted is kept in its own database; two
+  nodes voting with one key can sign conflicting votes and get it slashed.
+- **Hashes are chosen in genesis.** `Genesis.hash` is the chain hash: block and transaction
+  ids, the roots blocks commit to, contract addresses and gossip ids. The proof-of-work config
+  names its own work hash. Either can be any secure 256-bit algorithm the build has: sha256,
+  blake3, blake2s, blake2b or keccak256. XXH3 is refused for both; it only names contract
+  functions. A header hashes itself with its parent's algorithm, which genesis fixes through its
+  zero parent, so ids from another chain's hash never connect. The dev chains use BLAKE3 when it
+  is built in. Contracts and nodes need at least one secure hash feature; nothing requires
+  BLAKE3 any more.
 - **The end-to-end SDK test needs the wasm32 target.** It builds `contracts/` with cargo:
   `rustup target add wasm32-unknown-unknown`. CI installs it.
 - **Contracts build from their own workspace.** `contracts/.cargo/config.toml` sets the wasm32
@@ -50,23 +68,43 @@
   purpose: the work hash is read as a big-endian number, so valid hashes start with zeros in hex;
   height keys, so RocksDB sorts them in order; and XXH3 digests as bytes, matching `xxhsum`.
 - **The binary is also the client.** See the [README](../README.md). `chainv4 send` waits for
-  inclusion by default (`--timeout`, `--confirmations`, `--no-wait`) and exits non-zero when the
-  transaction landed but failed. Without `--key` it signs with the well-known development key.
+  inclusion by default (`--timeout`, `--confirmations`, `--final`, `--no-wait`) and exits
+  non-zero when the transaction landed but failed. Without `--key` it signs with the well-known development key.
 
 ## Todo
 
 ### Consensus
 
 - [x] **Proof of work.** Genesis names the scheme. Under proof of work anyone mines: a nonce
-  must make the BLAKE3 work hash of the block id meet the block's difficulty, which retargets
+  must make the work hash of the block id meet the block's difficulty, which retargets
   every block toward a target block time. Miners run on threads of their own (`--mine`,
   `--mine-threads`).
 - [x] **Fork choice and reorgs.** Side blocks are stored, and the branch with the most total work
   is the main chain. A heavier branch triggers a reorg: roll back to the fork with undo records,
   run the branch, one commit. A branch that fails to run is dropped, and its descendants refused.
-- [ ] **No other schemes yet.** The authority is still one key whose seed is in the source. Next
-  could be a rotating authority set, or stake with finality.
-- [ ] **No finality.** Only the 100-block reorg limit stops deep rewrites.
+- [ ] **No other schemes yet.** The authority is still one key whose seed is in the source. Stake
+  now only finalizes; producing blocks by stake, or a rotating authority set, could come next.
+- [x] **Finality.** Casper FFG-style: validators bond on chain (`Tx::Bond`, `Unbond`,
+  `Withdraw`) with a separate voting key, and vote at each epoch's checkpoint. Two thirds by
+  bond justify a checkpoint, and a justified direct child finalizes its parent. Votes are
+  gossiped, justifications stored and fetched by sync, and blocks carry them as proofs that pay
+  each voter `vote_reward`. Conflicting votes are evidence; `Tx::Slash` takes the bond and pays
+  the reporter a share. Fork choice never goes below the finalized checkpoint, follows work only
+  from the justified one on, and follows a newer justified branch over more work.
+- [ ] **A slashed validator keeps its weight in sets already fixed.** Its bond is zero at once,
+  but sets are fixed `activation_delay` epochs ahead, so it counts until it leaves them. Dropping
+  slashed validators from every set would close that window.
+- [ ] **Finality stalls if a third goes quiet.** There is no inactivity leak, and no penalty for
+  not voting, so a chain whose validators drop below two thirds never finalizes again until
+  they return.
+- [ ] **Vote tallies live in memory.** A restart forgets votes for links not yet justified, the
+  held-back votes, and the votes double-vote detection compares against. Justifications and
+  finality are stored; storing tallies would let a node resume counting.
+- [ ] **Vote rewards are minted.** Nothing pays for them but new supply. Fees, once there are
+  any, could fund them instead.
+- [ ] **No checkpoint sync.** A new node replays every block from genesis. There is no trusted
+  recent checkpoint to start from, which a long-lived staked chain needs against long-range
+  attacks.
 - [ ] **Difficulty only looks at the parent.** A miner may set its timestamp up to 15 seconds
   ahead to lower the next difficulty a little. A median-time-past rule, or retargeting over a
   window of blocks, would make that harder.
@@ -187,8 +225,11 @@
   `send` at a node across the internet.
 - [ ] **Key files are not encrypted.** They are created readable by their owner only, but hold
   the seed in plain hex.
-- [ ] **Only the dev chains exist.** There is no genesis file, so there is no way to start any
-  other network.
+- [x] **Genesis files.** `chainv4 genesis` writes the dev defaults as JSON; `--genesis FILE`
+  runs any chain one describes. `--producer-key` names an authority other than the dev key.
+- [x] **Finality in the API and CLI.** `/status` shows the justified and finalized checkpoints,
+  receipts say whether they are final, `/validators` and `/evidence` list validators and
+  conflicting votes, and `send` has `bond`, `unbond`, `withdraw`, `slash` and `--final`.
 - [ ] **No graceful shutdown.** Ctrl-C kills the process mid-loop. Commits are atomic, so data is
   safe, but the network and HTTP threads never close cleanly.
 - [x] **The HTTP API has transaction lookup and receipts.** `GET /txs/{id}`, and each transaction

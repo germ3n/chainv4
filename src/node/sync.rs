@@ -4,12 +4,13 @@
 //! after the heights the two share and imports them in order; side blocks wait until their
 //! branch outweighs the main chain, which then reorganizes. When a batch does not connect, the
 //! chains split earlier, so the next request starts a batch further back. One request is in
-//! flight at a time.
+//! flight at a time. Once nobody holds more work, the node asks a peer that is ahead on
+//! justification for the justifications it lacks, which may in turn finalize checkpoints here.
 
 use {
     super::{Node, NodeError},
-    crate::chain::ImportError,
-    crate::net::{MAX_SYNC_BLOCKS, NetCommand, SyncRequest, SyncResponse},
+    crate::chain::{FinalityError, ImportError},
+    crate::net::{MAX_SYNC_BLOCKS, MAX_SYNC_JUSTIFICATIONS, NetCommand, SyncRequest, SyncResponse},
     crate::structs::block::Block,
     crate::structs::u256::u256,
     libp2p::PeerId,
@@ -23,11 +24,15 @@ pub(super) struct SyncState {
     peers: HashMap<PeerId, PeerChain>,
     /// The peer asked for blocks, and the height asked from, while its answer is outstanding.
     asking: Option<(PeerId, u64)>,
+    /// The peer asked for justifications, while its answer is outstanding.
+    asking_proofs: Option<PeerId>,
 }
 
 struct PeerChain {
     height: u64,
     work: u256,
+    /// The epoch of its latest justified checkpoint.
+    justified: u64,
     /// Where to ask from next; None to start just past what both chains have.
     next: Option<u64>,
 }
@@ -41,13 +46,21 @@ impl Node {
             self.sync.asking = None;
         }
 
+        if self.sync.asking_proofs == Some(peer) {
+            self.sync.asking_proofs = None;
+        }
+
         self.sync_next();
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, response: SyncResponse, now: u64) -> Result<(), NodeError> {
         match response {
             SyncResponse::Status {
-                genesis, height, work, ..
+                genesis,
+                height,
+                work,
+                justified,
+                ..
             } => {
                 if genesis != self.chain.genesis() {
                     log::debug!("[node] {peer} is on another chain, {genesis}");
@@ -57,7 +70,40 @@ impl Node {
                 }
 
                 let next = self.sync.peers.get(&peer).and_then(|known| known.next);
-                self.sync.peers.insert(peer, PeerChain { height, work, next });
+                self.sync.peers.insert(peer, PeerChain {
+                    height,
+                    work,
+                    justified,
+                    next,
+                });
+                self.sync_next();
+            }
+            SyncResponse::Justifications(justifications) => {
+                if self.sync.asking_proofs != Some(peer) {
+                    return Ok(());
+                }
+
+                self.sync.asking_proofs = None;
+                let mut learned = false;
+
+                for justification in justifications {
+                    let epoch = justification.target.epoch;
+
+                    match self.chain.add_justification(justification) {
+                        Ok(update) => {
+                            learned |= !update.justified.is_empty();
+                            self.finality_changed(update, &format!("synced from {peer}"))?;
+                        }
+                        Err(FinalityError::Db(err)) => return Err(NodeError::Db(err)),
+                        Err(err) => log::debug!("[node] could not take {peer}'s justification for epoch {epoch}: {err}"),
+                    }
+                }
+
+                // Nothing new from it: stop asking it until it says more.
+                if !learned && let Some(known) = self.sync.peers.get_mut(&peer) {
+                    known.justified = self.chain.justified().map_or(0, |justified| justified.epoch);
+                }
+
                 self.sync_next();
             }
             SyncResponse::Blocks(blocks) => {
@@ -142,6 +188,8 @@ impl Node {
             .max_by_key(|(id, peer)| (peer.work, **id));
 
         let Some((peer, chain)) = heaviest else {
+            self.sync_proofs();
+
             return;
         };
         let from = chain.next.unwrap_or(tip.min(chain.height) + 1).clamp(1, chain.height);
@@ -154,5 +202,35 @@ impl Node {
             peer,
             request: SyncRequest::Blocks { from, count },
         });
+    }
+
+    /// Asks the peer furthest ahead on justification for the justifications this node lacks.
+    fn sync_proofs(&mut self) {
+        if self.sync.asking_proofs.is_some() {
+            return;
+        }
+
+        let Some(ours) = self.chain.justified().map(|justified| justified.epoch) else {
+            return;
+        };
+        let ahead = self
+            .sync
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.justified > ours)
+            .max_by_key(|(id, peer)| (peer.justified, **id))
+            .map(|(id, _)| *id);
+
+        if let Some(peer) = ahead {
+            log::debug!("[node] asking {peer} for justifications from epoch {}", ours + 1);
+            self.sync.asking_proofs = Some(peer);
+            self.send(NetCommand::Request {
+                peer,
+                request: SyncRequest::Justifications {
+                    from: ours + 1,
+                    count: MAX_SYNC_JUSTIFICATIONS,
+                },
+            });
+        }
     }
 }
