@@ -76,6 +76,7 @@ fn outcome(receipt: &TxReceipt) -> Value {
     let mut value = match &receipt.status {
         TxStatus::Done => json!({ "status": "done" }),
         TxStatus::Deployed(address) => json!({ "status": "deployed", "contract": address.to_string() }),
+        TxStatus::Upgraded(address) => json!({ "status": "upgraded", "contract": address.to_string() }),
         TxStatus::Returned(values) => json!({
             "status": "returned",
             "values": values.iter().map(argument).collect::<Vec<_>>(),
@@ -132,12 +133,16 @@ pub fn tx(tx: &Tx) -> Value {
             "amount": decimal(amount),
             "data": data.iter().map(argument).collect::<Vec<_>>(),
         }),
-        Tx::Deploy { code } => {
+        Tx::Deploy { code } | Tx::Upgrade { code, .. } => {
             let mut value = json!({
-                "type": "deploy",
+                "type": if matches!(tx, Tx::Deploy { .. }) { "deploy" } else { "upgrade" },
                 "engine": code.engine().name(),
                 "code_size": code.bytes().len(),
             });
+
+            if let Tx::Upgrade { contract, .. } = tx {
+                value["contract"] = contract.to_string().into();
+            }
 
             // Source is worth showing; a module's bytes are not.
             if let Code::Lua(source) = code {
@@ -182,6 +187,7 @@ pub fn contract(address: &Address, record: &ContractRecord) -> Value {
         "deployer": record.deployer.to_string(),
         "engine": record.engine.name(),
         "functions": record.functions,
+        "upgradable": record.functions.iter().any(|name| name == crate::vm::CHECK_PERMS),
         "reentrant": record.reentrant,
         "code_size": record.code.len(),
     })

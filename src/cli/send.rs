@@ -73,6 +73,18 @@ pub enum TxArgs {
         #[arg(long)]
         wasm: Option<PathBuf>,
     },
+    /// Replaces a contract's code. The contract's check_perms must allow the signer.
+    Upgrade {
+        /// The contract, such as contract:0x….
+        #[arg(long)]
+        contract: Address,
+        /// The new code: a Luau source file.
+        #[arg(long, conflicts_with = "wasm", required_unless_present = "wasm")]
+        lua: Option<PathBuf>,
+        /// The new code: a WebAssembly module.
+        #[arg(long)]
+        wasm: Option<PathBuf>,
+    },
     /// Calls a function on a contract.
     Call {
         /// The contract, such as contract:0x….
@@ -128,6 +140,17 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     report(&receipt)
 }
 
+/// Reads contract code from whichever file was given.
+fn code(lua: Option<PathBuf>, wasm: Option<PathBuf>) -> CliResult<Code> {
+    let read_error = |path: &PathBuf, err: std::io::Error| format!("cannot read {}: {err}", path.display());
+
+    match (lua, wasm) {
+        (Some(path), _) => Ok(Code::Lua(std::fs::read_to_string(&path).map_err(|err| read_error(&path, err))?)),
+        (None, Some(path)) => Ok(Code::Wasm(std::fs::read(&path).map_err(|err| read_error(&path, err))?)),
+        (None, None) => Err("give --lua or --wasm".into()),
+    }
+}
+
 /// Asks the node about the transaction until enough blocks hold it or the time runs out.
 fn wait(agent: &Agent, node: &str, id: &str, confirmations: u64, timeout: Duration) -> CliResult<Value> {
     let deadline = Instant::now() + timeout;
@@ -167,6 +190,7 @@ fn report(receipt: &Value) -> CliResult<()> {
 
     match receipt["status"].as_str() {
         Some("deployed") => println!("deployed {}", receipt["contract"].as_str().unwrap_or("?")),
+        Some("upgraded") => println!("upgraded {}", receipt["contract"].as_str().unwrap_or("?")),
         Some("returned") => println!("returned {}", receipt["values"]),
         Some("failed") => {}
         _ => println!("done"),
@@ -203,13 +227,11 @@ fn transaction(tx: TxArgs, sender: Address) -> CliResult<Tx> {
             from: sender,
             amount: amount(value),
         },
-        TxArgs::Deploy { lua: Some(path), .. } => Tx::Deploy {
-            code: Code::Lua(std::fs::read_to_string(&path).map_err(|err| format!("cannot read {}: {err}", path.display()))?),
+        TxArgs::Deploy { lua, wasm } => Tx::Deploy { code: code(lua, wasm)? },
+        TxArgs::Upgrade { contract, lua, wasm } => Tx::Upgrade {
+            contract,
+            code: code(lua, wasm)?,
         },
-        TxArgs::Deploy { wasm: Some(path), .. } => Tx::Deploy {
-            code: Code::Wasm(std::fs::read(&path).map_err(|err| format!("cannot read {}: {err}", path.display()))?),
-        },
-        TxArgs::Deploy { .. } => return Err("deploy needs --lua or --wasm".into()),
         TxArgs::Call {
             to,
             function,

@@ -4,8 +4,10 @@ A blockchain node, and a command-line client for it, in one binary. Contracts ru
 (Luau) or WebAssembly; blocks come from proof of work or a development authority; nodes talk
 over libp2p; a JSON HTTP API serves queries and takes transactions.
 
-This page covers the `chainv4` command. The code reference is the wiki that every build writes
-to `target/wiki/index.html`; open questions and caveats live in [docs/todo.md](docs/todo.md).
+This page covers the `chainv4` command and how contracts live on the chain. The code reference
+is the wiki that every build writes to `target/wiki/index.html`, tokens follow the
+[token standard](docs/token-standard.md), and open questions and caveats live in
+[docs/todo.md](docs/todo.md).
 
 ## Building
 
@@ -101,7 +103,7 @@ only and is never overwritten, but it is not encrypted: guard it.
 ## Sending transactions
 
 ```sh
-chainv4 send [OPTIONS] <transfer|mint|burn|deploy|call> …
+chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call> …
 ```
 
 `send` looks up the signer's next nonce, signs, posts the transaction to a node, and waits until
@@ -150,11 +152,26 @@ end
 return M
 ```
 
+Events land in the transaction's receipt; `send` prints them.
+
 Rust contracts use the SDK in [contracts/](contracts); build its examples with
 
 ```sh
 cd contracts && cargo build --release
 ```
+
+A deploy also runs the contract's `init`, if it has one; see [Contract lifecycle](#contract-lifecycle).
+
+### upgrade
+
+```sh
+chainv4 send upgrade --contract contract:0x41f0… --lua counter_v2.lua
+# included in block 30 0x… (1 confirmation)
+# upgraded contract:0x41f0…
+```
+
+Replaces the contract's code; its address, storage and balance stay. The contract decides who
+may: see below. `--wasm` works too, so a contract can even move between engines.
 
 ### call
 
@@ -180,6 +197,56 @@ Arguments are `type:value`:
 | `bytes` | `bytes:0x00ff` |
 | `address` | `address:ed25519:0x…`, `address:contract:0x…` |
 
+## Contract lifecycle
+
+Besides the functions a contract exports for everyone, the chain looks for three by name:
+
+| Function | Who runs it | When |
+| --- | --- | --- |
+| `init()` | the chain only | Once, at deploy, with the deployer as `ctx.sender`. Record an owner, mint an initial supply. If it fails, so does the deploy. |
+| `check_perms(permission, who)` | the chain, before a privileged action; anyone may call it | Before an upgrade, with `"upgrade"` and the sender. Only `true` lets the upgrade through. What it writes is thrown away. |
+| `migrate()` | the chain only | Once, after an upgrade to code that exports it, with the upgrader as sender. Move storage to a new layout. If it fails, so does the upgrade. |
+
+Transactions and other contracts cannot call `init` or `migrate`. A contract without
+`check_perms` can never be upgraded, and neither can one upgraded to code without it, so freezing
+a contract is one last upgrade. `GET /contracts/{address}` shows `"upgradable"`.
+
+An owned, upgradable contract:
+
+```lua
+local M = {}
+
+function M.init()
+    storage.set("owner", ctx.sender:hex())
+end
+
+function M.check_perms(permission, who)
+    return permission == "upgrade" and who:hex() == storage.get("owner")
+end
+
+return M
+```
+
+`check_perms` can hold any rule: a list of admins, a vote counted in storage, a time lock. Rust
+contracts export the same names with `#[export]`.
+
+## Tokens
+
+Tokens are contracts that follow the [token standard](docs/token-standard.md), much like ERC-20:
+`transfer`, `approve`, `transfer_from`, `balance_of` and the rest, with `Transfer` and
+`Approval` events. They never touch the native coin, which moves only with `--amount` and
+`accounts.transfer`. Deploy one of the examples and use it:
+
+```sh
+chainv4 send deploy --lua contracts/lua/token.lua
+# contract contract:0x9a1c…
+chainv4 send call --to contract:0x9a1c… --function transfer address:ed25519:0x5be0… u256:1000
+# event Transfer from contract:0x9a1c… [{"type":"address",…},{"type":"address",…},{"type":"u256","value":"1000"}]
+```
+
+The deployer owns the example token: `init` gives them a million tokens, and only they may
+`mint` more or upgrade it.
+
 ## HTTP API
 
 Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "…"}`.
@@ -191,7 +258,7 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "�
 | `GET /blocks/{latest\|height\|id}` | A block, its seal, and each transaction with its receipt. |
 | `GET /txs/{id}` | Where a transaction landed, its confirmations, result and events; 404 until it is on the main chain. |
 | `GET /accounts/{address}` | Nonce and balance. |
-| `GET /contracts/{address}` | Engine, deployer, exported functions. |
+| `GET /contracts/{address}` | Engine, deployer, exported functions, and whether it can be upgraded. |
 | `POST /txs` | `{"tx": "0x…"}`, an encoded signed transaction; answers 202 with its id. |
 
 Amounts and large integers are decimal strings, hashes and bytes are `0x` hex, and addresses

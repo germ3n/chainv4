@@ -182,6 +182,11 @@ impl World {
         Contracts::new(&self.state)
             .deploy(&self.vm, &DEPLOYER, self.nonce, &code, LIMITS)
             .unwrap()
+            .0
+    }
+
+    fn upgrade(&self, sender: Address, contract: Address, code: Code) -> Result<crate::registry::contracts::Hooked, crate::registry::RegistryError> {
+        Contracts::new(&self.state).upgrade(&self.vm, &sender, &contract, &code, LIMITS)
     }
 
     fn lua(&mut self) -> Address {
@@ -193,8 +198,12 @@ impl World {
     }
 
     fn call(&self, contract: Address, function: &str, args: &[TxCallArgumentType]) -> Outcome {
+        self.call_as(DEPLOYER, contract, function, args)
+    }
+
+    fn call_as(&self, sender: Address, contract: Address, function: &str, args: &[TxCallArgumentType]) -> Outcome {
         let context = CallContext {
-            sender: DEPLOYER,
+            sender,
             contract,
             value: u256::ZERO,
         };
@@ -493,4 +502,214 @@ fn wasm_contracts_emit_through_the_host() {
     assert_eq!(outcome.events[0].name, "Hi");
     assert_eq!(outcome.events[0].data, [TxCallArgumentType::I64(7)]);
     assert!(matches!(world.call(greeter, "too_long", &[]).result, Err(VmError::Runtime(text)) if text.contains("event names")));
+}
+
+/// Records its deployer as owner, and lets only the owner upgrade it.
+const OWNED_V1: &str = r#"
+local M = {}
+
+function M.init()
+    storage.set("owner", ctx.sender:hex())
+    events.emit("Created", ctx.sender)
+end
+
+function M.check_perms(permission, who)
+    storage.set("asked", "yes")
+    return permission == "upgrade" and who:hex() == storage.get("owner")
+end
+
+function M.version()
+    return 1
+end
+
+function M.call_init(target)
+    return contracts.call(target, "init")
+end
+
+return M
+"#;
+
+/// The next version: keeps the owner, moves storage along, and can be upgraded again.
+const OWNED_V2: &str = r#"
+local M = {}
+
+function M.migrate()
+    storage.set("migrated", "yes")
+    events.emit("Migrated", 2)
+end
+
+function M.check_perms(permission, who)
+    return permission == "upgrade" and who:hex() == storage.get("owner")
+end
+
+function M.version()
+    return 2, storage.get("owner"), storage.get("migrated")
+end
+
+return M
+"#;
+
+fn stored(world: &World, contract: Address, key: &[u8]) -> Option<Vec<u8>> {
+    world.state.get(Column::Storage, &storage_key(&contract, key)).unwrap()
+}
+
+#[test]
+fn init_runs_once_at_deploy_and_only_the_chain_may_run_it() {
+    let mut world = World::new();
+    world.nonce += 1;
+    let (owned, hooked) = Contracts::new(&world.state)
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(OWNED_V1.to_string()), LIMITS)
+        .unwrap();
+
+    assert!(hooked.fuel_used > 0);
+    assert_eq!(hooked.events.len(), 1);
+    assert_eq!(hooked.events[0].name, "Created");
+    assert_eq!(stored(&world, owned, b"owner"), Some(to_hex(DEPLOYER.bytes()).into_bytes()));
+
+    let direct = world.call(owned, "init", &[]).result.unwrap_err();
+    let other = world.deploy(Code::Lua(OWNED_V1.to_string()));
+    let nested = world.call(other, "call_init", &[address(owned)]).result.unwrap_err();
+
+    assert_eq!(direct, VmError::Reserved("init".to_string()));
+    assert!(matches!(&nested, VmError::Runtime(text) if text.contains("only run by the chain")), "{nested:?}");
+}
+
+#[test]
+fn upgrades_need_check_perms_and_keep_storage() {
+    let mut world = World::new();
+    let owned = world.deploy(Code::Lua(OWNED_V1.to_string()));
+    let stranger = Address::Ed25519([5; 32]);
+
+    assert_eq!(
+        world.upgrade(stranger, owned, Code::Lua(OWNED_V2.to_string())),
+        Err(crate::registry::RegistryError::NotPermitted)
+    );
+    // What check_perms wrote while being asked is thrown away.
+    assert_eq!(stored(&world, owned, b"asked"), None);
+
+    let hooked = world.upgrade(DEPLOYER, owned, Code::Lua(OWNED_V2.to_string())).unwrap();
+    let owner = to_hex(DEPLOYER.bytes());
+
+    assert_eq!(hooked.events.len(), 1);
+    assert_eq!(hooked.events[0].name, "Migrated");
+    assert_eq!(
+        world.call(owned, "version", &[]).result.unwrap(),
+        [
+            TxCallArgumentType::Number(2.0),
+            TxCallArgumentType::String(owner),
+            TxCallArgumentType::String("yes".to_string()),
+        ]
+    );
+    assert_eq!(world.call(owned, "migrate", &[]).result.unwrap_err(), VmError::Reserved("migrate".to_string()));
+}
+
+#[test]
+fn contracts_without_check_perms_are_immutable_and_upgrades_may_switch_engines() {
+    let mut world = World::new();
+    let fixed = world.lua();
+
+    assert_eq!(
+        world.upgrade(DEPLOYER, fixed, Code::Lua(OWNED_V2.to_string())),
+        Err(crate::registry::RegistryError::NotPermitted)
+    );
+
+    // From Lua to WebAssembly; the module has no check_perms, so this is the last upgrade.
+    let owned = world.deploy(Code::Lua(OWNED_V1.to_string()));
+    world.upgrade(DEPLOYER, owned, Code::Wasm(wat::parse_str(WASM_COUNTER).unwrap())).unwrap();
+    let record = Contracts::new(&world.state).get(&owned).unwrap().unwrap();
+
+    assert_eq!(record.engine, Engine::Wasm);
+    assert_eq!(record.deployer, DEPLOYER);
+    assert_eq!(world.call(owned, "bump", &[]).result.unwrap(), [TxCallArgumentType::I64(1)]);
+    assert_eq!(
+        world.upgrade(DEPLOYER, owned, Code::Lua(OWNED_V1.to_string())),
+        Err(crate::registry::RegistryError::NotPermitted)
+    );
+}
+
+/// Runs the token standard (docs/token-standard.md) against an example token, whichever engine
+/// runs it.
+fn conforms_to_the_token_standard(code: Code) {
+    let mut world = World::new();
+    world.nonce += 1;
+    let (token, hooked) = Contracts::new(&world.state)
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &code, LIMITS)
+        .unwrap();
+    let initial = u256::from(1_000_000u64) * u256::from(10u64).pow(18);
+    let zero = address(Address::Ed25519([0; 32]));
+    let (alice, bob, carol) = (Address::Ed25519([0xa; 32]), Address::Ed25519([0xb; 32]), Address::Ed25519([0xc; 32]));
+    let amount = |value: u64| TxCallArgumentType::U256(u256::from(value));
+    let yes = [TxCallArgumentType::Bool(true)];
+    let ok = |sender: Address, function: &str, args: &[TxCallArgumentType]| {
+        let outcome = world.call_as(sender, token, function, args);
+        let events: Vec<_> = outcome.events.iter().map(|event| (event.name.clone(), event.data.clone())).collect();
+
+        (outcome.result.unwrap_or_else(|err| panic!("{function}: {err}")), events)
+    };
+    let refused = |sender: Address, function: &str, args: &[TxCallArgumentType]| {
+        world.call_as(sender, token, function, args).result.unwrap_err().to_string()
+    };
+    let balance = |owner: Address| ok(DEPLOYER, "balance_of", &[address(owner)]).0;
+    let transfer = |from: TxCallArgumentType, to: Address, value: TxCallArgumentType| {
+        ("Transfer".to_string(), vec![from, address(to), value])
+    };
+
+    // init minted the whole initial supply to the deployer.
+    assert_eq!(hooked.events.len(), 1);
+    assert_eq!(hooked.events[0].name, "Transfer");
+    assert_eq!(hooked.events[0].data, [zero, address(DEPLOYER), TxCallArgumentType::U256(initial)]);
+    assert_eq!(ok(DEPLOYER, "name", &[]).0, [TxCallArgumentType::String("Example Token".to_string())]);
+    assert_eq!(ok(DEPLOYER, "symbol", &[]).0, [TxCallArgumentType::String("EXT".to_string())]);
+    assert!(matches!(
+        ok(DEPLOYER, "decimals", &[]).0[..],
+        [TxCallArgumentType::Number(18.0)] | [TxCallArgumentType::U64(18)]
+    ));
+    assert_eq!(ok(DEPLOYER, "total_supply", &[]).0, [TxCallArgumentType::U256(initial)]);
+    assert_eq!(balance(DEPLOYER), [TxCallArgumentType::U256(initial)]);
+
+    // transfer moves the sender's own tokens.
+    assert_eq!(
+        ok(DEPLOYER, "transfer", &[address(alice), amount(100)]),
+        (yes.to_vec(), vec![transfer(address(DEPLOYER), alice, amount(100))])
+    );
+    assert_eq!(balance(alice), [amount(100)]);
+    assert!(refused(alice, "transfer", &[address(bob), amount(101)]).contains("insufficient balance"));
+
+    // approve lets a spender move up to an allowance with transfer_from.
+    assert_eq!(
+        ok(alice, "approve", &[address(bob), amount(50)]),
+        (yes.to_vec(), vec![("Approval".to_string(), vec![address(alice), address(bob), amount(50)])])
+    );
+    assert_eq!(ok(DEPLOYER, "allowance", &[address(alice), address(bob)]).0, [amount(50)]);
+    assert_eq!(
+        ok(bob, "transfer_from", &[address(alice), address(carol), amount(30)]),
+        (yes.to_vec(), vec![transfer(address(alice), carol, amount(30))])
+    );
+    assert_eq!(ok(DEPLOYER, "allowance", &[address(alice), address(bob)]).0, [amount(20)]);
+    assert_eq!((balance(alice), balance(carol)), (vec![amount(70)], vec![amount(30)]));
+    assert!(refused(bob, "transfer_from", &[address(alice), address(carol), amount(21)]).contains("insufficient allowance"));
+
+    // Only the owner mints, and nobody calls init again.
+    assert!(refused(bob, "mint", &[address(bob), amount(5)]).contains("only the owner mints"));
+    ok(DEPLOYER, "mint", &[address(bob), amount(5)]);
+    assert_eq!(
+        ok(DEPLOYER, "total_supply", &[]).0,
+        [TxCallArgumentType::U256(initial + u256::from(5u64))]
+    );
+    assert_eq!(world.call(token, "init", &[]).result.unwrap_err(), VmError::Reserved("init".to_string()));
+
+    // Only the owner upgrades.
+    assert_eq!(world.upgrade(bob, token, code.clone()), Err(crate::registry::RegistryError::NotPermitted));
+    world.upgrade(DEPLOYER, token, code).unwrap();
+    assert_eq!(balance(carol), [amount(30)]);
+}
+
+#[test]
+fn the_lua_token_follows_the_standard() {
+    conforms_to_the_token_standard(Code::Lua(include_str!("../../contracts/lua/token.lua").to_string()));
+}
+
+#[test]
+fn the_rust_token_follows_the_standard() {
+    conforms_to_the_token_standard(Code::Wasm(example("token")));
 }

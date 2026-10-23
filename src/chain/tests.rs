@@ -543,3 +543,64 @@ return M
     assert!(matches!(&failed.status, TxStatus::Failed(error) if error.contains("no")), "{failed:?}");
     assert!(failed.events.is_empty());
 }
+
+#[test]
+fn upgrade_transactions_ask_the_contract_and_fail_whole() {
+    const V1: &str = r#"
+local M = {}
+function M.init() storage.set("owner", ctx.sender:hex()); events.emit("Created") end
+function M.check_perms(permission, who) return who:hex() == storage.get("owner") end
+function M.version() return 1 end
+return M
+"#;
+    const BROKEN: &str = r#"
+local M = {}
+function M.migrate() storage.set("half", "done"); error("migration failed") end
+function M.version() return 2 end
+return M
+"#;
+    const V2: &str = r#"
+local M = {}
+function M.version() return 2 end
+return M
+"#;
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let owner = authority();
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(V1.to_string()) }, 0, &owner);
+    let receipts = advance(&mut chain, vec![deploy]);
+    let contract = contract_address(&owner.public().address(), 0);
+
+    assert_eq!(receipts[0].result, Ok(Effect::Deployed(contract)));
+    assert!(receipts[0].fuel_used > 0);
+    assert_eq!(receipts[0].events[0].name, "Created");
+
+    let upgrade = |code: &str, nonce: u64, signer: &Keypair| {
+        let tx = Tx::Upgrade {
+            contract,
+            code: Code::Lua(code.to_string()),
+        };
+
+        SignedTx::sign(tx, nonce, signer)
+    };
+    let version = |chain: &mut Chain, nonce: u64| {
+        let tx = Tx::ContractCall {
+            to: contract,
+            func: Hash::Xxh3_64(selector("version")),
+            amount: Amount::U128(0),
+            data: Vec::new(),
+        };
+
+        advance(chain, vec![SignedTx::sign(tx, nonce, &authority())])[0].result.clone()
+    };
+    let receipts = advance(&mut chain, vec![upgrade(BROKEN, 1, &owner), upgrade(V2, 0, &stranger())]);
+
+    assert!(matches!(&receipts[0].result, Err(failure) if failure.to_string().contains("migration failed")));
+    assert!(matches!(&receipts[1].result, Err(failure) if failure.to_string().contains("does not permit")));
+    assert_eq!(version(&mut chain, 2), Ok(Effect::Returned(vec![TxCallArgumentType::Number(1.0)])));
+
+    let receipts = advance(&mut chain, vec![upgrade(V2, 3, &owner)]);
+
+    assert_eq!(receipts[0].result, Ok(Effect::Upgraded(contract)));
+    assert_eq!(version(&mut chain, 4), Ok(Effect::Returned(vec![TxCallArgumentType::Number(2.0)])));
+}

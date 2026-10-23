@@ -26,6 +26,35 @@ pub mod wasm;
 
 pub use host::{Host, MAX_CALL_DEPTH, MAX_EVENTS, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_VALUE_LEN};
 
+#[document(
+    summary = "The hook the chain runs once, when the contract is deployed, with the deployer as sender and no arguments. The place to record an owner or mint an initial supply. If it fails, so does the deploy. Only the chain may run it.",
+    category = "VM",
+    see_also = "Contracts::deploy, HOOKS",
+)]
+pub const INIT: &str = "init";
+
+#[document(
+    summary = "The hook the chain runs once when a contract is upgraded to code that exports it, with the upgrader as sender and no arguments. The place to move storage to a new layout. If it fails, so does the upgrade. Only the chain may run it.",
+    category = "VM",
+    see_also = "Contracts::upgrade, HOOKS",
+)]
+pub const MIGRATE: &str = "migrate";
+
+#[document(
+    summary = "The function the chain asks before a privileged action on a contract, with the permission's name and the address asking, such as (\"upgrade\", ed25519:0x…). Only a single true lets the action through, and what it writes is thrown away. A contract that does not export it can never be upgraded.",
+    category = "VM",
+    see_also = "Contracts::upgrade",
+    example = "function M.check_perms(permission, who)\n    return permission == \"upgrade\" and who:hex() == storage.get(\"owner\")\nend",
+)]
+pub const CHECK_PERMS: &str = "check_perms";
+
+#[document(
+    summary = "The functions only the chain may run. A transaction or contract that calls one is refused with Reserved.",
+    category = "VM",
+    see_also = "INIT, MIGRATE",
+)]
+pub const HOOKS: &[&str] = &[INIT, MIGRATE];
+
 /// What host operations cost in fuel. The same in every engine, so moving a contract from one
 /// engine to another never changes what its storage or calls cost.
 pub mod cost {
@@ -223,6 +252,36 @@ impl Vm {
         let Some(function) = record.functions.iter().find(|name| Hash::Xxh3_64(selector(name)) == *func) else {
             return Outcome::failed(VmError::NoSuchFunction);
         };
+
+        if HOOKS.contains(&function.as_str()) {
+            return Outcome::failed(VmError::Reserved(function.clone()));
+        }
+
+        self.run(state, record, context, function, args, limits)
+    }
+
+    #[document(
+        parent = "Vm",
+        summary = "Runs a contract function by name, hooks such as init and migrate included. For the chain itself; transactions go through call.",
+        params = {
+            state = "The state layer the run's writes land in, if it succeeds.",
+            record = "The contract, as stored.",
+            context = "Who is asking, which contract, and what was sent.",
+            function = "The function's name.",
+            args = "The arguments.",
+            limits = "What the run, contracts it calls included, may use.",
+        },
+        see_also = "Contracts::deploy, Contracts::upgrade",
+    )]
+    pub fn run(
+        self: &Arc<Self>,
+        state: &Arc<State>,
+        record: &ContractRecord,
+        context: CallContext,
+        function: &str,
+        args: &[TxCallArgumentType],
+        limits: Limits,
+    ) -> Outcome {
         let layer = Arc::new(State::new(state.clone()));
         let host = Host::root(layer, context, limits.memory, self.clone());
 
@@ -269,6 +328,8 @@ pub enum VmError {
     BadReturn(String),
     #[document(summary = "A contract called an address that holds no contract.")]
     NoSuchContract(Address),
+    #[document(summary = "A transaction or contract called a hook only the chain runs: init or migrate.")]
+    Reserved(String),
     #[document(summary = "A contract called one that is already running further up the chain of calls, and the function it called is not marked reentrant.")]
     Reentrant(Address),
     #[document(summary = "The chain of calls would go deeper than MAX_CALL_DEPTH.")]
@@ -296,6 +357,7 @@ impl fmt::Display for VmError {
             VmError::BadArgument(text) => write!(f, "bad argument: {text}"),
             VmError::BadReturn(text) => write!(f, "bad return value: {text}"),
             VmError::NoSuchContract(address) => write!(f, "no contract at {address}"),
+            VmError::Reserved(name) => write!(f, "{name} is only run by the chain"),
             VmError::Reentrant(address) => {
                 write!(f, "{address} is already running and the function is not reentrant")
             }

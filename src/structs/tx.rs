@@ -85,6 +85,16 @@ pub enum Tx {
     )]
     #[wincode(tag = 4)]
     Deploy { code: Code },
+    #[document(
+        summary = "Replaces a contract's code, keeping its address, storage and balance. The contract decides: its check_perms must return true for \"upgrade\" and the sender. Then the new code's migrate runs, if it has one.",
+        params = {
+            contract = "The contract to upgrade.",
+            code = "The new code, for either engine.",
+        },
+        see_also = "Contracts::upgrade, CHECK_PERMS",
+    )]
+    #[wincode(tag = 5)]
+    Upgrade { contract: Address, code: Code },
 }
 
 #[document(
@@ -175,7 +185,7 @@ impl Verifiable for Tx {
                 Ok(())
             }
             // Whether the source compiles is decided when the transaction runs.
-            Tx::Deploy { .. } => Ok(()),
+            Tx::Deploy { .. } | Tx::Upgrade { .. } => Ok(()),
         }
     }
 }

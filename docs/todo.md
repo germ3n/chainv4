@@ -42,6 +42,9 @@
 - **The WASM `call` import takes a value pointer.** It is
   `call(address, value, name, name_len, args, args_len)`; rebuild contracts made against the
   earlier five-argument form. Contracts also import `emit` now.
+- **Contracts have three special functions.** `init` (run at deploy), `migrate` (run after an
+  upgrade) and `check_perms` (asked before an upgrade). Transactions and other contracts cannot
+  call `init` or `migrate`. See the README's Contract lifecycle.
 - **The binary is also the client.** See the [README](../README.md). `chainv4 send` waits for
   inclusion by default (`--timeout`, `--confirmations`, `--no-wait`) and exits non-zero when the
   transaction landed but failed. Without `--key` it signs with the well-known development key.
@@ -95,11 +98,25 @@
   only by `MAX_SOURCE_LEN` and `MAX_MODULE_LEN`.
 - [ ] **No read-only calls.** There is no way to run a contract function without a transaction,
   for example from the HTTP API.
-- [ ] **No contract upgrades or removal.** May be the right call; decide on purpose.
+- [x] **Contract upgrades.** `Tx::Upgrade` (`chainv4 send upgrade`) swaps a contract's code and
+  keeps its address, storage and balance. The contract decides who may: the chain asks its
+  `check_perms("upgrade", sender)`. A contract without it is immutable. New code's `migrate`
+  runs once, and a failure undoes the whole upgrade.
+- [x] **Constructors.** `init` runs once at deploy with the deployer as sender; its fuel and events
+  land in the deploy's receipt. Only the chain may run `init` and `migrate`.
+- [x] **A token standard.** ERC-20-like, by convention: [docs/token-standard.md](token-standard.md),
+  with example tokens in Lua and Rust that one shared test holds to it.
+- [ ] **No contract removal.** May be the right call; decide on purpose.
+- [ ] **Only one permission exists.** `check_perms` is only ever asked about `"upgrade"`. Other
+  privileged actions, such as removal, would ask with their own names.
+- [ ] **Tokens are only a convention.** The chain cannot list tokens or tell a token from any other
+  contract; a registry, or a check that a contract exports the standard functions, would help
+  wallets.
 - [ ] **WASM module cache.** Modules are parsed and compiled again on every call. Caching does not
   affect consensus, only speed.
 - [ ] **Typed exports in the SDK.** `#[export]` functions take and return nothing and use
-  `input()`/`output()`; decoding arguments into Rust parameters would be nicer.
+  `input()`/`output()`; decoding arguments into Rust parameters would be nicer. The token example
+  shows how much argument handling that would save.
 - [ ] **The Luau fork is pinned by branch, not commit.** `Cargo.lock` holds the commit, but
   `cargo update` would move it. Like wasmi it is consensus: pin a `rev` in `Cargo.toml`.
 

@@ -50,6 +50,9 @@ pub enum TxStatus {
     #[document(summary = "It ran but failed. It still used up its nonce.")]
     #[wincode(tag = 3)]
     Failed(String),
+    #[document(summary = "The contract at this address runs new code.")]
+    #[wincode(tag = 4)]
+    Upgraded(Address),
 }
 
 impl TxReceipt {
@@ -62,6 +65,7 @@ impl TxReceipt {
             Ok(Effect::Done) => TxStatus::Done,
             Ok(Effect::Deployed(address)) => TxStatus::Deployed(*address),
             Ok(Effect::Returned(values)) => TxStatus::Returned(values.clone()),
+            Ok(Effect::Upgraded(address)) => TxStatus::Upgraded(*address),
             Err(failure) => TxStatus::Failed(failure.to_string()),
         };
 

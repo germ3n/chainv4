@@ -1,5 +1,5 @@
 use {
-    super::{CallContext, Limits, Outcome, Vm, VmError},
+    super::{CallContext, HOOKS, Limits, Outcome, Vm, VmError},
     crate::db::{Column, DbError, State, storage_key},
     crate::registry::contracts::{ContractRecord, Contracts},
     crate::registry::{Accounts, RegistryError},
@@ -172,6 +172,10 @@ impl Host {
 
         if !record.functions.iter().any(|name| name == function) {
             return Outcome::failed(VmError::NoSuchFunction);
+        }
+
+        if HOOKS.contains(&function) {
+            return Outcome::failed(VmError::Reserved(function.to_string()));
         }
 
         if self.stack.contains(target) && !record.reentrant.iter().any(|name| name == function) {

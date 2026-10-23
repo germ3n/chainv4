@@ -37,6 +37,8 @@ pub enum Effect {
     Done,
     #[document(summary = "A contract was deployed at this address.")]
     Deployed(Address),
+    #[document(summary = "The contract at this address runs new code.")]
+    Upgraded(Address),
     #[document(summary = "A contract call returned these values.")]
     Returned(Vec<TxCallArgumentType>),
 }
@@ -217,9 +219,20 @@ fn run(
                 return (0, Err(Failure::EngineNotAllowed(code.engine())), Vec::new());
             }
 
-            let deployed = Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, rules.limits);
+            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, rules.limits) {
+                Ok((address, hooked)) => (hooked.fuel_used, Ok(Effect::Deployed(address)), hooked.events),
+                Err(err) => (0, Err(Failure::Registry(err)), Vec::new()),
+            }
+        }
+        Tx::Upgrade { contract, code } => {
+            if vm.engine(code.engine()).is_none() {
+                return (0, Err(Failure::EngineNotAllowed(code.engine())), Vec::new());
+            }
 
-            (0, deployed.map(Effect::Deployed).map_err(Failure::Registry), Vec::new())
+            match Contracts::new(layer).upgrade(vm, &sender, contract, code, rules.limits) {
+                Ok(hooked) => (hooked.fuel_used, Ok(Effect::Upgraded(*contract)), hooked.events),
+                Err(err) => (0, Err(Failure::Registry(err)), Vec::new()),
+            }
         }
     }
 }

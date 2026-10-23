@@ -39,6 +39,8 @@ pub enum RegistryError {
     AlreadyDeployed(Address),
     #[document(summary = "No contract lives at the address.")]
     NoSuchContract(Address),
+    #[document(summary = "The contract does not let this address do that: it has no check_perms, or check_perms did not return true.")]
+    NotPermitted,
     #[document(summary = "The contract would not load, or this node lacks its engine.")]
     #[cfg(feature = "vm")]
     Vm(VmError),
@@ -55,6 +57,7 @@ impl fmt::Display for RegistryError {
                 write!(f, "a contract already lives at {address}")
             }
             RegistryError::NoSuchContract(address) => write!(f, "no contract at {address}"),
+            RegistryError::NotPermitted => write!(f, "the contract does not permit it"),
             #[cfg(feature = "vm")]
             RegistryError::Vm(err) => write!(f, "{err}"),
         }

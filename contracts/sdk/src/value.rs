@@ -68,6 +68,12 @@ pub enum Value {
     U256([u8; 32]),
 }
 
+impl From<crate::U256> for Value {
+    fn from(value: crate::U256) -> Value {
+        Value::U256(value.to_le_bytes())
+    }
+}
+
 impl Value {
     /// The value as a whole number, from any integer variant or a whole Number that fits.
     pub fn as_i64(&self) -> Option<i64> {
@@ -101,6 +107,11 @@ impl Value {
         };
 
         Some(amount(small))
+    }
+
+    /// The value as a U256, from anything as_amount takes.
+    pub fn as_u256(&self) -> Option<crate::U256> {
+        self.as_amount().map(crate::U256::from_le_bytes)
     }
 
     pub fn as_str(&self) -> Option<&str> {

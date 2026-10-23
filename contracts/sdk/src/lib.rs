@@ -25,9 +25,11 @@ use alloc::{string::String, vec, vec::Vec};
 
 pub mod storage;
 pub mod sys;
+pub mod u256;
 pub mod value;
 
 pub use chainv4_sdk_macros::export;
+pub use u256::U256;
 pub use value::{Address, AddressKind, Amount, Value, amount};
 
 /// The arguments the call was made with. Aborts if the node sent something unreadable, which
