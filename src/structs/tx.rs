@@ -1,5 +1,6 @@
 use {
     crate::crypto::hashable::Hashable,
+    crate::crypto::keypair::{Keypair, PublicKey, Signature},
     crate::crypto::verifiable::Verifiable,
     crate::crypto::verifiable::VerifyError,
     crate::structs::address::Address,
@@ -76,6 +77,13 @@ pub enum Tx {
         amount: Amount,
         data: Vec<TxCallArgumentType>,
     },
+    #[document(
+        summary = "Deploys a contract. Nodes compile the source themselves; the contract lands at an address derived from the sender and this transaction's nonce.",
+        params = { source = "The Luau source." },
+        see_also = "Contracts::deploy, contract_address",
+    )]
+    #[wincode(tag = 4)]
+    Deploy { source: String },
 }
 
 #[document(
@@ -165,6 +173,8 @@ impl Verifiable for Tx {
 
                 Ok(())
             }
+            // Whether the source compiles is decided when the transaction runs.
+            Tx::Deploy { .. } => Ok(()),
         }
     }
 }
@@ -222,3 +232,99 @@ impl Hashable for Tx {
 impl Hashable for TxCallArgumentType {
     const TAG_LEN: usize = 1;
 }
+
+/// Separates transaction signatures from anything else a key might sign.
+const SIGNING_DOMAIN: &[u8] = b"chainv4 transaction";
+
+#[document(
+    summary = "A transaction as it travels and lands in blocks: the transaction, the signer's next nonce, the signer's public key and their signature over all three. The sender is the signer's address.",
+    category = "Transactions",
+    see_also = "Tx, Keypair::sign",
+    example = "let signed = SignedTx::sign(tx, accounts.get(&keypair.public().address())?.nonce, &keypair);",
+)]
+#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+pub struct SignedTx {
+    #[document(summary = "What to do.")]
+    pub tx: Tx,
+    #[document(summary = "The sender's nonce at the time; each one is usable once, so the transaction cannot be replayed.")]
+    pub nonce: u64,
+    #[document(summary = "Who signed it. Their address is the sender.")]
+    pub signer: PublicKey,
+    #[document(summary = "The signer's signature over the transaction, nonce and signer.")]
+    pub signature: Signature,
+}
+
+impl SignedTx {
+    #[document(
+        parent = "SignedTx",
+        summary = "Signs a transaction.",
+        params = {
+            tx = "The transaction.",
+            nonce = "The sender's current nonce.",
+            keypair = "The sender's keys.",
+        },
+    )]
+    pub fn sign(tx: Tx, nonce: u64, keypair: &Keypair) -> SignedTx {
+        let signer = keypair.public();
+        let signature = keypair.sign(&signing_bytes(&tx, nonce, &signer));
+
+        SignedTx {
+            tx,
+            nonce,
+            signer,
+            signature,
+        }
+    }
+
+    #[document(
+        parent = "SignedTx",
+        summary = "The address sending the transaction: the signer's.",
+    )]
+    pub fn sender(&self) -> Address {
+        self.signer.address()
+    }
+
+    #[document(
+        parent = "SignedTx",
+        summary = "The transaction's id: BLAKE3 of its whole encoding, signature included.",
+    )]
+    #[cfg(feature = "blake3")]
+    pub fn id(&self) -> Hash {
+        self.hash_with_tag(crate::structs::hash::HashType::Blake3_256)
+    }
+}
+
+fn signing_bytes(tx: &Tx, nonce: u64, signer: &PublicKey) -> Vec<u8> {
+    let mut bytes = SIGNING_DOMAIN.to_vec();
+    bytes.extend_from_slice(&tx.hashable_bytes_with_tag());
+    bytes.extend_from_slice(&nonce.to_le_bytes());
+    bytes.extend_from_slice(&signer.hashable_bytes_with_tag());
+
+    bytes
+}
+
+impl Verifiable for SignedTx {
+    #[document(
+        parent = "SignedTx",
+        summary = "Checks the transaction itself, the signer's key, the signature, and that a transfer or burn only takes from the sender. Whether the nonce is the next one depends on chain state, so the executor checks that.",
+        see_also = "Tx::verify, VerifyError::NotSender",
+    )]
+    fn verify(&self) -> Result<(), VerifyError> {
+        self.tx.verify()?;
+        self.signer.verify()?;
+        self.signer.verify_signature(
+            &signing_bytes(&self.tx, self.nonce, &self.signer),
+            &self.signature,
+        )?;
+
+        match &self.tx {
+            Tx::Transfer { from, .. } | Tx::Burn { from, .. } if *from != self.sender() => {
+                Err(VerifyError::NotSender)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl Hashable for SignedTx {}
+

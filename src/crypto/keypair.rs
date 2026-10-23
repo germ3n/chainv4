@@ -2,8 +2,11 @@ use {
     crate::crypto::hashable::Hashable,
     crate::crypto::verifiable::Verifiable,
     crate::crypto::verifiable::VerifyError,
+    crate::structs::address::Address,
+    crate::structs::hex::to_hex,
     ed25519_dalek::VerifyingKey,
     r#macro::document,
+    std::fmt,
     wincode::SchemaRead,
     wincode::SchemaWrite,
     zeroize::Zeroize,
@@ -56,6 +59,19 @@ pub enum PublicKey {
 }
 
 impl PublicKey {
+    #[document(
+        parent = "PublicKey",
+        summary = "The account this key controls: the key itself, tagged with its scheme.",
+    )]
+    pub fn address(&self) -> Address {
+        match self {
+            #[cfg(feature = "ed25519")]
+            PublicKey::Ed25519(key) => Address::Ed25519(*key),
+            #[cfg(feature = "edblake")]
+            PublicKey::EdBlake(key) => Address::EdBlake(*key),
+        }
+    }
+
     #[document(
         parent = "PublicKey",
         summary = "The scheme this key belongs to.",
@@ -123,6 +139,13 @@ impl Verifiable for PublicKey {
 
 impl Hashable for PublicKey {
     const TAG_LEN: usize = 1;
+}
+
+/// The same text as the key's address, such as ed25519:0x3b6a….
+impl fmt::Display for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.address().fmt(f)
+    }
 }
 
 /// Both schemes put their keys on the same curve, and so does an address.
@@ -229,6 +252,18 @@ pub enum Signature {
 
 impl Hashable for Signature {
     const TAG_LEN: usize = 1;
+}
+
+/// The 64 bytes in hex. The scheme is left out: it is always the signer's.
+impl fmt::Display for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(feature = "ed25519")]
+            Signature::Ed25519(bytes) => f.write_str(&to_hex(bytes)),
+            #[cfg(feature = "edblake")]
+            Signature::EdBlake(bytes) => f.write_str(&to_hex(bytes)),
+        }
+    }
 }
 
 impl Hashable for KeyType {

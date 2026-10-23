@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release --locked
+      # build.rs writes the wiki next to the binaries, so it ships with them.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chainv4-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            target/release/chainv4
+            target/wiki/index.html
+          if-no-files-found: error

@@ -39,6 +39,8 @@ pub enum VerifyError {
     NonFiniteNumber,
     #[document(summary = "A signature that does not match its key and message, or was made with a different scheme than the key.")]
     InvalidSignature,
+    #[document(summary = "A transfer or burn taking from an address other than the signer's.")]
+    NotSender,
 }
 
 impl fmt::Display for VerifyError {
@@ -51,6 +53,7 @@ impl fmt::Display for VerifyError {
             }
             VerifyError::NonFiniteNumber => write!(f, "number argument must be finite"),
             VerifyError::InvalidSignature => write!(f, "signature does not match"),
+            VerifyError::NotSender => write!(f, "only the sender's own funds can move"),
         }
     }
 }

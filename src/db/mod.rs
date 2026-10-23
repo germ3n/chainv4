@@ -33,10 +33,23 @@ pub enum Column {
     Contracts,
     #[document(summary = "Contract storage, keyed by the contract's address followed by the script's own key.")]
     Storage,
+    #[document(summary = "Block by id.")]
+    Blocks,
+    #[document(summary = "Block id by height, big-endian so heights sort in order.")]
+    Heights,
+    #[document(summary = "Chain bookkeeping, such as which block is the tip.")]
+    Meta,
 }
 
 impl Column {
-    pub const ALL: [Column; 3] = [Column::Accounts, Column::Contracts, Column::Storage];
+    pub const ALL: [Column; 6] = [
+        Column::Accounts,
+        Column::Contracts,
+        Column::Storage,
+        Column::Blocks,
+        Column::Heights,
+        Column::Meta,
+    ];
 
     #[document(
         parent = "Column",
@@ -47,6 +60,9 @@ impl Column {
             Column::Accounts => "accounts",
             Column::Contracts => "contracts",
             Column::Storage => "storage",
+            Column::Blocks => "blocks",
+            Column::Heights => "heights",
+            Column::Meta => "meta",
         }
     }
 }

@@ -25,6 +25,19 @@ pub enum Amount {
     U256(#[wincode(with = "U256Le")] u256),
 }
 
+impl Amount {
+    #[document(
+        parent = "Amount",
+        summary = "The amount as a u256, whichever width it was sent in.",
+    )]
+    pub fn to_u256(&self) -> u256 {
+        match self {
+            Amount::U128(amount) => u256::from(*amount),
+            Amount::U256(amount) => *amount,
+        }
+    }
+}
+
 impl Verifiable for Amount {
     #[document(
         parent = "Amount",

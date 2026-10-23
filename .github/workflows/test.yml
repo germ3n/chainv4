@@ -1,0 +1,55 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --locked
+
+  # Every hash and key scheme sits behind a feature; these make sure each subset still builds,
+  # lints clean and passes its tests.
+  features:
+    name: features (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - sha256,ed25519
+          - blake3,edblake
+          - keccak256,blake2s,blake2b,ed25519
+          - lvm,ed25519
+          - node,ed25519
+          - http,edblake
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
+      - name: clippy
+        run: cargo clippy --all-targets --locked --no-default-features --features "${{ matrix.features }}" -- -D warnings
+      - name: test
+        run: cargo test --locked --no-default-features --features "${{ matrix.features }}"

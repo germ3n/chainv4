@@ -78,6 +78,40 @@ impl Hash {
             Hash::Keccak256(_) => HashType::Keccak256,
         }
     }
+
+    #[document(
+        parent = "Hash",
+        summary = "The digest's bytes, without the algorithm: 32 of them, or 8 big-endian for XXH3, the order xxhsum prints.",
+    )]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            #[cfg(feature = "sha256")]
+            Hash::Sha256(bytes) => bytes.to_vec(),
+            #[cfg(feature = "blake3")]
+            Hash::Blake3_256(bytes) => bytes.to_vec(),
+            #[cfg(feature = "blake2s")]
+            Hash::Blake2s256(bytes) => bytes.to_vec(),
+            #[cfg(feature = "blake2b")]
+            Hash::Blake2b256(bytes) => bytes.to_vec(),
+            #[cfg(feature = "xxh3")]
+            Hash::Xxh3_64(value) => value.to_be_bytes().to_vec(),
+            #[cfg(feature = "keccak256")]
+            Hash::Keccak256(bytes) => bytes.to_vec(),
+        }
+    }
+}
+
+/// Hex with a 0x prefix, for logs and messages.
+impl std::fmt::Display for Hash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "0x")?;
+
+        for byte in self.to_bytes() {
+            write!(f, "{byte:02x}")?;
+        }
+
+        Ok(())
+    }
 }
 
 impl Verifiable for Hash {

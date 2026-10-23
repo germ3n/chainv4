@@ -1,0 +1,158 @@
+//! Networking. libp2p runs on a thread of its own and talks to the node only through two
+//! channels: NetEvent in, NetCommand out. The node never sees libp2p's machinery, and a test can
+//! stand in for the whole network by holding the other ends of the channels.
+
+use {
+    crate::structs::block::Block,
+    crate::structs::hash::Hash,
+    crate::structs::tx::SignedTx,
+    libp2p::{Multiaddr, PeerId},
+    r#macro::document,
+    std::sync::mpsc,
+    tokio::sync::mpsc as async_mpsc,
+    wincode::{SchemaRead, SchemaWrite},
+};
+
+mod codec;
+mod swarm;
+
+pub use swarm::{NetError, spawn};
+
+/// The most blocks one sync response carries.
+pub const MAX_SYNC_BLOCKS: u32 = 128;
+
+#[document(
+    summary = "Something the network brings to the node.",
+    category = "Node",
+    see_also = "NetCommand, NetLink",
+)]
+#[derive(Debug)]
+pub enum NetEvent {
+    #[document(summary = "A block gossiped by a peer.")]
+    Block { from: PeerId, block: Block },
+    #[document(summary = "A transaction gossiped by a peer.")]
+    Tx { from: PeerId, tx: SignedTx },
+    #[document(summary = "A peer connected.")]
+    PeerUp(PeerId),
+    #[document(summary = "A peer's last connection closed.")]
+    PeerDown(PeerId),
+    #[document(summary = "A peer asked for something. Answer with NetCommand::Respond and the same id.")]
+    Request { peer: PeerId, id: u64, request: SyncRequest },
+    #[document(summary = "A peer answered a request this node sent.")]
+    Response { peer: PeerId, response: SyncResponse },
+    #[document(summary = "A request this node sent got no answer.")]
+    RequestFailed { peer: PeerId, error: String },
+}
+
+#[document(
+    summary = "Something the node asks the network to do.",
+    category = "Node",
+    see_also = "NetEvent, NetLink",
+)]
+#[derive(Debug)]
+pub enum NetCommand {
+    #[document(summary = "Gossip a block to every peer.")]
+    PublishBlock(Block),
+    #[document(summary = "Gossip a transaction to every peer.")]
+    PublishTx(SignedTx),
+    #[document(summary = "Ask one peer for something.")]
+    Request { peer: PeerId, request: SyncRequest },
+    #[document(summary = "Answer the request with this id.")]
+    Respond { id: u64, response: SyncResponse },
+}
+
+#[document(
+    summary = "What a node asks a peer for while syncing.",
+    category = "Node",
+    see_also = "SyncResponse",
+)]
+#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum SyncRequest {
+    #[document(summary = "Which chain the peer is on and how far it got.")]
+    #[wincode(tag = 0)]
+    Status,
+    #[document(summary = "Consecutive blocks starting at a height, at most MAX_SYNC_BLOCKS.")]
+    #[wincode(tag = 1)]
+    Blocks { from: u64, count: u32 },
+}
+
+#[document(
+    summary = "A peer's answer to a SyncRequest.",
+    category = "Node",
+    see_also = "SyncRequest",
+)]
+#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum SyncResponse {
+    #[document(summary = "The peer's genesis, tip and height.")]
+    #[wincode(tag = 0)]
+    Status { genesis: Hash, tip: Hash, height: u64 },
+    #[document(summary = "The blocks asked for that the peer has, in height order.")]
+    #[wincode(tag = 1)]
+    Blocks(Vec<Block>),
+}
+
+#[document(
+    summary = "Where and how to network.",
+    category = "Node",
+    see_also = "spawn",
+)]
+#[derive(Clone, Debug)]
+pub struct NetConfig {
+    #[document(summary = "Addresses to listen on, for example /ip4/0.0.0.0/udp/0/quic-v1.")]
+    pub listen: Vec<Multiaddr>,
+    #[document(summary = "Peers to dial at startup.")]
+    pub peers: Vec<Multiaddr>,
+    #[document(summary = "Names the network in gossip topics, so nodes on different chains ignore each other. Usually derived from the genesis id.")]
+    pub network: String,
+}
+
+#[document(
+    summary = "The node's end of the network: commands go out, events come in. spawn makes one backed by libp2p; NetLink::pair makes one backed by nothing, for tests.",
+    category = "Node",
+    see_also = "spawn, Node",
+)]
+pub struct NetLink {
+    pub commands: async_mpsc::UnboundedSender<NetCommand>,
+    pub events: mpsc::Receiver<NetEvent>,
+}
+
+#[document(
+    summary = "The far end of a NetLink made by pair: what the node sends, and a way to hand it events.",
+    category = "Node",
+)]
+pub struct FakeNet {
+    pub commands: async_mpsc::UnboundedReceiver<NetCommand>,
+    pub events: mpsc::Sender<NetEvent>,
+}
+
+impl NetLink {
+    #[document(
+        parent = "NetLink",
+        summary = "A link with no network behind it. The test holds the other end and plays the network.",
+    )]
+    pub fn pair() -> (NetLink, FakeNet) {
+        let (command_tx, command_rx) = async_mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel();
+
+        (
+            NetLink {
+                commands: command_tx,
+                events: event_rx,
+            },
+            FakeNet {
+                commands: command_rx,
+                events: event_tx,
+            },
+        )
+    }
+
+    #[document(
+        parent = "NetLink",
+        summary = "Sends a command. Returns false when the network thread has stopped.",
+    )]
+    pub fn send(&self, command: NetCommand) -> bool {
+        self.commands.send(command).is_ok()
+    }
+}

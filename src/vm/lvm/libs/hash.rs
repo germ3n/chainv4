@@ -31,34 +31,16 @@ pub struct LuaHash(pub Hash);
 
 impl UserData for LuaHash {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("hex", |_, this, ()| Ok(to_hex(&digest(&this.0))));
-        methods.add_method("bytes", |lua, this, ()| lua.create_string(digest(&this.0)));
+        methods.add_method("hex", |_, this, ()| Ok(to_hex(&this.0.to_bytes())));
+        methods.add_method("bytes", |lua, this, ()| lua.create_string(this.0.to_bytes()));
         methods.add_method("algorithm", |_, this, ()| Ok(algorithm_name(this.0.algorithm())));
-        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(to_hex(&digest(&this.0))));
+        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(to_hex(&this.0.to_bytes())));
         methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (AnyUserData, AnyUserData)| {
             match (a.borrow::<LuaHash>(), b.borrow::<LuaHash>()) {
                 (Ok(a), Ok(b)) => Ok(*a == *b),
                 _ => Ok(false),
             }
         });
-    }
-}
-
-/// The digest as bytes. XXH3 is written big-endian, the order xxhsum prints it in.
-fn digest(hash: &Hash) -> Vec<u8> {
-    match hash {
-        #[cfg(feature = "sha256")]
-        Hash::Sha256(bytes) => bytes.to_vec(),
-        #[cfg(feature = "blake3")]
-        Hash::Blake3_256(bytes) => bytes.to_vec(),
-        #[cfg(feature = "blake2s")]
-        Hash::Blake2s256(bytes) => bytes.to_vec(),
-        #[cfg(feature = "blake2b")]
-        Hash::Blake2b256(bytes) => bytes.to_vec(),
-        #[cfg(feature = "xxh3")]
-        Hash::Xxh3_64(value) => value.to_be_bytes().to_vec(),
-        #[cfg(feature = "keccak256")]
-        Hash::Keccak256(bytes) => bytes.to_vec(),
     }
 }
 
@@ -224,7 +206,7 @@ mod tests {
             let code = format!("local h = hash.{name}('abc') return h:hex(), h:algorithm()");
             let (hex, named): (String, String) = lua.load(code).eval().unwrap();
 
-            assert_eq!(hex, to_hex(&digest(&Hasher::digest(algorithm, b"abc"))), "{name}");
+            assert_eq!(hex, to_hex(&Hasher::digest(algorithm, b"abc").to_bytes()), "{name}");
             assert_eq!(named, name);
         }
     }
