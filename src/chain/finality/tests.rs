@@ -511,6 +511,89 @@ mod voting {
     }
 
     #[test]
+    fn keys_that_do_not_vote_leave_nothing_behind() {
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            grow_to(&mut chain, 2 * INTERVAL + 1);
+            let nowhere = Checkpoint {
+                epoch: 2,
+                block: Hash::zero(chain.hash()),
+            };
+
+            for seed in 100..120 {
+                let stranger = key(seed);
+                let placeable = signed(&chain, &stranger, start(&chain), checkpoint(&chain, 1));
+                let double = signed(&chain, &stranger, start(&chain), Checkpoint {
+                    epoch: 1,
+                    block: Hash::zero(chain.hash()),
+                });
+
+                // Refused, and not remembered: its second, conflicting vote finds nothing to
+                // conflict with.
+                assert!(matches!(chain.add_vote(placeable), Err(FinalityError::NotValidator)));
+                assert!(!matches!(chain.add_vote(double), Ok(FinalityUpdate { evidence: Some(_), .. })));
+
+                // Votes nobody can place yet are held, both of a pair, and neither is evidence.
+                let held = signed(&chain, &stranger, checkpoint(&chain, 1), checkpoint(&chain, 2));
+                let rival = signed(&chain, &stranger, checkpoint(&chain, 1), nowhere);
+
+                assert!(chain.add_vote(held).unwrap().pending);
+                assert!(chain.add_vote(rival).unwrap().pending);
+            }
+
+            assert!(stored_evidence(&*chain.db).unwrap().is_empty(), "{}", finality.name());
+
+            // Once epoch 1 is justified the held votes are tried: those that can be placed now
+            // turn out to be no voter's and go for good, and only those for blocks nobody has
+            // wait on, held votes being capped.
+            let [alice, bob, _] = voters();
+            chain.add_vote(signed(&chain, &alice, start(&chain), checkpoint(&chain, 1))).unwrap();
+            chain.add_vote(signed(&chain, &bob, start(&chain), checkpoint(&chain, 1))).unwrap();
+
+            assert_eq!(chain.justified(), Some(checkpoint(&chain, 1)));
+            assert!(stored_evidence(&*chain.db).unwrap().is_empty());
+            assert!(
+                stored_votes(&*chain.db, HELD, 0)
+                    .unwrap()
+                    .iter()
+                    .all(|vote| vote.vote.target.block == Hash::zero(chain.hash()))
+            );
+            assert_eq!(stored_votes(&*chain.db, HELD, 0).unwrap().len(), 40);
+        }
+    }
+
+    #[test]
+    fn a_voter_s_held_double_vote_is_evidence_once_one_counts() {
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            grow_to(&mut chain, 2 * INTERVAL + 1);
+            let alice = &voters()[0];
+            let real = signed(&chain, alice, checkpoint(&chain, 1), checkpoint(&chain, 2));
+            let rival = signed(&chain, alice, checkpoint(&chain, 1), Checkpoint {
+                epoch: 2,
+                block: Hash::zero(chain.hash()),
+            });
+
+            // Nobody can tell yet that alice votes: both are held.
+            assert!(chain.add_vote(real).unwrap().pending);
+            assert!(chain.add_vote(rival).unwrap().pending);
+            assert!(stored_evidence(&*chain.db).unwrap().is_empty());
+
+            // Justifying epoch 1 counts the real one, which shows alice votes, and the rival is
+            // evidence against her.
+            let bob = &voters()[1];
+            chain.add_vote(signed(&chain, alice, start(&chain), checkpoint(&chain, 1))).unwrap();
+            let update = chain.add_vote(signed(&chain, bob, start(&chain), checkpoint(&chain, 1))).unwrap();
+            let evidence = stored_evidence(&*chain.db).unwrap();
+
+            assert!(update.evidence.is_some(), "{}", finality.name());
+            assert_eq!(evidence.len(), 1);
+            assert_eq!([evidence[0].first, evidence[0].second].map(|vote| vote.vote.voter), [alice.public(); 2]);
+            assert!(stored_votes(&*chain.db, HELD, 0).unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn proofs_in_blocks_pay_every_voter_once() {
         for finality in kinds() {
             let mut chain = open(&finality);

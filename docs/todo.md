@@ -127,9 +127,10 @@
   Finality column by target epoch and voter, and counted again when the chain opens, so tallies,
   held votes and double-vote detection survive a restart. Counted votes stay 64 epochs behind
   the finalized checkpoint, to catch one vote surrounding another, and then go.
-- [ ] **Votes from non-voters are remembered.** Double-vote detection records any well-signed
-  vote before it knows whether its key votes, so a flood of throwaway keys grows memory until
-  finalization prunes it. Nothing from them is stored, and held votes are capped.
+- [x] **Only voters are remembered.** Double-vote detection compares a vote against its voter's
+  counted votes, and, once the vote shows its key votes, against that voter's held ones. Votes
+  are remembered only when counted, so throwaway keys can neither grow memory beyond the capped
+  held votes nor push real evidence out of the evidence log.
 - [ ] **Vote rewards are minted.** Nothing pays for them but new supply. Fees, once there are
   any, could fund them instead.
 - [ ] **No checkpoint sync.** A new node replays every block from genesis. There is no trusted
