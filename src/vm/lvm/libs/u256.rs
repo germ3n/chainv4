@@ -52,7 +52,7 @@ fn checked(result: Option<u256>, failure: &str) -> mlua::Result<LuaU256> {
 
 /// Either side of an operator: another U256, or a non-negative whole number small enough to
 /// be exact.
-fn operand(value: &Value) -> mlua::Result<u256> {
+pub(super) fn operand(value: &Value) -> mlua::Result<u256> {
     match value {
         Value::UserData(data) => {
             if let Ok(number) = data.borrow::<LuaU256>() {

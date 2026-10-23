@@ -260,3 +260,41 @@ fn deploys_for_engines_genesis_leaves_out_fail() {
     assert_eq!(receipts[0].result, Err(Failure::EngineNotAllowed(Engine::Wasm)));
     assert_eq!(nonce(&chain, &authority()), 1);
 }
+
+#[test]
+fn contracts_pass_on_what_a_transaction_sends_them() {
+    const SPLITTER: &str = r#"
+local M = {}
+
+function M.split(first, second)
+    local half = ctx.value / 2
+    accounts.transfer(first, half)
+    accounts.transfer(second, ctx.value - half)
+end
+
+return M
+"#;
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let deployer = authority();
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(SPLITTER.to_string()) }, 0, &deployer);
+    advance(&mut chain, vec![deploy]);
+    let splitter = contract_address(&deployer.public().address(), 0);
+    let (first, second) = (stranger().public().address(), stranger().public().address());
+    let call = SignedTx::sign(
+        Tx::ContractCall {
+            to: splitter,
+            func: Hash::Xxh3_64(selector("split")),
+            amount: Amount::U128(101),
+            data: vec![TxCallArgumentType::Address(first), TxCallArgumentType::Address(second)],
+        },
+        1,
+        &deployer,
+    );
+    let receipts = advance(&mut chain, vec![call]);
+
+    assert_eq!(receipts[0].result, Ok(Effect::Returned(Vec::new())));
+    assert_eq!(balance(&chain, &first), u256::new(50));
+    assert_eq!(balance(&chain, &second), u256::new(51));
+    assert_eq!(balance(&chain, &splitter), u256::ZERO);
+}

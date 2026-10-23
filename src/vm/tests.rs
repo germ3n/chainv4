@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::db::{Column, MemoryDb, storage_key};
+use crate::registry::Accounts;
 use crate::structs::hex::to_hex;
 use crate::registry::Contracts;
 use crate::structs::code::Code;
@@ -38,7 +39,7 @@ const WASM_COUNTER: &str = r#"
 const WASM_RELAY: &str = r#"
 (module
   (import "chain" "input_read" (func $input_read (param i32)))
-  (import "chain" "call" (func $call (param i32 i32 i32 i32 i32) (result i32)))
+  (import "chain" "call" (func $call (param i32 i32 i32 i32 i32 i32) (result i32)))
   (import "chain" "result_len" (func $result_len (result i32)))
   (import "chain" "result_read" (func $result_read (param i32)))
   (import "chain" "output" (func $output (param i32 i32)))
@@ -49,7 +50,7 @@ const WASM_RELAY: &str = r#"
     (local $status i32)
     (call $input_read (i32.const 0))
     (local.set $status
-      (call $call (i32.const 9) (i32.const 100) (i32.const 5) (i32.const 200) (i32.const 8)))
+      (call $call (i32.const 9) (i32.const 300) (i32.const 100) (i32.const 5) (i32.const 200) (i32.const 8)))
     (call $result_read (i32.const 1000))
     (if (local.get $status)
       (then (call $abort (i32.const 1000) (call $result_len))))
@@ -105,6 +106,30 @@ end
 
 function M.forward_caller()
     return contracts.call(ctx.sender, "forward", ctx.contract, "hello")
+end
+
+function M.pay(to, amount)
+    accounts.transfer(to, amount)
+    return accounts.balance(ctx.contract)
+end
+
+function M.send_value(target, amount, name)
+    return contracts.call_value(target, amount, name)
+end
+
+function M.try_send_value(target, amount, name)
+    local ok = pcall(contracts.call_value, target, amount, name)
+    return ok, accounts.balance(ctx.contract)
+end
+
+function M.receive()
+    return ctx.value, accounts.balance(ctx.contract)
+end
+
+function M.save(vault, amount)
+    contracts.call_value(vault, amount, "deposit")
+    contracts.call(vault, "withdraw", 20)
+    return accounts.balance(ctx.contract), accounts.balance(vault)
 end
 
 function M.forward(...)
@@ -166,6 +191,65 @@ impl World {
 
 fn address(address: Address) -> TxCallArgumentType {
     TxCallArgumentType::Address(address)
+}
+
+fn wide(value: u64) -> TxCallArgumentType {
+    TxCallArgumentType::U256(u256::from(value))
+}
+
+impl World {
+    fn fund(&self, address: Address, amount: u64) {
+        Accounts::new(&self.state).credit(&address, u256::from(amount)).unwrap();
+    }
+
+    fn balance(&self, address: Address) -> u256 {
+        Accounts::new(&self.state).get(&address).unwrap().balance
+    }
+}
+
+#[test]
+fn contracts_send_from_their_own_balance() {
+    let mut world = World::new();
+    let lua = world.lua();
+    let bob = Address::Ed25519([4; 32]);
+    world.fund(lua, 100);
+
+    assert_eq!(world.call(lua, "pay", &[address(bob), wide(30)]).result.unwrap(), [wide(70)]);
+    assert_eq!(world.balance(bob), u256::from(30u64));
+
+    let err = world.call(lua, "pay", &[address(bob), wide(1_000)]).result.unwrap_err();
+
+    assert!(matches!(&err, VmError::Runtime(text) if text.contains("insufficient balance")), "{err:?}");
+    assert_eq!(world.balance(lua), u256::from(70u64));
+}
+
+#[test]
+fn value_travels_with_calls_and_comes_back_when_they_fail() {
+    let mut world = World::new();
+    let payer = world.lua();
+    let payee = world.lua();
+    world.fund(payer, 100);
+
+    assert_eq!(
+        world.call(payer, "send_value", &[address(payee), wide(40), TxCallArgumentType::String("receive".into())]).result.unwrap(),
+        [wide(40), wide(40)]
+    );
+    assert_eq!(world.balance(payer), u256::from(60u64));
+
+    let failing = TxCallArgumentType::String("write_then_fail".into());
+
+    assert_eq!(
+        world.call(payer, "try_send_value", &[address(payee), wide(10), failing]).result.unwrap(),
+        [TxCallArgumentType::Bool(false), wide(60)]
+    );
+    assert_eq!(world.balance(payee), u256::from(40u64));
+
+    let err = world
+        .call(payer, "send_value", &[address(payee), wide(500), TxCallArgumentType::String("receive".into())])
+        .result
+        .unwrap_err();
+
+    assert!(matches!(&err, VmError::Runtime(text) if text.contains("insufficient balance")), "{err:?}");
 }
 
 #[test]
@@ -309,6 +393,16 @@ fn sdk_contracts_run_and_talk_to_lua() {
         [TxCallArgumentType::Number(12.0)]
     );
     assert_eq!(world.call(counter, "last", &[]).result.unwrap(), [address(lua)]);
+
+    // Lua funds the vault with a valued call, then withdraws part of it again.
+    let vault = world.deploy(Code::Wasm(example("vault")));
+    world.fund(lua, 100);
+
+    assert_eq!(world.call(lua, "save", &[address(vault), wide(50)]).result.unwrap(), [wide(70), wide(30)]);
+    assert_eq!(
+        world.call(vault, "total", &[]).result.unwrap(),
+        [TxCallArgumentType::Amount(crate::structs::amount::Amount::U256(u256::from(30u64)))]
+    );
 
     let forward = |target: Address, function: &str| {
         world

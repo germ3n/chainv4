@@ -58,6 +58,7 @@ fn net_error(err: impl fmt::Display) -> NetError {
 pub fn spawn(config: NetConfig) -> Result<NetLink, NetError> {
     let (command_tx, command_rx) = async_mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel();
+    let inbox = event_tx.clone();
     let (ready_tx, ready_rx) = mpsc::channel();
 
     std::thread::Builder::new()
@@ -92,6 +93,7 @@ pub fn spawn(config: NetConfig) -> Result<NetLink, NetError> {
     Ok(NetLink {
         commands: command_tx,
         events: event_rx,
+        inbox,
     })
 }
 

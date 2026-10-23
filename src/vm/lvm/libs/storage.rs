@@ -1,6 +1,7 @@
 use {
+    super::accounts::refused,
     crate::vm::lvm::charge,
-    crate::vm::{Host, MAX_KEY_LEN, MAX_VALUE_LEN, VmError, cost},
+    crate::vm::{Host, MAX_KEY_LEN, MAX_VALUE_LEN, cost},
     mlua::{Error, Lua},
     r#macro::document,
 };
@@ -11,13 +12,6 @@ fn host(lua: &Lua) -> mlua::Result<Host> {
         .ok_or_else(|| Error::runtime("storage is only available inside a call"))
 }
 
-/// A database failure is already recorded in the Host, so the script cannot hide it with pcall.
-fn refused(err: VmError) -> Error {
-    match err {
-        VmError::Storage(err) => Error::external(err),
-        other => Error::runtime(other.to_string()),
-    }
-}
 
 fn storage_get(lua: &Lua, key: &[u8]) -> mlua::Result<Option<mlua::String>> {
     let host = host(lua)?;

@@ -29,7 +29,7 @@ fn current(lua: &Lua) -> mlua::Result<CallContext> {
     kind = "library",
     name = "ctx",
     category = "Chain",
-    summary = "The call being run: who made it, to which contract, and how much it sent. Only available inside an exported function, not while the script's top level loads. When another contract calls this one, sender is that contract and value is zero.",
+    summary = "The call being run: who made it, to which contract, and how much it sent. Only available inside an exported function, not while the script's top level loads. When another contract calls this one, sender is that contract and value is what it sent with contracts.call_value, or zero.",
     example = "function M.deposit()\n    balances[ctx.sender:hex()] = ctx.value\nend",
 )]
 fn ctx_lib() {}

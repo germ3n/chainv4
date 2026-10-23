@@ -8,6 +8,7 @@ use {
     crate::structs::address::Address,
     crate::structs::hash::HashType,
     crate::structs::tx::TxCallArgumentType,
+    crate::structs::u256::u256,
     crate::vm::{Host, MAX_KEY_LEN, MAX_VALUE_LEN, VmError, cost},
     r#macro::document,
     wasmi::{Caller, Engine, Extern, Linker, Memory},
@@ -27,6 +28,8 @@ pub(super) const NAMES: &[&str] = &[
     "contract",
     "value",
     "hash",
+    "balance",
+    "transfer",
     "call",
     "abort",
 ];
@@ -162,7 +165,7 @@ fn chain_contract() {}
     wasm,
     parent = "chain",
     name = "value",
-    summary = "What the call sent. Calls between contracts send nothing.",
+    summary = "What the call sent: the transaction's value, or what the calling contract sent with call.",
     params = { ptr = { ty = "i32", desc = "Where to write the amount: 32 bytes, a little-endian u256." } },
 )]
 fn chain_value() {}
@@ -185,10 +188,36 @@ fn chain_hash() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "balance",
+    summary = "What an address holds. Costs 100 fuel.",
+    params = {
+        address = { ty = "i32", desc = "Any address: 33 bytes, as sender writes them." },
+        out = { ty = "i32", desc = "Where to write the balance: 32 bytes, a little-endian u256." },
+    },
+)]
+fn chain_balance() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "transfer",
+    summary = "Sends funds from this contract's own balance. Kept only if the call succeeds. Costs 1000 fuel.",
+    params = {
+        address = { ty = "i32", desc = "Who receives them: 33 bytes, as sender writes them." },
+        amount = { ty = "i32", desc = "How much: 32 bytes, a little-endian u256." },
+    },
+    returns = { ty = "i32", desc = "0 when the funds moved; 1 when the contract holds too little, with the reason in the result buffer." },
+)]
+fn chain_transfer() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "call",
-    summary = "Calls an exported function on another contract, whichever engine runs it. The callee sees this contract as its sender, receives no value, and burns fuel from this call's. Its writes are kept only if it succeeds. Costs 1000 fuel, plus 1 per 64 bytes of name and arguments.",
+    summary = "Calls an exported function on another contract, whichever engine runs it, and sends it value from this contract's balance. The callee sees this contract as its sender and the value as its own, and burns fuel from this call's. Its writes, and the value, are kept only if it succeeds. Costs 1000 fuel, 1000 more when value is not zero, plus 1 per 64 bytes of name and arguments.",
     params = {
         address = { ty = "i32", desc = "The contract to call: 33 bytes, as sender writes them." },
+        value = { ty = "i32", desc = "What to send: 32 bytes, a little-endian u256; zero for nothing." },
         name = { ty = "i32", desc = "The function's name, UTF-8." },
         name_len = { ty = "i32", desc = "Its length." },
         args = { ty = "i32", desc = "The encoded arguments." },
@@ -227,6 +256,8 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "contract", contract).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "value", value).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "hash", hash).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "balance", balance).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "transfer", transfer).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "call", call).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
 
@@ -335,23 +366,49 @@ fn hash(mut caller: Caller<'_, Run>, algorithm: u32, data: u32, len: u32, out: u
     Ok(digest.len() as u32)
 }
 
+fn balance(mut caller: Caller<'_, Run>, address: u32, out: u32) -> Result<()> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::BALANCE)?;
+    let address = address_at(&mut caller, address)?;
+    let balance = host.balance(&address).map_err(|err| stop(&mut caller, err))?;
+
+    write(&mut caller, out, &balance.to_le_bytes())
+}
+
+fn transfer(mut caller: Caller<'_, Run>, address: u32, amount: u32) -> Result<u32> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::TRANSFER)?;
+    let to = address_at(&mut caller, address)?;
+    let amount = amount_at(&mut caller, amount)?;
+
+    match host.transfer(&to, amount) {
+        Ok(()) => Ok(0),
+        Err(err @ VmError::Storage(_)) => Err(stop(&mut caller, err)),
+        Err(err) => {
+            caller.data_mut().result = err.to_string().into_bytes();
+
+            Ok(1)
+        }
+    }
+}
+
 fn call(
     mut caller: Caller<'_, Run>,
     address: u32,
+    value: u32,
     name: u32,
     name_len: u32,
     args: u32,
     args_len: u32,
 ) -> Result<u32> {
     let host = host(&mut caller)?;
+    let target = address_at(&mut caller, address)?;
+    let value = amount_at(&mut caller, value)?;
     let moved = u64::from(name_len) + u64::from(args_len);
-    charge(&mut caller, cost::CALL + moved / cost::COPY_BYTES_PER_FUEL)?;
-    let address = read(&mut caller, address, ADDRESS_LEN)?;
+    let transfer = if value == u256::ZERO { 0 } else { cost::TRANSFER };
+    charge(&mut caller, cost::CALL + transfer + moved / cost::COPY_BYTES_PER_FUEL)?;
     let name = read(&mut caller, name, name_len)?;
     let args = read(&mut caller, args, args_len)?;
-    let Ok(target) = wincode::deserialize::<Address>(&address) else {
-        return Err(stop(&mut caller, VmError::BadArgument("not an address".to_string())));
-    };
     let Ok(name) = String::from_utf8(name) else {
         return Err(stop(&mut caller, VmError::BadArgument("a function name is UTF-8".to_string())));
     };
@@ -360,7 +417,7 @@ fn call(
         Err(err) => return Err(stop(&mut caller, VmError::BadArgument(err.to_string()))),
     };
     let fuel = caller.get_fuel()?;
-    let outcome = host.call(&target, &name, &args, fuel);
+    let outcome = host.call(&target, &name, &args, value, fuel);
     caller.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;
     let (status, result) = match outcome.result {
         Ok(returns) => (0, wincode::serialize(&returns).expect("return values always encode")),
@@ -420,6 +477,21 @@ fn check_len(caller: &mut Caller<'_, Run>, len: u32, max: usize, what: &str) -> 
 
 fn address_bytes(address: &Address) -> Vec<u8> {
     wincode::serialize(address).expect("addresses always encode")
+}
+
+/// The 33-byte address at ptr: its kind tag, then its 32 bytes.
+fn address_at(caller: &mut Caller<'_, Run>, ptr: u32) -> Result<Address> {
+    let bytes = read(caller, ptr, ADDRESS_LEN)?;
+
+    wincode::deserialize::<Address>(&bytes)
+        .map_err(|_| stop(caller, VmError::BadArgument("not an address".to_string())))
+}
+
+/// The 32-byte little-endian amount at ptr.
+fn amount_at(caller: &mut Caller<'_, Run>, ptr: u32) -> Result<u256> {
+    let bytes: [u8; 32] = read(caller, ptr, 32)?.try_into().expect("read returns what it was asked for");
+
+    Ok(u256::from_le_bytes(bytes))
 }
 
 fn memory(caller: &mut Caller<'_, Run>) -> Result<Memory> {

@@ -1,6 +1,7 @@
 //! The node's main loop, shaped like the engine's server loop: one owner of all node state, the
 //! network on its own thread behind channels, and a loop that drains what arrived, produces a
-//! block when its slot comes, and sleeps until the next slot or the next event.
+//! block when its slot comes, and sleeps until the next slot or the next event. Catching up with
+//! peers lives in sync.rs.
 
 use {
     crate::chain::{Chain, ChainError, Genesis, ImportError},
@@ -8,15 +9,20 @@ use {
     crate::db::{Database, DbError},
     crate::mempool::{Mempool, MempoolError},
     crate::net::{MAX_SYNC_BLOCKS, NetCommand, NetEvent, NetLink, SyncRequest, SyncResponse},
+    crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
     libp2p::PeerId,
     r#macro::document,
     std::collections::HashSet,
     std::fmt,
     std::sync::Arc,
-    std::sync::mpsc::RecvTimeoutError,
+    std::sync::mpsc::{self, RecvTimeoutError},
     std::time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::SyncState,
+    tokio::sync::oneshot,
 };
+
+mod sync;
 
 /// The most events handled per pass, so a flood cannot starve block production.
 const EVENT_BUDGET: usize = 256;
@@ -41,7 +47,65 @@ pub struct Node {
     net: NetLink,
     held: Option<NetEvent>,
     peers: HashSet<PeerId>,
+    sync: SyncState,
     reported: u64,
+}
+
+#[document(
+    summary = "Hands transactions to a running node from another thread, such as the HTTP API's, and waits for the mempool's verdict. Cheap to clone.",
+    category = "Node",
+    see_also = "Node::submitter, NetEvent::Submitted",
+)]
+#[derive(Clone)]
+pub struct Submitter {
+    inbox: mpsc::Sender<NetEvent>,
+}
+
+impl Submitter {
+    #[document(
+        parent = "Submitter",
+        summary = "A submitter that delivers to whoever reads the other end of inbox, usually a node.",
+    )]
+    pub fn new(inbox: mpsc::Sender<NetEvent>) -> Submitter {
+        Submitter { inbox }
+    }
+
+    #[document(
+        parent = "Submitter",
+        summary = "Submits a transaction: the node checks it, queues it and gossips it.",
+        returns = "The transaction's id, or why the node refused it or could not be reached.",
+    )]
+    pub async fn submit(&self, tx: SignedTx) -> Result<Hash, SubmitError> {
+        let (reply, verdict) = oneshot::channel();
+
+        self.inbox
+            .send(NetEvent::Submitted { tx, reply })
+            .map_err(|_| SubmitError::Stopped)?;
+
+        verdict.await.map_err(|_| SubmitError::Stopped)?.map_err(SubmitError::Refused)
+    }
+}
+
+#[document(
+    summary = "Why a submitted transaction was not taken.",
+    category = "Node",
+    see_also = "Submitter::submit",
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub enum SubmitError {
+    #[document(summary = "The mempool refused it.")]
+    Refused(MempoolError),
+    #[document(summary = "The node is not running.")]
+    Stopped,
+}
+
+impl fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SubmitError::Refused(err) => write!(f, "{err}"),
+            SubmitError::Stopped => write!(f, "the node is not running"),
+        }
+    }
 }
 
 #[document(
@@ -102,6 +166,7 @@ impl Node {
             net,
             held: None,
             peers: HashSet::new(),
+            sync: SyncState::default(),
             reported: 0,
         })
     }
@@ -114,6 +179,14 @@ impl Node {
     #[document(parent = "Node", summary = "The transactions waiting for a block.")]
     pub fn mempool(&self) -> &Mempool {
         &self.mempool
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "A handle other threads use to submit transactions while the node runs.",
+    )]
+    pub fn submitter(&self) -> Submitter {
+        Submitter::new(self.net.inbox.clone())
     }
 
     #[document(
@@ -185,8 +258,8 @@ impl Node {
                     Err(ImportError::Db(err)) => return Err(NodeError::Db(err)),
                     Err(ImportError::Known) => {}
                     Err(ImportError::UnknownParent(_)) => {
-                        // Sync comes next: ask `from` for its status, then for the blocks in between.
-                        log::info!("[node] block {height} from {from} is ahead of this node; waiting for sync");
+                        log::debug!("[node] block {height} from {from} is ahead of this node");
+                        self.peer_reached(from, height);
                     }
                     Err(err) => log::warn!("[node] rejected block {height} from {from}: {err}"),
                 }
@@ -204,20 +277,34 @@ impl Node {
                 let response = self.answer(request)?;
                 self.send(NetCommand::Respond { id, response });
             }
-            NetEvent::Response { peer, response } => {
-                // Sync comes next: catch up from the blocks peers send back.
-                log::debug!("[node] response from {peer}: {response:?}");
-            }
+            NetEvent::Response { peer, response } => self.on_response(peer, response, now)?,
             NetEvent::RequestFailed { peer, error } => {
                 log::debug!("[node] request to {peer} failed: {error}");
+                self.peer_failed(peer);
             }
             NetEvent::PeerUp(peer) => {
                 self.peers.insert(peer);
                 log::info!("[node] peer {peer} connected ({} peers)", self.peers.len());
+                self.send(NetCommand::Request {
+                    peer,
+                    request: SyncRequest::Status,
+                });
             }
             NetEvent::PeerDown(peer) => {
                 self.peers.remove(&peer);
                 log::info!("[node] peer {peer} disconnected ({} peers)", self.peers.len());
+                self.peer_failed(peer);
+            }
+            NetEvent::Submitted { tx, reply } => {
+                let id = tx.id();
+                let verdict = self.submit(tx).map(|()| id);
+
+                if let Err(err) = &verdict {
+                    log::info!("[node] refused submitted transaction {id}: {err}");
+                }
+
+                // The client may have stopped waiting; the transaction stands either way.
+                let _ = reply.send(verdict);
             }
         }
 
@@ -295,6 +382,10 @@ impl Node {
 
     /// Sleeps until the next slot, waking early when an event arrives.
     fn wait(&mut self, now: u64) -> Result<(), NodeError> {
+        if self.net.stopped() {
+            return Err(NodeError::NetworkStopped);
+        }
+
         if self.held.is_some() {
             return Ok(());
         }

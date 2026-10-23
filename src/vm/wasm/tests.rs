@@ -27,7 +27,9 @@ const IMPORTS: &str = r#"
   (import "chain" "contract" (func $contract (param i32)))
   (import "chain" "value" (func $value (param i32)))
   (import "chain" "hash" (func $hash (param i32 i32 i32 i32) (result i32)))
-  (import "chain" "call" (func $call (param i32 i32 i32 i32 i32) (result i32)))
+  (import "chain" "balance" (func $balance (param i32 i32)))
+  (import "chain" "transfer" (func $transfer (param i32 i32) (result i32)))
+  (import "chain" "call" (func $call (param i32 i32 i32 i32 i32 i32) (result i32)))
   (import "chain" "abort" (func $abort (param i32 i32)))
 "#;
 

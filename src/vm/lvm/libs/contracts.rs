@@ -1,12 +1,26 @@
 use {
+    super::accounts::refused,
     super::address::LuaAddress,
+    super::u256::operand,
+    crate::structs::u256::u256,
     crate::vm::lvm::{charge, value},
-    crate::vm::{Host, cost},
-    mlua::{AnyUserData, Error, Lua, MultiValue},
+    crate::vm::{Host, VmError, cost},
+    mlua::{AnyUserData, Error, Lua, MultiValue, Value},
     r#macro::document,
 };
 
 fn call(lua: &Lua, (target, function, args): (AnyUserData, String, MultiValue)) -> mlua::Result<MultiValue> {
+    call_with(lua, target, u256::ZERO, function, args)
+}
+
+fn call_value(
+    lua: &Lua,
+    (target, value, function, args): (AnyUserData, Value, String, MultiValue),
+) -> mlua::Result<MultiValue> {
+    call_with(lua, target, operand(&value)?, function, args)
+}
+
+fn call_with(lua: &Lua, target: AnyUserData, value: u256, function: String, args: MultiValue) -> mlua::Result<MultiValue> {
     let target = *target.borrow::<LuaAddress>()?;
     let host = lua
         .app_data_ref::<Host>()
@@ -17,9 +31,10 @@ fn call(lua: &Lua, (target, function, args): (AnyUserData, String, MultiValue)) 
         .map(value::from_lua)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| Error::runtime(format!("contracts.call: {err}")))?;
-    charge(lua, cost::CALL)?;
+    let transfer = if value == u256::ZERO { 0 } else { cost::TRANSFER };
+    charge(lua, cost::CALL + transfer)?;
     let fuel = lua.get_fuel()?;
-    let outcome = host.call(&target.0, &function, &args, fuel);
+    let outcome = host.call(&target.0, &function, &args, value, fuel);
     lua.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;
 
     match outcome.result {
@@ -29,6 +44,7 @@ fn call(lua: &Lua, (target, function, args): (AnyUserData, String, MultiValue)) 
             .collect::<Result<Vec<_>, _>>()
             .map(MultiValue::from_vec)
             .map_err(|err| Error::runtime(format!("contracts.call: {err}"))),
+        Err(err @ VmError::Storage(_)) => Err(refused(err)),
         Err(err) => Err(Error::runtime(format!("call to {function} on {} failed: {err}", target.0))),
     }
 }
@@ -38,8 +54,8 @@ fn call(lua: &Lua, (target, function, args): (AnyUserData, String, MultiValue)) 
     kind = "library",
     name = "contracts",
     category = "Chain",
-    summary = "Calls other contracts, whichever engine runs them. The callee sees this contract as ctx.sender and receives no value; what it writes is kept only if it succeeds.",
-    note = "A call costs 1000 fuel on top of what the callee burns, which comes out of this call's fuel. Calls nest at most 8 deep. A contract already running further up the chain can only be entered again through a function marked with a --@reentrant line right above its definition; anything else fails with an error.",
+    summary = "Calls other contracts, whichever engine runs them. The callee sees this contract as ctx.sender; what it writes, and any value sent with call_value, is kept only if it succeeds.",
+    note = "A call costs 1000 fuel on top of what the callee burns, 1000 more when it sends value, which comes out of this call's fuel. Calls nest at most 8 deep. A contract already running further up the chain can only be entered again through a function marked with a --@reentrant line right above its definition; anything else fails with an error.",
     example = "local ok, total = pcall(contracts.call, token, \"balance_of\", ctx.sender)\nif not ok then error(\"token call failed: \" .. total) end",
 )]
 fn contracts_lib() {}
@@ -59,6 +75,22 @@ fn contracts_lib() {}
 )]
 fn contracts_call() {}
 
+#[document(
+    lua,
+    parent = "contracts",
+    name = "call_value",
+    summary = "Like call, but also sends funds from this contract's balance, which the callee sees in ctx.value. The funds go back if the call fails.",
+    params = {
+        address = { ty = "Address", desc = "The contract to call." },
+        amount = { ty = "U256 | number", desc = "How much to send." },
+        name = { ty = "string", desc = "The exported function's name." },
+        args = { ty = "...", desc = "The arguments.", optional = true },
+    },
+    returns = { ty = "...", desc = "The callee's return values." },
+    see_also = "accounts.transfer",
+)]
+fn contracts_call_value() {}
+
 pub fn register_contracts_lib(lua: &Lua) {
     let contracts_table = lua
         .create_table()
@@ -71,6 +103,13 @@ pub fn register_contracts_lib(lua: &Lua) {
                 .expect("[contracts] Failed to create call"),
         )
         .expect("[contracts] Failed to set call");
+    contracts_table
+        .set(
+            "call_value",
+            lua.create_function(call_value)
+                .expect("[contracts] Failed to create call_value"),
+        )
+        .expect("[contracts] Failed to set call_value");
 
     lua.globals()
         .set("contracts", contracts_table)

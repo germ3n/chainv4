@@ -6,6 +6,8 @@ use crate::db::MemoryDb;
 use crate::registry::contracts::contract_address;
 use crate::structs::amount::Amount;
 use crate::structs::code::Code;
+use crate::net::NetEvent;
+use crate::structs::hex::to_hex;
 use crate::structs::tx::{SignedTx, Tx};
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -51,15 +53,41 @@ fn serve() -> Fixture {
         chain.import(&block, &producer, now).unwrap();
     }
 
-    let address = start(db, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = start(db, Some(fake_node()), "127.0.0.1:0".parse().unwrap()).unwrap();
 
     Fixture { address, chain, bob }
 }
 
+/// A Submitter whose node takes every transaction except those with nonce 99, which it calls
+/// stale.
+fn fake_node() -> Submitter {
+    let (inbox, events) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        for event in events {
+            if let NetEvent::Submitted { tx, reply } = event {
+                let verdict = if tx.nonce == 99 { Err(MempoolError::Stale) } else { Ok(tx.id()) };
+                let _ = reply.send(verdict);
+            }
+        }
+    });
+
+    Submitter::new(inbox)
+}
+
 /// Sends a GET and reads the status, content type and JSON body of the answer.
 fn get(address: SocketAddr, path: &str) -> (u16, String, Value) {
+    request(address, "GET", path, "")
+}
+
+fn request(address: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String, Value) {
     let mut stream = TcpStream::connect(address).unwrap();
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     let (head, body) = response.split_once("\r\n\r\n").unwrap();
@@ -176,4 +204,67 @@ fn bad_requests_and_missing_things_answer_with_an_error() {
         assert_eq!(content_type, "application/json", "{path}");
         assert!(body["error"].is_string(), "{path}: {body}");
     }
+}
+
+fn signed(nonce: u64) -> SignedTx {
+    let authority = DevAuthority::dev_keypair();
+    let tx = Tx::Burn {
+        from: authority.public().address(),
+        amount: Amount::U128(1),
+    };
+
+    SignedTx::sign(tx, nonce, &authority)
+}
+
+fn post_tx(address: SocketAddr, bytes: &[u8]) -> (u16, Value) {
+    let (status, _, body) = request(address, "POST", "/txs", &json!({ "tx": to_hex(bytes) }).to_string());
+
+    (status, body)
+}
+
+#[test]
+fn transactions_are_submitted_as_hex() {
+    let fixture = serve();
+    let tx = signed(5);
+    let (status, body) = post_tx(fixture.address, &wincode::serialize(&tx).unwrap());
+
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["id"], tx.id().to_string());
+}
+
+#[test]
+fn bad_or_refused_submissions_say_why() {
+    let fixture = serve();
+    let mut trailing = wincode::serialize(&signed(5)).unwrap();
+    trailing.push(0);
+    let (status, body) = post_tx(fixture.address, &wincode::serialize(&signed(99)).unwrap());
+
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"], "nonce already used");
+
+    for (status, body) in [
+        post_tx(fixture.address, &[1, 2, 3]),
+        post_tx(fixture.address, &trailing),
+        {
+            let (status, _, body) = request(fixture.address, "POST", "/txs", "{\"tx\": \"zz\"}");
+            (status, body)
+        },
+        {
+            let (status, _, body) = request(fixture.address, "POST", "/txs", "not json");
+            (status, body)
+        },
+    ] {
+        assert_eq!(status, 400, "{body}");
+        assert!(body["error"].is_string(), "{body}");
+    }
+}
+
+#[test]
+fn an_api_without_a_node_takes_no_transactions() {
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &Genesis::dev(DevAuthority::dev_keypair().public())).unwrap();
+    let address = start(db, None, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let (status, body) = post_tx(address, &wincode::serialize(&signed(0)).unwrap());
+
+    assert_eq!(status, 503, "{body}");
 }

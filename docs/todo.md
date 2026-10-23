@@ -22,94 +22,113 @@
   `function M.name(` in Lua, `#[export(reentrant)]` in Rust.
 - **Lua annotations are read line by line.** A `--@reentrant` line inside a multi-line string
   would be read as an annotation too.
-- **Lua numbers reach WASM contracts as float bits.** `Value::as_i64` in the SDK turns whole ones
-  into integers using integer instructions only, since float instructions are refused at deploy.
+- **Lua numbers reach WASM contracts as float bits.** `Value::as_i64` and `Value::as_amount` in
+  the SDK turn whole ones into integers using integer instructions only, since float
+  instructions are refused at deploy.
 - **Each call in a chain of calls gets its own memory limit.** The worst case is 8 nested calls
   × 32 MiB in one transaction.
+- **The WASM `call` import takes a value pointer.** It is
+  `call(address, value, name, name_len, args, args_len)`; rebuild contracts made against the
+  earlier five-argument form.
+- **The binary is also the client.** `chainv4 keygen` writes a key file;
+  `chainv4 send [--node URL] [--key FILE] transfer|mint|burn|deploy|call …` signs with the
+  sender's next nonce and posts to a node's `POST /txs`. Without `--key` it signs with the
+  well-known development key. Plain `chainv4 [flags]` still runs a node.
 
-## Not done yet
+## Todo
 
 ### Consensus
 
-- **Only a development scheme exists.** `DevAuthority` lets one key produce every block, and its
-  seed is in the source. A real network needs a real scheme: a rotating authority set first,
+- [ ] **Only a development scheme exists.** `DevAuthority` lets one key produce every block, and
+  its seed is in the source. A real network needs a real scheme: a rotating authority set first,
   then stake with finality.
-- **No fork choice or reorgs.** Import only extends the tip; a competing block at the same height
-  is dropped as `NotOnTip`. Any scheme with more than one producer needs a fork-choice rule, and
-  the database needs a way to roll state back (see Database).
-- **No finality.**
-- **Block limits are not consensus rules.** `MAX_BLOCK_TXS` only limits the blocks this node
+- [ ] **No fork choice or reorgs.** Import only extends the tip; a competing block at the same
+  height is dropped as `NotOnTip`. Any scheme with more than one producer needs a fork-choice
+  rule, and the database needs a way to roll state back (see Database).
+- [ ] **No finality.**
+- [ ] **Block limits are not consensus rules.** `MAX_BLOCK_TXS` only limits the blocks this node
   builds. Import accepts any number of transactions, any size and any total fuel. Add maximum
   transactions, bytes and fuel per block, and check them on import.
-- **No fees or rewards.** Transactions cost nothing, failed ones included, so spam is free. Fuel
-  is capped per transaction but never paid for.
-- **Minting belongs to the dev authority key.** Decide who may mint on a real chain, if anyone.
+- [ ] **No fees or rewards.** Transactions cost nothing, failed ones included, so spam is free.
+  Fuel is capped per transaction but never paid for.
+- [ ] **Minting belongs to the dev authority key.** Decide who may mint on a real chain, if
+  anyone.
 
 ### Script layer
 
-- **Contracts cannot move funds.** A contract call can send value to a contract, but neither
-  engine can read a balance or transfer out of one, so funds sent to a contract are stuck. Add
-  `balance` and `transfer` to both engines' host interfaces.
-- **Calls between contracts send no value.** `ctx.value` and the `value` host function read zero
-  in nested calls.
-- **No events or logs.** Contracts have no way to emit anything for clients to follow.
-- **Deploys are not charged.** Running a Lua contract's top level at deploy burns fuel that never
-  reaches the receipt (`fuel_used` is 0). Compiling and validating are unmetered, bounded only by
-  `MAX_SOURCE_LEN` and `MAX_MODULE_LEN`.
-- **No read-only calls.** There is no way to run a contract function without a transaction, for
-  example from the HTTP API.
-- **No contract upgrades or removal.** May be the right call; decide on purpose.
-- **WASM module cache.** Modules are parsed and compiled again on every call. Caching does not
+- [x] **Contracts can move funds.** `accounts.balance` and `accounts.transfer` in Lua, the
+  `balance` and `transfer` host functions in WASM, `balance` and `transfer` in the SDK.
+- [x] **Calls between contracts can send value.** `contracts.call_value` in Lua, the value
+  argument of `call` in WASM, `call_with_value` in the SDK. The callee sees it in its context,
+  and it goes back if the call fails.
+- [ ] **No events or logs.** Contracts have no way to emit anything for clients to follow.
+- [ ] **Deploys are not charged.** Running a Lua contract's top level at deploy burns fuel that
+  never reaches the receipt (`fuel_used` is 0). Compiling and validating are unmetered, bounded
+  only by `MAX_SOURCE_LEN` and `MAX_MODULE_LEN`.
+- [ ] **No read-only calls.** There is no way to run a contract function without a transaction,
+  for example from the HTTP API.
+- [ ] **No contract upgrades or removal.** May be the right call; decide on purpose.
+- [ ] **WASM module cache.** Modules are parsed and compiled again on every call. Caching does not
   affect consensus, only speed.
-- **Typed exports in the SDK.** `#[export]` functions take and return nothing and use
+- [ ] **Typed exports in the SDK.** `#[export]` functions take and return nothing and use
   `input()`/`output()`; decoding arguments into Rust parameters would be nicer.
-- **The Luau fork is pinned by branch, not commit.** `Cargo.lock` holds the commit, but
+- [ ] **The Luau fork is pinned by branch, not commit.** `Cargo.lock` holds the commit, but
   `cargo update` would move it. Like wasmi it is consensus: pin a `rev` in `Cargo.toml`.
 
 ### Database
 
-- **No state root.** Block headers do not commit to state. Needed for snapshot sync, light
+- [ ] **No state root.** Block headers do not commit to state. Needed for snapshot sync, light
   clients, and any later ZK work.
-- **Commits cannot be undone.** Reorgs need either undo records per block or versioned state.
-- **No iteration.** `Read` only gets single keys. Snapshots, pruning, listing a contract's
+- [ ] **Commits cannot be undone.** Reorgs need either undo records per block or versioned state.
+- [ ] **No iteration.** `Read` only gets single keys. Snapshots, pruning, listing a contract's
   storage and most API listings need prefix or range scans.
-- **No pruning.** Every block and all history are kept forever.
-- **Receipts are not stored, and there is no transaction index.** A transaction's result is lost
-  once its block is imported, and nothing maps a transaction id to its block.
-- **No schema version.** Nothing in `Meta` records the storage format, so a format change cannot
-  be detected or migrated.
-- **Commits are not fsynced.** A power cut can lose the last few blocks, though never half of one.
-  Decide whether to sync each block.
-- **RocksDB runs on default options.** No tuning of caches, compression or compaction.
-- **API reads are not snapshot-consistent.** A request that reads several keys can see state from
-  two different tips.
+- [ ] **No pruning.** Every block and all history are kept forever.
+- [ ] **Receipts are not stored, and there is no transaction index.** A transaction's result is
+  lost once its block is imported, and nothing maps a transaction id to its block.
+- [ ] **No schema version.** Nothing in `Meta` records the storage format, so a format change
+  cannot be detected or migrated.
+- [ ] **Commits are not fsynced.** A power cut can lose the last few blocks, though never half of
+  one. Decide whether to sync each block.
+- [ ] **RocksDB runs on default options.** No tuning of caches, compression or compaction.
+- [ ] **API reads are not snapshot-consistent.** A request that reads several keys can see state
+  from two different tips.
 
 ### Network
 
-- **Sync.** Nodes answer `Status` and `Blocks` requests but never send them, so a node that starts
-  late or misses a block stalls at "waiting for sync". Responses and failed requests are only
-  logged.
-- **Gossip is forwarded before it is checked.** gossipsub relays blocks and transactions before
-  the node validates them. Turn on `validate_messages` and report each result, so only valid
-  messages spread.
-- **No peer scoring or banning.** Peers that send invalid blocks, transactions or floods of sync
-  requests pay no price.
-- **The node's identity changes on every start.** The libp2p key is generated fresh each run; keep
-  it in the data directory so the peer id is stable.
-- **No bootnode list.** Peers come from `--peer` and mDNS only, and Kademlia warns at startup when
-  it has nobody to bootstrap from.
-- **No connection or request limits.**
-- **No NAT traversal** (relay, hole punching, AutoNAT).
+- [x] **Sync.** A node asks each peer for its status when it connects, and learns heights from
+  gossiped blocks it cannot place yet. While any peer is ahead it asks the furthest one for the
+  next 128 blocks, imports them in order, and repeats until it has caught up.
+- [ ] **Sync uses one peer at a time.** Batches are fetched one after another from a single peer;
+  downloading from several peers at once would be faster for long catch-ups.
+- [ ] **Blocks gossiped ahead of the tip are dropped.** They only tell the node a peer is ahead;
+  sync fetches them again. Keeping a few would save the round trip.
+- [ ] **Gossip is forwarded before it is checked.** gossipsub relays blocks and transactions
+  before the node validates them. Turn on `validate_messages` and report each result, so only
+  valid messages spread.
+- [ ] **No peer scoring or banning.** Peers that send invalid blocks, transactions or floods of
+  sync requests pay no price. A peer whose sync batch does not fit is only forgotten.
+- [ ] **The node's identity changes on every start.** The libp2p key is generated fresh each run;
+  keep it in the data directory so the peer id is stable.
+- [ ] **No bootnode list.** Peers come from `--peer` and mDNS only, and Kademlia warns at startup
+  when it has nobody to bootstrap from.
+- [ ] **No connection or request limits.**
+- [ ] **No NAT traversal** (relay, hole punching, AutoNAT).
 
 ### Node, API and tooling
 
-- **Transactions cannot be submitted from outside.** The HTTP API is read-only and there is no
-  CLI command, so only code can call `Node::submit`. Add `POST /txs` or a client tool.
-- **Only the dev genesis exists.** There is no genesis file, so there is no way to start any other
-  network.
-- **No key management.** Only the dev key exists; no key generation or keystore.
-- **No graceful shutdown.** Ctrl-C kills the process mid-loop. Commits are atomic, so data is safe,
-  but the network and HTTP threads never close cleanly.
-- **The HTTP API has no transaction lookup, receipts or contract views.** It also serves one
+- [x] **Transactions can be submitted from outside.** `POST /txs` takes `{"tx": "0x…"}`, a
+  `SignedTx` encoded as the chain encodes it, and hands it to the node's mempool, which gossips
+  it. `chainv4 keygen` and `chainv4 send` make keys and sign and submit transactions.
+- [ ] **`chainv4 send` cannot wait for inclusion.** It prints the transaction id, but there is no
+  receipt or transaction lookup to wait on (see Database).
+- [ ] **The CLI speaks plain HTTP only.** ureq is built without TLS; add it before pointing
+  `send` at a node across the internet.
+- [ ] **Key files are not encrypted.** They are created readable by their owner only, but hold
+  the seed in plain hex.
+- [ ] **Only the dev genesis exists.** There is no genesis file, so there is no way to start any
+  other network.
+- [ ] **No graceful shutdown.** Ctrl-C kills the process mid-loop. Commits are atomic, so data is
+  safe, but the network and HTTP threads never close cleanly.
+- [ ] **The HTTP API has no transaction lookup, receipts or contract views.** It also serves one
   request at a time.
-- **Windows builds in CI.** Left out because of RocksDB and Luau build setup.
+- [ ] **Windows builds in CI.** Left out because of RocksDB and Luau build setup.

@@ -3,6 +3,8 @@ pub mod api;
 #[cfg(feature = "node")]
 pub mod chain;
 #[cfg(feature = "node")]
+pub mod cli;
+#[cfg(feature = "node")]
 pub mod consensus;
 pub mod crypto;
 pub mod db;
@@ -19,8 +21,30 @@ pub mod vm;
 
 #[cfg(feature = "node")]
 #[derive(clap::Parser)]
-#[command(about = "Runs a chainv4 node")]
-struct Args {
+#[command(
+    about = "Runs a chainv4 node, or with a subcommand, works as a client of one",
+    args_conflicts_with_subcommands = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    node: NodeArgs,
+}
+
+#[cfg(feature = "node")]
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Makes a key and writes it to a file.
+    Keygen(cli::KeygenArgs),
+    /// Signs a transaction and submits it to a node's HTTP API.
+    #[cfg(feature = "client")]
+    Send(cli::SendArgs),
+}
+
+#[cfg(feature = "node")]
+#[derive(clap::Args)]
+struct NodeArgs {
     /// Where the chain database lives.
     #[arg(long, default_value = "chain.db")]
     db: std::path::PathBuf,
@@ -48,7 +72,15 @@ fn main() -> std::process::ExitCode {
         .format_timestamp_millis()
         .init();
 
-    match run(Args::parse()) {
+    let cli = Cli::parse();
+    let result = match cli.command {
+        Some(Command::Keygen(args)) => cli::keygen(args),
+        #[cfg(feature = "client")]
+        Some(Command::Send(args)) => cli::send(args),
+        None => run(cli.node),
+    };
+
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             log::error!("{err}");
@@ -59,7 +91,7 @@ fn main() -> std::process::ExitCode {
 }
 
 #[cfg(feature = "node")]
-fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     use {
         chain::Genesis,
         consensus::DevAuthority,
@@ -101,7 +133,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "http")]
     if let Some(address) = args.http {
-        let address = api::start(db, address)?;
+        let address = api::start(db, Some(node.submitter()), address)?;
         log::info!("[http] listening on {address}");
     }
 

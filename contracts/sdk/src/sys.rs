@@ -19,8 +19,20 @@ unsafe extern "C" {
     pub fn value(ptr: *mut u8);
     /// Writes the digest and returns its length: 32, or 8 for XXH3.
     pub fn hash(algorithm: u32, data: *const u8, len: u32, out: *mut u8) -> u32;
+    /// Writes 32 bytes, little-endian.
+    pub fn balance(address: *const u8, out: *mut u8);
+    /// 0 when the funds moved; 1 when the contract holds too little, with the reason in the
+    /// result buffer.
+    pub fn transfer(address: *const u8, amount: *const u8) -> u32;
     /// 0 when the call succeeded, with its encoded return values in the result buffer; 1 when
     /// it failed, with the error text there.
-    pub fn call(address: *const u8, name: *const u8, name_len: u32, args: *const u8, args_len: u32) -> u32;
+    pub fn call(
+        address: *const u8,
+        value: *const u8,
+        name: *const u8,
+        name_len: u32,
+        args: *const u8,
+        args_len: u32,
+    ) -> u32;
     pub fn abort(message: *const u8, len: u32) -> !;
 }

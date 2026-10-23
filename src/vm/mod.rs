@@ -38,6 +38,10 @@ pub mod cost {
     pub const HASH_BYTES_PER_FUEL: u64 = 64;
     /// Calling another contract, on top of the fuel the callee burns.
     pub const CALL: u64 = 1_000;
+    /// Reading a balance: one account read.
+    pub const BALANCE: u64 = 100;
+    /// Moving funds, by transfer or with a call: two account writes.
+    pub const TRANSFER: u64 = 1_000;
     /// Copying bytes between a WebAssembly contract's memory and the host.
     pub const COPY_BYTES_PER_FUEL: u64 = 64;
 }
@@ -211,7 +215,8 @@ impl Vm {
         let Some(function) = record.functions.iter().find(|name| Hash::Xxh3_64(selector(name)) == *func) else {
             return Outcome::failed(VmError::NoSuchFunction);
         };
-        let host = Host::root(state.clone(), context, limits.memory, self.clone());
+        let layer = Arc::new(State::new(state.clone()));
+        let host = Host::root(layer, context, limits.memory, self.clone());
 
         host::run(state, record, function, args, host, limits)
     }
@@ -260,6 +265,8 @@ pub enum VmError {
     Reentrant(Address),
     #[document(summary = "The chain of calls would go deeper than MAX_CALL_DEPTH.")]
     TooDeep,
+    #[document(summary = "A contract tried to send more than it holds, by transfer or with a call.")]
+    InsufficientBalance,
     #[document(summary = "The chain does not run the engine the contract needs.")]
     EngineMissing(Engine),
     #[document(summary = "The database failed while the contract ran. The node's fault, not the contract's, so the node should stop rather than record the call as failed.")]
@@ -285,6 +292,7 @@ impl fmt::Display for VmError {
                 write!(f, "{address} is already running and the function is not reentrant")
             }
             VmError::TooDeep => write!(f, "calls nest deeper than {MAX_CALL_DEPTH}"),
+            VmError::InsufficientBalance => write!(f, "insufficient balance"),
             VmError::EngineMissing(engine) => write!(f, "this chain does not run {} contracts", engine.name()),
             VmError::Storage(err) => write!(f, "storage failed: {err}"),
         }

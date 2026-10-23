@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod address;
 pub mod contracts;
 pub mod ctx;
@@ -5,6 +6,7 @@ pub mod hash;
 pub mod storage;
 pub mod u256;
 
+pub use accounts::register_accounts_lib;
 pub use address::register_address_lib;
 pub use contracts::register_contracts_lib;
 pub use ctx::register_ctx_lib;

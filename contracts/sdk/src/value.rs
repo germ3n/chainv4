@@ -87,6 +87,22 @@ impl Value {
         }
     }
 
+    /// The value as an amount, a little-endian u256, from an Amount, any non-negative integer
+    /// or a whole non-negative Number.
+    pub fn as_amount(&self) -> Option<[u8; 32]> {
+        let small = match *self {
+            Value::Amount(Amount::U256(bytes)) | Value::U256(bytes) => return Some(bytes),
+            Value::Amount(Amount::U128(value)) | Value::U128(value) => value,
+            Value::U64(value) => u128::from(value),
+            Value::I64(value) => u128::try_from(value).ok()?,
+            Value::I128(value) => u128::try_from(value).ok()?,
+            Value::Number(bits) => u128::try_from(whole_number(bits)?).ok()?,
+            _ => return None,
+        };
+
+        Some(amount(small))
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(text) => Some(text),
@@ -115,6 +131,14 @@ impl Value {
             _ => None,
         }
     }
+}
+
+/// An amount as the host reads it: a little-endian u256.
+pub fn amount(value: u128) -> [u8; 32] {
+    let mut out = [0; 32];
+    out[..16].copy_from_slice(&value.to_le_bytes());
+
+    out
 }
 
 /// The integer an f64's bits hold, worked out with integer instructions only.

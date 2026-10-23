@@ -28,7 +28,7 @@ pub mod sys;
 pub mod value;
 
 pub use chainv4_sdk_macros::export;
-pub use value::{Address, AddressKind, Amount, Value};
+pub use value::{Address, AddressKind, Amount, Value, amount};
 
 /// The arguments the call was made with. Aborts if the node sent something unreadable, which
 /// it never does.
@@ -62,7 +62,8 @@ pub fn this() -> Address {
     Address::decode(&bytes).unwrap_or_else(|| abort("unreadable contract address"))
 }
 
-/// What the call sent, as a little-endian u256. Calls between contracts send nothing.
+/// What the call sent, as a little-endian u256: the transaction's value, or what the calling
+/// contract sent with call_with_value.
 pub fn value() -> [u8; 32] {
     let mut bytes = [0; 32];
     unsafe { sys::value(bytes.as_mut_ptr()) };
@@ -92,16 +93,44 @@ pub fn hash(algorithm: Algorithm, data: &[u8]) -> Vec<u8> {
     out[..len as usize].to_vec()
 }
 
+/// What an address holds, as a little-endian u256.
+pub fn balance(address: &Address) -> [u8; 32] {
+    let address = address.encode();
+    let mut out = [0; 32];
+    unsafe { sys::balance(address.as_ptr(), out.as_mut_ptr()) };
+
+    out
+}
+
+/// Sends funds from this contract's own balance. Kept only if the call succeeds.
+///
+/// Returns why not when the contract holds too little.
+pub fn transfer(to: &Address, amount: [u8; 32]) -> Result<(), String> {
+    let address = to.encode();
+
+    match unsafe { sys::transfer(address.as_ptr(), amount.as_ptr()) } {
+        0 => Ok(()),
+        _ => Err(String::from_utf8_lossy(&result()).into_owned()),
+    }
+}
+
 /// Calls an exported function on another contract, whichever engine runs it. Its writes are
 /// kept only if it succeeds; its fuel comes out of this call's.
 ///
 /// Returns its return values, or its error.
 pub fn call(target: &Address, function: &str, args: &[Value]) -> Result<Vec<Value>, String> {
+    call_with_value(target, [0; 32], function, args)
+}
+
+/// Like call, but also sends funds from this contract's balance, which the callee sees as its
+/// value. They come back if the call fails.
+pub fn call_with_value(target: &Address, value: [u8; 32], function: &str, args: &[Value]) -> Result<Vec<Value>, String> {
     let address = target.encode();
     let args = value::encode(args);
     let status = unsafe {
         sys::call(
             address.as_ptr(),
+            value.as_ptr(),
             function.as_ptr(),
             function.len() as u32,
             args.as_ptr(),

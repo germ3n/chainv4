@@ -1,8 +1,10 @@
 //! Networking. libp2p runs on a thread of its own and talks to the node only through two
 //! channels: NetEvent in, NetCommand out. The node never sees libp2p's machinery, and a test can
-//! stand in for the whole network by holding the other ends of the channels.
+//! stand in for the whole network by holding the other ends of the channels. Local clients, such
+//! as the HTTP API, use the same way in, so one channel wakes the node for everything.
 
 use {
+    crate::mempool::MempoolError,
     crate::structs::block::Block,
     crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
@@ -10,6 +12,7 @@ use {
     r#macro::document,
     std::sync::mpsc,
     tokio::sync::mpsc as async_mpsc,
+    tokio::sync::oneshot,
     wincode::{SchemaRead, SchemaWrite},
 };
 
@@ -22,7 +25,7 @@ pub use swarm::{NetError, spawn};
 pub const MAX_SYNC_BLOCKS: u32 = 128;
 
 #[document(
-    summary = "Something the network brings to the node.",
+    summary = "Something that arrived for the node: from a peer, or from a client of this node.",
     category = "Node",
     see_also = "NetCommand, NetLink",
 )]
@@ -42,6 +45,11 @@ pub enum NetEvent {
     Response { peer: PeerId, response: SyncResponse },
     #[document(summary = "A request this node sent got no answer.")]
     RequestFailed { peer: PeerId, error: String },
+    #[document(summary = "A client of this node submitted a transaction. The node answers on reply with its id, or why the mempool refused it.")]
+    Submitted {
+        tx: SignedTx,
+        reply: oneshot::Sender<Result<Hash, MempoolError>>,
+    },
 }
 
 #[document(
@@ -116,6 +124,8 @@ pub struct NetConfig {
 pub struct NetLink {
     pub commands: async_mpsc::UnboundedSender<NetCommand>,
     pub events: mpsc::Receiver<NetEvent>,
+    /// Another way into events, for local clients.
+    pub inbox: mpsc::Sender<NetEvent>,
 }
 
 #[document(
@@ -140,6 +150,7 @@ impl NetLink {
             NetLink {
                 commands: command_tx,
                 events: event_rx,
+                inbox: event_tx.clone(),
             },
             FakeNet {
                 commands: command_rx,
@@ -154,5 +165,13 @@ impl NetLink {
     )]
     pub fn send(&self, command: NetCommand) -> bool {
         self.commands.send(command).is_ok()
+    }
+
+    #[document(
+        parent = "NetLink",
+        summary = "Whether the network thread has stopped. Events cannot tell: the link keeps a sender of its own for local clients.",
+    )]
+    pub fn stopped(&self) -> bool {
+        self.commands.is_closed()
     }
 }

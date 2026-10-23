@@ -8,8 +8,8 @@ use {
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::tx::TxCallArgumentType,
     libs::{
-        register_address_lib, register_contracts_lib, register_ctx_lib, register_hash_lib,
-        register_storage_lib, register_u256_lib,
+        register_accounts_lib, register_address_lib, register_contracts_lib, register_ctx_lib,
+        register_hash_lib, register_storage_lib, register_u256_lib,
     },
     mlua::{ChunkMode, Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value},
     r#macro::document,
@@ -31,7 +31,7 @@ const GLOBALS: &[&str] = &[
     "assert", "error", "getmetatable", "ipairs", "next", "pairs", "pcall", "print", "rawequal",
     "rawget", "rawlen", "rawset", "select", "setmetatable", "tonumber", "tostring", "type",
     "typeof", "unpack", "xpcall", "string", "table", "utf8", "bit32", "address", "hash", "u256",
-    "ctx", "storage", "contracts",
+    "ctx", "storage", "contracts", "accounts",
 ];
 
 /// The math functions that give the same result on every platform. The trigonometric,
@@ -267,6 +267,7 @@ fn new_state(limits: Limits) -> Result<Lua, VmError> {
     register_ctx_lib(&lua);
     register_storage_lib(&lua);
     register_contracts_lib(&lua);
+    register_accounts_lib(&lua);
     lua.sandbox(true)?;
     lua.set_fuel(limits.fuel)?;
 
