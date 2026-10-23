@@ -42,9 +42,13 @@
 - **The WASM `call` import takes a value pointer.** It is
   `call(address, value, name, name_len, args, args_len)`; rebuild contracts made against the
   earlier five-argument form. Contracts also import `emit` now.
-- **Contracts have three special functions.** `init` (run at deploy), `migrate` (run after an
-  upgrade) and `check_perms` (asked before an upgrade). Transactions and other contracts cannot
-  call `init` or `migrate`. See the README's Contract lifecycle.
+- **Contracts have four special functions.** `init` (run at deploy), `migrate` (run after an
+  upgrade), `check_perms` (asked before an upgrade) and `fallback` (answers functions the
+  contract does not export). Transactions and other contracts cannot call `init`, `migrate` or
+  `fallback`, or delegate to them. See the README's Contract lifecycle.
+- **Byte order.** Everything the chain encodes is little-endian. Three things are big-endian on
+  purpose: the work hash is read as a big-endian number, so valid hashes start with zeros in hex;
+  height keys, so RocksDB sorts them in order; and XXH3 digests as bytes, matching `xxhsum`.
 - **The binary is also the client.** See the [README](../README.md). `chainv4 send` waits for
   inclusion by default (`--timeout`, `--confirmations`, `--no-wait`) and exits non-zero when the
   transaction landed but failed. Without `--key` it signs with the well-known development key.
@@ -106,7 +110,16 @@
   land in the deploy's receipt. Only the chain may run `init` and `migrate`.
 - [x] **A token standard.** ERC-20-like, by convention: [docs/token-standard.md](token-standard.md),
   with example tokens in Lua and Rust that one shared test holds to it.
+- [x] **Delegate calls and fallback.** `contracts.delegate` / `delegate` run another contract's code
+  on the caller's storage, like `delegatecall`; `fallback` answers functions a contract does not
+  export. Together they make proxies, upgradable without the built-in upgrade, with examples in
+  Lua and Rust.
 - [ ] **No contract removal.** May be the right call; decide on purpose.
+- [ ] **Lua proxies change value types in transit.** Arguments and return values pass through Lua,
+  so an `i64` becomes a number. A pass-through that keeps the encoded values as they are would
+  fix it.
+- [ ] **No storage layout tools for proxies.** Keeping a proxy's and its implementations' keys
+  apart is up to the contracts; a convention, or namespaced storage, would make it safer.
 - [ ] **Only one permission exists.** `check_perms` is only ever asked about `"upgrade"`. Other
   privileged actions, such as removal, would ask with their own names.
 - [ ] **Tokens are only a convention.** The chain cannot list tokens or tell a token from any other

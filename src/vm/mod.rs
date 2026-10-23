@@ -49,11 +49,72 @@ pub const MIGRATE: &str = "migrate";
 pub const CHECK_PERMS: &str = "check_perms";
 
 #[document(
-    summary = "The functions only the chain may run. A transaction or contract that calls one is refused with Reserved.",
+    summary = "The hook the chain runs when a call names a function the contract does not export: it gets the function's selector, as a u64, in front of the call's arguments, and answers in its place. What makes generic proxies possible: delegate the selector and arguments to an implementation. Only the chain may run it.",
     category = "VM",
-    see_also = "INIT, MIGRATE",
+    see_also = "Host::delegate, HOOKS",
+    example = "function M.fallback(selector, ...)\n    return contracts.delegate(address(storage.get(\"implementation\")), selector, ...)\nend",
 )]
-pub const HOOKS: &[&str] = &[INIT, MIGRATE];
+pub const FALLBACK: &str = "fallback";
+
+#[document(
+    summary = "The functions only the chain may run. A transaction or contract that calls or delegates to one is refused with Reserved.",
+    category = "VM",
+    see_also = "INIT, MIGRATE, FALLBACK",
+)]
+pub const HOOKS: &[&str] = &[INIT, MIGRATE, FALLBACK];
+
+#[document(
+    summary = "How a call names the function it wants: by name, as contracts do, or by the XXH3-64 selector transactions carry and fallback receives.",
+    category = "VM",
+    see_also = "selector, FALLBACK",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FunctionId<'a> {
+    #[document(summary = "The exported function's name.")]
+    Name(&'a str),
+    #[document(summary = "The XXH3-64 of the name.")]
+    Selector(u64),
+}
+
+impl FunctionId<'_> {
+    #[document(parent = "FunctionId", summary = "The selector, worked out from the name when need be.")]
+    pub fn selector(&self) -> u64 {
+        match self {
+            FunctionId::Name(name) => selector(name),
+            FunctionId::Selector(selector) => *selector,
+        }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            FunctionId::Name(wanted) => *wanted == name,
+            FunctionId::Selector(wanted) => selector(name) == *wanted,
+        }
+    }
+}
+
+/// Which function a call runs, and with what arguments: the one it names, or, when the contract
+/// does not export it and fallback is allowed, its fallback with the selector put in front.
+pub(crate) fn route<'r>(
+    record: &'r ContractRecord,
+    id: FunctionId,
+    args: &[TxCallArgumentType],
+    fallback: bool,
+) -> Result<(&'r str, Vec<TxCallArgumentType>), VmError> {
+    match record.functions.iter().find(|name| id.matches(name)) {
+        Some(name) if HOOKS.contains(&name.as_str()) => Err(VmError::Reserved(name.clone())),
+        Some(name) => Ok((name, args.to_vec())),
+        None => match record.functions.iter().find(|name| *name == FALLBACK) {
+            Some(name) if fallback => {
+                let mut routed = vec![TxCallArgumentType::U64(id.selector())];
+                routed.extend_from_slice(args);
+
+                Ok((name, routed))
+            }
+            _ => Err(VmError::NoSuchFunction),
+        },
+    }
+}
 
 /// What host operations cost in fuel. The same in every engine, so moving a contract from one
 /// engine to another never changes what its storage or calls cost.
@@ -229,7 +290,7 @@ impl Vm {
 
     #[document(
         parent = "Vm",
-        summary = "Calls a deployed contract on behalf of a transaction, whichever engine runs it. Its storage writes land in state only when the call succeeds.",
+        summary = "Calls a deployed contract on behalf of a transaction, whichever engine runs it. A selector the contract does not export goes to its fallback, if it has one. Its storage writes land in state only when the call succeeds.",
         params = {
             state = "The transaction's state layer.",
             record = "The contract, as stored.",
@@ -249,15 +310,16 @@ impl Vm {
         args: &[TxCallArgumentType],
         limits: Limits,
     ) -> Outcome {
-        let Some(function) = record.functions.iter().find(|name| Hash::Xxh3_64(selector(name)) == *func) else {
-            return Outcome::failed(VmError::NoSuchFunction);
+        let id = match func {
+            Hash::Xxh3_64(selector) => FunctionId::Selector(*selector),
+            #[allow(unreachable_patterns)]
+            _ => return Outcome::failed(VmError::NoSuchFunction),
         };
 
-        if HOOKS.contains(&function.as_str()) {
-            return Outcome::failed(VmError::Reserved(function.clone()));
+        match route(record, id, args, true) {
+            Ok((function, args)) => self.run(state, record, context, function, &args, limits),
+            Err(err) => Outcome::failed(err),
         }
-
-        self.run(state, record, context, function, args, limits)
     }
 
     #[document(

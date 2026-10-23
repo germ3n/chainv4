@@ -154,6 +154,30 @@ pub fn emit(name: &str, data: &[Value]) {
     unsafe { sys::emit(name.as_ptr(), name.len() as u32, data.as_ptr(), data.len() as u32) };
 }
 
+/// Runs another contract's function as this contract's own: on this contract's storage and
+/// balance, under this call's sender and value, with events in this contract's name. The EVM's
+/// delegatecall, for proxies. Only functions the target exports; never its fallback or a hook.
+///
+/// Returns its return values, or its error.
+pub fn delegate(target: &Address, selector: u64, args: &[Value]) -> Result<Vec<Value>, String> {
+    let address = target.encode();
+    let args = value::encode(args);
+    let status = unsafe { sys::delegate(address.as_ptr(), selector, args.as_ptr(), args.len() as u32) };
+    let result = result();
+
+    match status {
+        0 => Ok(value::decode(&result).unwrap_or_else(|| abort("unreadable return values"))),
+        _ => Err(String::from_utf8_lossy(&result).into_owned()),
+    }
+}
+
+/// The selector a call names a function by: XXH3-64 of its name, worked out on the node.
+pub fn selector(name: &str) -> u64 {
+    let digest = hash(Algorithm::Xxh3, name.as_bytes());
+
+    u64::from_be_bytes(digest.try_into().unwrap_or_else(|_| abort("xxh3 gives 8 bytes")))
+}
+
 /// Stops the call with an error. Nothing it wrote is kept.
 pub fn abort(message: &str) -> ! {
     unsafe { sys::abort(message.as_ptr(), message.len() as u32) }

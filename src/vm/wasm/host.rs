@@ -9,7 +9,7 @@ use {
     crate::structs::hash::HashType,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
-    crate::vm::{Host, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_VALUE_LEN, VmError, cost},
+    crate::vm::{FunctionId, Host, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_VALUE_LEN, VmError, cost},
     r#macro::document,
     wasmi::{Caller, Engine, Extern, Linker, Memory},
 };
@@ -31,6 +31,7 @@ pub(super) const NAMES: &[&str] = &[
     "balance",
     "transfer",
     "call",
+    "delegate",
     "emit",
     "abort",
 ];
@@ -232,6 +233,21 @@ fn chain_call() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "delegate",
+    summary = "Runs another contract's function as this contract's own: on this contract's storage and balance, under this call's sender and value, with events in this contract's name. The EVM's delegatecall, for proxies. What it does is kept only if it succeeds. Costs 1000 fuel, plus 1 per 64 bytes of arguments.",
+    params = {
+        address = { ty = "i32", desc = "The contract whose code to run: 33 bytes, as sender writes them." },
+        selector = { ty = "i64", desc = "The function's selector, XXH3-64 of its name, as a fallback receives it. Never a fallback or a hook." },
+        args = { ty = "i32", desc = "The encoded arguments." },
+        args_len = { ty = "i32", desc = "Their length." },
+    },
+    returns = { ty = "i32", desc = "0 when it succeeded, with its encoded return values in the result buffer; 1 when it failed, with the error text there." },
+)]
+fn chain_delegate() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "emit",
     summary = "Emits an event from this contract. It lands in the transaction's receipt only if this call, and every call above it, succeeds. Costs 200 fuel, plus 1 per 16 bytes of name and data.",
     params = {
@@ -274,6 +290,7 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "balance", balance).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "transfer", transfer).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "call", call).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "delegate", delegate).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "emit", emit).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
 
@@ -438,6 +455,28 @@ fn call(
     let (status, result) = match outcome.result {
         Ok(returns) => (0, wincode::serialize(&returns).expect("return values always encode")),
         // The node failed; no contract may carry on past that.
+        Err(VmError::Storage(err)) => return Err(stop(&mut caller, VmError::Storage(err))),
+        Err(err) => (1, err.to_string().into_bytes()),
+    };
+    caller.data_mut().result = result;
+
+    Ok(status)
+}
+
+fn delegate(mut caller: Caller<'_, Run>, address: u32, selector: u64, args: u32, args_len: u32) -> Result<u32> {
+    let host = host(&mut caller)?;
+    let target = address_at(&mut caller, address)?;
+    charge(&mut caller, cost::CALL + u64::from(args_len) / cost::COPY_BYTES_PER_FUEL)?;
+    let args = read(&mut caller, args, args_len)?;
+    let args = match wincode::deserialize::<Vec<TxCallArgumentType>>(&args) {
+        Ok(args) => args,
+        Err(err) => return Err(stop(&mut caller, VmError::BadArgument(err.to_string()))),
+    };
+    let fuel = caller.get_fuel()?;
+    let outcome = host.delegate(&target, FunctionId::Selector(selector), &args, fuel);
+    caller.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;
+    let (status, result) = match outcome.result {
+        Ok(returns) => (0, wincode::serialize(&returns).expect("return values always encode")),
         Err(VmError::Storage(err)) => return Err(stop(&mut caller, VmError::Storage(err))),
         Err(err) => (1, err.to_string().into_bytes()),
     };

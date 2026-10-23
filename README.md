@@ -199,15 +199,16 @@ Arguments are `type:value`:
 
 ## Contract lifecycle
 
-Besides the functions a contract exports for everyone, the chain looks for three by name:
+Besides the functions a contract exports for everyone, the chain looks for four by name:
 
 | Function | Who runs it | When |
 | --- | --- | --- |
 | `init()` | the chain only | Once, at deploy, with the deployer as `ctx.sender`. Record an owner, mint an initial supply. If it fails, so does the deploy. |
 | `check_perms(permission, who)` | the chain, before a privileged action; anyone may call it | Before an upgrade, with `"upgrade"` and the sender. Only `true` lets the upgrade through. What it writes is thrown away. |
 | `migrate()` | the chain only | Once, after an upgrade to code that exports it, with the upgrader as sender. Move storage to a new layout. If it fails, so does the upgrade. |
+| `fallback(selector, ...)` | the chain only | Whenever a call names a function the contract does not export, with that function's selector, a `u64`, in front of the call's arguments. It answers in that function's place. |
 
-Transactions and other contracts cannot call `init` or `migrate`. A contract without
+Transactions and other contracts cannot call `init`, `migrate` or `fallback`. A contract without
 `check_perms` can never be upgraded, and neither can one upgraded to code without it, so freezing
 a contract is one last upgrade. `GET /contracts/{address}` shows `"upgradable"`.
 
@@ -229,6 +230,53 @@ return M
 
 `check_perms` can hold any rule: a list of admins, a vote counted in storage, a time lock. Rust
 contracts export the same names with `#[export]`.
+
+### Proxies: upgrades without the built-in
+
+`contracts.delegate(address, function, ...)` (`delegate` in the SDK) runs another contract's
+code as the caller's own, like the EVM's `delegatecall`: on the caller's storage and balance,
+with `ctx.sender`, `ctx.contract` and `ctx.value` unchanged, and events in the caller's name.
+Together with `fallback`, that is a proxy: callers always use the proxy's address, it keeps the
+state, and its implementation can be swapped.
+
+```lua
+local M = {}
+
+function M.init()
+    storage.set("proxy:owner", ctx.sender:text())
+end
+
+function M.set_implementation(implementation)
+    if ctx.sender:text() ~= storage.get("proxy:owner") then error("only the owner") end
+    storage.set("proxy:implementation", implementation:text())
+end
+
+function M.fallback(selector, ...)
+    return contracts.delegate(address.parse(storage.get("proxy:implementation")), selector, ...)
+end
+
+return M
+```
+
+```sh
+chainv4 send deploy --lua contracts/lua/proxy.lua          # contract:0xP…
+chainv4 send deploy --lua counter.lua                       # contract:0xC…
+chainv4 send call --to contract:0xP… --function set_implementation address:contract:0xC…
+chainv4 send call --to contract:0xP… --function increment i64:5   # runs the counter's code on the proxy
+```
+
+Full proxies are in [contracts/lua/proxy.lua](contracts/lua/proxy.lua) and
+[contracts/examples/upgradable](contracts/examples/upgradable/src/lib.rs). Things to keep in mind:
+
+- Delegated code has full access to the caller: only delegate to code you trust.
+- The proxy and every implementation share one storage. Keep their keys apart (the examples
+  prefix the proxy's own with `proxy:`) and keep each new implementation able to read the old
+  layout.
+- Delegating only reaches functions the target exports, never its `fallback`, `init` or
+  `migrate`. An implementation that needs setting up exports something like `initialize`, called
+  through the proxy once it is pointed at it.
+- Values pass through a Lua proxy as Lua values, so an `i64` comes back as a number; a Rust proxy
+  forwards them exactly.
 
 ## Tokens
 

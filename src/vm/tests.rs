@@ -713,3 +713,154 @@ fn the_lua_token_follows_the_standard() {
 fn the_rust_token_follows_the_standard() {
     conforms_to_the_token_standard(Code::Wasm(example("token")));
 }
+
+const COUNTER_V1: &str = r#"
+local M = {}
+
+function M.increment(by)
+    local count = tonumber(storage.get("count") or "0") + by
+    storage.set("count", tostring(count))
+    events.emit("Counted", count, ctx.sender, ctx.contract)
+    return count
+end
+
+function M.count()
+    return tonumber(storage.get("count") or "0")
+end
+
+function M.paid()
+    return ctx.value, accounts.balance(ctx.contract)
+end
+
+function M.init()
+    storage.set("count", "1000")
+end
+
+return M
+"#;
+
+/// Reads the same storage as V1, and adds decrement.
+const COUNTER_V2: &str = r#"
+local M = {}
+
+function M.count()
+    return tonumber(storage.get("count") or "0")
+end
+
+function M.decrement(by)
+    local count = tonumber(storage.get("count") or "0") - by
+    storage.set("count", tostring(count))
+    return count
+end
+
+return M
+"#;
+
+const DELEGATOR: &str = r#"
+local M = {}
+
+function M.delegate_to(target, name)
+    return contracts.delegate(target, name)
+end
+
+function M.pay(proxy, amount)
+    return contracts.call_value(proxy, amount, "paid")
+end
+
+return M
+"#;
+
+fn proxy(world: &mut World, code: Code, implementation: Address) -> Address {
+    let proxy = world.deploy(code);
+    world.call(proxy, "set_implementation", &[address(implementation)]).result.unwrap();
+
+    proxy
+}
+
+fn upgradable_proxies_run_their_implementation_on_their_own_storage(proxy_code: Code) {
+    let mut world = World::new();
+    let alice = Address::Ed25519([0xa; 32]);
+    let v1 = world.lua_code(COUNTER_V1);
+    let proxy = proxy(&mut world, proxy_code, v1);
+    let increment = world.call_as(alice, proxy, "increment", &[TxCallArgumentType::I64(5)]);
+
+    // The code is V1's, but the storage, the sender and the events are the proxy's.
+    assert_eq!(increment.result.unwrap(), [TxCallArgumentType::Number(5.0)]);
+    assert_eq!(increment.events.len(), 1);
+    assert_eq!(increment.events[0].contract, proxy);
+    assert_eq!(increment.events[0].data, [TxCallArgumentType::Number(5.0), address(alice), address(proxy)]);
+    assert_eq!(stored(&world, proxy, b"count"), Some(b"5".to_vec()));
+    assert_eq!(stored(&world, v1, b"count"), Some(b"1000".to_vec()));
+
+    // Upgrading is repointing: storage stays, and the new code's functions appear.
+    let v2 = world.lua_code(COUNTER_V2);
+    let refused = world.call_as(alice, proxy, "set_implementation", &[address(v2)]).result.unwrap_err();
+
+    assert!(refused.to_string().contains("only the owner"), "{refused}");
+
+    world.call(proxy, "set_implementation", &[address(v2)]).result.unwrap();
+
+    assert_eq!(world.call(proxy, "decrement", &[TxCallArgumentType::I64(2)]).result.unwrap(), [TxCallArgumentType::Number(3.0)]);
+    assert!(matches!(world.call(proxy, "increment", &[TxCallArgumentType::I64(1)]).result, Err(VmError::Runtime(text)) if text.contains("no such function")));
+
+    // Value and balance are the proxy's own.
+    world.call(proxy, "set_implementation", &[address(v1)]).result.unwrap();
+    let payer = world.lua_code(DELEGATOR);
+    world.fund(payer, 100);
+
+    assert_eq!(world.call(payer, "pay", &[address(proxy), wide(40)]).result.unwrap(), [wide(40), wide(40)]);
+}
+
+impl World {
+    fn lua_code(&mut self, source: &str) -> Address {
+        self.deploy(Code::Lua(source.to_string()))
+    }
+}
+
+#[test]
+fn a_lua_proxy_delegates_through_fallback() {
+    upgradable_proxies_run_their_implementation_on_their_own_storage(Code::Lua(include_str!("../../contracts/lua/proxy.lua").to_string()));
+}
+
+#[test]
+fn a_rust_proxy_delegates_to_lua_code() {
+    upgradable_proxies_run_their_implementation_on_their_own_storage(Code::Wasm(example("upgradable")));
+}
+
+#[test]
+fn a_lua_proxy_delegates_to_rust_code() {
+    let mut world = World::new();
+    let counter = world.deploy(Code::Wasm(example("counter")));
+    let proxy = proxy(&mut world, Code::Lua(include_str!("../../contracts/lua/proxy.lua").to_string()), counter);
+    let alice = Address::Ed25519([0xa; 32]);
+    let increment = world.call_as(alice, proxy, "increment", &[TxCallArgumentType::I64(7)]);
+
+    // Values pass through Lua on their way, so the counter's I64 comes back as a Lua number.
+    assert_eq!(increment.result.unwrap(), [TxCallArgumentType::Number(7.0)]);
+    assert_eq!(increment.events[0].contract, proxy);
+    assert_eq!(increment.events[0].data, [TxCallArgumentType::I64(7), address(alice)]);
+    assert_eq!(world.call(proxy, "last", &[]).result.unwrap(), [address(alice)]);
+    assert_eq!(world.call(counter, "get", &[]).result.unwrap(), [TxCallArgumentType::I64(0)]);
+}
+
+#[test]
+fn hooks_and_fallbacks_are_never_called_or_delegated_to() {
+    let mut world = World::new();
+    let v1 = world.lua_code(COUNTER_V1);
+    let proxy = proxy(&mut world, Code::Lua(include_str!("../../contracts/lua/proxy.lua").to_string()), v1);
+    let delegator = world.lua_code(DELEGATOR);
+    let delegated = |target: Address, name: &str| {
+        world
+            .call(delegator, "delegate_to", &[address(target), TxCallArgumentType::String(name.to_string())])
+            .result
+            .unwrap_err()
+            .to_string()
+    };
+
+    assert_eq!(world.call(proxy, "fallback", &[]).result.unwrap_err(), VmError::Reserved("fallback".to_string()));
+    assert!(delegated(v1, "init").contains("init is only run by the chain"));
+    assert!(delegated(proxy, "fallback").contains("fallback is only run by the chain"));
+    // Delegating never falls back: the target must export the function itself.
+    assert!(delegated(proxy, "increment").contains("no such function"));
+    assert!(delegated(Address::Contract([9; 32]), "count").contains("no contract"));
+}

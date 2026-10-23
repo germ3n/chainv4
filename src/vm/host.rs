@@ -1,5 +1,5 @@
 use {
-    super::{CallContext, HOOKS, Limits, Outcome, Vm, VmError},
+    super::{CallContext, FunctionId, Limits, Outcome, Vm, VmError, route},
     crate::db::{Column, DbError, State, storage_key},
     crate::registry::contracts::{ContractRecord, Contracts},
     crate::registry::{Accounts, RegistryError},
@@ -170,13 +170,10 @@ impl Host {
             Err(err) => return Outcome::failed(self.fail(err)),
         };
 
-        if !record.functions.iter().any(|name| name == function) {
-            return Outcome::failed(VmError::NoSuchFunction);
-        }
-
-        if HOOKS.contains(&function) {
-            return Outcome::failed(VmError::Reserved(function.to_string()));
-        }
+        let (function, args) = match route(&record, FunctionId::Name(function), args, true) {
+            Ok(routed) => routed,
+            Err(err) => return Outcome::failed(err),
+        };
 
         if self.stack.contains(target) && !record.reentrant.iter().any(|name| name == function) {
             return Outcome::failed(VmError::Reentrant(*target));
@@ -211,7 +208,59 @@ impl Host {
             memory: self.memory,
         };
 
-        let mut outcome = run(&self.state, &record, function, args, callee, limits);
+        let mut outcome = run(&self.state, &record, function, &args, callee, limits);
+
+        if outcome.result.is_ok() {
+            lock(&self.events).append(&mut outcome.events);
+        }
+
+        outcome
+    }
+
+    #[document(
+        parent = "Host",
+        summary = "Runs another contract's code as this contract's own: on this contract's storage and balance, under this call's sender and value, with events in this contract's name. The EVM's delegatecall, and what proxies are built on. What it does stays only if it succeeds.",
+        params = {
+            target = "The contract whose code to run.",
+            function = "The function, by name or selector. It must be exported by target; neither its fallback nor a hook is ever run this way.",
+            args = "The arguments.",
+            fuel = "What it may burn: what the caller has left after paying cost::CALL.",
+        },
+        returns = "What the code did. Subtract its fuel_used from the caller's fuel.",
+        panics = "TooDeep past MAX_CALL_DEPTH, NoSuchContract or NoSuchFunction when there is nothing to run, Reserved for a hook.",
+        note = "The code runs with full access to this contract: delegate only to code you trust, and keep storage layouts in agreement, since both sides read and write the same keys.",
+    )]
+    pub fn delegate(&self, target: &Address, function: FunctionId, args: &[TxCallArgumentType], fuel: u64) -> Outcome {
+        if self.stack.len() >= MAX_CALL_DEPTH {
+            return Outcome::failed(VmError::TooDeep);
+        }
+
+        let record = match Contracts::new(&self.state).get(target) {
+            Ok(Some(record)) => record,
+            Ok(None) => return Outcome::failed(VmError::NoSuchContract(*target)),
+            Err(err) => return Outcome::failed(self.fail(err)),
+        };
+        let (function, args) = match route(&record, function, args, false) {
+            Ok(routed) => routed,
+            Err(err) => return Outcome::failed(err),
+        };
+        let mut stack = self.stack.clone();
+        stack.push(self.context.contract);
+        let delegated = Host {
+            state: Arc::new(State::new(self.state.clone())),
+            context: self.context,
+            stack,
+            memory: self.memory,
+            fault: self.fault.clone(),
+            vm: self.vm.clone(),
+            events: Arc::default(),
+            emitted: Arc::default(),
+        };
+        let limits = Limits {
+            fuel,
+            memory: self.memory,
+        };
+        let mut outcome = run(&self.state, &record, function, &args, delegated, limits);
 
         if outcome.result.is_ok() {
             lock(&self.events).append(&mut outcome.events);

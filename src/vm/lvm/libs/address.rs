@@ -17,6 +17,8 @@ impl UserData for LuaAddress {
         methods.add_method("is_contract", |_, this, ()| {
             Ok(matches!(this.0, Address::Contract(_)))
         });
+        methods.add_method("kind", |_, this, ()| Ok(this.0.kind()));
+        methods.add_method("text", |_, this, ()| Ok(this.0.to_string()));
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(to_hex(this.0.bytes())));
         methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (AnyUserData, AnyUserData)| {
             match (a.borrow::<LuaAddress>(), b.borrow::<LuaAddress>()) {
@@ -33,6 +35,12 @@ fn from_bytes(bytes: &[u8]) -> mlua::Result<LuaAddress> {
         .map_err(|_| Error::runtime("an address is 32 bytes"))?;
 
     Ok(LuaAddress(Address::Ed25519(key)))
+}
+
+fn parse_text(text: &str) -> mlua::Result<LuaAddress> {
+    text.parse()
+        .map(LuaAddress)
+        .map_err(|err: crate::structs::address::ParseAddressError| Error::runtime(format!("{err}: {text}")))
 }
 
 fn parse_hex(text: &str) -> mlua::Result<LuaAddress> {
@@ -64,6 +72,20 @@ fn address_lib() {}
     see_also = "address.from_bytes, Address:is_valid",
 )]
 fn address_from_hex() {}
+
+#[document(
+    lua,
+    parent = "address",
+    name = "parse",
+    summary = "Reads an address of any kind from its full text form, as Address:text writes it and the CLI and API show it. The way to store a contract's address and get it back.",
+    params = {
+        text = { ty = "string", desc = "Such as ed25519:0x… or contract:0x…." },
+    },
+    returns = { ty = "Address", desc = "The address." },
+    panics = "Errors when the kind is unknown or the hex is not 32 bytes.",
+    see_also = "Address:text",
+)]
+fn address_parse() {}
 
 #[document(
     lua,
@@ -123,6 +145,27 @@ fn address_is_contract() {}
 #[document(
     lua,
     parent = "Address",
+    name = "kind",
+    kind = "method",
+    summary = "What kind of address it is: ed25519, edblake or contract.",
+    returns = { ty = "string", desc = "The kind." },
+)]
+fn address_kind() {}
+
+#[document(
+    lua,
+    parent = "Address",
+    name = "text",
+    kind = "method",
+    summary = "The full text form: the kind, a colon and the hex, such as contract:0x…. Unlike hex, it keeps the kind, so address.parse gets the same address back.",
+    returns = { ty = "string", desc = "The text form." },
+    see_also = "address.parse",
+)]
+fn address_text() {}
+
+#[document(
+    lua,
+    parent = "Address",
     name = "is_valid",
     kind = "method",
     summary = "Whether the address is a usable public key: a point on the curve that is not a weak small-order point. Funds sent to an invalid address can never be spent.",
@@ -141,6 +184,13 @@ pub fn register_address_lib(lua: &Lua) {
                 .expect("[address] Failed to create from_hex"),
         )
         .expect("[address] Failed to set from_hex");
+    address_table
+        .set(
+            "parse",
+            lua.create_function(|_, text: String| parse_text(&text))
+                .expect("[address] Failed to create parse"),
+        )
+        .expect("[address] Failed to set parse");
     address_table
         .set(
             "from_bytes",
@@ -226,5 +276,16 @@ mod tests {
         assert!(lua.load("address('0x1234')").exec().unwrap_err().to_string().contains("32 bytes"));
         assert!(lua.load("address('nothex')").exec().unwrap_err().to_string().contains("not hex"));
         assert!(lua.load("address.from_bytes('short')").exec().is_err());
+    }
+
+    #[test]
+    fn the_text_form_keeps_the_kind() {
+        let lua = setup();
+        let text = format!("contract:0x{}", "ab".repeat(32));
+        let code = format!("local a = address.parse('{text}') return a:text(), a:kind(), a:is_contract(), a == address.parse(a:text())");
+        let (round, kind, contract, same): (String, String, bool, bool) = lua.load(code).eval().unwrap();
+
+        assert_eq!((round, kind.as_str(), contract, same), (text, "contract", true, true));
+        assert!(lua.load("address.parse('rsa:0x00')").exec().is_err());
     }
 }
