@@ -10,6 +10,8 @@
 
 #[cfg(feature = "finality-authority")]
 use super::authority::{self, AuthorityConfig};
+#[cfg(feature = "finality-authority")]
+use crate::registry::signers::Signers;
 #[cfg(feature = "finality-depth")]
 use super::depth::{Depth, DepthConfig};
 #[cfg(feature = "finality-ffg")]
@@ -18,7 +20,7 @@ use super::ffg::{self, FfgConfig};
 use super::votes::Votes;
 use {
     super::Finality,
-    crate::chain::StakingRules,
+    crate::chain::{SignerRules, StakingRules},
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::db::{DbError, Read, State},
@@ -41,7 +43,7 @@ pub enum FinalityConfig {
     #[cfg(feature = "finality-ffg")]
     #[wincode(tag = 0)]
     Ffg(FfgConfig),
-    #[document(summary = "The same votes, from a fixed set of keys genesis names, a threshold of them justifying. No bonds, and nobody can be slashed.")]
+    #[document(summary = "The same votes, from signers genesis names, a threshold of them justifying, who change by their own approval. No bonds, and nobody can be slashed.")]
     #[cfg(feature = "finality-authority")]
     #[wincode(tag = 1)]
     Authority(AuthorityConfig),
@@ -152,14 +154,29 @@ impl FinalityConfig {
 
     #[document(
         parent = "FinalityConfig",
-        summary = "Who votes in an epoch, as a state knows it: the fixed set for authority finality, the bonded set for FFG, and none for depth.",
+        summary = "The rules signer changes run under, for authority finality.",
+    )]
+    pub fn signer_rules(&self) -> Option<SignerRules> {
+        match *self {
+            #[cfg(feature = "finality-ffg")]
+            FinalityConfig::Ffg(_) => None,
+            #[cfg(feature = "finality-authority")]
+            FinalityConfig::Authority(ref config) => Some(config.signer_rules()),
+            #[cfg(feature = "finality-depth")]
+            FinalityConfig::Depth(_) => None,
+        }
+    }
+
+    #[document(
+        parent = "FinalityConfig",
+        summary = "Who votes in an epoch, as a state knows it: the bonded set for FFG, the signers fixed for it under authority finality, and none for depth.",
     )]
     pub fn voters(&self, state: &State, epoch: u64) -> Result<Option<ValidatorSet>, DbError> {
         match *self {
             #[cfg(feature = "finality-ffg")]
             FinalityConfig::Ffg(_) => crate::registry::validators::Validators::new(state).set(epoch),
             #[cfg(feature = "finality-authority")]
-            FinalityConfig::Authority(ref config) => Ok(Some(authority::set(config))),
+            FinalityConfig::Authority(_) => Ok(Signers::new(state).set(epoch)?.map(|set| set.validators())),
             #[cfg(feature = "finality-depth")]
             FinalityConfig::Depth(_) => Ok(None),
         }
@@ -183,7 +200,7 @@ impl FinalityConfig {
             #[cfg(feature = "finality-ffg")]
             FinalityConfig::Ffg(ref config) => ffg::write_genesis(state, config),
             #[cfg(feature = "finality-authority")]
-            FinalityConfig::Authority(_) => Ok(()),
+            FinalityConfig::Authority(ref config) => authority::write_genesis(state, config),
             #[cfg(feature = "finality-depth")]
             FinalityConfig::Depth(_) => Ok(()),
         }
@@ -202,7 +219,7 @@ impl FinalityConfig {
             #[cfg(feature = "finality-ffg")]
             FinalityConfig::Ffg(ref config) => Box::new(Votes::load(ffg::Staked::new(config.clone()), db, genesis)?),
             #[cfg(feature = "finality-authority")]
-            FinalityConfig::Authority(ref config) => Box::new(Votes::load(authority::Fixed::new(config), db, genesis)?),
+            FinalityConfig::Authority(ref config) => Box::new(Votes::load(authority::Appointed::new(config), db, genesis)?),
             #[cfg(feature = "finality-depth")]
             FinalityConfig::Depth(ref config) => Box::new(Depth::load(config, db, genesis)?),
         })

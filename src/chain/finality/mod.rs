@@ -5,8 +5,9 @@
 //!   at the start of each epoch, with links from a justified checkpoint to a later one. Two thirds
 //!   of the bonded weight voting for one link justifies its target; justifying the very next
 //!   checkpoint finalizes the source.
-//! - authority (authority.rs): the same votes, from a fixed set of keys genesis names, a
-//!   threshold of them justifying. No bonds, rewards are optional, and nobody can be slashed.
+//! - authority (authority.rs): the same votes, from signers genesis names, a threshold of them
+//!   justifying, who change by their own approval. No bonds, rewards are optional, and nobody
+//!   can be slashed.
 //! - depth (depth.rs): no votes. A block is final once enough blocks are on top of it.
 //!
 //! The chain talks to each through the Finality trait. Whatever the kind, it never rolls back past

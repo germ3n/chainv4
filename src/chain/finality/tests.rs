@@ -148,14 +148,17 @@ mod voting {
         })
     }
 
-    /// The three voters as signers, two of them the threshold.
+    /// The three voters as signers, two of them justifying and two changing the set.
     #[cfg(feature = "finality-authority")]
     pub(super) fn signers() -> AuthorityConfig {
         AuthorityConfig {
             checkpoint_interval: INTERVAL,
             vote_depth: 1,
+            activation_delay: 2,
+            max_signers: 10,
             signers: voters().iter().map(Keypair::public).collect(),
             threshold: 2,
+            change_threshold: 2,
             vote_reward: u256::new(VOTE_REWARD.into()),
             max_proofs_per_block: 4,
         }
@@ -751,6 +754,9 @@ mod voting {
             (AuthorityConfig { signers: Vec::new(), ..good.clone() }, "at least one signer"),
             (AuthorityConfig { signers: vec![signer, signer], threshold: 2, ..good.clone() }, "named twice"),
             (AuthorityConfig { checkpoint_interval: 0, ..good.clone() }, "checkpoint_interval"),
+            (AuthorityConfig { activation_delay: 0, ..good.clone() }, "activation_delay"),
+            (AuthorityConfig { change_threshold: 1, ..good.clone() }, "change_threshold must"),
+            (AuthorityConfig { max_signers: 2, ..good.clone() }, "max_signers"),
         ];
 
         for (config, expected) in cases {
@@ -767,10 +773,69 @@ mod voting {
         let even = AuthorityConfig {
             signers: voters().iter().map(Keypair::public).chain([key(14).public()]).collect(),
             threshold: 3,
+            change_threshold: 3,
             ..good
         };
 
         assert!(Chain::open(Arc::new(MemoryDb::default()), &genesis_with(Some(FinalityConfig::Authority(even)))).is_ok());
+    }
+
+    #[cfg(feature = "finality-authority")]
+    #[test]
+    fn signers_change_by_their_own_approval() {
+        use crate::registry::signers::Signers;
+        use crate::structs::tx::Tx;
+
+        let mut chain = open(&authority());
+        let [alice, bob, carol] = voters();
+        let dave = key(14);
+        let approve = |keypair: &Keypair, chain: &Chain| {
+            let tx = Tx::ApproveSigners {
+                version: 0,
+                signers: vec![alice.public(), bob.public(), dave.public()],
+                threshold: 2,
+                change_threshold: 2,
+            };
+
+            SignedTx::sign(tx, nonce(chain, keypair), keypair)
+        };
+
+        // Carol out, Dave in: one approval is not enough, and an outsider's does not count.
+        let txs = vec![approve(&alice, &chain), approve(&dave, &chain)];
+        let receipts = advance(&mut chain, txs, Vec::new()).unwrap();
+
+        assert_eq!(receipts[0].result, Ok(Effect::Done));
+        assert!(matches!(&receipts[1].result, Err(failure) if failure.to_string().contains("only a signer")));
+        assert_eq!(Signers::new(&chain.state()).decided().unwrap().version, 0);
+
+        let txs = vec![approve(&bob, &chain)];
+        advance(&mut chain, txs, Vec::new()).unwrap();
+        let decided = Signers::new(&chain.state()).decided().unwrap();
+
+        assert_eq!(decided.version, 1);
+        assert!(decided.set.signers.contains(&dave.public()) && !decided.set.signers.contains(&carol.public()));
+
+        // Decided in epoch 0, fixed at epoch 1's checkpoint for epoch 1 + 2: until then the old
+        // signers vote.
+        finalize_through(&mut chain, 2);
+        let fixed = |epoch: u64| Signers::new(&chain.state()).set(epoch).unwrap().unwrap();
+
+        assert!(fixed(2).signers.contains(&carol.public()));
+        assert!(fixed(3).signers.contains(&dave.public()));
+
+        grow_to(&mut chain, 3 * INTERVAL + 1);
+
+        assert_eq!(chain.vote_for(&carol.public()).unwrap(), None, "carol is no signer in epoch 3");
+
+        let late = signed(&chain, &carol, checkpoint(&chain, 2), checkpoint(&chain, 3));
+
+        assert!(matches!(chain.add_vote(late), Err(FinalityError::NotValidator)));
+
+        chain.add_vote(honest_vote(&chain, &dave)).unwrap();
+        let update = chain.add_vote(honest_vote(&chain, &alice)).unwrap();
+
+        assert_eq!(update.justified, [checkpoint(&chain, 3)]);
+        assert_eq!(update.finalized, Some(checkpoint(&chain, 2)));
     }
 
     #[cfg(feature = "finality-authority")]
@@ -815,7 +880,19 @@ fn staking_needs_staking() {
         voter: key(11).public(),
     };
 
+    let approve = SignedTx::sign(
+        Tx::ApproveSigners {
+            version: 0,
+            signers: vec![key(11).public()],
+            threshold: 1,
+            change_threshold: 1,
+        },
+        1,
+        &dev(),
+    );
+
     assert_eq!(receipts[0].result, Err(Failure::NoStaking));
+    assert_eq!(advance(&mut chain, vec![approve], Vec::new()).unwrap()[0].result, Err(Failure::NoSigners));
     assert_eq!((chain.justified(), chain.finalized()), (None, None));
     assert!(!chain.takes_votes());
     assert!(matches!(

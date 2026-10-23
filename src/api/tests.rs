@@ -346,17 +346,36 @@ fn serve_with(finality: crate::chain::FinalityConfig, height: u64, txs: impl Fn(
 
 #[cfg(feature = "finality-authority")]
 #[test]
-fn authority_chains_list_their_signers() {
+fn authority_chains_list_their_signers_and_changes() {
     let scheme = DevAuthority::dev_keypair().public().key_type();
-    let mut signers: Vec<_> = (0..3).map(|_| Keypair::generate(scheme).unwrap().public()).collect();
+    let keys: Vec<Keypair> = (0..3).map(|_| Keypair::generate(scheme).unwrap()).collect();
+    let mut signers: Vec<_> = keys.iter().map(Keypair::public).collect();
     let config = crate::chain::AuthorityConfig {
         signers: signers.clone(),
         threshold: 2,
+        change_threshold: 2,
         ..crate::chain::AuthorityConfig::dev(signers[0])
     };
-    let (address, _) = serve_with(crate::chain::FinalityConfig::Authority(config), 3, |_| Vec::new());
+    let proposal = vec![signers[0], signers[1]];
+    let approve = SignedTx::sign(
+        Tx::ApproveSigners {
+            version: 0,
+            signers: proposal.clone(),
+            threshold: 2,
+            change_threshold: 2,
+        },
+        0,
+        &keys[0],
+    );
+    let (address, _) = serve_with(crate::chain::FinalityConfig::Authority(config), 3, |height| match height {
+        1 => vec![approve.clone()],
+        _ => Vec::new(),
+    });
     let listing = ok(address, "/validators");
     signers.sort();
+    let mut proposed = proposal.clone();
+    proposed.sort();
+    let names = |keys: &[crate::crypto::keypair::PublicKey]| keys.iter().map(|key| key.to_string()).collect::<Vec<_>>();
 
     assert_eq!(ok(address, "/status")["finality"]["type"], "authority");
     assert_eq!(listing["validators"], json!([]), "nobody bonds");
@@ -369,6 +388,28 @@ fn authority_chains_list_their_signers() {
         })).collect::<Vec<_>>())
     );
     assert_eq!(listing["total_weight"], "3");
+
+    let tx = &ok(address, "/blocks/1")["txs"][0]["tx"];
+
+    assert_eq!(tx["type"], "approve_signers");
+    assert_eq!(tx["version"], 0);
+    assert_eq!(tx["signers"], json!(names(&proposed)));
+
+    let current = ok(address, "/signers");
+    let set = json!({ "signers": names(&signers), "threshold": 2, "change_threshold": 2 });
+
+    assert_eq!(current["version"], 0);
+    assert_eq!(current["decided"], set);
+    assert_eq!(current["active"], set);
+    assert_eq!(
+        current["proposals"],
+        json!([{
+            "signers": names(&proposed),
+            "threshold": 2,
+            "change_threshold": 2,
+            "approvals": [keys[0].public().to_string()],
+        }])
+    );
 }
 
 #[cfg(feature = "finality-depth")]
@@ -399,6 +440,7 @@ fn depth_chains_finalize_by_depth() {
     assert_eq!(ok(address, &format!("/txs/{}", id(1)))["final"], true);
     assert_eq!(ok(address, &format!("/txs/{}", id(5)))["final"], false);
     assert_eq!(get(address, "/validators").0, 404);
+    assert_eq!(get(address, "/signers").0, 404);
 }
 
 #[cfg(feature = "finality-ffg")]

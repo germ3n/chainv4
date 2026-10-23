@@ -263,6 +263,37 @@ mod send {
         assert!(node.chain().finalized().unwrap().epoch >= 1);
     }
 
+    #[cfg(feature = "finality-authority")]
+    #[test]
+    fn signers_change_with_send() {
+        use crate::registry::signers::Signers;
+
+        let dev = DevAuthority::dev_keypair().public();
+        let finality = FinalityConfig::Authority(crate::chain::AuthorityConfig::dev(dev));
+        let running = Running::launch(true, false, Some(finality));
+        let newcomer = Keypair::generate(dev.key_type()).unwrap().public();
+        let approve = |add: Vec<_>, version: Option<u64>| TxArgs::ApproveSigners {
+            add,
+            remove: Vec::new(),
+            threshold: Some(2),
+            change_threshold: Some(2),
+            version,
+        };
+        // The dev key is the one signer, and one approval changes the set.
+        let added = send(running.args(approve(vec![newcomer], None)));
+        let stale = send(running.args(approve(Vec::new(), Some(0))));
+        let already = send(running.args(approve(vec![dev], None)));
+        let node = running.stop();
+        let decided = Signers::new(&node.chain().state()).decided().unwrap();
+
+        added.unwrap();
+        assert!(stale.unwrap_err().to_string().contains("the signers changed since"));
+        assert!(already.unwrap_err().to_string().contains("is a signer already"));
+        assert_eq!(decided.version, 1);
+        assert_eq!(decided.set.signers.len(), 2);
+        assert!(decided.set.signers.contains(&newcomer));
+    }
+
     #[cfg(feature = "finality-ffg")]
     #[test]
     fn validators_bond_and_unbond_with_send() {

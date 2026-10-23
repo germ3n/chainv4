@@ -129,6 +129,23 @@ pub enum Tx {
     )]
     #[wincode(tag = 9)]
     Slash { first: Box<SignedVote>, second: Box<SignedVote> },
+    #[document(
+        summary = "Approves a new set of signers for authority finality. Only one of the decided signers may send it, from its key's address. Once change_threshold of them approve the same set for the same version, it is decided, and the checkpoints that follow fix it for epochs activation_delay on.",
+        params = {
+            version = "The version of the decided set this changes, so an approval never counts toward a later change.",
+            signers = "Every signer of the new set.",
+            threshold = "How many of them justify a checkpoint: more than half, and at most all.",
+            change_threshold = "How many of them change the set after that: more than half, and at most all.",
+        },
+        see_also = "Signers::approve, AuthorityConfig",
+    )]
+    #[wincode(tag = 10)]
+    ApproveSigners {
+        version: u64,
+        signers: Vec<PublicKey>,
+        threshold: u32,
+        change_threshold: u32,
+    },
 }
 
 #[document(
@@ -227,6 +244,7 @@ impl Verifiable for Tx {
                 nonzero(amount)
             }
             Tx::Unbond { voter } | Tx::Withdraw { voter } => voter.verify(),
+            Tx::ApproveSigners { signers, .. } => signers.iter().try_for_each(Verifiable::verify),
             // The signatures are checked when it runs, against the chain's genesis id.
             Tx::Slash { first, second } => {
                 if !first.vote.conflicts(&second.vote) {

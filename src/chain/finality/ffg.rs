@@ -5,11 +5,11 @@
 //! the whole bond, part of it paid to whoever reports them.
 
 use {
-    super::votes::{Electorate, VoteParams},
+    super::votes::{Electorate, VoteParams, Voters},
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::db::{DbError, State},
-    crate::registry::validators::{Staking, ValidatorRecord, ValidatorSet, Validators},
+    crate::registry::validators::{Staking, ValidatorRecord, Validators},
     crate::structs::address::Address,
     crate::structs::u256::{U256Le, u256},
     r#macro::document,
@@ -179,16 +179,22 @@ impl Electorate for Staked {
         }
     }
 
-    fn set(&self, state: &State, epoch: u64) -> Result<Option<ValidatorSet>, DbError> {
-        Validators::new(state).set(epoch)
+    /// Two thirds of the bonded weight: the smallest weight w with 3w >= 2 total, and never
+    /// nothing, so an empty set justifies nothing.
+    fn voters(&self, state: &State, epoch: u64) -> Result<Option<Voters>, DbError> {
+        Ok(Validators::new(state).set(epoch)?.map(|set| {
+            let (two, three) = (u256::from(2u64), u256::from(3u64));
+            let needed = set.total().saturating_mul(two).saturating_add(two) / three;
+
+            Voters {
+                set,
+                needed: needed.max(u256::ONE),
+            }
+        }))
     }
 
-    fn fixed_ahead(&self) -> Option<u64> {
-        Some(self.config.activation_delay)
-    }
-
-    fn enough(&self, set: &ValidatorSet, weight: u256) -> bool {
-        set.supermajority(weight)
+    fn fixed_ahead(&self) -> u64 {
+        self.config.activation_delay
     }
 
     /// Each checkpoint fixes the validator set activation_delay epochs ahead.

@@ -4,6 +4,7 @@
 use {
     crate::chain::{TxReceipt, TxStatus},
     crate::crypto::keypair::PublicKey,
+    crate::registry::signers::SignerSet,
     crate::registry::validators::ValidatorRecord,
     crate::structs::vote::{Checkpoint, Justification, SignedVote},
     crate::registry::contracts::ContractRecord,
@@ -170,7 +171,28 @@ pub fn tx(tx: &Tx) -> Value {
             "first": vote(first),
             "second": vote(second),
         }),
+        Tx::ApproveSigners {
+            version,
+            signers,
+            threshold,
+            change_threshold,
+        } => {
+            let mut value = signer_set(&SignerSet::new(signers.clone(), *threshold, *change_threshold));
+            value["type"] = "approve_signers".into();
+            value["version"] = (*version).into();
+
+            value
+        }
     }
+}
+
+/// A set of authority signers, with its two thresholds.
+pub fn signer_set(set: &SignerSet) -> Value {
+    json!({
+        "signers": set.signers.iter().map(|signer| signer.to_string()).collect::<Vec<_>>(),
+        "threshold": set.threshold,
+        "change_threshold": set.change_threshold,
+    })
 }
 
 pub fn checkpoint(checkpoint: &Checkpoint) -> Value {

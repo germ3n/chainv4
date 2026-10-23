@@ -196,8 +196,11 @@ fn finality_json(config: &FinalityConfig) -> Value {
             "type": "authority",
             "checkpoint_interval": authority.checkpoint_interval,
             "vote_depth": authority.vote_depth,
+            "activation_delay": authority.activation_delay,
+            "max_signers": authority.max_signers,
             "signers": authority.signers.iter().map(|signer| signer.to_string()).collect::<Vec<_>>(),
             "threshold": authority.threshold,
+            "change_threshold": authority.change_threshold,
             "vote_reward": authority.vote_reward.to_string(),
             "max_proofs_per_block": authority.max_proofs_per_block,
         }),
@@ -246,12 +249,15 @@ fn finality_from_json(mut finality: Fields) -> Result<FinalityConfig, String> {
         "authority" => FinalityConfig::Authority(AuthorityConfig {
             checkpoint_interval: finality.whole("checkpoint_interval")?,
             vote_depth: finality.whole("vote_depth")?,
+            activation_delay: finality.whole("activation_delay")?,
+            max_signers: finality.small("max_signers")?,
             signers: finality
                 .strings("signers")?
                 .iter()
                 .map(|text| text.parse::<PublicKey>().map_err(|_| format!("finality.signers: cannot read {text}")))
                 .collect::<Result<Vec<_>, String>>()?,
             threshold: finality.small("threshold")?,
+            change_threshold: finality.small("change_threshold")?,
             vote_reward: finality.amount("vote_reward")?,
             max_proofs_per_block: finality.small("max_proofs_per_block")?,
         }),

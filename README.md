@@ -2,7 +2,7 @@
 
 A blockchain node, and a command-line client for it, in one binary. Contracts run on Lua
 (Luau) or WebAssembly; blocks come from proof of work or a development authority, and are
-finalized by bonded validators, a fixed set of signers, or depth; nodes talk over libp2p; a JSON
+finalized by bonded validators, a set of signers, or depth; nodes talk over libp2p; a JSON
 HTTP API serves queries and takes transactions.
 
 This page covers the `chainv4` command and how contracts live on the chain. The code reference
@@ -133,7 +133,7 @@ only and is never overwritten, but it is not encrypted: guard it.
 ## Sending transactions
 
 ```sh
-chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call|bond|unbond|withdraw|slash> …
+chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call|bond|unbond|withdraw|slash|approve-signers> …
 ```
 
 `send` looks up the signer's next nonce, signs, posts the transaction to a node, and waits until
@@ -334,7 +334,7 @@ blocks become final, as its `finality.type`; each kind is a cargo feature, all o
 | Type | Final when | Who | Feature |
 | --- | --- | --- | --- |
 | `ffg` | Two thirds by bond vote for it, as in Casper FFG. | Validators who bond on chain, and can be slashed. | `finality-ffg` |
-| `authority` | A threshold of fixed signers vote for it, the same way. | Keys genesis names. | `finality-authority` |
+| `authority` | A threshold of signers vote for it, the same way. | Keys genesis names, changed by their own approval. | `finality-authority` |
 | `depth` | `depth` blocks are on top of it. | Nobody votes. | `finality-depth` |
 
 Under the two that vote, every `checkpoint_interval` blocks starts an epoch, and the block there
@@ -395,8 +395,23 @@ voting for a link justify it. The threshold must be more than half the signers, 
 conflicting checkpoints can only both be finalized if a signer voted against itself. Each signer
 runs a node with `--validate --validator-key` its key. There is no bonding or slashing: staking
 transactions fail, and conflicting votes are only logged and listed at `GET /evidence`.
-`vote_reward`, 0 in the dev settings, pays each signer's own address. The signers are fixed:
-changing them takes a new chain.
+`vote_reward`, 0 in the dev settings, pays each signer's own address.
+
+The signers change by their own approval. Each approving signer sends the whole new set, made
+from the decided one, signed with its key:
+
+```sh
+chainv4 send --key signer.key approve-signers --add ed25519:0x7c2e… --threshold 2 --change-threshold 2
+chainv4 send --key signer.key approve-signers --remove ed25519:0x41f0…
+```
+
+Once `change_threshold` of the decided signers approve the same set, it is decided; the
+checkpoint after that fixes it for epochs `activation_delay` on, as FFG fixes its validator sets,
+so a change decided in epoch k votes from epoch k + `activation_delay` + 1. Both thresholds must
+be more than half the new set, and it may hold at most `max_signers`. An approval names the
+version of the set it changes, which `send` fills in, so approvals for a set that has changed
+since never count, and a signer that approves a different set moves its approval there.
+`GET /signers` shows who votes now, the decided set, and the approvals so far.
 
 ### Depth finality
 
@@ -419,6 +434,7 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "�
 | `GET /contracts/{address}` | Engine, deployer, exported functions, and whether it can be upgraded. |
 | `GET /validators` | Every bonded validator, and who votes in the current epoch with what weight: the bonded set under `ffg`, the signers under `authority`; 404 under `depth`. |
 | `GET /validators/{voter}` | One validator by voting key: its account, bond, the epochs it votes in, and whether it was slashed. |
+| `GET /signers` | Under `authority`: who votes now, the set decided last and its version, and the approvals so far for changing it. |
 | `GET /evidence` | Conflicting votes this node has seen, each encoded ready for `send slash`. |
 | `POST /txs` | `{"tx": "0x…"}`, an encoded signed transaction; answers 202 with its id. |
 

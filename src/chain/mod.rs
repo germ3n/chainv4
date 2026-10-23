@@ -31,7 +31,7 @@ mod execute;
 mod finality;
 mod receipt;
 
-pub use execute::{Effect, Failure, Receipt, Rules, StakingRules, TxError};
+pub use execute::{Effect, Failure, Receipt, Rules, SignerRules, StakingRules, TxError};
 #[cfg(feature = "finality-authority")]
 pub use finality::AuthorityConfig;
 #[cfg(feature = "finality-depth")]
@@ -254,6 +254,7 @@ impl Genesis {
             minter: self.minter,
             limits: self.tx_limits,
             staking: self.finality.as_ref().and_then(|config| config.staking(self.block().id())),
+            signers: self.finality.as_ref().and_then(FinalityConfig::signer_rules),
         }
     }
 }

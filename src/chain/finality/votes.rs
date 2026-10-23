@@ -43,6 +43,12 @@ pub(super) struct VoteParams {
     pub(super) max_proofs_per_block: u32,
 }
 
+/// An epoch's voters, and the weight their votes for one link must add up to.
+pub(super) struct Voters {
+    pub(super) set: ValidatorSet,
+    pub(super) needed: u256,
+}
+
 /// Who votes, and what it takes: the part of vote-based finality each kind decides.
 pub(super) trait Electorate: Send {
     /// The kind's name.
@@ -52,15 +58,11 @@ pub(super) trait Electorate: Send {
     fn params(&self) -> VoteParams;
 
     /// The voters for an epoch as a state knows them, or None when that state cannot know yet.
-    fn set(&self, state: &State, epoch: u64) -> Result<Option<ValidatorSet>, DbError>;
+    fn voters(&self, state: &State, epoch: u64) -> Result<Option<Voters>, DbError>;
 
-    /// How many epochs ahead each epoch's voters are fixed, or None when they never change. A
-    /// branch only agrees with the main chain on a set if it split off after the checkpoint that
-    /// fixed it.
-    fn fixed_ahead(&self) -> Option<u64>;
-
-    /// Whether votes of this much weight justify, out of a set.
-    fn enough(&self, set: &ValidatorSet, weight: u256) -> bool;
+    /// How many epochs ahead each epoch's voters are fixed. A branch only agrees with the main
+    /// chain on its voters if it split off after the checkpoint that fixed them.
+    fn fixed_ahead(&self) -> u64;
 
     /// Updates state at a checkpoint, such as fixing a later epoch's voters.
     fn at_checkpoint(&self, _state: &Arc<State>, _epoch: u64) -> Result<(), DbError> {
@@ -173,11 +175,9 @@ impl<E: Electorate> Votes<E> {
     /// The voters a target's votes count against, when this node can know them: the main
     /// chain's, which also hold for any branch that split off after the checkpoint that fixed
     /// them.
-    fn set_for(&self, chain: &View, target: &Checkpoint) -> Result<Option<ValidatorSet>, DbError> {
-        if let Some(ahead) = self.electorate.fixed_ahead()
-            && !self.main_checkpoint(chain, target)?
-        {
-            let fixed_at = self.checkpoint_height(target.epoch.saturating_sub(ahead));
+    fn voters_for(&self, chain: &View, target: &Checkpoint) -> Result<Option<Voters>, DbError> {
+        if !self.main_checkpoint(chain, target)? {
+            let fixed_at = self.checkpoint_height(target.epoch.saturating_sub(self.electorate.fixed_ahead()));
             let Some(block) = chain.block(&target.block)? else {
                 return Ok(None);
             };
@@ -188,7 +188,7 @@ impl<E: Electorate> Votes<E> {
             }
         }
 
-        self.electorate.set(&chain.state(), target.epoch)
+        self.electorate.voters(&chain.state(), target.epoch)
     }
 
     /// Records the vote for conflict checks, and returns evidence when it conflicts with one the
@@ -261,8 +261,8 @@ impl<E: Electorate> Votes<E> {
         let placeable = self.main_checkpoint(chain, &target)?
             && self.main_checkpoint(chain, &source)?
             && self.is_justified(chain, &source)?;
-        let set = if placeable { self.set_for(chain, &target)? } else { None };
-        let Some(set) = set else {
+        let voters = if placeable { self.voters_for(chain, &target)? } else { None };
+        let Some(voters) = voters else {
             if self.pending.len() >= MAX_PENDING {
                 self.pending.pop_front();
             }
@@ -274,7 +274,7 @@ impl<E: Electorate> Votes<E> {
                 ..FinalityUpdate::default()
             });
         };
-        let member = *set.member(&vote.vote.voter).ok_or(FinalityError::NotValidator)?;
+        let member = *voters.set.member(&vote.vote.voter).ok_or(FinalityError::NotValidator)?;
         let already = stored_justification(&**chain.db(), &target.block)?.is_some();
         let tally = self.links.entry((source, target)).or_default();
 
@@ -282,7 +282,7 @@ impl<E: Electorate> Votes<E> {
             tally.weight += member.weight;
         }
 
-        if already || !self.electorate.enough(&set, tally.weight) {
+        if already || tally.weight < voters.needed {
             return Ok(FinalityUpdate::default());
         }
 
@@ -337,9 +337,9 @@ impl<E: Electorate> Finality for Votes<E> {
                 return Err(bad(format!("epoch {}'s voters are paid already", target.epoch)));
             }
 
-            let set = self
+            let voters = self
                 .electorate
-                .set(state, target.epoch)?
+                .voters(state, target.epoch)?
                 .ok_or_else(|| bad(format!("no validator set for epoch {}", target.epoch)))?;
             let mut weight = u256::ZERO;
             let mut previous: Option<PublicKey> = None;
@@ -354,7 +354,8 @@ impl<E: Electorate> Finality for Votes<E> {
                     return Err(bad(format!("a bad vote in the proof for epoch {}", target.epoch)));
                 }
 
-                let member = set
+                let member = voters
+                    .set
                     .member(&vote.vote.voter)
                     .ok_or_else(|| bad(format!("a vote by a non-validator for epoch {}", target.epoch)))?;
                 weight += member.weight;
@@ -362,7 +363,7 @@ impl<E: Electorate> Finality for Votes<E> {
                 previous = Some(vote.vote.voter);
             }
 
-            if !self.electorate.enough(&set, weight) {
+            if weight < voters.needed {
                 return Err(bad(format!("the proof for epoch {} falls short of a justification", target.epoch)));
             }
 
@@ -436,8 +437,8 @@ impl<E: Electorate> Finality for Votes<E> {
             return Err(FinalityError::Unverifiable("its source is not on its target's branch"));
         }
 
-        let set = self
-            .set_for(chain, &target)?
+        let voters = self
+            .voters_for(chain, &target)?
             .ok_or(FinalityError::Unverifiable("its validator set is not known here"))?;
         let mut weight = u256::ZERO;
         let mut previous: Option<PublicKey> = None;
@@ -452,11 +453,11 @@ impl<E: Electorate> Finality for Votes<E> {
             }
 
             vote.verify(&self.genesis).map_err(FinalityError::Invalid)?;
-            weight += set.member(&vote.vote.voter).ok_or(FinalityError::NotValidator)?.weight;
+            weight += voters.set.member(&vote.vote.voter).ok_or(FinalityError::NotValidator)?.weight;
             previous = Some(vote.vote.voter);
         }
 
-        if !self.electorate.enough(&set, weight) {
+        if weight < voters.needed {
             return Err(FinalityError::Unverifiable("its votes fall short of a justification"));
         }
 
@@ -514,8 +515,8 @@ impl<E: Electorate> Finality for Votes<E> {
             block: block.id(),
         };
 
-        match self.set_for(chain, &target)? {
-            Some(set) if set.member(voter).is_some() => Ok(Some(Vote {
+        match self.voters_for(chain, &target)? {
+            Some(voters) if voters.set.member(voter).is_some() => Ok(Some(Vote {
                 source,
                 target,
                 voter: *voter,

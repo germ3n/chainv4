@@ -8,6 +8,7 @@ use {
         stored_work,
     },
     crate::crypto::keypair::PublicKey,
+    crate::registry::signers::{SignerSet, Signers},
     crate::registry::validators::Validators,
     crate::structs::vote::Checkpoint,
     crate::db::{DbError, Read, State},
@@ -108,6 +109,7 @@ fn router(api: Api) -> Router {
         .route("/txs/{id}", get(transaction))
         .route("/validators", get(validators))
         .route("/validators/{voter}", get(validator))
+        .route("/signers", get(signers))
         .route("/evidence", get(evidence))
         .fallback(async || ApiError::NotFound("no such route".to_string()))
         .layer(DefaultBodyLimit::max(MAX_BODY))
@@ -254,6 +256,45 @@ async fn validator(Shared(api): Shared<Api>, Path(voter): Path<String>) -> Answe
         .ok_or_else(|| ApiError::NotFound(format!("no validator has the voting key {voter}")))?;
 
     Ok(Json(json::validator(&voter, &record)))
+}
+
+/// Authority finality's signers: those voting in the tip's epoch, the set decided last, and the
+/// approvals so far for changing it, by proposal.
+async fn signers(Shared(api): Shared<Api>) -> Answer {
+    let Some(config) = &api.finality else {
+        return Err(ApiError::NotFound("this chain has no finality".to_string()));
+    };
+
+    if config.signer_rules().is_none() {
+        return Err(ApiError::NotFound(format!("{} finality has no signers", config.name())));
+    }
+
+    let db = api.db;
+    let epoch = config.epoch_of(tip(&*db)?.header.height);
+    let state = State::new(db);
+    let signers = Signers::new(&state);
+    let decided = signers.decided()?;
+    let mut proposals: Vec<(SignerSet, Vec<PublicKey>)> = Vec::new();
+
+    for approval in signers.ballot()?.approvals {
+        match proposals.iter_mut().find(|(proposal, _)| *proposal == approval.proposal) {
+            Some((_, approvers)) => approvers.push(approval.signer),
+            None => proposals.push((approval.proposal, vec![approval.signer])),
+        }
+    }
+
+    Ok(Json(json!({
+        "epoch": epoch,
+        "active": signers.set(epoch)?.as_ref().map(json::signer_set),
+        "version": decided.version,
+        "decided": json::signer_set(&decided.set),
+        "proposals": proposals.iter().map(|(proposal, approvers)| {
+            let mut value = json::signer_set(proposal);
+            value["approvals"] = approvers.iter().map(PublicKey::to_string).collect::<Vec<_>>().into();
+
+            value
+        }).collect::<Vec<_>>(),
+    })))
 }
 
 /// Conflicting votes this node has seen, ready for Tx::Slash.

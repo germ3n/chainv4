@@ -100,10 +100,18 @@
   the reporter a share. Fork choice never goes below the finalized checkpoint, follows work only
   from the justified one on, and follows a newer justified branch over more work.
 - [x] **Switchable finality.** Genesis picks the kind as `finality.type`: `ffg`; `authority`, the
-  same votes from fixed signers with a threshold above half and no staking; or `depth`, final
+  same votes from signers genesis names, with a threshold above half and no staking; or `depth`, final
   under a number of blocks with no votes. `chainv4 genesis --finality` writes each.
-- [ ] **Authority signers are fixed.** Changing them takes a new chain. A signer-set change voted
-  by the current signers, taking effect a few epochs on as FFG's sets do, would fix it.
+- [x] **Authority signers change by approval.** `Tx::ApproveSigners` (`send approve-signers`)
+  names a whole new set and both thresholds; once `change_threshold` of the decided signers
+  approve the same one for the same version, it is decided and fixed for epochs
+  `activation_delay` on. `GET /signers` shows the ballot.
+- [ ] **Signer approvals never expire.** A proposal waits until a change is decided, however
+  old; the ballot only empties when one is. An expiry, or a way to withdraw an approval, would
+  tidy it.
+- [ ] **A signer's key is its account.** Approvals are sent from the address of the signer's
+  voting key, so that key has to sign transactions too, unlike FFG, where the voting key stays
+  apart from the bond's account.
 - [ ] **Conflicting authority votes go unpunished.** They are kept as evidence and logged, but
   with no bonds there is nothing to take; the remedy is social.
 - [ ] **Depth finality is each node's own.** Nodes split for longer than `depth` blocks finalize

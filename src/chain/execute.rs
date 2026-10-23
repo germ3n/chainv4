@@ -1,6 +1,7 @@
 use {
     crate::crypto::verifiable::{Verifiable, VerifyError},
     crate::db::{DbError, State},
+    crate::registry::signers::{SignerSet, Signers},
     crate::registry::validators::{Staking, Validators},
     crate::registry::{Accounts, Contracts, RegistryError},
     crate::structs::address::Address,
@@ -29,6 +30,19 @@ pub struct Rules {
     pub limits: Limits,
     #[document(summary = "What staking transactions run under, or None on a chain without staking, where they fail.")]
     pub staking: Option<StakingRules>,
+    #[document(summary = "What signer changes run under, or None on a chain without authority finality, where they fail.")]
+    pub signers: Option<SignerRules>,
+}
+
+#[document(
+    summary = "The settings signer changes run under, on a chain with authority finality.",
+    category = "Chain",
+    see_also = "Rules, AuthorityConfig, Tx::ApproveSigners",
+)]
+#[derive(Clone, Copy, Debug)]
+pub struct SignerRules {
+    #[document(summary = "The most signers a set may have.")]
+    pub max_signers: u32,
 }
 
 #[document(
@@ -80,6 +94,8 @@ pub enum Failure {
     EngineNotAllowed(Engine),
     #[document(summary = "A staking transaction on a chain where validators do not bond.")]
     NoStaking,
+    #[document(summary = "A signer change on a chain without authority finality.")]
+    NoSigners,
     #[document(summary = "Slashing evidence whose signatures do not check out.")]
     BadEvidence,
 }
@@ -92,6 +108,7 @@ impl fmt::Display for Failure {
             Failure::NotMinter => write!(f, "only the minter may mint"),
             Failure::EngineNotAllowed(engine) => write!(f, "this chain does not run {} contracts", engine.name()),
             Failure::NoStaking => write!(f, "this chain has no staking"),
+            Failure::NoSigners => write!(f, "this chain has no authority signers"),
             Failure::BadEvidence => write!(f, "the evidence's signatures do not check out"),
         }
     }
@@ -292,6 +309,20 @@ fn run(
             staking(&|validators, finality, epoch| {
                 validators.slash(&sender, &first.vote.voter, epoch, &finality.staking).map(|_| ())
             })
+        }
+        Tx::ApproveSigners {
+            version,
+            signers,
+            threshold,
+            change_threshold,
+        } => {
+            let Some(rules) = &rules.signers else {
+                return (0, Err(Failure::NoSigners), Vec::new());
+            };
+            let proposal = SignerSet::new(signers.clone(), *threshold, *change_threshold);
+            let approved = Signers::new(layer).approve(&sender, *version, proposal, rules.max_signers);
+
+            (0, moved(approved.map(|_| ())), Vec::new())
         }
     }
 }

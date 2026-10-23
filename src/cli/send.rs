@@ -117,6 +117,25 @@ pub enum TxArgs {
         #[arg(long, value_parser = parse_vote)]
         second: Box<SignedVote>,
     },
+    /// Approves a new set of authority signers, made from the decided one: --add and --remove
+    /// change who signs, and the thresholds stay unless given. Sign with a signer's key.
+    ApproveSigners {
+        /// A key to make a signer. Repeat for several.
+        #[arg(long)]
+        add: Vec<PublicKey>,
+        /// A signer to drop. Repeat for several.
+        #[arg(long)]
+        remove: Vec<PublicKey>,
+        /// How many of the new signers justify a checkpoint. Defaults to the decided set's.
+        #[arg(long)]
+        threshold: Option<u32>,
+        /// How many of the new signers must approve the next change. Defaults to the decided set's.
+        #[arg(long)]
+        change_threshold: Option<u32>,
+        /// The version of the decided set this changes. Defaults to the one the node reports.
+        #[arg(long)]
+        version: Option<u64>,
+    },
     /// Calls a function on a contract.
     Call {
         /// The contract, such as contract:0x….
@@ -148,7 +167,7 @@ pub fn send(args: SendArgs) -> CliResult<()> {
         .into();
     let account = ok(agent.get(format!("{node}/accounts/{sender}")).call())?;
     let nonce = account["nonce"].as_u64().ok_or("the node sent no nonce")?;
-    let tx = transaction(args.tx, sender)?;
+    let tx = transaction(args.tx, sender, &agent, node)?;
     let deploys = matches!(tx, Tx::Deploy { .. });
     let signed = SignedTx::sign(tx, nonce, &keypair);
     let body = json!({ "tx": to_hex(&wincode::serialize(&signed)?) }).to_string();
@@ -276,7 +295,7 @@ fn report(receipt: &Value) -> CliResult<()> {
     }
 }
 
-fn transaction(tx: TxArgs, sender: Address) -> CliResult<Tx> {
+fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliResult<Tx> {
     let tx = match tx {
         TxArgs::Transfer { to, amount: value } => Tx::Transfer {
             from: sender,
@@ -297,6 +316,65 @@ fn transaction(tx: TxArgs, sender: Address) -> CliResult<Tx> {
         TxArgs::Unbond { voter } => Tx::Unbond { voter },
         TxArgs::Withdraw { voter } => Tx::Withdraw { voter },
         TxArgs::Slash { first, second } => Tx::Slash { first, second },
+        TxArgs::ApproveSigners {
+            add,
+            remove,
+            threshold,
+            change_threshold,
+            version,
+        } => {
+            let current = ok(agent.get(format!("{node}/signers")).call())?;
+            let decided = &current["decided"];
+            let number = |value: &Value, what: &str| -> CliResult<u64> {
+                value.as_u64().ok_or_else(|| format!("the node sent no {what}").into())
+            };
+            let mut signers: Vec<PublicKey> = decided["signers"]
+                .as_array()
+                .ok_or("the node sent no signers")?
+                .iter()
+                .map(|signer| signer.as_str().and_then(|text| text.parse().ok()).ok_or("the node sent a bad signer"))
+                .collect::<Result<_, _>>()?;
+
+            for key in &remove {
+                if !signers.contains(key) {
+                    return Err(format!("{key} is not a signer").into());
+                }
+            }
+
+            signers.retain(|signer| !remove.contains(signer));
+
+            for key in add {
+                if signers.contains(&key) {
+                    return Err(format!("{key} is a signer already").into());
+                }
+
+                signers.push(key);
+            }
+
+            let threshold = match threshold {
+                Some(threshold) => threshold,
+                None => u32::try_from(number(&decided["threshold"], "threshold")?)?,
+            };
+            let change_threshold = match change_threshold {
+                Some(threshold) => threshold,
+                None => u32::try_from(number(&decided["change_threshold"], "change threshold")?)?,
+            };
+            let version = match version {
+                Some(version) => version,
+                None => number(&current["version"], "version")?,
+            };
+            println!(
+                "approving {} signers, threshold {threshold}, change threshold {change_threshold}, from version {version}",
+                signers.len()
+            );
+
+            Tx::ApproveSigners {
+                version,
+                signers,
+                threshold,
+                change_threshold,
+            }
+        }
         TxArgs::Call {
             to,
             function,
