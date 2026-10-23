@@ -4,6 +4,7 @@ use {
     crate::structs::address::Address,
     crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
+    crate::structs::u256::{U256Le, u256},
     crate::structs::vote::Justification,
     r#macro::document,
     wincode::SchemaRead,
@@ -36,6 +37,11 @@ pub struct BlockHeader {
     pub tx_root: Hash,
     #[document(summary = "The chain hash of the finality proofs the block carries, in order.")]
     pub proof_root: Hash,
+    #[document(summary = "The gas its transactions used, by the chain's gas schedule; 0 on a chain without fees. What moves a base fee, and at most the block gas limit.")]
+    pub gas_used: u64,
+    #[document(summary = "The base price of gas in this block, which every transaction pays at least: under a base fee, what the parent's gas used made it; when senders bid, their minimum; 0 on a chain without fees.")]
+    #[wincode(with = "U256Le")]
+    pub base_price: u256,
 }
 
 impl Hashable for BlockHeader {}

@@ -4,7 +4,7 @@
 
 use {
     crate::chain::{
-        FinalityConfig, Genesis, stored_block, stored_block_at, stored_evidence, stored_finality, stored_receipt, stored_tip,
+        FinalityConfig, Fees, Genesis, stored_block, stored_block_at, stored_evidence, stored_finality, stored_receipt, stored_tip,
         stored_work,
     },
     crate::crypto::keypair::PublicKey,
@@ -52,6 +52,10 @@ struct Api {
     finality: Option<Arc<FinalityConfig>>,
     /// The chain's hash, which ids are read and written with.
     hash: HashType,
+    /// The chain's fees, to tell what the next block's base price is.
+    fees: Option<Arc<Fees>>,
+    /// The most fuel one transaction's contracts may burn, which clients size gas limits by.
+    tx_fuel: u64,
 }
 
 #[document(
@@ -64,7 +68,7 @@ struct Api {
         address = "Where to listen.",
     },
     returns = "The address it listens on, which tells you the port when address asked for port 0.",
-    note = "Routes: GET /status; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
+    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
     see_also = "Node, Address, Submitter",
 )]
 pub fn start(
@@ -74,7 +78,8 @@ pub fn start(
     address: SocketAddr,
 ) -> std::io::Result<SocketAddr> {
     let finality = genesis.finality.clone().map(Arc::new);
-    let hash = genesis.hash;
+    let fees = genesis.fees.as_ref().map(|config| Arc::new(config.build()));
+    let (hash, tx_fuel) = (genesis.hash, genesis.tx_limits.fuel);
     let listener = std::net::TcpListener::bind(address)?;
     listener.set_nonblocking(true)?;
     let local = listener.local_addr()?;
@@ -89,7 +94,14 @@ pub fn start(
                     Err(err) => return log::error!("[http] {err}"),
                 };
 
-                if let Err(err) = axum::serve(listener, router(Api { db, submitter, finality, hash })).await {
+                if let Err(err) = axum::serve(listener, router(Api {
+                    db,
+                    submitter,
+                    finality,
+                    hash,
+                    fees,
+                    tx_fuel,
+                })).await {
                     log::error!("[http] {err}");
                 }
             })
@@ -179,6 +191,20 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         None => Value::Null,
     };
 
+    // What a transaction sent now pays at least, and what it is weighed by.
+    let fees = match &api.fees {
+        Some(fees) => {
+            let header = &tip.header;
+            let next = fees.pricing().next_price(header.base_price, header.gas_used, fees.block_gas_limit());
+            let mut value = crate::cli::genesis::fees_json(fees.config());
+            value["base_price"] = next.to_string().into();
+            value["tx_fuel"] = api.tx_fuel.into();
+
+            value
+        }
+        None => Value::Null,
+    };
+
     Ok(Json(json!({
         "genesis": genesis.id().to_string(),
         "tip": tip.id().to_string(),
@@ -188,6 +214,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "work": work.to_string(),
         "hash": api.hash.name(),
         "finality": finality,
+        "fees": fees,
     })))
 }
 
@@ -414,7 +441,10 @@ async fn submit(Shared(api): Shared<Api>, body: Bytes) -> Result<(StatusCode, Js
     match submitter.submit(tx).await {
         Ok(id) => Ok((StatusCode::ACCEPTED, Json(json!({ "id": id.to_string() })))),
         Err(SubmitError::Refused(err)) => Err(match err {
-            MempoolError::Invalid(_) => ApiError::BadRequest(err.to_string()),
+            MempoolError::Invalid(_)
+            | MempoolError::BadGasLimit
+            | MempoolError::PriceTooLow
+            | MempoolError::CannotPay => ApiError::BadRequest(err.to_string()),
             MempoolError::Stale | MempoolError::Duplicate => ApiError::Conflict(err.to_string()),
             MempoolError::Full => ApiError::Unavailable(err.to_string()),
             MempoolError::Db(err) => ApiError::Db(err),

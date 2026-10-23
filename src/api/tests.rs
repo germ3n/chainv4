@@ -8,7 +8,7 @@ use crate::structs::amount::Amount;
 use crate::structs::code::Code;
 use crate::net::NetEvent;
 use crate::structs::hex::to_hex;
-use crate::structs::tx::{SignedTx, Tx};
+use crate::structs::tx::{FeeOffer, SignedTx, Tx};
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 
@@ -30,12 +30,21 @@ struct Fixture {
     bob: Address,
 }
 
+/// The dev authority chain without fees, so balances move only as the tests say. Fees have tests
+/// of their own.
+fn free() -> Genesis {
+    Genesis {
+        fees: None,
+        ..Genesis::dev_authority(DevAuthority::dev_keypair().public())
+    }
+}
+
 /// A chain with a transfer to bob in block 1 and a deploy in block 2, served on a free port.
 fn serve() -> Fixture {
     let authority = DevAuthority::dev_keypair();
     let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
     let db = Arc::new(MemoryDb::default());
-    let mut chain = Chain::open(db.clone(), &Genesis::dev_authority(authority.public())).unwrap();
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
     let bob = Keypair::generate(authority.public().key_type()).unwrap().public().address();
     let transfer = Tx::Transfer {
         from: authority.public().address(),
@@ -48,13 +57,13 @@ fn serve() -> Fixture {
 
     for (nonce, tx) in [transfer, deploy].into_iter().enumerate() {
         let now = chain.tip().timestamp + SLOT;
-        let signed = SignedTx::sign(tx, nonce as u64, &authority);
-        let mut block = chain.build(vec![signed], Vec::new(), producer.address(), now);
+        let signed = SignedTx::sign(tx, nonce as u64, FeeOffer::NONE, &authority);
+        let mut block = chain.build(vec![signed], Vec::new(), producer.address(), now).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
         chain.import(&block, now).unwrap();
     }
 
-    let genesis = Genesis::dev_authority(authority.public());
+    let genesis = free();
     let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
 
     Fixture { address, chain, bob }
@@ -219,7 +228,7 @@ fn signed(nonce: u64) -> SignedTx {
         amount: Amount::U128(1),
     };
 
-    SignedTx::sign(tx, nonce, &authority)
+    SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
 }
 
 fn post_tx(address: SocketAddr, bytes: &[u8]) -> (u16, Value) {
@@ -268,8 +277,8 @@ fn bad_or_refused_submissions_say_why() {
 #[test]
 fn an_api_without_a_node_takes_no_transactions() {
     let db = Arc::new(MemoryDb::default());
-    Chain::open(db.clone(), &Genesis::dev_authority(DevAuthority::dev_keypair().public())).unwrap();
-    let genesis = Genesis::dev_authority(DevAuthority::dev_keypair().public());
+    Chain::open(db.clone(), &free()).unwrap();
+    let genesis = free();
     let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
     let (status, body) = post_tx(address, &wincode::serialize(&signed(0)).unwrap());
 
@@ -300,15 +309,63 @@ fn transactions_are_looked_up_by_id_once_they_land() {
     assert_eq!(get(fixture.address, "/txs/nope").0, 400);
 }
 
+#[test]
+fn fees_show_in_status_blocks_and_receipts() {
+    let authority = DevAuthority::dev_keypair();
+    let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let genesis = Genesis::dev_authority(authority.public());
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let base = chain.next_base_price();
+    let fee = FeeOffer {
+        gas_limit: 100_000,
+        max_price: base * crate::structs::u256::u256::from(2u64),
+        tip: crate::structs::u256::u256::from(3u64),
+    };
+    let transfer = Tx::Transfer {
+        from: authority.public().address(),
+        to: Keypair::generate(authority.public().key_type()).unwrap().public().address(),
+        amount: Amount::U128(10),
+    };
+    let now = chain.tip().timestamp + SLOT;
+    let mut block = chain.build(vec![SignedTx::sign(transfer, 0, fee, &authority)], Vec::new(), producer.address(), now).unwrap();
+    block.seal = producer.seal(&block.header).unwrap();
+    chain.import(&block, now).unwrap();
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let fees = &ok(address, "/status")["fees"];
+
+    assert_eq!(fees["base_price"], chain.next_base_price().to_string());
+    assert_eq!(fees["block_gas_limit"], 50_000_000);
+    assert_eq!(fees["burn_permille"], 500);
+    assert_eq!(fees["schedule"]["type"], "weighted");
+    assert_eq!(fees["pricing"]["type"], "base_fee");
+    assert_eq!(fees["tx_fuel"], 10_000_000);
+
+    let shown = ok(address, "/blocks/1");
+    let tx = &shown["txs"][0];
+    let gas = block.header.gas_used;
+
+    assert_eq!(shown["gas_used"], gas);
+    assert_eq!(shown["base_price"], base.to_string());
+    assert_eq!(tx["fee"], json!({ "gas_limit": 100_000, "max_price": fee.max_price.to_string(), "tip": "3" }));
+    assert_eq!(tx["receipt"]["gas_used"], gas);
+
+    let paid = crate::structs::u256::u256::from(gas) * (base + fee.tip);
+    let receipt = ok(address, &format!("/txs/{}", tx["id"].as_str().unwrap()));
+
+    assert_eq!(receipt["fee"], paid.to_string());
+    assert_eq!(receipt["gas_used"], gas);
+    assert_eq!(ok(serve().address, "/status")["fees"], Value::Null, "the free fixture");
+}
+
 // Finality: the dev authority chain, where under FFG the dev key is the one validator and epochs
 // are 8 blocks long, then the same chain with the other kinds.
 
 #[test]
 fn a_chain_without_finality_says_so() {
-    let authority = DevAuthority::dev_keypair();
     let genesis = Genesis {
         finality: None,
-        ..Genesis::dev_authority(authority.public())
+        ..free()
     };
     let db = Arc::new(MemoryDb::default());
     Chain::open(db.clone(), &genesis).unwrap();
@@ -328,13 +385,13 @@ fn serve_with(finality: crate::chain::FinalityConfig, height: u64, txs: impl Fn(
     let db = Arc::new(MemoryDb::default());
     let genesis = Genesis {
         finality: Some(finality),
-        ..Genesis::dev_authority(authority.public())
+        ..free()
     };
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
 
     for height in 1..=height {
         let now = chain.tip().timestamp + SLOT;
-        let mut block = chain.build(txs(height), Vec::new(), producer.address(), now);
+        let mut block = chain.build(txs(height), Vec::new(), producer.address(), now).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
         chain.import(&block, now).unwrap();
     }
@@ -365,6 +422,7 @@ fn authority_chains_list_their_signers_and_changes() {
             change_threshold: 2,
         },
         0,
+        FeeOffer::NONE,
         &keys[0],
     );
     let (address, _) = serve_with(crate::chain::FinalityConfig::Authority(config), 3, |height| match height {
@@ -422,7 +480,7 @@ fn depth_chains_finalize_by_depth() {
             amount: Amount::U128(1),
         };
 
-        SignedTx::sign(tx, nonce, &authority)
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
     };
     let (address, _) = serve_with(crate::chain::FinalityConfig::Depth(crate::chain::DepthConfig { depth: 3 }), 6, |height| {
         match height {
@@ -461,7 +519,7 @@ mod ffg {
         let authority = DevAuthority::dev_keypair();
         let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
         let db = Arc::new(MemoryDb::default());
-        let genesis = Genesis::dev_authority(authority.public());
+        let genesis = free();
         let mut chain = Chain::open(db.clone(), &genesis).unwrap();
         let newcomer = Keypair::generate(authority.public().key_type()).unwrap();
         let bond = SignedTx::sign(
@@ -470,6 +528,7 @@ mod ffg {
                 amount: Amount::U128(10u128.pow(20)),
             },
             0,
+            FeeOffer::NONE,
             &authority,
         );
         let transfer = SignedTx::sign(
@@ -479,6 +538,7 @@ mod ffg {
                 amount: Amount::U128(1),
             },
             1,
+            FeeOffer::NONE,
             &authority,
         );
 
@@ -490,7 +550,7 @@ mod ffg {
                 _ => Vec::new(),
             };
             let proofs = chain.unpaid_proofs().unwrap();
-            let mut block = chain.build(txs, proofs, producer.address(), now);
+            let mut block = chain.build(txs, proofs, producer.address(), now).unwrap();
             block.seal = producer.seal(&block.header).unwrap();
             chain.import(&block, now).unwrap();
 

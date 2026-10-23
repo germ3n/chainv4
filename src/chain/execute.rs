@@ -8,7 +8,9 @@ use {
     crate::structs::code::Engine,
     crate::structs::event::Event,
     crate::structs::hash::Hash,
+    crate::chain::fees::{Charged, Fees, Scoring},
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
+    crate::structs::u256::u256,
     crate::vm::{CallContext, Limits, Vm, VmError},
     r#macro::document,
     std::fmt,
@@ -20,7 +22,7 @@ use {
     category = "Chain",
     see_also = "Genesis::rules",
 )]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Rules {
     #[document(summary = "The chain's hash, which transaction ids use.")]
     pub hash: crate::structs::hash::HashType,
@@ -28,6 +30,8 @@ pub struct Rules {
     pub minter: Option<Address>,
     #[document(summary = "What one deploy or contract call may use.")]
     pub limits: Limits,
+    #[document(summary = "What transactions pay, or None on a chain where they are free.")]
+    pub fees: Option<Arc<Fees>>,
     #[document(summary = "What staking transactions run under, or None on a chain without staking, where they fail.")]
     pub staking: Option<StakingRules>,
     #[document(summary = "What signer changes run under, or None on a chain without authority finality, where they fail.")]
@@ -115,6 +119,20 @@ impl fmt::Display for Failure {
 }
 
 #[document(
+    summary = "The block a transaction runs in, as far as it matters to the transaction.",
+    category = "Chain",
+)]
+#[derive(Clone, Copy, Debug)]
+pub struct BlockContext {
+    #[document(summary = "The block's height.")]
+    pub height: u64,
+    #[document(summary = "Who produced it, and so gets its fees.")]
+    pub producer: Address,
+    #[document(summary = "Its base price of gas.")]
+    pub base_price: u256,
+}
+
+#[document(
     summary = "What happened to one transaction in a block.",
     category = "Chain",
 )]
@@ -124,6 +142,10 @@ pub struct Receipt {
     pub id: Hash,
     #[document(summary = "Fuel a contract call burned; 0 for everything else.")]
     pub fuel_used: u64,
+    #[document(summary = "Gas it used, which counts against the block's limit; 0 on a chain without fees.")]
+    pub gas_used: u64,
+    #[document(summary = "What the sender paid for it; 0 on a chain without fees.")]
+    pub fee: u256,
     #[document(summary = "What it did, or why it failed.")]
     pub result: Result<Effect, Failure>,
     #[document(summary = "What its contract calls emitted, in order. Empty when it failed.")]
@@ -140,6 +162,14 @@ pub enum TxError {
     Invalid(VerifyError),
     #[document(summary = "The nonce is not the sender's next one.")]
     WrongNonce { expected: u64, got: u64 },
+    #[document(summary = "Its gas limit does not cover what it costs before it even runs.")]
+    GasTooLow { needed: u64, limit: u64 },
+    #[document(summary = "Its max price is under the block's base price.")]
+    PriceTooLow { base: u256 },
+    #[document(summary = "The sender cannot cover its gas limit at its price.")]
+    CannotPay,
+    #[document(summary = "Its gas limit is more than the block has left.")]
+    BlockFull { left: u64 },
 }
 
 impl fmt::Display for TxError {
@@ -149,6 +179,10 @@ impl fmt::Display for TxError {
             TxError::WrongNonce { expected, got } => {
                 write!(f, "nonce {got}, but the sender's next is {expected}")
             }
+            TxError::GasTooLow { needed, limit } => write!(f, "gas limit {limit}, but it costs {needed} before it runs"),
+            TxError::PriceTooLow { base } => write!(f, "max price under the base price of {base}"),
+            TxError::CannotPay => write!(f, "the sender cannot pay for its gas limit"),
+            TxError::BlockFull { left } => write!(f, "its gas limit is more than the {left} the block has left"),
         }
     }
 }
@@ -166,14 +200,53 @@ impl From<DbError> for ExecuteError {
     }
 }
 
-/// Runs one transaction on top of its block's state. The nonce is used up in the block's layer
-/// either way; everything else happens in a layer of its own that is kept only on success.
+/// What a transaction pays per gas, and what it reserved before running.
+struct Payment<'a> {
+    fees: &'a Fees,
+    intrinsic: u64,
+    price: u256,
+    reserve: u256,
+}
+
+/// Checks a transaction can pay for itself: its gas limit covers its intrinsic cost, its price is
+/// enough for the block, and the sender holds its whole gas limit at that price.
+fn payment<'a>(fees: &'a Fees, tx: &SignedTx, sender: &Address, accounts: &Accounts, base: u256) -> Result<Payment<'a>, ExecuteError> {
+    let invalid = |error| Err(ExecuteError::Invalid(error));
+    let intrinsic = fees.schedule().intrinsic(tx);
+    let limit = tx.fee.gas_limit;
+
+    if limit < intrinsic {
+        return invalid(TxError::GasTooLow { needed: intrinsic, limit });
+    }
+
+    let Some(price) = fees.pricing().price(base, &tx.fee) else {
+        return invalid(TxError::PriceTooLow { base });
+    };
+    let Some(reserve) = u256::from(limit).checked_mul(price) else {
+        return invalid(TxError::CannotPay);
+    };
+
+    if accounts.get(sender)?.balance < reserve {
+        return invalid(TxError::CannotPay);
+    }
+
+    Ok(Payment {
+        fees,
+        intrinsic,
+        price,
+        reserve,
+    })
+}
+
+/// Runs one transaction on top of its block's state. The nonce and its fee are settled in the
+/// block's layer either way; everything else happens in a layer of its own that is kept only on
+/// success.
 pub(crate) fn execute(
     block: &Arc<State>,
     tx: &SignedTx,
     rules: &Rules,
     vm: &Arc<Vm>,
-    height: u64,
+    context: &BlockContext,
 ) -> Result<Receipt, ExecuteError> {
     tx.verify().map_err(|err| ExecuteError::Invalid(TxError::Invalid(err)))?;
     let sender = tx.sender();
@@ -187,9 +260,23 @@ pub(crate) fn execute(
         }));
     }
 
+    let payment = match &rules.fees {
+        Some(fees) => Some(payment(fees, tx, &sender, &accounts, context.base_price)?),
+        None => None,
+    };
     accounts.bump_nonce(&sender).map_err(node_fault)?;
+    let mut limits = rules.limits;
+
+    // The gas limit pays for fuel too: what is left over the intrinsic cost bounds what its
+    // contracts may burn, as well as the chain's own cap.
+    if let Some(payment) = &payment {
+        accounts.debit(&sender, payment.reserve).map_err(node_fault)?;
+        let spare = tx.fee.gas_limit - payment.intrinsic;
+        limits.fuel = limits.fuel.min(payment.fees.schedule().fuel_for(spare));
+    }
+
     let layer = Arc::new(State::new(block.clone()));
-    let (fuel_used, result, events) = run(&layer, tx, sender, rules, vm, height);
+    let (fuel_used, result, events) = run(&layer, tx, sender, rules, limits, vm, context.height);
 
     // A failing database is the node's fault, never the transaction's.
     match &result {
@@ -200,20 +287,75 @@ pub(crate) fn execute(
         Err(_) => {}
     }
 
+    // Running out of fuel uses all it was allowed, whatever the engine counted at the stop.
+    let burned = match &result {
+        Err(Failure::Contract(VmError::OutOfFuel)) => limits.fuel,
+        _ => fuel_used,
+    };
+    let charged = match payment {
+        Some(payment) => settle(block, tx, sender, &payment, burned, result.is_err(), vm, rules, context)?,
+        None => Charged::default(),
+    };
     let events = if result.is_ok() { events } else { Vec::new() };
 
     Ok(Receipt {
         id: tx.id(rules.hash),
         fuel_used,
+        gas_used: charged.gas_used,
+        fee: charged.fee,
         result,
         events,
     })
 }
 
+/// Settles a transaction's fee once it ran, for the fuel it burned: what it is charged for, the
+/// scorer decides, up to its gas limit; the sender gets the rest of its reserve back, and the fee
+/// goes to the producer, less what burns.
+#[allow(clippy::too_many_arguments)]
+fn settle(
+    block: &Arc<State>,
+    tx: &SignedTx,
+    sender: Address,
+    payment: &Payment,
+    fuel_used: u64,
+    failed: bool,
+    vm: &Arc<Vm>,
+    rules: &Rules,
+    context: &BlockContext,
+) -> Result<Charged, ExecuteError> {
+    let schedule = payment.fees.schedule();
+    let limit = tx.fee.gas_limit;
+    let gas = payment.intrinsic.saturating_add(schedule.for_fuel(fuel_used)).min(limit);
+    let scoring = Scoring {
+        tx,
+        sender,
+        fuel_used,
+        gas,
+        failed,
+        state: block,
+        vm,
+        limits: rules.limits,
+    };
+    let charged = schedule.charge(&scoring).min(limit);
+    let settled = payment.fees.settle(context.base_price, payment.price, gas, charged);
+    let accounts = Accounts::new(block);
+
+    // Neither can fail: the reserve covered the fee, and nothing holds near u256::MAX.
+    for (to, amount) in [(sender, payment.reserve - settled.fee), (context.producer, settled.to_producer)] {
+        if amount > u256::ZERO {
+            accounts.credit(&to, amount).map_err(node_fault)?;
+        }
+    }
+
+    Ok(settled)
+}
+
+/// A registry failure that only the node can cause: bumping a nonce or settling a fee fails in
+/// the database, or a balance or nonce at the very end of its range, which no chain reaches.
 fn node_fault(err: RegistryError) -> ExecuteError {
     match err {
         RegistryError::Db(err) => ExecuteError::Db(err),
-        other => unreachable!("bumping a nonce only fails in the database or at u64::MAX: {other}"),
+        other => unreachable!("only the database can fail here: {other}"),
     }
 }
 
@@ -222,6 +364,7 @@ fn run(
     signed: &SignedTx,
     sender: Address,
     rules: &Rules,
+    limits: Limits,
     vm: &Arc<Vm>,
     height: u64,
 ) -> (u64, Result<Effect, Failure>, Vec<Event>) {
@@ -263,7 +406,7 @@ fn run(
                 value,
             };
 
-            match Contracts::new(layer).call(vm, &context, func, data, rules.limits) {
+            match Contracts::new(layer).call(vm, &context, func, data, limits) {
                 Ok(outcome) => (
                     outcome.fuel_used,
                     outcome.result.map(Effect::Returned).map_err(Failure::Contract),
@@ -277,7 +420,7 @@ fn run(
                 return (0, Err(Failure::EngineNotAllowed(code.engine())), Vec::new());
             }
 
-            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, rules.limits) {
+            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits) {
                 Ok((address, hooked)) => (hooked.fuel_used, Ok(Effect::Deployed(address)), hooked.events),
                 Err(err) => (0, Err(Failure::Registry(err)), Vec::new()),
             }
@@ -287,7 +430,7 @@ fn run(
                 return (0, Err(Failure::EngineNotAllowed(code.engine())), Vec::new());
             }
 
-            match Contracts::new(layer).upgrade(vm, &sender, contract, code, rules.limits) {
+            match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits) {
                 Ok(hooked) => (hooked.fuel_used, Ok(Effect::Upgraded(*contract)), hooked.events),
                 Err(err) => (0, Err(Failure::Registry(err)), Vec::new()),
             }

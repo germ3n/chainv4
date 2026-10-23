@@ -2,9 +2,15 @@
 
 ## Things to know
 
-- **Old `chain.db` files are refused.** Headers now commit to finality proofs, and genesis names
-  its hash, limits and finality settings, so every dev genesis id changed again. Delete the
-  database, or the node stops with `WrongGenesis`.
+- **Old `chain.db` files are refused.** Headers now carry gas used and a base price,
+  transactions a fee offer, and genesis its fees, so every dev genesis id changed again. Delete
+  the database, or the node stops with `WrongGenesis`.
+- **The dev chains charge fees.** A base fee starting at 1 gwei of gas, half of the base part
+  burned. `chainv4 send` works out the offer from `GET /status`; an account needs coins to send
+  anything, the development key included. `chainv4 genesis --fees free` writes a chain without.
+- **Producers run what they build.** `Chain::build` runs the transactions it is given, keeps
+  those that can run and fit the block gas limit, and records the gas they used, so a block is
+  run twice by its producer: once to build, once to import.
 - **There are two dev chains, and pow is the default.** `--consensus pow` (mine with `--mine`)
   or `--consensus authority` (produce with `--produce`). Each is its own genesis and network.
 - **The dev genesis depends on build features.** The dev chains allow every engine the node was
@@ -131,8 +137,8 @@
   counted votes, and, once the vote shows its key votes, against that voter's held ones. Votes
   are remembered only when counted, so throwaway keys can neither grow memory beyond the capped
   held votes nor push real evidence out of the evidence log.
-- [ ] **Vote rewards are minted.** Nothing pays for them but new supply. Fees, once there are
-  any, could fund them instead.
+- [ ] **Vote rewards are minted.** Nothing pays for them but new supply. Fees could fund them
+  instead, from what producers get or what is burned.
 - [ ] **No checkpoint sync.** A new node replays every block from genesis. There is no trusted
   recent checkpoint to start from, which a long-lived staked chain needs against long-range
   attacks.
@@ -142,13 +148,29 @@
 - [ ] **Side branches are never pruned, and bad blocks are only remembered in memory.** With a
   low difficulty, a peer can fill the disk with side blocks cheaply; after a restart, a known-bad
   branch is run again before it is refused.
-- [ ] **Block limits are not consensus rules.** `MAX_BLOCK_TXS` only limits the blocks this node
-  builds. Import accepts any number of transactions, any size and any total fuel. Add maximum
-  transactions, bytes and fuel per block, and check them on import.
+- [x] **A block gas limit.** On a chain with fees, a transaction is only taken while its gas
+  limit fits what the block has left, and the header's gas used must match, both checked on
+  import.
+- [ ] **Other block limits are not consensus rules.** A chain without fees still takes any number
+  of transactions of any size, and `MAX_BLOCK_TXS` only limits the blocks this node builds.
+  Bytes per block would bound blocks on any chain.
 - [x] **Block rewards.** Genesis sets an initial reward and an optional halving interval; each
   block's producer is credited after its transactions run.
-- [ ] **No fees.** Transactions cost nothing, failed ones included, so spam is free. Fuel is
-  capped per transaction but never paid for. Fees would go to the producer like the reward.
+- [x] **Fees.** Every transaction pays for its gas, failed ones too, with what it does not use
+  refunded. Genesis picks the gas schedule (`weighted`, or `contract`, where a contract's `score`
+  says what is charged) and the pricing (`base_fee`, EIP-1559-style, or `bid`), with the block gas
+  limit and the burned share of the base part; the rest goes to the producer. Producers take the
+  best-paying transactions first. New schedules and pricings implement `GasSchedule` and
+  `Pricing`.
+- [ ] **No gas estimation.** `send` sizes gas limits from the schedule and the chain's fuel cap,
+  not by running the transaction, so calls reserve far more than they use; the reserve comes
+  back, but the sender must hold it. Read-only calls would allow estimates.
+- [ ] **Transactions that cannot pay linger.** The mempool checks a transaction can pay when it
+  arrives, but one whose sender's funds have gone since, or whose price fell under the base price,
+  waits until its nonce is used, and every block built tries it again.
+- [ ] **A scorer runs for every transaction.** The chain pays its fuel, bounded by its `fuel`
+  setting, so a costly scorer slows every block. It may only read; a scorer that keeps counts
+  would need its writes kept.
 - [ ] **The reward is invisible in the API.** A block's JSON does not say what it minted; clients
   would have to know the genesis reward schedule.
 - [ ] **Minting belongs to whoever genesis names.** The dev chains name the development key.

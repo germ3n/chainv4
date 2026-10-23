@@ -28,10 +28,12 @@ use {
 };
 
 mod execute;
+pub mod fees;
 mod finality;
 mod receipt;
 
-pub use execute::{Effect, Failure, Receipt, Rules, SignerRules, StakingRules, TxError};
+pub use execute::{BlockContext, Effect, Failure, Receipt, Rules, SignerRules, StakingRules, TxError};
+pub use fees::{FeeConfig, Fees};
 #[cfg(feature = "finality-authority")]
 pub use finality::AuthorityConfig;
 #[cfg(feature = "finality-depth")]
@@ -136,6 +138,8 @@ pub struct Genesis {
     pub max_reorg_depth: u64,
     #[document(summary = "Finality: its kind and every parameter of it, or None for a chain where only work decides.")]
     pub finality: Option<FinalityConfig>,
+    #[document(summary = "What transactions pay for gas, and the block gas limit, or None for a chain where transactions are free and blocks unbounded.")]
+    pub fees: Option<FeeConfig>,
 }
 
 impl Hashable for Genesis {}
@@ -148,7 +152,7 @@ fn dev_funds() -> u256 {
 impl Genesis {
     #[document(
         parent = "Genesis",
-        summary = "A development chain where one key produces a block every two seconds. That key holds a million coins at 18 decimals, may mint, and, in a build with FFG finality, is the one validator; there is no block reward. Allows every engine this node was built with, so nodes built with different engines are on different dev chains.",
+        summary = "A development chain where one key produces a block every two seconds. That key holds a million coins at 18 decimals, may mint, and, in a build with FFG finality, is the one validator; there is no block reward, and fees follow FeeConfig::dev. Allows every engine this node was built with, so nodes built with different engines are on different dev chains.",
         params = { authority = "The producing key, usually DevAuthority::dev_keypair." },
     )]
     pub fn dev_authority(authority: PublicKey) -> Genesis {
@@ -169,12 +173,13 @@ impl Genesis {
             tx_limits: DEV_TX_LIMITS,
             max_reorg_depth: DEV_MAX_REORG_DEPTH,
             finality: FinalityConfig::dev(authority),
+            fees: Some(FeeConfig::dev()),
         }
     }
 
     #[document(
         parent = "Genesis",
-        summary = "A development chain mined with proof of work, aiming for a block every two seconds. It hashes with HashType::default_chain, BLAKE3 in a default build, for both its ids and its work. Miners earn 50 coins a block, halving every 210,000 blocks. The development key holds a million coins, may mint, and, in a build with FFG finality, is the one validator, so the CLI works out of the box. Allows every engine this node was built with.",
+        summary = "A development chain mined with proof of work, aiming for a block every two seconds. It hashes with HashType::default_chain, BLAKE3 in a default build, for both its ids and its work. Miners earn 50 coins a block, halving every 210,000 blocks. The development key holds a million coins, may mint, and, in a build with FFG finality, is the one validator, so the CLI works out of the box. Fees follow FeeConfig::dev. Allows every engine this node was built with.",
         params = { dev = "The development key, usually DevAuthority::dev_keypair." },
     )]
     pub fn dev_pow(dev: PublicKey) -> Genesis {
@@ -200,6 +205,7 @@ impl Genesis {
             tx_limits: DEV_TX_LIMITS,
             max_reorg_depth: DEV_MAX_REORG_DEPTH,
             finality: FinalityConfig::dev(dev),
+            fees: Some(FeeConfig::dev()),
         }
     }
 
@@ -222,6 +228,8 @@ impl Genesis {
                 difficulty: 0,
                 tx_root: Hashable::hash(self, self.hash),
                 proof_root: Block::proof_root(self.hash, &[]),
+                gas_used: 0,
+                base_price: self.fees.as_ref().map_or(u256::ZERO, |fees| fees.pricing.build().genesis_price()),
             },
             txs: Vec::new(),
             proofs: Vec::new(),
@@ -241,7 +249,10 @@ impl Genesis {
             return Some("the proof-of-work hash must be a secure 256-bit one, not xxh3");
         }
 
-        self.finality.as_ref().and_then(FinalityConfig::problem)
+        self.finality
+            .as_ref()
+            .and_then(FinalityConfig::problem)
+            .or_else(|| self.fees.as_ref().and_then(FeeConfig::problem))
     }
 
     #[document(
@@ -255,6 +266,7 @@ impl Genesis {
             limits: self.tx_limits,
             staking: self.finality.as_ref().and_then(|config| config.staking(self.block().id())),
             signers: self.finality.as_ref().and_then(FinalityConfig::signer_rules),
+            fees: self.fees.as_ref().map(|config| Arc::new(config.build())),
         }
     }
 }
@@ -316,6 +328,10 @@ pub enum BlockError {
     Proof(String),
     #[document(summary = "It is on a branch that leaves the finalized checkpoint.")]
     ConflictsWithFinality,
+    #[document(summary = "Its base price is not what its parent's makes it.")]
+    BasePrice { expected: u256, got: u256 },
+    #[document(summary = "Its gas_used is not what its transactions used.")]
+    GasUsed { expected: u64, got: u64 },
 }
 
 impl fmt::Display for BlockError {
@@ -330,6 +346,8 @@ impl fmt::Display for BlockError {
             BlockError::ProofRoot => write!(f, "proof_root does not match"),
             BlockError::Proof(why) => write!(f, "bad finality proof: {why}"),
             BlockError::ConflictsWithFinality => write!(f, "conflicts with the finalized checkpoint"),
+            BlockError::BasePrice { expected, got } => write!(f, "base price {got}, but its parent makes it {expected}"),
+            BlockError::GasUsed { expected, got } => write!(f, "gas_used {got}, but its transactions used {expected}"),
         }
     }
 }
@@ -511,21 +529,82 @@ impl Chain {
             timestamp = "When it is made, which also sets its difficulty.",
         },
     )]
-    pub fn build(&self, txs: Vec<SignedTx>, proofs: Vec<Justification>, producer: Address, timestamp: u64) -> Block {
-        Block {
+    pub fn build(&self, txs: Vec<SignedTx>, proofs: Vec<Justification>, producer: Address, timestamp: u64) -> Result<Block, DbError> {
+        let context = BlockContext {
+            height: self.tip.height + 1,
+            producer,
+            base_price: self.next_base_price(),
+        };
+        // The transactions run here, on a layer that is thrown away, to keep only those that can
+        // run and fit, and to learn the gas they use.
+        let layer = Arc::new(State::new(self.db.clone()));
+        let mut kept = Vec::new();
+        let mut gas_used = 0;
+
+        for tx in txs {
+            if self.gas_left(gas_used).is_some_and(|left| tx.fee.gas_limit > left) {
+                continue;
+            }
+
+            match execute::execute(&layer, &tx, &self.rules, &self.vm, &context) {
+                Ok(receipt) => {
+                    gas_used += receipt.gas_used;
+                    kept.push(tx);
+                }
+                Err(execute::ExecuteError::Invalid(_)) => {}
+                Err(execute::ExecuteError::Db(err)) => return Err(err),
+            }
+        }
+
+        Ok(Block {
             header: BlockHeader {
                 parent: self.tip.id(),
-                height: self.tip.height + 1,
+                height: context.height,
                 timestamp,
                 producer,
                 difficulty: self.consensus.difficulty(&self.tip, timestamp),
-                tx_root: Block::tx_root(self.hash, &txs),
+                tx_root: Block::tx_root(self.hash, &kept),
                 proof_root: Block::proof_root(self.hash, &proofs),
+                gas_used,
+                base_price: context.base_price,
             },
-            txs,
+            txs: kept,
             proofs,
             seal: Seal::None,
+        })
+    }
+
+    #[document(parent = "Chain", summary = "The chain's fees, or None when transactions are free.")]
+    pub fn fees(&self) -> Option<&Fees> {
+        self.rules.fees.as_deref()
+    }
+
+    #[document(parent = "Chain", summary = "The base price of gas in the next block, the one on the tip: what a transaction sent now must offer at least.")]
+    pub fn next_base_price(&self) -> u256 {
+        self.base_price_after(&self.tip)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "What a producer gains per gas from a transaction in the next block, which is what producers order the mempool by.",
+    )]
+    pub fn priority(&self, tx: &SignedTx) -> u256 {
+        self.fees()
+            .map_or(u256::ZERO, |fees| fees.priority(self.next_base_price(), &tx.fee))
+    }
+
+    /// The base price of the block after parent.
+    fn base_price_after(&self, parent: &BlockHeader) -> u256 {
+        match self.fees() {
+            Some(fees) => fees.pricing().next_price(parent.base_price, parent.gas_used, fees.block_gas_limit()),
+            None => u256::ZERO,
         }
+    }
+
+    /// The gas a block has left once its transactions so far used this much, or None when blocks
+    /// are unbounded.
+    fn gas_left(&self, used: u64) -> Option<u64> {
+        self.fees().map(|fees| fees.block_gas_limit().saturating_sub(used))
     }
 
     #[document(
@@ -569,6 +648,15 @@ impl Chain {
 
         if block.header.proof_root != Block::proof_root(self.hash, &block.proofs) {
             return Err(ImportError::Invalid(BlockError::ProofRoot));
+        }
+
+        let base_price = self.base_price_after(&parent.header);
+
+        if block.header.base_price != base_price {
+            return Err(ImportError::Invalid(BlockError::BasePrice {
+                expected: base_price,
+                got: block.header.base_price,
+            }));
         }
 
         if self.finalized_height().is_some_and(|finalized| block.header.height <= finalized) {
@@ -699,15 +787,40 @@ impl Chain {
         let height = block.header.height;
         let layer = Arc::new(State::new(below.clone()));
         let mut receipts = Vec::new();
+        let context = BlockContext {
+            height,
+            producer: block.header.producer,
+            base_price: block.header.base_price,
+        };
+        let mut gas_used = 0;
 
         for (index, tx) in block.txs.iter().enumerate() {
-            match execute::execute(&layer, tx, &self.rules, &self.vm, height) {
-                Ok(receipt) => receipts.push(receipt),
+            if let Some(left) = self.gas_left(gas_used)
+                && tx.fee.gas_limit > left
+            {
+                return Err(ImportError::Invalid(BlockError::Tx {
+                    index,
+                    error: TxError::BlockFull { left },
+                }));
+            }
+
+            match execute::execute(&layer, tx, &self.rules, &self.vm, &context) {
+                Ok(receipt) => {
+                    gas_used += receipt.gas_used;
+                    receipts.push(receipt);
+                }
                 Err(execute::ExecuteError::Db(err)) => return Err(ImportError::Db(err)),
                 Err(execute::ExecuteError::Invalid(error)) => {
                     return Err(ImportError::Invalid(BlockError::Tx { index, error }));
                 }
             }
+        }
+
+        if gas_used != block.header.gas_used {
+            return Err(ImportError::Invalid(BlockError::GasUsed {
+                expected: gas_used,
+                got: block.header.gas_used,
+            }));
         }
 
         let reward = self.reward.at(height);

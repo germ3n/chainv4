@@ -5,6 +5,7 @@ use {
     crate::structs::event::Event,
     crate::structs::hash::Hash,
     crate::structs::tx::TxCallArgumentType,
+    crate::structs::u256::{U256Le, u256},
     r#macro::document,
     wincode::{SchemaRead, SchemaWrite},
 };
@@ -22,6 +23,11 @@ pub struct TxReceipt {
     pub index: u32,
     #[document(summary = "Fuel a contract call or deploy burned; 0 for everything else.")]
     pub fuel_used: u64,
+    #[document(summary = "Gas it used, against the block's limit; 0 on a chain without fees.")]
+    pub gas_used: u64,
+    #[document(summary = "What its sender paid for it; 0 on a chain without fees.")]
+    #[wincode(with = "U256Le")]
+    pub fee: u256,
     #[document(summary = "What it did, or why it failed.")]
     pub status: TxStatus,
     #[document(summary = "What its contract calls emitted, in order. Empty when it failed.")]
@@ -73,6 +79,8 @@ impl TxReceipt {
             block,
             index,
             fuel_used: receipt.fuel_used,
+            gas_used: receipt.gas_used,
+            fee: receipt.fee,
             status,
             events: receipt.events.clone(),
         }

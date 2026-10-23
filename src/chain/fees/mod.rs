@@ -1,0 +1,269 @@
+//! Fees: what transactions pay for the gas they use, so spam is never free. Genesis sets every
+//! part of it:
+//!
+//! - a gas schedule (schedule.rs), the scorer that says how much gas a transaction costs: for
+//!   what it is, how big it is and the fuel it burns. `weighted` weighs those three; `contract`
+//!   weighs them the same way, then lets a contract on chain say what the sender is charged.
+//! - a pricing (pricing.rs), what each gas costs: `base_fee`, a base price that follows how full
+//!   blocks are, as EIP-1559 has it, plus a tip from the sender; or `bid`, where each sender names
+//!   its price above a minimum.
+//! - the most gas one block may use, and what share of the base part of every fee is burned.
+//!
+//! A transaction names the most gas it may use and the most it pays per gas. That much is
+//! reserved from the sender before it runs, and what it does not use comes back after. Of what
+//! it pays, the base price times its gas is split: burn_permille of it is destroyed, the rest goes
+//! to the block's producer, along with everything paid above the base price. Failed transactions
+//! pay too.
+
+use {
+    crate::crypto::hashable::Hashable,
+    crate::db::State,
+    crate::structs::address::Address,
+    crate::structs::tx::{FeeOffer, SignedTx},
+    crate::structs::u256::u256,
+    crate::vm::{Limits, Vm},
+    r#macro::document,
+    std::sync::Arc,
+    wincode::{SchemaRead, SchemaWrite},
+};
+
+mod pricing;
+mod schedule;
+#[cfg(test)]
+mod tests;
+
+pub use pricing::{BaseFee, Bid, PricingConfig};
+pub use schedule::{ContractScorer, ScheduleConfig, Weighted};
+
+#[document(
+    summary = "Every parameter of a chain's fees, set in genesis.",
+    category = "Fees",
+    see_also = "Genesis, GasSchedule, Pricing, FeeOffer",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct FeeConfig {
+    #[document(summary = "The most gas one block's transactions may use together. A transaction is only taken while its gas limit fits in what the block has left.")]
+    pub block_gas_limit: u64,
+    #[document(summary = "How much of the base part of every fee is burned, in thousandths: 0 sends it all to the producer, 1000 burns it all. What senders pay above the base price always goes to the producer.")]
+    pub burn_permille: u16,
+    #[document(summary = "The scorer: how much gas a transaction costs.")]
+    pub schedule: ScheduleConfig,
+    #[document(summary = "What gas costs.")]
+    pub pricing: PricingConfig,
+}
+
+impl Hashable for FeeConfig {}
+
+impl FeeConfig {
+    #[document(
+        parent = "FeeConfig",
+        summary = "The development fees: the dev weighted schedule, a base fee starting at 1 gwei, blocks of up to 50 million gas, and half of the base part burned.",
+    )]
+    pub fn dev() -> FeeConfig {
+        FeeConfig {
+            block_gas_limit: 50_000_000,
+            burn_permille: 500,
+            schedule: ScheduleConfig::Weighted(Weighted::dev()),
+            pricing: PricingConfig::BaseFee(BaseFee::dev()),
+        }
+    }
+
+    /// Settings no chain could charge with.
+    pub(in crate::chain) fn problem(&self) -> Option<&'static str> {
+        if self.block_gas_limit == 0 {
+            return Some("block_gas_limit must be at least 1");
+        }
+
+        if self.burn_permille > 1000 {
+            return Some("burn_permille must be at most 1000");
+        }
+
+        self.schedule.problem().or_else(|| self.pricing.problem())
+    }
+
+    #[document(parent = "FeeConfig", summary = "The fees these settings describe.")]
+    pub fn build(&self) -> Fees {
+        Fees {
+            config: self.clone(),
+            schedule: self.schedule.build(),
+            pricing: self.pricing.build(),
+        }
+    }
+}
+
+#[document(
+    summary = "The scorer: how much gas a transaction costs. Genesis picks the kind with ScheduleConfig; a new kind is a new implementation of this.",
+    category = "Fees",
+    see_also = "ScheduleConfig, Weighted, ContractScorer",
+)]
+pub trait GasSchedule: Send + Sync {
+    #[document(parent = "GasSchedule", summary = "The kind's name, as genesis files spell it.")]
+    fn name(&self) -> &'static str;
+
+    #[document(
+        parent = "GasSchedule",
+        summary = "Gas a transaction costs whatever it does: for what it is and how big it is. Its gas limit must cover at least this.",
+    )]
+    fn intrinsic(&self, tx: &SignedTx) -> u64;
+
+    #[document(parent = "GasSchedule", summary = "Gas for fuel a transaction's contracts burned.")]
+    fn for_fuel(&self, fuel: u64) -> u64;
+
+    #[document(
+        parent = "GasSchedule",
+        summary = "The fuel this much gas buys: what a transaction's contracts may burn with the gas its limit has left over its intrinsic cost.",
+    )]
+    fn fuel_for(&self, gas: u64) -> u64;
+
+    #[document(
+        parent = "GasSchedule",
+        summary = "The gas a sender is charged for, once its transaction ran. By default the gas it used; a scorer may charge more or less. Never more than the gas limit, whatever this returns, and blocks count the gas used, not this.",
+    )]
+    fn charge(&self, scoring: &Scoring) -> u64 {
+        scoring.gas
+    }
+}
+
+#[document(
+    summary = "What a scorer knows about a transaction that ran.",
+    category = "Fees",
+    see_also = "GasSchedule::charge",
+)]
+pub struct Scoring<'a> {
+    #[document(summary = "The transaction.")]
+    pub tx: &'a SignedTx,
+    #[document(summary = "Its sender.")]
+    pub sender: Address,
+    #[document(summary = "Fuel its contracts burned.")]
+    pub fuel_used: u64,
+    #[document(summary = "The gas it used, intrinsic cost and fuel together, at most its limit.")]
+    pub gas: u64,
+    #[document(summary = "Whether it failed.")]
+    pub failed: bool,
+    #[document(summary = "The block's state after it ran, for a scorer that reads chain state. Nothing a scorer writes is kept.")]
+    pub state: &'a Arc<State>,
+    #[document(summary = "The contract engines, for a scorer that runs a contract.")]
+    pub vm: &'a Arc<Vm>,
+    #[document(summary = "The chain's limits on one call.")]
+    pub limits: Limits,
+}
+
+#[document(
+    summary = "What gas costs. Genesis picks the kind with PricingConfig; a new kind is a new implementation of this.",
+    category = "Fees",
+    see_also = "PricingConfig, BaseFee, Bid",
+)]
+pub trait Pricing: Send + Sync {
+    #[document(parent = "Pricing", summary = "The kind's name, as genesis files spell it.")]
+    fn name(&self) -> &'static str;
+
+    #[document(parent = "Pricing", summary = "The base price of the genesis block.")]
+    fn genesis_price(&self) -> u256;
+
+    #[document(
+        parent = "Pricing",
+        summary = "The base price of the block after one with this base price and gas used.",
+    )]
+    fn next_price(&self, parent_price: u256, parent_gas: u64, block_gas_limit: u64) -> u256;
+
+    #[document(
+        parent = "Pricing",
+        summary = "What a sender with this offer pays per gas in a block with this base price, or None when the offer is too low to be taken.",
+    )]
+    fn price(&self, base: u256, offer: &FeeOffer) -> Option<u256>;
+
+    #[document(
+        parent = "Pricing",
+        summary = "The least base price any block can have: offers below it are turned away from the mempool.",
+    )]
+    fn floor(&self) -> u256;
+}
+
+#[document(
+    summary = "A chain's fees, built from its FeeConfig: the scorer, the pricing, and how the two combine into what a transaction pays.",
+    category = "Fees",
+    see_also = "FeeConfig, GasSchedule, Pricing",
+)]
+pub struct Fees {
+    config: FeeConfig,
+    schedule: Box<dyn GasSchedule>,
+    pricing: Box<dyn Pricing>,
+}
+
+impl std::fmt::Debug for Fees {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fees").field("config", &self.config).finish()
+    }
+}
+
+#[document(
+    summary = "What a transaction was charged, and where it went.",
+    category = "Fees",
+    see_also = "Fees::settle",
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Charged {
+    #[document(summary = "The gas it used, which counts against the block's limit.")]
+    pub gas_used: u64,
+    #[document(summary = "What the sender paid: the gas charged for at the price it paid.")]
+    pub fee: u256,
+    #[document(summary = "What the producer got.")]
+    pub to_producer: u256,
+    #[document(summary = "What was burned.")]
+    pub burned: u256,
+}
+
+impl Fees {
+    #[document(parent = "Fees", summary = "The settings these fees came from.")]
+    pub fn config(&self) -> &FeeConfig {
+        &self.config
+    }
+
+    #[document(parent = "Fees", summary = "The scorer.")]
+    pub fn schedule(&self) -> &dyn GasSchedule {
+        &*self.schedule
+    }
+
+    #[document(parent = "Fees", summary = "The pricing.")]
+    pub fn pricing(&self) -> &dyn Pricing {
+        &*self.pricing
+    }
+
+    #[document(parent = "Fees", summary = "The most gas one block may use.")]
+    pub fn block_gas_limit(&self) -> u64 {
+        self.config.block_gas_limit
+    }
+
+    #[document(
+        parent = "Fees",
+        summary = "What a producer gains per gas from a transaction in a block with this base price: what it pays above the base. What producers order transactions by; 0 for an offer too low to be taken.",
+    )]
+    pub fn priority(&self, base: u256, offer: &FeeOffer) -> u256 {
+        self.pricing.price(base, offer).map_or(u256::ZERO, |price| price - base)
+    }
+
+    #[document(
+        parent = "Fees",
+        summary = "Splits a fee once a transaction ran: the base price times the gas charged for is the base part, of which burn_permille burns and the rest goes to the producer, as does everything paid above it.",
+        params = {
+            base = "The block's base price.",
+            price = "What the transaction paid per gas.",
+            gas_used = "The gas it used.",
+            charged = "The gas it is charged for.",
+        },
+    )]
+    pub fn settle(&self, base: u256, price: u256, gas_used: u64, charged: u64) -> Charged {
+        let fee = u256::from(charged) * price;
+        let base_part = u256::from(charged) * base;
+        // In two steps, so no part of it can overflow.
+        let (thousand, permille) = (u256::from(1000u64), u256::from(self.config.burn_permille));
+        let burned = base_part / thousand * permille + base_part % thousand * permille / thousand;
+
+        Charged {
+            gas_used,
+            fee,
+            to_producer: fee - burned,
+            burned,
+        }
+    }
+}

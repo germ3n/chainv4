@@ -39,7 +39,7 @@ enum Command {
     Keygen(cli::KeygenArgs),
     /// Signs a transaction and submits it to a node's HTTP API.
     #[cfg(feature = "client")]
-    Send(cli::SendArgs),
+    Send(Box<cli::SendArgs>),
     /// Writes a genesis file with the development defaults, to edit and run with --genesis.
     Genesis(cli::genesis::GenesisArgs),
 }
@@ -104,7 +104,7 @@ fn main() -> std::process::ExitCode {
     let result = match cli.command {
         Some(Command::Keygen(args)) => cli::keygen(args),
         #[cfg(feature = "client")]
-        Some(Command::Send(args)) => cli::send(args),
+        Some(Command::Send(args)) => cli::send(*args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
         None => run(cli.node),
     };

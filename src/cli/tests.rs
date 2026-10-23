@@ -147,6 +147,9 @@ mod send {
                 finalized: false,
                 timeout: 10,
                 confirmations: 1,
+                gas_limit: None,
+                max_price: None,
+                tip: None,
                 tx,
             }
         }
@@ -261,6 +264,36 @@ mod send {
         // In block 1 or 2, so final once the tip is 5 blocks further.
         assert!(node.chain().tip().height >= 6);
         assert!(node.chain().finalized().unwrap().epoch >= 1);
+    }
+
+    #[test]
+    fn send_pays_fees_with_what_the_flags_say() {
+        let running = Running::start(true);
+        let to = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap().public().address();
+        let tipped = send(SendArgs {
+            tip: Some(u256::new(7)),
+            ..running.args(TxArgs::Transfer { to, amount: u256::new(9) })
+        });
+        let starved = send(SendArgs {
+            gas_limit: Some(1),
+            ..running.args(TxArgs::Transfer { to, amount: u256::new(9) })
+        });
+        let node = running.stop();
+
+        tipped.unwrap();
+        assert!(starved.unwrap_err().to_string().contains("gas limit under its intrinsic cost"));
+
+        // The tip went in as given, and the default gas limit was the transfer's intrinsic cost.
+        let block = node.chain().block_at(node.chain().tip().height).unwrap().unwrap();
+        let landed = (1..=node.chain().tip().height)
+            .flat_map(|height| node.chain().block_at(height).unwrap().unwrap().txs)
+            .find(|tx| matches!(tx.tx, crate::structs::tx::Tx::Transfer { .. }))
+            .expect("the transfer landed");
+        let fees = node.chain().fees().unwrap();
+
+        assert_eq!(landed.fee.tip, u256::new(7));
+        assert_eq!(landed.fee.gas_limit, fees.schedule().intrinsic(&landed));
+        assert!(block.header.base_price > u256::ZERO);
     }
 
     #[cfg(feature = "finality-authority")]

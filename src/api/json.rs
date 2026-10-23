@@ -32,6 +32,8 @@ pub fn summary(block: &Block) -> Value {
         "producer": header.producer.to_string(),
         "difficulty": header.difficulty.to_string(),
         "tx_root": header.tx_root.to_string(),
+        "gas_used": header.gas_used,
+        "base_price": header.base_price.to_string(),
         "tx_count": block.txs.len(),
         "proof_count": block.proofs.len(),
     })
@@ -91,6 +93,8 @@ fn outcome(receipt: &TxReceipt) -> Value {
         TxStatus::Failed(error) => json!({ "status": "failed", "error": error }),
     };
     value["fuel_used"] = receipt.fuel_used.into();
+    value["gas_used"] = receipt.gas_used.into();
+    value["fee"] = receipt.fee.to_string().into();
     value["events"] = receipt.events.iter().map(event).collect();
 
     value
@@ -109,6 +113,11 @@ pub fn signed_tx(signed: &SignedTx, hash: HashType) -> Value {
         "id": signed.id(hash).to_string(),
         "sender": signed.sender().to_string(),
         "nonce": signed.nonce,
+        "fee": {
+            "gas_limit": signed.fee.gas_limit,
+            "max_price": signed.fee.max_price.to_string(),
+            "tip": signed.fee.tip.to_string(),
+        },
         "signer": signed.signer.to_string(),
         "signature": signed.signature.to_string(),
         "tx": tx(&signed.tx),

@@ -260,7 +260,7 @@ impl Node {
         summary = "Admits a transaction submitted to this node and gossips it.",
     )]
     pub fn submit(&mut self, tx: SignedTx) -> Result<(), MempoolError> {
-        self.mempool.add(tx.clone(), &self.chain.state())?;
+        self.mempool.add(tx.clone(), &self.chain.state(), self.chain.fees())?;
         log::info!("[node] accepted transaction {} from {}", tx.id(self.chain.hash()), tx.sender());
         self.send(NetCommand::PublishTx(tx));
 
@@ -296,7 +296,7 @@ impl Node {
             NetEvent::Tx { from, tx } => {
                 let id = tx.id(self.chain.hash());
 
-                match self.mempool.add(tx, &self.chain.state()) {
+                match self.mempool.add(tx, &self.chain.state(), self.chain.fees()) {
                     Ok(()) => log::debug!("[node] queued transaction {id} from {from}"),
                     Err(err) => log::debug!("[node] refused transaction {id} from {from}: {err}"),
                 }
@@ -409,7 +409,7 @@ impl Node {
             let state = self.chain.state();
 
             for tx in undone.into_iter().flat_map(|block| block.txs) {
-                let _ = self.mempool.add(tx, &state);
+                let _ = self.mempool.add(tx, &state, self.chain.fees());
             }
 
             self.mempool.prune(&self.chain.state())?;
@@ -464,7 +464,7 @@ impl Node {
 
                 for tx in undone.into_iter().flat_map(|block| block.txs) {
                     // Most will be back in the new branch or used up; the rest wait again.
-                    let _ = self.mempool.add(tx, &state);
+                    let _ = self.mempool.add(tx, &state, self.chain.fees());
                 }
             }
         }
@@ -498,9 +498,9 @@ impl Node {
             return Ok(());
         }
 
-        let txs = self.mempool.select(&self.chain.state(), MAX_BLOCK_TXS)?;
+        let txs = self.mempool.select(&self.chain.state(), MAX_BLOCK_TXS, &|tx| self.chain.priority(tx))?;
         let proofs = self.chain.unpaid_proofs()?;
-        let mut block = self.chain.build(txs, proofs, producer.address(), now);
+        let mut block = self.chain.build(txs, proofs, producer.address(), now)?;
 
         match producer.seal(&block.header) {
             Some(seal) => {

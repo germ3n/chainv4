@@ -42,6 +42,7 @@ chainv4 send transfer --to ed25519:0x5be0… --amount 1000000000000000000
 # submitted 0x9c1d…
 # included in block 14 0x77ab… (1 confirmation)
 # done
+# gas used 3620, fee 2771562507240
 ```
 
 Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
@@ -80,8 +81,10 @@ Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
 
 Both give the development key a million coins and let it mint, and make it the one FFG
 validator, bonded with 10,000 coins: run one node with `--validate` and the chain finalizes
-every 8 blocks. Its seed is in the source, so never use either chain for anything of value. A dev chain also allows every contract engine the
-node was built with, so nodes built with different features are on different chains.
+every 8 blocks. Both charge [fees](#fees), starting at 1 gwei of gas, which `send` works out on
+its own; an account needs coins to send anything. Its seed is in the source, so never use either
+chain for anything of value. A dev chain also allows every contract engine the node was built
+with, so nodes built with different features are on different chains.
 
 ### Several nodes
 
@@ -101,15 +104,16 @@ features.
 
 Every parameter of a chain lives in its genesis: the consensus and its timing, the hash, block
 rewards, allocations, the minter, which engines run contracts, transaction limits, how deep a
-reorg may go, and which finality it runs with every setting of it. `chainv4 genesis` writes the
-dev defaults as JSON to edit:
+reorg may go, which finality it runs and what transactions pay, with every setting of each.
+`chainv4 genesis` writes the dev defaults as JSON to edit:
 
 ```sh
-chainv4 genesis --consensus authority --finality authority --out mychain.json
+chainv4 genesis --consensus authority --finality authority --fees bid --out mychain.json
 chainv4 --genesis mychain.json --produce --producer-key me.key --http 127.0.0.1:8080
 ```
 
-`--finality` is `ffg` (the default), `authority`, `depth` or `none`.
+`--finality` is `ffg` (the default), `authority`, `depth` or `none`. `--fees` is `base-fee`
+(the default), `bid` or `free`, and `--scorer CONTRACT` has a contract score transactions.
 
 Every node on the chain needs the same file. Each field must be there and unknown ones are
 refused, so a misspelled parameter is an error, not a silent default; a node also refuses
@@ -148,6 +152,9 @@ transaction that landed but failed exits non-zero.
 | `--timeout SECS` | `60` | Give up waiting after this long. The transaction may still land. |
 | `--confirmations N` | `1` | Wait until N blocks hold it, its own included. On a pow chain, a few more guard against a fork taking it back off. |
 | `--final` | | Wait until its block is finalized, which no fork can take back. |
+| `--gas-limit N` | its cost | The most gas it may use. By default what the chain's gas schedule says it costs, plus the chain's fuel cap for calls, deploys and upgrades. |
+| `--max-price N` | see [Fees](#fees) | The most it pays per gas, in the smallest unit: by default twice the base price plus the tip, or the lowest bid. |
+| `--tip N` | `0` | Under a base fee, what it adds per gas for the producer. |
 
 ### transfer, mint, burn
 
@@ -420,16 +427,75 @@ reorganizes past it. `depth` 0 makes every block final as soon as it is the tip.
 node's own view, so nodes kept apart for longer than `depth` blocks, by a partition or a private
 fork, finalize different branches and never come back together. `--validate` is refused.
 
+## Fees
+
+On a chain with fees, every transaction pays for the gas it uses, failed ones too. It names a
+gas limit and the most it pays per gas; that much is reserved from the sender before it runs,
+and what it does not use comes back. A contract's fuel costs gas, so the gas limit also bounds
+what the contract may burn, as well as `tx_limits.fuel`; one that runs out pays all of the fuel
+it was allowed. A transaction whose gas limit does not cover its intrinsic cost, whose price is
+too low, or whose sender cannot cover its gas limit at its price, cannot go in a block at all.
+
+Genesis's `fees` sets every part of it, and `null` makes a chain free:
+
+| Field | What it does |
+| --- | --- |
+| `block_gas_limit` | The most gas a block's transactions may use together. Producers fill blocks by priority until it is reached. |
+| `burn_permille` | How much of the base part of each fee is burned, in thousandths; the producer gets the rest of it. |
+| `schedule` | The gas schedule, or scorer: how much gas a transaction costs. |
+| `pricing` | What each gas costs. |
+
+Two gas schedules ship, and each is an implementation of the `GasSchedule` trait, so others can
+be added the same way:
+
+- **`weighted`**: `per_tx` gas for every transaction, `per_byte` for each byte of it, `per_code_byte`
+  more for each byte of code a deploy or upgrade stores, and one gas for every `fuel_per_gas` fuel.
+- **`contract`**: weighs transactions the same way, then calls `score` on the contract at
+  `contract`, with `fuel` of its own, to say what the sender is charged. It is called as
+  `score(sender, kind, target, bytes, fuel, gas, failed)` and returns the gas to charge: `kind`
+  is the transaction's type as the API names it, `target` what it is sent to, and `gas` what the
+  weights say. It can make transactions cheaper or dearer by anything it can read, up to their
+  gas limit. Nothing it writes or emits is kept, and until a contract lives there, or when it
+  fails, the weights alone count. Blocks always count the weighed gas, whatever it charges.
+
+```lua
+local M = {}
+
+-- Transfers at half price; everything else as weighed.
+function M.score(sender, kind, target, bytes, fuel, gas, failed)
+    if kind == "transfer" then
+        return gas / 2
+    end
+    return gas
+end
+
+return M
+```
+
+Two pricings ship, each an implementation of the `Pricing` trait:
+
+- **`base_fee`**, as in EIP-1559: every block has a base price, set by how full its parent was
+  against a target of `block_gas_limit / elasticity`, moving by at most `1 / change_denominator`
+  a block and never below `min`. A transaction pays the base price plus its tip, as far as its max
+  price allows.
+- **`bid`**: each sender bids its price, at least `min_price`, and pays it whole. `min_price` is
+  every block's base price.
+
+Either way, the base price times the gas a transaction is charged for is the base part of its
+fee, which `burn_permille` splits between burning and the producer; whatever it pays above the
+base price goes to the producer whole. `GET /status` shows the fees and the base price a
+transaction sent now must offer, and every block and receipt shows its gas and fee.
+
 ## HTTP API
 
 Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "…"}`.
 
 | Route | Answers |
 | --- | --- |
-| `GET /status` | Genesis, tip, height, difficulty, total work, the chain's hash, and the epoch with the justified and finalized checkpoints. |
+| `GET /status` | Genesis, tip, height, difficulty, total work, the chain's hash, the epoch with the justified and finalized checkpoints, and the fees with the next block's base price. |
 | `GET /blocks?before=H&limit=N` | Block summaries, newest first, with a `next` cursor. |
-| `GET /blocks/{latest\|height\|id}` | A block, its seal, and each transaction with its receipt. |
-| `GET /txs/{id}` | Where a transaction landed, its confirmations, whether it is final, its result and events; 404 until it is on the main chain. |
+| `GET /blocks/{latest\|height\|id}` | A block, its gas used and base price, its seal, and each transaction with its fee offer and receipt. |
+| `GET /txs/{id}` | Where a transaction landed, its confirmations, whether it is final, its gas used and fee, its result and events; 404 until it is on the main chain. |
 | `GET /accounts/{address}` | Nonce and balance. |
 | `GET /contracts/{address}` | Engine, deployer, exported functions, and whether it can be upgraded. |
 | `GET /validators` | Every bonded validator, and who votes in the current epoch with what weight: the bonded set under `ffg`, the signers under `authority`; 404 under `depth`. |

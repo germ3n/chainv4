@@ -4,9 +4,10 @@ use {
     crate::structs::code::Code,
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::to_hex,
-    crate::crypto::keypair::PublicKey,
+    crate::chain::fees::PricingConfig,
+    crate::crypto::keypair::{Keypair, PublicKey},
     crate::structs::hex::from_hex,
-    crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
+    crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     crate::structs::u256::u256,
     crate::structs::vote::SignedVote,
     crate::vm::selector,
@@ -40,6 +41,17 @@ pub struct SendArgs {
     /// Wait until the transaction's block is finalized, not just deep enough.
     #[arg(long = "final", conflicts_with = "no_wait")]
     pub finalized: bool,
+    /// The most gas it may use. Defaults to its intrinsic cost under the chain's gas schedule,
+    /// plus the chain's fuel cap for calls, deploys and upgrades.
+    #[arg(long)]
+    pub gas_limit: Option<u64>,
+    /// The most it pays per gas, in the smallest unit. Defaults to twice the base price plus the
+    /// tip under a base fee, and to the lowest bid when senders bid.
+    #[arg(long, value_parser = parse_amount)]
+    pub max_price: Option<u256>,
+    /// Under a base fee, what it adds per gas for the producer. Defaults to 0.
+    #[arg(long, value_parser = parse_amount)]
+    pub tip: Option<u256>,
     #[command(subcommand)]
     pub tx: TxArgs,
 }
@@ -167,9 +179,16 @@ pub fn send(args: SendArgs) -> CliResult<()> {
         .into();
     let account = ok(agent.get(format!("{node}/accounts/{sender}")).call())?;
     let nonce = account["nonce"].as_u64().ok_or("the node sent no nonce")?;
+    let status = ok(agent.get(format!("{node}/status")).call())?;
     let tx = transaction(args.tx, sender, &agent, node)?;
     let deploys = matches!(tx, Tx::Deploy { .. });
-    let signed = SignedTx::sign(tx, nonce, &keypair);
+    let flags = FeeFlags {
+        gas_limit: args.gas_limit,
+        max_price: args.max_price,
+        tip: args.tip,
+    };
+    let fee = offer(&status["fees"], &tx, nonce, &keypair, flags)?;
+    let signed = SignedTx::sign(tx, nonce, fee, &keypair);
     let body = json!({ "tx": to_hex(&wincode::serialize(&signed)?) }).to_string();
     let submitted = ok(agent
         .post(format!("{node}/txs"))
@@ -181,7 +200,6 @@ pub fn send(args: SendArgs) -> CliResult<()> {
 
     if deploys {
         // Contract addresses are derived with the chain's hash, which the node says.
-        let status = ok(agent.get(format!("{node}/status")).call())?;
         let hash: HashType = status["hash"]
             .as_str()
             .ok_or("the node did not say its chain's hash")?
@@ -199,6 +217,56 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     };
     let receipt = wait(&agent, node, id, wanted, Duration::from_secs(args.timeout))?;
     report(&receipt)
+}
+
+/// The parts of a fee offer the flags set.
+struct FeeFlags {
+    gas_limit: Option<u64>,
+    max_price: Option<u256>,
+    tip: Option<u256>,
+}
+
+/// What to offer for a transaction: on a chain with fees, as the node reports them, the flags
+/// given, and for the rest what is sure to cover it. Nothing on a chain without fees.
+fn offer(fees: &Value, tx: &Tx, nonce: u64, keypair: &Keypair, flags: FeeFlags) -> CliResult<FeeOffer> {
+    if fees.is_null() {
+        return Ok(FeeOffer::NONE);
+    }
+
+    let base = parse_amount(fees["base_price"].as_str().ok_or("the node sent no base price")?)?;
+    let tx_fuel = fees["tx_fuel"].as_u64().ok_or("the node sent no fuel cap")?;
+    // What the node adds to the chain's fee settings, which the settings themselves do not hold.
+    let mut settings = fees.clone();
+    settings.as_object_mut().ok_or("the node sent bad fees")?.retain(|key, _| key != "base_price" && key != "tx_fuel");
+    let config = crate::cli::genesis::fees_from_json(&settings)?;
+    let tip = flags.tip.unwrap_or_default();
+    let max_price = match (flags.max_price, &config.pricing) {
+        (Some(max_price), _) => max_price,
+        (None, PricingConfig::BaseFee(_)) => base * u256::from(2u64) + tip,
+        (None, PricingConfig::Bid(_)) => base + tip,
+    };
+    let mut fee = FeeOffer {
+        gas_limit: 0,
+        max_price,
+        tip,
+    };
+    fee.gas_limit = match flags.gas_limit {
+        Some(gas_limit) => gas_limit,
+        None => {
+            // Every field of an offer has a fixed size, so this measures the transaction as sent.
+            let probe = SignedTx::sign(tx.clone(), nonce, fee, keypair);
+            let built = config.build();
+            let schedule = built.schedule();
+            let fuel = match tx {
+                Tx::ContractCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } => schedule.for_fuel(tx_fuel),
+                _ => 0,
+            };
+
+            schedule.intrinsic(&probe).saturating_add(fuel).min(config.block_gas_limit)
+        }
+    };
+
+    Ok(fee)
 }
 
 /// What a transaction's block must reach before send returns.
@@ -278,6 +346,10 @@ fn report(receipt: &Value) -> CliResult<()> {
 
     if let Some(fuel) = receipt["fuel_used"].as_u64().filter(|fuel| *fuel > 0) {
         println!("fuel used {fuel}");
+    }
+
+    if let Some(gas) = receipt["gas_used"].as_u64().filter(|gas| *gas > 0) {
+        println!("gas used {gas}, fee {}", receipt["fee"].as_str().unwrap_or("?"));
     }
 
     for event in receipt["events"].as_array().into_iter().flatten() {

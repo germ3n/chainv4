@@ -9,6 +9,7 @@ use crate::crypto::keypair::{Keypair, PrivateKey};
 use crate::db::MemoryDb;
 use crate::structs::address::Address;
 use crate::structs::block::Seal;
+use crate::structs::tx::FeeOffer;
 
 const SLOT: u64 = 2_000;
 /// Far enough ahead that no block in these tests is from the future.
@@ -31,6 +32,7 @@ fn key(seed: u8) -> Keypair {
 fn genesis_with(finality: Option<FinalityConfig>) -> Genesis {
     Genesis {
         finality,
+        fees: None,
         ..Genesis::dev_authority(dev().public())
     }
 }
@@ -43,7 +45,7 @@ fn open_with(finality: Option<FinalityConfig>) -> Chain {
 fn advance(chain: &mut Chain, txs: Vec<SignedTx>, proofs: Vec<Justification>) -> Result<Vec<Receipt>, ImportError> {
     let now = chain.tip().timestamp + SLOT;
     let mut producer = AuthorityProducer::new(dev(), SLOT);
-    let mut block = chain.build(txs, proofs, producer.address(), now);
+    let mut block = chain.build(txs, proofs, producer.address(), now).unwrap();
     block.seal = producer.seal(&block.header).unwrap();
 
     match chain.import(&block, now)? {
@@ -70,6 +72,7 @@ fn pow_genesis(finality: FinalityConfig) -> Genesis {
         }),
         reward: Reward::NONE,
         finality: Some(finality),
+        fees: None,
         ..Genesis::dev_pow(dev().public())
     }
 }
@@ -84,6 +87,8 @@ fn mine_on(chain: &Chain, parent: &Block, miner: u8) -> Block {
         difficulty: chain.consensus().difficulty(&parent.header, timestamp),
         tx_root: Block::tx_root(chain.hash(), &[]),
         proof_root: Block::proof_root(chain.hash(), &[]),
+        gas_used: 0,
+        base_price: u256::ZERO,
     };
     let nonce = (0..)
         .find(|nonce| meets(work_hash(chain.hash(), &header.id(), *nonce), header.difficulty))
@@ -239,7 +244,7 @@ mod voting {
 
     /// Sends a transaction from the dev key, which holds the funds, in the next block.
     pub(super) fn send(chain: &mut Chain, tx: Tx) -> Vec<Receipt> {
-        let signed = SignedTx::sign(tx, nonce(chain, &dev()), &dev());
+        let signed = SignedTx::sign(tx, nonce(chain, &dev()), FeeOffer::NONE, &dev());
 
         advance(chain, vec![signed], Vec::new()).unwrap()
     }
@@ -790,6 +795,7 @@ mod voting {
                     second: Box::new(second),
                 },
                 nonce,
+                FeeOffer::NONE,
                 &reporter,
             )
         };
@@ -805,9 +811,16 @@ mod voting {
         assert_eq!(record.bond, u256::ZERO);
         assert!(chain.has_staking());
 
-        // Not two conflicting votes: refused before it runs.
+        // Not two conflicting votes: refused before it runs, so a block holding it is invalid.
+        let now = chain.tip().timestamp + SLOT;
+        let mut producer = AuthorityProducer::new(dev(), SLOT);
+        let mut block = chain.build(Vec::new(), Vec::new(), producer.address(), now).unwrap();
+        block.txs = vec![slash(honest, honest, 2)];
+        block.header.tx_root = Block::tx_root(chain.hash(), &block.txs);
+        block.seal = producer.seal(&block.header).unwrap();
+
         assert!(matches!(
-            advance(&mut chain, vec![slash(honest, honest, 2)], Vec::new()),
+            chain.import(&block, now),
             Err(ImportError::Invalid(BlockError::Tx { error: TxError::Invalid(_), .. }))
         ));
     }
@@ -971,7 +984,7 @@ mod voting {
                 change_threshold: 2,
             };
 
-            SignedTx::sign(tx, nonce(chain, keypair), keypair)
+            SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair)
         };
 
         // Carol out, Dave in: one approval is not enough, and an outsider's does not count.
@@ -1039,6 +1052,7 @@ fn staking_needs_staking() {
             amount: Amount::U128(500),
         },
         0,
+        FeeOffer::NONE,
         &dev(),
     );
     let receipts = advance(&mut chain, vec![bond], Vec::new()).unwrap();
@@ -1062,6 +1076,7 @@ fn staking_needs_staking() {
             change_threshold: 1,
         },
         1,
+        FeeOffer::NONE,
         &dev(),
     );
 

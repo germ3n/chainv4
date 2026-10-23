@@ -13,7 +13,9 @@ use crate::chain::{FfgConfig, GenesisValidator};
 use crate::crypto::keypair::PublicKey;
 use {
     super::CliResult,
-    crate::chain::{Allocation, FinalityConfig, Genesis, Reward},
+    crate::chain::fees::{BaseFee, Bid, ContractScorer, PricingConfig, ScheduleConfig, Weighted},
+    crate::chain::{Allocation, FeeConfig, FinalityConfig, Genesis, Reward},
+    crate::structs::address::Address,
     crate::consensus::{ConsensusConfig, PowConfig},
     crate::structs::hash::HashType,
     crate::structs::code::Engine,
@@ -33,6 +35,14 @@ pub struct GenesisArgs {
     /// FFG with the development key as its one validator.
     #[arg(long, value_parser = parse_finality)]
     pub finality: Option<FinalityKind>,
+    /// What transactions pay: base-fee, the default, where a base price follows how full blocks
+    /// are; bid, where senders name their price; or free.
+    #[arg(long, value_enum, default_value_t = FeeKind::BaseFee)]
+    pub fees: FeeKind,
+    /// A contract whose score function says what each transaction is charged, on top of the
+    /// weighted gas schedule. Deploy it once the chain runs; until then the weights alone count.
+    #[arg(long)]
+    pub scorer: Option<Address>,
     /// Where to write it. Without one, it goes to stdout.
     #[arg(long)]
     pub out: Option<PathBuf>,
@@ -93,6 +103,37 @@ pub fn dev_finality(kind: FinalityKind) -> Option<FinalityConfig> {
     }
 }
 
+/// How the written genesis charges for transactions.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum FeeKind {
+    BaseFee,
+    Bid,
+    Free,
+}
+
+/// Development fees of a kind, with a scorer contract if one is named.
+pub fn dev_fees(kind: FeeKind, scorer: Option<Address>) -> Option<FeeConfig> {
+    let pricing = match kind {
+        FeeKind::BaseFee => PricingConfig::BaseFee(BaseFee::dev()),
+        FeeKind::Bid => PricingConfig::Bid(Bid::dev()),
+        FeeKind::Free => return None,
+    };
+    let schedule = match scorer {
+        Some(contract) => ScheduleConfig::Contract(ContractScorer {
+            weights: Weighted::dev(),
+            contract,
+            fuel: 100_000,
+        }),
+        None => ScheduleConfig::Weighted(Weighted::dev()),
+    };
+
+    Some(FeeConfig {
+        schedule,
+        pricing,
+        ..FeeConfig::dev()
+    })
+}
+
 /// The development genesis of a kind, as the node runs it without --genesis.
 pub fn dev(chain: DevChain) -> Genesis {
     let dev = crate::consensus::DevAuthority::dev_keypair().public();
@@ -110,6 +151,12 @@ pub fn write(args: GenesisArgs) -> CliResult<()> {
     if let Some(kind) = args.finality {
         genesis.finality = dev_finality(kind);
     }
+
+    if args.scorer.is_some() && matches!(args.fees, FeeKind::Free) {
+        return Err("--scorer needs fees; leave out --fees free".into());
+    }
+
+    genesis.fees = dev_fees(args.fees, args.scorer);
 
     let text = serde_json::to_string_pretty(&to_json(&genesis))? + "\n";
 
@@ -167,7 +214,99 @@ pub fn to_json(genesis: &Genesis) -> Value {
         },
         "max_reorg_depth": genesis.max_reorg_depth,
         "finality": genesis.finality.as_ref().map(finality_json),
+        "fees": genesis.fees.as_ref().map(fees_json),
     })
+}
+
+/// Fees as JSON: the shape genesis files and GET /status use.
+pub fn fees_json(fees: &FeeConfig) -> Value {
+    let weights = |weighted: &Weighted| {
+        json!({
+            "per_tx": weighted.per_tx,
+            "per_byte": weighted.per_byte,
+            "per_code_byte": weighted.per_code_byte,
+            "fuel_per_gas": weighted.fuel_per_gas,
+        })
+    };
+    let mut schedule = match &fees.schedule {
+        ScheduleConfig::Weighted(weighted) => weights(weighted),
+        ScheduleConfig::Contract(scorer) => {
+            let mut value = weights(&scorer.weights);
+            value["contract"] = scorer.contract.to_string().into();
+            value["fuel"] = scorer.fuel.into();
+
+            value
+        }
+    };
+    schedule["type"] = fees.schedule.name().into();
+
+    json!({
+        "block_gas_limit": fees.block_gas_limit,
+        "burn_permille": fees.burn_permille,
+        "schedule": schedule,
+        "pricing": match &fees.pricing {
+            PricingConfig::BaseFee(base_fee) => json!({
+                "type": "base_fee",
+                "initial": base_fee.initial.to_string(),
+                "min": base_fee.min.to_string(),
+                "elasticity": base_fee.elasticity,
+                "change_denominator": base_fee.change_denominator,
+            }),
+            PricingConfig::Bid(bid) => json!({
+                "type": "bid",
+                "min_price": bid.min_price.to_string(),
+            }),
+        },
+    })
+}
+
+/// Reads fees as fees_json writes them.
+pub fn fees_from_json(value: &Value) -> Result<FeeConfig, String> {
+    fees_from_fields(Fields::of(value, "fees")?)
+}
+
+fn fees_from_fields(mut fees: Fields) -> Result<FeeConfig, String> {
+    let mut schedule = fees.object("schedule")?;
+    let kind = schedule.text("type")?;
+    let weights = Weighted {
+        per_tx: schedule.whole("per_tx")?,
+        per_byte: schedule.whole("per_byte")?,
+        per_code_byte: schedule.whole("per_code_byte")?,
+        fuel_per_gas: schedule.whole("fuel_per_gas")?,
+    };
+    let schedule_config = match kind.as_str() {
+        "weighted" => ScheduleConfig::Weighted(weights),
+        "contract" => ScheduleConfig::Contract(ContractScorer {
+            weights,
+            contract: schedule.parse("contract")?,
+            fuel: schedule.whole("fuel")?,
+        }),
+        other => return Err(format!("fees.schedule.type: unknown schedule {other}; use weighted or contract")),
+    };
+    schedule.done()?;
+    let mut pricing = fees.object("pricing")?;
+    let pricing_config = match pricing.text("type")?.as_str() {
+        "base_fee" => PricingConfig::BaseFee(BaseFee {
+            initial: pricing.amount("initial")?,
+            min: pricing.amount("min")?,
+            elasticity: pricing.whole("elasticity")?,
+            change_denominator: pricing.whole("change_denominator")?,
+        }),
+        "bid" => PricingConfig::Bid(Bid {
+            min_price: pricing.amount("min_price")?,
+        }),
+        other => return Err(format!("fees.pricing.type: unknown pricing {other}; use base_fee or bid")),
+    };
+    pricing.done()?;
+    let config = FeeConfig {
+        block_gas_limit: fees.whole("block_gas_limit")?,
+        burn_permille: u16::try_from(fees.whole("burn_permille")?).map_err(|_| "fees.burn_permille is too large".to_string())?,
+        schedule: schedule_config,
+        pricing: pricing_config,
+    };
+    fees.done()?;
+
+    Ok(config)
 }
 
 /// Finality as JSON, its kind in "type" as consensus has it.
@@ -336,6 +475,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
     limits.done()?;
     let max_reorg_depth = root.whole("max_reorg_depth")?;
     let finality = root.optional_object("finality")?.map(finality_from_json).transpose()?;
+    let fees = root.optional_object("fees")?.map(fees_from_fields).transpose()?;
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -347,6 +487,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         tx_limits,
         max_reorg_depth,
         finality,
+        fees,
     };
     root.done()?;
 
@@ -514,14 +655,25 @@ mod tests {
 
     #[test]
     fn genesis_files_round_trip_exactly() {
+        let scorer = Address::Contract([5; 32]);
+        let fee_kinds = [
+            (FeeKind::BaseFee, None),
+            (FeeKind::Bid, None),
+            (FeeKind::BaseFee, Some(scorer)),
+            (FeeKind::Free, None),
+        ];
+
         for chain in [DevChain::Pow, DevChain::Authority] {
             for &kind in ALL_FINALITY {
-                let mut genesis = dev(chain);
-                genesis.finality = dev_finality(kind);
-                let read = from_json(&to_json(&genesis)).unwrap();
+                for (fees, scorer) in fee_kinds {
+                    let mut genesis = dev(chain);
+                    genesis.finality = dev_finality(kind);
+                    genesis.fees = dev_fees(fees, scorer);
+                    let read = from_json(&to_json(&genesis)).unwrap();
 
-                assert_eq!(read, genesis);
-                assert_eq!(read.block().id(), genesis.block().id());
+                    assert_eq!(read, genesis);
+                    assert_eq!(read.block().id(), genesis.block().id());
+                }
             }
         }
     }
@@ -617,6 +769,9 @@ mod tests {
             ("/engines", json!(["lua", "evm"]), "unknown engine evm"),
             ("/consensus/hash", json!("sha1"), "consensus.hash: unknown hash sha1"),
             ("/allocations/0/amount", json!("-5"), "allocations[0].amount: -5 is not a whole amount"),
+            ("/fees/pricing/type", json!("auction"), "unknown pricing auction"),
+            ("/fees/schedule/per_byte", json!(-1), "fees.schedule.per_byte must be a whole number"),
+            ("/fees/burn_permille", json!(70_000), "fees.burn_permille is too large"),
         ];
 
         for (pointer, replacement, expected) in cases {

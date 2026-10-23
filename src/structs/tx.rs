@@ -318,7 +318,7 @@ const SIGNING_DOMAIN: &[u8] = b"chainv4 transaction";
     summary = "A transaction as it travels and lands in blocks: the transaction, the signer's next nonce, the signer's public key and their signature over all three. The sender is the signer's address.",
     category = "Transactions",
     see_also = "Tx, Keypair::sign",
-    example = "let signed = SignedTx::sign(tx, accounts.get(&keypair.public().address())?.nonce, &keypair);",
+    example = "let signed = SignedTx::sign(tx, accounts.get(&keypair.public().address())?.nonce, FeeOffer::NONE, &keypair);",
 )]
 #[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
 pub struct SignedTx {
@@ -326,10 +326,48 @@ pub struct SignedTx {
     pub tx: Tx,
     #[document(summary = "The sender's nonce at the time; each one is usable once, so the transaction cannot be replayed.")]
     pub nonce: u64,
+    #[document(summary = "What the sender offers to pay for it. Ignored on a chain without fees.")]
+    pub fee: FeeOffer,
     #[document(summary = "Who signed it. Their address is the sender.")]
     pub signer: PublicKey,
-    #[document(summary = "The signer's signature over the transaction, nonce and signer.")]
+    #[document(summary = "The signer's signature over the transaction, nonce, fee offer and signer.")]
     pub signature: Signature,
+}
+
+#[document(
+    summary = "What a sender offers to pay for a transaction: the most gas it may use, and the most it pays for each. It pays for the gas it uses, and gets the rest back.",
+    category = "Transactions",
+    see_also = "SignedTx, FeeConfig",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct FeeOffer {
+    #[document(summary = "The most gas the transaction may use. Its fee is reserved from the sender up front, at max_price, and what it does not use is refunded.")]
+    pub gas_limit: u64,
+    #[document(summary = "The most the sender pays per gas: the whole price when senders bid, the cap on base price plus tip under a base fee.")]
+    #[wincode(with = "U256Le")]
+    pub max_price: u256,
+    #[document(summary = "Under a base fee, what the sender adds per gas for the producer, as far as max_price allows. Ignored when senders bid.")]
+    #[wincode(with = "U256Le")]
+    pub tip: u256,
+}
+
+impl Hashable for FeeOffer {}
+
+impl FeeOffer {
+    #[document(parent = "FeeOffer", summary = "No offer, for a chain without fees.")]
+    pub const NONE: FeeOffer = FeeOffer {
+        gas_limit: 0,
+        max_price: u256::ZERO,
+        tip: u256::ZERO,
+    };
+
+    #[document(
+        parent = "FeeOffer",
+        summary = "The most the transaction can cost: its gas limit at its max price. None when that passes the largest u256.",
+    )]
+    pub fn reserve(&self) -> Option<u256> {
+        u256::from(self.gas_limit).checked_mul(self.max_price)
+    }
 }
 
 impl SignedTx {
@@ -339,16 +377,18 @@ impl SignedTx {
         params = {
             tx = "The transaction.",
             nonce = "The sender's current nonce.",
+            fee = "What the sender offers to pay; FeeOffer::NONE on a chain without fees.",
             keypair = "The sender's keys.",
         },
     )]
-    pub fn sign(tx: Tx, nonce: u64, keypair: &Keypair) -> SignedTx {
+    pub fn sign(tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair) -> SignedTx {
         let signer = keypair.public();
-        let signature = keypair.sign(&signing_bytes(&tx, nonce, &signer));
+        let signature = keypair.sign(&signing_bytes(&tx, nonce, &fee, &signer));
 
         SignedTx {
             tx,
             nonce,
+            fee,
             signer,
             signature,
         }
@@ -372,10 +412,11 @@ impl SignedTx {
     }
 }
 
-fn signing_bytes(tx: &Tx, nonce: u64, signer: &PublicKey) -> Vec<u8> {
+fn signing_bytes(tx: &Tx, nonce: u64, fee: &FeeOffer, signer: &PublicKey) -> Vec<u8> {
     let mut bytes = SIGNING_DOMAIN.to_vec();
     bytes.extend_from_slice(&tx.hashable_bytes_with_tag());
     bytes.extend_from_slice(&nonce.to_le_bytes());
+    bytes.extend_from_slice(&fee.hashable_bytes_with_tag());
     bytes.extend_from_slice(&signer.hashable_bytes_with_tag());
 
     bytes
@@ -391,7 +432,7 @@ impl Verifiable for SignedTx {
         self.tx.verify()?;
         self.signer.verify()?;
         self.signer.verify_signature(
-            &signing_bytes(&self.tx, self.nonce, &self.signer),
+            &signing_bytes(&self.tx, self.nonce, &self.fee, &self.signer),
             &self.signature,
         )?;
 

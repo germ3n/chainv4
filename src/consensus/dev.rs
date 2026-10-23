@@ -139,6 +139,7 @@ impl Producer for AuthorityProducer {
 mod tests {
     use super::*;
     use crate::structs::hash::HashType;
+    use crate::structs::u256::u256;
     use crate::structs::hash::Hash;
 
     const SLOT: u64 = 2_000;
@@ -152,6 +153,8 @@ mod tests {
             difficulty: 0,
             tx_root: Hash::from_bytes(HashType::default_chain(), &[0; 32]).unwrap(),
             proof_root: Hash::from_bytes(HashType::default_chain(), &[0; 32]).unwrap(),
+            gas_used: 0,
+            base_price: u256::ZERO,
         }
     }
 

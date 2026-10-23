@@ -11,7 +11,7 @@ use crate::net::FakeNet;
 use crate::registry::Accounts;
 use crate::structs::amount::Amount;
 use crate::structs::block::Block;
-use crate::structs::tx::Tx;
+use crate::structs::tx::{FeeOffer, Tx};
 use crate::structs::u256::u256;
 use libp2p::PeerId;
 
@@ -19,7 +19,10 @@ const SLOT: u64 = 2_000;
 
 fn node(produce: bool) -> (Node, FakeNet) {
     let authority = DevAuthority::dev_keypair();
-    let genesis = Genesis::dev_authority(authority.public());
+    let genesis = Genesis {
+        fees: None,
+        ..Genesis::dev_authority(authority.public())
+    };
     let producer = produce.then(|| Box::new(AuthorityProducer::new(authority, SLOT)) as Box<dyn Producer>);
     let (link, fake) = NetLink::pair();
     let node = Node::new(Arc::new(MemoryDb::default()), &genesis, producer, link).unwrap();
@@ -40,6 +43,7 @@ fn easy_pow() -> Genesis {
             initial: u256::new(5),
             halving_interval: None,
         },
+        fees: None,
         ..Genesis::dev_pow(DevAuthority::dev_keypair().public())
     }
 }
@@ -62,6 +66,8 @@ fn mine_on(node: &Node, parent: &BlockHeader, miner: u8) -> Block {
         difficulty: node.chain().consensus().difficulty(parent, timestamp),
         tx_root: Block::tx_root(HashType::default_chain(), &[]),
         proof_root: Block::proof_root(HashType::default_chain(), &[]),
+        gas_used: 0,
+        base_price: u256::ZERO,
     };
     let nonce = (0..)
         .find(|nonce| meets(work_hash(HashType::default_chain(), &header.id(), *nonce), header.difficulty))
@@ -145,6 +151,7 @@ fn transactions_travel_to_the_producer_and_into_a_block() {
             amount: Amount::U128(42),
         },
         0,
+        FeeOffer::NONE,
         &authority,
     );
     follower.submit(tx.clone()).unwrap();
@@ -384,6 +391,7 @@ fn submitted_transactions_are_queued_gossiped_and_answered() {
             amount: Amount::U128(1),
         },
         0,
+        FeeOffer::NONE,
         &authority,
     );
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -494,6 +502,7 @@ mod finality {
         let authority = DevAuthority::dev_keypair();
         let genesis = Genesis {
             finality: Some(finality),
+            fees: None,
             ..Genesis::dev_authority(authority.public())
         };
         let producer = Box::new(AuthorityProducer::new(authority.clone(), SLOT)) as Box<dyn Producer>;
