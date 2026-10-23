@@ -134,6 +134,27 @@ fn every_call_starts_from_a_fresh_state() {
 }
 
 #[test]
+fn states_from_the_engine_s_pool_are_as_fresh_as_new_ones() {
+    let engine = LuaEngine::new();
+    let loaded = engine.load(SCRIPT.as_bytes(), LIMITS).unwrap();
+    let fresh = contract().call(&func("count"), &[], host(), LIMITS);
+
+    // More calls than the pool holds, so some take a waiting state and some build their own.
+    for _ in 0..POOL_SIZE * 3 {
+        let pooled = engine.run(&loaded.code, "count", &[], host(), LIMITS);
+
+        assert_eq!(pooled.result, fresh.result, "top-level locals start over every call");
+        assert_eq!(pooled.fuel_used, fresh.fuel_used, "and so does the fuel");
+    }
+
+    // The memory limit gives every call the same room.
+    let hog = contract().call(&func("hog"), &[], host(), LIMITS);
+
+    assert_eq!(hog.result, Err(VmError::OutOfMemory));
+    assert_eq!(engine.run(&loaded.code, "hog", &[], host(), LIMITS).result, hog.result);
+}
+
+#[test]
 fn ctx_describes_the_call() {
     let result = returns("whoami", &[]);
 

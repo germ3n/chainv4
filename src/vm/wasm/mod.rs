@@ -2,12 +2,18 @@
 //! its own rather than the machine's, so every node runs a module the same way. Everything here
 //! is consensus: the wasmi version, the features a module may use, and the stack limits. Changing
 //! any of them changes what some module does or what it costs.
+//!
+//! Compiling a module is nearly all of what a call costs, so compiled modules are cached by their
+//! code. That is not consensus: the same bytes always compile to the same module, so a cached one
+//! runs exactly as a fresh one would. Every call still gets a fresh instance, with fresh memory.
 
 use {
     super::{Host, Limits, Loaded, Outcome, ScriptEngine, VmError, selector},
     crate::structs::tx::TxCallArgumentType,
     r#macro::document,
     std::collections::HashMap,
+    std::sync::{Arc, Mutex},
+    xxhash_rust::xxh3::Xxh3Builder,
     wasmi::{
         CompilationMode, Config, EnforcedLimits, Engine, ExternType, Linker, Module, Store, StoreLimits,
         StoreLimitsBuilder, TrapCode,
@@ -37,6 +43,10 @@ pub const MEMORY_EXPORT: &str = "memory";
     category = "WASM VM",
 )]
 pub const REENTRANT_SECTION: &str = "chainv4.reentrant";
+/// How much code the module cache holds, in bytes of modules, and how many modules at most.
+const MODULE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const MODULE_CACHE_ENTRIES: usize = 1_024;
+
 /// How deep functions may recurse, and how many values the stack may hold.
 const MAX_RECURSION_DEPTH: usize = 1_000;
 const MAX_STACK_HEIGHT: usize = 1_000_000;
@@ -52,6 +62,65 @@ pub struct WasmEngine {
     engine: Engine,
     /// The host functions, resolved against every module's imports when it is instantiated.
     linker: Linker<Run>,
+    /// Modules already compiled, by their code.
+    modules: Mutex<Modules>,
+}
+
+/// Compiled modules by their code. One compiled module serves every call to every contract with
+/// that code; an upgrade is new code, which compiles once and takes a place of its own. Once the
+/// cache is full, the module no call used for longest leaves first.
+struct Modules {
+    entries: HashMap<Arc<[u8]>, Cached, Xxh3Builder>,
+    /// The code the entries hold, in bytes.
+    bytes: usize,
+    /// Counts lookups, to tell which entry was used longest ago.
+    clock: u64,
+    budget: usize,
+}
+
+struct Cached {
+    module: Module,
+    used: u64,
+}
+
+impl Modules {
+    fn new(budget: usize) -> Modules {
+        Modules {
+            entries: HashMap::with_hasher(Xxh3Builder::new()),
+            bytes: 0,
+            clock: 0,
+            budget,
+        }
+    }
+
+    fn get(&mut self, code: &[u8]) -> Option<Module> {
+        self.clock += 1;
+        let entry = self.entries.get_mut(code)?;
+        entry.used = self.clock;
+
+        Some(entry.module.clone())
+    }
+
+    fn insert(&mut self, code: &[u8], module: Module) {
+        if code.len() > self.budget || self.entries.contains_key(code) {
+            return;
+        }
+
+        while self.bytes + code.len() > self.budget || self.entries.len() >= MODULE_CACHE_ENTRIES {
+            let Some(oldest) = self.entries.iter().min_by_key(|(_, entry)| entry.used).map(|(code, _)| code.clone()) else {
+                break;
+            };
+            self.entries.remove(&oldest);
+            self.bytes -= oldest.len();
+        }
+
+        self.clock += 1;
+        self.bytes += code.len();
+        self.entries.insert(Arc::from(code), Cached {
+            module,
+            used: self.clock,
+        });
+    }
 }
 
 impl WasmEngine {
@@ -60,6 +129,11 @@ impl WasmEngine {
         summary = "Sets up the interpreter with the chain's settings and defines the host functions. Vm::new does this once per chain.",
     )]
     pub fn new() -> WasmEngine {
+        WasmEngine::with_cache(MODULE_CACHE_BYTES)
+    }
+
+    /// The engine, with room for this many bytes of compiled modules.
+    fn with_cache(budget: usize) -> WasmEngine {
         let mut config = Config::default();
         config
             .consume_fuel(true)
@@ -73,7 +147,27 @@ impl WasmEngine {
         let engine = Engine::new(&config);
         let linker = host::linker(&engine);
 
-        WasmEngine { engine, linker }
+        WasmEngine {
+            engine,
+            linker,
+            modules: Mutex::new(Modules::new(budget)),
+        }
+    }
+
+    /// The compiled module for some code: from the cache, or compiled now and cached.
+    fn module(&self, code: &[u8]) -> Result<Module, VmError> {
+        if let Some(module) = self.cache().get(code) {
+            return Ok(module);
+        }
+
+        let module = Module::new(&self.engine, code).map_err(|err| VmError::Compile(err.to_string()))?;
+        self.cache().insert(code, module.clone());
+
+        Ok(module)
+    }
+
+    fn cache(&self) -> std::sync::MutexGuard<'_, Modules> {
+        self.modules.lock().expect("the module cache never panics")
     }
 
     fn store(&self, host: Option<Host>, input: Vec<u8>, limits: Limits) -> Store<Run> {
@@ -114,6 +208,7 @@ impl ScriptEngine for WasmEngine {
             )));
         }
 
+        // Not cached until it passes every check, since a deploy that fails never runs.
         let module = Module::new(&self.engine, code).map_err(|err| VmError::Compile(err.to_string()))?;
 
         for import in module.imports() {
@@ -157,6 +252,7 @@ impl ScriptEngine for WasmEngine {
         let mut functions: Vec<String> = functions.into_values().collect();
         functions.sort();
         let reentrant = reentrant(&module, &functions)?;
+        self.cache().insert(code, module);
 
         Ok(Loaded {
             code: code.to_vec(),
@@ -166,9 +262,9 @@ impl ScriptEngine for WasmEngine {
     }
 
     fn run(&self, code: &[u8], function: &str, args: &[TxCallArgumentType], host: Host, limits: Limits) -> Outcome {
-        let module = match Module::new(&self.engine, code) {
+        let module = match self.module(code) {
             Ok(module) => module,
-            Err(err) => return Outcome::failed(VmError::Compile(err.to_string())),
+            Err(err) => return Outcome::failed(err),
         };
         let input = wincode::serialize(&args.to_vec()).expect("arguments always encode");
         let mut store = self.store(Some(host), input, limits);

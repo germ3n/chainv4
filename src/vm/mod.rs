@@ -269,7 +269,7 @@ impl Vm {
         for kind in allowed {
             let engine: Box<dyn ScriptEngine> = match kind {
                 #[cfg(feature = "lvm")]
-                Engine::Lua => Box::new(lvm::LuaEngine),
+                Engine::Lua => Box::new(lvm::LuaEngine::new()),
                 #[cfg(feature = "wasm")]
                 Engine::Wasm => Box::new(wasm::WasmEngine::new()),
                 #[allow(unreachable_patterns)]

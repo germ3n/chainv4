@@ -35,6 +35,41 @@ first; if the call fails, the value goes back with everything else.
 instance. Nothing outside storage survives a call, so a node that restarts computes exactly
 what one that never stopped does.
 
+**Why fresh, and not one state per engine:** a single long-lived state would break consensus in
+three ways:
+- **Top-level locals would survive.** In Lua they live on as upvalues, so
+  `local calls = 0; function M.count() calls += 1 end` would count across calls and
+  transactions, differently on each node.
+- **Memory limits would depend on history.** The memory limit counts the whole heap. In a reused
+  state, the heap holds leftovers that depend on what that node ran before: garbage, interned
+  strings, the garbage collector's pacing. A call near the limit could then fail on one node and
+  pass on another.
+- **Nested calls would share limits.** Each call in a chain of calls has its own fuel and memory
+  limit; in one shared state they would share them.
+
+**What makes fresh states cheap:**
+- **Lua pool.** Building a state is most of what a Lua call costs. `LuaEngine` keeps a pool of
+  pristine states:
+  - they are built ahead on two threads of its own, started on its first call;
+  - each is used for one call and then closed on a third thread;
+  - every pristine state is built the same way, so a call gives the same result in any of them.
+
+  If the pool runs dry, the call builds its own.
+- **WebAssembly cache.** Compiling is nearly all of what a WebAssembly call costs. `WasmEngine`
+  caches compiled modules by their code:
+  - the same bytes always compile to the same module, so the cache never changes a result, only
+    how fast it comes;
+  - identical code at many addresses shares one entry;
+  - an upgrade is new code, which compiles once and takes its own entry;
+  - the module used longest ago leaves first, once 32 MiB or 1,024 modules are cached.
+
+  Each call still gets a fresh instance, with fresh memory.
+
+| Engine | A call without | With |
+| --- | --- | --- |
+| Lua | about 70 µs, mostly building and closing the state | about 20 µs |
+| WebAssembly | about 300 µs, mostly compiling | about 35 µs |
+
 **Calls between contracts** (`contracts.call` in Lua, `call` in WebAssembly) reach any contract,
 whichever engine runs it.
 - **The callee's context:** it sees the caller as its sender, and the value it was sent, which
@@ -249,5 +284,4 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 - **Loading code is not charged.** Compiling and validating are bounded only by the size limits,
   and a Lua script's top level burns fuel no receipt shows.
 - **There are no read-only calls.** Every call is a transaction.
-- **Modules are not cached.** A WebAssembly module is parsed and compiled again on every call.
 - **A contract cannot be removed.**

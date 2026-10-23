@@ -274,3 +274,45 @@ fn the_reentrant_section_marks_exported_functions() {
     assert!(matches!(load(r#"(@custom "chainv4.reentrant" "c\00")"#), Err(VmError::Compile(text)) if text.contains("does not export")));
     assert!(matches!(load(r#"(@custom "chainv4.reentrant" "a")"#), Err(VmError::Compile(text)) if text.contains("zero byte")));
 }
+
+#[test]
+fn compiled_modules_are_cached_by_their_code() {
+    let engine = WasmEngine::new();
+    let counter = module(r#"(func (export "nothing"))"#);
+    let other = module(r#"(func (export "else"))"#);
+    let loaded = engine.load(&counter, LIMITS).unwrap();
+    let fresh = WasmEngine::new().run(&loaded.code, "nothing", &[], host(state()), LIMITS);
+
+    assert_eq!(engine.cache().entries.len(), 1, "deploying compiles it once");
+
+    for _ in 0..3 {
+        let cached = engine.run(&loaded.code, "nothing", &[], host(state()), LIMITS);
+
+        assert_eq!((cached.result, cached.fuel_used), (fresh.result.clone(), fresh.fuel_used));
+    }
+
+    // The same code at another address shares the entry; other code, such as an upgrade, has its own.
+    engine.load(&counter, LIMITS).unwrap();
+    engine.run(&other, "else", &[], host(state()), LIMITS);
+
+    assert_eq!(engine.cache().entries.len(), 2);
+}
+
+#[test]
+fn a_full_cache_lets_go_of_the_module_used_longest_ago() {
+    let [a, b, c] = ["a", "b", "c"].map(|name| module(&format!(r#"(func (export "{name}"))"#)));
+    let engine = WasmEngine::with_cache(a.len() + b.len());
+
+    for code in [&a, &b] {
+        engine.load(code, LIMITS).unwrap();
+    }
+
+    engine.run(&a, "a", &[], host(state()), LIMITS);
+    engine.load(&c, LIMITS).unwrap();
+    let cache = engine.cache();
+
+    assert!(cache.entries.contains_key(&a[..]), "used since b was");
+    assert!(!cache.entries.contains_key(&b[..]));
+    assert!(cache.entries.contains_key(&c[..]));
+    assert!(cache.bytes <= a.len() + b.len());
+}

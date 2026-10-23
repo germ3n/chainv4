@@ -120,6 +120,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **The WebAssembly `call` import takes a value pointer:**
   `call(address, value, name, name_len, args, args_len)`. Rebuild contracts made against the
   older five-argument form. Contracts can also import `emit` and `delegate`.
+- **Every call gets a fresh engine state, on purpose.** Reusing one would let top-level locals
+  survive between calls and make memory limits depend on what a node ran before, which could split
+  the chain. Instead, the Lua engine keeps fresh states ready and the WebAssembly engine caches
+  compiled modules. Both only change speed, never results.
 - **Delegate only to code you trust.** It runs with this contract's storage and balance.
 - **Loading code is not charged.** Compiling and validating are bounded only by the 128 KiB source
   and 512 KiB module limits.

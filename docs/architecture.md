@@ -39,6 +39,9 @@ static.
   transaction goes to the node as a `NetEvent::Submitted`, so the node is still the one that
   admits it.
 - **A miner** mines on threads of its own. A found seal comes back as `NetEvent::Sealed`.
+- **The Lua engine** builds fresh Lua states ahead on two threads of its own, and closes used ones
+  on a third, so a contract call neither waits for one nor pays to close it. Each state is used
+  for one call only (see [Contracts](contracts.md)).
 
 A test can stand in for the whole network by holding the other ends of the two channels
 (`NetLink::pair`). The node tests do this, driving the loop with `Node::step` and a clock of

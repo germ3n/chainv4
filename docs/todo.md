@@ -138,8 +138,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **Tokens are only a convention.** The chain cannot list tokens or tell a token from any other
   contract; a registry, or a check that a contract exports the standard functions, would help
   wallets.
-- [ ] **WASM module cache.** Modules are parsed and compiled again on every call. Caching does not
-  affect consensus, only speed.
+- [x] **Faster calls, same results.** Compiled WebAssembly modules are cached by their code, and
+  the Lua engine builds fresh states ahead and closes used ones on threads of its own. Every call
+  still runs in a fresh state or instance, so neither changes what a call does.
+- [ ] **Blocks run on one core.** Checking a block's signatures in parallel, and running
+  transactions that touch nothing in common in parallel, would use more of a machine; rayon
+  would fit there.
 - [ ] **Typed exports in the SDK.** `#[export]` functions take and return nothing and use
   `input()`/`output()`; decoding arguments into Rust parameters would be nicer. The token example
   shows how much argument handling that would save.
