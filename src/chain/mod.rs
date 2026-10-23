@@ -1,6 +1,6 @@
 //! The chain this node follows: genesis, every block it accepted, and which branch is the main
 //! chain: the one with the most total work among those holding the latest justified checkpoint,
-//! never leaving the finalized one (see finality.rs). A block that extends the tip is run and
+//! never leaving the finalized one (see finality/). A block that extends the tip is run and
 //! committed at once. One on a side branch is stored without running; if its branch comes to weigh more than
 //! the main chain, the main chain is rolled back to where they meet, using the undo record each
 //! block left, and the branch is run on top, all in one commit. A crash never leaves state from
@@ -31,11 +31,17 @@ mod execute;
 mod finality;
 mod receipt;
 
-pub use execute::{Effect, Failure, FinalityRules, Receipt, Rules, TxError};
+pub use execute::{Effect, Failure, Receipt, Rules, StakingRules, TxError};
+#[cfg(feature = "finality-authority")]
+pub use finality::AuthorityConfig;
+#[cfg(feature = "finality-depth")]
+pub use finality::DepthConfig;
 pub use finality::{
-    Evidence, FinalityConfig, FinalityError, FinalityUpdate, GenesisValidator, stored_evidence, stored_finality,
+    Evidence, Finality, FinalityConfig, FinalityError, FinalityUpdate, View, stored_evidence, stored_finality,
     stored_justification,
 };
+#[cfg(feature = "finality-ffg")]
+pub use finality::{FfgConfig, GenesisValidator};
 pub use receipt::{TxReceipt, TxStatus};
 
 /// The development chains' transaction limits: what one deploy or contract call may use.
@@ -128,7 +134,7 @@ pub struct Genesis {
     pub tx_limits: Limits,
     #[document(summary = "How far back the main chain may be rolled back. A branch that splits off deeper is never followed, however much work it holds, and undo records older than this are dropped.")]
     pub max_reorg_depth: u64,
-    #[document(summary = "Finality: who validates and every parameter of it, or None for a chain where only work decides.")]
+    #[document(summary = "Finality: its kind and every parameter of it, or None for a chain where only work decides.")]
     pub finality: Option<FinalityConfig>,
 }
 
@@ -142,7 +148,7 @@ fn dev_funds() -> u256 {
 impl Genesis {
     #[document(
         parent = "Genesis",
-        summary = "A development chain where one key produces a block every two seconds. That key holds a million coins at 18 decimals, may mint, and is the one finality validator; there is no block reward. Allows every engine this node was built with, so nodes built with different engines are on different dev chains.",
+        summary = "A development chain where one key produces a block every two seconds. That key holds a million coins at 18 decimals, may mint, and, in a build with FFG finality, is the one validator; there is no block reward. Allows every engine this node was built with, so nodes built with different engines are on different dev chains.",
         params = { authority = "The producing key, usually DevAuthority::dev_keypair." },
     )]
     pub fn dev_authority(authority: PublicKey) -> Genesis {
@@ -162,13 +168,13 @@ impl Genesis {
             engines: Engine::compiled(),
             tx_limits: DEV_TX_LIMITS,
             max_reorg_depth: DEV_MAX_REORG_DEPTH,
-            finality: Some(FinalityConfig::dev(authority)),
+            finality: FinalityConfig::dev(authority),
         }
     }
 
     #[document(
         parent = "Genesis",
-        summary = "A development chain mined with proof of work, aiming for a block every two seconds. It hashes with HashType::default_chain, BLAKE3 in a default build, for both its ids and its work. Miners earn 50 coins a block, halving every 210,000 blocks. The development key holds a million coins, may mint, and is the one finality validator, so the CLI works out of the box. Allows every engine this node was built with.",
+        summary = "A development chain mined with proof of work, aiming for a block every two seconds. It hashes with HashType::default_chain, BLAKE3 in a default build, for both its ids and its work. Miners earn 50 coins a block, halving every 210,000 blocks. The development key holds a million coins, may mint, and, in a build with FFG finality, is the one validator, so the CLI works out of the box. Allows every engine this node was built with.",
         params = { dev = "The development key, usually DevAuthority::dev_keypair." },
     )]
     pub fn dev_pow(dev: PublicKey) -> Genesis {
@@ -193,7 +199,7 @@ impl Genesis {
             engines: Engine::compiled(),
             tx_limits: DEV_TX_LIMITS,
             max_reorg_depth: DEV_MAX_REORG_DEPTH,
-            finality: Some(FinalityConfig::dev(dev)),
+            finality: FinalityConfig::dev(dev),
         }
     }
 
@@ -247,11 +253,7 @@ impl Genesis {
             hash: self.hash,
             minter: self.minter,
             limits: self.tx_limits,
-            finality: self.finality.as_ref().map(|config| FinalityRules {
-                staking: config.staking(),
-                checkpoint_interval: config.checkpoint_interval,
-                chain: self.block().id(),
-            }),
+            staking: self.finality.as_ref().and_then(|config| config.staking(self.block().id())),
         }
     }
 }
@@ -367,7 +369,8 @@ pub struct Chain {
     bad: HashSet<Hash>,
     /// Stored blocks no stored block builds on yet, which a justification may move the chain to.
     tips: HashSet<Hash>,
-    finality: Option<finality::FinalityState>,
+    finality_config: Option<FinalityConfig>,
+    finality: Option<Box<dyn Finality>>,
 }
 
 impl Chain {
@@ -400,7 +403,7 @@ impl Chain {
                 }
 
                 if let Some(config) = &genesis.finality {
-                    finality::write_genesis(&state, config)?;
+                    config.write_genesis(&state)?;
                 }
 
                 state.put_value(Column::Blocks, id_key(&id), &block);
@@ -419,11 +422,10 @@ impl Chain {
         let tip: Block = read_value(&*db, Column::Blocks, &id_key(&tip_id))?.expect("the tip is stored");
         let tip_work = work_of(&*db, &tip_id)?;
         let finality = match &genesis.finality {
-            Some(config) => Some(finality::FinalityState::load(config.clone(), &*db, id)?),
+            Some(config) => Some(config.build(&*db, id)?),
             None => None,
         };
-
-        Ok(Chain {
+        let mut chain = Chain {
             db,
             rules: genesis.rules(),
             hash: genesis.hash,
@@ -436,8 +438,13 @@ impl Chain {
             max_reorg_depth: genesis.max_reorg_depth,
             bad: HashSet::new(),
             tips: HashSet::from([tip_id]),
+            finality_config: genesis.finality.clone(),
             finality,
-        })
+        };
+        // In case the node stopped between committing a block and catching finality up with it.
+        chain.tip_moved()?;
+
+        Ok(chain)
     }
 
     #[document(parent = "Chain", summary = "How far back the main chain may be rolled back, from genesis.")]
@@ -563,10 +570,7 @@ impl Chain {
             return Err(ImportError::Invalid(BlockError::ProofRoot));
         }
 
-        if let Some(finalized) = self.finality.as_ref().map(|finality| finality.finalized)
-            && let Some(config) = self.finality_config()
-            && block.header.height <= config.checkpoint_height(finalized.epoch)
-        {
+        if self.finalized_height().is_some_and(|finalized| block.header.height <= finalized) {
             // At or below the finalized checkpoint, only the main chain's blocks exist.
             return Err(ImportError::Invalid(BlockError::ConflictsWithFinality));
         }
@@ -595,6 +599,7 @@ impl Chain {
             self.db.commit(state.take_changes())?;
             self.tip = block.header.clone();
             self.tip_work = work;
+            self.tip_moved()?;
 
             return Ok(Imported::Extended(receipts));
         }
@@ -638,10 +643,10 @@ impl Chain {
             return Ok(Imported::Side);
         }
 
-        if let (Some(finality), Some(config)) = (&self.finality, self.finality_config()) {
-            let anchor = if justified { finality.finalized } else { finality.justified };
+        if let Some(finality) = &self.finality {
+            let anchor = if justified { finality.finalized() } else { finality.justified() };
 
-            if fork_height < config.checkpoint_height(anchor.epoch) {
+            if fork_height < finality.height_of(&anchor) {
                 log::info!(
                     "[chain] not following a branch to {} that leaves the {} checkpoint of epoch {}",
                     new_tip.id(),
@@ -678,6 +683,7 @@ impl Chain {
         self.db.commit(state.take_changes())?;
         self.tip = new_tip.header.clone();
         self.tip_work = work;
+        self.tip_moved()?;
 
         Ok(Imported::Reorganized {
             undone,
@@ -714,13 +720,12 @@ impl Chain {
                 })?;
         }
 
-        finality::pay_proofs(self, &layer, block).map_err(|why| ImportError::Invalid(BlockError::Proof(why)))?;
-
-        // Each checkpoint fixes the validator set activation_delay epochs ahead.
-        if let Some(config) = self.finality_config()
-            && height.is_multiple_of(config.checkpoint_interval)
-        {
-            crate::registry::validators::Validators::new(&layer).fix_set(config.epoch_of(height) + config.activation_delay)?;
+        match &self.finality {
+            Some(finality) => finality.apply(&layer, block)?,
+            None if !block.proofs.is_empty() => {
+                return Err(ImportError::Invalid(BlockError::Proof("this chain has no finality".to_string())));
+            }
+            None => {}
         }
 
         for (index, (tx, receipt)) in block.txs.iter().zip(&receipts).enumerate() {
@@ -761,12 +766,7 @@ impl Chain {
     }
 
     pub(super) fn on_main_chain(&self, id: &Hash) -> Result<bool, DbError> {
-        let Some(block) = self.block(id)? else {
-            return Ok(false);
-        };
-        let at_height: Option<Hash> = read_value(&*self.db, Column::Heights, &block.header.height.to_be_bytes())?;
-
-        Ok(at_height == Some(*id))
+        self.view().on_main_chain(id)
     }
 }
 
@@ -930,6 +930,3 @@ where
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod finality_tests;

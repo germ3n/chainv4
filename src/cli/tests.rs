@@ -69,7 +69,7 @@ fn amounts_pick_the_narrowest_width() {
 #[cfg(all(feature = "client", feature = "http"))]
 mod send {
     use super::*;
-    use crate::chain::Genesis;
+    use crate::chain::{FinalityConfig, Genesis};
     use crate::consensus::{AuthorityProducer, ConsensusConfig, Producer};
     use crate::db::MemoryDb;
     use crate::net::{FakeNet, NetLink};
@@ -89,16 +89,17 @@ mod send {
     impl Running {
         /// A node on the dev authority chain, with blocks every 50 ms when it produces.
         fn start(produce: bool) -> Running {
-            Running::launch(produce, false)
+            Running::launch(produce, false, FinalityConfig::dev(DevAuthority::dev_keypair().public()))
         }
 
         /// A producing node that also votes with the dev key, the dev chain's one validator, so
         /// it finalizes an epoch of 8 blocks about every 400 ms.
+        #[cfg(feature = "finality-ffg")]
         fn validating() -> Running {
-            Running::launch(true, true)
+            Running::launch(true, true, FinalityConfig::dev(DevAuthority::dev_keypair().public()))
         }
 
-        fn launch(produce: bool, validate: bool) -> Running {
+        fn launch(produce: bool, validate: bool, finality: Option<FinalityConfig>) -> Running {
             const SLOT: u64 = 50;
             let authority = DevAuthority::dev_keypair();
             let genesis = Genesis {
@@ -107,6 +108,7 @@ mod send {
                     slot_ms: SLOT,
                 },
                 timestamp: now_ms(),
+                finality,
                 ..Genesis::dev_authority(authority.public())
             };
             let producer = produce.then(|| Box::new(AuthorityProducer::new(authority, SLOT)) as Box<dyn Producer>);
@@ -214,6 +216,7 @@ mod send {
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
+    #[cfg(feature = "finality-ffg")]
     #[test]
     fn final_waits_for_finality_not_just_a_block() {
         let running = Running::validating();
@@ -243,6 +246,24 @@ mod send {
         assert!(waited.unwrap_err().to_string().contains("was not final after 1s"));
     }
 
+    #[cfg(feature = "finality-depth")]
+    #[test]
+    fn final_on_a_depth_chain_waits_for_the_depth() {
+        let depth = crate::chain::DepthConfig { depth: 5 };
+        let running = Running::launch(true, false, Some(FinalityConfig::Depth(depth)));
+        let sent = send(SendArgs {
+            finalized: true,
+            ..running.args(TxArgs::Burn { amount: u256::new(1) })
+        });
+        let node = running.stop();
+
+        sent.unwrap();
+        // In block 1 or 2, so final once the tip is 5 blocks further.
+        assert!(node.chain().tip().height >= 6);
+        assert!(node.chain().finalized().unwrap().epoch >= 1);
+    }
+
+    #[cfg(feature = "finality-ffg")]
     #[test]
     fn validators_bond_and_unbond_with_send() {
         use crate::registry::validators::Validators;

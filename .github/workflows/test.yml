@@ -58,6 +58,10 @@ jobs:
           - node,blake2b,ed25519
           - http,sha256,edblake
           - client,keccak256,edblake
+          # Each kind of finality on its own; the rows above have none.
+          - http,client,blake3,ed25519,finality-ffg
+          - http,client,sha256,edblake,finality-authority
+          - http,client,keccak256,ed25519,finality-depth
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

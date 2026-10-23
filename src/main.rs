@@ -187,8 +187,8 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut node = Node::new(db.clone(), &genesis, producer, net)?;
 
     if args.validate {
-        if genesis.finality.is_none() {
-            return Err("--validate needs a chain with finality".into());
+        if !genesis.finality.as_ref().is_some_and(chain::FinalityConfig::votes) {
+            return Err("--validate needs a chain whose finality takes votes".into());
         }
 
         let voter = cli::signer(args.validator_key.as_deref())?;

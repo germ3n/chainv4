@@ -383,12 +383,21 @@ impl Node {
 
         if let Some(evidence) = update.evidence {
             let encode = |vote: &SignedVote| to_hex(&wincode::serialize(vote).expect("votes always encode"));
-            log::warn!(
-                "[node] validator {} signed conflicting votes; report it with: chainv4 send slash --first {} --second {}",
-                evidence.first.vote.voter,
-                encode(&evidence.first),
-                encode(&evidence.second)
-            );
+
+            match self.chain.has_staking() {
+                true => log::warn!(
+                    "[node] validator {} signed conflicting votes; report it with: chainv4 send slash --first {} --second {}",
+                    evidence.first.vote.voter,
+                    encode(&evidence.first),
+                    encode(&evidence.second)
+                ),
+                false => log::warn!(
+                    "[node] signer {} signed conflicting votes, which this chain cannot slash: {} and {}",
+                    evidence.first.vote.voter,
+                    encode(&evidence.first),
+                    encode(&evidence.second)
+                ),
+            }
         }
 
         if let Some((undone, applied)) = update.reorganized {

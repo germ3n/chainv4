@@ -1,9 +1,9 @@
 # chainv4
 
 A blockchain node, and a command-line client for it, in one binary. Contracts run on Lua
-(Luau) or WebAssembly; blocks come from proof of work or a development authority, and bonded
-validators finalize them by vote; nodes talk over libp2p; a JSON HTTP API serves queries and
-takes transactions.
+(Luau) or WebAssembly; blocks come from proof of work or a development authority, and are
+finalized by bonded validators, a fixed set of signers, or depth; nodes talk over libp2p; a JSON
+HTTP API serves queries and takes transactions.
 
 This page covers the `chainv4` command and how contracts live on the chain. The code reference
 is the wiki that every build writes to `target/wiki/index.html`, tokens follow the
@@ -19,8 +19,8 @@ cargo build --release
 
 You need stable Rust, a C/C++ toolchain and clang: RocksDB and Luau are built from source.
 Everything is on by default; each piece sits behind a cargo feature (`lvm` and `wasm` for the
-contract engines, `node`, `http` for the API, `client` for `chainv4 send`, one per hash and key
-scheme) if you want a smaller build.
+contract engines, `node`, `http` for the API, `client` for `chainv4 send`, one per hash, key
+scheme and [kind of finality](#finality)) if you want a smaller build.
 
 ## Quick start
 
@@ -63,8 +63,8 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--mine-threads N` | `1` | How many threads to mine on. |
 | `--produce` | | Produce blocks (authority). |
 | `--producer-key PATH` | dev key | The authority's key file, for `--produce`. |
-| `--validate` | | Vote on [finality](#finality). |
-| `--validator-key PATH` | dev key | The voting key file a validator bonded with, for `--validate`. |
+| `--validate` | | Vote on [finality](#finality), on chains whose finality takes votes. |
+| `--validator-key PATH` | dev key | The voting key file a validator bonded with, or a signer's key, for `--validate`. |
 | `--http ADDR` | | Serve the HTTP API, such as `127.0.0.1:8080`. |
 
 Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
@@ -78,7 +78,7 @@ Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
 - **authority**: the development key produces a block every two seconds, with `--produce` on
   exactly one node. No rewards, no forks. Handy for tests and demos.
 
-Both give the development key a million coins and let it mint, and make it the one finality
+Both give the development key a million coins and let it mint, and make it the one FFG
 validator, bonded with 10,000 coins: run one node with `--validate` and the chain finalizes
 every 8 blocks. Its seed is in the source, so never use either chain for anything of value. A dev chain also allows every contract engine the
 node was built with, so nodes built with different features are on different chains.
@@ -101,13 +101,15 @@ features.
 
 Every parameter of a chain lives in its genesis: the consensus and its timing, the hash, block
 rewards, allocations, the minter, which engines run contracts, transaction limits, how deep a
-reorg may go, and every finality setting. `chainv4 genesis` writes the dev defaults as JSON to
-edit:
+reorg may go, and which finality it runs with every setting of it. `chainv4 genesis` writes the
+dev defaults as JSON to edit:
 
 ```sh
-chainv4 genesis --consensus authority --out mychain.json   # or --no-finality
+chainv4 genesis --consensus authority --finality authority --out mychain.json
 chainv4 --genesis mychain.json --produce --producer-key me.key --http 127.0.0.1:8080
 ```
+
+`--finality` is `ffg` (the default), `authority`, `depth` or `none`.
 
 Every node on the chain needs the same file. Each field must be there and unknown ones are
 refused, so a misspelled parameter is an error, not a silent default; a node also refuses
@@ -326,18 +328,27 @@ The deployer owns the example token: `init` gives them a million tokens, and onl
 
 ## Finality
 
-Blocks are final once two thirds of the bonded validators, by bond, vote for them, as in
-Casper FFG. Every `checkpoint_interval` blocks starts an epoch, and the block there is its
-checkpoint. A validator votes for a link from the newest justified checkpoint to the newest
-checkpoint; a link with two thirds behind it justifies its target, and when the target is the
-very next epoch, its source is finalized.
+Final blocks never come off the chain, whatever the work on another branch. Genesis picks how
+blocks become final, as its `finality.type`; each kind is a cargo feature, all on by default:
 
-Final blocks never come off: a node refuses any branch that forks at or below the finalized
-checkpoint, follows work only on branches that keep the justified checkpoint, and moves to a
-branch with a newer justified checkpoint even when it holds less work. Votes travel by gossip,
-and a node that falls behind fetches the justifications it lacks with the blocks.
+| Type | Final when | Who | Feature |
+| --- | --- | --- | --- |
+| `ffg` | Two thirds by bond vote for it, as in Casper FFG. | Validators who bond on chain, and can be slashed. | `finality-ffg` |
+| `authority` | A threshold of fixed signers vote for it, the same way. | Keys genesis names. | `finality-authority` |
+| `depth` | `depth` blocks are on top of it. | Nobody votes. | `finality-depth` |
+
+Under the two that vote, every `checkpoint_interval` blocks starts an epoch, and the block there
+is its checkpoint. A validator votes for a link from the newest justified checkpoint to the
+newest checkpoint; a link with enough votes behind it justifies its target, and when the target
+is the very next epoch, its source is finalized. A node refuses any branch that forks at or below
+the finalized checkpoint, follows work only on branches that keep the justified checkpoint, and
+moves to a branch with a newer justified checkpoint even when it holds less work. Votes travel by
+gossip, and a node that falls behind fetches the justifications it lacks with the blocks.
 
 ### Validating
+
+The rest of this section is about `ffg`; [authority](#authority-finality) and
+[depth](#depth-finality) follow.
 
 A validator is a voting key with a bond behind it. Make a key, bond to it from an account with
 funds, and run a node that votes with it:
@@ -377,6 +388,23 @@ The validator's whole bond is gone at once, and it leaves the validator set the 
 does, `activation_delay` epochs on. The reporter gets 1/`reporter_divisor` of the bond, and the
 rest is burned.
 
+### Authority finality
+
+The same votes, from the keys in `finality.signers`, each counting once; `threshold` of them
+voting for a link justify it. The threshold must be more than half the signers, so two
+conflicting checkpoints can only both be finalized if a signer voted against itself. Each signer
+runs a node with `--validate --validator-key` its key. There is no bonding or slashing: staking
+transactions fail, and conflicting votes are only logged and listed at `GET /evidence`.
+`vote_reward`, 0 in the dev settings, pays each signer's own address. The signers are fixed:
+changing them takes a new chain.
+
+### Depth finality
+
+No votes: a main-chain block is final once `depth` blocks are on top of it, and the node never
+reorganizes past it. `depth` 0 makes every block final as soon as it is the tip. That is each
+node's own view, so nodes kept apart for longer than `depth` blocks, by a partition or a private
+fork, finalize different branches and never come back together. `--validate` is refused.
+
 ## HTTP API
 
 Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "…"}`.
@@ -389,7 +417,7 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "�
 | `GET /txs/{id}` | Where a transaction landed, its confirmations, whether it is final, its result and events; 404 until it is on the main chain. |
 | `GET /accounts/{address}` | Nonce and balance. |
 | `GET /contracts/{address}` | Engine, deployer, exported functions, and whether it can be upgraded. |
-| `GET /validators` | Every bonded validator, and who votes in the current epoch with what weight. |
+| `GET /validators` | Every bonded validator, and who votes in the current epoch with what weight: the bonded set under `ffg`, the signers under `authority`; 404 under `depth`. |
 | `GET /validators/{voter}` | One validator by voting key: its account, bond, the epochs it votes in, and whether it was slashed. |
 | `GET /evidence` | Conflicting votes this node has seen, each encoded ready for `send slash`. |
 | `POST /txs` | `{"tx": "0x…"}`, an encoded signed transaction; answers 202 with its id. |

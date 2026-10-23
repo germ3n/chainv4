@@ -22,9 +22,15 @@
   the minter, engines, transaction limits, the reorg depth and every finality setting.
   `chainv4 genesis` writes the dev defaults as a JSON file and `--genesis FILE` runs it; files
   must name every field and may not add any.
-- **Both dev chains have finality.** The dev key is the one validator, bonded with 10,000 coins,
-  with epochs of 8 blocks. Without a node running `--validate`, nothing finalizes, and the chain
-  runs as before.
+- **Both dev chains run FFG finality.** The dev key is the one validator, bonded with 10,000
+  coins, with epochs of 8 blocks. Without a node running `--validate`, nothing finalizes, and the
+  chain runs as before. A build without `finality-ffg` gives the dev chains no finality, so like
+  engines, it puts them on a different network.
+- **Finality kinds are consensus and features.** `finality-ffg`, `finality-authority` and
+  `finality-depth`, all default. A node built without the kind its genesis names refuses the
+  genesis file. The chain only talks to finality through the `Finality` trait
+  (`src/chain/finality/`); the two voting kinds share one vote engine and differ in their
+  `Electorate`.
 - **Genesis bonds are extra.** Genesis validators' bonds are locked on top of the allocations,
   not taken from them.
 - **A voting key belongs on one node.** What a node has voted is kept in its own database; two
@@ -84,6 +90,8 @@
   run the branch, one commit. A branch that fails to run is dropped, and its descendants refused.
 - [ ] **No other schemes yet.** The authority is still one key whose seed is in the source. Stake
   now only finalizes; producing blocks by stake, or a rotating authority set, could come next.
+  Tendermint-style instant finality replaces block production, so it would be a consensus scheme,
+  not a finality kind.
 - [x] **Finality.** Casper FFG-style: validators bond on chain (`Tx::Bond`, `Unbond`,
   `Withdraw`) with a separate voting key, and vote at each epoch's checkpoint. Two thirds by
   bond justify a checkpoint, and a justified direct child finalizes its parent. Votes are
@@ -91,6 +99,16 @@
   each voter `vote_reward`. Conflicting votes are evidence; `Tx::Slash` takes the bond and pays
   the reporter a share. Fork choice never goes below the finalized checkpoint, follows work only
   from the justified one on, and follows a newer justified branch over more work.
+- [x] **Switchable finality.** Genesis picks the kind as `finality.type`: `ffg`; `authority`, the
+  same votes from fixed signers with a threshold above half and no staking; or `depth`, final
+  under a number of blocks with no votes. `chainv4 genesis --finality` writes each.
+- [ ] **Authority signers are fixed.** Changing them takes a new chain. A signer-set change voted
+  by the current signers, taking effect a few epochs on as FFG's sets do, would fix it.
+- [ ] **Conflicting authority votes go unpunished.** They are kept as evidence and logged, but
+  with no bonds there is nothing to take; the remedy is social.
+- [ ] **Depth finality is each node's own.** Nodes split for longer than `depth` blocks finalize
+  different branches and never rejoin, and a node syncing from scratch keeps whichever branch it
+  syncs first.
 - [ ] **A slashed validator keeps its weight in sets already fixed.** Its bond is zero at once,
   but sets are fixed `activation_delay` epochs ahead, so it counts until it leaves them. Dropping
   slashed validators from every set would close that window.
@@ -227,9 +245,9 @@
   the seed in plain hex.
 - [x] **Genesis files.** `chainv4 genesis` writes the dev defaults as JSON; `--genesis FILE`
   runs any chain one describes. `--producer-key` names an authority other than the dev key.
-- [x] **Finality in the API and CLI.** `/status` shows the justified and finalized checkpoints,
-  receipts say whether they are final, `/validators` and `/evidence` list validators and
-  conflicting votes, and `send` has `bond`, `unbond`, `withdraw`, `slash` and `--final`.
+- [x] **Finality in the API and CLI.** `/status` shows the kind and the justified and finalized
+  checkpoints, receipts say whether they are final, `/validators` and `/evidence` list validators
+  and conflicting votes, and `send` has `bond`, `unbond`, `withdraw`, `slash` and `--final`.
 - [ ] **No graceful shutdown.** Ctrl-C kills the process mid-loop. Commits are atomic, so data is
   safe, but the network and HTTP threads never close cleanly.
 - [x] **The HTTP API has transaction lookup and receipts.** `GET /txs/{id}`, and each transaction

@@ -3,12 +3,19 @@
 //! FILE` runs a node on it. Every field must be present, and unknown fields are refused, so a
 //! misspelled parameter is an error rather than a silent default.
 
+#[cfg(feature = "finality-authority")]
+use crate::chain::AuthorityConfig;
+#[cfg(feature = "finality-depth")]
+use crate::chain::DepthConfig;
+#[cfg(feature = "finality-ffg")]
+use crate::chain::{FfgConfig, GenesisValidator};
+#[cfg(any(feature = "finality-ffg", feature = "finality-authority"))]
+use crate::crypto::keypair::PublicKey;
 use {
     super::CliResult,
-    crate::chain::{Allocation, FinalityConfig, Genesis, GenesisValidator, Reward},
+    crate::chain::{Allocation, FinalityConfig, Genesis, Reward},
     crate::consensus::{ConsensusConfig, PowConfig},
     crate::structs::hash::HashType,
-    crate::crypto::keypair::PublicKey,
     crate::structs::code::Engine,
     crate::structs::u256::u256,
     crate::vm::Limits,
@@ -22,9 +29,10 @@ pub struct GenesisArgs {
     /// Which development chain to start from.
     #[arg(long, value_enum, default_value_t = DevChain::Pow)]
     pub consensus: DevChain,
-    /// Leave finality out.
-    #[arg(long)]
-    pub no_finality: bool,
+    /// Which finality to give it: ffg, authority, depth or none. Without one, the dev chains' own:
+    /// FFG with the development key as its one validator.
+    #[arg(long, value_parser = parse_finality)]
+    pub finality: Option<FinalityKind>,
     /// Where to write it. Without one, it goes to stdout.
     #[arg(long)]
     pub out: Option<PathBuf>,
@@ -34,6 +42,55 @@ pub struct GenesisArgs {
 pub enum DevChain {
     Pow,
     Authority,
+}
+
+/// A kind of finality to write a genesis with, each with development settings.
+#[derive(Clone, Copy)]
+pub enum FinalityKind {
+    #[cfg(feature = "finality-ffg")]
+    Ffg,
+    #[cfg(feature = "finality-authority")]
+    Authority,
+    #[cfg(feature = "finality-depth")]
+    Depth,
+    None,
+}
+
+fn parse_finality(text: &str) -> Result<FinalityKind, String> {
+    match text {
+        #[cfg(feature = "finality-ffg")]
+        "ffg" => Ok(FinalityKind::Ffg),
+        #[cfg(feature = "finality-authority")]
+        "authority" => Ok(FinalityKind::Authority),
+        #[cfg(feature = "finality-depth")]
+        "depth" => Ok(FinalityKind::Depth),
+        "none" => Ok(FinalityKind::None),
+        other => Err(format!("unknown finality {other}; {}", kinds())),
+    }
+}
+
+/// The finality kinds this build has, for error messages.
+fn kinds() -> String {
+    match FinalityConfig::KINDS {
+        [] => "this build has none".to_string(),
+        kinds => format!("this build has {}", kinds.join(", ")),
+    }
+}
+
+/// A kind of finality with development settings, the development key voting.
+pub fn dev_finality(kind: FinalityKind) -> Option<FinalityConfig> {
+    #[cfg(any(feature = "finality-ffg", feature = "finality-authority"))]
+    let dev = crate::consensus::DevAuthority::dev_keypair().public();
+
+    match kind {
+        #[cfg(feature = "finality-ffg")]
+        FinalityKind::Ffg => Some(FinalityConfig::Ffg(FfgConfig::dev(dev))),
+        #[cfg(feature = "finality-authority")]
+        FinalityKind::Authority => Some(FinalityConfig::Authority(AuthorityConfig::dev(dev))),
+        #[cfg(feature = "finality-depth")]
+        FinalityKind::Depth => Some(FinalityConfig::Depth(DepthConfig::dev())),
+        FinalityKind::None => None,
+    }
 }
 
 /// The development genesis of a kind, as the node runs it without --genesis.
@@ -50,8 +107,8 @@ pub fn dev(chain: DevChain) -> Genesis {
 pub fn write(args: GenesisArgs) -> CliResult<()> {
     let mut genesis = dev(args.consensus);
 
-    if args.no_finality {
-        genesis.finality = None;
+    if let Some(kind) = args.finality {
+        genesis.finality = dev_finality(kind);
     }
 
     let text = serde_json::to_string_pretty(&to_json(&genesis))? + "\n";
@@ -109,23 +166,104 @@ pub fn to_json(genesis: &Genesis) -> Value {
             "memory": genesis.tx_limits.memory,
         },
         "max_reorg_depth": genesis.max_reorg_depth,
-        "finality": genesis.finality.as_ref().map(|finality| json!({
-            "checkpoint_interval": finality.checkpoint_interval,
-            "vote_depth": finality.vote_depth,
-            "min_bond": finality.min_bond.to_string(),
-            "activation_delay": finality.activation_delay,
-            "withdrawal_delay": finality.withdrawal_delay,
-            "reporter_divisor": finality.reporter_divisor,
-            "max_validators": finality.max_validators,
-            "vote_reward": finality.vote_reward.to_string(),
-            "max_proofs_per_block": finality.max_proofs_per_block,
-            "validators": finality.validators.iter().map(|validator| json!({
+        "finality": genesis.finality.as_ref().map(finality_json),
+    })
+}
+
+/// Finality as JSON, its kind in "type" as consensus has it.
+fn finality_json(config: &FinalityConfig) -> Value {
+    match *config {
+        #[cfg(feature = "finality-ffg")]
+        FinalityConfig::Ffg(ref ffg) => json!({
+            "type": "ffg",
+            "checkpoint_interval": ffg.checkpoint_interval,
+            "vote_depth": ffg.vote_depth,
+            "min_bond": ffg.min_bond.to_string(),
+            "activation_delay": ffg.activation_delay,
+            "withdrawal_delay": ffg.withdrawal_delay,
+            "reporter_divisor": ffg.reporter_divisor,
+            "max_validators": ffg.max_validators,
+            "vote_reward": ffg.vote_reward.to_string(),
+            "max_proofs_per_block": ffg.max_proofs_per_block,
+            "validators": ffg.validators.iter().map(|validator| json!({
                 "account": validator.account.to_string(),
                 "voter": validator.voter.to_string(),
                 "bond": validator.bond.to_string(),
             })).collect::<Vec<_>>(),
-        })),
-    })
+        }),
+        #[cfg(feature = "finality-authority")]
+        FinalityConfig::Authority(ref authority) => json!({
+            "type": "authority",
+            "checkpoint_interval": authority.checkpoint_interval,
+            "vote_depth": authority.vote_depth,
+            "signers": authority.signers.iter().map(|signer| signer.to_string()).collect::<Vec<_>>(),
+            "threshold": authority.threshold,
+            "vote_reward": authority.vote_reward.to_string(),
+            "max_proofs_per_block": authority.max_proofs_per_block,
+        }),
+        #[cfg(feature = "finality-depth")]
+        FinalityConfig::Depth(ref depth) => json!({
+            "type": "depth",
+            "depth": depth.depth,
+        }),
+    }
+}
+
+/// Reads finality, whichever kind its "type" names.
+#[cfg_attr(
+    not(any(feature = "finality-ffg", feature = "finality-authority", feature = "finality-depth")),
+    allow(unreachable_code, unused_variables)
+)]
+fn finality_from_json(mut finality: Fields) -> Result<FinalityConfig, String> {
+    let config = match finality.text("type")?.as_str() {
+        #[cfg(feature = "finality-ffg")]
+        "ffg" => FinalityConfig::Ffg(FfgConfig {
+            checkpoint_interval: finality.whole("checkpoint_interval")?,
+            vote_depth: finality.whole("vote_depth")?,
+            min_bond: finality.amount("min_bond")?,
+            activation_delay: finality.whole("activation_delay")?,
+            withdrawal_delay: finality.whole("withdrawal_delay")?,
+            reporter_divisor: finality.whole("reporter_divisor")?,
+            max_validators: finality.small("max_validators")?,
+            vote_reward: finality.amount("vote_reward")?,
+            max_proofs_per_block: finality.small("max_proofs_per_block")?,
+            validators: finality
+                .list("validators")?
+                .into_iter()
+                .map(|mut item| {
+                    let validator = GenesisValidator {
+                        account: item.parse("account")?,
+                        voter: item.parse::<PublicKey>("voter")?,
+                        bond: item.amount("bond")?,
+                    };
+                    item.done()?;
+
+                    Ok(validator)
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        }),
+        #[cfg(feature = "finality-authority")]
+        "authority" => FinalityConfig::Authority(AuthorityConfig {
+            checkpoint_interval: finality.whole("checkpoint_interval")?,
+            vote_depth: finality.whole("vote_depth")?,
+            signers: finality
+                .strings("signers")?
+                .iter()
+                .map(|text| text.parse::<PublicKey>().map_err(|_| format!("finality.signers: cannot read {text}")))
+                .collect::<Result<Vec<_>, String>>()?,
+            threshold: finality.small("threshold")?,
+            vote_reward: finality.amount("vote_reward")?,
+            max_proofs_per_block: finality.small("max_proofs_per_block")?,
+        }),
+        #[cfg(feature = "finality-depth")]
+        "depth" => FinalityConfig::Depth(DepthConfig {
+            depth: finality.whole("depth")?,
+        }),
+        other => return Err(format!("finality.type: unknown finality {other}; {}", kinds())),
+    };
+    finality.done()?;
+
+    Ok(config)
 }
 
 pub fn from_json(value: &Value) -> Result<Genesis, String> {
@@ -191,41 +329,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
     };
     limits.done()?;
     let max_reorg_depth = root.whole("max_reorg_depth")?;
-    let finality = match root.optional_object("finality")? {
-        None => None,
-        Some(mut finality) => {
-            let config = FinalityConfig {
-                checkpoint_interval: finality.whole("checkpoint_interval")?,
-                vote_depth: finality.whole("vote_depth")?,
-                min_bond: finality.amount("min_bond")?,
-                activation_delay: finality.whole("activation_delay")?,
-                withdrawal_delay: finality.whole("withdrawal_delay")?,
-                reporter_divisor: finality.whole("reporter_divisor")?,
-                max_validators: u32::try_from(finality.whole("max_validators")?)
-                    .map_err(|_| "finality.max_validators is too large".to_string())?,
-                vote_reward: finality.amount("vote_reward")?,
-                max_proofs_per_block: u32::try_from(finality.whole("max_proofs_per_block")?)
-                    .map_err(|_| "finality.max_proofs_per_block is too large".to_string())?,
-                validators: finality
-                    .list("validators")?
-                    .into_iter()
-                    .map(|mut item| {
-                        let validator = GenesisValidator {
-                            account: item.parse("account")?,
-                            voter: item.parse::<PublicKey>("voter")?,
-                            bond: item.amount("bond")?,
-                        };
-                        item.done()?;
-
-                        Ok(validator)
-                    })
-                    .collect::<Result<Vec<_>, String>>()?,
-            };
-            finality.done()?;
-
-            Some(config)
-        }
-    };
+    let finality = root.optional_object("finality")?.map(finality_from_json).transpose()?;
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -339,6 +443,14 @@ impl<'a> Fields<'a> {
             .ok_or_else(|| format!("{name} must be a whole number"))
     }
 
+    /// A whole number that fits 32 bits.
+    #[cfg_attr(not(any(feature = "finality-ffg", feature = "finality-authority")), allow(dead_code))]
+    fn small(&mut self, key: &'a str) -> Result<u32, String> {
+        let name = self.name(key);
+
+        u32::try_from(self.whole(key)?).map_err(|_| format!("{name} is too large"))
+    }
+
     fn optional_whole(&mut self, key: &'a str) -> Result<Option<u64>, String> {
         match self.get(key)? {
             Value::Null => Ok(None),
@@ -376,14 +488,30 @@ impl<'a> Fields<'a> {
 mod tests {
     use super::*;
 
+    /// Every finality a genesis can have in this build, none included.
+    const ALL_FINALITY: &[FinalityKind] = &[
+        #[cfg(feature = "finality-ffg")]
+        FinalityKind::Ffg,
+        #[cfg(feature = "finality-authority")]
+        FinalityKind::Authority,
+        #[cfg(feature = "finality-depth")]
+        FinalityKind::Depth,
+        FinalityKind::None,
+    ];
+
+    fn with(kind: FinalityKind) -> Value {
+        let mut genesis = dev(DevChain::Authority);
+        genesis.finality = dev_finality(kind);
+
+        to_json(&genesis)
+    }
+
     #[test]
     fn genesis_files_round_trip_exactly() {
         for chain in [DevChain::Pow, DevChain::Authority] {
-            let genesis = dev(chain);
-            let mut bare = genesis.clone();
-            bare.finality = None;
-
-            for genesis in [genesis, bare] {
+            for &kind in ALL_FINALITY {
+                let mut genesis = dev(chain);
+                genesis.finality = dev_finality(kind);
                 let read = from_json(&to_json(&genesis)).unwrap();
 
                 assert_eq!(read, genesis);
@@ -396,14 +524,10 @@ mod tests {
     fn every_parameter_can_change_and_changes_the_chain() {
         let genesis = dev(DevChain::Pow);
         let mut value = to_json(&genesis);
-        value["finality"]["checkpoint_interval"] = json!(32);
-        value["finality"]["activation_delay"] = json!(4);
         value["tx_limits"]["fuel"] = json!(1_000);
         value["max_reorg_depth"] = json!(500);
         let changed = from_json(&value).unwrap();
-        let finality = changed.finality.as_ref().unwrap();
 
-        assert_eq!((finality.checkpoint_interval, finality.activation_delay), (32, 4));
         assert_eq!((changed.tx_limits.fuel, changed.max_reorg_depth), (1_000, 500));
         assert_ne!(changed.block().id(), genesis.block().id());
 
@@ -420,8 +544,68 @@ mod tests {
     }
 
     #[test]
+    fn each_finality_kind_reads_its_own_parameters() {
+        #[cfg(feature = "finality-ffg")]
+        {
+            let mut value = with(FinalityKind::Ffg);
+            value["finality"]["checkpoint_interval"] = json!(32);
+            value["finality"]["activation_delay"] = json!(4);
+            let Some(FinalityConfig::Ffg(ffg)) = from_json(&value).unwrap().finality else {
+                panic!("not ffg")
+            };
+
+            assert_eq!((ffg.checkpoint_interval, ffg.activation_delay), (32, 4));
+        }
+
+        #[cfg(feature = "finality-authority")]
+        {
+            let scheme = crate::consensus::DevAuthority::dev_keypair().public().key_type();
+            let signers: Vec<PublicKey> = (0..3)
+                .map(|_| crate::crypto::keypair::Keypair::generate(scheme).unwrap().public())
+                .collect();
+            let mut value = with(FinalityKind::Authority);
+            value["finality"]["signers"] = json!(signers.iter().map(PublicKey::to_string).collect::<Vec<_>>());
+            value["finality"]["threshold"] = json!(2);
+            let Some(FinalityConfig::Authority(authority)) = from_json(&value).unwrap().finality else {
+                panic!("not authority")
+            };
+
+            assert_eq!((authority.signers, authority.threshold), (signers, 2));
+        }
+
+        #[cfg(feature = "finality-depth")]
+        {
+            let mut value = with(FinalityKind::Depth);
+            value["finality"]["depth"] = json!(12);
+
+            assert_eq!(
+                from_json(&value).unwrap().finality,
+                Some(FinalityConfig::Depth(DepthConfig { depth: 12 }))
+            );
+        }
+
+        // The finality's type is required, and must be a kind this build has.
+        for &kind in ALL_FINALITY {
+            let mut value = with(kind);
+
+            if value["finality"].is_null() {
+                continue;
+            }
+
+            value["finality"]["type"] = json!("grandpa");
+
+            assert!(from_json(&value).unwrap_err().contains("unknown finality grandpa"));
+
+            value["finality"].as_object_mut().unwrap().remove("type");
+
+            assert_eq!(from_json(&value).unwrap_err(), "finality.type is missing");
+        }
+    }
+
+    #[test]
     fn mistakes_are_named() {
-        let cases: [(&str, Value, &str); 5] = [
+        let cases = [
+            #[cfg(feature = "finality-ffg")]
             ("/finality/checkpont_interval", json!(8), "finality.checkpont_interval is not a genesis field"),
             ("/max_reorg_depth", json!("100"), "max_reorg_depth must be a whole number"),
             ("/engines", json!(["lua", "evm"]), "unknown engine evm"),
@@ -447,9 +631,12 @@ mod tests {
             assert!(err.contains(expected), "{pointer}: {err}");
         }
 
-        let mut missing = to_json(&dev(DevChain::Pow));
-        missing["finality"].as_object_mut().unwrap().remove("vote_depth");
+        #[cfg(feature = "finality-ffg")]
+        {
+            let mut missing = to_json(&dev(DevChain::Pow));
+            missing["finality"].as_object_mut().unwrap().remove("vote_depth");
 
-        assert_eq!(from_json(&missing).unwrap_err(), "finality.vote_depth is missing");
+            assert_eq!(from_json(&missing).unwrap_err(), "finality.vote_depth is missing");
+        }
     }
 }

@@ -167,8 +167,9 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
             };
 
             json!({
+                "type": config.name(),
                 "epoch": config.epoch_of(tip.header.height),
-                "checkpoint_interval": config.checkpoint_interval,
+                "checkpoint_interval": config.checkpoint_interval(),
                 "justified": checkpoint_at(&*db, &justified.unwrap_or(start))?,
                 "finalized": checkpoint_at(&*db, &finalized.unwrap_or(start))?,
             })
@@ -206,11 +207,17 @@ fn finalized_height(db: &dyn Read) -> Result<u64, ApiError> {
     Ok(stored_block(db, &finalized.block)?.map_or(0, |block| block.header.height))
 }
 
-/// Every registered validator, and who votes in the tip's epoch.
+/// Every bonded validator, and who votes in the tip's epoch: the bonded set under FFG, the fixed
+/// signers under authority finality.
 async fn validators(Shared(api): Shared<Api>) -> Answer {
     let Some(config) = &api.finality else {
         return Err(ApiError::NotFound("this chain has no finality".to_string()));
     };
+
+    if !config.votes() {
+        return Err(ApiError::NotFound(format!("{} finality has no validators", config.name())));
+    }
+
     let db = api.db;
     let epoch = config.epoch_of(tip(&*db)?.header.height);
     let state = State::new(db);
@@ -223,7 +230,7 @@ async fn validators(Shared(api): Shared<Api>) -> Answer {
         }
     }
 
-    let set = validators.set(epoch)?.unwrap_or_default();
+    let set = config.voters(&state, epoch)?.unwrap_or_default();
 
     Ok(Json(json!({
         "epoch": epoch,

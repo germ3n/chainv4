@@ -27,17 +27,17 @@ pub struct Rules {
     pub minter: Option<Address>,
     #[document(summary = "What one deploy or contract call may use.")]
     pub limits: Limits,
-    #[document(summary = "What staking transactions run under, or None on a chain without finality, where they fail.")]
-    pub finality: Option<FinalityRules>,
+    #[document(summary = "What staking transactions run under, or None on a chain without staking, where they fail.")]
+    pub staking: Option<StakingRules>,
 }
 
 #[document(
-    summary = "The finality settings staking transactions run under.",
+    summary = "The settings staking transactions run under, on a chain with FFG finality.",
     category = "Chain",
-    see_also = "Rules, FinalityConfig",
+    see_also = "Rules, FfgConfig",
 )]
 #[derive(Clone, Copy, Debug)]
-pub struct FinalityRules {
+pub struct StakingRules {
     #[document(summary = "Bonds, delays and the slashing share.")]
     pub staking: Staking,
     #[document(summary = "Blocks per epoch, to tell which epoch a transaction runs in.")]
@@ -78,8 +78,8 @@ pub enum Failure {
     NotMinter,
     #[document(summary = "A deploy for an engine this chain's genesis does not allow.")]
     EngineNotAllowed(Engine),
-    #[document(summary = "A staking transaction on a chain without finality.")]
-    NoFinality,
+    #[document(summary = "A staking transaction on a chain where validators do not bond.")]
+    NoStaking,
     #[document(summary = "Slashing evidence whose signatures do not check out.")]
     BadEvidence,
 }
@@ -91,7 +91,7 @@ impl fmt::Display for Failure {
             Failure::Contract(err) => write!(f, "{err}"),
             Failure::NotMinter => write!(f, "only the minter may mint"),
             Failure::EngineNotAllowed(engine) => write!(f, "this chain does not run {} contracts", engine.name()),
-            Failure::NoFinality => write!(f, "this chain has no finality"),
+            Failure::NoStaking => write!(f, "this chain has no staking"),
             Failure::BadEvidence => write!(f, "the evidence's signatures do not check out"),
         }
     }
@@ -209,9 +209,9 @@ fn run(
     height: u64,
 ) -> (u64, Result<Effect, Failure>, Vec<Event>) {
     let accounts = Accounts::new(layer);
-    let staking = |run: &dyn Fn(&Validators, &FinalityRules, u64) -> Result<(), RegistryError>| {
-        let Some(finality) = &rules.finality else {
-            return (0, Err(Failure::NoFinality), Vec::new());
+    let staking = |run: &dyn Fn(&Validators, &StakingRules, u64) -> Result<(), RegistryError>| {
+        let Some(finality) = &rules.staking else {
+            return (0, Err(Failure::NoStaking), Vec::new());
         };
         let epoch = height / finality.checkpoint_interval.max(1);
 
@@ -283,7 +283,7 @@ fn run(
         }),
         Tx::Withdraw { voter } => staking(&|validators, _, epoch| validators.withdraw(&sender, voter, epoch).map(|_| ())),
         Tx::Slash { first, second } => {
-            if let Some(finality) = &rules.finality
+            if let Some(finality) = &rules.staking
                 && (first.verify(&finality.chain).is_err() || second.verify(&finality.chain).is_err())
             {
                 return (0, Err(Failure::BadEvidence), Vec::new());

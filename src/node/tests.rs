@@ -478,146 +478,213 @@ fn forked_nodes_settle_on_the_heavier_chain() {
     assert_eq!(Accounts::new(&light.chain().state()).get(&Address::Ed25519([2; 32])).unwrap().balance, u256::ZERO);
 }
 
-// Finality: the dev chains have the dev key as their one validator, epochs of 8 blocks, and votes
-// two blocks behind the tip.
+// Finality. The dev chains run FFG with the dev key as their one validator, epochs of 8 blocks, and
+// votes two blocks behind the tip; the authority dev settings time votes the same way.
+#[cfg(any(feature = "finality-ffg", feature = "finality-authority", feature = "finality-depth"))]
+mod finality {
+    use super::*;
+    use crate::chain::FinalityConfig;
 
-const EPOCH: u64 = 8;
+    #[cfg(any(feature = "finality-ffg", feature = "finality-authority"))]
+    const EPOCH: u64 = 8;
 
-fn votes(commands: &[NetCommand]) -> Vec<crate::structs::vote::SignedVote> {
-    commands
-        .iter()
-        .filter_map(|command| match command {
-            NetCommand::PublishVote(vote) => Some(*vote),
-            _ => None,
-        })
-        .collect()
-}
+    /// A producer on the dev authority chain with this finality instead, voting with the dev key.
+    #[cfg(any(feature = "finality-authority", feature = "finality-depth"))]
+    fn validating_on(finality: FinalityConfig) -> (Node, FakeNet) {
+        let authority = DevAuthority::dev_keypair();
+        let genesis = Genesis {
+            finality: Some(finality),
+            ..Genesis::dev_authority(authority.public())
+        };
+        let producer = Box::new(AuthorityProducer::new(authority.clone(), SLOT)) as Box<dyn Producer>;
+        let (link, fake) = NetLink::pair();
+        let node = Node::new(Arc::new(MemoryDb::default()), &genesis, Some(producer), link).unwrap();
 
-fn validating_producer() -> (Node, FakeNet) {
-    let (producer, net) = node(true);
-
-    (producer.validate(DevAuthority::dev_keypair()), net)
-}
-
-#[test]
-fn a_validating_producer_votes_once_per_epoch_and_finalizes() {
-    let (mut producer, mut net) = validating_producer();
-    let dev = DevAuthority::dev_keypair().public();
-    let funds = Accounts::new(&producer.chain().state()).get(&dev.address()).unwrap().balance;
-
-    for slot in 1..=EPOCH + 1 {
-        producer.step(SLOT * slot).unwrap();
+        (node.validate(authority), fake)
     }
 
-    assert!(votes(&sent(&mut net)).is_empty(), "too close to the tip to vote yet");
-    assert_eq!(producer.chain().justified().unwrap().epoch, 0);
-
-    producer.step(SLOT * (EPOCH + 2)).unwrap();
-    let first = votes(&sent(&mut net));
-
-    assert_eq!(first.len(), 1);
-    assert_eq!((first[0].vote.source.epoch, first[0].vote.target.epoch), (0, 1));
-    assert_eq!(producer.chain().justified().unwrap().epoch, 1);
-
-    // The next block pays for the proof, and nothing more is owed until the next epoch.
-    producer.step(SLOT * (EPOCH + 3)).unwrap();
-    let paid = published_block(&mut net);
-
-    assert_eq!(paid.proofs.len(), 1);
-    assert_eq!(paid.proofs[0].target, first[0].vote.target);
-    assert_eq!(
-        Accounts::new(&producer.chain().state()).get(&dev.address()).unwrap().balance,
-        funds + producer.chain().finality_config().unwrap().vote_reward
-    );
-
-    for slot in EPOCH + 4..=2 * EPOCH + 2 {
-        producer.step(SLOT * slot).unwrap();
+    fn votes(commands: &[NetCommand]) -> Vec<crate::structs::vote::SignedVote> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                NetCommand::PublishVote(vote) => Some(*vote),
+                _ => None,
+            })
+            .collect()
     }
 
-    let second = votes(&sent(&mut net));
+    #[cfg(feature = "finality-ffg")]
+    fn validating_producer() -> (Node, FakeNet) {
+        let (producer, net) = node(true);
 
-    assert_eq!(second.len(), 1);
-    assert_eq!((second[0].vote.source.epoch, second[0].vote.target.epoch), (1, 2));
-    assert_eq!(producer.chain().finalized().unwrap(), first[0].vote.target);
-}
+        (producer.validate(DevAuthority::dev_keypair()), net)
+    }
 
-#[test]
-fn a_follower_counts_gossiped_votes() {
-    let (mut producer, mut producer_net) = validating_producer();
-    let (mut follower, mut follower_net) = node(false);
-    let peer = PeerId::random();
+    #[cfg(feature = "finality-ffg")]
+    #[test]
+    fn a_validating_producer_votes_once_per_epoch_and_finalizes() {
+        let (mut producer, mut net) = validating_producer();
+        let dev = DevAuthority::dev_keypair().public();
+        let funds = Accounts::new(&producer.chain().state()).get(&dev.address()).unwrap().balance;
 
-    for slot in 1..=EPOCH + 2 {
-        producer.step(SLOT * slot).unwrap();
-
-        for command in sent(&mut producer_net) {
-            let event = match command {
-                NetCommand::PublishBlock(block) => NetEvent::Block { from: peer, block },
-                NetCommand::PublishVote(vote) => NetEvent::Vote { from: peer, vote },
-                _ => continue,
-            };
-            follower_net.events.send(event).unwrap();
+        for slot in 1..=EPOCH + 1 {
+            producer.step(SLOT * slot).unwrap();
         }
 
-        follower.step(SLOT * slot).unwrap();
+        assert!(votes(&sent(&mut net)).is_empty(), "too close to the tip to vote yet");
+        assert_eq!(producer.chain().justified().unwrap().epoch, 0);
+
+        producer.step(SLOT * (EPOCH + 2)).unwrap();
+        let first = votes(&sent(&mut net));
+
+        assert_eq!(first.len(), 1);
+        assert_eq!((first[0].vote.source.epoch, first[0].vote.target.epoch), (0, 1));
+        assert_eq!(producer.chain().justified().unwrap().epoch, 1);
+
+        // The next block pays for the proof, and nothing more is owed until the next epoch.
+        producer.step(SLOT * (EPOCH + 3)).unwrap();
+        let paid = published_block(&mut net);
+
+        assert_eq!(paid.proofs.len(), 1);
+        assert_eq!(paid.proofs[0].target, first[0].vote.target);
+        assert_eq!(
+            Accounts::new(&producer.chain().state()).get(&dev.address()).unwrap().balance,
+            funds + match producer.chain().finality_config() {
+                Some(FinalityConfig::Ffg(ffg)) => ffg.vote_reward,
+                _ => unreachable!("the dev chains run FFG"),
+            }
+        );
+
+        for slot in EPOCH + 4..=2 * EPOCH + 2 {
+            producer.step(SLOT * slot).unwrap();
+        }
+
+        let second = votes(&sent(&mut net));
+
+        assert_eq!(second.len(), 1);
+        assert_eq!((second[0].vote.source.epoch, second[0].vote.target.epoch), (1, 2));
+        assert_eq!(producer.chain().finalized().unwrap(), first[0].vote.target);
     }
 
-    assert_eq!(follower.chain().justified(), producer.chain().justified());
-    assert_eq!(follower.chain().justified().unwrap().epoch, 1);
-    assert!(votes(&sent(&mut follower_net)).is_empty(), "a follower never votes");
-}
+    #[cfg(feature = "finality-ffg")]
+    #[test]
+    fn a_follower_counts_gossiped_votes() {
+        let (mut producer, mut producer_net) = validating_producer();
+        let (mut follower, mut follower_net) = node(false);
+        let peer = PeerId::random();
 
-#[test]
-fn a_late_node_syncs_justifications_with_the_blocks() {
-    let (mut producer, mut producer_net) = validating_producer();
-    let (mut late, mut late_net) = node(false);
-    let blocks = 3 * EPOCH + 2;
+        for slot in 1..=EPOCH + 2 {
+            producer.step(SLOT * slot).unwrap();
 
-    for slot in 1..=blocks {
-        producer.step(SLOT * slot).unwrap();
+            for command in sent(&mut producer_net) {
+                let event = match command {
+                    NetCommand::PublishBlock(block) => NetEvent::Block { from: peer, block },
+                    NetCommand::PublishVote(vote) => NetEvent::Vote { from: peer, vote },
+                    _ => continue,
+                };
+                follower_net.events.send(event).unwrap();
+            }
+
+            follower.step(SLOT * slot).unwrap();
+        }
+
+        assert_eq!(follower.chain().justified(), producer.chain().justified());
+        assert_eq!(follower.chain().justified().unwrap().epoch, 1);
+        assert!(votes(&sent(&mut follower_net)).is_empty(), "a follower never votes");
     }
 
-    sent(&mut producer_net);
+    #[cfg(feature = "finality-ffg")]
+    #[test]
+    fn a_late_node_syncs_justifications_with_the_blocks() {
+        let (mut producer, mut producer_net) = validating_producer();
+        let (mut late, mut late_net) = node(false);
+        let blocks = 3 * EPOCH + 2;
 
-    assert_eq!(producer.chain().justified().unwrap().epoch, 3);
+        for slot in 1..=blocks {
+            producer.step(SLOT * slot).unwrap();
+        }
 
-    let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
-    late_net.events.send(NetEvent::PeerUp(producer_peer)).unwrap();
-    late.step(SLOT * blocks).unwrap();
-    relay(
-        Side { node: &mut late, net: &mut late_net, peer: late_peer },
-        Side { node: &mut producer, net: &mut producer_net, peer: producer_peer },
-        SLOT * blocks,
-    );
+        sent(&mut producer_net);
 
-    assert_eq!(late.chain().tip().id(), producer.chain().tip().id());
-    assert_eq!(late.chain().justified(), producer.chain().justified());
-    assert_eq!(late.chain().finalized(), producer.chain().finalized());
-}
+        assert_eq!(producer.chain().justified().unwrap().epoch, 3);
 
-#[test]
-fn peers_get_justifications() {
-    let (mut producer, mut net) = validating_producer();
+        let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
+        late_net.events.send(NetEvent::PeerUp(producer_peer)).unwrap();
+        late.step(SLOT * blocks).unwrap();
+        relay(
+            Side { node: &mut late, net: &mut late_net, peer: late_peer },
+            Side { node: &mut producer, net: &mut producer_net, peer: producer_peer },
+            SLOT * blocks,
+        );
 
-    for slot in 1..=2 * EPOCH + 2 {
-        producer.step(SLOT * slot).unwrap();
+        assert_eq!(late.chain().tip().id(), producer.chain().tip().id());
+        assert_eq!(late.chain().justified(), producer.chain().justified());
+        assert_eq!(late.chain().finalized(), producer.chain().finalized());
     }
 
-    sent(&mut net);
-    net.events
-        .send(NetEvent::Request {
-            peer: PeerId::random(),
-            id: 7,
-            request: SyncRequest::Justifications { from: 1, count: 100 },
-        })
-        .unwrap();
-    producer.step(SLOT * (2 * EPOCH + 2) + 1).unwrap();
+    #[cfg(feature = "finality-ffg")]
+    #[test]
+    fn peers_get_justifications() {
+        let (mut producer, mut net) = validating_producer();
 
-    assert!(matches!(
-        &sent(&mut net)[..],
-        [NetCommand::Respond {
-            id: 7,
-            response: SyncResponse::Justifications(proofs),
-        }] if proofs.iter().map(|proof| proof.target.epoch).eq([1, 2])
-    ));
+        for slot in 1..=2 * EPOCH + 2 {
+            producer.step(SLOT * slot).unwrap();
+        }
+
+        sent(&mut net);
+        net.events
+            .send(NetEvent::Request {
+                peer: PeerId::random(),
+                id: 7,
+                request: SyncRequest::Justifications { from: 1, count: 100 },
+            })
+            .unwrap();
+        producer.step(SLOT * (2 * EPOCH + 2) + 1).unwrap();
+
+        assert!(matches!(
+            &sent(&mut net)[..],
+            [NetCommand::Respond {
+                id: 7,
+                response: SyncResponse::Justifications(proofs),
+            }] if proofs.iter().map(|proof| proof.target.epoch).eq([1, 2])
+        ));
+    }
+
+    #[cfg(feature = "finality-authority")]
+    #[test]
+    fn an_authority_signer_votes_and_finalizes_without_proofs() {
+        let dev = DevAuthority::dev_keypair().public();
+        let (mut producer, mut net) = validating_on(FinalityConfig::Authority(crate::chain::AuthorityConfig::dev(dev)));
+        let mut published = Vec::new();
+
+        for slot in 1..=2 * EPOCH + 2 {
+            producer.step(SLOT * slot).unwrap();
+            published.extend(sent(&mut net));
+        }
+
+        let cast = votes(&published);
+
+        assert_eq!(cast.len(), 2);
+        assert_eq!((cast[1].vote.source.epoch, cast[1].vote.target.epoch), (1, 2));
+        assert_eq!(producer.chain().finalized().unwrap(), cast[0].vote.target);
+        // Signers earn nothing in the dev settings, so blocks carry no proofs.
+        assert!(
+            published
+                .iter()
+                .all(|command| !matches!(command, NetCommand::PublishBlock(block) if !block.proofs.is_empty()))
+        );
+    }
+
+    #[cfg(feature = "finality-depth")]
+    #[test]
+    fn a_depth_chain_finalizes_without_votes() {
+        let (mut producer, mut net) = validating_on(FinalityConfig::Depth(crate::chain::DepthConfig { depth: 3 }));
+
+        for slot in 1..=10 {
+            producer.step(SLOT * slot).unwrap();
+        }
+
+        assert!(votes(&sent(&mut net)).is_empty(), "nothing to vote on");
+        assert_eq!(producer.chain().finalized().unwrap().epoch, 7);
+    }
 }

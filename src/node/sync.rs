@@ -206,7 +206,7 @@ impl Node {
 
     /// Asks the peer furthest ahead on justification for the justifications this node lacks.
     fn sync_proofs(&mut self) {
-        if self.sync.asking_proofs.is_some() {
+        if self.sync.asking_proofs.is_some() || !self.chain.takes_votes() {
             return;
         }
 

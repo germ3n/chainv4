@@ -9,7 +9,7 @@ members = ["macro", "wiki"]
 exclude = ["contracts"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "lvm", "wasm", "rocksdb", "node", "http", "client"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "lvm", "wasm", "rocksdb", "node", "http", "client", "finality-ffg", "finality-authority", "finality-depth"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -25,6 +25,11 @@ rocksdb = ["dep:rocksdb"]
 http = ["dep:axum", "dep:serde_json", "node"]
 # The client side of the CLI: chainv4 send talks to a node's HTTP API.
 client = ["dep:ureq", "dep:serde_json", "node"]
+# Kinds of finality a node can run, as genesis picks: bonded validators voting (FFG), a fixed set
+# of signers voting, or a number of blocks on top.
+finality-ffg = []
+finality-authority = []
+finality-depth = []
 node = ["dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "dep:serde_json", "lvm", "rocksdb"]
 
 [dependencies]
