@@ -145,6 +145,13 @@ pub fn call_with_value(target: &Address, value: [u8; 32], function: &str, args: 
     }
 }
 
+/// Announces something for clients to follow. The event lands in the transaction's receipt only
+/// if this call, and every call above it, succeeds. Names are 1 to 64 bytes.
+pub fn emit(name: &str, data: &[Value]) {
+    let data = value::encode(data);
+    unsafe { sys::emit(name.as_ptr(), name.len() as u32, data.as_ptr(), data.len() as u32) };
+}
+
 /// Stops the call with an error. Nothing it wrote is kept.
 pub fn abort(message: &str) -> ! {
     unsafe { sys::abort(message.as_ptr(), message.len() as u32) }

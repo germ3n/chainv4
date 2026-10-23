@@ -2,7 +2,7 @@
 
 #![no_std]
 
-use chainv4_sdk::{Value, abort, export, input, output, sender, storage};
+use chainv4_sdk::{Value, abort, emit, export, input, output, sender, storage};
 
 const COUNT: &[u8] = b"count";
 const LAST: &[u8] = b"last";
@@ -20,6 +20,7 @@ fn increment() {
         .unwrap_or_else(|| abort("the count would overflow"));
     storage::set(COUNT, &count.to_le_bytes());
     storage::set(LAST, &sender().encode());
+    emit("Incremented", &[Value::I64(count), Value::Address(sender())]);
     output(&[Value::I64(count)]);
 }
 

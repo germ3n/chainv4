@@ -70,52 +70,131 @@ fn amounts_pick_the_narrowest_width() {
 mod send {
     use super::*;
     use crate::chain::Genesis;
+    use crate::consensus::{AuthorityProducer, ConsensusConfig, Producer};
     use crate::db::MemoryDb;
-    use crate::net::NetLink;
+    use crate::net::{FakeNet, NetLink};
     use crate::node::{Node, now_ms};
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::JoinHandle;
+
+    /// A node behind an HTTP API, stepping on a thread of its own until stopped.
+    struct Running {
+        api: SocketAddr,
+        stop: Arc<AtomicBool>,
+        thread: JoinHandle<(Node, FakeNet)>,
+    }
+
+    impl Running {
+        /// A node on the dev authority chain, with blocks every 50 ms when it produces.
+        fn start(produce: bool) -> Running {
+            const SLOT: u64 = 50;
+            let authority = DevAuthority::dev_keypair();
+            let genesis = Genesis {
+                consensus: ConsensusConfig::Authority {
+                    key: authority.public(),
+                    slot_ms: SLOT,
+                },
+                timestamp: now_ms(),
+                ..Genesis::dev_authority(authority.public())
+            };
+            let producer = produce.then(|| Box::new(AuthorityProducer::new(authority, SLOT)) as Box<dyn Producer>);
+            let db = Arc::new(MemoryDb::default());
+            let (link, net) = NetLink::pair();
+            let node = Node::new(db.clone(), &genesis, producer, link).unwrap();
+            let api = crate::api::start(db, Some(node.submitter()), "127.0.0.1:0".parse().unwrap()).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread = std::thread::spawn({
+                let stop = stop.clone();
+                let mut node = node;
+
+                move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        node.step(now_ms()).unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+
+                    (node, net)
+                }
+            });
+
+            Running { api, stop, thread }
+        }
+
+        fn args(&self, tx: TxArgs) -> SendArgs {
+            SendArgs {
+                node: format!("http://{}", self.api),
+                key: None,
+                no_wait: false,
+                timeout: 10,
+                confirmations: 1,
+                tx,
+            }
+        }
+
+        fn stop(self) -> Node {
+            self.stop.store(true, Ordering::Relaxed);
+
+            self.thread.join().unwrap().0
+        }
+    }
 
     #[test]
-    fn send_signs_with_the_next_nonce_and_reaches_the_mempool() {
-        let authority = DevAuthority::dev_keypair();
-        let db = Arc::new(MemoryDb::default());
-        let consensus = DevAuthority::new(authority.public(), 2_000, None);
-        let (link, _net) = NetLink::pair();
-        let node = Node::new(db.clone(), &Genesis::dev(authority.public()), Box::new(consensus), link).unwrap();
-        let api = crate::api::start(db, Some(node.submitter()), "127.0.0.1:0".parse().unwrap()).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let running = std::thread::spawn({
-            let stop = stop.clone();
-            let mut node = node;
-
-            move || {
-                while !stop.load(Ordering::Relaxed) {
-                    node.step(now_ms()).unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-
-                node
-            }
-        });
-        let to = Address::Ed25519([3; 32]);
+    fn without_waiting_send_returns_once_the_mempool_has_it() {
+        let running = Running::start(false);
         let sent = send(SendArgs {
-            node: format!("http://{api}"),
-            key: None,
-            tx: TxArgs::Transfer { to, amount: u256::new(9) },
+            no_wait: true,
+            ..running.args(TxArgs::Transfer { to: Address::Ed25519([3; 32]), amount: u256::new(9) })
         });
-        stop.store(true, Ordering::Relaxed);
-        let node = running.join().unwrap();
+        let node = running.stop();
 
         sent.unwrap();
         assert_eq!(node.mempool().len(), 1);
 
         let refused = send(SendArgs {
             node: "http://127.0.0.1:1".to_string(),
-            key: None,
-            tx: TxArgs::Burn { amount: u256::new(1) },
+            ..Running::start(false).args(TxArgs::Burn { amount: u256::new(1) })
         });
 
         assert!(refused.unwrap_err().to_string().contains("cannot reach the node"));
+    }
+
+    #[test]
+    fn send_waits_until_enough_blocks_hold_the_transaction() {
+        let running = Running::start(true);
+        let to = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap().public().address();
+        let sent = send(SendArgs {
+            confirmations: 3,
+            ..running.args(TxArgs::Transfer { to, amount: u256::new(9) })
+        });
+        let node = running.stop();
+
+        sent.unwrap();
+        assert!(node.chain().tip().height >= 3);
+        assert!(node.mempool().is_empty());
+    }
+
+    #[test]
+    fn a_transaction_that_lands_but_fails_is_an_error() {
+        let running = Running::start(true);
+        let burned = send(running.args(TxArgs::Burn { amount: u256::MAX }));
+        running.stop();
+
+        assert!(burned.unwrap_err().to_string().contains("the transaction failed: insufficient balance"));
+    }
+
+    #[test]
+    fn waiting_gives_up_after_the_timeout() {
+        let running = Running::start(false);
+        let started = std::time::Instant::now();
+        let waited = send(SendArgs {
+            timeout: 1,
+            ..running.args(TxArgs::Burn { amount: u256::new(1) })
+        });
+        running.stop();
+
+        assert!(waited.unwrap_err().to_string().contains("was not in a block"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

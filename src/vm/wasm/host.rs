@@ -9,7 +9,7 @@ use {
     crate::structs::hash::HashType,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
-    crate::vm::{Host, MAX_KEY_LEN, MAX_VALUE_LEN, VmError, cost},
+    crate::vm::{Host, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_VALUE_LEN, VmError, cost},
     r#macro::document,
     wasmi::{Caller, Engine, Extern, Linker, Memory},
 };
@@ -31,6 +31,7 @@ pub(super) const NAMES: &[&str] = &[
     "balance",
     "transfer",
     "call",
+    "emit",
     "abort",
 ];
 
@@ -231,6 +232,20 @@ fn chain_call() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "emit",
+    summary = "Emits an event from this contract. It lands in the transaction's receipt only if this call, and every call above it, succeeds. Costs 200 fuel, plus 1 per 16 bytes of name and data.",
+    params = {
+        name = { ty = "i32", desc = "What happened, UTF-8, 1 to 64 bytes." },
+        name_len = { ty = "i32", desc = "Its length." },
+        data = { ty = "i32", desc = "The details: an encoded list of values, at most 16 KiB." },
+        data_len = { ty = "i32", desc = "Their length." },
+    },
+)]
+fn chain_emit() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "abort",
     summary = "Stops the call with an error. Nothing it wrote is kept. Only the first 1024 bytes of the message are.",
     params = {
@@ -259,6 +274,7 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "balance", balance).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "transfer", transfer).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "call", call).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "emit", emit).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
 
     linker
@@ -428,6 +444,25 @@ fn call(
     caller.data_mut().result = result;
 
     Ok(status)
+}
+
+fn emit(mut caller: Caller<'_, Run>, name: u32, name_len: u32, data: u32, data_len: u32) -> Result<()> {
+    let host = host(&mut caller)?;
+    check_len(&mut caller, name_len, MAX_EVENT_NAME, "event names")?;
+    check_len(&mut caller, data_len, MAX_EVENT_DATA, "event data")?;
+    let size = u64::from(name_len) + u64::from(data_len);
+    charge(&mut caller, cost::EVENT + size / cost::EVENT_BYTES_PER_FUEL)?;
+    let name = read(&mut caller, name, name_len)?;
+    let data = read(&mut caller, data, data_len)?;
+    let Ok(name) = String::from_utf8(name) else {
+        return Err(stop(&mut caller, VmError::BadArgument("an event name is UTF-8".to_string())));
+    };
+    let data = match wincode::deserialize::<Vec<TxCallArgumentType>>(&data) {
+        Ok(data) => data,
+        Err(err) => return Err(stop(&mut caller, VmError::BadArgument(err.to_string()))),
+    };
+
+    host.emit(&name, data).map(|_| ()).map_err(|err| stop(&mut caller, err))
 }
 
 fn abort(mut caller: Caller<'_, Run>, message: u32, len: u32) -> Result<()> {

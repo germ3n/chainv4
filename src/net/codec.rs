@@ -93,6 +93,7 @@ mod tests {
             genesis: Hash::Blake3_256([1; 32]),
             tip: Hash::Blake3_256([2; 32]),
             height: 9,
+            work: crate::structs::u256::u256::new(7),
         };
         let mut wire = Cursor::new(Vec::new());
         block_on(codec.write_request(&PROTOCOL, &mut wire, request.clone())).unwrap();

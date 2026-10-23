@@ -5,7 +5,7 @@
 
 use {
     crate::mempool::MempoolError,
-    crate::structs::block::Block,
+    crate::structs::block::{Block, Seal},
     crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
     libp2p::{Multiaddr, PeerId},
@@ -45,6 +45,8 @@ pub enum NetEvent {
     Response { peer: PeerId, response: SyncResponse },
     #[document(summary = "A request this node sent got no answer.")]
     RequestFailed { peer: PeerId, error: String },
+    #[document(summary = "This node's miner found the seal for the block with this id.")]
+    Sealed { block: Hash, seal: Seal },
     #[document(summary = "A client of this node submitted a transaction. The node answers on reply with its id, or why the mempool refused it.")]
     Submitted {
         tx: SignedTx,
@@ -93,9 +95,15 @@ pub enum SyncRequest {
 #[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
 pub enum SyncResponse {
-    #[document(summary = "The peer's genesis, tip and height.")]
+    #[document(summary = "The peer's genesis, tip, height and the total work of its main chain.")]
     #[wincode(tag = 0)]
-    Status { genesis: Hash, tip: Hash, height: u64 },
+    Status {
+        genesis: Hash,
+        tip: Hash,
+        height: u64,
+        #[wincode(with = "crate::structs::u256::U256Le")]
+        work: crate::structs::u256::u256,
+    },
     #[document(summary = "The blocks asked for that the peer has, in height order.")]
     #[wincode(tag = 1)]
     Blocks(Vec<Block>),

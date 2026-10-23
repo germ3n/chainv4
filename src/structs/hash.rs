@@ -25,7 +25,7 @@ compile_error!(
     see_also = "Hashable, HashType",
     note = "Each algorithm sits behind a cargo feature: sha256, blake3, blake2s, blake2b, xxh3 and keccak256, all on by default. Tags are pinned, so turning one off never changes how the others encode.",
 )]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, std::hash::Hash, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
 pub enum Hash {
     #[document(summary = "A SHA-256 digest.")]
@@ -131,7 +131,7 @@ impl Verifiable for Hash {
     see_also = "Hash",
     note = "Each algorithm sits behind the cargo feature of the same name as on Hash. Tags are pinned and match Hash's.",
 )]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, std::hash::Hash, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
 pub enum HashType {
     #[document(summary = "A SHA-256 digest.")]

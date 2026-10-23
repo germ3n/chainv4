@@ -1,6 +1,9 @@
 use super::*;
 use crate::net::{MAX_SYNC_BLOCKS, SyncRequest, SyncResponse};
-use crate::consensus::DevAuthority;
+use crate::chain::Reward;
+use crate::consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, Miner, PowConfig, PowHash, meets, work_hash};
+use crate::structs::address::Address;
+use crate::structs::block::{BlockHeader, Seal};
 use crate::crypto::keypair::Keypair;
 use crate::db::MemoryDb;
 use crate::net::FakeNet;
@@ -15,13 +18,62 @@ const SLOT: u64 = 2_000;
 
 fn node(produce: bool) -> (Node, FakeNet) {
     let authority = DevAuthority::dev_keypair();
-    let genesis = Genesis::dev(authority.public());
-    let consensus = DevAuthority::new(authority.public(), SLOT, produce.then_some(authority));
+    let genesis = Genesis::dev_authority(authority.public());
+    let producer = produce.then(|| Box::new(AuthorityProducer::new(authority, SLOT)) as Box<dyn Producer>);
     let (link, fake) = NetLink::pair();
-    let node = Node::new(Arc::new(MemoryDb::default()), &genesis, Box::new(consensus), link).unwrap();
+    let node = Node::new(Arc::new(MemoryDb::default()), &genesis, producer, link).unwrap();
 
     (node, fake)
 }
+
+/// A proof-of-work chain where any nonce does, so tests mine instantly.
+fn easy_pow() -> Genesis {
+    Genesis {
+        consensus: ConsensusConfig::ProofOfWork(PowConfig {
+            hash: PowHash::Blake3,
+            target_block_ms: 1_000,
+            initial_difficulty: 1,
+            min_difficulty: 1,
+        }),
+        reward: Reward {
+            initial: u256::new(5),
+            halving_interval: None,
+        },
+        ..Genesis::dev_pow(DevAuthority::dev_keypair().public())
+    }
+}
+
+fn pow_node() -> (Node, FakeNet) {
+    let (link, fake) = NetLink::pair();
+    let node = Node::new(Arc::new(MemoryDb::default()), &easy_pow(), None, link).unwrap();
+
+    (node, fake)
+}
+
+/// Mines a block on parent by hand, one target later.
+fn mine_on(node: &Node, parent: &BlockHeader, miner: u8) -> Block {
+    let timestamp = parent.timestamp + 1_000;
+    let header = BlockHeader {
+        parent: parent.id(),
+        height: parent.height + 1,
+        timestamp,
+        producer: Address::Ed25519([miner; 32]),
+        difficulty: node.chain().consensus().difficulty(parent, timestamp),
+        tx_root: Block::tx_root(&[]),
+    };
+    let nonce = (0..)
+        .find(|nonce| meets(work_hash(PowHash::Blake3, &header.id(), *nonce), header.difficulty))
+        .unwrap();
+
+    Block {
+        header,
+        txs: Vec::new(),
+        seal: Seal::Work { nonce },
+    }
+}
+
+/// Far enough ahead that no block in these tests is from the future.
+const LATER: u64 = 10_000_000;
 
 /// Everything the node asked the network to do since the last call.
 fn sent(fake: &mut FakeNet) -> Vec<NetCommand> {
@@ -307,6 +359,7 @@ fn peers_on_another_chain_are_never_asked_for_blocks() {
                 genesis: crate::structs::hash::Hash::Blake3_256([1; 32]),
                 tip: crate::structs::hash::Hash::Blake3_256([2; 32]),
                 height: 50,
+                work: u256::new(50),
             },
         })
         .unwrap();
@@ -357,4 +410,66 @@ fn submitted_transactions_are_queued_gossiped_and_answered() {
     }
 
     assert_eq!(again.join().unwrap(), Err(SubmitError::Refused(MempoolError::Duplicate)));
+}
+
+#[test]
+fn a_miner_seals_on_its_own_threads_and_publishes() {
+    let (link, mut net) = NetLink::pair();
+    let events = net.events.clone();
+    let miner = Miner::new(Address::Ed25519([9; 32]), PowHash::Blake3, 1, move |block, seal| {
+        let _ = events.send(NetEvent::Sealed { block, seal });
+    });
+    let mut node = Node::new(Arc::new(MemoryDb::default()), &easy_pow(), Some(Box::new(miner)), link).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+    while node.chain().tip().height < 2 {
+        assert!(std::time::Instant::now() < deadline, "no block was mined");
+        node.step(now_ms()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    let published = sent(&mut net)
+        .into_iter()
+        .filter(|command| matches!(command, NetCommand::PublishBlock(_)))
+        .count();
+
+    assert!(published >= 2);
+    assert!(Accounts::new(&node.chain().state()).get(&Address::Ed25519([9; 32])).unwrap().balance >= u256::new(10));
+}
+
+#[test]
+fn forked_nodes_settle_on_the_heavier_chain() {
+    let (mut heavy, mut heavy_net) = pow_node();
+    let (mut light, mut light_net) = pow_node();
+    let genesis = heavy.chain().tip().clone();
+    let feed = |node: &mut Node, net: &FakeNet, block: Block| {
+        net.events.send(NetEvent::Block { from: PeerId::random(), block }).unwrap();
+        node.step(LATER).unwrap();
+    };
+    let mut parent = genesis.clone();
+
+    for _ in 0..3 {
+        let block = mine_on(&heavy, &parent, 1);
+        parent = block.header.clone();
+        feed(&mut heavy, &heavy_net, block);
+    }
+
+    let lonely = mine_on(&light, &genesis, 2);
+    feed(&mut light, &light_net, lonely);
+    sent(&mut heavy_net);
+    sent(&mut light_net);
+
+    assert_eq!((heavy.chain().tip().height, light.chain().tip().height), (3, 1));
+
+    let (heavy_peer, light_peer) = (PeerId::random(), PeerId::random());
+    light_net.events.send(NetEvent::PeerUp(heavy_peer)).unwrap();
+    light.step(LATER).unwrap();
+    relay(
+        Side { node: &mut light, net: &mut light_net, peer: light_peer },
+        Side { node: &mut heavy, net: &mut heavy_net, peer: heavy_peer },
+        LATER,
+    );
+
+    assert_eq!(light.chain().tip().id(), heavy.chain().tip().id());
+    assert_eq!(Accounts::new(&light.chain().state()).get(&Address::Ed25519([2; 32])).unwrap().balance, u256::ZERO);
 }

@@ -1,14 +1,16 @@
 //! The node's main loop, shaped like the engine's server loop: one owner of all node state, the
 //! network on its own thread behind channels, and a loop that drains what arrived, produces a
-//! block when its slot comes, and sleeps until the next slot or the next event. Catching up with
-//! peers lives in sync.rs.
+//! block when it may, and sleeps until the next slot or the next event. A producer that seals at
+//! once, like an authority, produces in the loop; a miner gets a template, and its seal arrives
+//! later as an event. Catching up with peers lives in sync.rs.
 
 use {
-    crate::chain::{Chain, ChainError, Genesis, ImportError},
-    crate::consensus::Consensus,
+    crate::chain::{Chain, ChainError, Genesis, ImportError, Imported},
+    crate::consensus::Producer,
     crate::db::{Database, DbError},
     crate::mempool::{Mempool, MempoolError},
     crate::net::{MAX_SYNC_BLOCKS, NetCommand, NetEvent, NetLink, SyncRequest, SyncResponse},
+    crate::structs::block::Block,
     crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
     libp2p::PeerId,
@@ -34,16 +36,21 @@ const MEMPOOL_CAPACITY: usize = 50_000;
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// How often the node logs where it stands, in milliseconds.
 const REPORT_EVERY: u64 = 30_000;
+/// How long a miner works on one template before it is rebuilt with newer transactions and a
+/// newer timestamp, in milliseconds.
+const TEMPLATE_REFRESH: u64 = 2_000;
 
 #[document(
-    summary = "A running node: the chain, the mempool, the consensus scheme and the network, owned in one place. Tests can run several in one process.",
+    summary = "A running node: the chain, the mempool, the producer if it produces, and the network, owned in one place. Tests can run several in one process.",
     category = "Node",
-    see_also = "Chain, Mempool, Consensus, NetLink",
+    see_also = "Chain, Mempool, Producer, NetLink",
 )]
 pub struct Node {
     chain: Chain,
     mempool: Mempool,
-    consensus: Box<dyn Consensus>,
+    producer: Option<Box<dyn Producer>>,
+    /// The block the producer is sealing, until its seal arrives or the tip moves on.
+    template: Option<Block>,
     net: NetLink,
     held: Option<NetEvent>,
     peers: HashSet<PeerId>,
@@ -146,15 +153,15 @@ impl Node {
         summary = "Opens the chain and gets ready to run.",
         params = {
             db = "Where the chain lives.",
-            genesis = "The chain to follow.",
-            consensus = "Who may produce, and whether this node does.",
+            genesis = "The chain to follow. Its consensus decides which blocks are valid.",
+            producer = "How this node produces blocks, or None for a node that only follows.",
             net = "The network, from spawn, or NetLink::pair in tests.",
         },
     )]
     pub fn new(
         db: Arc<dyn Database>,
         genesis: &Genesis,
-        consensus: Box<dyn Consensus>,
+        producer: Option<Box<dyn Producer>>,
         net: NetLink,
     ) -> Result<Node, NodeError> {
         let chain = Chain::open(db, genesis).map_err(NodeError::Chain)?;
@@ -162,7 +169,8 @@ impl Node {
         Ok(Node {
             chain,
             mempool: Mempool::new(MEMPOOL_CAPACITY),
-            consensus,
+            producer,
+            template: None,
             net,
             held: None,
             peers: HashSet::new(),
@@ -246,24 +254,22 @@ impl Node {
             NetEvent::Block { from, block } => {
                 let height = block.header.height;
 
-                match self.chain.import(&block, &*self.consensus, now) {
-                    Ok(receipts) => {
-                        log::info!(
-                            "[node] imported block {height} {} from {from} ({} txs)",
-                            block.id(),
-                            receipts.len()
-                        );
-                        self.mempool.prune(&self.chain.state())?;
-                    }
+                match self.chain.import(&block, now) {
+                    Ok(imported) => self.imported(&block, imported, &format!("from {from}"))?,
                     Err(ImportError::Db(err)) => return Err(NodeError::Db(err)),
                     Err(ImportError::Known) => {}
                     Err(ImportError::UnknownParent(_)) => {
-                        log::debug!("[node] block {height} from {from} is ahead of this node");
-                        self.peer_reached(from, height);
+                        // Its status says how far it got and how much work that holds.
+                        log::debug!("[node] block {height} from {from} does not connect yet");
+                        self.send(NetCommand::Request {
+                            peer: from,
+                            request: SyncRequest::Status,
+                        });
                     }
                     Err(err) => log::warn!("[node] rejected block {height} from {from}: {err}"),
                 }
             }
+            NetEvent::Sealed { block, seal } => self.sealed(block, seal, now)?,
             NetEvent::Tx { from, tx } => {
                 let id = tx.id();
 
@@ -318,6 +324,7 @@ impl Node {
                 genesis: self.chain.genesis(),
                 tip: self.chain.tip().id(),
                 height: self.chain.tip().height,
+                work: self.chain.tip_work(),
             },
             SyncRequest::Blocks { from, count } => {
                 let mut blocks = Vec::new();
@@ -336,27 +343,97 @@ impl Node {
         Ok(response)
     }
 
+    /// Logs what an import did and brings the mempool in line: transactions the main chain now
+    /// holds leave it, and those a reorg took off come back.
+    fn imported(&mut self, block: &Block, imported: Imported, source: &str) -> Result<(), NodeError> {
+        let height = block.header.height;
+
+        match imported {
+            Imported::Extended(receipts) => {
+                log::info!("[node] imported block {height} {} {source} ({} txs)", block.id(), receipts.len());
+            }
+            Imported::Side => log::info!("[node] stored side block {height} {} {source}", block.id()),
+            Imported::Reorganized { undone, applied } => {
+                log::warn!(
+                    "[node] reorganized to block {height} {} {source}: took off {} blocks, put on {}",
+                    block.id(),
+                    undone.len(),
+                    applied.len()
+                );
+                let state = self.chain.state();
+
+                for tx in undone.into_iter().flat_map(|block| block.txs) {
+                    // Most will be back in the new branch or used up; the rest wait again.
+                    let _ = self.mempool.add(tx, &state);
+                }
+            }
+        }
+
+        self.mempool.prune(&self.chain.state())?;
+
+        Ok(())
+    }
+
+    /// Builds a block for the producer once it may produce, and starts sealing it. A miner keeps
+    /// one template at a time, rebuilt when the tip moves or TEMPLATE_REFRESH passes.
     fn produce_if_due(&mut self, now: u64) -> Result<(), NodeError> {
-        let Some(slot) = self.consensus.next_slot(self.chain.tip()) else {
+        let Some(producer) = self.producer.as_mut() else {
             return Ok(());
         };
+        let tip = self.chain.tip().clone();
 
-        if now < slot {
+        if let Some(template) = &self.template
+            && template.header.parent == tip.id()
+            && now < template.header.timestamp + TEMPLATE_REFRESH
+        {
+            return Ok(());
+        }
+
+        if now < producer.start_at(&tip) {
             return Ok(());
         }
 
         let txs = self.mempool.select(&self.chain.state(), MAX_BLOCK_TXS)?;
-        let Some(block) = self.chain.build(txs, &*self.consensus, now) else {
+        let mut block = self.chain.build(txs, producer.address(), now);
+
+        match producer.seal(&block.header) {
+            Some(seal) => {
+                self.template = None;
+                block.seal = seal;
+                self.finish(block, now)
+            }
+            None => {
+                log::debug!("[node] sealing block {} on {} txs", block.header.height, block.txs.len());
+                self.template = Some(block);
+
+                Ok(())
+            }
+        }
+    }
+
+    /// A miner found the seal for a template; if it is still the current one, it becomes a block.
+    fn sealed(&mut self, id: Hash, seal: crate::structs::block::Seal, now: u64) -> Result<(), NodeError> {
+        let Some(mut block) = self.template.take_if(|template| template.id() == id) else {
+            log::debug!("[node] a seal arrived for a stale template");
+
             return Ok(());
         };
+
+        block.seal = seal;
+        self.finish(block, now)
+    }
+
+    /// Imports a block this node produced and gossips it.
+    fn finish(&mut self, block: Block, now: u64) -> Result<(), NodeError> {
         let height = block.header.height;
 
-        match self.chain.import(&block, &*self.consensus, now) {
-            Ok(receipts) => {
+        match self.chain.import(&block, now) {
+            Ok(Imported::Extended(receipts)) => {
                 log::info!("[node] produced block {height} {} ({} txs)", block.id(), receipts.len());
                 self.mempool.prune(&self.chain.state())?;
                 self.send(NetCommand::PublishBlock(block));
             }
+            Ok(other) => log::warn!("[node] its own block {height} did not extend the tip: {other:?}"),
             Err(ImportError::Db(err)) => return Err(NodeError::Db(err)),
             Err(err) => log::error!("[node] could not import its own block {height}: {err}"),
         }
@@ -390,8 +467,13 @@ impl Node {
             return Ok(());
         }
 
-        let wait = match self.consensus.next_slot(self.chain.tip()) {
-            Some(slot) => Duration::from_millis(slot.saturating_sub(now)).min(IDLE_WAIT),
+        let wake = match (&self.producer, &self.template) {
+            (Some(_), Some(template)) => Some(template.header.timestamp + TEMPLATE_REFRESH),
+            (Some(producer), None) => Some(producer.start_at(self.chain.tip())),
+            (None, _) => None,
+        };
+        let wait = match wake {
+            Some(wake) => Duration::from_millis(wake.saturating_sub(now)).min(IDLE_WAIT),
             None => IDLE_WAIT,
         };
 

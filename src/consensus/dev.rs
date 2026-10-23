@@ -1,58 +1,45 @@
 use {
-    super::{Consensus, ConsensusError},
+    super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer},
     crate::crypto::hashable::Hashable,
-    crate::crypto::keypair::{Keypair, PrivateKey, PublicKey, Signature},
-    crate::structs::block::BlockHeader,
+    crate::crypto::keypair::{Keypair, PrivateKey, PublicKey},
+    crate::structs::address::Address,
+    crate::structs::block::{BlockHeader, Seal},
+    crate::structs::u256::u256,
     r#macro::document,
 };
 
-/// How far ahead of this node's clock a block's timestamp may be.
-pub const MAX_DRIFT_MS: u64 = 15_000;
-
 /// Separates block seals from anything else a key might sign.
 const SEAL_DOMAIN: &[u8] = b"chainv4 block";
-
 /// The development authority's seed. Public on purpose: anyone can run a dev network with it,
 /// and nothing of value should ever depend on it.
 const DEV_SEED: [u8; 32] = *b"chainv4 dev authority, not safe!";
 
 #[document(
-    summary = "One known key produces every block, one per slot. For development and tests: the loop, execution and networking can run end to end before a real consensus exists.",
+    summary = "The rules of a chain where one known key produces every block, one per slot. For development and tests: blocks come at a steady pace, and forks never happen.",
     category = "Consensus",
-    see_also = "Consensus, Genesis",
+    see_also = "Consensus, AuthorityProducer, ConsensusConfig::Authority",
 )]
 pub struct DevAuthority {
     authority: PublicKey,
     slot_ms: u64,
-    keypair: Option<Keypair>,
 }
 
 impl DevAuthority {
     #[document(
         parent = "DevAuthority",
-        summary = "Follows the authority, and produces when given its keys.",
+        summary = "The rules for an authority, from genesis.",
         params = {
-            authority = "The only key that may produce, from genesis.",
-            slot_ms = "Milliseconds between blocks, from genesis.",
-            keypair = "The authority's keys on the node that produces; None on every other node.",
+            authority = "The only key that may produce.",
+            slot_ms = "Milliseconds between blocks.",
         },
-        panics = "Panics when keypair is not the authority's.",
     )]
-    pub fn new(authority: PublicKey, slot_ms: u64, keypair: Option<Keypair>) -> DevAuthority {
-        if let Some(keypair) = &keypair {
-            assert_eq!(keypair.public(), authority, "the keypair must be the authority's");
-        }
-
-        DevAuthority {
-            authority,
-            slot_ms,
-            keypair,
-        }
+    pub fn new(authority: PublicKey, slot_ms: u64) -> DevAuthority {
+        DevAuthority { authority, slot_ms }
     }
 
     #[document(
         parent = "DevAuthority",
-        summary = "The well-known development authority. Never use it for anything of value: its seed is in the source.",
+        summary = "The well-known development key. Never use it for anything of value: its seed is in the source.",
     )]
     pub fn dev_keypair() -> Keypair {
         #[cfg(feature = "ed25519")]
@@ -72,28 +59,16 @@ fn seal_bytes(header: &BlockHeader) -> Vec<u8> {
 }
 
 impl Consensus for DevAuthority {
-    fn next_slot(&self, parent: &BlockHeader) -> Option<u64> {
-        self.keypair.as_ref()?;
-
-        Some(parent.timestamp + self.slot_ms)
+    fn work(&self, _header: &BlockHeader) -> u256 {
+        u256::ONE
     }
 
-    fn producer(&self) -> Option<PublicKey> {
-        self.keypair.as_ref().map(Keypair::public)
+    fn difficulty(&self, _parent: &BlockHeader, _timestamp: u64) -> u128 {
+        0
     }
 
-    fn seal(&self, header: &BlockHeader) -> Option<Signature> {
-        Some(self.keypair.as_ref()?.sign(&seal_bytes(header)))
-    }
-
-    fn check(
-        &self,
-        header: &BlockHeader,
-        seal: Option<&Signature>,
-        parent: &BlockHeader,
-        now: u64,
-    ) -> Result<(), ConsensusError> {
-        if header.producer != self.authority {
+    fn check(&self, header: &BlockHeader, seal: &Seal, parent: &BlockHeader, now: u64) -> Result<(), ConsensusError> {
+        if header.producer != self.authority.address() {
             return Err(ConsensusError::WrongProducer);
         }
 
@@ -105,11 +80,58 @@ impl Consensus for DevAuthority {
             return Err(ConsensusError::FromTheFuture);
         }
 
-        let seal = seal.ok_or(ConsensusError::BadSeal)?;
+        if header.difficulty != 0 {
+            return Err(ConsensusError::WrongDifficulty {
+                expected: 0,
+                got: header.difficulty,
+            });
+        }
+
+        let Seal::Signature(signature) = seal else {
+            return Err(ConsensusError::BadSeal);
+        };
 
         self.authority
-            .verify_signature(&seal_bytes(header), seal)
+            .verify_signature(&seal_bytes(header), signature)
             .map_err(|_| ConsensusError::BadSeal)
+    }
+}
+
+#[document(
+    summary = "Produces blocks as the authority: at each slot, signs the header's id at once.",
+    category = "Consensus",
+    see_also = "DevAuthority, Producer",
+)]
+pub struct AuthorityProducer {
+    keypair: Keypair,
+    slot_ms: u64,
+}
+
+impl AuthorityProducer {
+    #[document(
+        parent = "AuthorityProducer",
+        summary = "Produces with the authority's keys.",
+        params = {
+            keypair = "The authority's keys.",
+            slot_ms = "Milliseconds between blocks, from genesis.",
+        },
+    )]
+    pub fn new(keypair: Keypair, slot_ms: u64) -> AuthorityProducer {
+        AuthorityProducer { keypair, slot_ms }
+    }
+}
+
+impl Producer for AuthorityProducer {
+    fn address(&self) -> Address {
+        self.keypair.public().address()
+    }
+
+    fn start_at(&self, parent: &BlockHeader) -> u64 {
+        parent.timestamp + self.slot_ms
+    }
+
+    fn seal(&mut self, header: &BlockHeader) -> Option<Seal> {
+        Some(Seal::Signature(self.keypair.sign(&seal_bytes(header))))
     }
 }
 
@@ -125,7 +147,8 @@ mod tests {
             parent: Hash::Blake3_256([0; 32]),
             height: 0,
             timestamp: 10_000,
-            producer: DevAuthority::dev_keypair().public(),
+            producer: DevAuthority::dev_keypair().public().address(),
+            difficulty: 0,
             tx_root: Hash::Blake3_256([0; 32]),
         }
     }
@@ -139,67 +162,56 @@ mod tests {
         }
     }
 
-    fn producing() -> DevAuthority {
-        let keypair = DevAuthority::dev_keypair();
+    fn rules() -> DevAuthority {
+        DevAuthority::new(DevAuthority::dev_keypair().public(), SLOT)
+    }
 
-        DevAuthority::new(keypair.public(), SLOT, Some(keypair))
+    fn producer() -> AuthorityProducer {
+        AuthorityProducer::new(DevAuthority::dev_keypair(), SLOT)
+    }
+
+    fn sealed(header: &BlockHeader) -> Seal {
+        producer().seal(header).unwrap()
     }
 
     #[test]
     fn the_authority_produces_once_per_slot() {
-        let authority = producing();
         let header = child(12_000);
-        let seal = authority.seal(&header);
 
-        assert_eq!(authority.next_slot(&parent()), Some(12_000));
-        assert_eq!(authority.check(&header, seal.as_ref(), &parent(), 12_000), Ok(()));
-    }
-
-    #[test]
-    fn followers_never_produce_but_still_check() {
-        let follower = DevAuthority::new(DevAuthority::dev_keypair().public(), SLOT, None);
-        let header = child(12_000);
-        let seal = producing().seal(&header);
-
-        assert_eq!(follower.next_slot(&parent()), None);
-        assert_eq!(follower.seal(&header), None);
-        assert_eq!(follower.check(&header, seal.as_ref(), &parent(), 12_000), Ok(()));
+        assert_eq!(producer().start_at(&parent()), 12_000);
+        assert_eq!(producer().address(), parent().producer);
+        assert_eq!(rules().check(&header, &sealed(&header), &parent(), 12_000), Ok(()));
+        assert_eq!(rules().work(&header), u256::ONE);
     }
 
     #[test]
     fn bad_blocks_are_rejected() {
-        let authority = producing();
+        let rules = rules();
         let early = child(11_999);
         let future = child(12_000 + MAX_DRIFT_MS + 1);
         let header = child(12_000);
-        let other_seal = producing().seal(&child(13_000));
-
-        assert_eq!(
-            authority.check(&early, authority.seal(&early).as_ref(), &parent(), 12_000),
-            Err(ConsensusError::Early)
-        );
-        assert_eq!(
-            authority.check(&future, authority.seal(&future).as_ref(), &parent(), 12_000),
-            Err(ConsensusError::FromTheFuture)
-        );
-        assert_eq!(
-            authority.check(&header, None, &parent(), 12_000),
-            Err(ConsensusError::BadSeal)
-        );
-        assert_eq!(
-            authority.check(&header, other_seal.as_ref(), &parent(), 12_000),
-            Err(ConsensusError::BadSeal)
-        );
-
-        let stranger = Keypair::generate(authority.authority.key_type()).unwrap();
-        let forged = BlockHeader {
-            producer: stranger.public(),
+        let hard = BlockHeader {
+            difficulty: 5,
             ..child(12_000)
         };
 
-        assert_eq!(
-            authority.check(&forged, Some(&stranger.sign(&seal_bytes(&forged))), &parent(), 12_000),
-            Err(ConsensusError::WrongProducer)
-        );
+        assert_eq!(rules.check(&early, &sealed(&early), &parent(), 12_000), Err(ConsensusError::Early));
+        assert_eq!(rules.check(&future, &sealed(&future), &parent(), 12_000), Err(ConsensusError::FromTheFuture));
+        assert_eq!(rules.check(&header, &Seal::None, &parent(), 12_000), Err(ConsensusError::BadSeal));
+        assert_eq!(rules.check(&header, &Seal::Work { nonce: 1 }, &parent(), 12_000), Err(ConsensusError::BadSeal));
+        assert_eq!(rules.check(&header, &sealed(&child(13_000)), &parent(), 12_000), Err(ConsensusError::BadSeal));
+        assert!(matches!(
+            rules.check(&hard, &sealed(&hard), &parent(), 12_000),
+            Err(ConsensusError::WrongDifficulty { .. })
+        ));
+
+        let stranger = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap();
+        let forged = BlockHeader {
+            producer: stranger.public().address(),
+            ..child(12_000)
+        };
+        let forged_seal = Seal::Signature(stranger.sign(&seal_bytes(&forged)));
+
+        assert_eq!(rules.check(&forged, &forged_seal, &parent(), 12_000), Err(ConsensusError::WrongProducer));
     }
 }

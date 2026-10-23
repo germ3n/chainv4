@@ -126,6 +126,23 @@ function M.receive()
     return ctx.value, accounts.balance(ctx.contract)
 end
 
+function M.shout(word)
+    events.emit("Shout", word)
+    return word
+end
+
+function M.shout_then_fail()
+    events.emit("Lost")
+    error("no")
+end
+
+function M.relay_shout(target)
+    events.emit("Before")
+    contracts.call(target, "shout", "hi")
+    pcall(contracts.call, target, "shout_then_fail")
+    events.emit("After")
+end
+
 function M.save(vault, amount)
     contracts.call_value(vault, amount, "deposit")
     contracts.call(vault, "withdraw", 20)
@@ -384,7 +401,12 @@ fn sdk_contracts_run_and_talk_to_lua() {
 
     assert_eq!(record.functions, ["forward", "ping"]);
     assert_eq!(record.reentrant, ["ping"]);
-    assert_eq!(world.call(counter, "increment", &[TxCallArgumentType::I64(5)]).result.unwrap(), [TxCallArgumentType::I64(5)]);
+    let incremented = world.call(counter, "increment", &[TxCallArgumentType::I64(5)]);
+
+    assert_eq!(incremented.events.len(), 1);
+    assert_eq!(incremented.events[0].name, "Incremented");
+    assert_eq!(incremented.events[0].data, [TxCallArgumentType::I64(5), address(DEPLOYER)]);
+    assert_eq!(incremented.result.unwrap(), [TxCallArgumentType::I64(5)]);
     assert_eq!(world.call(counter, "last", &[]).result.unwrap(), [address(DEPLOYER)]);
 
     // Lua passes its numbers as floats; the SDK reads whole ones without float instructions.
@@ -420,4 +442,55 @@ fn sdk_contracts_run_and_talk_to_lua() {
     // The proxy forwards to Lua, which calls back into the proxy: ping is reentrant, forward is not.
     assert_eq!(forward(lua, "ping_caller").unwrap(), [TxCallArgumentType::String("pong".to_string())]);
     assert!(matches!(forward(lua, "forward_caller"), Err(VmError::Runtime(text)) if text.contains("not reentrant")));
+}
+
+#[test]
+fn events_follow_the_calls_that_succeed() {
+    let mut world = World::new();
+    let outer = world.lua();
+    let inner = world.lua();
+    let outcome = world.call(outer, "relay_shout", &[address(inner)]);
+    let events: Vec<_> = outcome
+        .events
+        .iter()
+        .map(|event| (event.contract, event.name.as_str(), event.data.clone()))
+        .collect();
+
+    outcome.result.unwrap();
+    assert_eq!(
+        events,
+        [
+            (outer, "Before", Vec::new()),
+            (inner, "Shout", vec![TxCallArgumentType::String("hi".to_string())]),
+            (outer, "After", Vec::new()),
+        ]
+    );
+    assert!(world.call(inner, "shout_then_fail", &[]).events.is_empty());
+}
+
+#[test]
+fn wasm_contracts_emit_through_the_host() {
+    // Emits "Hi" with [I64(7)].
+    let wat = r#"
+(module
+  (import "chain" "emit" (func $emit (param i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "Hi")
+  (func (export "greet")
+    (i64.store (i32.const 16) (i64.const 1))
+    (i32.store8 (i32.const 24) (i32.const 6))
+    (i64.store (i32.const 25) (i64.const 7))
+    (call $emit (i32.const 0) (i32.const 2) (i32.const 16) (i32.const 17)))
+  (func (export "too_long")
+    (call $emit (i32.const 0) (i32.const 65) (i32.const 16) (i32.const 17))))
+"#;
+    let mut world = World::new();
+    let greeter = world.wasm(wat);
+    let outcome = world.call(greeter, "greet", &[]);
+
+    outcome.result.unwrap();
+    assert_eq!(outcome.events.len(), 1);
+    assert_eq!(outcome.events[0].name, "Hi");
+    assert_eq!(outcome.events[0].data, [TxCallArgumentType::I64(7)]);
+    assert!(matches!(world.call(greeter, "too_long", &[]).result, Err(VmError::Runtime(text)) if text.contains("event names")));
 }

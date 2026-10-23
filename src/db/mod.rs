@@ -10,6 +10,7 @@ use {
     std::collections::BTreeMap,
     std::fmt,
     std::sync::{Arc, Mutex},
+    wincode::{SchemaRead, SchemaWrite},
 };
 
 mod memory;
@@ -25,30 +26,53 @@ pub use self::rocksdb::RocksDb;
     category = "Storage",
     see_also = "Database, State",
 )]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
 pub enum Column {
     #[document(summary = "Account by address.")]
+    #[wincode(tag = 0)]
     Accounts,
     #[document(summary = "Deployed contract by address.")]
+    #[wincode(tag = 1)]
     Contracts,
     #[document(summary = "Contract storage, keyed by the contract's address followed by the script's own key.")]
+    #[wincode(tag = 2)]
     Storage,
-    #[document(summary = "Block by id.")]
+    #[document(summary = "Block by id: every block this node accepted, on the main chain or a side branch.")]
+    #[wincode(tag = 3)]
     Blocks,
-    #[document(summary = "Block id by height, big-endian so heights sort in order.")]
+    #[document(summary = "Main-chain block id by height, big-endian so heights sort in order.")]
+    #[wincode(tag = 4)]
     Heights,
     #[document(summary = "Chain bookkeeping, such as which block is the tip.")]
+    #[wincode(tag = 5)]
     Meta,
+    #[document(summary = "Total work of the chain ending at a block, by block id. Fork choice compares these.")]
+    #[wincode(tag = 6)]
+    Work,
+    #[document(summary = "What a main-chain block changed, as the values it replaced, by block id. Kept for recent blocks so a reorg can take them back.")]
+    #[wincode(tag = 7)]
+    Undo,
+    #[document(summary = "Where a transaction landed and what it did, by transaction id.")]
+    #[wincode(tag = 8)]
+    Receipts,
+}
+
+impl Hashable for Column {
+    const TAG_LEN: usize = 1;
 }
 
 impl Column {
-    pub const ALL: [Column; 6] = [
+    pub const ALL: [Column; 9] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
         Column::Blocks,
         Column::Heights,
         Column::Meta,
+        Column::Work,
+        Column::Undo,
+        Column::Receipts,
     ];
 
     #[document(
@@ -63,6 +87,9 @@ impl Column {
             Column::Blocks => "blocks",
             Column::Heights => "heights",
             Column::Meta => "meta",
+            Column::Work => "work",
+            Column::Undo => "undo",
+            Column::Receipts => "receipts",
         }
     }
 }

@@ -191,6 +191,7 @@ impl ScriptEngine for WasmEngine {
         Outcome {
             fuel_used: limits.fuel - remaining,
             result,
+            events: Vec::new(),
         }
     }
 }

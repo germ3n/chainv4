@@ -9,6 +9,7 @@ use {
     crate::registry::contracts::ContractRecord,
     crate::structs::address::Address,
     crate::structs::code::Engine,
+    crate::structs::event::Event,
     crate::structs::hash::{Hash, HashType},
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
@@ -23,7 +24,7 @@ pub mod lvm;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-pub use host::{Host, MAX_CALL_DEPTH, MAX_KEY_LEN, MAX_VALUE_LEN};
+pub use host::{Host, MAX_CALL_DEPTH, MAX_EVENTS, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_VALUE_LEN};
 
 /// What host operations cost in fuel. The same in every engine, so moving a contract from one
 /// engine to another never changes what its storage or calls cost.
@@ -42,6 +43,10 @@ pub mod cost {
     pub const BALANCE: u64 = 100;
     /// Moving funds, by transfer or with a call: two account writes.
     pub const TRANSFER: u64 = 1_000;
+    /// Emitting an event, plus 1 for every EVENT_BYTES_PER_FUEL bytes of name and data: every
+    /// node keeps it in the receipt.
+    pub const EVENT: u64 = 200;
+    pub const EVENT_BYTES_PER_FUEL: u64 = 16;
     /// Copying bytes between a WebAssembly contract's memory and the host.
     pub const COPY_BYTES_PER_FUEL: u64 = 64;
 }
@@ -85,6 +90,8 @@ pub struct Outcome {
     pub fuel_used: u64,
     #[document(summary = "The function's return values, or why it failed.")]
     pub result: Result<Vec<TxCallArgumentType>, VmError>,
+    #[document(summary = "What the call and the calls it made emitted, in order. Empty when it failed.")]
+    pub events: Vec<Event>,
 }
 
 impl Outcome {
@@ -93,6 +100,7 @@ impl Outcome {
         Outcome {
             fuel_used: 0,
             result: Err(err),
+            events: Vec::new(),
         }
     }
 }

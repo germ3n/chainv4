@@ -1,6 +1,6 @@
 use super::*;
 use crate::chain::{Chain, Genesis};
-use crate::consensus::DevAuthority;
+use crate::consensus::{AuthorityProducer, DevAuthority, Producer};
 use crate::crypto::keypair::Keypair;
 use crate::db::MemoryDb;
 use crate::registry::contracts::contract_address;
@@ -33,9 +33,9 @@ struct Fixture {
 /// A chain with a transfer to bob in block 1 and a deploy in block 2, served on a free port.
 fn serve() -> Fixture {
     let authority = DevAuthority::dev_keypair();
-    let producer = DevAuthority::new(authority.public(), SLOT, Some(authority.clone()));
+    let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
     let db = Arc::new(MemoryDb::default());
-    let mut chain = Chain::open(db.clone(), &Genesis::dev(authority.public())).unwrap();
+    let mut chain = Chain::open(db.clone(), &Genesis::dev_authority(authority.public())).unwrap();
     let bob = Keypair::generate(authority.public().key_type()).unwrap().public().address();
     let transfer = Tx::Transfer {
         from: authority.public().address(),
@@ -49,8 +49,9 @@ fn serve() -> Fixture {
     for (nonce, tx) in [transfer, deploy].into_iter().enumerate() {
         let now = chain.tip().timestamp + SLOT;
         let signed = SignedTx::sign(tx, nonce as u64, &authority);
-        let block = chain.build(vec![signed], &producer, now).unwrap();
-        chain.import(&block, &producer, now).unwrap();
+        let mut block = chain.build(vec![signed], producer.address(), now);
+        block.seal = producer.seal(&block.header).unwrap();
+        chain.import(&block, now).unwrap();
     }
 
     let address = start(db, Some(fake_node()), "127.0.0.1:0".parse().unwrap()).unwrap();
@@ -130,7 +131,11 @@ fn a_block_is_found_by_height_by_id_and_as_latest() {
     assert_eq!(ok(fixture.address, &format!("/blocks/{id}")), first);
     assert_eq!(first["height"], 1);
     assert_eq!(first["tx_count"], 1);
-    assert!(first["seal"].as_str().unwrap().starts_with("0x"));
+    assert_eq!(first["seal"]["type"], "signature");
+    assert!(first["seal"]["signature"].as_str().unwrap().starts_with("0x"));
+    assert_eq!(first["difficulty"], "0");
+    assert_eq!(tx["receipt"]["status"], "done");
+    assert_eq!(tx["receipt"]["events"], json!([]));
     assert_eq!(tx["nonce"], 0);
     assert_eq!(tx["sender"], DevAuthority::dev_keypair().public().address().to_string());
     assert_eq!(tx["tx"]["type"], "transfer");
@@ -262,9 +267,33 @@ fn bad_or_refused_submissions_say_why() {
 #[test]
 fn an_api_without_a_node_takes_no_transactions() {
     let db = Arc::new(MemoryDb::default());
-    Chain::open(db.clone(), &Genesis::dev(DevAuthority::dev_keypair().public())).unwrap();
+    Chain::open(db.clone(), &Genesis::dev_authority(DevAuthority::dev_keypair().public())).unwrap();
     let address = start(db, None, "127.0.0.1:0".parse().unwrap()).unwrap();
     let (status, body) = post_tx(address, &wincode::serialize(&signed(0)).unwrap());
 
     assert_eq!(status, 503, "{body}");
+}
+
+#[test]
+fn transactions_are_looked_up_by_id_once_they_land() {
+    let fixture = serve();
+    let first = ok(fixture.address, "/blocks/1");
+    let id = first["txs"][0]["id"].as_str().unwrap().to_string();
+    let receipt = ok(fixture.address, &format!("/txs/{id}"));
+
+    assert_eq!(receipt["id"], id);
+    assert_eq!(receipt["block"], first["id"]);
+    assert_eq!(receipt["height"], 1);
+    assert_eq!(receipt["index"], 0);
+    assert_eq!(receipt["confirmations"], 2);
+    assert_eq!(receipt["status"], "done");
+
+    let deploy = ok(fixture.address, "/blocks/2")["txs"][0]["id"].as_str().unwrap().to_string();
+
+    assert_eq!(ok(fixture.address, &format!("/txs/{deploy}"))["status"], "deployed");
+
+    let (status, _, body) = get(fixture.address, &format!("/txs/0x{}", "11".repeat(32)));
+
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(get(fixture.address, "/txs/nope").0, 400);
 }

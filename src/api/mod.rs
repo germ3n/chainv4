@@ -3,7 +3,7 @@
 //! POST /txs, hands a signed transaction to the node through a Submitter.
 
 use {
-    crate::chain::{stored_block, stored_block_at, stored_tip},
+    crate::chain::{stored_block, stored_block_at, stored_receipt, stored_tip, stored_work},
     crate::db::{DbError, Read, State},
     crate::mempool::MempoolError,
     crate::node::{SubmitError, Submitter},
@@ -52,7 +52,7 @@ struct Api {
         address = "Where to listen.",
     },
     returns = "The address it listens on, which tells you the port when address asked for port 0.",
-    note = "Routes: GET /status; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
+    note = "Routes: GET /status; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, result and events once it is on the main chain, 404 before; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
     see_also = "Node, Address, Submitter",
 )]
 pub fn start(db: Arc<dyn Read>, submitter: Option<Submitter>, address: SocketAddr) -> std::io::Result<SocketAddr> {
@@ -87,6 +87,7 @@ fn router(api: Api) -> Router {
         .route("/accounts/{address}", get(account))
         .route("/contracts/{address}", get(contract))
         .route("/txs", post(submit))
+        .route("/txs/{id}", get(transaction))
         .fallback(async || ApiError::NotFound("no such route".to_string()))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(api)
@@ -134,12 +135,30 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
     let genesis = at_height(&*db, 0)?;
     let tip = tip(&*db)?;
 
+    let work = stored_work(&*db, &tip.id())?.unwrap_or_default();
+
     Ok(Json(json!({
         "genesis": genesis.id().to_string(),
         "tip": tip.id().to_string(),
         "height": tip.header.height,
         "timestamp": tip.header.timestamp,
+        "difficulty": tip.header.difficulty.to_string(),
+        "work": work.to_string(),
     })))
+}
+
+/// A transaction's receipt, once it is on the main chain.
+async fn transaction(Shared(api): Shared<Api>, Path(id): Path<String>) -> Answer {
+    let db = api.db;
+    let id = block_id(&id)?;
+    let receipt = stored_receipt(&*db, &id)?
+        .ok_or_else(|| ApiError::NotFound(format!("transaction {id} is not on the main chain, or not yet")))?;
+    let block = stored_block(&*db, &receipt.block)?
+        .ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("block {} is not stored", receipt.block))))?;
+    let tip = tip(&*db)?.header.height;
+    let confirmations = tip.saturating_sub(block.header.height) + 1;
+
+    Ok(Json(json::receipt(&id.to_string(), &receipt, block.header.height, confirmations)))
 }
 
 /// Block summaries, newest first, below the height in ?before.
@@ -178,7 +197,15 @@ async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
             .ok_or_else(|| ApiError::NotFound(format!("no block at height {height}")))?
     };
 
-    Ok(Json(json::block(&found)))
+    let id = found.id();
+    let mut receipts = Vec::new();
+
+    for tx in &found.txs {
+        // A side-branch block's transactions may sit elsewhere on the main chain, or nowhere.
+        receipts.push(stored_receipt(&*db, &tx.id())?.filter(|receipt| receipt.block == id));
+    }
+
+    Ok(Json(json::block(&found, &receipts)))
 }
 
 async fn account(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
@@ -251,11 +278,12 @@ fn number(query: &HashMap<String, String>, name: &str) -> Result<Option<u64>, Ap
         .transpose()
 }
 
+/// A block or transaction id: both are BLAKE3.
 fn block_id(text: &str) -> Result<Hash, ApiError> {
     from_hex(text)
         .and_then(|bytes| bytes.try_into().ok())
         .map(Hash::Blake3_256)
-        .ok_or_else(|| ApiError::BadRequest(format!("a block id is 0x and 64 hex digits: {text}")))
+        .ok_or_else(|| ApiError::BadRequest(format!("an id is 0x and 64 hex digits: {text}")))
 }
 
 fn parse_address(text: &str) -> Result<Address, ApiError> {

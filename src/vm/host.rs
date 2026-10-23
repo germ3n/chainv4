@@ -4,6 +4,7 @@ use {
     crate::registry::contracts::{ContractRecord, Contracts},
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
+    crate::structs::event::Event,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
     r#macro::document,
@@ -18,6 +19,15 @@ pub const MAX_KEY_LEN: usize = 256;
 
 /// The largest storage value, in bytes.
 pub const MAX_VALUE_LEN: usize = 64 * 1024;
+
+/// The longest event name, in bytes.
+pub const MAX_EVENT_NAME: usize = 64;
+
+/// The largest event data, encoded, in bytes.
+pub const MAX_EVENT_DATA: usize = 16 * 1024;
+
+/// The most events one call may emit itself, not counting calls it makes.
+pub const MAX_EVENTS: usize = 256;
 
 #[document(
     summary = "A running call's way out of its engine: the call's context, the contract's own storage and funds, and calls to other contracts. Each call gets its own, over a state layer of its own, so whatever a failed call wrote or sent is dropped with it.",
@@ -36,6 +46,10 @@ pub struct Host {
     fault: Arc<Mutex<Option<DbError>>>,
     /// The chain's engines, for calls to other contracts.
     vm: Arc<Vm>,
+    /// What this call emitted, joined by what the calls it made emitted once they succeed.
+    events: Arc<Mutex<Vec<Event>>>,
+    /// How many events this call emitted itself.
+    emitted: Arc<Mutex<usize>>,
 }
 
 impl Host {
@@ -57,6 +71,8 @@ impl Host {
             memory,
             fault: Arc::new(Mutex::new(None)),
             vm,
+            events: Arc::default(),
+            emitted: Arc::default(),
         }
     }
 
@@ -183,13 +199,57 @@ impl Host {
             memory: self.memory,
             fault: self.fault.clone(),
             vm: self.vm.clone(),
+            events: Arc::default(),
+            emitted: Arc::default(),
         };
         let limits = Limits {
             fuel,
             memory: self.memory,
         };
 
-        run(&self.state, &record, function, args, callee, limits)
+        let mut outcome = run(&self.state, &record, function, args, callee, limits);
+
+        if outcome.result.is_ok() {
+            lock(&self.events).append(&mut outcome.events);
+        }
+
+        outcome
+    }
+
+    #[document(
+        parent = "Host",
+        summary = "Emits an event from this contract. It reaches the receipt only if this call, and every call above it, succeeds. Engines charge cost::EVENT and the bytes it takes.",
+        params = {
+            name = "What happened: at most MAX_EVENT_NAME bytes.",
+            data = "The details: at most MAX_EVENT_DATA bytes encoded.",
+        },
+        returns = "The encoded size, for charging, or a Runtime error past a limit.",
+    )]
+    pub fn emit(&self, name: &str, data: Vec<TxCallArgumentType>) -> Result<usize, VmError> {
+        if name.is_empty() || name.len() > MAX_EVENT_NAME {
+            return Err(VmError::Runtime(format!("event names are 1 to {MAX_EVENT_NAME} bytes")));
+        }
+
+        let size = wincode::serialize(&data).expect("values always encode").len();
+
+        if size > MAX_EVENT_DATA {
+            return Err(VmError::Runtime(format!("event data is at most {MAX_EVENT_DATA} bytes")));
+        }
+
+        let mut emitted = lock(&self.emitted);
+
+        if *emitted >= MAX_EVENTS {
+            return Err(VmError::Runtime(format!("a call emits at most {MAX_EVENTS} events")));
+        }
+
+        *emitted += 1;
+        lock(&self.events).push(Event {
+            contract: self.context.contract,
+            name: name.to_string(),
+            data,
+        });
+
+        Ok(name.len() + size)
     }
 
     #[document(
@@ -224,6 +284,10 @@ fn send(state: &State, from: &Address, to: &Address, amount: u256) -> Result<(),
     Accounts::new(state).transfer(from, to, amount)
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().expect("never poisoned")
+}
+
 fn check_key(key: &[u8]) -> Result<(), VmError> {
     if key.len() > MAX_KEY_LEN {
         return Err(VmError::Runtime(format!("storage keys are at most {MAX_KEY_LEN} bytes")));
@@ -249,6 +313,7 @@ pub(super) fn run(
     };
     let layer = host.state.clone();
     let fault = host.fault.clone();
+    let events = host.events.clone();
     let mut outcome = engine.run(&record.code, function, args, host, limits);
 
     if let Some(err) = fault.lock().expect("never poisoned").clone() {
@@ -257,6 +322,7 @@ pub(super) fn run(
 
     if outcome.result.is_ok() {
         parent.merge(layer.take_changes());
+        outcome.events = std::mem::take(&mut *lock(&events));
     }
 
     outcome

@@ -4,6 +4,7 @@ use {
     crate::registry::{Accounts, Contracts, RegistryError},
     crate::structs::address::Address,
     crate::structs::code::Engine,
+    crate::structs::event::Event,
     crate::structs::hash::Hash,
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
     crate::vm::{CallContext, Limits, Vm, VmError},
@@ -57,6 +58,17 @@ pub enum Failure {
     EngineNotAllowed(Engine),
 }
 
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Failure::Registry(err) => write!(f, "{err}"),
+            Failure::Contract(err) => write!(f, "{err}"),
+            Failure::NotMinter => write!(f, "only the minter may mint"),
+            Failure::EngineNotAllowed(engine) => write!(f, "this chain does not run {} contracts", engine.name()),
+        }
+    }
+}
+
 #[document(
     summary = "What happened to one transaction in a block.",
     category = "Chain",
@@ -69,6 +81,8 @@ pub struct Receipt {
     pub fuel_used: u64,
     #[document(summary = "What it did, or why it failed.")]
     pub result: Result<Effect, Failure>,
+    #[document(summary = "What its contract calls emitted, in order. Empty when it failed.")]
+    pub events: Vec<Event>,
 }
 
 #[document(
@@ -124,7 +138,7 @@ pub(crate) fn execute(block: &Arc<State>, tx: &SignedTx, rules: &Rules, vm: &Arc
 
     accounts.bump_nonce(&sender).map_err(node_fault)?;
     let layer = Arc::new(State::new(block.clone()));
-    let (fuel_used, result) = run(&layer, tx, sender, rules, vm);
+    let (fuel_used, result, events) = run(&layer, tx, sender, rules, vm);
 
     // A failing database is the node's fault, never the transaction's.
     match &result {
@@ -135,10 +149,13 @@ pub(crate) fn execute(block: &Arc<State>, tx: &SignedTx, rules: &Rules, vm: &Arc
         Err(_) => {}
     }
 
+    let events = if result.is_ok() { events } else { Vec::new() };
+
     Ok(Receipt {
         id: tx.id(),
         fuel_used,
         result,
+        events,
     })
 }
 
@@ -155,19 +172,19 @@ fn run(
     sender: Address,
     rules: &Rules,
     vm: &Arc<Vm>,
-) -> (u64, Result<Effect, Failure>) {
+) -> (u64, Result<Effect, Failure>, Vec<Event>) {
     let accounts = Accounts::new(layer);
 
     match &signed.tx {
-        Tx::Transfer { from, to, amount } => (0, moved(accounts.transfer(from, to, amount.to_u256()))),
+        Tx::Transfer { from, to, amount } => (0, moved(accounts.transfer(from, to, amount.to_u256())), Vec::new()),
         Tx::Mint { to, amount } => {
             if rules.minter != Some(sender) {
-                return (0, Err(Failure::NotMinter));
+                return (0, Err(Failure::NotMinter), Vec::new());
             }
 
-            (0, moved(accounts.credit(to, amount.to_u256()).map(|_| ())))
+            (0, moved(accounts.credit(to, amount.to_u256()).map(|_| ())), Vec::new())
         }
-        Tx::Burn { from, amount } => (0, moved(accounts.debit(from, amount.to_u256()).map(|_| ()))),
+        Tx::Burn { from, amount } => (0, moved(accounts.debit(from, amount.to_u256()).map(|_| ())), Vec::new()),
         Tx::ContractCall {
             to,
             func,
@@ -177,7 +194,7 @@ fn run(
             let value = amount.to_u256();
 
             if let Err(err) = accounts.transfer(&sender, to, value) {
-                return (0, Err(Failure::Registry(err)));
+                return (0, Err(Failure::Registry(err)), Vec::new());
             }
 
             let context = CallContext {
@@ -190,18 +207,19 @@ fn run(
                 Ok(outcome) => (
                     outcome.fuel_used,
                     outcome.result.map(Effect::Returned).map_err(Failure::Contract),
+                    outcome.events,
                 ),
-                Err(err) => (0, Err(Failure::Registry(err))),
+                Err(err) => (0, Err(Failure::Registry(err)), Vec::new()),
             }
         }
         Tx::Deploy { code } => {
             if vm.engine(code.engine()).is_none() {
-                return (0, Err(Failure::EngineNotAllowed(code.engine())));
+                return (0, Err(Failure::EngineNotAllowed(code.engine())), Vec::new());
             }
 
             let deployed = Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, rules.limits);
 
-            (0, deployed.map(Effect::Deployed).map_err(Failure::Registry))
+            (0, deployed.map(Effect::Deployed).map_err(Failure::Registry), Vec::new())
         }
     }
 }

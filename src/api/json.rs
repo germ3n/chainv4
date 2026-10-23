@@ -2,11 +2,13 @@
 //! JavaScript numbers lose precision past 2^53; hashes, bytes and signatures are 0x hex.
 
 use {
+    crate::chain::{TxReceipt, TxStatus},
     crate::registry::contracts::ContractRecord,
     crate::structs::account::Account,
     crate::structs::address::Address,
     crate::structs::amount::Amount,
-    crate::structs::block::Block,
+    crate::structs::block::{Block, Seal},
+    crate::structs::event::Event,
     crate::structs::code::Code,
     crate::structs::hex::to_hex,
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
@@ -23,18 +25,75 @@ pub fn summary(block: &Block) -> Value {
         "parent": header.parent.to_string(),
         "timestamp": header.timestamp,
         "producer": header.producer.to_string(),
+        "difficulty": header.difficulty.to_string(),
         "tx_root": header.tx_root.to_string(),
         "tx_count": block.txs.len(),
     })
 }
 
-/// The summary, the seal and every transaction.
-pub fn block(block: &Block) -> Value {
+/// The summary, the seal and every transaction, each with its receipt when the block is on the
+/// main chain.
+pub fn block(block: &Block, receipts: &[Option<TxReceipt>]) -> Value {
     let mut value = summary(block);
-    value["seal"] = block.seal.map(|seal| seal.to_string()).into();
-    value["txs"] = block.txs.iter().map(signed_tx).collect();
+    value["seal"] = seal(&block.seal);
+    value["txs"] = block
+        .txs
+        .iter()
+        .enumerate()
+        .map(|(index, tx)| {
+            let mut value = signed_tx(tx);
+            value["receipt"] = receipts.get(index).and_then(Option::as_ref).map(outcome).into();
+
+            value
+        })
+        .collect();
 
     value
+}
+
+pub fn seal(seal: &Seal) -> Value {
+    match seal {
+        Seal::None => Value::Null,
+        Seal::Signature(signature) => json!({ "type": "signature", "signature": signature.to_string() }),
+        Seal::Work { nonce } => json!({ "type": "work", "nonce": nonce.to_string() }),
+    }
+}
+
+/// Where a transaction landed, how deep it is, and what it did.
+pub fn receipt(id: &str, receipt: &TxReceipt, height: u64, confirmations: u64) -> Value {
+    let mut value = outcome(receipt);
+    value["id"] = id.into();
+    value["block"] = receipt.block.to_string().into();
+    value["height"] = height.into();
+    value["index"] = receipt.index.into();
+    value["confirmations"] = confirmations.into();
+
+    value
+}
+
+/// What a transaction did and emitted.
+fn outcome(receipt: &TxReceipt) -> Value {
+    let mut value = match &receipt.status {
+        TxStatus::Done => json!({ "status": "done" }),
+        TxStatus::Deployed(address) => json!({ "status": "deployed", "contract": address.to_string() }),
+        TxStatus::Returned(values) => json!({
+            "status": "returned",
+            "values": values.iter().map(argument).collect::<Vec<_>>(),
+        }),
+        TxStatus::Failed(error) => json!({ "status": "failed", "error": error }),
+    };
+    value["fuel_used"] = receipt.fuel_used.into();
+    value["events"] = receipt.events.iter().map(event).collect();
+
+    value
+}
+
+pub fn event(event: &Event) -> Value {
+    json!({
+        "contract": event.contract.to_string(),
+        "name": event.name,
+        "data": event.data.iter().map(argument).collect::<Vec<_>>(),
+    })
 }
 
 pub fn signed_tx(signed: &SignedTx) -> Value {

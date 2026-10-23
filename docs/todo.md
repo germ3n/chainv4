@@ -2,11 +2,23 @@
 
 ## Things to know
 
-- **Old `chain.db` files are refused.** Genesis now lists the engines a chain allows, so the dev
-  genesis id changed. Delete the database, or the node stops with `WrongGenesis`.
-- **The dev genesis depends on build features.** `Genesis::dev` allows every engine the node was
+- **Old `chain.db` files are refused.** Blocks now carry a difficulty and a seal enum, and genesis
+  names its consensus, so every dev genesis id changed. Delete the database, or the node stops
+  with `WrongGenesis`.
+- **There are two dev chains, and pow is the default.** `--consensus pow` (mine with `--mine`)
+  or `--consensus authority` (produce with `--produce`). Each is its own genesis and network.
+- **The dev genesis depends on build features.** The dev chains allow every engine the node was
   built with, so nodes built with different engines get different genesis ids and land on
   separate networks.
+- **Rewards have no coinbase transaction.** The account model needs none: after a block's
+  transactions run, the chain credits `reward.at(height)` to the header's `producer`, and a
+  reorg takes it back with the rest of the block. Rewards can be spent from the next block on;
+  there is no maturity period.
+- **Reorgs reach back at most 100 blocks.** `MAX_REORG_DEPTH` bounds how far the main chain
+  rolls back; a heavier branch that splits off deeper is never followed, and undo records older
+  than that are dropped.
+- **The proof-of-work hash is named in genesis.** Only `PowHash::Blake3` exists; a memory-hard
+  algorithm can join under a new tag without touching chains that use BLAKE3.
 - **The end-to-end SDK test needs the wasm32 target.** It builds `contracts/` with cargo:
   `rustup target add wasm32-unknown-unknown`. CI installs it.
 - **Contracts build from their own workspace.** `contracts/.cargo/config.toml` sets the wasm32
@@ -29,30 +41,42 @@
   × 32 MiB in one transaction.
 - **The WASM `call` import takes a value pointer.** It is
   `call(address, value, name, name_len, args, args_len)`; rebuild contracts made against the
-  earlier five-argument form.
-- **The binary is also the client.** `chainv4 keygen` writes a key file;
-  `chainv4 send [--node URL] [--key FILE] transfer|mint|burn|deploy|call …` signs with the
-  sender's next nonce and posts to a node's `POST /txs`. Without `--key` it signs with the
-  well-known development key. Plain `chainv4 [flags]` still runs a node.
+  earlier five-argument form. Contracts also import `emit` now.
+- **The binary is also the client.** See the [README](../README.md). `chainv4 send` waits for
+  inclusion by default (`--timeout`, `--confirmations`, `--no-wait`) and exits non-zero when the
+  transaction landed but failed. Without `--key` it signs with the well-known development key.
 
 ## Todo
 
 ### Consensus
 
-- [ ] **Only a development scheme exists.** `DevAuthority` lets one key produce every block, and
-  its seed is in the source. A real network needs a real scheme: a rotating authority set first,
-  then stake with finality.
-- [ ] **No fork choice or reorgs.** Import only extends the tip; a competing block at the same
-  height is dropped as `NotOnTip`. Any scheme with more than one producer needs a fork-choice
-  rule, and the database needs a way to roll state back (see Database).
-- [ ] **No finality.**
+- [x] **Proof of work.** Genesis names the scheme. Under proof of work anyone mines: a nonce
+  must make the BLAKE3 work hash of the block id meet the block's difficulty, which retargets
+  every block toward a target block time. Miners run on threads of their own (`--mine`,
+  `--mine-threads`).
+- [x] **Fork choice and reorgs.** Side blocks are stored, and the branch with the most total work
+  is the main chain. A heavier branch triggers a reorg: roll back to the fork with undo records,
+  run the branch, one commit. A branch that fails to run is dropped, and its descendants refused.
+- [ ] **No other schemes yet.** The authority is still one key whose seed is in the source. Next
+  could be a rotating authority set, or stake with finality.
+- [ ] **No finality.** Only the 100-block reorg limit stops deep rewrites.
+- [ ] **Difficulty only looks at the parent.** A miner may set its timestamp up to 15 seconds
+  ahead to lower the next difficulty a little. A median-time-past rule, or retargeting over a
+  window of blocks, would make that harder.
+- [ ] **Side branches are never pruned, and bad blocks are only remembered in memory.** With a
+  low difficulty, a peer can fill the disk with side blocks cheaply; after a restart, a known-bad
+  branch is run again before it is refused.
 - [ ] **Block limits are not consensus rules.** `MAX_BLOCK_TXS` only limits the blocks this node
   builds. Import accepts any number of transactions, any size and any total fuel. Add maximum
   transactions, bytes and fuel per block, and check them on import.
-- [ ] **No fees or rewards.** Transactions cost nothing, failed ones included, so spam is free.
-  Fuel is capped per transaction but never paid for.
-- [ ] **Minting belongs to the dev authority key.** Decide who may mint on a real chain, if
-  anyone.
+- [x] **Block rewards.** Genesis sets an initial reward and an optional halving interval; each
+  block's producer is credited after its transactions run.
+- [ ] **No fees.** Transactions cost nothing, failed ones included, so spam is free. Fuel is
+  capped per transaction but never paid for. Fees would go to the producer like the reward.
+- [ ] **The reward is invisible in the API.** A block's JSON does not say what it minted; clients
+  would have to know the genesis reward schedule.
+- [ ] **Minting belongs to whoever genesis names.** The dev chains name the development key.
+  Decide who may mint on a real chain, if anyone.
 
 ### Script layer
 
@@ -61,7 +85,11 @@
 - [x] **Calls between contracts can send value.** `contracts.call_value` in Lua, the value
   argument of `call` in WASM, `call_with_value` in the SDK. The callee sees it in its context,
   and it goes back if the call fails.
-- [ ] **No events or logs.** Contracts have no way to emit anything for clients to follow.
+- [x] **Events.** `events.emit(name, ...)` in Lua, the `emit` host function in WASM, `emit` in
+  the SDK. They land in the transaction's receipt, in order, only if the call and every call
+  above it succeed.
+- [ ] **Events cannot be searched.** They are only reachable through their transaction's receipt;
+  following a contract's events needs an index by contract and name.
 - [ ] **Deploys are not charged.** Running a Lua contract's top level at deploy burns fuel that
   never reaches the receipt (`fuel_used` is 0). Compiling and validating are unmetered, bounded
   only by `MAX_SOURCE_LEN` and `MAX_MODULE_LEN`.
@@ -79,12 +107,13 @@
 
 - [ ] **No state root.** Block headers do not commit to state. Needed for snapshot sync, light
   clients, and any later ZK work.
-- [ ] **Commits cannot be undone.** Reorgs need either undo records per block or versioned state.
+- [x] **Commits can be undone.** Each main-chain block keeps an undo record of every value it
+  replaced, for the last 100 blocks.
 - [ ] **No iteration.** `Read` only gets single keys. Snapshots, pruning, listing a contract's
   storage and most API listings need prefix or range scans.
 - [ ] **No pruning.** Every block and all history are kept forever.
-- [ ] **Receipts are not stored, and there is no transaction index.** A transaction's result is
-  lost once its block is imported, and nothing maps a transaction id to its block.
+- [x] **Receipts and a transaction index.** Each transaction's block, index, fuel, result and
+  events are stored by transaction id, and reorgs move them along with everything else.
 - [ ] **No schema version.** Nothing in `Meta` records the storage format, so a format change
   cannot be detected or migrated.
 - [ ] **Commits are not fsynced.** A power cut can lose the last few blocks, though never half of
@@ -119,16 +148,18 @@
 - [x] **Transactions can be submitted from outside.** `POST /txs` takes `{"tx": "0x…"}`, a
   `SignedTx` encoded as the chain encodes it, and hands it to the node's mempool, which gossips
   it. `chainv4 keygen` and `chainv4 send` make keys and sign and submit transactions.
-- [ ] **`chainv4 send` cannot wait for inclusion.** It prints the transaction id, but there is no
-  receipt or transaction lookup to wait on (see Database).
+- [x] **`chainv4 send` waits for inclusion.** It polls `GET /txs/{id}` until enough blocks hold
+  the transaction or `--timeout` passes, then prints the result and events.
+- [x] **A README for the CLI.** Building, running nodes, keys, sending transactions and the API.
 - [ ] **The CLI speaks plain HTTP only.** ureq is built without TLS; add it before pointing
   `send` at a node across the internet.
 - [ ] **Key files are not encrypted.** They are created readable by their owner only, but hold
   the seed in plain hex.
-- [ ] **Only the dev genesis exists.** There is no genesis file, so there is no way to start any
+- [ ] **Only the dev chains exist.** There is no genesis file, so there is no way to start any
   other network.
 - [ ] **No graceful shutdown.** Ctrl-C kills the process mid-loop. Commits are atomic, so data is
   safe, but the network and HTTP threads never close cleanly.
-- [ ] **The HTTP API has no transaction lookup, receipts or contract views.** It also serves one
-  request at a time.
+- [x] **The HTTP API has transaction lookup and receipts.** `GET /txs/{id}`, and each transaction
+  in a block carries its receipt.
+- [ ] **The HTTP API has no contract views and serves one request at a time.**
 - [ ] **Windows builds in CI.** Left out because of RocksDB and Luau build setup.

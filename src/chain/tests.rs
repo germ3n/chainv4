@@ -1,5 +1,5 @@
 use super::*;
-use crate::consensus::DevAuthority;
+use crate::consensus::{AuthorityProducer, DevAuthority, Producer, meets, work_hash};
 use crate::crypto::keypair::Keypair;
 use crate::db::MemoryDb;
 use crate::registry::contracts::contract_address;
@@ -32,11 +32,11 @@ fn stranger() -> Keypair {
 }
 
 fn genesis() -> Genesis {
-    Genesis::dev(authority().public())
+    Genesis::dev_authority(authority().public())
 }
 
-fn producer() -> DevAuthority {
-    DevAuthority::new(authority().public(), SLOT, Some(authority()))
+fn producer() -> AuthorityProducer {
+    AuthorityProducer::new(authority(), SLOT)
 }
 
 fn open(db: &Arc<MemoryDb>) -> Chain {
@@ -45,15 +45,25 @@ fn open(db: &Arc<MemoryDb>) -> Chain {
 
 fn next_block(chain: &Chain, txs: Vec<SignedTx>) -> (Block, u64) {
     let now = chain.tip().timestamp + SLOT;
+    let mut block = chain.build(txs, producer().address(), now);
+    block.seal = producer().seal(&block.header).unwrap();
 
-    (chain.build(txs, &producer(), now).unwrap(), now)
+    (block, now)
+}
+
+/// The receipts of an import that extended the tip.
+fn extended(imported: Result<Imported, ImportError>) -> Vec<Receipt> {
+    match imported.unwrap() {
+        Imported::Extended(receipts) => receipts,
+        other => panic!("expected the tip to be extended, got {other:?}"),
+    }
 }
 
 /// Builds and imports the next block.
 fn advance(chain: &mut Chain, txs: Vec<SignedTx>) -> Vec<Receipt> {
     let (block, now) = next_block(chain, txs);
 
-    chain.import(&block, &producer(), now).unwrap()
+    extended(chain.import(&block, now))
 }
 
 fn balance(chain: &Chain, address: &Address) -> u256 {
@@ -96,7 +106,10 @@ fn a_different_genesis_is_refused() {
     let db = Arc::new(MemoryDb::default());
     open(&db);
     let other = Genesis {
-        slot_ms: 1_000,
+        consensus: ConsensusConfig::Authority {
+            key: authority().public(),
+            slot_ms: 1_000,
+        },
         ..genesis()
     };
 
@@ -204,22 +217,22 @@ fn blocks_must_follow_the_rules() {
     bad_height.header.height = 5;
 
     assert!(matches!(
-        chain.import(&bad_root, &producer(), now),
+        chain.import(&bad_root, now),
         Err(ImportError::Invalid(BlockError::TxRoot))
     ));
     assert!(matches!(
-        chain.import(&bad_height, &producer(), now),
+        chain.import(&bad_height, now),
         Err(ImportError::Invalid(BlockError::Height))
     ));
 
-    chain.import(&block, &producer(), now).unwrap();
+    extended(chain.import(&block, now));
     let (grandchild, later) = next_block(&chain, Vec::new());
     let mut orphan = grandchild.clone();
     orphan.header.parent = Hash::Blake3_256([7; 32]);
 
-    assert!(matches!(chain.import(&block, &producer(), now), Err(ImportError::Known)));
-    assert!(matches!(chain.import(&sibling, &producer(), now), Err(ImportError::NotOnTip(_))));
-    assert!(matches!(chain.import(&orphan, &producer(), later), Err(ImportError::UnknownParent(_))));
+    assert!(matches!(chain.import(&block, now), Err(ImportError::Known)));
+    assert!(matches!(chain.import(&sibling, now), Ok(Imported::Side)));
+    assert!(matches!(chain.import(&orphan, later), Err(ImportError::UnknownParent(_))));
 }
 
 #[test]
@@ -233,7 +246,7 @@ fn a_block_with_an_invalid_transaction_changes_nothing() {
     let (block, now) = next_block(&chain, vec![good, replayed]);
 
     assert!(matches!(
-        chain.import(&block, &producer(), now),
+        chain.import(&block, now),
         Err(ImportError::Invalid(BlockError::Tx {
             index: 1,
             error: TxError::WrongNonce { expected: 1, got: 0 },
@@ -255,7 +268,7 @@ fn deploys_for_engines_genesis_leaves_out_fail() {
     let module = vec![0, b'a', b's', b'm', 1, 0, 0, 0];
     let deploy = SignedTx::sign(Tx::Deploy { code: Code::Wasm(module) }, 0, &authority());
     let (block, now) = next_block(&chain, vec![deploy]);
-    let receipts = chain.import(&block, &producer(), now).unwrap();
+    let receipts = extended(chain.import(&block, now));
 
     assert_eq!(receipts[0].result, Err(Failure::EngineNotAllowed(Engine::Wasm)));
     assert_eq!(nonce(&chain, &authority()), 1);
@@ -297,4 +310,236 @@ return M
     assert_eq!(balance(&chain, &first), u256::new(50));
     assert_eq!(balance(&chain, &second), u256::new(51));
     assert_eq!(balance(&chain, &splitter), u256::ZERO);
+}
+
+// Proof of work: forks, reorgs and rewards. Difficulty 1 lets any nonce through, and blocks a
+// target apart keep it there, so every block weighs the same and the longer branch wins.
+
+/// Far enough ahead that no block in these tests is from the future.
+const LATER: u64 = 10_000_000;
+
+fn pow_genesis() -> Genesis {
+    Genesis {
+        consensus: ConsensusConfig::ProofOfWork(PowConfig {
+            hash: PowHash::Blake3,
+            target_block_ms: 1_000,
+            initial_difficulty: 1,
+            min_difficulty: 1,
+        }),
+        reward: Reward {
+            initial: u256::new(100),
+            halving_interval: Some(2),
+        },
+        ..Genesis::dev_pow(authority().public())
+    }
+}
+
+/// Mines a block on any stored block, one target after it.
+fn mine_on(chain: &Chain, parent: &Block, txs: Vec<SignedTx>, miner: Address) -> Block {
+    let timestamp = parent.header.timestamp + 1_000;
+    let header = BlockHeader {
+        parent: parent.id(),
+        height: parent.header.height + 1,
+        timestamp,
+        producer: miner,
+        difficulty: chain.consensus().difficulty(&parent.header, timestamp),
+        tx_root: Block::tx_root(&txs),
+    };
+    let nonce = (0..)
+        .find(|nonce| meets(work_hash(PowHash::Blake3, &header.id(), *nonce), header.difficulty))
+        .unwrap();
+
+    Block {
+        header,
+        txs,
+        seal: Seal::Work { nonce },
+    }
+}
+
+fn send(to: &Address, amount: u128, nonce: u64) -> SignedTx {
+    let tx = Tx::Transfer {
+        from: authority().public().address(),
+        to: *to,
+        amount: Amount::U128(amount),
+    };
+
+    SignedTx::sign(tx, nonce, &authority())
+}
+
+#[test]
+fn the_heavier_branch_wins_and_state_follows_it() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &pow_genesis()).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let (bob, carol) = (stranger().public().address(), stranger().public().address());
+    let (miner_a, miner_b) = (Address::Ed25519([1; 32]), Address::Ed25519([2; 32]));
+    let to_bob = send(&bob, 10, 0);
+    let to_carol = send(&carol, 20, 0);
+    let a1 = mine_on(&chain, &genesis, vec![to_bob.clone()], miner_a);
+    let b1 = mine_on(&chain, &genesis, vec![to_carol.clone()], miner_b);
+
+    extended(chain.import(&a1, LATER));
+    assert!(matches!(chain.import(&b1, LATER), Ok(Imported::Side)));
+    assert_eq!(balance(&chain, &bob), u256::new(10));
+
+    let b2 = mine_on(&chain, &b1, Vec::new(), miner_b);
+
+    match chain.import(&b2, LATER).unwrap() {
+        Imported::Reorganized { undone, applied } => {
+            assert_eq!(undone, std::slice::from_ref(&a1));
+            assert_eq!(applied, [b1.clone(), b2.clone()]);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(chain.tip().id(), b2.id());
+    assert_eq!(chain.block_at(1).unwrap().unwrap(), b1);
+    assert_eq!((balance(&chain, &bob), balance(&chain, &carol)), (u256::ZERO, u256::new(20)));
+    // 100 for height 1, halved to 50 for height 2; nothing for the block that was taken off.
+    assert_eq!((balance(&chain, &miner_a), balance(&chain, &miner_b)), (u256::ZERO, u256::new(150)));
+    assert_eq!(chain.receipt(&to_bob.id()).unwrap(), None);
+    assert_eq!(chain.receipt(&to_carol.id()).unwrap().unwrap().block, b1.id());
+
+    let a2 = mine_on(&chain, &a1, Vec::new(), miner_a);
+    let a3 = mine_on(&chain, &a2, Vec::new(), miner_a);
+
+    assert!(matches!(chain.import(&a2, LATER), Ok(Imported::Side)));
+    assert!(matches!(chain.import(&a3, LATER), Ok(Imported::Reorganized { .. })));
+    assert_eq!((balance(&chain, &bob), balance(&chain, &carol)), (u256::new(10), u256::ZERO));
+    assert_eq!((balance(&chain, &miner_a), balance(&chain, &miner_b)), (u256::new(200), u256::ZERO));
+    assert_eq!(chain.receipt(&to_bob.id()).unwrap().unwrap().block, a1.id());
+    assert_eq!(chain.receipt(&to_carol.id()).unwrap(), None);
+    assert_eq!(chain.tip_work(), u256::new(3));
+}
+
+#[test]
+fn a_heavier_branch_that_fails_to_run_is_dropped() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &pow_genesis()).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let bob = stranger().public().address();
+    let a1 = mine_on(&chain, &genesis, vec![send(&bob, 10, 0)], Address::Ed25519([1; 32]));
+    // Nonce 7 is not the sender's next, which only running the block finds out.
+    let b1 = mine_on(&chain, &genesis, vec![send(&bob, 99, 7)], Address::Ed25519([2; 32]));
+    let b2 = mine_on(&chain, &b1, Vec::new(), Address::Ed25519([2; 32]));
+    let b3 = mine_on(&chain, &b2, Vec::new(), Address::Ed25519([2; 32]));
+
+    extended(chain.import(&a1, LATER));
+    assert!(matches!(chain.import(&b1, LATER), Ok(Imported::Side)));
+    assert!(matches!(
+        chain.import(&b2, LATER),
+        Err(ImportError::Invalid(BlockError::Tx { index: 0, .. }))
+    ));
+    assert!(matches!(chain.import(&b3, LATER), Err(ImportError::Invalid(BlockError::Bad))));
+    assert_eq!(chain.tip().id(), a1.id());
+    assert_eq!(balance(&chain, &bob), u256::new(10));
+}
+
+#[test]
+fn branches_that_split_off_too_deep_are_never_followed() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &pow_genesis()).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let mut main = genesis.clone();
+
+    for _ in 0..MAX_REORG_DEPTH + 2 {
+        main = mine_on(&chain, &main, Vec::new(), Address::Ed25519([1; 32]));
+        extended(chain.import(&main, LATER));
+    }
+
+    let first = chain.block_at(1).unwrap().unwrap();
+    let second = chain.block_at(2).unwrap().unwrap();
+
+    // Undo records only reach back MAX_REORG_DEPTH blocks.
+    assert_eq!(db.read(Column::Undo, &id_key(&first.id())).unwrap(), None);
+    assert!(db.read(Column::Undo, &id_key(&second.id())).unwrap().is_some());
+
+    let mut side = genesis;
+    let tip = chain.tip().id();
+
+    for _ in 0..MAX_REORG_DEPTH + 4 {
+        side = mine_on(&chain, &side, Vec::new(), Address::Ed25519([2; 32]));
+        assert!(matches!(chain.import(&side, LATER), Ok(Imported::Side)));
+    }
+
+    assert_eq!(chain.tip().id(), tip);
+}
+
+#[test]
+fn rewards_are_fixed_or_halve() {
+    let fixed = Reward {
+        initial: u256::new(40),
+        halving_interval: None,
+    };
+    let halving = Reward {
+        initial: u256::new(40),
+        halving_interval: Some(10),
+    };
+
+    assert_eq!(fixed.at(1_000_000), u256::new(40));
+    assert_eq!([halving.at(9), halving.at(10), halving.at(25), halving.at(10 * 300)], [
+        u256::new(40),
+        u256::new(20),
+        u256::new(10),
+        u256::ZERO
+    ]);
+    assert_eq!(Reward::NONE.at(0), u256::ZERO);
+}
+
+#[test]
+fn receipts_keep_what_contracts_emitted() {
+    const EMITTER: &str = r#"
+local M = {}
+
+function M.ping(times)
+    for i = 1, times do
+        events.emit("Ping", i, ctx.sender)
+    end
+    return "pong"
+end
+
+function M.ping_then_fail()
+    events.emit("Lost")
+    error("no")
+end
+
+return M
+"#;
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let deployer = authority();
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, &deployer);
+    advance(&mut chain, vec![deploy]);
+    let emitter = contract_address(&deployer.public().address(), 0);
+    let call = |function: &str, nonce: u64, data: Vec<TxCallArgumentType>| {
+        let tx = Tx::ContractCall {
+            to: emitter,
+            func: Hash::Xxh3_64(selector(function)),
+            amount: Amount::U128(0),
+            data,
+        };
+
+        SignedTx::sign(tx, nonce, &deployer)
+    };
+    let ping = call("ping", 1, vec![TxCallArgumentType::I64(2)]);
+    let failing = call("ping_then_fail", 2, Vec::new());
+    advance(&mut chain, vec![ping.clone(), failing.clone()]);
+    let receipt = chain.receipt(&ping.id()).unwrap().unwrap();
+    let sender = TxCallArgumentType::Address(deployer.public().address());
+
+    assert_eq!(receipt.block, chain.tip().id());
+    assert_eq!(receipt.index, 0);
+    assert_eq!(receipt.status, TxStatus::Returned(vec![TxCallArgumentType::String("pong".to_string())]));
+    assert_eq!(
+        receipt.events.iter().map(|event| (event.contract, event.name.as_str(), event.data.clone())).collect::<Vec<_>>(),
+        [
+            (emitter, "Ping", vec![TxCallArgumentType::Number(1.0), sender.clone()]),
+            (emitter, "Ping", vec![TxCallArgumentType::Number(2.0), sender]),
+        ]
+    );
+
+    let failed = chain.receipt(&failing.id()).unwrap().unwrap();
+
+    assert!(matches!(&failed.status, TxStatus::Failed(error) if error.contains("no")), "{failed:?}");
+    assert!(failed.events.is_empty());
 }

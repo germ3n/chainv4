@@ -1,6 +1,7 @@
 use {
     crate::crypto::hashable::Hashable,
-    crate::crypto::keypair::{PublicKey, Signature},
+    crate::crypto::keypair::Signature,
+    crate::structs::address::Address,
     crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
     r#macro::document,
@@ -15,7 +16,7 @@ use {
 };
 
 #[document(
-    summary = "What a block commits to. Its hash is the block's id, and the producer's seal signs that hash.",
+    summary = "What a block commits to. Its hash is the block's id. The seal is not part of it: under an authority the seal signs the id, and under proof of work it is the nonce that makes the id's work hash small enough.",
     category = "Chain",
     see_also = "Block",
 )]
@@ -27,8 +28,10 @@ pub struct BlockHeader {
     pub height: u64,
     #[document(summary = "When the block was produced, in milliseconds since the Unix epoch.")]
     pub timestamp: u64,
-    #[document(summary = "The key that produced and sealed the block.")]
-    pub producer: PublicKey,
+    #[document(summary = "Who produced the block. Its reward goes here.")]
+    pub producer: Address,
+    #[document(summary = "How hard the block was to produce: under proof of work, the expected number of hashes to find its seal; 0 under an authority. Consensus decides what it must be.")]
+    pub difficulty: u128,
     #[document(summary = "BLAKE3 of the block's transactions, in order. For genesis, BLAKE3 of the genesis configuration instead, so chains with different genesis never share a block.")]
     pub tx_root: Hash,
 }
@@ -47,7 +50,7 @@ impl BlockHeader {
 }
 
 #[document(
-    summary = "A header, the transactions it commits to, and the producer's seal over the header. Genesis has no seal: it is defined by the configuration every node starts from.",
+    summary = "A header, the transactions it commits to, and the seal that proves the producer had the right to make it. Genesis has none: it is defined by the configuration every node starts from.",
     category = "Chain",
     see_also = "BlockHeader, SignedTx",
 )]
@@ -57,8 +60,31 @@ pub struct Block {
     pub header: BlockHeader,
     #[document(summary = "The transactions, run in this order.")]
     pub txs: Vec<SignedTx>,
-    #[document(summary = "The producer's signature over the header's id. None only for genesis.")]
-    pub seal: Option<Signature>,
+    #[document(summary = "The proof that the producer had the right to make the block.")]
+    pub seal: Seal,
+}
+
+#[document(
+    summary = "What proves a block was made by someone allowed to make it. Which kind a block needs depends on the chain's consensus.",
+    category = "Chain",
+    see_also = "Block, Consensus",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum Seal {
+    #[document(summary = "No seal: only genesis, and blocks still being sealed.")]
+    #[wincode(tag = 0)]
+    None,
+    #[document(summary = "The authority's signature over the block's id.")]
+    #[wincode(tag = 1)]
+    Signature(Signature),
+    #[document(summary = "A nonce that makes the hash of the block's id and itself fall under the target its difficulty sets.")]
+    #[wincode(tag = 2)]
+    Work { nonce: u64 },
+}
+
+impl Hashable for Seal {
+    const TAG_LEN: usize = 1;
 }
 
 impl Hashable for Block {}

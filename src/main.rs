@@ -54,13 +54,33 @@ struct NodeArgs {
     /// A peer to dial at startup. Repeat to dial several.
     #[arg(long)]
     peer: Vec<libp2p::Multiaddr>,
-    /// Produce blocks with the built-in development authority key.
+    /// Which development chain to run: pow, mined by anyone, or authority, where the built-in
+    /// development key produces every block.
+    #[arg(long, value_enum, default_value_t = DevChain::Pow)]
+    consensus: DevChain,
+    /// Mine blocks (pow chains).
+    #[arg(long, conflicts_with = "produce")]
+    mine: bool,
+    /// Where mining rewards go. Defaults to the development key's address.
+    #[arg(long, requires = "mine")]
+    reward_to: Option<structs::address::Address>,
+    /// How many threads to mine on.
+    #[arg(long, default_value_t = 1, requires = "mine")]
+    mine_threads: usize,
+    /// Produce blocks with the built-in development key (authority chains).
     #[arg(long)]
     produce: bool,
     /// Serve the JSON HTTP API on this address, such as 127.0.0.1:8080.
     #[cfg(feature = "http")]
     #[arg(long)]
     http: Option<std::net::SocketAddr>,
+}
+
+#[cfg(feature = "node")]
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum DevChain {
+    Pow,
+    Authority,
 }
 
 #[cfg(feature = "node")]
@@ -94,15 +114,18 @@ fn main() -> std::process::ExitCode {
 fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     use {
         chain::Genesis,
-        consensus::DevAuthority,
+        consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, Miner, Producer},
         db::{Database, RocksDb},
-        net::NetConfig,
+        net::{NetConfig, NetEvent},
         node::Node,
         std::sync::Arc,
     };
 
-    let authority = DevAuthority::dev_keypair();
-    let genesis = Genesis::dev(authority.public());
+    let dev = DevAuthority::dev_keypair();
+    let genesis = match args.consensus {
+        DevChain::Pow => Genesis::dev_pow(dev.public()),
+        DevChain::Authority => Genesis::dev_authority(dev.public()),
+    };
     let db: Arc<dyn Database> = Arc::new(RocksDb::open(&args.db)?);
     let network: String = genesis.block().id().to_bytes()[..8]
         .iter()
@@ -115,21 +138,36 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     log::info!(
-        "[node] contracts run on {}",
+        "[node] {} consensus; contracts run on {}",
+        genesis.consensus.name(),
         genesis.engines.iter().map(|engine| engine.name()).collect::<Vec<_>>().join(" and ")
     );
-
-    if args.produce {
-        log::info!("[node] producing blocks as {}", authority.public());
-    }
 
     let net = net::spawn(NetConfig {
         listen: args.listen,
         peers: args.peer,
         network,
     })?;
-    let consensus = DevAuthority::new(genesis.authority, genesis.slot_ms, args.produce.then_some(authority));
-    let node = Node::new(db.clone(), &genesis, Box::new(consensus), net)?;
+    let producer: Option<Box<dyn Producer>> = match (&genesis.consensus, args.mine, args.produce) {
+        (_, false, false) => None,
+        (ConsensusConfig::Authority { slot_ms, .. }, false, true) => {
+            log::info!("[node] producing blocks as {}", dev.public().address());
+
+            Some(Box::new(AuthorityProducer::new(dev, *slot_ms)))
+        }
+        (ConsensusConfig::ProofOfWork(config), true, false) => {
+            let reward_to = args.reward_to.unwrap_or(dev.public().address());
+            let inbox = net.inbox.clone();
+            log::info!("[node] mining on {} threads, rewards to {reward_to}", args.mine_threads.max(1));
+
+            Some(Box::new(Miner::new(reward_to, config.hash, args.mine_threads, move |block, seal| {
+                let _ = inbox.send(NetEvent::Sealed { block, seal });
+            })))
+        }
+        (ConsensusConfig::Authority { .. }, true, _) => return Err("--mine needs --consensus pow".into()),
+        (ConsensusConfig::ProofOfWork(_), _, true) => return Err("--produce needs --consensus authority".into()),
+    };
+    let node = Node::new(db.clone(), &genesis, producer, net)?;
 
     #[cfg(feature = "http")]
     if let Some(address) = args.http {
