@@ -141,9 +141,15 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Faster calls, same results.** Compiled WebAssembly modules are cached by their code, and
   the Lua engine builds fresh states ahead and closes used ones on threads of its own. Every call
   still runs in a fresh state or instance, so neither changes what a call does.
-- [ ] **Blocks run on one core.** Checking a block's signatures in parallel, and running
-  transactions that touch nothing in common in parallel, would use more of a machine; rayon
-  would fit there.
+- [x] **Blocks run on every core.** Transactions run side by side on the block's starting state,
+  recording what they read, then in order, keeping each result unless an earlier transaction wrote
+  what it read and running those again. The result is what running them one by one gives, and
+  signatures, in transactions and in finality proofs, check side by side.
+- [ ] **Transactions that depend on each other run twice.** A sender's later transactions, or calls
+  to a contract changed earlier in the block, run ahead for nothing. Running them again in
+  dependency waves, as Block-STM does, would save that.
+- [ ] **The mempool checks signatures one at a time,** on the node's thread, as transactions
+  arrive. A flood of gossiped transactions would gain from checking batches on the workers.
 - [ ] **Typed exports in the SDK.** `#[export]` functions take and return nothing and use
   `input()`/`output()`; decoding arguments into Rust parameters would be nicer. The token example
   shows how much argument handling that would save.

@@ -21,7 +21,7 @@
 //! the votes it counted or held back too, so a restart counts them again.
 
 use {
-    super::{Chain, ImportError, Imported, id_key, read_value, stored_block, stored_block_at, work_of},
+    super::{Chain, ImportError, Imported, Workers, id_key, read_value, stored_block, stored_block_at, work_of},
     crate::crypto::keypair::PublicKey,
     crate::crypto::verifiable::VerifyError,
     crate::db::{Column, Database, DbError, Read, State},
@@ -183,16 +183,29 @@ pub struct View<'a> {
     tip: &'a BlockHeader,
     genesis: Hash,
     max_reorg_depth: u64,
+    workers: &'a Arc<Workers>,
 }
 
 impl<'a> View<'a> {
-    pub(in crate::chain) fn new(db: &'a Arc<dyn Database>, tip: &'a BlockHeader, genesis: Hash, max_reorg_depth: u64) -> View<'a> {
+    pub(in crate::chain) fn new(
+        db: &'a Arc<dyn Database>,
+        tip: &'a BlockHeader,
+        genesis: Hash,
+        max_reorg_depth: u64,
+        workers: &'a Arc<Workers>,
+    ) -> View<'a> {
         View {
             db,
             tip,
             genesis,
             max_reorg_depth,
+            workers,
         }
+    }
+
+    #[document(parent = "View", summary = "The chain's worker threads, for checking many signatures at once.")]
+    pub fn workers(&self) -> &Arc<Workers> {
+        self.workers
     }
 
     #[document(parent = "View", summary = "The newest main-chain block's header.")]
@@ -407,7 +420,7 @@ pub fn stored_evidence(db: &dyn Read) -> Result<Vec<Evidence>, DbError> {
 
 impl Chain {
     pub(super) fn view(&self) -> View<'_> {
-        View::new(&self.db, &self.tip, self.genesis, self.max_reorg_depth)
+        View::new(&self.db, &self.tip, self.genesis, self.max_reorg_depth, &self.workers)
     }
 
     /// The finality and a view of the rest of the chain, borrowed apart so finality can learn
@@ -419,9 +432,11 @@ impl Chain {
             tip,
             genesis,
             max_reorg_depth,
+            workers,
             ..
         } = self;
-        (finality.as_deref_mut(), View::new(db, tip, *genesis, *max_reorg_depth))
+
+        (finality.as_deref_mut(), View::new(db, tip, *genesis, *max_reorg_depth, workers))
     }
 
     /// Lets finality catch up with the tip.

@@ -30,10 +30,13 @@ use {
 mod execute;
 pub mod fees;
 mod finality;
+mod parallel;
 mod receipt;
 
 pub use execute::{BlockContext, Effect, Failure, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
+pub use parallel::Workers;
+use parallel::{Runner, Unfit};
 #[cfg(feature = "finality-authority")]
 pub use finality::AuthorityConfig;
 #[cfg(feature = "finality-depth")]
@@ -332,6 +335,8 @@ pub enum BlockError {
     BasePrice { expected: u256, got: u256 },
     #[document(summary = "Its gas_used is not what its transactions used.")]
     GasUsed { expected: u64, got: u64 },
+    #[document(summary = "Crediting the producer its share of the fees would overflow its balance.")]
+    Fee(String),
 }
 
 impl fmt::Display for BlockError {
@@ -348,6 +353,7 @@ impl fmt::Display for BlockError {
             BlockError::ConflictsWithFinality => write!(f, "conflicts with the finalized checkpoint"),
             BlockError::BasePrice { expected, got } => write!(f, "base price {got}, but its parent makes it {expected}"),
             BlockError::GasUsed { expected, got } => write!(f, "gas_used {got}, but its transactions used {expected}"),
+            BlockError::Fee(why) => write!(f, "paying the producer its fees: {why}"),
         }
     }
 }
@@ -390,6 +396,8 @@ pub struct Chain {
     tips: HashSet<Hash>,
     finality_config: Option<FinalityConfig>,
     finality: Option<Box<dyn Finality>>,
+    /// The threads blocks run on, shared with finality to check votes.
+    workers: Arc<Workers>,
 }
 
 impl Chain {
@@ -440,8 +448,9 @@ impl Chain {
         let tip_id: Hash = read_value(&*db, Column::Meta, TIP_KEY)?.expect("genesis sets the tip");
         let tip: Block = read_value(&*db, Column::Blocks, &id_key(&tip_id))?.expect("the tip is stored");
         let tip_work = work_of(&*db, &tip_id)?;
+        let workers = Arc::new(Workers::new());
         let finality = match &genesis.finality {
-            Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth))?),
+            Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers))?),
             None => None,
         };
         let mut chain = Chain {
@@ -459,6 +468,7 @@ impl Chain {
             tips: HashSet::from([tip_id]),
             finality_config: genesis.finality.clone(),
             finality,
+            workers,
         };
         // In case the node stopped between committing a block and catching finality up with it.
         chain.tip_moved()?;
@@ -538,23 +548,13 @@ impl Chain {
         // The transactions run here, on a layer that is thrown away, to keep only those that can
         // run and fit, and to learn the gas they use.
         let layer = Arc::new(State::new(self.db.clone()));
-        let mut kept = Vec::new();
-        let mut gas_used = 0;
-
-        for tx in txs {
-            if self.gas_left(gas_used).is_some_and(|left| tx.fee.gas_limit > left) {
-                continue;
-            }
-
-            match execute::execute(&layer, &tx, &self.rules, &self.vm, &context) {
-                Ok(receipt) => {
-                    gas_used += receipt.gas_used;
-                    kept.push(tx);
-                }
-                Err(execute::ExecuteError::Invalid(_)) => {}
-                Err(execute::ExecuteError::Db(err)) => return Err(err),
-            }
-        }
+        let ran = match self.runner().run(&layer, &txs, &context, Unfit::Skip) {
+            Ok(ran) => ran,
+            Err(ImportError::Db(err)) => return Err(err),
+            Err(err) => unreachable!("building skips what does not fit, so only the database fails it: {err}"),
+        };
+        let gas_used = ran.gas_used;
+        let kept: Vec<SignedTx> = ran.kept.into_iter().map(|index| txs[index].clone()).collect();
 
         Ok(Block {
             header: BlockHeader {
@@ -601,10 +601,13 @@ impl Chain {
         }
     }
 
-    /// The gas a block has left once its transactions so far used this much, or None when blocks
-    /// are unbounded.
-    fn gas_left(&self, used: u64) -> Option<u64> {
-        self.fees().map(|fees| fees.block_gas_limit().saturating_sub(used))
+    /// What a block's transactions run with.
+    fn runner(&self) -> Runner<'_> {
+        Runner {
+            rules: &self.rules,
+            vm: &self.vm,
+            workers: &self.workers,
+        }
     }
 
     #[document(
@@ -786,39 +789,17 @@ impl Chain {
         let id = block.id();
         let height = block.header.height;
         let layer = Arc::new(State::new(below.clone()));
-        let mut receipts = Vec::new();
         let context = BlockContext {
             height,
             producer: block.header.producer,
             base_price: block.header.base_price,
         };
-        let mut gas_used = 0;
+        let ran = self.runner().run(&layer, &block.txs, &context, Unfit::Refuse)?;
+        let receipts = ran.receipts;
 
-        for (index, tx) in block.txs.iter().enumerate() {
-            if let Some(left) = self.gas_left(gas_used)
-                && tx.fee.gas_limit > left
-            {
-                return Err(ImportError::Invalid(BlockError::Tx {
-                    index,
-                    error: TxError::BlockFull { left },
-                }));
-            }
-
-            match execute::execute(&layer, tx, &self.rules, &self.vm, &context) {
-                Ok(receipt) => {
-                    gas_used += receipt.gas_used;
-                    receipts.push(receipt);
-                }
-                Err(execute::ExecuteError::Db(err)) => return Err(ImportError::Db(err)),
-                Err(execute::ExecuteError::Invalid(error)) => {
-                    return Err(ImportError::Invalid(BlockError::Tx { index, error }));
-                }
-            }
-        }
-
-        if gas_used != block.header.gas_used {
+        if ran.gas_used != block.header.gas_used {
             return Err(ImportError::Invalid(BlockError::GasUsed {
-                expected: gas_used,
+                expected: ran.gas_used,
                 got: block.header.gas_used,
             }));
         }

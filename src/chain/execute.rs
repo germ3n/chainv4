@@ -238,17 +238,39 @@ fn payment<'a>(fees: &'a Fees, tx: &SignedTx, sender: &Address, accounts: &Accou
     })
 }
 
-/// Runs one transaction on top of its block's state. The nonce and its fee are settled in the
-/// block's layer either way; everything else happens in a layer of its own that is kept only on
-/// success.
+/// A transaction that ran: its receipt, and the producer's share of its fee, which whoever runs
+/// the block credits as soon as the transaction is in. Crediting it there, rather than here, keeps
+/// the producer's balance out of what every transaction reads, so transactions can run side by
+/// side without all depending on each other.
+#[derive(Debug)]
+pub(crate) struct Executed {
+    pub(crate) receipt: Receipt,
+    pub(crate) to_producer: u256,
+}
+
+/// Checks a transaction's form and signature, then runs it on top of its block's state.
 pub(crate) fn execute(
     block: &Arc<State>,
     tx: &SignedTx,
     rules: &Rules,
     vm: &Arc<Vm>,
     context: &BlockContext,
-) -> Result<Receipt, ExecuteError> {
+) -> Result<Executed, ExecuteError> {
     tx.verify().map_err(|err| ExecuteError::Invalid(TxError::Invalid(err)))?;
+
+    execute_verified(block, tx, rules, vm, context)
+}
+
+/// Runs a transaction whose form and signature were checked already. The nonce and its fee are
+/// settled in the block's layer either way; everything else happens in a layer of its own that is
+/// kept only on success.
+pub(crate) fn execute_verified(
+    block: &Arc<State>,
+    tx: &SignedTx,
+    rules: &Rules,
+    vm: &Arc<Vm>,
+    context: &BlockContext,
+) -> Result<Executed, ExecuteError> {
     let sender = tx.sender();
     let accounts = Accounts::new(block);
     let expected = accounts.get(&sender)?.nonce;
@@ -297,20 +319,24 @@ pub(crate) fn execute(
         None => Charged::default(),
     };
     let events = if result.is_ok() { events } else { Vec::new() };
-
-    Ok(Receipt {
+    let receipt = Receipt {
         id: tx.id(rules.hash),
         fuel_used,
         gas_used: charged.gas_used,
         fee: charged.fee,
         result,
         events,
+    };
+
+    Ok(Executed {
+        receipt,
+        to_producer: charged.to_producer,
     })
 }
 
 /// Settles a transaction's fee once it ran, for the fuel it burned: what it is charged for, the
-/// scorer decides, up to its gas limit; the sender gets the rest of its reserve back, and the fee
-/// goes to the producer, less what burns.
+/// scorer decides, up to its gas limit, and the sender gets the rest of its reserve back. What the
+/// producer gets of it, the caller credits.
 #[allow(clippy::too_many_arguments)]
 fn settle(
     block: &Arc<State>,
@@ -338,13 +364,11 @@ fn settle(
     };
     let charged = schedule.charge(&scoring).min(limit);
     let settled = payment.fees.settle(context.base_price, payment.price, gas, charged);
-    let accounts = Accounts::new(block);
+    let refund = payment.reserve - settled.fee;
 
-    // Neither can fail: the reserve covered the fee, and nothing holds near u256::MAX.
-    for (to, amount) in [(sender, payment.reserve - settled.fee), (context.producer, settled.to_producer)] {
-        if amount > u256::ZERO {
-            accounts.credit(&to, amount).map_err(node_fault)?;
-        }
+    // It cannot fail: the reserve came from this balance.
+    if refund > u256::ZERO {
+        Accounts::new(block).credit(&sender, refund).map_err(node_fault)?;
     }
 
     Ok(settled)

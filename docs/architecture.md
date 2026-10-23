@@ -39,6 +39,9 @@ static.
   transaction goes to the node as a `NetEvent::Submitted`, so the node is still the one that
   admits it.
 - **A miner** mines on threads of its own. A found seal comes back as `NetEvent::Sealed`.
+- **The chain's workers,** a rayon pool the `Chain` owns, run a block's transactions side by side
+  and check many signatures at once. The node thread hands them a block and gets the result back,
+  exactly as if it had run the transactions one by one (see [Chain](chain.md)).
 - **The Lua engine** builds fresh Lua states ahead on two threads of its own, and closes used ones
   on a third, so a contract call neither waits for one nor pays to close it. Each state is used
   for one call only (see [Contracts](contracts.md)).

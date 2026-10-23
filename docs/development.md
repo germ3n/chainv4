@@ -58,7 +58,8 @@ A new feature belongs in the matrix too.
 These are the rules the code follows. Keep to them when adding to it.
 
 - **Owned state, never globals.** Long-lived machinery has an owner in the `Node` → `Chain` →
-  `Host` chain and is passed down: engines, linkers, registries, finality, fees. Nothing lives in
+  `Host` chain and is passed down: engines, linkers, registries, finality, fees, the chain's
+  rayon workers. Nothing lives in
   a `static` or `OnceLock`, so tests can build differently configured nodes in one process.
 - **Every algorithm behind a feature, on by default.**
   - Each hash, key scheme and kind of finality is gated: the variant and every match arm.

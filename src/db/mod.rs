@@ -7,7 +7,7 @@ use {
     crate::crypto::hashable::Hashable,
     crate::structs::address::Address,
     r#macro::document,
-    std::collections::BTreeMap,
+    std::collections::{BTreeMap, BTreeSet},
     std::fmt,
     std::sync::{Arc, Mutex},
     wincode::{SchemaRead, SchemaWrite},
@@ -135,6 +135,9 @@ impl std::error::Error for DbError {}
 /// Changes waiting to be committed. None deletes the key.
 pub type Changes = BTreeMap<(Column, Vec<u8>), Option<Vec<u8>>>;
 
+/// Keys, as a recording State lists what it read.
+pub type Keys = BTreeSet<(Column, Vec<u8>)>;
+
 #[document(
     summary = "Anything state can be read from: a database, or a State layered on one.",
     category = "Storage",
@@ -188,6 +191,8 @@ fn scan_from<'a>(prefix: &'a [u8], start: &'a [u8]) -> &'a [u8] {
 pub struct State {
     base: Arc<dyn Read>,
     changes: Mutex<Changes>,
+    /// What this layer read from below it, when it records reads.
+    reads: Option<Mutex<Keys>>,
 }
 
 impl State {
@@ -200,6 +205,31 @@ impl State {
         State {
             base,
             changes: Mutex::new(Changes::new()),
+            reads: None,
+        }
+    }
+
+    #[document(
+        parent = "State",
+        summary = "An empty layer over base that remembers every key it reads from below: those it, or a layer on top of it, read without having written them first. What a transaction run ahead of its turn depended on.",
+        params = { base = "The database, or the State below this one." },
+        see_also = "State::take_reads",
+    )]
+    pub fn recording(base: Arc<dyn Read>) -> State {
+        State {
+            reads: Some(Mutex::default()),
+            ..State::new(base)
+        }
+    }
+
+    #[document(
+        parent = "State",
+        summary = "Takes the keys a recording layer read from below, leaving it none. Empty for a layer that does not record.",
+    )]
+    pub fn take_reads(&self) -> Keys {
+        match &self.reads {
+            Some(reads) => std::mem::take(&mut *reads.lock().expect("a state layer is never poisoned")),
+            None => Keys::new(),
         }
     }
 
@@ -278,6 +308,10 @@ impl Read for State {
     fn read(&self, column: Column, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
         if let Some(value) = self.lock().get(&(column, key.to_vec())) {
             return Ok(value.clone());
+        }
+
+        if let Some(reads) = &self.reads {
+            reads.lock().expect("a state layer is never poisoned").insert((column, key.to_vec()));
         }
 
         self.base.read(column, key)
@@ -388,6 +422,30 @@ pub(crate) mod tests {
             assert_eq!(scan(b"b", b"b", 2), ["b", "b1"], "stopped early");
             assert!(scan(b"d", b"d", 10).is_empty());
         }
+    }
+
+    #[test]
+    fn a_recording_layer_lists_what_it_read_from_below() {
+        let db = Arc::new(MemoryDb::default());
+        let base = State::new(db.clone());
+        base.put(Column::Accounts, b"below".to_vec(), b"1".to_vec());
+        db.commit(base.take_changes()).unwrap();
+        let recording = Arc::new(State::recording(db));
+        recording.put(Column::Accounts, b"own".to_vec(), b"2".to_vec());
+        // A layer on top reads through it, as a transaction's calls do.
+        let top = State::new(recording.clone());
+        top.put(Column::Storage, b"top".to_vec(), b"3".to_vec());
+
+        for (column, key) in [(Column::Accounts, &b"below"[..]), (Column::Accounts, b"own"), (Column::Storage, b"top"), (Column::Storage, b"missing")] {
+            top.get(column, key).unwrap();
+        }
+
+        let read = recording.take_reads();
+
+        // Its own writes and the top layer's are not reads from below; a missing key is.
+        assert_eq!(read, Keys::from([(Column::Accounts, b"below".to_vec()), (Column::Storage, b"missing".to_vec())]));
+        assert!(recording.take_reads().is_empty());
+        assert!(State::new(Arc::new(MemoryDb::default())).take_reads().is_empty());
     }
 
     #[test]

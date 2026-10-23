@@ -10,7 +10,7 @@
 
 use {
     super::{
-        EVIDENCE_KEY, Evidence, FINALIZED_KEY, Finality, FinalityError, FinalityUpdate, JUSTIFIED_KEY, View,
+        EVIDENCE_KEY, Evidence, FINALIZED_KEY, Finality, FinalityError, FinalityUpdate, JUSTIFIED_KEY, View, Workers,
         justification_key, stored_evidence, stored_justification,
     },
     crate::chain::{BlockError, ImportError, read_value},
@@ -159,6 +159,8 @@ pub(super) struct Votes<E> {
     electorate: E,
     params: VoteParams,
     genesis: Hash,
+    /// The chain's threads, which check a proof's or a justification's signatures all at once.
+    workers: Arc<Workers>,
     justified: Checkpoint,
     finalized: Checkpoint,
     links: HashMap<(Checkpoint, Checkpoint), Tally>,
@@ -181,6 +183,7 @@ impl<E: Electorate> Votes<E> {
             params: electorate.params(),
             electorate,
             genesis: chain.genesis(),
+            workers: chain.workers().clone(),
             justified: read_value(db, Column::Finality, JUSTIFIED_KEY)?.unwrap_or(start),
             finalized: read_value(db, Column::Finality, FINALIZED_KEY)?.unwrap_or(start),
             links: HashMap::new(),
@@ -456,6 +459,10 @@ impl<E: Electorate> Finality for Votes<E> {
         }
 
         let validators = Validators::new(state);
+        // Every vote's signature, in every proof, checked at once.
+        let genesis = self.genesis;
+        let votes: Vec<&SignedVote> = block.proofs.iter().flat_map(|proof| &proof.votes).collect();
+        let mut signed = self.workers.map(&votes, |vote| vote.verify(&genesis).is_ok()).into_iter();
         let on_chain = |checkpoint: &Checkpoint| -> Result<bool, DbError> {
             let height = self.checkpoint_height(checkpoint.epoch);
             let id: Option<Hash> = read_value(&**state, Column::Heights, &height.to_be_bytes())?;
@@ -483,10 +490,12 @@ impl<E: Electorate> Finality for Votes<E> {
             let mut paid = Vec::new();
 
             for vote in &proof.votes {
+                let well_signed = signed.next().unwrap_or(false);
+
                 if previous.is_some_and(|previous| previous >= vote.vote.voter)
                     || vote.vote.source != source
                     || vote.vote.target != target
-                    || vote.verify(&self.genesis).is_err()
+                    || !well_signed
                 {
                     return Err(bad(format!("a bad vote in the proof for epoch {}", target.epoch)));
                 }
@@ -573,8 +582,12 @@ impl<E: Electorate> Finality for Votes<E> {
             .ok_or(FinalityError::Unverifiable("its validator set is not known here"))?;
         let mut weight = u256::ZERO;
         let mut previous: Option<PublicKey> = None;
+        // Every signature checked at once; what is wrong with the first bad vote is still what
+        // comes back.
+        let genesis = self.genesis;
+        let signed = self.workers.map(&justification.votes, |vote| vote.verify(&genesis));
 
-        for vote in &justification.votes {
+        for (vote, signed) in justification.votes.iter().zip(signed) {
             if previous.is_some_and(|previous| previous >= vote.vote.voter) {
                 return Err(FinalityError::Unverifiable("its votes are not sorted by voter"));
             }
@@ -583,7 +596,7 @@ impl<E: Electorate> Finality for Votes<E> {
                 return Err(FinalityError::Unverifiable("a vote is for another link"));
             }
 
-            vote.verify(&self.genesis).map_err(FinalityError::Invalid)?;
+            signed.map_err(FinalityError::Invalid)?;
             weight += voters.set.member(&vote.vote.voter).ok_or(FinalityError::NotValidator)?.weight;
             previous = Some(vote.vote.voter);
         }
