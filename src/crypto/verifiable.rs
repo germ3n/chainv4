@@ -1,0 +1,211 @@
+use {
+    crate::structs::hash::HashType,
+    r#macro::document,
+    std::fmt,
+};
+
+#[document(
+    summary = "A value that can check it follows the chain's rules by itself, without looking at chain state. Run it on anything received from outside before acting on it.",
+    category = "Crypto",
+    see_also = "VerifyError, Tx",
+    note = "Only what the value says about itself is checked. Balances, nonces and signatures need chain state and are checked elsewhere.",
+)]
+pub trait Verifiable {
+    #[document(
+        parent = "Verifiable",
+        summary = "Checks the value and everything inside it.",
+        returns = "The first rule the value breaks, if any.",
+    )]
+    fn verify(&self) -> Result<(), VerifyError>;
+}
+
+#[document(
+    summary = "Why a value failed verification.",
+    category = "Crypto",
+    see_also = "Verifiable",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifyError {
+    #[document(summary = "An address whose bytes are not a usable Ed25519 public key: not a point on the curve, or a weak small-order point that would accept one signature for almost any message.")]
+    InvalidPublicKey,
+    #[document(summary = "A transfer, mint or burn of nothing.")]
+    ZeroAmount,
+    #[document(
+        summary = "A contract call whose function hash is not XXH3-64.",
+        params = { "0" = "The algorithm it used instead." },
+    )]
+    FunctionHash(HashType),
+    #[document(summary = "A number argument that is NaN or infinite.")]
+    NonFiniteNumber,
+    #[document(summary = "A signature that does not match its key and message, or was made with a different scheme than the key.")]
+    InvalidSignature,
+}
+
+impl fmt::Display for VerifyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VerifyError::InvalidPublicKey => write!(f, "address is not a valid Ed25519 public key"),
+            VerifyError::ZeroAmount => write!(f, "amount must be greater than zero"),
+            VerifyError::FunctionHash(algorithm) => {
+                write!(f, "function hash must be Xxh3_64, not {algorithm:?}")
+            }
+            VerifyError::NonFiniteNumber => write!(f, "number argument must be finite"),
+            VerifyError::InvalidSignature => write!(f, "signature does not match"),
+        }
+    }
+}
+
+impl std::error::Error for VerifyError {}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::Verifiable,
+        super::VerifyError,
+        crate::structs::address::Address,
+        crate::structs::amount::Amount,
+        crate::structs::tx::Tx,
+        crate::structs::u256::u256,
+        ed25519_dalek::SigningKey,
+        ed25519_dalek::VerifyingKey,
+    };
+    #[cfg(any(feature = "xxh3", feature = "sha256"))]
+    use {
+        crate::crypto::hasher::Hasher,
+        crate::structs::hash::Hash,
+        crate::structs::hash::HashType,
+        crate::structs::tx::TxCallArgumentType,
+    };
+
+    /// A real public key, from a fixed secret.
+    fn address(seed: u8) -> Address {
+        Address::Ed25519(SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes())
+    }
+
+    /// The identity point: on the curve, but of small order.
+    fn weak_address() -> Address {
+        let mut identity = [0; 32];
+        identity[0] = 1;
+
+        Address::Ed25519(identity)
+    }
+
+    fn transfer(amount: u128) -> Tx {
+        Tx::Transfer {
+            from: address(1),
+            to: address(2),
+            amount: Amount::U128(amount),
+        }
+    }
+
+    /// Sends nothing, which a contract call is allowed to do.
+    #[cfg(any(feature = "xxh3", feature = "sha256"))]
+    fn call(func: Hash, data: Vec<TxCallArgumentType>) -> Tx {
+        Tx::ContractCall {
+            to: address(3),
+            func,
+            amount: Amount::U128(0),
+            data,
+        }
+    }
+
+    #[test]
+    fn real_keys_pass() {
+        assert_eq!(address(1).verify(), Ok(()));
+        assert_eq!(transfer(5).verify(), Ok(()));
+    }
+
+    #[test]
+    fn keys_off_the_curve_fail() {
+        // About half of all 32-byte strings are not points on the curve.
+        let off_curve = (0..=255u8)
+            .map(|byte| [byte; 32])
+            .find(|bytes| VerifyingKey::from_bytes(bytes).is_err())
+            .unwrap();
+
+        assert_eq!(
+            Address::Ed25519(off_curve).verify(),
+            Err(VerifyError::InvalidPublicKey)
+        );
+    }
+
+    #[test]
+    fn weak_keys_fail() {
+        assert_eq!(weak_address().verify(), Err(VerifyError::InvalidPublicKey));
+
+        let mint = Tx::Mint {
+            to: weak_address(),
+            amount: Amount::U128(1),
+        };
+
+        assert_eq!(mint.verify(), Err(VerifyError::InvalidPublicKey));
+    }
+
+    #[test]
+    fn moving_zero_fails() {
+        let mint = Tx::Mint {
+            to: address(1),
+            amount: Amount::U128(0),
+        };
+        let burn = Tx::Burn {
+            from: address(1),
+            amount: Amount::U128(0),
+        };
+
+        assert_eq!(transfer(0).verify(), Err(VerifyError::ZeroAmount));
+        assert_eq!(mint.verify(), Err(VerifyError::ZeroAmount));
+        assert_eq!(burn.verify(), Err(VerifyError::ZeroAmount));
+
+        let wide = |value| Tx::Transfer {
+            from: address(1),
+            to: address(2),
+            amount: Amount::U256(value),
+        };
+
+        assert_eq!(wide(u256::ZERO).verify(), Err(VerifyError::ZeroAmount));
+        assert_eq!(wide(u256::MAX).verify(), Ok(()));
+    }
+
+    #[cfg(feature = "xxh3")]
+    #[test]
+    fn contract_calls_with_an_xxh3_function_hash_pass() {
+        let func = Hasher::digest(HashType::Xxh3_64, b"transfer");
+        let data = vec![
+            TxCallArgumentType::Address(address(4)),
+            TxCallArgumentType::String("memo".to_string()),
+            TxCallArgumentType::Number(1.5),
+        ];
+
+        assert_eq!(call(func, data).verify(), Ok(()));
+    }
+
+    #[cfg(feature = "sha256")]
+    #[test]
+    fn contract_calls_with_another_function_hash_fail() {
+        let func = Hasher::digest(HashType::Sha256, b"transfer");
+
+        assert_eq!(
+            call(func, Vec::new()).verify(),
+            Err(VerifyError::FunctionHash(HashType::Sha256))
+        );
+    }
+
+    #[cfg(feature = "xxh3")]
+    #[test]
+    fn contract_call_arguments_are_checked() {
+        let func = Hasher::digest(HashType::Xxh3_64, b"scale");
+
+        for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let data = vec![TxCallArgumentType::Number(number)];
+
+            assert_eq!(call(func, data).verify(), Err(VerifyError::NonFiniteNumber));
+        }
+
+        let data = vec![
+            TxCallArgumentType::U64(1),
+            TxCallArgumentType::Address(weak_address()),
+        ];
+
+        assert_eq!(call(func, data).verify(), Err(VerifyError::InvalidPublicKey));
+    }
+}
