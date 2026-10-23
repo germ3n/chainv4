@@ -41,7 +41,7 @@
   × 32 MiB in one transaction.
 - **The WASM `call` import takes a value pointer.** It is
   `call(address, value, name, name_len, args, args_len)`; rebuild contracts made against the
-  earlier five-argument form. Contracts also import `emit` now.
+  earlier five-argument form. Contracts can also import `emit` and `delegate` now.
 - **Contracts have four special functions.** `init` (run at deploy), `migrate` (run after an
   upgrade), `check_perms` (asked before an upgrade) and `fallback` (answers functions the
   contract does not export). Transactions and other contracts cannot call `init`, `migrate` or
@@ -97,9 +97,10 @@
   above it succeed.
 - [ ] **Events cannot be searched.** They are only reachable through their transaction's receipt;
   following a contract's events needs an index by contract and name.
-- [ ] **Deploys are not charged.** Running a Lua contract's top level at deploy burns fuel that
-  never reaches the receipt (`fuel_used` is 0). Compiling and validating are unmetered, bounded
-  only by `MAX_SOURCE_LEN` and `MAX_MODULE_LEN`.
+- [ ] **Loading code is not charged.** What `init`, `check_perms` and `migrate` burn reaches the
+  receipt, but loading the code does not: running a Lua script's top level burns fuel the
+  receipt never shows, and compiling and validating either engine's code is unmetered, bounded
+  only by `MAX_SOURCE_LEN` and `MAX_MODULE_LEN`. This applies to deploys and upgrades alike.
 - [ ] **No read-only calls.** There is no way to run a contract function without a transaction,
   for example from the HTTP API.
 - [x] **Contract upgrades.** `Tx::Upgrade` (`chainv4 send upgrade`) swaps a contract's code and
@@ -154,9 +155,10 @@
 
 ### Network
 
-- [x] **Sync.** A node asks each peer for its status when it connects, and learns heights from
-  gossiped blocks it cannot place yet. While any peer is ahead it asks the furthest one for the
-  next 128 blocks, imports them in order, and repeats until it has caught up.
+- [x] **Sync.** A node asks each peer for its status when it connects, and again when it gossips a
+  block that does not connect. While any peer's chain holds more work, it asks the heaviest one
+  for the next 128 blocks and imports them in order, side branches and reorgs included. When a
+  batch does not connect, the chains split earlier, so it steps a batch further back.
 - [ ] **Sync uses one peer at a time.** Batches are fetched one after another from a single peer;
   downloading from several peers at once would be faster for long catch-ups.
 - [ ] **Blocks gossiped ahead of the tip are dropped.** They only tell the node a peer is ahead;
