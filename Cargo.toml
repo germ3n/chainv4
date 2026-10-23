@@ -1,0 +1,17 @@
+[package]
+name = "chainv4"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["macro", "wiki"]
+
+[dependencies]
+rocksdb = "0.25.0"
+blake3 = "1.8.7"
+blake2 = "0.11.0"
+wincode = { version = "0.6.3", features = ["derive"] }
+macro = { path = "macro" }
+
+[build-dependencies]
+wiki = { path = "wiki" }
