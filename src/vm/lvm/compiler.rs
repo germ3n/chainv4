@@ -1,0 +1,64 @@
+//! Turns contract source into Luau bytecode. Every setting here is part of consensus: the
+//! bytecode, and with it the fuel each call costs, depends on them, so every node must compile
+//! the same way. Contracts are deployed as source for the same reason, and because Luau does not
+//! check bytecode: loading bytecode someone else made can corrupt memory.
+
+use {
+    super::LvmError,
+    mlua::Compiler,
+    r#macro::document,
+};
+
+/// Luau's default: constant folding and other local optimizations, no inlining across functions.
+pub const OPTIMIZATION_LEVEL: u8 = 1;
+/// Line numbers, so an error says where it happened.
+pub const DEBUG_LEVEL: u8 = 1;
+/// None. Type information only feeds native code generation, which contracts never use.
+pub const TYPE_INFO_LEVEL: u8 = 0;
+/// The largest source a contract may have. Compiling is not metered by fuel, so this bounds the
+/// work one deploy can cause.
+pub const MAX_SOURCE_LEN: usize = 128 * 1024;
+
+#[document(
+    summary = "Compiles contract source with the chain's fixed settings. The same source always gives the same bytecode.",
+    category = "Lua VM",
+    params = { source = "The Luau source." },
+    returns = "The bytecode, or why it does not compile.",
+    see_also = "Contract::from_bytecode",
+)]
+pub fn compile(source: &str) -> Result<Vec<u8>, LvmError> {
+    if source.len() > MAX_SOURCE_LEN {
+        return Err(LvmError::Compile(format!(
+            "source is {} bytes, more than the {MAX_SOURCE_LEN} allowed",
+            source.len()
+        )));
+    }
+
+    Compiler::new()
+        .set_optimization_level(OPTIMIZATION_LEVEL)
+        .set_debug_level(DEBUG_LEVEL)
+        .set_type_info_level(TYPE_INFO_LEVEL)
+        .compile(source)
+        .map_err(|err| LvmError::Compile(err.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_same_source_gives_the_same_bytecode() {
+        let source = "local M = {} function M.f(a) return a * 2 end return M";
+
+        assert_eq!(compile(source).unwrap(), compile(source).unwrap());
+        assert_ne!(compile(source).unwrap(), compile("return {}").unwrap());
+    }
+
+    #[test]
+    fn syntax_errors_and_huge_sources_are_rejected() {
+        let huge = format!("return {{}} --{}", "x".repeat(MAX_SOURCE_LEN));
+
+        assert!(matches!(compile("local = 1"), Err(LvmError::Compile(_))));
+        assert!(matches!(compile(&huge), Err(LvmError::Compile(text)) if text.contains("allowed")));
+    }
+}

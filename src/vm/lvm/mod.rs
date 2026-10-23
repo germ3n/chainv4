@@ -4,18 +4,25 @@
 
 use {
     crate::crypto::hasher::Hasher,
+    crate::db::{DbError, State},
     crate::structs::address::Address,
     crate::structs::hash::Hash,
     crate::structs::hash::HashType,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
-    libs::{register_address_lib, register_ctx_lib, register_hash_lib, register_u256_lib},
-    mlua::{ChunkMode, Compiler, Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value},
+    libs::storage::StorageAccess,
+    libs::{
+        register_address_lib, register_ctx_lib, register_hash_lib, register_storage_lib,
+        register_u256_lib,
+    },
+    mlua::{ChunkMode, Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value},
     r#macro::document,
     std::collections::HashMap,
     std::fmt,
+    std::sync::Arc,
 };
 
+pub mod compiler;
 pub mod libs;
 mod value;
 
@@ -29,7 +36,7 @@ const GLOBALS: &[&str] = &[
     "assert", "error", "getmetatable", "ipairs", "next", "pairs", "pcall", "print", "rawequal",
     "rawget", "rawlen", "rawset", "select", "setmetatable", "tonumber", "tostring", "type",
     "typeof", "unpack", "xpcall", "string", "table", "utf8", "bit32", "address", "hash", "u256",
-    "ctx",
+    "ctx", "storage",
 ];
 
 /// The math functions that give the same result on every platform. The trigonometric,
@@ -88,11 +95,21 @@ impl Contract {
             limits = "What running the script's top level may use.",
         },
         returns = "The contract, or why it cannot be deployed: a syntax error, a top level that fails or returns something other than a table, or two exported names with the same hash.",
+        see_also = "compile",
     )]
     pub fn load(source: &str, limits: Limits) -> Result<Contract, LvmError> {
-        let bytecode = Compiler::new()
-            .compile(source)
-            .map_err(|err| LvmError::Compile(err.to_string()))?;
+        Contract::from_bytecode(compiler::compile(source)?, limits)
+    }
+
+    #[document(
+        parent = "Contract",
+        summary = "Runs compiled bytecode once to find the functions it exports.",
+        params = {
+            bytecode = "Bytecode from compile on this node. Never bytecode from anyone else: Luau does not check it, and bad bytecode can corrupt memory.",
+            limits = "What running the script's top level may use.",
+        },
+    )]
+    pub fn from_bytecode(bytecode: Vec<u8>, limits: Limits) -> Result<Contract, LvmError> {
         let lua = new_state(limits)?;
         let module = instantiate(&lua, &bytecode)?;
         let mut functions: HashMap<u64, String> = HashMap::new();
@@ -116,6 +133,42 @@ impl Contract {
 
     #[document(
         parent = "Contract",
+        summary = "Rebuilds a contract from what a registry stored, without running it again.",
+        params = {
+            bytecode = "Bytecode this node compiled.",
+            functions = "The exported names, from function_names.",
+        },
+    )]
+    pub fn from_compiled(bytecode: Vec<u8>, functions: Vec<String>) -> Contract {
+        let functions = functions.into_iter().map(|name| (selector(&name), name)).collect();
+
+        Contract {
+            bytecode,
+            functions,
+        }
+    }
+
+    #[document(
+        parent = "Contract",
+        summary = "The compiled bytecode.",
+    )]
+    pub fn bytecode(&self) -> &[u8] {
+        &self.bytecode
+    }
+
+    #[document(
+        parent = "Contract",
+        summary = "The exported function names, sorted so the list is the same on every node.",
+    )]
+    pub fn function_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.functions.values().cloned().collect();
+        names.sort();
+
+        names
+    }
+
+    #[document(
+        parent = "Contract",
         summary = "The name of the exported function a hash selects, if any.",
         params = { func = "The function hash from a contract call." },
     )]
@@ -129,9 +182,10 @@ impl Contract {
 
     #[document(
         parent = "Contract",
-        summary = "Calls an exported function in a fresh Lua state.",
+        summary = "Calls an exported function in a fresh Lua state. Storage writes go to a layer of their own and reach storage only if the call succeeds.",
         params = {
             context = "Who is calling, which contract, and how much they sent.",
+            storage = "The state the contract's storage lives in, or None for a call that may not touch storage.",
             func = "The XXH3-64 of the function's name, as in Tx::ContractCall.",
             args = "The arguments, converted to Lua values.",
             limits = "What the call may use.",
@@ -141,6 +195,7 @@ impl Contract {
     pub fn call(
         &self,
         context: &CallContext,
+        storage: Option<&Arc<State>>,
         func: &Hash,
         args: &[TxCallArgumentType],
         limits: Limits,
@@ -161,17 +216,32 @@ impl Contract {
             }
         };
         lua.set_app_data(*context);
+        let layer = storage.map(|state| Arc::new(State::new(state.clone())));
+
+        if let Some(layer) = &layer {
+            lua.set_app_data(StorageAccess::new(layer.clone(), context.contract));
+        }
+
         let result = run(&lua, &self.bytecode, name, args);
         let remaining = lua.get_fuel().unwrap_or(0);
-        let result = match result {
+        let failure = lua
+            .app_data_ref::<StorageAccess>()
+            .and_then(|access| access.failure());
+        let result = match (failure, result) {
+            // The node failed, whatever the script made of it.
+            (Some(err), _) => Err(LvmError::Storage(err)),
             // A script can raise "out of fuel" itself; only a nearly empty tank makes it real.
-            Err(LvmError::Runtime(text))
+            (None, Err(LvmError::Runtime(text)))
                 if text.contains("out of fuel") && remaining < MAX_INSTRUCTION_COST =>
             {
                 Err(LvmError::OutOfFuel)
             }
-            other => other,
+            (None, other) => other,
         };
+
+        if let (Ok(_), Some(state), Some(layer)) = (&result, storage, &layer) {
+            state.merge(layer.take_changes());
+        }
 
         Outcome {
             fuel_used: limits.fuel - remaining,
@@ -236,6 +306,8 @@ pub enum LvmError {
     BadArgument(String),
     #[document(summary = "A return value has no TxCallArgumentType equivalent.")]
     BadReturn(String),
+    #[document(summary = "The database failed while the script ran. The node's fault, not the script's, so the node should stop rather than record the call as failed.")]
+    Storage(DbError),
 }
 
 impl fmt::Display for LvmError {
@@ -252,6 +324,7 @@ impl fmt::Display for LvmError {
             LvmError::Runtime(text) => write!(f, "{text}"),
             LvmError::BadArgument(text) => write!(f, "bad argument: {text}"),
             LvmError::BadReturn(text) => write!(f, "bad return value: {text}"),
+            LvmError::Storage(err) => write!(f, "storage failed: {err}"),
         }
     }
 }
@@ -298,6 +371,7 @@ fn new_state(limits: Limits) -> Result<Lua, LvmError> {
     register_hash_lib(&lua);
     register_u256_lib(&lua);
     register_ctx_lib(&lua);
+    register_storage_lib(&lua);
     lua.sandbox(true)?;
     lua.set_fuel(limits.fuel)?;
 

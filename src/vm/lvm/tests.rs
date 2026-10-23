@@ -77,7 +77,7 @@ fn func(name: &str) -> Hash {
 }
 
 fn call(name: &str, args: &[TxCallArgumentType]) -> Outcome {
-    contract().call(&context(), &func(name), args, LIMITS)
+    contract().call(&context(), None, &func(name), args, LIMITS)
 }
 
 fn returns(name: &str, args: &[TxCallArgumentType]) -> Vec<TxCallArgumentType> {
@@ -104,7 +104,7 @@ fn unknown_functions_are_rejected() {
         let wrong = Hasher::digest(HashType::Blake3_256, b"add");
 
         assert_eq!(
-            contract().call(&context(), &wrong, &[], LIMITS).result.unwrap_err(),
+            contract().call(&context(), None, &wrong, &[], LIMITS).result.unwrap_err(),
             LvmError::NoSuchFunction
         );
     }
@@ -115,7 +115,7 @@ fn every_call_starts_from_a_fresh_state() {
     let contract = contract();
 
     for _ in 0..2 {
-        let result = contract.call(&context(), &func("count"), &[], LIMITS).result.unwrap();
+        let result = contract.call(&context(), None, &func("count"), &[], LIMITS).result.unwrap();
 
         assert!(matches!(result[..], [TxCallArgumentType::Number(n)] if n == 1.0));
     }

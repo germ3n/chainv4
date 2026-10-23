@@ -11,22 +11,19 @@ pub struct LuaAddress(pub Address);
 
 impl UserData for LuaAddress {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("hex", |_, this, ()| Ok(to_hex(key(&this.0))));
-        methods.add_method("bytes", |lua, this, ()| lua.create_string(key(&this.0)));
+        methods.add_method("hex", |_, this, ()| Ok(to_hex(this.0.bytes())));
+        methods.add_method("bytes", |lua, this, ()| lua.create_string(this.0.bytes()));
         methods.add_method("is_valid", |_, this, ()| Ok(this.0.verify().is_ok()));
-        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(to_hex(key(&this.0))));
+        methods.add_method("is_contract", |_, this, ()| {
+            Ok(matches!(this.0, Address::Contract(_)))
+        });
+        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(to_hex(this.0.bytes())));
         methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (AnyUserData, AnyUserData)| {
             match (a.borrow::<LuaAddress>(), b.borrow::<LuaAddress>()) {
                 (Ok(a), Ok(b)) => Ok(*a == *b),
                 _ => Ok(false),
             }
         });
-    }
-}
-
-fn key(address: &Address) -> &[u8; 32] {
-    match address {
-        Address::Ed25519(key) => key,
     }
 }
 
@@ -111,6 +108,17 @@ fn address_hex() {}
     returns = { ty = "string", desc = "32 bytes." },
 )]
 fn address_bytes() {}
+
+#[document(
+    lua,
+    parent = "Address",
+    name = "is_contract",
+    kind = "method",
+    summary = "Whether the address belongs to a deployed contract rather than a key.",
+    returns = { ty = "boolean", desc = "True for a contract." },
+    see_also = "ctx.contract",
+)]
+fn address_is_contract() {}
 
 #[document(
     lua,
