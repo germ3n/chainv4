@@ -5,10 +5,13 @@ A blockchain node, and a command-line client for it, in one binary. Contracts ru
 finalized by bonded validators, a set of signers, or depth; nodes talk over libp2p; a JSON
 HTTP API serves queries and takes transactions.
 
-This page covers the `chainv4` command and how contracts live on the chain. The code reference
-is the wiki that every build writes to `target/wiki/index.html`, tokens follow the
-[token standard](docs/token-standard.md), and open questions and caveats live in
-[docs/todo.md](docs/todo.md).
+This page covers the `chainv4` command and how contracts live on the chain.
+
+- **How each part works:** the guides in [docs/](docs/README.md), starting with
+  [Good to know](docs/good-to-know.md) for what to keep in mind.
+- **The code reference:** the wiki that every build writes to `target/wiki/index.html`.
+- **Tokens:** they follow the [token standard](docs/token-standard.md).
+- **What is left to do:** [docs/todo.md](docs/todo.md).
 
 ## Building
 

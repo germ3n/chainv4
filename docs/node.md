@@ -1,0 +1,128 @@
+# Node and network
+
+## The node loop
+
+`Node` (`src/node/`) owns all node state:
+- the chain and the mempool;
+- the producer, if it produces;
+- the validator key, if it votes;
+- the link to the network.
+
+Its loop, `Node::run`, repeats two steps. **`step`** does the work:
+1. It handles what arrived, at most 256 events a pass so a flood cannot starve block production:
+   - gossiped blocks, transactions and votes;
+   - peers' requests and answers;
+   - peers connecting and leaving;
+   - a miner's seal;
+   - transactions submitted through the API.
+2. It produces a block if its slot has come. An authority seals at once; a miner gets a template.
+3. It votes, if it validates and a checkpoint is deep enough.
+4. It logs where it stands every 30 seconds.
+
+**`wait`** then sleeps until the next slot, the next event, or a second at most.
+
+Tests drive `step` with a clock of their own, so they never sleep.
+
+| Constant | Value | What it bounds |
+| --- | --- | --- |
+| `EVENT_BUDGET` | 256 | Events handled per pass. |
+| `MAX_BLOCK_TXS` | 1,000 | Transactions this node puts in one block. |
+| `MEMPOOL_CAPACITY` | 50,000 | Transactions waiting at once. |
+| `TEMPLATE_REFRESH` | 2 s | How long a miner works on one template before it is rebuilt. |
+
+**After an import:**
+- the node brings the mempool in line: transactions the main chain now holds leave it, and those
+  a reorg took off come back;
+- it retries the finality votes it held back.
+
+**A block it produced** is imported first, then gossiped.
+
+## The mempool
+
+**How it is kept:** the mempool (`src/mempool/`) holds transactions by sender and nonce, so each
+sender's go in order.
+
+**Admission** checks:
+- the signature;
+- that the nonce is not used yet;
+- that the same sender and nonce are not waiting already;
+- on a chain with fees, that the gas limit could fit a block, the price could be taken and the
+  sender can pay (see [Fees](fees.md)).
+
+**Selection** for a block takes, for each sender, the waiting transactions in nonce order from
+its current nonce, up to the first gap. Across senders it takes whichever sender's next
+transaction pays the producer most, ties going to the lower address. The block builder then runs
+them and leaves out any that cannot run.
+
+**Pruning** after each block drops transactions whose nonce is used.
+
+## Networking
+
+**The thread:** libp2p runs on a thread of its own (`src/net/`), behind two channels:
+- `NetEvent`s come in;
+- `NetCommand`s go out.
+
+The node never sees libp2p itself.
+
+| Piece | What it does |
+| --- | --- |
+| QUIC | The transport. `--listen` picks addresses, `/ip4/0.0.0.0/udp/0/quic-v1` by default; port 0 picks one, and the log shows which. |
+| gossipsub | Blocks, transactions and votes, on topics `/chainv4/{network}/blocks`, `/txs` and `/votes`. |
+| Kademlia | Finding peers, as `/chainv4/kad/1`. |
+| mDNS | Finding peers on the local network. |
+| identify | Learning peers' addresses, as `/chainv4/1`. |
+| request-response | Sync, as `/chainv4/sync/1`. |
+
+**Topics:** `{network}` is the first eight bytes of the genesis id in hex, so nodes on different
+chains never share topics.
+
+**Message ids:** a gossip message's id is the chain hash of its bytes, so the same block or
+transaction is one message however many peers send it.
+
+**Size limits:** a gossip message is at most 4 MiB, a sync request 1 KiB, a sync response
+64 MiB.
+
+**Peers** come from `--peer`, mDNS and Kademlia. There is no bootnode list.
+
+## Sync
+
+A node catches up from its peers on its own (`src/node/sync.rs`).
+
+1. **Status.** It asks a peer for its status when the peer connects, and again whenever the peer
+   gossips a block that does not connect. A status says:
+   - the peer's genesis;
+   - its tip and height;
+   - its main chain's total work;
+   - its latest justified epoch.
+
+   A peer on another chain is never asked for anything again.
+2. **Blocks.** While some peer holds more work, the node asks the heaviest for the next blocks:
+   - it asks for at most 128, from just past what both chains share;
+   - it imports them in order, side blocks and reorgs included;
+   - when a batch does not connect, the chains split earlier, so it asks again a batch further
+     back;
+   - one request is in flight at a time.
+3. **Justifications.** Once nobody holds more work, the node asks a peer ahead of it on
+   justification for the justifications it lacks, at most 64 at a time. It checks each before it
+   counts, and they may finalize checkpoints here or move the chain to a justified branch.
+
+**Answering peers:**
+
+| Request | Answer |
+| --- | --- |
+| `Status` | Its genesis, tip, height, work and justified epoch. |
+| `Blocks { from, count }` | Up to 128 consecutive main-chain blocks. |
+| `Justifications { from, count }` | Up to 64 justifications for main-chain checkpoints, oldest first. |
+
+Kinds of finality that take no votes never ask for justifications.
+
+## What to keep in mind
+
+- **The node's identity changes on every start.** The libp2p key is generated fresh each run.
+- **Gossip is forwarded before it is checked,** and peers pay no price for invalid blocks or
+  floods of requests. There is no peer scoring yet.
+- **Sync uses one peer at a time,** and blocks gossiped ahead of the tip are dropped and fetched
+  again by sync.
+- **No graceful shutdown.** Ctrl-C stops the process mid-loop; commits are atomic, so data is
+  safe.
+- **No NAT traversal,** and no limits on connections or requests.

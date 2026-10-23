@@ -1,0 +1,197 @@
+# Finality
+
+Finality is when a block can no longer come off the chain, whatever the work on another branch.
+Genesis picks one of three kinds as `finality.type`, each behind a cargo feature of its own, all
+on by default:
+
+| Type | Final when | Who | Feature |
+| --- | --- | --- | --- |
+| `ffg` | Two thirds of the bonded weight vote for it, as in Casper FFG. | Validators who bond on chain, and can be slashed. | `finality-ffg` |
+| `authority` | A threshold of signers vote for it, the same way. | Keys genesis names, changed by their own approval. | `finality-authority` |
+| `depth` | `depth` blocks are on top of it. | Nobody votes. | `finality-depth` |
+
+`finality: null` gives a chain no finality: only work and `max_reorg_depth` decide.
+
+## How the chain uses it
+
+The chain only talks to finality through the `Finality` trait (`src/chain/finality/mod.rs`).
+`FinalityConfig::build` makes one from genesis.
+- **Consensus:** `apply` runs on every block, checking the proofs it carries and updating state
+  at checkpoints, and every node must agree on it.
+- **Node-local:** the rest is what this node has learned, from votes or from its own main chain.
+  - `finalized` and `justified` are the two anchors fork choice uses.
+  - `tip_moved` runs after every import that moves the tip.
+  - The vote methods take votes and justifications. Kinds without votes keep the defaults, which
+    take none.
+
+Whatever the kind:
+- the chain never adds a block at or below the finalized checkpoint, nor reorganizes past it;
+- work alone only moves the chain to a branch that holds the justified checkpoint.
+
+A new kind is a new implementation of the trait.
+
+## Checkpoints, votes and justification
+
+The two kinds that vote share one engine (`src/chain/finality/votes.rs`). They differ only in
+their electorate: who votes, with what weight, and how much it takes.
+
+- **Epochs and checkpoints:** every `checkpoint_interval` blocks starts an epoch, and the block at
+  its first height is its checkpoint. Genesis is epoch 0's checkpoint, justified and final from
+  the start.
+- **A vote** is a link from a source checkpoint to a later target checkpoint, signed by a voter
+  over `"chainv4 vote"`, the genesis id and the vote, so it cannot be replayed on another chain.
+- **Justification:** once the voters for one link add up to enough of the target epoch's
+  weight, the target is justified. That is two thirds of the bonded weight under FFG, or
+  `threshold` signers under authority finality.
+- **Finalization:** justifying a checkpoint whose source is the epoch right before it finalizes
+  the source.
+- **What a justification is:** the link and the votes behind it, sorted by voter. It is stored,
+  served to peers, and can be carried in blocks.
+
+### When validators vote
+
+A validating node votes `vote_depth` blocks after each checkpoint, so it rarely votes for a block
+about to lose a fork. Its vote:
+- has the latest justified checkpoint as its source;
+- has the newest checkpoint that deep as its target;
+- is only signed when this node's key is a voter in the target's epoch.
+
+It remembers every vote it signs in its database before the vote goes out, so it never signs
+one that conflicts with an earlier one, even across restarts. Its target epochs only ever rise,
+and its source is never older than one it used before.
+
+**Run each voting key on one node only.** Two nodes voting with the same key keep separate
+records, can sign conflicting votes, and under FFG get the key slashed.
+
+### Votes it cannot place yet
+
+A vote whose checkpoints are not on this node's main chain yet, or whose source is not
+justified here yet, is held back and tried again after every import. Up to 4,096 are held.
+
+### What a node keeps
+
+Every vote a node counts or holds back is stored in the Finality column, by target epoch and
+voter. When the chain opens they are counted again, so a restart forgets nothing:
+- the partial tallies;
+- the held votes;
+- the votes double-vote detection compares against.
+
+Counted votes stay 64 epochs behind the finalized checkpoint, to catch one vote surrounding an
+older one, and then they go.
+
+### Voter sets agree across forks
+
+Each epoch's voters are fixed in chain state at a checkpoint, `activation_delay` epochs ahead. A
+branch that split off after the checkpoint that fixed a set agrees with the main chain on it.
+So a vote for a checkpoint on a side branch only counts when that branch forked late enough.
+
+### Cheating
+
+Two votes by one key conflict when:
+- they target the same epoch but differ;
+- or one surrounds the other: an earlier source and a later target.
+
+A node compares each vote against its voter's counted votes. Once a vote can be placed, which
+shows its key really votes, the node also compares it against that voter's held votes.
+
+A conflict is evidence. It is:
+- logged, with the command to report it under FFG;
+- kept in a log of the last 64;
+- listed at `GET /evidence`.
+
+Votes are only remembered once counted, so keys that do not vote cannot grow a node's memory or
+push real evidence out of the log.
+
+### Rewards
+
+When `vote_reward` is above zero, a producer puts justifications whose voters have not been paid
+yet into its block, at most `max_proofs_per_block`. Every voter in a proof gets `vote_reward`, and
+each epoch pays once. A proof that does not check out makes the block invalid. With no reward,
+blocks carry no proofs. Rewards are minted.
+
+### Learning from peers
+
+A node behind on justification asks a peer that is ahead for the justifications it lacks, once
+no peer holds more work (see [Node and network](node.md)). It checks each one before it counts:
+- its source is justified here;
+- its source is on its target's branch;
+- every vote is valid and by a voter;
+- together they are enough.
+
+A justified checkpoint on another branch moves the main chain to the best known block through
+it, never past the finalized checkpoint.
+
+## FFG
+
+Validators bond on chain and vote with a key of their own; two thirds of the bonded weight
+justify.
+
+- **Bond** (`chainv4 send bond --voter KEY --amount N`): locks at least `min_bond` from the sender,
+  for a voting key. Only the bonding account may unbond or withdraw it; the voting key only signs
+  votes, so it can stay on the validating node while the account's key stays offline. A
+  validator bonded in epoch k votes from epoch k + `activation_delay` + 1, weighted by its bond.
+- **Unbond:** stops it voting after `activation_delay` epochs. Its bond stays locked, and
+  slashable, for `withdrawal_delay` epochs more.
+- **Withdraw:** pays the bond back to the account once it unlocks, and forgets the validator.
+- **Slash** (`chainv4 send slash --first 0x… --second 0x…`): anyone may report two conflicting
+  votes, as `GET /evidence` encodes them.
+  - The validator's whole bond is gone at once.
+  - The reporter gets 1/`reporter_divisor` of it, and the rest is burned.
+  - The validator leaves the set the way an unbond does, `activation_delay` epochs on.
+- **Limits:** at most `max_validators` are registered at once.
+- **Genesis validators** are bonded from the start. Their bonds are minted on top of the
+  allocations, not taken from them.
+
+Staking transactions fail with "this chain has no staking" under any other kind.
+
+## Authority
+
+The same votes, from signers each counting once; `threshold` of them justify.
+
+- **The signers** start as genesis's `signers`. Each epoch's set is fixed in state at the
+  checkpoint `activation_delay` epochs before it.
+- **Both thresholds** must be more than half the signers. Then two conflicting checkpoints can
+  only both be finalized if some signer voted against itself, and its votes show it.
+- **Changing signers** (`chainv4 send --key signer.key approve-signers --add KEY --remove KEY`):
+  1. A signer approves a whole new set and both of its thresholds (`Tx::ApproveSigners`),
+     naming the version of the decided set it changes.
+  2. Once `change_threshold` of the decided signers approve the same set for the same version, it
+     is decided, and the version goes up by one.
+  3. Approvals for an older version never count, and a signer that approves another set moves its
+     approval there.
+  4. The checkpoint after a decision fixes the new set for the epoch `activation_delay` ahead, so
+     a change decided in epoch k votes from epoch k + `activation_delay` + 1.
+
+  `GET /signers` shows the active set, the decided one, and the approvals so far.
+- **Rewards:** `vote_reward`, 0 in the dev settings, pays each signer's own address.
+- **No slashing:** there are no bonds, so conflicting votes are only logged and listed.
+
+## Depth
+
+No votes. A main-chain block is final once `depth` blocks are on top of it, and the chain never
+reorganizes past it. Every block is a checkpoint, so the finalized checkpoint's epoch is its
+height. `depth` 0 makes every block final as soon as it is the tip.
+
+This finality is each node's own view. Nodes kept apart for longer than `depth` blocks, by a
+partition or a private fork, finalize different branches and never come back together, and a
+node syncing from scratch keeps whichever branch it syncs first. `--validate` is refused.
+
+## Running a validator
+
+```sh
+chainv4 keygen --out vote.key
+chainv4 send --key alice.key bond --voter ed25519:0x… --amount 100000000000000000000   # FFG
+chainv4 --peer … --validate --validator-key vote.key
+```
+
+Without `--validator-key`, the node votes with the development key, which is the one validator,
+or signer, of the dev settings.
+
+## What to keep in mind
+
+- **No inactivity leak.** A chain whose voters drop under what justifies never finalizes again
+  until they return.
+- **A slashed validator keeps its weight in sets already fixed,** until `activation_delay`
+  passes.
+- **No checkpoint sync.** A new node replays every block from genesis.
+- **Vote rewards are minted,** not paid from fees.

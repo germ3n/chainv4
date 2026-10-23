@@ -56,13 +56,13 @@ pub enum Column {
     #[document(summary = "Where a transaction landed and what it did, by transaction id.")]
     #[wincode(tag = 8)]
     Receipts,
-    #[document(summary = "Finality validators by voting key: who bonded, how much, and when they vote.")]
+    #[document(summary = "Finality's voters: FFG validators by voting key, who bonded, how much and when they vote; and authority finality's decided signers and the ballot to change them.")]
     #[wincode(tag = 9)]
     Validators,
-    #[document(summary = "Per-epoch consensus records: each epoch's validator set, fixed two epochs ahead, and which checkpoints' voters have been paid.")]
+    #[document(summary = "Per-epoch consensus records: each epoch's validator set or signers, fixed activation_delay epochs ahead, and which checkpoints' voters have been paid.")]
     #[wincode(tag = 10)]
     Epochs,
-    #[document(summary = "What this node knows about finality and is not part of the chain's state: justifications it has seen, the latest justified and finalized checkpoints, its own votes, and evidence of cheating.")]
+    #[document(summary = "What this node knows about finality and is not part of the chain's state: justifications it has seen, the latest justified and finalized checkpoints, the votes it counted or holds, its own votes, and evidence of cheating.")]
     #[wincode(tag = 11)]
     Finality,
 }

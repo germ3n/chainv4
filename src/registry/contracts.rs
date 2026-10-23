@@ -15,7 +15,7 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
-/// Separates contract addresses from every other BLAKE3 hash the chain takes.
+/// Separates contract addresses from every other hash the chain takes.
 const ADDRESS_DOMAIN: &[u8] = b"chainv4 contract address";
 
 #[document(
