@@ -1,7 +1,7 @@
 use {
-    super::{Changes, Column, Database, DbError, Read},
+    super::{Changes, Column, Database, DbError, Read, scan_from},
     r#macro::document,
-    rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Options, WriteBatch},
+    rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options, WriteBatch},
     std::path::Path,
 };
 
@@ -61,6 +61,20 @@ impl Database for RocksDb {
         }
 
         self.rocks.write(batch).map_err(backend)
+    }
+
+    fn scan(&self, column: Column, prefix: &[u8], start: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError> {
+        let mode = IteratorMode::From(scan_from(prefix, start), Direction::Forward);
+
+        for record in self.rocks.iterator_cf(self.column(column), mode) {
+            let (key, value) = record.map_err(backend)?;
+
+            if !key.starts_with(prefix) || !visit(&key, &value) {
+                break;
+            }
+        }
+
+        Ok(())
     }
 }
 

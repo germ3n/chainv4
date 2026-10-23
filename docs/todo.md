@@ -123,9 +123,13 @@
 - [ ] **Finality stalls if a third goes quiet.** There is no inactivity leak, and no penalty for
   not voting, so a chain whose validators drop below two thirds never finalizes again until
   they return.
-- [ ] **Vote tallies live in memory.** A restart forgets votes for links not yet justified, the
-  held-back votes, and the votes double-vote detection compares against. Justifications and
-  finality are stored; storing tallies would let a node resume counting.
+- [x] **Vote tallies are stored.** Every vote a node counts or holds back is kept in the
+  Finality column by target epoch and voter, and counted again when the chain opens, so tallies,
+  held votes and double-vote detection survive a restart. Counted votes stay 64 epochs behind
+  the finalized checkpoint, to catch one vote surrounding another, and then go.
+- [ ] **Votes from non-voters are remembered.** Double-vote detection records any well-signed
+  vote before it knows whether its key votes, so a flood of throwaway keys grows memory until
+  finalization prunes it. Nothing from them is stored, and held votes are capped.
 - [ ] **Vote rewards are minted.** Nothing pays for them but new supply. Fees, once there are
   any, could fund them instead.
 - [ ] **No checkpoint sync.** A new node replays every block from genesis. There is no trusted
@@ -204,8 +208,13 @@
   clients, and any later ZK work.
 - [x] **Commits can be undone.** Each main-chain block keeps an undo record of every value it
   replaced, for the last 100 blocks.
-- [ ] **No iteration.** `Read` only gets single keys. Snapshots, pruning, listing a contract's
-  storage and most API listings need prefix or range scans.
+- [x] **Prefix scans.** `Database::scan` visits a column's keys with a prefix, in order, from a
+  start key: one seek, then only what it visits, on both backends. Finality uses it to find
+  stored votes.
+- [ ] **State layers cannot scan.** Scans see committed data only, so code running inside a
+  block still reads single keys. Snapshots, pruning, listing a contract's storage and most API
+  listings could build on `Database::scan`; contract storage iteration would need State to merge
+  its changes into a scan.
 - [ ] **No pruning.** Every block and all history are kept forever.
 - [x] **Receipts and a transaction index.** Each transaction's block, index, fuel, result and
   events are stored by transaction id, and reorgs move them along with everything else.

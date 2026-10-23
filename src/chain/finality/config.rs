@@ -19,11 +19,11 @@ use super::ffg::{self, FfgConfig};
 #[cfg(any(feature = "finality-ffg", feature = "finality-authority"))]
 use super::votes::Votes;
 use {
-    super::Finality,
+    super::{Finality, View},
     crate::chain::{SignerRules, StakingRules},
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
-    crate::db::{DbError, Read, State},
+    crate::db::{DbError, State},
     crate::registry::validators::ValidatorSet,
     crate::structs::hash::Hash,
     r#macro::document,
@@ -208,20 +208,17 @@ impl FinalityConfig {
 
     #[document(
         parent = "FinalityConfig",
-        summary = "The finality these settings describe, with what this node learned before.",
-        params = {
-            db = "The chain's database.",
-            genesis = "The genesis block's id.",
-        },
+        summary = "The finality these settings describe, with what this node learned before: the votes it counted or held back are counted again.",
+        params = { chain = "The chain as it was opened." },
     )]
-    pub fn build(&self, db: &dyn Read, genesis: Hash) -> Result<Box<dyn Finality>, DbError> {
+    pub fn build(&self, chain: &View) -> Result<Box<dyn Finality>, DbError> {
         Ok(match *self {
             #[cfg(feature = "finality-ffg")]
-            FinalityConfig::Ffg(ref config) => Box::new(Votes::load(ffg::Staked::new(config.clone()), db, genesis)?),
+            FinalityConfig::Ffg(ref config) => Box::new(Votes::load(ffg::Staked::new(config.clone()), chain)?),
             #[cfg(feature = "finality-authority")]
-            FinalityConfig::Authority(ref config) => Box::new(Votes::load(authority::Appointed::new(config), db, genesis)?),
+            FinalityConfig::Authority(ref config) => Box::new(Votes::load(authority::Appointed::new(config), chain)?),
             #[cfg(feature = "finality-depth")]
-            FinalityConfig::Depth(ref config) => Box::new(Depth::load(config, db, genesis)?),
+            FinalityConfig::Depth(ref config) => Box::new(Depth::load(config, &**chain.db(), chain.genesis())?),
         })
     }
 }

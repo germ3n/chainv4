@@ -112,6 +112,7 @@ fn mine_branch(chain: &mut Chain, from: &Block, count: u64, miner: u8) -> Block 
 #[cfg(any(feature = "finality-ffg", feature = "finality-authority"))]
 mod voting {
     use super::*;
+    use crate::chain::finality::votes::{COUNTED, HELD, MAX_HISTORY, stored_votes};
     use crate::structs::tx::Tx;
 
     /// Blocks per epoch in these chains.
@@ -306,6 +307,96 @@ mod voting {
             assert_eq!((reopened.justified(), reopened.finalized()), (justified, finalized));
             assert_eq!(finalized.unwrap().epoch, 1);
         }
+    }
+
+    /// The chain in a database, opened again as a restarted node would.
+    fn reopen(db: &Arc<MemoryDb>, finality: &FinalityConfig) -> Chain {
+        Chain::open(db.clone(), &genesis_with(Some(finality.clone()))).unwrap()
+    }
+
+    #[test]
+    fn a_tally_survives_a_restart() {
+        for finality in kinds() {
+            let db = Arc::new(MemoryDb::default());
+            let mut chain = reopen(&db, &finality);
+            grow_to(&mut chain, INTERVAL + 1);
+            let [alice, bob, _] = voters();
+
+            assert!(chain.add_vote(honest_vote(&chain, &alice)).unwrap().justified.is_empty());
+
+            // Alice's vote is counted again on opening, so Bob's makes two.
+            let mut chain = reopen(&db, &finality);
+            let update = chain.add_vote(honest_vote(&chain, &bob)).unwrap();
+
+            assert_eq!(update.justified, [checkpoint(&chain, 1)], "{}", finality.name());
+            assert_eq!(chain.justification(&checkpoint(&chain, 1).block).unwrap().unwrap().votes.len(), 2);
+        }
+    }
+
+    #[test]
+    fn held_votes_survive_a_restart() {
+        for finality in kinds() {
+            let db = Arc::new(MemoryDb::default());
+            let mut chain = reopen(&db, &finality);
+            grow_to(&mut chain, 2 * INTERVAL + 1);
+            let [alice, bob, _] = voters();
+
+            for keypair in [&alice, &bob] {
+                let early = signed(&chain, keypair, checkpoint(&chain, 1), checkpoint(&chain, 2));
+
+                assert!(chain.add_vote(early).unwrap().pending);
+            }
+
+            let mut chain = reopen(&db, &finality);
+            chain.add_vote(signed(&chain, &alice, start(&chain), checkpoint(&chain, 1))).unwrap();
+            let update = chain.add_vote(signed(&chain, &bob, start(&chain), checkpoint(&chain, 1))).unwrap();
+
+            assert_eq!(update.justified, [checkpoint(&chain, 1), checkpoint(&chain, 2)]);
+            assert_eq!(update.finalized, Some(checkpoint(&chain, 1)));
+
+            // Counted now, so no longer held: another restart holds nothing back.
+            assert!(stored_votes(&*db, HELD, 0).unwrap().is_empty());
+            assert_eq!(stored_votes(&*db, COUNTED, 0).unwrap().len(), 4);
+        }
+    }
+
+    #[test]
+    fn cheating_is_caught_across_a_restart() {
+        for finality in kinds() {
+            let db = Arc::new(MemoryDb::default());
+            let mut chain = reopen(&db, &finality);
+            grow_to(&mut chain, 3 * INTERVAL + 1);
+            let [alice, _, carol] = voters();
+            let other_target = Checkpoint {
+                epoch: 2,
+                block: Hash::zero(chain.hash()),
+            };
+            chain.add_vote(signed(&chain, &carol, start(&chain), checkpoint(&chain, 2))).unwrap();
+            chain.add_vote(signed(&chain, &alice, checkpoint(&chain, 1), checkpoint(&chain, 2))).unwrap();
+
+            let mut chain = reopen(&db, &finality);
+            let double = signed(&chain, &carol, start(&chain), other_target);
+            let surround = signed(&chain, &alice, start(&chain), checkpoint(&chain, 3));
+
+            assert!(chain.add_vote(double).unwrap().evidence.is_some(), "{}: a double vote", finality.name());
+            assert!(chain.add_vote(surround).unwrap().evidence.is_some(), "{}: a surround vote", finality.name());
+        }
+    }
+
+    #[test]
+    fn counted_votes_go_once_they_are_long_final() {
+        let finality = kinds().remove(0);
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = reopen(&db, &finality);
+        let last = MAX_HISTORY as u64 + 3;
+        finalize_through(&mut chain, last);
+        let finalized = chain.finalized().unwrap().epoch;
+        let kept = stored_votes(&*db, COUNTED, 0).unwrap();
+
+        assert_eq!(finalized, last - 1);
+        assert!(kept.iter().all(|vote| vote.vote.target.epoch > finalized - MAX_HISTORY as u64));
+        assert_eq!(kept.len(), 2 * (MAX_HISTORY + 1), "two votes for each epoch kept");
+        assert_eq!(reopen(&db, &finality).finalized(), chain.finalized());
     }
 
     #[test]

@@ -3,6 +3,10 @@
 //! checkpoint moved, validators who contradict themselves caught, and voters paid through proofs
 //! in blocks. What the two kinds differ in is their Electorate: who votes, with what weight, and
 //! how much it takes.
+//!
+//! Every vote counted or held back is also stored in the Finality column, by target epoch and
+//! voter. On load they are counted again, which brings back the tallies, the held votes and what
+//! double-vote detection compares against, so a restart forgets nothing it had.
 
 use {
     super::{
@@ -12,7 +16,7 @@ use {
     crate::chain::{BlockError, ImportError, read_value},
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
-    crate::db::{Column, DbError, Read, State},
+    crate::db::{Column, Database, DbError, State},
     crate::registry::validators::{ValidatorSet, Validators},
     crate::registry::{Accounts, RegistryError},
     crate::structs::block::Block,
@@ -30,9 +34,14 @@ const MAX_PENDING: usize = 4_096;
 /// Pieces of evidence a node keeps for operators to report.
 const MAX_EVIDENCE: usize = 64;
 /// Votes per validator kept to catch one vote surrounding another.
-const MAX_HISTORY: usize = 64;
+pub(super) const MAX_HISTORY: usize = 64;
 /// How far back a producer looks for justifications whose voters are still unpaid.
 const UNPAID_WINDOW: u64 = 64;
+/// Counted votes, by target epoch and voter. Kept MAX_HISTORY epochs behind the finalized
+/// checkpoint, so a vote surrounding one of them is still caught after a restart.
+pub(super) const COUNTED: &[u8] = b"v:";
+/// Votes held back to count later, the same way, as many as the node holds in memory.
+pub(super) const HELD: &[u8] = b"p:";
 
 /// Timing and rewards, which every vote-based kind sets in genesis.
 #[derive(Clone, Copy, Debug)]
@@ -86,6 +95,49 @@ struct OwnVotes {
 
 impl Hashable for OwnVotes {}
 
+/// Where a stored vote lives: its kind of record, then its target epoch, so a scan visits them
+/// oldest first, then its voter. One voter has at most one vote counted or held per epoch; a
+/// second is evidence instead.
+fn vote_key(prefix: &[u8], vote: &SignedVote) -> Vec<u8> {
+    let mut key = epoch_key(prefix, vote.vote.target.epoch);
+    key.extend_from_slice(&vote.vote.voter.hashable_bytes_with_tag());
+
+    key
+}
+
+fn epoch_key(prefix: &[u8], epoch: u64) -> Vec<u8> {
+    let mut key = prefix.to_vec();
+    key.extend_from_slice(&epoch.to_be_bytes());
+
+    key
+}
+
+/// The target epoch in a stored vote's key.
+fn epoch_in(prefix: &[u8], key: &[u8]) -> u64 {
+    let bytes = key.get(prefix.len()..prefix.len() + 8).and_then(|bytes| bytes.try_into().ok());
+
+    bytes.map_or(0, u64::from_be_bytes)
+}
+
+/// The stored votes of one kind, oldest target first, from an epoch on.
+pub(super) fn stored_votes(db: &dyn Database, prefix: &[u8], from: u64) -> Result<Vec<SignedVote>, DbError> {
+    let mut votes = Vec::new();
+    let mut corrupt = None;
+    db.scan(Column::Finality, prefix, &epoch_key(prefix, from), &mut |key, value| {
+        match wincode::deserialize(value) {
+            Ok(vote) => votes.push(vote),
+            Err(err) => corrupt = Some(DbError::Corrupt(format!("stored vote {key:?}: {err}"))),
+        }
+
+        corrupt.is_none()
+    })?;
+
+    match corrupt {
+        Some(err) => Err(err),
+        None => Ok(votes),
+    }
+}
+
 fn own_key(voter: &PublicKey) -> Vec<u8> {
     let mut key = b"own:".to_vec();
     key.extend_from_slice(&voter.hashable_bytes_with_tag());
@@ -107,25 +159,46 @@ pub(super) struct Votes<E> {
 }
 
 impl<E: Electorate> Votes<E> {
-    /// The finality an electorate makes, with the checkpoints this node justified and finalized
-    /// before.
-    pub(super) fn load(electorate: E, db: &dyn Read, genesis: Hash) -> Result<Votes<E>, DbError> {
+    /// The finality an electorate makes, with everything this node learned before: the
+    /// checkpoints it justified and finalized, and the votes it counted or held back, which it
+    /// counts again.
+    pub(super) fn load(electorate: E, chain: &View) -> Result<Votes<E>, DbError> {
+        let db = &**chain.db();
         let start = Checkpoint {
             epoch: 0,
-            block: genesis,
+            block: chain.genesis(),
         };
-
-        Ok(Votes {
+        let mut votes = Votes {
             params: electorate.params(),
             electorate,
-            genesis,
+            genesis: chain.genesis(),
             justified: read_value(db, Column::Finality, JUSTIFIED_KEY)?.unwrap_or(start),
             finalized: read_value(db, Column::Finality, FINALIZED_KEY)?.unwrap_or(start),
             links: HashMap::new(),
             pending: VecDeque::new(),
             seen: HashMap::new(),
             history: HashMap::new(),
-        })
+        };
+        let finalized = votes.finalized.epoch;
+        let counted = stored_votes(db, COUNTED, finalized.saturating_sub(MAX_HISTORY as u64))?;
+        let held = stored_votes(db, HELD, 0)?;
+
+        for vote in counted.iter().chain(&held) {
+            votes.remember(vote);
+        }
+
+        votes.pending.extend(held);
+
+        for vote in counted.into_iter().filter(|vote| vote.vote.target.epoch > finalized) {
+            match votes.count(chain, vote) {
+                Err(FinalityError::Db(err)) => return Err(err),
+                // Every stored vote counted once already; one that no longer does is dropped.
+                Err(_) => forget(chain, &vote, COUNTED)?,
+                Ok(_) => {}
+            }
+        }
+
+        Ok(votes)
     }
 
     fn epoch_of(&self, height: u64) -> u64 {
@@ -191,43 +264,41 @@ impl<E: Electorate> Votes<E> {
         self.electorate.voters(&chain.state(), target.epoch)
     }
 
-    /// Records the vote for conflict checks, and returns evidence when it conflicts with one the
-    /// same voter signed before.
-    fn watch(&mut self, chain: &View, vote: &SignedVote) -> Result<Option<Evidence>, DbError> {
+    /// Remembers a vote that conflicts with nothing, to compare later ones against.
+    fn remember(&mut self, vote: &SignedVote) {
         let voter = vote.vote.voter;
-        let mut found = None;
 
-        match self.seen.get(&(voter, vote.vote.target.epoch)) {
-            Some(first) if first != vote => {
-                found = Some(Evidence {
-                    first: *first,
-                    second: *vote,
-                })
-            }
-            Some(_) => {}
-            None => {
-                self.seen.insert((voter, vote.vote.target.epoch), *vote);
-            }
+        if vote.vote.target.epoch > self.finalized.epoch {
+            self.seen.entry((voter, vote.vote.target.epoch)).or_insert(*vote);
         }
 
         let history = self.history.entry(voter).or_default();
 
-        if found.is_none() {
-            found = history
-                .iter()
-                .find(|earlier| earlier.vote.conflicts(&vote.vote))
-                .map(|first| Evidence {
-                    first: *first,
-                    second: *vote,
-                });
-        }
-
-        if found.is_none() && !history.contains(vote) {
+        if !history.contains(vote) {
             history.push_back(*vote);
 
             if history.len() > MAX_HISTORY {
                 history.pop_front();
             }
+        }
+    }
+
+    /// Records the vote for conflict checks, and returns evidence when it conflicts with one the
+    /// same voter signed before.
+    fn watch(&mut self, chain: &View, vote: &SignedVote) -> Result<Option<Evidence>, DbError> {
+        let voter = vote.vote.voter;
+        let earlier = self.seen.get(&(voter, vote.vote.target.epoch)).filter(|first| *first != vote).or_else(|| {
+            self.history
+                .get(&voter)
+                .and_then(|history| history.iter().find(|earlier| earlier.vote.conflicts(&vote.vote)))
+        });
+        let found = earlier.map(|first| Evidence {
+            first: *first,
+            second: *vote,
+        });
+
+        if found.is_none() {
+            self.remember(vote);
         }
 
         if let Some(evidence) = found {
@@ -263,11 +334,18 @@ impl<E: Electorate> Votes<E> {
             && self.is_justified(chain, &source)?;
         let voters = if placeable { self.voters_for(chain, &target)? } else { None };
         let Some(voters) = voters else {
-            if self.pending.len() >= MAX_PENDING {
-                self.pending.pop_front();
+            let state = State::new(chain.db().clone());
+
+            if self.pending.len() >= MAX_PENDING
+                && let Some(dropped) = self.pending.pop_front()
+            {
+                state.delete(Column::Finality, vote_key(HELD, &dropped));
             }
 
             self.pending.push_back(vote);
+            state.put_value(Column::Finality, vote_key(HELD, &vote), &vote);
+            state.delete(Column::Finality, vote_key(COUNTED, &vote));
+            chain.db().commit(state.take_changes())?;
 
             return Ok(FinalityUpdate {
                 pending: true,
@@ -275,6 +353,10 @@ impl<E: Electorate> Votes<E> {
             });
         };
         let member = *voters.set.member(&vote.vote.voter).ok_or(FinalityError::NotValidator)?;
+        let state = State::new(chain.db().clone());
+        state.put_value(Column::Finality, vote_key(COUNTED, &vote), &vote);
+        state.delete(Column::Finality, vote_key(HELD, &vote));
+        chain.db().commit(state.take_changes())?;
         let already = stored_justification(&**chain.db(), &target.block)?.is_some();
         let tally = self.links.entry((source, target)).or_default();
 
@@ -290,6 +372,14 @@ impl<E: Electorate> Votes<E> {
 
         self.justify(chain, Justification { source, target, votes })
     }
+}
+
+/// Drops a stored vote of one kind.
+fn forget(chain: &View, vote: &SignedVote, prefix: &[u8]) -> Result<(), DbError> {
+    let state = State::new(chain.db().clone());
+    state.delete(Column::Finality, vote_key(prefix, vote));
+
+    chain.db().commit(state.take_changes())
 }
 
 impl<E: Electorate> Finality for Votes<E> {
@@ -411,7 +501,8 @@ impl<E: Electorate> Finality for Votes<E> {
             match self.count(chain, vote) {
                 Ok(counted) => update.merge(counted),
                 Err(FinalityError::Db(err)) => return Err(FinalityError::Db(err)),
-                Err(_) => {}
+                // Stale, or by someone who is no voter after all: it never will count.
+                Err(_) => forget(chain, &vote, HELD)?,
             }
         }
 
@@ -487,6 +578,19 @@ impl<E: Electorate> Finality for Votes<E> {
             let finalized = source.epoch;
             self.links.retain(|(_, target), _| target.epoch > finalized);
             self.seen.retain(|(_, epoch), _| *epoch > finalized);
+
+            // Counted votes stay a while, to catch one vote surrounding another; then they go.
+            if let Some(oldest) = finalized.checked_sub(MAX_HISTORY as u64) {
+                chain.db().scan(Column::Finality, COUNTED, COUNTED, &mut |key, _| {
+                    let old = epoch_in(COUNTED, key) <= oldest;
+
+                    if old {
+                        state.delete(Column::Finality, key.to_vec());
+                    }
+
+                    old
+                })?;
+            }
         }
 
         chain.db().commit(state.take_changes())?;

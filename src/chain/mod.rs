@@ -423,7 +423,7 @@ impl Chain {
         let tip: Block = read_value(&*db, Column::Blocks, &id_key(&tip_id))?.expect("the tip is stored");
         let tip_work = work_of(&*db, &tip_id)?;
         let finality = match &genesis.finality {
-            Some(config) => Some(config.build(&*db, id)?),
+            Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth))?),
             None => None,
         };
         let mut chain = Chain {

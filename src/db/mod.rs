@@ -160,6 +160,23 @@ pub trait Database: Read {
         params = { changes = "Usually a block's State, from take_changes. None values delete." },
     )]
     fn commit(&self, changes: Changes) -> Result<(), DbError>;
+
+    #[document(
+        parent = "Database",
+        summary = "Visits a column's committed records whose keys start with prefix, in key order, from the first at or after start. Backends keep keys sorted, so this seeks once and reads only what it visits. It sees committed data only, never a State's changes.",
+        params = {
+            column = "The column to scan.",
+            prefix = "What every visited key starts with.",
+            start = "Where to begin: the prefix itself for all of them, or a longer key to skip those before it.",
+            visit = "Called with each key and value; return false to stop. It must not write to the database.",
+        },
+    )]
+    fn scan(&self, column: Column, prefix: &[u8], start: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError>;
+}
+
+/// Where a scan begins: start, or the prefix when start comes before it.
+fn scan_from<'a>(prefix: &'a [u8], start: &'a [u8]) -> &'a [u8] {
+    prefix.max(start)
 }
 
 #[document(
@@ -338,6 +355,39 @@ pub(crate) mod tests {
                 }
             },
         ]
+    }
+
+    #[test]
+    fn scans_visit_a_prefix_in_order_from_a_start() {
+        for backend in backends("scan") {
+            let db = &backend.db;
+            let state = State::new(backend.base());
+
+            for key in [&b"b2"[..], b"a1", b"b1", b"b3", b"c1", b"b"] {
+                state.put(Column::Finality, key.to_vec(), key.to_vec());
+            }
+
+            state.put(Column::Accounts, b"b0".to_vec(), b"other column".to_vec());
+            db.commit(state.take_changes()).unwrap();
+            let scan = |prefix: &[u8], start: &[u8], stop_after: usize| {
+                let mut seen = Vec::new();
+                db.scan(Column::Finality, prefix, start, &mut |key, value| {
+                    assert_eq!(key, value);
+                    seen.push(String::from_utf8(key.to_vec()).unwrap());
+
+                    seen.len() < stop_after
+                })
+                .unwrap();
+
+                seen
+            };
+
+            assert_eq!(scan(b"b", b"b", 10), ["b", "b1", "b2", "b3"]);
+            assert_eq!(scan(b"b", b"b2", 10), ["b2", "b3"]);
+            assert_eq!(scan(b"b", b"a", 10), ["b", "b1", "b2", "b3"], "a start before the prefix");
+            assert_eq!(scan(b"b", b"b", 2), ["b", "b1"], "stopped early");
+            assert!(scan(b"d", b"d", 10).is_empty());
+        }
     }
 
     #[test]

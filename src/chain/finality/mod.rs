@@ -17,7 +17,8 @@
 //! takes.
 //!
 //! What a node learns about votes and justifications lives in the Finality column, outside block
-//! state: it comes from the network, and every justification carries its own proof.
+//! state: it comes from the network, and every justification carries its own proof. That holds
+//! the votes it counted or held back too, so a restart counts them again.
 
 use {
     super::{Chain, ImportError, Imported, id_key, read_value, stored_block, stored_block_at, work_of},
@@ -184,7 +185,16 @@ pub struct View<'a> {
     max_reorg_depth: u64,
 }
 
-impl View<'_> {
+impl<'a> View<'a> {
+    pub(in crate::chain) fn new(db: &'a Arc<dyn Database>, tip: &'a BlockHeader, genesis: Hash, max_reorg_depth: u64) -> View<'a> {
+        View {
+            db,
+            tip,
+            genesis,
+            max_reorg_depth,
+        }
+    }
+
     #[document(parent = "View", summary = "The newest main-chain block's header.")]
     pub fn tip(&self) -> &BlockHeader {
         self.tip
@@ -397,12 +407,7 @@ pub fn stored_evidence(db: &dyn Read) -> Result<Vec<Evidence>, DbError> {
 
 impl Chain {
     pub(super) fn view(&self) -> View<'_> {
-        View {
-            db: &self.db,
-            tip: &self.tip,
-            genesis: self.genesis,
-            max_reorg_depth: self.max_reorg_depth,
-        }
+        View::new(&self.db, &self.tip, self.genesis, self.max_reorg_depth)
     }
 
     /// The finality and a view of the rest of the chain, borrowed apart so finality can learn
@@ -416,14 +421,7 @@ impl Chain {
             max_reorg_depth,
             ..
         } = self;
-        let view = View {
-            db,
-            tip,
-            genesis: *genesis,
-            max_reorg_depth: *max_reorg_depth,
-        };
-
-        (finality.as_deref_mut(), view)
+        (finality.as_deref_mut(), View::new(db, tip, *genesis, *max_reorg_depth))
     }
 
     /// Lets finality catch up with the tip.
