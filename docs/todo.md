@@ -196,8 +196,19 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ### Database
 
-- [ ] **No state root.** Block headers do not commit to state. Needed for snapshot sync, light
-  clients, and any later ZK work.
+- [x] **A state root and a receipts root.** Each header's `state_root` is the root of a sparse
+  Merkle tree over every chain-state entry, kept incrementally in the `StateTree` column, and its
+  `receipts_root` a Merkle root over what its transactions did. Blocks with wrong roots are
+  refused; `GET /proofs/{column}/{key}` and `GET /proofs/receipts/{id}` serve proofs that
+  `StateProof::verify` and `crypto::merkle::verify` check.
+- [ ] **No snapshot sync.** A node still replays every block from genesis. The root lets it check a
+  snapshot of chain state it downloads instead, with `stored_root`, but nothing sends or takes one.
+- [ ] **No light client.** Proofs and headers are enough to check a value without the chain, but
+  nothing follows headers alone yet, and the explorer trusts its node.
+- [ ] **Proofs are against the tip only.** The node keeps one state tree, so it cannot prove what
+  an older block's state held; keeping nodes by version, as Jellyfish trees do, would.
+- [ ] **`tx_root` is a flat hash.** A transaction's inclusion is proven through its receipt; a
+  Merkle `tx_root` would prove the signed transaction itself.
 - [x] **Commits can be undone.** Each main-chain block keeps an undo record of every value it
   replaced, for the last 100 blocks.
 - [x] **Prefix scans.** `Database::scan` visits a column's keys with a prefix, in order, from a

@@ -10,7 +10,7 @@ use {
     crate::consensus::{Consensus, ConsensusConfig, ConsensusError, PowConfig},
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
-    crate::db::{Column, Database, DbError, Read, State},
+    crate::db::{Column, Database, DbError, MemoryDb, Read, State, StateTree},
     crate::registry::tokens::STANDARD_TOKEN_FUNCTIONS,
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
@@ -50,7 +50,7 @@ pub use finality::{
 };
 #[cfg(feature = "finality-ffg")]
 pub use finality::{FfgConfig, GenesisValidator};
-pub use receipt::{TxReceipt, TxStatus};
+pub use receipt::{CommittedOutcome, CommittedReceipt, TxReceipt, TxStatus, receipts_root};
 
 /// The development chains' transaction limits: what one deploy or contract call may use.
 pub const DEV_TX_LIMITS: Limits = Limits {
@@ -65,9 +65,9 @@ pub const DEV_MAX_REORG_DEPTH: u64 = 100;
     summary = "The layout this node keeps its database in. It goes up whenever a stored record changes shape, so a node never reads a database it would misread.",
     category = "Chain",
     see_also = "ChainError::OldFormat",
-    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry. 4: contracts record their storage layout. 5: layouts declare record keys and checked kinds.",
+    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry. 4: contracts record their storage layout. 5: layouts declare record keys and checked kinds. 6: headers commit to a state root and a receipts root, and the state tree is kept.",
 )]
-pub const STORAGE_FORMAT: u32 = 5;
+pub const STORAGE_FORMAT: u32 = 6;
 
 const TIP_KEY: &[u8] = b"tip";
 const TIPS_KEY: &[u8] = b"tips";
@@ -298,12 +298,42 @@ impl Genesis {
                 difficulty: 0,
                 tx_root: Hashable::hash(self, self.hash),
                 proof_root: Block::proof_root(self.hash, &[]),
+                receipts_root: receipts_root(self.hash, &[]),
+                state_root: self.state_root(),
                 gas_used: 0,
                 base_price: self.fees.as_ref().map_or(u256::ZERO, |fees| fees.pricing.build().genesis_price()),
             },
             txs: Vec::new(),
             proofs: Vec::new(),
             seal: Seal::None,
+        }
+    }
+
+    /// Writes the state the chain starts from: the allocations, and what its finality starts with.
+    fn write_state(&self, state: &State) -> Result<(), ChainError> {
+        let accounts = Accounts::new(state);
+
+        for allocation in &self.allocations {
+            accounts
+                .credit(&allocation.address, allocation.amount)
+                .map_err(|err| ChainError::BadGenesis(err.to_string()))?;
+        }
+
+        if let Some(config) = &self.finality {
+            config.write_genesis(state)?;
+        }
+
+        Ok(())
+    }
+
+    /// The root of the state the chain starts from. A genesis whose state cannot be written has
+    /// none, and Chain::open refuses it for that.
+    fn state_root(&self) -> Hash {
+        let state = State::new(Arc::new(MemoryDb::default()));
+
+        match self.write_state(&state) {
+            Ok(()) => StateTree::new(&state, self.hash).follow().expect("a memory database never fails"),
+            Err(_) => Hash::zero(self.hash),
         }
     }
 
@@ -412,6 +442,10 @@ pub enum BlockError {
     GasUsed { expected: u64, got: u64 },
     #[document(summary = "Crediting the producer its share of the fees would overflow its balance.")]
     Fee(String),
+    #[document(summary = "Its receipts_root is not the root of what its transactions did.")]
+    ReceiptsRoot,
+    #[document(summary = "Its state_root is not the state tree's root once it has run.")]
+    StateRoot { expected: Hash, got: Hash },
 }
 
 impl fmt::Display for BlockError {
@@ -429,6 +463,8 @@ impl fmt::Display for BlockError {
             BlockError::BasePrice { expected, got } => write!(f, "base price {got}, but its parent makes it {expected}"),
             BlockError::GasUsed { expected, got } => write!(f, "gas_used {got}, but its transactions used {expected}"),
             BlockError::Fee(why) => write!(f, "paying the producer its fees: {why}"),
+            BlockError::ReceiptsRoot => write!(f, "receipts_root does not match what its transactions did"),
+            BlockError::StateRoot { expected, got } => write!(f, "state_root {got}, but running it reaches {expected}"),
         }
     }
 }
@@ -507,17 +543,9 @@ impl Chain {
             }
             None => {
                 let state = State::new(db.clone());
-                let accounts = Accounts::new(&state);
-
-                for allocation in &genesis.allocations {
-                    accounts
-                        .credit(&allocation.address, allocation.amount)
-                        .map_err(|err| ChainError::BadGenesis(err.to_string()))?;
-                }
-
-                if let Some(config) = &genesis.finality {
-                    config.write_genesis(&state)?;
-                }
+                genesis.write_state(&state)?;
+                let root = StateTree::new(&state, genesis.hash).follow()?;
+                debug_assert_eq!(root, block.header.state_root, "genesis's state is the one its block commits to");
 
                 state.put_value(Column::Blocks, id_key(&id), &block);
                 state.put_value(Column::Work, id_key(&id), &WorkRecord { total: u256::ZERO });
@@ -715,38 +743,121 @@ impl Chain {
         },
     )]
     pub fn build(&self, txs: Vec<SignedTx>, proofs: Vec<Justification>, producer: Address, timestamp: u64) -> Result<Block, DbError> {
-        let context = BlockContext {
-            height: self.tip.height + 1,
-            producer,
-            base_price: self.next_base_price(),
-        };
-        // The transactions run here, on a layer that is thrown away, to keep only those that can
-        // run and fit, and to learn the gas they use.
         let layer = Arc::new(State::new(self.db.clone()));
-        let ran = match self.runner().run(&layer, &txs, &context, Unfit::Skip) {
+
+        self.build_in(&layer, &self.tip, txs, proofs, producer, timestamp)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "The next block on any stored block, unsealed, as build makes one on the tip. It is built in the state at the end of parent, worked out on a layer that is thrown away: the main chain rolled back to where parent's branch splits off, and the branch run up to it.",
+        params = {
+            parent = "The block to build on: the tip, or one on a side branch no deeper than max_reorg_depth.",
+            txs = "The transactions, in order.",
+            proofs = "Finality proofs to carry.",
+            producer = "Who produces it.",
+            timestamp = "When it is made.",
+        },
+        returns = "The block; UnknownParent when parent is not stored, Invalid when its branch does not run.",
+    )]
+    pub fn build_on(
+        &self,
+        parent: &Hash,
+        txs: Vec<SignedTx>,
+        proofs: Vec<Justification>,
+        producer: Address,
+        timestamp: u64,
+    ) -> Result<Block, ImportError> {
+        let header = self.block(parent)?.ok_or(ImportError::UnknownParent(*parent))?.header;
+        let layer = self.state_at(parent)?;
+
+        Ok(self.build_in(&layer, &header, txs, proofs, producer, timestamp)?)
+    }
+
+    /// Builds the next block on parent in layer, which holds the state at the end of parent. The
+    /// transactions run there, to keep only those that can run and fit and learn the gas they
+    /// use, and so do the reward and the proofs, to learn the roots; the layer is thrown away.
+    fn build_in(
+        &self,
+        layer: &Arc<State>,
+        parent: &BlockHeader,
+        txs: Vec<SignedTx>,
+        proofs: Vec<Justification>,
+        producer: Address,
+        timestamp: u64,
+    ) -> Result<Block, DbError> {
+        let context = BlockContext {
+            height: parent.height + 1,
+            producer,
+            base_price: self.base_price_after(parent),
+        };
+        let ran = match self.runner().run(layer, &txs, &context, Unfit::Skip) {
             Ok(ran) => ran,
             Err(ImportError::Db(err)) => return Err(err),
             Err(err) => unreachable!("building skips what does not fit, so only the database fails it: {err}"),
         };
         let gas_used = ran.gas_used;
         let kept: Vec<SignedTx> = ran.kept.into_iter().map(|index| txs[index].clone()).collect();
-
-        Ok(Block {
+        let committed: Vec<CommittedReceipt> = ran.receipts.iter().map(CommittedReceipt::of).collect();
+        let mut block = Block {
             header: BlockHeader {
-                parent: self.tip.id(),
+                parent: parent.id(),
                 height: context.height,
                 timestamp,
                 producer,
-                difficulty: self.consensus.difficulty(&self.tip, timestamp),
+                difficulty: self.consensus.difficulty(parent, timestamp),
                 tx_root: Block::tx_root(self.hash, &kept),
                 proof_root: Block::proof_root(self.hash, &proofs),
+                receipts_root: receipts_root(self.hash, &committed),
+                state_root: Hash::zero(self.hash),
                 gas_used,
                 base_price: context.base_price,
             },
             txs: kept,
             proofs,
             seal: Seal::None,
-        })
+        };
+
+        // The reward and the proofs change state too, so the root is the one importing reaches.
+        // A block whose reward or proofs do not hold is refused for that on import, whatever its
+        // root says.
+        match self.settle(layer, &block) {
+            Ok(()) | Err(ImportError::Invalid(_)) => {}
+            Err(ImportError::Db(err)) => return Err(err),
+            Err(err) => unreachable!("settling a block only fails it or the database: {err}"),
+        }
+
+        block.header.state_root = StateTree::new(layer, self.hash).follow()?;
+
+        Ok(block)
+    }
+
+    /// The state at the end of a stored block, in a layer that is thrown away: the main chain
+    /// rolled back to where the block's branch splits off, and the branch run up to it.
+    fn state_at(&self, id: &Hash) -> Result<Arc<State>, ImportError> {
+        let state = Arc::new(State::new(self.db.clone()));
+        let mut branch = Vec::new();
+        let mut fork = *id;
+
+        while !self.on_main_chain(&fork)? {
+            let block = self.block(&fork)?.ok_or_else(|| missing(&fork))?;
+            fork = block.header.parent;
+            branch.push(block);
+        }
+
+        let fork_height = self.block(&fork)?.ok_or_else(|| missing(&fork))?.header.height;
+
+        for height in (fork_height + 1..=self.tip.height).rev() {
+            let undone: Hash = read_value(&*state, Column::Heights, &height.to_be_bytes())?
+                .ok_or_else(|| DbError::Corrupt(format!("no main-chain block at height {height}")))?;
+            revert(&state, &undone)?;
+        }
+
+        for block in branch.iter().rev() {
+            self.apply(&state, block)?;
+        }
+
+        Ok(state)
     }
 
     #[document(parent = "Chain", summary = "The chain's fees, or None when transactions are free.")]
@@ -967,6 +1078,27 @@ impl Chain {
         })
     }
 
+    /// What a block does to state past its transactions: the producer's reward, and what its
+    /// finality proofs pay and record.
+    fn settle(&self, layer: &Arc<State>, block: &Block) -> Result<(), ImportError> {
+        let reward = self.reward.at(block.header.height);
+
+        if reward > u256::ZERO {
+            Accounts::new(layer)
+                .credit(&block.header.producer, reward)
+                .map_err(|err| match err {
+                    RegistryError::Db(err) => ImportError::Db(err),
+                    _ => ImportError::Invalid(BlockError::Reward),
+                })?;
+        }
+
+        match &self.finality {
+            Some(finality) => finality.apply(layer, block),
+            None if !block.proofs.is_empty() => Err(ImportError::Invalid(BlockError::Proof("this chain has no finality".to_string()))),
+            None => Ok(()),
+        }
+    }
+
     /// Runs a block on top of below and makes it the tip there, keeping an undo record of every
     /// value it replaced.
     fn apply(&self, below: &Arc<State>, block: &Block) -> Result<Vec<Receipt>, ImportError> {
@@ -988,23 +1120,21 @@ impl Chain {
             }));
         }
 
-        let reward = self.reward.at(height);
+        self.settle(&layer, block)?;
 
-        if reward > u256::ZERO {
-            Accounts::new(&layer)
-                .credit(&block.header.producer, reward)
-                .map_err(|err| match err {
-                    RegistryError::Db(err) => ImportError::Db(err),
-                    _ => ImportError::Invalid(BlockError::Reward),
-                })?;
+        let committed: Vec<CommittedReceipt> = receipts.iter().map(CommittedReceipt::of).collect();
+
+        if receipts_root(self.hash, &committed) != block.header.receipts_root {
+            return Err(ImportError::Invalid(BlockError::ReceiptsRoot));
         }
 
-        match &self.finality {
-            Some(finality) => finality.apply(&layer, block)?,
-            None if !block.proofs.is_empty() => {
-                return Err(ImportError::Invalid(BlockError::Proof("this chain has no finality".to_string())));
-            }
-            None => {}
+        let state_root = StateTree::new(&layer, self.hash).follow()?;
+
+        if state_root != block.header.state_root {
+            return Err(ImportError::Invalid(BlockError::StateRoot {
+                expected: state_root,
+                got: block.header.state_root,
+            }));
         }
 
         for (index, (tx, receipt)) in block.txs.iter().zip(&receipts).enumerate() {

@@ -3,7 +3,8 @@
 A blockchain node, and a command-line client for it, in one binary. Contracts run on Lua
 (Luau) or WebAssembly; blocks come from proof of work or a development authority, and are
 finalized by bonded validators, a set of signers, or depth; nodes talk over libp2p; a JSON
-HTTP API serves queries and takes transactions.
+HTTP API serves queries and takes transactions. Every header commits to the chain's state and to
+what its transactions did, as Merkle roots that values and receipts can be proven against.
 
 This page covers the `chainv4` command and how contracts live on the chain.
 
@@ -565,7 +566,9 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "â€
 | `GET /blocks/{latest\|height\|id}` | A block, its gas used and base price, its seal, and each transaction with its fee offer and receipt. |
 | `GET /txs/{id}` | Where a transaction landed, its confirmations, whether it is final, its gas used and fee, its result, events and trace of every call its contracts made; 404 until it is on the main chain. |
 | `GET /accounts/{address}` | Nonce and balance. |
-| `GET /contracts/{address}` | Engine, deployer, exported functions, whether it can be upgraded, and what the token registry holds for it. |
+| `GET /contracts/{address}` | Engine, deployer, exported functions, whether it can be upgraded, its storage layout, and what the token registry holds for it. |
+| `GET /proofs/{column}/{key}` | A proof of one chain-state entry, or that there is none, against the tip's `state_root`. |
+| `GET /proofs/receipts/{id}` | A proof that a transaction's receipt is in its block's `receipts_root`. |
 | `GET /validators` | Every bonded validator, and who votes in the current epoch with what weight: the bonded set under `ffg`, the signers under `authority`; 404 under `depth`. |
 | `GET /validators/{voter}` | One validator by voting key: its account, bond, the epochs it votes in, and whether it was slashed. |
 | `GET /signers` | Under `authority`: who votes now, the set decided last and its version, and the approvals so far for changing it. |

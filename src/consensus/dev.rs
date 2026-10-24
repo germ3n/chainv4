@@ -145,6 +145,8 @@ mod tests {
             difficulty: 0,
             tx_root: Hash::from_bytes(HashType::default_chain(), &[0; 32]).unwrap(),
             proof_root: Hash::from_bytes(HashType::default_chain(), &[0; 32]).unwrap(),
+            receipts_root: Hash::zero(HashType::default_chain()),
+            state_root: Hash::zero(HashType::default_chain()),
             gas_used: 0,
             base_price: u256::ZERO,
         }

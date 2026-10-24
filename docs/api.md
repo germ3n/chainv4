@@ -47,7 +47,7 @@ Block summaries, newest first, below height `before`, `limit` of them: 20 by def
 
 Each summary has:
 - `id`, `height`, `parent`, `timestamp`, `producer`;
-- `difficulty`, `tx_root`, `gas_used`, `base_price`;
+- `difficulty`, `tx_root`, `receipts_root`, `state_root`, `gas_used`, `base_price`;
 - `tx_count` and `proof_count`.
 
 ### `GET /blocks/{block}`
@@ -115,6 +115,38 @@ What a contract is:
 - what the token registry holds for it in `token`: its `address`, `name`, `symbol` and
   `decimals`, each `null` when it exports none; `token` is `null` for a contract that is not a
   token.
+
+### `GET /proofs/{column}/{key}`
+
+A proof of one chain-state entry against the tip's state root (see
+[Chain](chain.md#the-state-root)). `column` is one of `accounts`, `contracts`, `storage`,
+`validators`, `epochs`, `tokens` and `namespaces`; `key` is the entry's key in that column, in hex,
+as [Storage](storage.md#keys-and-encoding) describes. An account's key, for example, is its
+address's tag and 32 bytes.
+
+It answers:
+- `block`, `height` and `state_root`: the tip it proves against;
+- `column`, `key`, and the entry's `value` in hex, or `null` when it holds nothing;
+- `siblings`: the hash beside the path at each branch, the root's first;
+- `leaf`: where the path ends, its `path` and `value_hash`, or `null` where it ends empty.
+
+`StateProof::verify` checks it. A light client that trusts the header needs nothing else.
+
+**Consistency:** the node checks each proof against the root before it answers. A block committed
+while the proof was read would mix two trees, so the proof is read again, three times at most,
+and then it answers 503.
+
+### `GET /proofs/receipts/{id}`
+
+A proof that a transaction's receipt is in its block's receipts root: that the transaction is in
+the chain, and what it did. It answers:
+- `tx`, `block`, `height` and `receipts_root`;
+- `index` and `count`: its place among the block's transactions, and how many there are;
+- `receipt`: its `CommittedReceipt`, encoded, in hex;
+- `path`: the Merkle path from its leaf, the deepest sibling first.
+
+`crypto::merkle::verify(root, leaf(hash, receipt), index, count, path)` checks it. It answers 404 for a
+transaction not on the main chain.
 
 ### `POST /txs`
 
@@ -303,3 +335,6 @@ only plain paths below the directory are served.
 - **`/node`, `/mempool` and `/stream` ask the node.** The rest read the database; these go to
   the node loop, which answers between blocks.
 - **Reads are not snapshot-consistent.** A request that reads several keys can see two tips.
+  Proofs are the exception: each is checked against its root before it is sent.
+- **Proofs are against the tip only.** The node keeps one state tree, so it cannot prove what
+  state held at an older block.

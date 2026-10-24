@@ -16,10 +16,12 @@ use {
 mod memory;
 #[cfg(feature = "rocksdb")]
 mod rocksdb;
+mod tree;
 
 pub use self::memory::MemoryDb;
 #[cfg(feature = "rocksdb")]
 pub use self::rocksdb::RocksDb;
+pub use self::tree::{Path, STATE_COLUMNS, StateProof, StateTree, root_of, state_path, stored_root};
 
 #[document(
     summary = "Where a record lives. A backend keeps each column apart: RocksDb as column families, MemoryDb as part of the key.",
@@ -74,6 +76,9 @@ pub enum Column {
     #[document(summary = "Contract storage in namespaces, the contract's own space among them: keyed by the contract's address, the namespace's name with its length in front, and the script's own key.")]
     #[wincode(tag = 14)]
     Namespaces,
+    #[document(summary = "The state tree's nodes, by depth and the path bits above them: what the state root in each header is the root of. Kept in step with the chain-state columns, block by block.")]
+    #[wincode(tag = 15)]
+    StateTree,
 }
 
 impl Hashable for Column {
@@ -81,7 +86,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 15] = [
+    pub const ALL: [Column; 16] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -97,6 +102,7 @@ impl Column {
         Column::Events,
         Column::Tokens,
         Column::Namespaces,
+        Column::StateTree,
     ];
 
     #[document(
@@ -120,6 +126,7 @@ impl Column {
             Column::Events => "events",
             Column::Tokens => "tokens",
             Column::Namespaces => "namespaces",
+            Column::StateTree => "state_tree",
         }
     }
 }
@@ -308,6 +315,18 @@ impl State {
     )]
     pub fn put_value<T: Hashable>(&self, column: Column, key: Vec<u8>, value: &T) {
         self.put(column, key, value.hashable_bytes_with_tag());
+    }
+
+    #[document(
+        parent = "State",
+        summary = "What this layer changed in these columns, without taking it: each key, and its new value or None for a delete.",
+    )]
+    pub fn changed(&self, columns: &[Column]) -> Vec<(Column, Vec<u8>, Option<Vec<u8>>)> {
+        self.lock()
+            .iter()
+            .filter(|((column, _), _)| columns.contains(column))
+            .map(|((column, key), value)| (*column, key.clone(), value.clone()))
+            .collect()
     }
 
     #[document(

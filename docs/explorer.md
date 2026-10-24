@@ -84,7 +84,7 @@ At most 20,000 main-chain blocks are kept; older ones are let go.
 | --- | --- |
 | Overview | Height, block time, throughput, peers, mempool, finality, base price and the chain's coin. Charts of the last 120 blocks: block times, transactions, gas used against the limit, and the base price or the difficulty. The latest blocks, and the live feed. |
 | Block map | Every loaded block by height. The main chain runs along the middle, with finalized blocks green. Side branches sit in lanes above and below, each block joined to its parent. The tip and the justified checkpoint are outlined. Brighter blocks hold more transactions. |
-| Block | The header, seal and finality proofs, and every transaction with its status and fee. |
+| Block | The header, its roots included, seal and finality proofs, and every transaction with its status and fee. |
 | Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, its events, its fields and its signature. |
 | Account | The balance and nonce. For a contract: its deployer, engine, code size and functions, the storage layout its code declares, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, and the events that mention them, token transfers and approvals in the token's units. Events need a node started with `--index-events`. |
 | Network | The node's roles, uptime, listening addresses and sync state, its gossip backlog, and what it counted since it started. A graph of its peers, and a table of them with what each gossiped, how much of that was dropped, and how far its chain got. |

@@ -2,7 +2,9 @@
 //! JavaScript numbers lose precision past 2^53; hashes, bytes and signatures are 0x hex.
 
 use {
-    crate::chain::{IndexedEvent, TxReceipt, TxStatus},
+    crate::chain::{CommittedReceipt, IndexedEvent, TxReceipt, TxStatus},
+    crate::crypto::hashable::Hashable,
+    crate::db::{Column, StateProof},
     crate::crypto::keypair::PublicKey,
     crate::node::{NodeReport, PeerReport},
     crate::registry::signers::SignerSet,
@@ -16,7 +18,7 @@ use {
     crate::structs::block::{Block, Seal},
     crate::structs::event::Event,
     crate::structs::code::Code,
-    crate::structs::hash::HashType,
+    crate::structs::hash::{Hash, HashType},
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::u256::u256,
     crate::vm::{Declared, Outcome, Shape},
@@ -37,10 +39,42 @@ pub fn summary(block: &Block) -> Value {
         "producer": header.producer.to_string(),
         "difficulty": header.difficulty.to_string(),
         "tx_root": header.tx_root.to_string(),
+        "receipts_root": header.receipts_root.to_string(),
+        "state_root": header.state_root.to_string(),
         "gas_used": header.gas_used,
         "base_price": header.base_price.to_string(),
         "tx_count": block.txs.len(),
         "proof_count": block.proofs.len(),
+    })
+}
+
+/// A proof of one chain-state entry against a block's state root, with what it proves: the entry's
+/// value, or null for none.
+pub fn state_proof(block: &Block, column: Column, key: &[u8], value: Option<&[u8]>, proof: &StateProof) -> Value {
+    json!({
+        "block": block.id().to_string(),
+        "height": block.header.height,
+        "state_root": block.header.state_root.to_string(),
+        "column": column.name(),
+        "key": to_hex(key),
+        "value": value.map(to_hex),
+        "siblings": proof.siblings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "leaf": proof.leaf.map(|(path, value)| json!({"path": to_hex(&path), "value_hash": value.to_string()})),
+    })
+}
+
+/// A proof that a receipt is at its place in a block's receipts root: the receipt as committed,
+/// encoded, and the Merkle path from its leaf.
+pub fn receipt_proof(block: &Block, receipt: &CommittedReceipt, index: usize, count: usize, path: &[Hash]) -> Value {
+    json!({
+        "tx": receipt.tx.to_string(),
+        "block": block.id().to_string(),
+        "height": block.header.height,
+        "receipts_root": block.header.receipts_root.to_string(),
+        "index": index,
+        "count": count,
+        "receipt": to_hex(&receipt.hashable_bytes_with_tag()),
+        "path": path.iter().map(ToString::to_string).collect::<Vec<_>>(),
     })
 }
 

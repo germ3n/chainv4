@@ -18,6 +18,8 @@ A block is a header, its transactions, the finality proofs it carries, and a sea
 | `difficulty` | The expected hashes to find its seal under proof of work; 0 under the authority. |
 | `tx_root` | The chain hash of its transactions, in order. For genesis, the hash of the genesis configuration. |
 | `proof_root` | The chain hash of its finality proofs, in order. |
+| `receipts_root` | The Merkle root of what its transactions did, in order (see [Receipts](#receipts)). The zero hash for a block without transactions. |
+| `state_root` | The root of the state tree once it has run: every chain-state entry (see [The state root](#the-state-root)). |
 | `gas_used` | The gas its transactions used; 0 without fees. |
 | `base_price` | The base price of gas in it; 0 without fees. |
 
@@ -63,7 +65,8 @@ included, hashed with the chain hash.
 `Chain::import` checks a block against its parent before it stores anything:
 1. that it is not known already, and does not build on a block that failed to run;
 2. that its parent is known (`UnknownParent`, which makes the node ask for the gap);
-3. its height, `tx_root` and `proof_root`;
+3. its height, `tx_root` and `proof_root` (its `receipts_root` and `state_root` are checked once it
+   runs);
 4. its base price, which its parent's base price and gas used decide;
 5. that it is not at or below the finalized checkpoint (`ConflictsWithFinality`);
 6. its seal, producer, timing and difficulty, by consensus.
@@ -91,8 +94,44 @@ all of it commits or none of it does.
 3. The producer gets the block reward, `reward.at(height)`.
 4. Finality checks the proofs the block carries and pays their voters, and at a checkpoint updates
    what it keeps in state, such as the next validator set.
-5. Each transaction's receipt is stored by its id, the block becomes the tip at its height, and an
-   undo record keeps every value the block replaced.
+5. The root of what its transactions did must equal the header's `receipts_root`
+   (`ReceiptsRoot`).
+6. The state tree follows everything the block changed, and its root must equal the header's
+   `state_root` (`StateRoot`).
+7. Each transaction's receipt is stored by its id, the block becomes the tip at its height, and an
+   undo record keeps every value the block replaced, the state tree's nodes included.
+
+## The state root
+
+Every header commits to the state the chain is in once the block has run. That is what lets a
+snapshot be checked, a light client trust a value with a proof, and later ZK work prove
+transitions.
+
+**What it covers:** every column of chain state: `Accounts`, `Contracts`, `Storage`,
+`Namespaces`, `Validators`, `Epochs` and `Tokens` (`STATE_COLUMNS`). Blocks, receipts, the event
+index and what finality learned from the network are not chain state, and are left out.
+
+**The tree:** a sparse Merkle tree (`src/db/tree.rs`), binary over 256-bit paths.
+- **Paths:** an entry's path is the chain hash of `"chainv4 state path"`, its column's tag and its
+  key, so entries scatter evenly whatever their keys.
+- **Hashes:** a leaf is the hash of `0`, its path and its value's hash; a branch the hash of `1`
+  and its two halves'. An empty half is the zero hash.
+- **Canonical:** an empty subtree has no node, a subtree of one entry is that entry's leaf, as
+  high up as it can sit, and anything more is a branch. So the root depends on the entries alone,
+  not the order they came in, and `root_of` works it out from a list of entries.
+- **Kept incrementally:** the nodes are stored by depth and path in the `StateTree` column. Each
+  block updates only the nodes on the paths it changed, about log₂ n per entry, in the same layer
+  as everything else it did. So a block that is thrown away throws its nodes away too, and a
+  reorg's undo records put them back.
+
+**Proofs:** `StateTree::prove` gives the hashes beside an entry's path, and the leaf where the path
+ends. `StateProof::verify` checks it against a root: that the entry holds a value, or that it
+holds nothing, when the path ends empty or at another entry's leaf. The API serves them at
+`GET /proofs/{column}/{key}` (see [HTTP API](api.md#get-proofscolumnkey)).
+
+**Checking a database:** `stored_root` reads every chain-state entry back from a database and works
+out the root from them alone, without the tree. Tests check it against every tip, reorgs
+included.
 
 ## Running a transaction
 
@@ -178,8 +217,14 @@ peer's justification all at once.
 2. It keeps those that can run and fit the block gas limit, and leaves out the rest. For example,
    a nonce already used, or an offer that cannot pay.
 3. It records the gas they used and the base price.
+4. It credits the reward and settles the finality proofs too, and records the receipts root and
+   the state root they reach.
 
 A producer runs every block twice: once to build it, once to import it.
+
+`Chain::build_on` builds on any stored block instead, the tip or one on a side branch, in the
+state at the end of that block. It works that state out on a throwaway layer the way a reorg
+would: it rolls the main chain back to where the branch splits off, then runs the branch.
 
 ## Fork choice
 
@@ -228,6 +273,18 @@ Every transaction on the main chain has a receipt, stored by its id (`TxReceipt`
 
 A failed transaction keeps only its error message and its trace, and emits nothing. A reorg moves
 receipts with everything else.
+
+**The receipts root:** each header commits to what its transactions did as a Merkle root, built the
+way RFC 6962 (Certificate Transparency) builds one (`crypto::merkle`):
+- **Leaves:** one per transaction, in order: the hash of `0` and its `CommittedReceipt`, which is
+  its id, fuel burned, gas used, fee, outcome and events.
+- **Not committed:** a failure's message and the trace. Neither is consensus, so their wording and
+  depth can change without splitting the chain. The outcome only says that it failed.
+- **The tree:** a node is the hash of `1` and its two halves', and a list splits at the largest
+  power of two below its length, so no leaf is repeated to fill a level.
+
+`GET /proofs/receipts/{id}` serves the path that proves a transaction's receipt is in its block:
+that it is in the chain, and what it did.
 
 A node started with `--index-events` also indexes every event by its contract, by its contract
 and name, and by the addresses in its data, in the same commit. Events from before it was turned

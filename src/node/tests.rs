@@ -58,27 +58,16 @@ fn pow_node() -> (Node, FakeNet) {
 /// Mines a block on parent by hand, one target later.
 fn mine_on(node: &Node, parent: &BlockHeader, miner: u8) -> Block {
     let timestamp = parent.timestamp + 1_000;
-    let header = BlockHeader {
-        parent: parent.id(),
-        height: parent.height + 1,
-        timestamp,
-        producer: Address::Ed25519([miner; 32]),
-        difficulty: node.chain().consensus().difficulty(parent, timestamp),
-        tx_root: Block::tx_root(HashType::default_chain(), &[]),
-        proof_root: Block::proof_root(HashType::default_chain(), &[]),
-        gas_used: 0,
-        base_price: u256::ZERO,
-    };
-    let nonce = (0..)
-        .find(|nonce| meets(work_hash(HashType::default_chain(), &header.id(), *nonce), header.difficulty))
+    let mut block = node
+        .chain()
+        .build_on(&parent.id(), Vec::new(), Vec::new(), Address::Ed25519([miner; 32]), timestamp)
         .unwrap();
+    let nonce = (0..)
+        .find(|nonce| meets(work_hash(HashType::default_chain(), &block.id(), *nonce), block.header.difficulty))
+        .unwrap();
+    block.seal = Seal::Work { nonce };
 
-    Block {
-        header,
-        txs: Vec::new(),
-        proofs: Vec::new(),
-        seal: Seal::Work { nonce },
-    }
+    block
 }
 
 /// Far enough ahead that no block in these tests is from the future.

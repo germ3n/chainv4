@@ -164,8 +164,8 @@ fn a_deployed_token_is_registered_and_leaves_with_its_block() {
 
     // A heavier branch without the deploy takes the token off.
     let b1 = mine_on(&chain, &genesis_block, Vec::new(), miner);
-    let b2 = mine_on(&chain, &b1, Vec::new(), miner);
     chain.import(&b1, LATER).unwrap();
+    let b2 = mine_on(&chain, &b1, Vec::new(), miner);
     assert!(matches!(chain.import(&b2, LATER), Ok(Imported::Reorganized { .. })));
 
     assert_eq!(registered(&chain), None);
@@ -492,30 +492,39 @@ fn pow_genesis() -> Genesis {
 }
 
 /// Mines a block on any stored block, one target after it, on a chain whose work hash is its
-/// chain hash, as every proof-of-work chain in these tests is.
+/// chain hash, as every proof-of-work chain in these tests is. Import the parent first: the roots
+/// need its state. A block meant to be invalid, with a transaction that cannot run, on a branch
+/// that does not, or on one never imported, gets zero roots by hand: it is refused for what is
+/// wrong with it before its roots are looked at.
 fn mine_on(chain: &Chain, parent: &Block, txs: Vec<SignedTx>, miner: Address) -> Block {
     let timestamp = parent.header.timestamp + 1_000;
-    let header = BlockHeader {
-        parent: parent.id(),
-        height: parent.header.height + 1,
-        timestamp,
-        producer: miner,
-        difficulty: chain.consensus().difficulty(&parent.header, timestamp),
-        tx_root: Block::tx_root(chain.hash(), &txs),
-        proof_root: Block::proof_root(chain.hash(), &[]),
-        gas_used: 0,
-        base_price: u256::ZERO,
+    let mut block = match chain.build_on(&parent.id(), txs.clone(), Vec::new(), miner, timestamp) {
+        Ok(built) if built.txs == txs => built,
+        _ => Block {
+            header: BlockHeader {
+                parent: parent.id(),
+                height: parent.header.height + 1,
+                timestamp,
+                producer: miner,
+                difficulty: chain.consensus().difficulty(&parent.header, timestamp),
+                tx_root: Block::tx_root(chain.hash(), &txs),
+                proof_root: Block::proof_root(chain.hash(), &[]),
+                receipts_root: Hash::zero(chain.hash()),
+                state_root: Hash::zero(chain.hash()),
+                gas_used: 0,
+                base_price: u256::ZERO,
+            },
+            txs,
+            proofs: Vec::new(),
+            seal: Seal::None,
+        },
     };
     let nonce = (0..)
-        .find(|nonce| meets(work_hash(chain.hash(), &header.id(), *nonce), header.difficulty))
+        .find(|nonce| meets(work_hash(chain.hash(), &block.id(), *nonce), block.header.difficulty))
         .unwrap();
+    block.seal = Seal::Work { nonce };
 
-    Block {
-        header,
-        txs,
-        proofs: Vec::new(),
-        seal: Seal::Work { nonce },
-    }
+    block
 }
 
 fn send(to: &Address, amount: u128, nonce: u64) -> SignedTx {
@@ -563,9 +572,11 @@ fn the_heavier_branch_wins_and_state_follows_it() {
     assert_eq!(chain.receipt(&to_carol.id(HashType::default_chain())).unwrap().unwrap().block, b1.id());
 
     let a2 = mine_on(&chain, &a1, Vec::new(), miner_a);
-    let a3 = mine_on(&chain, &a2, Vec::new(), miner_a);
 
     assert!(matches!(chain.import(&a2, LATER), Ok(Imported::Side)));
+
+    let a3 = mine_on(&chain, &a2, Vec::new(), miner_a);
+
     assert!(matches!(chain.import(&a3, LATER), Ok(Imported::Reorganized { .. })));
     assert_eq!((balance(&chain, &bob), balance(&chain, &carol)), (u256::new(10), u256::ZERO));
     assert_eq!((balance(&chain, &miner_a), balance(&chain, &miner_b)), (u256::new(200), u256::ZERO));
@@ -957,8 +968,8 @@ fn indexed_events_are_found_by_contract_name_and_address_and_leave_with_their_bl
 
     // A heavier branch takes the indexed block, and its events, off.
     let b2 = mine_on(&chain, &a1, Vec::new(), miner);
-    let b3 = mine_on(&chain, &b2, Vec::new(), miner);
     chain.import(&b2, LATER).unwrap();
+    let b3 = mine_on(&chain, &b2, Vec::new(), miner);
     assert!(matches!(chain.import(&b3, LATER), Ok(Imported::Reorganized { .. })));
 
     assert!(listed(EventFilter::Contract(emitter)).is_empty());
@@ -1015,13 +1026,13 @@ fn the_event_index_catches_up_on_older_blocks_and_keeps_its_window() {
     let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &authority());
     let mut main = vec![mine_on(&late, &genesis_block, vec![deploy, ping(1, 1)], miner)];
 
-    for nonce in 2..6 {
-        main.push(mine_on(&late, main.last().unwrap(), vec![ping(nonce as i64, nonce)], miner));
-    }
-
-    for block in &main {
+    for nonce in 2..=6 {
         for chain in [&mut live, &mut late, &mut ahead] {
-            extended(chain.import(block, LATER));
+            extended(chain.import(main.last().unwrap(), LATER));
+        }
+
+        if nonce < 6 {
+            main.push(mine_on(&late, main.last().unwrap(), vec![ping(nonce as i64, nonce)], miner));
         }
     }
 
@@ -1042,13 +1053,13 @@ fn the_event_index_catches_up_on_older_blocks_and_keeps_its_window() {
     // empty, so nothing it indexes lands where theirs were.
     let mut branch = vec![mine_on(&late, &main[1], Vec::new(), miner)];
 
-    for nonce in 3..6 {
-        branch.push(mine_on(&late, branch.last().unwrap(), vec![ping(10 + nonce as i64, nonce)], miner));
-    }
-
-    for block in &branch {
+    for nonce in 3..=6 {
         for chain in [&mut live, &mut late] {
-            chain.import(block, LATER).unwrap();
+            chain.import(branch.last().unwrap(), LATER).unwrap();
+        }
+
+        if nonce < 6 {
+            branch.push(mine_on(&late, branch.last().unwrap(), vec![ping(10 + nonce as i64, nonce)], miner));
         }
     }
 
@@ -1111,4 +1122,108 @@ fn index_events_takes_genesis_a_height_or_a_window() {
     assert_eq!(EventsFrom::Latest(3).lowest(10), 8, "heights 8, 9 and 10");
     assert_eq!(EventsFrom::Latest(100).lowest(10), 0);
     assert_eq!(EventsFrom::Height(7).lowest(10), 7);
+}
+
+/// What the tip's header commits to, worked out from the database alone.
+fn roots_hold(chain: &Chain) {
+    let tip = chain.tip();
+    let block = chain.block(&tip.id()).unwrap().unwrap();
+    let committed: Vec<CommittedReceipt> = block
+        .txs
+        .iter()
+        .map(|tx| {
+            let id = tx.id(chain.hash());
+
+            chain.receipt(&id).unwrap().unwrap().committed(id)
+        })
+        .collect();
+
+    assert_eq!(crate::db::stored_root(&*chain.db, chain.hash()).unwrap(), tip.state_root, "at height {}", tip.height);
+    assert_eq!(StateTree::new(&chain.state(), chain.hash()).root().unwrap(), tip.state_root);
+    assert_eq!(receipts_root(chain.hash(), &committed), tip.receipts_root);
+}
+
+#[test]
+fn headers_commit_to_the_state_and_what_their_transactions_did() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let bob = stranger().public().address();
+
+    roots_hold(&chain);
+    assert_ne!(chain.tip().state_root, Hash::zero(chain.hash()), "genesis holds the allocations");
+    assert_eq!(chain.tip().receipts_root, Hash::zero(chain.hash()));
+
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 0, FeeOffer::NONE, &authority());
+    let counter = contract_address(&authority().public().address(), 0, chain.hash());
+    let increment = |nonce: u64| {
+        let tx = Tx::ContractCall {
+            to: counter,
+            func: Hash::Xxh3_64(selector("increment")),
+            amount: Amount::U128(0),
+            data: vec![TxCallArgumentType::I64(5)],
+        };
+
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+    };
+    advance(&mut chain, vec![deploy, send(&bob, 10, 1)]);
+    roots_hold(&chain);
+    advance(&mut chain, vec![increment(2), increment(3)]);
+    roots_hold(&chain);
+    advance(&mut chain, Vec::new());
+    roots_hold(&chain);
+
+    // A light client trusting the header can check a value with a proof alone.
+    let root = chain.tip().state_root;
+    let key = crate::db::address_key(&bob);
+    let account = chain.state().get(Column::Accounts, &key).unwrap().unwrap();
+    let proof = StateTree::new(&chain.state(), chain.hash()).prove(Column::Accounts, &key).unwrap();
+
+    assert!(proof.verify(&root, Column::Accounts, &key, Some(&account)));
+    assert!(!proof.verify(&root, Column::Accounts, &key, None));
+
+    // A header that claims another root is refused, and nothing it ran is kept.
+    let refused = |chain: &mut Chain, tamper: &dyn Fn(&mut BlockHeader)| {
+        let (mut block, now) = next_block(chain, vec![send(&bob, 1, 4)]);
+        tamper(&mut block.header);
+        block.seal = producer().seal(&block.header).unwrap();
+
+        chain.import(&block, now)
+    };
+
+    assert!(matches!(
+        refused(&mut chain, &|header| header.state_root = Hash::zero(header.state_root.algorithm())),
+        Err(ImportError::Invalid(BlockError::StateRoot { .. }))
+    ));
+    assert!(matches!(
+        refused(&mut chain, &|header| header.receipts_root = Hash::zero(header.receipts_root.algorithm())),
+        Err(ImportError::Invalid(BlockError::ReceiptsRoot))
+    ));
+    assert_eq!(chain.tip().state_root, root);
+    roots_hold(&chain);
+}
+
+#[test]
+fn reorgs_take_the_state_tree_along() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &pow_genesis()).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let bob = stranger().public().address();
+    let a1 = mine_on(&chain, &genesis, vec![send(&bob, 10, 0)], Address::Ed25519([1; 32]));
+    extended(chain.import(&a1, LATER));
+    roots_hold(&chain);
+
+    // A heavier branch, sending more to someone else, takes over, and then the first comes back.
+    let carol = stranger().public().address();
+    let b1 = mine_on(&chain, &genesis, vec![send(&bob, 30, 0), send(&carol, 1, 1)], Address::Ed25519([2; 32]));
+    assert!(matches!(chain.import(&b1, LATER), Ok(Imported::Side)));
+    let b2 = mine_on(&chain, &b1, Vec::new(), Address::Ed25519([2; 32]));
+    assert!(matches!(chain.import(&b2, LATER), Ok(Imported::Reorganized { .. })));
+    roots_hold(&chain);
+
+    let a2 = mine_on(&chain, &a1, Vec::new(), Address::Ed25519([1; 32]));
+    assert!(matches!(chain.import(&a2, LATER), Ok(Imported::Side)));
+    let a3 = mine_on(&chain, &a2, Vec::new(), Address::Ed25519([1; 32]));
+    assert!(matches!(chain.import(&a3, LATER), Ok(Imported::Reorganized { .. })));
+    roots_hold(&chain);
+    assert_eq!(balance(&chain, &bob), u256::new(10));
 }

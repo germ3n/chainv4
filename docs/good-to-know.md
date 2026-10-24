@@ -108,6 +108,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
     never connect.
 - **Kinds of finality, scorers and pricings.** A node built without the kind of finality its
   genesis names refuses the genesis file.
+- **The state root's tree, and what a receipt commits.** Paths, leaf and branch hashes, and which
+  columns count (`STATE_COLUMNS`) decide every `state_root`; `CommittedReceipt`'s fields and the
+  RFC 6962 split decide every `receipts_root`. A new chain-state column must join `STATE_COLUMNS`
+  on purpose, and so becomes a new chain.
 
 ## How the chain behaves
 
@@ -122,7 +126,16 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   earlier one wrote all the same runs again. Execution must therefore stay deterministic and read
   state only through `State`: a read that went around it would escape the conflict check.
 - **Receipts keep a trace.** Every call, delegate and transfer a transaction's contracts made,
-  failed ones included, up to 256 hops. It is not consensus: nothing hashes it.
+  failed ones included, up to 256 hops. It is not consensus: the receipts root leaves it out, and
+  a failure's message too.
+- **Headers commit to state.** Each `state_root` is the root of a sparse Merkle tree over every
+  chain-state entry, and each `receipts_root` a Merkle root over what the block's transactions
+  did. A block whose roots are wrong is refused (`StateRoot`, `ReceiptsRoot`), after it runs.
+  `GET /proofs/{column}/{key}` and `GET /proofs/receipts/{id}` serve proofs against the tip, and
+  `StateProof::verify` and `crypto::merkle::verify` check them. See
+  [Chain](chain.md#the-state-root).
+- **Storage format 6.** Headers changed shape, so every chain is new: delete old databases, or
+  point `--db` elsewhere.
 - **Coin decimals are for display only.** Genesis names the coin's symbol and decimals, but the
   chain counts every balance, fee and reward in whole units.
 - **Rewards have no coinbase transaction.** The chain credits the producer after a block's
@@ -187,8 +200,6 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   encoding, and the kinds differ by engine: Lua writes text (`number`, `decimal`,
   `address-hex`), Rust bytes (`i64`, `u256`, `address`). So a Lua version and a Rust version only
   share a namespace whose kind both write, such as `text` or `bytes`.
-- **Storage format 5.** Contract records keep their layout, records and kinds included, so
-  databases from before are refused; delete them, or point `--db` elsewhere.
 - **Loading code is charged.** A deploy or upgrade pays 1 fuel per byte of code to compile it,
   plus whatever a Lua script's top level burns, even when it fails. Every call pays for the top
   level again, since each runs it fresh, before the call is attached: a top level sees no `ctx`

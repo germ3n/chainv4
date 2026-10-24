@@ -66,6 +66,15 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, block: &str) {
         super::fact(ui, "transaction root");
         super::copyable(ui, &summary.tx_root);
         ui.end_row();
+
+        if !summary.state_root.is_empty() {
+            super::fact(ui, "receipts root");
+            super::copyable(ui, &summary.receipts_root);
+            ui.end_row();
+            super::fact(ui, "state root");
+            super::copyable(ui, &summary.state_root);
+            ui.end_row();
+        }
     });
 
     ui.add_space(6.0);

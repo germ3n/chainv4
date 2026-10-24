@@ -37,6 +37,10 @@ pub struct BlockHeader {
     pub tx_root: Hash,
     #[document(summary = "The chain hash of the finality proofs the block carries, in order.")]
     pub proof_root: Hash,
+    #[document(summary = "The Merkle root of what its transactions did, in order: receipts_root over their CommittedReceipts. The zero hash for a block without transactions.")]
+    pub receipts_root: Hash,
+    #[document(summary = "The root of the state tree once the block has run: every chain-state entry, as StateTree keeps them. What snapshots and light clients check state against.")]
+    pub state_root: Hash,
     #[document(summary = "The gas its transactions used, by the chain's gas schedule; 0 on a chain without fees. What moves a base fee, and at most the block gas limit.")]
     pub gas_used: u64,
     #[document(summary = "The base price of gas in this block, which every transaction pays at least: under a base fee, what the parent's gas used made it; when senders bid, their minimum; 0 on a chain without fees.")]

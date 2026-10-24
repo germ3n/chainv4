@@ -72,6 +72,11 @@ pub struct Summary {
     pub producer: String,
     pub difficulty: String,
     pub tx_root: String,
+    /// What its transactions did and the state it leaves, as roots; empty from older nodes.
+    #[serde(default)]
+    pub receipts_root: String,
+    #[serde(default)]
+    pub state_root: String,
     pub gas_used: u64,
     pub base_price: String,
     pub tx_count: usize,

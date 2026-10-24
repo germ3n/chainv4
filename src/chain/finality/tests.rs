@@ -79,27 +79,13 @@ fn pow_genesis(finality: FinalityConfig) -> Genesis {
 
 fn mine_on(chain: &Chain, parent: &Block, miner: u8) -> Block {
     let timestamp = parent.header.timestamp + 1_000;
-    let header = BlockHeader {
-        parent: parent.id(),
-        height: parent.header.height + 1,
-        timestamp,
-        producer: Address::Ed25519([miner; 32]),
-        difficulty: chain.consensus().difficulty(&parent.header, timestamp),
-        tx_root: Block::tx_root(chain.hash(), &[]),
-        proof_root: Block::proof_root(chain.hash(), &[]),
-        gas_used: 0,
-        base_price: u256::ZERO,
-    };
+    let mut block = chain.build_on(&parent.id(), Vec::new(), Vec::new(), Address::Ed25519([miner; 32]), timestamp).unwrap();
     let nonce = (0..)
-        .find(|nonce| meets(work_hash(chain.hash(), &header.id(), *nonce), header.difficulty))
+        .find(|nonce| meets(work_hash(chain.hash(), &block.id(), *nonce), block.header.difficulty))
         .unwrap();
+    block.seal = Seal::Work { nonce };
 
-    Block {
-        header,
-        txs: Vec::new(),
-        proofs: Vec::new(),
-        seal: Seal::Work { nonce },
-    }
+    block
 }
 
 /// Mines count blocks on top of from, importing each, and returns the last.

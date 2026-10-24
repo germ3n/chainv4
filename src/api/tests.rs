@@ -279,6 +279,9 @@ fn bad_requests_and_missing_things_answer_with_an_error() {
         ("/blocks?limit=lots", 400),
         ("/accounts/bob", 400),
         (&format!("/contracts/{nobody}"), 404),
+        ("/proofs/blocks/0x00", 400),
+        ("/proofs/accounts/zz", 400),
+        (&format!("/proofs/receipts/0x{}", "00".repeat(32)), 404),
         ("/nowhere", 404),
     ];
 
@@ -1179,4 +1182,60 @@ fn events_are_listed_from_the_index() {
     let caught_up = ok(address, &format!("/events?contract={greeter}"));
 
     assert_eq!((caught_up["indexed_from"].clone(), caught_up["catching_up_to"].clone()), (json!(0), Value::Null));
+}
+
+#[test]
+fn proofs_check_against_the_roots_in_headers() {
+    use crate::db::{Column, StateProof, address_key};
+
+    let fixture = serve();
+    let hash = HashType::default_chain();
+    let hash_of = |value: &Value| Hash::from_bytes(hash, &from_hex(value.as_str().unwrap()).unwrap()).unwrap();
+    let state_proof = |proof: &Value| StateProof {
+        siblings: proof["siblings"].as_array().unwrap().iter().map(hash_of).collect(),
+        leaf: (!proof["leaf"].is_null()).then(|| {
+            let path = from_hex(proof["leaf"]["path"].as_str().unwrap()).unwrap().try_into().unwrap();
+
+            (path, hash_of(&proof["leaf"]["value_hash"]))
+        }),
+    };
+
+    // What a light client does: trust a header, then check what it is told against its root.
+    let key = address_key(&fixture.bob);
+    let held = ok(fixture.address, &format!("/proofs/accounts/{}", to_hex(&key)));
+    let header = ok(fixture.address, &format!("/blocks/{}", held["height"]));
+    let root = hash_of(&header["state_root"]);
+    let value = from_hex(held["value"].as_str().unwrap()).unwrap();
+
+    assert_eq!(held["state_root"], header["state_root"]);
+    assert_eq!(held["block"], fixture.chain.tip().id().to_string());
+    assert!(state_proof(&held).verify(&root, Column::Accounts, &key, Some(&value)));
+    assert_eq!(
+        crate::registry::Accounts::new(&fixture.chain.state()).get(&fixture.bob).unwrap().balance,
+        u256::new(100),
+        "the value proven is bob's account"
+    );
+
+    let nobody = address_key(&Address::Contract([9; 32]));
+    let absent = ok(fixture.address, &format!("/proofs/accounts/{}", to_hex(&nobody)));
+
+    assert!(absent["value"].is_null());
+    assert!(state_proof(&absent).verify(&root, Column::Accounts, &nobody, None));
+
+    // The deploy in block 2: its receipt is the only leaf of that block's receipts root.
+    let block = ok(fixture.address, "/blocks/2");
+    let tx = block["txs"][0]["id"].as_str().unwrap().to_string();
+    let proof = ok(fixture.address, &format!("/proofs/receipts/{tx}"));
+    let receipt = from_hex(proof["receipt"].as_str().unwrap()).unwrap();
+    let path: Vec<Hash> = proof["path"].as_array().unwrap().iter().map(hash_of).collect();
+    let (index, count) = (proof["index"].as_u64().unwrap() as usize, proof["count"].as_u64().unwrap() as usize);
+
+    assert_eq!((proof["tx"].as_str(), index, count), (Some(tx.as_str()), 0, 1));
+    assert!(crate::crypto::merkle::verify(
+        &hash_of(&block["receipts_root"]),
+        &crate::crypto::merkle::leaf(hash, &receipt),
+        index,
+        count,
+        &path
+    ));
 }

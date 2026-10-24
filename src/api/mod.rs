@@ -6,13 +6,14 @@ use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
         Coin, EventFilter, FinalityConfig, Fees, Genesis, stored_event_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
-        stored_receipt, stored_tip, stored_tips, stored_work,
+        stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt,
     },
+    crate::crypto::merkle,
     crate::crypto::keypair::PublicKey,
     crate::registry::signers::{Approval, SignerSet, Signers},
     crate::registry::validators::Validators,
     crate::structs::vote::Checkpoint,
-    crate::db::{Database, DbError, Read, State},
+    crate::db::{Database, DbError, Read, STATE_COLUMNS, State, StateTree},
     crate::vm::{CallContext, Limits, Vm, VmError, selector},
     crate::mempool::MempoolError,
     crate::node::{NodeHandle, NodeReport, SubmitError},
@@ -182,6 +183,8 @@ fn router(api: Api) -> Router {
         .route("/blocks/{block}", get(block))
         .route("/accounts/{address}", get(account))
         .route("/contracts/{address}", get(contract))
+        .route("/proofs/receipts/{id}", get(receipt_proof))
+        .route("/proofs/{column}/{key}", get(state_proof))
         .route("/txs", post(submit))
         .route("/txs/{id}", get(transaction))
         .route("/validators", get(validators))
@@ -665,6 +668,74 @@ async fn contract(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
     let token = Tokens::new(&state).get(&address)?;
 
     Ok(Json(json::contract(&address, &record, token.as_ref())))
+}
+
+/// How many times a proof is read again when the node committed a block while it was being read.
+const PROOF_TRIES: usize = 3;
+
+/// A proof of one chain-state entry, or of its absence, against the tip's state root.
+async fn state_proof(Shared(api): Shared<Api>, Path((column, key)): Path<(String, String)>) -> Answer {
+    let named = column;
+    let column = STATE_COLUMNS.into_iter().find(|column| column.name() == named).ok_or_else(|| {
+        let names: Vec<&str> = STATE_COLUMNS.iter().map(|column| column.name()).collect();
+
+        ApiError::BadRequest(format!("{named} is not a chain-state column; they are {}", names.join(", ")))
+    })?;
+    let key = from_hex(&key).ok_or_else(|| ApiError::BadRequest(format!("the key is not hex: {key}")))?;
+
+    for _ in 0..PROOF_TRIES {
+        let state = State::new(api.db.clone());
+        let tip = tip(&*api.db)?;
+        let value = state.get(column, &key)?;
+        let proof = StateTree::new(&state, api.hash).prove(column, &key)?;
+
+        // A block committed while this was read mixes two trees, so the proof fails to check:
+        // read it again.
+        if proof.verify(&tip.header.state_root, column, &key, value.as_deref()) {
+            return Ok(Json(json::state_proof(&tip, column, &key, value.as_deref(), &proof)));
+        }
+    }
+
+    Err(ApiError::Unavailable("the state kept moving while the proof was read; ask again".to_string()))
+}
+
+/// A proof that a transaction's receipt is in its block's receipts root.
+async fn receipt_proof(Shared(api): Shared<Api>, Path(id): Path<String>) -> Answer {
+    let db = api.db.clone();
+    let id = block_id(&id, api.hash)?;
+
+    for _ in 0..PROOF_TRIES {
+        let receipt = stored_receipt(&*db, &id)?
+            .ok_or_else(|| ApiError::NotFound(format!("transaction {id} is not on the main chain, or not yet")))?;
+        let block = stored_block(&*db, &receipt.block)?
+            .ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("block {} is not stored", receipt.block))))?;
+        let mut committed: Vec<CommittedReceipt> = Vec::with_capacity(block.txs.len());
+
+        for tx in &block.txs {
+            let tx = tx.id(api.hash);
+
+            // A reorg between the reads leaves a receipt elsewhere, or gone: read it all again.
+            match stored_receipt(&*db, &tx)? {
+                Some(stored) if stored.block == receipt.block => committed.push(stored.committed(tx)),
+                _ => break,
+            }
+        }
+
+        let leaves: Vec<Hash> = committed.iter().map(|receipt| receipt.leaf(api.hash)).collect();
+        let index = receipt.index as usize;
+
+        if leaves.len() != block.txs.len() || index >= leaves.len() {
+            continue;
+        }
+
+        let path = merkle::audit_path(api.hash, &leaves, index);
+
+        if merkle::verify(&block.header.receipts_root, &leaves[index], index, leaves.len(), &path) {
+            return Ok(Json(json::receipt_proof(&block, &committed[index], index, leaves.len(), &path)));
+        }
+    }
+
+    Err(ApiError::Unavailable("the chain kept moving while the proof was read; ask again".to_string()))
 }
 
 /// The token registry by symbol, a page at a time: every token, or those whose symbol starts with
