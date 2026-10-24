@@ -25,6 +25,11 @@ hash under the domain `"chainv4 contract address"`. The same deployer and nonce 
 same address on a chain, and no key controls it. `chainv4 send deploy` prints the address before
 the deploy lands.
 
+**Tokens:** a contract that exports every function genesis names in `token_functions`, ERC-20's
+six on the dev chains, goes in the token registry. Its name, symbol and decimals are asked once,
+after `init`, and an answer that does not fit fails the deploy (see
+[Token standard](token-standard.md#the-token-registry)).
+
 ## Calling
 
 A `Tx::ContractCall` names a function by its selector: the XXH3-64 of its name. Two exports with
@@ -108,7 +113,9 @@ them (`Reserved`).
 address, storage and balance. They:
 1. ask its `check_perms("upgrade", sender)`;
 2. load the new code;
-3. run the new code's `migrate`.
+3. run the new code's `migrate`;
+4. bring the token registry in line with what the new code exports, asking a token's name, symbol
+   and decimals again.
 
 If anything fails, nothing changes.
 
@@ -192,6 +199,7 @@ what its storage or calls cost (`vm::cost`).
 | Event | 200, plus 1 per 16 bytes of name and data |
 | Copying between a module's memory and the host | 1 per 64 bytes |
 | Loading code at deploy or upgrade | 1 per byte of it, plus a Lua script's top level as it runs |
+| Asking a token's name, symbol and decimals at deploy or upgrade | What those functions burn |
 
 **Loading code** is paid for by the deploy or upgrade, and shows in its receipt's `fuel_used`:
 - **Compiling:** every byte costs 1 fuel (`cost::LOAD_BYTE`), as compiling and checking the code

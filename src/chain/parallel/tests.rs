@@ -39,6 +39,7 @@ fn rules() -> Rules {
             fuel: 1_000_000,
             memory: 16 * 1024 * 1024,
         },
+        token_functions: crate::chain::standard_token_functions().into(),
         staking: None,
         signers: None,
         fees: Some(Arc::new(FeeConfig::dev().build())),

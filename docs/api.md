@@ -36,6 +36,7 @@ Where the chain stands:
 | `difficulty`, `work` | The tip's difficulty and the main chain's total work. |
 | `hash` | The chain hash, such as `blake3`. Clients need it to predict contract addresses. |
 | `coin` | The chain's coin as genesis names it: its `symbol` and `decimals`, for showing amounts. |
+| `token_functions` | The functions that make a contract a token on this chain, as genesis names them; `[]` when it keeps no token registry. |
 | `finality` | `null`, or `type`, `epoch`, `checkpoint_interval`, and the `justified` and `finalized` checkpoints, each with `epoch`, `block` and `height`. |
 | `fees` | `null`, or the fee settings as genesis files write them, with `base_price`, what a transaction sent now must offer at least, and `tx_fuel`, the chain's fuel cap per transaction. |
 
@@ -104,7 +105,10 @@ too.
 What a contract is:
 - `address`, `deployer`, `engine` and `code_size`;
 - its exported `functions`, and which are `reentrant`;
-- whether it is `upgradable`, that is, whether it exports `check_perms`.
+- whether it is `upgradable`, that is, whether it exports `check_perms`;
+- what the token registry holds for it in `token`: its `address`, `name`, `symbol` and
+  `decimals`, each `null` when it exports none; `token` is `null` for a contract that is not a
+  token.
 
 ### `POST /txs`
 
@@ -181,6 +185,23 @@ transaction's events (`position`).
 - `catching_up_to` is the height the node is still moving that to, or `null` once it is there.
   It is below `indexed_from` while the node indexes older blocks, and briefly above it on a
   `latest-N` window, as the oldest block leaves.
+
+### `GET /tokens`
+
+The [token registry](token-standard.md#the-token-registry): every contract that exports what
+makes a token on this chain.
+
+**Order:** by symbol, alphabetically, ignoring the case of ASCII letters, then by address. Tokens
+without a symbol come first.
+
+**Searching:** `symbol=…` lists those whose symbol starts with it, ignoring ASCII case. An exact
+match comes first.
+
+**Pages:** `limit` of them (50 by default, at most 500). `next` is the `cursor` for the next page,
+or `null` after the last.
+
+**Each token** has its `address`, `name`, `symbol` and `decimals`, as it answered at its deploy
+or last upgrade, each `null` when it exports none.
 
 ### `GET /node`
 

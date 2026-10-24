@@ -11,6 +11,9 @@ use {
     std::sync::{Arc, Mutex},
 };
 
+/// How many tokens a page of the registry asks for.
+pub const TOKEN_PAGE: u64 = 100;
+
 /// Something to ask a node, which also names what came back.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Ask {
@@ -32,6 +35,8 @@ pub enum Ask {
     Evidence,
     /// A page of indexed events, from the newest or from where a cursor says.
     Events { query: EventQuery, cursor: Option<String> },
+    /// A page of the token registry: tokens whose symbol starts with this, or every one for "".
+    Tokens { symbol: String, cursor: Option<String> },
     /// A read-only call, with its arguments already written as JSON.
     Call { contract: String, function: String, args: String },
     /// A fee offer for a signed probe, with the sender's own choices, as POST /offer's body.
@@ -58,6 +63,19 @@ impl Ask {
             Ask::Evidence => "/evidence".to_string(),
             Ask::Events { query, cursor } => {
                 let mut path = format!("/events?{}", query.params());
+
+                if let Some(cursor) = cursor {
+                    path.push_str(&format!("&cursor={cursor}"));
+                }
+
+                path
+            }
+            Ask::Tokens { symbol, cursor } => {
+                let mut path = format!("/tokens?limit={TOKEN_PAGE}");
+
+                if !symbol.is_empty() {
+                    path.push_str(&format!("&symbol={}", encode(symbol)));
+                }
 
                 if let Some(cursor) = cursor {
                     path.push_str(&format!("&cursor={cursor}"));
@@ -330,6 +348,15 @@ mod tests {
         assert_eq!(
             Ask::Events { query: EventQuery::mentioning("ed25519:0x01"), cursor: None }.path(),
             "/events?address=ed25519:0x01"
+        );
+    }
+
+    #[test]
+    fn token_searches_become_paths() {
+        assert_eq!(Ask::Tokens { symbol: String::new(), cursor: None }.path(), "/tokens?limit=100");
+        assert_eq!(
+            Ask::Tokens { symbol: "a b".to_string(), cursor: Some("0x01".to_string()) }.path(),
+            "/tokens?limit=100&symbol=a%20b&cursor=0x01"
         );
     }
 }

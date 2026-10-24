@@ -49,6 +49,7 @@ holds addresses that matter.
 | `Epochs` | Each epoch's validators or signers, and which checkpoints' voters were paid. | Yes |
 | `Finality` | What this node learned about finality: justifications, the justified and finalized checkpoints, the votes it counted or holds, its own votes, and evidence. | No |
 | `Events` | The event index, on a node started with `--index-events`: each event under its contract, and pointers to it by contract and name and by every address in its data, newest first. | Node's |
+| `Tokens` | The token registry: each token by address, with its name, symbol and decimals, and a listing key by symbol, in ASCII lower case, then a zero byte, then its address. | Yes |
 
 **Chain state** is what every node computes the same from the blocks.
 
@@ -94,6 +95,7 @@ Once on, the database keeps it on, even without the flag, keeping the same block
 - **Format 1:** receipts carry traces, and the chain keeps its leaf blocks in `Meta`.
 - **Format 2:** authority finality's approvals of a signer change record the epoch they were made
   in, so they can expire.
+- **Format 3:** the token registry, which an older database would be missing its tokens from.
 
 There are no migrations: delete the database, or point `--db` elsewhere.
 

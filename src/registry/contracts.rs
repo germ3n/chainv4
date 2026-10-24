@@ -3,6 +3,7 @@ use {
     crate::crypto::hashable::Hashable,
     crate::crypto::hasher::Hasher,
     crate::db::{Column, DbError, State, address_key},
+    crate::registry::tokens::{METADATA_FUNCTIONS, Token, Tokens},
     crate::structs::address::Address,
     crate::structs::code::{Code, Engine},
     crate::structs::event::Event,
@@ -62,17 +63,18 @@ impl<'a> Contracts<'a> {
 
     #[document(
         parent = "Contracts",
-        summary = "Has the contract's engine check and load its code, stores it at an address derived from the deployer and their nonce, and runs its init, if it exports one, with the deployer as sender.",
+        summary = "Has the contract's engine check and load its code, stores it at an address derived from the deployer and their nonce, and runs its init, if it exports one, with the deployer as sender. A contract that exports every one of token_functions then goes in the token registry, with what its name(), symbol() and decimals() answer, for those it exports.",
         params = {
             vm = "The chain's engines.",
             deployer = "The address deploying it.",
             nonce = "The deployer's nonce for this transaction, which makes the address unique.",
             code = "The contract: Luau source, which nodes compile themselves, or a WebAssembly module.",
             limits = "What loading and init may use.",
+            token_functions = "What makes a contract a token, as genesis says; empty keeps no registry.",
         },
-        returns = "The new contract's address, and what loading the code and init burned and what init emitted. A failure carries what was burned before it.",
-        panics = "Vm when the code does not load, init fails or the chain does not run its engine, AlreadyDeployed when the address is taken.",
-        see_also = "contract_address, ScriptEngine::load, INIT",
+        returns = "The new contract's address, and what loading the code, init and the token registry's questions burned, and what init emitted. A failure carries what was burned before it.",
+        panics = "Vm when the code does not load, init fails or the chain does not run its engine, AlreadyDeployed when the address is taken, BadToken when it is a token but its name(), symbol() or decimals() answers badly.",
+        see_also = "contract_address, ScriptEngine::load, INIT, Tokens",
     )]
     pub fn deploy(
         &self,
@@ -81,6 +83,7 @@ impl<'a> Contracts<'a> {
         nonce: u64,
         code: &Code,
         limits: Limits,
+        token_functions: &[String],
     ) -> Result<(Address, Hooked), Failed> {
         let address = contract_address(deployer, nonce, vm.hash());
 
@@ -99,23 +102,25 @@ impl<'a> Contracts<'a> {
             .hook(vm, &record, context, INIT, spent(limits, loaded))
             .map_err(|failed| failed.after(loaded, Trace::default()))?;
         hooked.fuel_used += loaded;
+        self.register(vm, &record, context, limits, token_functions, &mut hooked)?;
 
         Ok((address, hooked))
     }
 
     #[document(
         parent = "Contracts",
-        summary = "Replaces a contract's code, keeping its address, storage and balance. The contract decides who may: its check_perms is asked with \"upgrade\" and the sender, and must return true. Then the new code's migrate runs, if it exports one, with the sender as sender. If anything fails, nothing changes.",
+        summary = "Replaces a contract's code, keeping its address, storage and balance. The contract decides who may: its check_perms is asked with \"upgrade\" and the sender, and must return true. Then the new code's migrate runs, if it exports one, with the sender as sender, and the token registry is brought in line with what the new code exports. If anything fails, nothing changes.",
         params = {
             vm = "The chain's engines.",
             sender = "Who asks for the upgrade.",
             contract = "The contract to upgrade.",
             code = "The new code, for either engine.",
             limits = "What check_perms, loading and migrate may use together.",
+            token_functions = "What makes a contract a token, as genesis says; empty keeps no registry.",
         },
-        returns = "What check_perms, loading the new code and migrate burned, and what migrate emitted. A failure carries what was burned before it.",
-        panics = "NotPermitted when the contract has no check_perms or it does not return true, NoSuchContract when there is nothing to upgrade, Vm when the code does not load or migrate fails.",
-        see_also = "CHECK_PERMS, MIGRATE, Tx::Upgrade",
+        returns = "What check_perms, loading the new code, migrate and the token registry's questions burned, and what migrate emitted. A failure carries what was burned before it.",
+        panics = "NotPermitted when the contract has no check_perms or it does not return true, NoSuchContract when there is nothing to upgrade, Vm when the code does not load or migrate fails, BadToken when the new code is a token but its name(), symbol() or decimals() answers badly.",
+        see_also = "CHECK_PERMS, MIGRATE, Tx::Upgrade, Tokens",
     )]
     pub fn upgrade(
         &self,
@@ -124,6 +129,7 @@ impl<'a> Contracts<'a> {
         contract: &Address,
         code: &Code,
         limits: Limits,
+        token_functions: &[String],
     ) -> Result<Hooked, Failed> {
         let current = self.get(contract)?.ok_or(RegistryError::NoSuchContract(*contract))?;
         let context = CallContext {
@@ -142,8 +148,75 @@ impl<'a> Contracts<'a> {
         hooked.fuel_used += before;
         trace.append(std::mem::take(&mut hooked.trace));
         hooked.trace = trace;
+        self.register(vm, &record, context, limits, token_functions, &mut hooked)?;
 
         Ok(hooked)
+    }
+
+    /// Puts a contract in the token registry when it exports every one of token_functions, with
+    /// what those of name(), symbol() and decimals() it exports answer, or takes it off when it
+    /// does not. The questions run on a throwaway copy of state, so whatever they write or emit is
+    /// gone; what they burn and where they go joins what the deploy or upgrade did so far.
+    fn register(
+        &self,
+        vm: &Arc<Vm>,
+        record: &ContractRecord,
+        context: CallContext,
+        limits: Limits,
+        token_functions: &[String],
+        hooked: &mut Hooked,
+    ) -> Result<(), Failed> {
+        let tokens = Tokens::new(self.state);
+        let exports = |function: &str| record.functions.iter().any(|name| name == function);
+
+        if token_functions.is_empty() {
+            return Ok(());
+        }
+
+        if !token_functions.iter().all(|function| exports(function)) {
+            return Ok(tokens.unregister(&context.contract)?);
+        }
+
+        let scratch = Arc::new(State::new(self.state.clone()));
+        let mut answers = Vec::with_capacity(METADATA_FUNCTIONS.len());
+
+        for function in METADATA_FUNCTIONS {
+            if !exports(function) {
+                answers.push(None);
+
+                continue;
+            }
+
+            let mut outcome = vm.run(&scratch, record, context, function, &[], spent(limits, hooked.fuel_used));
+            outcome.trace.forget_events();
+            hooked.fuel_used += outcome.fuel_used;
+            hooked.trace.append(outcome.trace);
+            let error = match outcome.result {
+                Ok(answer) => {
+                    answers.push(Some(answer));
+
+                    continue;
+                }
+                Err(VmError::Storage(err)) => RegistryError::Db(err),
+                Err(VmError::OutOfFuel) => RegistryError::Vm(VmError::OutOfFuel),
+                Err(err) => RegistryError::BadToken(format!("{function}() failed: {err}")),
+            };
+
+            return Err(Failed {
+                error,
+                fuel_used: hooked.fuel_used,
+                trace: std::mem::take(&mut hooked.trace),
+            });
+        }
+
+        match Token::from_answers(context.contract, answers[0].as_deref(), answers[1].as_deref(), answers[2].as_deref()) {
+            Ok(token) => Ok(tokens.register(&token)?),
+            Err(why) => Err(Failed {
+                error: RegistryError::BadToken(why),
+                fuel_used: hooked.fuel_used,
+                trace: std::mem::take(&mut hooked.trace),
+            }),
+        }
     }
 
     /// Asks a contract's check_perms whether context.sender has a permission, on a throwaway
@@ -429,7 +502,7 @@ return M
     fn storage_persists_between_calls() {
         let state = state();
         let contracts = Contracts::new(&state);
-        let counter = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS).unwrap().0;
+        let counter = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[]).unwrap().0;
 
         assert_eq!(count(increment(&contracts, counter, 2)), 2.0);
         assert_eq!(count(increment(&contracts, counter, 3)), 5.0);
@@ -439,7 +512,7 @@ return M
     fn failed_calls_leave_storage_alone() {
         let state = state();
         let contracts = Contracts::new(&state);
-        let counter = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS).unwrap().0;
+        let counter = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[]).unwrap().0;
         increment(&contracts, counter, 1);
         let func = Hash::Xxh3_64(selector("fail_after_write"));
         let outcome = contracts.call(&vm(), &context(counter), &func, &[], LIMITS).unwrap();
@@ -452,8 +525,8 @@ return M
     fn each_contract_keeps_its_own_storage() {
         let state = state();
         let contracts = Contracts::new(&state);
-        let first = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS).unwrap().0;
-        let second = contracts.deploy(&vm(), &DEPLOYER, 1, &lua(COUNTER), LIMITS).unwrap().0;
+        let first = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[]).unwrap().0;
+        let second = contracts.deploy(&vm(), &DEPLOYER, 1, &lua(COUNTER), LIMITS, &[]).unwrap().0;
         increment(&contracts, first, 10);
 
         assert_ne!(first, second);
@@ -464,7 +537,7 @@ return M
     fn contracts_survive_a_commit() {
         let db = Arc::new(MemoryDb::default());
         let state = Arc::new(State::new(db.clone()));
-        let counter = Contracts::new(&state).deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS).unwrap().0;
+        let counter = Contracts::new(&state).deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[]).unwrap().0;
         increment(&Contracts::new(&state), counter, 4);
         db.commit(state.take_changes()).unwrap();
         let fresh = Arc::new(State::new(db));
@@ -479,14 +552,14 @@ return M
     fn addresses_are_derived_and_unique() {
         let state = state();
         let contracts = Contracts::new(&state);
-        let address = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS).unwrap().0;
+        let address = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[]).unwrap().0;
 
         assert_eq!(address, contract_address(&DEPLOYER, 0, HashType::default_chain()));
         assert!(matches!(address, Address::Contract(_)));
         assert_ne!(address, contract_address(&DEPLOYER, 1, HashType::default_chain()));
         assert_ne!(address, contract_address(&Address::Ed25519([8; 32]), 0, HashType::default_chain()));
         assert_eq!(
-            contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS).map(|(address, _)| address).map_err(|failed| failed.error),
+            contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[]).map(|(address, _)| address).map_err(|failed| failed.error),
             Err(RegistryError::AlreadyDeployed(address))
         );
     }
@@ -499,7 +572,7 @@ return M
         let func = Hash::Xxh3_64(selector("increment"));
 
         assert!(matches!(
-            contracts.deploy(&vm(), &DEPLOYER, 0, &lua("local = 1"), LIMITS).map_err(|failed| failed.error),
+            contracts.deploy(&vm(), &DEPLOYER, 0, &lua("local = 1"), LIMITS, &[]).map_err(|failed| failed.error),
             Err(RegistryError::Vm(VmError::Compile(_)))
         ));
         assert_eq!(

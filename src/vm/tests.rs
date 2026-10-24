@@ -5,6 +5,7 @@ use crate::db::{Column, MemoryDb, storage_key};
 use crate::registry::Accounts;
 use crate::structs::hex::to_hex;
 use crate::registry::Contracts;
+use crate::registry::tokens::{Token, Tokens};
 use crate::structs::code::Code;
 use crate::structs::trace::{Hop, HopKind};
 
@@ -181,14 +182,14 @@ impl World {
         self.nonce += 1;
 
         Contracts::new(&self.state)
-            .deploy(&self.vm, &DEPLOYER, self.nonce, &code, LIMITS)
+            .deploy(&self.vm, &DEPLOYER, self.nonce, &code, LIMITS, &standard())
             .unwrap()
             .0
     }
 
     fn upgrade(&self, sender: Address, contract: Address, code: Code) -> Result<crate::registry::contracts::Hooked, crate::registry::RegistryError> {
         Contracts::new(&self.state)
-            .upgrade(&self.vm, &sender, &contract, &code, LIMITS)
+            .upgrade(&self.vm, &sender, &contract, &code, LIMITS, &standard())
             .map_err(|failed| failed.error)
     }
 
@@ -216,6 +217,11 @@ impl World {
             .call(&self.vm, &context, &func, args, LIMITS)
             .unwrap()
     }
+}
+
+/// What makes a contract a token on the chains these tests stand for: ERC-20's six.
+fn standard() -> Vec<String> {
+    crate::registry::tokens::STANDARD_TOKEN_FUNCTIONS.map(str::to_string).to_vec()
 }
 
 fn address(address: Address) -> TxCallArgumentType {
@@ -621,7 +627,7 @@ fn init_runs_once_at_deploy_and_only_the_chain_may_run_it() {
     let mut world = World::new();
     world.nonce += 1;
     let (owned, hooked) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(OWNED_V1.to_string()), LIMITS)
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(OWNED_V1.to_string()), LIMITS, &standard())
         .unwrap();
 
     assert!(hooked.fuel_used > 0);
@@ -696,7 +702,7 @@ fn conforms_to_the_token_standard(code: Code) {
     let mut world = World::new();
     world.nonce += 1;
     let (token, hooked) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &code, LIMITS)
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &code, LIMITS, &standard())
         .unwrap();
     let initial = u256::from(1_000_000u64) * u256::from(10u64).pow(18);
     let zero = address(Address::Ed25519([0; 32]));
@@ -716,6 +722,17 @@ fn conforms_to_the_token_standard(code: Code) {
     let transfer = |from: TxCallArgumentType, to: Address, value: TxCallArgumentType| {
         ("Transfer".to_string(), vec![from, address(to), value])
     };
+
+    // It is a token, as it said.
+    assert_eq!(
+        Tokens::new(&world.state).get(&token).unwrap(),
+        Some(Token {
+            address: token,
+            name: Some("Example Token".to_string()),
+            symbol: Some("EXT".to_string()),
+            decimals: Some(18),
+        })
+    );
 
     // init minted the whole initial supply to the deployer.
     assert_eq!(hooked.events.len(), 1);
@@ -765,6 +782,102 @@ fn conforms_to_the_token_standard(code: Code) {
     assert_eq!(world.upgrade(bob, token, code.clone()), Err(crate::registry::RegistryError::NotPermitted));
     world.upgrade(DEPLOYER, token, code).unwrap();
     assert_eq!(balance(carol), [amount(30)]);
+}
+
+/// The six functions that make a token, doing nothing, and a check_perms that lets anyone upgrade.
+const BARE_TOKEN: &str = r#"
+local M = {}
+
+function M.total_supply() return 0 end
+function M.balance_of(owner) return 0 end
+function M.transfer(to, amount) return true end
+function M.approve(spender, amount) return true end
+function M.allowance(owner, spender) return 0 end
+function M.transfer_from(from, to, amount) return true end
+function M.check_perms(permission, who) return true end
+
+return M
+"#;
+
+/// BARE_TOKEN with more functions, or with one taken out.
+fn token_with(extra: &str, without: Option<&str>) -> Code {
+    let mut source = BARE_TOKEN.replace("\nreturn M", &format!("\n{extra}\nreturn M"));
+
+    if let Some(function) = without {
+        source = source.lines().filter(|line| !line.starts_with(&format!("function M.{function}("))).collect::<Vec<_>>().join("\n");
+    }
+
+    Code::Lua(source)
+}
+
+#[test]
+fn contracts_that_export_the_six_are_tokens_and_their_metadata_is_optional() {
+    let mut world = World::new();
+    let tokens = |world: &World, address: Address| Tokens::new(&world.state).get(&address).unwrap();
+
+    // The six alone make a token; name, symbol and decimals are extras.
+    let bare = world.deploy(token_with("", None));
+
+    assert_eq!(tokens(&world, bare), Some(Token { address: bare, name: None, symbol: None, decimals: None }));
+    let plain = world.lua();
+
+    assert_eq!(tokens(&world, plain), None, "a contract short of them is not one");
+
+    // Those it exports are asked, on a copy of state that is thrown away.
+    let described = world.deploy(token_with(
+        r#"function M.symbol() storage.set("asked", "yes") events.emit("Asked") return "BARE" end
+function M.decimals() return 6 end"#,
+        None,
+    ));
+
+    assert_eq!(tokens(&world, described).unwrap().symbol.as_deref(), Some("BARE"));
+    assert_eq!(tokens(&world, described).unwrap().decimals, Some(6));
+    assert_eq!(stored(&world, described, b"asked"), None);
+
+    // Answers the registry cannot keep fail the deploy.
+    for (extra, why) in [
+        ("function M.symbol() return 5 end", "symbol() must return one string"),
+        ("function M.symbol() return \"\" end", "symbol() must give 1 to 16 bytes, not 0"),
+        ("function M.name() return string.rep(\"n\", 65) end", "name() must give 1 to 64 bytes, not 65"),
+        ("function M.name() return \"two\\nlines\" end", "name() gave control characters"),
+        ("function M.decimals() return 78 end", "decimals() must return one whole number from 0 to 77"),
+        ("function M.decimals() return 1.5 end", "decimals() must return one whole number from 0 to 77"),
+        ("function M.name() error(\"no\") end", "name() failed"),
+    ] {
+        world.nonce += 1;
+        let failed = Contracts::new(&world.state)
+            .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with(extra, None), LIMITS, &standard())
+            .unwrap_err();
+
+        assert!(failed.fuel_used > 0, "{extra}: asking cost fuel");
+        assert!(
+            matches!(&failed.error, crate::registry::RegistryError::BadToken(text) if text.contains(why)),
+            "{extra}: {}",
+            failed.error
+        );
+    }
+
+    // An upgrade short of one of the six takes it off; one that brings them back puts it on again.
+    world.upgrade(DEPLOYER, bare, token_with("", Some("approve"))).unwrap();
+
+    assert_eq!(tokens(&world, bare), None);
+
+    world.upgrade(DEPLOYER, bare, token_with("function M.name() return \"Bare\" end", None)).unwrap();
+
+    assert_eq!(tokens(&world, bare).unwrap().name.as_deref(), Some("Bare"));
+
+    // Genesis says what makes a token: other functions, or none, which keeps no registry.
+    world.nonce += 1;
+    let (minimal, _) = Contracts::new(&world.state)
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", Some("approve")), LIMITS, &["transfer".to_string()])
+        .unwrap();
+    world.nonce += 1;
+    let (unlisted, _) = Contracts::new(&world.state)
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", None), LIMITS, &[])
+        .unwrap();
+
+    assert!(tokens(&world, minimal).is_some());
+    assert_eq!(tokens(&world, unlisted), None);
 }
 
 #[test]
@@ -1048,7 +1161,7 @@ fn deploys_and_upgrades_pay_for_loading_and_for_failing() {
     let deploy = |world: &mut World, source: &str| {
         world.nonce += 1;
 
-        Contracts::new(&world.state).deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(source.to_string()), LIMITS)
+        Contracts::new(&world.state).deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(source.to_string()), LIMITS, &standard())
     };
 
     // A deploy pays for loading its code as well as for init.
@@ -1076,7 +1189,7 @@ fn deploys_and_upgrades_pay_for_loading_and_for_failing() {
     // check_perms saying no still pays for asking it.
     let stranger = Address::Ed25519([0xb; 32]);
     let refused = Contracts::new(&world.state)
-        .upgrade(&world.vm, &stranger, &owned, &Code::Lua(OWNED_V1.to_string()), LIMITS)
+        .upgrade(&world.vm, &stranger, &owned, &Code::Lua(OWNED_V1.to_string()), LIMITS, &standard())
         .unwrap_err();
 
     assert_eq!(refused.error, crate::registry::RegistryError::NotPermitted);

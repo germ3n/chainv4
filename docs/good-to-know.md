@@ -8,9 +8,10 @@ other pages explain each part in full; this one is the short list to keep in min
 - **Old `chain.db` files are refused.** Formats change as features land, and nothing migrates
   them. Delete the database, or point `--db` elsewhere. A node stops with:
   - `WrongGenesis` on a database written for another genesis. Switching `--consensus`,
-    `--genesis` or build features does this, and so did genesis gaining its coin;
+    `--genesis` or build features does this, and so did genesis gaining its coin and its
+    `token_functions`;
   - `OldFormat` on a database kept in another storage format (`STORAGE_FORMAT`), such as every
-    database from before signer approvals recorded their epoch (format 2).
+    database from before the token registry (format 3).
 - **There are two dev chains, and pow is the default.**
   - `--consensus pow`, mined with `--mine`;
   - `--consensus authority`, produced with `--produce` on exactly one node.
@@ -43,6 +44,12 @@ other pages explain each part in full; this one is the short list to keep in min
   (`--timeout`, `--confirmations`, `--final`, `--no-wait`). It exits non-zero when the
   transaction landed but failed.
 - **The node's peer id changes on every start.** Its libp2p key is generated fresh each run.
+- **The chain keeps a registry of tokens.** A contract that exports genesis's `token_functions`,
+  ERC-20's six on the dev chains, is registered as it deploys, with its name, symbol and decimals
+  if it exports them. `GET /tokens` lists them by symbol.
+  - **Bad answers fail the deploy:** a token whose `name()`, `symbol()` or `decimals()` fails or
+    gives something out of bounds does not deploy.
+  - **Symbols are not unique:** trust an address, not a symbol.
 - **Events are searchable on nodes that index them.** `--index-events` indexes every event by its
   contract, its name and the addresses in it, for `GET /events`.
   - **Which blocks:** `--index-events` alone keeps every block's events. `=5000` keeps them from a

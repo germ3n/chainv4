@@ -22,6 +22,7 @@ pub mod mempool;
 pub mod network;
 pub mod overview;
 pub mod send;
+pub mod tokens;
 pub mod tx;
 
 /// A page of the explorer.
@@ -35,17 +36,19 @@ pub enum View {
     Account(String),
     Network,
     Mempool,
+    Tokens,
     Finality,
     Send,
 }
 
 impl View {
     /// The pages the tab bar lists.
-    pub const TABS: [(View, &'static str); 6] = [
+    pub const TABS: [(View, &'static str); 7] = [
         (View::Overview, "Overview"),
         (View::Map, "Block map"),
         (View::Network, "Network"),
         (View::Mempool, "Mempool"),
+        (View::Tokens, "Tokens"),
         (View::Finality, "Finality"),
         (View::Send, "Send"),
     ];
@@ -119,30 +122,17 @@ impl Ctx<'_> {
         };
     }
 
-    /// A token's decimals and symbol when the contract is one, asking for what is not known yet.
+    /// A token's decimals and symbol, as the chain's registry holds them or as set by hand, when
+    /// the contract is one; asks for the contract when it is not known yet. None for a contract
+    /// that is no token, or one whose decimals neither it nor anyone gave.
     pub fn token(&mut self, contract: &str) -> Option<(u8, String)> {
-        match self.store.contracts.get(contract) {
-            None => {
+        let Some(token) = self.store.tokens.get(contract).cloned() else {
+            if !self.store.contracts.contains_key(contract) {
                 self.api.ask(Ask::Contract(contract.to_string()));
-
-                return None;
             }
-            Some(Some(record)) if record.is_token() => {}
-            Some(_) => return None,
-        }
 
-        let token = self.store.tokens.get(contract).cloned().unwrap_or_default();
-
-        for (function, known) in [("decimals", token.decimals.is_some()), ("symbol", token.symbol.is_some()), ("name", token.name.is_some())] {
-            if !known {
-                self.api.ask(Ask::Call {
-                    contract: contract.to_string(),
-                    function: function.to_string(),
-                    args: "[]".to_string(),
-                });
-            }
-        }
-
+            return None;
+        };
         let decimals = self.decimals_set(contract).or(token.decimals)?;
 
         Some((decimals, token.symbol.unwrap_or_else(|| "?".to_string())))

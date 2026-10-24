@@ -86,9 +86,10 @@ At most 20,000 main-chain blocks are kept; older ones are let go.
 | Block map | Every loaded block by height. The main chain runs along the middle, with finalized blocks green. Side branches sit in lanes above and below, each block joined to its parent. The tip and the justified checkpoint are outlined. Brighter blocks hold more transactions. |
 | Block | The header, seal and finality proofs, and every transaction with its status and fee. |
 | Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, its events, its fields and its signature. |
-| Account | The balance and nonce. For a contract: its deployer, engine, code size and functions, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals. For anyone: what they hold of every token the explorer has met, and the events that mention them, token transfers and approvals in the token's units. Events need a node started with `--index-events`. |
+| Account | The balance and nonce. For a contract: its deployer, engine, code size and functions, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, and the events that mention them, token transfers and approvals in the token's units. Events need a node started with `--index-events`. |
 | Network | The node's roles, uptime, listening addresses and sync state, and what it counted since it started. A graph of its peers, and a table of them with what each gossiped and how far its chain got. |
 | Mempool | What waits for a block, by sender and nonce. |
+| Tokens | The token registry by symbol, with a search by how a symbol starts: each token's symbol, decimals, contract and name, and what makes a token on this chain. |
 | Finality | The kind, the epoch, and the justified and finalized checkpoints. Who votes and with what weight, the bonded validators, the signers under authority finality, and any conflicting votes the node caught. |
 | Send | Signs and sends transfers, contract calls, deploys and burns. |
 
@@ -126,11 +127,13 @@ such as a transfer, shows its one step the same way.
 symbol and decimals (see [Genesis](genesis.md#coin)), and `/status` passes them on, so every
 client shows balances alike.
 
-**Tokens:** a contract that exports the [token standard](token-standard.md)'s functions is a
-token.
-- **What it says of itself:** the explorer asks it for `name()`, `symbol()` and `decimals()`
-  through the API's read-only calls.
+**Tokens:** the chain's [token registry](token-standard.md#the-token-registry) says which
+contracts are tokens.
+- **What it says of itself:** the token's name, symbol and decimals, as the registry holds them,
+  from `GET /tokens` or `GET /contracts/{address}`. Nothing is called to learn them.
 - **Its amounts:** shown in its own units, such as a `Transfer` event's amount.
+- **Holdings:** an account's page asks `balance_of` of the registry's first 100 tokens by symbol,
+  and of any other token met, and lists those it holds some of.
 - **Decimals by hand:** a token's decimals can be set by hand on its page, for one that reports
   them wrongly or not at all. What is set is remembered per chain, by genesis id.
 
@@ -187,7 +190,8 @@ CHAINV4_NODE=http://127.0.0.1:8080 cargo test -- --ignored   # sends a transfer 
   thread, holding up the API's other requests while it runs.
 - **Side branches show only what the node kept.** `/forks` lists the side blocks the node
   stores, from each leaf back to the main chain. Restarting a node keeps its leaves.
-- **Token holdings are only for tokens met so far.** Nothing lists every token on the chain.
+- **Holdings check at most the registry's first 100 tokens,** by symbol, besides those met
+  elsewhere, with a read-only call each on the node.
 - **Events need the node's index.** A node started with `--index-events` lists them, from the
   lowest height its index holds, and says when it is still indexing older blocks. On any other,
   the explorer says so instead. A list read to its end starts over once the node has indexed

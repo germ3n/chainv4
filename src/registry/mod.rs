@@ -14,6 +14,7 @@ use crate::vm::VmError;
 
 pub mod accounts;
 pub mod signers;
+pub mod tokens;
 pub mod validators;
 #[cfg(feature = "vm")]
 pub mod contracts;
@@ -21,6 +22,7 @@ pub mod contracts;
 pub use accounts::Accounts;
 #[cfg(feature = "vm")]
 pub use contracts::Contracts;
+pub use tokens::Tokens;
 
 #[document(
     summary = "Why a registry operation failed.",
@@ -69,6 +71,8 @@ pub enum RegistryError {
     SameSigners,
     #[document(summary = "The signer has no approval that still counts to withdraw.")]
     NoApproval,
+    #[document(summary = "The contract exports what makes a token on this chain, but its name(), symbol() or decimals() did not answer as the registry needs, and why.")]
+    BadToken(String),
     #[document(summary = "The contract would not load, or this node lacks its engine.")]
     #[cfg(feature = "vm")]
     Vm(VmError),
@@ -100,6 +104,7 @@ impl fmt::Display for RegistryError {
             RegistryError::BadSigners(why) => write!(f, "{why}"),
             RegistryError::SameSigners => write!(f, "those are the signers already"),
             RegistryError::NoApproval => write!(f, "no approval of this signer's counts to withdraw"),
+            RegistryError::BadToken(why) => write!(f, "it is a token, but {why}"),
             #[cfg(feature = "vm")]
             RegistryError::Vm(err) => write!(f, "{err}"),
         }

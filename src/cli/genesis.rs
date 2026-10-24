@@ -213,6 +213,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
             "fuel": genesis.tx_limits.fuel,
             "memory": genesis.tx_limits.memory,
         },
+        "token_functions": genesis.token_functions,
         "max_reorg_depth": genesis.max_reorg_depth,
         "finality": genesis.finality.as_ref().map(finality_json),
         "fees": genesis.fees.as_ref().map(fees_json),
@@ -487,6 +488,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         memory: usize::try_from(limits.whole("memory")?).map_err(|_| "tx_limits.memory is too large".to_string())?,
     };
     limits.done()?;
+    let token_functions = root.strings("token_functions")?;
     let max_reorg_depth = root.whole("max_reorg_depth")?;
     let finality = root.optional_object("finality")?.map(finality_from_json).transpose()?;
     let fees = root.optional_object("fees")?.map(fees_from_fields).transpose()?;
@@ -500,6 +502,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         allocations,
         engines,
         tx_limits,
+        token_functions,
         max_reorg_depth,
         finality,
         fees,
@@ -782,6 +785,7 @@ mod tests {
             ("/finality/checkpont_interval", json!(8), "finality.checkpont_interval is not a genesis field"),
             ("/max_reorg_depth", json!("100"), "max_reorg_depth must be a whole number"),
             ("/engines", json!(["lua", "evm"]), "unknown engine evm"),
+            ("/token_functions", json!("transfer"), "token_functions must be a list"),
             ("/consensus/hash", json!("sha1"), "consensus.hash: unknown hash sha1"),
             ("/allocations/0/amount", json!("-5"), "allocations[0].amount: -5 is not a whole amount"),
             ("/fees/pricing/type", json!("auction"), "unknown pricing auction"),

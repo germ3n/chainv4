@@ -9,6 +9,7 @@ use {
     crate::registry::validators::ValidatorRecord,
     crate::structs::vote::{Checkpoint, Justification, SignedVote},
     crate::registry::contracts::ContractRecord,
+    crate::registry::tokens::Token,
     crate::structs::account::Account,
     crate::structs::address::Address,
     crate::structs::amount::Amount,
@@ -440,7 +441,8 @@ pub fn account(address: &Address, account: &Account) -> Value {
     })
 }
 
-pub fn contract(address: &Address, record: &ContractRecord) -> Value {
+/// A contract, with what the token registry holds for it: null when it is not a token.
+pub fn contract(address: &Address, record: &ContractRecord, token: Option<&Token>) -> Value {
     json!({
         "address": address.to_string(),
         "deployer": record.deployer.to_string(),
@@ -449,6 +451,18 @@ pub fn contract(address: &Address, record: &ContractRecord) -> Value {
         "upgradable": record.functions.iter().any(|name| name == crate::vm::CHECK_PERMS),
         "reentrant": record.reentrant,
         "code_size": record.code.len(),
+        "token": token.map(self::token),
+    })
+}
+
+/// A registered token: its address, and its name, symbol and decimals, each null when it exports
+/// none.
+pub fn token(token: &Token) -> Value {
+    json!({
+        "address": token.address.to_string(),
+        "name": token.name,
+        "symbol": token.symbol,
+        "decimals": token.decimals,
     })
 }
 

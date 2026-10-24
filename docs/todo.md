@@ -148,9 +148,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   apart is up to the contracts; a convention, or namespaced storage, would make it safer.
 - [ ] **Only one permission exists.** `check_perms` is only ever asked about `"upgrade"`. Other
   privileged actions, such as removal, would ask with their own names.
-- [ ] **Tokens are only a convention.** The chain cannot list tokens or tell a token from any other
-  contract; a registry, or a check that a contract exports the standard functions, would help
-  wallets.
+- [x] **A token registry.** A contract that exports every function genesis names in
+  `token_functions`, ERC-20's six by default, is registered as it deploys or upgrades, with what
+  its optional `name()`, `symbol()` and `decimals()` answer; `GET /tokens` lists them by symbol.
+- [ ] **Token metadata is a snapshot.** The registry keeps what a token's name, symbol and decimals
+  answered at its deploy or last upgrade; one whose answers change shows them only after its next
+  upgrade.
 - [x] **Faster calls, same results.** Compiled WebAssembly modules are cached by their code, and
   the Lua engine builds fresh states ahead and closes used ones on threads of its own. Every call
   still runs in a fresh state or instance, so neither changes what a call does.
@@ -253,8 +256,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   transactions and peers as they happen, for nodes started with `--stream`.
 - [x] **The API can serve web pages.** `--cors` lets pages from other origins call it, and
   `--explorer` serves the explorer's web app from the API's own `/`.
-- [ ] **The explorer cannot list every token.** It knows only the tokens it has met; a list of
-  contracts that export the token standard would need an index on the node.
+- [x] **The explorer lists tokens.** A Tokens page lists the registry by symbol, token pages read
+  their name, symbol and decimals from it, and holdings cover its first 100 tokens.
 - [ ] **CI does not build the explorer's web bundle.** It lints the wasm32 build but never runs
   `trunk build`, so a broken `index.html` or wasm-bindgen mismatch shows only when someone builds
   it.
@@ -262,3 +265,4 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 add encryption to wallets/keypairs when stored to disk (if passphrase was set/selected)
 add db migration system (upgrade/downgrade calls maybe?)
+maybe have to check the event log not indexing properly in explorer? maybe settings werent properly changed

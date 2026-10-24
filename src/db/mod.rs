@@ -68,6 +68,9 @@ pub enum Column {
     #[document(summary = "The event index, for a node that keeps one: each event by its contract, and pointers to it by contract and name and by every address in its data, newest first.")]
     #[wincode(tag = 12)]
     Events,
+    #[document(summary = "The token registry: every contract that exports the token standard, with its name, symbol and decimals, by address and by symbol.")]
+    #[wincode(tag = 13)]
+    Tokens,
 }
 
 impl Hashable for Column {
@@ -75,7 +78,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 13] = [
+    pub const ALL: [Column; 14] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -89,6 +92,7 @@ impl Column {
         Column::Epochs,
         Column::Finality,
         Column::Events,
+        Column::Tokens,
     ];
 
     #[document(
@@ -110,6 +114,7 @@ impl Column {
             Column::Epochs => "epochs",
             Column::Finality => "finality",
             Column::Events => "events",
+            Column::Tokens => "tokens",
         }
     }
 }

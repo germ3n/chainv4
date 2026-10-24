@@ -332,8 +332,10 @@ Full proxies are in [contracts/lua/proxy.lua](contracts/lua/proxy.lua) and
 
 Tokens are contracts that follow the [token standard](docs/token-standard.md), much like ERC-20:
 `transfer`, `approve`, `transfer_from`, `balance_of` and the rest, with `Transfer` and
-`Approval` events. They never touch the native coin, which moves only with `--amount` and
-`accounts.transfer`. Deploy one of the examples and use it:
+`Approval` events, and optionally `name`, `symbol` and `decimals`. They never touch the native
+coin, which moves only with `--amount` and `accounts.transfer`. The chain keeps a registry of
+them: a contract that exports the functions genesis names in `token_functions`, ERC-20's six by
+default, is listed at `GET /tokens` as it deploys. Deploy one of the examples and use it:
 
 ```sh
 chainv4 send deploy --lua contracts/lua/token.lua
@@ -519,7 +521,7 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "â€
 | `GET /blocks/{latest\|height\|id}` | A block, its gas used and base price, its seal, and each transaction with its fee offer and receipt. |
 | `GET /txs/{id}` | Where a transaction landed, its confirmations, whether it is final, its gas used and fee, its result, events and trace of every call its contracts made; 404 until it is on the main chain. |
 | `GET /accounts/{address}` | Nonce and balance. |
-| `GET /contracts/{address}` | Engine, deployer, exported functions, and whether it can be upgraded. |
+| `GET /contracts/{address}` | Engine, deployer, exported functions, whether it can be upgraded, and what the token registry holds for it. |
 | `GET /validators` | Every bonded validator, and who votes in the current epoch with what weight: the bonded set under `ffg`, the signers under `authority`; 404 under `depth`. |
 | `GET /validators/{voter}` | One validator by voting key: its account, bond, the epochs it votes in, and whether it was slashed. |
 | `GET /signers` | Under `authority`: who votes now, the set decided last and its version, and the approvals so far for changing it. |
@@ -532,6 +534,7 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "â€
 | `GET /mempool` | The transactions waiting for a block. |
 | `GET /stream` | Server-sent events, from a node started with `--stream`: blocks, reorgs, finality, queued transactions and peers. |
 | `GET /events` | Indexed events, newest first and paged: a contract's, a contract's of one name, or those that mention an address. On nodes started with `--index-events`. |
+| `GET /tokens` | The token registry by symbol, paged, with a search by how a symbol starts. |
 
 Amounts and large integers are decimal strings, hashes and bytes are `0x` hex, and addresses
 are their kind and hex, such as `ed25519:0xâ€¦` or `contract:0xâ€¦`.

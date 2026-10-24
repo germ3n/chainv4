@@ -136,6 +136,52 @@ fn a_different_genesis_is_refused() {
 }
 
 #[test]
+fn token_functions_named_twice_or_blank_are_refused() {
+    for token_functions in [vec!["transfer".to_string(), "transfer".to_string()], vec![String::new()]] {
+        let genesis = Genesis { token_functions, ..genesis() };
+
+        assert!(matches!(
+            Chain::open(Arc::new(MemoryDb::default()), &genesis),
+            Err(ChainError::BadGenesis(why)) if why.contains("token_functions")
+        ));
+    }
+}
+
+#[test]
+fn a_deployed_token_is_registered_and_leaves_with_its_block() {
+    let token_code = Code::Lua(include_str!("../../contracts/lua/token.lua").to_string());
+    let deploy = SignedTx::sign(Tx::Deploy { code: token_code }, 0, FeeOffer::NONE, &authority());
+    let token = contract_address(&authority().public().address(), 0, HashType::default_chain());
+    let miner = Address::Ed25519([9; 32]);
+    let registered = |chain: &Chain| crate::registry::Tokens::new(&chain.state()).get(&token).unwrap();
+
+    let mut chain = Chain::open(Arc::new(MemoryDb::default()), &pow_genesis()).unwrap();
+    let genesis_block = chain.block_at(0).unwrap().unwrap();
+    let a1 = mine_on(&chain, &genesis_block, vec![deploy.clone()], miner);
+    extended(chain.import(&a1, LATER));
+
+    assert_eq!(registered(&chain).and_then(|token| token.symbol).as_deref(), Some("EXT"));
+
+    // A heavier branch without the deploy takes the token off.
+    let b1 = mine_on(&chain, &genesis_block, Vec::new(), miner);
+    let b2 = mine_on(&chain, &b1, Vec::new(), miner);
+    chain.import(&b1, LATER).unwrap();
+    assert!(matches!(chain.import(&b2, LATER), Ok(Imported::Reorganized { .. })));
+
+    assert_eq!(registered(&chain), None);
+
+    // A chain whose genesis names no token functions keeps no registry.
+    let unlisted = Genesis { token_functions: Vec::new(), ..pow_genesis() };
+    let mut chain = Chain::open(Arc::new(MemoryDb::default()), &unlisted).unwrap();
+    let genesis_block = chain.block_at(0).unwrap().unwrap();
+    let deployed = mine_on(&chain, &genesis_block, vec![deploy], miner);
+    extended(chain.import(&deployed, LATER));
+
+    assert!(chain.state().get_value::<crate::registry::contracts::ContractRecord>(Column::Contracts, &crate::db::address_key(&token)).unwrap().is_some());
+    assert_eq!(registered(&chain), None);
+}
+
+#[test]
 fn a_coin_nobody_could_show_is_refused() {
     for coin in [
         Coin { symbol: String::new(), decimals: 18 },

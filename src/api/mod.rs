@@ -16,7 +16,8 @@ use {
     crate::vm::{CallContext, Limits, Vm, VmError, selector},
     crate::mempool::MempoolError,
     crate::node::{NodeHandle, NodeReport, SubmitError},
-    crate::registry::{Accounts, Contracts},
+    crate::registry::tokens::stored_tokens,
+    crate::registry::{Accounts, Contracts, Tokens},
     crate::structs::address::Address,
     crate::structs::block::Block,
     crate::structs::hash::{Hash, HashType},
@@ -55,6 +56,10 @@ const MAX_FORKS: u64 = 1_000;
 const DEFAULT_EVENTS: u64 = 50;
 /// The most events /events returns.
 const MAX_EVENTS: u64 = 500;
+/// How many tokens /tokens returns when the client does not say.
+const DEFAULT_TOKENS: u64 = 50;
+/// The most tokens /tokens returns.
+const MAX_TOKENS: u64 = 500;
 /// How many waiting transactions /mempool returns when the client does not say.
 const DEFAULT_MEMPOOL: u64 = 100;
 /// The most waiting transactions /mempool returns.
@@ -79,6 +84,8 @@ struct Api {
     tx_fuel: u64,
     /// The chain's coin, for clients to show balances by.
     coin: Arc<Coin>,
+    /// The functions that make a contract a token on this chain.
+    token_functions: Arc<[String]>,
     /// The chain's engines, for read-only calls.
     vm: Arc<Vm>,
     /// What one transaction's contracts may use, which bounds a read-only call too.
@@ -113,7 +120,7 @@ pub struct ApiOptions {
         options = "Who else it answers, and what it serves besides the chain.",
     },
     returns = "The address it listens on, which tells you the port when address asked for port 0.",
-    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
+    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
     see_also = "Node, Address, NodeHandle",
 )]
 pub fn start(
@@ -126,6 +133,7 @@ pub fn start(
     let finality = genesis.finality.clone().map(Arc::new);
     let fees = genesis.fees.as_ref().map(|config| Arc::new(config.build()));
     let (hash, tx_fuel, coin, limits) = (genesis.hash, genesis.tx_limits.fuel, genesis.coin.clone(), genesis.tx_limits);
+    let token_functions = genesis.token_functions.clone().into();
     let vm = Arc::new(
         Vm::new(&genesis.engines, genesis.hash)
             .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?,
@@ -152,6 +160,7 @@ pub fn start(
                     fees,
                     tx_fuel,
                     coin: Arc::new(coin),
+                    token_functions,
                     vm,
                     limits,
                     cors: Arc::new(options.cors),
@@ -181,6 +190,7 @@ fn router(api: Api) -> Router {
         .route("/evidence", get(evidence))
         .route("/forks", get(forks))
         .route("/events", get(events))
+        .route("/tokens", get(tokens))
         .route("/node", get(node))
         .route("/mempool", get(mempool))
         .route("/offer", post(offer))
@@ -344,6 +354,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "work": work.to_string(),
         "hash": api.hash.name(),
         "coin": crate::cli::genesis::coin_json(&api.coin),
+        "token_functions": &*api.token_functions,
         "finality": finality,
         "fees": fees,
     })))
@@ -651,8 +662,25 @@ async fn contract(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
     let record = Contracts::new(&state)
         .get(&address)?
         .ok_or_else(|| ApiError::NotFound(format!("no contract at {address}")))?;
+    let token = Tokens::new(&state).get(&address)?;
 
-    Ok(Json(json::contract(&address, &record)))
+    Ok(Json(json::contract(&address, &record, token.as_ref())))
+}
+
+/// The token registry by symbol, a page at a time: every token, or those whose symbol starts with
+/// ?symbol=, ignoring ASCII case.
+async fn tokens(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_TOKENS).clamp(1, MAX_TOKENS) as usize;
+    let cursor = query
+        .get("cursor")
+        .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
+        .transpose()?;
+    let (found, next) = stored_tokens(&*api.db, query.get("symbol").map(String::as_str), cursor.as_deref(), limit)?;
+
+    Ok(Json(json!({
+        "tokens": found.iter().map(json::token).collect::<Vec<_>>(),
+        "next": next.map(|next| to_hex(&next)),
+    })))
 }
 
 /// Takes a signed transaction for the node's mempool.

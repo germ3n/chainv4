@@ -32,6 +32,8 @@ pub struct Rules {
     pub minter: Option<Address>,
     #[document(summary = "What one deploy or contract call may use.")]
     pub limits: Limits,
+    #[document(summary = "The functions that make a contract a token, as genesis says; empty keeps no registry.")]
+    pub token_functions: Arc<[String]>,
     #[document(summary = "What transactions pay, or None on a chain where they are free.")]
     pub fees: Option<Arc<Fees>>,
     #[document(summary = "What staking transactions run under, or None on a chain without staking, where they fail.")]
@@ -501,7 +503,7 @@ fn run(
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
-            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits) {
+            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits, &rules.token_functions) {
                 Ok((address, hooked)) => (Ok(Effect::Deployed(address)), hooked.into()),
                 Err(failed) => failed_hooks(failed),
             }
@@ -511,7 +513,7 @@ fn run(
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
-            match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits) {
+            match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits, &rules.token_functions) {
                 Ok(hooked) => (Ok(Effect::Upgraded(*contract)), hooked.into()),
                 Err(failed) => failed_hooks(failed),
             }

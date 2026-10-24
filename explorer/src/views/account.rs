@@ -1,12 +1,13 @@
 //! An address: its balance and nonce, and for a contract, its code, its functions and a way to
-//! call them read-only. A token shows its name, symbol and decimals, whose decimals can be set by
-//! hand; every account shows what it holds of the tokens the explorer has met.
+//! call them read-only. A token shows its name, symbol and decimals as the chain's registry holds
+//! them, and its decimals can be set by hand; every account shows what it holds of the registered
+//! tokens: the registry's first page, by symbol, and any other the explorer has met.
 
 use {
-    super::{BAD, Ctx, GOOD, events},
+    super::{BAD, Ctx, GOOD, events, tokens},
     crate::api::{Ask, EventQuery},
     crate::format,
-    crate::model::Called,
+    crate::model::{Called, RegisteredToken},
     egui::{RichText, Ui},
     serde_json::json,
 };
@@ -90,7 +91,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
             ui.end_row();
         });
 
-        if contract.is_token() {
+        if contract.token.is_some() {
             token(ui, ctx, address);
         }
 
@@ -117,24 +118,26 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
     });
 }
 
-/// A token's own name, symbol and decimals, and decimals set by hand.
+/// A token's name, symbol and decimals as the chain's registry holds them, and decimals set by
+/// hand.
 fn token(ui: &mut Ui, ctx: &mut Ctx, contract: &str) {
-    ctx.token(contract);
-    let token = ctx.store.tokens.get(contract).cloned().unwrap_or_default();
+    let Some(token) = ctx.store.tokens.get(contract).cloned() else {
+        return;
+    };
     let set = ctx.decimals_set(contract);
 
     ui.add_space(6.0);
     ui.strong("Token");
     super::facts(ui, "token", |ui| {
         super::fact(ui, "name");
-        ui.label(token.name.as_deref().unwrap_or("…"));
+        ui.label(token.name.as_deref().unwrap_or("not given"));
         ui.end_row();
         super::fact(ui, "symbol");
-        ui.label(token.symbol.as_deref().unwrap_or("…"));
+        ui.label(token.symbol.as_deref().unwrap_or("not given"));
         ui.end_row();
         super::fact(ui, "decimals");
         ui.horizontal(|ui| {
-            ui.label(token.decimals.map_or("…".to_string(), |decimals| format!("{decimals}, as the token says")));
+            ui.label(token.decimals.map_or("not given".to_string(), |decimals| format!("{decimals}, as the token says")));
             let mut chosen = set.or(token.decimals).unwrap_or(18);
             let mut by_hand = set.is_some();
 
@@ -150,27 +153,42 @@ fn token(ui: &mut Ui, ctx: &mut Ctx, contract: &str) {
     });
 }
 
-/// What the address holds of every token met so far.
+/// What the address holds of the registered tokens: the registry's first page, by symbol, and any
+/// other token met. Tokens it holds none of are left out.
 fn holdings(ui: &mut Ui, ctx: &mut Ctx, holder: &str) {
-    let tokens: Vec<String> = ctx
-        .store
-        .contracts
-        .iter()
-        .filter(|(_, contract)| contract.as_ref().is_some_and(|contract| contract.is_token()))
-        .map(|(address, _)| address.clone())
-        .collect();
+    tokens::first_page(ctx, "");
+    let mut known: Vec<RegisteredToken> = ctx.store.tokens.values().cloned().collect();
+    known.sort_by_key(|token| (token.symbol.as_ref().map(|symbol| symbol.to_ascii_lowercase()), token.address.clone()));
 
-    if tokens.is_empty() {
+    if known.is_empty() {
         return;
     }
 
+    let checked = known.len();
+    let held: Vec<(String, Option<String>)> = known
+        .into_iter()
+        .map(|token| {
+            let raw = ctx.holding(&token.address, holder);
+
+            (token.address, raw)
+        })
+        .filter(|(_, raw)| raw.as_deref() != Some("0"))
+        .collect();
+
     ui.add_space(6.0);
     ui.strong("Token holdings");
+
+    if held.is_empty() {
+        ui.weak(format!("It holds none of the {checked} registered tokens checked."));
+
+        return;
+    }
+
     egui::Grid::new("holdings").num_columns(2).striped(true).show(ui, |ui| {
-        for token in tokens {
+        for (token, raw) in held {
             super::address(ui, ctx, &token);
 
-            match (ctx.holding(&token, holder), ctx.token(&token)) {
+            match (raw, ctx.token(&token)) {
                 (Some(raw), Some((decimals, symbol))) => ui.label(format::amount(&raw, decimals, &symbol)),
                 (Some(raw), None) => ui.label(format!("{raw} units")),
                 (None, _) => ui.weak("…"),

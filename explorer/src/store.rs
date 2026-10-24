@@ -6,7 +6,7 @@ use {
     crate::api::{Ask, EventQuery, Failure},
     crate::model::{
         Account, BlockDetail, Checkpoint, Contract, EventsPage, Forks, FoundEvent, Mempool, NodeView, Page, Peer, PeerChange,
-        Receipt, Reorganized, Status, Summary, TxView,
+        Receipt, RegisteredToken, Reorganized, Status, Summary, TokensPage, TxView,
     },
     serde_json::Value,
     std::collections::{BTreeMap, HashMap, VecDeque},
@@ -21,12 +21,39 @@ const MAX_WAITING: usize = 1_000;
 /// How many blocks a page asks for at most, as the API allows.
 pub const PAGE: u64 = 100;
 
-/// A token's own account of itself, from read-only calls.
+/// The registered tokens a search found so far, by symbol.
 #[derive(Clone, Debug, Default)]
-pub struct Token {
-    pub name: Option<String>,
-    pub symbol: Option<String>,
-    pub decimals: Option<u8>,
+pub struct TokenList {
+    pub tokens: Vec<RegisteredToken>,
+    /// Where the next page starts, or None when there is none.
+    pub next: Option<String>,
+    /// How many pages were read.
+    pub pages: usize,
+    /// When the first page last came, in milliseconds since the Unix epoch.
+    pub refreshed: u64,
+}
+
+impl TokenList {
+    /// Takes a page: the first, which stands for the list while that is all that was read, or a
+    /// later one, which goes after what is held.
+    pub fn take(&mut self, page: TokensPage, later: bool, now: u64) {
+        if later {
+            let held: Vec<String> = self.tokens.iter().map(|token| token.address.clone()).collect();
+            self.tokens.extend(page.tokens.into_iter().filter(|token| !held.contains(&token.address)));
+            self.next = page.next;
+            self.pages += 1;
+
+            return;
+        }
+
+        self.refreshed = now;
+
+        if self.pages <= 1 {
+            self.tokens = page.tokens;
+            self.next = page.next;
+            self.pages = 1;
+        }
+    }
 }
 
 /// The indexed events a query found so far, newest first.
@@ -103,7 +130,10 @@ pub struct Store {
     pub accounts: HashMap<String, Account>,
     /// Contracts by address; None for an address that holds none.
     pub contracts: HashMap<String, Option<Contract>>,
-    pub tokens: HashMap<String, Token>,
+    /// Registered tokens met so far, by address, from the registry or their contract's page.
+    pub tokens: HashMap<String, RegisteredToken>,
+    /// Pages of the token registry, by the symbol searched for.
+    pub token_lists: HashMap<String, TokenList>,
     /// Token balances by token and holder, in whole units.
     pub holdings: HashMap<(String, String), String>,
     pub validators: Option<Value>,
@@ -463,6 +493,31 @@ pub(crate) mod tests {
             indexed_from: 1,
             catching_up_to: None,
         }
+    }
+
+    #[test]
+    fn a_token_search_refreshes_its_first_page_until_more_are_read() {
+        let token = |address: &str, symbol: &str| RegisteredToken {
+            address: address.to_string(),
+            symbol: Some(symbol.to_string()),
+            ..RegisteredToken::default()
+        };
+        let page = |tokens: Vec<RegisteredToken>, next: Option<&str>| TokensPage {
+            tokens,
+            next: next.map(str::to_string),
+        };
+        let addresses = |list: &TokenList| list.tokens.iter().map(|token| token.address.clone()).collect::<Vec<_>>();
+        let mut list = TokenList::default();
+        list.take(page(vec![token("a", "ABC")], Some("c1")), false, 10);
+        list.take(page(vec![token("b", "ABD"), token("c", "XYZ")], Some("c1")), false, 20);
+
+        assert_eq!(addresses(&list), ["b", "c"], "a first page alone is the list");
+
+        list.take(page(vec![token("d", "ZZZ"), token("c", "XYZ")], None), true, 30);
+        list.take(page(vec![token("e", "AAA")], Some("c2")), false, 40);
+
+        assert_eq!(addresses(&list), ["b", "c", "d"], "once more were read, the list stays");
+        assert_eq!((list.next, list.refreshed), (None, 40));
     }
 
     #[test]

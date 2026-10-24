@@ -11,6 +11,7 @@ use {
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::db::{Column, Database, DbError, Read, State},
+    crate::registry::tokens::STANDARD_TOKEN_FUNCTIONS,
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
     crate::structs::block::{Block, BlockHeader, Seal},
@@ -64,9 +65,9 @@ pub const DEV_MAX_REORG_DEPTH: u64 = 100;
     summary = "The layout this node keeps its database in. It goes up whenever a stored record changes shape, so a node never reads a database it would misread.",
     category = "Chain",
     see_also = "ChainError::OldFormat",
-    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in.",
+    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry.",
 )]
-pub const STORAGE_FORMAT: u32 = 2;
+pub const STORAGE_FORMAT: u32 = 3;
 
 const TIP_KEY: &[u8] = b"tip";
 const TIPS_KEY: &[u8] = b"tips";
@@ -151,6 +152,8 @@ pub struct Genesis {
     pub engines: Vec<Engine>,
     #[document(summary = "What one deploy, upgrade or contract call may use, called contracts included.")]
     pub tx_limits: Limits,
+    #[document(summary = "The functions that make a contract a token: one that exports them all is in the token registry. Usually STANDARD_TOKEN_FUNCTIONS, ERC-20's required six; empty keeps no registry.")]
+    pub token_functions: Vec<String>,
     #[document(summary = "How far back the main chain may be rolled back. A branch that splits off deeper is never followed, however much work it holds, and undo records older than this are dropped.")]
     pub max_reorg_depth: u64,
     #[document(summary = "Finality: its kind and every parameter of it, or None for a chain where only work decides.")]
@@ -198,6 +201,15 @@ impl Coin {
     }
 }
 
+#[document(
+    summary = "STANDARD_TOKEN_FUNCTIONS as genesis keeps them: ERC-20's required six.",
+    category = "Chain",
+    see_also = "Genesis, STANDARD_TOKEN_FUNCTIONS",
+)]
+pub fn standard_token_functions() -> Vec<String> {
+    STANDARD_TOKEN_FUNCTIONS.map(str::to_string).to_vec()
+}
+
 /// A million coins at 18 decimals.
 fn dev_funds() -> u256 {
     u256::from(1_000_000u64) * u256::from(10u64).pow(18)
@@ -226,6 +238,7 @@ impl Genesis {
             }],
             engines: Engine::compiled(),
             tx_limits: DEV_TX_LIMITS,
+            token_functions: standard_token_functions(),
             max_reorg_depth: DEV_MAX_REORG_DEPTH,
             finality: FinalityConfig::dev(authority),
             fees: Some(FeeConfig::dev()),
@@ -259,6 +272,7 @@ impl Genesis {
             }],
             engines: Engine::compiled(),
             tx_limits: DEV_TX_LIMITS,
+            token_functions: standard_token_functions(),
             max_reorg_depth: DEV_MAX_REORG_DEPTH,
             finality: FinalityConfig::dev(dev),
             fees: Some(FeeConfig::dev()),
@@ -305,6 +319,13 @@ impl Genesis {
             return Some("the proof-of-work hash must be a secure 256-bit one, not xxh3");
         }
 
+        let mut token_functions: Vec<&String> = self.token_functions.iter().collect();
+        token_functions.sort();
+
+        if token_functions.iter().any(|name| name.is_empty()) || token_functions.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Some("token_functions must name each function once");
+        }
+
         self.coin
             .problem()
             .or_else(|| self.finality.as_ref().and_then(FinalityConfig::problem))
@@ -320,6 +341,7 @@ impl Genesis {
             hash: self.hash,
             minter: self.minter,
             limits: self.tx_limits,
+            token_functions: self.token_functions.clone().into(),
             staking: self.finality.as_ref().and_then(|config| config.staking(self.block().id())),
             signers: self.finality.as_ref().and_then(FinalityConfig::signer_rules),
             fees: self.fees.as_ref().map(|config| Arc::new(config.build())),

@@ -9,11 +9,11 @@ use {
     crate::format,
     crate::model::{
         BlockDetail, Called, Checkpoint, Contract, EventsPage, Forks, Mempool, NodeView, Page, PeerChange, Receipt, Reorganized,
-        Status, Summary, TxView,
+        Status, Summary, TokensPage, TxView,
     },
     crate::store::{PAGE, Store},
     crate::views::{
-        self, Ctx, Settings, View, account::AccountState, hops::HopState, map::MapState, network::Streaming, send::SendState,
+        self, Ctx, Settings, View, account::AccountState, hops::HopState, map::MapState, network::Streaming, send::SendState, tokens::TokensState,
     },
     egui::{RichText, Ui},
     serde_json::Value,
@@ -58,6 +58,7 @@ pub struct Explorer {
     map: MapState,
     hops: HopState,
     account: AccountState,
+    tokens: TokensState,
     send: SendState,
     /// Something to tell the person, and whether it is bad news.
     notice: Option<(String, bool)>,
@@ -89,6 +90,7 @@ impl Explorer {
             map: MapState::default(),
             hops: HopState::default(),
             account: AccountState::default(),
+            tokens: TokensState::default(),
             send: SendState::default(),
             notice: None,
         };
@@ -201,34 +203,42 @@ impl Explorer {
                 }
             }
             Ask::Contract(address) => {
-                store.contracts.insert(address, parse::<Contract>(value));
+                let contract = parse::<Contract>(value);
+
+                // The registry has the last word on whether it is a token: an upgrade may have
+                // taken it off.
+                match contract.as_ref().and_then(|contract| contract.token.clone()) {
+                    Some(token) => store.tokens.insert(address.clone(), token),
+                    None => store.tokens.remove(&address),
+                };
+                store.contracts.insert(address, contract);
+            }
+            Ask::Tokens { symbol, cursor } => {
+                if let Some(page) = parse::<TokensPage>(value) {
+                    for token in &page.tokens {
+                        store.tokens.insert(token.address.clone(), token.clone());
+                    }
+
+                    store.token_lists.entry(symbol).or_default().take(page, cursor.is_some(), now);
+                }
             }
             Ask::Validators => store.validators = Some(value),
             Ask::Signers => store.signers = Some(value),
             Ask::Evidence => store.evidence = Some(value),
             Ask::Call { ref contract, ref function, ref args } => {
-                if let Some(called) = parse::<Called>(value.clone())
+                if function == "balance_of"
+                    && let Some(called) = parse::<Called>(value.clone())
                     && called.status == "returned"
                     && let Some(first) = called.values.first()
                 {
-                    let token = store.tokens.entry(contract.clone()).or_default();
+                    let holder = serde_json::from_str::<Value>(args)
+                        .ok()
+                        .and_then(|args| args.get(0)?.get("value")?.as_str().map(str::to_string));
 
-                    match function.as_str() {
-                        "decimals" => token.decimals = first.text().parse::<f64>().ok().map(|decimals| decimals as u8),
-                        "symbol" => token.symbol = Some(first.text()),
-                        "name" => token.name = Some(first.text()),
-                        "balance_of" => {
-                            let holder = serde_json::from_str::<Value>(args)
-                                .ok()
-                                .and_then(|args| args.get(0)?.get("value")?.as_str().map(str::to_string));
-
-                            if let Some(holder) = holder {
-                                let raw = first.text();
-                                let raw = raw.split('.').next().unwrap_or_default().to_string();
-                                store.holdings.insert((contract.clone(), holder), raw);
-                            }
-                        }
-                        _ => {}
+                    if let Some(holder) = holder {
+                        let raw = first.text();
+                        let raw = raw.split('.').next().unwrap_or_default().to_string();
+                        store.holdings.insert((contract.clone(), holder), raw);
                     }
                 }
 
@@ -465,6 +475,7 @@ impl Explorer {
             View::Account(address) => views::account::show(ui, &mut ctx, address, &mut self.account),
             View::Network => views::network::show(ui, &mut ctx, &self.streaming),
             View::Mempool => views::mempool::show(ui, &mut ctx),
+            View::Tokens => views::tokens::show(ui, &mut ctx, &mut self.tokens),
             View::Finality => views::finality::show(ui, &mut ctx),
             View::Send => views::send::show(ui, &mut ctx, &mut self.send),
         });

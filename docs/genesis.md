@@ -28,6 +28,7 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `allocations` | Who holds what from the start: a list of `address` and `amount`. |
 | `engines` | Which engines contracts may be deployed for: `lua`, `wasm`. A node built without one refuses the chain. |
 | `tx_limits` | `fuel` and `memory` one deploy, upgrade or call may use. |
+| `token_functions` | The functions that make a contract a token: one that exports them all is in the [token registry](token-standard.md#the-token-registry). The dev chains name ERC-20's six: `allowance`, `approve`, `balance_of`, `total_supply`, `transfer` and `transfer_from`. `[]` keeps no registry. Each is named once. |
 | `max_reorg_depth` | How far back the main chain may be rolled. |
 | `finality` | `null`, or the kind and its settings, by `type`: `ffg`, `authority` or `depth`. |
 | `fees` | `null` for free transactions, or the fee settings. |

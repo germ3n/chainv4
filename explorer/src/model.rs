@@ -18,6 +18,9 @@ pub struct Status {
     pub work: String,
     pub hash: String,
     pub coin: Coin,
+    /// The functions that make a contract a token on this chain; none keeps no registry.
+    #[serde(default)]
+    pub token_functions: Vec<String>,
     pub finality: Option<Finality>,
     /// The fee settings as genesis files write them, with base_price and tx_fuel.
     pub fees: Option<Value>,
@@ -219,15 +222,26 @@ pub struct Contract {
     pub reentrant: Vec<String>,
     pub upgradable: bool,
     pub code_size: u64,
+    /// What the chain's token registry holds for it, when it is a token.
+    #[serde(default)]
+    pub token: Option<RegisteredToken>,
 }
 
-impl Contract {
-    /// Whether it exports what the token standard asks.
-    pub fn is_token(&self) -> bool {
-        ["symbol", "decimals", "balance_of", "transfer"]
-            .iter()
-            .all(|wanted| self.functions.iter().any(|function| function == wanted))
-    }
+/// A token as the chain's registry holds it: what its name(), symbol() and decimals() answered
+/// when it was deployed or last upgraded, each None when it exports none.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct RegisteredToken {
+    pub address: String,
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub decimals: Option<u8>,
+}
+
+/// GET /tokens.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TokensPage {
+    pub tokens: Vec<RegisteredToken>,
+    pub next: Option<String>,
 }
 
 /// GET /node.

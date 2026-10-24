@@ -1063,6 +1063,35 @@ return M
 "#;
 
 #[test]
+fn tokens_are_listed_from_the_registry() {
+    let authority = DevAuthority::dev_keypair();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let deployed = |nonce: u64| contract_address(&authority.public().address(), nonce, HashType::default_chain());
+    let (token, greeter) = (deployed(0), deployed(1));
+    let deploy = |code: &str, nonce: u64| SignedTx::sign(Tx::Deploy { code: Code::Lua(code.to_string()) }, nonce, FeeOffer::NONE, &authority);
+    produce(&mut chain, vec![deploy(include_str!("../../contracts/lua/token.lua"), 0), deploy(GREETER, 1)]);
+
+    assert_eq!(
+        ok(address, "/status")["token_functions"],
+        json!(["allowance", "approve", "balance_of", "total_supply", "transfer", "transfer_from"])
+    );
+    assert_eq!(
+        ok(address, "/tokens"),
+        json!({
+            "tokens": [{ "address": token.to_string(), "name": "Example Token", "symbol": "EXT", "decimals": 18 }],
+            "next": null,
+        })
+    );
+    assert_eq!(ok(address, "/tokens?symbol=ex")["tokens"].as_array().unwrap().len(), 1, "symbols are searched by how they start");
+    assert!(ok(address, "/tokens?symbol=abc")["tokens"].as_array().unwrap().is_empty());
+    assert_eq!(ok(address, &format!("/contracts/{token}"))["token"]["symbol"], "EXT");
+    assert_eq!(ok(address, &format!("/contracts/{greeter}"))["token"], Value::Null, "a contract that is not a token");
+    assert_eq!(get(address, "/tokens?cursor=zz").0, 400);
+}
+
+#[test]
 fn events_are_listed_from_the_index() {
     let authority = DevAuthority::dev_keypair();
     let db = Arc::new(MemoryDb::default());
