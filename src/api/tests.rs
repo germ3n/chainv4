@@ -1072,7 +1072,7 @@ fn events_are_listed_from_the_index() {
 
     assert_eq!(get(address, &format!("/events?contract={greeter}")).0, 404, "no index yet");
 
-    chain.index_events().unwrap();
+    chain.index_events(None).unwrap();
     let bob = Keypair::generate(authority.public().key_type()).unwrap().public().address();
     let greet = |nonce: u64| {
         let tx = Tx::ContractCall {
@@ -1089,7 +1089,7 @@ fn events_are_listed_from_the_index() {
     let last = produce(&mut chain, vec![greet(2)]);
     let listing = ok(address, &format!("/events?contract={greeter}"));
 
-    assert_eq!(listing["indexed_from"], 1);
+    assert_eq!((listing["indexed_from"].clone(), listing["catching_up_to"].clone()), (json!(1), json!(0)), "genesis is still to come");
     assert_eq!(listing["next"], Value::Null);
     assert_eq!(listing["events"].as_array().unwrap().len(), 2);
     assert_eq!(
@@ -1119,4 +1119,9 @@ fn events_are_listed_from_the_index() {
     for bad in ["/events", &format!("/events?contract={greeter}&address={bob}"), "/events?address=nope", "/events?name=Hello"] {
         assert_eq!(get(address, bad).0, 400, "{bad}");
     }
+
+    while chain.catch_up_events().unwrap() {}
+    let caught_up = ok(address, &format!("/events?contract={greeter}"));
+
+    assert_eq!((caught_up["indexed_from"].clone(), caught_up["catching_up_to"].clone()), (json!(0), Value::Null));
 }

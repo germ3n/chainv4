@@ -35,17 +35,22 @@ pub struct EventList {
     pub events: Vec<FoundEvent>,
     /// Where the next older page starts, or None when there is none.
     pub next: Option<String>,
-    /// The first height the node indexed.
+    /// The lowest height the node's index holds.
     pub indexed_from: u64,
+    /// The height the node is still moving that to, if it is.
+    pub catching_up_to: Option<u64>,
     /// When the newest page last came, in milliseconds since the Unix epoch.
     pub refreshed: u64,
 }
 
 impl EventList {
     /// Takes a page: the newest, which puts any events newer than those held in front, or an
-    /// older one, which goes after them.
+    /// older one, which goes after them. A list read to its end starts over from the newest page
+    /// once the node has indexed further back, so the older events can be paged to.
     pub fn take(&mut self, page: EventsPage, older: bool, now: u64) {
+        let further_back = !older && self.next.is_none() && page.indexed_from < self.indexed_from;
         self.indexed_from = page.indexed_from;
+        self.catching_up_to = page.catching_up_to;
 
         if older {
             let last = self.events.last().map(FoundEvent::place);
@@ -58,6 +63,10 @@ impl EventList {
         self.refreshed = now;
 
         match self.events.first().map(FoundEvent::place) {
+            _ if further_back => {
+                self.events = page.events;
+                self.next = page.next;
+            }
             None => {
                 self.events = page.events;
                 self.next = page.next;
@@ -452,6 +461,7 @@ pub(crate) mod tests {
             events,
             next: next.map(str::to_string),
             indexed_from: 1,
+            catching_up_to: None,
         }
     }
 
@@ -470,5 +480,15 @@ pub(crate) mod tests {
         assert_eq!(list.events.iter().map(|event| event.height).collect::<Vec<_>>(), [7, 6, 5, 4, 4, 3, 2]);
         assert_eq!(list.next, None, "the older pages already read stay read");
         assert_eq!(list.refreshed, 30);
+
+        // Once the node has indexed further back, a list read to its end starts over.
+        let further = EventsPage {
+            indexed_from: 0,
+            ..events_page(vec![found(7, 0), found(6, 0)], Some("c3"))
+        };
+        list.take(further, false, 40);
+
+        assert_eq!(list.events.iter().map(|event| event.height).collect::<Vec<_>>(), [7, 6]);
+        assert_eq!(list.next.as_deref(), Some("c3"));
     }
 }

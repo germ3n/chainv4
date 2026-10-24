@@ -230,8 +230,9 @@ A failed transaction keeps only its error message and its trace, and emits nothi
 receipts with everything else.
 
 A node started with `--index-events` also indexes every event by its contract, by its contract
-and name, and by the addresses in its data, in the same commit (see
-[Storage](storage.md#the-event-index)). The API lists them at `GET /events`.
+and name, and by the addresses in its data, in the same commit. Events from before it was turned
+on are read back from the stored receipts (see [Storage](storage.md#the-event-index)). The API
+lists them at `GET /events`.
 
 ## Rewards
 

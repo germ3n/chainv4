@@ -34,7 +34,7 @@ mod finality;
 mod parallel;
 mod receipt;
 
-pub use events::{EventFilter, IndexedEvent, stored_events, stored_events_from};
+pub use events::{EventFilter, EventIndex, EventsFrom, IndexedEvent, stored_event_index, stored_events};
 pub use execute::{BlockContext, Effect, Failure, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
 pub use parallel::Workers;
@@ -451,8 +451,8 @@ pub struct Chain {
     finality: Option<Box<dyn Finality>>,
     /// The threads blocks run on, shared with finality to check votes.
     workers: Arc<Workers>,
-    /// The height the event index starts at, when this node keeps one.
-    events_from: Option<u64>,
+    /// The event index, when this node keeps one.
+    events: Option<EventIndex>,
 }
 
 impl Chain {
@@ -520,7 +520,7 @@ impl Chain {
             Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers))?),
             None => None,
         };
-        let events_from = events::stored_events_from(&*db)?;
+        let events = events::stored_event_index(&*db)?;
         let mut chain = Chain {
             db,
             rules: genesis.rules(),
@@ -537,7 +537,7 @@ impl Chain {
             finality_config: genesis.finality.clone(),
             finality,
             workers,
-            events_from,
+            events,
         };
         // In case the node stopped between committing a block and catching finality up with it.
         chain.tip_moved()?;
@@ -552,27 +552,61 @@ impl Chain {
 
     #[document(
         parent = "Chain",
-        summary = "Starts keeping the event index from the next block, unless this database keeps one already. Once on, it stays on, so it never has gaps.",
-        returns = "The height the index starts at.",
-        see_also = "stored_events",
+        summary = "Keeps the event index, and sets which blocks it keeps. A new index starts empty at the next block, and catch_up_events fills it in. Once on, it stays on.",
+        params = { keep = "Which blocks to keep; None keeps what the database keeps, or every block for a new index." },
+        returns = "The index.",
+        see_also = "Chain::catch_up_events, stored_events",
     )]
-    pub fn index_events(&mut self) -> Result<u64, DbError> {
-        if let Some(from) = self.events_from {
-            return Ok(from);
-        }
+    pub fn index_events(&mut self, keep: Option<EventsFrom>) -> Result<EventIndex, DbError> {
+        let index = match (self.events, keep) {
+            (Some(index), None) => return Ok(index),
+            (Some(index), Some(keep)) if index.keep == keep => return Ok(index),
+            (Some(index), Some(keep)) => EventIndex { keep, ..index },
+            (None, keep) => {
+                let keep = keep.unwrap_or(EventsFrom::Height(0));
 
-        let from = self.tip.height + 1;
+                EventIndex {
+                    from: keep.lowest(self.tip.height).max(self.tip.height + 1),
+                    keep,
+                }
+            }
+        };
         let state = State::new(self.db.clone());
-        state.put_value(Column::Meta, events::FROM_KEY.to_vec(), &events::IndexedFrom { height: from });
+        state.put_value(Column::Meta, events::FROM_KEY.to_vec(), &events::IndexedFrom { height: index.from });
+        state.put_value(Column::Meta, events::KEEP_KEY.to_vec(), &index.keep);
         self.db.commit(state.take_changes())?;
-        self.events_from = Some(from);
+        self.events = Some(index);
 
-        Ok(from)
+        Ok(index)
     }
 
-    #[document(parent = "Chain", summary = "The height the event index starts at, when this node keeps one.")]
-    pub fn events_from(&self) -> Option<u64> {
-        self.events_from
+    #[document(
+        parent = "Chain",
+        summary = "Moves the event index's low end a step toward what it keeps: indexing older blocks' events from their receipts, newest first, or dropping the oldest blocks' events. A step reads at most a few hundred blocks and commits once, so the index never has gaps, and a catch-up cut short picks up where it stopped.",
+        returns = "Whether there is more catching up to do.",
+        see_also = "Chain::index_events",
+    )]
+    pub fn catch_up_events(&mut self) -> Result<bool, DbError> {
+        let Some(index) = self.events else {
+            return Ok(false);
+        };
+
+        if index.caught_up(self.tip.height) {
+            return Ok(false);
+        }
+
+        let index = EventIndex {
+            from: events::catch_up(&self.db, self.hash, index, self.tip.height)?,
+            ..index
+        };
+        self.events = Some(index);
+
+        Ok(!index.caught_up(self.tip.height))
+    }
+
+    #[document(parent = "Chain", summary = "The event index, when this node keeps one.")]
+    pub fn event_index(&self) -> Option<EventIndex> {
+        self.events
     }
 
     #[document(parent = "Chain", summary = "The newest main-chain block's header.")]
@@ -931,7 +965,8 @@ impl Chain {
             let tx_id = tx.id(self.hash);
             layer.put_value(Column::Receipts, id_key(&tx_id), &record);
 
-            if self.events_from.is_some() {
+            // Blocks below the low end wait for catch_up_events, or were dropped.
+            if self.events.is_some_and(|events| height >= events.from) {
                 events::index(&layer, id, height, tx_id, index as u32, &receipt.events);
             }
         }

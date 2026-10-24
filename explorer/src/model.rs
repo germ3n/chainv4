@@ -319,6 +319,9 @@ pub struct EventsPage {
     pub events: Vec<FoundEvent>,
     pub next: Option<String>,
     pub indexed_from: u64,
+    /// The height the node is still moving the index's low end to, if it is.
+    #[serde(default)]
+    pub catching_up_to: Option<u64>,
 }
 
 /// POST /call.

@@ -175,8 +175,12 @@ older page, or `null` after the last.
 `height`, the transaction's place in the block (`index`) and the event's place among the
 transaction's events (`position`).
 
-**Coverage:** `indexed_from` is the first height the index covers. The index starts at the block
-after the one it was turned on at; older events are only in their receipts.
+**Coverage:**
+- `indexed_from` is the lowest height the index holds: every main-chain block's events from there
+  to the tip are in it.
+- `catching_up_to` is the height the node is still moving that to, or `null` once it is there.
+  It is below `indexed_from` while the node indexes older blocks, and briefly above it on a
+  `latest-N` window, as the oldest block leaves.
 
 ### `GET /node`
 

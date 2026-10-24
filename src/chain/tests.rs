@@ -815,9 +815,12 @@ fn indexed_events_are_found_by_contract_name_and_address_and_leave_with_their_bl
     let a1 = mine_on(&chain, &genesis_block, vec![deploy, ping(alice, 1, 1)], miner);
     extended(chain.import(&a1, LATER));
 
-    assert_eq!(stored_events_from(&*db).unwrap(), None);
-    assert_eq!(chain.index_events().unwrap(), 2);
-    assert_eq!(chain.index_events().unwrap(), 2, "turning it on again changes nothing");
+    let index = EventIndex { from: 2, keep: EventsFrom::Height(2) };
+
+    assert_eq!(stored_event_index(&*db).unwrap(), None);
+    assert_eq!(chain.index_events(Some(EventsFrom::Height(2))).unwrap(), index);
+    assert_eq!(chain.index_events(None).unwrap(), index, "turning it on again changes nothing");
+    assert!(!chain.catch_up_events().unwrap(), "it holds what it keeps");
 
     let a2 = mine_on(&chain, &a1, vec![ping(bob, 2, 2), ping(alice, 3, 3)], miner);
     extended(chain.import(&a2, LATER));
@@ -850,7 +853,7 @@ fn indexed_events_are_found_by_contract_name_and_address_and_leave_with_their_bl
 
     assert_eq!((first.len(), rest.len(), after), (3, 1, None));
     assert_eq!((rest[0].index, rest[0].position), (0, 0));
-    assert_eq!(Chain::open(db.clone(), &pow_genesis()).unwrap().events_from(), Some(2), "it stays on");
+    assert_eq!(Chain::open(db.clone(), &pow_genesis()).unwrap().event_index(), Some(index), "it stays on");
 
     // A heavier branch takes the indexed block, and its events, off.
     let b2 = mine_on(&chain, &a1, Vec::new(), miner);
@@ -860,4 +863,139 @@ fn indexed_events_are_found_by_contract_name_and_address_and_leave_with_their_bl
 
     assert!(listed(EventFilter::Contract(emitter)).is_empty());
     assert!(stored_events(&*db, &EventFilter::Mentions(bob), None, 100).unwrap().0.is_empty());
+}
+
+#[test]
+fn the_event_index_catches_up_on_older_blocks_and_keeps_its_window() {
+    // The same blocks go to a chain that indexes them as they come, and to one that catches up.
+    let live_db = Arc::new(MemoryDb::default());
+    let mut live = Chain::open(live_db.clone(), &pow_genesis()).unwrap();
+    let late_db = Arc::new(MemoryDb::default());
+    let mut late = Chain::open(late_db.clone(), &pow_genesis()).unwrap();
+    let ahead_db = Arc::new(MemoryDb::default());
+    let mut ahead = Chain::open(ahead_db.clone(), &pow_genesis()).unwrap();
+    let genesis_block = late.block_at(0).unwrap().unwrap();
+    let alice = stranger().public().address();
+    let miner = Address::Ed25519([9; 32]);
+    let emitter = contract_address(&authority().public().address(), 0, HashType::default_chain());
+    let ping = |n: i64, nonce: u64| {
+        let tx = Tx::ContractCall {
+            to: emitter,
+            func: Hash::Xxh3_64(selector("ping")),
+            amount: Amount::U128(0),
+            data: vec![TxCallArgumentType::Address(alice), TxCallArgumentType::I64(n)],
+        };
+
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+    };
+    let entries = |db: &MemoryDb| {
+        let mut all = Vec::new();
+        db.scan(Column::Events, &[], &[], &mut |key, value| {
+            all.push((key.to_vec(), value.to_vec()));
+
+            true
+        })
+        .unwrap();
+
+        all
+    };
+    let heights = |chain: &Chain| {
+        stored_events(&*chain.db, &EventFilter::Contract(emitter), None, 100)
+            .unwrap()
+            .0
+            .iter()
+            .map(|found| found.height)
+            .collect::<Vec<_>>()
+    };
+    let caught_up = |chain: &mut Chain| while chain.catch_up_events().unwrap() {};
+
+    live.index_events(None).unwrap();
+    assert_eq!(ahead.index_events(Some(EventsFrom::Height(3))).unwrap().from, 3, "it waits for height 3");
+
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &authority());
+    let mut main = vec![mine_on(&late, &genesis_block, vec![deploy, ping(1, 1)], miner)];
+
+    for nonce in 2..6 {
+        main.push(mine_on(&late, main.last().unwrap(), vec![ping(nonce as i64, nonce)], miner));
+    }
+
+    for block in &main {
+        for chain in [&mut live, &mut late, &mut ahead] {
+            extended(chain.import(block, LATER));
+        }
+    }
+
+    assert_eq!(heights(&ahead), [5, 5, 4, 4, 3, 3]);
+    assert!(!ahead.catch_up_events().unwrap());
+
+    // Turned on late, it starts empty at the next block, then reads the older receipts back.
+    assert_eq!(late.index_events(None).unwrap(), EventIndex { from: 6, keep: EventsFrom::Height(0) });
+    assert!(entries(&late_db).is_empty());
+    caught_up(&mut live);
+    caught_up(&mut late);
+
+    assert_eq!(late.event_index().unwrap().from, 0);
+    assert_eq!(heights(&late), [5, 5, 4, 4, 3, 3, 2, 2, 1, 1]);
+    assert_eq!(entries(&late_db), entries(&live_db), "catching up builds what indexing as blocks came does");
+
+    // A heavier branch takes caught-up blocks off, and their events with them. Its first block is
+    // empty, so nothing it indexes lands where theirs were.
+    let mut branch = vec![mine_on(&late, &main[1], Vec::new(), miner)];
+
+    for nonce in 3..6 {
+        branch.push(mine_on(&late, branch.last().unwrap(), vec![ping(10 + nonce as i64, nonce)], miner));
+    }
+
+    for block in &branch {
+        for chain in [&mut live, &mut late] {
+            chain.import(block, LATER).unwrap();
+        }
+    }
+
+    assert_eq!(late.tip().id(), branch[3].header.id());
+    assert_eq!(heights(&late), [6, 6, 5, 5, 4, 4, 2, 2, 1, 1]);
+    assert_eq!(entries(&late_db), entries(&live_db));
+
+    // A window of the latest two blocks drops the rest, and moves with the tip.
+    late.index_events(Some(EventsFrom::Latest(2))).unwrap();
+    caught_up(&mut late);
+
+    assert_eq!(heights(&late), [6, 6, 5, 5]);
+
+    let next = mine_on(&late, &branch[3], vec![ping(17, 6)], miner);
+
+    for chain in [&mut live, &mut late] {
+        extended(chain.import(&next, LATER));
+    }
+
+    assert!(!late.catch_up_events().unwrap(), "one step drops the block that left the window");
+    assert_eq!(heights(&late), [7, 7, 6, 6]);
+    assert_eq!(late.event_index().unwrap().from, 6);
+
+    // Asking for every block again reads the dropped ones back, and it stays as asked.
+    late.index_events(Some(EventsFrom::Height(0))).unwrap();
+    caught_up(&mut live);
+    caught_up(&mut late);
+
+    assert_eq!(entries(&late_db), entries(&live_db));
+    assert_eq!(
+        Chain::open(late_db.clone(), &pow_genesis()).unwrap().event_index(),
+        Some(EventIndex { from: 0, keep: EventsFrom::Height(0) })
+    );
+}
+
+#[test]
+fn index_events_takes_genesis_a_height_or_a_window() {
+    assert_eq!("genesis".parse(), Ok(EventsFrom::Height(0)));
+    assert_eq!("GENESIS".parse(), Ok(EventsFrom::Height(0)));
+    assert_eq!("5000".parse(), Ok(EventsFrom::Height(5000)));
+    assert_eq!("LATEST-100000".parse(), Ok(EventsFrom::Latest(100_000)));
+
+    for bad in ["latest", "latest-0", "latest-x", "-5", "soon", ""] {
+        assert!(bad.parse::<EventsFrom>().is_err(), "{bad}");
+    }
+
+    assert_eq!(EventsFrom::Latest(3).lowest(10), 8, "heights 8, 9 and 10");
+    assert_eq!(EventsFrom::Latest(100).lowest(10), 0);
+    assert_eq!(EventsFrom::Height(7).lowest(10), 7);
 }

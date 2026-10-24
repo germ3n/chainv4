@@ -112,8 +112,11 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Events can be searched.** A node started with `--index-events` indexes every event by its
   contract, by its contract and name, and by every address in its data; `GET /events` lists them
   newest first, a page at a time, and the explorer shows them on contract and account pages.
-- [ ] **The event index cannot be rebuilt.** It starts at the block after it was turned on;
-  indexing older events would mean reading every receipt back from the stored blocks.
+- [x] **The event index catches up.** `--index-events` takes `genesis`, a height or `latest-N`.
+  The node reads older blocks' receipts back in the background, a step at a time, and a
+  `latest-N` window drops the oldest blocks' events as the tip moves.
+- [ ] **The event index cannot be turned off.** Once on, the database keeps it; dropping it means
+  a fresh database, or a window as small as `latest-1`.
 - [x] **Loading code is charged.** A deploy or upgrade pays `cost::LOAD_BYTE` (1 fuel) a byte to
   compile its code, plus what a Lua script's top level burns, and a failing one pays for what it
   burned before it failed. A top level runs before a call is attached, so it is the same work at

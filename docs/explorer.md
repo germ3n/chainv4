@@ -189,4 +189,6 @@ CHAINV4_NODE=http://127.0.0.1:8080 cargo test -- --ignored   # sends a transfer 
   stores, from each leaf back to the main chain. Restarting a node keeps its leaves.
 - **Token holdings are only for tokens met so far.** Nothing lists every token on the chain.
 - **Events need the node's index.** A node started with `--index-events` lists them, from the
-  height it started indexing at; on any other, the explorer says so instead.
+  lowest height its index holds, and says when it is still indexing older blocks. On any other,
+  the explorer says so instead. A list read to its end starts over once the node has indexed
+  further back.

@@ -66,11 +66,24 @@ A node started with `--index-events` keeps an index of every event on the main c
 - **Pointers:** keys by contract and name, and by every address in its data, point at it.
 - **Newest first:** heights and places are stored inverted, so a listing reads forward from where
   the last page stopped.
-- **Reorgs:** entries go into the same commit as the block's receipts, so the block's undo record
-  takes them off with it.
-- **Starting late:** the index starts at the block after the one it was turned on at, and `Meta`
-  records that height (`events_from`). Once on, it stays on, even without the flag, so it never
-  has gaps.
+- **Reorgs:** a new block's entries go into the same commit as its receipts, so the block's undo
+  record takes them off with it.
+
+**Which blocks it holds.** `Meta` keeps two records: the index's low end (`events_from`) and which
+blocks it keeps (`events_keep`), as `--index-events` set them. The index always holds every
+main-chain block from the low end to the tip, and the node moves the low end toward what it keeps:
+- **Down:** it reads older blocks' receipts back, newest first, and indexes their events. A block
+  a reorg could still take off gets those entries added to its undo record, so a reorg takes them
+  off too.
+- **Up:** a `latest-N` window drops the oldest block's events once the tip moves past it.
+  Asking for fewer blocks than are held drops the rest the same way.
+
+**A step at a time:** each step reads at most 500 blocks or 2,000 transactions, and commits the
+new low end together with the entries it wrote or removed. A node stopped mid-way picks up where
+the last commit left off, and the index never has gaps.
+
+**Starting:** a new index starts empty at the block after the tip, and steps down from there.
+Once on, the database keeps it on, even without the flag, keeping the same blocks.
 
 ## The storage format
 

@@ -75,7 +75,7 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--stream` | | Push what the node does to API clients as it happens, on `GET /stream`. |
 | `--cors ORIGIN` | | Let web pages from this origin call the API, or `*` for any; repeat for several. |
 | `--explorer DIR` | | Serve the [explorer](docs/explorer.md)'s web app, built into `explorer/dist`, from the API's `/`. |
-| `--index-events` | | Index events by contract, by name and by the addresses in them, for `GET /events`. It starts at the next block, and stays on. |
+| `--index-events[=FROM]` | | Index events by contract, by name and by the addresses in them, for `GET /events`. `FROM` is `genesis` (when left out), a height, or `latest-N` for a window of the latest N blocks. Older blocks are indexed in the background. Once on, it stays on. |
 
 Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
 

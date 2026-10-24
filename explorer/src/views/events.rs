@@ -1,6 +1,6 @@
 //! Events from the node's event index: a contract's, of one name or all, or those that mention an
 //! address, newest first, a page at a time. A node keeps the index only when started with
-//! --index-events, and only from the height it was turned on at.
+//! --index-events, and may still be indexing older blocks, or keep only the latest ones.
 
 use {
     super::{Ctx, tx},
@@ -41,8 +41,18 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
         }
     };
 
+    // Still indexing older blocks, rather than dropping the oldest from a window.
+    let still = found
+        .catching_up_to
+        .filter(|to| *to < found.indexed_from)
+        .map(|to| format!(" It is still indexing older blocks, down to height {}.", format::thousands(&to.to_string())))
+        .unwrap_or_default();
+
     if found.events.is_empty() {
-        ui.weak(format!("None since height {}, where this node's index starts.", found.indexed_from));
+        ui.weak(format!(
+            "None since height {}, where this node's index starts.{still}",
+            format::thousands(&found.indexed_from.to_string())
+        ));
 
         return;
     }
@@ -82,6 +92,10 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
             }
         }
 
-        ui.weak(format!("{} shown, indexed from height {}", found.events.len(), found.indexed_from));
+        ui.weak(format!(
+            "{} shown, indexed from height {}.{still}",
+            found.events.len(),
+            format::thousands(&found.indexed_from.to_string())
+        ));
     });
 }

@@ -44,8 +44,13 @@ other pages explain each part in full; this one is the short list to keep in min
   transaction landed but failed.
 - **The node's peer id changes on every start.** Its libp2p key is generated fresh each run.
 - **Events are searchable on nodes that index them.** `--index-events` indexes every event by its
-  contract, its name and the addresses in it, from the next block on, for `GET /events`. Once on,
-  the database keeps it on.
+  contract, its name and the addresses in it, for `GET /events`.
+  - **Which blocks:** `--index-events` alone keeps every block's events. `=5000` keeps them from a
+    height, and `=latest-100000` keeps a window that moves with the tip.
+  - **Older blocks:** the node reads them back from their receipts in the background, newest
+    first. `indexed_from` says how far it got.
+  - **Staying on:** once on, the database keeps it on, keeping the same blocks until the flag
+    says otherwise.
 - **A node only streams when asked.** `--stream` turns on `GET /stream`. Without it, clients
   such as the explorer poll.
 - **Read-only calls hold up the API.** `POST /call` runs a contract under the chain's fuel cap on

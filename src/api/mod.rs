@@ -5,7 +5,7 @@
 use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
-        Coin, EventFilter, FinalityConfig, Fees, Genesis, stored_events, stored_events_from, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        Coin, EventFilter, FinalityConfig, Fees, Genesis, stored_event_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work,
     },
     crate::crypto::keypair::PublicKey,
@@ -580,7 +580,7 @@ async fn forks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, Str
 /// address, a page at a time.
 async fn events(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
     let db = api.db;
-    let Some(from) = stored_events_from(&*db)? else {
+    let Some(index) = stored_event_index(&*db)? else {
         return Err(ApiError::NotFound("this node keeps no event index; start it with --index-events".to_string()));
     };
     let filter = match (query.get("contract"), query.get("name"), query.get("address")) {
@@ -599,11 +599,13 @@ async fn events(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
         .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
         .transpose()?;
     let (found, next) = stored_events(&*db, &filter, cursor.as_deref(), limit)?;
+    let tip = tip(&*db)?.header.height;
 
     Ok(Json(json!({
         "events": found.iter().map(json::indexed_event).collect::<Vec<_>>(),
         "next": next.map(|next| to_hex(&next)),
-        "indexed_from": from,
+        "indexed_from": index.from,
+        "catching_up_to": (!index.caught_up(tip)).then(|| index.keep.lowest(tip)),
     })))
 }
 

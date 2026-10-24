@@ -120,6 +120,30 @@ fn the_producer_makes_a_block_when_its_slot_comes() {
 }
 
 #[test]
+fn the_loop_catches_the_event_index_up_and_moves_its_window() {
+    let (mut producer, _net) = node(true);
+
+    for slot in 1..=3 {
+        producer.step(slot * SLOT).unwrap();
+    }
+
+    let mut producer = producer.index_events(Some(EventsFrom::Latest(2))).unwrap();
+
+    assert_eq!(producer.chain().event_index().unwrap().from, 4, "a new index starts empty at the next block");
+    assert!(producer.catching_up, "so the loop does not sleep until it holds heights 2 and 3");
+
+    producer.step(3 * SLOT + 1).unwrap();
+
+    assert_eq!(producer.chain().event_index().unwrap().from, 2);
+    assert!(!producer.catching_up);
+
+    producer.step(4 * SLOT).unwrap();
+
+    assert_eq!(producer.chain().tip().height, 4);
+    assert_eq!(producer.chain().event_index().unwrap().from, 3, "the same pass drops height 2");
+}
+
+#[test]
 fn followers_import_gossiped_blocks_and_never_produce() {
     let (mut producer, mut producer_net) = node(true);
     let (mut follower, mut follower_net) = node(false);

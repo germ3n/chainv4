@@ -6,7 +6,7 @@
 //! counts the votes it hears. Catching up with peers lives in sync.rs.
 
 use {
-    crate::chain::{Chain, ChainError, FinalityError, FinalityUpdate, Genesis, ImportError, Imported},
+    crate::chain::{Chain, ChainError, EventsFrom, FinalityError, FinalityUpdate, Genesis, ImportError, Imported},
     crate::consensus::Producer,
     crate::crypto::keypair::Keypair,
     crate::db::{Database, DbError},
@@ -75,6 +75,8 @@ pub struct Node {
     counters: Counters,
     /// Where the node tells what it does, when it streams.
     events: Option<broadcast::Sender<NodeEvent>>,
+    /// Whether the event index has catching up left, which keeps the loop from sleeping.
+    catching_up: bool,
 }
 
 #[document(
@@ -226,6 +228,7 @@ impl Node {
             listening: Vec::new(),
             counters: Counters::default(),
             events: None,
+            catching_up: false,
         })
     }
 
@@ -241,13 +244,15 @@ impl Node {
 
     #[document(
         parent = "Node",
-        summary = "Makes the node keep the event index, from the next block unless its database keeps one already. Once on, the database keeps it on.",
+        summary = "Makes the node keep the event index. Its loop then catches the index up a step at a time, in between everything else. Once on, the database keeps it on.",
+        params = { keep = "Which blocks to keep; None keeps what the database keeps, or every block for a new index." },
         returns = "The node, or the database failure that kept it from starting.",
         see_also = "Chain::index_events",
     )]
-    pub fn index_events(mut self) -> Result<Node, NodeError> {
-        let from = self.chain.index_events()?;
-        log::info!("[node] indexing events from height {from}");
+    pub fn index_events(mut self, keep: Option<EventsFrom>) -> Result<Node, NodeError> {
+        let index = self.chain.index_events(keep)?;
+        self.catching_up = !index.caught_up(self.chain.tip().height);
+        log::info!("[node] indexing the events of {}, held from height {} so far", index.keep, index.from);
 
         Ok(self)
     }
@@ -313,6 +318,7 @@ impl Node {
 
         self.produce_if_due(now)?;
         self.vote_if_due()?;
+        self.catch_up_events()?;
         self.report_if_due(now);
 
         Ok(())
@@ -693,6 +699,21 @@ impl Node {
     }
 
     /// Logs the height, peers and mempool every REPORT_EVERY, so a quiet node still shows it is alive.
+    /// Catches the event index up a step, and says so when a long catch-up is done.
+    fn catch_up_events(&mut self) -> Result<(), NodeError> {
+        let was = self.catching_up;
+        self.catching_up = self.chain.catch_up_events()?;
+
+        if was
+            && !self.catching_up
+            && let Some(index) = self.chain.event_index()
+        {
+            log::info!("[node] the event index caught up: it holds events from height {}", index.from);
+        }
+
+        Ok(())
+    }
+
     fn report_if_due(&mut self, now: u64) {
         if now < self.reported.saturating_add(REPORT_EVERY) {
             return;
@@ -706,6 +727,16 @@ impl Node {
             self.peers.len(),
             self.mempool.len()
         );
+
+        if self.catching_up
+            && let Some(index) = self.chain.event_index()
+        {
+            log::info!(
+                "[node] indexing events: held from height {}, catching up to {}",
+                index.from,
+                index.keep.lowest(self.chain.tip().height)
+            );
+        }
     }
 
     /// Sleeps until the next slot, waking early when an event arrives.
@@ -714,7 +745,7 @@ impl Node {
             return Err(NodeError::NetworkStopped);
         }
 
-        if self.held.is_some() {
+        if self.held.is_some() || self.catching_up {
             return Ok(());
         }
 

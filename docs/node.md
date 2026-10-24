@@ -17,9 +17,13 @@ Its loop, `Node::run`, repeats two steps. **`step`** does the work:
    - transactions submitted through the API, and the API asking for a report.
 2. It produces a block if its slot has come. An authority seals at once; a miner gets a template.
 3. It votes, if it validates and a checkpoint is deep enough.
-4. It logs where it stands every 30 seconds.
+4. It catches the event index up a step, on a node started with `--index-events` (see
+   [Storage](storage.md#the-event-index)).
+5. It logs where it stands every 30 seconds.
 
-**`wait`** then sleeps until the next slot, the next event, or a second at most.
+**`wait`** then sleeps until the next slot, the next event, or a second at most. While the event
+index is still catching up, it does not sleep, so a long catch-up runs a step at a time in
+between everything else.
 
 Tests drive `step` with a clock of their own, so they never sleep.
 
@@ -155,8 +159,12 @@ Kinds of finality that take no votes never ask for justifications.
 - **No graceful shutdown.** Ctrl-C stops the process mid-loop; commits are atomic, so data is
   safe.
 - **No NAT traversal,** and no limits on connections or requests.
-- **The event index is opt in.** `--index-events` starts it at the next block, and once on, the
-  database keeps it on. `GET /events` answers 404 on nodes without one.
+- **The event index is opt in.** `--index-events` keeps it, from genesis or the height or
+  `latest-N` window given, and once on, the database keeps it on. `GET /events` answers 404 on
+  nodes without one.
+- **Catching up on a long chain takes a while.** Every older block and its receipts are read
+  back. The node keeps syncing and producing meanwhile, and logs how far it got every 30
+  seconds.
 - **Streaming is opt in, twice:** at build time with the `stream` feature, in the default set,
   and at run time with `--stream`. A node that does not stream answers `/stream` with 404, and
   clients such as the explorer poll instead.
