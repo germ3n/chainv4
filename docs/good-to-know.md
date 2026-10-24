@@ -83,10 +83,11 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   offer that cannot pay.
 - **Producers run what they build.** `Chain::build` runs the transactions it is given and keeps
   those that can run and fit the block gas limit. A producer runs each block twice.
-- **Blocks run on every core, with the result one by one gives.** Transactions run side by side
-  on the block's starting state, then in order. Those that read what an earlier one wrote run
-  again. Execution must therefore stay deterministic and read state only through `State`: a read
-  that went around it would escape the conflict check.
+- **Blocks run on every core, with the result one by one gives.** A transaction waits for the
+  earlier ones that name what it names, such as its sender or contract. Transactions then run side
+  by side in rounds on what the block holds so far, and go in in order. One that read what an
+  earlier one wrote all the same runs again. Execution must therefore stay deterministic and read
+  state only through `State`: a read that went around it would escape the conflict check.
 - **Rewards have no coinbase transaction.** The chain credits the producer after a block's
   transactions run, and a reorg takes it back. A reward can be spent from the next block on.
 - **Reorgs reach back at most `max_reorg_depth` blocks**, 100 on the dev chains. Finality bounds

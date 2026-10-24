@@ -124,29 +124,47 @@ contract caught the error.
 A block's transactions run on every core (`src/chain/parallel.rs`), with exactly the result
 running them one by one gives.
 
-1. **Ahead:** every transaction runs at once, each on a layer of its own over the block's
-   starting state. The layer records every key the transaction reads that it did not write itself.
-   Signature checks, most of what a simple transaction costs, run here too.
-2. **In order:** walking the block in order, a transaction's result is kept if no earlier
-   transaction in the block wrote anything it read. What it read is then what it would have read
-   in its turn, so its result is the one it would have had.
-3. **Again:** a transaction that read something an earlier one wrote runs again in its turn, on
-   what the block holds by then, without checking its signature again.
+1. **Waits:** each transaction waits for the last one before it in the block that names something
+   it names. That is its sender, its recipient or contract, a deploy's address, the staking
+   records, or the signer records.
+2. **Rounds:** each round runs every transaction whose wait is over, side by side, each on a layer
+   of its own over what the block holds so far. The layer records every key the transaction reads
+   that it did not write itself. The first round also checks every signature in the block at once,
+   most of what a simple transaction costs.
+3. **In order:** results then go in in block order, for as long as they hold. A result holds if
+   no transaction that went in after it ran wrote anything it read. What it read is then what it
+   would have read in its turn, so its result is the one it would have had. Each one that goes in
+   ends the wait of those waiting for it, and they run in the next round.
+4. **Again:** what a transaction names is only a guess at what it touches, since a contract can
+   reach accounts and contracts nobody named. A transaction whose result no longer holds runs
+   again in the next round, on what the block holds by then. These are the only ones that run
+   twice (`Ran.again`).
 
 **What it means for blocks:**
-- **Nothing to conflict:** transactions that touch nothing in common, such as transfers between
-  different accounts, run side by side.
-- **Conflicts:** a sender's later transactions, calls to a contract another transaction in the
-  block changes, and anything reading an account an earlier transaction paid, run again.
-- **Fees:** every transaction pays the producer, so the producer's share is credited by the block
-  loop right after each transaction, rather than by the transaction. The order and the result are
-  the same, but the producer's balance is no longer something every transaction reads.
+- **Nothing to conflict:** transactions that name nothing in common, such as transfers between
+  different accounts, all run in the first round.
+- **Dependents:** a sender's transactions, or calls to one contract, run one at a time, as they
+  must, and each runs once. Everything beside them runs alongside.
+- **Contracts reaching further:** a call that reads an account or contract no transaction named,
+  after an earlier transaction wrote it, runs twice.
+- **Fees:** every transaction pays the producer, so the block loop credits the producer's share
+  right after each transaction, rather than the transaction doing it. The order and the result
+  are the same, but the producer's balance is no longer something every transaction reads. A
+  transaction that names the producer, such as a transfer to it, waits for the one right before
+  it.
 
 **What it means for consensus:** none of this is consensus; it only changes how fast a block
-runs. On 12 cores, a block of 1,000 transfers runs about five times faster:
-- 43 ms one by one, 8 ms side by side;
-- even when they all come from one sender and every one runs again, since their signatures still
-  check side by side.
+runs. On 12 cores, a block of 1,000 transfers runs about five times faster, and none of them
+runs twice:
+
+| Block | One by one | Side by side |
+| --- | --- | --- |
+| Different senders and recipients | 43 ms | 9 ms |
+| All from one sender | 41 ms | 8 ms |
+| Half from one sender | 42 ms | 8 ms |
+
+One sender's transfers run one at a time, but their signatures still check side by side in the
+first round, and that is most of what they cost.
 
 The threads are a rayon pool the `Chain` owns (`Workers`), started the first time a block has more
 than one transaction. Finality uses them to check the signatures in a block's proofs and in a

@@ -132,11 +132,14 @@ impl fmt::Display for DbError {
 
 impl std::error::Error for DbError {}
 
+/// A key, with the column it is in.
+pub type Key = (Column, Vec<u8>);
+
 /// Changes waiting to be committed. None deletes the key.
-pub type Changes = BTreeMap<(Column, Vec<u8>), Option<Vec<u8>>>;
+pub type Changes = BTreeMap<Key, Option<Vec<u8>>>;
 
 /// Keys, as a recording State lists what it read.
-pub type Keys = BTreeSet<(Column, Vec<u8>)>;
+pub type Keys = BTreeSet<Key>;
 
 #[document(
     summary = "Anything state can be read from: a database, or a State layered on one.",

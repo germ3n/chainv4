@@ -1,5 +1,5 @@
 use {
-    crate::crypto::verifiable::{Verifiable, VerifyError},
+    crate::crypto::verifiable::VerifyError,
     crate::db::{DbError, State},
     crate::registry::signers::{SignerSet, Signers},
     crate::registry::validators::{Staking, Validators},
@@ -248,7 +248,9 @@ pub(crate) struct Executed {
     pub(crate) to_producer: u256,
 }
 
-/// Checks a transaction's form and signature, then runs it on top of its block's state.
+/// Checks a transaction's form and signature, then runs it on top of its block's state, the way
+/// blocks once ran one transaction at a time; what tests compare running side by side against.
+#[cfg(test)]
 pub(crate) fn execute(
     block: &Arc<State>,
     tx: &SignedTx,
@@ -256,6 +258,8 @@ pub(crate) fn execute(
     vm: &Arc<Vm>,
     context: &BlockContext,
 ) -> Result<Executed, ExecuteError> {
+    use crate::crypto::verifiable::Verifiable;
+
     tx.verify().map_err(|err| ExecuteError::Invalid(TxError::Invalid(err)))?;
 
     execute_verified(block, tx, rules, vm, context)

@@ -145,9 +145,10 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   recording what they read, then in order, keeping each result unless an earlier transaction wrote
   what it read and running those again. The result is what running them one by one gives, and
   signatures, in transactions and in finality proofs, check side by side.
-- [ ] **Transactions that depend on each other run twice.** A sender's later transactions, or calls
-  to a contract changed earlier in the block, run ahead for nothing. Running them again in
-  dependency waves, as Block-STM does, would save that.
+- [x] **Transactions that depend on each other run once.** Each transaction waits for the last
+  one before it that names its sender, recipient, contract or staking and signer records, and
+  runs in rounds once its wait is over, with signatures checked alongside the first round. Only
+  a contract reaching what nobody named, and reading what an earlier one wrote, still runs twice.
 - [ ] **The mempool checks signatures one at a time,** on the node's thread, as transactions
   arrive. A flood of gossiped transactions would gain from checking batches on the workers.
 - [ ] **Typed exports in the SDK.** `#[export]` functions take and return nothing and use

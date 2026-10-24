@@ -1,28 +1,36 @@
 //! Running a block's transactions on every core, with the result they would have one by one.
 //!
-//! Every transaction runs at once, each on a layer of its own over the block's starting state,
-//! which records the keys it reads. Then, in block order, each one's result is kept if no earlier
-//! transaction in the block wrote anything it read: what it read is then what it would have read
-//! in its turn, so its result is the one it would have had. A transaction that read something an
-//! earlier one wrote runs again, in its turn, on what the block holds by then. Either way every
-//! transaction ends up with exactly the result running them one by one gives, so this is no part
-//! of consensus, only of speed. Transactions that touch nothing in common, such as transfers
-//! between different accounts, run side by side; ones that do, such as two from one sender, cost
-//! their sender's later ones a second run, and nothing else.
+//! The transactions run in rounds. A transaction waits for the last one before it that names
+//! something it names: its sender, its recipient or contract, a deploy's address, staking or
+//! signer records, or, under fees, the producer every transaction pays. Every signature is checked
+//! at once alongside the first round, since that is most of what a simple transaction costs, so
+//! those that wait have theirs checked by the time their turn comes. Each round runs every
+//! transaction whose wait is over, side by side, each on a layer of its own over what the block
+//! holds so far, which records the keys it reads. Then results go in in block order for as long as
+//! they hold, which ends some waits for the next round.
 //!
-//! Checking signatures is most of what a simple transaction costs, and runs ahead with the rest. A
-//! transaction run again does not check its signature again.
+//! What a transaction names is a guess at what it touches: a contract can reach accounts and
+//! contracts nobody named. So a result only goes in if nothing it read was written by a
+//! transaction that went in after it ran. One that was runs again, the only kind that ever runs
+//! twice. Either way every transaction ends up with exactly the result running them one by one
+//! gives, so none of this is consensus, only speed. A run of transactions that depend on each
+//! other runs one at a time, as it must, and everything beside it runs alongside.
 
 use {
     super::execute::{self, BlockContext, ExecuteError, Executed, Rules},
     super::{BlockError, ImportError, Receipt, TxError},
-    crate::db::{Changes, Column, Keys, State, address_key},
+    crate::crypto::verifiable::{Verifiable, VerifyError},
+    crate::db::{Changes, Column, Key, Keys, State, address_key},
+    crate::registry::contracts::contract_address,
     crate::registry::{Accounts, RegistryError},
-    crate::structs::tx::SignedTx,
+    crate::structs::address::Address,
+    crate::structs::hash::HashType,
+    crate::structs::tx::{SignedTx, Tx},
     crate::structs::u256::u256,
     crate::vm::Vm,
     r#macro::document,
     rayon::prelude::*,
+    std::collections::{BTreeMap, BTreeSet, HashMap},
     std::sync::{Arc, OnceLock},
 };
 
@@ -92,7 +100,8 @@ pub(super) struct Ran {
     pub(super) receipts: Vec<Receipt>,
     /// The gas they used together.
     pub(super) gas_used: u64,
-    /// Which had to run again in their turn, having read what an earlier one wrote, by position.
+    /// Which ran more than once, by position: those that touched what no transaction before them
+    /// named, and read what one of those wrote.
     pub(super) again: Vec<usize>,
 }
 
@@ -103,11 +112,154 @@ pub(super) struct Runner<'a> {
     pub(super) workers: &'a Workers,
 }
 
-/// One transaction run ahead of its turn: what came of it, what it wrote and what it read.
-struct Ahead {
+/// One run of a transaction: what came of it, what it wrote and what it read.
+struct Attempt {
     outcome: Result<Executed, ExecuteError>,
     changes: Changes,
     reads: Keys,
+}
+
+/// What a transaction names, and so is expected to touch: accounts and contracts by address, and
+/// the records every staking or signer transaction shares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Touch {
+    Address(Address),
+    Staking,
+    Signers,
+}
+
+fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
+    let sender = tx.sender();
+    let mut touched = vec![Touch::Address(sender)];
+
+    match &tx.tx {
+        Tx::Transfer { to, .. } | Tx::Mint { to, .. } | Tx::ContractCall { to, .. } => touched.push(Touch::Address(*to)),
+        Tx::Deploy { .. } => touched.push(Touch::Address(contract_address(&sender, tx.nonce, hash))),
+        Tx::Upgrade { contract, .. } => touched.push(Touch::Address(*contract)),
+        Tx::Burn { .. } => {}
+        Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::Slash { .. } => touched.push(Touch::Staking),
+        Tx::ApproveSigners { .. } => touched.push(Touch::Signers),
+    }
+
+    touched
+}
+
+/// For each transaction, the last one before it that names something it names, which it waits
+/// for. Every transaction pays the producer under fees, so one naming the producer waits for the
+/// one right before it, and with it for all of them.
+fn waits(txs: &[SignedTx], hash: HashType, paid: Option<Address>) -> Vec<Option<usize>> {
+    let mut last: HashMap<Touch, usize> = HashMap::new();
+
+    txs.iter()
+        .enumerate()
+        .map(|(index, tx)| {
+            let touched = touches(tx, hash);
+            let mut wait = match paid {
+                Some(producer) if touched.contains(&Touch::Address(producer)) => index.checked_sub(1),
+                _ => None,
+            };
+
+            for touch in touched {
+                wait = wait.max(last.insert(touch, index));
+            }
+
+            wait
+        })
+        .collect()
+}
+
+/// Where each of a block's transactions stands in its rounds.
+struct Schedule {
+    /// Each transaction's latest attempt, numbered so stale records of older ones are told apart.
+    attempts: Vec<Option<(Attempt, u64)>>,
+    /// Whether a transaction's attempt read what one that went in since wrote.
+    stale: Vec<bool>,
+    /// Which attempts read each key, so a transaction going in can tell which it spoiled.
+    readers: BTreeMap<Key, Vec<(usize, u64)>>,
+    /// The transactions waiting for each one.
+    waiting: Vec<Vec<usize>>,
+    /// What runs next round.
+    runnable: BTreeSet<usize>,
+    /// Which have run before.
+    ran: Vec<bool>,
+    next: u64,
+}
+
+impl Schedule {
+    fn new(waits: Vec<Option<usize>>) -> Schedule {
+        let count = waits.len();
+        let mut waiting = vec![Vec::new(); count];
+        let mut runnable = BTreeSet::new();
+
+        for (index, wait) in waits.into_iter().enumerate() {
+            match wait {
+                Some(before) => waiting[before].push(index),
+                None => {
+                    runnable.insert(index);
+                }
+            }
+        }
+
+        Schedule {
+            attempts: (0..count).map(|_| None).collect(),
+            stale: vec![false; count],
+            readers: BTreeMap::new(),
+            waiting,
+            runnable,
+            ran: vec![false; count],
+            next: 0,
+        }
+    }
+
+    /// What runs this round. The transaction whose turn it is always does, when it has no result
+    /// to go in with, so every round lets at least one go in.
+    fn round(&mut self, turn: usize) -> Vec<usize> {
+        if self.attempts[turn].is_none() || self.stale[turn] {
+            self.runnable.insert(turn);
+        }
+
+        std::mem::take(&mut self.runnable).into_iter().collect()
+    }
+
+    /// Keeps an attempt. Returns whether the transaction had run before.
+    fn record(&mut self, index: usize, attempt: Attempt) -> bool {
+        let id = self.next;
+        self.next += 1;
+
+        for key in &attempt.reads {
+            self.readers.entry(key.clone()).or_default().push((index, id));
+        }
+
+        self.attempts[index] = Some((attempt, id));
+        self.stale[index] = false;
+
+        std::mem::replace(&mut self.ran[index], true)
+    }
+
+    /// The attempt the transaction whose turn it is goes in with, if it still holds.
+    fn take(&mut self, turn: usize) -> Option<Attempt> {
+        match self.stale[turn] {
+            true => None,
+            false => self.attempts[turn].take().map(|(attempt, _)| attempt),
+        }
+    }
+
+    /// Notes that a transaction went in, or was left out, having written these keys: attempts
+    /// after it that read one run again, and those waiting for it may run.
+    fn done(&mut self, turn: usize, written: &Keys) {
+        for key in written {
+            for (reader, id) in self.readers.remove(key).unwrap_or_default() {
+                let current = self.attempts[reader].as_ref().is_some_and(|(_, current)| *current == id);
+
+                if reader > turn && current && !self.stale[reader] {
+                    self.stale[reader] = true;
+                    self.runnable.insert(reader);
+                }
+            }
+        }
+
+        self.runnable.extend(std::mem::take(&mut self.waiting[turn]));
+    }
 }
 
 impl Runner<'_> {
@@ -115,69 +267,102 @@ impl Runner<'_> {
     /// share of each fee as soon as each is in. The result is exactly what running them one by
     /// one gives.
     pub(super) fn run(&self, layer: &Arc<State>, txs: &[SignedTx], context: &BlockContext, unfit: Unfit) -> Result<Ran, ImportError> {
-        let ahead = self.workers.map(txs, |tx| self.ahead(layer, tx, context));
+        let paid = self.rules.fees.is_some().then_some(context.producer);
+        let mut schedule = Schedule::new(waits(txs, self.rules.hash, paid));
+        let mut checked: Vec<Result<(), VerifyError>> = Vec::with_capacity(txs.len());
         let mut ran = Ran::default();
-        // Everything the transactions kept so far wrote.
-        let mut written = Keys::new();
+        let mut turn = 0;
 
-        for (index, (tx, ahead)) in txs.iter().zip(ahead).enumerate() {
-            if let Some(left) = self.gas_left(ran.gas_used)
-                && tx.fee.gas_limit > left
-            {
-                match unfit {
-                    Unfit::Refuse => return Err(ImportError::Invalid(BlockError::Tx { index, error: TxError::BlockFull { left } })),
-                    Unfit::Skip => continue,
+        while turn < txs.len() {
+            let round = schedule.round(turn);
+
+            if checked.is_empty() {
+                // The first round checks every signature at once, and runs those with nothing to
+                // wait for in the same go.
+                let mut now = vec![false; txs.len()];
+                round.iter().for_each(|&index| now[index] = true);
+                let every: Vec<usize> = (0..txs.len()).collect();
+                let first = self.workers.map(&every, |&index| {
+                    let check = txs[index].verify();
+
+                    (check, now[index].then(|| self.attempt(layer, &txs[index], check, context)))
+                });
+
+                for (index, (check, attempt)) in first.into_iter().enumerate() {
+                    checked.push(check);
+
+                    if let Some(attempt) = attempt {
+                        schedule.record(index, attempt);
+                    }
+                }
+            } else {
+                let attempts = self.workers.map(&round, |&index| self.attempt(layer, &txs[index], checked[index], context));
+
+                for (index, attempt) in round.into_iter().zip(attempts) {
+                    if schedule.record(index, attempt) {
+                        ran.again.push(index);
+                    }
                 }
             }
 
-            let (outcome, changes) = match ahead {
-                Ahead { outcome: Err(ExecuteError::Db(err)), .. } => return Err(ImportError::Db(err)),
-                Ahead { outcome, changes, reads } if reads.is_disjoint(&written) => (outcome, changes),
-                _ => {
-                    ran.again.push(index);
-                    self.again(layer, tx, context)
-                }
-            };
+            // In block order, for as long as results hold.
+            while let Some(attempt) = (turn < txs.len()).then(|| schedule.take(turn)).flatten() {
+                let mut written = Keys::new();
 
-            match outcome {
-                Ok(executed) => {
-                    written.extend(changes.keys().cloned());
-                    layer.merge(changes);
-                    self.pay_producer(layer, context, executed.to_producer, &mut written)?;
-                    ran.gas_used += executed.receipt.gas_used;
-                    ran.kept.push(index);
-                    ran.receipts.push(executed.receipt);
+                match self.gas_left(ran.gas_used) {
+                    Some(left) if txs[turn].fee.gas_limit > left => {
+                        if unfit == Unfit::Refuse {
+                            return Err(ImportError::Invalid(BlockError::Tx { index: turn, error: TxError::BlockFull { left } }));
+                        }
+                    }
+                    _ => match attempt.outcome {
+                        Ok(executed) => {
+                            written.extend(attempt.changes.keys().cloned());
+                            layer.merge(attempt.changes);
+                            self.pay_producer(layer, context, executed.to_producer, &mut written)?;
+                            ran.gas_used += executed.receipt.gas_used;
+                            ran.kept.push(turn);
+                            ran.receipts.push(executed.receipt);
+                        }
+                        Err(ExecuteError::Invalid(error)) => {
+                            if unfit == Unfit::Refuse {
+                                return Err(ImportError::Invalid(BlockError::Tx { index: turn, error }));
+                            }
+                        }
+                        Err(ExecuteError::Db(err)) => return Err(ImportError::Db(err)),
+                    },
                 }
-                Err(ExecuteError::Invalid(error)) => match unfit {
-                    Unfit::Refuse => return Err(ImportError::Invalid(BlockError::Tx { index, error })),
-                    Unfit::Skip => {}
-                },
-                Err(ExecuteError::Db(err)) => return Err(ImportError::Db(err)),
+
+                schedule.done(turn, &written);
+                turn += 1;
             }
         }
+
+        ran.again.sort_unstable();
+        ran.again.dedup();
 
         Ok(ran)
     }
 
-    /// Runs a transaction ahead of its turn, on the block's starting state, recording its reads.
-    fn ahead(&self, layer: &Arc<State>, tx: &SignedTx, context: &BlockContext) -> Ahead {
-        let own = Arc::new(State::recording(layer.clone()));
-        let outcome = execute::execute(&own, tx, self.rules, self.vm, context);
+    /// Runs a transaction on what the block holds now, recording what it reads. One that failed
+    /// its checks does not run at all.
+    fn attempt(&self, layer: &Arc<State>, tx: &SignedTx, checked: Result<(), VerifyError>, context: &BlockContext) -> Attempt {
+        if let Err(err) = checked {
+            return Attempt {
+                outcome: Err(ExecuteError::Invalid(TxError::Invalid(err))),
+                changes: Changes::new(),
+                reads: Keys::new(),
+            };
+        }
 
-        Ahead {
+        let own = Arc::new(State::recording(layer.clone()));
+        let outcome = execute::execute_verified(&own, tx, self.rules, self.vm, context);
+
+        Attempt {
             outcome,
             changes: own.take_changes(),
             reads: own.take_reads(),
         }
-    }
-
-    /// Runs a transaction again in its turn, on what the block holds now. It passed its checks when
-    /// it ran ahead, since a transaction that fails them reads nothing and never runs again.
-    fn again(&self, layer: &Arc<State>, tx: &SignedTx, context: &BlockContext) -> (Result<Executed, ExecuteError>, Changes) {
-        let turn = Arc::new(State::new(layer.clone()));
-        let outcome = execute::execute_verified(&turn, tx, self.rules, self.vm, context);
-
-        (outcome, turn.take_changes())
     }
 
     /// Credits the producer its share of a transaction's fee, as a write later transactions may

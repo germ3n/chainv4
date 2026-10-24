@@ -7,7 +7,7 @@ use crate::structs::address::Address;
 use crate::structs::amount::Amount;
 use crate::structs::code::{Code, Engine};
 use crate::structs::hash::{Hash, HashType};
-use crate::structs::tx::{FeeOffer, Tx};
+use crate::structs::tx::{FeeOffer, Tx, TxCallArgumentType};
 use crate::vm::{Limits, selector};
 
 const COUNTER: &str = r#"
@@ -191,10 +191,9 @@ fn running_side_by_side_gives_what_running_one_by_one_does() {
         let layer = Arc::new(State::new(db.clone()));
         let ran = runner.run(&layer, &txs, &context(), Unfit::Skip).unwrap();
 
-        // Those that read what an earlier one wrote ran again: a run's later nonces, the recipient
-        // that sends, the calls after the deploy, both touching the producer's balance, and the
-        // replay. The five that touch nothing in common kept what they did side by side.
-        assert_eq!(ran.again, [3, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15]);
+        // Every dependency here is one the transactions name, so each waited for what it
+        // depends on and nothing ran twice.
+        assert!(ran.again.is_empty(), "{:?} ran again", ran.again);
         assert_eq!(ran.kept, expected.kept);
         assert_eq!(ran.receipts, expected.receipts);
         assert_eq!(ran.gas_used, expected.gas_used);
@@ -209,6 +208,63 @@ fn running_side_by_side_gives_what_running_one_by_one_does() {
 
     assert!(matches!(&refused, ImportError::Invalid(BlockError::Tx { index: 14, .. })), "{refused:?}");
     assert!(expected.starts_with("14: nonce 0"), "{expected}");
+}
+
+/// Pays whoever it is told, from what it was sent: an account no transaction calling it names.
+const PAYER: &str = r#"
+local M = {}
+
+function M.pay(to)
+    accounts.transfer(to, 1)
+end
+
+return M
+"#;
+
+#[test]
+fn a_contract_reaching_what_nobody_named_makes_only_the_reader_run_again() {
+    let rules = rules();
+    let vm = Arc::new(Vm::new(&[Engine::Lua], rules.hash).unwrap());
+    let workers = Workers::new();
+    let runner = Runner {
+        rules: &rules,
+        vm: &vm,
+        workers: &workers,
+    };
+    let payer = contract_address(&key(6).public().address(), 0, rules.hash);
+    let fee = FeeOffer {
+        gas_limit: 1_000_000,
+        max_price: u256::from(2_000_000_000u64),
+        tip: u256::ZERO,
+    };
+    let pay = Tx::ContractCall {
+        to: payer,
+        func: Hash::Xxh3_64(selector("pay")),
+        amount: Amount::U128(10),
+        data: vec![TxCallArgumentType::Address(key(5).public().address())],
+    };
+    let spend = Tx::Transfer {
+        from: key(5).public().address(),
+        to: key(105).public().address(),
+        amount: Amount::U128(1_000),
+    };
+    let txs = vec![
+        SignedTx::sign(Tx::Deploy { code: Code::Lua(PAYER.to_string()) }, 0, fee, &key(6)),
+        // Waits for the deploy, which it names, then pays key 5, which it does not.
+        SignedTx::sign(pay, 0, fee, &key(7)),
+        // Names nothing the others do, so runs at once, on key 5's balance from before the payment.
+        // The payment goes in first and changes that balance, so this runs again on the new one.
+        SignedTx::sign(spend, 0, fee, &key(5)),
+    ];
+    let db = funded();
+    let reference = Arc::new(State::new(db.clone()));
+    let expected = one_by_one(&rules, &vm, &reference, &txs, &context(), Unfit::Skip).unwrap();
+    let layer = Arc::new(State::new(db));
+    let ran = runner.run(&layer, &txs, &context(), Unfit::Skip).unwrap();
+
+    assert_eq!(ran.again, [2], "only the spend read what the payment wrote");
+    assert_eq!(ran.receipts, expected.receipts);
+    assert_eq!(layer.take_changes(), reference.take_changes());
 }
 
 #[test]
