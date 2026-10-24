@@ -1,5 +1,5 @@
-//! The client side of the binary: making keys, and signing transactions and submitting them to a
-//! node's HTTP API.
+//! The client side of the binary: making keys, signing transactions and submitting them to a
+//! node's HTTP API, and checking contract code's storage layout before it is sent.
 
 use {
     crate::consensus::DevAuthority,
@@ -16,8 +16,11 @@ use {
 };
 
 pub mod genesis;
+mod layout;
 #[cfg(feature = "client")]
 mod send;
+
+pub use layout::{LayoutArgs, layout};
 
 #[cfg(feature = "client")]
 pub use send::{SendArgs, TxArgs, send};

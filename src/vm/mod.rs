@@ -20,12 +20,14 @@ use {
 };
 
 mod host;
+mod layout;
 #[cfg(feature = "lvm")]
 pub mod lvm;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
 pub use host::{Host, MAX_CALL_DEPTH, MAX_EVENTS, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_VALUE_LEN, Space};
+pub use layout::{Declared, Layout, MAX_KIND_LEN};
 
 #[document(
     summary = "The hook the chain runs once, when the contract is deployed, with the deployer as sender and no arguments. The place to record an owner or mint an initial supply. If it fails, so does the deploy. Only the chain may run it.",
@@ -147,6 +149,8 @@ pub mod cost {
     /// Asking the token registry to ask a token's name, symbol and decimals again, once the
     /// transaction succeeds; the questions themselves are charged as they run.
     pub const TOKEN_REFRESH: u64 = 100;
+    /// Comparing two contracts' storage layouts: two contract reads, as a call makes one.
+    pub const CHECK_LAYOUT: u64 = 2_000;
 }
 
 #[document(
@@ -222,6 +226,8 @@ pub struct Loaded {
     pub functions: Vec<String>,
     #[document(summary = "The exported functions marked reentrant, sorted. Every other function refuses to run while its contract is already running further up the chain of calls.")]
     pub reentrant: Vec<String>,
+    #[document(summary = "The namespaces the code declares it keeps its state in.")]
+    pub layout: Layout,
 }
 
 #[document(

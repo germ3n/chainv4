@@ -238,11 +238,13 @@ impl ScriptEngine for LuaEngine {
         let result = contract.and_then(|contract| {
             let functions = contract.function_names();
             let reentrant = annotations::reentrant(source, &functions)?;
+            let layout = annotations::layout(source)?;
 
             Ok(Loaded {
                 code: contract.bytecode,
                 functions,
                 reentrant,
+                layout,
             })
         });
 

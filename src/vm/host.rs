@@ -1,5 +1,5 @@
 use {
-    super::{CallContext, FunctionId, Limits, Outcome, Vm, VmError, route},
+    super::{CallContext, FunctionId, Layout, Limits, Outcome, Vm, VmError, route},
     crate::db::{Column, DbError, State, namespace_key, storage_key},
     crate::registry::contracts::{ContractRecord, Contracts},
     crate::registry::{Accounts, RegistryError},
@@ -84,6 +84,8 @@ pub struct Host {
     stack: Vec<Address>,
     /// Whether the code running is another contract's, run by delegate on this one's storage.
     delegated: bool,
+    /// The layout of the code running, which says which namespaces it may use.
+    layout: Arc<Layout>,
     memory: usize,
     /// The first database failure anywhere in this tree of calls.
     fault: Arc<Mutex<Option<DbError>>>,
@@ -121,6 +123,7 @@ impl Host {
             context,
             stack: vec![context.contract],
             delegated: false,
+            layout: Arc::default(),
             memory,
             fault: Arc::new(Mutex::new(None)),
             vm,
@@ -148,7 +151,7 @@ impl Host {
         returns = "The value, or None when the key has none. Runtime when the key or the namespace's name is too long, Storage when the database failed.",
     )]
     pub fn storage_get(&self, space: &Space, key: &[u8]) -> Result<Option<Vec<u8>>, VmError> {
-        let (column, key) = self.locate(space, key)?;
+        let (column, key) = self.locate(space, key, false)?;
 
         self.state.get(column, &key).map_err(|err| self.fail(err))
     }
@@ -161,10 +164,10 @@ impl Host {
             key = "The key.",
             value = "The value, or None to delete it.",
         },
-        panics = "Runtime past a limit, or for code run by delegate writing the contract's own space.",
+        panics = "Runtime past a limit, for code run by delegate writing the contract's own space, or for code that declares a layout using a namespace outside it, or writing one it retired.",
     )]
     pub fn storage_set(&self, space: &Space, key: &[u8], value: Option<&[u8]>) -> Result<(), VmError> {
-        let (column, key) = self.locate(space, key)?;
+        let (column, key) = self.locate(space, key, value.is_some())?;
 
         if value.is_some_and(|value| value.len() > MAX_VALUE_LEN) {
             return Err(VmError::Runtime(format!("storage values are at most {MAX_VALUE_LEN} bytes")));
@@ -184,8 +187,8 @@ impl Host {
         Ok(())
     }
 
-    /// Where a key in a space is kept.
-    fn locate(&self, space: &Space, key: &[u8]) -> Result<(Column, Vec<u8>), VmError> {
+    /// Where a key in a space is kept, if the code running may use it there.
+    fn locate(&self, space: &Space, key: &[u8], write: bool) -> Result<(Column, Vec<u8>), VmError> {
         check_key(key)?;
         let contract = &self.context.contract;
 
@@ -194,10 +197,34 @@ impl Host {
             Space::Own => Ok((Column::Namespaces, namespace_key(contract, &[], key))),
             Space::Named(name) => {
                 check_namespace(name)?;
+                self.layout.reaches(name, write).map_err(VmError::Runtime)?;
 
                 Ok((Column::Namespaces, namespace_key(contract, name, key)))
             }
         }
+    }
+
+    #[document(
+        parent = "Host",
+        summary = "Whether one contract's code keeps another's storage layout, as Tx::Upgrade asks of new code: what a proxy checks before it points at a new implementation. Engines charge cost::CHECK_LAYOUT.",
+        params = {
+            from = "The contract whose code would be replaced: a proxy's current implementation.",
+            to = "The contract whose code would replace it.",
+        },
+        returns = "Runtime saying why when to does not keep from's layout, NoSuchContract when either holds no contract, Storage when the database failed.",
+        see_also = "Layout::keeps",
+    )]
+    pub fn check_layout(&self, from: &Address, to: &Address) -> Result<(), VmError> {
+        let contracts = Contracts::new(&self.state);
+        let layout = |address: &Address| match contracts.get(address) {
+            Ok(Some(record)) => Ok(record.layout),
+            Ok(None) => Err(VmError::NoSuchContract(*address)),
+            Err(err) => Err(self.fail(err)),
+        };
+        let (old, new) = (layout(from)?, layout(to)?);
+
+        new.keeps(&old)
+            .map_err(|why| VmError::Runtime(format!("{to} does not keep the layout of {from}: {why}")))
     }
 
     #[document(
@@ -303,6 +330,7 @@ impl Host {
             context,
             stack,
             delegated: false,
+            layout: Arc::default(),
             memory: self.memory,
             fault: self.fault.clone(),
             vm: self.vm.clone(),
@@ -375,6 +403,7 @@ impl Host {
             context: self.context,
             stack,
             delegated: true,
+            layout: Arc::default(),
             memory: self.memory,
             fault: self.fault.clone(),
             vm: self.vm.clone(),
@@ -546,6 +575,10 @@ pub(super) fn run(
     let vm = host.vm.clone();
     let Some(engine) = vm.engine(record.engine) else {
         return Outcome::failed(VmError::EngineMissing(record.engine));
+    };
+    let host = Host {
+        layout: Arc::new(record.layout.clone()),
+        ..host
     };
     let layer = host.state.clone();
     let fault = host.fault.clone();

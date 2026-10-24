@@ -458,6 +458,11 @@ pub fn contract(address: &Address, record: &ContractRecord, token: Option<&Token
         "functions": record.functions,
         "upgradable": record.functions.iter().any(|name| name == crate::vm::CHECK_PERMS),
         "reentrant": record.reentrant,
+        "layout": record.layout.namespaces.iter().map(|declared| json!({
+            "name": declared.name,
+            "kind": declared.kind,
+            "retired": declared.kind.is_none(),
+        })).collect::<Vec<_>>(),
         "code_size": record.code.len(),
         "token": token.map(self::token),
     })

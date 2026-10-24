@@ -15,10 +15,17 @@ function M.init()
     storage.own:set(OWNER, ctx.sender:text())
 end
 
--- Points the proxy at new code. Storage stays, so the new code must read the old layout.
+-- Points the proxy at new code. Storage stays, so the new code must keep the old code's storage
+-- layout, as an upgrade's would.
 function M.set_implementation(implementation)
     if ctx.sender:text() ~= storage.own:get(OWNER) then
         error("only the owner")
+    end
+
+    local current = storage.own:get(IMPLEMENTATION)
+
+    if current ~= nil then
+        contracts.check_layout(address.parse(current), implementation)
     end
 
     storage.own:set(IMPLEMENTATION, implementation:text())

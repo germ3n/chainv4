@@ -220,7 +220,8 @@ chainv4 send upgrade --contract contract:0x41f0… --lua counter_v2.lua
 ```
 
 Replaces the contract's code; its address, storage and balance stay. The contract decides who
-may: see below. `--wasm` works too, so a contract can even move between engines.
+may: see below. `--wasm` works too, so a contract can even move between engines. New code must
+keep the old code's [storage layout](#storage-layouts).
 
 ### call
 
@@ -299,6 +300,9 @@ end
 
 function M.set_implementation(implementation)
     if ctx.sender:text() ~= storage.own:get("owner") then error("only the owner") end
+    -- New code must keep the current implementation's storage layout, as an upgrade's would.
+    local current = storage.own:get("implementation")
+    if current then contracts.check_layout(address.parse(current), implementation) end
     storage.own:set("implementation", implementation:text())
 end
 
@@ -324,7 +328,8 @@ Full proxies are in [contracts/lua/proxy.lua](contracts/lua/proxy.lua) and
 - Delegated code has full access to the caller, but for its own space, which it can only read:
   only delegate to code you trust.
 - The proxy and every implementation share its plain storage and its namespaces
-  (`storage.namespace(name)`), so keep each new implementation able to read the old layout. The
+  (`storage.namespace(name)`), so keep each new implementation able to read the old layout:
+  declare it, and the proxy's `check_layout` holds new implementations to it (see below). The
   proxy's own keys go in `storage.own` (`storage::own()` in Rust), where no implementation can
   change them.
 - Delegating only reaches functions the target exports, never its `fallback`, `init` or
@@ -332,6 +337,32 @@ Full proxies are in [contracts/lua/proxy.lua](contracts/lua/proxy.lua) and
   through the proxy once it is pointed at it.
 - Values pass through a Lua proxy as Lua values, so an `i64` comes back as a number; a Rust proxy
   forwards them exactly.
+
+### Storage layouts
+
+Code can declare the namespaces it keeps its state in, and what each holds. New code, by
+`send upgrade` or a proxy repointing, must then keep every one, with the same kind, or retire it
+on purpose:
+
+```lua
+--@namespace counter number
+--@retired fees
+
+local counter = storage.namespace("counter")
+```
+
+In Rust, `chainv4_sdk::namespace!(COUNTER, "counter", "number");` and
+`chainv4_sdk::retired!("fees");`. Code that declares a layout can only use the namespaces in it,
+and retired ones it can read and clear but not write, so `migrate` can move their state into new
+ones. Check new code before sending it:
+
+```sh
+chainv4 layout counter_v2.lua --from counter_v1.lua
+chainv4 layout counter_v2.lua --from contract:0x41f0…    # what is deployed, over the API
+# counter_v2.lua does not keep the layout of contract:0x41f0…: namespace counter is dropped: keep it, or retire it
+```
+
+See [Storage layouts](docs/contracts.md#storage-layouts).
 
 ## Tokens
 

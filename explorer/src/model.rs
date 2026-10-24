@@ -220,11 +220,22 @@ pub struct Contract {
     pub engine: String,
     pub functions: Vec<String>,
     pub reentrant: Vec<String>,
+    /// The namespaces its code declares it keeps its state in; empty from nodes before layouts.
+    #[serde(default)]
+    pub layout: Vec<Declared>,
     pub upgradable: bool,
     pub code_size: u64,
     /// What the chain's token registry holds for it, when it is a token.
     #[serde(default)]
     pub token: Option<RegisteredToken>,
+}
+
+/// One namespace a contract's storage layout declares.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Declared {
+    pub name: String,
+    /// What it holds, as its code says; None once retired.
+    pub kind: Option<String>,
 }
 
 /// A token as the chain's registry holds it: what its name(), symbol() and decimals() answered

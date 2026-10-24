@@ -184,6 +184,20 @@ pub fn delegate(target: &Address, selector: u64, args: &[Value]) -> Result<Vec<V
     }
 }
 
+/// Whether to's code keeps from's storage layout: every namespace from's code declares is
+/// declared by to's too, with the same kind, or retired, the rule an upgrade's new code is held
+/// to. What a proxy checks before it points at a new implementation.
+///
+/// Returns which namespace breaks it, or that either address holds no contract.
+pub fn check_layout(from: &Address, to: &Address) -> Result<(), String> {
+    let (from, to) = (from.encode(), to.encode());
+
+    match unsafe { sys::check_layout(from.as_ptr(), to.as_ptr()) } {
+        0 => Ok(()),
+        _ => Err(String::from_utf8_lossy(&result()).into_owned()),
+    }
+}
+
 /// The selector a call names a function by: XXH3-64 of its name, worked out on the node.
 pub fn selector(name: &str) -> u64 {
     let digest = hash(Algorithm::Xxh3, name.as_bytes());

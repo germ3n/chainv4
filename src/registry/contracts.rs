@@ -11,7 +11,7 @@ use {
     crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
-    crate::vm::{CHECK_PERMS, CallContext, INIT, Limits, MIGRATE, Outcome, Vm, VmError},
+    crate::vm::{CHECK_PERMS, CallContext, INIT, Layout, Limits, MIGRATE, Outcome, Vm, VmError},
     r#macro::document,
     std::sync::Arc,
     wincode::{SchemaRead, SchemaWrite},
@@ -21,7 +21,7 @@ use {
 const ADDRESS_DOMAIN: &[u8] = b"chainv4 contract address";
 
 #[document(
-    summary = "A deployed contract as stored: who deployed it, which engine runs it, what the engine made of its code, and the names it exports.",
+    summary = "A deployed contract as stored: who deployed it, which engine runs it, what the engine made of its code, the names it exports, and the storage layout it declares.",
     category = "Registries",
     see_also = "Contracts, Loaded",
 )]
@@ -37,6 +37,8 @@ pub struct ContractRecord {
     pub functions: Vec<String>,
     #[document(summary = "The exported functions that may be entered while the contract is already running, sorted.")]
     pub reentrant: Vec<String>,
+    #[document(summary = "The namespaces its code declares it keeps its state in. New code must keep them.")]
+    pub layout: Layout,
 }
 
 impl Hashable for ContractRecord {}
@@ -109,7 +111,7 @@ impl<'a> Contracts<'a> {
 
     #[document(
         parent = "Contracts",
-        summary = "Replaces a contract's code, keeping its address, storage and balance. The contract decides who may: its check_perms is asked with \"upgrade\" and the sender, and must return true. Then the new code's migrate runs, if it exports one, with the sender as sender, and the token registry is brought in line with what the new code exports. If anything fails, nothing changes.",
+        summary = "Replaces a contract's code, keeping its address, storage and balance. The contract decides who may: its check_perms is asked with \"upgrade\" and the sender, and must return true. The new code must keep the old code's storage layout. Then the new code's migrate runs, if it exports one, with the sender as sender, and the token registry is brought in line with what the new code exports. If anything fails, nothing changes.",
         params = {
             vm = "The chain's engines.",
             sender = "Who asks for the upgrade.",
@@ -119,8 +121,8 @@ impl<'a> Contracts<'a> {
             token_functions = "What makes a contract a token, as genesis says; empty keeps no registry.",
         },
         returns = "What check_perms, loading the new code, migrate and the token registry's questions burned, and what migrate emitted. A failure carries what was burned before it.",
-        panics = "NotPermitted when the contract has no check_perms or it does not return true, NoSuchContract when there is nothing to upgrade, Vm when the code does not load or migrate fails, BadToken when the new code is a token but its name(), symbol() or decimals() answers badly.",
-        see_also = "CHECK_PERMS, MIGRATE, Tx::Upgrade, Tokens",
+        panics = "NotPermitted when the contract has no check_perms or it does not return true, NoSuchContract when there is nothing to upgrade, Vm when the code does not load or migrate fails, Layout when the new code does not keep the old layout, BadToken when the new code is a token but its name(), symbol() or decimals() answers badly.",
+        see_also = "CHECK_PERMS, MIGRATE, Tx::Upgrade, Tokens, Layout::keeps",
     )]
     pub fn upgrade(
         &self,
@@ -140,8 +142,17 @@ impl<'a> Contracts<'a> {
         let (asked, mut trace) = self.permits(vm, &current, context, "upgrade", limits)?;
         let (record, loaded) = load(vm, current.deployer, code, spent(limits, asked))
             .map_err(|failed| failed.after(asked, trace.clone()))?;
-        self.state.put_value(Column::Contracts, address_key(contract), &record);
         let before = asked + loaded;
+
+        if let Err(why) = record.layout.keeps(&current.layout) {
+            return Err(Failed {
+                error: RegistryError::Layout(why),
+                fuel_used: before,
+                trace,
+            });
+        }
+
+        self.state.put_value(Column::Contracts, address_key(contract), &record);
         let mut hooked = self
             .hook(vm, &record, context, MIGRATE, spent(limits, before))
             .map_err(|failed| failed.after(before, trace.clone()))?;
@@ -435,6 +446,7 @@ fn load(vm: &Vm, deployer: Address, code: &Code, limits: Limits) -> Result<(Cont
         code: loaded.code,
         functions: loaded.functions,
         reentrant: loaded.reentrant,
+        layout: loaded.layout,
     };
 
     Ok((record, loading.fuel_used))

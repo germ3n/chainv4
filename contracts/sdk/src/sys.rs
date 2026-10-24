@@ -40,6 +40,8 @@ unsafe extern "C" {
     ) -> u32;
     /// Runs another contract's function on this contract's storage; status and result as call.
     pub fn delegate(address: *const u8, selector: u64, args: *const u8, args_len: u32) -> u32;
+    /// 0 when to's code keeps from's storage layout; 1 when not, with why in the result buffer.
+    pub fn check_layout(from: *const u8, to: *const u8) -> u32;
     /// Emits an event; data is an encoded list of values.
     pub fn emit(name: *const u8, name_len: u32, data: *const u8, data_len: u32);
     /// Asks the token registry to ask this contract's name, symbol and decimals again.

@@ -26,6 +26,9 @@ enum Command {
     Send(Box<cli::SendArgs>),
     /// Writes a genesis file with the development defaults, to edit and run with --genesis.
     Genesis(cli::genesis::GenesisArgs),
+    /// Shows the storage layout contract code declares, and with --from, checks it keeps an
+    /// older version's, as an upgrade or a proxy repointing would.
+    Layout(cli::LayoutArgs),
 }
 
 #[cfg(feature = "node")]
@@ -121,6 +124,7 @@ fn main() -> std::process::ExitCode {
         #[cfg(feature = "client")]
         Some(Command::Send(args)) => cli::send(*args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
+        Some(Command::Layout(args)) => cli::layout(args),
         None => run(cli.node),
     };
 

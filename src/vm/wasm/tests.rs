@@ -35,6 +35,7 @@ const IMPORTS: &str = r#"
   (import "chain" "transfer" (func $transfer (param i32 i32) (result i32)))
   (import "chain" "call" (func $call (param i32 i32 i32 i32 i32 i32) (result i32)))
   (import "chain" "delegate" (func $delegate (param i32 i64 i32 i32) (result i32)))
+  (import "chain" "check_layout" (func $check_layout (param i32 i32) (result i32)))
   (import "chain" "emit" (func $emit (param i32 i32 i32 i32)))
   (import "chain" "refresh_token" (func $refresh_token))
   (import "chain" "abort" (func $abort (param i32 i32)))
@@ -334,6 +335,23 @@ fn the_reentrant_section_marks_exported_functions() {
     assert_eq!(load(r#"(@custom "chainv4.reentrant" "b\00a\00") (@custom "chainv4.reentrant" "b\00")"#).unwrap().reentrant, ["a", "b"]);
     assert!(matches!(load(r#"(@custom "chainv4.reentrant" "c\00")"#), Err(VmError::Compile(text)) if text.contains("does not export")));
     assert!(matches!(load(r#"(@custom "chainv4.reentrant" "a")"#), Err(VmError::Compile(text)) if text.contains("zero byte")));
+}
+
+#[test]
+fn the_layout_section_declares_namespaces() {
+    let engine = WasmEngine::new();
+    let load = |sections: &str| {
+        let wat = format!(r#"(module (memory (export "memory") 1) {sections})"#);
+
+        engine.load(&wat::parse_str(wat).unwrap(), LIMITS).result
+    };
+    let declared = load(r#"(@custom "chainv4.layout" "retired fees\00") (@custom "chainv4.layout" "namespace balances u256\00")"#).unwrap();
+
+    assert_eq!(declared.layout.to_string(), "namespace balances u256\nretired fees\n");
+    assert_eq!(load("").unwrap().layout, crate::vm::Layout::default());
+    assert!(matches!(load(r#"(@custom "chainv4.layout" "namespace balances\00")"#), Err(VmError::Compile(text)) if text.contains("NAME KIND")));
+    assert!(matches!(load(r#"(@custom "chainv4.layout" "retired a\00retired a\00")"#), Err(VmError::Compile(text)) if text.contains("declared twice")));
+    assert!(matches!(load(r#"(@custom "chainv4.layout" "retired a")"#), Err(VmError::Compile(text)) if text.contains("zero byte")));
 }
 
 #[test]

@@ -453,7 +453,7 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 type Response = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
 
 /// The JSON a request came back with, or the node's error.
-fn ok(response: Response) -> CliResult<Value> {
+pub(super) fn ok(response: Response) -> CliResult<Value> {
     match fetch(response)? {
         (200..=299, json) => Ok(json),
         (status, json) => Err(refusal(status, &json)),

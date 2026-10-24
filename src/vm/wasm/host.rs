@@ -35,6 +35,7 @@ pub(super) const NAMES: &[&str] = &[
     "transfer",
     "call",
     "delegate",
+    "check_layout",
     "emit",
     "refresh_token",
     "abort",
@@ -298,6 +299,20 @@ fn chain_delegate() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "check_layout",
+    summary = "Whether one contract's code keeps another's storage layout, by the rule Tx::Upgrade holds new code to: what a proxy checks before it points at a new implementation. Costs 2000 fuel.",
+    params = {
+        from = { ty = "i32", desc = "The 33-byte address of the contract whose code would be replaced: a proxy's current implementation." },
+        to = { ty = "i32", desc = "The 33-byte address of the contract whose code would replace it." },
+    },
+    returns = { ty = "i32", desc = "0 when it keeps it; 1 when it does not, or either holds no contract, with why in the result buffer." },
+    see_also = "rust/Layout",
+)]
+fn chain_check_layout() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "emit",
     summary = "Emits an event from this contract. It lands in the transaction's receipt only if this call, and every call above it, succeeds. Costs 200 fuel, plus 1 per 16 bytes of name and data.",
     params = {
@@ -352,6 +367,7 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "transfer", transfer).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "call", call).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "delegate", delegate).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "check_layout", check_layout).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "emit", emit).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "refresh_token", refresh_token).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
@@ -520,6 +536,23 @@ fn transfer(mut caller: Caller<'_, Run>, address: u32, amount: u32) -> Result<u3
     let amount = amount_at(&mut caller, amount)?;
 
     match host.transfer(&to, amount) {
+        Ok(()) => Ok(0),
+        Err(err @ VmError::Storage(_)) => Err(stop(&mut caller, err)),
+        Err(err) => {
+            caller.data_mut().result = err.to_string().into_bytes();
+
+            Ok(1)
+        }
+    }
+}
+
+fn check_layout(mut caller: Caller<'_, Run>, from: u32, to: u32) -> Result<u32> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::CHECK_LAYOUT)?;
+    let from = address_at(&mut caller, from)?;
+    let to = address_at(&mut caller, to)?;
+
+    match host.check_layout(&from, &to) {
         Ok(()) => Ok(0),
         Err(err @ VmError::Storage(_)) => Err(stop(&mut caller, err)),
         Err(err) => {

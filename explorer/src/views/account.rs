@@ -89,6 +89,23 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
                 }
             });
             ui.end_row();
+
+            if !contract.layout.is_empty() {
+                super::fact(ui, "layout");
+                ui.vertical(|ui| {
+                    for declared in &contract.layout {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&declared.name).monospace());
+
+                            match &declared.kind {
+                                Some(kind) => ui.weak(kind),
+                                None => ui.label(RichText::new("retired").color(super::SIDE)),
+                            };
+                        });
+                    }
+                });
+                ui.end_row();
+            }
         });
 
         if contract.token.is_some() {

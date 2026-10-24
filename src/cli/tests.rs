@@ -359,3 +359,30 @@ mod send {
         assert!(early.unwrap_err().to_string().contains("the transaction failed"));
     }
 }
+
+#[test]
+fn layout_checks_new_code_against_older_files() {
+    let dir = TempDir::new("layout");
+    let write = |name: &str, source: &str| {
+        let path = dir.0.join(name);
+        fs::write(&path, format!("{source}\nlocal M = {{}}\nfunction M.f() end\nreturn M\n")).unwrap();
+
+        path
+    };
+    let v1 = write("v1.lua", "--@namespace counter number\n--@namespace fees u256");
+    let v2 = write("v2.lua", "--@namespace counter number\n--@retired fees");
+    let retyped = write("retyped.lua", "--@namespace counter text\n--@retired fees");
+    let check = |code: &PathBuf, from: &PathBuf| {
+        layout(LayoutArgs {
+            code: code.clone(),
+            from: Some(from.display().to_string()),
+            node: String::new(),
+        })
+        .map_err(|err| err.to_string())
+    };
+
+    check(&v2, &v1).unwrap();
+    assert!(check(&retyped, &v2).unwrap_err().contains("held number, and now holds text"));
+    assert!(check(&v1, &v2).unwrap_err().contains("stays retired"));
+    assert!(check(&v1, &dir.0.join("v1.txt")).unwrap_err().contains(".lua, .luau or .wasm"));
+}

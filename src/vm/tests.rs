@@ -1120,6 +1120,36 @@ impl World {
     }
 }
 
+/// A proxy repoints only to code that keeps its current implementation's layout, as an upgrade
+/// would need.
+fn proxies_repoint_only_to_code_that_keeps_the_layout(proxy_code: Code) {
+    let mut world = World::new();
+    let v1 = world.lua_code(LAYOUT_V1);
+    let proxy = proxy(&mut world, proxy_code, v1);
+    world.call(proxy, "increment", &[TxCallArgumentType::I64(3)]).result.unwrap();
+    let retyped = world.lua_code(&LAYOUT_V1.replace("counter number", "counter text"));
+    let refused = world.call(proxy, "set_implementation", &[address(retyped)]).result.unwrap_err().to_string();
+
+    assert!(refused.contains("does not keep the layout") && refused.contains("held number"), "{refused}");
+    assert_eq!(world.call(proxy, "implementation", &[]).result.unwrap(), [address(v1)]);
+
+    // A copy that keeps it is fine, and finds the count where V1 left it, in the proxy's storage.
+    let same = world.lua_code(&format!("{LAYOUT_V1}\n-- another copy"));
+    world.call(proxy, "set_implementation", &[address(same)]).result.unwrap();
+
+    assert_eq!(world.call(proxy, "count", &[]).result.unwrap(), [TxCallArgumentType::Number(3.0)]);
+}
+
+#[test]
+fn a_lua_proxy_checks_the_layout_before_repointing() {
+    proxies_repoint_only_to_code_that_keeps_the_layout(Code::Lua(include_str!("../../contracts/lua/proxy.lua").to_string()));
+}
+
+#[test]
+fn a_rust_proxy_checks_the_layout_before_repointing() {
+    proxies_repoint_only_to_code_that_keeps_the_layout(Code::Wasm(example("upgradable")));
+}
+
 #[test]
 fn a_lua_proxy_delegates_through_fallback() {
     upgradable_proxies_run_their_implementation_on_their_own_storage(Code::Lua(include_str!("../../contracts/lua/proxy.lua").to_string()));
@@ -1174,6 +1204,111 @@ fn hooks_and_fallbacks_are_never_called_or_delegated_to() {
     // Delegating never falls back: the target must export the function itself.
     assert!(delegated(proxy, "increment").contains("no such function"));
     assert!(delegated(Address::Contract([9; 32]), "count").contains("no contract"));
+}
+
+/// Counts in a namespace its layout declares. Anyone may upgrade it.
+const LAYOUT_V1: &str = r#"
+--@namespace counter number
+local M = {}
+local counter = storage.namespace("counter")
+
+function M.increment(by)
+    local count = tonumber(counter:get("count") or "0") + by
+    counter:set("count", tostring(count))
+    return count
+end
+
+function M.count()
+    return tonumber(counter:get("count") or "0")
+end
+
+function M.stray()
+    storage.namespace("elsewhere"):set("k", "v")
+end
+
+function M.check_perms(permission)
+    return permission == "upgrade"
+end
+
+return M
+"#;
+
+/// Retires V1's namespace, and moves the count to a new one as it migrates.
+const LAYOUT_V2: &str = r#"
+--@retired counter
+--@namespace totals number
+local M = {}
+local totals = storage.namespace("totals")
+
+function M.migrate()
+    local old = storage.namespace("counter")
+    totals:set("count", old:get("count"))
+    old:set("count", nil)
+end
+
+function M.count()
+    return tonumber(totals:get("count") or "0")
+end
+
+function M.leftover()
+    return storage.namespace("counter"):get("count")
+end
+
+function M.revive()
+    storage.namespace("counter"):set("count", "1")
+end
+
+function M.check_perms(permission)
+    return permission == "upgrade"
+end
+
+return M
+"#;
+
+fn layout_of(world: &World, contract: Address) -> String {
+    Contracts::new(&world.state).get(&contract).unwrap().unwrap().layout.to_string()
+}
+
+#[test]
+fn code_that_declares_a_layout_uses_only_its_namespaces() {
+    let mut world = World::new();
+    let counter = world.lua_code(LAYOUT_V1);
+    world.call(counter, "increment", &[TxCallArgumentType::I64(2)]).result.unwrap();
+    let stray = world.call(counter, "stray", &[]).result.unwrap_err().to_string();
+
+    assert_eq!(layout_of(&world, counter), "namespace counter number\n");
+    assert!(stray.contains("namespace elsewhere is not in this code's layout"), "{stray}");
+
+    // The Rust counter declares its own, in the custom section namespace! writes.
+    let rust = world.deploy(Code::Wasm(example("counter")));
+
+    assert_eq!(layout_of(&world, rust), "namespace counter counter-v1\n");
+    assert_eq!(world.call(rust, "increment", &[TxCallArgumentType::I64(4)]).result.unwrap(), [TxCallArgumentType::I64(4)]);
+}
+
+#[test]
+fn upgrades_keep_the_layout_or_retire_namespaces_on_purpose() {
+    let mut world = World::new();
+    let counter = world.lua_code(LAYOUT_V1);
+    world.call(counter, "increment", &[TxCallArgumentType::I64(5)]).result.unwrap();
+    let refused = |code: String| match world.upgrade(DEPLOYER, counter, Code::Lua(code)) {
+        Err(crate::registry::RegistryError::Layout(why)) => why,
+        other => panic!("{other:?}"),
+    };
+
+    assert!(refused(LAYOUT_V1.replace("counter number", "counter text")).contains("held number, and now holds text"));
+    assert!(refused(LAYOUT_V1.replace("--@namespace counter number", "--@namespace totals number")).contains("counter is dropped"));
+    assert!(refused(LAYOUT_V1.replace("--@namespace counter number", "")).contains("counter is dropped"), "declaring none drops all");
+    assert_eq!(layout_of(&world, counter), "namespace counter number\n", "a refused upgrade changes nothing");
+
+    // Retiring is on purpose: migrate reads and clears the old namespace, and moves its state.
+    world.upgrade(DEPLOYER, counter, Code::Lua(LAYOUT_V2.to_string())).unwrap();
+    let revived = world.call(counter, "revive", &[]).result.unwrap_err().to_string();
+
+    assert_eq!(world.call(counter, "count", &[]).result.unwrap(), [TxCallArgumentType::Number(5.0)]);
+    assert_eq!(world.call(counter, "leftover", &[]).result.unwrap(), [TxCallArgumentType::Nil]);
+    assert!(revived.contains("namespace counter is retired"), "{revived}");
+    assert!(refused(LAYOUT_V1.to_string()).contains("counter was retired, and stays retired"));
 }
 
 /// Passes calls on with values lists, and shows what converting them would do instead.

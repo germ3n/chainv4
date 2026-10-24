@@ -7,7 +7,7 @@
 
 extern crate alloc;
 
-use chainv4_sdk::{Address, Value, abort, delegate, emit, export, input, output, sender, storage};
+use chainv4_sdk::{Address, Value, abort, check_layout, delegate, emit, export, input, output, sender, storage};
 
 // Kept in the proxy's own space, apart from every key an implementation uses. Implementations
 // may read them, but only the proxy's own code can change them.
@@ -28,7 +28,8 @@ fn init() {
     storage::own().set(OWNER, &sender().encode());
 }
 
-/// Points the proxy at new code. Storage stays, so the new code must read the old layout.
+/// Points the proxy at new code. Storage stays, so the new code must keep the old code's storage
+/// layout, as an upgrade's would.
 #[export]
 fn set_implementation() {
     if stored(OWNER) != Some(sender()) {
@@ -39,6 +40,11 @@ fn set_implementation() {
         .first()
         .and_then(Value::as_address)
         .unwrap_or_else(|| abort("set_implementation takes an address"));
+
+    if let Some(current) = stored(IMPLEMENTATION) {
+        check_layout(&current, &implementation).unwrap_or_else(|err| abort(&err));
+    }
+
     storage::own().set(IMPLEMENTATION, &implementation.encode());
     emit("Upgraded", &[Value::Address(implementation)]);
 }

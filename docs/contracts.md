@@ -113,8 +113,9 @@ them (`Reserved`).
 address, storage and balance. They:
 1. ask its `check_perms("upgrade", sender)`;
 2. load the new code;
-3. run the new code's `migrate`;
-4. bring the token registry in line with what the new code exports, asking a token's name, symbol
+3. check that the new code keeps the old code's [storage layout](#storage-layouts);
+4. run the new code's `migrate`;
+5. bring the token registry in line with what the new code exports, asking a token's name, symbol
    and decimals again.
 
 If anything fails, nothing changes.
@@ -144,6 +145,47 @@ two entries.
 
 They are kept in the `Namespaces` column (see [Storage](storage.md#columns)).
 
+## Storage layouts
+
+Code may declare its storage layout: the namespaces it keeps its state in, and what each holds.
+New code then has to keep it, so an upgrade or a proxy's new implementation cannot silently
+start from empty storage because it renamed a namespace.
+
+| | Lua | Rust SDK |
+| --- | --- | --- |
+| Declare a namespace | `--@namespace counter number` | `namespace!(COUNTER, "counter", "number");` |
+| Retire one | `--@retired fees` | `retired!("fees");` |
+
+A name and a kind are each one word, 1 to 64 bytes. The kind is the code's own label for what
+the namespace holds and how it is encoded, such as `u256` or `counter-v1`. Lua lines may sit
+anywhere in the script. Rust's macros write the module's `chainv4.layout` custom section, and
+`namespace!` also defines a constant to use the namespace by: `COUNTER.get(b"count")`.
+
+**What it enforces:**
+- **Code that declares a layout uses only its namespaces.** Reaching any other fails: "namespace
+  elsewhere is not in this code's layout". Under `delegate`, it is the running code's layout
+  that counts. Plain storage and the own space stay free, and code that declares nothing may use
+  any namespace.
+- **New code keeps the old layout.** Every namespace the old code declared must still be
+  declared, with the same kind, or retired. New namespaces may come in. Code that declares
+  nothing keeps nothing, so it cannot replace code that declares a layout.
+- **Retiring is on purpose, and for good.** Retired namespaces can be read and cleared, but not
+  written, so `migrate` can move their state into a new one. Later code must keep them retired.
+  To change a namespace's kind, retire it and declare another.
+
+**Where it is checked:**
+- **`Tx::Upgrade`** refuses new code that does not keep the layout: "the new code does not keep
+  the storage layout: namespace counter is dropped: keep it, or retire it".
+- **Proxies** check before repointing, with `contracts.check_layout(current, new)` in Lua,
+  `check_layout(&current, &new)` in the SDK and `check_layout` in WebAssembly. The example
+  proxies do.
+- **Before you send anything,** `chainv4 layout new.lua --from old.lua` compares two files, and
+  `--from contract:0x…` compares against a deployed contract, such as a proxy's current
+  implementation, over the API (`--node`). It loads the code as a node would, prints both
+  layouts, and fails with the first namespace that breaks.
+
+Contract records keep their layout, and `GET /contracts/{address}` shows it.
+
 ## Delegate calls and proxies
 
 `contracts.delegate` in Lua, and `delegate` in WebAssembly, run another contract's code as this
@@ -164,7 +206,8 @@ README's "Proxies" section has a worked example. Keep in mind:
   proxy's plain storage and namespaces, but cannot change its own space, so no key they pick
   can change its owner or implementation (see [Storage namespaces](#storage-namespaces)).
 - **Keep layouts in agreement:** each new implementation must still read the keys and namespaces
-  of the one before.
+  of the one before. Declare a [layout](#storage-layouts) and have the proxy call
+  `check_layout` before it repoints, as the examples do, and the namespaces are checked for you.
 - **Forward with `ctx.args`.** A Lua proxy's fallback passes `ctx.args` on, and returns what
   `delegate` gives back, so every value keeps its type both ways (see
   [values lists](#values-lists)). Passing `...` instead converts them through Lua, so an `i64`
@@ -283,7 +326,7 @@ numbers.
 | `ctx` | `ctx.sender`, `ctx.contract`, `ctx.value`, and `ctx.args`, the call's arguments as a values list. |
 | `storage` | `storage.get(key)`, `storage.set(key, value)`; `nil` deletes. Keys and values are strings. `storage.namespace(name)` and `storage.own` have the same `get` and `set`, as methods, on keys of their own. |
 | `accounts` | `accounts.balance(address)`, `accounts.transfer(to, amount)` from the contract's balance. |
-| `contracts` | `contracts.call(address, name, ...)`, `contracts.call_value(address, value, name, ...)`, `contracts.delegate(address, name_or_selector, ...)`, `contracts.selector(name)`. |
+| `contracts` | `contracts.call(address, name, ...)`, `contracts.call_value(address, value, name, ...)`, `contracts.delegate(address, name_or_selector, ...)`, `contracts.check_layout(from, to)`, `contracts.selector(name)`. |
 | `events` | `events.emit(name, ...)`. |
 | `tokens` | `tokens.refresh()`: asks the token registry to ask this token's name, symbol and decimals again once the transaction succeeds. |
 | `address` | `address.parse("ed25519:0x…")`, `address.from_hex`, `address.from_bytes`; methods `hex`, `bytes`, `text`, `kind`, `is_contract`, `is_valid`. |
@@ -354,6 +397,7 @@ into its exported memory.
 | `hash` | Hashes bytes with a chosen algorithm. |
 | `balance`, `transfer` | Funds, from the contract's own balance. |
 | `call`, `delegate` | Other contracts: `call(address, value, name, name_len, args, args_len)`. |
+| `check_layout` | Whether one contract's code keeps another's storage layout. |
 | `emit` | An event. |
 | `refresh_token` | Asks the token registry to ask this token's name, symbol and decimals again once the transaction succeeds. |
 | `abort` | Stops the call with an error. Only the first 1,024 bytes of the message are kept. |
@@ -397,8 +441,9 @@ order, and what it returns becomes the call's return values (`chainv4_sdk::args`
 **What else it offers:**
 - `#[export(reentrant)]` also marks a function reentrant;
 - `sender`, `this`, `value`, `balance`, `transfer`;
-- `call` and `call_with_value`, `delegate`, `emit`, `hash`, `abort`, `refresh_token`, and
-  `storage`, with `storage::namespace(name)` and `storage::own()`.
+- `call` and `call_with_value`, `delegate`, `check_layout`, `emit`, `hash`, `abort`,
+  `refresh_token`, and `storage`, with `storage::namespace(name)` and `storage::own()`;
+- `namespace!` and `retired!`, which declare the storage layout.
 
 **Numbers:** Lua numbers reach a WebAssembly contract as float bits, and floats are refused in
 modules. So `Value::as_i64` and `Value::as_amount` turn whole numbers into integers using integer
@@ -411,10 +456,10 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 
 | Example | Shows |
 | --- | --- |
-| `contracts/examples/counter` | Storage, arguments and return values. |
+| `contracts/examples/counter` | Storage, arguments and return values, and a storage layout. |
 | `contracts/examples/vault` | Holding and sending funds. |
 | `contracts/examples/proxy` | Calling other contracts for a caller, and a reentrant callback. |
-| `contracts/examples/upgradable`, `contracts/lua/proxy.lua` | A proxy built on `fallback` and `delegate`, with its owner and implementation in its own space. |
+| `contracts/examples/upgradable`, `contracts/lua/proxy.lua` | A proxy built on `fallback` and `delegate`, with its owner and implementation in its own space, that checks a new implementation's layout. |
 | `contracts/examples/token`, `contracts/lua/token.lua` | The [token standard](token-standard.md), held to it by one shared test. |
 
 ## What to keep in mind

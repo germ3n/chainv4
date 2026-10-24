@@ -47,6 +47,17 @@ fn delegate(lua: &Lua, (target, function, args): (AnyUserData, Value, MultiValue
     returned(lua, outcome.result, "delegate", &target, untouched)
 }
 
+fn check_layout(lua: &Lua, (from, to): (AnyUserData, AnyUserData)) -> mlua::Result<()> {
+    let (from, to) = (*from.borrow::<LuaAddress>()?, *to.borrow::<LuaAddress>()?);
+    let host = lua
+        .app_data_ref::<Host>()
+        .map(|host| host.clone())
+        .ok_or_else(|| Error::runtime("contracts.check_layout is only available inside a call"))?;
+    charge(lua, cost::CHECK_LAYOUT)?;
+
+    host.check_layout(&from.0, &to.0).map_err(refused)
+}
+
 fn selector_of(_: &Lua, name: String) -> mlua::Result<LuaU256> {
     Ok(LuaU256(u256::from(selector(&name))))
 }
@@ -152,10 +163,27 @@ fn contracts_call_value() {}
         args = { ty = "...", desc = "The arguments.", optional = true },
     },
     returns = { ty = "...", desc = "The function's return values." },
-    note = "Costs 1000 fuel on top of what the code burns. Only functions the target exports can be delegated to, never its fallback or a hook. The code has full access to this contract, so delegate only to code you trust, and keep storage layouts in agreement.",
-    see_also = "contracts.selector",
+    note = "Costs 1000 fuel on top of what the code burns. Only functions the target exports can be delegated to, never its fallback or a hook. The code has full access to this contract but for storage.own, which it can only read, so delegate only to code you trust, and keep storage layouts in agreement: contracts.check_layout says whether new code keeps the old code's.",
+    see_also = "contracts.selector, contracts.check_layout",
 )]
 fn contracts_delegate() {}
+
+#[document(
+    lua,
+    parent = "contracts",
+    name = "check_layout",
+    summary = "Raises an error unless to's code keeps the storage layout of from's: every namespace from's code declares is declared by to's too, with the same kind, or retired, the rule Tx::Upgrade holds new code to. What a proxy checks before it points at a new implementation.",
+    params = {
+        from = { ty = "Address", desc = "The contract whose code would be replaced: a proxy's current implementation." },
+        to = { ty = "Address", desc = "The contract whose code would replace it." },
+    },
+    returns = { ty = "nil", desc = "" },
+    panics = "Errors saying which namespace breaks the layout, or when either address holds no contract.",
+    note = "Costs 2000 fuel.",
+    example = "function M.set_implementation(implementation)\n    local current = storage.own:get(\"implementation\")\n    if current then contracts.check_layout(address.parse(current), implementation) end\n    storage.own:set(\"implementation\", implementation:text())\nend",
+    see_also = "contracts.delegate, storage.namespace",
+)]
+fn contracts_check_layout() {}
 
 #[document(
     lua,
@@ -194,6 +222,13 @@ pub fn register_contracts_lib(lua: &Lua) {
                 .expect("[contracts] Failed to create delegate"),
         )
         .expect("[contracts] Failed to set delegate");
+    contracts_table
+        .set(
+            "check_layout",
+            lua.create_function(check_layout)
+                .expect("[contracts] Failed to create check_layout"),
+        )
+        .expect("[contracts] Failed to set check_layout");
     contracts_table
         .set(
             "selector",

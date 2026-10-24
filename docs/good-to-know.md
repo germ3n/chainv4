@@ -152,8 +152,8 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   running further up the chain of calls if it is marked:
   - `--@reentrant` on the line right above `function M.name(` in Lua;
   - `#[export(reentrant)]` in Rust.
-- **Lua annotations are read line by line.** A `--@reentrant` line inside a multi-line string
-  counts too.
+- **Lua annotations are read line by line.** A `--@reentrant`, `--@namespace` or `--@retired`
+  line inside a multi-line string counts too.
 - **Lua numbers reach WebAssembly contracts as float bits.** Floats are refused in modules, so the
   SDK's `Value::as_i64` and `Value::as_amount` turn whole numbers into integers using integer
   instructions only.
@@ -176,6 +176,14 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   storage. Code a contract delegates to can read its own space but never write it, so the
   example proxies keep their owner and implementation there. See
   [Contracts](contracts.md#storage-namespaces).
+- **Declared layouts are enforced.** Code with `--@namespace` lines, or the SDK's `namespace!`,
+  can only use the namespaces it declares, and new code must keep every one with the same kind,
+  or `--@retired` it: `Tx::Upgrade` refuses it otherwise, and the example proxies check with
+  `check_layout` before repointing. Retired namespaces stay retired, so rolling back to code
+  from before a retirement is refused too. `chainv4 layout new.lua --from old.lua` checks before
+  you send. See [Contracts](contracts.md#storage-layouts).
+- **Storage format 4.** Contract records now keep their layout, so databases from before are
+  refused; delete them, or point `--db` elsewhere.
 - **Loading code is charged.** A deploy or upgrade pays 1 fuel per byte of code to compile it,
   plus whatever a Lua script's top level burns, even when it fails. Every call pays for the top
   level again, since each runs it fresh, before the call is attached: a top level sees no `ctx`

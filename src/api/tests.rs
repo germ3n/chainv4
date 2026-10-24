@@ -17,6 +17,7 @@ use std::net::TcpStream;
 const SLOT: u64 = 2_000;
 
 const COUNTER: &str = r#"
+--@namespace counter number
 local M = {}
 
 function M.increment(by)
@@ -262,6 +263,7 @@ fn accounts_and_contracts_are_read_from_state() {
     assert_eq!(contract["deployer"], authority.to_string());
     assert_eq!(contract["functions"], json!(["increment"]));
     assert_eq!(contract["engine"], "lua");
+    assert_eq!(contract["layout"], json!([{"name": "counter", "kind": "number", "retired": false}]));
     assert!(contract["code_size"].as_u64().unwrap() > 0);
 }
 

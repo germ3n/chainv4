@@ -8,7 +8,7 @@
 //! runs exactly as a fresh one would. Every call still gets a fresh instance, with fresh memory.
 
 use {
-    super::{Host, Limits, Loaded, Loading, Outcome, ScriptEngine, VmError, selector},
+    super::{Declared, Host, Layout, Limits, Loaded, Loading, Outcome, ScriptEngine, VmError, selector},
     crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     r#macro::document,
@@ -44,6 +44,12 @@ pub const MEMORY_EXPORT: &str = "memory";
     category = "WASM VM",
 )]
 pub const REENTRANT_SECTION: &str = "chainv4.reentrant";
+#[document(
+    summary = "The custom section declaring the module's storage layout: entries such as `namespace balances u256` or `retired fees`, each ending in a zero byte. The SDK's namespace! and retired! write it, and the linker joins the pieces into one section.",
+    category = "WASM VM",
+    see_also = "rust/Layout",
+)]
+pub const LAYOUT_SECTION: &str = "chainv4.layout";
 /// How much code the module cache holds, in bytes of modules, and how many modules at most.
 const MODULE_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MODULE_CACHE_ENTRIES: usize = 1_024;
@@ -225,12 +231,14 @@ impl WasmEngine {
         let mut functions: Vec<String> = functions.into_values().collect();
         functions.sort();
         let reentrant = reentrant(&module, &functions)?;
+        let layout = layout(&module)?;
         self.cache().insert(code, module);
 
         Ok(Loaded {
             code: code.to_vec(),
             functions,
             reentrant,
+            layout,
         })
     }
 
@@ -350,6 +358,27 @@ fn reentrant(module: &Module, exported: &[String]) -> Result<Vec<String>, VmErro
     marked.dedup();
 
     Ok(marked)
+}
+
+/// The storage layout the module's chainv4.layout sections declare.
+fn layout(module: &Module) -> Result<Layout, VmError> {
+    let mut declared = Vec::new();
+
+    for section in module.custom_sections().filter(|section| section.name() == LAYOUT_SECTION) {
+        let Some(entries) = section.data().strip_suffix(&[0]) else {
+            return Err(VmError::Compile(format!("{LAYOUT_SECTION} must end each entry with a zero byte")));
+        };
+
+        for entry in entries.split(|byte| *byte == 0) {
+            let parsed = std::str::from_utf8(entry)
+                .map_err(|_| "entries are UTF-8".to_string())
+                .and_then(Declared::parse)
+                .map_err(|why| VmError::Compile(format!("{LAYOUT_SECTION}: {why}")))?;
+            declared.push(parsed);
+        }
+    }
+
+    Layout::new(declared).map_err(|why| VmError::Compile(format!("{LAYOUT_SECTION}: {why}")))
 }
 
 fn trapped(err: &wasmi::Error) -> VmError {

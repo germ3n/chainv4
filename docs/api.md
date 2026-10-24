@@ -106,6 +106,8 @@ What a contract is:
 - `address`, `deployer`, `engine` and `code_size`;
 - its exported `functions`, and which are `reentrant`;
 - whether it is `upgradable`, that is, whether it exports `check_perms`;
+- its storage `layout`: each namespace its code declares, with its `name`, its `kind`, and
+  whether it is `retired`, when `kind` is `null`; empty for code that declares none;
 - what the token registry holds for it in `token`: its `address`, `name`, `symbol` and
   `decimals`, each `null` when it exports none; `token` is `null` for a contract that is not a
   token.

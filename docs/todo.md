@@ -149,9 +149,14 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   storage and each other. Code a contract delegates to may read its own space but never write
   it, so the example proxies keep their owner and implementation there, out of their
   implementations' reach.
-- [ ] **Nothing checks that an upgrade keeps the layout.** A proxy's new implementation, or code
-  swapped in by `Tx::Upgrade`, must read the keys and namespaces the old code left; no tool
-  compares what two versions read and write.
+- [x] **Storage layouts.** Code declares the namespaces it keeps its state in, and what each
+  holds (`--@namespace NAME KIND`, `--@retired NAME`; `namespace!` and `retired!` in Rust), and
+  may use no others. `Tx::Upgrade` refuses new code that drops one or changes its kind, proxies
+  check with `check_layout` before repointing, and `chainv4 layout` compares two versions
+  before anything is sent.
+- [ ] **Layouts stop at namespaces.** Keys inside a namespace, plain storage, and whether values
+  match their kind are not checked: a kind is the code's own label, and renaming a key inside a
+  namespace still starts it empty.
 - [ ] **Only one permission exists.** `check_perms` is only ever asked about `"upgrade"`. Other
   privileged actions, such as removal, would ask with their own names.
 - [x] **A token registry.** A contract that exports every function genesis names in

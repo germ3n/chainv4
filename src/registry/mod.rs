@@ -76,6 +76,8 @@ pub enum RegistryError {
     #[document(summary = "The contract would not load, or this node lacks its engine.")]
     #[cfg(feature = "vm")]
     Vm(VmError),
+    #[document(summary = "An upgrade's new code does not keep the old code's storage layout, and why.")]
+    Layout(String),
 }
 
 impl fmt::Display for RegistryError {
@@ -107,6 +109,7 @@ impl fmt::Display for RegistryError {
             RegistryError::BadToken(why) => write!(f, "it is a token, but {why}"),
             #[cfg(feature = "vm")]
             RegistryError::Vm(err) => write!(f, "{err}"),
+            RegistryError::Layout(why) => write!(f, "the new code does not keep the storage layout: {why}"),
         }
     }
 }

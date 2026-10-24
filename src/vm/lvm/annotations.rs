@@ -1,13 +1,16 @@
-//! Annotations: comment lines starting `--@` that say something about the function defined on
-//! the next line, in the style of Luau's `--!strict`. The source stays plain Luau, and every node
-//! reads the annotations the same way when the contract is deployed.
+//! Annotations: comment lines starting `--@` that say something about the script, in the style
+//! of Luau's `--!strict`: about the function defined on the next line, or about its storage
+//! layout. The source stays plain Luau, and every node reads the annotations the same way when
+//! the contract is deployed.
 
 use {
-    crate::vm::VmError,
+    crate::vm::{Declared, Layout, VmError},
     r#macro::document,
 };
 
 const PREFIX: &str = "--@";
+/// The annotations that make up a storage layout, wherever they sit.
+const LAYOUT_ENTRIES: &[&str] = &["namespace", "retired"];
 
 #[document(
     summary = "The functions a script marks with a --@reentrant line right above their definition. Only those may be entered while their contract is already running further up the chain of calls.",
@@ -29,8 +32,13 @@ pub fn reentrant(source: &str, exported: &[String]) -> Result<Vec<String>, VmErr
             continue;
         };
 
-        if annotation.trim() != "reentrant" {
-            return Err(error(index, format!("unknown annotation {PREFIX}{}", annotation.trim())));
+        let annotation = annotation.trim();
+
+        if annotation != "reentrant" {
+            match annotation.split_whitespace().next() {
+                Some(word) if LAYOUT_ENTRIES.contains(&word) => continue,
+                _ => return Err(error(index, format!("unknown annotation {PREFIX}{annotation}"))),
+            }
         }
 
         let next = lines.next().map_or("", |(_, line)| line.trim());
@@ -49,6 +57,30 @@ pub fn reentrant(source: &str, exported: &[String]) -> Result<Vec<String>, VmErr
     marked.dedup();
 
     Ok(marked)
+}
+
+#[document(
+    summary = "The storage layout a script declares with --@namespace NAME KIND and --@retired NAME lines, anywhere in it: the namespaces it keeps its state in and what each holds, and those it no longer uses.",
+    category = "Lua VM",
+    params = { source = "The Luau source." },
+    returns = "The layout, empty for a script that declares none, or a Compile error for an entry that is not `namespace NAME KIND` or `retired NAME`, or a name declared twice.",
+    example = "--@namespace balances u256\n--@retired fees\nlocal balances = storage.namespace(\"balances\")",
+    see_also = "Layout",
+)]
+pub fn layout(source: &str) -> Result<Layout, VmError> {
+    let mut declared = Vec::new();
+
+    for (index, line) in source.lines().enumerate() {
+        let Some(annotation) = line.trim().strip_prefix(PREFIX) else {
+            continue;
+        };
+
+        if annotation.split_whitespace().next().is_some_and(|word| LAYOUT_ENTRIES.contains(&word)) {
+            declared.push(Declared::parse(annotation).map_err(|why| error(index, why))?);
+        }
+    }
+
+    Layout::new(declared).map_err(VmError::Compile)
 }
 
 /// The name in `function M.name(` or `function M:name(`.
@@ -90,6 +122,34 @@ return M
 "#;
 
         assert_eq!(reentrant(source, &exported()).unwrap(), ["deposit", "on_payment"]);
+    }
+
+    #[test]
+    fn layout_lines_declare_namespaces_wherever_they_sit() {
+        let source = r#"
+--@namespace balances u256
+local M = {}
+
+  --@ retired fees
+--@reentrant
+function M.on_payment(amount) end
+
+--@namespace allowances u256
+return M
+"#;
+        let layout = layout(source).unwrap();
+
+        assert_eq!(layout.to_string(), "namespace allowances u256\nnamespace balances u256\nretired fees\n");
+        assert_eq!(reentrant(source, &exported()).unwrap(), ["on_payment"], "reentrant marks read past them");
+        assert_eq!(super::layout("local M = {}").unwrap(), Layout::default());
+
+        for (source, expected) in [
+            ("--@namespace balances", "line 1: a namespace is declared as"),
+            ("--@retired", "line 1: a namespace is retired as"),
+            ("--@namespace a u256\n--@retired a", "declared twice"),
+        ] {
+            assert!(matches!(super::layout(source), Err(VmError::Compile(text)) if text.contains(expected)), "{source}");
+        }
     }
 
     #[test]
