@@ -155,6 +155,8 @@ Kinds of finality that take no votes never ask for justifications.
 - **No graceful shutdown.** Ctrl-C stops the process mid-loop; commits are atomic, so data is
   safe.
 - **No NAT traversal,** and no limits on connections or requests.
+- **The event index is opt in.** `--index-events` starts it at the next block, and once on, the
+  database keeps it on. `GET /events` answers 404 on nodes without one.
 - **Streaming is opt in, twice:** at build time with the `stream` feature, in the default set,
   and at run time with `--stream`. A node that does not stream answers `/stream` with 404, and
   clients such as the explorer poll instead.

@@ -48,6 +48,7 @@ holds addresses that matter.
 | `Validators` | FFG validators by voting key; authority finality's decided signers and ballot. | Yes |
 | `Epochs` | Each epoch's validators or signers, and which checkpoints' voters were paid. | Yes |
 | `Finality` | What this node learned about finality: justifications, the justified and finalized checkpoints, the votes it counted or holds, its own votes, and evidence. | No |
+| `Events` | The event index, on a node started with `--index-events`: each event under its contract, and pointers to it by contract and name and by every address in its data, newest first. | Node's |
 
 **Chain state** is what every node computes the same from the blocks.
 
@@ -55,6 +56,21 @@ holds addresses that matter.
 
 **`Finality`** is outside the chain's state altogether: it is learned from the network, so two
 nodes can differ in it, and a reorg never touches it.
+
+## The event index
+
+A node started with `--index-events` keeps an index of every event on the main chain
+(`src/chain/events.rs`):
+- **Once:** each event is stored once, under its contract, with its transaction, block, height and
+  place.
+- **Pointers:** keys by contract and name, and by every address in its data, point at it.
+- **Newest first:** heights and places are stored inverted, so a listing reads forward from where
+  the last page stopped.
+- **Reorgs:** entries go into the same commit as the block's receipts, so the block's undo record
+  takes them off with it.
+- **Starting late:** the index starts at the block after the one it was turned on at, and `Meta`
+  records that height (`events_from`). Once on, it stays on, even without the flag, so it never
+  has gaps.
 
 ## The storage format
 

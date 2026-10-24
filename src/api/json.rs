@@ -2,7 +2,7 @@
 //! JavaScript numbers lose precision past 2^53; hashes, bytes and signatures are 0x hex.
 
 use {
-    crate::chain::{TxReceipt, TxStatus},
+    crate::chain::{IndexedEvent, TxReceipt, TxStatus},
     crate::crypto::keypair::PublicKey,
     crate::node::{NodeReport, PeerReport},
     crate::registry::signers::SignerSet,
@@ -215,6 +215,18 @@ fn hop(hop: &Hop) -> Value {
         "error": hop.error,
         "events": hop.events,
     })
+}
+
+/// An indexed event: the event, and the transaction and block it came from.
+pub fn indexed_event(found: &IndexedEvent) -> Value {
+    let mut value = event(&found.event);
+    value["tx"] = found.tx.to_string().into();
+    value["block"] = found.block.to_string().into();
+    value["height"] = found.height.into();
+    value["index"] = found.index.into();
+    value["position"] = found.position.into();
+
+    value
 }
 
 pub fn event(event: &Event) -> Value {

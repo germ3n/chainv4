@@ -30,6 +30,8 @@ pub enum Ask {
     Validators,
     Signers,
     Evidence,
+    /// A page of indexed events, from the newest or from where a cursor says.
+    Events { query: EventQuery, cursor: Option<String> },
     /// A read-only call, with its arguments already written as JSON.
     Call { contract: String, function: String, args: String },
     /// A fee offer for a signed probe, with the sender's own choices, as POST /offer's body.
@@ -54,6 +56,15 @@ impl Ask {
             Ask::Validators => "/validators".to_string(),
             Ask::Signers => "/signers".to_string(),
             Ask::Evidence => "/evidence".to_string(),
+            Ask::Events { query, cursor } => {
+                let mut path = format!("/events?{}", query.params());
+
+                if let Some(cursor) = cursor {
+                    path.push_str(&format!("&cursor={cursor}"));
+                }
+
+                path
+            }
             Ask::Call { .. } => "/call".to_string(),
             Ask::Offer(_) => "/offer".to_string(),
             Ask::Submit(_) => "/txs".to_string(),
@@ -71,6 +82,50 @@ impl Ask {
             _ => None,
         }
     }
+}
+
+/// Which indexed events to list: a contract's, a contract's of one name, or an address's.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EventQuery {
+    pub contract: Option<String>,
+    pub name: Option<String>,
+    pub address: Option<String>,
+}
+
+impl EventQuery {
+    pub fn contract(contract: &str, name: Option<&str>) -> EventQuery {
+        EventQuery {
+            contract: Some(contract.to_string()),
+            name: name.filter(|name| !name.is_empty()).map(str::to_string),
+            address: None,
+        }
+    }
+
+    pub fn mentioning(address: &str) -> EventQuery {
+        EventQuery {
+            contract: None,
+            name: None,
+            address: Some(address.to_string()),
+        }
+    }
+
+    fn params(&self) -> String {
+        [("contract", &self.contract), ("name", &self.name), ("address", &self.address)]
+            .iter()
+            .filter_map(|(key, value)| value.as_ref().map(|value| format!("{key}={}", encode(value))))
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+}
+
+/// Text made safe for a URL's query.
+fn encode(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => (byte as char).to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
 
 /// Why a request got no answer it could use.
@@ -253,4 +308,28 @@ fn read(response: &ehttp::Response) -> Result<Value, Failure> {
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_queries_become_paths() {
+        let named = Ask::Events {
+            query: EventQuery::contract("contract:0xab", Some("Big Win")),
+            cursor: Some("0x00ff".to_string()),
+        };
+        let everything = Ask::Events {
+            query: EventQuery::contract("contract:0xab", Some("")),
+            cursor: None,
+        };
+
+        assert_eq!(named.path(), "/events?contract=contract:0xab&name=Big%20Win&cursor=0x00ff");
+        assert_eq!(everything.path(), "/events?contract=contract:0xab");
+        assert_eq!(
+            Ask::Events { query: EventQuery::mentioning("ed25519:0x01"), cursor: None }.path(),
+            "/events?address=ed25519:0x01"
+        );
+    }
 }

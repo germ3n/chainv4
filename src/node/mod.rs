@@ -239,6 +239,19 @@ impl Node {
         self
     }
 
+    #[document(
+        parent = "Node",
+        summary = "Makes the node keep the event index, from the next block unless its database keeps one already. Once on, the database keeps it on.",
+        returns = "The node, or the database failure that kept it from starting.",
+        see_also = "Chain::index_events",
+    )]
+    pub fn index_events(mut self) -> Result<Node, NodeError> {
+        let from = self.chain.index_events()?;
+        log::info!("[node] indexing events from height {from}");
+
+        Ok(self)
+    }
+
     #[document(parent = "Node", summary = "The chain this node follows.")]
     pub fn chain(&self) -> &Chain {
         &self.chain

@@ -229,6 +229,10 @@ Every transaction on the main chain has a receipt, stored by its id (`TxReceipt`
 A failed transaction keeps only its error message and its trace, and emits nothing. A reorg moves
 receipts with everything else.
 
+A node started with `--index-events` also indexes every event by its contract, by its contract
+and name, and by the addresses in its data, in the same commit (see
+[Storage](storage.md#the-event-index)). The API lists them at `GET /events`.
+
 ## Rewards
 
 There is no coinbase transaction. After a block's transactions run, the chain credits

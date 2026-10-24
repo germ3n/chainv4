@@ -5,14 +5,14 @@
 use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
-        Coin, FinalityConfig, Fees, Genesis, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        Coin, EventFilter, FinalityConfig, Fees, Genesis, stored_events, stored_events_from, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work,
     },
     crate::crypto::keypair::PublicKey,
     crate::registry::signers::{Approval, SignerSet, Signers},
     crate::registry::validators::Validators,
     crate::structs::vote::Checkpoint,
-    crate::db::{DbError, Read, State},
+    crate::db::{Database, DbError, Read, State},
     crate::vm::{CallContext, Limits, Vm, VmError, selector},
     crate::mempool::MempoolError,
     crate::node::{NodeHandle, NodeReport, SubmitError},
@@ -20,7 +20,7 @@ use {
     crate::structs::address::Address,
     crate::structs::block::Block,
     crate::structs::hash::{Hash, HashType},
-    crate::structs::hex::from_hex,
+    crate::structs::hex::{from_hex, to_hex},
     crate::structs::tx::{FeeOffer, SignedTx},
     crate::structs::u256::u256,
     axum::body::Bytes,
@@ -51,6 +51,10 @@ const MAX_PAGE: u64 = 100;
 const DEFAULT_FORKS: u64 = 256;
 /// The most side blocks /forks returns.
 const MAX_FORKS: u64 = 1_000;
+/// How many events /events returns when the client does not say.
+const DEFAULT_EVENTS: u64 = 50;
+/// The most events /events returns.
+const MAX_EVENTS: u64 = 500;
 /// How many waiting transactions /mempool returns when the client does not say.
 const DEFAULT_MEMPOOL: u64 = 100;
 /// The most waiting transactions /mempool returns.
@@ -61,7 +65,8 @@ const MAX_BODY: usize = 2 * 1024 * 1024;
 /// What every handler reads from.
 #[derive(Clone)]
 struct Api {
-    db: Arc<dyn Read>,
+    /// Only ever read: a Database rather than a Read so listings can scan it.
+    db: Arc<dyn Database>,
     /// None when no node runs behind the API, so nothing can be submitted.
     node: Option<NodeHandle>,
     /// The chain's finality settings, to tell which epoch a height is in.
@@ -112,7 +117,7 @@ pub struct ApiOptions {
     see_also = "Node, Address, NodeHandle",
 )]
 pub fn start(
-    db: Arc<dyn Read>,
+    db: Arc<dyn Database>,
     node: Option<NodeHandle>,
     genesis: &Genesis,
     address: SocketAddr,
@@ -175,6 +180,7 @@ fn router(api: Api) -> Router {
         .route("/signers", get(signers))
         .route("/evidence", get(evidence))
         .route("/forks", get(forks))
+        .route("/events", get(events))
         .route("/node", get(node))
         .route("/mempool", get(mempool))
         .route("/offer", post(offer))
@@ -567,6 +573,37 @@ async fn forks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, Str
     Ok(Json(json!({
         "blocks": side.iter().map(json::summary).collect::<Vec<_>>(),
         "tips": tips,
+    })))
+}
+
+/// Indexed events, newest first: a contract's, a contract's of one name, or those that mention an
+/// address, a page at a time.
+async fn events(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let db = api.db;
+    let Some(from) = stored_events_from(&*db)? else {
+        return Err(ApiError::NotFound("this node keeps no event index; start it with --index-events".to_string()));
+    };
+    let filter = match (query.get("contract"), query.get("name"), query.get("address")) {
+        (Some(contract), None, None) => EventFilter::Contract(parse_address(contract)?),
+        (Some(contract), Some(name), None) => EventFilter::Named(parse_address(contract)?, name.clone()),
+        (None, None, Some(address)) => EventFilter::Mentions(parse_address(address)?),
+        _ => {
+            return Err(ApiError::BadRequest(
+                "ask for a contract's events, with or without a name, or an address's".to_string(),
+            ));
+        }
+    };
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_EVENTS).clamp(1, MAX_EVENTS) as usize;
+    let cursor = query
+        .get("cursor")
+        .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
+        .transpose()?;
+    let (found, next) = stored_events(&*db, &filter, cursor.as_deref(), limit)?;
+
+    Ok(Json(json!({
+        "events": found.iter().map(json::indexed_event).collect::<Vec<_>>(),
+        "next": next.map(|next| to_hex(&next)),
+        "indexed_from": from,
     })))
 }
 

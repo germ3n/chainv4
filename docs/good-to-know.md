@@ -43,6 +43,9 @@ other pages explain each part in full; this one is the short list to keep in min
   (`--timeout`, `--confirmations`, `--final`, `--no-wait`). It exits non-zero when the
   transaction landed but failed.
 - **The node's peer id changes on every start.** Its libp2p key is generated fresh each run.
+- **Events are searchable on nodes that index them.** `--index-events` indexes every event by its
+  contract, its name and the addresses in it, from the next block on, for `GET /events`. Once on,
+  the database keeps it on.
 - **A node only streams when asked.** `--stream` turns on `GET /stream`. Without it, clients
   such as the explorer poll.
 - **Read-only calls hold up the API.** `POST /call` runs a contract under the chain's fuel cap on

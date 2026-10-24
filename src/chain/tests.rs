@@ -778,3 +778,86 @@ fn a_deploy_that_never_finishes_loading_pays_for_all_its_fuel() {
     assert!(matches!(&receipts[0].result, Err(failure) if failure.to_string().contains("out of fuel")));
     assert!(receipts[0].fuel_used > DEV_TX_LIMITS.fuel - 1_000, "it burned {}", receipts[0].fuel_used);
 }
+
+/// Emits an event naming an address, and one that names none.
+const EMITTER: &str = r#"
+local M = {}
+
+function M.ping(to, n)
+    events.emit("Ping", to, n)
+    events.emit("Pong", n)
+end
+
+return M
+"#;
+
+#[test]
+fn indexed_events_are_found_by_contract_name_and_address_and_leave_with_their_block() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &pow_genesis()).unwrap();
+    let genesis_block = chain.block_at(0).unwrap().unwrap();
+    let (alice, bob) = (stranger().public().address(), stranger().public().address());
+    let miner = Address::Ed25519([9; 32]);
+    let emitter = contract_address(&authority().public().address(), 0, HashType::default_chain());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &authority());
+    let ping = |to: Address, n: i64, nonce: u64| {
+        let tx = Tx::ContractCall {
+            to: emitter,
+            func: Hash::Xxh3_64(selector("ping")),
+            amount: Amount::U128(0),
+            data: vec![TxCallArgumentType::Address(to), TxCallArgumentType::I64(n)],
+        };
+
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+    };
+
+    // Events before the index is turned on are not in it.
+    let a1 = mine_on(&chain, &genesis_block, vec![deploy, ping(alice, 1, 1)], miner);
+    extended(chain.import(&a1, LATER));
+
+    assert_eq!(stored_events_from(&*db).unwrap(), None);
+    assert_eq!(chain.index_events().unwrap(), 2);
+    assert_eq!(chain.index_events().unwrap(), 2, "turning it on again changes nothing");
+
+    let a2 = mine_on(&chain, &a1, vec![ping(bob, 2, 2), ping(alice, 3, 3)], miner);
+    extended(chain.import(&a2, LATER));
+    let listed = |filter: EventFilter| {
+        stored_events(&*db, &filter, None, 100)
+            .unwrap()
+            .0
+            .iter()
+            .map(|found| (found.event.name.clone(), found.index, found.position))
+            .collect::<Vec<_>>()
+    };
+
+    // Newest first: the later transaction, and within it the later event, first.
+    assert_eq!(
+        listed(EventFilter::Contract(emitter)),
+        [("Pong".to_string(), 1, 1), ("Ping".to_string(), 1, 0), ("Pong".to_string(), 0, 1), ("Ping".to_string(), 0, 0)]
+    );
+    assert_eq!(listed(EventFilter::Named(emitter, "Ping".to_string())), [("Ping".to_string(), 1, 0), ("Ping".to_string(), 0, 0)]);
+    assert!(listed(EventFilter::Named(emitter, "Pin".to_string())).is_empty(), "a name never matches a longer one");
+
+    let mentions = stored_events(&*db, &EventFilter::Mentions(alice), None, 100).unwrap().0;
+
+    assert_eq!(mentions.len(), 1);
+    assert_eq!((mentions[0].height, mentions[0].block, mentions[0].event.data[1].clone()), (2, a2.id(), TxCallArgumentType::Number(3.0)));
+    assert_eq!(mentions[0].tx, ping(alice, 3, 3).id(HashType::default_chain()));
+
+    // Pages pick up where the last stopped.
+    let (first, next) = stored_events(&*db, &EventFilter::Contract(emitter), None, 3).unwrap();
+    let (rest, after) = stored_events(&*db, &EventFilter::Contract(emitter), next.as_deref(), 3).unwrap();
+
+    assert_eq!((first.len(), rest.len(), after), (3, 1, None));
+    assert_eq!((rest[0].index, rest[0].position), (0, 0));
+    assert_eq!(Chain::open(db.clone(), &pow_genesis()).unwrap().events_from(), Some(2), "it stays on");
+
+    // A heavier branch takes the indexed block, and its events, off.
+    let b2 = mine_on(&chain, &a1, Vec::new(), miner);
+    let b3 = mine_on(&chain, &b2, Vec::new(), miner);
+    chain.import(&b2, LATER).unwrap();
+    assert!(matches!(chain.import(&b3, LATER), Ok(Imported::Reorganized { .. })));
+
+    assert!(listed(EventFilter::Contract(emitter)).is_empty());
+    assert!(stored_events(&*db, &EventFilter::Mentions(bob), None, 100).unwrap().0.is_empty());
+}

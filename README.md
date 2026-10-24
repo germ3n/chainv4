@@ -75,6 +75,7 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--stream` | | Push what the node does to API clients as it happens, on `GET /stream`. |
 | `--cors ORIGIN` | | Let web pages from this origin call the API, or `*` for any; repeat for several. |
 | `--explorer DIR` | | Serve the [explorer](docs/explorer.md)'s web app, built into `explorer/dist`, from the API's `/`. |
+| `--index-events` | | Index events by contract, by name and by the addresses in them, for `GET /events`. It starts at the next block, and stays on. |
 
 Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
 
@@ -530,6 +531,7 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "�
 | `GET /node` | The node's peers, roles, sync and what it counted since it started. |
 | `GET /mempool` | The transactions waiting for a block. |
 | `GET /stream` | Server-sent events, from a node started with `--stream`: blocks, reorgs, finality, queued transactions and peers. |
+| `GET /events` | Indexed events, newest first and paged: a contract's, a contract's of one name, or those that mention an address. On nodes started with `--index-events`. |
 
 Amounts and large integers are decimal strings, hashes and bytes are `0x` hex, and addresses
 are their kind and hex, such as `ed25519:0x…` or `contract:0x…`.

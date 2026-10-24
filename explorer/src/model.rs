@@ -293,6 +293,34 @@ pub struct Forks {
     pub tips: Vec<String>,
 }
 
+/// One of GET /events's events: the event, and where it happened.
+#[derive(Clone, Debug, Deserialize)]
+pub struct FoundEvent {
+    pub contract: String,
+    pub name: String,
+    pub data: Vec<Argument>,
+    pub tx: String,
+    pub block: String,
+    pub height: u64,
+    pub index: u32,
+    pub position: u32,
+}
+
+impl FoundEvent {
+    /// Where it sits on the chain, to order and tell events apart by.
+    pub fn place(&self) -> (u64, u32, u32) {
+        (self.height, self.index, self.position)
+    }
+}
+
+/// GET /events.
+#[derive(Clone, Debug, Deserialize)]
+pub struct EventsPage {
+    pub events: Vec<FoundEvent>,
+    pub next: Option<String>,
+    pub indexed_from: u64,
+}
+
 /// POST /call.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Called {

@@ -1051,3 +1051,72 @@ fn nil_is_written_as_null() {
     assert_eq!(json::parse_argument(&json!({ "type": "nil" })), Ok(TxCallArgumentType::Nil));
     assert_eq!(json::parse_argument(&json!({ "type": "nil", "value": null })), Ok(TxCallArgumentType::Nil));
 }
+
+const GREETER: &str = r#"
+local M = {}
+
+function M.greet(who)
+    events.emit("Hello", who)
+end
+
+return M
+"#;
+
+#[test]
+fn events_are_listed_from_the_index() {
+    let authority = DevAuthority::dev_keypair();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let greeter = contract_address(&authority.public().address(), 0, HashType::default_chain());
+
+    assert_eq!(get(address, &format!("/events?contract={greeter}")).0, 404, "no index yet");
+
+    chain.index_events().unwrap();
+    let bob = Keypair::generate(authority.public().key_type()).unwrap().public().address();
+    let greet = |nonce: u64| {
+        let tx = Tx::ContractCall {
+            to: greeter,
+            func: Hash::Xxh3_64(crate::vm::selector("greet")),
+            amount: Amount::U128(0),
+            data: vec![TxCallArgumentType::Address(bob)],
+        };
+
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
+    };
+    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(GREETER.to_string()) }, 0, FeeOffer::NONE, &authority)]);
+    produce(&mut chain, vec![greet(1)]);
+    let last = produce(&mut chain, vec![greet(2)]);
+    let listing = ok(address, &format!("/events?contract={greeter}"));
+
+    assert_eq!(listing["indexed_from"], 1);
+    assert_eq!(listing["next"], Value::Null);
+    assert_eq!(listing["events"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        listing["events"][0],
+        json!({
+            "contract": greeter.to_string(),
+            "name": "Hello",
+            "data": [{ "type": "address", "value": bob.to_string() }],
+            "tx": greet(2).id(HashType::default_chain()).to_string(),
+            "block": last.id().to_string(),
+            "height": 3,
+            "index": 0,
+            "position": 0,
+        })
+    );
+    assert_eq!(ok(address, &format!("/events?address={bob}"))["events"], listing["events"]);
+
+    // A page at a time.
+    let first = ok(address, &format!("/events?contract={greeter}&name=Hello&limit=1"));
+    let cursor = first["next"].as_str().unwrap();
+    let second = ok(address, &format!("/events?contract={greeter}&name=Hello&limit=1&cursor={cursor}"));
+
+    assert_eq!((first["events"][0]["height"].clone(), second["events"][0]["height"].clone()), (json!(3), json!(2)));
+    assert_eq!(second["next"], Value::Null);
+    assert!(ok(address, &format!("/events?contract={greeter}&name=Bye"))["events"].as_array().unwrap().is_empty());
+
+    for bad in ["/events", &format!("/events?contract={greeter}&address={bob}"), "/events?address=nope", "/events?name=Hello"] {
+        assert_eq!(get(address, bad).0, 400, "{bad}");
+    }
+}

@@ -8,8 +8,8 @@ use {
     crate::api::{Api, Ask, News, Reply},
     crate::format,
     crate::model::{
-        BlockDetail, Called, Checkpoint, Contract, Forks, Mempool, NodeView, Page, PeerChange, Receipt, Reorganized, Status,
-        Summary, TxView,
+        BlockDetail, Called, Checkpoint, Contract, EventsPage, Forks, Mempool, NodeView, Page, PeerChange, Receipt, Reorganized,
+        Status, Summary, TxView,
     },
     crate::store::{PAGE, Store},
     crate::views::{
@@ -127,7 +127,7 @@ impl Explorer {
                     match result {
                         Ok(value) => {
                             self.store.failures.remove(&ask);
-                            self.answered(ask, value);
+                            self.answered(ask, value, now);
                         }
                         Err(failure) => {
                             match &ask {
@@ -148,7 +148,7 @@ impl Explorer {
         }
     }
 
-    fn answered(&mut self, ask: Ask, value: Value) {
+    fn answered(&mut self, ask: Ask, value: Value, now: u64) {
         let store = &mut self.store;
 
         match ask {
@@ -233,6 +233,11 @@ impl Explorer {
                 }
 
                 store.calls.insert(ask.clone(), value);
+            }
+            Ask::Events { query, cursor } => {
+                if let Some(page) = parse::<EventsPage>(value) {
+                    store.events.entry(query).or_default().take(page, cursor.is_some(), now);
+                }
             }
             Ask::Offer(_) | Ask::Submit(_) => {}
         }

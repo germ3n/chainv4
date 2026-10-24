@@ -86,6 +86,10 @@ struct NodeArgs {
     #[cfg(feature = "stream")]
     #[arg(long, requires = "http")]
     stream: bool,
+    /// Keep an index of events, by contract, by name and by the addresses in them, for the API's
+    /// GET /events. It starts at the next block, and once on, the database keeps it on.
+    #[arg(long)]
+    index_events: bool,
 }
 
 /// How many events a slow /stream client may fall behind by before it misses some.
@@ -200,6 +204,10 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "stream")]
     if args.stream {
         node = node.stream(STREAM_BACKLOG);
+    }
+
+    if args.index_events || node.chain().events_from().is_some() {
+        node = node.index_events()?;
     }
 
     #[cfg(feature = "http")]

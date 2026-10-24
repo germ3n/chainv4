@@ -14,6 +14,7 @@ use {
 
 pub mod account;
 pub mod block;
+pub mod events;
 pub mod finality;
 pub mod hops;
 pub mod map;

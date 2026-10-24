@@ -157,6 +157,27 @@ The side branches the node stores, every block off the main chain, newest first,
 - `blocks`: summaries, whose `parent` links each branch to the main chain;
 - `tips`: every leaf, the tip among them.
 
+### `GET /events`
+
+Events from the node's event index, newest first. Only a node started with `--index-events`
+keeps one; on any other, 404.
+
+**Which events,** by query:
+- `contract=…`: every event a contract emitted;
+- `contract=…&name=…`: one kind of them, such as `Transfer`;
+- `address=…`: every event, from any contract, with this address in its data, such as token
+  transfers to or from an account.
+
+**Pages:** `limit` of them (50 by default, at most 500). `next` is the `cursor` for the next,
+older page, or `null` after the last.
+
+**Each event** has its `contract`, `name` and `data`, the `tx` that emitted it, its `block` and
+`height`, the transaction's place in the block (`index`) and the event's place among the
+transaction's events (`position`).
+
+**Coverage:** `indexed_from` is the first height the index covers. The index starts at the block
+after the one it was turned on at; older events are only in their receipts.
+
 ### `GET /node`
 
 How the node behind the API is doing. 503 when no node runs behind it.

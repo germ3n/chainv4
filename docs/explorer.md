@@ -86,7 +86,7 @@ At most 20,000 main-chain blocks are kept; older ones are let go.
 | Block map | Every loaded block by height. The main chain runs along the middle, with finalized blocks green. Side branches sit in lanes above and below, each block joined to its parent. The tip and the justified checkpoint are outlined. Brighter blocks hold more transactions. |
 | Block | The header, seal and finality proofs, and every transaction with its status and fee. |
 | Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, its events, its fields and its signature. |
-| Account | The balance and nonce. For a contract: its deployer, engine, code size and functions, and a form to call any of them read-only. For a token: its name, symbol and decimals. For anyone: what they hold of every token the explorer has met. |
+| Account | The balance and nonce. For a contract: its deployer, engine, code size and functions, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals. For anyone: what they hold of every token the explorer has met, and the events that mention them, token transfers and approvals in the token's units. Events need a node started with `--index-events`. |
 | Network | The node's roles, uptime, listening addresses and sync state, and what it counted since it started. A graph of its peers, and a table of them with what each gossiped and how far its chain got. |
 | Mempool | What waits for a block, by sender and nonce. |
 | Finality | The kind, the epoch, and the justified and finalized checkpoints. Who votes and with what weight, the bonded validators, the signers under authority finality, and any conflicting votes the node caught. |
@@ -188,3 +188,5 @@ CHAINV4_NODE=http://127.0.0.1:8080 cargo test -- --ignored   # sends a transfer 
 - **Side branches show only what the node kept.** `/forks` lists the side blocks the node
   stores, from each leaf back to the main chain. Restarting a node keeps its leaves.
 - **Token holdings are only for tokens met so far.** Nothing lists every token on the chain.
+- **Events need the node's index.** A node started with `--index-events` lists them, from the
+  height it started indexing at; on any other, the explorer says so instead.

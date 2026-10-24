@@ -27,12 +27,14 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
+mod events;
 mod execute;
 pub mod fees;
 mod finality;
 mod parallel;
 mod receipt;
 
+pub use events::{EventFilter, IndexedEvent, stored_events, stored_events_from};
 pub use execute::{BlockContext, Effect, Failure, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
 pub use parallel::Workers;
@@ -449,6 +451,8 @@ pub struct Chain {
     finality: Option<Box<dyn Finality>>,
     /// The threads blocks run on, shared with finality to check votes.
     workers: Arc<Workers>,
+    /// The height the event index starts at, when this node keeps one.
+    events_from: Option<u64>,
 }
 
 impl Chain {
@@ -516,6 +520,7 @@ impl Chain {
             Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers))?),
             None => None,
         };
+        let events_from = events::stored_events_from(&*db)?;
         let mut chain = Chain {
             db,
             rules: genesis.rules(),
@@ -532,6 +537,7 @@ impl Chain {
             finality_config: genesis.finality.clone(),
             finality,
             workers,
+            events_from,
         };
         // In case the node stopped between committing a block and catching finality up with it.
         chain.tip_moved()?;
@@ -542,6 +548,31 @@ impl Chain {
     #[document(parent = "Chain", summary = "How far back the main chain may be rolled back, from genesis.")]
     pub fn max_reorg_depth(&self) -> u64 {
         self.max_reorg_depth
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Starts keeping the event index from the next block, unless this database keeps one already. Once on, it stays on, so it never has gaps.",
+        returns = "The height the index starts at.",
+        see_also = "stored_events",
+    )]
+    pub fn index_events(&mut self) -> Result<u64, DbError> {
+        if let Some(from) = self.events_from {
+            return Ok(from);
+        }
+
+        let from = self.tip.height + 1;
+        let state = State::new(self.db.clone());
+        state.put_value(Column::Meta, events::FROM_KEY.to_vec(), &events::IndexedFrom { height: from });
+        self.db.commit(state.take_changes())?;
+        self.events_from = Some(from);
+
+        Ok(from)
+    }
+
+    #[document(parent = "Chain", summary = "The height the event index starts at, when this node keeps one.")]
+    pub fn events_from(&self) -> Option<u64> {
+        self.events_from
     }
 
     #[document(parent = "Chain", summary = "The newest main-chain block's header.")]
@@ -897,7 +928,12 @@ impl Chain {
 
         for (index, (tx, receipt)) in block.txs.iter().zip(&receipts).enumerate() {
             let record = TxReceipt::new(id, index as u32, receipt);
-            layer.put_value(Column::Receipts, id_key(&tx.id(self.hash)), &record);
+            let tx_id = tx.id(self.hash);
+            layer.put_value(Column::Receipts, id_key(&tx_id), &record);
+
+            if self.events_from.is_some() {
+                events::index(&layer, id, height, tx_id, index as u32, &receipt.events);
+            }
         }
 
         layer.put_value(Column::Heights, height.to_be_bytes().to_vec(), &id);

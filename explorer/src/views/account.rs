@@ -3,8 +3,8 @@
 //! hand; every account shows what it holds of the tokens the explorer has met.
 
 use {
-    super::{BAD, Ctx, GOOD},
-    crate::api::Ask,
+    super::{BAD, Ctx, GOOD, events},
+    crate::api::{Ask, EventQuery},
     crate::format,
     crate::model::Called,
     egui::{RichText, Ui},
@@ -18,6 +18,9 @@ const KINDS: [&str; 12] = ["address", "amount", "u256", "u128", "u64", "i64", "i
 pub struct AccountState {
     /// The address these are for: another one starts afresh.
     address: String,
+    /// The event name being typed, and the one the list shows.
+    typing: String,
+    named: String,
     function: String,
     args: Vec<(String, String)>,
     /// The call last made.
@@ -93,9 +96,25 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
 
         ui.add_space(6.0);
         read(ui, ctx, address, &contract.functions, state);
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new("Its events").default_open(true).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.weak("Name");
+                let field = ui.add(egui::TextEdit::singleline(&mut state.typing).hint_text("any").desired_width(160.0));
+
+                if field.lost_focus() {
+                    state.named = state.typing.trim().to_string();
+                }
+            });
+            events::list(ui, ctx, &EventQuery::contract(address, Some(&state.named)));
+        });
     }
 
     holdings(ui, ctx, address);
+    ui.add_space(6.0);
+    egui::CollapsingHeader::new("Events that mention it").default_open(true).show(ui, |ui| {
+        events::list(ui, ctx, &EventQuery::mentioning(address));
+    });
 }
 
 /// A token's own name, symbol and decimals, and decimals set by hand.

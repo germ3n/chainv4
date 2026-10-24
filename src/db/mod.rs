@@ -65,6 +65,9 @@ pub enum Column {
     #[document(summary = "What this node knows about finality and is not part of the chain's state: justifications it has seen, the latest justified and finalized checkpoints, the votes it counted or holds, its own votes, and evidence of cheating.")]
     #[wincode(tag = 11)]
     Finality,
+    #[document(summary = "The event index, for a node that keeps one: each event by its contract, and pointers to it by contract and name and by every address in its data, newest first.")]
+    #[wincode(tag = 12)]
+    Events,
 }
 
 impl Hashable for Column {
@@ -72,7 +75,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 12] = [
+    pub const ALL: [Column; 13] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -85,6 +88,7 @@ impl Column {
         Column::Validators,
         Column::Epochs,
         Column::Finality,
+        Column::Events,
     ];
 
     #[document(
@@ -105,6 +109,7 @@ impl Column {
             Column::Validators => "validators",
             Column::Epochs => "epochs",
             Column::Finality => "finality",
+            Column::Events => "events",
         }
     }
 }

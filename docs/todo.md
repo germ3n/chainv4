@@ -109,8 +109,11 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Events.** `events.emit(name, ...)` in Lua, the `emit` host function in WASM, `emit` in
   the SDK. They land in the transaction's receipt, in order, only if the call and every call
   above it succeed.
-- [ ] **Events cannot be searched.** They are only reachable through their transaction's receipt;
-  following a contract's events needs an index by contract and name.
+- [x] **Events can be searched.** A node started with `--index-events` indexes every event by its
+  contract, by its contract and name, and by every address in its data; `GET /events` lists them
+  newest first, a page at a time, and the explorer shows them on contract and account pages.
+- [ ] **The event index cannot be rebuilt.** It starts at the block after it was turned on;
+  indexing older events would mean reading every receipt back from the stored blocks.
 - [x] **Loading code is charged.** A deploy or upgrade pays `cost::LOAD_BYTE` (1 fuel) a byte to
   compile its code, plus what a Lua script's top level burns, and a failing one pays for what it
   burned before it failed. A top level runs before a call is attached, so it is the same work at
@@ -247,9 +250,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   transactions and peers as they happen, for nodes started with `--stream`.
 - [x] **The API can serve web pages.** `--cors` lets pages from other origins call it, and
   `--explorer` serves the explorer's web app from the API's own `/`.
-- [ ] **The explorer cannot search events or list tokens.** It knows only the tokens it has met,
-  and finds a contract's events only through the transactions it opens; both need an index on
-  the node.
+- [ ] **The explorer cannot list every token.** It knows only the tokens it has met; a list of
+  contracts that export the token standard would need an index on the node.
 - [ ] **CI does not build the explorer's web bundle.** It lints the wasm32 build but never runs
   `trunk build`, so a broken `index.html` or wasm-bindgen mismatch shows only when someone builds
   it.

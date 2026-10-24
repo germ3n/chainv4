@@ -221,37 +221,49 @@ pub fn events(ui: &mut Ui, ctx: &mut Ctx, events: &[EventView]) {
             ui.label(index.to_string());
             super::address(ui, ctx, &event.contract);
             ui.strong(&event.name);
-            ui.horizontal_wrapped(|ui| match token_transfer(ctx, event) {
-                Some((from, to, amount)) => {
-                    super::address(ui, ctx, &from);
-                    ui.weak("to");
-                    super::address(ui, ctx, &to);
-                    ui.label(RichText::new(amount).strong());
-                }
-                None => {
-                    for value in &event.data {
-                        super::argument(ui, ctx, value);
-                    }
-                }
-            });
+            event_data(ui, ctx, &event.contract, &event.name, &event.data);
             ui.end_row();
         }
     });
 }
 
-/// A token standard Transfer: from, to and the amount in the token's units.
-fn token_transfer(ctx: &mut Ctx, event: &EventView) -> Option<(String, String, String)> {
-    let [from, to, amount] = event.data.as_slice() else {
+/// An event's data in a row. A token's Transfer reads as who sent how much to whom, and its
+/// Approval as who let whom spend how much, in the token's units.
+pub fn event_data(ui: &mut Ui, ctx: &mut Ctx, contract: &str, name: &str, data: &[Argument]) {
+    ui.horizontal_wrapped(|ui| match token_movement(ctx, contract, name, data) {
+        Some((from, link, to, amount)) => {
+            super::address(ui, ctx, &from);
+            ui.weak(link);
+            super::address(ui, ctx, &to);
+            ui.label(RichText::new(amount).strong());
+        }
+        None => {
+            for value in data {
+                super::argument(ui, ctx, value);
+            }
+        }
+    });
+}
+
+/// A token standard Transfer or Approval: who, how they relate, whom, and the amount in the
+/// token's units.
+fn token_movement(ctx: &mut Ctx, contract: &str, name: &str, data: &[Argument]) -> Option<(String, &'static str, String, String)> {
+    let [from, to, amount] = data else {
         return None;
     };
+    let link = match name {
+        "Transfer" => "to",
+        "Approval" => "lets spend",
+        _ => return None,
+    };
 
-    if event.name != "Transfer" || from.kind != "address" || to.kind != "address" {
+    if from.kind != "address" || to.kind != "address" {
         return None;
     }
 
-    let (decimals, symbol) = ctx.token(&event.contract)?;
+    let (decimals, symbol) = ctx.token(contract)?;
 
-    Some((from.text(), to.text(), format::amount(&amount.text(), decimals, &symbol)))
+    Some((from.text(), link, to.text(), format::amount(&amount.text(), decimals, &symbol)))
 }
 
 fn signature(ui: &mut Ui, tx: &TxView) {

@@ -3,10 +3,10 @@
 //! longer is, or never was, is a side block.
 
 use {
-    crate::api::{Ask, Failure},
+    crate::api::{Ask, EventQuery, Failure},
     crate::model::{
-        Account, BlockDetail, Checkpoint, Contract, Forks, Mempool, NodeView, Page, Peer, PeerChange, Receipt, Reorganized,
-        Status, Summary, TxView,
+        Account, BlockDetail, Checkpoint, Contract, EventsPage, Forks, FoundEvent, Mempool, NodeView, Page, Peer, PeerChange,
+        Receipt, Reorganized, Status, Summary, TxView,
     },
     serde_json::Value,
     std::collections::{BTreeMap, HashMap, VecDeque},
@@ -27,6 +27,47 @@ pub struct Token {
     pub name: Option<String>,
     pub symbol: Option<String>,
     pub decimals: Option<u8>,
+}
+
+/// The indexed events a query found so far, newest first.
+#[derive(Clone, Debug, Default)]
+pub struct EventList {
+    pub events: Vec<FoundEvent>,
+    /// Where the next older page starts, or None when there is none.
+    pub next: Option<String>,
+    /// The first height the node indexed.
+    pub indexed_from: u64,
+    /// When the newest page last came, in milliseconds since the Unix epoch.
+    pub refreshed: u64,
+}
+
+impl EventList {
+    /// Takes a page: the newest, which puts any events newer than those held in front, or an
+    /// older one, which goes after them.
+    pub fn take(&mut self, page: EventsPage, older: bool, now: u64) {
+        self.indexed_from = page.indexed_from;
+
+        if older {
+            let last = self.events.last().map(FoundEvent::place);
+            self.events.extend(page.events.into_iter().filter(|event| last.is_none_or(|last| event.place() < last)));
+            self.next = page.next;
+
+            return;
+        }
+
+        self.refreshed = now;
+
+        match self.events.first().map(FoundEvent::place) {
+            None => {
+                self.events = page.events;
+                self.next = page.next;
+            }
+            Some(newest) => {
+                let newer: Vec<FoundEvent> = page.events.into_iter().filter(|event| event.place() > newest).collect();
+                self.events.splice(0..0, newer);
+            }
+        }
+    }
 }
 
 /// One line of the live feed.
@@ -64,6 +105,8 @@ pub struct Store {
     pub failures: HashMap<Ask, Failure>,
     /// What read-only calls answered.
     pub calls: HashMap<Ask, Value>,
+    /// Indexed events, by what was asked.
+    pub events: HashMap<EventQuery, EventList>,
 }
 
 impl Store {
@@ -389,5 +432,43 @@ pub(crate) mod tests {
         assert_eq!(store.main.values().cloned().collect::<Vec<_>>(), ["a", "x", "y"]);
         assert_eq!(store.blocks["b"].main, Some(false));
         assert_eq!(store.recent(2).iter().map(|block| block.id.as_str()).collect::<Vec<_>>(), ["x", "y"]);
+    }
+
+    fn found(height: u64, index: u32) -> FoundEvent {
+        FoundEvent {
+            contract: "contract:0x01".to_string(),
+            name: "Ping".to_string(),
+            data: Vec::new(),
+            tx: format!("0x{height}{index}"),
+            block: format!("0x{height}"),
+            height,
+            index,
+            position: 0,
+        }
+    }
+
+    fn events_page(events: Vec<FoundEvent>, next: Option<&str>) -> EventsPage {
+        EventsPage {
+            events,
+            next: next.map(str::to_string),
+            indexed_from: 1,
+        }
+    }
+
+    #[test]
+    fn event_pages_add_newer_events_in_front_and_older_ones_behind() {
+        let mut list = EventList::default();
+        list.take(events_page(vec![found(5, 0), found(4, 1), found(4, 0)], Some("c1")), false, 10);
+        list.take(events_page(vec![found(3, 0), found(2, 0)], None), true, 20);
+
+        assert_eq!(list.next, None);
+        assert_eq!(list.refreshed, 10, "only the newest page refreshes");
+
+        // The newest page again, with two new events: only those are added, in front.
+        list.take(events_page(vec![found(7, 0), found(6, 0), found(5, 0), found(4, 1)], Some("c2")), false, 30);
+
+        assert_eq!(list.events.iter().map(|event| event.height).collect::<Vec<_>>(), [7, 6, 5, 4, 4, 3, 2]);
+        assert_eq!(list.next, None, "the older pages already read stay read");
+        assert_eq!(list.refreshed, 30);
     }
 }
