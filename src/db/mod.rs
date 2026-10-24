@@ -71,6 +71,9 @@ pub enum Column {
     #[document(summary = "The token registry: every contract that exports the token standard, with its name, symbol and decimals, by address and by symbol.")]
     #[wincode(tag = 13)]
     Tokens,
+    #[document(summary = "Contract storage in namespaces, the contract's own space among them: keyed by the contract's address, the namespace's name with its length in front, and the script's own key.")]
+    #[wincode(tag = 14)]
+    Namespaces,
 }
 
 impl Hashable for Column {
@@ -78,7 +81,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 14] = [
+    pub const ALL: [Column; 15] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -93,6 +96,7 @@ impl Column {
         Column::Finality,
         Column::Events,
         Column::Tokens,
+        Column::Namespaces,
     ];
 
     #[document(
@@ -115,6 +119,7 @@ impl Column {
             Column::Finality => "finality",
             Column::Events => "events",
             Column::Tokens => "tokens",
+            Column::Namespaces => "namespaces",
         }
     }
 }
@@ -355,6 +360,18 @@ pub fn storage_key(contract: &Address, key: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The key of one entry in one of a contract's namespaces, in Column::Namespaces. The name goes
+/// in with its length in front, so no two namespaces' keys ever meet; the contract's own space is
+/// the one with no name. Names are at most 255 bytes.
+pub fn namespace_key(contract: &Address, name: &[u8], key: &[u8]) -> Vec<u8> {
+    let mut out = address_key(contract);
+    out.push(u8::try_from(name.len()).expect("namespace names are at most 255 bytes"));
+    out.extend_from_slice(name);
+    out.extend_from_slice(key);
+
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -580,5 +597,14 @@ pub(crate) mod tests {
             address_key(&Address::Ed25519([1; 32])),
             address_key(&Address::Contract([1; 32]))
         );
+    }
+
+    #[test]
+    fn namespaces_never_share_keys() {
+        let contract = Address::Contract([1; 32]);
+
+        assert_ne!(namespace_key(&contract, b"ab", b"c"), namespace_key(&contract, b"a", b"bc"));
+        assert_ne!(namespace_key(&contract, b"", b"\x01ak"), namespace_key(&contract, b"a", b"k"), "the own space is apart too");
+        assert_ne!(namespace_key(&contract, b"a", b"k"), namespace_key(&Address::Contract([2; 32]), b"a", b"k"));
     }
 }

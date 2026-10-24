@@ -119,6 +119,31 @@ address, storage and balance. They:
 
 If anything fails, nothing changes.
 
+## Storage namespaces
+
+A contract's storage has three parts, each with keys of its own: the same key in two of them is
+two entries.
+
+| Part | Lua | Rust SDK | Who may write it |
+| --- | --- | --- | --- |
+| Plain storage | `storage.get(key)`, `storage.set(key, value)` | `storage::get`, `set`, `delete` | Any code running on the contract. |
+| A namespace | `storage.namespace(name):get(key)`, `:set(key, value)` | `storage::namespace(name).get(key)`, `.set`, `.delete` | Any code running on the contract, by its name. |
+| Its own space | `storage.own:get(key)`, `:set(key, value)` | `storage::own().get(key)`, `.set`, `.delete` | Only the contract's own code. Code it delegates to may read it, never write it. |
+
+- **Namespaces** keep pieces of code that share a contract apart, such as a module, a library of
+  functions, or one version's layout. Names are 1 to 64 bytes, and code naming the same
+  namespace shares it. This is ERC-7201's namespaced storage, except the chain keeps namespaces
+  apart, rather than hashing.
+- **The own space** holds what code a contract delegates to must never change: a proxy's owner and
+  implementation. Delegated code that writes it fails, whatever key it picks: "a contract's own
+  storage is written only by its own code, not by code it delegates to". The built-in upgrade
+  keeps it, since the code changes but the contract does not.
+- **Cost:** what plain storage costs, plus 1 fuel for every 16 bytes of the name.
+- **In WebAssembly:** `namespace_get`, `namespace_set` and `namespace_delete` take the name
+  first, and an empty name is the own space.
+
+They are kept in the `Namespaces` column (see [Storage](storage.md#columns)).
+
 ## Delegate calls and proxies
 
 `contracts.delegate` in Lua, and `delegate` in WebAssembly, run another contract's code as this
@@ -133,9 +158,13 @@ nor a hook is ever run this way.
 A proxy forwards everything to an implementation with `fallback` and `delegate`. It is then
 upgradable without the built-in upgrade, by changing which implementation it points at. The
 README's "Proxies" section has a worked example. Keep in mind:
-- **Delegate only to code you trust.** It has full access to the contract.
-- **Keep storage layouts apart:** the proxy's keys and the implementation's live in the same
-  storage.
+- **Delegate only to code you trust.** It has full access to the contract, except that it can
+  only read the contract's own space.
+- **Keep the proxy's keys in its own space,** as the examples do. Implementations share the
+  proxy's plain storage and namespaces, but cannot change its own space, so no key they pick
+  can change its owner or implementation (see [Storage namespaces](#storage-namespaces)).
+- **Keep layouts in agreement:** each new implementation must still read the keys and namespaces
+  of the one before.
 - **Forward with `ctx.args`.** A Lua proxy's fallback passes `ctx.args` on, and returns what
   `delegate` gives back, so every value keeps its type both ways (see
   [values lists](#values-lists)). Passing `...` instead converts them through Lua, so an `i64`
@@ -252,7 +281,7 @@ numbers.
 | Library | What it has |
 | --- | --- |
 | `ctx` | `ctx.sender`, `ctx.contract`, `ctx.value`, and `ctx.args`, the call's arguments as a values list. |
-| `storage` | `storage.get(key)`, `storage.set(key, value)`; `nil` deletes. Keys and values are strings. |
+| `storage` | `storage.get(key)`, `storage.set(key, value)`; `nil` deletes. Keys and values are strings. `storage.namespace(name)` and `storage.own` have the same `get` and `set`, as methods, on keys of their own. |
 | `accounts` | `accounts.balance(address)`, `accounts.transfer(to, amount)` from the contract's balance. |
 | `contracts` | `contracts.call(address, name, ...)`, `contracts.call_value(address, value, name, ...)`, `contracts.delegate(address, name_or_selector, ...)`, `contracts.selector(name)`. |
 | `events` | `events.emit(name, ...)`. |
@@ -320,6 +349,7 @@ into its exported memory.
 | `output` | Sets what the call returns; the last one wins. |
 | `result_len`, `result_read` | What the last `storage_get` or `call` left in the result buffer. |
 | `storage_get`, `storage_set`, `storage_delete` | The contract's own storage. |
+| `namespace_get`, `namespace_set`, `namespace_delete` | A namespace, by its name first, or for an empty name the contract's own space. |
 | `sender`, `contract`, `value` | The call's context. |
 | `hash` | Hashes bytes with a chosen algorithm. |
 | `balance`, `transfer` | Funds, from the contract's own balance. |
@@ -368,7 +398,7 @@ order, and what it returns becomes the call's return values (`chainv4_sdk::args`
 - `#[export(reentrant)]` also marks a function reentrant;
 - `sender`, `this`, `value`, `balance`, `transfer`;
 - `call` and `call_with_value`, `delegate`, `emit`, `hash`, `abort`, `refresh_token`, and
-  `storage`.
+  `storage`, with `storage::namespace(name)` and `storage::own()`.
 
 **Numbers:** Lua numbers reach a WebAssembly contract as float bits, and floats are refused in
 modules. So `Value::as_i64` and `Value::as_amount` turn whole numbers into integers using integer
@@ -383,8 +413,8 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 | --- | --- |
 | `contracts/examples/counter` | Storage, arguments and return values. |
 | `contracts/examples/vault` | Holding and sending funds. |
-| `contracts/examples/upgradable` | `check_perms` and `migrate`. |
-| `contracts/examples/proxy`, `contracts/lua/proxy.lua` | A proxy built on `fallback` and `delegate`. |
+| `contracts/examples/proxy` | Calling other contracts for a caller, and a reentrant callback. |
+| `contracts/examples/upgradable`, `contracts/lua/proxy.lua` | A proxy built on `fallback` and `delegate`, with its owner and implementation in its own space. |
 | `contracts/examples/token`, `contracts/lua/token.lua` | The [token standard](token-standard.md), held to it by one shared test. |
 
 ## What to keep in mind

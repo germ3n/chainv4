@@ -24,6 +24,9 @@ const IMPORTS: &str = r#"
   (import "chain" "storage_get" (func $storage_get (param i32 i32) (result i32)))
   (import "chain" "storage_set" (func $storage_set (param i32 i32 i32 i32)))
   (import "chain" "storage_delete" (func $storage_delete (param i32 i32)))
+  (import "chain" "namespace_get" (func $namespace_get (param i32 i32 i32 i32) (result i32)))
+  (import "chain" "namespace_set" (func $namespace_set (param i32 i32 i32 i32 i32 i32)))
+  (import "chain" "namespace_delete" (func $namespace_delete (param i32 i32 i32 i32)))
   (import "chain" "sender" (func $sender (param i32)))
   (import "chain" "contract" (func $contract (param i32)))
   (import "chain" "value" (func $value (param i32)))
@@ -127,6 +130,40 @@ fn storage_persists_through_the_host() {
     run_in(&state, body, "forget", &[]).result.unwrap();
 
     assert_eq!(run_in(&state, body, "bump", &[]).result.unwrap(), [TxCallArgumentType::I64(1)]);
+}
+
+#[test]
+fn namespaces_keep_keys_apart_from_plain_storage() {
+    use crate::db::{Column, namespace_key, storage_key};
+
+    // Writes "k" three times: plain, in namespace "ns", and in the own space (no name).
+    let body = r#"
+      (data (i32.const 0) "k")
+      (data (i32.const 8) "ns")
+      (data (i32.const 16) "plainnamedown")
+      (func (export "write")
+        (call $storage_set (i32.const 0) (i32.const 1) (i32.const 16) (i32.const 5))
+        (call $namespace_set (i32.const 8) (i32.const 2) (i32.const 0) (i32.const 1) (i32.const 21) (i32.const 5))
+        (call $namespace_set (i32.const 8) (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 26) (i32.const 3)))
+      (func (export "forget")
+        (call $namespace_delete (i32.const 8) (i32.const 2) (i32.const 0) (i32.const 1)))
+      (func (export "long_name")
+        (drop (call $namespace_get (i32.const 0) (i32.const 65) (i32.const 0) (i32.const 1))))
+    "#;
+    let state = state();
+    let contract = context().contract;
+    run_in(&state, body, "write", &[]).result.unwrap();
+    let read = |column, key: Vec<u8>| state.get(column, &key).unwrap();
+
+    assert_eq!(read(Column::Storage, storage_key(&contract, b"k")), Some(b"plain".to_vec()));
+    assert_eq!(read(Column::Namespaces, namespace_key(&contract, b"ns", b"k")), Some(b"named".to_vec()));
+    assert_eq!(read(Column::Namespaces, namespace_key(&contract, b"", b"k")), Some(b"own".to_vec()));
+
+    run_in(&state, body, "forget", &[]).result.unwrap();
+
+    assert_eq!(read(Column::Namespaces, namespace_key(&contract, b"ns", b"k")), None);
+    assert_eq!(read(Column::Storage, storage_key(&contract, b"k")), Some(b"plain".to_vec()));
+    assert!(matches!(run(body, "long_name", &[]).result, Err(VmError::Runtime(text)) if text.contains("namespace names are at most 64")));
 }
 
 #[test]

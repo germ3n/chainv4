@@ -1,6 +1,6 @@
 use {
     super::{CallContext, FunctionId, Limits, Outcome, Vm, VmError, route},
-    crate::db::{Column, DbError, State, storage_key},
+    crate::db::{Column, DbError, State, namespace_key, storage_key},
     crate::registry::contracts::{ContractRecord, Contracts},
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
@@ -22,6 +22,9 @@ pub const MAX_KEY_LEN: usize = 256;
 /// The largest storage value, in bytes.
 pub const MAX_VALUE_LEN: usize = 64 * 1024;
 
+/// The longest namespace name, in bytes.
+pub const MAX_NAMESPACE_LEN: usize = 64;
+
 /// The longest event name, in bytes.
 pub const MAX_EVENT_NAME: usize = 64;
 
@@ -30,6 +33,42 @@ pub const MAX_EVENT_DATA: usize = 16 * 1024;
 
 /// The most events one call may emit itself, not counting calls it makes.
 pub const MAX_EVENTS: usize = 256;
+
+#[document(
+    summary = "Which part of a contract's storage a key is in. Each part has keys of its own: the same key in two of them is two entries.",
+    category = "VM",
+    see_also = "Host::storage_get",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Space {
+    #[document(summary = "Plain storage, where most contracts keep everything.")]
+    Plain,
+    #[document(summary = "A namespace, by its name: 1 to 64 bytes. Any code running on the contract reaches it by name, delegated code included, so code that agrees on a name shares it.")]
+    Named(Vec<u8>),
+    #[document(summary = "The contract's own space. Only the contract's own code writes it; code it delegates to may read it, but never change it, so a proxy keeps its owner and implementation here, out of its implementations' reach.")]
+    Own,
+}
+
+impl Space {
+    #[document(
+        parent = "Space",
+        summary = "The space a WebAssembly contract names: the namespace by that name, or the contract's own space for an empty one.",
+    )]
+    pub fn from_name(name: &[u8]) -> Space {
+        match name.is_empty() {
+            true => Space::Own,
+            false => Space::Named(name.to_vec()),
+        }
+    }
+
+    #[document(parent = "Space", summary = "The namespace's name, which engines charge for with the key; empty for the others.")]
+    pub fn name(&self) -> &[u8] {
+        match self {
+            Space::Named(name) => name,
+            Space::Plain | Space::Own => &[],
+        }
+    }
+}
 
 #[document(
     summary = "A running call's way out of its engine: the call's context, the contract's own storage and funds, and calls to other contracts. Each call gets its own, over a state layer of its own, so whatever a failed call wrote or sent is dropped with it.",
@@ -43,6 +82,8 @@ pub struct Host {
     context: CallContext,
     /// The contracts running, outermost first, ending with this one.
     stack: Vec<Address>,
+    /// Whether the code running is another contract's, run by delegate on this one's storage.
+    delegated: bool,
     memory: usize,
     /// The first database failure anywhere in this tree of calls.
     fault: Arc<Mutex<Option<DbError>>>,
@@ -79,6 +120,7 @@ impl Host {
             state,
             context,
             stack: vec![context.contract],
+            delegated: false,
             memory,
             fault: Arc::new(Mutex::new(None)),
             vm,
@@ -98,36 +140,64 @@ impl Host {
 
     #[document(
         parent = "Host",
-        summary = "Reads from the contract's storage. Engines charge cost::STORAGE_READ and the bytes moved.",
-        returns = "The value, or None when the key has none. Runtime when the key is too long, Storage when the database failed.",
+        summary = "Reads from the contract's storage. Engines charge cost::STORAGE_READ and the bytes moved, the namespace's name among them.",
+        params = {
+            space = "Which part of it.",
+            key = "The key.",
+        },
+        returns = "The value, or None when the key has none. Runtime when the key or the namespace's name is too long, Storage when the database failed.",
     )]
-    pub fn storage_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, VmError> {
-        check_key(key)?;
+    pub fn storage_get(&self, space: &Space, key: &[u8]) -> Result<Option<Vec<u8>>, VmError> {
+        let (column, key) = self.locate(space, key)?;
 
-        self.state
-            .get(Column::Storage, &storage_key(&self.context.contract, key))
-            .map_err(|err| self.fail(err))
+        self.state.get(column, &key).map_err(|err| self.fail(err))
     }
 
     #[document(
         parent = "Host",
-        summary = "Writes to the contract's storage, or deletes the key when value is None. Engines charge cost::STORAGE_WRITE and the bytes moved.",
+        summary = "Writes to the contract's storage, or deletes the key when value is None. Engines charge cost::STORAGE_WRITE and the bytes moved, the namespace's name among them.",
+        params = {
+            space = "Which part of it.",
+            key = "The key.",
+            value = "The value, or None to delete it.",
+        },
+        panics = "Runtime past a limit, or for code run by delegate writing the contract's own space.",
     )]
-    pub fn storage_set(&self, key: &[u8], value: Option<&[u8]>) -> Result<(), VmError> {
-        check_key(key)?;
+    pub fn storage_set(&self, space: &Space, key: &[u8], value: Option<&[u8]>) -> Result<(), VmError> {
+        let (column, key) = self.locate(space, key)?;
 
         if value.is_some_and(|value| value.len() > MAX_VALUE_LEN) {
             return Err(VmError::Runtime(format!("storage values are at most {MAX_VALUE_LEN} bytes")));
         }
 
-        let key = storage_key(&self.context.contract, key);
+        if *space == Space::Own && self.delegated {
+            return Err(VmError::Runtime(
+                "a contract's own storage is written only by its own code, not by code it delegates to".to_string(),
+            ));
+        }
 
         match value {
-            Some(value) => self.state.put(Column::Storage, key, value.to_vec()),
-            None => self.state.delete(Column::Storage, key),
+            Some(value) => self.state.put(column, key, value.to_vec()),
+            None => self.state.delete(column, key),
         }
 
         Ok(())
+    }
+
+    /// Where a key in a space is kept.
+    fn locate(&self, space: &Space, key: &[u8]) -> Result<(Column, Vec<u8>), VmError> {
+        check_key(key)?;
+        let contract = &self.context.contract;
+
+        match space {
+            Space::Plain => Ok((Column::Storage, storage_key(contract, key))),
+            Space::Own => Ok((Column::Namespaces, namespace_key(contract, &[], key))),
+            Space::Named(name) => {
+                check_namespace(name)?;
+
+                Ok((Column::Namespaces, namespace_key(contract, name, key)))
+            }
+        }
     }
 
     #[document(
@@ -232,6 +302,7 @@ impl Host {
             state: layer,
             context,
             stack,
+            delegated: false,
             memory: self.memory,
             fault: self.fault.clone(),
             vm: self.vm.clone(),
@@ -268,7 +339,7 @@ impl Host {
         },
         returns = "What the code did. Subtract its fuel_used from the caller's fuel.",
         panics = "TooDeep past MAX_CALL_DEPTH, NoSuchContract or NoSuchFunction when there is nothing to run, Reserved for a hook.",
-        note = "The code runs with full access to this contract: delegate only to code you trust, and keep storage layouts in agreement, since both sides read and write the same keys.",
+        note = "The code runs with full access to this contract but for its own space, which it may read and not write: delegate only to code you trust, and keep storage layouts in agreement, since both sides read and write the same plain keys and namespaces.",
     )]
     pub fn delegate(&self, target: &Address, function: FunctionId, args: &[TxCallArgumentType], fuel: u64) -> Outcome {
         let named = match function {
@@ -303,6 +374,7 @@ impl Host {
             state: Arc::new(State::new(self.state.clone())),
             context: self.context,
             stack,
+            delegated: true,
             memory: self.memory,
             fault: self.fault.clone(),
             vm: self.vm.clone(),
@@ -426,6 +498,14 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn check_key(key: &[u8]) -> Result<(), VmError> {
     if key.len() > MAX_KEY_LEN {
         return Err(VmError::Runtime(format!("storage keys are at most {MAX_KEY_LEN} bytes")));
+    }
+
+    Ok(())
+}
+
+fn check_namespace(name: &[u8]) -> Result<(), VmError> {
+    if name.is_empty() || name.len() > MAX_NAMESPACE_LEN {
+        return Err(VmError::Runtime(format!("namespace names are 1 to {MAX_NAMESPACE_LEN} bytes")));
     }
 
     Ok(())

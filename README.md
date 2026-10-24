@@ -292,19 +292,20 @@ state, and its implementation can be swapped.
 ```lua
 local M = {}
 
+-- storage.own is the proxy's own space: implementations can read it, but never write it.
 function M.init()
-    storage.set("proxy:owner", ctx.sender:text())
+    storage.own:set("owner", ctx.sender:text())
 end
 
 function M.set_implementation(implementation)
-    if ctx.sender:text() ~= storage.get("proxy:owner") then error("only the owner") end
-    storage.set("proxy:implementation", implementation:text())
+    if ctx.sender:text() ~= storage.own:get("owner") then error("only the owner") end
+    storage.own:set("implementation", implementation:text())
 end
 
 -- ctx.args are the caller's arguments exactly as they came, and the results go back the same
 -- way, so no value changes type passing through.
 function M.fallback(selector)
-    return contracts.delegate(address.parse(storage.get("proxy:implementation")), selector, ctx.args)
+    return contracts.delegate(address.parse(storage.own:get("implementation")), selector, ctx.args)
 end
 
 return M
@@ -320,10 +321,12 @@ chainv4 send call --to contract:0xP… --function increment i64:5   # runs the c
 Full proxies are in [contracts/lua/proxy.lua](contracts/lua/proxy.lua) and
 [contracts/examples/upgradable](contracts/examples/upgradable/src/lib.rs). Things to keep in mind:
 
-- Delegated code has full access to the caller: only delegate to code you trust.
-- The proxy and every implementation share one storage. Keep their keys apart (the examples
-  prefix the proxy's own with `proxy:`) and keep each new implementation able to read the old
-  layout.
+- Delegated code has full access to the caller, but for its own space, which it can only read:
+  only delegate to code you trust.
+- The proxy and every implementation share its plain storage and its namespaces
+  (`storage.namespace(name)`), so keep each new implementation able to read the old layout. The
+  proxy's own keys go in `storage.own` (`storage::own()` in Rust), where no implementation can
+  change them.
 - Delegating only reaches functions the target exports, never its `fallback`, `init` or
   `migrate`. An implementation that needs setting up exports something like `initialize`, called
   through the proxy once it is pointed at it.

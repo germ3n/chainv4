@@ -144,8 +144,14 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   values list, which `contracts.call`, `call_value`, `delegate` and `events.emit` take in place
   of loose values; a call given one returns one, and a function returning one returns its values
   as they are. The Lua proxy forwards this way, so no value changes type passing through.
-- [ ] **No storage layout tools for proxies.** Keeping a proxy's and its implementations' keys
-  apart is up to the contracts; a convention, or namespaced storage, would make it safer.
+- [x] **Namespaced storage.** `storage.namespace(name)` and `storage.own` in Lua,
+  `storage::namespace` and `storage::own()` in Rust, have keys of their own, apart from plain
+  storage and each other. Code a contract delegates to may read its own space but never write
+  it, so the example proxies keep their owner and implementation there, out of their
+  implementations' reach.
+- [ ] **Nothing checks that an upgrade keeps the layout.** A proxy's new implementation, or code
+  swapped in by `Tx::Upgrade`, must read the keys and namespaces the old code left; no tool
+  compares what two versions read and write.
 - [ ] **Only one permission exists.** `check_perms` is only ever asked about `"upgrade"`. Other
   privileged actions, such as removal, would ask with their own names.
 - [x] **A token registry.** A contract that exports every function genesis names in

@@ -1,10 +1,26 @@
 use {
     super::accounts::refused,
     crate::vm::lvm::charge,
-    crate::vm::{Host, MAX_KEY_LEN, MAX_VALUE_LEN, cost},
-    mlua::{Error, Lua},
+    crate::vm::{Host, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_VALUE_LEN, Space, cost},
+    mlua::{Error, Lua, UserData, UserDataMethods},
     r#macro::document,
 };
+
+/// One part of the contract's storage with keys of its own: a namespace, from storage.namespace,
+/// or the contract's own space, storage.own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LuaNamespace(pub Space);
+
+impl UserData for LuaNamespace {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("get", |lua, this, key: mlua::String| storage_get(lua, &this.0, &key.as_bytes()));
+        methods.add_method("set", |lua, this, (key, value): (mlua::String, Option<mlua::String>)| {
+            let value = value.as_ref().map(|value| value.as_bytes());
+
+            storage_set(lua, &this.0, &key.as_bytes(), value.as_deref())
+        });
+    }
+}
 
 fn host(lua: &Lua) -> mlua::Result<Host> {
     lua.app_data_ref::<Host>()
@@ -12,17 +28,17 @@ fn host(lua: &Lua) -> mlua::Result<Host> {
         .ok_or_else(|| Error::runtime("storage is only available inside a call"))
 }
 
-
-fn storage_get(lua: &Lua, key: &[u8]) -> mlua::Result<Option<mlua::String>> {
+fn storage_get(lua: &Lua, space: &Space, key: &[u8]) -> mlua::Result<Option<mlua::String>> {
     let host = host(lua)?;
 
     if key.len() > MAX_KEY_LEN {
         return Err(Error::runtime(format!("storage keys are at most {MAX_KEY_LEN} bytes")));
     }
 
-    charge(lua, cost::STORAGE_READ + key.len() as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
+    let named = (space.name().len() + key.len()) as u64;
+    charge(lua, cost::STORAGE_READ + named / cost::STORAGE_BYTES_PER_FUEL)?;
 
-    let Some(value) = host.storage_get(key).map_err(refused)? else {
+    let Some(value) = host.storage_get(space, key).map_err(refused)? else {
         return Ok(None);
     };
 
@@ -30,17 +46,26 @@ fn storage_get(lua: &Lua, key: &[u8]) -> mlua::Result<Option<mlua::String>> {
     lua.create_string(&value).map(Some)
 }
 
-fn storage_set(lua: &Lua, key: &[u8], value: Option<&[u8]>) -> mlua::Result<()> {
+fn storage_set(lua: &Lua, space: &Space, key: &[u8], value: Option<&[u8]>) -> mlua::Result<()> {
     let host = host(lua)?;
     let len = value.map_or(0, <[u8]>::len);
 
     if key.len() > MAX_KEY_LEN || len > MAX_VALUE_LEN {
         // The Host words the error.
-        return host.storage_set(key, value).map_err(refused);
+        return host.storage_set(space, key, value).map_err(refused);
     }
 
-    charge(lua, cost::STORAGE_WRITE + (key.len() + len) as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
-    host.storage_set(key, value).map_err(refused)
+    let moved = (space.name().len() + key.len() + len) as u64;
+    charge(lua, cost::STORAGE_WRITE + moved / cost::STORAGE_BYTES_PER_FUEL)?;
+    host.storage_set(space, key, value).map_err(refused)
+}
+
+fn namespace(name: &[u8]) -> mlua::Result<LuaNamespace> {
+    if name.is_empty() || name.len() > MAX_NAMESPACE_LEN {
+        return Err(Error::runtime(format!("namespace names are 1 to {MAX_NAMESPACE_LEN} bytes")));
+    }
+
+    Ok(LuaNamespace(Space::Named(name.to_vec())))
 }
 
 #[document(
@@ -48,8 +73,8 @@ fn storage_set(lua: &Lua, key: &[u8], value: Option<&[u8]>) -> mlua::Result<()> 
     kind = "library",
     name = "storage",
     category = "Chain",
-    summary = "The contract's own key-value storage, kept between calls. Every contract has its own; keys and values are strings of bytes. A call that fails leaves storage as it was.",
-    note = "A read costs 100 fuel and a write 500, plus 1 for every 16 bytes of key and value. Keys are at most 256 bytes and values at most 64 KiB. Store numbers as strings, for example tostring(balance) and u256(text).",
+    summary = "The contract's own key-value storage, kept between calls. Every contract has its own; keys and values are strings of bytes. A call that fails leaves storage as it was. Besides the plain keys storage.get and storage.set reach, it has namespaces, each with keys of its own, and the contract's own space, which code it delegates to cannot write.",
+    note = "A read costs 100 fuel and a write 500, plus 1 for every 16 bytes of key and value, and of a namespace's name. Keys are at most 256 bytes and values at most 64 KiB. Store numbers as strings, for example tostring(balance) and u256(text).",
     example = "local count = tonumber(storage.get(\"count\") or \"0\")\nstorage.set(\"count\", tostring(count + 1))",
 )]
 fn storage_lib() {}
@@ -79,6 +104,69 @@ fn storage_get_doc() {}
 )]
 fn storage_set_doc() {}
 
+#[document(
+    lua,
+    parent = "storage",
+    name = "namespace",
+    summary = "A namespace: keys of its own, apart from plain storage and from every other namespace, so two pieces of code that keep state on one contract cannot clash by picking the same key. Code that names the same namespace shares it, delegated code included.",
+    params = { name = { ty = "string", desc = "Its name: 1 to 64 bytes. Something long enough not to clash, such as \"my-token.balances\"." } },
+    returns = { ty = "Namespace", desc = "The namespace." },
+    panics = "Errors when the name is empty or longer than 64 bytes.",
+    example = "local balances = storage.namespace(\"token.balances\")\nbalances:set(ctx.sender:text(), tostring(amount))",
+    see_also = "storage.own, Namespace",
+)]
+fn storage_namespace_doc() {}
+
+#[document(
+    lua,
+    parent = "storage",
+    name = "own",
+    kind = "field",
+    summary = "The contract's own space: keys apart from plain storage and every namespace, which only this contract's own code may write. Code it runs with contracts.delegate may read them, but never change them, so a proxy keeps its owner and implementation here.",
+    returns = { ty = "Namespace", desc = "The own space." },
+    example = "function M.init()\n    storage.own:set(\"owner\", ctx.sender:text())\nend",
+    see_also = "storage.namespace, contracts.delegate",
+)]
+fn storage_own_doc() {}
+
+#[document(
+    lua,
+    kind = "class",
+    name = "Namespace",
+    category = "Chain",
+    summary = "One part of the contract's storage with keys of its own, from storage.namespace or storage.own. Its methods work like storage.get and storage.set, and cost the same, plus the name's bytes.",
+    see_also = "storage.namespace, storage.own",
+)]
+fn namespace_class() {}
+
+#[document(
+    lua,
+    parent = "Namespace",
+    name = "get",
+    kind = "method",
+    summary = "Reads a value.",
+    params = { key = { ty = "string", desc = "The key." } },
+    returns = { ty = "string?", desc = "The value, or nil when the key has none." },
+    see_also = "Namespace:set",
+)]
+fn namespace_get_doc() {}
+
+#[document(
+    lua,
+    parent = "Namespace",
+    name = "set",
+    kind = "method",
+    summary = "Writes a value, or deletes the key when value is nil.",
+    params = {
+        key = { ty = "string", desc = "The key." },
+        value = { ty = "string?", desc = "The value, or nil to delete.", optional = true },
+    },
+    returns = { ty = "nil", desc = "" },
+    panics = "Errors for code run by contracts.delegate writing storage.own.",
+    see_also = "Namespace:get",
+)]
+fn namespace_set_doc() {}
+
 pub fn register_storage_lib(lua: &Lua) {
     let storage_table = lua
         .create_table()
@@ -86,7 +174,7 @@ pub fn register_storage_lib(lua: &Lua) {
     storage_table
         .set(
             "get",
-            lua.create_function(|lua, key: mlua::String| storage_get(lua, &key.as_bytes()))
+            lua.create_function(|lua, key: mlua::String| storage_get(lua, &Space::Plain, &key.as_bytes()))
                 .expect("[storage] Failed to create get"),
         )
         .expect("[storage] Failed to set get");
@@ -96,11 +184,21 @@ pub fn register_storage_lib(lua: &Lua) {
             lua.create_function(|lua, (key, value): (mlua::String, Option<mlua::String>)| {
                 let value = value.as_ref().map(|value| value.as_bytes());
 
-                storage_set(lua, &key.as_bytes(), value.as_deref())
+                storage_set(lua, &Space::Plain, &key.as_bytes(), value.as_deref())
             })
             .expect("[storage] Failed to create set"),
         )
         .expect("[storage] Failed to set set");
+    storage_table
+        .set(
+            "namespace",
+            lua.create_function(|_, name: mlua::String| namespace(&name.as_bytes()))
+                .expect("[storage] Failed to create namespace"),
+        )
+        .expect("[storage] Failed to set namespace");
+    storage_table
+        .set("own", LuaNamespace(Space::Own))
+        .expect("[storage] Failed to set own");
     lua.globals()
         .set("storage", storage_table)
         .expect("[storage] Failed to set storage table");
@@ -110,7 +208,7 @@ pub fn register_storage_lib(lua: &Lua) {
 mod tests {
     use super::*;
     use crate::structs::hash::HashType;
-    use crate::db::{Column, MemoryDb, State, storage_key};
+    use crate::db::{Column, MemoryDb, State, namespace_key, storage_key};
     use crate::structs::address::Address;
     use crate::structs::u256::u256;
     use crate::vm::{CallContext, Vm};
@@ -162,6 +260,36 @@ mod tests {
             state.get(Column::Storage, &storage_key(&Address::Contract([2; 32]), b"k")).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn namespaces_and_the_own_space_keep_their_keys_apart() {
+        let contract = Address::Contract([1; 32]);
+        let (lua, state) = setup(contract);
+        let code = r#"
+            storage.set("k", "plain")
+            storage.namespace("a"):set("k", "a")
+            storage.namespace("b"):set("k", "b")
+            storage.own:set("k", "own")
+            local read = { storage.get("k"), storage.namespace("a"):get("k"), storage.namespace("b"):get("k"), storage.own:get("k") }
+            storage.namespace("a"):set("k", nil)
+            return read[1], read[2], read[3], read[4], storage.namespace("a"):get("k")
+        "#;
+        let read: (String, String, String, String, Option<String>) = lua.load(code).eval().unwrap();
+
+        assert_eq!(read, ("plain".into(), "a".into(), "b".into(), "own".into(), None));
+        assert_eq!(state.get(Column::Namespaces, &namespace_key(&contract, b"b", b"k")).unwrap(), Some(b"b".to_vec()));
+        assert_eq!(state.get(Column::Namespaces, &namespace_key(&contract, b"", b"k")).unwrap(), Some(b"own".to_vec()));
+    }
+
+    #[test]
+    fn namespace_names_are_one_to_64_bytes() {
+        let (lua, _) = setup(Address::Contract([1; 32]));
+        let long = format!("storage.namespace(string.rep('n', {}))", MAX_NAMESPACE_LEN + 1);
+
+        assert!(lua.load("storage.namespace('')").exec().unwrap_err().to_string().contains("1 to 64 bytes"));
+        assert!(lua.load(long).exec().unwrap_err().to_string().contains("1 to 64 bytes"));
+        lua.load(format!("storage.namespace(string.rep('n', {MAX_NAMESPACE_LEN})):set('k', 'v')")).exec().unwrap();
     }
 
     #[test]

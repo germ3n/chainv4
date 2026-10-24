@@ -9,12 +9,13 @@ extern crate alloc;
 
 use chainv4_sdk::{Address, Value, abort, delegate, emit, export, input, output, sender, storage};
 
-// Prefixed, so they cannot clash with an implementation's own keys.
-const OWNER: &[u8] = b"proxy:owner";
-const IMPLEMENTATION: &[u8] = b"proxy:implementation";
+// Kept in the proxy's own space, apart from every key an implementation uses. Implementations
+// may read them, but only the proxy's own code can change them.
+const OWNER: &[u8] = b"owner";
+const IMPLEMENTATION: &[u8] = b"implementation";
 
 fn stored(key: &[u8]) -> Option<Address> {
-    Address::decode(storage::get(key)?.as_slice().try_into().ok()?)
+    Address::decode(storage::own().get(key)?.as_slice().try_into().ok()?)
 }
 
 fn implementation_or_abort() -> Address {
@@ -24,7 +25,7 @@ fn implementation_or_abort() -> Address {
 /// Run once by the chain when the proxy is deployed.
 #[export]
 fn init() {
-    storage::set(OWNER, &sender().encode());
+    storage::own().set(OWNER, &sender().encode());
 }
 
 /// Points the proxy at new code. Storage stays, so the new code must read the old layout.
@@ -38,7 +39,7 @@ fn set_implementation() {
         .first()
         .and_then(Value::as_address)
         .unwrap_or_else(|| abort("set_implementation takes an address"));
-    storage::set(IMPLEMENTATION, &implementation.encode());
+    storage::own().set(IMPLEMENTATION, &implementation.encode());
     emit("Upgraded", &[Value::Address(implementation)]);
 }
 

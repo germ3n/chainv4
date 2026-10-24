@@ -1008,6 +1008,36 @@ end
 return M
 "#;
 
+/// An implementation that reaches for the proxy's own space, and keeps plain keys by the same
+/// names as the proxy's.
+const HIJACKER: &str = r#"
+local M = {}
+
+function M.owner()
+    return storage.own:get("owner")
+end
+
+function M.seize()
+    storage.own:set("implementation", ctx.contract:text())
+end
+
+function M.shadow()
+    storage.set("owner", "me")
+    storage.set("implementation", "me")
+    storage.namespace("proxy"):set("owner", "me")
+end
+
+return M
+"#;
+
+/// The WebAssembly twin of HIJACKER's seize: writes "owner" in the own space, the one with no name.
+const WASM_HIJACKER: &str = r#"(module
+  (import "chain" "namespace_set" (func $namespace_set (param i32 i32 i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "ownerme")
+  (func (export "seize")
+    (call $namespace_set (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 5) (i32.const 5) (i32.const 2))))"#;
+
 const DELEGATOR: &str = r#"
 local M = {}
 
@@ -1061,6 +1091,27 @@ fn upgradable_proxies_run_their_implementation_on_their_own_storage(proxy_code: 
     world.fund(payer, 100);
 
     assert_eq!(world.call(payer, "pay", &[address(proxy), wide(40)]).result.unwrap(), [wide(40), wide(40)]);
+
+    // An implementation reads the proxy's own space but never writes it, so no key it picks can
+    // take the proxy over.
+    let hijacker = world.lua_code(HIJACKER);
+    world.call(proxy, "set_implementation", &[address(hijacker)]).result.unwrap();
+    let seized = world.call(proxy, "seize", &[]).result.unwrap_err().to_string();
+
+    assert_ne!(world.call(proxy, "owner", &[]).result.unwrap(), [TxCallArgumentType::Nil]);
+    assert!(seized.contains("written only by its own code"), "{seized}");
+
+    let wasm_hijacker = world.wasm(WASM_HIJACKER);
+    world.call(proxy, "set_implementation", &[address(wasm_hijacker)]).result.unwrap();
+    let seized = world.call(proxy, "seize", &[]).result.unwrap_err().to_string();
+
+    assert!(seized.contains("written only by its own code"), "{seized}");
+
+    world.call(proxy, "set_implementation", &[address(hijacker)]).result.unwrap();
+    world.call(proxy, "shadow", &[]).result.unwrap();
+
+    assert_eq!(world.call(proxy, "implementation", &[]).result.unwrap(), [address(hijacker)]);
+    assert!(world.call_as(alice, proxy, "set_implementation", &[address(v1)]).result.unwrap_err().to_string().contains("only the owner"));
 }
 
 impl World {

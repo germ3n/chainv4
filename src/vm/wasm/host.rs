@@ -9,7 +9,7 @@ use {
     crate::structs::hash::HashType,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
-    crate::vm::{FunctionId, Host, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_VALUE_LEN, VmError, cost},
+    crate::vm::{FunctionId, Host, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_VALUE_LEN, Space, VmError, cost},
     r#macro::document,
     wasmi::{Caller, Engine, Extern, Linker, Memory},
 };
@@ -24,6 +24,9 @@ pub(super) const NAMES: &[&str] = &[
     "storage_get",
     "storage_set",
     "storage_delete",
+    "namespace_get",
+    "namespace_set",
+    "namespace_delete",
     "sender",
     "contract",
     "value",
@@ -145,6 +148,52 @@ fn chain_storage_set() {}
     },
 )]
 fn chain_storage_delete() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "namespace_get",
+    summary = "Reads from one of the contract's namespaces, or its own space, and leaves the value in the result buffer. Each has keys of its own, apart from plain storage and from each other. Costs what storage_get does, plus 1 per 16 bytes of the name.",
+    params = {
+        name = { ty = "i32", desc = "The namespace's name." },
+        name_len = { ty = "i32", desc = "Its length: at most 64. 0 is the contract's own space." },
+        key = { ty = "i32", desc = "The key." },
+        key_len = { ty = "i32", desc = "Its length: at most 256." },
+    },
+    returns = { ty = "i32", desc = "The value's length, or -1 when the key has none." },
+    see_also = "chain.result_read, chain.namespace_set",
+)]
+fn chain_namespace_get() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "namespace_set",
+    summary = "Writes to one of the contract's namespaces, or its own space. Kept only if the call succeeds. Code run by delegate may not write the own space: that traps. Costs what storage_set does, plus 1 per 16 bytes of the name.",
+    params = {
+        name = { ty = "i32", desc = "The namespace's name." },
+        name_len = { ty = "i32", desc = "Its length: at most 64. 0 is the contract's own space." },
+        key = { ty = "i32", desc = "The key." },
+        key_len = { ty = "i32", desc = "Its length: at most 256." },
+        value = { ty = "i32", desc = "The value." },
+        value_len = { ty = "i32", desc = "Its length: at most 65536." },
+    },
+)]
+fn chain_namespace_set() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "namespace_delete",
+    summary = "Deletes a key from one of the contract's namespaces, or its own space, as namespace_set writes one. Costs what a write does.",
+    params = {
+        name = { ty = "i32", desc = "The namespace's name." },
+        name_len = { ty = "i32", desc = "Its length: at most 64. 0 is the contract's own space." },
+        key = { ty = "i32", desc = "The key." },
+        key_len = { ty = "i32", desc = "Its length: at most 256." },
+    },
+)]
+fn chain_namespace_delete() {}
 
 #[document(
     wasm,
@@ -292,6 +341,9 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "storage_get", storage_get).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "storage_set", storage_set).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "storage_delete", storage_delete).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "namespace_get", namespace_get).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "namespace_set", namespace_set).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "namespace_delete", namespace_delete).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "sender", sender).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "contract", contract).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "value", value).expect(defined);
@@ -338,42 +390,85 @@ fn result_read(mut caller: Caller<'_, Run>, ptr: u32) -> Result<()> {
 }
 
 fn storage_get(mut caller: Caller<'_, Run>, key: u32, key_len: u32) -> Result<i32> {
-    let host = host(&mut caller)?;
-    check_len(&mut caller, key_len, MAX_KEY_LEN, "storage keys")?;
-    charge(&mut caller, cost::STORAGE_READ + u64::from(key_len) / cost::STORAGE_BYTES_PER_FUEL)?;
-    let key = read(&mut caller, key, key_len)?;
-    let value = host.storage_get(&key).map_err(|err| stop(&mut caller, err))?;
+    get_in(&mut caller, &Space::Plain, key, key_len)
+}
+
+fn storage_set(mut caller: Caller<'_, Run>, key: u32, key_len: u32, value: u32, value_len: u32) -> Result<()> {
+    set_in(&mut caller, &Space::Plain, key, key_len, Some((value, value_len)))
+}
+
+fn storage_delete(mut caller: Caller<'_, Run>, key: u32, key_len: u32) -> Result<()> {
+    set_in(&mut caller, &Space::Plain, key, key_len, None)
+}
+
+fn namespace_get(mut caller: Caller<'_, Run>, name: u32, name_len: u32, key: u32, key_len: u32) -> Result<i32> {
+    let space = space(&mut caller, name, name_len)?;
+
+    get_in(&mut caller, &space, key, key_len)
+}
+
+fn namespace_set(
+    mut caller: Caller<'_, Run>,
+    name: u32,
+    name_len: u32,
+    key: u32,
+    key_len: u32,
+    value: u32,
+    value_len: u32,
+) -> Result<()> {
+    let space = space(&mut caller, name, name_len)?;
+
+    set_in(&mut caller, &space, key, key_len, Some((value, value_len)))
+}
+
+fn namespace_delete(mut caller: Caller<'_, Run>, name: u32, name_len: u32, key: u32, key_len: u32) -> Result<()> {
+    let space = space(&mut caller, name, name_len)?;
+
+    set_in(&mut caller, &space, key, key_len, None)
+}
+
+/// The space a namespace import names: an empty name is the contract's own.
+fn space(caller: &mut Caller<'_, Run>, name: u32, name_len: u32) -> Result<Space> {
+    check_len(caller, name_len, MAX_NAMESPACE_LEN, "namespace names")?;
+    let name = read(caller, name, name_len)?;
+
+    Ok(Space::from_name(&name))
+}
+
+fn get_in(caller: &mut Caller<'_, Run>, space: &Space, key: u32, key_len: u32) -> Result<i32> {
+    let host = host(caller)?;
+    check_len(caller, key_len, MAX_KEY_LEN, "storage keys")?;
+    let named = space.name().len() as u64 + u64::from(key_len);
+    charge(caller, cost::STORAGE_READ + named / cost::STORAGE_BYTES_PER_FUEL)?;
+    let key = read(caller, key, key_len)?;
+    let value = host.storage_get(space, &key).map_err(|err| stop(caller, err))?;
 
     let Some(value) = value else {
         return Ok(-1);
     };
 
-    charge(&mut caller, value.len() as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
+    charge(caller, value.len() as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
     let len = value.len() as i32;
     caller.data_mut().result = value;
 
     Ok(len)
 }
 
-fn storage_set(mut caller: Caller<'_, Run>, key: u32, key_len: u32, value: u32, value_len: u32) -> Result<()> {
-    let host = host(&mut caller)?;
-    check_len(&mut caller, key_len, MAX_KEY_LEN, "storage keys")?;
-    check_len(&mut caller, value_len, MAX_VALUE_LEN, "storage values")?;
-    let moved = u64::from(key_len) + u64::from(value_len);
-    charge(&mut caller, cost::STORAGE_WRITE + moved / cost::STORAGE_BYTES_PER_FUEL)?;
-    let key = read(&mut caller, key, key_len)?;
-    let value = read(&mut caller, value, value_len)?;
+/// Writes the value at value's pointer and length, or deletes the key for None.
+fn set_in(caller: &mut Caller<'_, Run>, space: &Space, key: u32, key_len: u32, value: Option<(u32, u32)>) -> Result<()> {
+    let host = host(caller)?;
+    check_len(caller, key_len, MAX_KEY_LEN, "storage keys")?;
+    let value_len = value.map_or(0, |(_, len)| len);
+    check_len(caller, value_len, MAX_VALUE_LEN, "storage values")?;
+    let moved = space.name().len() as u64 + u64::from(key_len) + u64::from(value_len);
+    charge(caller, cost::STORAGE_WRITE + moved / cost::STORAGE_BYTES_PER_FUEL)?;
+    let key = read(caller, key, key_len)?;
+    let value = match value {
+        Some((ptr, len)) => Some(read(caller, ptr, len)?),
+        None => None,
+    };
 
-    host.storage_set(&key, Some(&value)).map_err(|err| stop(&mut caller, err))
-}
-
-fn storage_delete(mut caller: Caller<'_, Run>, key: u32, key_len: u32) -> Result<()> {
-    let host = host(&mut caller)?;
-    check_len(&mut caller, key_len, MAX_KEY_LEN, "storage keys")?;
-    charge(&mut caller, cost::STORAGE_WRITE + u64::from(key_len) / cost::STORAGE_BYTES_PER_FUEL)?;
-    let key = read(&mut caller, key, key_len)?;
-
-    host.storage_set(&key, None).map_err(|err| stop(&mut caller, err))
+    host.storage_set(space, &key, value.as_deref()).map_err(|err| stop(caller, err))
 }
 
 fn sender(mut caller: Caller<'_, Run>, ptr: u32) -> Result<()> {

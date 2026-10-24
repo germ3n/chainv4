@@ -50,6 +50,7 @@ holds addresses that matter.
 | `Finality` | What this node learned about finality: justifications, the justified and finalized checkpoints, the votes it counted or holds, its own votes, and evidence. | No |
 | `Events` | The event index, on a node started with `--index-events`: each event under its contract, and pointers to it by contract and name and by every address in its data, newest first. | Node's |
 | `Tokens` | The token registry: each token by address, with its name, symbol and decimals, and a listing key by symbol, in ASCII lower case, then a zero byte, then its address. | Yes |
+| `Namespaces` | Contract storage in [namespaces](contracts.md#storage-namespaces) and each contract's own space: by the contract's address, the namespace's name with its length in front (none for the own space), then the contract's own key. | Yes |
 
 **Chain state** is what every node computes the same from the blocks.
 

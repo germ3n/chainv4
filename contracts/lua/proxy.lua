@@ -5,27 +5,28 @@
 
 local M = {}
 
--- Prefixed, so they cannot clash with an implementation's own keys.
-local OWNER = "proxy:owner"
-local IMPLEMENTATION = "proxy:implementation"
+-- Kept in the proxy's own space, apart from every key an implementation uses. Implementations
+-- may read them, but only the proxy's own code can change them.
+local OWNER = "owner"
+local IMPLEMENTATION = "implementation"
 
 -- Run once by the chain when the proxy is deployed.
 function M.init()
-    storage.set(OWNER, ctx.sender:text())
+    storage.own:set(OWNER, ctx.sender:text())
 end
 
 -- Points the proxy at new code. Storage stays, so the new code must read the old layout.
 function M.set_implementation(implementation)
-    if ctx.sender:text() ~= storage.get(OWNER) then
+    if ctx.sender:text() ~= storage.own:get(OWNER) then
         error("only the owner")
     end
 
-    storage.set(IMPLEMENTATION, implementation:text())
+    storage.own:set(IMPLEMENTATION, implementation:text())
     events.emit("Upgraded", implementation)
 end
 
 function M.implementation()
-    local text = storage.get(IMPLEMENTATION)
+    local text = storage.own:get(IMPLEMENTATION)
 
     if text == nil then
         error("no implementation set")

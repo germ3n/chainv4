@@ -12,6 +12,10 @@ unsafe extern "C" {
     pub fn storage_get(key: *const u8, key_len: u32) -> i32;
     pub fn storage_set(key: *const u8, key_len: u32, value: *const u8, value_len: u32);
     pub fn storage_delete(key: *const u8, key_len: u32);
+    /// As storage_get, in the namespace by that name; an empty name is the contract's own space.
+    pub fn namespace_get(name: *const u8, name_len: u32, key: *const u8, key_len: u32) -> i32;
+    pub fn namespace_set(name: *const u8, name_len: u32, key: *const u8, key_len: u32, value: *const u8, value_len: u32);
+    pub fn namespace_delete(name: *const u8, name_len: u32, key: *const u8, key_len: u32);
     /// Writes 33 bytes: the address's kind, then its 32 bytes.
     pub fn sender(ptr: *mut u8);
     pub fn contract(ptr: *mut u8);
