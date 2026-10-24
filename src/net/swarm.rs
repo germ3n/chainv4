@@ -1,18 +1,18 @@
 use {
     super::codec::SyncCodec,
-    super::{NetCommand, NetConfig, NetEvent, NetLink, SyncResponse},
+    super::{Admission, Backlog, NetCommand, NetConfig, NetEvent, NetLink, Origin, SyncResponse},
     crate::crypto::hasher::Hasher,
     crate::structs::block::Block,
     crate::structs::tx::SignedTx,
     crate::structs::vote::SignedVote,
     libp2p::futures::StreamExt,
     libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent},
-    libp2p::{StreamProtocol, SwarmBuilder, gossipsub, identify, kad, mdns, request_response},
+    libp2p::{PeerId, StreamProtocol, SwarmBuilder, gossipsub, identify, kad, mdns, request_response},
     r#macro::document,
     std::collections::HashMap,
     std::fmt,
-    std::sync::mpsc,
-    std::time::Duration,
+    std::sync::{Arc, mpsc},
+    std::time::{Duration, Instant},
     tokio::sync::mpsc as async_mpsc,
 };
 
@@ -62,6 +62,8 @@ pub fn spawn(config: NetConfig) -> Result<NetLink, NetError> {
     let (event_tx, event_rx) = mpsc::channel();
     let inbox = event_tx.clone();
     let (ready_tx, ready_rx) = mpsc::channel();
+    let backlog = Arc::new(Backlog::new(config.backlog));
+    let counted = backlog.clone();
 
     std::thread::Builder::new()
         .name("net".to_string())
@@ -76,7 +78,7 @@ pub fn spawn(config: NetConfig) -> Result<NetLink, NetError> {
             };
 
             runtime.block_on(async move {
-                let mut net = match Net::start(&config) {
+                let mut net = match Net::start(&config, counted) {
                     Ok(net) => net,
                     Err(err) => {
                         let _ = ready_tx.send(Err(err));
@@ -97,6 +99,7 @@ pub fn spawn(config: NetConfig) -> Result<NetLink, NetError> {
         events: event_rx,
         inbox,
         check_inline: false,
+        backlog,
     })
 }
 
@@ -107,10 +110,12 @@ struct Net {
     votes: gossipsub::IdentTopic,
     channels: HashMap<u64, request_response::ResponseChannel<SyncResponse>>,
     next_id: u64,
+    /// What waits for the node, counted in here.
+    backlog: Arc<Backlog>,
 }
 
 impl Net {
-    fn start(config: &NetConfig) -> Result<Net, NetError> {
+    fn start(config: &NetConfig, backlog: Arc<Backlog>) -> Result<Net, NetError> {
         let hash = config.hash;
         let mut swarm = SwarmBuilder::with_new_identity()
             .with_tokio()
@@ -184,6 +189,7 @@ impl Net {
             votes,
             channels: HashMap::new(),
             next_id: 0,
+            backlog,
         })
     }
 
@@ -226,18 +232,28 @@ impl Net {
                         }
                     }
                 } else if message.topic == self.txs.hash() {
+                    if !self.admit(from) {
+                        return true;
+                    }
+
                     match wincode::deserialize::<SignedTx>(&message.data) {
                         Ok(tx) => NetEvent::Tx { from, tx },
                         Err(err) => {
+                            self.backlog.release(Origin::Peer(from));
                             log::debug!("[net] undecodable transaction from {from}: {err}");
 
                             return true;
                         }
                     }
                 } else if message.topic == self.votes.hash() {
+                    if !self.admit(from) {
+                        return true;
+                    }
+
                     match wincode::deserialize::<SignedVote>(&message.data) {
                         Ok(vote) => NetEvent::Vote { from, vote },
                         Err(err) => {
+                            self.backlog.release(Origin::Peer(from));
                             log::debug!("[net] undecodable vote from {from}: {err}");
 
                             return true;
@@ -341,6 +357,25 @@ impl Net {
         events.send(event).is_ok()
     }
 
+    /// Whether the backlog has room for one more transaction or vote from a peer, disconnecting a
+    /// peer that keeps going over its share.
+    fn admit(&mut self, from: PeerId) -> bool {
+        match self.backlog.admit(Origin::Peer(from), Instant::now()) {
+            Admission::Admitted => true,
+            Admission::Dropped => {
+                log::debug!("[net] dropped gossip from {from}: the backlog is full");
+
+                false
+            }
+            Admission::Disconnect => {
+                log::warn!("[net] disconnecting {from}: it kept sending more gossip than its share of the backlog");
+                let _ = self.swarm.disconnect_peer_id(from);
+
+                false
+            }
+        }
+    }
+
     fn on_command(&mut self, command: NetCommand) {
         match command {
             NetCommand::PublishBlock(block) => self.publish(&self.blocks.clone(), &block),
@@ -369,5 +404,82 @@ impl Net {
             // Mostly no peers yet; gossip is best effort.
             log::debug!("[net] could not publish: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::consensus::DevAuthority,
+        crate::net::{BacklogLimits, MAX_STRIKES},
+        crate::structs::amount::Amount,
+        crate::structs::hash::HashType,
+        crate::structs::tx::{FeeOffer, Tx},
+        libp2p::Multiaddr,
+    };
+
+    fn config(network: &str, backlog: BacklogLimits, peers: Vec<Multiaddr>) -> NetConfig {
+        NetConfig {
+            listen: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
+            peers,
+            hash: HashType::default_chain(),
+            network: network.to_string(),
+            backlog,
+        }
+    }
+
+    /// The next event matching, waiting up to a deadline.
+    fn wait_for<T>(link: &NetLink, mut matches: impl FnMut(NetEvent) -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(30);
+
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let event = link.events.recv_timeout(left).expect("the event came in time");
+
+            if let Some(found) = matches(event) {
+                return found;
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "opens real sockets on 127.0.0.1"]
+    fn a_peer_flooding_gossip_is_turned_away_then_disconnected() {
+        // Its own network name, so no other node on this machine's network joins in.
+        let network = format!("flood-{}", PeerId::random());
+        let flooder = spawn(config(&network, BacklogLimits::default(), Vec::new())).unwrap();
+        let address = wait_for(&flooder, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+        // Nobody drains the victim's events, so two transactions fill the flooder's share.
+        let victim = spawn(config(&network, BacklogLimits { total: 1_000, per_peer: 2 }, vec![address])).unwrap();
+        let flooder_id = wait_for(&victim, |event| match event {
+            NetEvent::PeerUp { peer, .. } => Some(peer),
+            _ => None,
+        });
+        let authority = DevAuthority::dev_keypair();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut nonce = 0;
+
+        // Gossip reaches the victim once it has told the flooder what it subscribes to.
+        while victim.backlog.disconnected() == 0 {
+            assert!(Instant::now() < deadline, "never disconnected; dropped {}", victim.backlog.dropped());
+            let tx = SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority);
+            flooder.send(NetCommand::PublishTx(tx));
+            nonce += 1;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(victim.backlog.waiting(), 2, "its share, and no more");
+        assert!(victim.backlog.dropped() >= u64::from(MAX_STRIKES));
+        assert_eq!(
+            wait_for(&victim, |event| match event {
+                NetEvent::PeerDown(peer) => Some(peer),
+                _ => None,
+            }),
+            flooder_id
+        );
     }
 }

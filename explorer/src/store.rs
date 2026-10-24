@@ -353,6 +353,7 @@ impl Store {
                 address: change.address.unwrap_or_default(),
                 since: now,
                 heard: Default::default(),
+                dropped: 0,
                 chain: None,
             });
         }

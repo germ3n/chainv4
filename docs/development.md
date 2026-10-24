@@ -20,6 +20,10 @@ You need stable Rust, a C/C++ toolchain and clang: RocksDB and Luau are built fr
 - the SDK's own tests run on the host: `cargo test -p chainv4-sdk --target <host>` inside
   `contracts/`.
 
+**Tests that open sockets** are ignored by default: `cargo test -- --ignored net::` floods one
+real libp2p node from another on 127.0.0.1 and checks the flooder is turned away, then
+disconnected.
+
 **The explorer workspace,** `explorer/`, is the egui explorer (see [Explorer](explorer.md)):
 - it has a lockfile of its own, so egui and the browser crates never meet the node's, whose
   libp2p pins older web crates than egui needs;

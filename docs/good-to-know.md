@@ -64,6 +64,11 @@ other pages explain each part in full; this one is the short list to keep in min
     first. `indexed_from` says how far it got.
   - **Staying on:** once on, the database keeps it on, keeping the same blocks until the flag
     says otherwise. `--index-events=off` deletes it.
+- **Floods are turned away at the door.** Gossiped transactions and votes, and submissions, count
+  against a backlog: 10,000 in all and 1,000 from any one peer by default
+  (`--max-gossip-backlog`, `--max-gossip-per-peer`). Past it they are dropped, `POST /txs`
+  answers 503, and a peer over its share 10 times in a minute is disconnected. It can come back
+  at once: there are no bans yet (see [Node](node.md#the-gossip-backlog)).
 - **A node only streams when asked.** `--stream` turns on `GET /stream`. Without it, clients
   such as the explorer poll.
 - **Read-only calls hold up the API.** `POST /call` runs a contract under the chain's fuel cap on

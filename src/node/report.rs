@@ -4,6 +4,7 @@
 
 use {
     super::{MEMPOOL_CAPACITY, Node},
+    crate::net::BacklogLimits,
     crate::structs::tx::SignedTx,
     crate::structs::u256::u256,
     libp2p::{Multiaddr, PeerId},
@@ -39,6 +40,8 @@ pub struct NodeReport {
     pub txs: Vec<SignedTx>,
     #[document(summary = "What it heard and did since it started.")]
     pub counters: Counters,
+    #[document(summary = "How much gossip and how many submissions wait for it now, and the backlog's limits.")]
+    pub backlog: (usize, BacklogLimits),
 }
 
 #[document(
@@ -56,6 +59,8 @@ pub struct PeerReport {
     pub since: u64,
     #[document(summary = "The blocks, transactions and votes it gossiped.")]
     pub heard: Heard,
+    #[document(summary = "The transactions and votes of its that were dropped, the backlog having no room for them.")]
+    pub dropped: u64,
     #[document(summary = "How far its chain got, from its last status: height, total work and the epoch it justified last. None before it answered.")]
     pub chain: Option<(u64, u256, u64)>,
 }
@@ -112,6 +117,10 @@ pub struct Counters {
     pub requests_failed: u64,
     #[document(summary = "Connections to peers it made or took.")]
     pub connections: u64,
+    #[document(summary = "Transactions, votes and submissions dropped, the backlog having no room for them.")]
+    pub gossip_dropped: u64,
+    #[document(summary = "Peers disconnected for going over their share of the backlog too often.")]
+    pub flooders_disconnected: u64,
 }
 
 /// A connected peer, as the node keeps it.
@@ -133,6 +142,7 @@ impl Node {
                 address: peer.address.clone(),
                 since: peer.since,
                 heard: peer.heard,
+                dropped: self.backlog.dropped_from(id),
                 chain: self.sync.chain_of(id),
             })
             .collect();
@@ -149,7 +159,12 @@ impl Node {
             waiting: self.mempool.len(),
             capacity: MEMPOOL_CAPACITY,
             txs: self.mempool.iter().take(txs).cloned().collect(),
-            counters: self.counters,
+            counters: Counters {
+                gossip_dropped: self.backlog.dropped(),
+                flooders_disconnected: self.backlog.disconnected(),
+                ..self.counters
+            },
+            backlog: (self.backlog.waiting(), self.backlog.limits()),
         }
     }
 }

@@ -94,6 +94,13 @@ pub fn node(report: &NodeReport) -> Value {
             "requests_sent": counters.requests_sent,
             "requests_failed": counters.requests_failed,
             "connections": counters.connections,
+            "gossip_dropped": counters.gossip_dropped,
+            "flooders_disconnected": counters.flooders_disconnected,
+        },
+        "backlog": {
+            "waiting": report.backlog.0,
+            "total": report.backlog.1.total,
+            "per_peer": report.backlog.1.per_peer,
         },
         "peers": report.peers.iter().map(peer).collect::<Vec<_>>(),
     })
@@ -105,6 +112,7 @@ fn peer(peer: &PeerReport) -> Value {
         "address": peer.address.to_string(),
         "since": peer.since,
         "heard": { "blocks": peer.heard.blocks, "txs": peer.heard.txs, "votes": peer.heard.votes },
+        "dropped": peer.dropped,
         "chain": peer.chain.map(|(height, work, justified)| json!({
             "height": height,
             "work": work.to_string(),

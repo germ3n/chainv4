@@ -116,7 +116,8 @@ What a contract is:
 past the transaction is refused.
 
 **What it does:** the node's mempool admits it and gossips it. The API answers 202 with its
-`id`.
+`id`, or 503 when the node's [backlog](node.md#the-gossip-backlog) has no room: try again
+shortly.
 
 `chainv4 send` is a client of this route.
 
@@ -214,8 +215,9 @@ How the node behind the API is doing. 503 when no node runs behind it.
 | `producing`, `validating` | Whether it produces blocks and votes on finality. |
 | `mempool` | `count` waiting and the `capacity`. |
 | `syncing` | `null`, or the `peer` it fetches blocks from and the height `from`. |
-| `counters` | What it heard and did since it started: blocks heard, imported, stored on side branches, rejected and produced; reorgs; transactions heard, submitted and refused; votes heard and cast; sync requests served, sent and failed; connections. |
-| `peers` | Each connected peer's `id`, `address` and `since`, what it gossiped (`heard`: `blocks`, `txs`, `votes`), and its `chain` from its last status (`height`, `work`, `justified`), or `null`. |
+| `counters` | What it heard and did since it started: blocks heard, imported, stored on side branches, rejected and produced; reorgs; transactions heard, submitted and refused; votes heard and cast; sync requests served, sent and failed; connections; gossip and submissions the backlog dropped (`gossip_dropped`), and peers disconnected for flooding (`flooders_disconnected`). |
+| `backlog` | What waits for the node loop now (`waiting`), and the backlog's limits, `total` and `per_peer` (see [Node](node.md#the-gossip-backlog)). |
+| `peers` | Each connected peer's `id`, `address` and `since`, what it gossiped (`heard`: `blocks`, `txs`, `votes`), how much of it the backlog `dropped`, and its `chain` from its last status (`height`, `work`, `justified`), or `null`. |
 
 ### `GET /mempool?limit=N`
 

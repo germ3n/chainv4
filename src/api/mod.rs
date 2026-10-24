@@ -701,7 +701,7 @@ async fn submit(Shared(api): Shared<Api>, body: Bytes) -> Result<(StatusCode, Js
             MempoolError::Full => ApiError::Unavailable(err.to_string()),
             MempoolError::Db(err) => ApiError::Db(err),
         }),
-        Err(err @ SubmitError::Stopped) => Err(ApiError::Unavailable(err.to_string())),
+        Err(err @ (SubmitError::Stopped | SubmitError::Busy)) => Err(ApiError::Unavailable(err.to_string())),
     }
 }
 

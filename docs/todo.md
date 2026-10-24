@@ -167,9 +167,10 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   a contract reaching what nobody named, and reading what an earlier one wrote, still runs twice.
 - [x] **Signatures are checked off the node loop.** A verifier thread checks arriving
   transactions' signatures in batches on the chain's workers, and hands every event on in order.
-- [ ] **The verifier's queue is unbounded.** A peer flooding transactions grows the queue between
-  the network and the verifier, as it grew the node's before; it has no backpressure or per-peer
-  limit yet.
+- [x] **Gossip waits in a bounded backlog.** Transactions and votes from the network, and
+  submissions, count against `--max-gossip-backlog` in all and `--max-gossip-per-peer` per peer.
+  Past them gossip is dropped and submissions get 503; a peer over its share 10 times in a minute
+  is disconnected. See [Node](node.md#the-gossip-backlog) for what hardening is still to do.
 - [x] **Typed exports in the SDK.** `#[export]` reads the call's arguments into the function's
   parameters and returns what it returns, refusing arguments that do not fit; the token and
   counter examples use it.
@@ -219,7 +220,16 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   before the node validates them. Turn on `validate_messages` and report each result, so only
   valid messages spread.
 - [ ] **No peer scoring or banning.** Peers that send invalid blocks, transactions or floods of
-  sync requests pay no price. A peer whose sync batch does not fit is only forgotten.
+  sync requests pay no price. A peer whose sync batch does not fit is only forgotten, and one the
+  backlog disconnects for flooding can connect again at once.
+- [ ] **Backlog shares are per peer id.** One host with many ids gets many shares; limits per IP
+  address would close that.
+- [ ] **Invalid gossip is not struck.** The backlog strikes a peer for volume only, not for
+  transactions that fail their signature check or blocks that do not import.
+- [ ] **Blocks and sync requests are not counted in the backlog.** Gossiped blocks and requests
+  from syncing peers still queue without bound.
+- [ ] **The strike rules are fixed.** `MAX_STRIKES` and `STRIKE_WINDOW` are constants, and a small
+  share can cut off an honest peer relaying a burst.
 - [ ] **The node's identity changes on every start.** The libp2p key is generated fresh each run;
   keep it in the data directory so the peer id is stable.
 - [ ] **No bootnode list.** Peers come from `--peer` and mDNS only, and Kademlia warns at startup

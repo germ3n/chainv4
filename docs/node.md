@@ -85,7 +85,7 @@ sender's go in order.
 
 **Admission** checks:
 - the signature, which the verifier checked already for anything gossiped or submitted
-  (`Mempool::add_checked`);
+  (`Mempool::add_checked`), after the [backlog](#the-gossip-backlog) had room for it;
 - that the nonce is not used yet;
 - that the same sender and nonce are not waiting already;
 - on a chain with fees, that the gas limit could fit a block, the price could be taken and the
@@ -126,6 +126,52 @@ transaction is one message however many peers send it.
 
 **Peers** come from `--peer`, mDNS and Kademlia. There is no bootnode list.
 
+## The gossip backlog
+
+Gossiped transactions and votes, and transactions clients submit, wait between the network and
+the node loop: in the verifier's queue, then the loop's. The backlog (`src/net/backlog.rs`)
+counts them, so a flood is turned away at the door instead of queueing without end.
+- **Counted in:** the network thread counts a transaction or vote in as it arrives, before it is
+  even decoded. A `NodeHandle` counts a submission in.
+- **Counted out:** the node loop counts it out once it handled it, taken or refused.
+
+**The limits:**
+
+| Flag | Default | What it bounds |
+| --- | --- | --- |
+| `--max-gossip-backlog N` | 10,000 | Everything waiting, submissions included. |
+| `--max-gossip-per-peer N` | 1,000 | What any one peer's may be. |
+
+**Over a limit:**
+- **Gossip is dropped.** It is best effort: honest peers gossip it again, and the transaction is
+  still out there.
+- **A peer over its own share is struck.** `MAX_STRIKES` (10) strikes within `STRIKE_WINDOW` (a
+  minute) and the network disconnects it. A full backlog strikes nobody, since no one peer
+  filled it.
+- **Submissions are refused:** `POST /txs` answers 503, "the node is busy; try again shortly".
+
+`GET /node` shows what waits (`backlog`), what was dropped in all and from each peer, and how many
+peers were disconnected for it. The explorer's Network page shows them too.
+
+**Hardening still to do.** The backlog bounds memory and the loop's work, but a determined peer
+still has ways around it:
+- **No bans.** A disconnected flooder can connect again at once, through its own dial, mDNS or
+  Kademlia, and starts with a clean slate. A ban list, with an expiry, would keep it out.
+- **Shares are per peer id.** Ids are free, so one host with many ids gets many shares. Limits per
+  IP address, or on connections, would close that.
+- **Invalid gossip costs nothing.** A peer whose transactions fail their signature check, or whose
+  blocks are invalid, is not struck; only volume is. Striking, or scoring, on what the verifier
+  and the chain find would.
+- **Gossip is forwarded before it is checked.** gossipsub relays messages on before the node has
+  looked at them, so a flood passes through this node to its peers. Its `validate_messages` mode,
+  reporting each verdict back, would stop that, and gossipsub's own peer scoring could build on it.
+- **Blocks and sync requests are not counted.** Only transactions and votes are; gossiped blocks
+  and requests from syncing peers still queue without bound.
+- **The strike rules are fixed.** `MAX_STRIKES` and `STRIKE_WINDOW` are constants; a share small
+  enough to stop a flood can also cut off an honest peer relaying a burst.
+- **The API has no per-client limit.** Submissions share the backlog's total, so one client can
+  still keep others out, if not the node.
+
 ## Sync
 
 A node catches up from its peers on its own (`src/node/sync.rs`).
@@ -162,7 +208,9 @@ Kinds of finality that take no votes never ask for justifications.
 
 - **The node's identity changes on every start.** The libp2p key is generated fresh each run.
 - **Gossip is forwarded before it is checked,** and peers pay no price for invalid blocks or
-  floods of requests. There is no peer scoring yet.
+  floods of requests. Floods of transactions and votes are bounded by the
+  [backlog](#the-gossip-backlog), which disconnects a peer that keeps going over its share, but
+  there is no peer scoring or banning yet.
 - **Sync uses one peer at a time,** and blocks gossiped ahead of the tip are dropped and fetched
   again by sync.
 - **No graceful shutdown.** Ctrl-C stops the process mid-loop; commits are atomic, so data is

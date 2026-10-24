@@ -62,6 +62,8 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--db PATH` | `chain.db` | Where the chain is stored. |
 | `--listen ADDR` | `/ip4/0.0.0.0/udp/0/quic-v1` | A libp2p address to listen on; repeat for several. Port 0 picks one; the log shows which. |
 | `--peer ADDR` | | A peer to dial at startup; repeat for several. Nodes on the same network also find each other through mDNS. |
+| `--max-gossip-backlog N` | `10000` | The most gossiped transactions and votes, and submitted transactions, that may wait for the node. More are dropped; submissions get 503. |
+| `--max-gossip-per-peer N` | `1000` | The most of those from any one peer. More are dropped, and a peer that goes over 10 times in a minute is disconnected. |
 | `--consensus pow\|authority` | `pow` | Which development chain to run. |
 | `--genesis FILE` | | Run the chain a [genesis file](#your-own-chain) describes instead. |
 | `--mine` | | Mine blocks (pow). |

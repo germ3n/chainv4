@@ -86,6 +86,23 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                 .desired_width(220.0),
         );
         ui.end_row();
+
+        if let Some(backlog) = &node.backlog {
+            super::fact(ui, "backlog");
+            ui.add(
+                egui::ProgressBar::new(backlog.waiting as f32 / backlog.total.max(1) as f32)
+                    .text(format!(
+                        "{} of {} waiting, {} per peer",
+                        format::thousands(&backlog.waiting.to_string()),
+                        format::thousands(&backlog.total.to_string()),
+                        format::thousands(&backlog.per_peer.to_string())
+                    ))
+                    .desired_width(220.0),
+            )
+            .on_hover_text("Gossiped transactions and votes, and submissions, on their way to the node loop. Past either limit they are dropped, and a peer that keeps going over its share is disconnected.");
+            ui.end_row();
+        }
+
         super::fact(ui, "listening");
         ui.vertical(|ui| {
             for address in &node.listening {
@@ -160,7 +177,13 @@ fn peers(ui: &mut Ui, ctx: &mut Ctx, peers: &[Peer], height: u64) {
             super::copyable(ui, &format::short(&peer.id));
             ui.monospace(&peer.address);
             ui.weak(format::ago(peer.since, ctx.now));
-            ui.label(format!("{} blocks · {} txs · {} votes", peer.heard.blocks, peer.heard.txs, peer.heard.votes));
+            ui.horizontal(|ui| {
+                ui.label(format!("{} blocks · {} txs · {} votes", peer.heard.blocks, peer.heard.txs, peer.heard.votes));
+
+                if peer.dropped > 0 {
+                    ui.colored_label(BAD, format!("· {} dropped", format::thousands(&peer.dropped.to_string())));
+                }
+            });
 
             match &peer.chain {
                 Some(chain) => {

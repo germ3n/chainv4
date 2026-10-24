@@ -87,7 +87,7 @@ At most 20,000 main-chain blocks are kept; older ones are let go.
 | Block | The header, seal and finality proofs, and every transaction with its status and fee. |
 | Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, its events, its fields and its signature. |
 | Account | The balance and nonce. For a contract: its deployer, engine, code size and functions, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, and the events that mention them, token transfers and approvals in the token's units. Events need a node started with `--index-events`. |
-| Network | The node's roles, uptime, listening addresses and sync state, and what it counted since it started. A graph of its peers, and a table of them with what each gossiped and how far its chain got. |
+| Network | The node's roles, uptime, listening addresses and sync state, its gossip backlog, and what it counted since it started. A graph of its peers, and a table of them with what each gossiped, how much of that was dropped, and how far its chain got. |
 | Mempool | What waits for a block, by sender and nonce. |
 | Tokens | The token registry by symbol, with a search by how a symbol starts: each token's symbol, decimals, contract and name, and what makes a token on this chain. |
 | Finality | The kind, the epoch, and the justified and finalized checkpoints. Who votes and with what weight, the bonded validators, the signers under authority finality, and any conflicting votes the node caught. |

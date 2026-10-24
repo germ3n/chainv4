@@ -255,6 +255,16 @@ pub struct NodeView {
     pub syncing: Option<Syncing>,
     pub counters: BTreeMap<String, u64>,
     pub peers: Vec<Peer>,
+    /// Gossip and submissions waiting for the node, and its limits; none from older nodes.
+    #[serde(default)]
+    pub backlog: Option<Backlog>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Backlog {
+    pub waiting: usize,
+    pub total: usize,
+    pub per_peer: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -275,6 +285,9 @@ pub struct Peer {
     pub address: String,
     pub since: u64,
     pub heard: Heard,
+    /// Its transactions and votes the backlog had no room for.
+    #[serde(default)]
+    pub dropped: u64,
     pub chain: Option<PeerChain>,
 }
 

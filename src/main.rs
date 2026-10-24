@@ -40,6 +40,14 @@ struct NodeArgs {
     /// A peer to dial at startup. Repeat to dial several.
     #[arg(long)]
     peer: Vec<libp2p::Multiaddr>,
+    /// The most gossiped transactions and votes, and submitted transactions, that may wait for
+    /// the node at once. More are dropped until it catches up; submissions get 503.
+    #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(1..))]
+    max_gossip_backlog: u32,
+    /// The most of those any one peer's may be. More are dropped, and a peer that goes over
+    /// 10 times in a minute is disconnected.
+    #[arg(long, default_value_t = 1_000, value_parser = clap::value_parser!(u32).range(1..))]
+    max_gossip_per_peer: u32,
     /// Which development chain to run: pow, mined by anyone, or authority, where the built-in
     /// development key produces every block.
     #[arg(long, value_enum, default_value_t = cli::genesis::DevChain::Pow)]
@@ -132,7 +140,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         chainv4::chain::{self, Genesis},
         chainv4::consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, Miner, Producer},
         chainv4::db::{Database, RocksDb},
-        chainv4::net::{self, NetConfig, NetEvent},
+        chainv4::net::{self, BacklogLimits, NetConfig, NetEvent},
         chainv4::node::Node,
         std::sync::Arc,
     };
@@ -165,6 +173,10 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         peers: args.peer,
         hash: genesis.hash,
         network,
+        backlog: BacklogLimits {
+            total: args.max_gossip_backlog as usize,
+            per_peer: args.max_gossip_per_peer as usize,
+        },
     })?;
     let producer: Option<Box<dyn Producer>> = match (&genesis.consensus, args.mine, args.produce) {
         (_, false, false) => None,

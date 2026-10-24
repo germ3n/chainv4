@@ -11,14 +11,17 @@ use {
     crate::structs::vote::{Justification, SignedVote},
     libp2p::{Multiaddr, PeerId},
     r#macro::document,
-    std::sync::mpsc,
+    std::sync::{Arc, mpsc},
     tokio::sync::mpsc as async_mpsc,
     tokio::sync::oneshot,
     wincode::{SchemaRead, SchemaWrite},
 };
 
+mod backlog;
 mod codec;
 mod swarm;
+
+pub use backlog::{Admission, Backlog, BacklogLimits, MAX_STRIKES, Origin, STRIKE_WINDOW};
 
 pub use swarm::{NetError, spawn};
 
@@ -145,6 +148,8 @@ pub struct NetConfig {
     pub hash: crate::structs::hash::HashType,
     #[document(summary = "Names the network in gossip topics, so nodes on different chains ignore each other. Usually derived from the genesis id.")]
     pub network: String,
+    #[document(summary = "How much gossip may wait for the node, in all and from any one peer.")]
+    pub backlog: BacklogLimits,
 }
 
 #[document(
@@ -161,6 +166,8 @@ pub struct NetLink {
     /// rather than on a verifier thread in front of it: true for pair, so a test's events are
     /// there the moment it sends them.
     pub check_inline: bool,
+    /// What waits for the node, which the network counts in and the node counts out.
+    pub backlog: Arc<Backlog>,
 }
 
 #[document(
@@ -187,6 +194,7 @@ impl NetLink {
                 events: event_rx,
                 inbox: event_tx.clone(),
                 check_inline: true,
+                backlog: Arc::new(Backlog::new(BacklogLimits::default())),
             },
             FakeNet {
                 commands: command_rx,

@@ -12,7 +12,7 @@ use {
     crate::crypto::verifiable::VerifyError,
     crate::db::{Database, DbError},
     crate::mempool::{Mempool, MempoolError},
-    crate::net::{MAX_SYNC_BLOCKS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, SyncRequest, SyncResponse},
+    crate::net::{Admission, Backlog, MAX_SYNC_BLOCKS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, Origin, SyncRequest, SyncResponse},
     crate::structs::block::Block,
     crate::structs::hash::Hash,
     crate::structs::hex::to_hex,
@@ -25,7 +25,7 @@ use {
     std::fmt,
     std::sync::Arc,
     std::sync::mpsc::{self, RecvTimeoutError},
-    std::time::{Duration, SystemTime, UNIX_EPOCH},
+    std::time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     sync::SyncState,
     tokio::sync::{broadcast, mpsc as async_mpsc, oneshot},
     verifier::Arrival,
@@ -70,6 +70,8 @@ pub struct Node {
     inbox: mpsc::Sender<NetEvent>,
     arrivals: Arrivals,
     held: Option<Arrival>,
+    /// What waits for the node: gossip and submissions are counted out here once handled.
+    backlog: Arc<Backlog>,
     peers: HashMap<PeerId, Peer>,
     sync: SyncState,
     reported: u64,
@@ -95,15 +97,17 @@ pub struct Node {
 pub struct NodeHandle {
     inbox: mpsc::Sender<NetEvent>,
     events: Option<broadcast::Sender<NodeEvent>>,
+    /// Where submissions are counted in, so a client cannot flood the node either.
+    backlog: Arc<Backlog>,
 }
 
 impl NodeHandle {
     #[document(
         parent = "NodeHandle",
-        summary = "A handle that delivers to whoever reads the other end of inbox, usually a node, and has nothing to stream.",
+        summary = "A handle that delivers to whoever reads the other end of inbox, usually a node, and has nothing to stream. Submissions are counted into backlog, and whoever reads inbox counts them out.",
     )]
-    pub fn new(inbox: mpsc::Sender<NetEvent>) -> NodeHandle {
-        NodeHandle { inbox, events: None }
+    pub fn new(inbox: mpsc::Sender<NetEvent>, backlog: Arc<Backlog>) -> NodeHandle {
+        NodeHandle { inbox, events: None, backlog }
     }
 
     #[document(
@@ -118,14 +122,20 @@ impl NodeHandle {
     #[document(
         parent = "NodeHandle",
         summary = "Submits a transaction: the node checks it, queues it and gossips it.",
-        returns = "The transaction's id, or why the node refused it or could not be reached.",
+        returns = "The transaction's id, or why the node refused it, has no room for it now, or could not be reached.",
     )]
     pub async fn submit(&self, tx: SignedTx) -> Result<Hash, SubmitError> {
+        if self.backlog.admit(Origin::Local, Instant::now()) != Admission::Admitted {
+            return Err(SubmitError::Busy);
+        }
+
         let (reply, verdict) = oneshot::channel();
 
-        self.inbox
-            .send(NetEvent::Submitted { tx, reply })
-            .map_err(|_| SubmitError::Stopped)?;
+        if self.inbox.send(NetEvent::Submitted { tx, reply }).is_err() {
+            self.backlog.release(Origin::Local);
+
+            return Err(SubmitError::Stopped);
+        }
 
         verdict.await.map_err(|_| SubmitError::Stopped)?.map_err(SubmitError::Refused)
     }
@@ -158,6 +168,8 @@ pub enum SubmitError {
     Refused(MempoolError),
     #[document(summary = "The node is not running.")]
     Stopped,
+    #[document(summary = "The node has as much waiting as its backlog allows; try again shortly.")]
+    Busy,
 }
 
 impl fmt::Display for SubmitError {
@@ -165,6 +177,7 @@ impl fmt::Display for SubmitError {
         match self {
             SubmitError::Refused(err) => write!(f, "{err}"),
             SubmitError::Stopped => write!(f, "the node is not running"),
+            SubmitError::Busy => write!(f, "the node is busy; try again shortly"),
         }
     }
 }
@@ -227,6 +240,7 @@ impl Node {
             events,
             inbox,
             check_inline,
+            backlog,
         } = net;
         // The verifier takes the network's events, and the node reads what it checked.
         let arrivals = match check_inline {
@@ -245,6 +259,7 @@ impl Node {
             inbox,
             arrivals,
             held: None,
+            backlog,
             peers: HashMap::new(),
             sync: SyncState::default(),
             reported: 0,
@@ -316,6 +331,7 @@ impl Node {
     pub fn handle(&self) -> NodeHandle {
         NodeHandle {
             inbox: self.inbox.clone(),
+            backlog: self.backlog.clone(),
             events: self.events.clone(),
         }
     }
@@ -393,6 +409,14 @@ impl Node {
 
     fn on_event(&mut self, arrival: Arrival, now: u64) -> Result<(), NodeError> {
         let Arrival { event, checked } = arrival;
+
+        // Handled now, whatever comes of it, so it no longer counts against its peer.
+        match &event {
+            NetEvent::Tx { from, .. } | NetEvent::Vote { from, .. } => self.backlog.release(Origin::Peer(*from)),
+            NetEvent::Submitted { .. } => self.backlog.release(Origin::Local),
+            NetEvent::PeerDown(peer) => self.backlog.forget(peer),
+            _ => {}
+        }
 
         match event {
             NetEvent::Block { from, block } => {

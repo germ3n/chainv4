@@ -144,6 +144,29 @@ fn the_loop_catches_the_event_index_up_and_moves_its_window() {
 }
 
 #[test]
+fn gossip_leaves_the_backlog_once_the_loop_handled_it() {
+    let (mut follower, follower_net) = node(false);
+    let authority = DevAuthority::dev_keypair();
+    let peer = PeerId::random();
+    let backlog = follower.backlog.clone();
+
+    for nonce in 0..2 {
+        let tx = SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority);
+
+        // As the network does: counted in, then handed on.
+        assert_eq!(backlog.admit(crate::net::Origin::Peer(peer), std::time::Instant::now()), crate::net::Admission::Admitted);
+        follower_net.events.send(NetEvent::Tx { from: peer, tx }).unwrap();
+    }
+
+    assert_eq!(backlog.waiting(), 2);
+
+    follower.step(1).unwrap();
+
+    assert_eq!(backlog.waiting(), 0, "taken and refused alike");
+    assert_eq!(follower.report(1, 0).backlog.0, 0);
+}
+
+#[test]
 fn followers_import_gossiped_blocks_and_never_produce() {
     let (mut producer, mut producer_net) = node(true);
     let (mut follower, mut follower_net) = node(false);

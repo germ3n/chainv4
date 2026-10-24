@@ -6,7 +6,7 @@ use crate::db::MemoryDb;
 use crate::registry::contracts::contract_address;
 use crate::structs::amount::Amount;
 use crate::structs::code::Code;
-use crate::net::NetEvent;
+use crate::net::{Backlog, BacklogLimits, NetEvent};
 use crate::node::{Counters, Heard, NodeReport, PeerReport};
 use crate::structs::block::Block;
 use crate::structs::hex::to_hex;
@@ -74,12 +74,19 @@ fn serve() -> Fixture {
 /// A handle to a node that takes every transaction except those with nonce 99, which it calls
 /// stale, and reports one peer and two transactions waiting.
 fn fake_node() -> NodeHandle {
+    fake_node_with(BacklogLimits::default())
+}
+
+fn fake_node_with(limits: BacklogLimits) -> NodeHandle {
     let (inbox, events) = std::sync::mpsc::channel();
+    let backlog = Arc::new(Backlog::new(limits));
+    let handled = backlog.clone();
 
     std::thread::spawn(move || {
         for event in events {
             match event {
                 NetEvent::Submitted { tx, reply } => {
+                    handled.release(crate::net::Origin::Local);
                     let verdict = if tx.nonce == 99 { Err(MempoolError::Stale) } else { Ok(tx.id(HashType::default_chain())) };
                     let _ = reply.send(verdict);
                 }
@@ -91,7 +98,7 @@ fn fake_node() -> NodeHandle {
         }
     });
 
-    NodeHandle::new(inbox)
+    NodeHandle::new(inbox, backlog)
 }
 
 fn fake_report(txs: usize) -> NodeReport {
@@ -106,6 +113,7 @@ fn fake_report(txs: usize) -> NodeReport {
             address: "/ip4/10.0.0.2/udp/4001/quic-v1".parse().unwrap(),
             since: 2_000,
             heard: Heard { blocks: 3, txs: 4, votes: 0 },
+            dropped: 7,
             chain: Some((5, crate::structs::u256::u256::new(5), 0)),
         }],
         syncing: None,
@@ -115,8 +123,10 @@ fn fake_report(txs: usize) -> NodeReport {
         counters: Counters {
             blocks_heard: 3,
             txs_heard: 4,
+            gossip_dropped: 7,
             ..Counters::default()
         },
+        backlog: (12, BacklogLimits::default()),
     }
 }
 
@@ -303,6 +313,18 @@ fn transactions_are_submitted_as_hex() {
 
     assert_eq!(status, 202, "{body}");
     assert_eq!(body["id"], tx.id(HashType::default_chain()).to_string());
+}
+
+#[test]
+fn a_node_with_no_room_says_it_is_busy() {
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let full = fake_node_with(BacklogLimits { total: 0, per_peer: 0 });
+    let address = start(db, Some(full), &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let (status, body) = post_tx(address, &wincode::serialize(&signed(5)).unwrap());
+
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"], "the node is busy; try again shortly");
 }
 
 #[test]
@@ -759,6 +781,8 @@ fn the_node_tells_how_it_is_doing_and_what_waits() {
     assert_eq!(node["counters"]["blocks_heard"], 3);
     assert_eq!(node["peers"][0]["heard"], json!({ "blocks": 3, "txs": 4, "votes": 0 }));
     assert_eq!(node["peers"][0]["chain"], json!({ "height": 5, "work": "5", "justified": 0 }));
+    assert_eq!((node["peers"][0]["dropped"].clone(), node["counters"]["gossip_dropped"].clone()), (json!(7), json!(7)));
+    assert_eq!(node["backlog"], json!({ "waiting": 12, "total": 10_000, "per_peer": 1_000 }));
     assert_eq!(node["syncing"], Value::Null);
 
     let mempool = ok(fixture.address, "/mempool?limit=1");
