@@ -13,8 +13,8 @@ use {
     crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     libs::{
-        register_accounts_lib, register_address_lib, register_contracts_lib, register_ctx_lib,
-        register_events_lib, register_hash_lib, register_storage_lib, register_u256_lib,
+        ctx::CallArgs, register_accounts_lib, register_address_lib, register_contracts_lib, register_ctx_lib,
+        register_events_lib, register_hash_lib, register_storage_lib, register_u256_lib, values::Given,
     },
     mlua::{ChunkMode, Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value},
     r#macro::document,
@@ -324,9 +324,11 @@ impl Pool {
 /// to be used again.
 fn call(state: &Pristine, bytecode: &[u8], name: &str, args: &[TxCallArgumentType], host: Host, limits: Limits) -> Outcome {
     state.lua.set_app_data(host);
+    state.lua.set_app_data(CallArgs::new(name, args));
     let result = run(state, bytecode, name, args);
     // The call's host goes now, wherever the state is closed later.
     state.lua.remove_app_data::<Host>();
+    state.lua.remove_app_data::<CallArgs>();
     let remaining = state.lua.get_fuel().unwrap_or(0);
     let result = match result {
         // A script can raise "out of fuel" itself; only a nearly empty tank makes it real.
@@ -360,7 +362,8 @@ fn run(
 
     let returns: MultiValue = function.call(MultiValue::from_vec(lua_args))?;
 
-    returns.into_iter().map(value::from_lua).collect()
+    // A values list returned alone goes back untouched.
+    Ok(Given::read(returns)?.into_values())
 }
 
 impl From<mlua::Error> for VmError {

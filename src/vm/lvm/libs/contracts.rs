@@ -2,6 +2,7 @@ use {
     super::accounts::refused,
     super::address::LuaAddress,
     super::u256::{LuaU256, operand},
+    super::values::{Given, LuaValues},
     crate::structs::u256::u256,
     crate::vm::lvm::{charge, value},
     crate::vm::{FunctionId, Host, VmError, cost, selector},
@@ -36,30 +37,35 @@ fn delegate(lua: &Lua, (target, function, args): (AnyUserData, Value, MultiValue
             u64::try_from(operand(&function)?).map_err(|_| Error::runtime("a selector fits in 64 bits"))?,
         ),
     };
-    let args = args
-        .into_iter()
-        .map(value::from_lua)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| Error::runtime(format!("contracts.delegate: {err}")))?;
+    let given = Given::read(args).map_err(|err| Error::runtime(format!("contracts.delegate: {err}")))?;
+    let untouched = given.untouched();
+    let args = given.into_values();
     charge(lua, cost::CALL)?;
     let fuel = lua.get_fuel()?;
     let outcome = host.delegate(&target.0, id, &args, fuel);
     lua.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;
-    returned(lua, outcome.result, "delegate", &target)
+    returned(lua, outcome.result, "delegate", &target, untouched)
 }
 
 fn selector_of(_: &Lua, name: String) -> mlua::Result<LuaU256> {
     Ok(LuaU256(u256::from(selector(&name))))
 }
 
-/// A call's return values as Lua values, or its failure as a Lua error.
+/// A call's return values as Lua values, or as one values list when it was given one, or its
+/// failure as a Lua error.
 fn returned(
     lua: &Lua,
     result: Result<Vec<crate::structs::tx::TxCallArgumentType>, VmError>,
     what: &str,
     target: &LuaAddress,
+    untouched: bool,
 ) -> mlua::Result<MultiValue> {
     match result {
+        Ok(returns) if untouched => {
+            let list = lua.create_userdata(LuaValues::new(lua, &returns)?)?;
+
+            Ok(MultiValue::from_vec(vec![Value::UserData(list)]))
+        }
         Ok(returns) => returns
             .iter()
             .map(|value| value::to_lua(lua, value))
@@ -77,11 +83,9 @@ fn call_with(lua: &Lua, target: AnyUserData, value: u256, function: String, args
         .app_data_ref::<Host>()
         .map(|host| host.clone())
         .ok_or_else(|| Error::runtime("contracts.call is only available inside a call"))?;
-    let args = args
-        .into_iter()
-        .map(value::from_lua)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| Error::runtime(format!("contracts.call: {err}")))?;
+    let given = Given::read(args).map_err(|err| Error::runtime(format!("contracts.call: {err}")))?;
+    let untouched = given.untouched();
+    let args = given.into_values();
     let transfer = if value == u256::ZERO { 0 } else { cost::TRANSFER };
     charge(lua, cost::CALL + transfer)?;
     let fuel = lua.get_fuel()?;
@@ -91,7 +95,7 @@ fn call_with(lua: &Lua, target: AnyUserData, value: u256, function: String, args
     match outcome.result {
         Err(err @ VmError::Storage(_)) => Err(refused(err)),
         Err(err) => Err(Error::runtime(format!("call to {function} on {} failed: {err}", target.0))),
-        ok => returned(lua, ok, "call", &target),
+        ok => returned(lua, ok, "call", &target, untouched),
     }
 }
 

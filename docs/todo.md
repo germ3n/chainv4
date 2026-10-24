@@ -132,9 +132,10 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   export. Together they make proxies, upgradable without the built-in upgrade, with examples in
   Lua and Rust.
 - [ ] **No contract removal.** May be the right call; decide on purpose.
-- [ ] **Lua proxies change value types in transit.** Arguments and return values pass through Lua,
-  so an `i64` becomes a number. A pass-through that keeps the encoded values as they are would
-  fix it.
+- [x] **Lua contracts can pass values on untouched.** `ctx.args` is the call's arguments as a
+  values list, which `contracts.call`, `call_value`, `delegate` and `events.emit` take in place
+  of loose values; a call given one returns one, and a function returning one returns its values
+  as they are. The Lua proxy forwards this way, so no value changes type passing through.
 - [ ] **No storage layout tools for proxies.** Keeping a proxy's and its implementations' keys
   apart is up to the contracts; a convention, or namespaced storage, would make it safer.
 - [ ] **Only one permission exists.** `check_perms` is only ever asked about `"upgrade"`. Other

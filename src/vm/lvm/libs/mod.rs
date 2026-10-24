@@ -6,6 +6,7 @@ pub mod events;
 pub mod hash;
 pub mod storage;
 pub mod u256;
+pub mod values;
 
 pub use accounts::register_accounts_lib;
 pub use address::register_address_lib;

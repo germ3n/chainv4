@@ -297,8 +297,10 @@ function M.set_implementation(implementation)
     storage.set("proxy:implementation", implementation:text())
 end
 
-function M.fallback(selector, ...)
-    return contracts.delegate(address.parse(storage.get("proxy:implementation")), selector, ...)
+-- ctx.args are the caller's arguments exactly as they came, and the results go back the same
+-- way, so no value changes type passing through.
+function M.fallback(selector)
+    return contracts.delegate(address.parse(storage.get("proxy:implementation")), selector, ctx.args)
 end
 
 return M

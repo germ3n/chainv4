@@ -140,6 +140,9 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   survive between calls and make memory limits depend on what a node ran before, which could split
   the chain. Instead, the Lua engine keeps fresh states ready and the WebAssembly engine caches
   compiled modules. Both only change speed, never results.
+- **Lua changes value types; values lists do not.** An `i64` passed through Lua comes back a
+  number, and bytes that read as text a string. To pass values on as they came, forward
+  `ctx.args`, as the Lua proxy does: calls given a values list return one, untouched.
 - **Delegate only to code you trust.** It runs with this contract's storage and balance.
 - **Loading code is not charged.** Compiling and validating are bounded only by the 128 KiB source
   and 512 KiB module limits.

@@ -1,6 +1,7 @@
 use {
     super::accounts::refused,
-    crate::vm::lvm::{charge, value},
+    super::values::Given,
+    crate::vm::lvm::charge,
     crate::vm::{Host, cost},
     mlua::{Error, Lua, MultiValue},
     r#macro::document,
@@ -11,11 +12,9 @@ fn emit(lua: &Lua, (name, data): (String, MultiValue)) -> mlua::Result<()> {
         .app_data_ref::<Host>()
         .map(|host| host.clone())
         .ok_or_else(|| Error::runtime("events is only available inside a call"))?;
-    let data = data
-        .into_iter()
-        .map(value::from_lua)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| Error::runtime(format!("events.emit: {err}")))?;
+    let data = Given::read(data)
+        .map_err(|err| Error::runtime(format!("events.emit: {err}")))?
+        .into_values();
     let size = host.emit(&name, data).map_err(refused)?;
 
     charge(lua, cost::EVENT + size as u64 / cost::EVENT_BYTES_PER_FUEL)

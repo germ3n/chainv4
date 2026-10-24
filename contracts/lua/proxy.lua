@@ -34,9 +34,11 @@ function M.implementation()
     return address.parse(text)
 end
 
--- Run by the chain for every function the proxy does not export.
-function M.fallback(selector, ...)
-    return contracts.delegate(M.implementation(), selector, ...)
+-- Run by the chain for every function the proxy does not export. ctx.args are the caller's
+-- arguments exactly as they came, and what the implementation returns goes back the same way,
+-- so no value changes type passing through Lua.
+function M.fallback(selector)
+    return contracts.delegate(M.implementation(), selector, ctx.args)
 end
 
 return M

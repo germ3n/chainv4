@@ -896,8 +896,8 @@ fn a_lua_proxy_delegates_to_rust_code() {
     let alice = Address::Ed25519([0xa; 32]);
     let increment = world.call_as(alice, proxy, "increment", &[TxCallArgumentType::I64(7)]);
 
-    // Values pass through Lua on their way, so the counter's I64 comes back as a Lua number.
-    assert_eq!(increment.result.unwrap(), [TxCallArgumentType::Number(7.0)]);
+    // Values pass through the Lua proxy untouched, so the counter's I64 comes back an I64.
+    assert_eq!(increment.result.unwrap(), [TxCallArgumentType::I64(7)]);
     assert_eq!(increment.events[0].contract, proxy);
     assert_eq!(increment.events[0].data, [TxCallArgumentType::I64(7), address(alice)]);
     assert_eq!(world.call(proxy, "last", &[]).result.unwrap(), [address(alice)]);
@@ -932,4 +932,94 @@ fn hooks_and_fallbacks_are_never_called_or_delegated_to() {
     // Delegating never falls back: the target must export the function itself.
     assert!(delegated(proxy, "increment").contains("no such function"));
     assert!(delegated(Address::Contract([9; 32]), "count").contains("no contract"));
+}
+
+/// Passes calls on with values lists, and shows what converting them would do instead.
+const RELAY: &str = r#"
+local M = {}
+
+function M.point_at(target)
+    storage.set("target", target:text())
+end
+
+-- Every call it does not export goes on to the target's echo, values untouched both ways.
+function M.fallback(selector)
+    return contracts.call(address.parse(storage.get("target")), "echo", ctx.args)
+end
+
+function M.echo()
+    return ctx.args
+end
+
+function M.converted(...)
+    return ...
+end
+
+function M.unpacked()
+    return ctx.args:unpack()
+end
+
+function M.describe()
+    local list = ctx.args
+
+    return #list, list:type(1), list:type(#list + 1) == nil, tostring(list), rawequal(list, ctx.args)
+end
+
+function M.announce()
+    events.emit("Raw", ctx.args)
+end
+
+function M.mixed()
+    return 1, ctx.args
+end
+
+return M
+"#;
+
+#[test]
+fn values_lists_pass_through_lua_untouched() {
+    let mut world = World::new();
+    let relay = world.lua_code(RELAY);
+    let target = world.lua_code(RELAY);
+    world.call(relay, "point_at", &[address(target)]).result.unwrap();
+    let sent = vec![
+        TxCallArgumentType::I64(-5),
+        TxCallArgumentType::Bytes(b"hi".to_vec()),
+        TxCallArgumentType::U64(7),
+        TxCallArgumentType::Amount(crate::structs::amount::Amount::U128(9)),
+        TxCallArgumentType::Address(DEPLOYER),
+    ];
+
+    // Through the relay's fallback, a call, the target's echo and back: nothing changes.
+    assert_eq!(world.call(relay, "anything", &sent).result.unwrap(), sent);
+    assert_eq!(world.call(target, "echo", &sent).result.unwrap(), sent);
+
+    // Converted through Lua, the same values change type.
+    assert_eq!(
+        world.call(target, "converted", &sent).result.unwrap(),
+        [
+            TxCallArgumentType::Number(-5.0),
+            TxCallArgumentType::String("hi".to_string()),
+            TxCallArgumentType::U256(u256::from(7u64)),
+            TxCallArgumentType::U256(u256::from(9u64)),
+            TxCallArgumentType::Address(DEPLOYER),
+        ]
+    );
+    assert_eq!(world.call(target, "unpacked", &sent).result.unwrap()[0], TxCallArgumentType::Number(-5.0));
+    // Its length and types can be read, and ctx.args is one list however often it is read.
+    assert_eq!(
+        world.call(target, "describe", &sent).result.unwrap(),
+        [
+            TxCallArgumentType::Number(5.0),
+            TxCallArgumentType::String("i64".to_string()),
+            TxCallArgumentType::Bool(true),
+            TxCallArgumentType::String("values(5)".to_string()),
+            TxCallArgumentType::Bool(true),
+        ]
+    );
+
+    let announced = world.call(target, "announce", &sent);
+
+    assert_eq!(announced.events[0].data, sent);
+    assert!(matches!(world.call(target, "mixed", &sent).result, Err(err) if err.to_string().contains("goes alone")));
 }

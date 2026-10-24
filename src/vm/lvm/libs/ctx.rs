@@ -1,10 +1,32 @@
 use {
     super::address::LuaAddress,
     super::u256::LuaU256,
-    crate::vm::{CallContext, Host},
-    mlua::{Error, Lua, UserData, UserDataFields},
+    super::values::LuaValues,
+    crate::structs::tx::TxCallArgumentType,
+    crate::vm::{CallContext, FALLBACK, Host},
+    mlua::{AnyUserData, Error, Lua, UserData, UserDataFields},
     r#macro::document,
 };
+
+/// The arguments of the call running, as they arrived, and the list ctx.args gives once it is
+/// made: made once, so reading ctx.args again costs nothing.
+pub struct CallArgs {
+    args: Vec<TxCallArgumentType>,
+    list: Option<AnyUserData>,
+}
+
+impl CallArgs {
+    /// The arguments a function is called with. A fallback's selector, which the chain put in
+    /// front, is not among them: they are what the caller sent.
+    pub fn new(function: &str, args: &[TxCallArgumentType]) -> CallArgs {
+        let args = match function == FALLBACK {
+            true => args.get(1..).unwrap_or_default().to_vec(),
+            false => args.to_vec(),
+        };
+
+        CallArgs { args, list: None }
+    }
+}
 
 /// The ctx global. It holds nothing itself: every field reads the context of the call running
 /// right now.
@@ -15,6 +37,17 @@ impl UserData for LuaCtx {
         fields.add_field_function_get("sender", |lua, _| Ok(LuaAddress(current(lua)?.sender)));
         fields.add_field_function_get("contract", |lua, _| Ok(LuaAddress(current(lua)?.contract)));
         fields.add_field_function_get("value", |lua, _| Ok(LuaU256(current(lua)?.value)));
+        fields.add_field_function_get("args", |lua, _| {
+            let mut call = lua
+                .app_data_mut::<CallArgs>()
+                .ok_or_else(|| Error::runtime("ctx is only available inside a call"))?;
+
+            if call.list.is_none() {
+                call.list = Some(lua.create_userdata(LuaValues::new(lua, &call.args)?)?);
+            }
+
+            Ok(call.list.clone())
+        });
     }
 }
 
@@ -63,6 +96,17 @@ fn ctx_contract() {}
     returns = { ty = "U256", desc = "Zero when nothing was sent." },
 )]
 fn ctx_value() {}
+
+#[document(
+    lua,
+    parent = "ctx",
+    name = "args",
+    kind = "field",
+    summary = "The arguments the call came with, exactly as they arrived, to pass on unchanged. In a fallback they are what the caller sent, without the selector the chain put in front.",
+    returns = { ty = "Values", desc = "The same list each time it is read." },
+    see_also = "Values",
+)]
+fn ctx_args() {}
 
 pub fn register_ctx_lib(lua: &Lua) {
     lua.globals()

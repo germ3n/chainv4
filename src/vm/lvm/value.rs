@@ -2,6 +2,7 @@ use {
     crate::vm::VmError,
     super::libs::address::LuaAddress,
     super::libs::u256::LuaU256,
+    super::libs::values::is_list,
     crate::structs::amount::Amount,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
@@ -67,6 +68,8 @@ pub(super) fn from_lua(value: Value) -> Result<TxCallArgumentType, VmError> {
                 TxCallArgumentType::Address(address.0)
             } else if let Ok(number) = data.borrow::<LuaU256>() {
                 TxCallArgumentType::U256(number.0)
+            } else if is_list(&data) {
+                return Err(VmError::BadArgument("a values list goes alone, in place of every other value".to_string()));
             } else {
                 return Err(VmError::BadReturn("this userdata".to_string()));
             }

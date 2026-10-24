@@ -129,8 +129,10 @@ README's "Proxies" section has a worked example. Keep in mind:
 - **Delegate only to code you trust.** It has full access to the contract.
 - **Keep storage layouts apart:** the proxy's keys and the implementation's live in the same
   storage.
-- **Lua proxies pass values as Lua values,** so an `i64` comes back as a number. A Rust proxy
-  forwards values exactly.
+- **Forward with `ctx.args`.** A Lua proxy's fallback passes `ctx.args` on, and returns what
+  `delegate` gives back, so every value keeps its type both ways (see
+  [values lists](#values-lists)). Passing `...` instead converts them through Lua, so an `i64`
+  comes back a number. A Rust proxy forwards the encoded values as they are.
 
 ## Events
 
@@ -225,7 +227,7 @@ numbers.
 
 | Library | What it has |
 | --- | --- |
-| `ctx` | `ctx.sender`, `ctx.contract`, `ctx.value`. |
+| `ctx` | `ctx.sender`, `ctx.contract`, `ctx.value`, and `ctx.args`, the call's arguments as a values list. |
 | `storage` | `storage.get(key)`, `storage.set(key, value)`; `nil` deletes. Keys and values are strings. |
 | `accounts` | `accounts.balance(address)`, `accounts.transfer(to, amount)` from the contract's balance. |
 | `contracts` | `contracts.call(address, name, ...)`, `contracts.call_value(address, value, name, ...)`, `contracts.delegate(address, name_or_selector, ...)`, `contracts.selector(name)`. |
@@ -243,6 +245,39 @@ numbers.
 - numbers come back as numbers;
 - `u256` values come back as `u256`;
 - strings come back as strings, or bytes when they are not UTF-8.
+
+### Values lists
+
+Lua has no `i64`, no `u64` and no bytes of its own, so values converted into Lua and back can
+change type:
+
+| Arrives as | In Lua | Goes back out as |
+| --- | --- | --- |
+| `i64`, `i128` | a number | `number` |
+| `u64`, `u128`, `amount` | a `u256` | `u256` |
+| `bytes` that read as UTF-8 | a string | `string` |
+
+**Keeping types:** a values list keeps values exactly as they came. `ctx.args` is the call's
+arguments as one, without the selector a fallback was given.
+- **Passing one on:** give it to `contracts.call`, `contracts.call_value`, `contracts.delegate`
+  or `events.emit` in place of loose values.
+- **Results:** a call or delegate given a values list returns its results as one too, untouched.
+- **Returning one:** a function that returns one returns its values as they are.
+
+A list goes alone, never among other values.
+
+**Looking inside:** `#list` counts its values, `list:type(i)` names the i-th one's type, and
+`list:unpack()` converts them to Lua values the usual way.
+
+**Memory:** a list keeps its values encoded in a Lua string, so it counts against the call's
+memory like any other value.
+
+```lua
+-- A router: every call it does not export goes on to a target, as it came, both ways.
+function M.fallback(selector)
+    return contracts.call(target(), "handle", ctx.args)
+end
+```
 
 The full API is in the wiki under Lua.
 
