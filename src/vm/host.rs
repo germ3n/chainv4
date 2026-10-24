@@ -1,5 +1,5 @@
 use {
-    super::{CallContext, FunctionId, Layout, Limits, Outcome, Vm, VmError, route},
+    super::{Access, CallContext, FunctionId, Layout, Limits, Outcome, Vm, VmError, route},
     crate::db::{Column, DbError, State, namespace_key, storage_key},
     crate::registry::contracts::{ContractRecord, Contracts},
     crate::registry::{Accounts, RegistryError},
@@ -151,7 +151,7 @@ impl Host {
         returns = "The value, or None when the key has none. Runtime when the key or the namespace's name is too long, Storage when the database failed.",
     )]
     pub fn storage_get(&self, space: &Space, key: &[u8]) -> Result<Option<Vec<u8>>, VmError> {
-        let (column, key) = self.locate(space, key, false)?;
+        let (column, key) = self.locate(space, key, Access::Read)?;
 
         self.state.get(column, &key).map_err(|err| self.fail(err))
     }
@@ -164,14 +164,15 @@ impl Host {
             key = "The key.",
             value = "The value, or None to delete it.",
         },
-        panics = "Runtime past a limit, for code run by delegate writing the contract's own space, or for code that declares a layout using a namespace outside it, or writing one it retired.",
+        panics = "Runtime past a limit, for code run by delegate writing the contract's own space, or for code that declares a layout reaching past it: a namespace or key it does not declare, a value that is not its kind, or a write to something retired or to plain storage.",
     )]
     pub fn storage_set(&self, space: &Space, key: &[u8], value: Option<&[u8]>) -> Result<(), VmError> {
-        let (column, key) = self.locate(space, key, value.is_some())?;
-
         if value.is_some_and(|value| value.len() > MAX_VALUE_LEN) {
             return Err(VmError::Runtime(format!("storage values are at most {MAX_VALUE_LEN} bytes")));
         }
+
+        let access = value.map_or(Access::Clear, Access::Write);
+        let (column, key) = self.locate(space, key, access)?;
 
         if *space == Space::Own && self.delegated {
             return Err(VmError::Runtime(
@@ -187,17 +188,21 @@ impl Host {
         Ok(())
     }
 
-    /// Where a key in a space is kept, if the code running may use it there.
-    fn locate(&self, space: &Space, key: &[u8], write: bool) -> Result<(Column, Vec<u8>), VmError> {
+    /// Where a key in a space is kept, if the code running may do this with it there.
+    fn locate(&self, space: &Space, key: &[u8], access: Access<'_>) -> Result<(Column, Vec<u8>), VmError> {
         check_key(key)?;
         let contract = &self.context.contract;
 
         match space {
-            Space::Plain => Ok((Column::Storage, storage_key(contract, key))),
+            Space::Plain => {
+                self.layout.reaches_plain(access).map_err(VmError::Runtime)?;
+
+                Ok((Column::Storage, storage_key(contract, key)))
+            }
             Space::Own => Ok((Column::Namespaces, namespace_key(contract, &[], key))),
             Space::Named(name) => {
                 check_namespace(name)?;
-                self.layout.reaches(name, write).map_err(VmError::Runtime)?;
+                self.layout.reaches(name, key, access).map_err(VmError::Runtime)?;
 
                 Ok((Column::Namespaces, namespace_key(contract, name, key)))
             }

@@ -154,9 +154,15 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   may use no others. `Tx::Upgrade` refuses new code that drops one or changes its kind, proxies
   check with `check_layout` before repointing, and `chainv4 layout` compares two versions
   before anything is sent.
-- [ ] **Layouts stop at namespaces.** Keys inside a namespace, plain storage, and whether values
-  match their kind are not checked: a kind is the code's own label, and renaming a key inside a
-  namespace still starts it empty.
+- [x] **Layouts reach keys, kinds and plain storage.** A namespace is a map, any key with values
+  of one kind, or a record, only the keys it declares (`--@key NAME KEY KIND`), each with its
+  kind; keys retire like namespaces. Kinds are encodings the node checks on every write, and
+  code that declares a layout may only read and clear plain storage.
+- [ ] **A map's keys are not checked.** Any key goes into a map, so code that changes how it
+  forms keys, `who:hex()` to `who:text()`, still starts from empty entries.
+- [ ] **Kinds check encodings, not meanings.** A `decimal` that held wei and now holds whole coins
+  passes, and Lua and Rust write different encodings of the same type, so a version that
+  switches engines must retire and migrate what it keeps.
 - [ ] **Only one permission exists.** `check_perms` is only ever asked about `"upgrade"`. Other
   privileged actions, such as removal, would ask with their own names.
 - [x] **A token registry.** A contract that exports every function genesis names in

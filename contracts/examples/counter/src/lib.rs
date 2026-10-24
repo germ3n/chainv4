@@ -5,9 +5,9 @@
 
 use chainv4_sdk::{Address, Value, abort, emit, export, namespace, sender};
 
-// The count, as a little-endian i64, and who counted last. Declaring the namespace puts it in
-// the contract's storage layout: new code must declare it too, with the same kind.
-namespace!(COUNTER, "counter", "counter-v1");
+// The count and who counted last, in a record its storage layout declares: the node checks each
+// value is its kind, and new code must keep both keys with the same kinds.
+namespace!(COUNTER, "counter", { "count": "i64", "last": "address" });
 
 const COUNT: &[u8] = b"count";
 const LAST: &[u8] = b"last";
@@ -20,8 +20,8 @@ fn increment(by: Option<i64>) -> i64 {
         .unwrap_or(0)
         .checked_add(by.unwrap_or(1))
         .unwrap_or_else(|| abort("the count would overflow"));
-    COUNTER.set(COUNT, &count.to_le_bytes());
-    COUNTER.set(LAST, &sender().encode());
+    COUNTER.set_i64(COUNT, count);
+    COUNTER.set_address(LAST, &sender());
     emit("Incremented", &[Value::I64(count), Value::Address(sender())]);
 
     count
@@ -36,5 +36,5 @@ fn get() -> i64 {
 /// Who incremented last, or nil before anyone did.
 #[export]
 fn last() -> Option<Address> {
-    COUNTER.get(LAST).and_then(|bytes| Address::decode(bytes.as_slice().try_into().ok()?))
+    COUNTER.get_address(LAST)
 }

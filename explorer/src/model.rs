@@ -230,11 +230,26 @@ pub struct Contract {
     pub token: Option<RegisteredToken>,
 }
 
-/// One namespace a contract's storage layout declares.
+/// One namespace a contract's storage layout declares: a map of one kind, a record of keys, or
+/// retired.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Declared {
     pub name: String,
-    /// What it holds, as its code says; None once retired.
+    /// map, record or retired.
+    pub shape: String,
+    /// A map's kind.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// A record's keys.
+    #[serde(default)]
+    pub keys: Vec<Field>,
+}
+
+/// One key a record namespace declares.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Field {
+    pub key: String,
+    /// Its kind; None once retired.
     pub kind: Option<String>,
 }
 

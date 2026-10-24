@@ -263,7 +263,7 @@ fn accounts_and_contracts_are_read_from_state() {
     assert_eq!(contract["deployer"], authority.to_string());
     assert_eq!(contract["functions"], json!(["increment"]));
     assert_eq!(contract["engine"], "lua");
-    assert_eq!(contract["layout"], json!([{"name": "counter", "kind": "number", "retired": false}]));
+    assert_eq!(contract["layout"], json!([{"name": "counter", "shape": "map", "kind": "number"}]));
     assert!(contract["code_size"].as_u64().unwrap() > 0);
 }
 

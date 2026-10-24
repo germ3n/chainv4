@@ -73,7 +73,7 @@ fn namespace(name: &[u8]) -> mlua::Result<LuaNamespace> {
     kind = "library",
     name = "storage",
     category = "Chain",
-    summary = "The contract's own key-value storage, kept between calls. Every contract has its own; keys and values are strings of bytes. A call that fails leaves storage as it was. Besides the plain keys storage.get and storage.set reach, it has namespaces, each with keys of its own, and the contract's own space, which code it delegates to cannot write.",
+    summary = "The contract's own key-value storage, kept between calls. Every contract has its own; keys and values are strings of bytes. A call that fails leaves storage as it was. Besides the plain keys storage.get and storage.set reach, it has namespaces, each with keys of its own, and the contract's own space, which code it delegates to cannot write. A script that declares a storage layout, with --@namespace, --@key and --@retired lines, reaches only what it declares, and only reads and clears plain keys.",
     note = "A read costs 100 fuel and a write 500, plus 1 for every 16 bytes of key and value, and of a namespace's name. Keys are at most 256 bytes and values at most 64 KiB. Store numbers as strings, for example tostring(balance) and u256(text).",
     example = "local count = tonumber(storage.get(\"count\") or \"0\")\nstorage.set(\"count\", tostring(count + 1))",
 )]
@@ -100,6 +100,7 @@ fn storage_get_doc() {}
         value = { ty = "string?", desc = "The value, or nil to delete.", optional = true },
     },
     returns = { ty = "nil", desc = "" },
+    panics = "Errors writing a value in a script that declares a storage layout: its state lives in namespaces, and plain keys can only be read and deleted.",
     see_also = "storage.get",
 )]
 fn storage_set_doc() {}
@@ -162,7 +163,7 @@ fn namespace_get_doc() {}
         value = { ty = "string?", desc = "The value, or nil to delete.", optional = true },
     },
     returns = { ty = "nil", desc = "" },
-    panics = "Errors for code run by contracts.delegate writing storage.own.",
+    panics = "Errors for code run by contracts.delegate writing storage.own, and for a script that declares a storage layout reaching past it: a namespace or key it does not declare, a retired one, or a value that is not its kind.",
     see_also = "Namespace:get",
 )]
 fn namespace_set_doc() {}

@@ -149,40 +149,89 @@ They are kept in the `Namespaces` column (see [Storage](storage.md#columns)).
 
 Code may declare its storage layout: the namespaces it keeps its state in, and what each holds.
 New code then has to keep it, so an upgrade or a proxy's new implementation cannot silently
-start from empty storage because it renamed a namespace.
+start from empty storage because it renamed a namespace or a key, or misread a value because it
+changed how one is encoded.
 
-| | Lua | Rust SDK |
+A namespace is one of two shapes:
+- **A map:** any key, every value one kind. For state keyed by something, such as balances by
+  address.
+- **A record:** only the keys it declares, each with its own kind. For a contract's settings and
+  counters.
+
+```lua
+--@namespace balances decimal        -- a map: any key, every value decimal text
+--@namespace config                  -- a record: only the keys below
+--@key config owner address-hex
+--@key config paused bool
+--@retired config fee_rate           -- a key no longer used
+--@retired fees                      -- a namespace no longer used
+
+local balances = storage.namespace("balances")
+balances:set(who:hex(), tostring(amount))
+storage.namespace("config"):set("owner", ctx.sender:hex())
+```
+
+```rust
+namespace!(BALANCES, "balances", "u256");
+namespace!(CONFIG, "config", { "owner": "address", "paused": "bool" });
+retired!("config", "fee_rate");
+retired!("fees");
+
+BALANCES.set_u256(&who.encode(), amount);
+CONFIG.set_address(b"owner", &sender());
+```
+
+Lua lines may sit anywhere in the script. Rust's macros write the module's `chainv4.layout`
+custom section, check names, keys and kinds at compile time, and define a constant to use the
+namespace by. Names are 1 to 64 bytes and keys 1 to 256, each one word.
+
+**Kinds** are encodings, and the node checks every value written against its kind:
+
+| Kind | Encoding | Written by |
 | --- | --- | --- |
-| Declare a namespace | `--@namespace counter number` | `namespace!(COUNTER, "counter", "number");` |
-| Retire one | `--@retired fees` | `retired!("fees");` |
+| `bytes` | Anything. | |
+| `text` | UTF-8. | |
+| `number` | A number in text: `5`, `-2.5`, `1e+20`, `inf`, `nan`. | Lua's `tostring(n)` |
+| `decimal` | A whole number from 0 in decimal text, up to the largest u256. | Lua's `tostring(u256)` |
+| `bool` | One byte, 0 or 1. | `set_bool` |
+| `i64`, `u64` | 8 bytes, little-endian. | `set_i64`, `set_u64` |
+| `u128` | 16 bytes, little-endian. | |
+| `u256` | 32 bytes, little-endian. | `set_u256` |
+| `address` | 33 bytes: the kind's tag, then its 32. | `set_address`, `Address::encode` |
+| `address-text` | An address in text: `ed25519:0x…`. | Lua's `address:text()` |
+| `address-hex` | `0x` and 64 hex digits. | Lua's `address:hex()` |
 
-A name and a kind are each one word, 1 to 64 bytes. The kind is the code's own label for what
-the namespace holds and how it is encoded, such as `u256` or `counter-v1`. Lua lines may sit
-anywhere in the script. Rust's macros write the module's `chainv4.layout` custom section, and
-`namespace!` also defines a constant to use the namespace by: `COUNTER.get(b"count")`.
+A kind that is not in the list is refused at deploy.
 
 **What it enforces:**
-- **Code that declares a layout uses only its namespaces.** Reaching any other fails: "namespace
-  elsewhere is not in this code's layout". Under `delegate`, it is the running code's layout
-  that counts. Plain storage and the own space stay free, and code that declares nothing may use
-  any namespace.
+- **Code that declares a layout reaches only what it declares.** Every one of these fails, naming
+  what went wrong:
+  - another namespace: "namespace elsewhere is not in this code's layout";
+  - a key a record does not declare: "key onwer is not in namespace config's layout";
+  - a value that is not its kind: "namespace balances, key alice: the value is not decimal".
+- **Plain storage is read and clear only** for such code, since declared state lives in
+  namespaces. A contract that starts declaring a layout can still read its older plain keys and
+  delete them, so it can move them into namespaces: in `migrate`, or behind a proxy in an
+  exported function called once. Its own space stays free. Under `delegate`, it is the running
+  code's layout that counts. Code that declares nothing may use anything.
 - **New code keeps the old layout.** Every namespace the old code declared must still be
-  declared, with the same kind, or retired. New namespaces may come in. Code that declares
-  nothing keeps nothing, so it cannot replace code that declares a layout.
-- **Retiring is on purpose, and for good.** Retired namespaces can be read and cleared, but not
-  written, so `migrate` can move their state into a new one. Later code must keep them retired.
-  To change a namespace's kind, retire it and declare another.
+  declared, with the same shape: a map with the same kind, a record with every key it had, each
+  with the same kind. Anything may be retired instead. New namespaces and keys may come in. Code
+  that declares nothing keeps nothing, so it cannot replace code that declares a layout.
+- **Retiring is on purpose, and for good.** A retired namespace or key can be read and cleared,
+  but not written, so `migrate` can move its state somewhere new. Later code must keep it
+  retired. To change a kind, or turn a map into a record, retire it and declare another.
 
 **Where it is checked:**
 - **`Tx::Upgrade`** refuses new code that does not keep the layout: "the new code does not keep
-  the storage layout: namespace counter is dropped: keep it, or retire it".
+  the storage layout: key owner of namespace config is dropped: keep it, or retire it".
 - **Proxies** check before repointing, with `contracts.check_layout(current, new)` in Lua,
   `check_layout(&current, &new)` in the SDK and `check_layout` in WebAssembly. The example
   proxies do.
 - **Before you send anything,** `chainv4 layout new.lua --from old.lua` compares two files, and
   `--from contract:0x…` compares against a deployed contract, such as a proxy's current
   implementation, over the API (`--node`). It loads the code as a node would, prints both
-  layouts, and fails with the first namespace that breaks.
+  layouts, and fails with the first namespace or key that breaks.
 
 Contract records keep their layout, and `GET /contracts/{address}` shows it.
 
@@ -443,7 +492,9 @@ order, and what it returns becomes the call's return values (`chainv4_sdk::args`
 - `sender`, `this`, `value`, `balance`, `transfer`;
 - `call` and `call_with_value`, `delegate`, `check_layout`, `emit`, `hash`, `abort`,
   `refresh_token`, and `storage`, with `storage::namespace(name)` and `storage::own()`;
-- `namespace!` and `retired!`, which declare the storage layout.
+- `namespace!` and `retired!`, which declare the storage layout, and typed methods on a
+  namespace that write each kind's encoding: `set_i64`, `set_u64`, `set_u256`, `set_address`,
+  `set_bool`, and their `get_` twins.
 
 **Numbers:** Lua numbers reach a WebAssembly contract as float bits, and floats are refused in
 modules. So `Value::as_i64` and `Value::as_amount` turn whole numbers into integers using integer

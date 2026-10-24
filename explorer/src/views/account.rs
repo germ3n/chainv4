@@ -93,15 +93,30 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
             if !contract.layout.is_empty() {
                 super::fact(ui, "layout");
                 ui.vertical(|ui| {
+                    let retired = || RichText::new("retired").color(super::SIDE);
+
                     for declared in &contract.layout {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&declared.name).monospace());
 
-                            match &declared.kind {
-                                Some(kind) => ui.weak(kind),
-                                None => ui.label(RichText::new("retired").color(super::SIDE)),
+                            match (declared.shape.as_str(), &declared.kind) {
+                                ("map", Some(kind)) => ui.weak(format!("map of {kind}")),
+                                ("record", _) => ui.weak("record"),
+                                _ => ui.label(retired()),
                             };
                         });
+
+                        for field in &declared.keys {
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                ui.label(RichText::new(&field.key).monospace());
+
+                                match &field.kind {
+                                    Some(kind) => ui.weak(kind),
+                                    None => ui.label(retired()),
+                                };
+                            });
+                        }
                     }
                 });
                 ui.end_row();

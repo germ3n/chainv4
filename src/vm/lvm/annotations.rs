@@ -4,13 +4,13 @@
 //! the contract is deployed.
 
 use {
-    crate::vm::{Declared, Layout, VmError},
+    crate::vm::{Entry, Layout, VmError},
     r#macro::document,
 };
 
 const PREFIX: &str = "--@";
 /// The annotations that make up a storage layout, wherever they sit.
-const LAYOUT_ENTRIES: &[&str] = &["namespace", "retired"];
+const LAYOUT_ENTRIES: &[&str] = &["namespace", "key", "retired"];
 
 #[document(
     summary = "The functions a script marks with a --@reentrant line right above their definition. Only those may be entered while their contract is already running further up the chain of calls.",
@@ -60,15 +60,15 @@ pub fn reentrant(source: &str, exported: &[String]) -> Result<Vec<String>, VmErr
 }
 
 #[document(
-    summary = "The storage layout a script declares with --@namespace NAME KIND and --@retired NAME lines, anywhere in it: the namespaces it keeps its state in and what each holds, and those it no longer uses.",
+    summary = "The storage layout a script declares with --@namespace, --@key and --@retired lines, anywhere in it: the namespaces it keeps its state in, maps of one kind or records of declared keys, and those it no longer uses.",
     category = "Lua VM",
     params = { source = "The Luau source." },
-    returns = "The layout, empty for a script that declares none, or a Compile error for an entry that is not `namespace NAME KIND` or `retired NAME`, or a name declared twice.",
-    example = "--@namespace balances u256\n--@retired fees\nlocal balances = storage.namespace(\"balances\")",
+    returns = "The layout, empty for a script that declares none, or a Compile error for an entry Entry::parse refuses, or entries that do not fit together.",
+    example = "--@namespace balances decimal\n--@namespace config\n--@key config owner address-hex\n--@retired fees\nlocal balances = storage.namespace(\"balances\")",
     see_also = "Layout",
 )]
 pub fn layout(source: &str) -> Result<Layout, VmError> {
-    let mut declared = Vec::new();
+    let mut entries = Vec::new();
 
     for (index, line) in source.lines().enumerate() {
         let Some(annotation) = line.trim().strip_prefix(PREFIX) else {
@@ -76,11 +76,11 @@ pub fn layout(source: &str) -> Result<Layout, VmError> {
         };
 
         if annotation.split_whitespace().next().is_some_and(|word| LAYOUT_ENTRIES.contains(&word)) {
-            declared.push(Declared::parse(annotation).map_err(|why| error(index, why))?);
+            entries.push(Entry::parse(annotation).map_err(|why| error(index, why))?);
         }
     }
 
-    Layout::new(declared).map_err(VmError::Compile)
+    Layout::new(entries).map_err(VmError::Compile)
 }
 
 /// The name in `function M.name(` or `function M:name(`.
@@ -134,19 +134,21 @@ local M = {}
 --@reentrant
 function M.on_payment(amount) end
 
---@namespace allowances u256
+--@key config owner address-hex
+--@namespace config
 return M
 "#;
         let layout = layout(source).unwrap();
 
-        assert_eq!(layout.to_string(), "namespace allowances u256\nnamespace balances u256\nretired fees\n");
+        assert_eq!(layout.to_string(), "namespace balances u256\nnamespace config\nkey config owner address-hex\nretired fees\n");
         assert_eq!(reentrant(source, &exported()).unwrap(), ["on_payment"], "reentrant marks read past them");
         assert_eq!(super::layout("local M = {}").unwrap(), Layout::default());
 
         for (source, expected) in [
-            ("--@namespace balances", "line 1: a namespace is declared as"),
+            ("--@namespace balances u2566", "line 1: there is no kind u2566"),
             ("--@retired", "line 1: a namespace is retired as"),
             ("--@namespace a u256\n--@retired a", "declared twice"),
+            ("--@key a k u64", "not declared as a record"),
         ] {
             assert!(matches!(super::layout(source), Err(VmError::Compile(text)) if text.contains(expected)), "{source}");
         }

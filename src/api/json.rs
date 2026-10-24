@@ -19,7 +19,7 @@ use {
     crate::structs::hash::HashType,
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::u256::u256,
-    crate::vm::Outcome,
+    crate::vm::{Declared, Outcome, Shape},
     crate::structs::trace::{Hop, HopKind, Trace},
     crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     serde_json::{Value, json},
@@ -458,14 +458,28 @@ pub fn contract(address: &Address, record: &ContractRecord, token: Option<&Token
         "functions": record.functions,
         "upgradable": record.functions.iter().any(|name| name == crate::vm::CHECK_PERMS),
         "reentrant": record.reentrant,
-        "layout": record.layout.namespaces.iter().map(|declared| json!({
-            "name": declared.name,
-            "kind": declared.kind,
-            "retired": declared.kind.is_none(),
-        })).collect::<Vec<_>>(),
+        "layout": record.layout.namespaces.iter().map(declared).collect::<Vec<_>>(),
         "code_size": record.code.len(),
         "token": token.map(self::token),
     })
+}
+
+/// One namespace of a contract's storage layout: a map with its kind, a record with its keys, or
+/// retired.
+fn declared(declared: &Declared) -> Value {
+    match &declared.shape {
+        Shape::Map(kind) => json!({"name": declared.name, "shape": "map", "kind": kind.name()}),
+        Shape::Retired => json!({"name": declared.name, "shape": "retired"}),
+        Shape::Record(keys) => json!({
+            "name": declared.name,
+            "shape": "record",
+            "keys": keys.iter().map(|field| json!({
+                "key": field.key,
+                "kind": field.kind.map(|kind| kind.name()),
+                "retired": field.kind.is_none(),
+            })).collect::<Vec<_>>(),
+        }),
+    }
 }
 
 /// A registered token: its address, and its name, symbol and decimals, each null when it exports

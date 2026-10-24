@@ -128,7 +128,7 @@ fn chain_storage_get() {}
     wasm,
     parent = "chain",
     name = "storage_set",
-    summary = "Writes to the contract's own storage. Kept only if the call succeeds. Costs 500 fuel, plus 1 per 16 bytes of key and value.",
+    summary = "Writes to the contract's own storage. Kept only if the call succeeds. A module that declares a storage layout may only read and delete plain keys: writing one traps. Costs 500 fuel, plus 1 per 16 bytes of key and value.",
     params = {
         key = { ty = "i32", desc = "The key." },
         key_len = { ty = "i32", desc = "Its length: at most 256." },
@@ -170,7 +170,7 @@ fn chain_namespace_get() {}
     wasm,
     parent = "chain",
     name = "namespace_set",
-    summary = "Writes to one of the contract's namespaces, or its own space. Kept only if the call succeeds. Code run by delegate may not write the own space: that traps. Costs what storage_set does, plus 1 per 16 bytes of the name.",
+    summary = "Writes to one of the contract's namespaces, or its own space. Kept only if the call succeeds. Code run by delegate may not write the own space, and a module that declares a storage layout may not reach past it, to a namespace or key it does not declare, a retired one, or a value that is not its kind: those trap. Costs what storage_set does, plus 1 per 16 bytes of the name.",
     params = {
         name = { ty = "i32", desc = "The namespace's name." },
         name_len = { ty = "i32", desc = "Its length: at most 64. 0 is the contract's own space." },

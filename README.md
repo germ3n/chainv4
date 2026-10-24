@@ -340,26 +340,34 @@ Full proxies are in [contracts/lua/proxy.lua](contracts/lua/proxy.lua) and
 
 ### Storage layouts
 
-Code can declare the namespaces it keeps its state in, and what each holds. New code, by
-`send upgrade` or a proxy repointing, must then keep every one, with the same kind, or retire it
-on purpose:
+Code can declare the namespaces it keeps its state in: maps, any key with values of one kind,
+and records, only the keys they declare, each with its kind. New code, by `send upgrade` or a
+proxy repointing, must then keep every namespace and key with the same kind, or retire it on
+purpose:
 
 ```lua
---@namespace counter number
+--@namespace balances decimal        -- a map: any key, every value decimal text
+--@namespace config                  -- a record
+--@key config owner address-hex
 --@retired fees
 
-local counter = storage.namespace("counter")
+local balances = storage.namespace("balances")
 ```
 
-In Rust, `chainv4_sdk::namespace!(COUNTER, "counter", "number");` and
-`chainv4_sdk::retired!("fees");`. Code that declares a layout can only use the namespaces in it,
-and retired ones it can read and clear but not write, so `migrate` can move their state into new
-ones. Check new code before sending it:
+In Rust, `chainv4_sdk::namespace!(BALANCES, "balances", "u256");`,
+`namespace!(CONFIG, "config", { "owner": "address" });` and `retired!("fees");`.
+
+Kinds are encodings the node checks on every write: `bytes`, `text`, `number`, `decimal`,
+`bool`, `i64`, `u64`, `u128`, `u256`, `address`, `address-text` and `address-hex`. Code that
+declares a layout reaches nothing past it: no other namespace or key, no value of the wrong
+kind, and plain storage only to read and clear it. Retired namespaces and keys can be read and
+cleared but not written, so `migrate` can move their state into new ones. Check new code before
+sending it:
 
 ```sh
 chainv4 layout counter_v2.lua --from counter_v1.lua
 chainv4 layout counter_v2.lua --from contract:0x41f0…    # what is deployed, over the API
-# counter_v2.lua does not keep the layout of contract:0x41f0…: namespace counter is dropped: keep it, or retire it
+# counter_v2.lua does not keep the layout of contract:0x41f0…: key owner of namespace config is dropped: keep it, or retire it
 ```
 
 See [Storage layouts](docs/contracts.md#storage-layouts).

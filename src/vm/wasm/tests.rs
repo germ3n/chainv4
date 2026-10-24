@@ -345,11 +345,11 @@ fn the_layout_section_declares_namespaces() {
 
         engine.load(&wat::parse_str(wat).unwrap(), LIMITS).result
     };
-    let declared = load(r#"(@custom "chainv4.layout" "retired fees\00") (@custom "chainv4.layout" "namespace balances u256\00")"#).unwrap();
+    let declared = load(r#"(@custom "chainv4.layout" "retired fees\00key config owner address\00") (@custom "chainv4.layout" "namespace balances u256\00namespace config\00")"#).unwrap();
 
-    assert_eq!(declared.layout.to_string(), "namespace balances u256\nretired fees\n");
+    assert_eq!(declared.layout.to_string(), "namespace balances u256\nnamespace config\nkey config owner address\nretired fees\n");
     assert_eq!(load("").unwrap().layout, crate::vm::Layout::default());
-    assert!(matches!(load(r#"(@custom "chainv4.layout" "namespace balances\00")"#), Err(VmError::Compile(text)) if text.contains("NAME KIND")));
+    assert!(matches!(load(r#"(@custom "chainv4.layout" "namespace balances int\00")"#), Err(VmError::Compile(text)) if text.contains("no kind int")));
     assert!(matches!(load(r#"(@custom "chainv4.layout" "retired a\00retired a\00")"#), Err(VmError::Compile(text)) if text.contains("declared twice")));
     assert!(matches!(load(r#"(@custom "chainv4.layout" "retired a")"#), Err(VmError::Compile(text)) if text.contains("zero byte")));
 }

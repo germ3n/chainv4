@@ -176,14 +176,19 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   storage. Code a contract delegates to can read its own space but never write it, so the
   example proxies keep their owner and implementation there. See
   [Contracts](contracts.md#storage-namespaces).
-- **Declared layouts are enforced.** Code with `--@namespace` lines, or the SDK's `namespace!`,
-  can only use the namespaces it declares, and new code must keep every one with the same kind,
-  or `--@retired` it: `Tx::Upgrade` refuses it otherwise, and the example proxies check with
-  `check_layout` before repointing. Retired namespaces stay retired, so rolling back to code
-  from before a retirement is refused too. `chainv4 layout new.lua --from old.lua` checks before
-  you send. See [Contracts](contracts.md#storage-layouts).
-- **Storage format 4.** Contract records now keep their layout, so databases from before are
-  refused; delete them, or point `--db` elsewhere.
+- **Declared layouts are enforced.** Code with `--@namespace` and `--@key` lines, or the SDK's
+  `namespace!`, reaches only what it declares: its namespaces, a record's keys, values of their
+  kind, and plain storage only to read and clear. New code must keep every namespace and key with
+  the same kind, or `--@retired` it: `Tx::Upgrade` refuses it otherwise, and the example proxies
+  check with `check_layout` before repointing. Retired things stay retired, so rolling back to
+  code from before a retirement is refused too. `chainv4 layout new.lua --from old.lua` checks
+  before you send. See [Contracts](contracts.md#storage-layouts).
+- **Kinds are encodings, not labels.** A value written to a declared key must be its kind's
+  encoding, and the kinds differ by engine: Lua writes text (`number`, `decimal`,
+  `address-hex`), Rust bytes (`i64`, `u256`, `address`). So a Lua version and a Rust version only
+  share a namespace whose kind both write, such as `text` or `bytes`.
+- **Storage format 5.** Contract records keep their layout, records and kinds included, so
+  databases from before are refused; delete them, or point `--db` elsewhere.
 - **Loading code is charged.** A deploy or upgrade pays 1 fuel per byte of code to compile it,
   plus whatever a Lua script's top level burns, even when it fails. Every call pays for the top
   level again, since each runs it fresh, before the call is attached: a top level sees no `ctx`

@@ -103,6 +103,7 @@ behind.
   in, so they can expire.
 - **Format 3:** the token registry, which an older database would be missing its tokens from.
 - **Format 4:** contract records keep their code's [storage layout](contracts.md#storage-layouts).
+- **Format 5:** layouts declare records and their keys, and kinds the node checks.
 
 There are no migrations: delete the database, or point `--db` elsewhere.
 

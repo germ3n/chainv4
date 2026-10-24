@@ -1279,11 +1279,72 @@ fn code_that_declares_a_layout_uses_only_its_namespaces() {
     assert_eq!(layout_of(&world, counter), "namespace counter number\n");
     assert!(stray.contains("namespace elsewhere is not in this code's layout"), "{stray}");
 
-    // The Rust counter declares its own, in the custom section namespace! writes.
+    // The Rust counter declares a record, in the custom section namespace! writes, and what it
+    // stores is each key's kind.
     let rust = world.deploy(Code::Wasm(example("counter")));
 
-    assert_eq!(layout_of(&world, rust), "namespace counter counter-v1\n");
+    assert_eq!(layout_of(&world, rust), "namespace counter\nkey counter count i64\nkey counter last address\n");
     assert_eq!(world.call(rust, "increment", &[TxCallArgumentType::I64(4)]).result.unwrap(), [TxCallArgumentType::I64(4)]);
+    assert_eq!(world.call(rust, "last", &[]).result.unwrap(), [address(DEPLOYER)]);
+}
+
+/// A map of balances and a record of settings, and plain storage from before it declared them.
+const LAYOUT_RECORD: &str = r#"
+--@namespace balances decimal
+--@namespace config
+--@key config owner address-hex
+--@key config paused bool
+local M = {}
+local balances = storage.namespace("balances")
+local config = storage.namespace("config")
+
+function M.set_balance(who, amount)
+    balances:set(who, amount)
+end
+
+function M.set_owner(owner)
+    config:set("owner", owner)
+end
+
+function M.typo()
+    config:set("onwer", ctx.sender:hex())
+end
+
+function M.write_plain()
+    storage.set("legacy", "1")
+end
+
+-- What a first declared version does with the plain state it finds: moves it, then clears it.
+function M.move_plain()
+    local legacy = storage.get("legacy")
+    balances:set("legacy", legacy)
+    storage.set("legacy", nil)
+    return legacy
+end
+
+return M
+"#;
+
+#[test]
+fn declared_values_keys_and_plain_storage_are_checked() {
+    let mut world = World::new();
+    let contract = world.lua_code(LAYOUT_RECORD);
+    let text = |value: &str| TxCallArgumentType::String(value.to_string());
+    let refused = |function: &str, args: &[TxCallArgumentType]| world.call(contract, function, args).result.unwrap_err().to_string();
+
+    world.call(contract, "set_balance", &[text("alice"), text("12")]).result.unwrap();
+    world.call(contract, "set_owner", &[text(&format!("0x{}", "ab".repeat(32)))]).result.unwrap();
+
+    assert!(refused("set_balance", &[text("alice"), text("12a")]).contains("namespace balances, key alice: the value is not decimal"));
+    assert!(refused("set_owner", &[text("ed25519:0xab")]).contains("key owner: the value is not address-hex"));
+    assert!(refused("typo", &[]).contains("key onwer is not in namespace config's layout"));
+    assert!(refused("write_plain", &[]).contains("plain storage can be read and cleared, not written"));
+
+    // Plain state from before can still be read and cleared, so it can move into a namespace.
+    world.state.put(Column::Storage, storage_key(&contract, b"legacy"), b"7".to_vec());
+
+    assert_eq!(world.call(contract, "move_plain", &[]).result.unwrap(), [text("7")]);
+    assert_eq!(stored(&world, contract, b"legacy"), None);
 }
 
 #[test]

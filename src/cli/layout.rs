@@ -77,31 +77,43 @@ fn read(path: &Path) -> CliResult<Layout> {
     Ok(loaded.layout)
 }
 
-/// The layout of a deployed contract, from the node's GET /contracts/{address}.
+/// The layout of a deployed contract, from the node's GET /contracts/{address}, read back from
+/// the entries it would be declared with.
 #[cfg(feature = "client")]
 fn deployed(node: &str, address: &Address) -> CliResult<Layout> {
-    use crate::vm::Declared;
-
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(std::time::Duration::from_secs(30)))
         .build()
         .into();
     let contract = super::send::ok(agent.get(format!("{}/contracts/{address}", node.trim_end_matches('/'))).call())?;
-    let entries = contract["layout"].as_array().ok_or("the node sent no layout; is it older than layouts?")?;
-    let declared = entries
-        .iter()
-        .map(|entry| {
-            let name = entry["name"].as_str().ok_or("the node sent a namespace without a name")?;
+    let namespaces = contract["layout"].as_array().ok_or("the node sent no layout; is it older than layouts?")?;
+    let text = |value: &serde_json::Value, what: &str| value.as_str().map(str::to_string).ok_or(format!("the node sent a namespace without {what}"));
+    let mut entries = Vec::new();
 
-            Ok(Declared {
-                name: name.to_string(),
-                kind: entry["kind"].as_str().map(str::to_string),
-            })
-        })
-        .collect::<CliResult<Vec<_>>>()?;
+    for namespace in namespaces {
+        let name = text(&namespace["name"], "a name")?;
 
-    Ok(Layout::new(declared)?)
+        match namespace["shape"].as_str() {
+            Some("map") => entries.push(format!("namespace {name} {}", text(&namespace["kind"], "a kind")?)),
+            Some("retired") => entries.push(format!("retired {name}")),
+            Some("record") => {
+                entries.push(format!("namespace {name}"));
+
+                for field in namespace["keys"].as_array().into_iter().flatten() {
+                    let key = text(&field["key"], "a key")?;
+
+                    match field["kind"].as_str() {
+                        Some(kind) => entries.push(format!("key {name} {key} {kind}")),
+                        None => entries.push(format!("retired {name} {key}")),
+                    }
+                }
+            }
+            _ => return Err(format!("the node sent namespace {name} without a shape; is it older than records?").into()),
+        }
+    }
+
+    Ok(Layout::read(entries.iter().map(String::as_str))?)
 }
 
 #[cfg(not(feature = "client"))]
