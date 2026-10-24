@@ -242,6 +242,7 @@ Arguments are `type:value`:
 | `string` | `string:hello` |
 | `bytes` | `bytes:0x00ff` |
 | `address` | `address:ed25519:0x…`, `address:contract:0x…` |
+| `nil` | `nil`, alone: no value, Lua's `nil` |
 
 ## Contract lifecycle
 

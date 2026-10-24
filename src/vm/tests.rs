@@ -959,6 +959,10 @@ function M.unpacked()
     return ctx.args:unpack()
 end
 
+function M.nothing()
+    return nil
+end
+
 function M.describe()
     local list = ctx.args
 
@@ -1017,6 +1021,16 @@ fn values_lists_pass_through_lua_untouched() {
             TxCallArgumentType::Bool(true),
         ]
     );
+
+    // nil crosses both ways, among other values or alone, and a values list names it.
+    let with_nil = [TxCallArgumentType::I64(1), TxCallArgumentType::Nil, TxCallArgumentType::Bool(true)];
+
+    assert_eq!(
+        world.call(target, "converted", &with_nil).result.unwrap(),
+        [TxCallArgumentType::Number(1.0), TxCallArgumentType::Nil, TxCallArgumentType::Bool(true)]
+    );
+    assert_eq!(world.call(relay, "anything", &with_nil).result.unwrap(), with_nil);
+    assert_eq!(world.call(target, "nothing", &[]).result.unwrap(), [TxCallArgumentType::Nil]);
 
     let announced = world.call(target, "announce", &sent);
 

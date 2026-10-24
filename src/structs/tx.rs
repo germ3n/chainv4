@@ -196,6 +196,9 @@ pub enum TxCallArgumentType {
     #[document(summary = "An unsigned 256-bit integer.")]
     #[wincode(tag = 10)]
     U256(#[wincode(with = "U256Le")] u256),
+    #[document(summary = "No value: Lua's nil, JSON's null. A function that returns nil returns it, and one that is given it sees nil.")]
+    #[wincode(tag = 11)]
+    Nil,
 }
 
 impl Verifiable for Tx {
@@ -306,7 +309,8 @@ impl Verifiable for TxCallArgumentType {
             | TxCallArgumentType::U64(_)
             | TxCallArgumentType::I128(_)
             | TxCallArgumentType::U128(_)
-            | TxCallArgumentType::U256(_) => Ok(()),
+            | TxCallArgumentType::U256(_)
+            | TxCallArgumentType::Nil => Ok(()),
         }
     }
 }

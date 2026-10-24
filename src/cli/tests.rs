@@ -50,6 +50,7 @@ fn arguments_are_typed_by_their_prefix() {
     assert_eq!(parse_argument(&format!("address:{address}")), Ok(TxCallArgumentType::Address(address)));
     assert_eq!(parse_argument("bytes:0x00ff"), Ok(TxCallArgumentType::Bytes(vec![0, 255])));
     assert_eq!(parse_argument("amount:5"), Ok(TxCallArgumentType::Amount(Amount::U128(5))));
+    assert_eq!(parse_argument("nil"), Ok(TxCallArgumentType::Nil));
     assert!(parse_argument("5").is_err());
     assert!(parse_argument("i64:five").is_err());
     assert!(parse_argument("float:1").is_err());

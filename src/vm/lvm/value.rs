@@ -30,6 +30,7 @@ pub(super) fn to_lua(lua: &Lua, arg: &TxCallArgumentType) -> Result<Value, VmErr
         TxCallArgumentType::U64(number) => wide(lua, u256::from(*number))?,
         TxCallArgumentType::U128(number) => wide(lua, u256::from(*number))?,
         TxCallArgumentType::U256(number) => wide(lua, *number)?,
+        TxCallArgumentType::Nil => Value::Nil,
     };
 
     Ok(value)
@@ -52,6 +53,7 @@ fn exact(number: i128) -> Result<Value, VmError> {
 /// A string comes back as String when it is valid UTF-8 and as Bytes otherwise.
 pub(super) fn from_lua(value: Value) -> Result<TxCallArgumentType, VmError> {
     let arg = match value {
+        Value::Nil => TxCallArgumentType::Nil,
         Value::Boolean(flag) => TxCallArgumentType::Bool(flag),
         Value::Integer(number) => TxCallArgumentType::Number(f64::from(number)),
         Value::Number(number) => TxCallArgumentType::Number(number),

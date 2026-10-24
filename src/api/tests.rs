@@ -10,7 +10,7 @@ use crate::net::NetEvent;
 use crate::node::{Counters, Heard, NodeReport, PeerReport};
 use crate::structs::block::Block;
 use crate::structs::hex::to_hex;
-use crate::structs::tx::{FeeOffer, SignedTx, Tx};
+use crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType};
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 
@@ -1043,4 +1043,11 @@ fn status_names_the_coin() {
     let fixture = serve();
 
     assert_eq!(ok(fixture.address, "/status")["coin"], json!({ "symbol": "DEV", "decimals": 18 }));
+}
+
+#[test]
+fn nil_is_written_as_null() {
+    assert_eq!(json::argument(&TxCallArgumentType::Nil), json!({ "type": "nil", "value": null }));
+    assert_eq!(json::parse_argument(&json!({ "type": "nil" })), Ok(TxCallArgumentType::Nil));
+    assert_eq!(json::parse_argument(&json!({ "type": "nil", "value": null })), Ok(TxCallArgumentType::Nil));
 }

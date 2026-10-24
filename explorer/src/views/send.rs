@@ -22,7 +22,7 @@ use {
 };
 
 /// The argument types a call can be given.
-const KINDS: [&str; 11] = ["address", "amount", "u256", "u128", "u64", "i64", "i128", "number", "bool", "string", "bytes"];
+const KINDS: [&str; 12] = ["address", "amount", "u256", "u128", "u64", "i64", "i128", "number", "bool", "string", "bytes", "nil"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -429,6 +429,7 @@ fn argument(kind: &str, text: &str) -> Result<TxCallArgumentType, String> {
         "bool" => TxCallArgumentType::Bool(text.parse().map_err(|_| bad())?),
         "string" => TxCallArgumentType::String(text.to_string()),
         "bytes" => TxCallArgumentType::Bytes(from_hex(text).ok_or_else(bad)?),
+        "nil" => TxCallArgumentType::Nil,
         other => return Err(format!("unknown argument type {other}")),
     })
 }

@@ -11,7 +11,10 @@ Start a node with `--http ADDR`, such as `127.0.0.1:8080`, to serve the API (`sr
 - errors are `{"error": "…"}`;
 - amounts, and integers that can pass 2^53, are decimal strings;
 - hashes and bytes are `0x` hex;
-- addresses are their kind and hex, such as `ed25519:0x…` or `contract:0x…`.
+- addresses are their kind and hex, such as `ed25519:0x…` or `contract:0x…`;
+- call arguments and return values are `{"type": …, "value": …}`, the type being `address`,
+  `amount`, `bytes`, `bool`, `string`, `number`, `i64`, `u64`, `i128`, `u128`, `u256` or `nil`,
+  whose value is `null`.
 
 | Status | When |
 | --- | --- |

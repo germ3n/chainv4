@@ -97,8 +97,13 @@ pub fn amount(value: u256) -> Amount {
     }
 }
 
-/// A call argument written as type:value, such as i64:-5, string:hi or address:ed25519:0x….
+/// A call argument written as type:value, such as i64:-5, string:hi or address:ed25519:0x…, or
+/// nil for no value.
 pub fn parse_argument(text: &str) -> Result<TxCallArgumentType, String> {
+    if text == "nil" {
+        return Ok(TxCallArgumentType::Nil);
+    }
+
     let (kind, value) = text
         .split_once(':')
         .ok_or_else(|| format!("{text} needs a type, such as i64:{text}"))?;
@@ -117,7 +122,7 @@ pub fn parse_argument(text: &str) -> Result<TxCallArgumentType, String> {
         "u256" => TxCallArgumentType::U256(parse_amount(value)?),
         other => {
             return Err(format!(
-                "unknown type {other}; use address, amount, bytes, bool, string, number, i64, u64, i128, u128 or u256"
+                "unknown type {other}; use address, amount, bytes, bool, string, number, i64, u64, i128, u128, u256, or nil alone"
             ));
         }
     };

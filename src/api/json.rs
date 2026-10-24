@@ -371,6 +371,7 @@ pub fn argument(argument: &TxCallArgumentType) -> Value {
         TxCallArgumentType::I128(value) => ("i128", value.to_string().into()),
         TxCallArgumentType::U128(value) => ("u128", value.to_string().into()),
         TxCallArgumentType::U256(value) => ("u256", value.to_string().into()),
+        TxCallArgumentType::Nil => ("nil", Value::Null),
     };
 
     json!({ "type": kind, "value": value })
@@ -380,6 +381,11 @@ pub fn argument(argument: &TxCallArgumentType) -> Value {
 /// JSON numbers.
 pub fn parse_argument(value: &Value) -> Result<TxCallArgumentType, String> {
     let kind = value.get("type").and_then(Value::as_str).ok_or("an argument is {\"type\": …, \"value\": …}")?;
+
+    if kind == "nil" {
+        return Ok(TxCallArgumentType::Nil);
+    }
+
     let given = value.get("value").ok_or("an argument needs a value")?;
     let text = given.as_str().map(str::to_string).unwrap_or_else(|| given.to_string());
     let bad = || format!("not a {kind}: {text}");

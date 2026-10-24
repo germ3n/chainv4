@@ -66,6 +66,8 @@ pub enum Value {
     U128(u128),
     /// Little-endian.
     U256([u8; 32]),
+    /// No value: Lua's nil.
+    Nil,
 }
 
 impl From<crate::U256> for Value {
@@ -237,6 +239,7 @@ pub fn encode(values: &[Value]) -> Vec<u8> {
                 out.push(10);
                 out.extend_from_slice(number);
             }
+            Value::Nil => out.push(11),
         }
     }
 
@@ -270,6 +273,7 @@ pub fn decode(bytes: &[u8]) -> Option<Vec<Value>> {
             8 => Value::I128(i128::from_le_bytes(reader.array()?)),
             9 => Value::U128(u128::from_le_bytes(reader.array()?)),
             10 => Value::U256(reader.array()?),
+            11 => Value::Nil,
             _ => return None,
         };
         values.push(value);
@@ -345,6 +349,7 @@ mod tests {
             Value::Number(2.5f64.to_bits()),
             Value::I64(-1),
             Value::U256([9; 32]),
+            Value::Nil,
         ];
 
         assert_eq!(decode(&encode(&values)), Some(values));

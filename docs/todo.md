@@ -99,6 +99,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ### Script layer
 
+- [x] **A nil value.** `TxCallArgumentType::Nil` (tag 11): Lua's `nil` both ways, so functions
+  may return it, `null` in the API, `nil` on the command line, `Value::Nil` in the SDK.
 - [x] **Contracts can move funds.** `accounts.balance` and `accounts.transfer` in Lua, the
   `balance` and `transfer` host functions in WASM, `balance` and `transfer` in the SDK.
 - [x] **Calls between contracts can send value.** `contracts.call_value` in Lua, the value

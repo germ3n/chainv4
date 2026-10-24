@@ -239,12 +239,15 @@ numbers.
 **How values cross into Lua:**
 - unsigned integers and amounts arrive as `u256`, so nothing is rounded;
 - signed integers arrive as numbers and must fit one exactly, within 2^53;
-- addresses arrive as `address` values.
+- addresses arrive as `address` values;
+- `nil` arrives as `nil`.
 
 **How values come back:**
 - numbers come back as numbers;
 - `u256` values come back as `u256`;
-- strings come back as strings, or bytes when they are not UTF-8.
+- strings come back as strings, or bytes when they are not UTF-8;
+- `nil` comes back as `nil`, so a function may return it, alone or among other values. A
+  function that returns nothing returns no values at all.
 
 ### Values lists
 
