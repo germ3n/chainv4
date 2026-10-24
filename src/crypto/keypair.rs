@@ -3,7 +3,7 @@ use {
     crate::crypto::verifiable::Verifiable,
     crate::crypto::verifiable::VerifyError,
     crate::structs::address::Address,
-    crate::structs::hex::to_hex,
+    crate::structs::hex::{from_hex, to_hex},
     ed25519_dalek::VerifyingKey,
     r#macro::document,
     std::fmt,
@@ -296,7 +296,28 @@ pub struct Keypair {
     public: PublicKey,
 }
 
+#[document(
+    summary = "The well-known development key's seed. Public on purpose: anyone can run a dev network with it, and nothing of value should ever depend on it.",
+    category = "Keys",
+    see_also = "Keypair::development",
+)]
+pub const DEV_SEED: [u8; 32] = *b"chainv4 dev authority, not safe!";
+
 impl Keypair {
+    #[document(
+        parent = "Keypair",
+        summary = "The well-known development key: Ed25519 when built in, else EdBlake. Never use it for anything of value: its seed is in the source.",
+        see_also = "DEV_SEED, DevAuthority::dev_keypair",
+    )]
+    pub fn development() -> Keypair {
+        #[cfg(feature = "ed25519")]
+        let private = PrivateKey::Ed25519(DEV_SEED);
+        #[cfg(not(feature = "ed25519"))]
+        let private = PrivateKey::EdBlake(DEV_SEED);
+
+        Keypair::from_private(private)
+    }
+
     #[document(
         parent = "Keypair",
         summary = "Makes a new key from the operating system's random number generator.",
@@ -326,6 +347,45 @@ impl Keypair {
         let public = private.public_key();
 
         Keypair { private, public }
+    }
+
+    #[document(
+        parent = "Keypair",
+        summary = "Reads a key file: one line holding the scheme, a colon and the 32-byte seed in hex, as chainv4 keygen writes it.",
+        returns = "The keypair, or what is wrong with the text.",
+        see_also = "Keypair::to_key_file",
+    )]
+    pub fn from_key_file(text: &str) -> Result<Keypair, String> {
+        let (scheme, seed) = text.trim().split_once(':').ok_or("not a key file")?;
+        let mut seed: [u8; 32] = from_hex(seed)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or("it does not hold a 32-byte seed")?;
+        let private = match scheme {
+            #[cfg(feature = "ed25519")]
+            "ed25519" => Ok(PrivateKey::Ed25519(seed)),
+            #[cfg(feature = "edblake")]
+            "edblake" => Ok(PrivateKey::EdBlake(seed)),
+            other => Err(format!("unknown scheme {other}")),
+        };
+        seed.zeroize();
+
+        private.map(Keypair::from_private)
+    }
+
+    #[document(
+        parent = "Keypair",
+        summary = "The key file's line for this key, without its newline.",
+        see_also = "Keypair::from_key_file",
+    )]
+    pub fn to_key_file(&self) -> String {
+        let (scheme, seed) = match &self.private {
+            #[cfg(feature = "ed25519")]
+            PrivateKey::Ed25519(seed) => ("ed25519", seed),
+            #[cfg(feature = "edblake")]
+            PrivateKey::EdBlake(seed) => ("edblake", seed),
+        };
+
+        format!("{scheme}:{}", to_hex(seed))
     }
 
     #[document(

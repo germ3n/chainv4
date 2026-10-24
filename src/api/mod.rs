@@ -1,37 +1,45 @@
 //! An HTTP API over the committed chain, answering in JSON. It runs on a thread of its own and
 //! reads the database directly, so a slow client never holds up the node loop. The one write,
-//! POST /txs, hands a signed transaction to the node through a Submitter.
+//! POST /txs, hands a signed transaction to the node through a NodeHandle.
 
 use {
+    crate::chain::fees::OfferChoice,
     crate::chain::{
-        FinalityConfig, Fees, Genesis, stored_block, stored_block_at, stored_evidence, stored_finality, stored_receipt, stored_tip,
-        stored_work,
+        Coin, FinalityConfig, Fees, Genesis, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        stored_receipt, stored_tip, stored_tips, stored_work,
     },
     crate::crypto::keypair::PublicKey,
     crate::registry::signers::{SignerSet, Signers},
     crate::registry::validators::Validators,
     crate::structs::vote::Checkpoint,
     crate::db::{DbError, Read, State},
+    crate::vm::{CallContext, Limits, Vm, VmError, selector},
     crate::mempool::MempoolError,
-    crate::node::{SubmitError, Submitter},
+    crate::node::{NodeHandle, NodeReport, SubmitError},
     crate::registry::{Accounts, Contracts},
     crate::structs::address::Address,
     crate::structs::block::Block,
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::from_hex,
-    crate::structs::tx::SignedTx,
+    crate::structs::tx::{FeeOffer, SignedTx},
+    crate::structs::u256::u256,
     axum::body::Bytes,
-    axum::extract::{DefaultBodyLimit, Path, Query, State as Shared},
-    axum::http::StatusCode,
+    axum::extract::{DefaultBodyLimit, Path, Query, Request, State as Shared},
+    axum::http::{HeaderValue, Method, StatusCode, Uri, header},
+    axum::middleware::{self, Next},
     axum::response::{IntoResponse, Response},
     axum::routing::{get, post},
     axum::{Json, Router},
     r#macro::document,
     serde_json::{Value, json},
-    std::collections::HashMap,
+    std::collections::{HashMap, HashSet},
     std::net::SocketAddr,
+    std::path::PathBuf,
     std::sync::Arc,
 };
+
+#[cfg(feature = "stream")]
+use axum::response::sse::{Event, KeepAlive, Sse};
 
 mod json;
 
@@ -39,6 +47,14 @@ mod json;
 const DEFAULT_PAGE: u64 = 20;
 /// The most blocks one listing returns.
 const MAX_PAGE: u64 = 100;
+/// How many side blocks /forks returns when the client does not say.
+const DEFAULT_FORKS: u64 = 256;
+/// The most side blocks /forks returns.
+const MAX_FORKS: u64 = 1_000;
+/// How many waiting transactions /mempool returns when the client does not say.
+const DEFAULT_MEMPOOL: u64 = 100;
+/// The most waiting transactions /mempool returns.
+const MAX_MEMPOOL: u64 = 1_000;
 /// The largest request body: room for the largest deploy, hex-encoded.
 const MAX_BODY: usize = 2 * 1024 * 1024;
 
@@ -47,7 +63,7 @@ const MAX_BODY: usize = 2 * 1024 * 1024;
 struct Api {
     db: Arc<dyn Read>,
     /// None when no node runs behind the API, so nothing can be submitted.
-    submitter: Option<Submitter>,
+    node: Option<NodeHandle>,
     /// The chain's finality settings, to tell which epoch a height is in.
     finality: Option<Arc<FinalityConfig>>,
     /// The chain's hash, which ids are read and written with.
@@ -56,6 +72,29 @@ struct Api {
     fees: Option<Arc<Fees>>,
     /// The most fuel one transaction's contracts may burn, which clients size gas limits by.
     tx_fuel: u64,
+    /// The chain's coin, for clients to show balances by.
+    coin: Arc<Coin>,
+    /// The chain's engines, for read-only calls.
+    vm: Arc<Vm>,
+    /// What one transaction's contracts may use, which bounds a read-only call too.
+    limits: Limits,
+    /// The browser origins allowed to call the API.
+    cors: Arc<Vec<String>>,
+    /// A built explorer web app, served from /.
+    explorer: Option<Arc<PathBuf>>,
+}
+
+#[document(
+    summary = "What an API serves besides the chain, and to which web pages.",
+    category = "Node",
+    see_also = "start",
+)]
+#[derive(Clone, Debug, Default)]
+pub struct ApiOptions {
+    #[document(summary = "Browser origins allowed to call the API from their pages, such as http://localhost:8081, or * for any. Empty lets only pages the API serves itself call it.")]
+    pub cors: Vec<String>,
+    #[document(summary = "A built explorer web app, trunk's dist directory, to serve from / on the API's own origin. Its files never shadow a route.")]
+    pub explorer: Option<PathBuf>,
 }
 
 #[document(
@@ -63,23 +102,29 @@ struct Api {
     category = "Node",
     params = {
         db = "The node's database. Start the API after Node::new, so genesis is in it.",
-        submitter = "The running node's Submitter, for POST /txs; None to refuse submissions.",
+        node = "The running node's handle, for POST /txs, /node, /mempool and /stream; None to serve only what the database holds.",
         genesis = "The chain's genesis: its hash, and its finality settings if it has finality.",
         address = "Where to listen.",
+        options = "Who else it answers, and what it serves besides the chain.",
     },
     returns = "The address it listens on, which tells you the port when address asked for port 0.",
-    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
-    see_also = "Node, Address, Submitter",
+    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
+    see_also = "Node, Address, NodeHandle",
 )]
 pub fn start(
     db: Arc<dyn Read>,
-    submitter: Option<Submitter>,
+    node: Option<NodeHandle>,
     genesis: &Genesis,
     address: SocketAddr,
+    options: ApiOptions,
 ) -> std::io::Result<SocketAddr> {
     let finality = genesis.finality.clone().map(Arc::new);
     let fees = genesis.fees.as_ref().map(|config| Arc::new(config.build()));
-    let (hash, tx_fuel) = (genesis.hash, genesis.tx_limits.fuel);
+    let (hash, tx_fuel, coin, limits) = (genesis.hash, genesis.tx_limits.fuel, genesis.coin.clone(), genesis.tx_limits);
+    let vm = Arc::new(
+        Vm::new(&genesis.engines, genesis.hash)
+            .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?,
+    );
     let listener = std::net::TcpListener::bind(address)?;
     listener.set_nonblocking(true)?;
     let local = listener.local_addr()?;
@@ -96,11 +141,16 @@ pub fn start(
 
                 if let Err(err) = axum::serve(listener, router(Api {
                     db,
-                    submitter,
+                    node,
                     finality,
                     hash,
                     fees,
                     tx_fuel,
+                    coin: Arc::new(coin),
+                    vm,
+                    limits,
+                    cors: Arc::new(options.cors),
+                    explorer: options.explorer.map(Arc::new),
                 })).await {
                     log::error!("[http] {err}");
                 }
@@ -111,7 +161,8 @@ pub fn start(
 }
 
 fn router(api: Api) -> Router {
-    Router::new()
+    let cors = !api.cors.is_empty();
+    let router = Router::new()
         .route("/status", get(status))
         .route("/blocks", get(blocks))
         .route("/blocks/{block}", get(block))
@@ -123,9 +174,82 @@ fn router(api: Api) -> Router {
         .route("/validators/{voter}", get(validator))
         .route("/signers", get(signers))
         .route("/evidence", get(evidence))
-        .fallback(async || ApiError::NotFound("no such route".to_string()))
-        .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(api)
+        .route("/forks", get(forks))
+        .route("/node", get(node))
+        .route("/mempool", get(mempool))
+        .route("/offer", post(offer))
+        .route("/call", post(call));
+    #[cfg(feature = "stream")]
+    let router = router.route("/stream", get(stream));
+    let router = router.fallback(explorer).layer(DefaultBodyLimit::max(MAX_BODY));
+
+    match cors {
+        true => router.layer(middleware::from_fn_with_state(api.clone(), allow_origins)).with_state(api),
+        false => router.with_state(api),
+    }
+}
+
+/// Lets pages from the allowed origins read the API's answers, and answers their browsers'
+/// preflight questions.
+async fn allow_origins(Shared(api): Shared<Api>, request: Request, next: Next) -> Response {
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|origin| HeaderValue::from_bytes(origin.as_bytes()).ok())
+        .filter(|origin| api.cors.iter().any(|allowed| allowed == "*" || origin.as_bytes() == allowed.as_bytes()));
+    let preflight = request.method() == Method::OPTIONS && request.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+    let mut response = match (preflight, &origin) {
+        (true, Some(_)) => StatusCode::NO_CONTENT.into_response(),
+        _ => next.run(request).await,
+    };
+
+    if let Some(origin) = origin {
+        let headers = response.headers_mut();
+        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        headers.append(header::VARY, HeaderValue::from_static("origin"));
+
+        if preflight {
+            headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST"));
+            headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("content-type"));
+            headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
+        }
+    }
+
+    response
+}
+
+/// Serves the explorer web app's files for anything that is not a route: / is its index.html.
+async fn explorer(Shared(api): Shared<Api>, uri: Uri) -> Result<Response, ApiError> {
+    let missing = || ApiError::NotFound("no such route".to_string());
+    let Some(root) = &api.explorer else {
+        return Err(missing());
+    };
+    let wanted = match uri.path().trim_start_matches('/') {
+        "" => "index.html",
+        path => path,
+    };
+    let relative = std::path::Path::new(wanted);
+
+    // Only plain names below the app's directory, never .. or an absolute path.
+    if !relative.components().all(|part| matches!(part, std::path::Component::Normal(_))) {
+        return Err(missing());
+    }
+
+    let path = root.join(relative);
+    let bytes = std::fs::read(&path).map_err(|_| missing())?;
+    let kind = match path.extension().and_then(|extension| extension.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    };
+
+    Ok(([(header::CONTENT_TYPE, kind)], bytes).into_response())
 }
 
 /// Why a request failed. Each becomes a status and {"error": message}.
@@ -213,6 +337,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "difficulty": tip.header.difficulty.to_string(),
         "work": work.to_string(),
         "hash": api.hash.name(),
+        "coin": crate::cli::genesis::coin_json(&api.coin),
         "finality": finality,
         "fees": fees,
     })))
@@ -397,7 +522,75 @@ async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
         receipts.push(stored_receipt(&*db, &tx.id(hash))?.filter(|receipt| receipt.block == id));
     }
 
-    Ok(Json(json::block(&found, &receipts, hash)))
+    let mut value = json::block(&found, &receipts, hash);
+    value["main"] = stored_on_main_chain(&*db, &found)?.into();
+
+    Ok(Json(value))
+}
+
+/// The side branches this node stores: every block off the main chain, newest first, from each
+/// leaf back to where its branch meets the main chain.
+async fn forks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let db = api.db;
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_FORKS).min(MAX_FORKS) as usize;
+    let mut seen = HashSet::new();
+    let mut side = Vec::new();
+
+    'leaves: for leaf in stored_tips(&*db)? {
+        let mut id = leaf;
+
+        while seen.insert(id) {
+            let Some(block) = stored_block(&*db, &id)? else {
+                break;
+            };
+
+            if stored_on_main_chain(&*db, &block)? {
+                break;
+            }
+
+            if side.len() == limit {
+                break 'leaves;
+            }
+
+            id = block.header.parent;
+            side.push(block);
+        }
+    }
+
+    side.sort_by_key(|block| std::cmp::Reverse(block.header.height));
+    let tips: Vec<String> = stored_tips(&*db)?.iter().map(Hash::to_string).collect();
+
+    Ok(Json(json!({
+        "blocks": side.iter().map(json::summary).collect::<Vec<_>>(),
+        "tips": tips,
+    })))
+}
+
+/// How the node behind the API is doing: its peers, what it heard and did, how syncing goes.
+async fn node(Shared(api): Shared<Api>) -> Answer {
+    let report = report(&api, 0).await?;
+
+    Ok(Json(json::node(&report)))
+}
+
+/// The transactions waiting in the node's mempool, by sender and nonce.
+async fn mempool(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_MEMPOOL).min(MAX_MEMPOOL) as usize;
+    let report = report(&api, limit).await?;
+
+    Ok(Json(json!({
+        "count": report.waiting,
+        "capacity": report.capacity,
+        "txs": report.txs.iter().map(|tx| json::signed_tx(tx, api.hash)).collect::<Vec<_>>(),
+    })))
+}
+
+async fn report(api: &Api, txs: usize) -> Result<NodeReport, ApiError> {
+    let Some(node) = &api.node else {
+        return Err(ApiError::Unavailable("this API has no node behind it".to_string()));
+    };
+
+    node.report(txs).await.map_err(|err| ApiError::Unavailable(err.to_string()))
 }
 
 async fn account(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
@@ -421,10 +614,128 @@ async fn contract(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
 
 /// Takes a signed transaction for the node's mempool.
 async fn submit(Shared(api): Shared<Api>, body: Bytes) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let Some(submitter) = api.submitter else {
+    let Some(node) = api.node else {
         return Err(ApiError::Unavailable("this API has no node to submit to".to_string()));
     };
-    let body: Value = serde_json::from_slice(&body).map_err(|err| ApiError::BadRequest(format!("not JSON: {err}")))?;
+    let tx = signed_tx(&json_body(&body)?)?;
+
+    match node.submit(tx).await {
+        Ok(id) => Ok((StatusCode::ACCEPTED, Json(json!({ "id": id.to_string() })))),
+        Err(SubmitError::Refused(err)) => Err(match err {
+            MempoolError::Invalid(_)
+            | MempoolError::BadGasLimit
+            | MempoolError::PriceTooLow
+            | MempoolError::CannotPay => ApiError::BadRequest(err.to_string()),
+            MempoolError::Stale | MempoolError::Duplicate => ApiError::Conflict(err.to_string()),
+            MempoolError::Full => ApiError::Unavailable(err.to_string()),
+            MempoolError::Db(err) => ApiError::Db(err),
+        }),
+        Err(err @ SubmitError::Stopped) => Err(ApiError::Unavailable(err.to_string())),
+    }
+}
+
+/// The fee offer sure to cover a transaction sent now, keeping what the body sets itself:
+/// gas_limit, max_price and tip. The body's tx is the transaction signed with any offer, which
+/// weighs what the real one will. Nothing, on a chain without fees.
+async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
+    let body = json_body(&body)?;
+    let probe = signed_tx(&body)?;
+    let Some(fees) = &api.fees else {
+        return Ok(Json(json::fee_offer(&FeeOffer::NONE)));
+    };
+    let amount = |name: &str| {
+        body.get(name)
+            .map(|value| {
+                value
+                    .as_str()
+                    .and_then(|text| u256::from_str_radix(text, 10).ok())
+                    .ok_or_else(|| ApiError::BadRequest(format!("{name} must be a whole amount, as a string")))
+            })
+            .transpose()
+    };
+    let gas_limit = body
+        .get("gas_limit")
+        .map(|value| value.as_u64().ok_or_else(|| ApiError::BadRequest("gas_limit must be a whole number".to_string())))
+        .transpose()?;
+    let chosen = OfferChoice {
+        gas_limit,
+        max_price: amount("max_price")?,
+        tip: amount("tip")?,
+    };
+    let header = tip(&*api.db)?.header;
+    let base = fees.pricing().next_price(header.base_price, header.gas_used, fees.block_gas_limit());
+
+    Ok(Json(json::fee_offer(&fees.offer(base, api.tx_fuel, &probe, chosen))))
+}
+
+/// Runs a contract function as a transaction would call it, but on a throwaway copy of the
+/// committed state: whatever it writes, sends or emits is dropped. For reading contracts, such as
+/// a token's decimals or someone's balance.
+async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
+    let body = json_body(&body)?;
+    let field = |name: &str| body.get(name).and_then(Value::as_str);
+    let contract = parse_address(field("contract").ok_or_else(|| ApiError::BadRequest("contract is missing".to_string()))?)?;
+    let function = field("function").ok_or_else(|| ApiError::BadRequest("function is missing".to_string()))?;
+    let sender = field("sender").map(parse_address).transpose()?.unwrap_or(Address::Ed25519([0; 32]));
+    let args = match body.get("args") {
+        None => Vec::new(),
+        Some(Value::Array(args)) => args
+            .iter()
+            .map(|arg| json::parse_argument(arg).map_err(ApiError::BadRequest))
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(ApiError::BadRequest("args must be a list".to_string())),
+    };
+    let state = Arc::new(State::new(api.db.clone()));
+    let record = Contracts::new(&state)
+        .get(&contract)?
+        .ok_or_else(|| ApiError::NotFound(format!("no contract at {contract}")))?;
+    let context = CallContext {
+        sender,
+        contract,
+        value: u256::ZERO,
+    };
+    let outcome = api.vm.call(&state, &record, context, &Hash::Xxh3_64(selector(function)), &args, api.limits);
+
+    if let Err(VmError::Storage(err)) = &outcome.result {
+        return Err(ApiError::Db(err.clone()));
+    }
+
+    Ok(Json(json::call(&outcome)))
+}
+
+/// What the node does, as server-sent events, for a node started with --stream. A client that
+/// falls too far behind gets a lagged event saying how many it missed, and should read the
+/// chain again.
+#[cfg(feature = "stream")]
+async fn stream(
+    Shared(api): Shared<Api>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
+    use tokio_stream::{StreamExt, wrappers::BroadcastStream, wrappers::errors::BroadcastStreamRecvError};
+
+    let events = api
+        .node
+        .as_ref()
+        .and_then(NodeHandle::subscribe)
+        .ok_or_else(|| ApiError::NotFound("this node does not stream; start it with --stream".to_string()))?;
+    let hash = api.hash;
+    let events = BroadcastStream::new(events).map(move |event| {
+        let (name, data) = match event {
+            Ok(event) => json::node_event(&event, hash),
+            Err(BroadcastStreamRecvError::Lagged(missed)) => ("lagged", json!({ "missed": missed })),
+        };
+
+        Ok(Event::default().event(name).data(data.to_string()))
+    });
+
+    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+}
+
+fn json_body(body: &[u8]) -> Result<Value, ApiError> {
+    serde_json::from_slice(body).map_err(|err| ApiError::BadRequest(format!("not JSON: {err}")))
+}
+
+/// The signed transaction a body's tx holds, encoded as the chain encodes it.
+fn signed_tx(body: &Value) -> Result<SignedTx, ApiError> {
     let hex = body
         .get("tx")
         .and_then(Value::as_str)
@@ -438,19 +749,7 @@ async fn submit(Shared(api): Shared<Api>, body: Bytes) -> Result<(StatusCode, Js
         return Err(ApiError::BadRequest("tx has bytes past the transaction".to_string()));
     }
 
-    match submitter.submit(tx).await {
-        Ok(id) => Ok((StatusCode::ACCEPTED, Json(json!({ "id": id.to_string() })))),
-        Err(SubmitError::Refused(err)) => Err(match err {
-            MempoolError::Invalid(_)
-            | MempoolError::BadGasLimit
-            | MempoolError::PriceTooLow
-            | MempoolError::CannotPay => ApiError::BadRequest(err.to_string()),
-            MempoolError::Stale | MempoolError::Duplicate => ApiError::Conflict(err.to_string()),
-            MempoolError::Full => ApiError::Unavailable(err.to_string()),
-            MempoolError::Db(err) => ApiError::Db(err),
-        }),
-        Err(err @ SubmitError::Stopped) => Err(ApiError::Unavailable(err.to_string())),
-    }
+    Ok(tx)
 }
 
 fn tip(db: &dyn Read) -> Result<Block, ApiError> {
@@ -473,7 +772,6 @@ fn number(query: &HashMap<String, String>, name: &str) -> Result<Option<u64>, Ap
         .transpose()
 }
 
-/// A block or transaction id: both are BLAKE3.
 /// A block or transaction id, in the chain's hash.
 fn block_id(text: &str, hash: HashType) -> Result<Hash, ApiError> {
     from_hex(text)

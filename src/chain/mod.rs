@@ -58,7 +58,17 @@ pub const DEV_TX_LIMITS: Limits = Limits {
 /// The development chains' reorg limit.
 pub const DEV_MAX_REORG_DEPTH: u64 = 100;
 
+#[document(
+    summary = "The layout this node keeps its database in. It goes up whenever a stored record changes shape, so a node never reads a database it would misread.",
+    category = "Chain",
+    see_also = "ChainError::OldFormat",
+    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database.",
+)]
+pub const STORAGE_FORMAT: u32 = 1;
+
 const TIP_KEY: &[u8] = b"tip";
+const TIPS_KEY: &[u8] = b"tips";
+const FORMAT_KEY: &[u8] = b"format";
 
 #[document(
     summary = "Funds an address holds from the start.",
@@ -125,6 +135,8 @@ pub struct Genesis {
     pub timestamp: u64,
     #[document(summary = "The chain's hash, for block and transaction ids, the roots blocks commit to and contract addresses: any secure algorithm this build has. Proof of work names its own.")]
     pub hash: HashType,
+    #[document(summary = "What the chain's own coin is called, and where a display puts its point.")]
+    pub coin: Coin,
     #[document(summary = "Which consensus the chain runs, and its parameters.")]
     pub consensus: ConsensusConfig,
     #[document(summary = "What each block mints for its producer.")]
@@ -147,6 +159,43 @@ pub struct Genesis {
 
 impl Hashable for Genesis {}
 
+#[document(
+    summary = "How the chain's own coin is named and shown, so every client shows balances alike. Only displays read it: balances, fees and rewards are always counted in whole units.",
+    category = "Chain",
+    see_also = "Genesis",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct Coin {
+    #[document(summary = "Its ticker, such as DEV: 1 to 12 ASCII letters and digits.")]
+    pub symbol: String,
+    #[document(summary = "How many decimals a display divides by: 18 means 10^18 units make one coin. At most 77, the digits a balance can have.")]
+    pub decimals: u8,
+}
+
+impl Hashable for Coin {}
+
+impl Coin {
+    #[document(parent = "Coin", summary = "The development chains' coin: DEV, at 18 decimals.")]
+    pub fn dev() -> Coin {
+        Coin {
+            symbol: "DEV".to_string(),
+            decimals: 18,
+        }
+    }
+
+    fn problem(&self) -> Option<&'static str> {
+        if self.symbol.is_empty() || self.symbol.len() > 12 || !self.symbol.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Some("the coin's symbol must be 1 to 12 ASCII letters and digits");
+        }
+
+        if self.decimals > 77 {
+            return Some("the coin's decimals must be at most 77");
+        }
+
+        None
+    }
+}
+
 /// A million coins at 18 decimals.
 fn dev_funds() -> u256 {
     u256::from(1_000_000u64) * u256::from(10u64).pow(18)
@@ -162,6 +211,7 @@ impl Genesis {
         Genesis {
             timestamp: 0,
             hash: HashType::default_chain(),
+            coin: Coin::dev(),
             consensus: ConsensusConfig::Authority {
                 key: authority,
                 slot_ms: 2_000,
@@ -189,6 +239,7 @@ impl Genesis {
         Genesis {
             timestamp: 0,
             hash: HashType::default_chain(),
+            coin: Coin::dev(),
             consensus: ConsensusConfig::ProofOfWork(PowConfig {
                 hash: HashType::default_chain(),
                 target_block_ms: 2_000,
@@ -252,9 +303,9 @@ impl Genesis {
             return Some("the proof-of-work hash must be a secure 256-bit one, not xxh3");
         }
 
-        self.finality
-            .as_ref()
-            .and_then(FinalityConfig::problem)
+        self.coin
+            .problem()
+            .or_else(|| self.finality.as_ref().and_then(FinalityConfig::problem))
             .or_else(|| self.fees.as_ref().and_then(FeeConfig::problem))
     }
 
@@ -418,7 +469,16 @@ impl Chain {
 
         match stored {
             Some(stored) if stored != id => return Err(ChainError::WrongGenesis { stored, expected: id }),
-            Some(_) => {}
+            Some(_) => {
+                let found = read_value::<FormatRecord>(&*db, Column::Meta, FORMAT_KEY)?.map(|record| record.format);
+
+                if found != Some(STORAGE_FORMAT) {
+                    return Err(ChainError::OldFormat {
+                        found,
+                        expected: STORAGE_FORMAT,
+                    });
+                }
+            }
             None => {
                 let state = State::new(db.clone());
                 let accounts = Accounts::new(&state);
@@ -437,6 +497,8 @@ impl Chain {
                 state.put_value(Column::Work, id_key(&id), &WorkRecord { total: u256::ZERO });
                 state.put_value(Column::Heights, 0u64.to_be_bytes().to_vec(), &id);
                 state.put_value(Column::Meta, TIP_KEY.to_vec(), &id);
+                state.put_value(Column::Meta, TIPS_KEY.to_vec(), &Leaves { blocks: vec![id] });
+                state.put_value(Column::Meta, FORMAT_KEY.to_vec(), &FormatRecord { format: STORAGE_FORMAT });
                 db.commit(state.take_changes())?;
                 log::info!(
                     "[chain] wrote genesis {id} with {} allocations",
@@ -448,6 +510,7 @@ impl Chain {
         let tip_id: Hash = read_value(&*db, Column::Meta, TIP_KEY)?.expect("genesis sets the tip");
         let tip: Block = read_value(&*db, Column::Blocks, &id_key(&tip_id))?.expect("the tip is stored");
         let tip_work = work_of(&*db, &tip_id)?;
+        let tips = read_value::<Leaves>(&*db, Column::Meta, TIPS_KEY)?.map_or_else(|| vec![tip_id], |leaves| leaves.blocks);
         let workers = Arc::new(Workers::new());
         let finality = match &genesis.finality {
             Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers))?),
@@ -465,7 +528,7 @@ impl Chain {
             tip_work,
             max_reorg_depth: genesis.max_reorg_depth,
             bad: HashSet::new(),
-            tips: HashSet::from([tip_id]),
+            tips: tips.into_iter().collect(),
             finality_config: genesis.finality.clone(),
             finality,
             workers,
@@ -674,8 +737,6 @@ impl Chain {
         let state = Arc::new(State::new(self.db.clone()));
         state.put_value(Column::Blocks, id_key(&id), block);
         state.put_value(Column::Work, id_key(&id), &WorkRecord { total: work });
-        self.tips.remove(&parent_id);
-        self.tips.insert(id);
 
         if parent_id == self.tip.id() {
             let receipts = match self.apply(&state, block) {
@@ -688,6 +749,7 @@ impl Chain {
                     return Err(err);
                 }
             };
+            self.stored_leaf(&state, id, &parent_id);
             self.db.commit(state.take_changes())?;
             self.tip = block.header.clone();
             self.tip_work = work;
@@ -696,6 +758,7 @@ impl Chain {
             return Ok(Imported::Extended(receipts));
         }
 
+        self.stored_leaf(&state, id, &parent_id);
         self.db.commit(state.take_changes())?;
 
         if work <= self.tip_work {
@@ -703,6 +766,15 @@ impl Chain {
         }
 
         self.reorganize(block, work, false)
+    }
+
+    /// Notes that a block is being stored: no stored block builds on it yet, and its parent is
+    /// built on now. The leaves go in the commit too, for readers such as the API.
+    fn stored_leaf(&mut self, state: &State, id: Hash, parent: &Hash) {
+        self.tips.remove(parent);
+        self.tips.insert(id);
+        let blocks = self.tips.iter().copied().collect();
+        state.put_value(Column::Meta, TIPS_KEY.to_vec(), &Leaves { blocks });
     }
 
     /// Makes new_tip the tip: rolls the main chain back to where its branch splits off, then runs
@@ -907,6 +979,22 @@ struct WorkRecord {
 
 impl Hashable for WorkRecord {}
 
+/// The stored blocks no stored block builds on yet.
+#[derive(Clone, Debug, Default, SchemaWrite, SchemaRead)]
+struct Leaves {
+    blocks: Vec<Hash>,
+}
+
+impl Hashable for Leaves {}
+
+/// Which STORAGE_FORMAT a database is kept in.
+#[derive(Clone, Copy, Debug, SchemaWrite, SchemaRead)]
+struct FormatRecord {
+    format: u32,
+}
+
+impl Hashable for FormatRecord {}
+
 #[document(
     summary = "Why the chain could not be opened.",
     category = "Chain",
@@ -921,6 +1009,8 @@ pub enum ChainError {
     BadGenesis(String),
     #[document(summary = "The chain allows contracts for an engine this node was built without.")]
     MissingEngine(Engine),
+    #[document(summary = "The database is kept in another layout than STORAGE_FORMAT: found is the one it is in, None for one from before formats were recorded.")]
+    OldFormat { found: Option<u32>, expected: u32 },
 }
 
 impl From<DbError> for ChainError {
@@ -937,6 +1027,11 @@ impl fmt::Display for ChainError {
                 write!(f, "the database holds genesis {stored}, not {expected}")
             }
             ChainError::BadGenesis(text) => write!(f, "bad genesis: {text}"),
+            ChainError::OldFormat { found, expected } => {
+                let found = found.map_or("an older one".to_string(), |found| format!("format {found}"));
+
+                write!(f, "the database is kept in {found}, not format {expected}; delete it or use another --db")
+            }
             ChainError::MissingEngine(engine) => write!(
                 f,
                 "the chain runs {} contracts; build the node with the {} feature",
@@ -983,6 +1078,24 @@ pub fn stored_tip(db: &dyn Read) -> Result<Option<Block>, DbError> {
     };
 
     stored_block(db, &id)
+}
+
+#[document(
+    summary = "The stored blocks no stored block builds on yet, the tip among them, read straight from a database. Every side branch ends in one.",
+    category = "Chain",
+)]
+pub fn stored_tips(db: &dyn Read) -> Result<Vec<Hash>, DbError> {
+    Ok(read_value::<Leaves>(db, Column::Meta, TIPS_KEY)?.unwrap_or_default().blocks)
+}
+
+#[document(
+    summary = "Whether a block is on the main chain, read straight from a database.",
+    category = "Chain",
+)]
+pub fn stored_on_main_chain(db: &dyn Read, block: &Block) -> Result<bool, DbError> {
+    let at: Option<Hash> = read_value(db, Column::Heights, &block.header.height.to_be_bytes())?;
+
+    Ok(at == Some(block.id()))
 }
 
 #[document(

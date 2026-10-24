@@ -40,8 +40,8 @@ pub enum NetEvent {
     Tx { from: PeerId, tx: SignedTx },
     #[document(summary = "A finality vote gossiped by a peer.")]
     Vote { from: PeerId, vote: SignedVote },
-    #[document(summary = "A peer connected.")]
-    PeerUp(PeerId),
+    #[document(summary = "A peer connected, from or at this address.")]
+    PeerUp { peer: PeerId, address: Multiaddr },
     #[document(summary = "A peer's last connection closed.")]
     PeerDown(PeerId),
     #[document(summary = "A peer asked for something. Answer with NetCommand::Respond and the same id.")]
@@ -56,6 +56,13 @@ pub enum NetEvent {
     Submitted {
         tx: SignedTx,
         reply: oneshot::Sender<Result<Hash, MempoolError>>,
+    },
+    #[document(summary = "The network listens here now. The address ends in /p2p/ and this node's peer id.")]
+    Listening(Multiaddr),
+    #[document(summary = "A client of this node asked how it is doing, with up to txs of the transactions waiting. The node answers on reply.")]
+    Report {
+        txs: usize,
+        reply: oneshot::Sender<crate::node::NodeReport>,
     },
 }
 

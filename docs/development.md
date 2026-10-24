@@ -20,6 +20,15 @@ You need stable Rust, a C/C++ toolchain and clang: RocksDB and Luau are built fr
 - the SDK's own tests run on the host: `cargo test -p chainv4-sdk --target <host>` inside
   `contracts/`.
 
+**The explorer workspace,** `explorer/`, is the egui explorer (see [Explorer](explorer.md)):
+- it has a lockfile of its own, so egui and the browser crates never meet the node's, whose
+  libp2p pins older web crates than egui needs;
+- it links the chainv4 library with only the hash and key features, which build for
+  `wasm32-unknown-unknown` too;
+- inside `explorer/`: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and
+  `cargo clippy --target wasm32-unknown-unknown -- -D warnings` for the web build;
+- `trunk build --release` builds the web app into `explorer/dist`.
+
 ## Features
 
 Every piece sits behind a cargo feature, and everything is on by default.
@@ -32,6 +41,7 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `rocksdb` | The RocksDB backend. |
 | `node` | The node, the chain and the CLI. |
 | `http` | The HTTP API. |
+| `stream` | `GET /stream`, and the node's `--stream`. Needs `http`. |
 | `client` | `chainv4 send`. |
 | `finality-ffg`, `finality-authority`, `finality-depth` | Kinds of finality. |
 
@@ -44,6 +54,7 @@ different dev chains, which puts it on a different network.
 **CI** (`.github/workflows/test.yml`):
 - it runs clippy and the tests on the workspace;
 - it runs clippy on the contracts and the SDK's tests;
+- it runs clippy and the tests on the explorer, and clippy on its web build;
 - it runs clippy and the tests on a matrix of feature subsets.
 
 The matrix:

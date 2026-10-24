@@ -9,6 +9,7 @@
 
 use {
     super::{Host, Limits, Loaded, Outcome, ScriptEngine, VmError, selector},
+    crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     r#macro::document,
     std::collections::HashMap,
@@ -288,6 +289,7 @@ impl ScriptEngine for WasmEngine {
             fuel_used: limits.fuel - remaining,
             result,
             events: Vec::new(),
+            trace: Trace::default(),
         }
     }
 }

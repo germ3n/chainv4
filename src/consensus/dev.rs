@@ -1,7 +1,7 @@
 use {
     super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer},
     crate::crypto::hashable::Hashable,
-    crate::crypto::keypair::{Keypair, PrivateKey, PublicKey},
+    crate::crypto::keypair::{Keypair, PublicKey},
     crate::structs::address::Address,
     crate::structs::block::{BlockHeader, Seal},
     crate::structs::u256::u256,
@@ -10,9 +10,6 @@ use {
 
 /// Separates block seals from anything else a key might sign.
 const SEAL_DOMAIN: &[u8] = b"chainv4 block";
-/// The development authority's seed. Public on purpose: anyone can run a dev network with it,
-/// and nothing of value should ever depend on it.
-const DEV_SEED: [u8; 32] = *b"chainv4 dev authority, not safe!";
 
 #[document(
     summary = "The rules of a chain where one known key produces every block, one per slot. For development and tests: blocks come at a steady pace, and forks never happen.",
@@ -42,12 +39,7 @@ impl DevAuthority {
         summary = "The well-known development key. Never use it for anything of value: its seed is in the source.",
     )]
     pub fn dev_keypair() -> Keypair {
-        #[cfg(feature = "ed25519")]
-        let private = PrivateKey::Ed25519(DEV_SEED);
-        #[cfg(not(feature = "ed25519"))]
-        let private = PrivateKey::EdBlake(DEV_SEED);
-
-        Keypair::from_private(private)
+        Keypair::development()
     }
 }
 

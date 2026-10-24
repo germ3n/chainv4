@@ -4,7 +4,7 @@ use {
     crate::structs::code::Code,
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::to_hex,
-    crate::chain::fees::PricingConfig,
+    crate::chain::fees::OfferChoice,
     crate::crypto::keypair::{Keypair, PublicKey},
     crate::structs::hex::from_hex,
     crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
@@ -182,12 +182,12 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     let status = ok(agent.get(format!("{node}/status")).call())?;
     let tx = transaction(args.tx, sender, &agent, node)?;
     let deploys = matches!(tx, Tx::Deploy { .. });
-    let flags = FeeFlags {
+    let chosen = OfferChoice {
         gas_limit: args.gas_limit,
         max_price: args.max_price,
         tip: args.tip,
     };
-    let fee = offer(&status["fees"], &tx, nonce, &keypair, flags)?;
+    let fee = offer(&status["fees"], &tx, nonce, &keypair, chosen)?;
     let signed = SignedTx::sign(tx, nonce, fee, &keypair);
     let body = json!({ "tx": to_hex(&wincode::serialize(&signed)?) }).to_string();
     let submitted = ok(agent
@@ -219,16 +219,9 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     report(&receipt)
 }
 
-/// The parts of a fee offer the flags set.
-struct FeeFlags {
-    gas_limit: Option<u64>,
-    max_price: Option<u256>,
-    tip: Option<u256>,
-}
-
 /// What to offer for a transaction: on a chain with fees, as the node reports them, the flags
 /// given, and for the rest what is sure to cover it. Nothing on a chain without fees.
-fn offer(fees: &Value, tx: &Tx, nonce: u64, keypair: &Keypair, flags: FeeFlags) -> CliResult<FeeOffer> {
+fn offer(fees: &Value, tx: &Tx, nonce: u64, keypair: &Keypair, chosen: OfferChoice) -> CliResult<FeeOffer> {
     if fees.is_null() {
         return Ok(FeeOffer::NONE);
     }
@@ -239,34 +232,9 @@ fn offer(fees: &Value, tx: &Tx, nonce: u64, keypair: &Keypair, flags: FeeFlags) 
     let mut settings = fees.clone();
     settings.as_object_mut().ok_or("the node sent bad fees")?.retain(|key, _| key != "base_price" && key != "tx_fuel");
     let config = crate::cli::genesis::fees_from_json(&settings)?;
-    let tip = flags.tip.unwrap_or_default();
-    let max_price = match (flags.max_price, &config.pricing) {
-        (Some(max_price), _) => max_price,
-        (None, PricingConfig::BaseFee(_)) => base * u256::from(2u64) + tip,
-        (None, PricingConfig::Bid(_)) => base + tip,
-    };
-    let mut fee = FeeOffer {
-        gas_limit: 0,
-        max_price,
-        tip,
-    };
-    fee.gas_limit = match flags.gas_limit {
-        Some(gas_limit) => gas_limit,
-        None => {
-            // Every field of an offer has a fixed size, so this measures the transaction as sent.
-            let probe = SignedTx::sign(tx.clone(), nonce, fee, keypair);
-            let built = config.build();
-            let schedule = built.schedule();
-            let fuel = match tx {
-                Tx::ContractCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } => schedule.for_fuel(tx_fuel),
-                _ => 0,
-            };
+    let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, keypair);
 
-            schedule.intrinsic(&probe).saturating_add(fuel).min(config.block_gas_limit)
-        }
-    };
-
-    Ok(fee)
+    Ok(config.build().offer(base, tx_fuel, &probe, chosen))
 }
 
 /// What a transaction's block must reach before send returns.

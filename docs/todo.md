@@ -113,8 +113,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   receipt, but loading the code does not: running a Lua script's top level burns fuel the
   receipt never shows, and compiling and validating either engine's code is unmetered, bounded
   only by `MAX_SOURCE_LEN` and `MAX_MODULE_LEN`. This applies to deploys and upgrades alike.
-- [ ] **No read-only calls.** There is no way to run a contract function without a transaction,
-  for example from the HTTP API.
+- [x] **Read-only calls.** `POST /call` runs a contract function as a transaction would call it,
+  on a throwaway copy of the committed state under the chain's fuel cap.
+- [x] **Traces.** Every receipt keeps where its contracts went: each call, delegate and transfer,
+  failed ones included, which events each emitted, up to 256 hops. Not consensus.
+- [ ] **A failed deploy or upgrade keeps no trace.** When `init`, `check_perms` or `migrate`
+  fails, the registry returns only the error, so the receipt cannot show where it failed.
 - [x] **Contract upgrades.** `Tx::Upgrade` (`chainv4 send upgrade`) swaps a contract's code and
   keeps its address, storage and balance. The contract decides who may: the chain asks its
   `check_perms("upgrade", sender)`. A contract without it is immutable. New code's `migrate`
@@ -173,8 +177,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **No pruning.** Every block and all history are kept forever.
 - [x] **Receipts and a transaction index.** Each transaction's block, index, fuel, result and
   events are stored by transaction id, and reorgs move them along with everything else.
-- [ ] **No schema version.** Nothing in `Meta` records the storage format, so a format change
-  cannot be detected or migrated.
+- [x] **A storage format version.** `Meta` records `STORAGE_FORMAT`, and a node refuses a
+  database kept in another (`OldFormat`) rather than misread it.
+- [ ] **No migrations.** A database in an old format has to be deleted; nothing upgrades it.
+- [x] **Leaves are stored.** The chain's leaf blocks go into `Meta` with each block, so side
+  branches outlast a restart and the API can list them (`/forks`).
+- [ ] **Leaves are never pruned.** Every side branch's leaf stays, even far below the finalized
+  checkpoint, where no branch can matter again.
 - [ ] **Commits are not fsynced.** A power cut can lose the last few blocks, though never half of
   one. Decide whether to sync each block.
 - [ ] **RocksDB runs on default options.** No tuning of caches, compression or compaction.
@@ -224,5 +233,23 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   safe, but the network and HTTP threads never close cleanly.
 - [x] **The HTTP API has transaction lookup and receipts.** `GET /txs/{id}`, and each transaction
   in a block carries its receipt.
-- [ ] **The HTTP API has no contract views and serves one request at a time.**
+- [ ] **The HTTP API serves one request at a time.** A slow read-only call holds up every other
+  request; a multi-threaded runtime, or calls on a pool of their own, would keep the API answering.
+- [x] **An explorer.** `explorer/`, built with egui, for the desktop and, built to WebAssembly,
+  the browser. It shows blocks on a map with side branches, transactions with their hops as a
+  call tree and a graph, accounts, contracts and tokens, the network, the mempool and finality,
+  with charts, and signs and sends transactions with chainv4's own code.
+- [x] **The node tells how it is doing.** `GET /node` reports peers, roles, sync and counters,
+  `GET /mempool` lists what waits, and `GET /stream` pushes blocks, reorgs, finality, queued
+  transactions and peers as they happen, for nodes started with `--stream`.
+- [x] **The API can serve web pages.** `--cors` lets pages from other origins call it, and
+  `--explorer` serves the explorer's web app from the API's own `/`.
+- [ ] **The explorer cannot search events or list tokens.** It knows only the tokens it has met,
+  and finds a contract's events only through the transactions it opens; both need an index on
+  the node.
+- [ ] **CI does not build the explorer's web bundle.** It lints the wasm32 build but never runs
+  `trunk build`, so a broken `index.html` or wasm-bindgen mismatch shows only when someone builds
+  it.
 - [ ] **Windows builds in CI.** Left out because of RocksDB and Luau build setup.
+
+add encryption to wallets/keypairs when stored to disk (if passphrase was set/selected)

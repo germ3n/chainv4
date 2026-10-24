@@ -88,6 +88,11 @@ impl Mempool {
         self.txs.len()
     }
 
+    #[document(parent = "Mempool", summary = "The transactions waiting, by sender and then nonce.")]
+    pub fn iter(&self) -> impl Iterator<Item = &SignedTx> {
+        self.txs.values()
+    }
+
     #[document(parent = "Mempool", summary = "Whether nothing is waiting.")]
     pub fn is_empty(&self) -> bool {
         self.txs.is_empty()

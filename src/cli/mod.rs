@@ -3,10 +3,10 @@
 
 use {
     crate::consensus::DevAuthority,
-    crate::crypto::keypair::{KeyType, Keypair, PrivateKey},
+    crate::crypto::keypair::{KeyType, Keypair},
     crate::structs::address::Address,
     crate::structs::amount::Amount,
-    crate::structs::hex::{from_hex, to_hex},
+    crate::structs::hex::from_hex,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
     std::error::Error,
@@ -54,12 +54,6 @@ pub fn signer(key: Option<&Path>) -> CliResult<Keypair> {
 
 /// A key file holds one line: the scheme, a colon and the 32-byte seed in hex, like an address.
 fn write_key(path: &Path, keypair: &Keypair) -> CliResult<()> {
-    let (scheme, seed) = match keypair.private() {
-        #[cfg(feature = "ed25519")]
-        PrivateKey::Ed25519(seed) => ("ed25519", seed),
-        #[cfg(feature = "edblake")]
-        PrivateKey::EdBlake(seed) => ("edblake", seed),
-    };
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
 
@@ -69,28 +63,15 @@ fn write_key(path: &Path, keypair: &Keypair) -> CliResult<()> {
     let mut file = options
         .open(path)
         .map_err(|err| format!("cannot create {}: {err}", path.display()))?;
-    writeln!(file, "{scheme}:{}", to_hex(seed))?;
+    writeln!(file, "{}", keypair.to_key_file())?;
 
     Ok(())
 }
 
 fn read_key(path: &Path) -> CliResult<Keypair> {
     let text = fs::read_to_string(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
-    let (scheme, seed) = text
-        .trim()
-        .split_once(':')
-        .ok_or_else(|| format!("{} is not a key file", path.display()))?;
-    let seed: [u8; 32] = from_hex(seed)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| format!("{} does not hold a 32-byte seed", path.display()))?;
-    let private = match parse_scheme(scheme)? {
-        #[cfg(feature = "ed25519")]
-        KeyType::Ed25519 => PrivateKey::Ed25519(seed),
-        #[cfg(feature = "edblake")]
-        KeyType::EdBlake => PrivateKey::EdBlake(seed),
-    };
 
-    Ok(Keypair::from_private(private))
+    Ok(Keypair::from_key_file(&text).map_err(|err| format!("{}: {err}", path.display()))?)
 }
 
 fn parse_scheme(text: &str) -> Result<KeyType, String> {

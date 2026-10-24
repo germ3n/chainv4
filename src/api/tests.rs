@@ -7,6 +7,8 @@ use crate::registry::contracts::contract_address;
 use crate::structs::amount::Amount;
 use crate::structs::code::Code;
 use crate::net::NetEvent;
+use crate::node::{Counters, Heard, NodeReport, PeerReport};
+use crate::structs::block::Block;
 use crate::structs::hex::to_hex;
 use crate::structs::tx::{FeeOffer, SignedTx, Tx};
 use std::io::{Read as _, Write as _};
@@ -64,26 +66,82 @@ fn serve() -> Fixture {
     }
 
     let genesis = free();
-    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
 
     Fixture { address, chain, bob }
 }
 
-/// A Submitter whose node takes every transaction except those with nonce 99, which it calls
-/// stale.
-fn fake_node() -> Submitter {
+/// A handle to a node that takes every transaction except those with nonce 99, which it calls
+/// stale, and reports one peer and two transactions waiting.
+fn fake_node() -> NodeHandle {
     let (inbox, events) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
         for event in events {
-            if let NetEvent::Submitted { tx, reply } = event {
-                let verdict = if tx.nonce == 99 { Err(MempoolError::Stale) } else { Ok(tx.id(HashType::default_chain())) };
-                let _ = reply.send(verdict);
+            match event {
+                NetEvent::Submitted { tx, reply } => {
+                    let verdict = if tx.nonce == 99 { Err(MempoolError::Stale) } else { Ok(tx.id(HashType::default_chain())) };
+                    let _ = reply.send(verdict);
+                }
+                NetEvent::Report { txs, reply } => {
+                    let _ = reply.send(fake_report(txs));
+                }
+                _ => {}
             }
         }
     });
 
-    Submitter::new(inbox)
+    NodeHandle::new(inbox)
+}
+
+fn fake_report(txs: usize) -> NodeReport {
+    NodeReport {
+        started: 1_000,
+        now: 61_000,
+        listening: vec!["/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap()],
+        producing: true,
+        validating: false,
+        peers: vec![PeerReport {
+            id: libp2p::PeerId::random(),
+            address: "/ip4/10.0.0.2/udp/4001/quic-v1".parse().unwrap(),
+            since: 2_000,
+            heard: Heard { blocks: 3, txs: 4, votes: 0 },
+            chain: Some((5, crate::structs::u256::u256::new(5), 0)),
+        }],
+        syncing: None,
+        waiting: 2,
+        capacity: 50_000,
+        txs: [signed(0), signed(1)].into_iter().take(txs).collect(),
+        counters: Counters {
+            blocks_heard: 3,
+            txs_heard: 4,
+            ..Counters::default()
+        },
+    }
+}
+
+/// Produces the next block on a chain with these transactions.
+fn produce(chain: &mut Chain, txs: Vec<SignedTx>) -> Block {
+    let mut producer = AuthorityProducer::new(DevAuthority::dev_keypair(), SLOT);
+    let now = chain.tip().timestamp + SLOT;
+    let mut block = chain.build(txs, Vec::new(), producer.address(), now).unwrap();
+    block.seal = producer.seal(&block.header).unwrap();
+    chain.import(&block, now).unwrap();
+
+    block
+}
+
+/// Sends a request with extra headers and reads the status, the headers and the raw body.
+fn raw(address: SocketAddr, method: &str, path: &str, headers: &str) -> (u16, String, Vec<u8>) {
+    let mut stream = TcpStream::connect(address).unwrap();
+    write!(stream, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{headers}\r\n").unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    let split = response.windows(4).position(|window| window == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8(response[..split].to_vec()).unwrap().to_ascii_lowercase();
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+
+    (status, head, response[split + 4..].to_vec())
 }
 
 /// Sends a GET and reads the status, content type and JSON body of the answer.
@@ -279,7 +337,7 @@ fn an_api_without_a_node_takes_no_transactions() {
     let db = Arc::new(MemoryDb::default());
     Chain::open(db.clone(), &free()).unwrap();
     let genesis = free();
-    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let (status, body) = post_tx(address, &wincode::serialize(&signed(0)).unwrap());
 
     assert_eq!(status, 503, "{body}");
@@ -331,7 +389,7 @@ fn fees_show_in_status_blocks_and_receipts() {
     let mut block = chain.build(vec![SignedTx::sign(transfer, 0, fee, &authority)], Vec::new(), producer.address(), now).unwrap();
     block.seal = producer.seal(&block.header).unwrap();
     chain.import(&block, now).unwrap();
-    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let fees = &ok(address, "/status")["fees"];
 
     assert_eq!(fees["base_price"], chain.next_base_price().to_string());
@@ -369,7 +427,7 @@ fn a_chain_without_finality_says_so() {
     };
     let db = Arc::new(MemoryDb::default());
     Chain::open(db.clone(), &genesis).unwrap();
-    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
 
     assert_eq!(ok(address, "/status")["finality"], Value::Null);
     assert_eq!(get(address, "/validators").0, 404);
@@ -396,7 +454,7 @@ fn serve_with(finality: crate::chain::FinalityConfig, height: u64, txs: impl Fn(
         chain.import(&block, now).unwrap();
     }
 
-    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
 
     (address, chain)
 }
@@ -568,7 +626,7 @@ mod ffg {
             ..chain.justification(&chain.justified().unwrap().block).unwrap().unwrap().votes[0].vote
         };
         chain.add_vote(SignedVote::sign(double, &authority, &chain.genesis())).unwrap();
-        let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
 
         Finalized { address, chain, newcomer }
     }
@@ -671,4 +729,302 @@ mod ffg {
 
         assert_eq!(vote.verify(&fixture.chain.genesis()), Ok(()));
     }
+}
+
+#[test]
+fn the_node_tells_how_it_is_doing_and_what_waits() {
+    let fixture = serve();
+    let node = ok(fixture.address, "/node");
+
+    assert_eq!(node["uptime_ms"], 60_000);
+    assert_eq!(node["producing"], true);
+    assert_eq!(node["listening"], json!(["/ip4/127.0.0.1/udp/4001/quic-v1"]));
+    assert_eq!(node["mempool"], json!({ "count": 2, "capacity": 50_000 }));
+    assert_eq!(node["counters"]["blocks_heard"], 3);
+    assert_eq!(node["peers"][0]["heard"], json!({ "blocks": 3, "txs": 4, "votes": 0 }));
+    assert_eq!(node["peers"][0]["chain"], json!({ "height": 5, "work": "5", "justified": 0 }));
+    assert_eq!(node["syncing"], Value::Null);
+
+    let mempool = ok(fixture.address, "/mempool?limit=1");
+
+    assert_eq!(mempool["count"], 2);
+    assert_eq!(mempool["txs"].as_array().unwrap().len(), 1);
+    assert_eq!(mempool["txs"][0]["id"], signed(0).id(HashType::default_chain()).to_string());
+
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let alone = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+
+    assert_eq!(get(alone, "/node").0, 503);
+    assert_eq!(get(alone, "/mempool").0, 503);
+}
+
+#[test]
+fn receipts_show_where_a_call_went() {
+    let mut fixture = serve();
+    let authority = DevAuthority::dev_keypair().public().address();
+    let counter = contract_address(&authority, 1, HashType::default_chain());
+    let call = SignedTx::sign(
+        Tx::ContractCall {
+            to: counter,
+            func: Hash::Xxh3_64(crate::vm::selector("increment")),
+            amount: Amount::U128(0),
+            data: vec![crate::structs::tx::TxCallArgumentType::I64(3)],
+        },
+        2,
+        FeeOffer::NONE,
+        &DevAuthority::dev_keypair(),
+    );
+    produce(&mut fixture.chain, vec![call.clone()]);
+    let receipt = ok(fixture.address, &format!("/txs/{}", call.id(HashType::default_chain())));
+
+    assert_eq!(receipt["status"], "returned");
+    assert_eq!(
+        receipt["trace"],
+        json!({
+            "hops": [{
+                "depth": 0,
+                "kind": "call",
+                "from": authority.to_string(),
+                "to": counter.to_string(),
+                "function": "increment",
+                "value": "0",
+                "fuel_used": receipt["fuel_used"],
+                "error": null,
+                "events": [],
+            }],
+            "dropped": 0,
+        })
+    );
+    assert_eq!(ok(fixture.address, "/blocks/1")["txs"][0]["receipt"]["trace"], json!({ "hops": [], "dropped": 0 }));
+}
+
+#[test]
+fn side_branches_are_listed_back_to_the_main_chain() {
+    let mut fixture = serve();
+    let tip = fixture.chain.block_at(2).unwrap().unwrap();
+    let mut sibling = tip.clone();
+    sibling.header.timestamp += SLOT;
+    sibling.seal = AuthorityProducer::new(DevAuthority::dev_keypair(), SLOT).seal(&sibling.header).unwrap();
+
+    assert!(matches!(fixture.chain.import(&sibling, sibling.header.timestamp), Ok(crate::chain::Imported::Side)));
+
+    let forks = ok(fixture.address, "/forks");
+
+    assert_eq!(forks["blocks"].as_array().unwrap().len(), 1);
+    assert_eq!(forks["blocks"][0]["id"], sibling.id().to_string());
+    assert_eq!(forks["blocks"][0]["parent"], tip.header.parent.to_string());
+    assert_eq!(forks["tips"].as_array().unwrap().len(), 2);
+
+    let side = ok(fixture.address, &format!("/blocks/{}", sibling.id()));
+
+    assert_eq!(side["main"], false);
+    assert_eq!(side["txs"][0]["receipt"], Value::Null);
+    assert_eq!(ok(fixture.address, "/blocks/latest")["main"], true);
+    assert_eq!(ok(fixture.address, "/forks?limit=0")["blocks"], json!([]));
+}
+
+#[test]
+fn offers_cover_what_a_transaction_costs_now() {
+    let authority = DevAuthority::dev_keypair();
+    let db = Arc::new(MemoryDb::default());
+    let genesis = Genesis::dev_authority(authority.public());
+    let chain = Chain::open(db.clone(), &genesis).unwrap();
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let probe = SignedTx::sign(
+        Tx::Deploy {
+            code: Code::Lua(COUNTER.to_string()),
+        },
+        0,
+        FeeOffer::NONE,
+        &authority,
+    );
+    let body = |extra: Value| {
+        let mut body = json!({ "tx": to_hex(&wincode::serialize(&probe).unwrap()) });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+
+        body.to_string()
+    };
+    let (status, _, offered) = request(address, "POST", "/offer", &body(json!({})));
+    let fees = genesis.fees.as_ref().unwrap().build();
+    let expected = fees.offer(chain.next_base_price(), genesis.tx_limits.fuel, &probe, OfferChoice::default());
+
+    assert_eq!(status, 200, "{offered}");
+    assert_eq!(offered, json::fee_offer(&expected));
+    assert!(expected.gas_limit > fees.schedule().for_fuel(genesis.tx_limits.fuel));
+
+    let (_, _, chosen) = request(address, "POST", "/offer", &body(json!({ "gas_limit": 77, "tip": "5" })));
+
+    assert_eq!(chosen["gas_limit"], 77);
+    assert_eq!(chosen["tip"], "5");
+    assert_eq!(request(address, "POST", "/offer", &body(json!({ "tip": 5 }))).0, 400);
+
+    let free = serve();
+
+    assert_eq!(
+        request(free.address, "POST", "/offer", &body(json!({}))).2,
+        json!({ "gas_limit": 0, "max_price": "0", "tip": "0" })
+    );
+}
+
+#[test]
+fn pages_from_allowed_origins_may_call_the_api() {
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let options = ApiOptions {
+        cors: vec!["http://app.example".to_string()],
+        explorer: None,
+    };
+    let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+    let (status, head, _) = raw(address, "GET", "/status", "Origin: http://app.example\r\n");
+
+    assert_eq!(status, 200);
+    assert!(head.contains("access-control-allow-origin: http://app.example"), "{head}");
+
+    let (status, head, _) = raw(
+        address,
+        "OPTIONS",
+        "/txs",
+        "Origin: http://app.example\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type\r\n",
+    );
+
+    assert_eq!(status, 204);
+    assert!(head.contains("access-control-allow-methods: get, post"), "{head}");
+    assert!(head.contains("access-control-allow-headers: content-type"), "{head}");
+
+    let (_, head, _) = raw(address, "GET", "/status", "Origin: http://elsewhere.example\r\n");
+
+    assert!(!head.contains("access-control-allow-origin"), "{head}");
+}
+
+#[test]
+fn the_explorer_is_served_beside_the_routes() {
+    let dir = std::env::temp_dir().join(format!("chainv4-explorer-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("index.html"), "<html>explorer</html>").unwrap();
+    std::fs::write(dir.join("assets/app.wasm"), b"\0asm").unwrap();
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let options = ApiOptions {
+        cors: Vec::new(),
+        explorer: Some(dir.clone()),
+    };
+    let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+    let (status, head, body) = raw(address, "GET", "/", "");
+
+    assert_eq!(status, 200);
+    assert!(head.contains("content-type: text/html"), "{head}");
+    assert_eq!(body, b"<html>explorer</html>");
+
+    let (status, head, body) = raw(address, "GET", "/assets/app.wasm", "");
+
+    assert_eq!(status, 200);
+    assert!(head.contains("content-type: application/wasm"), "{head}");
+    assert_eq!(body, b"\0asm");
+    assert_eq!(raw(address, "GET", "/assets/../index.html", "").0, 404);
+    assert_eq!(raw(address, "GET", "/missing.js", "").0, 404);
+    assert_eq!(ok(address, "/status")["height"], 0);
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(feature = "stream")]
+#[test]
+fn a_streaming_node_pushes_what_it_does() {
+    use crate::net::NetLink;
+    use crate::node::Node;
+
+    let db = Arc::new(MemoryDb::default());
+    let (link, fake) = NetLink::pair();
+    let mut node = Node::new(db.clone(), &free(), None, link).unwrap().stream(16);
+    let address = start(db.clone(), Some(node.handle()), &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    write!(stream, "GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut seen = String::new();
+    let mut buffer = [0; 4096];
+
+    // Subscribed once the answer's head is back.
+    while !seen.contains("\r\n\r\n") {
+        let read = stream.read(&mut buffer).unwrap();
+        seen.push_str(&String::from_utf8_lossy(&buffer[..read]));
+    }
+
+    assert!(seen.to_ascii_lowercase().contains("content-type: text/event-stream"), "{seen}");
+
+    let peer = libp2p::PeerId::random();
+    fake.events
+        .send(NetEvent::PeerUp {
+            peer,
+            address: "/ip4/10.0.0.9/udp/1/quic-v1".parse().unwrap(),
+        })
+        .unwrap();
+    node.step(SLOT).unwrap();
+
+    while !seen.contains("event: peer_up") {
+        let read = stream.read(&mut buffer).unwrap();
+        seen.push_str(&String::from_utf8_lossy(&buffer[..read]));
+    }
+
+    assert!(seen.contains(&peer.to_string()), "{seen}");
+
+    let quiet = start(db, Some(fake_node()), &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+
+    assert_eq!(get(quiet, "/stream").0, 404);
+}
+
+const BUMPER: &str = r#"
+local M = {}
+
+function M.bump(by)
+    local count = tonumber(storage.get("count") or "0") + by
+    storage.set("count", tostring(count))
+    events.emit("Bumped", count)
+    return count
+end
+
+return M
+"#;
+
+#[test]
+fn read_only_calls_run_on_a_copy_that_is_thrown_away() {
+    let mut fixture = serve();
+    let authority = DevAuthority::dev_keypair();
+    let deploy = SignedTx::sign(
+        Tx::Deploy {
+            code: Code::Lua(BUMPER.to_string()),
+        },
+        2,
+        FeeOffer::NONE,
+        &authority,
+    );
+    produce(&mut fixture.chain, vec![deploy]);
+    let bumper = contract_address(&authority.public().address(), 2, HashType::default_chain());
+    let call = |body: Value| request(fixture.address, "POST", "/call", &body.to_string());
+    let bump = json!({ "contract": bumper.to_string(), "function": "bump", "args": [{ "type": "number", "value": 5 }] });
+
+    for _ in 0..2 {
+        let (status, _, answer) = call(bump.clone());
+
+        assert_eq!(status, 200, "{answer}");
+        assert_eq!(answer["status"], "returned");
+        assert_eq!(answer["values"], json!([{ "type": "number", "value": 5.0 }]));
+        assert_eq!(answer["events"][0]["name"], "Bumped");
+        assert_eq!(answer["trace"]["hops"][0]["function"], "bump");
+        assert!(answer["fuel_used"].as_u64().unwrap() > 0);
+    }
+
+    let (_, _, missing) = call(json!({ "contract": bumper.to_string(), "function": "nope" }));
+
+    assert_eq!(missing["status"], "failed");
+    assert_eq!(call(json!({ "contract": fixture.bob.to_string(), "function": "bump" })).0, 404);
+    assert_eq!(call(json!({ "contract": bumper.to_string(), "function": "bump", "args": [{ "type": "i64", "value": "x" }] })).0, 400);
+    assert_eq!(call(json!({ "function": "bump" })).0, 400);
+}
+
+#[test]
+fn status_names_the_coin() {
+    let fixture = serve();
+
+    assert_eq!(ok(fixture.address, "/status")["coin"], json!({ "symbol": "DEV", "decimals": 18 }));
 }

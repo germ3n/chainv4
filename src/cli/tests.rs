@@ -120,7 +120,7 @@ mod send {
                 node = node.validate(DevAuthority::dev_keypair());
             }
 
-            let api = crate::api::start(db, Some(node.submitter()), &genesis, "127.0.0.1:0".parse().unwrap()).unwrap();
+            let api = crate::api::start(db, Some(node.handle()), &genesis, "127.0.0.1:0".parse().unwrap(), Default::default()).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
             let thread = std::thread::spawn({
                 let stop = stop.clone();

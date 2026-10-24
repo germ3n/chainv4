@@ -7,6 +7,7 @@ use {
     crate::structs::code::{Code, Engine},
     crate::structs::event::Event,
     crate::structs::hash::{Hash, HashType},
+    crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
     crate::vm::{CHECK_PERMS, CallContext, INIT, Limits, MIGRATE, Outcome, Vm, VmError},
@@ -127,7 +128,7 @@ impl<'a> Contracts<'a> {
             contract: *contract,
             value: u256::ZERO,
         };
-        let asked = self.permits(vm, &current, context, "upgrade", limits)?;
+        let (asked, mut trace) = self.permits(vm, &current, context, "upgrade", limits)?;
         let record = load(vm, current.deployer, code, limits)?;
         self.state.put_value(Column::Contracts, address_key(contract), &record);
         let remaining = Limits {
@@ -136,12 +137,15 @@ impl<'a> Contracts<'a> {
         };
         let mut hooked = self.hook(vm, &record, context, MIGRATE, remaining)?;
         hooked.fuel_used += asked;
+        trace.append(std::mem::take(&mut hooked.trace));
+        hooked.trace = trace;
 
         Ok(hooked)
     }
 
     /// Asks a contract's check_perms whether context.sender has a permission, on a throwaway
-    /// copy of state. Returns the fuel the question burned when the answer is yes.
+    /// copy of state. Returns the fuel the question burned and where it went when the answer is
+    /// yes.
     fn permits(
         &self,
         vm: &Arc<Vm>,
@@ -149,7 +153,7 @@ impl<'a> Contracts<'a> {
         context: CallContext,
         permission: &str,
         limits: Limits,
-    ) -> Result<u64, RegistryError> {
+    ) -> Result<(u64, Trace), RegistryError> {
         if !record.functions.iter().any(|name| name == CHECK_PERMS) {
             return Err(RegistryError::NotPermitted);
         }
@@ -159,10 +163,12 @@ impl<'a> Contracts<'a> {
             TxCallArgumentType::String(permission.to_string()),
             TxCallArgumentType::Address(context.sender),
         ];
-        let outcome = vm.run(&scratch, record, context, CHECK_PERMS, &args, limits);
+        let mut outcome = vm.run(&scratch, record, context, CHECK_PERMS, &args, limits);
+        // What it emitted was thrown away with the scratch state.
+        outcome.trace.forget_events();
 
         match outcome.result {
-            Ok(answer) if answer == [TxCallArgumentType::Bool(true)] => Ok(outcome.fuel_used),
+            Ok(answer) if answer == [TxCallArgumentType::Bool(true)] => Ok((outcome.fuel_used, outcome.trace)),
             Err(VmError::Storage(err)) => Err(RegistryError::Db(err)),
             _ => Err(RegistryError::NotPermitted),
         }
@@ -187,6 +193,7 @@ impl<'a> Contracts<'a> {
         Ok(Hooked {
             fuel_used: outcome.fuel_used,
             events: outcome.events,
+            trace: outcome.trace,
         })
     }
 
@@ -238,6 +245,8 @@ pub struct Hooked {
     pub fuel_used: u64,
     #[document(summary = "What init or migrate emitted, in order.")]
     pub events: Vec<Event>,
+    #[document(summary = "Where init, or check_perms and then migrate, went.")]
+    pub trace: Trace,
 }
 
 /// Checks and loads code into the record that stores it.

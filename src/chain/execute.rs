@@ -3,10 +3,12 @@ use {
     crate::db::{DbError, State},
     crate::registry::signers::{SignerSet, Signers},
     crate::registry::validators::{Staking, Validators},
+    crate::registry::contracts::Hooked,
     crate::registry::{Accounts, Contracts, RegistryError},
     crate::structs::address::Address,
     crate::structs::code::Engine,
     crate::structs::event::Event,
+    crate::structs::trace::Trace,
     crate::structs::hash::Hash,
     crate::chain::fees::{Charged, Fees, Scoring},
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
@@ -150,6 +152,8 @@ pub struct Receipt {
     pub result: Result<Effect, Failure>,
     #[document(summary = "What its contract calls emitted, in order. Empty when it failed.")]
     pub events: Vec<Event>,
+    #[document(summary = "Where its contracts went: every call, delegate and transfer, failed ones included. Empty for a transaction that runs no contract.")]
+    pub trace: Trace,
 }
 
 #[document(
@@ -302,7 +306,12 @@ pub(crate) fn execute_verified(
     }
 
     let layer = Arc::new(State::new(block.clone()));
-    let (fuel_used, result, events) = run(&layer, tx, sender, rules, limits, vm, context.height);
+    let (result, contracted) = run(&layer, tx, sender, rules, limits, vm, context.height);
+    let Contracted {
+        fuel_used,
+        mut events,
+        mut trace,
+    } = contracted;
 
     // A failing database is the node's fault, never the transaction's.
     match &result {
@@ -322,7 +331,12 @@ pub(crate) fn execute_verified(
         Some(payment) => settle(block, tx, sender, &payment, burned, result.is_err(), vm, rules, context)?,
         None => Charged::default(),
     };
-    let events = if result.is_ok() { events } else { Vec::new() };
+
+    if result.is_err() {
+        events.clear();
+        trace.forget_events();
+    }
+
     let receipt = Receipt {
         id: tx.id(rules.hash),
         fuel_used,
@@ -330,6 +344,7 @@ pub(crate) fn execute_verified(
         fee: charged.fee,
         result,
         events,
+        trace,
     };
 
     Ok(Executed {
@@ -387,6 +402,25 @@ fn node_fault(err: RegistryError) -> ExecuteError {
     }
 }
 
+/// What a transaction's contracts did: the fuel they burned, what they emitted, and where they
+/// went. Nothing, for a transaction that runs none.
+#[derive(Default)]
+struct Contracted {
+    fuel_used: u64,
+    events: Vec<Event>,
+    trace: Trace,
+}
+
+impl From<Hooked> for Contracted {
+    fn from(hooked: Hooked) -> Contracted {
+        Contracted {
+            fuel_used: hooked.fuel_used,
+            events: hooked.events,
+            trace: hooked.trace,
+        }
+    }
+}
+
 fn run(
     layer: &Arc<State>,
     signed: &SignedTx,
@@ -395,27 +429,27 @@ fn run(
     limits: Limits,
     vm: &Arc<Vm>,
     height: u64,
-) -> (u64, Result<Effect, Failure>, Vec<Event>) {
+) -> (Result<Effect, Failure>, Contracted) {
     let accounts = Accounts::new(layer);
     let staking = |run: &dyn Fn(&Validators, &StakingRules, u64) -> Result<(), RegistryError>| {
         let Some(finality) = &rules.staking else {
-            return (0, Err(Failure::NoStaking), Vec::new());
+            return (Err(Failure::NoStaking), Contracted::default());
         };
         let epoch = height / finality.checkpoint_interval.max(1);
 
-        (0, moved(run(&Validators::new(layer), finality, epoch)), Vec::new())
+        (moved(run(&Validators::new(layer), finality, epoch)), Contracted::default())
     };
 
     match &signed.tx {
-        Tx::Transfer { from, to, amount } => (0, moved(accounts.transfer(from, to, amount.to_u256())), Vec::new()),
+        Tx::Transfer { from, to, amount } => (moved(accounts.transfer(from, to, amount.to_u256())), Contracted::default()),
         Tx::Mint { to, amount } => {
             if rules.minter != Some(sender) {
-                return (0, Err(Failure::NotMinter), Vec::new());
+                return (Err(Failure::NotMinter), Contracted::default());
             }
 
-            (0, moved(accounts.credit(to, amount.to_u256()).map(|_| ())), Vec::new())
+            (moved(accounts.credit(to, amount.to_u256()).map(|_| ())), Contracted::default())
         }
-        Tx::Burn { from, amount } => (0, moved(accounts.debit(from, amount.to_u256()).map(|_| ())), Vec::new()),
+        Tx::Burn { from, amount } => (moved(accounts.debit(from, amount.to_u256()).map(|_| ())), Contracted::default()),
         Tx::ContractCall {
             to,
             func,
@@ -425,7 +459,7 @@ fn run(
             let value = amount.to_u256();
 
             if let Err(err) = accounts.transfer(&sender, to, value) {
-                return (0, Err(Failure::Registry(err)), Vec::new());
+                return (Err(Failure::Registry(err)), Contracted::default());
             }
 
             let context = CallContext {
@@ -436,31 +470,34 @@ fn run(
 
             match Contracts::new(layer).call(vm, &context, func, data, limits) {
                 Ok(outcome) => (
-                    outcome.fuel_used,
                     outcome.result.map(Effect::Returned).map_err(Failure::Contract),
-                    outcome.events,
+                    Contracted {
+                        fuel_used: outcome.fuel_used,
+                        events: outcome.events,
+                        trace: outcome.trace,
+                    },
                 ),
-                Err(err) => (0, Err(Failure::Registry(err)), Vec::new()),
+                Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
             }
         }
         Tx::Deploy { code } => {
             if vm.engine(code.engine()).is_none() {
-                return (0, Err(Failure::EngineNotAllowed(code.engine())), Vec::new());
+                return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
             match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits) {
-                Ok((address, hooked)) => (hooked.fuel_used, Ok(Effect::Deployed(address)), hooked.events),
-                Err(err) => (0, Err(Failure::Registry(err)), Vec::new()),
+                Ok((address, hooked)) => (Ok(Effect::Deployed(address)), hooked.into()),
+                Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
             }
         }
         Tx::Upgrade { contract, code } => {
             if vm.engine(code.engine()).is_none() {
-                return (0, Err(Failure::EngineNotAllowed(code.engine())), Vec::new());
+                return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
             match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits) {
-                Ok(hooked) => (hooked.fuel_used, Ok(Effect::Upgraded(*contract)), hooked.events),
-                Err(err) => (0, Err(Failure::Registry(err)), Vec::new()),
+                Ok(hooked) => (Ok(Effect::Upgraded(*contract)), hooked.into()),
+                Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
             }
         }
         Tx::Bond { voter, amount } => staking(&|validators, finality, epoch| {
@@ -474,7 +511,7 @@ fn run(
             if let Some(finality) = &rules.staking
                 && (first.verify(&finality.chain).is_err() || second.verify(&finality.chain).is_err())
             {
-                return (0, Err(Failure::BadEvidence), Vec::new());
+                return (Err(Failure::BadEvidence), Contracted::default());
             }
 
             staking(&|validators, finality, epoch| {
@@ -488,12 +525,12 @@ fn run(
             change_threshold,
         } => {
             let Some(rules) = &rules.signers else {
-                return (0, Err(Failure::NoSigners), Vec::new());
+                return (Err(Failure::NoSigners), Contracted::default());
             };
             let proposal = SignerSet::new(signers.clone(), *threshold, *change_threshold);
             let approved = Signers::new(layer).approve(&sender, *version, proposal, rules.max_signers);
 
-            (0, moved(approved.map(|_| ())), Vec::new())
+            (moved(approved.map(|_| ())), Contracted::default())
         }
     }
 }

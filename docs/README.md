@@ -23,5 +23,6 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Node and network](node.md) | The node loop, the mempool, peer-to-peer networking and sync. |
 | [Crypto and encoding](crypto.md) | Hashes, keys, signatures, signing domains and how everything is encoded. |
 | [HTTP API](api.md) | Every route and what it answers. |
+| [Explorer](explorer.md) | The egui explorer for the desktop and the browser: pages, hops, tokens, sending and how it stays live. |
 | [Development](development.md) | Building, features, tests, CI, the wiki, and the conventions the code follows. |
 | [Todo](todo.md) | What is done, what is next, and known gaps. |

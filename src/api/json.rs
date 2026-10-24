@@ -4,6 +4,7 @@
 use {
     crate::chain::{TxReceipt, TxStatus},
     crate::crypto::keypair::PublicKey,
+    crate::node::{NodeReport, PeerReport},
     crate::registry::signers::SignerSet,
     crate::registry::validators::ValidatorRecord,
     crate::structs::vote::{Checkpoint, Justification, SignedVote},
@@ -15,8 +16,11 @@ use {
     crate::structs::event::Event,
     crate::structs::code::Code,
     crate::structs::hash::HashType,
-    crate::structs::hex::to_hex,
-    crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
+    crate::structs::hex::{from_hex, to_hex},
+    crate::structs::u256::u256,
+    crate::vm::Outcome,
+    crate::structs::trace::{Hop, HopKind, Trace},
+    crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     serde_json::{Value, json},
 };
 
@@ -60,6 +64,90 @@ pub fn block(block: &Block, receipts: &[Option<TxReceipt>], hash: HashType) -> V
     value
 }
 
+/// How a node is doing, as GET /node answers.
+pub fn node(report: &NodeReport) -> Value {
+    let counters = &report.counters;
+
+    json!({
+        "started": report.started,
+        "now": report.now,
+        "uptime_ms": report.now.saturating_sub(report.started),
+        "listening": report.listening.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "producing": report.producing,
+        "validating": report.validating,
+        "mempool": { "count": report.waiting, "capacity": report.capacity },
+        "syncing": report.syncing.map(|(peer, from)| json!({ "peer": peer.to_string(), "from": from })),
+        "counters": {
+            "blocks_heard": counters.blocks_heard,
+            "blocks_imported": counters.blocks_imported,
+            "side_blocks": counters.side_blocks,
+            "reorgs": counters.reorgs,
+            "blocks_rejected": counters.blocks_rejected,
+            "blocks_produced": counters.blocks_produced,
+            "txs_heard": counters.txs_heard,
+            "txs_submitted": counters.txs_submitted,
+            "txs_refused": counters.txs_refused,
+            "votes_heard": counters.votes_heard,
+            "votes_cast": counters.votes_cast,
+            "requests_served": counters.requests_served,
+            "requests_sent": counters.requests_sent,
+            "requests_failed": counters.requests_failed,
+            "connections": counters.connections,
+        },
+        "peers": report.peers.iter().map(peer).collect::<Vec<_>>(),
+    })
+}
+
+fn peer(peer: &PeerReport) -> Value {
+    json!({
+        "id": peer.id.to_string(),
+        "address": peer.address.to_string(),
+        "since": peer.since,
+        "heard": { "blocks": peer.heard.blocks, "txs": peer.heard.txs, "votes": peer.heard.votes },
+        "chain": peer.chain.map(|(height, work, justified)| json!({
+            "height": height,
+            "work": work.to_string(),
+            "justified": justified,
+        })),
+    })
+}
+
+/// A fee offer, as POST /offer answers.
+pub fn fee_offer(offer: &FeeOffer) -> Value {
+    json!({
+        "gas_limit": offer.gas_limit,
+        "max_price": offer.max_price.to_string(),
+        "tip": offer.tip.to_string(),
+    })
+}
+
+/// What a streaming node did: the event's name, and its data.
+#[cfg(feature = "stream")]
+pub fn node_event(event: &crate::node::NodeEvent, hash: HashType) -> (&'static str, Value) {
+    use crate::node::NodeEvent;
+
+    match event {
+        NodeEvent::Block { block, main } => {
+            let mut value = summary(block);
+            value["main"] = (*main).into();
+
+            ("block", value)
+        }
+        NodeEvent::Reorganized { undone, applied } => (
+            "reorganized",
+            json!({
+                "undone": undone.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "applied": applied.iter().map(|block| summary(block)).collect::<Vec<_>>(),
+            }),
+        ),
+        NodeEvent::Justified(checkpoint) => ("justified", self::checkpoint(checkpoint)),
+        NodeEvent::Finalized(checkpoint) => ("finalized", self::checkpoint(checkpoint)),
+        NodeEvent::Queued(tx) => ("queued", signed_tx(tx, hash)),
+        NodeEvent::PeerUp { peer, address } => ("peer_up", json!({ "id": peer.to_string(), "address": address.to_string() })),
+        NodeEvent::PeerDown(peer) => ("peer_down", json!({ "id": peer.to_string() })),
+    }
+}
+
 pub fn seal(seal: &Seal) -> Value {
     match seal {
         Seal::None => Value::Null,
@@ -96,8 +184,37 @@ fn outcome(receipt: &TxReceipt) -> Value {
     value["gas_used"] = receipt.gas_used.into();
     value["fee"] = receipt.fee.to_string().into();
     value["events"] = receipt.events.iter().map(event).collect();
+    value["trace"] = trace(&receipt.trace);
 
     value
+}
+
+/// Where a transaction's contracts went, hop by hop, depth first.
+pub fn trace(trace: &Trace) -> Value {
+    json!({
+        "hops": trace.hops.iter().map(hop).collect::<Vec<_>>(),
+        "dropped": trace.dropped,
+    })
+}
+
+fn hop(hop: &Hop) -> Value {
+    let kind = match hop.kind {
+        HopKind::Call => "call",
+        HopKind::Delegate => "delegate",
+        HopKind::Transfer => "transfer",
+    };
+
+    json!({
+        "depth": hop.depth,
+        "kind": kind,
+        "from": hop.from.to_string(),
+        "to": hop.to.to_string(),
+        "function": hop.function,
+        "value": hop.value.to_string(),
+        "fuel_used": hop.fuel_used,
+        "error": hop.error,
+        "events": hop.events,
+    })
 }
 
 pub fn event(event: &Event) -> Value {
@@ -256,6 +373,44 @@ pub fn argument(argument: &TxCallArgumentType) -> Value {
     };
 
     json!({ "type": kind, "value": value })
+}
+
+/// A call argument from its type and value, as argument writes it. Whole numbers may also be
+/// JSON numbers.
+pub fn parse_argument(value: &Value) -> Result<TxCallArgumentType, String> {
+    let kind = value.get("type").and_then(Value::as_str).ok_or("an argument is {\"type\": …, \"value\": …}")?;
+    let given = value.get("value").ok_or("an argument needs a value")?;
+    let text = given.as_str().map(str::to_string).unwrap_or_else(|| given.to_string());
+    let bad = || format!("not a {kind}: {text}");
+    let argument = match kind {
+        "address" => TxCallArgumentType::Address(text.parse().map_err(|_| bad())?),
+        "amount" => TxCallArgumentType::Amount(Amount::U256(u256::from_str_radix(&text, 10).map_err(|_| bad())?)),
+        "bytes" => TxCallArgumentType::Bytes(from_hex(&text).ok_or_else(bad)?),
+        "bool" => TxCallArgumentType::Bool(given.as_bool().or_else(|| text.parse().ok()).ok_or_else(bad)?),
+        "string" => TxCallArgumentType::String(text),
+        "number" => TxCallArgumentType::Number(given.as_f64().or_else(|| text.parse().ok()).ok_or_else(bad)?),
+        "i64" => TxCallArgumentType::I64(text.parse().map_err(|_| bad())?),
+        "u64" => TxCallArgumentType::U64(text.parse().map_err(|_| bad())?),
+        "i128" => TxCallArgumentType::I128(text.parse().map_err(|_| bad())?),
+        "u128" => TxCallArgumentType::U128(text.parse().map_err(|_| bad())?),
+        "u256" => TxCallArgumentType::U256(u256::from_str_radix(&text, 10).map_err(|_| bad())?),
+        other => return Err(format!("unknown argument type {other}")),
+    };
+
+    Ok(argument)
+}
+
+/// What a read-only call did: its values or why it failed, and what it would have emitted.
+pub fn call(outcome: &Outcome) -> Value {
+    let mut value = match &outcome.result {
+        Ok(values) => json!({ "status": "returned", "values": values.iter().map(argument).collect::<Vec<_>>() }),
+        Err(err) => json!({ "status": "failed", "error": err.to_string() }),
+    };
+    value["fuel_used"] = outcome.fuel_used.into();
+    value["events"] = outcome.events.iter().map(event).collect();
+    value["trace"] = trace(&outcome.trace);
+
+    value
 }
 
 pub fn account(address: &Address, account: &Account) -> Value {

@@ -5,12 +5,12 @@ other pages explain each part in full; this one is the short list to keep in min
 
 ## Running a chain
 
-- **Old `chain.db` files are refused.** Formats change as features land, and nothing records a
-  storage format to migrate from. A node that finds a database written for another genesis stops
-  with `WrongGenesis`: delete it, or point `--db` elsewhere.
-  - Recent changes that did this: block headers now carry gas used and a base price,
-    transactions a fee offer, and genesis its fees.
-  - Switching `--consensus`, `--genesis` or build features does it too.
+- **Old `chain.db` files are refused.** Formats change as features land, and nothing migrates
+  them. Delete the database, or point `--db` elsewhere. A node stops with:
+  - `WrongGenesis` on a database written for another genesis. Switching `--consensus`,
+    `--genesis` or build features does this, and so did genesis gaining its coin;
+  - `OldFormat` on a database kept in another storage format (`STORAGE_FORMAT`), such as every
+    database from before receipts carried traces.
 - **There are two dev chains, and pow is the default.**
   - `--consensus pow`, mined with `--mine`;
   - `--consensus authority`, produced with `--produce` on exactly one node.
@@ -43,6 +43,13 @@ other pages explain each part in full; this one is the short list to keep in min
   (`--timeout`, `--confirmations`, `--final`, `--no-wait`). It exits non-zero when the
   transaction landed but failed.
 - **The node's peer id changes on every start.** Its libp2p key is generated fresh each run.
+- **A node only streams when asked.** `--stream` turns on `GET /stream`. Without it, clients
+  such as the explorer poll.
+- **Read-only calls hold up the API.** `POST /call` runs a contract under the chain's fuel cap on
+  the API's one thread, and every other request waits for it.
+- **The explorer signs where it runs.** Its key stays in the window, desktop or browser, and only
+  signed transactions go to the node. Serve the web app from the node itself with
+  `--explorer explorer/dist`, or allow the page's origin with `--cors`. See [Explorer](explorer.md).
 
 ## Consensus-critical: changing these makes a new chain
 
@@ -88,6 +95,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   by side in rounds on what the block holds so far, and go in in order. One that read what an
   earlier one wrote all the same runs again. Execution must therefore stay deterministic and read
   state only through `State`: a read that went around it would escape the conflict check.
+- **Receipts keep a trace.** Every call, delegate and transfer a transaction's contracts made,
+  failed ones included, up to 256 hops. It is not consensus: nothing hashes it.
+- **Coin decimals are for display only.** Genesis names the coin's symbol and decimals, but the
+  chain counts every balance, fee and reward in whole units.
 - **Rewards have no coinbase transaction.** The chain credits the producer after a block's
   transactions run, and a reorg takes it back. A reward can be spent from the next block on.
 - **Reorgs reach back at most `max_reorg_depth` blocks**, 100 on the dev chains. Finality bounds

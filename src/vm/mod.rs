@@ -11,6 +11,7 @@ use {
     crate::structs::code::Engine,
     crate::structs::event::Event,
     crate::structs::hash::{Hash, HashType},
+    crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
     r#macro::document,
@@ -182,6 +183,8 @@ pub struct Outcome {
     pub result: Result<Vec<TxCallArgumentType>, VmError>,
     #[document(summary = "What the call and the calls it made emitted, in order. Empty when it failed.")]
     pub events: Vec<Event>,
+    #[document(summary = "Where the call went, for one a transaction or the chain started: its own hop and every hop under it, failed or not. Empty for a call one contract made to another, whose hops are in the trace of the run it belongs to.")]
+    pub trace: Trace,
 }
 
 impl Outcome {
@@ -191,6 +194,7 @@ impl Outcome {
             fuel_used: 0,
             result: Err(err),
             events: Vec::new(),
+            trace: Trace::default(),
         }
     }
 }
@@ -357,7 +361,7 @@ impl Vm {
         let layer = Arc::new(State::new(state.clone()));
         let host = Host::root(layer, context, limits.memory, self.clone());
 
-        host::run(state, record, function, args, host, limits)
+        host::run_traced(state, record, function, args, host, limits)
     }
 }
 

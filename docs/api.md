@@ -32,6 +32,7 @@ Where the chain stands:
 | `genesis`, `tip`, `height`, `timestamp` | The chain and its tip. |
 | `difficulty`, `work` | The tip's difficulty and the main chain's total work. |
 | `hash` | The chain hash, such as `blake3`. Clients need it to predict contract addresses. |
+| `coin` | The chain's coin as genesis names it: its `symbol` and `decimals`, for showing amounts. |
 | `finality` | `null`, or `type`, `epoch`, `checkpoint_interval`, and the `justified` and `finalized` checkpoints, each with `epoch`, `block` and `height`. |
 | `fees` | `null`, or the fee settings as genesis files write them, with `base_price`, what a transaction sent now must offer at least, and `tx_fuel`, the chain's fuel cap per transaction. |
 
@@ -51,6 +52,7 @@ Each summary has:
 
 **What it returns:**
 - the summary;
+- whether it is on the main chain (`main`);
 - its `seal`;
 - its `proofs`, each with its link and voters;
 - every transaction.
@@ -74,7 +76,21 @@ Each summary has:
 - what it cost: `fuel_used`, `gas_used`, `fee`;
 - its `events`;
 - its `status`: `done`, `deployed` with `contract`, `upgraded` with `contract`, `returned` with
-  `values`, or `failed` with `error`.
+  `values`, or `failed` with `error`;
+- its `trace`: where its contracts went (see below).
+
+**The trace** is `hops`, depth first, and `dropped`, how many hops past the 256 a receipt keeps
+were only counted. Each hop has:
+- `depth`: 0 for what the transaction ran itself;
+- `kind`: `call`, `delegate` or `transfer`;
+- `from`, `to`, `function` and `value`;
+- `fuel_used`, including the hops under it;
+- `error`: why it failed, or `null`;
+- `events`: where the events it emitted itself sit in the receipt's `events`, empty once it or
+  anything above it failed.
+
+A transaction that runs no contract has no hops. Receipts in `/blocks/{block}` carry the trace
+too.
 
 ### `GET /accounts/{address}`
 
@@ -96,6 +112,82 @@ past the transaction is refused.
 `id`.
 
 `chainv4 send` is a client of this route.
+
+### `POST /offer`
+
+**The body:** `{"tx": "0x…"}`, the transaction signed with any offer, such as a zero one. Every
+field of an offer has a fixed size, so it weighs what the real one will. `gas_limit`, and
+`max_price` and `tip` as decimal strings, keep what the sender chose.
+
+**What it does:** works out the offer `chainv4 send` would make now, for the rest:
+- a gas limit of its intrinsic cost, plus the fuel cap's worth for a call, deploy or upgrade;
+- a max price of twice the next base price plus the tip under a base fee, or the base price
+  plus the tip when senders bid;
+- a tip of 0.
+
+It answers `gas_limit`, `max_price` and `tip`: all zero on a chain without fees. Clients that
+cannot run the chain's fee code, such as the [explorer](explorer.md) in a browser, use it.
+
+### `POST /call`
+
+**The body:** `contract`, `function` by name, `args` as a list of `{"type": …, "value": …}` the
+way `values` are written, and optionally the `sender` it runs as (the zero address otherwise).
+
+**What it does:** runs the function as a transaction would call it, on a throwaway copy of the
+committed state, under the chain's fuel cap. Whatever it writes, sends or emits is dropped.
+
+**What it answers:**
+- its `status`, `returned` with `values` or `failed` with `error`;
+- `fuel_used`;
+- the `events` it would have emitted;
+- its `trace`.
+
+404 for an address that holds no contract. For reading contracts, such as a token's
+`decimals()` or someone's `balance_of`.
+
+### `GET /forks?limit=N`
+
+The side branches the node stores, every block off the main chain, newest first, `limit` of them
+(256 by default, at most 1,000). Each is walked from a leaf back to where it meets the main chain.
+
+**What it answers:**
+- `blocks`: summaries, whose `parent` links each branch to the main chain;
+- `tips`: every leaf, the tip among them.
+
+### `GET /node`
+
+How the node behind the API is doing. 503 when no node runs behind it.
+
+| Field | What it is |
+| --- | --- |
+| `started`, `now`, `uptime_ms` | When its loop first ran, the time of the report, and the time between. |
+| `listening` | Where peers reach it, each ending in `/p2p/` and its peer id. |
+| `producing`, `validating` | Whether it produces blocks and votes on finality. |
+| `mempool` | `count` waiting and the `capacity`. |
+| `syncing` | `null`, or the `peer` it fetches blocks from and the height `from`. |
+| `counters` | What it heard and did since it started: blocks heard, imported, stored on side branches, rejected and produced; reorgs; transactions heard, submitted and refused; votes heard and cast; sync requests served, sent and failed; connections. |
+| `peers` | Each connected peer's `id`, `address` and `since`, what it gossiped (`heard`: `blocks`, `txs`, `votes`), and its `chain` from its last status (`height`, `work`, `justified`), or `null`. |
+
+### `GET /mempool?limit=N`
+
+What waits for a block, by sender and nonce: `count`, `capacity`, and the first `limit`
+transactions (100 by default, at most 1,000), shown as blocks show them. 503 without a node.
+
+### `GET /stream`
+
+Server-sent events, for a node started with `--stream`; 404 otherwise. Each event has a name
+and JSON data:
+
+| Event | Data |
+| --- | --- |
+| `block` | A stored block's summary, with `main` true when it extended the main chain. |
+| `reorganized` | The ids taken off (`undone`, newest first), and the summaries put on (`applied`, oldest first). |
+| `justified`, `finalized` | The checkpoint: `epoch` and `block`. |
+| `queued` | A transaction that joined the mempool. |
+| `peer_up`, `peer_down` | The peer's `id`, and for `peer_up` its `address`. |
+| `lagged` | The client fell too far behind and missed `missed` events: read the chain again. |
+
+A comment line keeps the connection alive every 15 seconds.
 
 ### `GET /validators`
 
@@ -134,8 +226,21 @@ Sets show their `signers`, `threshold` and `change_threshold`.
 Conflicting votes this node has seen, newest last. Each has its `voter` and both votes. Each vote
 is shown readable, and `encoded` as `chainv4 send slash` takes it.
 
+## Serving web pages
+
+**Other origins:** browsers only let a page call an API on its own origin. `--cors ORIGIN` lets
+pages from another origin call the API, such as `http://localhost:8081`, or `*` for any. Repeat
+it for several. Allowed pages get the CORS headers, and their preflight questions are answered.
+
+**The explorer:** `--explorer DIR` serves the [explorer](explorer.md)'s web app, built with
+`trunk build` into `explorer/dist`, from the API's own `/`. Its files never shadow a route, and
+only plain paths below the directory are served.
+
 ## What to keep in mind
 
 - **Plain HTTP only.** The CLI is built without TLS, so keep the API on a trusted network.
-- **One request at a time,** with no contract views and no read-only calls.
+- **One request at a time.** A read-only call runs on the API's thread under the chain's fuel
+  cap, and holds up every other request while it runs.
+- **`/node`, `/mempool` and `/stream` ask the node.** The rest read the database; these go to
+  the node loop, which answers between blocks.
 - **Reads are not snapshot-consistent.** A request that reads several keys can see two tips.

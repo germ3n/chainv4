@@ -1,0 +1,7 @@
+# Builds the web app: trunk build --release. The result in dist/ is what a node serves with
+# --explorer explorer/dist.
+[build]
+target = "index.html"
+dist = "dist"
+# Relative, so the app works from whatever path serves it.
+public_url = "./"

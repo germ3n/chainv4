@@ -37,6 +37,19 @@ struct PeerChain {
     next: Option<u64>,
 }
 
+impl SyncState {
+    /// How far a peer's chain got, from its last status: its height, total work, and the epoch it
+    /// justified last.
+    pub(super) fn chain_of(&self, peer: &PeerId) -> Option<(u64, u256, u64)> {
+        self.peers.get(peer).map(|chain| (chain.height, chain.work, chain.justified))
+    }
+
+    /// The peer blocks are being fetched from, and from which height.
+    pub(super) fn asking(&self) -> Option<(PeerId, u64)> {
+        self.asking
+    }
+}
+
 impl Node {
     /// A peer left, or failed to answer: stop counting on it.
     pub(super) fn peer_failed(&mut self, peer: PeerId) {

@@ -41,7 +41,7 @@ holds addresses that matter.
 | `Storage` | Contract storage, by the contract's address followed by the contract's own key. | Yes |
 | `Blocks` | Every block this node accepted, by id, on the main chain or a side branch. | Node's |
 | `Heights` | Main-chain block id by height, big-endian so heights sort in order. | Node's |
-| `Meta` | Bookkeeping, such as which block is the tip. | Node's |
+| `Meta` | Bookkeeping: the tip (`tip`), every leaf block (`tips`), and the storage format (`format`). | Node's |
 | `Work` | Total work of the chain ending at each block, which fork choice compares. | Node's |
 | `Undo` | What each recent main-chain block replaced, for reorgs. | Node's |
 | `Receipts` | Where each transaction landed and what it did, by id. | Node's |
@@ -55,6 +55,16 @@ holds addresses that matter.
 
 **`Finality`** is outside the chain's state altogether: it is learned from the network, so two
 nodes can differ in it, and a reorg never touches it.
+
+## The storage format
+
+`STORAGE_FORMAT` names the layout records are kept in, and genesis writes it to `Meta`.
+- **On open:** a node refuses a database kept in another format (`OldFormat`), or in none, as
+  databases from before formats were recorded are. It never misreads one.
+- **When to bump it:** whenever a stored record changes shape.
+- **Format 1:** receipts carry traces, and the chain keeps its leaf blocks in `Meta`.
+
+There are no migrations: delete the database, or point `--db` elsewhere.
 
 ## Undo records
 
@@ -93,8 +103,8 @@ Records are stored in the chain's encoding (see [Crypto and encoding](crypto.md)
 
 - **A database belongs to one chain.** Opening one written for another genesis fails with
   `WrongGenesis`.
-- **No schema version.** Nothing records the storage format, so a format change cannot be
-  detected or migrated. Delete the database after one.
+- **Formats are checked, not migrated.** A database in another storage format is refused, so it
+  must be deleted after a format change. A genesis change refuses it as well (`WrongGenesis`).
 - **Commits are not fsynced.** A power cut can lose the last few blocks, though never half of
   one.
 - **No pruning.** Every block and all history are kept, and side branches are never pruned.

@@ -19,7 +19,7 @@ use {
     crate::crypto::hashable::Hashable,
     crate::db::State,
     crate::structs::address::Address,
-    crate::structs::tx::{FeeOffer, SignedTx},
+    crate::structs::tx::{FeeOffer, SignedTx, Tx},
     crate::structs::u256::u256,
     crate::vm::{Limits, Vm},
     r#macro::document,
@@ -213,6 +213,21 @@ pub struct Charged {
     pub burned: u256,
 }
 
+#[document(
+    summary = "The parts of a fee offer a sender set itself; Fees::offer fills in the rest.",
+    category = "Fees",
+    see_also = "Fees::offer, FeeOffer",
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OfferChoice {
+    #[document(summary = "The most gas it may use.")]
+    pub gas_limit: Option<u64>,
+    #[document(summary = "The most it pays per gas.")]
+    pub max_price: Option<u256>,
+    #[document(summary = "What it adds per gas for the producer, under a base fee.")]
+    pub tip: Option<u256>,
+}
+
 impl Fees {
     #[document(parent = "Fees", summary = "The settings these fees came from.")]
     pub fn config(&self) -> &FeeConfig {
@@ -240,6 +255,40 @@ impl Fees {
     )]
     pub fn priority(&self, base: u256, offer: &FeeOffer) -> u256 {
         self.pricing.price(base, offer).map_or(u256::ZERO, |price| price - base)
+    }
+
+    #[document(
+        parent = "Fees",
+        summary = "A fee offer sure to cover a transaction sent now, keeping what its sender chose. A gas limit left open is the transaction's intrinsic cost, plus the fuel cap's worth for a call, deploy or upgrade, at most what a block holds. A max price left open is twice the base price plus the tip under a base fee, and the base price plus the tip when senders bid. A tip left open is 0.",
+        params = {
+            base = "The base price the next block will have.",
+            tx_fuel = "The chain's fuel cap per transaction.",
+            probe = "The transaction, signed by its sender with any offer. Every field of an offer has a fixed size, so it weighs what the real one will.",
+            chosen = "What the sender set itself.",
+        },
+        see_also = "OfferChoice",
+    )]
+    pub fn offer(&self, base: u256, tx_fuel: u64, probe: &SignedTx, chosen: OfferChoice) -> FeeOffer {
+        let tip = chosen.tip.unwrap_or_default();
+        let max_price = match (chosen.max_price, &self.config.pricing) {
+            (Some(max_price), _) => max_price,
+            (None, PricingConfig::BaseFee(_)) => base * u256::from(2u64) + tip,
+            (None, PricingConfig::Bid(_)) => base + tip,
+        };
+        let gas_limit = chosen.gas_limit.unwrap_or_else(|| {
+            let fuel = match probe.tx {
+                Tx::ContractCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } => self.schedule.for_fuel(tx_fuel),
+                _ => 0,
+            };
+
+            self.schedule.intrinsic(probe).saturating_add(fuel).min(self.config.block_gas_limit)
+        });
+
+        FeeOffer {
+            gas_limit,
+            max_price,
+            tip,
+        }
     }
 
     #[document(

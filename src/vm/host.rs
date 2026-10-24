@@ -5,6 +5,7 @@ use {
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
     crate::structs::event::Event,
+    crate::structs::trace::{Hop, HopKind, Trace},
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
     r#macro::document,
@@ -50,6 +51,12 @@ pub struct Host {
     events: Arc<Mutex<Vec<Event>>>,
     /// How many events this call emitted itself.
     emitted: Arc<Mutex<usize>>,
+    /// Every hop in this tree of calls so far, shared by all of them.
+    trace: Arc<Mutex<Trace>>,
+    /// Where this call's own hop is in the trace: None for one nobody traced, or past MAX_HOPS.
+    hop: Option<usize>,
+    /// Where this call's events start among the receipt's, if every call above it succeeds.
+    offset: usize,
 }
 
 impl Host {
@@ -73,6 +80,9 @@ impl Host {
             vm,
             events: Arc::default(),
             emitted: Arc::default(),
+            trace: Arc::default(),
+            hop: None,
+            offset: 0,
         }
     }
 
@@ -136,7 +146,11 @@ impl Host {
         panics = "InsufficientBalance when the contract holds less than amount.",
     )]
     pub fn transfer(&self, to: &Address, amount: u256) -> Result<(), VmError> {
-        send(&self.state, &self.context.contract, to, amount).map_err(|err| self.refused(err))
+        let hop = self.open(HopKind::Transfer, *to, "", amount);
+        let sent = send(&self.state, &self.context.contract, to, amount).map_err(|err| self.refused(err));
+        lock(&self.trace).close(hop, 0, sent.as_ref().err().map(ToString::to_string));
+
+        sent
     }
 
     #[document(
@@ -159,6 +173,22 @@ impl Host {
         args: &[TxCallArgumentType],
         value: u256,
         fuel: u64,
+    ) -> Outcome {
+        let hop = self.open(HopKind::Call, *target, function, value);
+        let outcome = self.enter(target, function, args, value, fuel, hop);
+        self.close(hop, &outcome);
+
+        outcome
+    }
+
+    fn enter(
+        &self,
+        target: &Address,
+        function: &str,
+        args: &[TxCallArgumentType],
+        value: u256,
+        fuel: u64,
+        hop: Option<usize>,
     ) -> Outcome {
         if self.stack.len() >= MAX_CALL_DEPTH {
             return Outcome::failed(VmError::TooDeep);
@@ -202,6 +232,9 @@ impl Host {
             vm: self.vm.clone(),
             events: Arc::default(),
             emitted: Arc::default(),
+            trace: self.trace.clone(),
+            hop,
+            offset: self.offset + lock(&self.events).len(),
         };
         let limits = Limits {
             fuel,
@@ -231,6 +264,18 @@ impl Host {
         note = "The code runs with full access to this contract: delegate only to code you trust, and keep storage layouts in agreement, since both sides read and write the same keys.",
     )]
     pub fn delegate(&self, target: &Address, function: FunctionId, args: &[TxCallArgumentType], fuel: u64) -> Outcome {
+        let named = match function {
+            FunctionId::Name(name) => name.to_string(),
+            FunctionId::Selector(selector) => format!("0x{selector:016x}"),
+        };
+        let hop = self.open(HopKind::Delegate, *target, &named, u256::ZERO);
+        let outcome = self.run_as_own(target, function, args, fuel, hop);
+        self.close(hop, &outcome);
+
+        outcome
+    }
+
+    fn run_as_own(&self, target: &Address, function: FunctionId, args: &[TxCallArgumentType], fuel: u64, hop: Option<usize>) -> Outcome {
         if self.stack.len() >= MAX_CALL_DEPTH {
             return Outcome::failed(VmError::TooDeep);
         }
@@ -244,6 +289,7 @@ impl Host {
             Ok(routed) => routed,
             Err(err) => return Outcome::failed(err),
         };
+        lock(&self.trace).rename(hop, function);
         let mut stack = self.stack.clone();
         stack.push(self.context.contract);
         let delegated = Host {
@@ -255,6 +301,9 @@ impl Host {
             vm: self.vm.clone(),
             events: Arc::default(),
             emitted: Arc::default(),
+            trace: self.trace.clone(),
+            hop,
+            offset: self.offset + lock(&self.events).len(),
         };
         let limits = Limits {
             fuel,
@@ -296,7 +345,9 @@ impl Host {
         }
 
         *emitted += 1;
-        lock(&self.events).push(Event {
+        let mut events = lock(&self.events);
+        lock(&self.trace).emitted(self.hop, self.offset + events.len());
+        events.push(Event {
             contract: self.context.contract,
             name: name.to_string(),
             data,
@@ -311,6 +362,15 @@ impl Host {
     )]
     pub fn fault(&self) -> Option<DbError> {
         self.fault.lock().expect("never poisoned").clone()
+    }
+
+    /// Records a hop this call starts. Its depth is the calls running, this one included.
+    fn open(&self, kind: HopKind, to: Address, function: &str, value: u256) -> Option<usize> {
+        lock(&self.trace).open(Hop::start(self.stack.len(), kind, self.context.contract, to, function, value))
+    }
+
+    fn close(&self, hop: Option<usize>, outcome: &Outcome) {
+        close(&self.trace, hop, outcome);
     }
 
     fn fail(&self, err: DbError) -> VmError {
@@ -337,6 +397,10 @@ fn send(state: &State, from: &Address, to: &Address, amount: u256) -> Result<(),
     Accounts::new(state).transfer(from, to, amount)
 }
 
+fn close(trace: &Mutex<Trace>, hop: Option<usize>, outcome: &Outcome) {
+    lock(trace).close(hop, outcome.fuel_used, outcome.result.as_ref().err().map(ToString::to_string));
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().expect("never poisoned")
 }
@@ -347,6 +411,27 @@ fn check_key(key: &[u8]) -> Result<(), VmError> {
     }
 
     Ok(())
+}
+
+/// Runs a call that a transaction or the chain itself started, as run does, and traces it: its
+/// own hop at depth 0, from its sender, and every hop under it.
+pub(super) fn run_traced(
+    parent: &Arc<State>,
+    record: &ContractRecord,
+    function: &str,
+    args: &[TxCallArgumentType],
+    mut host: Host,
+    limits: Limits,
+) -> Outcome {
+    let trace = host.trace.clone();
+    let root = Hop::start(0, HopKind::Call, host.context.sender, host.context.contract, function, host.context.value);
+    host.hop = lock(&trace).open(root);
+    let hop = host.hop;
+    let mut outcome = run(parent, record, function, args, host, limits);
+    close(&trace, hop, &outcome);
+    outcome.trace = std::mem::take(&mut *lock(&trace));
+
+    outcome
 }
 
 /// Runs one call in host's state layer, which sits over parent, and merges the layer into parent

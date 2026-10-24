@@ -21,6 +21,7 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | --- | --- |
 | `timestamp` | The genesis block's timestamp, in milliseconds. |
 | `hash` | The chain hash: block and transaction ids, roots, contract addresses, gossip ids. `blake3`, `sha256`, `keccak256`, `blake2s` or `blake2b`, whichever the build has; never `xxh3`. |
+| `coin` | What the chain's coin is called and how it is shown: `symbol` and `decimals`. |
 | `consensus` | Who may produce, by `type`: `authority` or `pow`. |
 | `reward` | `initial`, what a block mints for its producer, and `halving_interval`, blocks between halvings or `null` for never. |
 | `minter` | The one address allowed to send `Mint`, or `null`. |
@@ -30,6 +31,20 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `max_reorg_depth` | How far back the main chain may be rolled. |
 | `finality` | `null`, or the kind and its settings, by `type`: `ffg`, `authority` or `depth`. |
 | `fees` | `null` for free transactions, or the fee settings. |
+
+### coin
+
+`{"symbol": "DEV", "decimals": 18}` on the dev chains.
+
+| Field | What it sets |
+| --- | --- |
+| `symbol` | The coin's ticker: 1 to 12 ASCII letters and digits. |
+| `decimals` | How many decimals a display divides by: 18 means 10¹⁸ units make one coin. At most 77, the digits a balance can have. |
+
+**Only displays read it.** Balances, fees and rewards are always counted in whole units, and the
+chain never divides by the decimals. They are in genesis so every client shows amounts alike:
+`/status` passes them on, and the [explorer](explorer.md) shows amounts by them. Like every
+field, they are part of the genesis id.
 
 ### consensus
 
@@ -73,6 +88,8 @@ has only `min_price`. What each field means is in [Fees](fees.md).
 `Chain::open` checks a genesis before writing anything, and refuses one no chain could run with:
 
 - **Hashes:** a chain or work hash that is not secure: `xxh3`.
+- **The coin:** a symbol that is empty, longer than 12, or not ASCII letters and digits, or more
+  than 77 decimals.
 - **FFG:** a `checkpoint_interval`, `activation_delay` or `reporter_divisor` of 0, or more genesis
   validators than `max_validators`.
 - **Authority finality:**
@@ -85,8 +102,12 @@ has only `min_price`. What each field means is in [Fees](fees.md).
   - a base fee `min` of 0, an `initial` under `min`, or an `elasticity` or `change_denominator`
     of 0;
   - a scorer that is not a contract address, or that has no fuel.
-- **The database:** a database written for a different genesis (`WrongGenesis`). Point `--db`
-  elsewhere or delete it.
+- **The database:**
+  - a database written for a different genesis (`WrongGenesis`);
+  - a database kept in another storage format (`OldFormat`), such as one from before formats
+    were recorded.
+
+  Point `--db` elsewhere or delete it.
 
 ## The dev chains
 

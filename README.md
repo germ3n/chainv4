@@ -11,6 +11,8 @@ This page covers the `chainv4` command and how contracts live on the chain.
   [Good to know](docs/good-to-know.md) for what to keep in mind.
 - **The code reference:** the wiki that every build writes to `target/wiki/index.html`.
 - **Tokens:** they follow the [token standard](docs/token-standard.md).
+- **The explorer:** [explorer/](explorer/), an egui app for the desktop and the browser; see
+  [docs/explorer.md](docs/explorer.md).
 - **What is left to do:** [docs/todo.md](docs/todo.md).
 
 ## Building
@@ -70,6 +72,9 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--validate` | | Vote on [finality](#finality), on chains whose finality takes votes. |
 | `--validator-key PATH` | dev key | The voting key file a validator bonded with, or a signer's key, for `--validate`. |
 | `--http ADDR` | | Serve the HTTP API, such as `127.0.0.1:8080`. |
+| `--stream` | | Push what the node does to API clients as it happens, on `GET /stream`. |
+| `--cors ORIGIN` | | Let web pages from this origin call the API, or `*` for any; repeat for several. |
+| `--explorer DIR` | | Serve the [explorer](docs/explorer.md)'s web app, built into `explorer/dist`, from the API's `/`. |
 
 Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
 
@@ -495,10 +500,10 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "â€
 
 | Route | Answers |
 | --- | --- |
-| `GET /status` | Genesis, tip, height, difficulty, total work, the chain's hash, the epoch with the justified and finalized checkpoints, and the fees with the next block's base price. |
+| `GET /status` | Genesis, tip, height, difficulty, total work, the chain's hash and coin, the epoch with the justified and finalized checkpoints, and the fees with the next block's base price. |
 | `GET /blocks?before=H&limit=N` | Block summaries, newest first, with a `next` cursor. |
 | `GET /blocks/{latest\|height\|id}` | A block, its gas used and base price, its seal, and each transaction with its fee offer and receipt. |
-| `GET /txs/{id}` | Where a transaction landed, its confirmations, whether it is final, its gas used and fee, its result and events; 404 until it is on the main chain. |
+| `GET /txs/{id}` | Where a transaction landed, its confirmations, whether it is final, its gas used and fee, its result, events and trace of every call its contracts made; 404 until it is on the main chain. |
 | `GET /accounts/{address}` | Nonce and balance. |
 | `GET /contracts/{address}` | Engine, deployer, exported functions, and whether it can be upgraded. |
 | `GET /validators` | Every bonded validator, and who votes in the current epoch with what weight: the bonded set under `ffg`, the signers under `authority`; 404 under `depth`. |
@@ -506,6 +511,12 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "â€
 | `GET /signers` | Under `authority`: who votes now, the set decided last and its version, and the approvals so far for changing it. |
 | `GET /evidence` | Conflicting votes this node has seen, each encoded ready for `send slash`. |
 | `POST /txs` | `{"tx": "0xâ€¦"}`, an encoded signed transaction; answers 202 with its id. |
+| `POST /offer` | The same body, signed with any offer; answers the fee offer that covers it now. |
+| `POST /call` | Runs a contract function read-only: `contract`, `function` and `args`; nothing it does is kept. |
+| `GET /forks` | The side branches the node stores, back to where each meets the main chain. |
+| `GET /node` | The node's peers, roles, sync and what it counted since it started. |
+| `GET /mempool` | The transactions waiting for a block. |
+| `GET /stream` | Server-sent events, from a node started with `--stream`: blocks, reorgs, finality, queued transactions and peers. |
 
 Amounts and large integers are decimal strings, hashes and bytes are `0x` hex, and addresses
 are their kind and hex, such as `ed25519:0xâ€¦` or `contract:0xâ€¦`.

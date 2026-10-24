@@ -143,6 +143,36 @@ An event lands in the transaction's receipt only if its call, and every call abo
 | Data, encoded | at most 16 KiB |
 | Events per call | 256, not counting calls it makes |
 
+## Traces
+
+Every run a transaction or the chain starts records where it went, in the receipt's `trace`:
+- a call;
+- a deploy's `init`;
+- an upgrade's `check_perms` and `migrate`.
+
+**What it records:** a hop for the run itself at depth 0, and one for every call, delegate and
+transfer under it, in the order they started (`structs::trace`). Each hop says:
+- who made it and who it reached;
+- the function, by name: a selector that names a function is shown as the function's name;
+- the value it sent, and the fuel it burned with everything under it;
+- why it failed, if it did;
+- which of the receipt's events it emitted itself.
+
+**Failures:**
+- **Failed hops are kept.** A call that failed shows where it failed, even when its caller
+  caught the error and went on.
+- **Their events are not.** A failed hop's events were dropped with it, so it and every hop
+  under it point at no events. A whole transaction that failed keeps its trace, with no events.
+
+**What it is not:**
+- **Not consensus:** nothing hashes the trace, and recording it costs no fuel.
+- **Kept small:** a run keeps at most 256 hops (`MAX_HOPS`). Past that, hops are only counted in
+  `dropped`, so a contract looping over transfers cannot make its receipt huge.
+- **Only on success for hooks:** a deploy or upgrade whose hook fails keeps no trace, as it keeps
+  no receipt values either.
+
+The [explorer](explorer.md) draws traces as a call tree and as a graph.
+
 ## Fuel
 
 Every engine meters fuel: Luau per instruction, in the forked Luau, and wasmi per instruction.

@@ -305,9 +305,10 @@ impl Net {
                 num_established,
                 ..
             } if num_established.get() == 1 => {
-                log::debug!("[net] connected to {peer_id} at {}", endpoint.get_remote_address());
+                let address = endpoint.get_remote_address().clone();
+                log::debug!("[net] connected to {peer_id} at {address}");
 
-                NetEvent::PeerUp(peer_id)
+                NetEvent::PeerUp { peer: peer_id, address }
             }
             SwarmEvent::ConnectionClosed {
                 peer_id,
@@ -315,9 +316,10 @@ impl Net {
                 ..
             } => NetEvent::PeerDown(peer_id),
             SwarmEvent::NewListenAddr { address, .. } => {
-                log::info!("[net] listening on {address}/p2p/{}", self.swarm.local_peer_id());
+                let address = address.with_p2p(*self.swarm.local_peer_id()).unwrap_or_else(|address| address);
+                log::info!("[net] listening on {address}");
 
-                return true;
+                NetEvent::Listening(address)
             }
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 match peer_id {

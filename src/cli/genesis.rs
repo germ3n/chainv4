@@ -14,7 +14,7 @@ use crate::crypto::keypair::PublicKey;
 use {
     super::CliResult,
     crate::chain::fees::{BaseFee, Bid, ContractScorer, PricingConfig, ScheduleConfig, Weighted},
-    crate::chain::{Allocation, FeeConfig, FinalityConfig, Genesis, Reward},
+    crate::chain::{Allocation, Coin, FeeConfig, FinalityConfig, Genesis, Reward},
     crate::structs::address::Address,
     crate::consensus::{ConsensusConfig, PowConfig},
     crate::structs::hash::HashType,
@@ -184,6 +184,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
     json!({
         "timestamp": genesis.timestamp,
         "hash": genesis.hash.name(),
+        "coin": coin_json(&genesis.coin),
         "consensus": match &genesis.consensus {
             ConsensusConfig::Authority { key, slot_ms } => json!({
                 "type": "authority",
@@ -216,6 +217,11 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "finality": genesis.finality.as_ref().map(finality_json),
         "fees": genesis.fees.as_ref().map(fees_json),
     })
+}
+
+/// The coin as JSON: the shape genesis files and GET /status use.
+pub fn coin_json(coin: &Coin) -> Value {
+    json!({ "symbol": coin.symbol, "decimals": coin.decimals })
 }
 
 /// Fees as JSON: the shape genesis files and GET /status use.
@@ -413,6 +419,12 @@ fn finality_from_json(mut finality: Fields) -> Result<FinalityConfig, String> {
 
 pub fn from_json(value: &Value) -> Result<Genesis, String> {
     let mut root = Fields::of(value, "genesis")?;
+    let mut coin = root.object("coin")?;
+    let coin_value = Coin {
+        symbol: coin.text("symbol")?,
+        decimals: u8::try_from(coin.whole("decimals")?).map_err(|_| "coin.decimals is too large".to_string())?,
+    };
+    coin.done()?;
     let mut consensus = root.object("consensus")?;
     let consensus = match consensus.text("type")?.as_str() {
         "authority" => {
@@ -479,6 +491,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
+        coin: coin_value,
         consensus,
         reward: reward_value,
         minter,
@@ -772,6 +785,8 @@ mod tests {
             ("/fees/pricing/type", json!("auction"), "unknown pricing auction"),
             ("/fees/schedule/per_byte", json!(-1), "fees.schedule.per_byte must be a whole number"),
             ("/fees/burn_permille", json!(70_000), "fees.burn_permille is too large"),
+            ("/coin/decimals", json!(300), "coin.decimals is too large"),
+            ("/coin/name", json!("Dev"), "coin.name is not a genesis field"),
         ];
 
         for (pointer, replacement, expected) in cases {

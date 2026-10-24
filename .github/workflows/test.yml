@@ -39,6 +39,29 @@ jobs:
           host=$(rustc -vV | sed -n 's/^host: //p')
           cargo test --manifest-path contracts/Cargo.toml -p chainv4-sdk --locked --target "$host"
 
+  # The explorer is a workspace of its own, for the desktop and the browser.
+  explorer:
+    name: explorer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: explorer -> target
+      # What winit and egui's clipboard build against on Linux.
+      - name: system libraries
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      - name: clippy
+        run: cargo clippy --manifest-path explorer/Cargo.toml --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --manifest-path explorer/Cargo.toml --locked
+      - name: clippy (web)
+        run: cargo clippy --manifest-path explorer/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
+
   # Every hash and key scheme sits behind a feature; these make sure each subset still builds,
   # lints clean and passes its tests.
   features:
@@ -57,6 +80,7 @@ jobs:
           - lvm,wasm,blake2s,edblake
           - node,blake2b,ed25519
           - http,sha256,edblake
+          - stream,blake2b,edblake
           - client,keccak256,edblake
           # Each kind of finality on its own; the rows above have none.
           - http,client,blake3,ed25519,finality-ffg

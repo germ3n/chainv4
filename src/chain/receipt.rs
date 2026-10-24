@@ -4,6 +4,7 @@ use {
     crate::structs::address::Address,
     crate::structs::event::Event,
     crate::structs::hash::Hash,
+    crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::{U256Le, u256},
     r#macro::document,
@@ -32,6 +33,8 @@ pub struct TxReceipt {
     pub status: TxStatus,
     #[document(summary = "What its contract calls emitted, in order. Empty when it failed.")]
     pub events: Vec<Event>,
+    #[document(summary = "Where its contracts went: every call, delegate and transfer, failed ones included. Empty for a transaction that runs no contract.")]
+    pub trace: Trace,
 }
 
 impl Hashable for TxReceipt {}
@@ -83,6 +86,7 @@ impl TxReceipt {
             fee: receipt.fee,
             status,
             events: receipt.events.clone(),
+            trace: receipt.trace.clone(),
         }
     }
 }

@@ -6,6 +6,7 @@ use crate::registry::Accounts;
 use crate::structs::hex::to_hex;
 use crate::registry::Contracts;
 use crate::structs::code::Code;
+use crate::structs::trace::{Hop, HopKind};
 
 const LIMITS: Limits = Limits {
     fuel: 5_000_000,
@@ -478,6 +479,66 @@ fn events_follow_the_calls_that_succeed() {
 }
 
 #[test]
+fn traces_show_every_call_and_which_events_stayed() {
+    let mut world = World::new();
+    let outer = world.lua();
+    let inner = world.lua();
+    let outcome = world.call(outer, "relay_shout", &[address(inner)]);
+    let hops: Vec<_> = outcome
+        .trace
+        .hops
+        .iter()
+        .map(|hop| (hop.depth, hop.kind, hop.from, hop.to, hop.function.as_str(), hop.error.is_some(), hop.events.clone()))
+        .collect();
+
+    // Before and After are the receipt's first and third events; Shout, between them, is the
+    // inner call's. The failed call's event was dropped.
+    assert_eq!(
+        hops,
+        [
+            (0, HopKind::Call, DEPLOYER, outer, "relay_shout", false, vec![0, 2]),
+            (1, HopKind::Call, outer, inner, "shout", false, vec![1]),
+            (1, HopKind::Call, outer, inner, "shout_then_fail", true, vec![]),
+        ]
+    );
+    assert_eq!(outcome.events[1].name, "Shout");
+    assert_eq!(outcome.trace.hops[0].fuel_used, outcome.fuel_used);
+    assert!(outcome.trace.hops[1].fuel_used > 0 && outcome.trace.hops[1].fuel_used < outcome.fuel_used);
+    assert_eq!(outcome.trace.dropped, 0);
+}
+
+#[test]
+fn traces_show_transfers_and_where_a_run_failed() {
+    let mut world = World::new();
+    let payer = world.lua();
+    let bob = Address::Ed25519([4; 32]);
+    world.fund(payer, 100);
+    let paid = world.call(payer, "pay", &[address(bob), wide(30)]);
+
+    paid.result.unwrap();
+    assert_eq!(
+        paid.trace.hops[1],
+        Hop {
+            depth: 1,
+            kind: HopKind::Transfer,
+            from: payer,
+            to: bob,
+            function: String::new(),
+            value: u256::from(30u64),
+            fuel_used: 0,
+            error: None,
+            events: Vec::new(),
+        }
+    );
+
+    let broke = world.call(payer, "pay", &[address(bob), wide(1_000)]);
+
+    assert!(broke.result.is_err());
+    assert!(broke.trace.hops[0].error.is_some());
+    assert!(broke.trace.hops[1].error.as_ref().is_some_and(|error| error.contains("insufficient balance")));
+}
+
+#[test]
 fn wasm_contracts_emit_through_the_host() {
     // Emits "Hi" with [I64(7)].
     let wat = r#"
@@ -841,6 +902,14 @@ fn a_lua_proxy_delegates_to_rust_code() {
     assert_eq!(increment.events[0].data, [TxCallArgumentType::I64(7), address(alice)]);
     assert_eq!(world.call(proxy, "last", &[]).result.unwrap(), [address(alice)]);
     assert_eq!(world.call(counter, "get", &[]).result.unwrap(), [TxCallArgumentType::I64(0)]);
+
+    // The proxy delegated by selector; the trace names what it ran, and the event is its own.
+    let hops = &increment.trace.hops;
+
+    assert_eq!((hops[0].from, hops[0].to, hops[0].function.as_str()), (alice, proxy, "fallback"));
+    assert_eq!(hops[0].events, Vec::<u32>::new());
+    assert_eq!(hops.last().map(|hop| (hop.kind, hop.from, hop.to, hop.function.as_str())), Some((HopKind::Delegate, proxy, counter, "increment")));
+    assert_eq!(hops.last().unwrap().events, [0]);
 }
 
 #[test]

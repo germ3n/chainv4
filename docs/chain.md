@@ -207,8 +207,12 @@ have. If a block of the branch fails to run, the reorg is dropped, and that bloc
 after it on the branch are remembered as bad.
 
 Undo records are kept for the last `max_reorg_depth` blocks; older ones are deleted, since
-nothing can roll back that far. The chain also keeps every leaf block it stores (`tips`), so a
-justification for a side branch can move the chain to the best block on it.
+nothing can roll back that far.
+
+**Leaves:** the chain also keeps every leaf block it stores (`tips`), so a justification for a
+side branch can move the chain to the best block on it. The leaves go into the database with
+each block (`Meta`), so they outlast a restart, and the API's `/forks` finds side branches from
+them.
 
 ## Receipts
 
@@ -217,10 +221,12 @@ Every transaction on the main chain has a receipt, stored by its id (`TxReceipt`
 - the fuel its contracts burned;
 - the gas it used, and the fee it paid;
 - its status: what it did, or why it failed;
-- the events its contracts emitted, in order.
+- the events its contracts emitted, in order;
+- its trace: every call, delegate and transfer its contracts made (see
+  [Contracts](contracts.md#traces)).
 
-A failed transaction keeps only its error message, and emits nothing. A reorg moves receipts
-with everything else.
+A failed transaction keeps only its error message and its trace, and emits nothing. A reorg moves
+receipts with everything else.
 
 ## Rewards
 

@@ -10,6 +10,7 @@ use {
     super::{Host, Limits, Loaded, Outcome, ScriptEngine, VmError, selector},
     crate::structs::hash::Hash,
     crate::structs::hex::{from_hex, to_hex},
+    crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     libs::{
         register_accounts_lib, register_address_lib, register_contracts_lib, register_ctx_lib,
@@ -339,6 +340,7 @@ fn call(state: &Pristine, bytecode: &[u8], name: &str, args: &[TxCallArgumentTyp
         fuel_used: limits.fuel - remaining,
         result,
         events: Vec::new(),
+        trace: Trace::default(),
     }
 }
 

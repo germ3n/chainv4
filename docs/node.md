@@ -14,7 +14,7 @@ Its loop, `Node::run`, repeats two steps. **`step`** does the work:
    - peers' requests and answers;
    - peers connecting and leaving;
    - a miner's seal;
-   - transactions submitted through the API.
+   - transactions submitted through the API, and the API asking for a report.
 2. It produces a block if its slot has come. An authority seals at once; a miner gets a template.
 3. It votes, if it validates and a checkpoint is deep enough.
 4. It logs where it stands every 30 seconds.
@@ -36,6 +36,35 @@ Tests drive `step` with a clock of their own, so they never sleep.
 - it retries the finality votes it held back.
 
 **A block it produced** is imported first, then gossiped.
+
+## Other threads' way in
+
+A `NodeHandle` (`Node::handle`) is how another thread, such as the HTTP API's, reaches the
+running node. It is cheap to clone, and does three things.
+
+**Submit:** it hands the node a transaction and waits for the mempool's verdict.
+
+**Report:** it asks how the node is doing. The loop answers between events with a `NodeReport`,
+so it is always current. A report holds:
+- its peers: each one's address, when it connected, what it gossiped, and its chain from its
+  last status;
+- where it listens, and whether it produces or validates;
+- the sync it has under way;
+- the mempool's count and its first transactions;
+- what it counted since it started (`Counters`): blocks heard, imported, stored on side
+  branches, rejected and produced; reorgs; transactions heard, submitted and refused; votes
+  heard and cast; sync requests served, sent and failed; connections.
+
+**Subscribe:** it follows what the node does as it happens (`NodeEvent`), when the node streams.
+`Node::stream` turns streaming on: `--stream` on the command line, in a build with the `stream`
+feature. Then the node broadcasts:
+- every block it stores, on the main chain or a side branch;
+- every reorg, justified and finalized checkpoint and transaction it queues;
+- every peer that comes or goes.
+
+Events are only made while someone listens. A subscriber that falls more than 1,024 events
+behind misses some and is told so. The API serves this as `GET /stream` (see
+[HTTP API](api.md#get-stream)).
 
 ## The mempool
 
@@ -126,3 +155,6 @@ Kinds of finality that take no votes never ask for justifications.
 - **No graceful shutdown.** Ctrl-C stops the process mid-loop; commits are atomic, so data is
   safe.
 - **No NAT traversal,** and no limits on connections or requests.
+- **Streaming is opt in, twice:** at build time with the `stream` feature, in the default set,
+  and at run time with `--stream`. A node that does not stream answers `/stream` with 404, and
+  clients such as the explorer poll instead.

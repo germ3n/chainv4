@@ -1,23 +1,7 @@
+#[cfg(feature = "node")]
+use chainv4::{cli, structs};
 #[cfg(feature = "http")]
-pub mod api;
-#[cfg(feature = "node")]
-pub mod chain;
-#[cfg(feature = "node")]
-pub mod cli;
-#[cfg(feature = "node")]
-pub mod consensus;
-pub mod crypto;
-pub mod db;
-#[cfg(feature = "node")]
-pub mod mempool;
-#[cfg(feature = "node")]
-pub mod net;
-#[cfg(feature = "node")]
-pub mod node;
-pub mod registry;
-pub mod structs;
-#[cfg(feature = "vm")]
-pub mod vm;
+use chainv4::api;
 
 #[cfg(feature = "node")]
 #[derive(clap::Parser)]
@@ -89,7 +73,24 @@ struct NodeArgs {
     #[cfg(feature = "http")]
     #[arg(long)]
     http: Option<std::net::SocketAddr>,
+    /// Let web pages from this origin call the API, such as http://localhost:8081, or * for any.
+    /// Repeat to allow several.
+    #[cfg(feature = "http")]
+    #[arg(long, requires = "http")]
+    cors: Vec<String>,
+    /// Serve the explorer web app built in this directory (trunk's dist) from the API's /.
+    #[cfg(feature = "http")]
+    #[arg(long, requires = "http")]
+    explorer: Option<std::path::PathBuf>,
+    /// Tell clients what the node does as it happens, on the API's GET /stream.
+    #[cfg(feature = "stream")]
+    #[arg(long, requires = "http")]
+    stream: bool,
 }
+
+/// How many events a slow /stream client may fall behind by before it misses some.
+#[cfg(feature = "stream")]
+const STREAM_BACKLOG: usize = 1_024;
 
 #[cfg(feature = "node")]
 fn main() -> std::process::ExitCode {
@@ -122,11 +123,11 @@ fn main() -> std::process::ExitCode {
 #[cfg(feature = "node")]
 fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     use {
-        chain::Genesis,
-        consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, Miner, Producer},
-        db::{Database, RocksDb},
-        net::{NetConfig, NetEvent},
-        node::Node,
+        chainv4::chain::{self, Genesis},
+        chainv4::consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, Miner, Producer},
+        chainv4::db::{Database, RocksDb},
+        chainv4::net::{self, NetConfig, NetEvent},
+        chainv4::node::Node,
         std::sync::Arc,
     };
 
@@ -196,9 +197,18 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         node = node.validate(voter);
     }
 
+    #[cfg(feature = "stream")]
+    if args.stream {
+        node = node.stream(STREAM_BACKLOG);
+    }
+
     #[cfg(feature = "http")]
     if let Some(address) = args.http {
-        let address = api::start(db, Some(node.submitter()), &genesis, address)?;
+        let options = api::ApiOptions {
+            cors: args.cors,
+            explorer: args.explorer,
+        };
+        let address = api::start(db, Some(node.handle()), &genesis, address, options)?;
         log::info!("[http] listening on {address}");
     }
 

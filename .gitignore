@@ -1,2 +1,4 @@
 /target
 /contracts/target
+/explorer/target
+/explorer/dist

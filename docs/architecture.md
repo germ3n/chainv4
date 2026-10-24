@@ -1,8 +1,12 @@
 # Architecture
 
-chainv4 is one binary that runs a node, and with a subcommand works as a client of one. The
-node is a set of parts with one owner each, talking through plain function calls and two
-channels.
+chainv4 is a library and one binary built on it. The binary runs a node, and with a subcommand
+works as a client of one. The node is a set of parts with one owner each, talking through plain
+function calls and two channels.
+
+The library (`src/lib.rs`) holds every part; `src/main.rs` only reads the command line and starts
+them. Other programs link the library too: the [explorer](explorer.md), a workspace of its own,
+builds and signs transactions with the library's structs and keys, in the browser as well.
 
 ## The parts
 
@@ -20,6 +24,7 @@ channels.
 | Network | `src/net/` | libp2p on a thread of its own, behind channels. |
 | API | `src/api/` | JSON over HTTP, on a thread of its own, reading the committed chain. |
 | CLI | `src/cli/` | Keys, genesis files, and `send`, which talks to a node's API. |
+| Explorer | `explorer/` | An egui app, for the desktop and the browser, that shows a node's chain, network and mempool and sends transactions, all through the API. |
 | Structs and crypto | `src/structs/`, `src/crypto/` | Blocks, transactions, addresses, amounts, hashes, keys. |
 
 Each part has one owner, passed down rather than shared through globals:
@@ -35,9 +40,13 @@ static.
 - **The node loop** runs on the main thread and owns all node state. Nothing else touches it.
 - **libp2p** runs on a thread of its own. It sends the node `NetEvent`s, such as a gossiped block
   or a peer's request, and takes `NetCommand`s, such as gossiping a block or answering a request.
-- **The HTTP API** runs on a thread of its own and only reads the database. A submitted
-  transaction goes to the node as a `NetEvent::Submitted`, so the node is still the one that
-  admits it.
+- **The HTTP API** runs on a thread of its own and reads the database. It reaches the node
+  through a `NodeHandle`, so the node stays the one that changes anything:
+  - a submitted transaction goes to the node as `NetEvent::Submitted`, and the node admits it;
+  - `/node` and `/mempool` ask for a report with `NetEvent::Report`;
+  - `/stream` subscribes to what a streaming node broadcasts.
+
+  Read-only calls run on the API's own engines, on a throwaway copy of the committed state.
 - **A miner** mines on threads of its own. A found seal comes back as `NetEvent::Sealed`.
 - **The chain's workers,** a rayon pool the `Chain` owns, run a block's transactions side by side
   and check many signatures at once. The node thread hands them a block and gets the result back,

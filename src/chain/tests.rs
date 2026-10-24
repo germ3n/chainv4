@@ -136,6 +136,39 @@ fn a_different_genesis_is_refused() {
 }
 
 #[test]
+fn a_coin_nobody_could_show_is_refused() {
+    for coin in [
+        Coin { symbol: String::new(), decimals: 18 },
+        Coin { symbol: "TOO-LONG".to_string(), decimals: 18 },
+        Coin { symbol: "DEV".to_string(), decimals: 78 },
+    ] {
+        let genesis = Genesis { coin, ..genesis() };
+
+        assert!(matches!(Chain::open(Arc::new(MemoryDb::default()), &genesis), Err(ChainError::BadGenesis(_))));
+    }
+}
+
+#[test]
+fn a_database_kept_in_another_format_is_refused() {
+    let db = Arc::new(MemoryDb::default());
+    open(&db);
+    let state = State::new(db.clone());
+    state.put_value(Column::Meta, FORMAT_KEY.to_vec(), &FormatRecord { format: STORAGE_FORMAT + 1 });
+    db.commit(state.take_changes()).unwrap();
+
+    assert!(matches!(
+        Chain::open(db.clone(), &genesis()),
+        Err(ChainError::OldFormat { found: Some(found), expected: STORAGE_FORMAT }) if found == STORAGE_FORMAT + 1
+    ));
+
+    let state = State::new(db.clone());
+    state.delete(Column::Meta, FORMAT_KEY.to_vec());
+    db.commit(state.take_changes()).unwrap();
+
+    assert!(matches!(Chain::open(db.clone(), &genesis()), Err(ChainError::OldFormat { found: None, .. })));
+}
+
+#[test]
 fn transfers_run_and_failures_still_use_the_nonce() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
@@ -439,6 +472,25 @@ fn the_heavier_branch_wins_and_state_follows_it() {
     assert_eq!(chain.receipt(&to_bob.id(HashType::default_chain())).unwrap().unwrap().block, a1.id());
     assert_eq!(chain.receipt(&to_carol.id(HashType::default_chain())).unwrap(), None);
     assert_eq!(chain.tip_work(), u256::new(3));
+}
+
+#[test]
+fn side_branches_can_be_found_in_the_database() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &pow_genesis()).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let a1 = mine_on(&chain, &genesis, Vec::new(), Address::Ed25519([1; 32]));
+    let b1 = mine_on(&chain, &genesis, Vec::new(), Address::Ed25519([2; 32]));
+
+    extended(chain.import(&a1, LATER));
+    assert!(matches!(chain.import(&b1, LATER), Ok(Imported::Side)));
+
+    let leaves = HashSet::from([a1.id(), b1.id()]);
+
+    assert_eq!(stored_tips(&*db).unwrap().into_iter().collect::<HashSet<_>>(), leaves);
+    assert!(stored_on_main_chain(&*db, &a1).unwrap());
+    assert!(!stored_on_main_chain(&*db, &b1).unwrap());
+    assert_eq!(Chain::open(db.clone(), &pow_genesis()).unwrap().tips, leaves);
 }
 
 #[test]

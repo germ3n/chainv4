@@ -312,7 +312,7 @@ fn a_late_node_catches_up_in_batches() {
 
     sent(&mut producer_net);
     let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
-    late_net.events.send(NetEvent::PeerUp(producer_peer)).unwrap();
+    late_net.events.send(NetEvent::PeerUp { peer: producer_peer, address: Multiaddr::empty() }).unwrap();
     late.step(SLOT * blocks).unwrap();
     relay(
         Side { node: &mut late, net: &mut late_net, peer: late_peer },
@@ -357,7 +357,7 @@ fn a_block_from_the_future_makes_the_node_ask_its_sender() {
 fn peers_on_another_chain_are_never_asked_for_blocks() {
     let (mut follower, mut net) = node(false);
     let stranger = PeerId::random();
-    net.events.send(NetEvent::PeerUp(stranger)).unwrap();
+    net.events.send(NetEvent::PeerUp { peer: stranger, address: Multiaddr::empty() }).unwrap();
     follower.step(SLOT).unwrap();
 
     assert!(matches!(&sent(&mut net)[..], [NetCommand::Request { request: SyncRequest::Status, .. }]));
@@ -382,7 +382,7 @@ fn peers_on_another_chain_are_never_asked_for_blocks() {
 #[test]
 fn submitted_transactions_are_queued_gossiped_and_answered() {
     let (mut node, mut net) = node(false);
-    let submitter = node.submitter();
+    let submitter = node.handle();
     let authority = DevAuthority::dev_keypair();
     let tx = SignedTx::sign(
         Tx::Transfer {
@@ -474,7 +474,7 @@ fn forked_nodes_settle_on_the_heavier_chain() {
     assert_eq!((heavy.chain().tip().height, light.chain().tip().height), (3, 1));
 
     let (heavy_peer, light_peer) = (PeerId::random(), PeerId::random());
-    light_net.events.send(NetEvent::PeerUp(heavy_peer)).unwrap();
+    light_net.events.send(NetEvent::PeerUp { peer: heavy_peer, address: Multiaddr::empty() }).unwrap();
     light.step(LATER).unwrap();
     relay(
         Side { node: &mut light, net: &mut light_net, peer: light_peer },
@@ -618,7 +618,7 @@ mod finality {
         assert_eq!(producer.chain().justified().unwrap().epoch, 3);
 
         let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
-        late_net.events.send(NetEvent::PeerUp(producer_peer)).unwrap();
+        late_net.events.send(NetEvent::PeerUp { peer: producer_peer, address: Multiaddr::empty() }).unwrap();
         late.step(SLOT * blocks).unwrap();
         relay(
             Side { node: &mut late, net: &mut late_net, peer: late_peer },
@@ -696,4 +696,42 @@ mod finality {
         assert!(votes(&sent(&mut net)).is_empty(), "nothing to vote on");
         assert_eq!(producer.chain().finalized().unwrap().epoch, 7);
     }
+}
+
+#[test]
+fn the_report_counts_what_peers_sent_and_shows_what_waits() {
+    let (mut node, mut net) = node(false);
+    let authority = DevAuthority::dev_keypair();
+    let peer = PeerId::random();
+    let address: Multiaddr = "/ip4/10.0.0.1/udp/1/quic-v1".parse().unwrap();
+    let tx = SignedTx::sign(
+        Tx::Burn {
+            from: authority.public().address(),
+            amount: Amount::U128(1),
+        },
+        0,
+        FeeOffer::NONE,
+        &authority,
+    );
+    net.events.send(NetEvent::Listening("/ip4/127.0.0.1/udp/9/quic-v1".parse().unwrap())).unwrap();
+    net.events.send(NetEvent::PeerUp { peer, address: address.clone() }).unwrap();
+    net.events.send(NetEvent::Tx { from: peer, tx: tx.clone() }).unwrap();
+    net.events.send(NetEvent::Tx { from: peer, tx: tx.clone() }).unwrap();
+    node.step(SLOT).unwrap();
+    sent(&mut net);
+    let report = node.report(SLOT * 2, 10);
+
+    assert_eq!((report.started, report.now), (SLOT, SLOT * 2));
+    assert_eq!(report.listening.len(), 1);
+    assert_eq!(report.peers.len(), 1);
+    assert_eq!((report.peers[0].id, &report.peers[0].address, report.peers[0].since), (peer, &address, SLOT));
+    assert_eq!(report.peers[0].heard, Heard { blocks: 0, txs: 2, votes: 0 });
+    assert_eq!(report.peers[0].chain, None);
+    assert_eq!(report.waiting, 1);
+    assert_eq!(report.txs, [tx]);
+    assert_eq!(
+        (report.counters.txs_heard, report.counters.txs_refused, report.counters.connections, report.counters.requests_sent),
+        (2, 1, 1, 1)
+    );
+    assert!(node.report(SLOT * 2, 0).txs.is_empty());
 }

@@ -1,0 +1,256 @@
+//! Talking to a node's HTTP API. Every request runs in the background, on the desktop and in the
+//! browser alike; answers wait in an inbox the app empties each frame, and each one wakes the UI.
+//! The same question is never asked twice at once.
+
+use {
+    crate::sse,
+    serde_json::{Value, json},
+    std::collections::HashSet,
+    std::ops::ControlFlow,
+    std::sync::atomic::{AtomicBool, Ordering},
+    std::sync::{Arc, Mutex},
+};
+
+/// Something to ask a node, which also names what came back.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Ask {
+    Status,
+    Node,
+    Mempool,
+    Forks,
+    /// Main-chain summaries below a height, newest first.
+    Blocks { before: Option<u64>, limit: u64 },
+    /// A block by height or id.
+    Block(String),
+    Tx(String),
+    /// A 0x id that may name a block or a transaction: the block is tried first.
+    Lookup(String),
+    Account(String),
+    Contract(String),
+    Validators,
+    Signers,
+    Evidence,
+    /// A read-only call, with its arguments already written as JSON.
+    Call { contract: String, function: String, args: String },
+    /// A fee offer for a signed probe, with the sender's own choices, as POST /offer's body.
+    Offer(String),
+    /// A signed transaction to submit, as POST /txs's body.
+    Submit(String),
+}
+
+impl Ask {
+    fn path(&self) -> String {
+        match self {
+            Ask::Status => "/status".to_string(),
+            Ask::Node => "/node".to_string(),
+            Ask::Mempool => "/mempool?limit=200".to_string(),
+            Ask::Forks => "/forks".to_string(),
+            Ask::Blocks { before: Some(before), limit } => format!("/blocks?before={before}&limit={limit}"),
+            Ask::Blocks { before: None, limit } => format!("/blocks?limit={limit}"),
+            Ask::Block(block) | Ask::Lookup(block) => format!("/blocks/{block}"),
+            Ask::Tx(id) => format!("/txs/{id}"),
+            Ask::Account(address) => format!("/accounts/{address}"),
+            Ask::Contract(address) => format!("/contracts/{address}"),
+            Ask::Validators => "/validators".to_string(),
+            Ask::Signers => "/signers".to_string(),
+            Ask::Evidence => "/evidence".to_string(),
+            Ask::Call { .. } => "/call".to_string(),
+            Ask::Offer(_) => "/offer".to_string(),
+            Ask::Submit(_) => "/txs".to_string(),
+        }
+    }
+
+    fn body(&self) -> Option<String> {
+        match self {
+            Ask::Call { contract, function, args } => Some(format!(
+                "{{\"contract\":{},\"function\":{},\"args\":{args}}}",
+                json!(contract),
+                json!(function)
+            )),
+            Ask::Offer(body) | Ask::Submit(body) => Some(body.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// Why a request got no answer it could use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    /// The HTTP status, or 0 when the node could not be reached.
+    pub status: u16,
+    pub message: String,
+}
+
+/// What arrived from the node.
+#[derive(Debug)]
+pub enum Reply {
+    Answer { ask: Ask, result: Result<Value, Failure> },
+    Stream(News),
+}
+
+/// What the stream said.
+#[derive(Debug)]
+pub enum News {
+    /// It is open: events follow.
+    Open,
+    Event { name: String, data: Value },
+    /// It ended. Unsupported when the node does not stream at all.
+    Closed { why: String, unsupported: bool },
+}
+
+pub struct Api {
+    base: String,
+    inbox: Arc<Mutex<Vec<Reply>>>,
+    asking: HashSet<Ask>,
+    wake: egui::Context,
+    /// Set to end the stream that is open.
+    hang_up: Option<Arc<AtomicBool>>,
+}
+
+impl Api {
+    /// An API at base, such as http://127.0.0.1:8080, that wakes the UI when answers come.
+    pub fn new(base: &str, wake: egui::Context) -> Api {
+        Api {
+            base: base.trim_end_matches('/').to_string(),
+            inbox: Arc::default(),
+            asking: HashSet::new(),
+            wake,
+            hang_up: None,
+        }
+    }
+
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// Asks, unless the same question is out already.
+    pub fn ask(&mut self, ask: Ask) {
+        if !self.asking.insert(ask.clone()) {
+            return;
+        }
+
+        let url = format!("{}{}", self.base, ask.path());
+        let request = match ask.body() {
+            Some(body) => ehttp::Request::post(url, body.into_bytes()),
+            None => ehttp::Request::get(url),
+        };
+        let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
+
+        ehttp::fetch(request, move |response| {
+            let result = match response {
+                Ok(response) => read(&response),
+                Err(message) => Err(Failure { status: 0, message }),
+            };
+
+            lock(&inbox).push(Reply::Answer { ask, result });
+            wake.request_repaint();
+        });
+    }
+
+    /// Whether this question is out.
+    pub fn asking(&self, ask: &Ask) -> bool {
+        self.asking.contains(ask)
+    }
+
+    /// Everything that arrived since last time.
+    pub fn replies(&mut self) -> Vec<Reply> {
+        let replies = std::mem::take(&mut *lock(&self.inbox));
+
+        for reply in &replies {
+            if let Reply::Answer { ask, .. } = reply {
+                self.asking.remove(ask);
+            }
+        }
+
+        replies
+    }
+
+    /// Opens the node's event stream, hanging up any open one.
+    pub fn listen(&mut self) {
+        self.hang_up();
+        let hang_up = Arc::new(AtomicBool::new(false));
+        self.hang_up = Some(hang_up.clone());
+        let mut request = ehttp::Request::get(format!("{}/stream", self.base));
+        request.timeout = None;
+        let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
+        let parser = Mutex::new(sse::Parser::default());
+
+        ehttp::streaming::fetch(request, move |part| {
+            let tell = |news: News| {
+                lock(&inbox).push(Reply::Stream(news));
+                wake.request_repaint();
+            };
+
+            if hang_up.load(Ordering::Relaxed) {
+                return ControlFlow::Break(());
+            }
+
+            match part {
+                Ok(ehttp::streaming::Part::Response(response)) if response.ok => tell(News::Open),
+                Ok(ehttp::streaming::Part::Response(response)) => {
+                    tell(News::Closed {
+                        why: format!("{} {}", response.status, response.status_text),
+                        unsupported: response.status == 404,
+                    });
+
+                    return ControlFlow::Break(());
+                }
+                Ok(ehttp::streaming::Part::Chunk(bytes)) if bytes.is_empty() => {
+                    tell(News::Closed {
+                        why: "the node closed the stream".to_string(),
+                        unsupported: false,
+                    });
+
+                    return ControlFlow::Break(());
+                }
+                Ok(ehttp::streaming::Part::Chunk(bytes)) => {
+                    for event in lock(&parser).feed(&bytes) {
+                        let data = serde_json::from_str(&event.data).unwrap_or(Value::String(event.data));
+                        tell(News::Event { name: event.name, data });
+                    }
+                }
+                Err(why) => {
+                    tell(News::Closed { why, unsupported: false });
+
+                    return ControlFlow::Break(());
+                }
+            }
+
+            ControlFlow::Continue(())
+        });
+    }
+
+    /// Ends the open stream, if any.
+    pub fn hang_up(&mut self) {
+        if let Some(hang_up) = self.hang_up.take() {
+            hang_up.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for Api {
+    fn drop(&mut self) {
+        self.hang_up();
+    }
+}
+
+/// An answer's JSON, or the API's {"error": …} as a failure.
+fn read(response: &ehttp::Response) -> Result<Value, Failure> {
+    let value: Option<Value> = serde_json::from_slice(&response.bytes).ok();
+
+    match (response.ok, value) {
+        (true, Some(value)) => Ok(value),
+        (_, value) => Err(Failure {
+            status: response.status,
+            message: value
+                .as_ref()
+                .and_then(|value| value.get("error"))
+                .and_then(Value::as_str)
+                .map_or_else(|| format!("{} {}", response.status, response.status_text), str::to_string),
+        }),
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
