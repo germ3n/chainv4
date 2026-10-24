@@ -59,7 +59,7 @@ fn state() -> Arc<State> {
 
 fn run_in(state: &Arc<State>, body: &str, function: &str, args: &[TxCallArgumentType]) -> Outcome {
     let engine = WasmEngine::new();
-    let loaded = engine.load(&module(body), LIMITS).unwrap();
+    let loaded = engine.load(&module(body), LIMITS).result.unwrap();
 
     engine.run(&loaded.code, function, args, host(state.clone()), LIMITS)
 }
@@ -94,7 +94,7 @@ fn exports_are_the_functions_without_parameters() {
       (func (export "takes_one") (param i32))
       (func (export "gives_one") (result i32) (i32.const 1))
     "#;
-    let loaded = WasmEngine::new().load(&module(body), LIMITS).unwrap();
+    let loaded = WasmEngine::new().load(&module(body), LIMITS).result.unwrap();
 
     assert_eq!(loaded.functions, ["a", "b"]);
     assert_eq!(run(body, "missing", &[]).result.map_err(|err| matches!(err, VmError::Runtime(_))), Err(true));
@@ -206,7 +206,7 @@ fn memory_is_capped() {
     let huge = wat::parse_str(r#"(module (memory (export "memory") 100))"#).unwrap();
 
     assert_eq!(run(grow, "grow", &[]).result.unwrap_err(), VmError::OutOfMemory);
-    assert!(WasmEngine::new().load(&huge, LIMITS).is_err());
+    assert!(WasmEngine::new().load(&huge, LIMITS).result.is_err());
 }
 
 #[test]
@@ -238,9 +238,32 @@ fn storage_limits_are_enforced() {
 }
 
 #[test]
+fn loading_pays_for_the_bytes() {
+    let engine = WasmEngine::new();
+    let plain = module(r#"(func (export "f"))"#);
+    let loading = engine.load(&plain, LIMITS);
+
+    assert!(loading.result.is_ok(), "{:?}", loading.result);
+    assert_eq!(loading.fuel_used, plain.len() as u64 * crate::vm::cost::LOAD_BYTE, "nothing ran");
+
+    // A start function would run while loading, so modules may not have one; refusing it still
+    // pays for the bytes.
+    let started = module(r#"(func $begin) (start $begin) (func (export "f"))"#);
+    let refused = engine.load(&started, LIMITS);
+
+    assert!(matches!(refused.result, Err(VmError::Compile(text)) if text.contains("start")));
+    assert_eq!(refused.fuel_used, started.len() as u64 * crate::vm::cost::LOAD_BYTE);
+
+    let starved = engine.load(&plain, Limits { fuel: 5, ..LIMITS });
+
+    assert_eq!((starved.result.unwrap_err(), starved.fuel_used), (VmError::OutOfFuel, 5));
+    assert_eq!(engine.load(&[0, 1, 2], LIMITS).fuel_used, 3, "a module that does not compile pays for its bytes");
+}
+
+#[test]
 fn modules_that_could_disagree_or_misbehave_are_refused() {
     let engine = WasmEngine::new();
-    let refused = |wat: &str| engine.load(&wat::parse_str(wat).unwrap(), LIMITS).unwrap_err();
+    let refused = |wat: &str| engine.load(&wat::parse_str(wat).unwrap(), LIMITS).result.unwrap_err();
 
     assert!(matches!(refused(r#"(module (memory (export "memory") 1) (func (export "f") (drop (f64.const 1))))"#), VmError::Compile(_)));
     assert!(matches!(refused(r#"(module (memory (export "memory") 1) (func $f) (start $f))"#), VmError::Compile(_)));
@@ -248,14 +271,14 @@ fn modules_that_could_disagree_or_misbehave_are_refused() {
     assert!(matches!(refused(r#"(module (import "chain" "nope" (func)) (memory (export "memory") 1))"#), VmError::Compile(text) if text.contains("unknown import")));
     assert!(matches!(refused(r#"(module (func (export "f")))"#), VmError::Compile(text) if text.contains("memory")));
     assert!(matches!(refused(r#"(module (import "chain" "abort" (func (param i64))) (memory (export "memory") 1))"#), VmError::Runtime(_) | VmError::Compile(_)));
-    assert!(matches!(engine.load(&[0, 1, 2], LIMITS), Err(VmError::Compile(_))));
-    assert!(matches!(engine.load(&vec![0; MAX_MODULE_LEN + 1], LIMITS), Err(VmError::Compile(text)) if text.contains("allowed")));
+    assert!(matches!(engine.load(&[0, 1, 2], LIMITS).result, Err(VmError::Compile(_))));
+    assert!(matches!(engine.load(&vec![0; MAX_MODULE_LEN + 1], LIMITS).result, Err(VmError::Compile(text)) if text.contains("allowed")));
 }
 
 #[test]
 fn every_host_function_links() {
     assert_eq!(IMPORTS.matches("(import").count(), host::NAMES.len());
-    WasmEngine::new().load(&module(""), LIMITS).unwrap();
+    WasmEngine::new().load(&module(""), LIMITS).result.unwrap();
 }
 
 #[test]
@@ -266,7 +289,7 @@ fn the_reentrant_section_marks_exported_functions() {
             r#"(module (memory (export "memory") 1) (func (export "a")) (func (export "b")) {sections})"#
         );
 
-        engine.load(&wat::parse_str(wat).unwrap(), LIMITS)
+        engine.load(&wat::parse_str(wat).unwrap(), LIMITS).result
     };
 
     assert_eq!(load("").unwrap().reentrant, Vec::<String>::new());
@@ -280,7 +303,7 @@ fn compiled_modules_are_cached_by_their_code() {
     let engine = WasmEngine::new();
     let counter = module(r#"(func (export "nothing"))"#);
     let other = module(r#"(func (export "else"))"#);
-    let loaded = engine.load(&counter, LIMITS).unwrap();
+    let loaded = engine.load(&counter, LIMITS).result.unwrap();
     let fresh = WasmEngine::new().run(&loaded.code, "nothing", &[], host(state()), LIMITS);
 
     assert_eq!(engine.cache().entries.len(), 1, "deploying compiles it once");
@@ -292,7 +315,7 @@ fn compiled_modules_are_cached_by_their_code() {
     }
 
     // The same code at another address shares the entry; other code, such as an upgrade, has its own.
-    engine.load(&counter, LIMITS).unwrap();
+    engine.load(&counter, LIMITS).result.unwrap();
     engine.run(&other, "else", &[], host(state()), LIMITS);
 
     assert_eq!(engine.cache().entries.len(), 2);
@@ -304,11 +327,11 @@ fn a_full_cache_lets_go_of_the_module_used_longest_ago() {
     let engine = WasmEngine::with_cache(a.len() + b.len());
 
     for code in [&a, &b] {
-        engine.load(code, LIMITS).unwrap();
+        engine.load(code, LIMITS).result.unwrap();
     }
 
     engine.run(&a, "a", &[], host(state()), LIMITS);
-    engine.load(&c, LIMITS).unwrap();
+    engine.load(&c, LIMITS).result.unwrap();
     let cache = engine.cache();
 
     assert!(cache.entries.contains_key(&a[..]), "used since b was");

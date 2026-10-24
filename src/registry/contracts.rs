@@ -70,7 +70,7 @@ impl<'a> Contracts<'a> {
             code = "The contract: Luau source, which nodes compile themselves, or a WebAssembly module.",
             limits = "What loading and init may use.",
         },
-        returns = "The new contract's address, and what init burned and emitted.",
+        returns = "The new contract's address, and what loading the code and init burned and what init emitted. A failure carries what was burned before it.",
         panics = "Vm when the code does not load, init fails or the chain does not run its engine, AlreadyDeployed when the address is taken.",
         see_also = "contract_address, ScriptEngine::load, INIT",
     )]
@@ -81,21 +81,24 @@ impl<'a> Contracts<'a> {
         nonce: u64,
         code: &Code,
         limits: Limits,
-    ) -> Result<(Address, Hooked), RegistryError> {
+    ) -> Result<(Address, Hooked), Failed> {
         let address = contract_address(deployer, nonce, vm.hash());
 
         if self.get(&address)?.is_some() {
-            return Err(RegistryError::AlreadyDeployed(address));
+            return Err(RegistryError::AlreadyDeployed(address).into());
         }
 
-        let record = load(vm, *deployer, code, limits)?;
+        let (record, loaded) = load(vm, *deployer, code, limits)?;
         self.state.put_value(Column::Contracts, address_key(&address), &record);
         let context = CallContext {
             sender: *deployer,
             contract: address,
             value: u256::ZERO,
         };
-        let hooked = self.hook(vm, &record, context, INIT, limits)?;
+        let mut hooked = self
+            .hook(vm, &record, context, INIT, spent(limits, loaded))
+            .map_err(|failed| failed.after(loaded, Trace::default()))?;
+        hooked.fuel_used += loaded;
 
         Ok((address, hooked))
     }
@@ -110,7 +113,7 @@ impl<'a> Contracts<'a> {
             code = "The new code, for either engine.",
             limits = "What check_perms, loading and migrate may use together.",
         },
-        returns = "What check_perms and migrate burned, and what migrate emitted.",
+        returns = "What check_perms, loading the new code and migrate burned, and what migrate emitted. A failure carries what was burned before it.",
         panics = "NotPermitted when the contract has no check_perms or it does not return true, NoSuchContract when there is nothing to upgrade, Vm when the code does not load or migrate fails.",
         see_also = "CHECK_PERMS, MIGRATE, Tx::Upgrade",
     )]
@@ -121,7 +124,7 @@ impl<'a> Contracts<'a> {
         contract: &Address,
         code: &Code,
         limits: Limits,
-    ) -> Result<Hooked, RegistryError> {
+    ) -> Result<Hooked, Failed> {
         let current = self.get(contract)?.ok_or(RegistryError::NoSuchContract(*contract))?;
         let context = CallContext {
             sender: *sender,
@@ -129,14 +132,14 @@ impl<'a> Contracts<'a> {
             value: u256::ZERO,
         };
         let (asked, mut trace) = self.permits(vm, &current, context, "upgrade", limits)?;
-        let record = load(vm, current.deployer, code, limits)?;
+        let (record, loaded) = load(vm, current.deployer, code, spent(limits, asked))
+            .map_err(|failed| failed.after(asked, trace.clone()))?;
         self.state.put_value(Column::Contracts, address_key(contract), &record);
-        let remaining = Limits {
-            fuel: limits.fuel.saturating_sub(asked),
-            ..limits
-        };
-        let mut hooked = self.hook(vm, &record, context, MIGRATE, remaining)?;
-        hooked.fuel_used += asked;
+        let before = asked + loaded;
+        let mut hooked = self
+            .hook(vm, &record, context, MIGRATE, spent(limits, before))
+            .map_err(|failed| failed.after(before, trace.clone()))?;
+        hooked.fuel_used += before;
         trace.append(std::mem::take(&mut hooked.trace));
         hooked.trace = trace;
 
@@ -145,7 +148,7 @@ impl<'a> Contracts<'a> {
 
     /// Asks a contract's check_perms whether context.sender has a permission, on a throwaway
     /// copy of state. Returns the fuel the question burned and where it went when the answer is
-    /// yes.
+    /// yes; a no burned it all the same.
     fn permits(
         &self,
         vm: &Arc<Vm>,
@@ -153,9 +156,9 @@ impl<'a> Contracts<'a> {
         context: CallContext,
         permission: &str,
         limits: Limits,
-    ) -> Result<(u64, Trace), RegistryError> {
+    ) -> Result<(u64, Trace), Failed> {
         if !record.functions.iter().any(|name| name == CHECK_PERMS) {
-            return Err(RegistryError::NotPermitted);
+            return Err(RegistryError::NotPermitted.into());
         }
 
         let scratch = Arc::new(State::new(self.state.clone()));
@@ -167,11 +170,17 @@ impl<'a> Contracts<'a> {
         // What it emitted was thrown away with the scratch state.
         outcome.trace.forget_events();
 
-        match outcome.result {
-            Ok(answer) if answer == [TxCallArgumentType::Bool(true)] => Ok((outcome.fuel_used, outcome.trace)),
-            Err(VmError::Storage(err)) => Err(RegistryError::Db(err)),
-            _ => Err(RegistryError::NotPermitted),
-        }
+        let error = match outcome.result {
+            Ok(answer) if answer == [TxCallArgumentType::Bool(true)] => return Ok((outcome.fuel_used, outcome.trace)),
+            Err(VmError::Storage(err)) => RegistryError::Db(err),
+            _ => RegistryError::NotPermitted,
+        };
+
+        Err(Failed {
+            error,
+            fuel_used: outcome.fuel_used,
+            trace: outcome.trace,
+        })
     }
 
     /// Runs a hook the contract may export, keeping what it does only if it succeeds.
@@ -182,13 +191,20 @@ impl<'a> Contracts<'a> {
         context: CallContext,
         name: &str,
         limits: Limits,
-    ) -> Result<Hooked, RegistryError> {
+    ) -> Result<Hooked, Failed> {
         if !record.functions.iter().any(|function| function == name) {
             return Ok(Hooked::default());
         }
 
         let outcome = vm.run(self.state, record, context, name, &[], limits);
-        outcome.result?;
+
+        if let Err(err) = outcome.result {
+            return Err(Failed {
+                error: err.into(),
+                fuel_used: outcome.fuel_used,
+                trace: outcome.trace,
+            });
+        }
 
         Ok(Hooked {
             fuel_used: outcome.fuel_used,
@@ -249,18 +265,75 @@ pub struct Hooked {
     pub trace: Trace,
 }
 
-/// Checks and loads code into the record that stores it.
-fn load(vm: &Vm, deployer: Address, code: &Code, limits: Limits) -> Result<ContractRecord, RegistryError> {
-    let engine = vm.engine(code.engine()).ok_or(VmError::EngineMissing(code.engine()))?;
-    let loaded = engine.load(code.bytes(), limits)?;
+#[document(
+    summary = "Why a deploy or upgrade failed, with the fuel it burned before it did and where its hooks went: a failure still pays for the work it made every node do.",
+    category = "Registries",
+    see_also = "Contracts::deploy, Contracts::upgrade",
+)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Failed {
+    #[document(summary = "Why it failed.")]
+    pub error: RegistryError,
+    #[document(summary = "Fuel burned before it failed: by check_perms, loading the code, and init or migrate, as far as each got.")]
+    pub fuel_used: u64,
+    #[document(summary = "Where check_perms, and init or migrate, went before it failed.")]
+    pub trace: Trace,
+}
 
-    Ok(ContractRecord {
+impl Failed {
+    /// The same failure, after something else burned fuel and went somewhere first.
+    fn after(mut self, fuel_used: u64, mut trace: Trace) -> Failed {
+        self.fuel_used = self.fuel_used.saturating_add(fuel_used);
+        trace.append(self.trace);
+        self.trace = trace;
+        self
+    }
+}
+
+impl From<RegistryError> for Failed {
+    fn from(error: RegistryError) -> Failed {
+        Failed {
+            error,
+            fuel_used: 0,
+            trace: Trace::default(),
+        }
+    }
+}
+
+impl From<DbError> for Failed {
+    fn from(err: DbError) -> Failed {
+        RegistryError::Db(err).into()
+    }
+}
+
+/// What is left of limits once fuel_used is spent.
+fn spent(limits: Limits, fuel_used: u64) -> Limits {
+    Limits {
+        fuel: limits.fuel.saturating_sub(fuel_used),
+        ..limits
+    }
+}
+
+/// Checks and loads code into the record that stores it, and says what loading burned.
+fn load(vm: &Vm, deployer: Address, code: &Code, limits: Limits) -> Result<(ContractRecord, u64), Failed> {
+    let engine = vm
+        .engine(code.engine())
+        .ok_or(RegistryError::Vm(VmError::EngineMissing(code.engine())))?;
+    let loading = engine.load(code.bytes(), limits);
+    let loaded = loading.result.map_err(|err| Failed {
+        error: err.into(),
+        fuel_used: loading.fuel_used,
+        trace: Trace::default(),
+    })?;
+    let record = ContractRecord {
         deployer,
         engine: code.engine(),
         code: loaded.code,
         functions: loaded.functions,
         reentrant: loaded.reentrant,
-    })
+    };
+
+    Ok((record, loading.fuel_used))
 }
 
 #[document(
@@ -413,7 +486,7 @@ return M
         assert_ne!(address, contract_address(&DEPLOYER, 1, HashType::default_chain()));
         assert_ne!(address, contract_address(&Address::Ed25519([8; 32]), 0, HashType::default_chain()));
         assert_eq!(
-            contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS).map(|(address, _)| address),
+            contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS).map(|(address, _)| address).map_err(|failed| failed.error),
             Err(RegistryError::AlreadyDeployed(address))
         );
     }
@@ -426,7 +499,7 @@ return M
         let func = Hash::Xxh3_64(selector("increment"));
 
         assert!(matches!(
-            contracts.deploy(&vm(), &DEPLOYER, 0, &lua("local = 1"), LIMITS),
+            contracts.deploy(&vm(), &DEPLOYER, 0, &lua("local = 1"), LIMITS).map_err(|failed| failed.error),
             Err(RegistryError::Vm(VmError::Compile(_)))
         ));
         assert_eq!(

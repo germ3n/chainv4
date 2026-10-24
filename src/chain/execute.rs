@@ -3,7 +3,7 @@ use {
     crate::db::{DbError, State},
     crate::registry::signers::{SignerSet, Signers},
     crate::registry::validators::{Staking, Validators},
-    crate::registry::contracts::Hooked,
+    crate::registry::contracts::{Failed, Hooked},
     crate::registry::{Accounts, Contracts, RegistryError},
     crate::structs::address::Address,
     crate::structs::code::Engine,
@@ -328,7 +328,7 @@ pub(crate) fn execute_verified(
 
     // Running out of fuel uses all it was allowed, whatever the engine counted at the stop.
     let burned = match &result {
-        Err(Failure::Contract(VmError::OutOfFuel)) => limits.fuel,
+        Err(Failure::Contract(VmError::OutOfFuel)) | Err(Failure::Registry(RegistryError::Vm(VmError::OutOfFuel))) => limits.fuel,
         _ => fuel_used,
     };
     let charged = match payment {
@@ -425,6 +425,18 @@ impl From<Hooked> for Contracted {
     }
 }
 
+/// A deploy or upgrade that failed: it emitted nothing, but burned what it burned and went where
+/// it went.
+fn failed_hooks(failed: Failed) -> (Result<Effect, Failure>, Contracted) {
+    let contracted = Contracted {
+        fuel_used: failed.fuel_used,
+        events: Vec::new(),
+        trace: failed.trace,
+    };
+
+    (Err(Failure::Registry(failed.error)), contracted)
+}
+
 fn run(
     layer: &Arc<State>,
     signed: &SignedTx,
@@ -491,7 +503,7 @@ fn run(
 
             match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits) {
                 Ok((address, hooked)) => (Ok(Effect::Deployed(address)), hooked.into()),
-                Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
+                Err(failed) => failed_hooks(failed),
             }
         }
         Tx::Upgrade { contract, code } => {
@@ -501,7 +513,7 @@ fn run(
 
             match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits) {
                 Ok(hooked) => (Ok(Effect::Upgraded(*contract)), hooked.into()),
-                Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
+                Err(failed) => failed_hooks(failed),
             }
         }
         Tx::Bond { voter, amount } => staking(&|validators, finality, epoch| {

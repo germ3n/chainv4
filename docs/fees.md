@@ -57,7 +57,7 @@ Two kinds ship; a new one is a new implementation.
 | --- | --- |
 | `per_tx` | for every transaction |
 | `per_byte` | for each byte of the signed transaction |
-| `per_code_byte` | on top, for each byte of code a deploy or upgrade stores, which every node keeps |
+| `per_code_byte` | on top, for each byte of code a deploy or upgrade stores, which every node keeps. Compiling it is fuel on top, 1 per byte, which costs gas like any fuel |
 | `fuel_per_gas` | how much fuel one gas buys; at least 1 |
 
 **`contract`** weighs a transaction as `weighted` does, with the same fields, then calls

@@ -170,8 +170,8 @@ transfer under it, in the order they started (`structs::trace`). Each hop says:
 - **Not consensus:** nothing hashes the trace, and recording it costs no fuel.
 - **Kept small:** a run keeps at most 256 hops (`MAX_HOPS`). Past that, hops are only counted in
   `dropped`, so a contract looping over transfers cannot make its receipt huge.
-- **Only on success for hooks:** a deploy or upgrade whose hook fails keeps no trace, as it keeps
-  no receipt values either.
+- **Kept for failed hooks too:** a deploy or upgrade whose `init`, `check_perms` or `migrate`
+  fails keeps the trace up to where it failed.
 
 The [explorer](explorer.md) draws traces as a call tree and as a graph.
 
@@ -191,6 +191,21 @@ what its storage or calls cost (`vm::cost`).
 | Transfer | 1,000 |
 | Event | 200, plus 1 per 16 bytes of name and data |
 | Copying between a module's memory and the host | 1 per 64 bytes |
+| Loading code at deploy or upgrade | 1 per byte of it, plus a Lua script's top level as it runs |
+
+**Loading code** is paid for by the deploy or upgrade, and shows in its receipt's `fuel_used`:
+- **Compiling:** every byte costs 1 fuel (`cost::LOAD_BYTE`), as compiling and checking the code
+  is real work on every node: up to about 131,000 fuel for a full Lua script, 524,000 for a full
+  module.
+- **The top level:** a Lua script's top level runs once while it loads, to find its exports, and
+  burns fuel like any code. WebAssembly modules run nothing while they load: start functions are
+  refused.
+- **Failing still pays:** a deploy or upgrade that fails pays for what it burned before it did,
+  loading included. One that runs out of fuel, while loading or in a hook, pays for all of it.
+- **Every call pays for the top level too.** Each call runs the script's top level again in its
+  fresh state, so the same work is charged again. It runs before the call is attached, so it
+  sees nothing of the call: `ctx`, `storage`, `contracts`, `accounts` and `events` are not
+  there yet. It is the same code doing the same work every time.
 
 A call that runs out of fuel fails with `OutOfFuel`. On a chain with fees, fuel costs gas, and the
 gas limit bounds the fuel too (see [Fees](fees.md)).
@@ -349,7 +364,8 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 
 ## What to keep in mind
 
-- **Loading code is not charged.** Compiling and validating are bounded only by the size limits,
-  and a Lua script's top level burns fuel no receipt shows.
-- **There are no read-only calls.** Every call is a transaction.
+- **Keep top levels light.** A Lua script's top level runs on every call, before the call is
+  attached, and every call pays for it.
+- **Read-only calls go through the API.** `POST /call` runs a function on a throwaway copy of the
+  committed state (see [HTTP API](api.md)); from a contract, every call is part of a transaction.
 - **A contract cannot be removed.**

@@ -187,7 +187,9 @@ impl World {
     }
 
     fn upgrade(&self, sender: Address, contract: Address, code: Code) -> Result<crate::registry::contracts::Hooked, crate::registry::RegistryError> {
-        Contracts::new(&self.state).upgrade(&self.vm, &sender, &contract, &code, LIMITS)
+        Contracts::new(&self.state)
+            .upgrade(&self.vm, &sender, &contract, &code, LIMITS)
+            .map_err(|failed| failed.error)
     }
 
     fn lua(&mut self) -> Address {
@@ -1036,4 +1038,71 @@ fn values_lists_pass_through_lua_untouched() {
 
     assert_eq!(announced.events[0].data, sent);
     assert!(matches!(world.call(target, "mixed", &sent).result, Err(err) if err.to_string().contains("goes alone")));
+}
+
+#[test]
+fn deploys_and_upgrades_pay_for_loading_and_for_failing() {
+    use crate::registry::contracts::Failed;
+
+    let mut world = World::new();
+    let deploy = |world: &mut World, source: &str| {
+        world.nonce += 1;
+
+        Contracts::new(&world.state).deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(source.to_string()), LIMITS)
+    };
+
+    // A deploy pays for loading its code as well as for init.
+    let (owned, hooked) = deploy(&mut world, OWNED_V1).unwrap();
+
+    assert!(hooked.fuel_used > OWNED_V1.len() as u64 * cost::LOAD_BYTE);
+
+    // A top level that never ends burns everything; an init that fails burns what it got to.
+    let Err(Failed { error, fuel_used, .. }) = deploy(&mut world, "while true do end") else {
+        panic!("an endless top level deploys");
+    };
+
+    assert_eq!(error, crate::registry::RegistryError::Vm(VmError::OutOfFuel));
+    assert!(fuel_used > LIMITS.fuel - 1_000);
+
+    let failing_init = "local M = {}\nfunction M.init()\n    for i = 1, 5000 do end\n    error(\"no\")\nend\nreturn M";
+    let Err(failed) = deploy(&mut world, failing_init) else {
+        panic!("a failing init deploys");
+    };
+
+    assert!(failed.fuel_used > failing_init.len() as u64 + 5_000);
+    assert_eq!(failed.trace.hops[0].function, "init");
+    assert!(failed.trace.hops[0].error.is_some());
+
+    // check_perms saying no still pays for asking it.
+    let stranger = Address::Ed25519([0xb; 32]);
+    let refused = Contracts::new(&world.state)
+        .upgrade(&world.vm, &stranger, &owned, &Code::Lua(OWNED_V1.to_string()), LIMITS)
+        .unwrap_err();
+
+    assert_eq!(refused.error, crate::registry::RegistryError::NotPermitted);
+    assert!(refused.fuel_used > 0);
+    assert_eq!(refused.trace.hops[0].function, "check_perms");
+}
+
+/// Peeks at the call from its top level, which runs before the call is attached.
+const PEEKER: &str = r#"
+local seen = pcall(function()
+    return ctx.sender
+end)
+
+local M = {}
+
+function M.saw()
+    return seen
+end
+
+return M
+"#;
+
+#[test]
+fn a_top_level_sees_nothing_of_the_call() {
+    let mut world = World::new();
+    let peeker = world.lua_code(PEEKER);
+
+    assert_eq!(world.call(peeker, "saw", &[]).result.unwrap(), [TxCallArgumentType::Bool(false)]);
 }

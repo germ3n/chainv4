@@ -144,8 +144,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   number, and bytes that read as text a string. To pass values on as they came, forward
   `ctx.args`, as the Lua proxy does: calls given a values list return one, untouched.
 - **Delegate only to code you trust.** It runs with this contract's storage and balance.
-- **Loading code is not charged.** Compiling and validating are bounded only by the 128 KiB source
-  and 512 KiB module limits.
+- **Loading code is charged.** A deploy or upgrade pays 1 fuel per byte of code to compile it,
+  plus whatever a Lua script's top level burns, even when it fails. Every call pays for the top
+  level again, since each runs it fresh, before the call is attached: a top level sees no `ctx`
+  or `storage`.
 
 ## Building and testing
 

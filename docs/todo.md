@@ -111,16 +111,16 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   above it succeed.
 - [ ] **Events cannot be searched.** They are only reachable through their transaction's receipt;
   following a contract's events needs an index by contract and name.
-- [ ] **Loading code is not charged.** What `init`, `check_perms` and `migrate` burn reaches the
-  receipt, but loading the code does not: running a Lua script's top level burns fuel the
-  receipt never shows, and compiling and validating either engine's code is unmetered, bounded
-  only by `MAX_SOURCE_LEN` and `MAX_MODULE_LEN`. This applies to deploys and upgrades alike.
+- [x] **Loading code is charged.** A deploy or upgrade pays `cost::LOAD_BYTE` (1 fuel) a byte to
+  compile its code, plus what a Lua script's top level burns, and a failing one pays for what it
+  burned before it failed. A top level runs before a call is attached, so it is the same work at
+  deploy and on every call, and every call pays for it.
 - [x] **Read-only calls.** `POST /call` runs a contract function as a transaction would call it,
   on a throwaway copy of the committed state under the chain's fuel cap.
 - [x] **Traces.** Every receipt keeps where its contracts went: each call, delegate and transfer,
   failed ones included, which events each emitted, up to 256 hops. Not consensus.
-- [ ] **A failed deploy or upgrade keeps no trace.** When `init`, `check_perms` or `migrate`
-  fails, the registry returns only the error, so the receipt cannot show where it failed.
+- [x] **Failed deploys and upgrades keep their trace and fuel.** When loading, `init`,
+  `check_perms` or `migrate` fails, the receipt still shows where it went and what it burned.
 - [x] **Contract upgrades.** `Tx::Upgrade` (`chainv4 send upgrade`) swaps a contract's code and
   keeps its address, storage and balance. The contract decides who may: the chain asks its
   `check_perms("upgrade", sender)`. A contract without it is immutable. New code's `migrate`

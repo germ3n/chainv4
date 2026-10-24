@@ -759,3 +759,22 @@ fn xxh3_is_never_a_chain_or_work_hash() {
         assert!(matches!(&err, ChainError::BadGenesis(why) if why.contains("xxh3")), "{err}");
     }
 }
+
+#[test]
+fn a_deploy_that_never_finishes_loading_pays_for_all_its_fuel() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let deployer = authority();
+    let deploy = SignedTx::sign(
+        Tx::Deploy {
+            code: Code::Lua("while true do end".to_string()),
+        },
+        nonce(&chain, &deployer),
+        FeeOffer::NONE,
+        &deployer,
+    );
+    let receipts = advance(&mut chain, vec![deploy]);
+
+    assert!(matches!(&receipts[0].result, Err(failure) if failure.to_string().contains("out of fuel")));
+    assert!(receipts[0].fuel_used > DEV_TX_LIMITS.fuel - 1_000, "it burned {}", receipts[0].fuel_used);
+}

@@ -7,7 +7,7 @@
 //! on a thread of its own, and still uses each one once.
 
 use {
-    super::{Host, Limits, Loaded, Outcome, ScriptEngine, VmError, selector},
+    super::{Host, Limits, Loaded, Loading, Outcome, ScriptEngine, VmError, selector},
     crate::structs::hash::Hash,
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::trace::Trace,
@@ -88,8 +88,24 @@ impl Contract {
         },
     )]
     pub fn from_bytecode(bytecode: Vec<u8>, limits: Limits) -> Result<Contract, VmError> {
-        let state = Pristine::new()?.ready(limits)?;
-        let module = instantiate(&state, &bytecode)?;
+        Contract::explore(bytecode, limits).1
+    }
+
+    /// Runs compiled bytecode's top level once to find the functions it exports, and says what
+    /// that burned, whether or not it worked.
+    fn explore(bytecode: Vec<u8>, limits: Limits) -> (u64, Result<Contract, VmError>) {
+        let state = match Pristine::new().and_then(|state| state.ready(limits)) {
+            Ok(state) => state,
+            Err(err) => return (0, Err(err)),
+        };
+        let result = Contract::exports(&state, bytecode);
+        let remaining = state.lua.get_fuel().unwrap_or(0);
+
+        (limits.fuel - remaining, fueled(result, remaining))
+    }
+
+    fn exports(state: &Pristine, bytecode: Vec<u8>) -> Result<Contract, VmError> {
+        let module = instantiate(state, &bytecode)?;
         let mut functions: HashMap<u64, String> = HashMap::new();
 
         for pair in module.pairs::<Value, Value>() {
@@ -203,17 +219,37 @@ impl LuaEngine {
 }
 
 impl ScriptEngine for LuaEngine {
-    fn load(&self, code: &[u8], limits: Limits) -> Result<Loaded, VmError> {
-        let source = std::str::from_utf8(code).map_err(|err| VmError::Compile(format!("source is not UTF-8: {err}")))?;
-        let contract = Contract::load(source, limits)?;
-        let functions = contract.function_names();
-        let reentrant = annotations::reentrant(source, &functions)?;
+    fn load(&self, code: &[u8], limits: Limits) -> Loading {
+        let Some(fee) = Loading::fee(code, limits) else {
+            return Loading::failed(limits.fuel, VmError::OutOfFuel);
+        };
+        let source = match std::str::from_utf8(code) {
+            Ok(source) => source,
+            Err(err) => return Loading::failed(fee, VmError::Compile(format!("source is not UTF-8: {err}"))),
+        };
+        let bytecode = match compiler::compile(source) {
+            Ok(bytecode) => bytecode,
+            Err(err) => return Loading::failed(fee, err),
+        };
+        let (ran, contract) = Contract::explore(bytecode, Limits {
+            fuel: limits.fuel - fee,
+            ..limits
+        });
+        let result = contract.and_then(|contract| {
+            let functions = contract.function_names();
+            let reentrant = annotations::reentrant(source, &functions)?;
 
-        Ok(Loaded {
-            code: contract.bytecode,
-            functions,
-            reentrant,
-        })
+            Ok(Loaded {
+                code: contract.bytecode,
+                functions,
+                reentrant,
+            })
+        });
+
+        Loading {
+            fuel_used: fee + ran,
+            result,
+        }
     }
 
     fn run(&self, code: &[u8], function: &str, args: &[TxCallArgumentType], host: Host, limits: Limits) -> Outcome {
@@ -323,20 +359,12 @@ impl Pool {
 /// Runs one exported function of compiled bytecode in a state readied for it. The state is not
 /// to be used again.
 fn call(state: &Pristine, bytecode: &[u8], name: &str, args: &[TxCallArgumentType], host: Host, limits: Limits) -> Outcome {
-    state.lua.set_app_data(host);
-    state.lua.set_app_data(CallArgs::new(name, args));
-    let result = run(state, bytecode, name, args);
+    let result = run(state, bytecode, name, args, host);
     // The call's host goes now, wherever the state is closed later.
     state.lua.remove_app_data::<Host>();
     state.lua.remove_app_data::<CallArgs>();
     let remaining = state.lua.get_fuel().unwrap_or(0);
-    let result = match result {
-        // A script can raise "out of fuel" itself; only a nearly empty tank makes it real.
-        Err(VmError::Runtime(text)) if text.contains("out of fuel") && remaining < MAX_INSTRUCTION_COST => {
-            Err(VmError::OutOfFuel)
-        }
-        other => other,
-    };
+    let result = fueled(result, remaining);
 
     Outcome {
         fuel_used: limits.fuel - remaining,
@@ -346,13 +374,28 @@ fn call(state: &Pristine, bytecode: &[u8], name: &str, args: &[TxCallArgumentTyp
     }
 }
 
+/// A script's own "out of fuel" error is only running out when the tank is nearly empty.
+fn fueled<T>(result: Result<T, VmError>, remaining: u64) -> Result<T, VmError> {
+    match result {
+        Err(VmError::Runtime(text)) if text.contains("out of fuel") && remaining < MAX_INSTRUCTION_COST => {
+            Err(VmError::OutOfFuel)
+        }
+        other => other,
+    }
+}
+
 fn run(
     state: &Pristine,
     bytecode: &[u8],
     name: &str,
     args: &[TxCallArgumentType],
+    host: Host,
 ) -> Result<Vec<TxCallArgumentType>, VmError> {
+    // The top level runs before the call is attached, so it sees nothing of it: it is the same
+    // code, doing the same work, on every call as at deploy.
     let module = instantiate(state, bytecode)?;
+    state.lua.set_app_data(host);
+    state.lua.set_app_data(CallArgs::new(name, args));
     let function: Function = module.get(name)?;
     let mut lua_args = Vec::new();
 

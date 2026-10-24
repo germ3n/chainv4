@@ -140,6 +140,10 @@ pub mod cost {
     pub const EVENT_BYTES_PER_FUEL: u64 = 16;
     /// Copying bytes between a WebAssembly contract's memory and the host.
     pub const COPY_BYTES_PER_FUEL: u64 = 64;
+    /// Compiling and checking a contract's code at deploy or upgrade, per byte of it. A Lua
+    /// script's top level, which runs while it loads, is charged on top as it runs; WebAssembly
+    /// modules may not have a start function, so they run nothing while they load.
+    pub const LOAD_BYTE: u64 = 1;
 }
 
 #[document(
@@ -215,6 +219,36 @@ pub struct Loaded {
 }
 
 #[document(
+    summary = "What loading code did: the fuel it burned, failing or not, and the stored form or why the code cannot be deployed.",
+    category = "VM",
+    see_also = "ScriptEngine::load",
+)]
+#[derive(Debug)]
+pub struct Loading {
+    #[document(summary = "Fuel for compiling the code, cost::LOAD_BYTE a byte, and for what it ran while loading. All the fuel allowed when it ran out.")]
+    pub fuel_used: u64,
+    #[document(summary = "The stored form and its exports, or why the code cannot be deployed.")]
+    pub result: Result<Loaded, VmError>,
+}
+
+impl Loading {
+    /// Loading that failed having burned this much.
+    pub(crate) fn failed(fuel_used: u64, err: VmError) -> Loading {
+        Loading {
+            fuel_used,
+            result: Err(err),
+        }
+    }
+
+    /// What compiling code this long costs, or None when the fuel allowed does not cover it.
+    pub(crate) fn fee(code: &[u8], limits: Limits) -> Option<u64> {
+        let fee = (code.len() as u64).saturating_mul(cost::LOAD_BYTE);
+
+        (fee <= limits.fuel).then_some(fee)
+    }
+}
+
+#[document(
     summary = "An engine that runs one kind of contract. Engines never touch the database themselves: everything outside the contract goes through the Host they are handed.",
     category = "VM",
     see_also = "Engine, Host, Vm",
@@ -222,14 +256,14 @@ pub struct Loaded {
 pub trait ScriptEngine: Send + Sync {
     #[document(
         parent = "ScriptEngine",
-        summary = "Checks deployed code and turns it into what is stored.",
+        summary = "Checks deployed code and turns it into what is stored, charging cost::LOAD_BYTE a byte for it, and for whatever it runs while it loads. That runs before any call is attached, so it sees nothing of one.",
         params = {
             code = "The code from the deploy: Luau source, or a WebAssembly module.",
-            limits = "What any code run while loading may use.",
+            limits = "What loading, and anything run while loading, may use.",
         },
-        returns = "The stored form and its exports, or why the code cannot be deployed.",
+        returns = "The fuel it burned, and the stored form and its exports or why the code cannot be deployed.",
     )]
-    fn load(&self, code: &[u8], limits: Limits) -> Result<Loaded, VmError>;
+    fn load(&self, code: &[u8], limits: Limits) -> Loading;
 
     #[document(
         parent = "ScriptEngine",

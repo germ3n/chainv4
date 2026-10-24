@@ -8,7 +8,7 @@
 //! runs exactly as a fresh one would. Every call still gets a fresh instance, with fresh memory.
 
 use {
-    super::{Host, Limits, Loaded, Outcome, ScriptEngine, VmError, selector},
+    super::{Host, Limits, Loaded, Loading, Outcome, ScriptEngine, VmError, selector},
     crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     r#macro::document,
@@ -171,37 +171,9 @@ impl WasmEngine {
         self.modules.lock().expect("the module cache never panics")
     }
 
-    fn store(&self, host: Option<Host>, input: Vec<u8>, limits: Limits) -> Store<Run> {
-        let run = Run {
-            host,
-            input,
-            output: None,
-            result: Vec::new(),
-            limits: StoreLimitsBuilder::new()
-                .memory_size(limits.memory)
-                .memories(1)
-                .tables(1)
-                .instances(1)
-                .trap_on_grow_failure(true)
-                .build(),
-            error: None,
-        };
-        let mut store = Store::new(&self.engine, run);
-        store.limiter(|run| &mut run.limits);
-        store.set_fuel(limits.fuel).expect("the engine meters fuel");
-
-        store
-    }
-}
-
-impl Default for WasmEngine {
-    fn default() -> WasmEngine {
-        WasmEngine::new()
-    }
-}
-
-impl ScriptEngine for WasmEngine {
-    fn load(&self, code: &[u8], limits: Limits) -> Result<Loaded, VmError> {
+    /// Checks a module and instantiates it once, adding what instantiating burned to started.
+    /// Start functions are refused, so it runs none of the module's code.
+    fn check(&self, code: &[u8], limits: Limits, started: &mut u64) -> Result<Loaded, VmError> {
         if code.len() > MAX_MODULE_LEN {
             return Err(VmError::Compile(format!(
                 "module is {} bytes, more than the {MAX_MODULE_LEN} allowed",
@@ -246,9 +218,9 @@ impl ScriptEngine for WasmEngine {
         // Instantiating links every import and sizes the memory, so a module that cannot run
         // fails here rather than in its first call.
         let mut store = self.store(None, Vec::new(), limits);
-        self.linker
-            .instantiate_and_start(&mut store, &module)
-            .map_err(|err| store.data_mut().error.take().unwrap_or_else(|| trapped(&err)))?;
+        let instance = self.linker.instantiate_and_start(&mut store, &module);
+        *started = limits.fuel - store.get_fuel().unwrap_or(0);
+        instance.map_err(|err| store.data_mut().error.take().unwrap_or_else(|| trapped(&err)))?;
 
         let mut functions: Vec<String> = functions.into_values().collect();
         functions.sort();
@@ -260,6 +232,52 @@ impl ScriptEngine for WasmEngine {
             functions,
             reentrant,
         })
+    }
+
+    fn store(&self, host: Option<Host>, input: Vec<u8>, limits: Limits) -> Store<Run> {
+        let run = Run {
+            host,
+            input,
+            output: None,
+            result: Vec::new(),
+            limits: StoreLimitsBuilder::new()
+                .memory_size(limits.memory)
+                .memories(1)
+                .tables(1)
+                .instances(1)
+                .trap_on_grow_failure(true)
+                .build(),
+            error: None,
+        };
+        let mut store = Store::new(&self.engine, run);
+        store.limiter(|run| &mut run.limits);
+        store.set_fuel(limits.fuel).expect("the engine meters fuel");
+
+        store
+    }
+}
+
+impl Default for WasmEngine {
+    fn default() -> WasmEngine {
+        WasmEngine::new()
+    }
+}
+
+impl ScriptEngine for WasmEngine {
+    fn load(&self, code: &[u8], limits: Limits) -> Loading {
+        let Some(fee) = Loading::fee(code, limits) else {
+            return Loading::failed(limits.fuel, VmError::OutOfFuel);
+        };
+        let mut started = 0;
+        let result = self.check(code, Limits {
+            fuel: limits.fuel - fee,
+            ..limits
+        }, &mut started);
+
+        Loading {
+            fuel_used: fee + started,
+            result,
+        }
     }
 
     fn run(&self, code: &[u8], function: &str, args: &[TxCallArgumentType], host: Host, limits: Limits) -> Outcome {
