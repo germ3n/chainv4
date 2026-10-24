@@ -1,5 +1,5 @@
 #[cfg(feature = "node")]
-use chainv4::{chain::EventsFrom, cli, structs};
+use chainv4::{chain::IndexEvents, cli, structs};
 #[cfg(feature = "http")]
 use chainv4::api;
 
@@ -89,9 +89,9 @@ struct NodeArgs {
     /// Keep an index of events, by contract, by name and by the addresses in them, for the API's
     /// GET /events. FROM is which blocks to keep: genesis (the default), a height, or latest-N, a
     /// window of the latest N blocks. Older blocks are indexed in the background. Once on, the
-    /// database keeps it on, keeping the same blocks until told otherwise.
+    /// database keeps it on, keeping the same blocks until told otherwise; off deletes it.
     #[arg(long, value_name = "FROM", num_args = 0..=1, require_equals = true, default_missing_value = "genesis")]
-    index_events: Option<EventsFrom>,
+    index_events: Option<IndexEvents>,
 }
 
 /// How many events a slow /stream client may fall behind by before it misses some.
@@ -208,8 +208,11 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         node = node.stream(STREAM_BACKLOG);
     }
 
-    if args.index_events.is_some() || node.chain().event_index().is_some() {
-        node = node.index_events(args.index_events)?;
+    match args.index_events {
+        Some(IndexEvents::Off) => node = node.drop_event_index()?,
+        Some(IndexEvents::Keep(keep)) => node = node.index_events(Some(keep))?,
+        None if node.chain().event_index().is_some() => node = node.index_events(None)?,
+        None => {}
     }
 
     #[cfg(feature = "http")]

@@ -182,6 +182,60 @@ fn a_deployed_token_is_registered_and_leaves_with_its_block() {
 }
 
 #[test]
+fn a_token_that_asks_is_asked_again_once_its_transaction_succeeds() {
+    let source = format!(
+        "{}\n{}",
+        r#"local M = {}
+function M.total_supply() return 0 end
+function M.balance_of(owner) return 0 end
+function M.transfer(to, amount) return true end
+function M.approve(spender, amount) return true end
+function M.allowance(owner, spender) return 0 end
+function M.transfer_from(from, to, amount) return true end
+function M.name() return storage.get("name") or "First" end"#,
+        r#"function M.rename(name) storage.set("name", name) tokens.refresh() end
+return M"#
+    );
+    let token = contract_address(&authority().public().address(), 0, HashType::default_chain());
+    let rename = |name: &str, nonce: u64| {
+        let tx = Tx::ContractCall {
+            to: token,
+            func: Hash::Xxh3_64(selector("rename")),
+            amount: Amount::U128(0),
+            data: vec![TxCallArgumentType::String(name.to_string())],
+        };
+
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+    };
+    let named = |chain: &Chain| crate::registry::Tokens::new(&chain.state()).get(&token).unwrap().and_then(|token| token.name);
+    let miner = Address::Ed25519([9; 32]);
+    let mut chain = Chain::open(Arc::new(MemoryDb::default()), &pow_genesis()).unwrap();
+    let genesis_block = chain.block_at(0).unwrap().unwrap();
+    let deployed = mine_on(&chain, &genesis_block, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(source) }, 0, FeeOffer::NONE, &authority())], miner);
+    extended(chain.import(&deployed, LATER));
+
+    assert_eq!(named(&chain).as_deref(), Some("First"));
+
+    let renamed = mine_on(&chain, &deployed, vec![rename("Better", 1)], miner);
+    let receipts = extended(chain.import(&renamed, LATER));
+
+    assert!(receipts[0].result.is_ok(), "{:?}", receipts[0].result);
+    assert_eq!(named(&chain).as_deref(), Some("Better"));
+
+    // An answer that does not fit fails the whole transaction: the rename is gone too.
+    let emptied = mine_on(&chain, &renamed, vec![rename("", 2)], miner);
+    let receipts = extended(chain.import(&emptied, LATER));
+
+    assert!(
+        matches!(&receipts[0].result, Err(Failure::Registry(RegistryError::BadToken(why))) if why.contains("name()")),
+        "{:?}",
+        receipts[0].result
+    );
+    assert!(receipts[0].fuel_used > 0);
+    assert_eq!(named(&chain).as_deref(), Some("Better"));
+}
+
+#[test]
 fn a_coin_nobody_could_show_is_refused() {
     for coin in [
         Coin { symbol: String::new(), decimals: 18 },
@@ -1028,6 +1082,17 @@ fn the_event_index_catches_up_on_older_blocks_and_keeps_its_window() {
         Chain::open(late_db.clone(), &pow_genesis()).unwrap().event_index(),
         Some(EventIndex { from: 0, keep: EventsFrom::Height(0) })
     );
+
+    // Turned off, it is gone at once and stays gone; turned on again, it is built afresh.
+    assert!(late.drop_event_index().unwrap());
+    assert!(!late.drop_event_index().unwrap(), "nothing left to drop");
+    assert!(entries(&late_db).is_empty());
+    assert_eq!(Chain::open(late_db.clone(), &pow_genesis()).unwrap().event_index(), None);
+
+    late.index_events(None).unwrap();
+    caught_up(&mut late);
+
+    assert_eq!(entries(&late_db), entries(&live_db));
 }
 
 #[test]
@@ -1036,6 +1101,8 @@ fn index_events_takes_genesis_a_height_or_a_window() {
     assert_eq!("GENESIS".parse(), Ok(EventsFrom::Height(0)));
     assert_eq!("5000".parse(), Ok(EventsFrom::Height(5000)));
     assert_eq!("LATEST-100000".parse(), Ok(EventsFrom::Latest(100_000)));
+    assert_eq!("Off".parse(), Ok(IndexEvents::Off));
+    assert_eq!("latest-5".parse(), Ok(IndexEvents::Keep(EventsFrom::Latest(5))));
 
     for bad in ["latest", "latest-0", "latest-x", "-5", "soon", ""] {
         assert!(bad.parse::<EventsFrom>().is_err(), "{bad}");

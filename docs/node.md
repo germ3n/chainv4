@@ -8,6 +8,14 @@
 - the validator key, if it votes;
 - the link to the network.
 
+**The verifier:** events reach the loop through a thread of their own, `verify`
+(`src/node/verifier.rs`). It takes them from the network and from local clients, up to 256 at a
+time, and checks every transaction's signature in the batch side by side on the chain's workers.
+Then it hands them on, in the order they came, with what each check found. The loop never
+spends its time on signatures, and a flood of gossiped transactions is checked on every core.
+`NetLink::pair` links, in tests, check on the loop's own thread instead, so a test's events are
+there the moment it sends them.
+
 Its loop, `Node::run`, repeats two steps. **`step`** does the work:
 1. It handles what arrived, at most 256 events a pass so a flood cannot starve block production:
    - gossiped blocks, transactions and votes;
@@ -76,7 +84,8 @@ behind misses some and is told so. The API serves this as `GET /stream` (see
 sender's go in order.
 
 **Admission** checks:
-- the signature;
+- the signature, which the verifier checked already for anything gossiped or submitted
+  (`Mempool::add_checked`);
 - that the nonce is not used yet;
 - that the same sender and nonce are not waiting already;
 - on a chain with fees, that the gas limit could fit a block, the price could be taken and the
@@ -160,8 +169,9 @@ Kinds of finality that take no votes never ask for justifications.
   safe.
 - **No NAT traversal,** and no limits on connections or requests.
 - **The event index is opt in.** `--index-events` keeps it, from genesis or the height or
-  `latest-N` window given, and once on, the database keeps it on. `GET /events` answers 404 on
-  nodes without one.
+  `latest-N` window given, and once on, the database keeps it on. `--index-events=off` deletes
+  it at startup, in one atomic write however big it is. `GET /events` answers 404 on nodes
+  without one.
 - **Catching up on a long chain takes a while.** Every older block and its receipts are read
   back. The node keeps syncing and producing meanwhile, and logs how far it got every 30
   seconds.

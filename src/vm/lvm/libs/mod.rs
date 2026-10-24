@@ -5,6 +5,7 @@ pub mod ctx;
 pub mod events;
 pub mod hash;
 pub mod storage;
+pub mod tokens;
 pub mod u256;
 pub mod values;
 
@@ -15,4 +16,5 @@ pub use ctx::register_ctx_lib;
 pub use events::register_events_lib;
 pub use hash::register_hash_lib;
 pub use storage::register_storage_lib;
+pub use tokens::register_tokens_lib;
 pub use u256::register_u256_lib;

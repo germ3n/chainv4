@@ -33,6 +33,7 @@ pub(super) const NAMES: &[&str] = &[
     "call",
     "delegate",
     "emit",
+    "refresh_token",
     "abort",
 ];
 
@@ -50,7 +51,7 @@ type Result<T> = std::result::Result<T, wasmi::Error>;
     category = "Host",
     summary = "Everything a WebAssembly contract can do outside itself. Import these from the \"chain\" module; pointers and lengths are i32s into the memory the contract exports as \"memory\". Each call starts from a fresh instance, so nothing outside storage outlives it.",
     note = "Arguments and return values are lists of TxCallArgumentType, encoded the way the node encodes them: a u64 count, then each value's u8 tag and contents, all little-endian. Floating-point instructions, SIMD and start functions are refused at deploy. A function may only be entered while its contract is already running further up the chain of calls if the chainv4.reentrant custom section names it. Out-of-bounds pointers, oversized keys and running out of fuel all trap.",
-    example = "use chainv4_sdk::{Value, export, input, output, storage};\n\n#[export]\nfn increment() {\n    let by = input().first().and_then(Value::as_i64).unwrap_or(1);\n    let count = storage::get_i64(b\"count\").unwrap_or(0) + by;\n    storage::set(b\"count\", &count.to_le_bytes());\n    output(&[Value::I64(count)]);\n}",
+    example = "use chainv4_sdk::{export, storage};\n\n#[export]\nfn increment(by: Option<i64>) -> i64 {\n    let count = storage::get_i64(b\"count\").unwrap_or(0) + by.unwrap_or(1);\n    storage::set(b\"count\", &count.to_le_bytes());\n    count\n}",
     see_also = "rust/WasmEngine, rust/TxCallArgumentType",
 )]
 fn chain_module() {}
@@ -262,6 +263,14 @@ fn chain_emit() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "refresh_token",
+    summary = "Asks the token registry to ask this contract's name, symbol and decimals again, as a deploy does, once the transaction succeeds. An answer that does not fit fails the transaction. Kept only if this call, and every call above it, succeeds; does nothing for a contract that is not a token. Costs 100 fuel, and the questions cost what they burn.",
+)]
+fn chain_refresh_token() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "abort",
     summary = "Stops the call with an error. Nothing it wrote is kept. Only the first 1024 bytes of the message are.",
     params = {
@@ -292,6 +301,7 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "call", call).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "delegate", delegate).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "emit", emit).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "refresh_token", refresh_token).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
 
     linker
@@ -502,6 +512,14 @@ fn emit(mut caller: Caller<'_, Run>, name: u32, name_len: u32, data: u32, data_l
     };
 
     host.emit(&name, data).map(|_| ()).map_err(|err| stop(&mut caller, err))
+}
+
+fn refresh_token(mut caller: Caller<'_, Run>) -> Result<()> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::TOKEN_REFRESH)?;
+    host.refresh_token();
+
+    Ok(())
 }
 
 fn abort(mut caller: Caller<'_, Run>, message: u32, len: u32) -> Result<()> {

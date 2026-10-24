@@ -308,6 +308,7 @@ impl ScriptEngine for WasmEngine {
             result,
             events: Vec::new(),
             trace: Trace::default(),
+            refresh_tokens: Vec::new(),
         }
     }
 }

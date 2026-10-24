@@ -7,8 +7,8 @@
 extern crate alloc;
 
 use {
-    alloc::vec::Vec,
-    chainv4_sdk::{Address, AddressKind, U256, Value, abort, emit, export, input, output, sender, storage},
+    alloc::{string::String, vec::Vec},
+    chainv4_sdk::{Address, AddressKind, U256, Value, abort, emit, export, sender, storage},
 };
 
 const NAME: &str = "Example Token";
@@ -60,18 +60,6 @@ fn owner() -> Option<Address> {
     Address::decode(storage::get(OWNER)?.as_slice().try_into().ok()?)
 }
 
-fn address_arg(args: &[Value], index: usize) -> Address {
-    args.get(index)
-        .and_then(Value::as_address)
-        .unwrap_or_else(|| abort("expected an address"))
-}
-
-fn amount_arg(args: &[Value], index: usize) -> U256 {
-    args.get(index)
-        .and_then(Value::as_u256)
-        .unwrap_or_else(|| abort("expected an amount"))
-}
-
 fn move_tokens(from: &Address, to: &Address, amount: U256) {
     let remaining = get(&balance_key(from))
         .checked_sub(amount)
@@ -103,85 +91,75 @@ fn init() {
 }
 
 #[export]
-fn name() {
-    output(&[Value::String(NAME.into())]);
+fn name() -> &'static str {
+    NAME
 }
 
 #[export]
-fn symbol() {
-    output(&[Value::String(SYMBOL.into())]);
+fn symbol() -> &'static str {
+    SYMBOL
 }
 
 #[export]
-fn decimals() {
-    output(&[Value::U64(DECIMALS)]);
+fn decimals() -> u64 {
+    DECIMALS
 }
 
 #[export]
-fn total_supply() {
-    output(&[get(SUPPLY).into()]);
+fn total_supply() -> U256 {
+    get(SUPPLY)
 }
 
 #[export]
-fn balance_of() {
-    let owner = address_arg(&input(), 0);
-    output(&[get(&balance_key(&owner)).into()]);
+fn balance_of(owner: Address) -> U256 {
+    get(&balance_key(&owner))
 }
 
 #[export]
-fn allowance() {
-    let args = input();
-    let (owner, spender) = (address_arg(&args, 0), address_arg(&args, 1));
-    output(&[get(&allowance_key(&owner, &spender)).into()]);
+fn allowance(owner: Address, spender: Address) -> U256 {
+    get(&allowance_key(&owner, &spender))
 }
 
 #[export]
-fn transfer() {
-    let args = input();
-    move_tokens(&sender(), &address_arg(&args, 0), amount_arg(&args, 1));
-    output(&[Value::Bool(true)]);
+fn transfer(to: Address, amount: U256) -> bool {
+    move_tokens(&sender(), &to, amount);
+
+    true
 }
 
 #[export]
-fn approve() {
-    let args = input();
-    let (owner, spender, amount) = (sender(), address_arg(&args, 0), amount_arg(&args, 1));
+fn approve(spender: Address, amount: U256) -> bool {
+    let owner = sender();
     put(&allowance_key(&owner, &spender), amount);
     emit("Approval", &[Value::Address(owner), Value::Address(spender), amount.into()]);
-    output(&[Value::Bool(true)]);
+
+    true
 }
 
 #[export]
-fn transfer_from() {
-    let args = input();
-    let (from, to, amount) = (address_arg(&args, 0), address_arg(&args, 1), amount_arg(&args, 2));
+fn transfer_from(from: Address, to: Address, amount: U256) -> Result<bool, &'static str> {
     let key = allowance_key(&from, &sender());
-    let allowed = get(&key)
-        .checked_sub(amount)
-        .unwrap_or_else(|| abort("insufficient allowance"));
+    let allowed = get(&key).checked_sub(amount).ok_or("insufficient allowance")?;
     put(&key, allowed);
     move_tokens(&from, &to, amount);
-    output(&[Value::Bool(true)]);
+
+    Ok(true)
 }
 
 /// Beyond the standard: only the owner mints more.
 #[export]
-fn mint() {
+fn mint(to: Address, amount: U256) -> Result<bool, &'static str> {
     if owner() != Some(sender()) {
-        abort("only the owner mints");
+        return Err("only the owner mints");
     }
 
-    let args = input();
-    mint_to(&address_arg(&args, 0), amount_arg(&args, 1));
-    output(&[Value::Bool(true)]);
+    mint_to(&to, amount);
+
+    Ok(true)
 }
 
 /// Asked by the chain before an upgrade: only the owner may.
 #[export]
-fn check_perms() {
-    let args = input();
-    let permitted = args.first().and_then(Value::as_str) == Some("upgrade")
-        && args.get(1).and_then(Value::as_address) == owner()
-        && owner().is_some();
-    output(&[Value::Bool(permitted)]);
+fn check_perms(permission: String, who: Address) -> bool {
+    permission == "upgrade" && owner() == Some(who)
 }

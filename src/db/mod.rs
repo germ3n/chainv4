@@ -188,6 +188,16 @@ pub trait Database: Read {
         },
     )]
     fn scan(&self, column: Column, prefix: &[u8], start: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError>;
+
+    #[document(
+        parent = "Database",
+        summary = "Deletes every record in a column and commits changes with it, atomically: after a crash, either the column is empty and the changes are there, or neither. Backends delete the column as a range, so this is quick however much it holds. Meant for the node's own columns, such as an index it stops keeping; never for the chain's state, which undo records would no longer match.",
+        params = {
+            column = "The column to empty.",
+            changes = "What to commit with it, written after the column is emptied, so they may write to it too.",
+        },
+    )]
+    fn clear(&self, column: Column, changes: Changes) -> Result<(), DbError>;
 }
 
 /// Where a scan begins: start, or the prefix when start comes before it.
@@ -434,6 +444,41 @@ pub(crate) mod tests {
             assert_eq!(scan(b"b", b"a", 10), ["b", "b1", "b2", "b3"], "a start before the prefix");
             assert_eq!(scan(b"b", b"b", 2), ["b", "b1"], "stopped early");
             assert!(scan(b"d", b"d", 10).is_empty());
+        }
+    }
+
+    #[test]
+    fn clearing_empties_one_column_and_commits_with_it() {
+        for backend in backends("clear") {
+            let db = &backend.db;
+            let state = State::new(backend.base());
+
+            for key in [&b"a"[..], b"m", b"z", b"\xff\xff"] {
+                state.put(Column::Events, key.to_vec(), b"old".to_vec());
+            }
+
+            state.put(Column::Meta, b"keep".to_vec(), b"1".to_vec());
+            state.put(Column::Meta, b"drop".to_vec(), b"1".to_vec());
+            db.commit(state.take_changes()).unwrap();
+
+            let state = State::new(backend.base());
+            state.delete(Column::Meta, b"drop".to_vec());
+            state.put(Column::Events, b"new".to_vec(), b"after".to_vec());
+            db.clear(Column::Events, state.take_changes()).unwrap();
+            let mut left = Vec::new();
+            db.scan(Column::Events, b"", b"", &mut |key, value| {
+                left.push((key.to_vec(), value.to_vec()));
+
+                true
+            })
+            .unwrap();
+
+            assert_eq!(left, [(b"new".to_vec(), b"after".to_vec())], "the last key goes too, and the changes land after");
+            assert_eq!(db.read(Column::Meta, b"keep").unwrap(), Some(b"1".to_vec()), "other columns stay");
+            assert_eq!(db.read(Column::Meta, b"drop").unwrap(), None);
+
+            // An empty column clears too.
+            db.clear(Column::Finality, Changes::new()).unwrap();
         }
     }
 

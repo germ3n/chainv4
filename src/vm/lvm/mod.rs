@@ -14,7 +14,7 @@ use {
     crate::structs::tx::TxCallArgumentType,
     libs::{
         ctx::CallArgs, register_accounts_lib, register_address_lib, register_contracts_lib, register_ctx_lib,
-        register_events_lib, register_hash_lib, register_storage_lib, register_u256_lib, values::Given,
+        register_events_lib, register_hash_lib, register_storage_lib, register_tokens_lib, register_u256_lib, values::Given,
     },
     mlua::{ChunkMode, Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value},
     r#macro::document,
@@ -42,7 +42,7 @@ const GLOBALS: &[&str] = &[
     "assert", "error", "getmetatable", "ipairs", "next", "pairs", "pcall", "print", "rawequal",
     "rawget", "rawlen", "rawset", "select", "setmetatable", "tonumber", "tostring", "type",
     "typeof", "unpack", "xpcall", "string", "table", "utf8", "bit32", "address", "hash", "u256",
-    "ctx", "storage", "contracts", "accounts", "events",
+    "ctx", "storage", "contracts", "accounts", "events", "tokens",
 ];
 
 /// The math functions that give the same result on every platform. The trigonometric,
@@ -290,6 +290,7 @@ impl Pristine {
         register_contracts_lib(&lua);
         register_accounts_lib(&lua);
         register_events_lib(&lua);
+        register_tokens_lib(&lua);
         lua.sandbox(true)?;
         let env = environment(&lua)?;
 
@@ -371,6 +372,7 @@ fn call(state: &Pristine, bytecode: &[u8], name: &str, args: &[TxCallArgumentTyp
         result,
         events: Vec::new(),
         trace: Trace::default(),
+        refresh_tokens: Vec::new(),
     }
 }
 

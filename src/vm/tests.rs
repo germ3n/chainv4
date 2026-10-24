@@ -880,9 +880,85 @@ function M.decimals() return 6 end"#,
     assert_eq!(tokens(&world, unlisted), None);
 }
 
+/// A token whose name its caller can change, asking the registry to ask again when it does.
+const RENAMING: &str = r#"function M.name() return storage.get("name") or "First" end
+function M.rename(name) storage.set("name", name) tokens.refresh() end"#;
+
+#[test]
+fn a_token_s_request_to_be_asked_again_reaches_the_transaction_only_if_its_calls_succeed() {
+    let mut world = World::new();
+    let token = world.deploy(token_with(RENAMING, None));
+    let caller = world.deploy(Code::Lua(
+        r#"
+local M = {}
+
+function M.rename(token, name, fail)
+    contracts.call(token, "rename", name)
+    if fail then error("changed my mind") end
+end
+
+return M
+"#
+        .to_string(),
+    ));
+    let rename = |name: &str, fail: bool| {
+        world.call(caller, "rename", &[address(token), TxCallArgumentType::String(name.to_string()), TxCallArgumentType::Bool(fail)])
+    };
+
+    assert_eq!(world.call(token, "rename", &[TxCallArgumentType::String("Second".into())]).refresh_tokens, [token]);
+    assert_eq!(rename("Third", false).refresh_tokens, [token], "from a call it made");
+
+    let failed = rename("Fourth", true);
+
+    assert!(failed.result.is_err());
+    assert!(failed.refresh_tokens.is_empty(), "gone with the call that failed");
+
+    // WebAssembly asks the same way, and it costs fuel.
+    let poke = world.wasm(
+        r#"(module (import "chain" "refresh_token" (func $refresh_token)) (memory (export "memory") 1)
+             (func (export "poke") (call $refresh_token)))"#,
+    );
+    let poked = world.call(poke, "poke", &[]);
+
+    assert_eq!(poked.refresh_tokens, [poke]);
+    assert!(poked.fuel_used >= crate::vm::cost::TOKEN_REFRESH);
+
+    // The registry asks again when told to, and the answer stands.
+    Contracts::new(&world.state).refresh(&world.vm, &token, DEPLOYER, LIMITS, &standard()).unwrap();
+
+    assert_eq!(Tokens::new(&world.state).get(&token).unwrap().unwrap().name.as_deref(), Some("Third"));
+}
+
 #[test]
 fn the_lua_token_follows_the_standard() {
     conforms_to_the_token_standard(Code::Lua(include_str!("../../contracts/lua/token.lua").to_string()));
+}
+
+#[test]
+fn typed_exports_refuse_arguments_that_do_not_fit() {
+    let mut world = World::new();
+    let token = world.deploy(Code::Wasm(example("token")));
+    let counter = world.deploy(Code::Wasm(example("counter")));
+    let refused = |contract: Address, function: &str, args: &[TxCallArgumentType]| match world.call(contract, function, args).result {
+        Err(VmError::Runtime(text)) => text,
+        other => panic!("{function}: {other:?}"),
+    };
+    let bob = address(Address::Ed25519([0xb; 32]));
+
+    assert!(refused(token, "transfer", &[bob.clone(), TxCallArgumentType::String("ten".into())]).contains("amount: expected an amount"));
+    assert!(refused(token, "transfer", std::slice::from_ref(&bob)).contains("amount: missing"));
+    assert!(refused(token, "transfer", &[bob.clone(), TxCallArgumentType::U64(1), TxCallArgumentType::U64(2)]).contains("transfer takes 2 arguments, not 3"));
+    assert!(refused(token, "name", &[TxCallArgumentType::U64(1)]).contains("name takes 0 arguments, not 1"));
+    // A Result's error aborts the call.
+    let minted = world.call_as(Address::Ed25519([0xb; 32]), token, "mint", &[bob, TxCallArgumentType::U64(1)]);
+
+    assert!(matches!(minted.result, Err(VmError::Runtime(text)) if text.contains("only the owner mints")));
+
+    // Option parameters may be left out or passed nil, and None returns nil.
+    assert_eq!(world.call(counter, "last", &[]).result.unwrap(), [TxCallArgumentType::Nil]);
+    assert_eq!(world.call(counter, "increment", &[]).result.unwrap(), [TxCallArgumentType::I64(1)]);
+    assert_eq!(world.call(counter, "increment", &[TxCallArgumentType::Nil]).result.unwrap(), [TxCallArgumentType::I64(2)]);
+    assert_eq!(world.call(counter, "increment", &[TxCallArgumentType::Number(3.0)]).result.unwrap(), [TxCallArgumentType::I64(5)]);
 }
 
 #[test]

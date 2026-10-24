@@ -83,6 +83,25 @@ So a contract is in the registry exactly when it exports them.
   upgrade (`BadToken`), so what the registry holds can be trusted. One out of fuel fails it with
   `OutOfFuel`.
 
+**Asking again:** a token whose name, symbol or decimals change, say by an owner's `rename`, asks
+the registry to ask again: `tokens.refresh()` in Lua, `refresh_token()` in the SDK.
+- **When:** once the transaction succeeds, the chain asks the same three questions a deploy
+  does, out of the transaction's fuel, and keeps the new answers.
+- **Only if it succeeds:** a request from a call that fails, or under one that fails, is dropped
+  with it.
+- **Answers must fit here too:** one that does not fails the whole transaction, so the rename is
+  gone with it.
+- **Who:** the contract running, or under `delegate` the one delegating. For a contract that is
+  not a token it does nothing.
+
+```lua
+function M.rename(name)
+    assert(ctx.sender == owner(), "only the owner renames")
+    storage.set("name", name)
+    tokens.refresh()
+end
+```
+
 **Reading it:**
 - `GET /tokens` lists tokens by symbol, ignoring ASCII case, with a search by how a symbol starts;
 - `GET /contracts/{address}` says what the registry holds for a contract, in `token`;
@@ -105,6 +124,6 @@ Anything else is up to the token. The examples add:
 - **The registry checks exports, not behaviour.** A contract that exports the required functions
   is listed, whatever they do. Anyone can deploy one called "Example Token" with the symbol EXT,
   as symbols are not unique: trust an address, not a symbol.
-- **Name, symbol and decimals are a snapshot.** The registry keeps what they answered at the
-  deploy or last upgrade. A token whose answers change later shows the new ones only after its
-  next upgrade.
+- **Name, symbol and decimals are kept, not read live.** The registry holds what they answered at
+  the deploy, the last upgrade or the last refresh. A token whose answers change without asking
+  for a refresh keeps showing the old ones.

@@ -33,6 +33,7 @@ const IMPORTS: &str = r#"
   (import "chain" "call" (func $call (param i32 i32 i32 i32 i32 i32) (result i32)))
   (import "chain" "delegate" (func $delegate (param i32 i64 i32 i32) (result i32)))
   (import "chain" "emit" (func $emit (param i32 i32 i32 i32)))
+  (import "chain" "refresh_token" (func $refresh_token))
   (import "chain" "abort" (func $abort (param i32 i32)))
 "#;
 

@@ -9,6 +9,7 @@ use {
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
     r#macro::document,
+    std::collections::BTreeSet,
     std::sync::{Arc, Mutex},
 };
 
@@ -57,6 +58,9 @@ pub struct Host {
     hop: Option<usize>,
     /// Where this call's events start among the receipt's, if every call above it succeeds.
     offset: usize,
+    /// The contracts that asked for their token registry entry to be asked again, this call's
+    /// and those of the calls it made that succeeded.
+    refresh: Arc<Mutex<BTreeSet<Address>>>,
 }
 
 impl Host {
@@ -83,6 +87,7 @@ impl Host {
             trace: Arc::default(),
             hop: None,
             offset: 0,
+            refresh: Arc::default(),
         }
     }
 
@@ -235,6 +240,7 @@ impl Host {
             trace: self.trace.clone(),
             hop,
             offset: self.offset + lock(&self.events).len(),
+            refresh: Arc::default(),
         };
         let limits = Limits {
             fuel,
@@ -245,6 +251,7 @@ impl Host {
 
         if outcome.result.is_ok() {
             lock(&self.events).append(&mut outcome.events);
+            lock(&self.refresh).extend(std::mem::take(&mut outcome.refresh_tokens));
         }
 
         outcome
@@ -304,6 +311,7 @@ impl Host {
             trace: self.trace.clone(),
             hop,
             offset: self.offset + lock(&self.events).len(),
+            refresh: Arc::default(),
         };
         let limits = Limits {
             fuel,
@@ -313,6 +321,7 @@ impl Host {
 
         if outcome.result.is_ok() {
             lock(&self.events).append(&mut outcome.events);
+            lock(&self.refresh).extend(std::mem::take(&mut outcome.refresh_tokens));
         }
 
         outcome
@@ -354,6 +363,15 @@ impl Host {
         });
 
         Ok(name.len() + size)
+    }
+
+    #[document(
+        parent = "Host",
+        summary = "Asks for this contract's token registry entry to be asked again: once the transaction succeeds, the chain asks its name(), symbol() and decimals() as a deploy does, and an answer that does not fit fails the transaction. Kept only if this call, and every call above it, succeeds. Does nothing for a contract that is not a token. Under delegate, the contract is the one delegating. Engines charge cost::TOKEN_REFRESH.",
+        see_also = "Contracts::refresh",
+    )]
+    pub fn refresh_token(&self) {
+        lock(&self.refresh).insert(self.context.contract);
     }
 
     #[document(
@@ -452,6 +470,7 @@ pub(super) fn run(
     let layer = host.state.clone();
     let fault = host.fault.clone();
     let events = host.events.clone();
+    let refresh = host.refresh.clone();
     let mut outcome = engine.run(&record.code, function, args, host, limits);
 
     if let Some(err) = fault.lock().expect("never poisoned").clone() {
@@ -461,6 +480,7 @@ pub(super) fn run(
     if outcome.result.is_ok() {
         parent.merge(layer.take_changes());
         outcome.events = std::mem::take(&mut *lock(&events));
+        outcome.refresh_tokens = std::mem::take(&mut *lock(&refresh)).into_iter().collect();
     }
 
     outcome

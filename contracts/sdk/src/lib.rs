@@ -3,16 +3,19 @@
 //! whichever engine runs them.
 //!
 //! ```ignore
-//! use chainv4_sdk::{Value, export, input, output, storage};
+//! use chainv4_sdk::{export, storage};
 //!
 //! #[export]
-//! fn increment() {
-//!     let by = input().first().and_then(Value::as_i64).unwrap_or(1);
-//!     let count = storage::get_i64(b"count").unwrap_or(0) + by;
+//! fn increment(by: Option<i64>) -> i64 {
+//!     let count = storage::get_i64(b"count").unwrap_or(0) + by.unwrap_or(1);
 //!     storage::set(b"count", &count.to_le_bytes());
-//!     output(&[Value::I64(count)]);
+//!     count
 //! }
 //! ```
+//!
+//! An exported function's parameters are read from the call's arguments, and what it returns
+//! becomes the call's return values (see [args]). One that takes and returns nothing reads them
+//! itself with [input] and sets them with [output].
 //!
 //! Every call runs in a fresh instance: nothing outside storage survives it. Floating-point
 //! instructions are refused by the node, so contracts work in integers.
@@ -23,11 +26,13 @@ extern crate alloc;
 
 use alloc::{string::String, vec, vec::Vec};
 
+pub mod args;
 pub mod storage;
 pub mod sys;
 pub mod u256;
 pub mod value;
 
+pub use args::{FromValue, IntoOutput, IntoValue};
 pub use chainv4_sdk_macros::export;
 pub use u256::U256;
 pub use value::{Address, AddressKind, Amount, Value, amount};
@@ -152,6 +157,14 @@ pub fn call_with_value(target: &Address, value: [u8; 32], function: &str, args: 
 pub fn emit(name: &str, data: &[Value]) {
     let data = value::encode(data);
     unsafe { sys::emit(name.as_ptr(), name.len() as u32, data.as_ptr(), data.len() as u32) };
+}
+
+/// Asks the chain's token registry to ask this contract's name(), symbol() and decimals() again,
+/// as a deploy does, once the transaction succeeds; for a token whose answers just changed. An
+/// answer that does not fit fails the transaction. Kept only if this call, and every call above
+/// it, succeeds; does nothing for a contract that is not a token.
+pub fn refresh_token() {
+    unsafe { sys::refresh_token() }
 }
 
 /// Runs another contract's function as this contract's own: on this contract's storage and

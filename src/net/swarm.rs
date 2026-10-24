@@ -96,6 +96,7 @@ pub fn spawn(config: NetConfig) -> Result<NetLink, NetError> {
         commands: command_tx,
         events: event_rx,
         inbox,
+        check_inline: false,
     })
 }
 

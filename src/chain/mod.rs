@@ -35,7 +35,7 @@ mod finality;
 mod parallel;
 mod receipt;
 
-pub use events::{EventFilter, EventIndex, EventsFrom, IndexedEvent, stored_event_index, stored_events};
+pub use events::{EventFilter, EventIndex, EventsFrom, IndexEvents, IndexedEvent, stored_event_index, stored_events};
 pub use execute::{BlockContext, Effect, Failure, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
 pub use parallel::Workers;
@@ -574,7 +574,7 @@ impl Chain {
 
     #[document(
         parent = "Chain",
-        summary = "Keeps the event index, and sets which blocks it keeps. A new index starts empty at the next block, and catch_up_events fills it in. Once on, it stays on.",
+        summary = "Keeps the event index, and sets which blocks it keeps. A new index starts empty at the next block, and catch_up_events fills it in; whatever an index dropped half-way left behind is cleared first. Once on, it stays on until drop_event_index.",
         params = { keep = "Which blocks to keep; None keeps what the database keeps, or every block for a new index." },
         returns = "The index.",
         see_also = "Chain::catch_up_events, stored_events",
@@ -596,10 +596,30 @@ impl Chain {
         let state = State::new(self.db.clone());
         state.put_value(Column::Meta, events::FROM_KEY.to_vec(), &events::IndexedFrom { height: index.from });
         state.put_value(Column::Meta, events::KEEP_KEY.to_vec(), &index.keep);
-        self.db.commit(state.take_changes())?;
+
+        match self.events {
+            Some(_) => self.db.commit(state.take_changes())?,
+            None => self.db.clear(Column::Events, state.take_changes())?,
+        }
+
         self.events = Some(index);
 
         Ok(index)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Stops keeping the event index, and deletes it and its records in Meta in one atomic write, quick however big it is.",
+        returns = "Whether there was an index to drop.",
+        see_also = "Chain::index_events",
+    )]
+    pub fn drop_event_index(&mut self) -> Result<bool, DbError> {
+        let state = State::new(self.db.clone());
+        state.delete(Column::Meta, events::FROM_KEY.to_vec());
+        state.delete(Column::Meta, events::KEEP_KEY.to_vec());
+        self.db.clear(Column::Events, state.take_changes())?;
+
+        Ok(self.events.take().is_some())
     }
 
     #[document(
@@ -624,6 +644,11 @@ impl Chain {
         self.events = Some(index);
 
         Ok(!index.caught_up(self.tip.height))
+    }
+
+    #[document(parent = "Chain", summary = "The threads the chain runs blocks and checks signatures on, for others to share.")]
+    pub fn workers(&self) -> Arc<Workers> {
+        self.workers.clone()
     }
 
     #[document(parent = "Chain", summary = "The event index, when this node keeps one.")]

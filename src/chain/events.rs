@@ -3,8 +3,9 @@
 //! two keys only point at it. Keys sort newest first, so a listing reads forward from where the
 //! last page stopped.
 //!
-//! A node keeps the index only when started with --index-events, and once on it stays on. It
-//! holds the events of every main-chain block from its low end to the tip. New blocks' entries go
+//! A node keeps the index only when started with --index-events, and once on it stays on until
+//! --index-events=off drops it. It holds the events of every main-chain block from its low end to
+//! the tip. New blocks' entries go
 //! into the same commit as their receipts, so a reorg takes them off with the block.
 //!
 //! Which blocks it keeps is set apart from where its low end is. The node moves the low end a
@@ -124,7 +125,31 @@ impl FromStr for EventsFrom {
 
         text.parse()
             .map(EventsFrom::Height)
-            .map_err(|_| format!("{text} is not genesis, a height or latest-N, such as latest-100000"))
+            .map_err(|_| format!("{text} is not genesis, a height, latest-N such as latest-100000, or off"))
+    }
+}
+
+#[document(
+    summary = "What --index-events asks for: keep the event index, of which blocks, or keep none.",
+    category = "Chain",
+    see_also = "EventsFrom, Chain::index_events, Chain::drop_event_index",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexEvents {
+    #[document(summary = "Keep it, of these blocks.")]
+    Keep(EventsFrom),
+    #[document(summary = "Keep none, dropping the index the database holds.")]
+    Off,
+}
+
+impl FromStr for IndexEvents {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<IndexEvents, String> {
+        match text.trim().eq_ignore_ascii_case("off") {
+            true => Ok(IndexEvents::Off),
+            false => text.parse().map(IndexEvents::Keep),
+        }
     }
 }
 

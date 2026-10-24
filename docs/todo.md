@@ -115,8 +115,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **The event index catches up.** `--index-events` takes `genesis`, a height or `latest-N`.
   The node reads older blocks' receipts back in the background, a step at a time, and a
   `latest-N` window drops the oldest blocks' events as the tip moves.
-- [ ] **The event index cannot be turned off.** Once on, the database keeps it; dropping it means
-  a fresh database, or a window as small as `latest-1`.
+- [x] **The event index can be turned off.** `--index-events=off` deletes it at startup with
+  `Database::clear`, one atomic range delete however big it is.
 - [x] **Loading code is charged.** A deploy or upgrade pays `cost::LOAD_BYTE` (1 fuel) a byte to
   compile its code, plus what a Lua script's top level burns, and a failing one pays for what it
   burned before it failed. A top level runs before a call is attached, so it is the same work at
@@ -151,9 +151,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **A token registry.** A contract that exports every function genesis names in
   `token_functions`, ERC-20's six by default, is registered as it deploys or upgrades, with what
   its optional `name()`, `symbol()` and `decimals()` answer; `GET /tokens` lists them by symbol.
-- [ ] **Token metadata is a snapshot.** The registry keeps what a token's name, symbol and decimals
-  answered at its deploy or last upgrade; one whose answers change shows them only after its next
-  upgrade.
+- [x] **Tokens refresh their metadata.** `tokens.refresh()` in Lua, `refresh_token()` in the SDK,
+  asks the registry to ask a token's name, symbol and decimals again once the transaction
+  succeeds; an answer that does not fit fails it.
 - [x] **Faster calls, same results.** Compiled WebAssembly modules are cached by their code, and
   the Lua engine builds fresh states ahead and closes used ones on threads of its own. Every call
   still runs in a fresh state or instance, so neither changes what a call does.
@@ -165,11 +165,14 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   one before it that names its sender, recipient, contract or staking and signer records, and
   runs in rounds once its wait is over, with signatures checked alongside the first round. Only
   a contract reaching what nobody named, and reading what an earlier one wrote, still runs twice.
-- [ ] **The mempool checks signatures one at a time,** on the node's thread, as transactions
-  arrive. A flood of gossiped transactions would gain from checking batches on the workers.
-- [ ] **Typed exports in the SDK.** `#[export]` functions take and return nothing and use
-  `input()`/`output()`; decoding arguments into Rust parameters would be nicer. The token example
-  shows how much argument handling that would save.
+- [x] **Signatures are checked off the node loop.** A verifier thread checks arriving
+  transactions' signatures in batches on the chain's workers, and hands every event on in order.
+- [ ] **The verifier's queue is unbounded.** A peer flooding transactions grows the queue between
+  the network and the verifier, as it grew the node's before; it has no backpressure or per-peer
+  limit yet.
+- [x] **Typed exports in the SDK.** `#[export]` reads the call's arguments into the function's
+  parameters and returns what it returns, refusing arguments that do not fit; the token and
+  counter examples use it.
 - [ ] **The Luau fork is pinned by branch, not commit.** `Cargo.lock` holds the commit, but
   `cargo update` would move it. Like wasmi it is consensus: pin a `rev` in `Cargo.toml`.
 

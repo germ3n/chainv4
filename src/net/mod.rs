@@ -157,6 +157,10 @@ pub struct NetLink {
     pub events: mpsc::Receiver<NetEvent>,
     /// Another way into events, for local clients.
     pub inbox: mpsc::Sender<NetEvent>,
+    /// Whether the node checks transactions' signatures on its own thread as it handles them,
+    /// rather than on a verifier thread in front of it: true for pair, so a test's events are
+    /// there the moment it sends them.
+    pub check_inline: bool,
 }
 
 #[document(
@@ -182,6 +186,7 @@ impl NetLink {
                 commands: command_tx,
                 events: event_rx,
                 inbox: event_tx.clone(),
+                check_inline: true,
             },
             FakeNet {
                 commands: command_rx,

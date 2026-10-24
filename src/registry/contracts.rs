@@ -102,7 +102,7 @@ impl<'a> Contracts<'a> {
             .hook(vm, &record, context, INIT, spent(limits, loaded))
             .map_err(|failed| failed.after(loaded, Trace::default()))?;
         hooked.fuel_used += loaded;
-        self.register(vm, &record, context, limits, token_functions, &mut hooked)?;
+        self.register(vm, context, limits, token_functions, &mut hooked)?;
 
         Ok((address, hooked))
     }
@@ -148,36 +148,55 @@ impl<'a> Contracts<'a> {
         hooked.fuel_used += before;
         trace.append(std::mem::take(&mut hooked.trace));
         hooked.trace = trace;
-        self.register(vm, &record, context, limits, token_functions, &mut hooked)?;
+        self.register(vm, context, limits, token_functions, &mut hooked)?;
 
         Ok(hooked)
     }
 
-    /// Puts a contract in the token registry when it exports every one of token_functions, with
-    /// what those of name(), symbol() and decimals() it exports answer, or takes it off when it
-    /// does not. The questions run on a throwaway copy of state, so whatever they write or emit is
-    /// gone; what they burn and where they go joins what the deploy or upgrade did so far.
-    fn register(
+    #[document(
+        parent = "Contracts",
+        summary = "Brings a contract's token registry entry in line with it: a contract that exports every one of token_functions is registered, with what those of name(), symbol() and decimals() it exports answer; one that does not is taken off. The questions run on a throwaway copy of state, so whatever they write or emit is gone. Deploys and upgrades do this themselves, and a transaction does it for the tokens that asked with tokens.refresh.",
+        params = {
+            vm = "The chain's engines.",
+            contract = "The contract.",
+            sender = "Who the questions come from: the transaction's sender.",
+            limits = "What the questions may use together.",
+            token_functions = "What makes a contract a token, as genesis says; empty keeps no registry, and does nothing.",
+        },
+        returns = "What the questions burned and where they went. A failure carries those too.",
+        panics = "BadToken when an answer does not fit, Vm(OutOfFuel) when the questions run out, NoSuchContract when no contract lives there.",
+        see_also = "Tokens, Host::refresh_token",
+    )]
+    pub fn refresh(
         &self,
         vm: &Arc<Vm>,
-        record: &ContractRecord,
-        context: CallContext,
+        contract: &Address,
+        sender: Address,
         limits: Limits,
         token_functions: &[String],
-        hooked: &mut Hooked,
-    ) -> Result<(), Failed> {
+    ) -> Result<(u64, Trace), Failed> {
         let tokens = Tokens::new(self.state);
-        let exports = |function: &str| record.functions.iter().any(|name| name == function);
 
         if token_functions.is_empty() {
-            return Ok(());
+            return Ok((0, Trace::default()));
         }
+
+        let record = self.get(contract)?.ok_or(RegistryError::NoSuchContract(*contract))?;
+        let exports = |function: &str| record.functions.iter().any(|name| name == function);
 
         if !token_functions.iter().all(|function| exports(function)) {
-            return Ok(tokens.unregister(&context.contract)?);
+            tokens.unregister(contract)?;
+
+            return Ok((0, Trace::default()));
         }
 
+        let context = CallContext {
+            sender,
+            contract: *contract,
+            value: u256::ZERO,
+        };
         let scratch = Arc::new(State::new(self.state.clone()));
+        let (mut fuel_used, mut trace) = (0, Trace::default());
         let mut answers = Vec::with_capacity(METADATA_FUNCTIONS.len());
 
         for function in METADATA_FUNCTIONS {
@@ -187,10 +206,10 @@ impl<'a> Contracts<'a> {
                 continue;
             }
 
-            let mut outcome = vm.run(&scratch, record, context, function, &[], spent(limits, hooked.fuel_used));
+            let mut outcome = vm.run(&scratch, &record, context, function, &[], spent(limits, fuel_used));
             outcome.trace.forget_events();
-            hooked.fuel_used += outcome.fuel_used;
-            hooked.trace.append(outcome.trace);
+            fuel_used += outcome.fuel_used;
+            trace.append(outcome.trace);
             let error = match outcome.result {
                 Ok(answer) => {
                     answers.push(Some(answer));
@@ -202,21 +221,33 @@ impl<'a> Contracts<'a> {
                 Err(err) => RegistryError::BadToken(format!("{function}() failed: {err}")),
             };
 
-            return Err(Failed {
-                error,
-                fuel_used: hooked.fuel_used,
-                trace: std::mem::take(&mut hooked.trace),
-            });
+            return Err(Failed { error, fuel_used, trace });
         }
 
-        match Token::from_answers(context.contract, answers[0].as_deref(), answers[1].as_deref(), answers[2].as_deref()) {
-            Ok(token) => Ok(tokens.register(&token)?),
+        match Token::from_answers(*contract, answers[0].as_deref(), answers[1].as_deref(), answers[2].as_deref()) {
+            Ok(token) => {
+                tokens.register(&token)?;
+
+                Ok((fuel_used, trace))
+            }
             Err(why) => Err(Failed {
                 error: RegistryError::BadToken(why),
-                fuel_used: hooked.fuel_used,
-                trace: std::mem::take(&mut hooked.trace),
+                fuel_used,
+                trace,
             }),
         }
+    }
+
+    /// Refreshes the token registry for a contract a deploy or upgrade just left, after what it
+    /// did so far.
+    fn register(&self, vm: &Arc<Vm>, context: CallContext, limits: Limits, token_functions: &[String], hooked: &mut Hooked) -> Result<(), Failed> {
+        let (asked, trace) = self
+            .refresh(vm, &context.contract, context.sender, spent(limits, hooked.fuel_used), token_functions)
+            .map_err(|failed| failed.after(hooked.fuel_used, std::mem::take(&mut hooked.trace)))?;
+        hooked.fuel_used += asked;
+        hooked.trace.append(trace);
+
+        Ok(())
     }
 
     /// Asks a contract's check_perms whether context.sender has a permission, on a throwaway

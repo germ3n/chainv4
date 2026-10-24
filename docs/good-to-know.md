@@ -50,6 +50,12 @@ other pages explain each part in full; this one is the short list to keep in min
   - **Bad answers fail the deploy:** a token whose `name()`, `symbol()` or `decimals()` fails or
     gives something out of bounds does not deploy.
   - **Symbols are not unique:** trust an address, not a symbol.
+  - **A token that changes its name asks for a refresh:** `tokens.refresh()` in Lua,
+    `refresh_token()` in Rust. Without one, the registry keeps the old answers.
+- **Rust exports take typed parameters.** `#[export] fn transfer(to: Address, amount: U256) ->
+  bool` reads the call's arguments into its parameters and refuses a call whose arguments do not
+  fit, naming the parameter. A function that takes and returns nothing still reads `input()`
+  itself.
 - **Events are searchable on nodes that index them.** `--index-events` indexes every event by its
   contract, its name and the addresses in it, for `GET /events`.
   - **Which blocks:** `--index-events` alone keeps every block's events. `=5000` keeps them from a
@@ -57,7 +63,7 @@ other pages explain each part in full; this one is the short list to keep in min
   - **Older blocks:** the node reads them back from their receipts in the background, newest
     first. `indexed_from` says how far it got.
   - **Staying on:** once on, the database keeps it on, keeping the same blocks until the flag
-    says otherwise.
+    says otherwise. `--index-events=off` deletes it.
 - **A node only streams when asked.** `--stream` turns on `GET /stream`. Without it, clients
   such as the explorer poll.
 - **Read-only calls hold up the API.** `POST /call` runs a contract under the chain's fuel cap on

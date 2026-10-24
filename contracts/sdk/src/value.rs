@@ -111,6 +111,15 @@ impl Value {
         Some(amount(small))
     }
 
+    /// The value as a u128, from anything as_amount takes that fits.
+    pub fn as_u128(&self) -> Option<u128> {
+        let bytes = self.as_amount()?;
+        let mut low = [0; 16];
+        low.copy_from_slice(&bytes[..16]);
+
+        bytes[16..].iter().all(|byte| *byte == 0).then(|| u128::from_le_bytes(low))
+    }
+
     /// The value as a U256, from anything as_amount takes.
     pub fn as_u256(&self) -> Option<crate::U256> {
         self.as_amount().map(crate::U256::from_le_bytes)

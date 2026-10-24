@@ -49,16 +49,39 @@ impl Read for RocksDb {
     }
 }
 
-impl Database for RocksDb {
-    fn commit(&self, changes: Changes) -> Result<(), DbError> {
-        let mut batch = WriteBatch::default();
-
+impl RocksDb {
+    /// Adds a set of changes to a batch.
+    fn add(&self, batch: &mut WriteBatch, changes: Changes) {
         for ((column, key), value) in changes {
             match value {
                 Some(value) => batch.put_cf(self.column(column), key, value),
                 None => batch.delete_cf(self.column(column), key),
             }
         }
+    }
+}
+
+impl Database for RocksDb {
+    fn commit(&self, changes: Changes) -> Result<(), DbError> {
+        let mut batch = WriteBatch::default();
+        self.add(&mut batch, changes);
+
+        self.rocks.write(batch).map_err(backend)
+    }
+
+    fn clear(&self, column: Column, changes: Changes) -> Result<(), DbError> {
+        let handle = self.column(column);
+        let first = self.rocks.iterator_cf(handle, IteratorMode::Start).next().transpose().map_err(backend)?;
+        let last = self.rocks.iterator_cf(handle, IteratorMode::End).next().transpose().map_err(backend)?;
+        let mut batch = WriteBatch::default();
+
+        if let (Some((first, _)), Some((last, _))) = (first, last) {
+            // A range delete leaves its end out, so the last key goes on its own.
+            batch.delete_range_cf(handle, &first, &last);
+            batch.delete_cf(handle, &last);
+        }
+
+        self.add(&mut batch, changes);
 
         self.rocks.write(batch).map_err(backend)
     }

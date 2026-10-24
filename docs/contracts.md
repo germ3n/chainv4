@@ -200,6 +200,7 @@ what its storage or calls cost (`vm::cost`).
 | Copying between a module's memory and the host | 1 per 64 bytes |
 | Loading code at deploy or upgrade | 1 per byte of it, plus a Lua script's top level as it runs |
 | Asking a token's name, symbol and decimals at deploy or upgrade | What those functions burn |
+| Asking for that again, with `tokens.refresh` or `refresh_token` | 100, and what the questions burn once the call succeeds |
 
 **Loading code** is paid for by the deploy or upgrade, and shows in its receipt's `fuel_used`:
 - **Compiling:** every byte costs 1 fuel (`cost::LOAD_BYTE`), as compiling and checking the code
@@ -212,8 +213,8 @@ what its storage or calls cost (`vm::cost`).
   loading included. One that runs out of fuel, while loading or in a hook, pays for all of it.
 - **Every call pays for the top level too.** Each call runs the script's top level again in its
   fresh state, so the same work is charged again. It runs before the call is attached, so it
-  sees nothing of the call: `ctx`, `storage`, `contracts`, `accounts` and `events` are not
-  there yet. It is the same code doing the same work every time.
+  sees nothing of the call: `ctx`, `storage`, `contracts`, `accounts`, `events` and `tokens` are
+  not there yet. It is the same code doing the same work every time.
 
 A call that runs out of fuel fails with `OutOfFuel`. On a chain with fees, fuel costs gas, and the
 gas limit bounds the fuel too (see [Fees](fees.md)).
@@ -255,6 +256,7 @@ numbers.
 | `accounts` | `accounts.balance(address)`, `accounts.transfer(to, amount)` from the contract's balance. |
 | `contracts` | `contracts.call(address, name, ...)`, `contracts.call_value(address, value, name, ...)`, `contracts.delegate(address, name_or_selector, ...)`, `contracts.selector(name)`. |
 | `events` | `events.emit(name, ...)`. |
+| `tokens` | `tokens.refresh()`: asks the token registry to ask this token's name, symbol and decimals again once the transaction succeeds. |
 | `address` | `address.parse("ed25519:0x…")`, `address.from_hex`, `address.from_bytes`; methods `hex`, `bytes`, `text`, `kind`, `is_contract`, `is_valid`. |
 | `u256` | `u256(value)` or `u256.new`, `u256.zero`, `u256.max`; arithmetic, comparisons and `hex`. |
 | `hash` | `hash.sha256`, `blake3`, `blake2s`, `blake2b`, `xxh3`, `keccak256`, whichever the node has; the result has `hex`, `bytes`, `algorithm`. |
@@ -323,6 +325,7 @@ into its exported memory.
 | `balance`, `transfer` | Funds, from the contract's own balance. |
 | `call`, `delegate` | Other contracts: `call(address, value, name, name_len, args, args_len)`. |
 | `emit` | An event. |
+| `refresh_token` | Asks the token registry to ask this token's name, symbol and decimals again once the transaction succeeds. |
 | `abort` | Stops the call with an error. Only the first 1,024 bytes of the message are kept. |
 
 **The encoding:** arguments and return values travel as the chain's encoding of a list of
@@ -337,21 +340,35 @@ wasmi is pinned to `=2.0.0`: its version, features and limits are consensus.
 `wasm32-unknown-unknown`.
 
 ```rust
-use chainv4_sdk::{Value, export, input, output, storage};
+use chainv4_sdk::{Address, U256, export, sender};
 
 #[export]
-fn increment() {
-    let by = input().first().and_then(Value::as_i64).unwrap_or(1);
-    let count = storage::get_i64(b"count").unwrap_or(0) + by;
-    storage::set(b"count", &count.to_le_bytes());
-    output(&[Value::I64(count)]);
+fn transfer(to: Address, amount: U256) -> Result<bool, &'static str> {
+    let from = sender();
+    // move the balance in storage, failing with "insufficient balance", then:
+    Ok(true)
 }
 ```
 
-**What it offers:**
-- `#[export]` makes a function callable by name; `#[export(reentrant)]` also marks it reentrant;
-- `input` and `output`, `sender`, `this`, `value`, `balance`, `transfer`;
-- `call` and `call_with_value`, `delegate`, `emit`, `hash`, `abort`, and `storage`.
+**Typed exports:** an exported function's parameters are read from the call's arguments, in
+order, and what it returns becomes the call's return values (`chainv4_sdk::args`).
+- **Parameters** may be any `FromValue` type: `Address`, `U256`, `bool`, `String`, `Vec<u8>`,
+  `i64`, `u64`, `u32`, `u8`, `i128`, `u128`, a `Value` as it came, or an `Option` of any of
+  them. Whole numbers arrive as any integer kind, and as Lua's floats when whole.
+- **Refused arguments:** a call with too many arguments, one left out, or one of the wrong kind
+  aborts, naming the parameter: `amount: expected an amount`, `amount: missing`,
+  `transfer takes 2 arguments, not 3`. An `Option` parameter may be left out or passed nil.
+- **Results** may be nothing, any `IntoValue` (the same types; `None` returns nil), a tuple of up
+  to four, a `Vec<Value>`, or a `Result` whose error aborts the call with its message.
+- **By hand:** a function that takes and returns nothing is exported as it is, and may read its
+  arguments with `input()` and set its return values with `output()`, as a proxy's `fallback`
+  does.
+
+**What else it offers:**
+- `#[export(reentrant)]` also marks a function reentrant;
+- `sender`, `this`, `value`, `balance`, `transfer`;
+- `call` and `call_with_value`, `delegate`, `emit`, `hash`, `abort`, `refresh_token`, and
+  `storage`.
 
 **Numbers:** Lua numbers reach a WebAssembly contract as float bits, and floats are refused in
 modules. So `Value::as_i64` and `Value::as_amount` turn whole numbers into integers using integer

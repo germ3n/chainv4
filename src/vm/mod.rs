@@ -144,6 +144,9 @@ pub mod cost {
     /// script's top level, which runs while it loads, is charged on top as it runs; WebAssembly
     /// modules may not have a start function, so they run nothing while they load.
     pub const LOAD_BYTE: u64 = 1;
+    /// Asking the token registry to ask a token's name, symbol and decimals again, once the
+    /// transaction succeeds; the questions themselves are charged as they run.
+    pub const TOKEN_REFRESH: u64 = 100;
 }
 
 #[document(
@@ -189,6 +192,8 @@ pub struct Outcome {
     pub events: Vec<Event>,
     #[document(summary = "Where the call went, for one a transaction or the chain started: its own hop and every hop under it, failed or not. Empty for a call one contract made to another, whose hops are in the trace of the run it belongs to.")]
     pub trace: Trace,
+    #[document(summary = "The contracts that asked, with tokens.refresh or refresh_token, for the token registry to ask their name, symbol and decimals again once the transaction succeeds, sorted. Empty when the call failed, or asked for none.")]
+    pub refresh_tokens: Vec<Address>,
 }
 
 impl Outcome {
@@ -199,6 +204,7 @@ impl Outcome {
             result: Err(err),
             events: Vec::new(),
             trace: Trace::default(),
+            refresh_tokens: Vec::new(),
         }
     }
 }

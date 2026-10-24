@@ -86,6 +86,11 @@ the last commit left off, and the index never has gaps.
 **Starting:** a new index starts empty at the block after the tip, and steps down from there.
 Once on, the database keeps it on, even without the flag, keeping the same blocks.
 
+**Turning it off:** `--index-events=off` deletes the whole `Events` column and the two records in
+`Meta` in one atomic write, `Database::clear`: a range delete in RocksDB, so it is quick however
+big the index is. A new index clears the column the same way first, in case anything was left
+behind.
+
 ## The storage format
 
 `STORAGE_FORMAT` names the layout records are kept in, and genesis writes it to `Meta`.

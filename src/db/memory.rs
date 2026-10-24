@@ -40,6 +40,20 @@ impl Database for MemoryDb {
         Ok(())
     }
 
+    fn clear(&self, column: Column, changes: Changes) -> Result<(), DbError> {
+        let mut records = self.records.lock().expect("the memory database is never poisoned");
+        records.retain(|(at, _), _| *at != column);
+
+        for (key, value) in changes {
+            match value {
+                Some(value) => records.insert(key, value),
+                None => records.remove(&key),
+            };
+        }
+
+        Ok(())
+    }
+
     fn scan(&self, column: Column, prefix: &[u8], start: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError> {
         // Copied out first, so visit can read the database without waiting on the lock.
         let found: Vec<(Vec<u8>, Vec<u8>)> = {

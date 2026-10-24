@@ -112,7 +112,27 @@ impl Mempool {
             return Err(MempoolError::Full);
         }
 
-        tx.verify().map_err(MempoolError::Invalid)?;
+        let checked = tx.verify();
+
+        self.add_checked(tx, checked, state, fees)
+    }
+
+    #[document(
+        parent = "Mempool",
+        summary = "Admits a transaction whose signature was checked already, such as on the node's verifier thread, going by what that check found. Everything else is checked as add checks it.",
+        params = {
+            tx = "The transaction.",
+            checked = "What its verify returned.",
+            state = "The state at the tip.",
+            fees = "The chain's fees, if it has any.",
+        },
+    )]
+    pub fn add_checked(&mut self, tx: SignedTx, checked: Result<(), VerifyError>, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
+        if self.txs.len() >= self.capacity {
+            return Err(MempoolError::Full);
+        }
+
+        checked.map_err(MempoolError::Invalid)?;
         let sender = tx.sender();
         let account = Accounts::new(state).get(&sender)?;
 

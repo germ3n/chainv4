@@ -13,7 +13,7 @@ use {
     crate::chain::fees::{Charged, Fees, Scoring},
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
     crate::structs::u256::u256,
-    crate::vm::{CallContext, Limits, Vm, VmError},
+    crate::vm::{CallContext, Limits, Outcome, Vm, VmError},
     r#macro::document,
     std::fmt,
     std::sync::Arc,
@@ -439,6 +439,51 @@ fn failed_hooks(failed: Failed) -> (Result<Effect, Failure>, Contracted) {
     (Err(Failure::Registry(failed.error)), contracted)
 }
 
+/// A call's result, once the tokens it asked to be asked again with tokens.refresh are: what
+/// their questions burn and where they go join the call's, and an answer that does not fit fails
+/// the transaction.
+fn refreshed(
+    layer: &Arc<State>,
+    vm: &Arc<Vm>,
+    sender: Address,
+    limits: Limits,
+    token_functions: &[String],
+    outcome: Outcome,
+) -> (Result<Effect, Failure>, Contracted) {
+    let mut contracted = Contracted {
+        fuel_used: outcome.fuel_used,
+        events: outcome.events,
+        trace: outcome.trace,
+    };
+    let returned = match outcome.result {
+        Ok(returned) => returned,
+        Err(err) => return (Err(Failure::Contract(err)), contracted),
+    };
+    let contracts = Contracts::new(layer);
+
+    for token in &outcome.refresh_tokens {
+        let left = Limits {
+            fuel: limits.fuel.saturating_sub(contracted.fuel_used),
+            ..limits
+        };
+
+        match contracts.refresh(vm, token, sender, left, token_functions) {
+            Ok((fuel_used, trace)) => {
+                contracted.fuel_used += fuel_used;
+                contracted.trace.append(trace);
+            }
+            Err(failed) => {
+                contracted.fuel_used += failed.fuel_used;
+                contracted.trace.append(failed.trace);
+
+                return (Err(Failure::Registry(failed.error)), contracted);
+            }
+        }
+    }
+
+    (Ok(Effect::Returned(returned)), contracted)
+}
+
 fn run(
     layer: &Arc<State>,
     signed: &SignedTx,
@@ -487,14 +532,7 @@ fn run(
             };
 
             match Contracts::new(layer).call(vm, &context, func, data, limits) {
-                Ok(outcome) => (
-                    outcome.result.map(Effect::Returned).map_err(Failure::Contract),
-                    Contracted {
-                        fuel_used: outcome.fuel_used,
-                        events: outcome.events,
-                        trace: outcome.trace,
-                    },
-                ),
+                Ok(outcome) => refreshed(layer, vm, sender, limits, &rules.token_functions, outcome),
                 Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
             }
         }

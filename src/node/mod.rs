@@ -9,6 +9,7 @@ use {
     crate::chain::{Chain, ChainError, EventsFrom, FinalityError, FinalityUpdate, Genesis, ImportError, Imported},
     crate::consensus::Producer,
     crate::crypto::keypair::Keypair,
+    crate::crypto::verifiable::VerifyError,
     crate::db::{Database, DbError},
     crate::mempool::{Mempool, MempoolError},
     crate::net::{MAX_SYNC_BLOCKS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, SyncRequest, SyncResponse},
@@ -26,12 +27,14 @@ use {
     std::sync::mpsc::{self, RecvTimeoutError},
     std::time::{Duration, SystemTime, UNIX_EPOCH},
     sync::SyncState,
-    tokio::sync::{broadcast, oneshot},
+    tokio::sync::{broadcast, mpsc as async_mpsc, oneshot},
+    verifier::Arrival,
 };
 
 mod report;
 mod stream;
 mod sync;
+mod verifier;
 
 pub use report::{Counters, Heard, NodeReport, PeerReport};
 pub use stream::NodeEvent;
@@ -61,8 +64,12 @@ pub struct Node {
     producer: Option<Box<dyn Producer>>,
     /// The block the producer is sealing, until its seal arrives or the tip moves on.
     template: Option<Block>,
-    net: NetLink,
-    held: Option<NetEvent>,
+    /// What the node asks the network to do.
+    commands: async_mpsc::UnboundedSender<NetCommand>,
+    /// The way into arrivals for local clients, which handles hand out.
+    inbox: mpsc::Sender<NetEvent>,
+    arrivals: Arrivals,
+    held: Option<Arrival>,
     peers: HashMap<PeerId, Peer>,
     sync: SyncState,
     reported: u64,
@@ -174,6 +181,8 @@ pub enum NodeError {
     Db(DbError),
     #[document(summary = "The network thread stopped.")]
     NetworkStopped,
+    #[document(summary = "A thread the node needs, such as its verifier, could not start.")]
+    Thread(String),
 }
 
 impl fmt::Display for NodeError {
@@ -182,6 +191,7 @@ impl fmt::Display for NodeError {
             NodeError::Chain(err) => write!(f, "{err}"),
             NodeError::Db(err) => write!(f, "{err}"),
             NodeError::NetworkStopped => write!(f, "the network stopped"),
+            NodeError::Thread(why) => write!(f, "a thread would not start: {why}"),
         }
     }
 }
@@ -212,13 +222,28 @@ impl Node {
         net: NetLink,
     ) -> Result<Node, NodeError> {
         let chain = Chain::open(db, genesis).map_err(NodeError::Chain)?;
+        let NetLink {
+            commands,
+            events,
+            inbox,
+            check_inline,
+        } = net;
+        // The verifier takes the network's events, and the node reads what it checked.
+        let arrivals = match check_inline {
+            true => Arrivals::Unchecked(events),
+            false => Arrivals::Checked(
+                verifier::spawn(events, chain.workers()).map_err(|err| NodeError::Thread(format!("the verifier: {err}")))?,
+            ),
+        };
 
         Ok(Node {
             chain,
             mempool: Mempool::new(MEMPOOL_CAPACITY),
             producer,
             template: None,
-            net,
+            commands,
+            inbox,
+            arrivals,
             held: None,
             peers: HashMap::new(),
             sync: SyncState::default(),
@@ -257,6 +282,23 @@ impl Node {
         Ok(self)
     }
 
+    #[document(
+        parent = "Node",
+        summary = "Makes the node keep no event index, deleting the one its database holds.",
+        returns = "The node, or the database failure that kept it from starting.",
+        see_also = "Chain::drop_event_index",
+    )]
+    pub fn drop_event_index(mut self) -> Result<Node, NodeError> {
+        self.catching_up = false;
+
+        match self.chain.drop_event_index()? {
+            true => log::info!("[node] dropped the event index"),
+            false => log::info!("[node] there is no event index to drop"),
+        }
+
+        Ok(self)
+    }
+
     #[document(parent = "Node", summary = "The chain this node follows.")]
     pub fn chain(&self) -> &Chain {
         &self.chain
@@ -273,7 +315,7 @@ impl Node {
     )]
     pub fn handle(&self) -> NodeHandle {
         NodeHandle {
-            inbox: self.net.inbox.clone(),
+            inbox: self.inbox.clone(),
             events: self.events.clone(),
         }
     }
@@ -306,14 +348,10 @@ impl Node {
         }
 
         for _ in 0..EVENT_BUDGET {
-            let event = match self.held.take() {
-                Some(event) => event,
-                None => match self.net.events.try_recv() {
-                    Ok(event) => event,
-                    Err(_) => break,
-                },
+            let Some(arrival) = self.held.take().or_else(|| self.arrivals.try_next()) else {
+                break;
             };
-            self.on_event(event, now)?;
+            self.on_event(arrival, now)?;
         }
 
         self.produce_if_due(now)?;
@@ -329,7 +367,13 @@ impl Node {
         summary = "Admits a transaction submitted to this node and gossips it.",
     )]
     pub fn submit(&mut self, tx: SignedTx) -> Result<(), MempoolError> {
-        self.mempool.add(tx.clone(), &self.chain.state(), self.chain.fees())?;
+        self.submit_checked(tx, None)
+    }
+
+    /// Admits a submitted transaction, checking its signature unless the verifier did, and
+    /// gossips it.
+    fn submit_checked(&mut self, tx: SignedTx, checked: Option<Result<(), VerifyError>>) -> Result<(), MempoolError> {
+        self.admit(tx.clone(), checked)?;
         log::info!("[node] accepted transaction {} from {}", tx.id(self.chain.hash()), tx.sender());
         self.publish(|| NodeEvent::Queued(Arc::new(tx.clone())));
         self.send(NetCommand::PublishTx(tx));
@@ -337,7 +381,19 @@ impl Node {
         Ok(())
     }
 
-    fn on_event(&mut self, event: NetEvent, now: u64) -> Result<(), NodeError> {
+    /// Puts a transaction in the mempool, going by what the verifier found when it checked it.
+    fn admit(&mut self, tx: SignedTx, checked: Option<Result<(), VerifyError>>) -> Result<(), MempoolError> {
+        let state = self.chain.state();
+
+        match checked {
+            Some(checked) => self.mempool.add_checked(tx, checked, &state, self.chain.fees()),
+            None => self.mempool.add(tx, &state, self.chain.fees()),
+        }
+    }
+
+    fn on_event(&mut self, arrival: Arrival, now: u64) -> Result<(), NodeError> {
+        let Arrival { event, checked } = arrival;
+
         match event {
             NetEvent::Block { from, block } => {
                 let height = block.header.height;
@@ -378,7 +434,7 @@ impl Node {
                 self.counters.txs_heard += 1;
                 self.heard(&from, |heard| heard.txs += 1);
 
-                match self.mempool.add(tx.clone(), &self.chain.state(), self.chain.fees()) {
+                match self.admit(tx.clone(), checked) {
                     Ok(()) => {
                         log::debug!("[node] queued transaction {id} from {from}");
                         self.publish(|| NodeEvent::Queued(Arc::new(tx)));
@@ -426,7 +482,7 @@ impl Node {
             }
             NetEvent::Submitted { tx, reply } => {
                 let id = tx.id(self.chain.hash());
-                let verdict = self.submit(tx).map(|()| id);
+                let verdict = self.submit_checked(tx, checked).map(|()| id);
 
                 match &verdict {
                     Ok(_) => self.counters.txs_submitted += 1,
@@ -741,7 +797,7 @@ impl Node {
 
     /// Sleeps until the next slot, waking early when an event arrives.
     fn wait(&mut self, now: u64) -> Result<(), NodeError> {
-        if self.net.stopped() {
+        if self.commands.is_closed() {
             return Err(NodeError::NetworkStopped);
         }
 
@@ -759,8 +815,8 @@ impl Node {
             None => IDLE_WAIT,
         };
 
-        match self.net.events.recv_timeout(wait) {
-            Ok(event) => self.held = Some(event),
+        match self.arrivals.next_within(wait) {
+            Ok(arrival) => self.held = Some(arrival),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Err(NodeError::NetworkStopped),
         }
@@ -773,8 +829,34 @@ impl Node {
             self.counters.requests_sent += 1;
         }
 
-        if !self.net.send(command) {
+        if self.commands.send(command).is_err() {
             log::warn!("[node] the network thread is gone");
+        }
+    }
+}
+
+/// Where the node's events come from.
+enum Arrivals {
+    /// Through the verifier, with transactions' signatures checked.
+    Checked(mpsc::Receiver<Arrival>),
+    /// Straight from the network, for a link that checks inline.
+    Unchecked(mpsc::Receiver<NetEvent>),
+}
+
+impl Arrivals {
+    /// The next event if one is waiting.
+    fn try_next(&self) -> Option<Arrival> {
+        match self {
+            Arrivals::Checked(arrivals) => arrivals.try_recv().ok(),
+            Arrivals::Unchecked(events) => events.try_recv().ok().map(Arrival::unchecked),
+        }
+    }
+
+    /// The next event, waiting at most this long for one.
+    fn next_within(&self, wait: Duration) -> Result<Arrival, RecvTimeoutError> {
+        match self {
+            Arrivals::Checked(arrivals) => arrivals.recv_timeout(wait),
+            Arrivals::Unchecked(events) => events.recv_timeout(wait).map(Arrival::unchecked),
         }
     }
 }
