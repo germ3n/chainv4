@@ -146,6 +146,13 @@ pub enum Tx {
         threshold: u32,
         change_threshold: u32,
     },
+    #[document(
+        summary = "Takes back the sender's approval of a change of signers, so it backs no change. Only one of the decided signers may send it, while its approval still counts.",
+        params = { version = "The version of the decided set its approval was for." },
+        see_also = "Signers::withdraw, Tx::ApproveSigners",
+    )]
+    #[wincode(tag = 11)]
+    WithdrawApproval { version: u64 },
 }
 
 #[document(
@@ -245,6 +252,7 @@ impl Verifiable for Tx {
             }
             Tx::Unbond { voter } | Tx::Withdraw { voter } => voter.verify(),
             Tx::ApproveSigners { signers, .. } => signers.iter().try_for_each(Verifiable::verify),
+            Tx::WithdrawApproval { .. } => Ok(()),
             // The signatures are checked when it runs, against the chain's genesis id.
             Tx::Slash { first, second } => {
                 if !first.vote.conflicts(&second.vote) {

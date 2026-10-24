@@ -176,6 +176,7 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::Withdraw { .. } => ("withdraw", sender),
         Tx::Slash { .. } => ("slash", sender),
         Tx::ApproveSigners { .. } => ("approve_signers", sender),
+        Tx::WithdrawApproval { .. } => ("withdraw_approval", sender),
     }
 }
 

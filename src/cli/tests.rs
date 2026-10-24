@@ -316,15 +316,26 @@ mod send {
         let added = send(running.args(approve(vec![newcomer], None)));
         let stale = send(running.args(approve(Vec::new(), Some(0))));
         let already = send(running.args(approve(vec![dev], None)));
+        // Now two must approve: the dev key's approval waits, until it takes it back.
+        let third = Keypair::generate(dev.key_type()).unwrap().public();
+        let pending = send(running.args(approve(vec![third], None)));
+        let withdrawn = send(running.args(TxArgs::WithdrawApproval { version: None }));
+        let nothing_left = send(running.args(TxArgs::WithdrawApproval { version: None }));
         let node = running.stop();
-        let decided = Signers::new(&node.chain().state()).decided().unwrap();
+        let state = node.chain().state();
+        let signers = Signers::new(&state);
+        let decided = signers.decided().unwrap();
 
         added.unwrap();
         assert!(stale.unwrap_err().to_string().contains("the signers changed since"));
         assert!(already.unwrap_err().to_string().contains("is a signer already"));
+        pending.unwrap();
+        withdrawn.unwrap();
+        assert!(nothing_left.unwrap_err().to_string().contains("no approval"));
         assert_eq!(decided.version, 1);
         assert_eq!(decided.set.signers.len(), 2);
         assert!(decided.set.signers.contains(&newcomer));
+        assert!(signers.ballot().unwrap().approvals.is_empty());
     }
 
     #[cfg(feature = "finality-ffg")]

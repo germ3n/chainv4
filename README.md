@@ -145,7 +145,7 @@ only and is never overwritten, but it is not encrypted: guard it.
 ## Sending transactions
 
 ```sh
-chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call|bond|unbond|withdraw|slash|approve-signers> …
+chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call|bond|unbond|withdraw|slash|approve-signers|withdraw-approval> …
 ```
 
 `send` looks up the signer's next nonce, signs, posts the transaction to a node, and waits until
@@ -426,7 +426,17 @@ so a change decided in epoch k votes from epoch k + `activation_delay` + 1. Both
 be more than half the new set, and it may hold at most `max_signers`. An approval names the
 version of the set it changes, which `send` fills in, so approvals for a set that has changed
 since never count, and a signer that approves a different set moves its approval there.
-`GET /signers` shows who votes now, the decided set, and the approvals so far.
+
+An approval counts for `approval_epochs` epochs, 64 in the dev settings, so a change is only
+decided by approvals that are recent; approving again starts the clock afresh. A signer can also
+take its approval back:
+
+```sh
+chainv4 send --key signer.key withdraw-approval
+```
+
+`GET /signers` shows who votes now, the decided set, and the approvals that still count, with
+the last epoch each counts in.
 
 ### Depth finality
 

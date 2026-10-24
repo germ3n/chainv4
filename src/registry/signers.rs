@@ -129,10 +129,19 @@ pub struct Approval {
     pub signer: PublicKey,
     #[document(summary = "The set it approves.")]
     pub proposal: SignerSet,
+    #[document(summary = "The epoch it was made in. It counts for approval_epochs epochs from there, and approving again starts it afresh.")]
+    pub epoch: u64,
+}
+
+impl Approval {
+    #[document(parent = "Approval", summary = "Whether it still counts in an epoch, when approvals count for approval_epochs epochs.")]
+    pub fn counts(&self, epoch: u64, approval_epochs: u64) -> bool {
+        epoch < self.epoch.saturating_add(approval_epochs)
+    }
 }
 
 #[document(
-    summary = "The approvals for changing the decided set, at most one per signer. A signer that approves another change moves its approval there.",
+    summary = "The approvals for changing the decided set, at most one per signer. A signer that approves another change moves its approval there, and one that withdraws takes it back. An approval stops counting approval_epochs epochs after the one it was made in.",
     category = "Finality",
     see_also = "Signers::approve",
 )]
@@ -147,6 +156,19 @@ pub struct Ballot {
 impl Hashable for Ballot {}
 
 impl Ballot {
+    #[document(
+        parent = "Ballot",
+        summary = "The ballot as it stands in an epoch: only the approvals that still count.",
+        params = {
+            epoch = "The epoch to count in.",
+            approval_epochs = "How many epochs an approval counts for.",
+        },
+    )]
+    pub fn counting(mut self, epoch: u64, approval_epochs: u64) -> Ballot {
+        self.approvals.retain(|approval| approval.counts(epoch, approval_epochs));
+        self
+    }
+
     #[document(parent = "Ballot", summary = "Who approved a proposal.")]
     pub fn approvers(&self, proposal: &SignerSet) -> Vec<PublicKey> {
         self.approvals
@@ -222,7 +244,10 @@ impl<'a> Signers<'a> {
             .ok_or_else(|| DbError::Corrupt("no decided signer set".to_string()))
     }
 
-    #[document(parent = "Signers", summary = "The approvals so far for changing the decided set.")]
+    #[document(
+        parent = "Signers",
+        summary = "The approvals so far for changing the decided set, expired ones included: Ballot::counting leaves only those that count.",
+    )]
     pub fn ballot(&self) -> Result<Ballot, DbError> {
         let decided = self.decided()?;
         let ballot: Ballot = self.state.get_value(Column::Validators, BALLOT)?.unwrap_or_default();
@@ -239,24 +264,28 @@ impl<'a> Signers<'a> {
 
     #[document(
         parent = "Signers",
-        summary = "Counts a signer's approval of a new set. Once change_threshold of the decided set's signers approve the same one, it becomes the decided set, and the checkpoints that follow fix it for later epochs.",
+        summary = "Counts a signer's approval of a new set. Once change_threshold of the decided set's signers approve the same one with approvals that still count, it becomes the decided set, and the checkpoints that follow fix it for later epochs.",
         params = {
             sender = "Who sent the approval: one of the decided set's signers, by its key's address.",
             version = "The version it changes, which must be the decided one's.",
             proposal = "The set it approves.",
             max_signers = "The most signers a set may have.",
+            epoch = "The epoch the approval is made in.",
+            approval_epochs = "How many epochs an approval counts for.",
         },
         returns = "Whether that decided it. Fails for a sender that is not a signer, an older version, an unusable set, or the set already decided.",
     )]
-    pub fn approve(&self, sender: &Address, version: u64, proposal: SignerSet, max_signers: u32) -> Result<Approved, RegistryError> {
-        let decided = self.decided()?;
+    pub fn approve(
+        &self,
+        sender: &Address,
+        version: u64,
+        proposal: SignerSet,
+        max_signers: u32,
+        epoch: u64,
+        approval_epochs: u64,
+    ) -> Result<Approved, RegistryError> {
+        let (decided, signer) = self.signer(sender, version)?;
         let proposal = SignerSet::new(proposal.signers, proposal.threshold, proposal.change_threshold);
-
-        if version != decided.version {
-            return Err(RegistryError::StaleSigners(decided.version));
-        }
-
-        let signer = decided.set.signer_at(sender).ok_or(RegistryError::NotSigner)?;
 
         if let Some(problem) = proposal.problem(max_signers) {
             return Err(RegistryError::BadSigners(problem));
@@ -266,11 +295,12 @@ impl<'a> Signers<'a> {
             return Err(RegistryError::SameSigners);
         }
 
-        let mut ballot = self.ballot()?;
+        let mut ballot = self.ballot()?.counting(epoch, approval_epochs);
         ballot.approvals.retain(|approval| approval.signer != signer);
         ballot.approvals.push(Approval {
             signer,
             proposal: proposal.clone(),
+            epoch,
         });
         let approvals = ballot.approvers(&proposal).len() as u32;
         let needed = decided.set.change_threshold;
@@ -286,6 +316,48 @@ impl<'a> Signers<'a> {
         self.state.delete(Column::Validators, BALLOT.to_vec());
 
         Ok(Approved::Decided(version))
+    }
+
+    #[document(
+        parent = "Signers",
+        summary = "Takes back a signer's approval, while it still counts, so it backs no change.",
+        params = {
+            sender = "The signer, by its key's address.",
+            version = "The version its approval was for, which must be the decided one's.",
+            epoch = "The epoch it is withdrawn in.",
+            approval_epochs = "How many epochs an approval counts for.",
+        },
+        panics = "NotSigner for a sender that is not a signer, StaleSigners for an older version, NoApproval when it has no approval that still counts.",
+    )]
+    pub fn withdraw(&self, sender: &Address, version: u64, epoch: u64, approval_epochs: u64) -> Result<(), RegistryError> {
+        let (_, signer) = self.signer(sender, version)?;
+        let mut ballot = self.ballot()?.counting(epoch, approval_epochs);
+        let before = ballot.approvals.len();
+        ballot.approvals.retain(|approval| approval.signer != signer);
+
+        if ballot.approvals.len() == before {
+            return Err(RegistryError::NoApproval);
+        }
+
+        match ballot.approvals.is_empty() {
+            true => self.state.delete(Column::Validators, BALLOT.to_vec()),
+            false => self.state.put_value(Column::Validators, BALLOT.to_vec(), &ballot),
+        }
+
+        Ok(())
+    }
+
+    /// The decided set and the sender's key in it, for a ballot on the decided version.
+    fn signer(&self, sender: &Address, version: u64) -> Result<(Decided, PublicKey), RegistryError> {
+        let decided = self.decided()?;
+
+        if version != decided.version {
+            return Err(RegistryError::StaleSigners(decided.version));
+        }
+
+        let signer = decided.set.signer_at(sender).ok_or(RegistryError::NotSigner)?;
+
+        Ok((decided, signer))
     }
 }
 
@@ -325,6 +397,9 @@ mod tests {
         SignerSet::new(vec![key(1), key(2), key(3), key(4)], 3, 3)
     }
 
+    /// How many epochs approvals count for in these tests.
+    const WINDOW: u64 = 4;
+
     #[test]
     fn genesis_signers_are_fixed_for_the_first_epochs() {
         let (state, set) = genesis();
@@ -343,11 +418,11 @@ mod tests {
     fn enough_approvals_decide_a_change_that_later_checkpoints_fix() {
         let (state, set) = genesis();
         let signers = Signers::new(&state);
-        let first = signers.approve(&key(1).address(), 0, with_fourth(), 10).unwrap();
+        let first = signers.approve(&key(1).address(), 0, with_fourth(), 10, 0, WINDOW).unwrap();
 
         assert_eq!(first, Approved::Counted { approvals: 1, needed: 2 });
         assert_eq!(signers.ballot().unwrap().approvers(&with_fourth()), [key(1)]);
-        assert_eq!(signers.approve(&key(3).address(), 0, with_fourth(), 10).unwrap(), Approved::Decided(1));
+        assert_eq!(signers.approve(&key(3).address(), 0, with_fourth(), 10, 0, WINDOW).unwrap(), Approved::Decided(1));
         assert_eq!(signers.decided().unwrap(), Decided { version: 1, set: with_fourth() });
         assert!(signers.ballot().unwrap().approvals.is_empty());
 
@@ -364,8 +439,8 @@ mod tests {
         let (state, _) = genesis();
         let signers = Signers::new(&state);
         let without_third = SignerSet::new(vec![key(1), key(2)], 2, 2);
-        signers.approve(&key(1).address(), 0, with_fourth(), 10).unwrap();
-        signers.approve(&key(1).address(), 0, without_third.clone(), 10).unwrap();
+        signers.approve(&key(1).address(), 0, with_fourth(), 10, 0, WINDOW).unwrap();
+        signers.approve(&key(1).address(), 0, without_third.clone(), 10, 0, WINDOW).unwrap();
         let ballot = signers.ballot().unwrap();
 
         assert!(ballot.approvers(&with_fourth()).is_empty());
@@ -373,7 +448,7 @@ mod tests {
 
         // Its earlier approval no longer counts toward the first proposal.
         assert_eq!(
-            signers.approve(&key(2).address(), 0, with_fourth(), 10).unwrap(),
+            signers.approve(&key(2).address(), 0, with_fourth(), 10, 0, WINDOW).unwrap(),
             Approved::Counted { approvals: 1, needed: 2 }
         );
     }
@@ -383,7 +458,7 @@ mod tests {
         let (state, set) = genesis();
         let signers = Signers::new(&state);
         let approve = |sender: PublicKey, version: u64, proposal: SignerSet| {
-            signers.approve(&sender.address(), version, proposal, 4)
+            signers.approve(&sender.address(), version, proposal, 4, 0, WINDOW)
         };
 
         assert_eq!(approve(key(9), 0, with_fourth()), Err(RegistryError::NotSigner));
@@ -415,5 +490,52 @@ mod tests {
             Approved::Counted { approvals: 1, needed: 3 },
             "the new signer approves, against the new change_threshold"
         );
+    }
+
+    #[test]
+    fn approvals_stop_counting_once_they_expire() {
+        let (state, _) = genesis();
+        let signers = Signers::new(&state);
+        signers.approve(&key(1).address(), 0, with_fourth(), 10, 3, WINDOW).unwrap();
+
+        // Made in epoch 3, it counts in epochs 3 to 6.
+        assert_eq!(signers.ballot().unwrap().counting(6, WINDOW).approvers(&with_fourth()), [key(1)]);
+        assert!(signers.ballot().unwrap().counting(7, WINDOW).approvals.is_empty());
+
+        // A second approval in epoch 7 finds the first expired, so it decides nothing.
+        assert_eq!(
+            signers.approve(&key(2).address(), 0, with_fourth(), 10, 7, WINDOW).unwrap(),
+            Approved::Counted { approvals: 1, needed: 2 }
+        );
+        assert_eq!(signers.ballot().unwrap().approvals.len(), 1, "the expired approval is let go");
+
+        // Approving again starts the clock afresh, and now two count.
+        assert_eq!(
+            signers.approve(&key(1).address(), 0, with_fourth(), 10, 8, WINDOW).unwrap(),
+            Approved::Decided(1)
+        );
+    }
+
+    #[test]
+    fn a_signer_can_take_its_approval_back() {
+        let (state, _) = genesis();
+        let signers = Signers::new(&state);
+        signers.approve(&key(1).address(), 0, with_fourth(), 10, 0, WINDOW).unwrap();
+        signers.approve(&key(2).address(), 0, SignerSet::new(vec![key(1), key(2)], 2, 2), 10, 0, WINDOW).unwrap();
+
+        signers.withdraw(&key(1).address(), 0, 1, WINDOW).unwrap();
+
+        assert!(signers.ballot().unwrap().approvers(&with_fourth()).is_empty());
+        assert_eq!(signers.ballot().unwrap().approvals.len(), 1, "another signer's approval stays");
+        assert_eq!(signers.withdraw(&key(1).address(), 0, 1, WINDOW), Err(RegistryError::NoApproval));
+        assert_eq!(signers.withdraw(&key(9).address(), 0, 1, WINDOW), Err(RegistryError::NotSigner));
+        assert_eq!(signers.withdraw(&key(2).address(), 1, 1, WINDOW), Err(RegistryError::StaleSigners(0)));
+
+        // An approval that expired has nothing left to withdraw.
+        assert_eq!(signers.withdraw(&key(2).address(), 0, WINDOW, WINDOW), Err(RegistryError::NoApproval));
+
+        signers.withdraw(&key(2).address(), 0, 1, WINDOW).unwrap();
+
+        assert_eq!(signers.ballot().unwrap(), Ballot::default());
     }
 }

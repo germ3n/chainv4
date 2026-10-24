@@ -148,6 +148,14 @@ pub enum TxArgs {
         #[arg(long)]
         version: Option<u64>,
     },
+    /// Takes back the signer's approval of a change of authority signers. Sign with that signer's
+    /// key.
+    WithdrawApproval {
+        /// The version of the decided set the approval was for. Defaults to the one the node
+        /// reports.
+        #[arg(long)]
+        version: Option<u64>,
+    },
     /// Calls a function on a contract.
     Call {
         /// The contract, such as contract:0x….
@@ -414,6 +422,17 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
                 threshold,
                 change_threshold,
             }
+        }
+        TxArgs::WithdrawApproval { version } => {
+            let version = match version {
+                Some(version) => version,
+                None => ok(agent.get(format!("{node}/signers")).call())?["version"]
+                    .as_u64()
+                    .ok_or("the node sent no version")?,
+            };
+            println!("withdrawing this signer's approval for version {version}");
+
+            Tx::WithdrawApproval { version }
         }
         TxArgs::Call {
             to,

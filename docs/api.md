@@ -65,7 +65,7 @@ Each summary has:
 
 **Each `tx`** has a `type` and that type's fields:
 - `transfer`, `mint`, `burn`, `call`, `deploy`, `upgrade`;
-- `bond`, `unbond`, `withdraw`, `slash`, `approve_signers`.
+- `bond`, `unbond`, `withdraw`, `slash`, `approve_signers`, `withdraw_approval`.
 
 ### `GET /txs/{id}`
 
@@ -214,8 +214,10 @@ Under `authority`:
 - `epoch`;
 - the `active` set;
 - the `decided` set and its `version`;
-- the `proposals` so far, each with its `signers`, `threshold`, `change_threshold` and
-  `approvals`.
+- `approval_epochs`, how many epochs an approval counts for;
+- the `proposals` with approvals that still count in the tip's epoch, each with its `signers`,
+  `threshold`, `change_threshold` and `approvals`. Each approval has its `signer`, the `epoch`
+  it was made in, and the last epoch it counts in (`counts_until`).
 
 Sets show their `signers`, `threshold` and `change_threshold`.
 

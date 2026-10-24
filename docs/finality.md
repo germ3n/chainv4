@@ -155,14 +155,24 @@ The same votes, from signers each counting once; `threshold` of them justify.
 - **Changing signers** (`chainv4 send --key signer.key approve-signers --add KEY --remove KEY`):
   1. A signer approves a whole new set and both of its thresholds (`Tx::ApproveSigners`),
      naming the version of the decided set it changes.
-  2. Once `change_threshold` of the decided signers approve the same set for the same version, it
-     is decided, and the version goes up by one.
-  3. Approvals for an older version never count, and a signer that approves another set moves its
-     approval there.
-  4. The checkpoint after a decision fixes the new set for the epoch `activation_delay` ahead, so
+  2. Once `change_threshold` of the decided signers approve the same set for the same version,
+     with approvals that still count, it is decided, and the version goes up by one.
+  3. The checkpoint after a decision fixes the new set for the epoch `activation_delay` ahead, so
      a change decided in epoch k votes from epoch k + `activation_delay` + 1.
 
-  `GET /signers` shows the active set, the decided one, and the approvals so far.
+  `GET /signers` shows the active set, the decided one, and the approvals that still count.
+- **What makes an approval count:**
+  - **One per signer:** a signer that approves another set moves its approval there.
+  - **Withdrawing:** a signer can take its approval back (`Tx::WithdrawApproval`,
+    `chainv4 send --key signer.key withdraw-approval`), so it backs no change. It fails when the
+    signer has no approval that still counts.
+  - **Expiry:** an approval counts for `approval_epochs` epochs, the one it was made in included:
+    made in epoch k, it counts through epoch k + `approval_epochs` - 1. A change is only decided
+    by approvals that still count, so it reflects what the signers want now, not what they once
+    did. Approving again starts the clock afresh. Expired approvals are simply not counted, and
+    are let go the next time the ballot is written.
+  - **Versions:** approvals for an older version never count. Deciding any change empties the
+    ballot.
 - **Rewards:** `vote_reward`, 0 in the dev settings, pays each signer's own address.
 - **No slashing:** there are no bonds, so conflicting votes are only logged and listed.
 

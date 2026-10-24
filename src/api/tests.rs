@@ -483,8 +483,22 @@ fn authority_chains_list_their_signers_and_changes() {
         FeeOffer::NONE,
         &keys[0],
     );
+    // Another signer approves something else, then takes it back.
+    let other = SignedTx::sign(
+        Tx::ApproveSigners {
+            version: 0,
+            signers: vec![signers[1], signers[2]],
+            threshold: 2,
+            change_threshold: 2,
+        },
+        0,
+        FeeOffer::NONE,
+        &keys[1],
+    );
+    let withdraw = SignedTx::sign(Tx::WithdrawApproval { version: 0 }, 1, FeeOffer::NONE, &keys[1]);
     let (address, _) = serve_with(crate::chain::FinalityConfig::Authority(config), 3, |height| match height {
-        1 => vec![approve.clone()],
+        1 => vec![approve.clone(), other.clone()],
+        2 => vec![withdraw.clone()],
         _ => Vec::new(),
     });
     let listing = ok(address, "/validators");
@@ -514,16 +528,18 @@ fn authority_chains_list_their_signers_and_changes() {
     let current = ok(address, "/signers");
     let set = json!({ "signers": names(&signers), "threshold": 2, "change_threshold": 2 });
 
+    assert_eq!(ok(address, "/blocks/2")["txs"][0]["tx"], json!({ "type": "withdraw_approval", "version": 0 }));
     assert_eq!(current["version"], 0);
     assert_eq!(current["decided"], set);
     assert_eq!(current["active"], set);
+    assert_eq!(current["approval_epochs"], 64);
     assert_eq!(
         current["proposals"],
         json!([{
             "signers": names(&proposed),
             "threshold": 2,
             "change_threshold": 2,
-            "approvals": [keys[0].public().to_string()],
+            "approvals": [{ "signer": keys[0].public().to_string(), "epoch": 0, "counts_until": 63 }],
         }])
     );
 }

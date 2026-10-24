@@ -49,6 +49,10 @@ pub struct Rules {
 pub struct SignerRules {
     #[document(summary = "The most signers a set may have.")]
     pub max_signers: u32,
+    #[document(summary = "Blocks per epoch, to tell which epoch an approval is made in.")]
+    pub checkpoint_interval: u64,
+    #[document(summary = "How many epochs an approval counts for.")]
+    pub approval_epochs: u64,
 }
 
 #[document(
@@ -528,9 +532,18 @@ fn run(
                 return (Err(Failure::NoSigners), Contracted::default());
             };
             let proposal = SignerSet::new(signers.clone(), *threshold, *change_threshold);
-            let approved = Signers::new(layer).approve(&sender, *version, proposal, rules.max_signers);
+            let epoch = height / rules.checkpoint_interval.max(1);
+            let approved = Signers::new(layer).approve(&sender, *version, proposal, rules.max_signers, epoch, rules.approval_epochs);
 
             (moved(approved.map(|_| ())), Contracted::default())
+        }
+        Tx::WithdrawApproval { version } => {
+            let Some(rules) = &rules.signers else {
+                return (Err(Failure::NoSigners), Contracted::default());
+            };
+            let epoch = height / rules.checkpoint_interval.max(1);
+
+            (moved(Signers::new(layer).withdraw(&sender, *version, epoch, rules.approval_epochs)), Contracted::default())
         }
     }
 }

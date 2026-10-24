@@ -63,6 +63,8 @@ nodes can differ in it, and a reorg never touches it.
   databases from before formats were recorded are. It never misreads one.
 - **When to bump it:** whenever a stored record changes shape.
 - **Format 1:** receipts carry traces, and the chain keeps its leaf blocks in `Meta`.
+- **Format 2:** authority finality's approvals of a signer change record the epoch they were made
+  in, so they can expire.
 
 There are no migrations: delete the database, or point `--db` elsewhere.
 

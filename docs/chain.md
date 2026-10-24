@@ -51,6 +51,7 @@ included, hashed with the chain hash.
 | `Bond`, `Unbond`, `Withdraw` | FFG staking (see [Finality](finality.md)). |
 | `Slash` | Reports two conflicting votes, under FFG. |
 | `ApproveSigners` | Approves a new set of authority finality signers. |
+| `WithdrawApproval` | Takes back the sender's approval of a new set of signers. |
 
 **Validity checks:**
 - **Always:** a transfer or burn may only take from the sender, and amounts must not be zero.

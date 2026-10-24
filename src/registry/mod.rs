@@ -67,6 +67,8 @@ pub enum RegistryError {
     BadSigners(&'static str),
     #[document(summary = "The proposed signers are the decided ones already.")]
     SameSigners,
+    #[document(summary = "The signer has no approval that still counts to withdraw.")]
+    NoApproval,
     #[document(summary = "The contract would not load, or this node lacks its engine.")]
     #[cfg(feature = "vm")]
     Vm(VmError),
@@ -93,10 +95,11 @@ impl fmt::Display for RegistryError {
             RegistryError::NotWithdrawable(None) => write!(f, "the validator has not unbonded"),
             RegistryError::AlreadySlashed => write!(f, "the validator was slashed already"),
             RegistryError::TooManyValidators => write!(f, "the chain has as many validators as it allows"),
-            RegistryError::NotSigner => write!(f, "only a signer may approve a change to the signers"),
+            RegistryError::NotSigner => write!(f, "only a signer may approve or withdraw a change to the signers"),
             RegistryError::StaleSigners(version) => write!(f, "the signers changed since; the decided version is {version}"),
             RegistryError::BadSigners(why) => write!(f, "{why}"),
             RegistryError::SameSigners => write!(f, "those are the signers already"),
+            RegistryError::NoApproval => write!(f, "no approval of this signer's counts to withdraw"),
             #[cfg(feature = "vm")]
             RegistryError::Vm(err) => write!(f, "{err}"),
         }

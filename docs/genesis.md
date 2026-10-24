@@ -66,7 +66,8 @@ field, they are part of the genesis id.
   "vote_reward": "1000000000000000000", "max_proofs_per_block": 4,
   "validators": [{ "account": "ed25519:0x…", "voter": "ed25519:0x…", "bond": "10000000000000000000000" }] }
 { "type": "authority", "checkpoint_interval": 8, "vote_depth": 2, "activation_delay": 2, "max_signers": 100,
-  "signers": ["ed25519:0x…"], "threshold": 1, "change_threshold": 1, "vote_reward": "0", "max_proofs_per_block": 4 }
+  "signers": ["ed25519:0x…"], "threshold": 1, "change_threshold": 1, "approval_epochs": 64,
+  "vote_reward": "0", "max_proofs_per_block": 4 }
 { "type": "depth", "depth": 6 }
 ```
 
@@ -95,6 +96,7 @@ has only `min_price`. What each field means is in [Fees](fees.md).
 - **Authority finality:**
   - a `checkpoint_interval` or `activation_delay` of 0;
   - no signers, a signer named twice, or more signers than `max_signers`;
+  - an `approval_epochs` of 0;
   - a `threshold` or `change_threshold` that is not more than half the signers and at most all of
     them.
 - **Fees:**

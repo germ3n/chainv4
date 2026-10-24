@@ -42,6 +42,8 @@ pub struct AuthorityConfig {
     pub threshold: u32,
     #[document(summary = "How many signers must approve a change to the set: more than half of them, and at most all.")]
     pub change_threshold: u32,
+    #[document(summary = "How many epochs an approval of a change counts for, the epoch it was made in included. At least 1. A change is only decided by approvals that still count, so it always reflects what the signers want now.")]
+    pub approval_epochs: u64,
     #[document(summary = "What every signer in a justification gets when a block carries it, paid to its key's address. With none, blocks carry no proofs.")]
     #[wincode(with = "U256Le")]
     pub vote_reward: u256,
@@ -54,7 +56,7 @@ impl Hashable for AuthorityConfig {}
 impl AuthorityConfig {
     #[document(
         parent = "AuthorityConfig",
-        summary = "Development settings: one signer, an epoch every 8 blocks, votes 2 blocks deep, changes after 2 epochs, up to 100 signers, and no rewards.",
+        summary = "Development settings: one signer, an epoch every 8 blocks, votes 2 blocks deep, changes after 2 epochs, approvals counting for 64 epochs, up to 100 signers, and no rewards.",
         params = { signer = "The one key that votes." },
     )]
     pub fn dev(signer: PublicKey) -> AuthorityConfig {
@@ -66,6 +68,7 @@ impl AuthorityConfig {
             signers: vec![signer],
             threshold: 1,
             change_threshold: 1,
+            approval_epochs: 64,
             vote_reward: u256::ZERO,
             max_proofs_per_block: 4,
         }
@@ -80,6 +83,8 @@ impl AuthorityConfig {
     pub fn signer_rules(&self) -> SignerRules {
         SignerRules {
             max_signers: self.max_signers,
+            checkpoint_interval: self.checkpoint_interval,
+            approval_epochs: self.approval_epochs,
         }
     }
 
@@ -91,6 +96,10 @@ impl AuthorityConfig {
 
         if self.activation_delay == 0 {
             return Some("activation_delay must be at least 1");
+        }
+
+        if self.approval_epochs == 0 {
+            return Some("approval_epochs must be at least 1");
         }
 
         self.genesis_set().problem(self.max_signers)

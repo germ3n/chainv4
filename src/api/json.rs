@@ -309,6 +309,7 @@ pub fn tx(tx: &Tx) -> Value {
 
             value
         }
+        Tx::WithdrawApproval { version } => json!({ "type": "withdraw_approval", "version": version }),
     }
 }
 

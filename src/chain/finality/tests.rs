@@ -165,6 +165,7 @@ mod voting {
             signers: voters().iter().map(Keypair::public).collect(),
             threshold: 2,
             change_threshold: 2,
+            approval_epochs: 64,
             vote_reward: u256::new(VOTE_REWARD.into()),
             max_proofs_per_block: 4,
         }
@@ -942,6 +943,7 @@ mod voting {
             (AuthorityConfig { signers: vec![signer, signer], threshold: 2, ..good.clone() }, "named twice"),
             (AuthorityConfig { checkpoint_interval: 0, ..good.clone() }, "checkpoint_interval"),
             (AuthorityConfig { activation_delay: 0, ..good.clone() }, "activation_delay"),
+            (AuthorityConfig { approval_epochs: 0, ..good.clone() }, "approval_epochs"),
             (AuthorityConfig { change_threshold: 1, ..good.clone() }, "change_threshold must"),
             (AuthorityConfig { max_signers: 2, ..good.clone() }, "max_signers"),
         ];
@@ -1023,6 +1025,46 @@ mod voting {
 
         assert_eq!(update.justified, [checkpoint(&chain, 3)]);
         assert_eq!(update.finalized, Some(checkpoint(&chain, 2)));
+    }
+
+    #[cfg(feature = "finality-authority")]
+    #[test]
+    fn approvals_can_be_withdrawn_and_expire() {
+        use crate::registry::signers::Signers;
+        use crate::structs::tx::Tx;
+
+        // Approvals count only in the epoch they are made in.
+        let mut chain = open(&FinalityConfig::Authority(AuthorityConfig { approval_epochs: 1, ..signers() }));
+        let [alice, bob, _] = voters();
+        let approve = Tx::ApproveSigners {
+            version: 0,
+            signers: vec![alice.public(), bob.public(), key(14).public()],
+            threshold: 2,
+            change_threshold: 2,
+        };
+        let withdraw = Tx::WithdrawApproval { version: 0 };
+        let send = |chain: &mut Chain, keypair: &Keypair, tx: &Tx| {
+            let signed = SignedTx::sign(tx.clone(), nonce(chain, keypair), FeeOffer::NONE, keypair);
+
+            advance(chain, vec![signed], Vec::new()).unwrap().remove(0).result
+        };
+        let version = |chain: &Chain| Signers::new(&chain.state()).decided().unwrap().version;
+
+        // Heights 1 to 3, epoch 0: Alice approves and takes it back, and has nothing left to take.
+        assert_eq!(send(&mut chain, &alice, &approve), Ok(Effect::Done));
+        assert_eq!(send(&mut chain, &alice, &withdraw), Ok(Effect::Done));
+        assert!(matches!(send(&mut chain, &alice, &withdraw), Err(failure) if failure.to_string().contains("no approval")));
+
+        // Height 4, epoch 1: she approves again, but it has expired by Bob's approval at height 8,
+        // epoch 2, so his decides nothing.
+        assert_eq!(send(&mut chain, &alice, &approve), Ok(Effect::Done));
+        grow_to(&mut chain, 2 * INTERVAL - 1);
+        assert_eq!(send(&mut chain, &bob, &approve), Ok(Effect::Done));
+        assert_eq!(version(&chain), 0);
+
+        // Approving again in epoch 2 counts alongside Bob's, and decides it.
+        assert_eq!(send(&mut chain, &alice, &approve), Ok(Effect::Done));
+        assert_eq!(version(&chain), 1);
     }
 
     #[cfg(feature = "finality-authority")]

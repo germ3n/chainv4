@@ -9,7 +9,7 @@ use {
         stored_receipt, stored_tip, stored_tips, stored_work,
     },
     crate::crypto::keypair::PublicKey,
-    crate::registry::signers::{SignerSet, Signers},
+    crate::registry::signers::{Approval, SignerSet, Signers},
     crate::registry::validators::Validators,
     crate::structs::vote::Checkpoint,
     crate::db::{DbError, Read, State},
@@ -411,27 +411,26 @@ async fn validator(Shared(api): Shared<Api>, Path(voter): Path<String>) -> Answe
 }
 
 /// Authority finality's signers: those voting in the tip's epoch, the set decided last, and the
-/// approvals so far for changing it, by proposal.
+/// approvals that still count for changing it, by proposal.
 async fn signers(Shared(api): Shared<Api>) -> Answer {
     let Some(config) = &api.finality else {
         return Err(ApiError::NotFound("this chain has no finality".to_string()));
     };
-
-    if config.signer_rules().is_none() {
+    let Some(rules) = config.signer_rules() else {
         return Err(ApiError::NotFound(format!("{} finality has no signers", config.name())));
-    }
+    };
 
     let db = api.db;
     let epoch = config.epoch_of(tip(&*db)?.header.height);
     let state = State::new(db);
     let signers = Signers::new(&state);
     let decided = signers.decided()?;
-    let mut proposals: Vec<(SignerSet, Vec<PublicKey>)> = Vec::new();
+    let mut proposals: Vec<(SignerSet, Vec<Approval>)> = Vec::new();
 
-    for approval in signers.ballot()?.approvals {
+    for approval in signers.ballot()?.counting(epoch, rules.approval_epochs).approvals {
         match proposals.iter_mut().find(|(proposal, _)| *proposal == approval.proposal) {
-            Some((_, approvers)) => approvers.push(approval.signer),
-            None => proposals.push((approval.proposal, vec![approval.signer])),
+            Some((_, approvals)) => approvals.push(approval),
+            None => proposals.push((approval.proposal.clone(), vec![approval])),
         }
     }
 
@@ -440,9 +439,14 @@ async fn signers(Shared(api): Shared<Api>) -> Answer {
         "active": signers.set(epoch)?.as_ref().map(json::signer_set),
         "version": decided.version,
         "decided": json::signer_set(&decided.set),
-        "proposals": proposals.iter().map(|(proposal, approvers)| {
+        "approval_epochs": rules.approval_epochs,
+        "proposals": proposals.iter().map(|(proposal, approvals)| {
             let mut value = json::signer_set(proposal);
-            value["approvals"] = approvers.iter().map(PublicKey::to_string).collect::<Vec<_>>().into();
+            value["approvals"] = approvals.iter().map(|approval| json!({
+                "signer": approval.signer.to_string(),
+                "epoch": approval.epoch,
+                "counts_until": approval.epoch + rules.approval_epochs - 1,
+            })).collect();
 
             value
         }).collect::<Vec<_>>(),

@@ -138,7 +138,7 @@ fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
         Tx::Upgrade { contract, .. } => touched.push(Touch::Address(*contract)),
         Tx::Burn { .. } => {}
         Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::Slash { .. } => touched.push(Touch::Staking),
-        Tx::ApproveSigners { .. } => touched.push(Touch::Signers),
+        Tx::ApproveSigners { .. } | Tx::WithdrawApproval { .. } => touched.push(Touch::Signers),
     }
 
     touched

@@ -10,7 +10,7 @@ other pages explain each part in full; this one is the short list to keep in min
   - `WrongGenesis` on a database written for another genesis. Switching `--consensus`,
     `--genesis` or build features does this, and so did genesis gaining its coin;
   - `OldFormat` on a database kept in another storage format (`STORAGE_FORMAT`), such as every
-    database from before receipts carried traces.
+    database from before signer approvals recorded their epoch (format 2).
 - **There are two dev chains, and pow is the default.**
   - `--consensus pow`, mined with `--mine`;
   - `--consensus authority`, produced with `--produce` on exactly one node.

@@ -70,6 +70,7 @@ pub fn of(tx: &TxView, outcome: Option<&Outcome>) -> Vec<Hop> {
         "bond" => ("bond", "(staking)".to_string(), String::new(), field("amount")),
         "unbond" | "withdraw" | "slash" => (tx.kind(), "(staking)".to_string(), String::new(), "0".to_string()),
         "approve_signers" => ("approve", "(signers)".to_string(), String::new(), "0".to_string()),
+        "withdraw_approval" => ("withdraw approval", "(signers)".to_string(), String::new(), "0".to_string()),
         other => (other, "?".to_string(), String::new(), "0".to_string()),
     };
 

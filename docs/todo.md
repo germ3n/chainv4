@@ -33,9 +33,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   names a whole new set and both thresholds; once `change_threshold` of the decided signers
   approve the same one for the same version, it is decided and fixed for epochs
   `activation_delay` on. `GET /signers` shows the ballot.
-- [ ] **Signer approvals never expire.** A proposal waits until a change is decided, however
-  old; the ballot only empties when one is. An expiry, or a way to withdraw an approval, would
-  tidy it.
+- [x] **Signer approvals expire and can be withdrawn.** An approval counts for genesis's
+  `approval_epochs` epochs from the one it was made in, and only approvals that still count
+  decide a change. `Tx::WithdrawApproval` (`send withdraw-approval`) takes one back.
 - [ ] **A signer's key is its account.** Approvals are sent from the address of the signer's
   voting key, so that key has to sign transactions too, unlike FFG, where the voting key stays
   apart from the bond's account.
@@ -253,3 +253,4 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **Windows builds in CI.** Left out because of RocksDB and Luau build setup.
 
 add encryption to wallets/keypairs when stored to disk (if passphrase was set/selected)
+add db migration system (upgrade/downgrade calls maybe?)
