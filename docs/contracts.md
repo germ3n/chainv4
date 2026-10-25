@@ -512,6 +512,7 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 | `contracts/examples/proxy` | Calling other contracts for a caller, and a reentrant callback. |
 | `contracts/examples/upgradable`, `contracts/lua/proxy.lua` | A proxy built on `fallback` and `delegate`, with its owner and implementation in its own space, that checks a new implementation's layout. |
 | `contracts/examples/token`, `contracts/lua/token.lua` | The [token standard](token-standard.md), held to it by one shared test. |
+| `contracts/lua/guestbook.lua` | Events with addresses in them, for the event index and the explorer; value passed on with `accounts.transfer`; and a storage layout of a map and a record. |
 
 ## What to keep in mind
 

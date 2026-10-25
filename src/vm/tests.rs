@@ -1542,3 +1542,44 @@ fn a_top_level_sees_nothing_of_the_call() {
 
     assert_eq!(world.call(peeker, "saw", &[]).result.unwrap(), [TxCallArgumentType::Bool(false)]);
 }
+
+/// Tips a guestbook with value it sends along.
+const TIPPER: &str = r#"
+local M = {}
+
+function M.tip(book, amount)
+    return contracts.call_value(book, amount, "tip")
+end
+
+return M
+"#;
+
+#[test]
+fn the_guestbook_emits_an_event_for_every_signature_and_tip() {
+    let mut world = World::new();
+    let book = world.lua_code(include_str!("../../contracts/lua/guestbook.lua"));
+    let (alice, bob) = (Address::Ed25519([0xa; 32]), Address::Ed25519([0xb; 32]));
+    let text = |value: &str| TxCallArgumentType::String(value.to_string());
+    let signed = world.call_as(alice, book, "sign", &[text("hi")]);
+
+    assert_eq!(signed.result.unwrap(), [TxCallArgumentType::U256(u256::ONE)]);
+    assert_eq!((signed.events[0].name.as_str(), signed.events[0].data.clone()), ("Signed", vec![address(alice), text("hi"), TxCallArgumentType::U256(u256::ONE)]));
+
+    world.call_as(bob, book, "sign", &[text("hello")]).result.unwrap();
+
+    assert_eq!(world.call(book, "total", &[]).result.unwrap(), [TxCallArgumentType::U256(u256::new(2))]);
+    assert_eq!(world.call(book, "last", &[]).result.unwrap(), [address(bob)]);
+    assert_eq!(world.call(book, "signatures", &[address(alice)]).result.unwrap(), [TxCallArgumentType::U256(u256::ONE)]);
+    assert!(world.call(book, "sign", &[text("")]).result.unwrap_err().to_string().contains("1 to 140 bytes"));
+    assert_eq!(layout_of(&world, book), "namespace book\nkey book last address-text\nkey book total decimal\nnamespace signatures decimal\n");
+
+    // A tip goes to whoever signed last.
+    let tipper = world.lua_code(TIPPER);
+    world.fund(tipper, 100);
+    let tipped = world.call(tipper, "tip", &[address(book), wide(40)]);
+
+    assert!(tipped.result.is_ok(), "{:?}", tipped.result);
+    assert_eq!(tipped.events[0].name, "Tipped");
+    assert_eq!(tipped.events[0].data, [address(tipper), address(bob), TxCallArgumentType::U256(u256::new(40))]);
+    assert_eq!(Accounts::new(&world.state).get(&bob).unwrap().balance, u256::new(40));
+}
