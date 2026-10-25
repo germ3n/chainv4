@@ -49,6 +49,9 @@ justified checkpoint (`ConflictsWithFinality`).
   - they come from the target epoch's voters, and their weight adds up to enough: two thirds of
     the bonded weight under FFG, the threshold of signers under authority finality.
   - The source of a direct successor is finalized.
+  - **One past the headers it followed waits.** A node can justify a checkpoint after sending
+    the client its headers, and send that justification with the rest. The client stops there,
+    with no error, and the next refresh brings the headers and the justification together.
 - **Voters** come from proofs, never the node's word. Each epoch's voters are kept in chain state,
   fixed `activation_delay` epochs ahead by the checkpoint `activation_delay` epochs before them, or
   by genesis for the first few.
@@ -136,8 +139,8 @@ where it was.
 ## In the explorer
 
 The explorer runs the same client against the node it talks to:
-- **The top bar** says whether it is starting, catching up, following, or stopped, and why it
-  stopped.
+- **The sidebar,** or Settings on a phone, says whether it is starting, catching up, following,
+  or stopped, and why it stopped.
 - **An account's page** shows the balance it proved, at the finalized block and at the tip, and
   whether each is final. A proof that does not check is shown in red.
 
@@ -152,6 +155,10 @@ The explorer runs the same client against the node it talks to:
   check against such a node.
 - **Proving at a block takes the node's undo records,** so only the last `max_reorg_depth` blocks
   can be proven at. Final values need the finalized checkpoint to be within that.
+- **Dev chains share a genesis id.** Every chain started from the built-in dev genesis has the
+  same one, so a wallet that followed one dev chain resumes its saved client against the next, and
+  waits for blocks past where the old chain got to. Settings → Light client → **Start over** in the
+  wallet follows the node's chain afresh. A chain of your own, from its own genesis, has its own id.
 - **Trust on first use, in the explorer and the wallet.** They trust whatever genesis they first
   see at a node; the wallet remembers it, and takes a pasted one instead. To trust a chain from
   the start, give the CLI a genesis file or id.

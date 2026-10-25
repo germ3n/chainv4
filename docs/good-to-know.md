@@ -203,6 +203,9 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   Peers can serve state only at their last `max_reorg_depth` blocks, so a pivot that grows too
   old moves up, and the walk fetches only what changed. See
   [Node](node.md#syncing-from-a-snapshot).
+- **Every dev chain has the same genesis id.** A wallet that followed one resumes against the next
+  as if it were the same chain, and waits for blocks past where the old one got to: Settings →
+  Light client → **Start over**. See [Light client](light-client.md#what-to-keep-in-mind).
 - **Light clients trust only a genesis id.** `chainv4 light`, and the explorer, check every
   header by consensus, every justification against voters proven from state, and every value
   against a header they checked. Voters are trusted from a checkpoint's state once that

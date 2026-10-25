@@ -1081,6 +1081,53 @@ mod voting {
     }
 
     #[test]
+    fn a_justification_past_the_headers_followed_waits_for_them() {
+        use crate::light::{LightClient, LightRequest};
+
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            finalize_through(&mut chain, 3);
+            let params = genesis_with(Some(finality.clone())).light_params();
+            let genesis = stored_header_at(&*chain.db, 0).unwrap().unwrap();
+            let mut client = LightClient::new(params, genesis, chain.genesis()).unwrap();
+            serve(&chain, &mut client);
+
+            // Caught up, it knows the voters of the epochs after the next already. The node sends
+            // headers short of the checkpoint after the next, then justifies it before it is asked
+            // for justifications, and sends them all.
+            let justified = client.justified().epoch;
+            let short = (justified + 2) * INTERVAL - 1;
+            finalize_through(&mut chain, justified + 4);
+            client.refresh();
+
+            while let Some(request) = client.next() {
+                match request {
+                    LightRequest::Headers { from, count } => {
+                        let headers = (from..(from + u64::from(count)).min(short + 1))
+                            .map_while(|height| stored_header_at(&*chain.db, height).unwrap())
+                            .collect();
+                        client.deliver_headers(from, headers, LATER).unwrap();
+                    }
+                    LightRequest::Update { block } => client.take_update(&block, stored_light_update(&*chain.db, &block).unwrap()).unwrap(),
+                    LightRequest::Justifications { from } => {
+                        client.deliver_justifications(&chain.justifications_from(from, 64).unwrap()).unwrap();
+                    }
+                }
+            }
+
+            assert_eq!(client.tip().height, short, "{}", finality.name());
+            assert_eq!(client.justified().epoch, justified + 1, "it takes what it can place, and waits");
+
+            // Once the headers come, so does the rest.
+            client.refresh();
+            serve(&chain, &mut client);
+
+            assert_eq!(Some(client.justified()), chain.justified());
+            assert_eq!(Some(client.finalized()), chain.finalized());
+        }
+    }
+
+    #[test]
     fn a_light_client_follows_headers_and_finality_from_the_genesis_id_alone() {
         use crate::light::{LightClient, LightError};
 

@@ -782,7 +782,7 @@ impl LightClient {
 
     #[document(
         parent = "LightClient",
-        summary = "Checks the justifications a node sent, in order, and takes each that holds: its target on the client's chain at its checkpoint, its source justified, and votes from the target epoch's voters adding up to enough. The source of a direct successor is finalized. It stops, without an error, at one whose voters it cannot know yet: the checkpoints it justified make updates trusted that tell it, and next asks for them, then for the rest again.",
+        summary = "Checks the justifications a node sent, in order, and takes each that holds: its target on the client's chain at its checkpoint, its source justified, and votes from the target epoch's voters adding up to enough. The source of a direct successor is finalized. It stops, without an error, at one whose voters it cannot know yet: the checkpoints it justified make updates trusted that tell it, and next asks for them, then for the rest again. It stops too at one past the headers it followed, which the node justified after sending them: the next refresh brings both.",
         returns = "How many it took; the first that does not hold stops it, with why.",
     )]
     pub fn deliver_justifications(&mut self, justifications: &[Justification]) -> Result<usize, LightError> {
@@ -790,11 +790,20 @@ impl LightClient {
             self.justifications_done = true;
         }
 
+        let interval = self.params.finality.and_then(|finality| finality.checkpoint_interval());
+        let tip = self.tip().height;
         let mut taken = 0;
 
         for justification in justifications {
             if justification.target.epoch <= self.justified().epoch {
                 continue;
+            }
+
+            // The chain went on between the headers and these: the rest wait for its headers.
+            if interval.is_some_and(|interval| justification.target.epoch * interval > tip) {
+                self.justifications_done = true;
+
+                break;
             }
 
             if !self.voters.contains_key(&justification.target.epoch) {

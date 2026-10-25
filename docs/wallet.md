@@ -347,5 +347,8 @@ out when it builds without one, as Android refuses an app that declares code it 
   line. The guestbook's `Tipped` event, for one, does show.
 - **Only the registry's first page of tokens,** 100, is proven. A token past it does not show.
 - **Unlocking takes a moment.** Argon2id is slow on purpose, and slower in the browser.
+- **A new dev chain looks like the old one.** Every dev chain has the same genesis id, so after
+  starting a new one the wallet resumes what it followed on the old, and keeps proving: Settings
+  → Light client → **Start over** follows the new one. Its keys and wallets stay.
 - **The API is plain HTTP.** What the wallet sends is signed and public anyway, but keep the node
   on a trusted network all the same.
