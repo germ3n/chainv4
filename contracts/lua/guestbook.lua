@@ -3,9 +3,9 @@
 -- something to show. Its state lives in namespaces its layout declares, so an upgrade must keep
 -- them.
 
---@namespace signatures decimal
+--@namespace signatures address-text -> decimal:signatures
 --@namespace book
---@key book total decimal
+--@key book total decimal:signatures
 --@key book last address-text
 
 local M = {}

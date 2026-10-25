@@ -21,7 +21,7 @@ use {
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::u256::u256,
-    crate::vm::{Declared, Outcome, Shape},
+    crate::vm::{Declared, Outcome},
     crate::structs::trace::{Hop, HopKind, Trace},
     crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     serde_json::{Value, json},
@@ -540,21 +540,31 @@ pub fn contract(address: &Address, record: &ContractRecord, token: Option<&Token
     })
 }
 
-/// One namespace of a contract's storage layout: a map with its kind, a record with its keys, or
-/// retired.
+/// One namespace of a contract's storage layout: a map with its kind and unit, and its keys' kind
+/// and unit, null for any key; a record with its keys, each with its kind and unit; or retired.
 fn declared(declared: &Declared) -> Value {
-    match &declared.shape {
-        Shape::Map(kind) => json!({"name": declared.name, "shape": "map", "kind": kind.name()}),
-        Shape::Retired => json!({"name": declared.name, "shape": "retired"}),
-        Shape::Record(keys) => json!({
+    let shape = &declared.shape;
+
+    match (shape, shape.map(), shape.record()) {
+        (_, Some((key, value)), _) => json!({
+            "name": declared.name,
+            "shape": "map",
+            "kind": value.kind.name(),
+            "unit": value.unit,
+            "key_kind": key.as_ref().map(|key| key.kind.name()),
+            "key_unit": key.and_then(|key| key.unit),
+        }),
+        (_, None, Some(keys)) => json!({
             "name": declared.name,
             "shape": "record",
             "keys": keys.iter().map(|field| json!({
                 "key": field.key,
-                "kind": field.kind.map(|kind| kind.name()),
-                "retired": field.kind.is_none(),
+                "kind": field.value.as_ref().map(|value| value.kind.name()),
+                "unit": field.value.as_ref().and_then(|value| value.unit.clone()),
+                "retired": field.value.is_none(),
             })).collect::<Vec<_>>(),
         }),
+        _ => json!({"name": declared.name, "shape": "retired"}),
     }
 }
 

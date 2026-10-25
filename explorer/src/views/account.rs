@@ -135,7 +135,15 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
                                     ui.label(RichText::new(&declared.name).monospace());
 
                                     match (declared.shape.as_str(), &declared.kind) {
-                                        ("map", Some(kind)) => ui.label(RichText::new(format!("map of {kind}")).color(look.palette.muted)),
+                                        ("map", Some(kind)) => {
+                                            let values = crate::model::kind_text(kind, declared.unit.as_deref());
+                                            let shown = match &declared.key_kind {
+                                                Some(key) => format!("map {} → {values}", crate::model::kind_text(key, declared.key_unit.as_deref())),
+                                                None => format!("map of {values}"),
+                                            };
+
+                                            ui.label(RichText::new(shown).color(look.palette.muted))
+                                        }
                                         ("record", _) => ui.label(RichText::new("record").color(look.palette.muted)),
                                         _ => ui.label(retired()),
                                     };
@@ -147,7 +155,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
                                         ui.label(RichText::new(&field.key).monospace());
 
                                         match &field.kind {
-                                            Some(kind) => ui.label(RichText::new(kind).color(look.palette.muted)),
+                                            Some(kind) => ui.label(RichText::new(crate::model::kind_text(kind, field.unit.as_deref())).color(look.palette.muted)),
                                             None => ui.label(retired()),
                                         };
                                     });

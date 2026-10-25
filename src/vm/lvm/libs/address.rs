@@ -19,6 +19,7 @@ impl UserData for LuaAddress {
         });
         methods.add_method("kind", |_, this, ()| Ok(this.0.kind()));
         methods.add_method("text", |_, this, ()| Ok(this.0.to_string()));
+        methods.add_method("encode", |lua, this, ()| lua.create_string(this.0.to_abi()));
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(to_hex(this.0.bytes())));
         methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (AnyUserData, AnyUserData)| {
             match (a.borrow::<LuaAddress>(), b.borrow::<LuaAddress>()) {
@@ -42,6 +43,12 @@ fn parse_text(text: &str) -> mlua::Result<LuaAddress> {
     text.parse()
         .map(LuaAddress)
         .map_err(|err: crate::structs::address::ParseAddressError| Error::runtime(format!("{err}: {text}")))
+}
+
+fn decode(bytes: &[u8]) -> mlua::Result<LuaAddress> {
+    Address::from_abi(bytes)
+        .map(LuaAddress)
+        .ok_or_else(|| Error::runtime("not an encoded address: 33 bytes, its kind's tag then its bytes"))
 }
 
 fn parse_hex(text: &str) -> mlua::Result<LuaAddress> {
@@ -174,6 +181,29 @@ fn address_text() {}
 )]
 fn address_is_valid() {}
 
+#[document(
+    lua,
+    parent = "Address",
+    name = "encode",
+    kind = "method",
+    summary = "The 33 bytes Rust contracts keep an address in: its kind's tag, its bytes, and zeros after a kind shorter than 32. The key or value of a layout's address kind, so a Lua version reaches what a Rust version kept under addresses.",
+    returns = { ty = "string", desc = "The 33 bytes." },
+    see_also = "address.decode, Namespace:get_address",
+)]
+fn address_encode() {}
+
+#[document(
+    lua,
+    parent = "address",
+    name = "decode",
+    summary = "Reads the 33 bytes Address:encode writes, and Rust contracts keep addresses in.",
+    params = { bytes = { ty = "string", desc = "Exactly 33 bytes." } },
+    returns = { ty = "Address", desc = "The address." },
+    panics = "Errors for anything that is not an address in that form.",
+    see_also = "Address:encode",
+)]
+fn address_decode() {}
+
 pub fn register_address_lib(lua: &Lua) {
     let address_table = lua
         .create_table()
@@ -199,6 +229,13 @@ pub fn register_address_lib(lua: &Lua) {
                 .expect("[address] Failed to create from_bytes"),
         )
         .expect("[address] Failed to set from_bytes");
+    address_table
+        .set(
+            "decode",
+            lua.create_function(|_, bytes: mlua::String| decode(&bytes.as_bytes()))
+                .expect("[address] Failed to create decode"),
+        )
+        .expect("[address] Failed to set decode");
 
     let meta = lua
         .create_table()

@@ -336,9 +336,9 @@ keep the old code's [storage layout](#storage-layouts).
 ```sh
 chainv4 send call --to contract:0x41f0… --function increment i64:5
 # included in block 21 0x… (1 confirmation)
-# returned [{"type":"number","value":5.0}]
+# returned [{"type":"i64","value":"5"}]
 # fuel used 4821
-# event Incremented from contract:0x41f0… [{"type":"number","value":5.0},{"type":"address","value":"ed25519:0x…"}]
+# event Incremented from contract:0x41f0… [{"type":"i64","value":"5"},{"type":"address","value":"ed25519:0x…"}]
 ```
 
 `--amount N` sends coins along with the call; the contract sees them as `ctx.value`.
@@ -348,7 +348,7 @@ Arguments are `type:value`:
 | Type | Example |
 | --- | --- |
 | `i64`, `u64`, `i128`, `u128`, `u256` | `i64:-5`, `u256:1000` |
-| `number` | `number:1.5` |
+| `number` | `number:2`: Lua contracts take whole numbers only, and hand them back as `i64` |
 | `amount` | `amount:1000000000000000000` |
 | `bool` | `bool:true` |
 | `string` | `string:hello` |
@@ -443,32 +443,35 @@ Full proxies are in [contracts/lua/proxy.lua](contracts/lua/proxy.lua) and
 - Delegating only reaches functions the target exports, never its `fallback`, `init` or
   `migrate`. An implementation that needs setting up exports something like `initialize`, called
   through the proxy once it is pointed at it.
-- Values pass through a Lua proxy as Lua values, so an `i64` comes back as a number; a Rust proxy
-  forwards them exactly.
+- Values pass through a Lua proxy as Lua values, so a `u64` comes back as a `u256`; a Rust proxy
+  forwards them exactly, and so does a Lua one passing `ctx.args` on.
 
 ### Storage layouts
 
-Code can declare the namespaces it keeps its state in: maps, any key with values of one kind,
-and records, only the keys they declare, each with its kind. New code, by `send upgrade` or a
-proxy repointing, must then keep every namespace and key with the same kind, or retire it on
-purpose:
+Code can declare the namespaces it keeps its state in: maps, keys of one kind or any with values
+of one kind, and records, only the keys they declare, each with its kind. A kind may name its
+unit. New code, by `send upgrade` or a proxy repointing, must then keep every namespace and key
+with the same kinds and units, or retire it on purpose:
 
 ```lua
---@namespace balances decimal        -- a map: any key, every value decimal text
---@namespace config                  -- a record
+--@namespace balances address-text -> decimal:wei   -- a map: text keys, decimal values in wei
+--@namespace config                                 -- a record
 --@key config owner address-hex
 --@retired fees
 
 local balances = storage.namespace("balances")
 ```
 
-In Rust, `chainv4_sdk::namespace!(BALANCES, "balances", "u256");`,
+In Rust, `chainv4_sdk::namespace!(BALANCES, "balances", "address" => "u256:wei");`,
 `namespace!(CONFIG, "config", { "owner": "address" });` and `retired!("fees");`.
 
-Kinds are encodings the node checks on every write: `bytes`, `text`, `number`, `decimal`,
-`bool`, `i64`, `u64`, `u128`, `u256`, `address`, `address-text` and `address-hex`. Code that
-declares a layout reaches nothing past it: no other namespace or key, no value of the wrong
-kind, and plain storage only to read and clear it. Retired namespaces and keys can be read and
+Kinds are encodings the node checks on every write, and on every access for a map's keys:
+`bytes`, `text`, `number`, `decimal`, `bool`, `i64`, `u64`, `u128`, `u256`, `address`,
+`address-text` and `address-hex`, each with a unit after a colon or none. Lua writes the text
+kinds and Rust the binary ones, and each engine reads and writes the other's, so a contract can
+move between them and keep its state. Code that declares a layout reaches nothing past it: no
+other namespace or key, no key or value of the wrong kind, and plain storage only to read and
+clear it. Retired namespaces and keys can be read and
 cleared but not written, so `migrate` can move their state into new ones. Check new code before
 sending it:
 

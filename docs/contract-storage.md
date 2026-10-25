@@ -9,8 +9,12 @@ guide walks through it with examples; the reference tables are in
 - Every contract has storage of its own: keys to values, both bytes.
 - It comes in three spaces: plain storage, namespaces by name, and the contract's own space.
 - `--@namespace`, `--@key` and `--@retired` lines declare a **layout**: which namespaces the code
-  uses, and what each holds. The node then holds the code to it, and holds every later version
-  to it too, so an upgrade cannot lose or misread state by accident.
+  uses, what each holds, how a map's keys are formed, and the units its numbers count. The node
+  then holds the code to it, and holds every later version to it too, so an upgrade cannot lose or
+  misread state by accident.
+- **Either engine keeps either's state:** Lua writes the text kinds and Rust the binary ones, and
+  each has methods for the other's, so a contract can move from Lua to Rust, or back, keeping
+  every entry.
 - Everything a contract stores is part of the chain's state, so anyone can prove any entry
   against a block's state root.
 
@@ -120,44 +124,65 @@ comment lines starting `--@`, anywhere in the script or in a file it
 node reads them when the code is deployed.
 
 ```lua
---@namespace points decimal          -- a map: any key, every value decimal
---@namespace config                  -- a record: only the keys declared below
---@key config owner address-text     -- one of config's keys, and its kind
+--@namespace points address-text -> decimal:points   -- a map: keys of one kind, values of another
+--@namespace notes text                              -- a map of any key
+--@namespace config                                  -- a record: only the keys declared below
+--@key config owner address-text                     -- one of config's keys, and its kind
 --@key config name text
 ```
 
-There are five kinds of line:
+There are six kinds of line:
 
 | Line | Declares |
 | --- | --- |
-| `--@namespace NAME KIND` | A **map**: any key, every value of one kind. For state keyed by something, such as points by address. |
+| `--@namespace NAME KEYKIND -> KIND` | A **map** whose keys are one kind and values another. For state keyed by something, such as points by address. |
+| `--@namespace NAME KIND` | A **map** of any key, every value of one kind. |
 | `--@namespace NAME` | A **record**: only the keys its `--@key` lines declare. For settings and counters. |
 | `--@key NAME KEY KIND` | One of a record's keys, and the kind of its value. |
 | `--@retired NAME` | A namespace earlier code used, kept only to be read and cleared. |
 | `--@retired NAME KEY` | One of a record's keys, retired the same way. |
 
-Names and keys are one word each: names 1 to 64 bytes, keys 1 to 256.
+Names and keys are one word each: names 1 to 64 bytes, keys 1 to 256. A Lua comment may follow
+any line, as above.
 
 ### Kinds
 
 A kind is how a value is written. The node checks every value written against its kind, so a
-map of `decimal` can never hold `"lots"`.
+map of `decimal` can never hold `"lots"`. Each engine reads and writes every kind:
 
-| Kind | What a value is | In Lua |
-| --- | --- | --- |
-| `text` | Any UTF-8 text. | A string. |
-| `decimal` | A whole number from 0, in decimal digits, up to the largest u256. | `tostring(u256)`, read back with `u256(text)` |
-| `number` | A Lua number as text: `5`, `-2.5`, `1e+20`, `inf`, `nan`. | `tostring(n)`, read back with `tonumber` |
-| `address-text` | An address's text form: `ed25519:0x…`, `secp256k1:0x…`. | `who:text()`, read back with `address.parse` |
-| `address-hex` | `0x` and 64 hex digits, or 40 for secp256k1. | `who:hex()`, read back with `address(hex)` |
-| `bytes` | Anything. | Any string. |
-| `bool` | One byte, 0 or 1. | `string.char(flag and 1 or 0)` |
-| `i64`, `u64` | 8 bytes, little-endian. | For Rust contracts: `set_i64`, `set_u64` |
-| `u128`, `u256` | 16 or 32 bytes, little-endian. | For Rust contracts: `set_u256` |
-| `address` | 33 bytes: the address's tag, then its bytes. | For Rust contracts: `set_address` |
+| Kind | What a value is | In Lua | In Rust |
+| --- | --- | --- | --- |
+| `text` | Any UTF-8 text. | A string. | `get_text`, `set_text` |
+| `decimal` | A whole number from 0, in decimal digits, up to the largest u256. | `tostring(u256)`, read back with `u256(text)` | `get_decimal`, `set_decimal` |
+| `number` | A whole number within 2^53 either way, in digits: `5`, `-42`. | `ns:set_number(key, n)`, `ns:get_number(key)` | `get_number`, `set_number` |
+| `address-text` | An address's text form: `ed25519:0x…`, `secp256k1:0x…`. | `who:text()`, read back with `address.parse` | `get_address_text`, `set_address_text` |
+| `address-hex` | `0x` and 64 hex digits, or 40 for secp256k1. | `who:hex()`, read back with `address(hex)` | `get_address_hex`, `set_address_hex` |
+| `bytes` | Anything. | Any string. | `get`, `set` |
+| `bool` | One byte, 0 or 1. | `ns:set_bool`, `ns:get_bool` | `get_bool`, `set_bool` |
+| `i64`, `u64` | 8 bytes, little-endian. | `ns:set_i64`, `ns:get_u64`… | `get_i64`, `set_u64`… |
+| `u128`, `u256` | 16 or 32 bytes, little-endian. | `ns:set_u256`, `ns:get_u128`…, as a `u256` | `get_u256`, `set_u128`… |
+| `address` | 33 bytes: the address's tag, then its bytes. | `ns:set_address`, `ns:get_address`; `who:encode()` and `address.decode` for keys | `get_address`, `set_address`; `Address::encode` |
 
-**For Lua,** use `decimal` for amounts, `address-text` for addresses, `text` for words and
-`number` for Lua numbers. The binary kinds are what the Rust SDK writes.
+**Which to pick:** `decimal` for amounts, `address-text` for addresses, `text` for words, and
+`number` or `i64` for small counts. The text kinds read well anywhere, in proofs and the explorer
+included; the binary ones are smaller. Lua writes `number` with `set_number`, not `tostring`,
+which spells 10^15 as `1e+15`: the kind takes one spelling for each number.
+
+### Key kinds
+
+A map declared `KEYKIND -> KIND` checks its keys too, whatever the code does with them: reading,
+writing and clearing a key that is not its kind all fail. Keys are bytes, so `who:text()` and
+`who:hex()` are two different entries for one address; without a key kind, code that switched
+from one to the other would read every entry as empty and never know. With one, it fails at the
+first read: "namespace points takes keys of address-text, and 0x0a0a… is not one".
+
+### Units
+
+A kind may name a unit after a colon: `decimal:wei`, `u256:points`, `u64:basis-points`. The node
+cannot check what a number means, only how it is written, so a unit is the layout's word for it,
+which every later version must keep. A version whose `decimal:wei` became `decimal:coins` is
+refused like a changed kind, so code that changes what its numbers count says so, retiring the old
+namespace and declaring a new one. Units are 1 to 32 letters, digits, `-`, `_` or `.`.
 
 ### What the node holds the code to
 
@@ -168,6 +193,7 @@ and with it the transaction, naming what went wrong:
 | --- | --- |
 | uses a namespace it does not declare | `namespace elsewhere is not in this code's layout` |
 | uses a key a record does not declare | `key onwer is not in namespace config's layout` |
+| reads, writes or clears a map key that is not its key kind | `namespace points takes keys of address-text, and 0x0a0a… is not one` |
 | writes a value that is not its kind | `namespace points, key ed25519:0x…: the value is not decimal` |
 | writes something retired | `key name of namespace config is retired: it can be read and cleared, not written` |
 | writes plain storage | `code that declares a layout keeps its state in namespaces: plain storage can be read and cleared, not written` |
@@ -182,11 +208,12 @@ Under `contracts.delegate`, the layout that counts is the running code's.
 
 ## Changing a layout: an example
 
-`contracts/lua/points/` holds a contract in two versions. Version 1, `points_v1.lua`, keeps who
-holds how many points in a map, and its owner and name in a record:
+`contracts/lua/points/` holds a contract in two versions, and `contracts/examples/points` a third,
+in Rust. Version 1, `points_v1.lua`, keeps who holds how many points in a map, keyed by their
+address's text, and its owner and name in a record:
 
 ```lua
---@namespace points decimal
+--@namespace points address-text -> decimal:points
 --@namespace config
 --@key config owner address-text
 --@key config name text
@@ -234,13 +261,13 @@ Version 2, `points_v2.lua`, wants three things: badges, a cap on one award, and 
 a title. Its layout:
 
 ```lua
---@namespace points decimal          -- kept as it was
---@namespace badges text             -- new: a namespace may come in
+--@namespace points address-text -> decimal:points   -- kept as it was
+--@namespace badges address-text -> text            -- new: a namespace may come in
 --@namespace config
---@key config owner address-text     -- kept as it was
---@retired config name               -- no longer used: retired, not dropped
---@key config title text             -- new: replaces name
---@key config max_award decimal      -- new
+--@key config owner address-text                     -- kept as it was
+--@retired config name                               -- no longer used: retired, not dropped
+--@key config title text                             -- new: replaces name
+--@key config max_award decimal:points               -- new
 ```
 
 **The rules a new version keeps:**
@@ -251,24 +278,27 @@ a title. Its layout:
 - **New namespaces and keys may come in,** and start empty.
 - **Kinds never change, and maps never become records,** or the other way round: retire the old
   one and declare another.
+- **Key kinds and units come in once, then stay.** A map of any key may declare a key kind, and a
+  kind without a unit may name one, as a version learns what it keeps; after that, changing or
+  dropping either is refused like changing a kind.
 
 `chainv4 layout` checks before anything is sent, loading the code as a node would:
 
 ```sh
 chainv4 layout contracts/lua/points/points_v2.lua --from contracts/lua/points/points_v1.lua
 # contracts/lua/points/points_v2.lua declares
-#   namespace badges text
+#   namespace badges address-text -> text
 #   namespace config
-#   key config max_award decimal
+#   key config max_award decimal:points
 #   retired config name
 #   key config owner address-text
 #   key config title text
-#   namespace points decimal
+#   namespace points address-text -> decimal:points
 # contracts/lua/points/points_v1.lua declares
 #   namespace config
 #   key config name text
 #   key config owner address-text
-#   namespace points decimal
+#   namespace points address-text -> decimal:points
 # contracts/lua/points/points_v2.lua keeps the layout of contracts/lua/points/points_v1.lua
 ```
 
@@ -279,8 +309,9 @@ chainv4 layout contracts/lua/points/points_v2.lua --from contracts/lua/points/po
 the transaction failed: the new code does not keep the storage layout: key name of namespace config is dropped: keep it, or retire it
 ```
 
-And had it declared `points` as `number`: "namespace points held decimal, and now holds number:
-retire it and declare another".
+And had it declared `points` as `decimal:coins`, or its keys as `address-hex`: "namespace points
+held decimal:points, and now holds decimal:coins: retire it and declare another", and "namespace
+points took keys of address-text, and now takes address-hex".
 
 **Moving state with `migrate`.** The upgrade runs the new code's `migrate` once, right after it
 loads. Version 2 moves the name into its new key there, and sets the new cap:
@@ -313,8 +344,10 @@ clearing it, the upgrade would have failed with "key name of namespace config is
   one, as `max_award` does.
 - **Rename a key:** retire the old one, declare the new one, and move the value in `migrate`, as
   `name` became `title`.
-- **Change a kind:** the same, under a new key or namespace: retire `count number`, declare
-  `total decimal`, and convert in `migrate`.
+- **Change a kind or a unit:** the same, under a new key or namespace: retire `count number`,
+  declare `total decimal:points`, and convert in `migrate`.
+- **Give a map a key kind, or a kind a unit:** declare it, once, in place: `points decimal` may
+  become `points address-text -> decimal:points`. Every later version keeps it.
 - **Move plain storage into namespaces:** declare the layout, then in `migrate` read each old
   plain key, write it into its namespace, and clear it. Declared code may still read and clear
   plain storage, for exactly this.
@@ -324,6 +357,41 @@ clearing it, the upgrade would have failed with "key name of namespace config is
 
 **A layout is for good.** Code that declares nothing keeps nothing, so it cannot replace code that
 declares a layout.
+
+### Moving to the other engine
+
+An upgrade may swap Lua code for WebAssembly, or back, like any other version: the layout is the
+same, and so is the storage. What the new code needs is to read and write what the old wrote,
+which each engine does for every kind. Version 3, `contracts/examples/points`, is version 2 in
+Rust, and keeps its layout line for line:
+
+```rust
+namespace!(POINTS, "points", "address-text" => "decimal:points");
+namespace!(BADGES, "badges", "address-text" => "text");
+namespace!(CONFIG, "config", { "owner": "address-text", "title": "text", "max_award": "decimal:points" });
+retired!("config", "name");
+
+#[export]
+fn award(who: Address, amount: U256) -> U256 {
+    // …only the owner, at most max_award…
+    let key = who.text();                                  // the key Lua formed with who:text()
+    let held = POINTS.get_decimal(key.as_bytes()).unwrap_or(U256::ZERO);
+    let now = held.checked_add(amount).unwrap_or_else(|| abort("too many points"));
+    POINTS.set_decimal(key.as_bytes(), now);               // "150", as Lua's tostring wrote it
+    now
+}
+```
+
+```sh
+chainv4 layout contracts/target/wasm32-unknown-unknown/release/points.wasm --from contracts/lua/points/points_v2.lua
+# …keeps the layout of contracts/lua/points/points_v2.lua
+chainv4 send upgrade --contract contract:0x8e27… --wasm contracts/target/wasm32-unknown-unknown/release/points.wasm
+```
+
+Every point and badge stays where it was, nothing is retired, and nothing moves. Since version 3
+writes the same text Lua did, version 2 could take over again just the same. Going the other way, a
+Lua version keeps a Rust one's binary kinds with `ns:get_u256`, `ns:set_address`, `who:encode()`
+and the rest.
 
 ## Proxies
 
@@ -392,18 +460,19 @@ The SDK declares the same layouts with macros, which write them into the module'
 ```rust
 use chainv4_sdk::{namespace, retired, sender};
 
-namespace!(POINTS, "points", "decimal");
-namespace!(BADGES, "badges", "text");
-namespace!(CONFIG, "config", { "owner": "address-text", "title": "text", "max_award": "decimal" });
+namespace!(POINTS, "points", "address-text" => "decimal:points");
+namespace!(BADGES, "badges", "address-text" => "text");
+namespace!(CONFIG, "config", { "owner": "address-text", "title": "text", "max_award": "decimal:points" });
 retired!("config", "name");
 
-CONFIG.set(b"owner", sender().text().as_bytes());
-let title = CONFIG.get(b"title");
+CONFIG.set_address_text(b"owner", &sender());
+let title = CONFIG.get_text(b"title");
 ```
 
-Each constant is the namespace's handle, with `get`, `set` and `delete`, and typed helpers for the
-binary kinds: `set_u256`, `get_address`, `set_bool` and so on. `storage::get`, `set` and `delete`
-are plain storage, and `storage::own()` the own space. See `contracts/examples/counter`.
+Each constant is the namespace's handle, with `get`, `set` and `delete`, and a `get_` and `set_`
+for every kind: `set_u256`, `get_address`, `set_decimal`, `get_address_text` and so on (see
+[Kinds](#kinds)). `storage::get`, `set` and `delete` are plain storage, and `storage::own()` the
+own space. See `contracts/examples/counter` and `contracts/examples/points`.
 
 ## What to keep in mind
 
@@ -412,6 +481,10 @@ are plain storage, and `storage::own()` the own space. See `contracts/examples/c
 - **Retiring is for good.** A retired name or key can never be used again, so pick new names
   for what replaces it.
 - **Nothing lists keys.** Plan how you will find every entry again before you need to migrate it.
-- **`decimal`, not `number`, for amounts.** `number` is a Lua float, exact only to 2^53.
-- **Keys are bytes,** so `who:text()` and `who:hex()` are two different keys for the same
-  address. Pick one per namespace; the token standard picks the text.
+- **`decimal` for amounts.** `number` holds whole numbers only to 2^53, as far as a Lua number is
+  exact.
+- **Declare how a map's keys are formed.** Keys are bytes, so `who:text()` and `who:hex()` are two
+  different keys for the same address. A key kind makes that a loud error instead of an empty
+  entry; the token standard keys by the text.
+- **A unit is a promise, not a check.** The node keeps it across versions; it cannot see whether
+  the numbers still count what it says.

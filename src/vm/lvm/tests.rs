@@ -36,6 +36,10 @@ function M.echo(...)
     return ...
 end
 
+function M.half()
+    return 1 / 2
+end
+
 function M.spin()
     while true do end
 end
@@ -129,7 +133,7 @@ fn every_call_starts_from_a_fresh_state() {
     for _ in 0..2 {
         let result = contract.call(&func("count"), &[], host(), LIMITS).result.unwrap();
 
-        assert!(matches!(result[..], [TxCallArgumentType::Number(n)] if n == 1.0));
+        assert_eq!(result, [TxCallArgumentType::I64(1)]);
     }
 }
 
@@ -174,7 +178,7 @@ fn values_cross_into_lua_and_back() {
         TxCallArgumentType::Bool(true),
         TxCallArgumentType::String("hi".to_string()),
         TxCallArgumentType::Bytes(vec![0xff, 0x00]),
-        TxCallArgumentType::Number(1.5),
+        TxCallArgumentType::Number(2.0),
         TxCallArgumentType::I64(-5),
         TxCallArgumentType::Address(Address::Ed25519([9; 32])),
         TxCallArgumentType::Amount(Amount::U128(7)),
@@ -187,13 +191,25 @@ fn values_cross_into_lua_and_back() {
             TxCallArgumentType::Bool(true),
             TxCallArgumentType::String(text),
             TxCallArgumentType::Bytes(bytes),
-            TxCallArgumentType::Number(half),
-            TxCallArgumentType::Number(minus_five),
+            TxCallArgumentType::I64(2),
+            TxCallArgumentType::I64(-5),
             TxCallArgumentType::Address(Address::Ed25519([9, ..])),
             TxCallArgumentType::U256(seven),
-        ] if text == "hi" && bytes[..] == [0xff, 0x00] && *half == 1.5 && *minus_five == -5.0
-            && *seven == u256::new(7)
-    ));
+        ] if text == "hi" && bytes[..] == [0xff, 0x00] && *seven == u256::new(7)
+    ), "numbers come back whole, as i64: {result:?}");
+}
+
+#[test]
+fn numbers_cross_a_contracts_edges_whole() {
+    for fraction in [1.5, f64::INFINITY, f64::NAN, 9007199254740994.0] {
+        let err = call("echo", &[TxCallArgumentType::Number(fraction)]).result.unwrap_err();
+
+        assert!(err.to_string().contains("a Lua contract takes whole numbers"), "{fraction}: {err}");
+    }
+
+    let err = call("half", &[]).result.unwrap_err();
+
+    assert!(err.to_string().contains("numbers leave a contract whole"), "{err}");
 }
 
 #[test]
@@ -296,3 +312,46 @@ fn bad_scripts_do_not_load() {
     assert!(matches!(Contract::load("return 5", LIMITS), Err(VmError::NotAModule)));
     assert!(matches!(Contract::load("error('no')", LIMITS), Err(VmError::Runtime(_))));
 }
+
+#[test]
+fn no_memory_address_reaches_a_result_or_a_failure() {
+    let script = r#"
+local M = {}
+
+function M.texts()
+    local named = setmetatable({}, { __tostring = function() return "named" end })
+
+    return tostring({}), tostring(print), tostring(named), tostring(u256(5)), tostring(address("0x" .. string.rep("07", 32)))
+end
+
+function M.thrown()
+    error({})
+end
+
+return M
+"#;
+    // Other states alive alongside move each run's objects to other addresses.
+    let run = |name: &str, others: usize| {
+        let _others: Vec<Contract> = (0..others).map(|_| Contract::load("return {}", LIMITS).unwrap()).collect();
+
+        Contract::load(script, LIMITS).unwrap().call(&func(name), &[], host(), LIMITS).result
+    };
+    let texts = run("texts", 0).unwrap();
+    let text = |value: &str| TxCallArgumentType::String(value.to_string());
+
+    assert_eq!(texts, [text("table"), text("function"), text("named"), text("5"), text(&format!("0x{}", "07".repeat(32)))]);
+    assert_eq!(run("texts", 3).unwrap(), texts, "the same in any state");
+
+    let thrown = run("thrown", 0).unwrap_err().to_string();
+
+    assert!(thrown.contains("runtime error: table\n") && !thrown.contains("0x"), "{thrown}");
+    assert_eq!(run("thrown", 3).unwrap_err().to_string(), thrown);
+}
+
+#[test]
+fn addresses_are_cut_from_error_text() {
+    assert_eq!(without_addresses("runtime error: table: 0x7cb4c831b8\nmore"), "runtime error: table\nmore");
+    assert_eq!(without_addresses("a function: 0x00ff and userdata: 0xAB"), "a function and userdata");
+    assert_eq!(without_addresses("sent to ed25519:0xab12, 7: 0x"), "sent to ed25519:0xab12, 7: 0x", "only a value's address");
+}
+

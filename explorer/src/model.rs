@@ -247,16 +247,23 @@ pub struct Contract {
     pub token: Option<RegisteredToken>,
 }
 
-/// One namespace a contract's storage layout declares: a map of one kind, a record of keys, or
-/// retired.
+/// One namespace a contract's storage layout declares: a map of one kind, keyed by any key or by
+/// keys of a kind, a record of keys, or retired.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Declared {
     pub name: String,
     /// map, record or retired.
     pub shape: String,
-    /// A map's kind.
+    /// A map's values' kind, and the unit they are in.
     #[serde(default)]
     pub kind: Option<String>,
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// A map's keys' kind and unit; None for any key, and from nodes before key kinds.
+    #[serde(default)]
+    pub key_kind: Option<String>,
+    #[serde(default)]
+    pub key_unit: Option<String>,
     /// A record's keys.
     #[serde(default)]
     pub keys: Vec<Field>,
@@ -268,6 +275,17 @@ pub struct Field {
     pub key: String,
     /// Its kind; None once retired.
     pub kind: Option<String>,
+    /// The unit its value is in, if the layout names one.
+    #[serde(default)]
+    pub unit: Option<String>,
+}
+
+/// A kind as a layout writes it: with its unit after a colon, when it has one.
+pub fn kind_text(kind: &str, unit: Option<&str>) -> String {
+    match unit {
+        Some(unit) => format!("{kind}:{unit}"),
+        None => kind.to_string(),
+    }
 }
 
 /// A token as the chain's registry holds it: what its name(), symbol() and decimals() answered
@@ -455,6 +473,25 @@ pub struct PeerChange {
 #[cfg(test)]
 mod tests {
     use {super::*, serde_json::json};
+
+    #[test]
+    fn layouts_read_with_key_kinds_and_units_and_without() {
+        let layout: Vec<Declared> = serde_json::from_value(json!([
+            {"name": "points", "shape": "map", "kind": "decimal", "unit": "points", "key_kind": "address-text", "key_unit": null},
+            {"name": "notes", "shape": "map", "kind": "text"},
+            {"name": "config", "shape": "record", "keys": [
+                {"key": "cap", "kind": "decimal", "unit": "points", "retired": false},
+                {"key": "name", "kind": null, "retired": true},
+            ]},
+        ]))
+        .unwrap();
+
+        assert_eq!(layout[0].key_kind.as_deref(), Some("address-text"));
+        assert_eq!(kind_text(layout[0].kind.as_deref().unwrap(), layout[0].unit.as_deref()), "decimal:points");
+        assert_eq!((layout[1].key_kind.as_deref(), layout[1].unit.as_deref()), (None, None), "from a node before either");
+        assert_eq!(kind_text("decimal", layout[2].keys[0].unit.as_deref()), "decimal:points");
+        assert_eq!(layout[2].keys[1].kind, None);
+    }
 
     #[test]
     fn blocks_read_with_their_transactions_receipts_and_traces() {

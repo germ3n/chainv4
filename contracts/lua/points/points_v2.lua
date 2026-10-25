@@ -2,13 +2,13 @@
 -- award, and the name kept under a new key, title. It keeps every namespace and key version 1
 -- declared, and retires the one it no longer uses.
 
---@namespace points decimal
---@namespace badges text
+--@namespace points address-text -> decimal:points
+--@namespace badges address-text -> text
 --@namespace config
 --@key config owner address-text
 --@retired config name
 --@key config title text
---@key config max_award decimal
+--@key config max_award decimal:points
 
 local M = {}
 

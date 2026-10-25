@@ -1,9 +1,14 @@
 //! Storage layouts: the namespaces a contract's code says it keeps its state in, and what each
-//! holds. A namespace is a map, any key with values of one kind, or a record, only the keys it
-//! declares, each with its kind. Code that declares any may reach nothing else: no other
-//! namespace or key, no value that is not its kind, and plain storage only to read and clear it.
-//! So the declaration is what the code does, and a new version must keep every namespace and key
-//! the old one declared, with what it holds, or retire it on purpose.
+//! holds. A namespace is a map, keys of one kind or any, with values of one kind, or a record, only
+//! the keys it declares, each with its kind. A kind may name the unit its values are in. Code that
+//! declares any may reach nothing else: no other namespace or key, no map key that is not its
+//! kind, no value that is not its kind, and plain storage only to read and clear it. So the
+//! declaration is what the code does, and a new version must keep every namespace and key the old
+//! one declared, with what it holds, or retire it on purpose.
+//!
+//! Layouts are kept in contract records, under the state root, so a layout that uses neither key
+//! kinds nor units is kept as it was before either existed: Map and Record. TypedMap and TypedRecord
+//! hold the rest.
 
 use {
     super::MAX_NAMESPACE_LEN,
@@ -17,11 +22,14 @@ use {
 /// The longest key a record declares, in bytes, as storage keys may be.
 const MAX_DECLARED_KEY_LEN: usize = super::MAX_KEY_LEN;
 
+/// The longest unit, in bytes.
+pub const MAX_UNIT_LEN: usize = 32;
+
 #[document(
     summary = "The namespaces a contract's code keeps its state in, as it declares them: --@namespace, --@key and --@retired lines in Lua, the chainv4.layout custom section in WebAssembly. Code that declares any may use no other namespace, no key a record does not declare, and no value that is not its kind, and may only read and clear plain storage; its own space stays free. A new version, swapped in by Tx::Upgrade or by a proxy repointing, must keep every namespace and key with the same kind, or retire it.",
     category = "VM",
     see_also = "Layout::keeps, Layout::reaches, Kind, Space, LAYOUT_SECTION",
-    example = "--@namespace balances decimal\n--@namespace config\n--@key config owner address-hex\n--@retired config fee_rate\n--@retired fees",
+    example = "--@namespace balances address-text -> decimal:wei\n--@namespace config\n--@key config owner address-hex\n--@retired config fee_rate\n--@retired fees",
 )]
 #[derive(Clone, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct Layout {
@@ -50,6 +58,138 @@ pub enum Shape {
     #[document(summary = "Nothing any more: `retired NAME`. It may be read and cleared, never written.")]
     #[wincode(tag = 2)]
     Retired,
+    #[document(summary = "A map whose keys are of a kind, or whose values name a unit: `namespace NAME KEYKIND -> KIND`, `namespace NAME KIND:UNIT`. key is what every key is, None for any; value what every value is. One with neither a key kind nor a unit is a Map, as it was before either existed.")]
+    #[wincode(tag = 3)]
+    TypedMap { key: Option<Typed>, value: Typed },
+    #[document(summary = "A record with a key whose value names a unit: only these keys, sorted, each with its kind and unit. One whose keys name none is a Record.")]
+    #[wincode(tag = 4)]
+    TypedRecord(Vec<TypedField>),
+}
+
+impl Shape {
+    /// A map's key kind, if it has one, and its values' kind, without their units: what the node
+    /// checks on every access.
+    fn map_kinds(&self) -> Option<(Option<Kind>, Kind)> {
+        match self {
+            Shape::Map(kind) => Some((None, *kind)),
+            Shape::TypedMap { key, value } => Some((key.as_ref().map(|key| key.kind), value.kind)),
+            _ => None,
+        }
+    }
+
+    #[document(parent = "Shape", summary = "A map's keys and values, units and all, whichever way it is kept; None for a record or a retired namespace.")]
+    pub fn map(&self) -> Option<(Option<Typed>, Typed)> {
+        match self {
+            Shape::Map(kind) => Some((None, Typed::new(*kind))),
+            Shape::TypedMap { key, value } => Some((key.clone(), value.clone())),
+            _ => None,
+        }
+    }
+
+    /// The kind of one of a record's keys: None when it declares no such key, Some(None) when the
+    /// key is retired.
+    fn record_kind(&self, key: &[u8]) -> Option<Option<Kind>> {
+        match self {
+            Shape::Record(fields) => {
+                let at = fields.binary_search_by(|field| field.key.as_bytes().cmp(key)).ok()?;
+
+                Some(fields[at].kind)
+            }
+            Shape::TypedRecord(fields) => {
+                let at = fields.binary_search_by(|field| field.key.as_bytes().cmp(key)).ok()?;
+
+                Some(fields[at].value.as_ref().map(|value| value.kind))
+            }
+            _ => None,
+        }
+    }
+
+    #[document(parent = "Shape", summary = "A record's keys, sorted, each with its kind and unit, or None once retired, whichever way it is kept; None for a map or a retired namespace.")]
+    pub fn record(&self) -> Option<Vec<TypedField>> {
+        match self {
+            Shape::Record(fields) => Some(
+                fields
+                    .iter()
+                    .map(|field| TypedField {
+                        key: field.key.clone(),
+                        value: field.kind.map(Typed::new),
+                    })
+                    .collect(),
+            ),
+            Shape::TypedRecord(fields) => Some(fields.clone()),
+            _ => None,
+        }
+    }
+}
+
+#[document(summary = "One key a record declares, with its value's kind and unit.", category = "VM", see_also = "Shape::TypedRecord")]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct TypedField {
+    #[document(summary = "The key: 1 to 256 bytes, without spaces.")]
+    pub key: String,
+    #[document(summary = "What its value is; None once it is retired.")]
+    pub value: Option<Typed>,
+}
+
+#[document(
+    summary = "A kind, and the unit its values are in when the layout names one: `decimal:wei`, `u256:points`. The chain checks the kind on every write. The unit is the layout's word for what a value means, which no write can check: an upgrade must keep it, so code that changes what its numbers count says so, retiring the old and declaring the new.",
+    category = "VM",
+    see_also = "Kind, Layout::keeps",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct Typed {
+    #[document(summary = "How the value is written.")]
+    pub kind: Kind,
+    #[document(summary = "What it counts or means: 1 to 32 letters, digits, - _ or ., or None.")]
+    pub unit: Option<String>,
+}
+
+impl Typed {
+    #[document(parent = "Typed", summary = "A kind with no unit.")]
+    pub fn new(kind: Kind) -> Typed {
+        Typed { kind, unit: None }
+    }
+
+    #[document(
+        parent = "Typed",
+        summary = "Reads a kind as a layout writes it, with its unit after a colon when it has one.",
+        returns = "It, or why not: a kind there is none of, or a unit that is empty, too long or has other characters.",
+    )]
+    pub fn parse(word: &str) -> Result<Typed, String> {
+        let (kind, unit) = match word.split_once(':') {
+            Some((kind, unit)) => (kind, Some(unit)),
+            None => (word, None),
+        };
+        let kind = kind_named(kind)?;
+
+        if let Some(unit) = unit
+            && (unit.is_empty() || unit.len() > MAX_UNIT_LEN || !unit.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)))
+        {
+            return Err(format!("a unit is 1 to {MAX_UNIT_LEN} letters, digits, - _ or .: {word}"));
+        }
+
+        Ok(Typed {
+            kind,
+            unit: unit.map(str::to_string),
+        })
+    }
+
+    #[document(
+        parent = "Typed",
+        summary = "Whether a new version's declaration keeps this one: the same kind, and the same unit, or any where this named none, as a unit may be named once and is then kept.",
+    )]
+    pub fn kept_by(&self, now: &Typed) -> bool {
+        self.kind == now.kind && (self.unit.is_none() || self.unit == now.unit)
+    }
+}
+
+impl fmt::Display for Typed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.unit {
+            Some(unit) => write!(f, "{}:{unit}", self.kind),
+            None => write!(f, "{}", self.kind),
+        }
+    }
 }
 
 #[document(summary = "One key a record namespace declares.", category = "VM", see_also = "Shape::Record")]
@@ -74,7 +214,7 @@ pub enum Kind {
     #[document(summary = "text: UTF-8.")]
     #[wincode(tag = 1)]
     Text,
-    #[document(summary = "number: a number in text, as Lua's tostring writes one: 5, -2.5, 1e+20, inf or nan.")]
+    #[document(summary = "number: a whole number within 2^53 either way, in decimal digits after a minus for one below zero, no leading zeros: 5, -42, as Lua's Namespace:set_number and the SDK's set_number write one. One spelling for each number, so as a map's key it is one entry.")]
     #[wincode(tag = 2)]
     Number,
     #[document(summary = "decimal: a whole number from 0 in decimal text, no larger than the largest u256, as tostring writes a U256.")]
@@ -153,7 +293,7 @@ impl Kind {
         match self {
             Kind::Bytes => true,
             Kind::Text => text().is_some(),
-            Kind::Number => text().is_some_and(is_number),
+            Kind::Number => text().is_some_and(is_whole_number),
             Kind::Decimal => text().is_some_and(|text| {
                 !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) && u256::from_str_radix(text, 10).is_ok()
             }),
@@ -176,27 +316,13 @@ impl fmt::Display for Kind {
     }
 }
 
-/// Whether text is a number as Lua's tostring writes one: an optional minus, digits, an optional
-/// fraction and an optional exponent; or inf or nan.
-fn is_number(text: &str) -> bool {
-    let unsigned = text.strip_prefix('-').unwrap_or(text);
+/// Whether text is a whole number within 2^53 either way, spelled one way: digits with no leading
+/// zero, after a minus for one below zero, and no -0.
+fn is_whole_number(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    let canonical = !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) && (digits == "0" || !digits.starts_with('0'));
 
-    if matches!(unsigned, "inf" | "nan") {
-        return true;
-    }
-
-    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
-        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
-        None => (unsigned, None),
-    };
-    let (whole, fraction) = match mantissa.split_once('.') {
-        Some((whole, fraction)) => (whole, Some(fraction)),
-        None => (mantissa, None),
-    };
-    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-    let exponent_ok = exponent.is_none_or(|exponent| digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent)));
-
-    digits(whole) && fraction.is_none_or(digits) && exponent_ok
+    canonical && text != "-0" && text.parse::<i64>().is_ok_and(|number| number.unsigned_abs() <= 1 << 53)
 }
 
 #[document(
@@ -206,12 +332,12 @@ fn is_number(text: &str) -> bool {
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Entry {
-    #[document(summary = "`namespace NAME KIND`: a map.")]
-    Map(String, Kind),
+    #[document(summary = "`namespace NAME KIND`, or `namespace NAME KEYKIND -> KIND`: a map, of any key or of keys of a kind.")]
+    Map(String, Option<Typed>, Typed),
     #[document(summary = "`namespace NAME`: a record, whose keys key entries declare.")]
     Record(String),
     #[document(summary = "`key NAME KEY KIND`: one of a record's keys.")]
-    Key(String, String, Kind),
+    Key(String, String, Typed),
     #[document(summary = "`retired NAME`: a namespace no longer used.")]
     Retired(String),
     #[document(summary = "`retired NAME KEY`: one of a record's keys no longer used.")]
@@ -227,18 +353,21 @@ impl Entry {
     pub fn parse(text: &str) -> Result<Entry, String> {
         let words: Vec<&str> = text.split_whitespace().collect();
         let entry = match words[..] {
-            ["namespace", name, kind] => Entry::Map(name.to_string(), kind_named(kind)?),
+            ["namespace", name, kind] => Entry::Map(name.to_string(), None, Typed::parse(kind)?),
+            ["namespace", name, key, "->", kind] => Entry::Map(name.to_string(), Some(Typed::parse(key)?), Typed::parse(kind)?),
             ["namespace", name] => Entry::Record(name.to_string()),
-            ["key", name, key, kind] => Entry::Key(name.to_string(), key.to_string(), kind_named(kind)?),
+            ["key", name, key, kind] => Entry::Key(name.to_string(), key.to_string(), Typed::parse(kind)?),
             ["retired", name] => Entry::Retired(name.to_string()),
             ["retired", name, key] => Entry::RetiredKey(name.to_string(), key.to_string()),
-            ["namespace", ..] => return Err("a namespace is declared as `namespace NAME KIND` or `namespace NAME`".to_string()),
+            ["namespace", ..] => {
+                return Err("a namespace is declared as `namespace NAME KIND`, `namespace NAME KEYKIND -> KIND` or `namespace NAME`".to_string());
+            }
             ["key", ..] => return Err("a key is declared as `key NAME KEY KIND`".to_string()),
             ["retired", ..] => return Err("a namespace is retired as `retired NAME`, a key as `retired NAME KEY`".to_string()),
             _ => return Err(format!("unknown layout entry `{}`", text.trim())),
         };
         let (name, key) = match &entry {
-            Entry::Map(name, _) | Entry::Record(name) | Entry::Retired(name) => (name, None),
+            Entry::Map(name, _, _) | Entry::Record(name) | Entry::Retired(name) => (name, None),
             Entry::Key(name, key, _) | Entry::RetiredKey(name, key) => (name, Some(key)),
         };
 
@@ -289,16 +418,18 @@ impl Layout {
 
         for entry in entries {
             let (name, shape) = match entry {
-                Entry::Map(name, kind) => (name, Shape::Map(kind)),
-                Entry::Record(name) => (name, Shape::Record(Vec::new())),
+                // As it was kept before key kinds and units, when it has neither.
+                Entry::Map(name, None, Typed { kind, unit: None }) => (name, Shape::Map(kind)),
+                Entry::Map(name, key, value) => (name, Shape::TypedMap { key, value }),
+                Entry::Record(name) => (name, Shape::TypedRecord(Vec::new())),
                 Entry::Retired(name) => (name, Shape::Retired),
-                Entry::Key(name, key, kind) => {
-                    fields.push((name, Field { key, kind: Some(kind) }));
+                Entry::Key(name, key, value) => {
+                    fields.push((name, TypedField { key, value: Some(value) }));
 
                     continue;
                 }
                 Entry::RetiredKey(name, key) => {
-                    fields.push((name, Field { key, kind: None }));
+                    fields.push((name, TypedField { key, value: None }));
 
                     continue;
                 }
@@ -312,7 +443,7 @@ impl Layout {
         }
 
         for (name, field) in fields {
-            let Some(Declared { shape: Shape::Record(keys), .. }) = namespaces.iter_mut().find(|declared| declared.name == name) else {
+            let Some(Declared { shape: Shape::TypedRecord(keys), .. }) = namespaces.iter_mut().find(|declared| declared.name == name) else {
                 return Err(format!("key {} names namespace {name}, which is not declared as a record: `namespace {name}`", field.key));
             };
 
@@ -326,8 +457,20 @@ impl Layout {
         namespaces.sort_by(|a, b| a.name.cmp(&b.name));
 
         for declared in &mut namespaces {
-            if let Shape::Record(keys) = &mut declared.shape {
+            if let Shape::TypedRecord(keys) = &mut declared.shape {
                 keys.sort_by(|a, b| a.key.cmp(&b.key));
+
+                // As it was kept before units, when none of its keys names one.
+                if keys.iter().all(|field| field.value.as_ref().is_none_or(|value| value.unit.is_none())) {
+                    let plain = keys
+                        .drain(..)
+                        .map(|field| Field {
+                            key: field.key,
+                            kind: field.value.map(|value| value.kind),
+                        })
+                        .collect();
+                    declared.shape = Shape::Record(plain);
+                }
             }
         }
 
@@ -358,7 +501,7 @@ impl Layout {
 
     #[document(
         parent = "Layout",
-        summary = "Whether code with this layout may do this with a key in a namespace: anything, when it declares none. Otherwise the namespace must be declared, and a record's key too; what is retired may only be read and cleared; and a value written must be its kind.",
+        summary = "Whether code with this layout may do this with a key in a namespace: anything, when it declares none. Otherwise the namespace must be declared, and a record's key too, and a map's key must be its key kind, whatever is done with it; what is retired may only be read and cleared; and a value written must be its kind.",
         params = {
             name = "The namespace's name.",
             key = "The key.",
@@ -375,20 +518,29 @@ impl Layout {
         let Some(declared) = self.get(name) else {
             return Err(format!("namespace {shown} is not in this code's layout"));
         };
-        let kind = match &declared.shape {
-            Shape::Retired => None,
-            Shape::Map(kind) => Some(*kind),
-            Shape::Record(keys) => {
-                let Ok(at) = keys.binary_search_by(|field| field.key.as_bytes().cmp(key)) else {
+        let kind = match (&declared.shape, declared.shape.map_kinds()) {
+            (Shape::Retired, _) => None,
+            (_, Some((key_kind, kind))) => {
+                // Read, written or cleared: a key of another form is an entry the code never meant.
+                if let Some(key_kind) = key_kind
+                    && !key_kind.holds(key)
+                {
+                    return Err(format!("namespace {shown} takes keys of {key_kind}, and {} is not one", printable(key)));
+                }
+
+                Some(kind)
+            }
+            (shape, None) => {
+                let Some(kind) = shape.record_kind(key) else {
                     return Err(format!("key {} is not in namespace {shown}'s layout", String::from_utf8_lossy(key)));
                 };
 
-                match keys[at].kind {
+                match kind {
                     Some(kind) => Some(kind),
                     None if matches!(access, Access::Write(_)) => {
                         return Err(format!(
                             "key {} of namespace {shown} is retired: it can be read and cleared, not written",
-                            keys[at].key
+                            String::from_utf8_lossy(key)
                         ));
                     }
                     None => return Ok(()),
@@ -423,7 +575,7 @@ impl Layout {
 
     #[document(
         parent = "Layout",
-        summary = "Whether this layout, a new version's, keeps old: every namespace old declares is still declared, the same shape and kind, or retired; every key of a record still declared with the same kind, or retired; and what old retired stays retired. New namespaces and keys may come in. Anything keeps a layout that declares nothing.",
+        summary = "Whether this layout, a new version's, keeps old: every namespace old declares is still declared, the same shape and kind, or retired; a map's key kind kept, or declared where it had none; every key of a record still declared with the same kind, or retired; every unit kept, or named where there was none; and what old retired stays retired. New namespaces and keys may come in. Anything keeps a layout that declares nothing.",
         params = { old = "The layout of the code it replaces." },
         returns = "Why not, naming the first namespace or key that breaks it.",
         see_also = "Contracts::upgrade, Host::check_layout",
@@ -436,19 +588,19 @@ impl Layout {
             };
 
             match (&before.shape, &now.shape) {
-                (Shape::Retired, Shape::Retired) | (Shape::Map(_) | Shape::Record(_), Shape::Retired) => {}
+                (_, Shape::Retired) => {}
                 (Shape::Retired, _) => return Err(format!("namespace {name} was retired, and stays retired")),
-                (Shape::Map(was), Shape::Map(is)) if was != is => {
-                    return Err(format!("namespace {name} held {was}, and now holds {is}: retire it and declare another"));
-                }
-                (Shape::Map(_), Shape::Map(_)) => {}
-                (Shape::Map(_), Shape::Record(_)) => {
-                    return Err(format!("namespace {name} was a map, and is now a record: retire it and declare another"));
-                }
-                (Shape::Record(_), Shape::Map(_)) => {
-                    return Err(format!("namespace {name} was a record, and is now a map: retire it and declare another"));
-                }
-                (Shape::Record(was), Shape::Record(is)) => keeps_keys(name, was, is)?,
+                (was, is) => match (was.map(), is.map(), was.record(), is.record()) {
+                    (Some(was), Some(is), _, _) => keeps_map(name, was, is)?,
+                    (Some(_), None, _, _) => {
+                        return Err(format!("namespace {name} was a map, and is now a record: retire it and declare another"));
+                    }
+                    (None, Some(_), _, _) => {
+                        return Err(format!("namespace {name} was a record, and is now a map: retire it and declare another"));
+                    }
+                    (None, None, Some(was), Some(is)) => keeps_keys(name, &was, &is)?,
+                    (None, None, _, _) => unreachable!("a namespace not retired is a map or a record"),
+                },
             }
         }
 
@@ -456,17 +608,33 @@ impl Layout {
     }
 }
 
+/// Whether a map, as a new version declares it, keeps the old version's: its values' kind and
+/// unit, and its keys' kind, which may come in where it had none, and then stays.
+fn keeps_map(name: &str, (was_key, was): (Option<Typed>, Typed), (is_key, is): (Option<Typed>, Typed)) -> Result<(), String> {
+    if !was.kept_by(&is) {
+        return Err(format!("namespace {name} held {was}, and now holds {is}: retire it and declare another"));
+    }
+
+    match (was_key, is_key) {
+        (Some(was), None) => Err(format!("namespace {name} took keys of {was}, and now takes any: retire it and declare another")),
+        (Some(was), Some(is)) if !was.kept_by(&is) => {
+            Err(format!("namespace {name} took keys of {was}, and now takes {is}: retire it and declare another"))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Whether a record's keys, as a new version declares them, keep the old version's.
-fn keeps_keys(name: &str, old: &[Field], new: &[Field]) -> Result<(), String> {
+fn keeps_keys(name: &str, old: &[TypedField], new: &[TypedField]) -> Result<(), String> {
     for before in old {
         let key = &before.key;
         let Some(now) = new.iter().find(|field| field.key == *key) else {
             return Err(format!("key {key} of namespace {name} is dropped: keep it, or retire it"));
         };
 
-        match (before.kind, now.kind) {
+        match (&before.value, &now.value) {
             (None, Some(_)) => return Err(format!("key {key} of namespace {name} was retired, and stays retired")),
-            (Some(was), Some(is)) if was != is => {
+            (Some(was), Some(is)) if !was.kept_by(is) => {
                 return Err(format!("key {key} of namespace {name} held {was}, and now holds {is}: retire it and declare another"));
             }
             _ => {}
@@ -476,25 +644,36 @@ fn keeps_keys(name: &str, old: &[Field], new: &[Field]) -> Result<(), String> {
     Ok(())
 }
 
+/// A key as an error shows it: as text when it is printable, else in hex.
+fn printable(key: &[u8]) -> String {
+    match std::str::from_utf8(key) {
+        Ok(text) if !text.chars().any(char::is_control) => text.to_string(),
+        _ => format!("0x{}", key.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+    }
+}
+
 /// One entry a line, as code declares them: each namespace, then a record's keys.
 impl fmt::Display for Layout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for declared in &self.namespaces {
             let name = &declared.name;
+            let shape = &declared.shape;
 
-            match &declared.shape {
-                Shape::Map(kind) => writeln!(f, "namespace {name} {kind}")?,
-                Shape::Retired => writeln!(f, "retired {name}")?,
-                Shape::Record(keys) => {
+            match (shape, shape.map(), shape.record()) {
+                (Shape::Retired, _, _) => writeln!(f, "retired {name}")?,
+                (_, Some((Some(key), value)), _) => writeln!(f, "namespace {name} {key} -> {value}")?,
+                (_, Some((None, value)), _) => writeln!(f, "namespace {name} {value}")?,
+                (_, None, Some(keys)) => {
                     writeln!(f, "namespace {name}")?;
 
                     for field in keys {
-                        match field.kind {
-                            Some(kind) => writeln!(f, "key {name} {} {kind}", field.key)?,
+                        match field.value {
+                            Some(value) => writeln!(f, "key {name} {} {value}", field.key)?,
                             None => writeln!(f, "retired {name} {}", field.key)?,
                         }
                     }
                 }
+                (_, None, None) => unreachable!("a namespace not retired is a map or a record"),
             }
         }
 
@@ -512,15 +691,28 @@ mod tests {
 
     #[test]
     fn entries_read_as_code_writes_them() {
-        assert_eq!(Entry::parse("  namespace  balances decimal ").unwrap(), Entry::Map("balances".into(), Kind::Decimal));
+        let typed = |kind, unit: Option<&str>| Typed { kind, unit: unit.map(str::to_string) };
+
+        assert_eq!(Entry::parse("  namespace  balances decimal ").unwrap(), Entry::Map("balances".into(), None, typed(Kind::Decimal, None)));
+        assert_eq!(
+            Entry::parse("namespace balances address-text -> decimal:wei").unwrap(),
+            Entry::Map("balances".into(), Some(typed(Kind::AddressText, None)), typed(Kind::Decimal, Some("wei")))
+        );
         assert_eq!(Entry::parse("namespace config").unwrap(), Entry::Record("config".into()));
-        assert_eq!(Entry::parse("key config owner address-hex").unwrap(), Entry::Key("config".into(), "owner".into(), Kind::AddressHex));
+        assert_eq!(Entry::parse("key config owner address-hex").unwrap(), Entry::Key("config".into(), "owner".into(), typed(Kind::AddressHex, None)));
+        assert_eq!(Entry::parse("key config fee u64:basis-points").unwrap(), Entry::Key("config".into(), "fee".into(), typed(Kind::U64, Some("basis-points"))));
         assert_eq!(Entry::parse("retired config fee").unwrap(), Entry::RetiredKey("config".into(), "fee".into()));
         assert_eq!(Entry::parse("retired fees").unwrap(), Entry::Retired("fees".into()));
 
         for (entry, expected) in [
             ("namespace balances u512", "there is no kind u512; the kinds are bytes, text"),
-            ("namespace a b c", "`namespace NAME KIND` or `namespace NAME`"),
+            ("namespace a b c", "`namespace NAME KIND`, `namespace NAME KEYKIND -> KIND` or `namespace NAME`"),
+            ("namespace a text => decimal", "`namespace NAME KEYKIND -> KIND`"),
+            ("namespace a text -> u512", "there is no kind u512"),
+            ("namespace a decimal:", "a unit is 1 to 32"),
+            ("key a k decimal:two words", "`key NAME KEY KIND`"),
+            ("key a k decimal:wei/s", "a unit is 1 to 32"),
+            (&format!("namespace a decimal:{}", "u".repeat(33)), "a unit is 1 to 32"),
             ("key config owner", "`key NAME KEY KIND`"),
             ("retired a b c", "`retired NAME KEY`"),
             ("reentrant", "unknown"),
@@ -561,7 +753,7 @@ mod tests {
         let cases: &[Case] = &[
             (Kind::Bytes, &[b"", b"\xff"], &[]),
             (Kind::Text, &["héllo".as_bytes()], &[b"\xff"]),
-            (Kind::Number, &[b"5", b"-2.5", b"1e+20", b"1E-3", b"inf", b"-nan", b"0.1"], &[b"", b"5.", b".5", b"1e", b"0x10", b"five", b"+5"]),
+            (Kind::Number, &[b"5", b"0", b"-42", b"9007199254740992", b"-9007199254740992"], &[b"", b"-2.5", b"1e+20", b"inf", b"nan", b"05", b"-0", b"+5", b"0x10", b"9007199254740993"]),
             (Kind::Decimal, &[b"0", b"1000000000000000000000000"], &[b"", b"-1", b"1.5", b"0x10", &[b'9'; 79]]),
             (Kind::Bool, &[b"\x00", b"\x01"], &[b"\x02", b"", b"true"]),
             (Kind::I64, &[&[0; 8]], &[&[0; 7]]),
@@ -641,5 +833,83 @@ mod tests {
 
         assert!(v1.keeps(v2).unwrap_err().contains("key fee of namespace config was retired, and stays retired"));
         assert!(v1.keeps(&kept[2]).unwrap_err().contains("namespace balances was retired, and stays retired"));
+    }
+
+    #[test]
+    fn layouts_without_key_kinds_or_units_are_kept_as_they_were() {
+        // Contract records sit under the state root: what code could declare before key kinds and
+        // units must encode as it did, so they come out as Map and Record.
+        let plain = layout(&["namespace balances decimal", "namespace config", "key config owner address-hex", "retired config fee"]);
+
+        assert_eq!(plain.namespaces[0].shape, Shape::Map(Kind::Decimal));
+        assert_eq!(
+            plain.namespaces[1].shape,
+            Shape::Record(vec![
+                Field { key: "fee".into(), kind: None },
+                Field { key: "owner".into(), kind: Some(Kind::AddressHex) },
+            ])
+        );
+
+        let typed = layout(&["namespace balances address-text -> decimal", "namespace config", "key config owner address-hex", "key config fee u64:bps"]);
+
+        assert!(matches!(typed.namespaces[0].shape, Shape::TypedMap { key: Some(_), .. }));
+        assert!(matches!(typed.namespaces[1].shape, Shape::TypedRecord(_)));
+        assert_eq!(Layout::read(typed.to_string().lines()).unwrap(), typed, "what it writes reads back");
+        assert_eq!(
+            typed.to_string(),
+            "namespace balances address-text -> decimal\nnamespace config\nkey config fee u64:bps\nkey config owner address-hex\n"
+        );
+
+        let bytes = wincode::serialize(&typed).unwrap();
+
+        assert_eq!(wincode::deserialize::<Layout>(&bytes).unwrap(), typed);
+    }
+
+    #[test]
+    fn a_maps_keys_are_checked_whatever_is_done_with_them() {
+        let who = Address::Ed25519([7; 32]);
+        let (text, hex) = (who.to_string(), format!("0x{}", "07".repeat(32)));
+        let layout = layout(&["namespace points address-text -> decimal:points", "namespace config", "key config cap decimal:points"]);
+
+        assert_eq!(layout.reaches(b"points", text.as_bytes(), Access::Write(b"5")), Ok(()));
+        assert_eq!(layout.reaches(b"points", text.as_bytes(), Access::Read), Ok(()));
+
+        for access in [Access::Read, Access::Clear, Access::Write(b"5")] {
+            assert_eq!(
+                layout.reaches(b"points", hex.as_bytes(), access),
+                Err(format!("namespace points takes keys of address-text, and {hex} is not one")),
+                "who:hex() where the map takes who:text()"
+            );
+        }
+
+        assert!(layout.reaches(b"points", b"\x01\x02", Access::Read).unwrap_err().contains("0x0102 is not one"));
+        assert!(layout.reaches(b"points", text.as_bytes(), Access::Write(b"lots")).unwrap_err().contains("the value is not decimal"));
+        assert_eq!(layout.reaches(b"config", b"cap", Access::Write(b"100")), Ok(()), "a unit is no encoding: it checks nothing");
+        assert!(layout.reaches(b"config", b"limit", Access::Read).unwrap_err().contains("key limit is not in namespace config's layout"));
+    }
+
+    #[test]
+    fn key_kinds_and_units_come_in_once_and_then_stay() {
+        let v1 = layout(&["namespace points decimal", "namespace config", "key config cap decimal"]);
+        let v2 = layout(&["namespace points address-text -> decimal:points", "namespace config", "key config cap decimal:points"]);
+
+        assert_eq!(v2.keeps(&v1), Ok(()), "a map may take a key kind, and a kind a unit, where it had none");
+        assert_eq!(v2.keeps(&v2), Ok(()));
+
+        let broken = [
+            (layout(&["namespace points decimal:points", "namespace config", "key config cap decimal:points"]), "namespace points took keys of address-text, and now takes any"),
+            (layout(&["namespace points address-hex -> decimal:points", "namespace config", "key config cap decimal:points"]), "took keys of address-text, and now takes address-hex"),
+            (layout(&["namespace points address-text -> decimal:coins", "namespace config", "key config cap decimal:points"]), "held decimal:points, and now holds decimal:coins"),
+            (layout(&["namespace points address-text -> decimal", "namespace config", "key config cap decimal:points"]), "held decimal:points, and now holds decimal"),
+            (layout(&["namespace points address-text -> u256:points", "namespace config", "key config cap decimal:points"]), "held decimal:points, and now holds u256:points"),
+            (layout(&["namespace points address-text -> decimal:points", "namespace config", "key config cap decimal"]), "key cap of namespace config held decimal:points, and now holds decimal"),
+            (layout(&["namespace points address-text -> decimal:points", "namespace config address-text -> decimal"]), "namespace config was a record, and is now a map"),
+        ];
+
+        for (v3, expected) in broken {
+            assert!(v3.keeps(&v2).unwrap_err().contains(expected), "{v3}: {:?}", v3.keeps(&v2));
+        }
+
+        assert_eq!(layout(&["retired points", "retired config"]).keeps(&v2), Ok(()), "retiring forgets what it held");
     }
 }

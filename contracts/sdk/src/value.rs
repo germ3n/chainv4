@@ -75,9 +75,8 @@ impl Address {
     }
 
     /// The address in its text form, as the node writes it: its kind, a colon and 0x hex, such
-    /// as `ed25519:0x3b6a…`.
+    /// as `ed25519:0x3b6a…`. What the `address-text` kind holds.
     pub fn text(&self) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
         let kind = match self.kind {
             AddressKind::Ed25519 => "ed25519",
             AddressKind::Contract => "contract",
@@ -86,7 +85,33 @@ impl Address {
         };
         let mut out = String::with_capacity(kind.len() + 67);
         out.push_str(kind);
-        out.push_str(":0x");
+        out.push(':');
+        out.push_str(&self.hex());
+
+        out
+    }
+
+    /// Reads the text form, as text writes it and Lua's address.parse reads it. None for anything
+    /// else.
+    pub fn parse(text: &str) -> Option<Address> {
+        let (kind, hex) = text.split_once(':')?;
+        let kind = match kind {
+            "ed25519" => AddressKind::Ed25519,
+            "contract" => AddressKind::Contract,
+            "edblake" => AddressKind::EdBlake,
+            "secp256k1" => AddressKind::Secp256k1,
+            _ => return None,
+        };
+
+        Address::new(kind, &from_hex(hex.strip_prefix("0x")?)?)
+    }
+
+    /// The address as `0x` and lowercase hex, as Lua's Address:hex writes it: what the
+    /// `address-hex` kind holds. It keeps no kind.
+    pub fn hex(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(66);
+        out.push_str("0x");
 
         for byte in self.as_bytes() {
             out.push(HEX[usize::from(byte >> 4)] as char);
@@ -95,6 +120,31 @@ impl Address {
 
         out
     }
+
+    /// Reads `0x` and hex, as Lua's address(hex) does: 64 digits are an Ed25519 address, 40 a
+    /// secp256k1 one, the hex form keeping no kind.
+    pub fn from_hex(text: &str) -> Option<Address> {
+        let bytes = from_hex(text.strip_prefix("0x")?)?;
+        let kind = match bytes.len() {
+            32 => AddressKind::Ed25519,
+            20 => AddressKind::Secp256k1,
+            _ => return None,
+        };
+
+        Address::new(kind, &bytes)
+    }
+}
+
+/// Hex digits, either case, into bytes.
+fn from_hex(hex: &str) -> Option<Vec<u8>> {
+    let digit = |byte: u8| (byte as char).to_digit(16).map(|digit| digit as u8);
+    let bytes = hex.as_bytes();
+
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+
+    bytes.chunks(2).map(|pair| Some(digit(pair[0])? << 4 | digit(pair[1])?)).collect()
 }
 
 /// An amount of the chain's currency.
@@ -388,6 +438,28 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn addresses_read_back_from_text_and_hex_as_lua_writes_them() {
+        let mut bytes = [0; 32];
+        bytes[0] = 0xab;
+        bytes[31] = 0x01;
+        let edblake = Address::new(AddressKind::EdBlake, &bytes).unwrap();
+        let ethereum = Address::new(AddressKind::Secp256k1, &[0xff; 20]).unwrap();
+
+        assert_eq!(edblake.text(), alloc::format!("edblake:0xab{}01", "00".repeat(30)));
+        assert_eq!(Address::parse(&edblake.text()), Some(edblake));
+        assert_eq!(Address::parse(&ethereum.text().to_uppercase().replace("SECP256K1:0X", "secp256k1:0x")), Some(ethereum), "either case");
+        assert_eq!(ethereum.hex(), alloc::format!("0x{}", "ff".repeat(20)));
+        assert_eq!(Address::from_hex(&ethereum.hex()), Some(ethereum));
+        assert_eq!(Address::from_hex(&edblake.hex()).map(|address| address.kind), Some(AddressKind::Ed25519), "hex keeps no kind");
+
+        for bad in ["edblake:ab", "ed25519:0x12", "nokind:0x00", "ed25519:0xzz", "0x"] {
+            assert_eq!(Address::parse(bad), None, "{bad}");
+        }
+
+        assert_eq!(Address::from_hex("0x1234"), None);
+    }
 
     #[test]
     fn whole_numbers_come_out_of_float_bits() {

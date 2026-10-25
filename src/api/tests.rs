@@ -17,7 +17,7 @@ use std::net::TcpStream;
 const SLOT: u64 = 2_000;
 
 const COUNTER: &str = r#"
---@namespace counter number
+--@namespace counter text -> number:clicks
 local M = {}
 
 function M.increment(by)
@@ -263,7 +263,10 @@ fn accounts_and_contracts_are_read_from_state() {
     assert_eq!(contract["deployer"], authority.to_string());
     assert_eq!(contract["functions"], json!(["increment"]));
     assert_eq!(contract["engine"], "lua");
-    assert_eq!(contract["layout"], json!([{"name": "counter", "shape": "map", "kind": "number"}]));
+    assert_eq!(
+        contract["layout"],
+        json!([{"name": "counter", "shape": "map", "kind": "number", "unit": "clicks", "key_kind": "text", "key_unit": null}])
+    );
     assert!(contract["code_size"].as_u64().unwrap() > 0);
 }
 
@@ -1073,7 +1076,7 @@ fn read_only_calls_run_on_a_copy_that_is_thrown_away() {
 
         assert_eq!(status, 200, "{answer}");
         assert_eq!(answer["status"], "returned");
-        assert_eq!(answer["values"], json!([{ "type": "number", "value": 5.0 }]));
+        assert_eq!(answer["values"], json!([{ "type": "i64", "value": "5" }]));
         assert_eq!(answer["events"][0]["name"], "Bumped");
         assert_eq!(answer["trace"]["hops"][0]["function"], "bump");
         assert!(answer["fuel_used"].as_u64().unwrap() > 0);

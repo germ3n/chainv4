@@ -158,11 +158,27 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   of one kind, or a record, only the keys it declares (`--@key NAME KEY KIND`), each with its
   kind; keys retire like namespaces. Kinds are encodings the node checks on every write, and
   code that declares a layout may only read and clear plain storage.
-- [ ] **A map's keys are not checked.** Any key goes into a map, so code that changes how it
-  forms keys, `who:hex()` to `who:text()`, still starts from empty entries.
-- [ ] **Kinds check encodings, not meanings.** A `decimal` that held wei and now holds whole coins
-  passes, and Lua and Rust write different encodings of the same type, so a version that
-  switches engines must retire and migrate what it keeps.
+- [x] **Map keys have kinds.** `--@namespace NAME KEYKIND -> KIND` checks every key read, written
+  or cleared, so code that changes how it forms keys, `who:hex()` to `who:text()`, fails at once
+  instead of starting from empty entries. A map of any key may gain a key kind once.
+- [x] **Kinds name their units.** `decimal:wei`: no write can check what a number means, so the
+  layout says it, and an upgrade must keep it, or retire and redeclare.
+- [x] **Either engine keeps either's state.** Lua has get_ and set_ methods for the binary kinds
+  Rust writes, and the SDK for the text kinds Lua writes, so a contract moves between engines by
+  upgrade keeping every namespace: `contracts/examples/points` is version 3 of the Lua points.
+- [x] **No floats leave a contract.** Lua numbers go out as `i64`, whole and within 2^53, or the
+  call fails; `math` keeps only its whole-number functions; the `number` kind holds whole
+  numbers in digits.
+- [x] **No memory address reaches a result.** `tostring` of a table, function or userdata gives
+  its type's name, and failure text has addresses cut, so a script cannot return, store or fail
+  with something that differs between nodes.
+- [ ] **Tables keyed by tables iterate in address order.** Luau hashes table, function and
+  userdata keys by their address, so `pairs` over them differs between nodes. The plan: the Luau
+  fork hashes tables, functions and threads by a creation sequence number instead, and refuses
+  userdata keys, where an Address is a new value each time and two equal ones never meet.
+- [ ] **Lua still computes with floats inside a script.** Luau has no integer type, so `/` makes
+  fractions, which only fail once they would leave. An integer division and number type in the
+  Luau fork would close that.
 - [ ] **Only one permission exists.** `check_perms` is only ever asked about `"upgrade"`. Other
   privileged actions, such as removal, would ask with their own names.
 - [x] **A token registry.** A contract that exports every function genesis names in
@@ -460,3 +476,4 @@ make sure contract addresses start with contract:, then limit which keys can cal
 add a thing to storage (At least lua), where we dont have to save addresses as text but can just save it directly
 make a native ens type thing, with fees/params that are from genesis or voted on i guess
 make sure max supply is configurable
+storage seems to save strings only, make it save raw types to save space, etc

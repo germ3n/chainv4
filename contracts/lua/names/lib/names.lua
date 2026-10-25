@@ -1,8 +1,8 @@
 -- Where the registry keeps its state: each name's holder, and how many names each address holds.
 -- Included by names.lua; the layout below is the contract's, wherever it is declared.
 
---@namespace names address-text
---@namespace held decimal
+--@namespace names text -> address-text
+--@namespace held address-text -> decimal:names
 
 local names = storage.namespace("names")
 local held = storage.namespace("held")

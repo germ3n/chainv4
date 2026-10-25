@@ -82,7 +82,9 @@ pub fn layout(source: &str) -> Result<Layout, VmError> {
         };
 
         if annotation.split_whitespace().next().is_some_and(|word| LAYOUT_ENTRIES.contains(&word)) {
-            entries.push(Entry::parse(annotation).map_err(|why| error(index, why))?);
+            // A Lua comment may follow, as after any line: no word of an entry starts with --.
+            let words: Vec<&str> = annotation.split_whitespace().take_while(|word| !word.starts_with("--")).collect();
+            entries.push(Entry::parse(&words.join(" ")).map_err(|why| error(index, why))?);
         }
     }
 
@@ -140,13 +142,18 @@ local M = {}
 --@reentrant
 function M.on_payment(amount) end
 
---@key config owner address-hex
+--@key config owner address-hex   -- who may change it
 --@namespace config
+--@namespace points address-text -> decimal:points --keyed by who holds them
 return M
 "#;
         let layout = layout(source).unwrap();
 
-        assert_eq!(layout.to_string(), "namespace balances u256\nnamespace config\nkey config owner address-hex\nretired fees\n");
+        assert_eq!(
+            layout.to_string(),
+            "namespace balances u256\nnamespace config\nkey config owner address-hex\nretired fees\nnamespace points address-text -> decimal:points\n",
+            "a comment after an entry is no part of it"
+        );
         assert_eq!(reentrant(source, &exported()).unwrap(), ["on_payment"], "reentrant marks read past them");
         assert_eq!(super::layout("local M = {}").unwrap(), Layout::default());
 

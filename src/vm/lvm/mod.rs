@@ -45,13 +45,11 @@ const GLOBALS: &[&str] = &[
     "ctx", "storage", "contracts", "accounts", "events", "tokens",
 ];
 
-/// The math functions that give the same result on every platform. The trigonometric,
-/// logarithmic and power functions come from the platform's C library and can differ in the
-/// last bit, and random needs no explanation.
-const MATH: &[&str] = &[
-    "abs", "ceil", "clamp", "floor", "fmod", "frexp", "huge", "ldexp", "max", "min", "modf", "pi",
-    "round", "sign", "sqrt",
-];
+/// What scripts keep of math: what rounds to and works on whole numbers. Contracts deal in whole
+/// numbers, so none of its float functions, sqrt, pi, huge, fmod, modf, frexp or ldexp, is there
+/// to make fractions with; the trigonometric, logarithmic and power functions also come from the
+/// platform's C library and can differ in the last bit, and random needs no explanation.
+const MATH: &[&str] = &["abs", "ceil", "clamp", "floor", "max", "min", "round", "sign"];
 
 #[document(
     summary = "A compiled contract script. The script returns a table, and each function in it can be called by the XXH3-64 of its name.",
@@ -293,6 +291,7 @@ impl Pristine {
         register_accounts_lib(&lua);
         register_events_lib(&lua);
         register_tokens_lib(&lua);
+        replace_tostring(&lua)?;
         lua.sandbox(true)?;
         let env = environment(&lua)?;
 
@@ -419,8 +418,67 @@ impl From<mlua::Error> for VmError {
             return VmError::OutOfMemory;
         }
 
-        VmError::Runtime(err.to_string())
+        // Failures go into receipts, which every node must agree on.
+        VmError::Runtime(without_addresses(&err.to_string()))
     }
+}
+
+/// tostring as scripts see it: Luau's, except that a table, function, thread, buffer or userdata
+/// without __tostring reads as its type's name, where Luau prints its memory address, which no two
+/// nodes share. A script could otherwise return, store or emit one, and split the chain.
+fn replace_tostring(lua: &Lua) -> mlua::Result<()> {
+    let globals = lua.globals();
+    let luau: Function = globals.get("tostring")?;
+    let tostring = lua.create_function(move |lua, value: Value| -> mlua::Result<Value> {
+        let has_tostring = |meta: Option<Table>| meta.and_then(|meta| meta.raw_get::<Value>("__tostring").ok()).is_some_and(|found| !found.is_nil());
+        let named = match &value {
+            Value::Table(table) => (!has_tostring(table.metatable())).then_some("table"),
+            Value::UserData(data) => {
+                let found = data.metatable().and_then(|meta| meta.get::<Value>("__tostring")).is_ok_and(|found| !found.is_nil());
+
+                (!found).then_some("userdata")
+            }
+            Value::LightUserData(_) => Some("userdata"),
+            Value::Function(_) => Some("function"),
+            Value::Thread(_) => Some("thread"),
+            Value::Buffer(_) => Some("buffer"),
+            _ => None,
+        };
+
+        match named {
+            Some(name) => lua.create_string(name).map(Value::String),
+            None => luau.call(value),
+        }
+    })?;
+
+    globals.set("tostring", tostring)
+}
+
+/// Text with each `table: 0x…`, `function: 0x…` and the like cut to the type's name: Luau shows a
+/// value's address there, as in the message of an error raised with a table, and no two nodes
+/// share one.
+fn without_addresses(text: &str) -> String {
+    const NAMED: [&str; 5] = ["table", "function", "userdata", "thread", "buffer"];
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(at) = rest.find(": 0x") {
+        let (before, after) = rest.split_at(at);
+        let digits = after[4..].bytes().take_while(u8::is_ascii_hexdigit).count();
+
+        if digits > 0 && NAMED.iter().any(|name| before.ends_with(name)) {
+            kept.push_str(before);
+            rest = &after[4 + digits..];
+        } else {
+            kept.push_str(before);
+            kept.push_str(": 0x");
+            rest = &after[4..];
+        }
+    }
+
+    kept.push_str(rest);
+
+    kept
 }
 
 fn is_memory_error(err: &mlua::Error) -> bool {

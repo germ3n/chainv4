@@ -379,7 +379,7 @@ fn contracts_deploy_and_run_through_transactions() {
 
     assert_eq!(receipts[0].result, Ok(Effect::Deployed(counter)));
 
-    for expected in [5.0, 10.0] {
+    for expected in [5, 10] {
         let call = SignedTx::sign(
             Tx::ContractCall {
                 to: counter,
@@ -395,7 +395,7 @@ fn contracts_deploy_and_run_through_transactions() {
 
         assert_eq!(
             receipts[0].result,
-            Ok(Effect::Returned(vec![TxCallArgumentType::Number(expected)]))
+            Ok(Effect::Returned(vec![TxCallArgumentType::I64(expected)]))
         );
         assert!(receipts[0].fuel_used > 0);
     }
@@ -770,8 +770,8 @@ return M
     assert_eq!(
         receipt.events.iter().map(|event| (event.contract, event.name.as_str(), event.data.clone())).collect::<Vec<_>>(),
         [
-            (emitter, "Ping", vec![TxCallArgumentType::Number(1.0), sender.clone()]),
-            (emitter, "Ping", vec![TxCallArgumentType::Number(2.0), sender]),
+            (emitter, "Ping", vec![TxCallArgumentType::I64(1), sender.clone()]),
+            (emitter, "Ping", vec![TxCallArgumentType::I64(2), sender]),
         ]
     );
 
@@ -834,12 +834,12 @@ return M
 
     assert!(matches!(&receipts[0].result, Err(failure) if failure.to_string().contains("migration failed")));
     assert!(matches!(&receipts[1].result, Err(failure) if failure.to_string().contains("does not permit")));
-    assert_eq!(version(&mut chain, 2), Ok(Effect::Returned(vec![TxCallArgumentType::Number(1.0)])));
+    assert_eq!(version(&mut chain, 2), Ok(Effect::Returned(vec![TxCallArgumentType::I64(1)])));
 
     let receipts = advance(&mut chain, vec![upgrade(V2, 3, &owner)]);
 
     assert_eq!(receipts[0].result, Ok(Effect::Upgraded(contract)));
-    assert_eq!(version(&mut chain, 4), Ok(Effect::Returned(vec![TxCallArgumentType::Number(2.0)])));
+    assert_eq!(version(&mut chain, 4), Ok(Effect::Returned(vec![TxCallArgumentType::I64(2)])));
 }
 
 /// A proof-of-work chain that hashes everything, its work included, with one algorithm.
@@ -1000,7 +1000,7 @@ fn indexed_events_are_found_by_contract_name_and_address_and_leave_with_their_bl
     let mentions = stored_events(&*db, &EventFilter::Mentions(alice), None, 100).unwrap().0;
 
     assert_eq!(mentions.len(), 1);
-    assert_eq!((mentions[0].height, mentions[0].block, mentions[0].event.data[1].clone()), (2, a2.id(), TxCallArgumentType::Number(3.0)));
+    assert_eq!((mentions[0].height, mentions[0].block, mentions[0].event.data[1].clone()), (2, a2.id(), TxCallArgumentType::I64(3)));
     assert_eq!(mentions[0].tx, ping(alice, 3, 3).id(HashType::default_chain()));
 
     // Pages pick up where the last stopped.

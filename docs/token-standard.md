@@ -13,7 +13,7 @@ There are two reference implementations, kept in step by one shared test:
 ## Types
 
 - **Amounts** are `u256`, in the token's smallest unit. Functions that take one also accept any
-  non-negative whole number, since Lua passes its numbers as floats.
+  non-negative whole number, such as an `i64` a Lua contract passes.
 - **Addresses** are any address: a key's or a contract's.
 - **The zero address**, `ed25519:0x00…00`, stands for "nobody": the source of a mint and the
   destination of a burn.

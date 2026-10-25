@@ -534,9 +534,9 @@ return M
             .unwrap()
     }
 
-    fn count(outcome: Outcome) -> f64 {
+    fn count(outcome: Outcome) -> i64 {
         match outcome.result.unwrap()[..] {
-            [TxCallArgumentType::Number(count)] => count,
+            [TxCallArgumentType::I64(count)] => count,
             ref other => panic!("{other:?}"),
         }
     }
@@ -547,8 +547,8 @@ return M
         let contracts = Contracts::new(&state);
         let counter = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[]).unwrap().0;
 
-        assert_eq!(count(increment(&contracts, counter, 2)), 2.0);
-        assert_eq!(count(increment(&contracts, counter, 3)), 5.0);
+        assert_eq!(count(increment(&contracts, counter, 2)), 2);
+        assert_eq!(count(increment(&contracts, counter, 3)), 5);
     }
 
     #[test]
@@ -561,7 +561,7 @@ return M
         let outcome = contracts.call(&vm(), &context(counter), &func, &[], LIMITS).unwrap();
 
         assert!(matches!(outcome.result, Err(VmError::Runtime(_))));
-        assert_eq!(count(increment(&contracts, counter, 1)), 2.0);
+        assert_eq!(count(increment(&contracts, counter, 1)), 2);
     }
 
     #[test]
@@ -573,7 +573,7 @@ return M
         increment(&contracts, first, 10);
 
         assert_ne!(first, second);
-        assert_eq!(count(increment(&contracts, second, 1)), 1.0);
+        assert_eq!(count(increment(&contracts, second, 1)), 1);
     }
 
     #[test]
@@ -588,7 +588,7 @@ return M
 
         assert_eq!(record.deployer, DEPLOYER);
         assert_eq!(record.functions, ["fail_after_write", "increment"]);
-        assert_eq!(count(increment(&Contracts::new(&fresh), counter, 1)), 5.0);
+        assert_eq!(count(increment(&Contracts::new(&fresh), counter, 1)), 5);
     }
 
     #[test]

@@ -241,9 +241,20 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   - `#[export(reentrant)]` in Rust.
 - **Lua annotations are read line by line.** A `--@reentrant`, `--@namespace` or `--@retired`
   line inside a multi-line string counts too.
-- **Lua numbers reach WebAssembly contracts as float bits.** Floats are refused in modules, so the
-  SDK's `Value::as_i64` and `Value::as_amount` turn whole numbers into integers using integer
-  instructions only.
+- **Numbers leave a contract whole.** Luau computes with floats inside a script, but every number
+  a contract returns, passes, emits or lists goes out as an `i64`, whole and within 2^53, or the
+  call fails; a `number` argument must be whole to come in. `math` keeps only `abs`, `ceil`,
+  `clamp`, `floor`, `max`, `min`, `round` and `sign`. Floats are refused in WebAssembly outright.
+  This changed what Lua contracts return, `number` to `i64`, so chains from before it differ.
+- **Scripts never see a memory address.** `tostring({})` is `table`, not `table: 0x…`, and
+  `error({})` fails with `table`: an address differs from node to node, and a script that
+  returned or stored one would split the chain.
+- **Iterating a table keyed by tables or userdata is not yet the same on every node.** Luau
+  hashes such keys by address, so `pairs` over them visits them in an order that differs between
+  nodes. Key by strings and numbers, such as `who:text()`, until the Luau fork hashes them by
+  creation order (see [Todo](todo.md)).
+- **The `number` kind holds whole numbers, spelled one way.** Digits, within 2^53: write it with
+  `ns:set_number` in Lua, not `tostring`, which spells 10^15 as `1e+15`.
 - **Each call in a chain of calls gets its own memory limit.** The worst case is 8 nested calls ×
   32 MiB in one transaction on the dev chains.
 - **The WebAssembly `call` import takes a value pointer:**
@@ -270,10 +281,14 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   check with `check_layout` before repointing. Retired things stay retired, so rolling back to
   code from before a retirement is refused too. `chainv4 layout new.lua --from old.lua` checks
   before you send. See [Contracts](contracts.md#storage-layouts).
-- **Kinds are encodings, not labels.** A value written to a declared key must be its kind's
-  encoding, and the kinds differ by engine: Lua writes text (`number`, `decimal`,
-  `address-hex`), Rust bytes (`i64`, `u256`, `address`). So a Lua version and a Rust version only
-  share a namespace whose kind both write, such as `text` or `bytes`.
+- **Kinds are encodings; units are their meaning.** A value written to a declared key must be its
+  kind's encoding. Lua writes text (`decimal`, `address-text`) and Rust bytes (`u256`,
+  `address`), but each engine has methods for the other's, so a Lua version and a Rust version
+  share any namespace. A unit, `decimal:wei`, is the layout's word for what a number counts: the
+  node keeps it across versions, but cannot check it.
+- **A map's key kind is checked on reads too.** Code that forms a key another way than the map
+  declares, `who:hex()` for `who:text()`, fails at once instead of reading an empty entry. Key
+  kinds and units may be added to a deployed layout once, then never changed.
 - **Loading code is charged.** A deploy or upgrade pays 1 fuel per byte of code to compile it,
   plus whatever a Lua script's top level burns, even when it fails. Every call pays for the top
   level again, since each runs it fresh, before the call is attached: a top level sees no `ctx`

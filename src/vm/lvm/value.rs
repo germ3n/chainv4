@@ -9,7 +9,8 @@ use {
     mlua::{Lua, Value},
 };
 
-/// The largest integer a Lua number holds exactly.
+/// The largest integer a Lua number holds exactly. Numbers cross a contract's edges whole and
+/// within it either way: Luau has floats inside a script, but none get in or out.
 const MAX_EXACT: i128 = 1 << 53;
 
 /// Unsigned integers and amounts arrive as u256, so no value is ever rounded. Signed integers
@@ -24,7 +25,9 @@ pub(super) fn to_lua(lua: &Lua, arg: &TxCallArgumentType) -> Result<Value, VmErr
         TxCallArgumentType::Bytes(bytes) => Value::String(lua.create_string(bytes)?),
         TxCallArgumentType::String(text) => Value::String(lua.create_string(text)?),
         TxCallArgumentType::Bool(flag) => Value::Boolean(*flag),
-        TxCallArgumentType::Number(number) => Value::Number(*number),
+        TxCallArgumentType::Number(number) => Value::Number(whole(*number).ok_or_else(|| {
+            VmError::BadArgument(format!("{number}: a Lua contract takes whole numbers, within 2^53 either way"))
+        })? as f64),
         TxCallArgumentType::I64(number) => exact(i128::from(*number))?,
         TxCallArgumentType::I128(number) => exact(*number)?,
         TxCallArgumentType::U64(number) => wide(lua, u256::from(*number))?,
@@ -38,6 +41,15 @@ pub(super) fn to_lua(lua: &Lua, arg: &TxCallArgumentType) -> Result<Value, VmErr
 
 fn wide(lua: &Lua, number: u256) -> Result<Value, VmError> {
     Ok(Value::UserData(lua.create_userdata(LuaU256(number))?))
+}
+
+/// A whole number within 2^53 either way, as an i64; None for a fraction, inf, nan or one past it.
+fn whole(number: f64) -> Option<i64> {
+    (number.fract() == 0.0 && number.abs() <= MAX_EXACT as f64).then_some(number as i64)
+}
+
+fn numbers_leave_whole(number: f64) -> VmError {
+    VmError::Runtime(format!("{number}: numbers leave a contract whole, within 2^53 either way, as i64"))
 }
 
 fn exact(number: i128) -> Result<Value, VmError> {
@@ -55,8 +67,8 @@ pub(super) fn from_lua(value: Value) -> Result<TxCallArgumentType, VmError> {
     let arg = match value {
         Value::Nil => TxCallArgumentType::Nil,
         Value::Boolean(flag) => TxCallArgumentType::Bool(flag),
-        Value::Integer(number) => TxCallArgumentType::Number(f64::from(number)),
-        Value::Number(number) => TxCallArgumentType::Number(number),
+        Value::Integer(number) => TxCallArgumentType::I64(whole(f64::from(number)).ok_or_else(|| numbers_leave_whole(f64::from(number)))?),
+        Value::Number(number) => TxCallArgumentType::I64(whole(number).ok_or_else(|| numbers_leave_whole(number))?),
         Value::String(text) => {
             let bytes = text.as_bytes().to_vec();
 

@@ -1,7 +1,7 @@
 -- Points an owner awards: the example docs/contract-storage.md walks through. Version 1 keeps who
 -- holds how many points in a map, and its settings in a record.
 
---@namespace points decimal
+--@namespace points address-text -> decimal:points
 --@namespace config
 --@key config owner address-text
 --@key config name text

@@ -295,7 +295,7 @@ fn lua_calls_wasm_and_its_writes_stick() {
 
     assert_eq!(
         world.call(lua, "bump_twice", &[address(counter)]).result.unwrap(),
-        [TxCallArgumentType::Number(2.0)]
+        [TxCallArgumentType::I64(2)]
     );
     assert_eq!(
         world.call(counter, "bump", &[]).result.unwrap(),
@@ -365,7 +365,7 @@ fn calls_nest_only_so_deep() {
 
     assert_eq!(
         world.call(chain[0], "forward", &args(&chain[1..MAX_CALL_DEPTH])).result.unwrap(),
-        [TxCallArgumentType::Number((MAX_CALL_DEPTH - 1) as f64)]
+        [TxCallArgumentType::I64((MAX_CALL_DEPTH - 1) as i64)]
     );
 
     let err = world.call(chain[0], "forward", &args(&chain[1..])).result.unwrap_err();
@@ -427,10 +427,10 @@ fn sdk_contracts_run_and_talk_to_lua() {
     assert_eq!(incremented.result.unwrap(), [TxCallArgumentType::I64(5)]);
     assert_eq!(world.call(counter, "last", &[]).result.unwrap(), [address(DEPLOYER)]);
 
-    // Lua passes its numbers as floats; the SDK reads whole ones without float instructions.
+    // Lua passes its numbers whole, as i64, which the SDK reads as it reads its own.
     assert_eq!(
         world.call(lua, "bump_by", &[address(counter)]).result.unwrap(),
-        [TxCallArgumentType::Number(12.0)]
+        [TxCallArgumentType::I64(12)]
     );
     assert_eq!(world.call(counter, "last", &[]).result.unwrap(), [address(lua)]);
 
@@ -664,7 +664,7 @@ fn upgrades_need_check_perms_and_keep_storage() {
     assert_eq!(
         world.call(owned, "version", &[]).result.unwrap(),
         [
-            TxCallArgumentType::Number(2.0),
+            TxCallArgumentType::I64(2),
             TxCallArgumentType::String(owner),
             TxCallArgumentType::String("yes".to_string()),
         ]
@@ -749,7 +749,7 @@ fn conforms_to_the_token_standard(code: Code) {
     assert_eq!(ok(DEPLOYER, "symbol", &[]).0, [TxCallArgumentType::String("EXT".to_string())]);
     assert!(matches!(
         ok(DEPLOYER, "decimals", &[]).0[..],
-        [TxCallArgumentType::Number(18.0)] | [TxCallArgumentType::U64(18)]
+        [TxCallArgumentType::I64(18)] | [TxCallArgumentType::U64(18)]
     ));
     assert_eq!(ok(DEPLOYER, "total_supply", &[]).0, [TxCallArgumentType::U256(initial)]);
     assert_eq!(balance(DEPLOYER), [TxCallArgumentType::U256(initial)]);
@@ -852,7 +852,7 @@ function M.decimals() return 6 end"#,
         ("function M.name() return string.rep(\"n\", 65) end", "name() must give 1 to 64 bytes, not 65"),
         ("function M.name() return \"two\\nlines\" end", "name() gave control characters"),
         ("function M.decimals() return 78 end", "decimals() must return one whole number from 0 to 77"),
-        ("function M.decimals() return 1.5 end", "decimals() must return one whole number from 0 to 77"),
+        ("function M.decimals() return 1.5 end", "decimals() failed: 1.5: numbers leave a contract whole"),
         ("function M.name() error(\"no\") end", "name() failed"),
     ] {
         world.nonce += 1;
@@ -1078,10 +1078,10 @@ fn upgradable_proxies_run_their_implementation_on_their_own_storage(proxy_code: 
     let increment = world.call_as(alice, proxy, "increment", &[TxCallArgumentType::I64(5)]);
 
     // The code is V1's, but the storage, the sender and the events are the proxy's.
-    assert_eq!(increment.result.unwrap(), [TxCallArgumentType::Number(5.0)]);
+    assert_eq!(increment.result.unwrap(), [TxCallArgumentType::I64(5)]);
     assert_eq!(increment.events.len(), 1);
     assert_eq!(increment.events[0].contract, proxy);
-    assert_eq!(increment.events[0].data, [TxCallArgumentType::Number(5.0), address(alice), address(proxy)]);
+    assert_eq!(increment.events[0].data, [TxCallArgumentType::I64(5), address(alice), address(proxy)]);
     assert_eq!(stored(&world, proxy, b"count"), Some(b"5".to_vec()));
     assert_eq!(stored(&world, v1, b"count"), Some(b"1000".to_vec()));
 
@@ -1093,7 +1093,7 @@ fn upgradable_proxies_run_their_implementation_on_their_own_storage(proxy_code: 
 
     world.call(proxy, "set_implementation", &[address(v2)]).result.unwrap();
 
-    assert_eq!(world.call(proxy, "decrement", &[TxCallArgumentType::I64(2)]).result.unwrap(), [TxCallArgumentType::Number(3.0)]);
+    assert_eq!(world.call(proxy, "decrement", &[TxCallArgumentType::I64(2)]).result.unwrap(), [TxCallArgumentType::I64(3)]);
     assert!(matches!(world.call(proxy, "increment", &[TxCallArgumentType::I64(1)]).result, Err(VmError::Runtime(text)) if text.contains("no such function")));
 
     // Value and balance are the proxy's own.
@@ -1148,7 +1148,7 @@ fn proxies_repoint_only_to_code_that_keeps_the_layout(proxy_code: Code) {
     let same = world.lua_code(&format!("{LAYOUT_V1}\n-- another copy"));
     world.call(proxy, "set_implementation", &[address(same)]).result.unwrap();
 
-    assert_eq!(world.call(proxy, "count", &[]).result.unwrap(), [TxCallArgumentType::Number(3.0)]);
+    assert_eq!(world.call(proxy, "count", &[]).result.unwrap(), [TxCallArgumentType::I64(3)]);
 }
 
 #[test]
@@ -1377,7 +1377,7 @@ fn upgrades_keep_the_layout_or_retire_namespaces_on_purpose() {
     world.upgrade(DEPLOYER, counter, Code::Lua(LAYOUT_V2.to_string())).unwrap();
     let revived = world.call(counter, "revive", &[]).result.unwrap_err().to_string();
 
-    assert_eq!(world.call(counter, "count", &[]).result.unwrap(), [TxCallArgumentType::Number(5.0)]);
+    assert_eq!(world.call(counter, "count", &[]).result.unwrap(), [TxCallArgumentType::I64(5)]);
     assert_eq!(world.call(counter, "leftover", &[]).result.unwrap(), [TxCallArgumentType::Nil]);
     assert!(revived.contains("namespace counter is retired"), "{revived}");
     assert!(refused(LAYOUT_V1.to_string()).contains("counter was retired, and stays retired"));
@@ -1451,19 +1451,19 @@ fn values_lists_pass_through_lua_untouched() {
     assert_eq!(
         world.call(target, "converted", &sent).result.unwrap(),
         [
-            TxCallArgumentType::Number(-5.0),
+            TxCallArgumentType::I64(-5),
             TxCallArgumentType::String("hi".to_string()),
             TxCallArgumentType::U256(u256::from(7u64)),
             TxCallArgumentType::U256(u256::from(9u64)),
             TxCallArgumentType::Address(DEPLOYER),
         ]
     );
-    assert_eq!(world.call(target, "unpacked", &sent).result.unwrap()[0], TxCallArgumentType::Number(-5.0));
+    assert_eq!(world.call(target, "unpacked", &sent).result.unwrap()[0], TxCallArgumentType::I64(-5));
     // Its length and types can be read, and ctx.args is one list however often it is read.
     assert_eq!(
         world.call(target, "describe", &sent).result.unwrap(),
         [
-            TxCallArgumentType::Number(5.0),
+            TxCallArgumentType::I64(5),
             TxCallArgumentType::String("i64".to_string()),
             TxCallArgumentType::Bool(true),
             TxCallArgumentType::String("values(5)".to_string()),
@@ -1476,7 +1476,7 @@ fn values_lists_pass_through_lua_untouched() {
 
     assert_eq!(
         world.call(target, "converted", &with_nil).result.unwrap(),
-        [TxCallArgumentType::Number(1.0), TxCallArgumentType::Nil, TxCallArgumentType::Bool(true)]
+        [TxCallArgumentType::I64(1), TxCallArgumentType::Nil, TxCallArgumentType::Bool(true)]
     );
     assert_eq!(world.call(relay, "anything", &with_nil).result.unwrap(), with_nil);
     assert_eq!(world.call(target, "nothing", &[]).result.unwrap(), [TxCallArgumentType::Nil]);
@@ -1582,7 +1582,10 @@ fn the_guestbook_emits_an_event_for_every_signature_and_tip() {
     assert_eq!(world.call(book, "last", &[]).result.unwrap(), [address(bob)]);
     assert_eq!(world.call(book, "signatures", &[address(alice)]).result.unwrap(), [TxCallArgumentType::U256(u256::ONE)]);
     assert!(world.call(book, "sign", &[text("")]).result.unwrap_err().to_string().contains("1 to 140 bytes"));
-    assert_eq!(layout_of(&world, book), "namespace book\nkey book last address-text\nkey book total decimal\nnamespace signatures decimal\n");
+    assert_eq!(
+        layout_of(&world, book),
+        "namespace book\nkey book last address-text\nkey book total decimal:signatures\nnamespace signatures address-text -> decimal:signatures\n"
+    );
 
     // A tip goes to whoever signed last.
     let tipper = world.lua_code(TIPPER);
@@ -1611,7 +1614,11 @@ fn a_contract_split_across_files_runs_as_one_once_put_together() {
     let name = TxCallArgumentType::String("alice".to_string());
 
     assert_eq!(bundle.files, ["names.lua", "lib/checks.lua", "lib/names.lua"]);
-    assert_eq!(layout_of(&world, registry), "namespace held decimal\nnamespace names address-text\n", "the layout an included file declares");
+    assert_eq!(
+        layout_of(&world, registry),
+        "namespace held address-text -> decimal:names\nnamespace names text -> address-text\n",
+        "the layout an included file declares"
+    );
 
     let claimed = world.call_as(alice, registry, "claim", std::slice::from_ref(&name));
 
@@ -1646,7 +1653,10 @@ fn the_storage_guides_points_example_upgrades_as_the_guide_says() {
 
     assert_eq!(world.call_as(DEPLOYER, points, "award", &[address(alice), amount(100)]).result.unwrap(), [amount(100)]);
     assert!(world.call_as(alice, points, "award", &[address(alice), amount(1)]).result.unwrap_err().to_string().contains("only the owner awards points"));
-    assert_eq!(layout_of(&world, points), "namespace config\nkey config name text\nkey config owner address-text\nnamespace points decimal\n");
+    assert_eq!(
+        layout_of(&world, points),
+        "namespace config\nkey config name text\nkey config owner address-text\nnamespace points address-text -> decimal:points\n"
+    );
 
     let refused = |code: String| match world.upgrade(DEPLOYER, points, Code::Lua(code)) {
         Err(err) => err.to_string(),
@@ -1654,7 +1664,22 @@ fn the_storage_guides_points_example_upgrades_as_the_guide_says() {
     };
 
     assert!(refused(v2.replace("--@retired config name\n", "")).contains("key name of namespace config is dropped: keep it, or retire it"));
-    assert!(refused(v2.replace("--@namespace points decimal", "--@namespace points number")).contains("namespace points held decimal, and now holds number: retire it and declare another"));
+    let points_line = "--@namespace points address-text -> decimal:points";
+
+    assert!(
+        refused(v2.replace(points_line, "--@namespace points address-text -> number:points"))
+            .contains("namespace points held decimal:points, and now holds number:points: retire it and declare another")
+    );
+    assert!(
+        refused(v2.replace(points_line, "--@namespace points address-text -> decimal:coins"))
+            .contains("namespace points held decimal:points, and now holds decimal:coins"),
+        "what the numbers count is kept too"
+    );
+    assert!(
+        refused(v2.replace(points_line, "--@namespace points address-hex -> decimal:points"))
+            .contains("namespace points took keys of address-text, and now takes address-hex"),
+        "and how its keys are formed"
+    );
     assert_eq!(world.call(points, "name", &[]).result.unwrap(), [TxCallArgumentType::String("Points".to_string())], "refused before anything changed");
 
     // A migrate that writes the retired key fails, and with it the upgrade: in a transaction,
@@ -1685,4 +1710,32 @@ fn the_storage_guides_points_example_upgrades_as_the_guide_says() {
     world.call_as(DEPLOYER, points, "give_badge", &[address(alice), TxCallArgumentType::String("early".to_string())]).result.unwrap();
 
     assert_eq!(world.call(points, "badge_of", &[address(alice)]).result.unwrap(), [TxCallArgumentType::String("early".to_string())]);
+
+    // Code that forms a key another way finds no empty entry: the map's key kind refuses it.
+    let by_hex = v2.replace("return u256(points:get(who:text()) or \"0\")", "return u256(points:get(who:hex()) or \"0\")");
+    let stray = world.lua_code(&by_hex.replace("function M.migrate()", "function M.unused_migrate()"));
+    let refused_key = world.call(stray, "points_of", &[address(alice)]).result.unwrap_err().to_string();
+
+    assert!(refused_key.contains(&format!("namespace points takes keys of address-text, and {} is not one", to_hex(alice.bytes()))), "{refused_key}");
+
+    // Version 3 is in Rust, and keeps version 2's layout as it is: it reads and writes what Lua
+    // wrote, the text kinds, so the upgrade retires nothing and moves nothing.
+    world.upgrade(DEPLOYER, points, Code::Wasm(example("points"))).unwrap();
+
+    assert_eq!(world.call(points, "points_of", &[address(alice)]).result.unwrap(), [amount(100)]);
+    assert_eq!(world.call_as(DEPLOYER, points, "award", &[address(alice), amount(50)]).result.unwrap(), [amount(150)]);
+    assert_eq!(world.call(points, "badge_of", &[address(alice)]).result.unwrap(), [TxCallArgumentType::String("early".to_string())]);
+    assert_eq!(world.call(points, "title", &[]).result.unwrap(), [TxCallArgumentType::String("Points".to_string())]);
+    assert!(world.call_as(DEPLOYER, points, "award", &[address(alice), amount(5_000)]).result.unwrap_err().to_string().contains("one award is at most 1000 points"));
+    assert!(world.call_as(alice, points, "award", &[address(alice), amount(1)]).result.unwrap_err().to_string().contains("only the owner may"));
+    assert_eq!(
+        world.state.get(Column::Namespaces, &crate::db::namespace_key(&points, b"points", alice.to_string().as_bytes())).unwrap(),
+        Some(b"150".to_vec()),
+        "written as Lua wrote it, so a Lua version could take over again"
+    );
+
+    // And back: version 2 in Lua keeps version 3's layout, the same one.
+    world.upgrade(DEPLOYER, points, Code::Lua(v2.replace("config:set(\"max_award\", \"1000\")", "").to_string())).unwrap();
+
+    assert_eq!(world.call(points, "points_of", &[address(alice)]).result.unwrap(), [amount(150)]);
 }

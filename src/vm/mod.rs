@@ -27,7 +27,7 @@ pub mod lvm;
 pub mod wasm;
 
 pub use host::{Host, MAX_CALL_DEPTH, MAX_EVENTS, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_VALUE_LEN, Space};
-pub use layout::{Access, Declared, Entry, Field, Kind, Layout, Shape};
+pub use layout::{Access, Declared, Entry, Field, Kind, Layout, Shape, Typed, TypedField};
 
 #[document(
     summary = "The hook the chain runs once, when the contract is deployed, with the deployer as sender and no arguments. The place to record an owner or mint an initial supply. If it fails, so does the deploy. Only the chain may run it.",

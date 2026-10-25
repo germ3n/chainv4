@@ -1,6 +1,6 @@
 # Contracts build for wasm32-unknown-unknown, so they live in a workspace of their own.
 [workspace]
-members = ["sdk", "sdk-macros", "examples/counter", "examples/proxy", "examples/vault", "examples/token", "examples/upgradable"]
+members = ["sdk", "sdk-macros", "examples/counter", "examples/proxy", "examples/vault", "examples/token", "examples/upgradable", "examples/points"]
 resolver = "3"
 
 [profile.release]

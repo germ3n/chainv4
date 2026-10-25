@@ -157,18 +157,19 @@ start from empty storage because it renamed a namespace or a key, or misread a v
 changed how one is encoded.
 
 A namespace is one of two shapes:
-- **A map:** any key, every value one kind. For state keyed by something, such as balances by
-  address.
+- **A map:** keys of one kind, or any key, and every value one kind. For state keyed by something,
+  such as balances by address.
 - **A record:** only the keys it declares, each with its own kind. For a contract's settings and
   counters.
 
 ```lua
---@namespace balances decimal        -- a map: any key, every value decimal text
---@namespace config                  -- a record: only the keys below
+--@namespace balances address-hex -> decimal:wei   -- a map: keys and values of a kind each
+--@namespace notes text                            -- a map of any key
+--@namespace config                                -- a record: only the keys below
 --@key config owner address-hex
 --@key config paused bool
---@retired config fee_rate           -- a key no longer used
---@retired fees                      -- a namespace no longer used
+--@retired config fee_rate                         -- a key no longer used
+--@retired fees                                    -- a namespace no longer used
 
 local balances = storage.namespace("balances")
 balances:set(who:hex(), tostring(amount))
@@ -176,7 +177,7 @@ storage.namespace("config"):set("owner", ctx.sender:hex())
 ```
 
 ```rust
-namespace!(BALANCES, "balances", "u256");
+namespace!(BALANCES, "balances", "address-hex" => "decimal:wei");
 namespace!(CONFIG, "config", { "owner": "address", "paused": "bool" });
 retired!("config", "fee_rate");
 retired!("fees");
@@ -189,29 +190,35 @@ Lua lines may sit anywhere in the script. Rust's macros write the module's `chai
 custom section, check names, keys and kinds at compile time, and define a constant to use the
 namespace by. Names are 1 to 64 bytes and keys 1 to 256, each one word.
 
-**Kinds** are encodings, and the node checks every value written against its kind:
+**Kinds** are encodings, and the node checks every value written against its kind, and every key
+a map with a key kind is read, written or cleared at. Both engines read and write every kind, the
+SDK with a `get_` and `set_` on a namespace for each, Lua with strings and with namespace methods
+for the binary ones:
 
-| Kind | Encoding | Written by |
-| --- | --- | --- |
-| `bytes` | Anything. | |
-| `text` | UTF-8. | |
-| `number` | A number in text: `5`, `-2.5`, `1e+20`, `inf`, `nan`. | Lua's `tostring(n)` |
-| `decimal` | A whole number from 0 in decimal text, up to the largest u256. | Lua's `tostring(u256)` |
-| `bool` | One byte, 0 or 1. | `set_bool` |
-| `i64`, `u64` | 8 bytes, little-endian. | `set_i64`, `set_u64` |
-| `u128` | 16 bytes, little-endian. | |
-| `u256` | 32 bytes, little-endian. | `set_u256` |
-| `address` | 33 bytes: the kind's tag, then its 32, or a secp256k1 address's 20 and 12 zeros. | `set_address`, `Address::encode` |
-| `address-text` | An address in text: `ed25519:0x…`, `secp256k1:0x…`. | Lua's `address:text()` |
-| `address-hex` | `0x` and 64 hex digits, or 40 for secp256k1. | Lua's `address:hex()` |
+| Kind | Encoding | Lua | Rust |
+| --- | --- | --- | --- |
+| `bytes` | Anything. | a string | `get`, `set` |
+| `text` | UTF-8. | a string | `get_text`, `set_text` |
+| `number` | A whole number within 2^53 either way, in digits: `5`, `-42`. | `ns:set_number`, `ns:get_number` | `get_number`, `set_number` |
+| `decimal` | A whole number from 0 in decimal text, up to the largest u256. | `tostring(u256)`, `u256(text)` | `get_decimal`, `set_decimal` |
+| `bool` | One byte, 0 or 1. | `ns:set_bool`, `ns:get_bool` | `get_bool`, `set_bool` |
+| `i64`, `u64` | 8 bytes, little-endian. | `ns:set_i64`, `ns:get_u64`… | `set_i64`, `get_u64`… |
+| `u128`, `u256` | 16 or 32 bytes, little-endian. | `ns:set_u256`, `ns:get_u128`… | `set_u256`, `get_u128`… |
+| `address` | 33 bytes: the kind's tag, then its 32, or a secp256k1 address's 20 and 12 zeros. | `ns:set_address`; `who:encode()`, `address.decode` | `set_address`, `Address::encode` |
+| `address-text` | An address in text: `ed25519:0x…`, `secp256k1:0x…`. | `who:text()`, `address.parse` | `get_address_text`, `set_address_text` |
+| `address-hex` | `0x` and 64 hex digits, or 40 for secp256k1. | `who:hex()`, `address(hex)` | `get_address_hex`, `set_address_hex` |
 
-A kind that is not in the list is refused at deploy.
+A kind that is not in the list is refused at deploy. A kind may name a **unit** after a colon,
+`decimal:wei`: no write can check what a number counts, so the unit is the layout's word for it,
+which later code must keep.
 
 **What it enforces:**
 - **Code that declares a layout reaches only what it declares.** Every one of these fails, naming
   what went wrong:
   - another namespace: "namespace elsewhere is not in this code's layout";
   - a key a record does not declare: "key onwer is not in namespace config's layout";
+  - a map key that is not its key kind, read, written or cleared: "namespace balances takes keys
+    of address-hex, and ed25519:0xa9d1… is not one";
   - a value that is not its kind: "namespace balances, key alice: the value is not decimal".
 - **Plain storage is read and clear only** for such code, since declared state lives in
   namespaces. A contract that starts declaring a layout can still read its older plain keys and
@@ -219,8 +226,9 @@ A kind that is not in the list is refused at deploy.
   exported function called once. Its own space stays free. Under `delegate`, it is the running
   code's layout that counts. Code that declares nothing may use anything.
 - **New code keeps the old layout.** Every namespace the old code declared must still be
-  declared, with the same shape: a map with the same kind, a record with every key it had, each
-  with the same kind. Anything may be retired instead. New namespaces and keys may come in. Code
+  declared, with the same shape: a map with the same kinds, a record with every key it had, each
+  with the same kind. Anything may be retired instead. New namespaces and keys may come in. A map
+  of any key may gain a key kind, and a kind without a unit may gain one; then they stay. Code
   that declares nothing keeps nothing, so it cannot replace code that declares a layout.
 - **Retiring is on purpose, and for good.** A retired namespace or key can be read and cleared,
   but not written, so `migrate` can move its state somewhere new. Later code must keep it
@@ -263,8 +271,8 @@ README's "Proxies" section has a worked example. Keep in mind:
   `check_layout` before it repoints, as the examples do, and the namespaces are checked for you.
 - **Forward with `ctx.args`.** A Lua proxy's fallback passes `ctx.args` on, and returns what
   `delegate` gives back, so every value keeps its type both ways (see
-  [values lists](#values-lists)). Passing `...` instead converts them through Lua, so an `i64`
-  comes back a number. A Rust proxy forwards the encoded values as they are.
+  [values lists](#values-lists)). Passing `...` instead converts them through Lua, so a `u64`
+  comes back a `u256`. A Rust proxy forwards the encoded values as they are.
 
 ## Events
 
@@ -368,11 +376,15 @@ return M
 **The sandbox** has only:
 - the globals that behave the same on every machine: `assert`, `error`, `pairs`, `pcall`,
   `select`, `tostring`, `type`, `string`, `table`, `utf8`, `bit32` and the like;
-- the deterministic part of `math`: `abs`, `floor`, `ceil`, `max`, `min`, `sqrt` and so on;
+- what `math` has for whole numbers: `abs`, `ceil`, `clamp`, `floor`, `max`, `min`, `round` and
+  `sign`, and none of its float functions, such as `sqrt` or `pi`;
 - the chain's libraries.
 
 Nothing reads the clock, the platform or the garbage collector, and nothing gives random
-numbers.
+numbers. Nor does anything show a memory address, which differs from node to node: `tostring` of
+a table, function or userdata without `__tostring` gives its type's name, `table`, and a failure
+raised with such a value reads the same way. `setfenv`, `getfenv`, `load`, `require`,
+`collectgarbage`, `coroutine`, `os`, `io` and `debug` are not there at all.
 
 | Library | What it has |
 | --- | --- |
@@ -449,12 +461,18 @@ chainv4 send deploy --lua contracts/lua/names/names.lua
 
 ### Values lists
 
-Lua has no `i64`, no `u64` and no bytes of its own, so values converted into Lua and back can
-change type:
+**Numbers cross whole.** Luau has one number type, a float, and computes with it inside a script.
+But every number a contract hands out, returns, arguments to other contracts, events and values
+lists, goes out as an `i64`, and must be whole and within 2^53 either way: `return 1 / 2` fails
+the call with "0.5: numbers leave a contract whole". A `number` argument coming in must be whole
+too. So no float ever reaches a caller, another contract, a receipt or storage; `u256` is for
+anything larger.
+
+Lua has no `u64` and no bytes of its own, so values converted into Lua and back can change type:
 
 | Arrives as | In Lua | Goes back out as |
 | --- | --- | --- |
-| `i64`, `i128` | a number | `number` |
+| `i64`, `i128`, `number` | a number | `i64` |
 | `u64`, `u128`, `amount` | a `u256` | `u256` |
 | `bytes` that read as UTF-8 | a string | `string` |
 
@@ -529,7 +547,7 @@ fn transfer(to: Address, amount: U256) -> Result<bool, &'static str> {
 order, and what it returns becomes the call's return values (`chainv4_sdk::args`).
 - **Parameters** may be any `FromValue` type: `Address`, `U256`, `bool`, `String`, `Vec<u8>`,
   `i64`, `u64`, `u32`, `u8`, `i128`, `u128`, a `Value` as it came, or an `Option` of any of
-  them. Whole numbers arrive as any integer kind, and as Lua's floats when whole.
+  them. Whole numbers arrive as any integer kind; Lua sends its numbers as `i64`.
 - **Refused arguments:** a call with too many arguments, one left out, or one of the wrong kind
   aborts, naming the parameter: `amount: expected an amount`, `amount: missing`,
   `transfer takes 2 arguments, not 3`. An `Option` parameter may be left out or passed nil.
@@ -545,12 +563,13 @@ order, and what it returns becomes the call's return values (`chainv4_sdk::args`
 - `call` and `call_with_value`, `delegate`, `check_layout`, `emit`, `hash`, `abort`,
   `refresh_token`, and `storage`, with `storage::namespace(name)` and `storage::own()`;
 - `namespace!` and `retired!`, which declare the storage layout, and typed methods on a
-  namespace that write each kind's encoding: `set_i64`, `set_u64`, `set_u256`, `set_address`,
-  `set_bool`, and their `get_` twins.
+  namespace for every kind's encoding: `set_i64`, `set_u256`, `set_address`, `set_bool`, and the
+  text kinds Lua writes, `set_decimal`, `set_text`, `set_number`, `set_address_text` and
+  `set_address_hex`, each with its `get_` twin.
 
-**Numbers:** Lua numbers reach a WebAssembly contract as float bits, and floats are refused in
-modules. So `Value::as_i64` and `Value::as_amount` turn whole numbers into integers using integer
-instructions only.
+**Numbers:** floats are refused in modules, and Lua sends its numbers as `i64`. A `number` value
+from a transaction still comes as float bits, so `Value::as_i64` and `Value::as_amount` turn whole
+ones into integers using integer instructions only.
 
 **Building:** build from `contracts/`, whose `.cargo/config.toml` sets the wasm32 target. From
 the repo root, pass `--target wasm32-unknown-unknown`.
@@ -566,7 +585,7 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 | `contracts/examples/token`, `contracts/lua/token.lua` | The [token standard](token-standard.md), held to it by one shared test. |
 | `contracts/lua/guestbook.lua` | Events with addresses in them, for the event index and the explorer; value passed on with `accounts.transfer`; and a storage layout of a map and a record. |
 | `contracts/lua/names/` | A contract split across files with `--@include`, its storage layout declared in an included file. |
-| `contracts/lua/points/` | Two versions of one contract: the second keeps the first's layout, adds to it, retires a key and moves its value in `migrate`. [Contract storage](contract-storage.md) walks through them. |
+| `contracts/lua/points/`, `contracts/examples/points` | Three versions of one contract: the second keeps the first's layout, adds to it, retires a key and moves its value in `migrate`; the third is the second in Rust, keeping the Lua version's text kinds and units. [Contract storage](contract-storage.md) walks through them. |
 
 ## What to keep in mind
 
