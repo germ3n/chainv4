@@ -57,6 +57,30 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
             super::fact(ui, "nonce");
             ui.label(account.nonce.to_string()).on_hover_text("Transactions sent so far, and the nonce the next one takes");
             ui.end_row();
+            super::fact(ui, "proven");
+            ui.vertical(|ui| match ctx.light.proven.get(address) {
+                None => {
+                    ui.weak("not yet: the light client is still checking the chain");
+                }
+                Some(Err(why)) => {
+                    ui.colored_label(BAD, format!("does not check: {why}"));
+                }
+                Some(Ok(proven)) => {
+                    for proven in proven {
+                        let (word, color) = match proven.assurance.final_ {
+                            true => ("final", GOOD),
+                            false => ("not final yet", super::SIDE),
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(ctx.coins(&proven.balance)).color(color));
+                            ui.weak(format!("nonce {}, at block {}, {word}", proven.nonce, proven.assurance.height));
+                        });
+                    }
+                }
+            })
+            .response
+            .on_hover_text("What the light client proved, checking the node's proofs against headers it checked itself, trusting only the genesis it first saw at this node");
+            ui.end_row();
         }),
         None => super::waiting(ui, ctx, &Ask::Account(address.to_string())),
     }

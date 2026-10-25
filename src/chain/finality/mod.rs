@@ -21,7 +21,7 @@
 //! the votes it counted or held back too, so a restart counts them again.
 
 use {
-    super::{Chain, ImportError, Imported, Workers, id_key, read_value, stored_block, stored_block_at, work_of},
+    super::{Chain, ImportError, Imported, Workers, id_key, read_value, stored_header, stored_header_at, work_of},
     crate::crypto::keypair::PublicKey,
     crate::crypto::verifiable::VerifyError,
     crate::db::{Column, Database, DbError, Read, State},
@@ -228,32 +228,32 @@ impl<'a> View<'a> {
         State::new(self.db.clone())
     }
 
-    #[document(parent = "View", summary = "A stored block by id, on the main chain or a side branch.")]
-    pub fn block(&self, id: &Hash) -> Result<Option<Block>, DbError> {
-        stored_block(&**self.db, id)
+    #[document(parent = "View", summary = "A stored block's header by id, on the main chain or a side branch, the blocks before a snapshot included.")]
+    pub fn header(&self, id: &Hash) -> Result<Option<BlockHeader>, DbError> {
+        Ok(stored_header(&**self.db, id)?.map(|sealed| sealed.header))
     }
 
-    #[document(parent = "View", summary = "The main-chain block at a height.")]
-    pub fn block_at(&self, height: u64) -> Result<Option<Block>, DbError> {
-        stored_block_at(&**self.db, height)
+    #[document(parent = "View", summary = "The main-chain block's header at a height.")]
+    pub fn header_at(&self, height: u64) -> Result<Option<BlockHeader>, DbError> {
+        Ok(stored_header_at(&**self.db, height)?.map(|sealed| sealed.header))
     }
 
     #[document(parent = "View", summary = "Whether a stored block is on the main chain.")]
     pub fn on_main_chain(&self, id: &Hash) -> Result<bool, DbError> {
-        let Some(block) = self.block(id)? else {
+        let Some(header) = self.header(id)? else {
             return Ok(false);
         };
-        let at_height: Option<Hash> = read_value(&**self.db, Column::Heights, &block.header.height.to_be_bytes())?;
+        let at_height: Option<Hash> = read_value(&**self.db, Column::Heights, &header.height.to_be_bytes())?;
 
         Ok(at_height == Some(*id))
     }
 
-    #[document(parent = "View", summary = "Whether block has ancestor, at height, on its branch.")]
-    pub fn descends(&self, block: &Block, ancestor: &Hash, height: u64) -> Result<bool, DbError> {
-        let mut current = block.clone();
+    #[document(parent = "View", summary = "Whether the block with this header has ancestor, at height, on its branch.")]
+    pub fn descends(&self, header: &BlockHeader, ancestor: &Hash, height: u64) -> Result<bool, DbError> {
+        let mut current = header.clone();
 
-        while current.header.height > height {
-            match self.block(&current.header.parent)? {
+        while current.height > height {
+            match self.header(&current.parent)? {
                 Some(parent) => current = parent,
                 None => return Ok(false),
             }
@@ -266,15 +266,15 @@ impl<'a> View<'a> {
         parent = "View",
         summary = "The height where a stored block's branch meets the main chain, if it does within max_reorg_depth.",
     )]
-    pub fn fork_height(&self, block: &Block) -> Result<Option<u64>, DbError> {
-        let mut current = block.clone();
+    pub fn fork_height(&self, header: &BlockHeader) -> Result<Option<u64>, DbError> {
+        let mut current = header.clone();
 
         for _ in 0..=self.max_reorg_depth {
             if self.on_main_chain(&current.id())? {
-                return Ok(Some(current.header.height));
+                return Ok(Some(current.height));
             }
 
-            match self.block(&current.header.parent)? {
+            match self.header(&current.parent)? {
                 Some(parent) => current = parent,
                 None => return Ok(None),
             }
@@ -587,7 +587,7 @@ impl Chain {
             };
 
             if candidate.header.height <= block.header.height
-                || !self.view().descends(&candidate, target, block.header.height)?
+                || !self.view().descends(&candidate.header, target, block.header.height)?
             {
                 continue;
             }

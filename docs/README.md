@@ -20,7 +20,8 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Contracts](contracts.md) | The Lua and WebAssembly engines, fuel, the host API, lifecycle hooks, calls and proxies. |
 | [Token standard](token-standard.md) | The interface every token contract follows, and the registry that lists them. |
 | [Storage](storage.md) | The database, its columns, state layers, undo records and scans. |
-| [Node and network](node.md) | The node loop, the mempool, peer-to-peer networking and sync. |
+| [Node and network](node.md) | The node loop, the mempool, peer-to-peer networking, sync, and syncing from a snapshot. |
+| [Light client](light-client.md) | Following a chain from its genesis id alone: headers by consensus, finality by proven voters, and values by proofs. |
 | [Crypto and encoding](crypto.md) | Hashes, keys, signatures, signing domains and how everything is encoded. |
 | [HTTP API](api.md) | Every route and what it answers. |
 | [Explorer](explorer.md) | The egui explorer for the desktop and the browser: pages, hops, tokens, sending and how it stays live. |

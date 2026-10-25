@@ -12,7 +12,7 @@ use {
     crate::crypto::verifiable::VerifyError,
     crate::db::{Database, DbError},
     crate::mempool::{Mempool, MempoolError},
-    crate::net::{Admission, Backlog, MAX_SYNC_BLOCKS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, Origin, SyncRequest, SyncResponse},
+    crate::net::{Admission, Backlog, MAX_SYNC_BLOCKS, MAX_SYNC_ENTRIES, MAX_SYNC_HEADERS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, Origin, SyncRequest, SyncResponse},
     crate::structs::block::Block,
     crate::structs::hash::Hash,
     crate::structs::hex::to_hex,
@@ -32,6 +32,7 @@ use {
 };
 
 mod report;
+mod snapshot;
 mod stream;
 mod sync;
 mod verifier;
@@ -370,9 +371,12 @@ impl Node {
             self.on_event(arrival, now)?;
         }
 
-        self.produce_if_due(now)?;
-        self.vote_if_due()?;
-        self.catch_up_events()?;
+        if !self.snapshotting() {
+            self.produce_if_due(now)?;
+            self.vote_if_due()?;
+            self.catch_up_events()?;
+        }
+
         self.report_if_due(now);
 
         Ok(())
@@ -419,6 +423,13 @@ impl Node {
         }
 
         match event {
+            // While it takes a snapshot its state is half the pivot's: nothing can be run on it.
+            NetEvent::Block { from, .. } | NetEvent::Vote { from, .. } | NetEvent::Tx { from, .. } if self.snapshotting() => {
+                log::debug!("[node] ignored gossip from {from} while syncing from a snapshot");
+            }
+            NetEvent::Submitted { reply, .. } if self.snapshotting() => {
+                let _ = reply.send(Err(MempoolError::Syncing));
+            }
             NetEvent::Block { from, block } => {
                 let height = block.header.height;
                 self.counters.blocks_heard += 1;
@@ -479,7 +490,7 @@ impl Node {
             NetEvent::RequestFailed { peer, error } => {
                 log::debug!("[node] request to {peer} failed: {error}");
                 self.counters.requests_failed += 1;
-                self.peer_failed(peer);
+                self.peer_failed(peer)?;
             }
             NetEvent::PeerUp { peer, address } => {
                 self.counters.connections += 1;
@@ -502,7 +513,7 @@ impl Node {
                 self.peers.remove(&peer);
                 self.publish(|| NodeEvent::PeerDown(peer));
                 log::info!("[node] peer {peer} disconnected ({} peers)", self.peers.len());
-                self.peer_failed(peer);
+                self.peer_failed(peer)?;
             }
             NetEvent::Submitted { tx, reply } => {
                 let id = tx.id(self.chain.hash());
@@ -554,6 +565,12 @@ impl Node {
                 self.chain
                     .justifications_from(from, count.min(MAX_SYNC_JUSTIFICATIONS) as usize)?,
             ),
+            SyncRequest::Headers { from, count } => SyncResponse::Headers(self.chain.headers_from(from, count.min(MAX_SYNC_HEADERS))?),
+            SyncRequest::State { block, depth, prefix } => SyncResponse::State(match self.snapshotting() {
+                // Its own state is half a pivot's while it takes one.
+                true => None,
+                false => self.chain.state_part(&block, depth, &prefix, MAX_SYNC_ENTRIES)?,
+            }),
         };
 
         Ok(response)
@@ -807,6 +824,10 @@ impl Node {
             self.peers.len(),
             self.mempool.len()
         );
+
+        if let Some(snapshot) = &self.sync.snapshot {
+            log::info!("[node] syncing from a snapshot: {}", snapshot.stage());
+        }
 
         if self.catching_up
             && let Some(index) = self.chain.event_index()

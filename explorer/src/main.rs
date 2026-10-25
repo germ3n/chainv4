@@ -5,6 +5,7 @@
 mod api;
 mod app;
 mod format;
+mod light;
 mod model;
 mod sse;
 mod store;

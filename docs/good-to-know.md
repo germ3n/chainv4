@@ -134,8 +134,21 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   `GET /proofs/{column}/{key}` and `GET /proofs/receipts/{id}` serve proofs against the tip, and
   `StateProof::verify` and `crypto::merkle::verify` check them. See
   [Chain](chain.md#the-state-root).
-- **Storage format 6.** Headers changed shape, so every chain is new: delete old databases, or
-  point `--db` elsewhere.
+- **Storage format 7.** Headers changed shape, and the database keeps more, so every chain is new:
+  delete old databases, or point `--db` elsewhere.
+- **Genesis commits to the light client's parameters.** Its `proof_root` is the hash of
+  `light_params()`: the chain hash, consensus and finality's timing. Changing any of them is a new
+  chain, as changing genesis always is.
+- **Snapshot nodes keep headers only before their pivot.** `--snapshot` checks every header and
+  takes the state of a block 16 below the best tip, then runs the blocks after it. Before the
+  pivot it has no bodies, receipts, events or light updates, and it never rolls back past it.
+  Peers can serve state only at their last `max_reorg_depth` blocks, so a pivot that grows too
+  old moves up, and the walk fetches only what changed. See
+  [Node](node.md#syncing-from-a-snapshot).
+- **Light clients trust only a genesis id.** `chainv4 light`, and the explorer, check every
+  header by consensus, every justification against voters proven from state, and every value
+  against a header they checked. Voters are trusted from a checkpoint's state once that
+  checkpoint is justified. See [Light client](light-client.md).
 - **Coin decimals are for display only.** Genesis names the coin's symbol and decimals, but the
   chain counts every balance, fee and reward in whole units.
 - **Rewards have no coinbase transaction.** The chain credits the producer after a block's

@@ -102,7 +102,37 @@ impl Hashable for Seal {
 
 impl Hashable for Block {}
 
+#[document(
+    summary = "A header and its seal: all a light client, or a node syncing headers first, needs to check a block by consensus, without its transactions.",
+    category = "Chain",
+    see_also = "BlockHeader, Seal, Consensus::check",
+)]
+#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+pub struct SealedHeader {
+    #[document(summary = "The header.")]
+    pub header: BlockHeader,
+    #[document(summary = "Its seal.")]
+    pub seal: Seal,
+}
+
+impl Hashable for SealedHeader {}
+
+impl SealedHeader {
+    #[document(parent = "SealedHeader", summary = "The block's id.")]
+    pub fn id(&self) -> Hash {
+        self.header.id()
+    }
+}
+
 impl Block {
+    #[document(parent = "Block", summary = "Its header and seal, without the transactions and proofs.")]
+    pub fn sealed_header(&self) -> SealedHeader {
+        SealedHeader {
+            header: self.header.clone(),
+            seal: self.seal,
+        }
+    }
+
     #[document(
         parent = "Block",
         summary = "The block's id, the same as its header's.",

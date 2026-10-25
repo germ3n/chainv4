@@ -1,0 +1,699 @@
+//! A light client: it follows a chain from its headers alone, checking every one by the chain's
+//! consensus, and its finality from justifications, checking each against voters it proved from
+//! the state of a checkpoint it trusts already. Then it checks any value or receipt a node sends,
+//! with its proof, against a header it holds. It trusts nothing but the genesis id it starts
+//! from.
+//!
+//! It is sans-IO: next says what to fetch, and the deliver and take methods check what came back,
+//! so the CLI drives it over HTTP with one library and the explorer with another.
+
+use {
+    crate::consensus::{Consensus, ConsensusConfig, ConsensusError},
+    crate::crypto::hashable::Hashable,
+    crate::crypto::keypair::PublicKey,
+    crate::crypto::merkle,
+    crate::db::{Column, DbError, State, StateProof, StateTree},
+    crate::registry::signers::{SignerSet, Signers},
+    crate::registry::validators::{ValidatorSet, Validators},
+    crate::structs::block::{BlockHeader, SealedHeader},
+    crate::structs::hash::{Hash, HashType},
+    crate::structs::receipt::CommittedReceipt,
+    crate::structs::u256::u256,
+    crate::structs::vote::{Checkpoint, Justification},
+    r#macro::document,
+    std::collections::{BTreeMap, BTreeSet, HashMap},
+    std::fmt,
+    std::ops::RangeInclusive,
+    wincode::{SchemaRead, SchemaWrite},
+};
+
+#[document(summary = "The most headers a light client asks for at once.", category = "Light client")]
+pub const MAX_LIGHT_HEADERS: u32 = 1_000;
+
+#[document(
+    summary = "What a light client needs to know about a chain to follow it: its hash, its consensus, and how its finality works. Genesis's proof_root is the hash of these, so a client that trusts a genesis id can check what a node tells it they are.",
+    category = "Light client",
+    see_also = "LightClient, Genesis::light_params",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct LightParams {
+    #[document(summary = "The chain hash.")]
+    pub hash: HashType,
+    #[document(summary = "The chain's consensus, which every header is checked by.")]
+    pub consensus: ConsensusConfig,
+    #[document(summary = "How finality works on the chain, or None for a chain without.")]
+    pub finality: Option<LightFinality>,
+}
+
+impl Hashable for LightParams {}
+
+#[document(
+    summary = "How finality works on a chain, as much as a light client needs: when checkpoints come, how far ahead their voters are fixed, and how deep a block is final under depth finality.",
+    category = "Light client",
+    see_also = "LightParams",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum LightFinality {
+    #[document(summary = "Bonded validators vote, two thirds of the weight justifying.")]
+    #[wincode(tag = 0)]
+    Ffg { checkpoint_interval: u64, fixed_ahead: u64 },
+    #[document(summary = "A set of signers votes, a threshold of them justifying.")]
+    #[wincode(tag = 1)]
+    Authority { checkpoint_interval: u64, fixed_ahead: u64 },
+    #[document(summary = "A block is final once this many are on top of it.")]
+    #[wincode(tag = 2)]
+    Depth { depth: u64 },
+}
+
+impl LightFinality {
+    #[document(parent = "LightFinality", summary = "Blocks between checkpoints, for the kinds that vote.")]
+    pub fn checkpoint_interval(&self) -> Option<u64> {
+        match *self {
+            LightFinality::Ffg { checkpoint_interval, .. } | LightFinality::Authority { checkpoint_interval, .. } => Some(checkpoint_interval),
+            LightFinality::Depth { .. } => None,
+        }
+    }
+
+    #[document(
+        parent = "LightFinality",
+        summary = "The epochs whose voters a block fixes: those up to fixed_ahead for genesis, epoch plus fixed_ahead for a checkpoint, none for any other block or kind.",
+        params = { height = "The block's height." },
+    )]
+    pub fn fixed_at(&self, height: u64) -> Option<RangeInclusive<u64>> {
+        let (LightFinality::Ffg { checkpoint_interval, fixed_ahead } | LightFinality::Authority { checkpoint_interval, fixed_ahead }) = *self else {
+            return None;
+        };
+
+        match height {
+            0 => Some(1..=fixed_ahead),
+            _ if height.is_multiple_of(checkpoint_interval) => {
+                let epoch = height / checkpoint_interval + fixed_ahead;
+
+                Some(epoch..=epoch)
+            }
+            _ => None,
+        }
+    }
+
+    #[document(parent = "LightFinality", summary = "Where an epoch's voters are kept, in Column::Epochs.")]
+    pub fn voters_key(&self, epoch: u64) -> Option<Vec<u8>> {
+        match self {
+            LightFinality::Ffg { .. } => Some(Validators::set_key(epoch)),
+            LightFinality::Authority { .. } => Some(Signers::set_key(epoch)),
+            LightFinality::Depth { .. } => None,
+        }
+    }
+
+    #[document(parent = "LightFinality", summary = "An epoch's voters, and what they must add up to, from the value kept at voters_key.")]
+    pub fn voters(&self, value: &[u8]) -> Option<Voters> {
+        match self {
+            LightFinality::Ffg { .. } => wincode::deserialize::<ValidatorSet>(value).ok().map(|set| Voters {
+                needed: set.two_thirds(),
+                set,
+            }),
+            LightFinality::Authority { .. } => wincode::deserialize::<SignerSet>(value).ok().map(|set| Voters {
+                needed: u256::from(set.threshold),
+                set: set.validators(),
+            }),
+            LightFinality::Depth { .. } => None,
+        }
+    }
+}
+
+#[document(summary = "An epoch's voters, with their weights, and the weight a link's votes must add up to.", category = "Light client")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Voters {
+    #[document(summary = "Who votes, and with what weight.")]
+    pub set: ValidatorSet,
+    #[document(summary = "What a justification's votes must add up to.")]
+    pub needed: u256,
+}
+
+#[document(
+    summary = "What a node records for light clients when it runs a block that fixes voters, genesis or a checkpoint: proofs of those voters against the block's state root. A client that trusts the block's state, because it is at or below a justified checkpoint, learns the voters from them.",
+    category = "Light client",
+    see_also = "LightClient::take_update",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct LightUpdate {
+    #[document(summary = "The block whose state root the proofs are against.")]
+    pub block: Hash,
+    #[document(summary = "The voters it fixed, each with its proof.")]
+    pub voters: Vec<VoterProof>,
+}
+
+impl Hashable for LightUpdate {}
+
+#[document(summary = "One epoch's voters, as kept in state, with the proof they are there.", category = "Light client", see_also = "LightUpdate")]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct VoterProof {
+    #[document(summary = "The epoch they vote in.")]
+    pub epoch: u64,
+    #[document(summary = "Their record, as kept at LightFinality::voters_key.")]
+    pub value: Vec<u8>,
+    #[document(summary = "The proof of it, against the block's state root.")]
+    pub proof: StateProof,
+}
+
+impl LightUpdate {
+    #[document(
+        parent = "LightUpdate",
+        summary = "The update for a block that fixes voters, made from the state it leaves; None for a block that fixes none.",
+        params = {
+            state = "The state once the block ran, its state tree followed.",
+            hash = "The chain's hash.",
+            finality = "How finality works on the chain.",
+            block = "The block's id.",
+            height = "Its height.",
+        },
+    )]
+    pub fn of(state: &State, hash: HashType, finality: &LightFinality, block: Hash, height: u64) -> Result<Option<LightUpdate>, DbError> {
+        let Some(epochs) = finality.fixed_at(height) else {
+            return Ok(None);
+        };
+        let tree = StateTree::new(state, hash);
+        let mut voters = Vec::new();
+
+        for epoch in epochs {
+            let key = finality.voters_key(epoch).expect("kinds that fix voters keep them");
+
+            if let Some(value) = state.get(Column::Epochs, &key)? {
+                voters.push(VoterProof {
+                    epoch,
+                    value,
+                    proof: tree.prove(Column::Epochs, &key)?,
+                });
+            }
+        }
+
+        Ok(Some(LightUpdate { block, voters }))
+    }
+}
+
+#[document(summary = "Something for the light client's driver to fetch next.", category = "Light client", see_also = "LightClient::next")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LightRequest {
+    #[document(summary = "The node's main-chain headers from a height on, at most count.")]
+    Headers { from: u64, count: u32 },
+    #[document(summary = "The light update of a block on the client's chain: genesis, or a checkpoint.")]
+    Update { block: Hash },
+    #[document(summary = "The node's justifications for main-chain checkpoints from an epoch on.")]
+    Justifications { from: u64 },
+}
+
+#[document(summary = "How far the client trusts a value or receipt it checked.", category = "Light client")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Assurance {
+    #[document(summary = "The block it was proven in.")]
+    pub block: Hash,
+    #[document(summary = "Its height.")]
+    pub height: u64,
+    #[document(summary = "Whether the block is final: at or below the finalized checkpoint, or deep enough under depth finality.")]
+    pub final_: bool,
+}
+
+#[document(summary = "Why the light client refused something a node sent.", category = "Light client")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LightError {
+    #[document(summary = "The genesis it was given is not the one it trusts.")]
+    WrongGenesis,
+    #[document(summary = "The parameters do not hash to the genesis's proof_root.")]
+    WrongParams,
+    #[document(summary = "A header does not follow its parent, or consensus refused it.")]
+    BadHeader { height: u64, why: String },
+    #[document(summary = "The headers do not start where asked.")]
+    Misplaced,
+    #[document(summary = "Following a branch would drop a justified checkpoint.")]
+    ConflictsWithFinality,
+    #[document(summary = "The block is not on the client's chain.")]
+    NotOnChain,
+    #[document(summary = "The block's state is not trusted yet: it is above the latest justified checkpoint.")]
+    Untrusted,
+    #[document(summary = "A proof does not check.")]
+    BadProof,
+    #[document(summary = "The epoch's voters are not known yet.")]
+    UnknownVoters(u64),
+    #[document(summary = "A justification does not check, and why.")]
+    BadJustification(&'static str),
+    #[document(summary = "Something does not decode.")]
+    Undecodable,
+}
+
+impl fmt::Display for LightError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LightError::WrongGenesis => write!(f, "the node is on another chain than the genesis trusted"),
+            LightError::WrongParams => write!(f, "the chain's parameters do not match its genesis"),
+            LightError::BadHeader { height, why } => write!(f, "header {height}: {why}"),
+            LightError::Misplaced => write!(f, "headers that do not start where they were asked from"),
+            LightError::ConflictsWithFinality => write!(f, "a branch that leaves a justified checkpoint"),
+            LightError::NotOnChain => write!(f, "a block not on the chain followed"),
+            LightError::Untrusted => write!(f, "a block above the latest justified checkpoint, whose state is not trusted yet"),
+            LightError::BadProof => write!(f, "a proof that does not check"),
+            LightError::UnknownVoters(epoch) => write!(f, "epoch {epoch}'s voters are not known yet"),
+            LightError::BadJustification(why) => write!(f, "a justification that does not check: {why}"),
+            LightError::Undecodable => write!(f, "something that does not decode"),
+        }
+    }
+}
+
+impl std::error::Error for LightError {}
+
+#[document(summary = "What delivering headers did.", category = "Light client", see_also = "LightClient::deliver_headers")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Extended {
+    #[document(summary = "They extended the chain by this many.")]
+    Added(usize),
+    #[document(summary = "They were a heavier branch, followed from this height on.")]
+    Switched(u64),
+    #[document(summary = "A branch no heavier than the chain followed: kept the chain.")]
+    Lighter,
+    #[document(summary = "They do not link to the chain where asked: the node's chain split off lower, so ask from further back.")]
+    Unlinked,
+    #[document(summary = "None: the client has every header the node has.")]
+    UpToDate,
+}
+
+#[document(
+    summary = "A light client of one chain: the headers it checked, the voters it proved, and the checkpoints it saw justified and finalized.",
+    category = "Light client",
+    see_also = "LightParams, LightRequest, Assurance",
+    example = "let mut client = LightClient::new(params, genesis, trusted_id)?;\nwhile let Some(request) = client.next() {\n    // fetch it from a node, and deliver what comes back\n}\nlet assurance = client.check_state(&block, Column::Accounts, &key, Some(&value), &proof)?;",
+)]
+pub struct LightClient {
+    params: LightParams,
+    consensus: Box<dyn Consensus>,
+    genesis: Hash,
+    /// The chain followed, by height, genesis first.
+    headers: Vec<SealedHeader>,
+    /// Each header's total work.
+    work: Vec<u256>,
+    heights: HashMap<Hash, u64>,
+    voters: BTreeMap<u64, Voters>,
+    /// The justified checkpoints on the chain, by epoch: the block's id.
+    justified: BTreeMap<u64, Hash>,
+    finalized: Checkpoint,
+    /// The blocks whose updates were taken, or that had none to take, by height.
+    updated: BTreeSet<u64>,
+    /// Whether the node had no more headers, or justifications, when last asked.
+    headers_done: bool,
+    justifications_done: bool,
+    /// Where to ask for headers from after a branch that did not link.
+    back: Option<u64>,
+}
+
+impl LightClient {
+    #[document(
+        parent = "LightClient",
+        summary = "A client of the chain with this genesis, once it checked the genesis is the one it trusts and the parameters are the ones it commits to.",
+        params = {
+            params = "The chain's light parameters, from any node.",
+            genesis = "The genesis header, from any node.",
+            trusted = "The genesis id the client trusts.",
+        },
+    )]
+    pub fn new(params: LightParams, genesis: SealedHeader, trusted: Hash) -> Result<LightClient, LightError> {
+        if genesis.id() != trusted || genesis.header.height != 0 {
+            return Err(LightError::WrongGenesis);
+        }
+
+        if params.hash != trusted.algorithm() || genesis.header.proof_root != params.hash(params.hash) {
+            return Err(LightError::WrongParams);
+        }
+
+        let consensus = params.consensus.rules();
+
+        Ok(LightClient {
+            consensus,
+            genesis: trusted,
+            heights: HashMap::from([(trusted, 0)]),
+            work: vec![u256::ZERO],
+            headers: vec![genesis],
+            voters: BTreeMap::new(),
+            justified: BTreeMap::from([(0, trusted)]),
+            finalized: Checkpoint { epoch: 0, block: trusted },
+            updated: BTreeSet::new(),
+            headers_done: false,
+            justifications_done: false,
+            back: None,
+            params,
+        })
+    }
+
+    #[document(parent = "LightClient", summary = "The chain's parameters.")]
+    pub fn params(&self) -> &LightParams {
+        &self.params
+    }
+
+    #[document(parent = "LightClient", summary = "The newest header followed.")]
+    pub fn tip(&self) -> &BlockHeader {
+        &self.headers.last().expect("genesis is always there").header
+    }
+
+    #[document(parent = "LightClient", summary = "A followed header by height.")]
+    pub fn header_at(&self, height: u64) -> Option<&BlockHeader> {
+        self.headers.get(height as usize).map(|sealed| &sealed.header)
+    }
+
+    #[document(parent = "LightClient", summary = "The latest justified checkpoint it checked; genesis's before any.")]
+    pub fn justified(&self) -> Checkpoint {
+        let (epoch, block) = self.justified.last_key_value().expect("genesis is justified");
+
+        Checkpoint { epoch: *epoch, block: *block }
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "The height up to which blocks are final: the finalized checkpoint's under the kinds that vote, the tip's less the depth under depth finality, 0 without finality.",
+    )]
+    pub fn final_height(&self) -> u64 {
+        match self.params.finality {
+            Some(LightFinality::Depth { depth }) => self.tip().height.saturating_sub(depth),
+            Some(finality) => self.finalized.epoch * finality.checkpoint_interval().unwrap_or(1),
+            None => 0,
+        }
+    }
+
+    #[document(parent = "LightClient", summary = "The finalized checkpoint it checked, under the kinds that vote.")]
+    pub fn finalized(&self) -> Checkpoint {
+        self.finalized
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "What to fetch next: headers until the node has no more, then, under voting finality, the updates of trusted checkpoints and the justifications after the latest; None once caught up. Call refresh to follow the chain again.",
+    )]
+    pub fn next(&self) -> Option<LightRequest> {
+        if !self.headers_done {
+            let from = self.back.unwrap_or(self.tip().height + 1);
+
+            return Some(LightRequest::Headers { from, count: MAX_LIGHT_HEADERS });
+        }
+
+        let finality = self.params.finality?;
+        let interval = finality.checkpoint_interval()?;
+        let trusted = self.justified().epoch * interval;
+
+        for height in (0..=trusted.min(self.tip().height)).step_by(interval as usize) {
+            if !self.updated.contains(&height) {
+                return Some(LightRequest::Update {
+                    block: self.headers[height as usize].id(),
+                });
+            }
+        }
+
+        let next = self.justified().epoch + 1;
+
+        (!self.justifications_done && self.voters.contains_key(&next) && next * interval <= self.tip().height)
+            .then_some(LightRequest::Justifications { from: next })
+    }
+
+    #[document(parent = "LightClient", summary = "Asks for what came since: headers, and justifications, again.")]
+    pub fn refresh(&mut self) {
+        self.headers_done = false;
+        self.justifications_done = false;
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "Checks the headers a node sent from a height on, and follows them: as more of the chain, or as a heavier branch from where they split off, never past a justified checkpoint.",
+        params = {
+            from = "The height they start at, as asked.",
+            headers = "The node's main-chain headers from there, in order.",
+            now = "The clock, in milliseconds since the Unix epoch, for consensus's check of timestamps.",
+        },
+    )]
+    pub fn deliver_headers(&mut self, from: u64, headers: Vec<SealedHeader>, now: u64) -> Result<Extended, LightError> {
+        let Some(first) = headers.first() else {
+            self.headers_done = self.back.is_none();
+            self.back = None;
+
+            return Ok(Extended::UpToDate);
+        };
+
+        if from == 0 || from > self.tip().height + 1 || first.header.height != from {
+            return Err(LightError::Misplaced);
+        }
+
+        if first.header.parent != self.headers[from as usize - 1].id() {
+            // The node's chain split off below from: look further back.
+            self.back = Some(from.saturating_sub(MAX_LIGHT_HEADERS as u64).max(1));
+
+            return Ok(Extended::Unlinked);
+        }
+
+        self.back = None;
+        let mut work = self.work[from as usize - 1];
+        let mut parent = &self.headers[from as usize - 1].header;
+
+        for sealed in &headers {
+            let height = sealed.header.height;
+
+            if height != parent.height + 1 || sealed.header.parent != parent.id() {
+                return Err(LightError::BadHeader { height, why: "does not follow its parent".to_string() });
+            }
+
+            self.consensus
+                .check(&sealed.header, &sealed.seal, parent, now)
+                .map_err(|err: ConsensusError| LightError::BadHeader { height, why: err.to_string() })?;
+            work += self.consensus.work(&sealed.header);
+            parent = &sealed.header;
+        }
+
+        let fork = from - 1;
+        let ours = *self.work.last().expect("genesis is always there");
+
+        if fork == self.tip().height {
+            self.append(headers, from);
+
+            return Ok(Extended::Added(self.headers.len() - from as usize));
+        }
+
+        if work <= ours {
+            return Ok(Extended::Lighter);
+        }
+
+        if self.justified().epoch > 0 && self.justified_height() > fork {
+            return Err(LightError::ConflictsWithFinality);
+        }
+
+        for dropped in self.headers.drain(from as usize..) {
+            self.heights.remove(&dropped.id());
+        }
+
+        self.work.truncate(from as usize);
+        self.updated.retain(|height| *height <= fork);
+        self.append(headers, from);
+
+        Ok(Extended::Switched(from))
+    }
+
+    fn append(&mut self, headers: Vec<SealedHeader>, from: u64) {
+        let mut work = self.work[from as usize - 1];
+
+        for sealed in headers {
+            work += self.consensus.work(&sealed.header);
+            self.heights.insert(sealed.id(), sealed.header.height);
+            self.work.push(work);
+            self.headers.push(sealed);
+        }
+    }
+
+    fn justified_height(&self) -> u64 {
+        let interval = self.params.finality.and_then(|finality| finality.checkpoint_interval()).unwrap_or(1);
+
+        self.justified().epoch * interval
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "Takes a block's light update, or its absence when the node has none: proves the voters it fixed against the block's state root, which the client trusts once the block is at or below its latest justified checkpoint.",
+        params = {
+            block = "The block asked for.",
+            update = "What the node sent; None when it has none, as a node that synced from a snapshot lacks those before it.",
+        },
+    )]
+    pub fn take_update(&mut self, block: &Hash, update: Option<LightUpdate>) -> Result<(), LightError> {
+        let height = *self.heights.get(block).ok_or(LightError::NotOnChain)?;
+
+        if height > self.justified_height() {
+            return Err(LightError::Untrusted);
+        }
+
+        let Some(update) = update else {
+            self.updated.insert(height);
+
+            return Ok(());
+        };
+        let finality = self.params.finality.ok_or(LightError::BadProof)?;
+        let fixed = finality.fixed_at(height).ok_or(LightError::BadProof)?;
+
+        if update.block != *block {
+            return Err(LightError::BadProof);
+        }
+
+        let root = self.headers[height as usize].header.state_root;
+        let mut learned = Vec::new();
+
+        for voter in &update.voters {
+            let key = finality.voters_key(voter.epoch).ok_or(LightError::BadProof)?;
+
+            if !fixed.contains(&voter.epoch) || !voter.proof.verify(&root, Column::Epochs, &key, Some(&voter.value)) {
+                return Err(LightError::BadProof);
+            }
+
+            learned.push((voter.epoch, finality.voters(&voter.value).ok_or(LightError::Undecodable)?));
+        }
+
+        self.voters.extend(learned);
+        self.updated.insert(height);
+
+        Ok(())
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "Checks the justifications a node sent, in order, and takes each that holds: its target on the client's chain at its checkpoint, its source justified, and votes from the target epoch's voters adding up to enough. The source of a direct successor is finalized. It stops, without an error, at one whose voters it cannot know yet: the checkpoints it justified make updates trusted that tell it, and next asks for them, then for the rest again.",
+        returns = "How many it took; the first that does not hold stops it, with why.",
+    )]
+    pub fn deliver_justifications(&mut self, justifications: &[Justification]) -> Result<usize, LightError> {
+        if justifications.is_empty() {
+            self.justifications_done = true;
+        }
+
+        let mut taken = 0;
+
+        for justification in justifications {
+            if justification.target.epoch <= self.justified().epoch {
+                continue;
+            }
+
+            if !self.voters.contains_key(&justification.target.epoch) {
+                break;
+            }
+
+            self.check_justification(justification)?;
+            let (source, target) = (justification.source, justification.target);
+            self.justified.insert(target.epoch, target.block);
+
+            if target.epoch == source.epoch + 1 && source.epoch > self.finalized.epoch {
+                self.finalized = source;
+            }
+
+            taken += 1;
+        }
+
+        Ok(taken)
+    }
+
+    fn check_justification(&self, justification: &Justification) -> Result<(), LightError> {
+        let (source, target) = (justification.source, justification.target);
+        let interval = self
+            .params
+            .finality
+            .and_then(|finality| finality.checkpoint_interval())
+            .ok_or(LightError::BadJustification("the chain does not vote"))?;
+        let on_chain = |checkpoint: &Checkpoint| {
+            self.headers
+                .get((checkpoint.epoch * interval) as usize)
+                .is_some_and(|sealed| sealed.id() == checkpoint.block)
+        };
+
+        if source.epoch >= target.epoch || !on_chain(&target) || !on_chain(&source) {
+            return Err(LightError::BadJustification("its link is not on the chain followed"));
+        }
+
+        if self.justified.get(&source.epoch) != Some(&source.block) {
+            return Err(LightError::BadJustification("its source is not justified"));
+        }
+
+        let voters = self.voters.get(&target.epoch).ok_or(LightError::UnknownVoters(target.epoch))?;
+        let mut weight = u256::ZERO;
+        let mut previous: Option<PublicKey> = None;
+
+        for vote in &justification.votes {
+            if previous.is_some_and(|previous| previous >= vote.vote.voter) {
+                return Err(LightError::BadJustification("its votes are not sorted by voter"));
+            }
+
+            if vote.vote.source != source || vote.vote.target != target {
+                return Err(LightError::BadJustification("a vote is for another link"));
+            }
+
+            vote.verify(&self.genesis).map_err(|_| LightError::BadJustification("a vote's signature does not check"))?;
+            weight += voters
+                .set
+                .member(&vote.vote.voter)
+                .ok_or(LightError::BadJustification("a vote is from someone who does not vote"))?
+                .weight;
+            previous = Some(vote.vote.voter);
+        }
+
+        if weight < voters.needed {
+            return Err(LightError::BadJustification("its votes fall short"));
+        }
+
+        Ok(())
+    }
+
+    fn assurance(&self, block: &Hash) -> Result<(Assurance, &BlockHeader), LightError> {
+        let height = *self.heights.get(block).ok_or(LightError::NotOnChain)?;
+        let header = &self.headers[height as usize].header;
+
+        Ok((
+            Assurance {
+                block: *block,
+                height,
+                final_: self.params.finality.is_some() && height <= self.final_height(),
+            },
+            header,
+        ))
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "Checks a chain-state entry a node sent, with its proof, against the state root of a block the client followed.",
+        params = {
+            block = "The block it is proven at: a node's tip, or its finalized checkpoint.",
+            column = "The entry's column.",
+            key = "Its key.",
+            value = "What the node says it holds, or None for nothing.",
+            proof = "The node's proof.",
+        },
+        returns = "How far to trust it, or BadProof, or NotOnChain for a block the client has not followed.",
+    )]
+    pub fn check_state(&self, block: &Hash, column: Column, key: &[u8], value: Option<&[u8]>, proof: &StateProof) -> Result<Assurance, LightError> {
+        let (assurance, header) = self.assurance(block)?;
+
+        match proof.verify(&header.state_root, column, key, value) {
+            true => Ok(assurance),
+            false => Err(LightError::BadProof),
+        }
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "Checks a receipt a node sent, with its Merkle path, against the receipts root of a block the client followed.",
+        params = {
+            block = "The block it landed in.",
+            receipt = "The CommittedReceipt, encoded.",
+            index = "Its place among the block's transactions.",
+            count = "How many there are.",
+            path = "Its Merkle path.",
+        },
+        returns = "The receipt, and how far to trust it.",
+    )]
+    pub fn check_receipt(&self, block: &Hash, receipt: &[u8], index: usize, count: usize, path: &[Hash]) -> Result<(CommittedReceipt, Assurance), LightError> {
+        let (assurance, header) = self.assurance(block)?;
+        let leaf = merkle::leaf(self.params.hash, receipt);
+
+        if !merkle::verify(&header.receipts_root, &leaf, index, count, path) {
+            return Err(LightError::BadProof);
+        }
+
+        let decoded: CommittedReceipt = wincode::deserialize(receipt).map_err(|_| LightError::Undecodable)?;
+
+        Ok((decoded, assurance))
+    }
+}

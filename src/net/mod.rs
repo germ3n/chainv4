@@ -5,7 +5,8 @@
 
 use {
     crate::mempool::MempoolError,
-    crate::structs::block::{Block, Seal},
+    crate::db::{Path, StatePart},
+    crate::structs::block::{Block, Seal, SealedHeader},
     crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
     crate::structs::vote::{Justification, SignedVote},
@@ -29,6 +30,11 @@ pub use swarm::{NetError, spawn};
 pub const MAX_SYNC_BLOCKS: u32 = 128;
 /// The most justifications one sync response carries.
 pub const MAX_SYNC_JUSTIFICATIONS: u32 = 64;
+/// The most headers one sync response carries.
+pub const MAX_SYNC_HEADERS: u32 = 1_024;
+/// The most chain-state entries one sync response carries. Values are at most 64 KiB, so the
+/// largest answer still fits a response.
+pub const MAX_SYNC_ENTRIES: usize = 512;
 
 #[document(
     summary = "Something that arrived for the node: from a peer, or from a client of this node.",
@@ -105,6 +111,12 @@ pub enum SyncRequest {
     #[document(summary = "The justifications the peer holds for its main-chain checkpoints from an epoch on, at most MAX_SYNC_JUSTIFICATIONS.")]
     #[wincode(tag = 2)]
     Justifications { from: u64, count: u32 },
+    #[document(summary = "Consecutive main-chain headers with their seals, from a height on, at most MAX_SYNC_HEADERS: what a node syncing from a snapshot checks first.")]
+    #[wincode(tag = 3)]
+    Headers { from: u64, count: u32 },
+    #[document(summary = "One position of the state tree as it was at a recent main-chain block: its entries, at most MAX_SYNC_ENTRIES, or its two halves' hashes.")]
+    #[wincode(tag = 4)]
+    State { block: Hash, depth: u16, prefix: Path },
 }
 
 #[document(
@@ -131,6 +143,12 @@ pub enum SyncResponse {
     #[document(summary = "The justifications asked for that the peer holds, oldest first.")]
     #[wincode(tag = 2)]
     Justifications(Vec<Justification>),
+    #[document(summary = "The headers asked for that the peer has, in height order.")]
+    #[wincode(tag = 3)]
+    Headers(Vec<SealedHeader>),
+    #[document(summary = "The part of the state tree asked for, or None when the peer cannot serve it: the block is not on its main chain, or older than its undo records reach.")]
+    #[wincode(tag = 4)]
+    State(Option<StatePart>),
 }
 
 #[document(

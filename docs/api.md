@@ -116,6 +116,31 @@ What a contract is:
   `decimals`, each `null` when it exports none; `token` is `null` for a contract that is not a
   token.
 
+### `GET /light`
+
+What a [light client](light-client.md) starts from: the chain's `genesis` id, its light
+parameters (`params`) and its genesis header with seal (`header`), each encoded, in hex. A client
+checks that the header hashes to the genesis id it trusts, and the parameters to the header's
+`proof_root`.
+
+### `GET /headers?from=H&count=N`
+
+Main-chain headers with their seals, from height `from` (1 by default), at most `count`, at most
+1,000: `{"headers": ["0x…", …]}`, each a `SealedHeader` encoded. Below the pivot of a node that
+synced from a snapshot, these are all it has.
+
+### `GET /light/updates/{block}`
+
+The light update genesis or a checkpoint keeps: `{"update": "0x…"}`, a `LightUpdate` encoded, with
+proofs of the voters it fixed against its state root. 404 for any other block, and for those
+before a snapshot node's pivot.
+
+### `GET /justifications?from=E&count=N`
+
+The justifications this node holds for main-chain checkpoints from epoch `from` on, in order, at
+most `count`, at most 64: `{"justifications": ["0x…", …]}`. It stops at the first checkpoint it
+holds none for. 404 on a chain whose finality does not vote.
+
 ### `GET /proofs/{column}/{key}`
 
 A proof of one chain-state entry against the tip's state root (see
@@ -124,8 +149,12 @@ A proof of one chain-state entry against the tip's state root (see
 as [Storage](storage.md#keys-and-encoding) describes. An account's key, for example, is its
 address's tag and 32 bytes.
 
+`?block=ID` proves at a recent main-chain block rather than the tip, one within the last
+`max_reorg_depth` blocks, whose undo records the node keeps: 404 for any other.
+
 It answers:
-- `block`, `height` and `state_root`: the tip it proves against;
+- `block`, `height` and `state_root`: the block it proves against;
+- `proof`: the `StateProof`, encoded, in hex;
 - `column`, `key`, and the entry's `value` in hex, or `null` when it holds nothing;
 - `siblings`: the hash beside the path at each branch, the root's first;
 - `leaf`: where the path ends, its `path` and `value_hash`, or `null` where it ends empty.
@@ -336,5 +365,7 @@ only plain paths below the directory are served.
   the node loop, which answers between blocks.
 - **Reads are not snapshot-consistent.** A request that reads several keys can see two tips.
   Proofs are the exception: each is checked against its root before it is sent.
-- **Proofs are against the tip only.** The node keeps one state tree, so it cannot prove what
-  state held at an older block.
+- **Proofs reach back `max_reorg_depth` blocks.** The node keeps one state tree, and rolls it back
+  by undo records to prove at an older block, so it can only go as far back as it keeps those.
+- **A snapshot node's history is headers only** before its pivot: `GET /blocks` and
+  `GET /blocks/{block}` show those blocks marked `"pruned": true`, without transactions.

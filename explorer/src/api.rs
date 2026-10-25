@@ -43,6 +43,16 @@ pub enum Ask {
     Offer(String),
     /// A signed transaction to submit, as POST /txs's body.
     Submit(String),
+    /// What the light client starts from: the chain's light parameters and genesis header.
+    Light,
+    /// Main-chain headers from a height on, encoded.
+    Headers { from: u64, count: u32 },
+    /// The light update a block keeps, by its id.
+    LightUpdate(String),
+    /// Justifications from an epoch on, encoded.
+    Justifications(u64),
+    /// A proof of a chain-state entry, at a block, or at the tip.
+    Proof { column: String, key: String, block: Option<String> },
 }
 
 impl Ask {
@@ -83,6 +93,12 @@ impl Ask {
 
                 path
             }
+            Ask::Light => "/light".to_string(),
+            Ask::Headers { from, count } => format!("/headers?from={from}&count={count}"),
+            Ask::LightUpdate(block) => format!("/light/updates/{block}"),
+            Ask::Justifications(from) => format!("/justifications?from={from}"),
+            Ask::Proof { column, key, block: Some(block) } => format!("/proofs/{column}/{key}?block={block}"),
+            Ask::Proof { column, key, block: None } => format!("/proofs/{column}/{key}"),
             Ask::Call { .. } => "/call".to_string(),
             Ask::Offer(_) => "/offer".to_string(),
             Ask::Submit(_) => "/txs".to_string(),

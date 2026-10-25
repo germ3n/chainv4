@@ -7,6 +7,7 @@
 use {
     crate::api::{Api, Ask, News, Reply},
     crate::format,
+    crate::light::Light,
     crate::model::{
         BlockDetail, Called, Checkpoint, Contract, EventsPage, Forks, Mempool, NodeView, Page, PeerChange, Receipt, Reorganized,
         Status, Summary, TokensPage, TxView,
@@ -60,6 +61,8 @@ pub struct Explorer {
     account: AccountState,
     tokens: TokensState,
     send: SendState,
+    /// The light client, which checks what the node says about balances.
+    light: Light,
     /// Something to tell the person, and whether it is bad news.
     notice: Option<(String, bool)>,
 }
@@ -92,6 +95,7 @@ impl Explorer {
             account: AccountState::default(),
             tokens: TokensState::default(),
             send: SendState::default(),
+            light: Light::default(),
             notice: None,
         };
         explorer.connect(&node);
@@ -105,6 +109,7 @@ impl Explorer {
         self.api = Api::new(&node, self.wake.clone());
         self.store = Store::default();
         self.map = MapState::default();
+        self.light = Light::default();
         self.asked = Asked::default();
         self.settings.node = node.clone();
         self.address = node;
@@ -124,6 +129,10 @@ impl Explorer {
         for reply in self.api.replies() {
             match reply {
                 Reply::Answer { ask, result } => {
+                    if self.light.answered(&ask, &result, &mut self.settings.pinned, &self.settings.node, now, time) {
+                        continue;
+                    }
+
                     self.send.answered(&ask, &result, &mut self.api);
 
                     match result {
@@ -250,6 +259,8 @@ impl Explorer {
                 }
             }
             Ask::Offer(_) | Ask::Submit(_) => {}
+            // The light client's own, which it took already.
+            Ask::Light | Ask::Headers { .. } | Ask::LightUpdate(_) | Ask::Justifications(_) | Ask::Proof { .. } => {}
         }
     }
 
@@ -348,10 +359,14 @@ impl Explorer {
             self.api.ask(Ask::Forks);
         }
 
+        if let Some(ask) = self.light.ask(time) {
+            self.api.ask(ask);
+        }
+
         let page = match &self.view {
             View::Mempool | View::Tx(_) => vec![Ask::Mempool],
             View::Finality => vec![Ask::Validators, Ask::Signers, Ask::Evidence],
-            View::Account(address) => vec![Ask::Account(address.clone())],
+            View::Account(address) => [Ask::Account(address.clone())].into_iter().chain(self.light.prove(address)).collect(),
             _ => Vec::new(),
         };
 
@@ -390,6 +405,18 @@ impl Explorer {
                 Streaming::Connecting => views::badge(ui, "connecting", views::SIDE),
                 _ => views::badge(ui, "polling", views::SIDE),
             }
+
+            let (text, color, hover) = match (&self.light.trouble, self.light.following()) {
+                (Some(trouble), _) => ("light: stopped", views::BAD, trouble.clone()),
+                (None, Some((tip, final_height))) if self.light.caught_up() => (
+                    "light: following",
+                    views::GOOD,
+                    format!("The light client checked every header to {tip}, and finality to {final_height}, trusting only the genesis it first saw at this node"),
+                ),
+                (None, Some((tip, _))) => ("light: catching up", views::SIDE, format!("{tip} headers checked so far")),
+                (None, None) => ("light: starting", views::SIDE, "Fetching the chain's light parameters".to_string()),
+            };
+            ui.scope(|ui| views::badge(ui, text, color)).response.on_hover_text(hover);
 
             ui.separator();
 
@@ -461,6 +488,7 @@ impl Explorer {
         let mut go = None;
         let mut ctx = Ctx {
             store: &self.store,
+            light: &mut self.light,
             api: &mut self.api,
             go: &mut go,
             settings: &mut self.settings,

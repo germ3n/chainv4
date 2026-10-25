@@ -4,6 +4,12 @@ A chain is its genesis. Every parameter it runs under is set there, and the gene
 `tx_root` is the hash of all of it, so nodes with different genesis are on different chains and
 never connect.
 
+The genesis block also commits to:
+- **Light clients' parameters:** its `proof_root` is the hash of `light_params()`, the chain's
+  hash, consensus and how its finality works. A [light client](light-client.md) holding only the
+  genesis id can then check them.
+- **The starting state:** its `state_root` is the root of the state genesis writes.
+
 `chainv4 genesis` writes the development settings as JSON to edit, and `chainv4 --genesis FILE`
 runs a node on a file. A file must name every field, and unknown fields are refused, so a
 misspelled parameter is an error rather than a silent default. Every node on a chain needs the

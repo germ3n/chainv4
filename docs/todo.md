@@ -201,10 +201,24 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   `receipts_root` a Merkle root over what its transactions did. Blocks with wrong roots are
   refused; `GET /proofs/{column}/{key}` and `GET /proofs/receipts/{id}` serve proofs that
   `StateProof::verify` and `crypto::merkle::verify` check.
-- [ ] **No snapshot sync.** A node still replays every block from genesis. The root lets it check a
-  snapshot of chain state it downloads instead, with `stored_root`, but nothing sends or takes one.
-- [ ] **No light client.** Proofs and headers are enough to check a value without the chain, but
-  nothing follows headers alone yet, and the explorer trusts its node.
+- [x] **Snapshot sync.** `--snapshot` checks every header peers have, walks a recent pivot's state
+  tree from them a part at a time, checking each part against the pivot's state root and skipping
+  what it holds already, and makes the pivot its tip. A pivot that grows too old moves up, and
+  the walk fetches only what changed.
+- [x] **A light client.** `chainv4::light` follows a chain from its genesis id alone: headers by
+  consensus, finality from justifications whose voters it proved from checkpoints' state, and
+  values and receipts by their proofs. `chainv4 light` and the explorer run it.
+- [ ] **Snapshot nodes cannot serve finality before their pivot.** They never ran the checkpoints
+  before it, so they have no light updates for them. Fetching those from peers along with the
+  state would let them serve light clients from genesis.
+- [ ] **Light clients start from genesis every time.** Nothing they checked is kept between runs,
+  and every header is fetched. Keeping the client's state, or starting from a finalized
+  checkpoint someone trusts, would save that.
+- [ ] **Snapshots come from one peer at a time,** and a pivot only stays servable for
+  `max_reorg_depth` blocks. Asking several peers at once, and frozen snapshots kept by serving
+  nodes, would suit large states.
+- [ ] **The explorer pins genesis on first use.** It should also take a genesis id to trust from
+  the person, before it meets a node.
 - [ ] **Proofs are against the tip only.** The node keeps one state tree, so it cannot prove what
   an older block's state held; keeping nodes by version, as Jellyfish trees do, would.
 - [ ] **`tx_root` is a flat hash.** A transaction's inclusion is proven through its receipt; a
@@ -307,3 +321,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 add encryption to wallets/keypairs when stored to disk (if passphrase was set/selected)
 add db migration system (upgrade/downgrade calls maybe?)
 maybe have to check the event log not indexing properly in explorer? maybe settings werent properly changed
+add fuzzing
+make consensus switchable (pow -> pos, etc)
+adjust fuel costs
+if we have something like hashable bytes in block header, for light node, we mmight be able to do a macro to auto-error if field was omitted? make fields ignorable, rest has to be used in code
+
+maybe make adjustable?/// come off in a reorg, yet recent enough for peers to serve: they keep undo records for the last
+/// max_reorg_depth blocks.
+pub(super) const PIVOT_DEPTH: u64 = 16;
+/// A chain shorter than this is synced by running its blocks: a snapshot would save nothing.
+pub(super) const MIN_SNAPSHOT_HEIGHT: u64 = 2 * PIVOT_DEPTH;

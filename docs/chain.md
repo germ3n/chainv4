@@ -133,6 +133,14 @@ holds nothing, when the path ends empty or at another entry's leaf. The API serv
 out the root from them alone, without the tree. Tests check it against every tip, reorgs
 included.
 
+**Leaves name their entries:** each leaf keeps its entry's column and key besides its path, so the
+tree can say which entries any subtree holds. That is what a node serving a snapshot sends, a
+subtree at a time (see [Node](node.md#syncing-from-a-snapshot)).
+
+**State at an older block:** `stored_state_at` rolls the main chain back by its undo records, on a
+throwaway layer, to a block within the last `max_reorg_depth`, for proofs and snapshots against
+that block's root.
+
 ## Running a transaction
 
 `execute` (`src/chain/execute.rs`) runs one transaction on its block's layer.
@@ -225,6 +233,10 @@ A producer runs every block twice: once to build it, once to import it.
 `Chain::build_on` builds on any stored block instead, the tip or one on a side branch, in the
 state at the end of that block. It works that state out on a throwaway layer the way a reorg
 would: it rolls the main chain back to where the branch splits off, then runs the branch.
+
+**Headers** of every block are also stored on their own (`Headers`), which is all a node that
+synced from a snapshot has for the blocks before its pivot. Finality reads headers alone, so it
+checks old checkpoints on such a node too.
 
 ## Fork choice
 

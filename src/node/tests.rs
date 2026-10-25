@@ -771,3 +771,115 @@ fn the_report_counts_what_peers_sent_and_shows_what_waits() {
     );
     assert!(node.report(SLOT * 2, 0).txs.is_empty());
 }
+
+#[test]
+fn a_new_node_syncs_from_a_snapshot_and_runs_only_the_blocks_after_it() {
+    use crate::db::stored_root;
+    use super::snapshot::PIVOT_DEPTH;
+
+    let (mut producer, mut producer_net) = node(true);
+    let authority = DevAuthority::dev_keypair();
+    let blocks = 60;
+    let mut paid = Vec::new();
+
+    // Transfers to new accounts along the way, so the state is worth taking.
+    for slot in 1..=blocks {
+        if slot % 2 == 0 {
+            let to = Keypair::generate(authority.public().key_type()).unwrap().public().address();
+            let tx = Tx::Transfer {
+                from: authority.public().address(),
+                to,
+                amount: Amount::U128(u128::from(slot)),
+            };
+            producer.submit(SignedTx::sign(tx, slot / 2 - 1, FeeOffer::NONE, &authority)).unwrap();
+            paid.push((to, slot));
+        }
+
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    sent(&mut producer_net);
+    let (mut late, mut late_net) = node(false);
+
+    assert!(late.sync_from_snapshot().unwrap());
+
+    let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
+    late_net.events.send(NetEvent::PeerUp { peer: producer_peer, address: Multiaddr::empty() }).unwrap();
+    late.step(SLOT * blocks).unwrap();
+    relay(
+        Side { node: &mut late, net: &mut late_net, peer: late_peer },
+        Side { node: &mut producer, net: &mut producer_net, peer: producer_peer },
+        SLOT * blocks,
+    );
+    let pivot = blocks - PIVOT_DEPTH;
+
+    assert_eq!(late.chain().tip().id(), producer.chain().tip().id(), "it ran the blocks after the pivot");
+    assert_eq!(late.chain().snapshot(), Some(pivot));
+    assert_eq!(stored_root(&**late.chain().db(), late.chain().hash()).unwrap(), late.chain().tip().state_root);
+
+    for (to, amount) in &paid {
+        assert_eq!(Accounts::new(&late.chain().state()).get(to).unwrap().balance, u256::new(u128::from(*amount)));
+    }
+
+    // It never ran the blocks before the pivot: it keeps their headers only.
+    assert!(late.chain().block_at(pivot - 1).unwrap().is_none());
+    assert!(late.chain().block_at(pivot).unwrap().is_some());
+    assert_eq!(late.chain().headers_from(1, 1_000).unwrap().len() as u64, blocks);
+}
+
+#[test]
+fn a_snapshot_whose_pivot_grows_too_old_moves_it_up_and_fetches_only_what_changed() {
+    let authority = DevAuthority::dev_keypair();
+    // Undo records for 20 blocks only, so peers serve state 20 blocks back at most.
+    let genesis = Genesis {
+        fees: None,
+        max_reorg_depth: 20,
+        ..Genesis::dev_authority(authority.public())
+    };
+    let start = |produce: bool| {
+        let producer = produce.then(|| Box::new(AuthorityProducer::new(authority.clone(), SLOT)) as Box<dyn Producer>);
+        let (link, fake) = NetLink::pair();
+
+        (Node::new(Arc::new(MemoryDb::default()), &genesis, producer, link).unwrap(), fake)
+    };
+    let (mut producer, mut producer_net) = start(true);
+    let (mut late, mut late_net) = start(false);
+
+    for slot in 1..=60 {
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    sent(&mut producer_net);
+    assert!(late.sync_from_snapshot().unwrap());
+    let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
+    late_net.events.send(NetEvent::PeerUp { peer: producer_peer, address: Multiaddr::empty() }).unwrap();
+    late.step(SLOT * 60).unwrap();
+
+    // Headers first; then the chain runs on 30 blocks before any state is asked for.
+    while late.sync.snapshot.as_ref().is_some_and(|snapshot| snapshot.stage().starts_with("checking headers")) {
+        let mut other = Vec::new();
+        let moved = pass(
+            &mut Side { node: &mut late, net: &mut late_net, peer: late_peer },
+            &mut Side { node: &mut producer, net: &mut producer_net, peer: producer_peer },
+            SLOT * 60,
+            &mut other,
+        );
+        assert!(moved, "it keeps asking until it picks a pivot");
+    }
+
+    assert_eq!(late.sync.snapshot.as_ref().unwrap().stage(), "taking state at height 50, 0 entries so far");
+
+    for slot in 61..=90 {
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    sent(&mut producer_net);
+    relay(
+        Side { node: &mut late, net: &mut late_net, peer: late_peer },
+        Side { node: &mut producer, net: &mut producer_net, peer: producer_peer },
+        SLOT * 90,
+    );
+
+    assert_eq!(late.chain().snapshot(), Some(80), "the pivot moved up, 10 below the new tip");
+    assert_eq!(late.chain().tip().id(), producer.chain().tip().id());
+}

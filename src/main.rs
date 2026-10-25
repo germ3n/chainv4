@@ -29,6 +29,10 @@ enum Command {
     /// Shows the storage layout contract code declares, and with --from, checks it keeps an
     /// older version's, as an upgrade or a proxy repointing would.
     Layout(cli::LayoutArgs),
+    /// A light client: follows a node's chain from the genesis it trusts alone, checking every
+    /// header and justification, and answers only with what it proved.
+    #[cfg(feature = "client")]
+    Light(cli::LightArgs),
 }
 
 #[cfg(feature = "node")]
@@ -103,6 +107,11 @@ struct NodeArgs {
     /// database keeps it on, keeping the same blocks until told otherwise; off deletes it.
     #[arg(long, value_name = "FROM", num_args = 0..=1, require_equals = true, default_missing_value = "genesis")]
     index_events: Option<IndexEvents>,
+    /// On a database that holds only genesis, sync from a snapshot: check every header peers have,
+    /// take the state of a block 16 below the best tip from them, and run only the blocks after
+    /// it. The node then keeps headers alone for the blocks before it.
+    #[arg(long)]
+    snapshot: bool,
 }
 
 /// How many events a slow /stream client may fall behind by before it misses some.
@@ -125,6 +134,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Send(args)) => cli::send(*args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
         Some(Command::Layout(args)) => cli::layout(args),
+        #[cfg(feature = "client")]
+        Some(Command::Light(args)) => cli::light(args),
         None => run(cli.node),
     };
 
@@ -208,6 +219,13 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         (ConsensusConfig::ProofOfWork(_), _, true) => return Err("--produce needs an authority chain".into()),
     };
     let mut node = Node::new(db.clone(), &genesis, producer, net)?;
+
+    if args.snapshot {
+        match node.sync_from_snapshot()? {
+            true => log::info!("[node] syncing from a snapshot"),
+            false => log::info!("[node] the database holds more than genesis already: syncing as usual, not from a snapshot"),
+        }
+    }
 
     if args.validate {
         if !genesis.finality.as_ref().is_some_and(chain::FinalityConfig::votes) {

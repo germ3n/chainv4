@@ -281,8 +281,8 @@ fn unindex(layer: &State, height: u64, index: u32, events: &[Event]) {
 /// Moves the index's low end a step toward where it keeps, in one commit: indexing the blocks
 /// below it newest first, or dropping its oldest. Only blocks up to the tip are read; above it
 /// there is nothing to index or drop.
-pub(super) fn catch_up(db: &Arc<dyn Database>, hash: HashType, index: EventIndex, tip: u64) -> Result<u64, DbError> {
-    let lowest = index.keep.lowest(tip);
+pub(super) fn catch_up(db: &Arc<dyn Database>, hash: HashType, index: EventIndex, tip: u64, floor: u64) -> Result<u64, DbError> {
+    let lowest = index.keep.lowest(tip).max(floor);
     let state = Arc::new(State::new(db.clone()));
     let (mut from, mut blocks, mut txs) = (index.from, 0, 0);
 

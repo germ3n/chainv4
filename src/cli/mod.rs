@@ -18,10 +18,14 @@ use {
 pub mod genesis;
 mod layout;
 #[cfg(feature = "client")]
+mod light;
+#[cfg(feature = "client")]
 mod send;
 
 pub use layout::{LayoutArgs, layout};
 
+#[cfg(feature = "client")]
+pub use light::{LightArgs, light};
 #[cfg(feature = "client")]
 pub use send::{SendArgs, TxArgs, send};
 

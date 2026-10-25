@@ -7,6 +7,7 @@ pub mod code;
 pub mod event;
 pub mod hash;
 pub mod hex;
+pub mod receipt;
 pub mod trace;
 pub mod u256;
 pub mod vote;

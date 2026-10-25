@@ -6,8 +6,11 @@ use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
         Coin, EventFilter, FinalityConfig, Fees, Genesis, stored_event_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
-        stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt,
+        stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
+        stored_light_update, stored_state_at,
     },
+    crate::crypto::hashable::Hashable,
+    crate::light::{LightParams, MAX_LIGHT_HEADERS},
     crate::crypto::merkle,
     crate::crypto::keypair::PublicKey,
     crate::registry::signers::{Approval, SignerSet, Signers},
@@ -95,6 +98,8 @@ struct Api {
     cors: Arc<Vec<String>>,
     /// A built explorer web app, served from /.
     explorer: Option<Arc<PathBuf>>,
+    /// What light clients need to follow the chain.
+    light: Arc<LightParams>,
 }
 
 #[document(
@@ -132,6 +137,7 @@ pub fn start(
     options: ApiOptions,
 ) -> std::io::Result<SocketAddr> {
     let finality = genesis.finality.clone().map(Arc::new);
+    let light = Arc::new(genesis.light_params());
     let fees = genesis.fees.as_ref().map(|config| Arc::new(config.build()));
     let (hash, tx_fuel, coin, limits) = (genesis.hash, genesis.tx_limits.fuel, genesis.coin.clone(), genesis.tx_limits);
     let token_functions = genesis.token_functions.clone().into();
@@ -166,6 +172,7 @@ pub fn start(
                     limits,
                     cors: Arc::new(options.cors),
                     explorer: options.explorer.map(Arc::new),
+                    light,
                 })).await {
                     log::error!("[http] {err}");
                 }
@@ -183,6 +190,10 @@ fn router(api: Api) -> Router {
         .route("/blocks/{block}", get(block))
         .route("/accounts/{address}", get(account))
         .route("/contracts/{address}", get(contract))
+        .route("/light", get(light))
+        .route("/light/updates/{block}", get(light_update))
+        .route("/headers", get(headers))
+        .route("/justifications", get(justifications))
         .route("/proofs/receipts/{id}", get(receipt_proof))
         .route("/proofs/{column}/{key}", get(state_proof))
         .route("/txs", post(submit))
@@ -512,7 +523,11 @@ async fn blocks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
     let mut summaries = Vec::new();
 
     for height in (first..before).rev() {
-        summaries.push(json::summary(&at_height(&*db, height)?));
+        summaries.push(match stored_block_at(&*db, height)? {
+            Some(block) => json::summary(&block),
+            // Before the snapshot this node synced from, it keeps headers alone.
+            None => json::pruned(&stored_header_at(&*db, height)?.ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("no block at height {height}"))))?),
+        });
     }
 
     Ok(Json(json!({
@@ -523,19 +538,24 @@ async fn blocks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
 
 async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
     let (db, hash) = (api.db, api.hash);
-    let found = if block == "latest" {
-        tip(&*db)?
+    let (found, header) = if block == "latest" {
+        (Some(tip(&*db)?), None)
     } else if block.starts_with("0x") {
         let id = block_id(&block, hash)?;
 
-        stored_block(&*db, &id)?.ok_or_else(|| ApiError::NotFound(format!("no block {id}")))?
+        (stored_block(&*db, &id)?, stored_header(&*db, &id)?)
     } else {
         let height = block
             .parse()
             .map_err(|_| ApiError::BadRequest(format!("not a height or a block id: {block}")))?;
 
-        stored_block_at(&*db, height)?
-            .ok_or_else(|| ApiError::NotFound(format!("no block at height {height}")))?
+        (stored_block_at(&*db, height)?, stored_header_at(&*db, height)?)
+    };
+    let found = match (found, header) {
+        (Some(found), _) => found,
+        // Before the snapshot this node synced from, it keeps headers alone.
+        (None, Some(sealed)) => return Ok(Json(json::pruned(&sealed))),
+        (None, None) => return Err(ApiError::NotFound(format!("no block {block}"))),
     };
 
     let id = found.id();
@@ -673,8 +693,83 @@ async fn contract(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
 /// How many times a proof is read again when the node committed a block while it was being read.
 const PROOF_TRIES: usize = 3;
 
-/// A proof of one chain-state entry, or of its absence, against the tip's state root.
-async fn state_proof(Shared(api): Shared<Api>, Path((column, key)): Path<(String, String)>) -> Answer {
+/// What a light client starts from: the chain's light parameters and its genesis header, encoded,
+/// for it to check against the genesis id it trusts.
+async fn light(Shared(api): Shared<Api>) -> Answer {
+    let genesis = stored_header_at(&*api.db, 0)?.ok_or_else(|| ApiError::NotFound("the chain has no genesis yet".to_string()))?;
+
+    Ok(Json(json!({
+        "genesis": genesis.id().to_string(),
+        "params": to_hex(&api.light.hashable_bytes_with_tag()),
+        "header": to_hex(&genesis.hashable_bytes_with_tag()),
+    })))
+}
+
+/// Main-chain headers with their seals, encoded, from ?from= on, at most ?count=.
+async fn headers(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let from = number(&query, "from")?.unwrap_or(1);
+    let count = number(&query, "count")?.unwrap_or(u64::from(MAX_LIGHT_HEADERS)).min(u64::from(MAX_LIGHT_HEADERS));
+    let mut headers = Vec::new();
+
+    for height in from..from.saturating_add(count) {
+        match stored_header_at(&*api.db, height)? {
+            Some(sealed) => headers.push(to_hex(&sealed.hashable_bytes_with_tag())),
+            None => break,
+        }
+    }
+
+    Ok(Json(json!({ "headers": headers })))
+}
+
+/// The light update a block keeps, encoded: proofs of the voters genesis or a checkpoint fixed.
+async fn light_update(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
+    let block = block_id(&block, api.hash)?;
+    let update = stored_light_update(&*api.db, &block)?
+        .ok_or_else(|| ApiError::NotFound(format!("block {block} keeps no light update")))?;
+
+    Ok(Json(json!({ "update": to_hex(&update.hashable_bytes_with_tag()) })))
+}
+
+/// The justifications this node holds for main-chain checkpoints from ?from= on, encoded, at most
+/// ?count=, under the kinds of finality that vote.
+async fn justifications(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let interval = api
+        .light
+        .finality
+        .and_then(|finality| finality.checkpoint_interval())
+        .ok_or_else(|| ApiError::NotFound("this chain's finality does not vote".to_string()))?;
+    let from = number(&query, "from")?.unwrap_or(1).max(1);
+    let count = number(&query, "count")?.unwrap_or(MAX_PROOF_JUSTIFICATIONS).min(MAX_PROOF_JUSTIFICATIONS);
+    let top = tip(&*api.db)?.header.height;
+    let mut found = Vec::new();
+
+    for epoch in from..from.saturating_add(count) {
+        let Some(height) = epoch.checked_mul(interval).filter(|height| *height <= top) else {
+            break;
+        };
+        let Some(sealed) = stored_header_at(&*api.db, height)? else {
+            break;
+        };
+
+        match stored_justification(&*api.db, &sealed.id())? {
+            Some(justification) => found.push(to_hex(&justification.hashable_bytes_with_tag())),
+            None => break,
+        }
+    }
+
+    Ok(Json(json!({ "justifications": found })))
+}
+
+/// The most justifications one request answers.
+const MAX_PROOF_JUSTIFICATIONS: u64 = 64;
+
+/// A proof of one chain-state entry, or of its absence, against the state root of the tip, or of
+/// the recent main-chain block ?block= names.
+async fn state_proof(
+    Shared(api): Shared<Api>,
+    Path((column, key)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Answer {
     let named = column;
     let column = STATE_COLUMNS.into_iter().find(|column| column.name() == named).ok_or_else(|| {
         let names: Vec<&str> = STATE_COLUMNS.iter().map(|column| column.name()).collect();
@@ -683,16 +778,31 @@ async fn state_proof(Shared(api): Shared<Api>, Path((column, key)): Path<(String
     })?;
     let key = from_hex(&key).ok_or_else(|| ApiError::BadRequest(format!("the key is not hex: {key}")))?;
 
+    let at = query.get("block").map(|block| block_id(block, api.hash)).transpose()?;
+
     for _ in 0..PROOF_TRIES {
-        let state = State::new(api.db.clone());
-        let tip = tip(&*api.db)?;
+        let (state, sealed) = match at {
+            None => {
+                let tip = tip(&*api.db)?;
+
+                (Arc::new(State::new(api.db.clone())), tip.sealed_header())
+            }
+            Some(block) => {
+                let state = stored_state_at(api.db.clone(), &block)?.ok_or_else(|| {
+                    ApiError::NotFound(format!("block {block} is not on the main chain, or older than this node can prove at"))
+                })?;
+                let sealed = stored_header(&*api.db, &block)?.ok_or_else(|| ApiError::NotFound(format!("no block {block}")))?;
+
+                (state, sealed)
+            }
+        };
         let value = state.get(column, &key)?;
         let proof = StateTree::new(&state, api.hash).prove(column, &key)?;
 
         // A block committed while this was read mixes two trees, so the proof fails to check:
         // read it again.
-        if proof.verify(&tip.header.state_root, column, &key, value.as_deref()) {
-            return Ok(Json(json::state_proof(&tip, column, &key, value.as_deref(), &proof)));
+        if proof.verify(&sealed.header.state_root, column, &key, value.as_deref()) {
+            return Ok(Json(json::state_proof(&sealed, column, &key, value.as_deref(), &proof)));
         }
     }
 
@@ -769,7 +879,7 @@ async fn submit(Shared(api): Shared<Api>, body: Bytes) -> Result<(StatusCode, Js
             | MempoolError::PriceTooLow
             | MempoolError::CannotPay => ApiError::BadRequest(err.to_string()),
             MempoolError::Stale | MempoolError::Duplicate => ApiError::Conflict(err.to_string()),
-            MempoolError::Full => ApiError::Unavailable(err.to_string()),
+            MempoolError::Full | MempoolError::Syncing => ApiError::Unavailable(err.to_string()),
             MempoolError::Db(err) => ApiError::Db(err),
         }),
         Err(err @ (SubmitError::Stopped | SubmitError::Busy)) => Err(ApiError::Unavailable(err.to_string())),

@@ -201,8 +201,58 @@ A node catches up from its peers on its own (`src/node/sync.rs`).
 | `Status` | Its genesis, tip, height, work and justified epoch. |
 | `Blocks { from, count }` | Up to 128 consecutive main-chain blocks. |
 | `Justifications { from, count }` | Up to 64 justifications for main-chain checkpoints, oldest first. |
+| `Headers { from, count }` | Up to 1,024 consecutive main-chain headers with their seals. |
+| `State { block, depth, prefix }` | One position of the state tree at a recent main-chain block: its entries, at most 512, or its two halves' hashes. `None` for a block it cannot serve. |
 
 Kinds of finality that take no votes never ask for justifications.
+
+## Syncing from a snapshot
+
+`--snapshot` makes a node with a fresh database take the chain's state from its peers rather
+than run every block from genesis (`src/node/snapshot.rs`). It checks every header, takes the
+state of one recent block, the pivot, checking it against that block's state root, and makes it
+the tip. Then it syncs the rest as usual.
+
+1. **Headers.** It asks the heaviest peer for its headers, 1,024 at a time, and checks each by
+   consensus: that it follows its parent, its producer, timing, difficulty and seal. It adds up
+   total work as it goes. When a batch does not link, the peer's chain split off earlier, so it
+   steps a batch back.
+2. **The pivot.** Once a peer has no more, the pivot is the block `PIVOT_DEPTH` (16) below the
+   last header, or half `max_reorg_depth` below when that is less. Deep enough not to come off in
+   a reorg, and recent enough for peers to serve: they rebuild state at any of their last
+   `max_reorg_depth` blocks from undo records. A chain shorter than `MIN_SNAPSHOT_HEIGHT` (32) is
+   synced by running its blocks instead.
+3. **State.** It walks the pivot's state tree down from the root (`SnapshotWalk`), a position at a
+   time:
+   - **What it gets:** a peer answers with the position's entries, when there are at most 512, or
+     else with its two halves' hashes, to ask for one at a time.
+   - **Checked first:** every part is checked against the pivot's state root before it is kept.
+     Its entries must sit under the position and hash, with the siblings, up to the root. A peer
+     that sends one that does not is never asked again.
+   - **Skipping:** any subtree whose hash matches what the node holds already is skipped.
+4. **Moving the pivot.** If a peer can no longer serve the pivot, because the chain moved more than
+   `max_reorg_depth` past it, the node fetches the headers since, picks a newer pivot and walks
+   again. The walk skips every subtree that did not change, so it only fetches what did. After 8
+   moves it gives up on the snapshot and syncs by running blocks.
+5. **Installing.** Once the tree is the pivot's, it fetches the pivot block itself, checks its
+   body against the header, and makes it the tip (`Chain::install_snapshot`):
+   - it stores every header below it, with the main chain's heights and the pivot's total work;
+   - it records the pivot in `Meta`;
+   - it asks every peer for its status again, since what they said may be from before the pivot
+     moved.
+6. **The rest.** From there it syncs blocks from the pivot on as usual, and justifications from
+   genesis on, which it checks against the headers and the voters in its state.
+
+**While it takes state,** its state is half the pivot's. So it imports, produces, votes on and
+admits nothing: gossip is ignored, submitted transactions answer `Syncing` (503), and it serves
+no state of its own.
+
+**Afterwards,** it keeps headers alone for the blocks before the pivot:
+- the API shows them marked `pruned`, and the node cannot serve their bodies to peers;
+- it never rolls back past the pivot;
+- its event index reaches back to the block after it, since it has no receipts before;
+- it has no light updates before it, so light clients following finality from genesis need
+  another node.
 
 ## What to keep in mind
 
@@ -211,8 +261,10 @@ Kinds of finality that take no votes never ask for justifications.
   floods of requests. Floods of transactions and votes are bounded by the
   [backlog](#the-gossip-backlog), which disconnects a peer that keeps going over its share, but
   there is no peer scoring or banning yet.
-- **Sync uses one peer at a time,** and blocks gossiped ahead of the tip are dropped and fetched
-  again by sync.
+- **Sync uses one peer at a time,** snapshots included, and blocks gossiped ahead of the tip are
+  dropped and fetched again by sync.
+- **A snapshot node keeps no history before its pivot:** headers only, no bodies, receipts,
+  events or light updates (see [Syncing from a snapshot](#syncing-from-a-snapshot)).
 - **No graceful shutdown.** Ctrl-C stops the process mid-loop; commits are atomic, so data is
   safe.
 - **No NAT traversal,** and no limits on connections or requests.

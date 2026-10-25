@@ -45,6 +45,8 @@ pub enum MempoolError {
     PriceTooLow,
     #[document(summary = "The sender cannot cover its gas limit at its max price.")]
     CannotPay,
+    #[document(summary = "The node is still taking its state from a snapshot, so it cannot check transactions yet.")]
+    Syncing,
     #[document(summary = "The database failed.")]
     Db(DbError),
 }
@@ -59,6 +61,7 @@ impl fmt::Display for MempoolError {
             MempoolError::BadGasLimit => write!(f, "gas limit under its intrinsic cost, or over the block gas limit"),
             MempoolError::PriceTooLow => write!(f, "max price under the least base price"),
             MempoolError::CannotPay => write!(f, "the sender cannot pay for its gas limit"),
+            MempoolError::Syncing => write!(f, "the node is still syncing its state from a snapshot"),
             MempoolError::Db(err) => write!(f, "{err}"),
         }
     }

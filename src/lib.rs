@@ -7,10 +7,10 @@ pub mod api;
 pub mod chain;
 #[cfg(feature = "node")]
 pub mod cli;
-#[cfg(feature = "node")]
 pub mod consensus;
 pub mod crypto;
 pub mod db;
+pub mod light;
 #[cfg(feature = "node")]
 pub mod mempool;
 #[cfg(feature = "node")]

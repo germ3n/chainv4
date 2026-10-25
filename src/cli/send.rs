@@ -180,11 +180,7 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     let keypair = signer(args.key.as_deref())?;
     let sender = keypair.public().address();
     let node = args.node.trim_end_matches('/');
-    let agent: Agent = Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into();
+    let agent = agent();
     let account = ok(agent.get(format!("{node}/accounts/{sender}")).call())?;
     let nonce = account["nonce"].as_u64().ok_or("the node sent no nonce")?;
     let status = ok(agent.get(format!("{node}/status")).call())?;
@@ -452,6 +448,15 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
 type Response = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
 
+/// A client for a node's API: errors come back as answers, so their message can be shown.
+pub(super) fn agent() -> Agent {
+    Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into()
+}
+
 /// The JSON a request came back with, or the node's error.
 pub(super) fn ok(response: Response) -> CliResult<Value> {
     match fetch(response)? {
@@ -461,7 +466,7 @@ pub(super) fn ok(response: Response) -> CliResult<Value> {
 }
 
 /// The status and JSON a request came back with, whatever the status.
-fn fetch(response: Response) -> CliResult<(u16, Value)> {
+pub(super) fn fetch(response: Response) -> CliResult<(u16, Value)> {
     let mut response = response.map_err(|err| format!("cannot reach the node: {err}"))?;
     let status = response.status().as_u16();
     let text = response.body_mut().read_to_string()?;

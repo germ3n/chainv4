@@ -182,14 +182,9 @@ impl Electorate for Staked {
     /// Two thirds of the bonded weight: the smallest weight w with 3w >= 2 total, and never
     /// nothing, so an empty set justifies nothing.
     fn voters(&self, state: &State, epoch: u64) -> Result<Option<Voters>, DbError> {
-        Ok(Validators::new(state).set(epoch)?.map(|set| {
-            let (two, three) = (u256::from(2u64), u256::from(3u64));
-            let needed = set.total().saturating_mul(two).saturating_add(two) / three;
-
-            Voters {
-                set,
-                needed: needed.max(u256::ONE),
-            }
+        Ok(Validators::new(state).set(epoch)?.map(|set| Voters {
+            needed: set.two_thirds(),
+            set,
         }))
     }
 

@@ -8,6 +8,7 @@ use crate::structs::amount::Amount;
 use crate::structs::code::{Code, Engine};
 use crate::structs::tx::{FeeOffer, Tx, TxCallArgumentType};
 use crate::vm::selector;
+use crate::structs::block::SealedHeader;
 
 const SLOT: u64 = 2_000;
 
@@ -1226,4 +1227,58 @@ fn reorgs_take_the_state_tree_along() {
     assert!(matches!(chain.import(&a3, LATER), Ok(Imported::Reorganized { .. })));
     roots_hold(&chain);
     assert_eq!(balance(&chain, &bob), u256::new(10));
+}
+
+#[test]
+fn a_light_client_follows_proof_of_work_through_a_reorg() {
+    use crate::light::{Extended, LightClient, LightRequest};
+
+    let mut chain = Chain::open(Arc::new(MemoryDb::default()), &pow_genesis()).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let headers_from = |chain: &Chain, from: u64| -> Vec<SealedHeader> {
+        (from..).map_while(|height| stored_header_at(&*chain.db, height).unwrap()).collect()
+    };
+    let mut client = LightClient::new(pow_genesis().light_params(), genesis.sealed_header(), chain.genesis()).unwrap();
+    let follow = |chain: &Chain, client: &mut LightClient| {
+        let mut outcomes = Vec::new();
+
+        while let Some(LightRequest::Headers { from, .. }) = client.next() {
+            outcomes.push(client.deliver_headers(from, headers_from(chain, from), LATER).unwrap());
+        }
+
+        outcomes
+    };
+
+    let a1 = mine_on(&chain, &genesis, Vec::new(), Address::Ed25519([1; 32]));
+    extended(chain.import(&a1, LATER));
+    let a2 = mine_on(&chain, &a1, Vec::new(), Address::Ed25519([1; 32]));
+    extended(chain.import(&a2, LATER));
+    follow(&chain, &mut client);
+
+    assert_eq!(client.tip().id(), a2.id());
+
+    // A heavier branch from genesis takes over; the client finds where it splits and follows it.
+    let mut branch = genesis.clone();
+
+    for _ in 0..3 {
+        branch = mine_on(&chain, &branch, Vec::new(), Address::Ed25519([2; 32]));
+        chain.import(&branch, LATER).unwrap();
+    }
+
+    client.refresh();
+    let outcomes = follow(&chain, &mut client);
+
+    assert_eq!(chain.tip().id(), branch.id());
+    assert_eq!(client.tip().id(), branch.id());
+    assert_eq!(outcomes[..2], [Extended::Unlinked, Extended::Switched(1)]);
+
+    // A header consensus refuses is refused: here, one declaring a difficulty its parent does not
+    // make it.
+    let mut forged = stored_header_at(&*chain.db, 3).unwrap().unwrap();
+    forged.header.difficulty += 1;
+    let mut fresh = LightClient::new(pow_genesis().light_params(), genesis.sealed_header(), chain.genesis()).unwrap();
+    let mut headers = headers_from(&chain, 1);
+    headers[2] = forged;
+
+    assert!(matches!(fresh.deliver_headers(1, headers, LATER), Err(crate::light::LightError::BadHeader { height: 3, .. })));
 }

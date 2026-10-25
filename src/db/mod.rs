@@ -16,12 +16,14 @@ use {
 mod memory;
 #[cfg(feature = "rocksdb")]
 mod rocksdb;
+mod snapshot;
 mod tree;
 
 pub use self::memory::MemoryDb;
 #[cfg(feature = "rocksdb")]
 pub use self::rocksdb::RocksDb;
-pub use self::tree::{Path, STATE_COLUMNS, StateProof, StateTree, root_of, state_path, stored_root};
+pub use self::snapshot::{SnapshotWalk, WalkError};
+pub use self::tree::{PartContents, Path, STATE_COLUMNS, StateEntry, StatePart, StateProof, StateTree, root_of, state_path, stored_root};
 
 #[document(
     summary = "Where a record lives. A backend keeps each column apart: RocksDb as column families, MemoryDb as part of the key.",
@@ -79,6 +81,12 @@ pub enum Column {
     #[document(summary = "The state tree's nodes, by depth and the path bits above them: what the state root in each header is the root of. Kept in step with the chain-state columns, block by block.")]
     #[wincode(tag = 15)]
     StateTree,
+    #[document(summary = "Every stored block's header and seal, by block id: a node that synced from a snapshot keeps these for the blocks before it, whose bodies it never had.")]
+    #[wincode(tag = 16)]
+    Headers,
+    #[document(summary = "What light clients need to follow finality, by checkpoint block id: proofs, against the block's state root, of the voters it fixed for a later epoch.")]
+    #[wincode(tag = 17)]
+    Light,
 }
 
 impl Hashable for Column {
@@ -86,7 +94,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 16] = [
+    pub const ALL: [Column; 18] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -103,6 +111,8 @@ impl Column {
         Column::Tokens,
         Column::Namespaces,
         Column::StateTree,
+        Column::Headers,
+        Column::Light,
     ];
 
     #[document(
@@ -127,6 +137,8 @@ impl Column {
             Column::Tokens => "tokens",
             Column::Namespaces => "namespaces",
             Column::StateTree => "state_tree",
+            Column::Headers => "headers",
+            Column::Light => "light",
         }
     }
 }

@@ -1066,6 +1066,89 @@ mod voting {
         assert_eq!(chain.finalized().unwrap().epoch, 1);
         assert!(chain.unpaid_proofs().unwrap().is_empty());
     }
+
+    /// What a node serves a light client, read from a chain's database.
+    fn serve(chain: &Chain, client: &mut crate::light::LightClient) {
+        use crate::light::LightRequest;
+
+        while let Some(request) = client.next() {
+            match request {
+                LightRequest::Headers { from, count } => {
+                    let headers = (from..from + u64::from(count)).map_while(|height| stored_header_at(&*chain.db, height).unwrap()).collect();
+                    client.deliver_headers(from, headers, LATER).unwrap();
+                }
+                LightRequest::Update { block } => client.take_update(&block, stored_light_update(&*chain.db, &block).unwrap()).unwrap(),
+                LightRequest::Justifications { from } => {
+                    client.deliver_justifications(&chain.justifications_from(from, 64).unwrap()).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_light_client_follows_headers_and_finality_from_the_genesis_id_alone() {
+        use crate::light::{LightClient, LightError};
+
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            finalize_through(&mut chain, 5);
+            let params = genesis_with(Some(finality.clone())).light_params();
+            let genesis = stored_header_at(&*chain.db, 0).unwrap().unwrap();
+            let mut client = LightClient::new(params.clone(), genesis.clone(), chain.genesis()).unwrap();
+            serve(&chain, &mut client);
+
+            assert_eq!(client.tip().id(), chain.tip().id(), "{}", finality.name());
+            assert_eq!(Some(client.justified()), chain.justified());
+            assert_eq!(Some(client.finalized()), chain.finalized());
+            assert!(client.finalized().epoch >= 4);
+
+            // A value proven at the finalized checkpoint is final; at the tip it is not, yet.
+            let who = dev().public().address();
+            let key = crate::db::address_key(&who);
+            let finalized = client.finalized().block;
+            let at = |block: &Hash| {
+                let state = chain.state_at(block).unwrap();
+                let value = state.get(Column::Accounts, &key).unwrap();
+                let proof = StateTree::new(&state, chain.hash()).prove(Column::Accounts, &key).unwrap();
+
+                (value, proof)
+            };
+            let (value, proof) = at(&finalized);
+
+            assert!(client.check_state(&finalized, Column::Accounts, &key, value.as_deref(), &proof).unwrap().final_);
+            let (value, proof) = at(&chain.tip().id());
+            assert!(!client.check_state(&chain.tip().id(), Column::Accounts, &key, value.as_deref(), &proof).unwrap().final_);
+            assert_eq!(client.check_state(&chain.tip().id(), Column::Accounts, &key, None, &proof), Err(LightError::BadProof));
+
+            // It keeps following as the chain goes on.
+            finalize_through(&mut chain, 7);
+            client.refresh();
+            serve(&chain, &mut client);
+
+            assert_eq!(Some(client.finalized()), chain.finalized());
+
+            // It trusts nothing it cannot check.
+            let mut forged = params.clone();
+            forged.hash = HashType::default_chain();
+            forged.finality = None;
+
+            assert_eq!(LightClient::new(params.clone(), genesis.clone(), Hash::zero(chain.hash())).err(), Some(LightError::WrongGenesis));
+            assert_eq!(LightClient::new(forged, genesis.clone(), chain.genesis()).err(), Some(LightError::WrongParams));
+
+            let mut fresh = LightClient::new(params, genesis, chain.genesis()).unwrap();
+            let headers: Vec<_> = (1..=chain.tip().height).map(|height| stored_header_at(&*chain.db, height).unwrap().unwrap()).collect();
+            fresh.deliver_headers(1, headers, LATER).unwrap();
+            fresh.take_update(&chain.genesis(), stored_light_update(&*chain.db, &chain.genesis()).unwrap()).unwrap();
+            let mut short = chain.justifications_from(1, 1).unwrap();
+            short[0].votes.truncate(1);
+
+            assert_eq!(fresh.deliver_justifications(&short), Err(LightError::BadJustification("its votes fall short")));
+
+            let later = chain.block_at(2 * INTERVAL).unwrap().unwrap().id();
+
+            assert_eq!(fresh.take_update(&later, stored_light_update(&*chain.db, &later).unwrap()), Err(LightError::Untrusted), "not justified yet");
+        }
+    }
 }
 
 #[test]

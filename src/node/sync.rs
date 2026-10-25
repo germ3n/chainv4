@@ -8,6 +8,7 @@
 //! justification for the justifications it lacks, which may in turn finalize checkpoints here.
 
 use {
+    super::snapshot::SnapshotSync,
     super::{Node, NodeError},
     crate::chain::{FinalityError, ImportError},
     crate::net::{MAX_SYNC_BLOCKS, MAX_SYNC_JUSTIFICATIONS, NetCommand, SyncRequest, SyncResponse},
@@ -21,16 +22,18 @@ use {
 #[derive(Default)]
 pub(super) struct SyncState {
     /// What each peer on this chain said about its main chain.
-    peers: HashMap<PeerId, PeerChain>,
+    pub(super) peers: HashMap<PeerId, PeerChain>,
+    /// Where taking a snapshot stands, while this node syncs from one.
+    pub(super) snapshot: Option<SnapshotSync>,
     /// The peer asked for blocks, and the height asked from, while its answer is outstanding.
     asking: Option<(PeerId, u64)>,
     /// The peer asked for justifications, while its answer is outstanding.
     asking_proofs: Option<PeerId>,
 }
 
-struct PeerChain {
-    height: u64,
-    work: u256,
+pub(super) struct PeerChain {
+    pub(super) height: u64,
+    pub(super) work: u256,
     /// The epoch of its latest justified checkpoint.
     justified: u64,
     /// Where to ask from next; None to start just past what both chains have.
@@ -52,7 +55,7 @@ impl SyncState {
 
 impl Node {
     /// A peer left, or failed to answer: stop counting on it.
-    pub(super) fn peer_failed(&mut self, peer: PeerId) {
+    pub(super) fn peer_failed(&mut self, peer: PeerId) -> Result<(), NodeError> {
         self.sync.peers.remove(&peer);
 
         if self.sync.asking.is_some_and(|(asked, _)| asked == peer) {
@@ -63,7 +66,11 @@ impl Node {
             self.sync.asking_proofs = None;
         }
 
-        self.sync_next();
+        if let Some(snapshot) = &mut self.sync.snapshot {
+            snapshot.forget(peer);
+        }
+
+        self.sync_next()
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, response: SyncResponse, now: u64) -> Result<(), NodeError> {
@@ -89,7 +96,7 @@ impl Node {
                     justified,
                     next,
                 });
-                self.sync_next();
+                self.sync_next()?;
             }
             SyncResponse::Justifications(justifications) => {
                 if self.sync.asking_proofs != Some(peer) {
@@ -117,8 +124,10 @@ impl Node {
                     known.justified = self.chain.justified().map_or(0, |justified| justified.epoch);
                 }
 
-                self.sync_next();
+                self.sync_next()?;
             }
+            response @ (SyncResponse::Headers(_) | SyncResponse::State(_)) => self.on_snapshot_response(peer, response, now)?,
+            response @ SyncResponse::Blocks(_) if self.snapshotting() => self.on_snapshot_response(peer, response, now)?,
             SyncResponse::Blocks(blocks) => {
                 let Some((asked, from)) = self.sync.asking.filter(|(asked, _)| *asked == peer) else {
                     log::debug!("[node] ignored blocks {peer} sent unasked");
@@ -128,7 +137,7 @@ impl Node {
 
                 self.sync.asking = None;
                 self.import_batch(asked, from, blocks, now)?;
-                self.sync_next();
+                self.sync_next()?;
             }
         }
 
@@ -185,10 +194,15 @@ impl Node {
     }
 
     /// Asks the peer holding the most work for its next blocks, unless a request is already out
-    /// or nobody holds more work than this node.
-    fn sync_next(&mut self) {
+    /// or nobody holds more work than this node; or, while syncing from a snapshot, for what that
+    /// needs next.
+    pub(super) fn sync_next(&mut self) -> Result<(), NodeError> {
+        if self.snapshotting() {
+            return self.snapshot_next();
+        }
+
         if self.sync.asking.is_some() {
-            return;
+            return Ok(());
         }
 
         let ours = self.chain.tip_work();
@@ -203,7 +217,7 @@ impl Node {
         let Some((peer, chain)) = heaviest else {
             self.sync_proofs();
 
-            return;
+            return Ok(());
         };
         let from = chain.next.unwrap_or(tip.min(chain.height) + 1).clamp(1, chain.height);
         let count = (chain.height - from + 1).min(u64::from(MAX_SYNC_BLOCKS)) as u32;
@@ -215,6 +229,8 @@ impl Node {
             peer,
             request: SyncRequest::Blocks { from, count },
         });
+
+        Ok(())
     }
 
     /// Asks the peer furthest ahead on justification for the justifications this node lacks.

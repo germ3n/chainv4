@@ -41,7 +41,7 @@ holds addresses that matter.
 | `Storage` | Contract storage, by the contract's address followed by the contract's own key. | Yes |
 | `Blocks` | Every block this node accepted, by id, on the main chain or a side branch. | Node's |
 | `Heights` | Main-chain block id by height, big-endian so heights sort in order. | Node's |
-| `Meta` | Bookkeeping: the tip (`tip`), every leaf block (`tips`), and the storage format (`format`). | Node's |
+| `Meta` | Bookkeeping: the tip (`tip`), every leaf block (`tips`), the storage format (`format`), and the block a node that synced from a snapshot took state at (`snapshot`). | Node's |
 | `Work` | Total work of the chain ending at each block, which fork choice compares. | Node's |
 | `Undo` | What each recent main-chain block replaced, for reorgs. | Node's |
 | `Receipts` | Where each transaction landed and what it did, by id. | Node's |
@@ -50,6 +50,8 @@ holds addresses that matter.
 | `Finality` | What this node learned about finality: justifications, the justified and finalized checkpoints, the votes it counted or holds, its own votes, and evidence. | No |
 | `Events` | The event index, on a node started with `--index-events`: each event under its contract, and pointers to it by contract and name and by every address in its data, newest first. | Node's |
 | `Tokens` | The token registry: each token by address, with its name, symbol and decimals, and a listing key by symbol, in ASCII lower case, then a zero byte, then its address. | Yes |
+| `Headers` | Every stored block's header and seal, by id: a node that synced from a snapshot keeps these alone for the blocks before its pivot. | Node's |
+| `Light` | For genesis and each checkpoint, the light update: proofs of the voters it fixed, against its state root (see [Light client](light-client.md)). | Node's |
 | `StateTree` | The state tree's nodes, by depth and the path bits above them, kept in step with the chain-state columns block by block (see [Chain](chain.md#the-state-root)). Its root is each header's `state_root`. | Node's |
 | `Namespaces` | Contract storage in [namespaces](contracts.md#storage-namespaces) and each contract's own space: by the contract's address, the namespace's name with its length in front (none for the own space), then the contract's own key. Which namespaces a contract's code may use is its [layout](contracts.md#storage-layouts), kept in its `Contracts` record. | Yes |
 
@@ -106,6 +108,8 @@ behind.
 - **Format 4:** contract records keep their code's [storage layout](contracts.md#storage-layouts).
 - **Format 5:** layouts declare records and their keys, and kinds the node checks.
 - **Format 6:** headers commit to a state root and a receipts root, and the state tree is kept.
+- **Format 7:** every header is kept in `Headers`, state tree leaves name their entry's column and
+  key, and checkpoints keep light updates.
 
 There are no migrations: delete the database, or point `--db` elsewhere.
 

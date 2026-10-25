@@ -226,7 +226,12 @@ impl<'a> Signers<'a> {
 
     #[document(parent = "Signers", summary = "The signers fixed for an epoch, if any are yet.")]
     pub fn set(&self, epoch: u64) -> Result<Option<SignerSet>, DbError> {
-        self.state.get_value(Column::Epochs, &epoch_key(epoch))
+        self.state.get_value(Column::Epochs, &Signers::set_key(epoch))
+    }
+
+    #[document(parent = "Signers", summary = "Where an epoch's signers are kept, in Column::Epochs: what a light client asks a proof of.")]
+    pub fn set_key(epoch: u64) -> Vec<u8> {
+        epoch_key(epoch)
     }
 
     #[document(parent = "Signers", summary = "Fixes the decided set for an epoch. Each checkpoint fixes the epoch activation_delay ahead.")]

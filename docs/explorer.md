@@ -78,6 +78,19 @@ the stream:
 
 At most 20,000 main-chain blocks are kept; older ones are let go.
 
+## The light client
+
+The explorer does not have to take the node's word for balances. It runs the library's
+[light client](light-client.md) against the node it talks to:
+- **What it trusts:** the genesis it saw the first time it met the node, which it pins.
+- **What it checks:** every header by consensus, and every justification against voters it proved
+  from state. It follows the chain again every few seconds.
+- **The top bar** says whether it is starting, catching up, following, or stopped, with why on
+  hover: a node now on another chain than the one pinned, or one that sent something that does
+  not check.
+- **An account's page** shows the balance it proved, from the node's proofs, at the finalized
+  block and at the tip, each marked final or not yet. A proof that does not check is shown in red.
+
 ## Pages
 
 | Page | Shows |
@@ -86,7 +99,7 @@ At most 20,000 main-chain blocks are kept; older ones are let go.
 | Block map | Every loaded block by height. The main chain runs along the middle, with finalized blocks green. Side branches sit in lanes above and below, each block joined to its parent. The tip and the justified checkpoint are outlined. Brighter blocks hold more transactions. |
 | Block | The header, its roots included, seal and finality proofs, and every transaction with its status and fee. |
 | Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, its events, its fields and its signature. |
-| Account | The balance and nonce. For a contract: its deployer, engine, code size and functions, the storage layout its code declares, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, and the events that mention them, token transfers and approvals in the token's units. Events need a node started with `--index-events`. |
+| Account | The balance and nonce, and the balance the light client proved, at the finalized block and the tip. For a contract: its deployer, engine, code size and functions, the storage layout its code declares, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, and the events that mention them, token transfers and approvals in the token's units. Events need a node started with `--index-events`. |
 | Network | The node's roles, uptime, listening addresses and sync state, its gossip backlog, and what it counted since it started. A graph of its peers, and a table of them with what each gossiped, how much of that was dropped, and how far its chain got. |
 | Mempool | What waits for a block, by sender and nonce. |
 | Tokens | The token registry by symbol, with a search by how a symbol starts: each token's symbol, decimals, contract and name, and what makes a token on this chain. |
@@ -160,7 +173,8 @@ dev chain.
 
 ## What it remembers
 
-The node address and any token decimals set by hand. It keeps them where eframe keeps app
+The node address, any token decimals set by hand, and the genesis the light client pinned for
+each node. It keeps them where eframe keeps app
 data: the platform's app-data directory on the desktop, the page's local storage in the browser.
 
 ## Building and testing

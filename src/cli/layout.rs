@@ -81,11 +81,7 @@ fn read(path: &Path) -> CliResult<Layout> {
 /// the entries it would be declared with.
 #[cfg(feature = "client")]
 fn deployed(node: &str, address: &Address) -> CliResult<Layout> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(std::time::Duration::from_secs(30)))
-        .build()
-        .into();
+    let agent = super::send::agent();
     let contract = super::send::ok(agent.get(format!("{}/contracts/{address}", node.trim_end_matches('/'))).call())?;
     let namespaces = contract["layout"].as_array().ok_or("the node sent no layout; is it older than layouts?")?;
     let text = |value: &serde_json::Value, what: &str| value.as_str().map(str::to_string).ok_or(format!("the node sent a namespace without {what}"));

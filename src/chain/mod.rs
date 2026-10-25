@@ -10,11 +10,12 @@ use {
     crate::consensus::{Consensus, ConsensusConfig, ConsensusError, PowConfig},
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
-    crate::db::{Column, Database, DbError, MemoryDb, Read, State, StateTree},
+    crate::db::{Column, Database, DbError, MemoryDb, Path, Read, SnapshotWalk, State, StatePart, StateTree, WalkError},
+    crate::light::{LightFinality, LightParams, LightUpdate},
     crate::registry::tokens::STANDARD_TOKEN_FUNCTIONS,
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
-    crate::structs::block::{Block, BlockHeader, Seal},
+    crate::structs::block::{Block, BlockHeader, Seal, SealedHeader},
     crate::structs::code::Engine,
     crate::structs::hash::{Hash, HashType},
     crate::structs::tx::SignedTx,
@@ -50,7 +51,8 @@ pub use finality::{
 };
 #[cfg(feature = "finality-ffg")]
 pub use finality::{FfgConfig, GenesisValidator};
-pub use receipt::{CommittedOutcome, CommittedReceipt, TxReceipt, TxStatus, receipts_root};
+pub use crate::structs::receipt::{CommittedOutcome, CommittedReceipt, receipts_root};
+pub use receipt::{TxReceipt, TxStatus};
 
 /// The development chains' transaction limits: what one deploy or contract call may use.
 pub const DEV_TX_LIMITS: Limits = Limits {
@@ -65,13 +67,15 @@ pub const DEV_MAX_REORG_DEPTH: u64 = 100;
     summary = "The layout this node keeps its database in. It goes up whenever a stored record changes shape, so a node never reads a database it would misread.",
     category = "Chain",
     see_also = "ChainError::OldFormat",
-    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry. 4: contracts record their storage layout. 5: layouts declare record keys and checked kinds. 6: headers commit to a state root and a receipts root, and the state tree is kept.",
+    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry. 4: contracts record their storage layout. 5: layouts declare record keys and checked kinds. 6: headers commit to a state root and a receipts root, and the state tree is kept. 7: every header is kept on its own, state tree leaves name their entries, and checkpoints keep what light clients need.",
 )]
-pub const STORAGE_FORMAT: u32 = 6;
+pub const STORAGE_FORMAT: u32 = 7;
 
 const TIP_KEY: &[u8] = b"tip";
 const TIPS_KEY: &[u8] = b"tips";
 const FORMAT_KEY: &[u8] = b"format";
+/// Where a node that synced from a snapshot keeps which block it took state at.
+const SNAPSHOT_KEY: &[u8] = b"snapshot";
 
 #[document(
     summary = "Funds an address holds from the start.",
@@ -281,7 +285,7 @@ impl Genesis {
 
     #[document(
         parent = "Genesis",
-        summary = "The genesis block. Its tx_root is the hash of this configuration, and its producer is the authority's address, or the zero address under proof of work.",
+        summary = "The genesis block. Its tx_root is the hash of this configuration and its proof_root the hash of its light_params, its state_root the root of the state it starts with, and its producer the authority's address, or the zero address under proof of work.",
     )]
     pub fn block(&self) -> Block {
         let producer = match &self.consensus {
@@ -297,7 +301,7 @@ impl Genesis {
                 producer,
                 difficulty: 0,
                 tx_root: Hashable::hash(self, self.hash),
-                proof_root: Block::proof_root(self.hash, &[]),
+                proof_root: Hashable::hash(&self.light_params(), self.hash),
                 receipts_root: receipts_root(self.hash, &[]),
                 state_root: self.state_root(),
                 gas_used: 0,
@@ -306,6 +310,34 @@ impl Genesis {
             txs: Vec::new(),
             proofs: Vec::new(),
             seal: Seal::None,
+        }
+    }
+
+    #[document(
+        parent = "Genesis",
+        summary = "What a light client needs to follow the chain: its hash, consensus, and how its finality works. The genesis block's proof_root commits to them.",
+        see_also = "LightParams, LightClient",
+    )]
+    pub fn light_params(&self) -> LightParams {
+        let finality = self.finality.as_ref().map(|config| match *config {
+            #[cfg(feature = "finality-ffg")]
+            FinalityConfig::Ffg(ref ffg) => LightFinality::Ffg {
+                checkpoint_interval: ffg.checkpoint_interval,
+                fixed_ahead: ffg.activation_delay,
+            },
+            #[cfg(feature = "finality-authority")]
+            FinalityConfig::Authority(ref authority) => LightFinality::Authority {
+                checkpoint_interval: authority.checkpoint_interval,
+                fixed_ahead: authority.activation_delay,
+            },
+            #[cfg(feature = "finality-depth")]
+            FinalityConfig::Depth(ref depth) => LightFinality::Depth { depth: depth.depth },
+        });
+
+        LightParams {
+            hash: self.hash,
+            consensus: self.consensus.clone(),
+            finality,
         }
     }
 
@@ -507,10 +539,15 @@ pub struct Chain {
     tips: HashSet<Hash>,
     finality_config: Option<FinalityConfig>,
     finality: Option<Box<dyn Finality>>,
+    /// How finality works, as light clients see it, for the light updates blocks keep.
+    light: Option<LightFinality>,
     /// The threads blocks run on, shared with finality to check votes.
     workers: Arc<Workers>,
     /// The event index, when this node keeps one.
     events: Option<EventIndex>,
+    /// The height this node took state at, when it synced from a snapshot: it has headers only
+    /// below it, and never rolls back past it.
+    snapshot: Option<u64>,
 }
 
 impl Chain {
@@ -547,7 +584,14 @@ impl Chain {
                 let root = StateTree::new(&state, genesis.hash).follow()?;
                 debug_assert_eq!(root, block.header.state_root, "genesis's state is the one its block commits to");
 
+                if let Some(finality) = genesis.light_params().finality
+                    && let Some(update) = LightUpdate::of(&state, genesis.hash, &finality, id, 0)?
+                {
+                    state.put_value(Column::Light, id_key(&id), &update);
+                }
+
                 state.put_value(Column::Blocks, id_key(&id), &block);
+                state.put_value(Column::Headers, id_key(&id), &block.sealed_header());
                 state.put_value(Column::Work, id_key(&id), &WorkRecord { total: u256::ZERO });
                 state.put_value(Column::Heights, 0u64.to_be_bytes().to_vec(), &id);
                 state.put_value(Column::Meta, TIP_KEY.to_vec(), &id);
@@ -571,6 +615,7 @@ impl Chain {
             None => None,
         };
         let events = events::stored_event_index(&*db)?;
+        let snapshot = read_value::<SnapshotRecord>(&*db, Column::Meta, SNAPSHOT_KEY)?.map(|record| record.height);
         let mut chain = Chain {
             db,
             rules: genesis.rules(),
@@ -586,8 +631,10 @@ impl Chain {
             tips: tips.into_iter().collect(),
             finality_config: genesis.finality.clone(),
             finality,
+            light: genesis.light_params().finality,
             workers,
             events,
+            snapshot,
         };
         // In case the node stopped between committing a block and catching finality up with it.
         chain.tip_moved()?;
@@ -652,7 +699,7 @@ impl Chain {
 
     #[document(
         parent = "Chain",
-        summary = "Moves the event index's low end a step toward what it keeps: indexing older blocks' events from their receipts, newest first, or dropping the oldest blocks' events. A step reads at most a few hundred blocks and commits once, so the index never has gaps, and a catch-up cut short picks up where it stopped.",
+        summary = "Moves the event index's low end a step toward what it keeps: indexing older blocks' events from their receipts, newest first, or dropping the oldest blocks' events. A step reads at most a few hundred blocks and commits once, so the index never has gaps, and a catch-up cut short picks up where it stopped. A node that synced from a snapshot has no receipts up to its pivot, so its index reaches back no further than the block after it.",
         returns = "Whether there is more catching up to do.",
         see_also = "Chain::index_events",
     )]
@@ -661,17 +708,20 @@ impl Chain {
             return Ok(false);
         };
 
-        if index.caught_up(self.tip.height) {
+        let floor = self.snapshot.map_or(0, |pivot| pivot + 1);
+        let lowest = index.keep.lowest(self.tip.height).max(floor);
+
+        if index.from == lowest {
             return Ok(false);
         }
 
         let index = EventIndex {
-            from: events::catch_up(&self.db, self.hash, index, self.tip.height)?,
+            from: events::catch_up(&self.db, self.hash, index, self.tip.height, floor)?,
             ..index
         };
         self.events = Some(index);
 
-        Ok(!index.caught_up(self.tip.height))
+        Ok(index.from != lowest)
     }
 
     #[document(parent = "Chain", summary = "The threads the chain runs blocks and checks signatures on, for others to share.")]
@@ -847,6 +897,10 @@ impl Chain {
 
         let fork_height = self.block(&fork)?.ok_or_else(|| missing(&fork))?.header.height;
 
+        if self.snapshot.is_some_and(|pivot| fork_height < pivot) {
+            return Err(ImportError::Db(DbError::Corrupt("history before the snapshot cannot be rolled back".to_string())));
+        }
+
         for height in (fork_height + 1..=self.tip.height).rev() {
             let undone: Hash = read_value(&*state, Column::Heights, &height.to_be_bytes())?
                 .ok_or_else(|| DbError::Corrupt(format!("no main-chain block at height {height}")))?;
@@ -858,6 +912,131 @@ impl Chain {
         }
 
         Ok(state)
+    }
+
+    #[document(parent = "Chain", summary = "The database the chain is kept in.")]
+    pub fn db(&self) -> &Arc<dyn Database> {
+        &self.db
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "The height this node took its state at, when it synced from a snapshot: it holds only headers below it, and never rolls back past it.",
+    )]
+    pub fn snapshot(&self) -> Option<u64> {
+        self.snapshot
+    }
+
+    #[document(parent = "Chain", summary = "Main-chain headers with their seals, from a height on: what a peer syncing from a snapshot checks first.")]
+    pub fn headers_from(&self, from: u64, count: u32) -> Result<Vec<SealedHeader>, DbError> {
+        let mut headers = Vec::new();
+
+        for height in from..from.saturating_add(u64::from(count)) {
+            match stored_header_at(&*self.db, height)? {
+                Some(sealed) => headers.push(sealed),
+                None => break,
+            }
+        }
+
+        Ok(headers)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "One position of the state tree as it was at a recent main-chain block, for a peer syncing from a snapshot.",
+        params = {
+            block = "The peer's pivot.",
+            depth = "The position's depth.",
+            prefix = "Its path bits.",
+            limit = "The most entries to send.",
+        },
+        returns = "The part; None for a block not on the main chain or older than the undo records, or a position the tree has no node at.",
+    )]
+    pub fn state_part(&self, block: &Hash, depth: u16, prefix: &Path, limit: usize) -> Result<Option<StatePart>, DbError> {
+        let Some(state) = stored_state_at(self.db.clone(), block)? else {
+            return Ok(None);
+        };
+
+        StateTree::new(&state, self.hash).part(depth, prefix, limit)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "The next position a snapshot walk wants from peers, given the state this node holds now.",
+    )]
+    pub fn snapshot_next(&self, walk: &mut SnapshotWalk) -> Result<Option<(u16, Path)>, DbError> {
+        walk.next(&StateTree::new(&self.state(), self.hash))
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Takes a peer's part of a snapshot into the database, once the walk checked it, and brings the state tree in line, in one commit. Only for a chain that holds genesis alone while it syncs from a snapshot: the state is half the pivot's until the walk is done.",
+        returns = "Invalid or Unasked from the walk, for a part not to keep.",
+    )]
+    pub fn take_snapshot_part(&self, walk: &mut SnapshotWalk, depth: u16, prefix: Path, part: StatePart) -> Result<(), WalkError> {
+        let layer = State::new(self.db.clone());
+        walk.take(&layer, self.hash, depth, prefix, part)?;
+        StateTree::new(&layer, self.hash).follow()?;
+        self.db.commit(layer.take_changes())?;
+
+        Ok(())
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Makes a block whose state the database already holds, taken from peers, the tip of a chain that held only genesis: stores the headers below it and the block itself, and from then on never rolls back past it. Finality starts over from genesis, and learns again from peers.",
+        params = {
+            headers = "Every header from height 1 to the block's, checked by consensus.",
+            pivot = "The block, whose state root the state in the database must have.",
+            work = "Its total work.",
+        },
+        returns = "BadSnapshot when the chain holds more than genesis, the headers do not end at the block, or the state is not the block's.",
+    )]
+    pub fn install_snapshot(&mut self, headers: &[SealedHeader], pivot: &Block, work: u256) -> Result<(), ChainError> {
+        let bad = |why: &str| Err(ChainError::BadSnapshot(why.to_string()));
+        let id = pivot.id();
+
+        if self.tip.height != 0 {
+            return bad("this chain holds more than genesis");
+        }
+
+        if headers.last().map(SealedHeader::id) != Some(id) || headers.len() as u64 != pivot.header.height {
+            return bad("the headers do not lead to the block");
+        }
+
+        let state = State::new(self.db.clone());
+
+        if StateTree::new(&state, self.hash).root()? != pivot.header.state_root {
+            return bad("the state held is not the block's");
+        }
+
+        for sealed in headers {
+            state.put_value(Column::Headers, id_key(&sealed.id()), sealed);
+            state.put_value(Column::Heights, sealed.header.height.to_be_bytes().to_vec(), &sealed.id());
+        }
+
+        state.put_value(Column::Blocks, id_key(&id), pivot);
+        state.put_value(Column::Work, id_key(&id), &WorkRecord { total: work });
+        state.put_value(Column::Meta, TIP_KEY.to_vec(), &id);
+        state.put_value(Column::Meta, TIPS_KEY.to_vec(), &Leaves { blocks: vec![id] });
+        state.put_value(Column::Meta, SNAPSHOT_KEY.to_vec(), &SnapshotRecord {
+            height: pivot.header.height,
+            block: id,
+        });
+        self.db.commit(state.take_changes())?;
+        log::info!("[chain] installed a snapshot at height {} {id}", pivot.header.height);
+
+        self.tip = pivot.header.clone();
+        self.tip_work = work;
+        self.tips = HashSet::from([id]);
+        self.snapshot = Some(pivot.header.height);
+        self.finality = match &self.finality_config {
+            Some(config) => Some(config.build(&self.view())?),
+            None => None,
+        };
+        self.tip_moved()?;
+
+        Ok(())
     }
 
     #[document(parent = "Chain", summary = "The chain's fees, or None when transactions are free.")]
@@ -959,6 +1138,7 @@ impl Chain {
         let work = work_of(&*self.db, &parent_id)? + self.consensus.work(&block.header);
         let state = Arc::new(State::new(self.db.clone()));
         state.put_value(Column::Blocks, id_key(&id), block);
+        state.put_value(Column::Headers, id_key(&id), &block.sealed_header());
         state.put_value(Column::Work, id_key(&id), &WorkRecord { total: work });
 
         if parent_id == self.tip.id() {
@@ -1019,6 +1199,15 @@ impl Chain {
         }
 
         let fork_height = self.block(&fork)?.ok_or_else(|| missing(&fork))?.header.height;
+
+        if self.snapshot.is_some_and(|pivot| fork_height < pivot) {
+            log::warn!(
+                "[chain] not following a branch to {} that splits off below the snapshot this node took state at",
+                new_tip.id()
+            );
+
+            return Ok(Imported::Side);
+        }
 
         if !self.on_main_chain(&fork)? || self.tip.height - fork_height > self.max_reorg_depth {
             log::warn!(
@@ -1137,6 +1326,12 @@ impl Chain {
             }));
         }
 
+        if let Some(finality) = &self.light
+            && let Some(update) = LightUpdate::of(&layer, self.hash, finality, id, height)?
+        {
+            layer.put_value(Column::Light, id_key(&id), &update);
+        }
+
         for (index, (tx, receipt)) in block.txs.iter().zip(&receipts).enumerate() {
             let record = TxReceipt::new(id, index as u32, receipt);
             let tx_id = tx.id(self.hash);
@@ -1235,6 +1430,15 @@ struct Leaves {
 
 impl Hashable for Leaves {}
 
+/// The block a node that synced from a snapshot took its state at.
+#[derive(Clone, Copy, Debug, SchemaWrite, SchemaRead)]
+struct SnapshotRecord {
+    height: u64,
+    block: Hash,
+}
+
+impl Hashable for SnapshotRecord {}
+
 /// Which STORAGE_FORMAT a database is kept in.
 #[derive(Clone, Copy, Debug, SchemaWrite, SchemaRead)]
 struct FormatRecord {
@@ -1259,6 +1463,8 @@ pub enum ChainError {
     MissingEngine(Engine),
     #[document(summary = "The database is kept in another layout than STORAGE_FORMAT: found is the one it is in, None for one from before formats were recorded.")]
     OldFormat { found: Option<u32>, expected: u32 },
+    #[document(summary = "A snapshot could not be installed, and why.")]
+    BadSnapshot(String),
 }
 
 impl From<DbError> for ChainError {
@@ -1275,6 +1481,7 @@ impl fmt::Display for ChainError {
                 write!(f, "the database holds genesis {stored}, not {expected}")
             }
             ChainError::BadGenesis(text) => write!(f, "bad genesis: {text}"),
+            ChainError::BadSnapshot(why) => write!(f, "cannot install the snapshot: {why}"),
             ChainError::OldFormat { found, expected } => {
                 let found = found.map_or("an older one".to_string(), |found| format!("format {found}"));
 
@@ -1301,6 +1508,73 @@ impl std::error::Error for ChainError {}
 )]
 pub fn stored_block(db: &dyn Read, id: &Hash) -> Result<Option<Block>, DbError> {
     read_value(db, Column::Blocks, &id_key(id))
+}
+
+#[document(
+    summary = "A block's header and seal by id, read straight from a database: there for every block the node stored, and for those before a snapshot it synced from, whose bodies it never had.",
+    category = "Chain",
+)]
+pub fn stored_header(db: &dyn Read, id: &Hash) -> Result<Option<SealedHeader>, DbError> {
+    read_value(db, Column::Headers, &id_key(id))
+}
+
+#[document(
+    summary = "The state at the end of a recent main-chain block, read straight from a database into a layer that is thrown away: every block above it rolled back by its undo record. For proofs against an older block's state root.",
+    category = "Chain",
+    returns = "The layer; None for a block not on the main chain, or older than the undo records, which reach back max_reorg_depth blocks.",
+)]
+pub fn stored_state_at(db: Arc<dyn Read>, id: &Hash) -> Result<Option<Arc<State>>, DbError> {
+    let Some(sealed) = stored_header(&*db, id)? else {
+        return Ok(None);
+    };
+    let height = sealed.header.height;
+
+    if read_value::<Hash>(&*db, Column::Heights, &height.to_be_bytes())? != Some(*id) {
+        return Ok(None);
+    }
+
+    let Some(tip) = read_value::<Hash>(&*db, Column::Meta, TIP_KEY)? else {
+        return Ok(None);
+    };
+    let Some(top) = stored_header(&*db, &tip)?.map(|sealed| sealed.header.height) else {
+        return Ok(None);
+    };
+    let state = Arc::new(State::new(db));
+
+    for above in (height + 1..=top).rev() {
+        let Some(undone) = read_value::<Hash>(&*state, Column::Heights, &above.to_be_bytes())? else {
+            return Ok(None);
+        };
+
+        if read_value::<Undo>(&*state, Column::Undo, &id_key(&undone))?.is_none() {
+            return Ok(None);
+        }
+
+        revert(&state, &undone)?;
+    }
+
+    Ok(Some(state))
+}
+
+#[document(
+    summary = "What a block keeps for light clients, read straight from a database: for genesis and checkpoints, proofs of the voters they fixed. None for other blocks, and for those before a snapshot this node synced from.",
+    category = "Chain",
+    see_also = "LightUpdate",
+)]
+pub fn stored_light_update(db: &dyn Read, block: &Hash) -> Result<Option<LightUpdate>, DbError> {
+    read_value(db, Column::Light, &id_key(block))
+}
+
+#[document(
+    summary = "The main-chain block's header and seal at a height, read straight from a database.",
+    category = "Chain",
+)]
+pub fn stored_header_at(db: &dyn Read, height: u64) -> Result<Option<SealedHeader>, DbError> {
+    let Some(id) = read_value::<Hash>(db, Column::Heights, &height.to_be_bytes())? else {
+        return Ok(None);
+    };
+
+    stored_header(db, &id)
 }
 
 #[document(

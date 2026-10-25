@@ -15,7 +15,7 @@ use {
     crate::structs::account::Account,
     crate::structs::address::Address,
     crate::structs::amount::Amount,
-    crate::structs::block::{Block, Seal},
+    crate::structs::block::{Block, Seal, SealedHeader},
     crate::structs::event::Event,
     crate::structs::code::Code,
     crate::structs::hash::{Hash, HashType},
@@ -49,12 +49,13 @@ pub fn summary(block: &Block) -> Value {
 }
 
 /// A proof of one chain-state entry against a block's state root, with what it proves: the entry's
-/// value, or null for none.
-pub fn state_proof(block: &Block, column: Column, key: &[u8], value: Option<&[u8]>, proof: &StateProof) -> Value {
+/// value, or null for none. The proof comes encoded too, for light clients to decode.
+pub fn state_proof(block: &SealedHeader, column: Column, key: &[u8], value: Option<&[u8]>, proof: &StateProof) -> Value {
     json!({
         "block": block.id().to_string(),
         "height": block.header.height,
         "state_root": block.header.state_root.to_string(),
+        "proof": to_hex(&wincode::serialize(proof).expect("proofs always encode")),
         "column": column.name(),
         "key": to_hex(key),
         "value": value.map(to_hex),
@@ -75,6 +76,33 @@ pub fn receipt_proof(block: &Block, receipt: &CommittedReceipt, index: usize, co
         "count": count,
         "receipt": to_hex(&receipt.hashable_bytes_with_tag()),
         "path": path.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    })
+}
+
+/// A block this node keeps the header of alone, as one that synced from a snapshot does for those
+/// before it: the summary but for what the body holds, marked pruned, with its seal.
+pub fn pruned(sealed: &SealedHeader) -> Value {
+    let header = &sealed.header;
+
+    json!({
+        "id": sealed.id().to_string(),
+        "height": header.height,
+        "parent": header.parent.to_string(),
+        "timestamp": header.timestamp,
+        "producer": header.producer.to_string(),
+        "difficulty": header.difficulty.to_string(),
+        "tx_root": header.tx_root.to_string(),
+        "receipts_root": header.receipts_root.to_string(),
+        "state_root": header.state_root.to_string(),
+        "gas_used": header.gas_used,
+        "base_price": header.base_price.to_string(),
+        "tx_count": Value::Null,
+        "proof_count": Value::Null,
+        "pruned": true,
+        "seal": seal(&sealed.seal),
+        "txs": [],
+        "proofs": [],
+        "main": true,
     })
 }
 

@@ -62,6 +62,8 @@ pub struct Settings {
     pub node: String,
     /// Decimals set by hand per token contract, by chain (its genesis id), then contract.
     pub decimals: HashMap<String, HashMap<String, u8>>,
+    /// The genesis id the light client first saw at each node, which it trusts there from then on.
+    pub pinned: HashMap<String, String>,
 }
 
 pub const GOOD: Color32 = Color32::from_rgb(90, 190, 120);
@@ -74,6 +76,8 @@ pub const JUSTIFIED: Color32 = Color32::from_rgb(80, 200, 210);
 /// What a page works with.
 pub struct Ctx<'a> {
     pub store: &'a Store,
+    /// The light client, and the balances it proved.
+    pub light: &'a mut crate::light::Light,
     pub api: &'a mut Api,
     /// Where to go next, when a page says.
     pub go: &'a mut Option<View>,

@@ -9,7 +9,7 @@ use crate::structs::code::Code;
 use crate::net::{Backlog, BacklogLimits, NetEvent};
 use crate::node::{Counters, Heard, NodeReport, PeerReport};
 use crate::structs::block::Block;
-use crate::structs::hex::to_hex;
+use crate::structs::hex::{from_hex, to_hex};
 use crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType};
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -1238,4 +1238,59 @@ fn proofs_check_against_the_roots_in_headers() {
         count,
         &path
     ));
+}
+
+#[test]
+fn a_light_client_follows_the_chain_from_the_api_alone() {
+    use crate::db::{Column, StateProof, address_key};
+    use crate::light::{LightClient, LightParams, LightRequest, LightUpdate};
+    use crate::structs::block::SealedHeader;
+    use crate::structs::vote::Justification;
+
+    let fixture = serve();
+    let decode = |value: &Value| from_hex(value.as_str().unwrap()).unwrap();
+    let start = ok(fixture.address, "/light");
+    let params: LightParams = wincode::deserialize(&decode(&start["params"])).unwrap();
+    let genesis: SealedHeader = wincode::deserialize(&decode(&start["header"])).unwrap();
+    let mut client = LightClient::new(params, genesis, fixture.chain.genesis()).unwrap();
+
+    while let Some(request) = client.next() {
+        match request {
+            LightRequest::Headers { from, count } => {
+                let answer = ok(fixture.address, &format!("/headers?from={from}&count={count}"));
+                let headers: Vec<SealedHeader> = answer["headers"].as_array().unwrap().iter().map(|header| wincode::deserialize(&decode(header)).unwrap()).collect();
+                client.deliver_headers(from, headers, u64::MAX / 2).unwrap();
+            }
+            LightRequest::Update { block } => {
+                let answer = ok(fixture.address, &format!("/light/updates/{block}"));
+                let update: LightUpdate = wincode::deserialize(&decode(&answer["update"])).unwrap();
+                client.take_update(&block, Some(update)).unwrap();
+            }
+            LightRequest::Justifications { from } => {
+                let answer = ok(fixture.address, &format!("/justifications?from={from}"));
+                let found: Vec<Justification> = answer["justifications"].as_array().unwrap().iter().map(|one| wincode::deserialize(&decode(one)).unwrap()).collect();
+                client.deliver_justifications(&found).unwrap();
+            }
+        }
+    }
+
+    assert_eq!(client.tip().id(), fixture.chain.tip().id());
+
+    // Bob's account, proven at block 1 and at the tip: a client trusting the genesis id alone
+    // checks both.
+    let key = address_key(&fixture.bob);
+    let block1 = fixture.chain.block_at(1).unwrap().unwrap().id();
+
+    for at in [format!("?block={block1}"), String::new()] {
+        let answer = ok(fixture.address, &format!("/proofs/accounts/{}{at}", to_hex(&key)));
+        let proof: StateProof = wincode::deserialize(&decode(&answer["proof"])).unwrap();
+        let block = Hash::from_bytes(HashType::default_chain(), &decode(&answer["block"])).unwrap();
+        let value = decode(&answer["value"]);
+
+        assert!(client.check_state(&block, Column::Accounts, &key, Some(&value), &proof).is_ok(), "{at}");
+    }
+
+    let (status, _, _) = get(fixture.address, &format!("/proofs/accounts/{}?block=0x{}", to_hex(&key), "00".repeat(32)));
+
+    assert_eq!(status, 404, "a block it cannot prove at");
 }

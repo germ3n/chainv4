@@ -107,6 +107,16 @@ impl ValidatorSet {
             .map(|index| &self.members[index])
     }
 
+    #[document(
+        parent = "ValidatorSet",
+        summary = "The weight a link's votes must add up to under FFG: two thirds of the set's, the smallest w with 3w >= 2 total, and never nothing, so an empty set justifies nothing.",
+    )]
+    pub fn two_thirds(&self) -> u256 {
+        let (two, three) = (u256::from(2u64), u256::from(3u64));
+
+        (self.total().saturating_mul(two).saturating_add(two) / three).max(u256::ONE)
+    }
+
     #[document(parent = "ValidatorSet", summary = "Whether a weight is at least two thirds of the set's.")]
     pub fn supermajority(&self, weight: u256) -> bool {
         let total = self.total();
@@ -288,7 +298,12 @@ impl<'a> Validators<'a> {
         summary = "The validator set of an epoch, once fixed.",
     )]
     pub fn set(&self, epoch: u64) -> Result<Option<ValidatorSet>, DbError> {
-        self.state.get_value(Column::Epochs, &epoch_key(b"set:", epoch))
+        self.state.get_value(Column::Epochs, &Validators::set_key(epoch))
+    }
+
+    #[document(parent = "Validators", summary = "Where an epoch's validator set is kept, in Column::Epochs: what a light client asks a proof of.")]
+    pub fn set_key(epoch: u64) -> Vec<u8> {
+        epoch_key(b"set:", epoch)
     }
 
     #[document(parent = "Validators", summary = "Whether the voters of an epoch's checkpoint have been paid.")]

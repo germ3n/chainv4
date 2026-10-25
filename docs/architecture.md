@@ -19,11 +19,12 @@ builds and signs transactions with the library's structs and keys, in the browse
 | Fees | `src/chain/fees/` | What transactions pay, and the block gas limit. |
 | Registries | `src/registry/` | Accounts, contracts, validators and signers, read and written in state layers. |
 | VM | `src/vm/` | Runs contracts: Luau scripts and WebAssembly modules. |
-| Storage | `src/db/` | The database behind a trait: RocksDB for nodes, memory for tests; and the state tree every header's state root is the root of. |
+| Storage | `src/db/` | The database behind a trait: RocksDB for nodes, memory for tests; the state tree every header's state root is the root of; and the walk a node takes a snapshot of it by. |
+| Light client | `src/light/` | Follows a chain from its genesis id alone, checking headers, finality and proofs; built without the node, so the explorer runs it too. |
 | Mempool | `src/mempool/` | Transactions waiting for a block. |
 | Network | `src/net/` | libp2p on a thread of its own, behind channels. |
 | API | `src/api/` | JSON over HTTP, on a thread of its own, reading the committed chain. |
-| CLI | `src/cli/` | Keys, genesis files, and `send`, which talks to a node's API. |
+| CLI | `src/cli/` | Keys, genesis files, `send`, which talks to a node's API, `layout`, and `light`, the light client. |
 | Explorer | `explorer/` | An egui app, for the desktop and the browser, that shows a node's chain, network and mempool and sends transactions, all through the API. |
 | Structs and crypto | `src/structs/`, `src/crypto/` | Blocks, transactions, addresses, amounts, hashes, keys, and Merkle roots over lists. |
 

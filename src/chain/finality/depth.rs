@@ -91,12 +91,12 @@ impl Finality for Depth {
             return Ok(());
         }
 
-        let block = chain
-            .block_at(height)?
+        let header = chain
+            .header_at(height)?
             .ok_or_else(|| DbError::Corrupt(format!("no main-chain block at height {height}")))?;
         self.finalized = Checkpoint {
             epoch: height,
-            block: block.id(),
+            block: header.id(),
         };
         let state = State::new(chain.db().clone());
         state.put_value(Column::Finality, JUSTIFIED_KEY.to_vec(), &self.finalized);

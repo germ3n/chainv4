@@ -78,6 +78,7 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--stream` | | Push what the node does to API clients as it happens, on `GET /stream`. |
 | `--cors ORIGIN` | | Let web pages from this origin call the API, or `*` for any; repeat for several. |
 | `--explorer DIR` | | Serve the [explorer](docs/explorer.md)'s web app, built into `explorer/dist`, from the API's `/`. |
+| `--snapshot` | | On a fresh database, sync from a snapshot: check every header peers have, take the state of a block 16 below the best tip from them, checking every part against its state root, and run only the blocks after it. See [Syncing from a snapshot](docs/node.md#syncing-from-a-snapshot). |
 | `--index-events[=FROM]` | | Index events by contract, by name and by the addresses in them, for `GET /events`. `FROM` is `genesis` (when left out), a height, or `latest-N` for a window of the latest N blocks. Older blocks are indexed in the background. Once on, it stays on until `--index-events=off` deletes it. |
 
 Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
@@ -106,7 +107,19 @@ chainv4 --db b.db --mine --listen /ip4/127.0.0.1/udp/4002/quic-v1 --peer /ip4/12
 chainv4 --db c.db --peer /ip4/127.0.0.1/udp/4001/quic-v1 --http 127.0.0.1:8081
 ```
 
-A node that starts late, or falls behind, catches up from its peers on its own.
+A node that starts late, or falls behind, catches up from its peers on its own. A new one can
+skip running the history with `--snapshot`: it checks every header, then takes the state of a
+recent block from its peers, checking each part against that block's state root, and runs only
+the blocks after it.
+
+```sh
+chainv4 --db d.db --snapshot --peer /ip4/127.0.0.1/udp/4001/quic-v1
+# [node] checked 46 headers; taking state at height 30
+# [node] took 12 entries of state at height 30; fetching the block
+# [node] synced from a snapshot to height 30 0x7d8e…
+```
+
+It keeps headers alone for the blocks before that one.
 
 A database belongs to one chain: a node refuses to open a `chain.db` written for a different
 genesis. Delete it, or point `--db` elsewhere, after switching `--consensus`, `--genesis` or
@@ -135,6 +148,25 @@ settings that cannot work, such as a checkpoint interval of 0.
 addresses: `blake3`, `sha256`, `keccak256`, `blake2s` or `blake2b`, whichever the build has. A
 pow chain picks its work hash separately, as `consensus.hash`. `xxh3` is fast but not secure,
 so neither takes it.
+
+### A light client
+
+`chainv4 light` checks what a node says without running the chain. It trusts only the genesis
+you give it, checks every header by consensus and every justification against voters it proved
+from state, and answers only with values it proved:
+
+```sh
+chainv4 light --consensus authority account ed25519:0xa9d1…
+# followed 45 headers to 45 0x7417…, each checked by authority
+# justified epoch 5 0x23f4…, finalized epoch 4 0xb379…
+# balance 1000003000000000000000000, nonce 0: proven at block 32 0xb379…, which is final
+# balance 1000005000000000000000000, nonce 0: proven at block 45 0x7417…, not final yet
+```
+
+`status`, `account ADDRESS`, `entry COLUMN KEY` and `receipt TX`; `--genesis FILE` or
+`--genesis-id 0x…` to trust another chain, and `--node URL` for the node, which it does not
+trust. The explorer runs the same client and shows the balances it proved. See
+[Light client](docs/light-client.md).
 
 ## Keys
 
@@ -567,8 +599,12 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "�
 | `GET /txs/{id}` | Where a transaction landed, its confirmations, whether it is final, its gas used and fee, its result, events and trace of every call its contracts made; 404 until it is on the main chain. |
 | `GET /accounts/{address}` | Nonce and balance. |
 | `GET /contracts/{address}` | Engine, deployer, exported functions, whether it can be upgraded, its storage layout, and what the token registry holds for it. |
-| `GET /proofs/{column}/{key}` | A proof of one chain-state entry, or that there is none, against the tip's `state_root`. |
+| `GET /proofs/{column}/{key}` | A proof of one chain-state entry, or that there is none, against the tip's `state_root`, or a recent block's with `?block=`. |
 | `GET /proofs/receipts/{id}` | A proof that a transaction's receipt is in its block's `receipts_root`. |
+| `GET /light` | What a light client starts from: the chain's light parameters and genesis header, encoded. |
+| `GET /headers?from=H&count=N` | Main-chain headers with their seals, encoded. |
+| `GET /light/updates/{block}` | Proofs of the voters genesis or a checkpoint fixed, for light clients to follow finality. |
+| `GET /justifications?from=E` | Justifications for main-chain checkpoints, encoded. |
 | `GET /validators` | Every bonded validator, and who votes in the current epoch with what weight: the bonded set under `ffg`, the signers under `authority`; 404 under `depth`. |
 | `GET /validators/{voter}` | One validator by voting key: its account, bond, the epochs it votes in, and whether it was slashed. |
 | `GET /signers` | Under `authority`: who votes now, the set decided last and its version, and the approvals so far for changing it. |

@@ -231,7 +231,7 @@ impl<E: Electorate> Votes<E> {
             return Ok(false);
         }
 
-        Ok(chain.block_at(height)?.is_some_and(|block| block.id() == checkpoint.block))
+        Ok(chain.header_at(height)?.is_some_and(|header| header.id() == checkpoint.block))
     }
 
     /// Whether source is target's ancestor checkpoint, on whichever branch target is.
@@ -240,15 +240,15 @@ impl<E: Electorate> Votes<E> {
             return Ok(false);
         }
 
-        let Some(block) = chain.block(&target.block)? else {
+        let Some(header) = chain.header(&target.block)? else {
             return Ok(false);
         };
 
-        if block.header.height != self.checkpoint_height(target.epoch) {
+        if header.height != self.checkpoint_height(target.epoch) {
             return Ok(false);
         }
 
-        chain.descends(&block, &source.block, self.checkpoint_height(source.epoch))
+        chain.descends(&header, &source.block, self.checkpoint_height(source.epoch))
     }
 
     fn is_justified(&self, chain: &View, checkpoint: &Checkpoint) -> Result<bool, DbError> {
@@ -265,10 +265,10 @@ impl<E: Electorate> Votes<E> {
     fn voters_for(&self, chain: &View, target: &Checkpoint) -> Result<Option<Voters>, DbError> {
         if !self.main_checkpoint(chain, target)? {
             let fixed_at = self.checkpoint_height(target.epoch.saturating_sub(self.electorate.fixed_ahead()));
-            let Some(block) = chain.block(&target.block)? else {
+            let Some(header) = chain.header(&target.block)? else {
                 return Ok(None);
             };
-            let fork = chain.fork_height(&block)?;
+            let fork = chain.fork_height(&header)?;
 
             if fork.is_none_or(|fork| fork < fixed_at) {
                 return Ok(None);
@@ -664,12 +664,12 @@ impl<E: Electorate> Finality for Votes<E> {
             return Ok(None);
         }
 
-        let Some(block) = chain.block_at(self.checkpoint_height(epoch))? else {
+        let Some(header) = chain.header_at(self.checkpoint_height(epoch))? else {
             return Ok(None);
         };
         let target = Checkpoint {
             epoch,
-            block: block.id(),
+            block: header.id(),
         };
 
         match self.voters_for(chain, &target)? {
@@ -708,11 +708,11 @@ impl<E: Electorate> Finality for Votes<E> {
                 break;
             }
 
-            let Some(block) = chain.block_at(self.checkpoint_height(epoch))? else {
+            let Some(header) = chain.header_at(self.checkpoint_height(epoch))? else {
                 continue;
             };
 
-            if let Some(proof) = stored_justification(&**chain.db(), &block.id())?
+            if let Some(proof) = stored_justification(&**chain.db(), &header.id())?
                 && !validators.paid(epoch)?
                 && self.main_checkpoint(chain, &proof.source)?
             {
@@ -732,8 +732,8 @@ impl<E: Electorate> Finality for Votes<E> {
                 break;
             }
 
-            if let Some(block) = chain.block_at(self.checkpoint_height(epoch))?
-                && let Some(justification) = stored_justification(&**chain.db(), &block.id())?
+            if let Some(header) = chain.header_at(self.checkpoint_height(epoch))?
+                && let Some(justification) = stored_justification(&**chain.db(), &header.id())?
             {
                 out.push(justification);
             }
