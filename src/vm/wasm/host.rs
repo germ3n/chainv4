@@ -201,7 +201,7 @@ fn chain_namespace_delete() {}
     parent = "chain",
     name = "sender",
     summary = "Who made the call: a transaction's sender, or the contract that called this one.",
-    params = { ptr = { ty = "i32", desc = "Where to write 33 bytes: the address's kind (0 Ed25519, 1 contract, 2 EdBlake), then its 32 bytes." } },
+    params = { ptr = { ty = "i32", desc = "Where to write 33 bytes: the address's kind (0 Ed25519, 1 contract, 2 EdBlake, 3 secp256k1), then its bytes, then zeros after secp256k1's 20." } },
 )]
 fn chain_sender() {}
 
@@ -490,13 +490,13 @@ fn set_in(caller: &mut Caller<'_, Run>, space: &Space, key: u32, key_len: u32, v
 fn sender(mut caller: Caller<'_, Run>, ptr: u32) -> Result<()> {
     let sender = host(&mut caller)?.context().sender;
 
-    write(&mut caller, ptr, &address_bytes(&sender))
+    write(&mut caller, ptr, &sender.to_abi())
 }
 
 fn contract(mut caller: Caller<'_, Run>, ptr: u32) -> Result<()> {
     let contract = host(&mut caller)?.context().contract;
 
-    write(&mut caller, ptr, &address_bytes(&contract))
+    write(&mut caller, ptr, &contract.to_abi())
 }
 
 fn value(mut caller: Caller<'_, Run>, ptr: u32) -> Result<()> {
@@ -695,16 +695,11 @@ fn check_len(caller: &mut Caller<'_, Run>, len: u32, max: usize, what: &str) -> 
     Ok(())
 }
 
-fn address_bytes(address: &Address) -> Vec<u8> {
-    wincode::serialize(address).expect("addresses always encode")
-}
-
-/// The 33-byte address at ptr: its kind tag, then its 32 bytes.
+/// The 33-byte address at ptr, as Address::to_abi writes one.
 fn address_at(caller: &mut Caller<'_, Run>, ptr: u32) -> Result<Address> {
     let bytes = read(caller, ptr, ADDRESS_LEN)?;
 
-    wincode::deserialize::<Address>(&bytes)
-        .map_err(|_| stop(caller, VmError::BadArgument("not an address".to_string())))
+    Address::from_abi(&bytes).ok_or_else(|| stop(caller, VmError::BadArgument("not an address".to_string())))
 }
 
 /// The 32-byte little-endian amount at ptr.

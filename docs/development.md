@@ -46,7 +46,8 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | Features | What they are |
 | --- | --- |
 | `sha256`, `blake3`, `blake2s`, `blake2b`, `keccak256`, `xxh3` | Hash algorithms. |
-| `ed25519`, `edblake` | Key schemes. |
+| `ed25519`, `edblake`, `secp256k1` | Key schemes. |
+| `mnemonic` | Seed phrases: BIP39 words, and keys derived from them for every scheme built in. |
 | `lvm`, `wasm` | The contract engines; either pulls in `vm`. |
 | `rocksdb` | The RocksDB backend. |
 | `node` | The node, the chain and the CLI. |
@@ -55,8 +56,8 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `client` | `chainv4 send`. |
 | `finality-ffg`, `finality-authority`, `finality-depth` | Kinds of finality. |
 
-**What a build must have:** contracts and nodes need at least one secure hash, or they fail to
-build.
+**What a build must have:** at least one key scheme, and for contracts and nodes, at least one
+secure hash, or they fail to build.
 
 **Builds without some features:** a build without a kind of finality, or an engine, makes
 different dev chains, which puts it on a different network.

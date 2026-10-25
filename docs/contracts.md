@@ -197,9 +197,9 @@ namespace by. Names are 1 to 64 bytes and keys 1 to 256, each one word.
 | `i64`, `u64` | 8 bytes, little-endian. | `set_i64`, `set_u64` |
 | `u128` | 16 bytes, little-endian. | |
 | `u256` | 32 bytes, little-endian. | `set_u256` |
-| `address` | 33 bytes: the kind's tag, then its 32. | `set_address`, `Address::encode` |
-| `address-text` | An address in text: `ed25519:0x…`. | Lua's `address:text()` |
-| `address-hex` | `0x` and 64 hex digits. | Lua's `address:hex()` |
+| `address` | 33 bytes: the kind's tag, then its 32, or a secp256k1 address's 20 and 12 zeros. | `set_address`, `Address::encode` |
+| `address-text` | An address in text: `ed25519:0x…`, `secp256k1:0x…`. | Lua's `address:text()` |
+| `address-hex` | `0x` and 64 hex digits, or 40 for secp256k1. | Lua's `address:hex()` |
 
 A kind that is not in the list is refused at deploy.
 

@@ -97,6 +97,10 @@ jobs:
           - sha256,ed25519
           - blake3,edblake
           - keccak256,blake2s,blake2b,ed25519
+          # Ethereum's scheme on its own, and seed phrases with and without it.
+          - sha256,secp256k1
+          - blake3,ed25519,mnemonic
+          - keccak256,edblake,secp256k1,mnemonic
           # Contracts and nodes need a secure hash; these run on ones other than BLAKE3.
           - lvm,sha256,ed25519
           - wasm,keccak256,ed25519
@@ -105,6 +109,7 @@ jobs:
           - http,sha256,edblake
           - stream,blake2b,edblake
           - client,keccak256,edblake
+          - node,blake3,secp256k1
           # Each kind of finality on its own; the rows above have none.
           - http,client,blake3,ed25519,finality-ffg
           - http,client,sha256,edblake,finality-authority

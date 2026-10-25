@@ -4,4 +4,8 @@ pub mod hashable;
 pub mod hasher;
 pub mod keypair;
 pub mod merkle;
+#[cfg(feature = "mnemonic")]
+pub mod mnemonic;
+#[cfg(feature = "secp256k1")]
+pub mod secp256k1;
 pub mod verifiable;

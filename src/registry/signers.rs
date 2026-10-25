@@ -381,12 +381,7 @@ mod tests {
 
     /// A real key from a fixed seed, in whichever scheme this build has.
     fn key(seed: u8) -> PublicKey {
-        #[cfg(feature = "ed25519")]
-        let private = crate::crypto::keypair::PrivateKey::Ed25519([seed; 32]);
-        #[cfg(not(feature = "ed25519"))]
-        let private = crate::crypto::keypair::PrivateKey::EdBlake([seed; 32]);
-
-        crate::crypto::keypair::Keypair::from_private(private).public()
+        crate::crypto::keypair::Keypair::from_seed([seed; 32]).public()
     }
 
     /// Three signers, two of whom justify and two of whom change the set.

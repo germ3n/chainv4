@@ -9,13 +9,15 @@ pub mod send;
 mod settings;
 
 use {
-    crate::app::{Coin, Holder, Settings},
+    crate::app::{Coin, Settings},
     crate::chain::Chain,
     crate::format,
+    crate::keys::{self, Holder},
     crate::node::Node,
     crate::theme::{self, Palette},
-    crate::vault::Vault,
+    crate::vault::{Book, Vault},
     chainv4::light::Assurance,
+    chainv4::structs::address::Address,
     egui::{RichText, Ui},
 };
 
@@ -50,6 +52,8 @@ pub struct Ctx<'a> {
     pub holders: &'a mut Vec<Holder>,
     /// The account in use, by its place among the holders.
     pub current: usize,
+    /// What the wallet's vault holds besides its accounts: the seed phrase.
+    pub book: &'a mut Book,
     pub coin: &'a Coin,
     pub settings: &'a mut Settings,
     /// Milliseconds since the Unix epoch.
@@ -60,6 +64,8 @@ pub struct Ctx<'a> {
     /// Whether the accounts changed, so the vault seals them again.
     pub changed: &'a mut bool,
     pub vault: &'a mut Option<Vault>,
+    /// Whether to lock once the page is drawn, without sealing again: the wallet open was removed.
+    pub leave: &'a mut bool,
     /// What wakes the app when something arrives later, as a key file picked.
     #[cfg_attr(target_os = "android", allow(dead_code))]
     pub wake: &'a egui::Context,
@@ -70,9 +76,9 @@ impl Ctx<'_> {
         self.holders.get(self.current)
     }
 
-    /// The account in use, by its address text.
-    pub fn address(&self) -> String {
-        self.holder().map(|holder| holder.address.to_string()).unwrap_or_default()
+    /// The account in use's addresses, as text.
+    pub fn addresses(&self) -> Vec<String> {
+        self.holder().map(|holder| holder.addresses().iter().map(Address::to_string).collect()).unwrap_or_default()
     }
 
     /// A token's symbol and decimals, as its proven registry entry says: its short address and no
@@ -94,7 +100,7 @@ impl Ctx<'_> {
             Some(token) => self.token(token),
         };
 
-        format!("{} {symbol}", format::brief(raw, decimals, 4))
+        format!("{} {symbol}", format::compact(raw, decimals, 4))
     }
 
     /// An amount of the coin, or of a token, with its symbol.
@@ -114,6 +120,7 @@ impl Ctx<'_> {
 #[derive(Default)]
 pub struct States {
     pub send: send::SendState,
+    receive: receive::ReceiveState,
     accounts: accounts::AccountsState,
     settings: settings::SettingsState,
 }
@@ -124,10 +131,19 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         *ctx.page = Page::Accounts;
     }
 
+    // Words and keys shown go out of sight once their page does.
+    if *ctx.page != Page::Accounts {
+        states.accounts.hide();
+    }
+
+    if *ctx.page != Page::Settings {
+        states.settings.hide();
+    }
+
     match *ctx.page {
         Page::Overview => overview::show(ui, ctx),
         Page::Send => send::show(ui, ctx, &mut states.send),
-        Page::Receive => receive::show(ui, ctx),
+        Page::Receive => receive::show(ui, ctx, &mut states.receive),
         Page::Activity => activity::show(ui, ctx),
         Page::Accounts => accounts::show(ui, ctx, &mut states.accounts),
         Page::Settings => settings::show(ui, ctx, &mut states.settings),
@@ -191,6 +207,11 @@ pub fn assurance(ui: &mut Ui, palette: &Palette, assurance: &Assurance) {
     theme::pill(ui, text, color).on_hover_text(detail);
 }
 
+/// The scheme an address belongs to, as a page names it.
+pub fn scheme(address: &Address) -> &'static str {
+    keys::scheme_of(address).map_or("Contract", keys::label)
+}
+
 /// An address in the mono face, cut short, with the whole one on hover and a copy button.
 pub fn address(ui: &mut Ui, palette: &Palette, address: &str) {
     ui.horizontal(|ui| {
@@ -210,6 +231,21 @@ pub fn copy(ui: &mut Ui, palette: &Palette, text: &str) {
     if ui.add(button).on_hover_text("Copy to the clipboard").clicked() {
         ui.ctx().copy_text(text.to_string());
     }
+}
+
+/// A text field with a button on its right: the button takes the room it needs, and the field the
+/// rest, however narrow the screen. Returns whether the button was pressed.
+pub fn beside(ui: &mut Ui, button: impl FnOnce(&mut Ui) -> bool, field: impl FnOnce(&mut Ui, f32)) -> bool {
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let pressed = button(ui);
+            field(ui, ui.available_width());
+
+            pressed
+        })
+        .inner
+    })
+    .inner
 }
 
 /// A row of a card: a label on the left, what it says on the right.

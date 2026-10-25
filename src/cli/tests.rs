@@ -19,6 +19,42 @@ impl Drop for TempDir {
     }
 }
 
+#[cfg(feature = "mnemonic")]
+#[test]
+fn keygen_writes_the_keys_a_seed_phrase_gives() {
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Keygen {
+        #[command(flatten)]
+        args: KeygenArgs,
+    }
+
+    let dir = TempDir::new("phrase");
+    let made = |name: &str, flags: &[&str], input: &str| {
+        let out = dir.0.join(name);
+        let out_text = out.display().to_string();
+        let args = Keygen::try_parse_from(["keygen", "--out", out_text.as_str()].into_iter().chain(flags.iter().copied())).unwrap().args;
+        keygen_reading(args, &mut input.as_bytes()).unwrap();
+
+        read_key(&out).unwrap().public().address().to_string()
+    };
+    let words = "test test test test test test test test test test test junk\n";
+
+    // The addresses Ethereum's wallets show for these words.
+    assert_eq!(made("a.key", &["--from-phrase", "--scheme", "secp256k1"], words), "secp256k1:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+    assert_eq!(made("b.key", &["--from-phrase", "--scheme", "secp256k1", "--account", "1"], words), "secp256k1:0x70997970c51812dc3a010c7d01b50e0d17dc79c8");
+
+    // The library's keys for the same account, and another passphrase makes another wallet.
+    let seed = crate::crypto::mnemonic::Phrase::parse(words).unwrap().seed("");
+
+    assert_eq!(made("c.key", &["--from-phrase"], words), seed.key(KeyType::Ed25519, 0).public().address().to_string());
+    assert_ne!(made("d.key", &["--from-phrase", "--passphrase"], &format!("{words}secret\n")), made("e.key", &["--from-phrase"], words));
+    assert!(Keygen::try_parse_from(["keygen", "--phrase", "--from-phrase"]).is_err());
+    assert!(Keygen::try_parse_from(["keygen", "--phrase", "--words", "13"]).is_err());
+    assert!(keygen_reading(Keygen::try_parse_from(["keygen", "--from-phrase", "--out", "/dev/null/x"]).unwrap().args, &mut "not a phrase\n".as_bytes()).is_err());
+}
+
 #[test]
 fn key_files_round_trip_and_are_never_overwritten() {
     let dir = TempDir::new("keys");

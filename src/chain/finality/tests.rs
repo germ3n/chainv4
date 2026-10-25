@@ -5,7 +5,7 @@
 use super::*;
 use crate::chain::*;
 use crate::consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, PowConfig, Producer, meets, work_hash};
-use crate::crypto::keypair::{Keypair, PrivateKey};
+use crate::crypto::keypair::Keypair;
 use crate::db::MemoryDb;
 use crate::structs::address::Address;
 use crate::structs::block::Seal;
@@ -21,12 +21,7 @@ fn dev() -> Keypair {
 }
 
 fn key(seed: u8) -> Keypair {
-    #[cfg(feature = "ed25519")]
-    let private = PrivateKey::Ed25519([seed; 32]);
-    #[cfg(not(feature = "ed25519"))]
-    let private = PrivateKey::EdBlake([seed; 32]);
-
-    Keypair::from_private(private)
+    Keypair::from_seed([seed; 32])
 }
 
 fn genesis_with(finality: Option<FinalityConfig>) -> Genesis {

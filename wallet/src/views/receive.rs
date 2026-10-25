@@ -1,8 +1,10 @@
-//! Where to send to: the account's address, written out and as a QR code to scan.
+//! Where to send to: one of the account's addresses, picked by its scheme, written out and as a QR
+//! code to scan, and all of them listed.
 
 use {
     super::Ctx,
     crate::theme,
+    chainv4::structs::address::Address,
     egui::{Color32, RichText, Ui},
     qrcode::{Color, EcLevel, QrCode},
 };
@@ -10,40 +12,76 @@ use {
 /// The quiet border around the code, in modules, as scanners want it.
 const QUIET: usize = 3;
 
-pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
+/// Which of the account's addresses the code shows, by its place among them.
+#[derive(Default)]
+pub struct ReceiveState {
+    shown: usize,
+}
+
+pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
     let palette = *ctx.palette;
     let Some(holder) = ctx.holder() else {
         return;
     };
-    let (name, address) = (holder.name.clone(), holder.address.to_string());
+    let (name, addresses) = (holder.name.clone(), holder.addresses());
+    state.shown = state.shown.min(addresses.len().saturating_sub(1));
+    let Some(shown) = addresses.get(state.shown).map(Address::to_string) else {
+        return;
+    };
 
-    theme::title(ui, &palette, "Receive", "Share this address to be paid. What comes in shows once the light client proves it.");
+    theme::title(ui, &palette, "Receive", "Share an address to be paid. What comes in shows once the light client proves it.");
 
     theme::card(ui, &palette, |ui| {
         ui.vertical_centered(|ui| {
             theme::caps(ui, &palette, &name);
+
+            if addresses.len() > 1 {
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (index, address) in addresses.iter().enumerate() {
+                        ui.selectable_value(&mut state.shown, index, super::scheme(address));
+                    }
+                });
+            }
+
             ui.add_space(10.0);
-            qr(ui, &address, 232.0);
+            qr(ui, &shown, 232.0);
             ui.add_space(14.0);
-            ui.label(theme::mono(&address).color(palette.ink).size(13.5));
+            ui.add(egui::Label::new(theme::mono(&shown).color(palette.ink).size(13.5)).wrap());
             ui.add_space(8.0);
 
             if super::CAN_COPY && theme::primary(ui, &palette, "Copy address", true).clicked() {
-                ui.ctx().copy_text(address.clone());
+                ui.ctx().copy_text(shown.clone());
             }
         });
     });
+
+    if addresses.len() > 1 {
+        ui.add_space(14.0);
+        theme::card(ui, &palette, |ui| {
+            theme::caps(ui, &palette, "All its addresses");
+            ui.add_space(4.0);
+
+            for address in &addresses {
+                super::row(ui, &palette, super::scheme(address), |ui| super::address(ui, &palette, &address.to_string()));
+            }
+        });
+    }
 
     ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Good to know");
         ui.add_space(4.0);
 
-        for line in [
-            "The coin and every token the chain's registry lists arrive at this same address.",
-            "A payment counts once the light client proves it, and cannot be undone once its block is final.",
-            "Coins a contract pays out show in the balance; the activity lists them when the node keeps an address index.",
-        ] {
+        let ethereum = addresses.iter().any(|address| matches!(address, Address::Secp256k1(_)));
+        let lines = [
+            Some("Each address holds its own coin and tokens. The coin and every token the chain's registry lists arrive at any of them."),
+            ethereum.then_some("The Ethereum address is the one Ethereum wallets show for the same key, but what this chain sends to it lives on this chain alone."),
+            Some("A payment counts once the light client proves it, and cannot be undone once its block is final."),
+            Some("Coins a contract pays out show in the balance; the activity lists them when the node keeps an address index."),
+        ];
+
+        for line in lines.into_iter().flatten() {
             ui.label(RichText::new(line).color(palette.soft));
         }
     });

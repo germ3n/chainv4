@@ -158,6 +158,19 @@ pub fn caps(ui: &mut Ui, palette: &Palette, text: &str) {
     ui.label(job);
 }
 
+/// One line of text that shrinks to fit the width there is, down to smallest, and is cut short
+/// past that: a row never grows past the screen, however large what it shows.
+pub fn fitted(ui: &mut Ui, text: &str, size: f32, smallest: f32, family: FontFamily, color: Color32) -> Response {
+    let width = ui.available_width().max(1.0);
+    let natural = ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), FontId::new(size, family.clone()), color).size().x);
+    let size = match natural > width {
+        true => (size * width / natural).max(smallest),
+        false => size,
+    };
+
+    ui.add(egui::Label::new(RichText::new(text).font(FontId::new(size, family)).color(color)).truncate())
+}
+
 /// Text in the semibold face.
 pub fn strong(text: impl Into<String>, size: f32) -> RichText {
     RichText::new(text.into()).font(FontId::new(size, FontFamily::Name(SEMIBOLD.into())))

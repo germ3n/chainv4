@@ -1,4 +1,5 @@
-//! A chainv4 light wallet. Its keys are sealed with a password in app storage, and everything it
+//! A chainv4 light wallet. Its keys come from a seed phrase, an address in every scheme for each
+//! account, and are sealed with a password in app storage; everything it
 //! shows of the chain it proved itself: it follows the chain from the genesis it trusts with the
 //! light client, and checks every balance, token and transaction a node sends against headers it
 //! checked. It runs as a desktop app, in the browser built with trunk, and on Android built with
@@ -8,6 +9,8 @@ mod app;
 mod chain;
 mod format;
 mod history;
+mod keys;
+mod lock;
 mod node;
 mod theme;
 mod vault;
@@ -45,6 +48,8 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
             Ok(Box::new(OnAndroid {
                 wallet: wallet(creation, None, ANDROID_NODE),
                 app,
+                keyboard: false,
+                unwanted_since: None,
             }))
         }),
     );
@@ -61,6 +66,45 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
 struct OnAndroid {
     wallet: Box<dyn eframe::App>,
     app: winit::platform::android::activity::AndroidApp,
+    /// Whether the soft keyboard was asked for, and since when no text field has wanted it.
+    keyboard: bool,
+    unwanted_since: Option<f64>,
+}
+
+#[cfg(target_os = "android")]
+impl OnAndroid {
+    /// Shows the soft keyboard while a text field has focus, and hides it once none does.
+    /// egui-winit would, from egui's IME output, but it also hides and shows the keyboard again
+    /// whenever egui interrupts a composition, which a text field does on every tap on it and every
+    /// frame a finger drags in it. There is no composition to interrupt in a NativeActivity, so on
+    /// Android that only makes the keyboard flicker. So the wallet takes the IME output from
+    /// egui-winit, and keeps the keyboard itself.
+    fn keep_keyboard(&mut self, ctx: &egui::Context) {
+        let wanted = ctx.output_mut(|output| output.ime.take()).is_some();
+        let (time, tapped) = ctx.input(|input| (input.time, input.pointer.any_pressed()));
+
+        if wanted {
+            self.unwanted_since = None;
+
+            // A tap on the field brings back a keyboard the person put away.
+            if !self.keyboard || tapped {
+                self.app.show_soft_input(true);
+                self.keyboard = true;
+            }
+        } else if self.keyboard {
+            // A field lets go of focus for a frame as a tap lands on it: the keyboard goes only
+            // once no field has wanted it for a moment.
+            let since = *self.unwanted_since.get_or_insert(time);
+
+            if time - since >= 0.2 {
+                self.app.hide_soft_input(true);
+                self.keyboard = false;
+                self.unwanted_since = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -69,6 +113,7 @@ impl eframe::App for OnAndroid {
         // The root Ui covers the whole window, safe area or not, so the wallet gets the safe part.
         let seen = ui.ctx().content_rect();
         ui.scope_builder(egui::UiBuilder::new().max_rect(seen), |ui| self.wallet.ui(ui, frame));
+        self.keep_keyboard(ui.ctx());
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

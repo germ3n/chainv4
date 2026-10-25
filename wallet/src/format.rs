@@ -121,13 +121,45 @@ fn civil(days: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
-/// An amount, cut to at most places decimals: what fits a row; the full amount shows on hover.
+/// An amount, cut to at most places decimals: what fits a row; the full amount shows on hover. One
+/// too small to show any is less than the least it could: <0.0001, never 0.
 pub fn brief(raw: &str, decimals: u8, places: usize) -> String {
     let full = units(raw, decimals);
 
     match full.split_once('.') {
-        Some((whole, fraction)) if fraction.len() > places => format!("{whole}.{}", &fraction[..places]),
+        Some((whole, fraction)) if fraction.len() > places => match fraction[..places].trim_end_matches('0') {
+            "" if whole == "0" && places > 0 => format!("<0.{}1", "0".repeat(places - 1)),
+            "" if whole == "0" => "<1".to_string(),
+            "" => whole.to_string(),
+            cut => format!("{whole}.{cut}"),
+        },
         _ => full,
+    }
+}
+
+/// An amount short enough for a row, however large: cut to at most places decimals, and past a
+/// billion whole units, a suffix for billions and trillions, then a power of ten: 1.23B, 4.5T,
+/// 6.78e18. Cut, never rounded up. The full amount belongs on hover, or in the details.
+pub fn compact(raw: &str, decimals: u8, places: usize) -> String {
+    let full = units(raw, decimals);
+    let whole: String = full.split('.').next().unwrap_or_default().chars().filter(char::is_ascii_digit).collect();
+
+    if whole.len() <= 9 {
+        return brief(raw, decimals, places);
+    }
+
+    let power = whole.len() - 1;
+    let (suffix, shift) = match power {
+        9..=11 => ("B".to_string(), 9),
+        12..=14 => ("T".to_string(), 12),
+        _ => (format!("e{power}"), power),
+    };
+    let (lead, rest) = whole.split_at(whole.len() - shift);
+    let fraction = rest[..2].trim_end_matches('0');
+
+    match fraction.is_empty() {
+        true => format!("{lead}{suffix}"),
+        false => format!("{lead}.{fraction}{suffix}"),
     }
 }
 
@@ -142,6 +174,23 @@ mod tests {
         assert_eq!(parse_units("1.5", 18).as_deref(), Some("1500000000000000000"));
         assert_eq!(parse_units("1.5", 0), None);
         assert_eq!(brief("1234567891234567890", 18, 4), "1.2345");
+        assert_eq!(brief("1000024000097000000000000", 18, 4), "1,000,024", "no zeros left over from the cut");
         assert_eq!(short("ed25519:0x3b6a91aabbccddeeff00f2c0"), "ed25519:0x3b6a91…f2c0");
+    }
+
+    #[test]
+    fn huge_amounts_fit_a_row() {
+        let whole = |digits: &str| format!("{digits}000000000000000000");
+
+        assert_eq!(compact(&whole("999999999"), 18, 4), "999,999,999", "up to a billion in full");
+        assert_eq!(compact("1500000000000000000", 18, 4), "1.5");
+        assert_eq!(compact("25", 18, 4), "<0.0001", "too small to show, but not nothing");
+        assert_eq!(compact("25", 18, 0), "<1");
+        assert_eq!(compact("0", 18, 4), "0");
+        assert_eq!(compact("2000000000000000025", 18, 4), "2");
+        assert_eq!(compact(&whole("1234567891"), 18, 4), "1.23B");
+        assert_eq!(compact(&whole("45000000000000"), 18, 4), "45T");
+        assert_eq!(compact(&whole("6789000000000000000"), 18, 4), "6.78e18", "cut, not rounded");
+        assert_eq!(compact(&whole("1000000000000000000000"), 18, 4), "1e21");
     }
 }

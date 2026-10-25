@@ -1,6 +1,6 @@
-//! What happened to the account, newest first: what it sent, from this wallet's own log until
-//! proven, and every transaction the node's address index says touched it, each shown once the
-//! light client proved who sent what and what it did.
+//! What happened to the account, at all its addresses together, newest first: what it sent, from
+//! this wallet's own log until proven, and every transaction the node's address index says touched
+//! one of them, each shown once the light client proved who sent what and what it did.
 
 use {
     super::Ctx,
@@ -18,7 +18,7 @@ pub const UNSEEN_AFTER: u64 = 10 * 60 * 1_000;
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     let palette = *ctx.palette;
-    theme::title(ui, &palette, "Activity", "Everything this account sent, and everything that touched it, as the light client proved it.");
+    theme::title(ui, &palette, "Activity", "Everything this account sent, and everything that touched its addresses, as the light client proved it.");
 
     let note = match (ctx.chain.indexes_addresses, ctx.chain.indexes_events) {
         (Some(false), Some(false)) => Some("This node keeps no address index, nor an event index: only what this wallet sent shows. Start it with --index-addresses."),
@@ -57,8 +57,8 @@ impl Entry<'_> {
 /// The account's history, at most this many lines.
 pub fn list(ui: &mut Ui, ctx: &Ctx, limit: usize) {
     let palette = *ctx.palette;
-    let address = ctx.address();
-    let entries = entries(ctx, &address);
+    let addresses = ctx.addresses();
+    let entries = entries(ctx, &addresses);
 
     if entries.is_empty() {
         let text = match ctx.chain.caught_up() {
@@ -75,11 +75,11 @@ pub fn list(ui: &mut Ui, ctx: &Ctx, limit: usize) {
             theme::rule(ui, &palette);
         }
 
-        line(ui, ctx, &address, entry);
+        line(ui, ctx, &addresses, entry);
     }
 }
 
-fn entries<'a>(ctx: &'a Ctx, address: &str) -> Vec<Entry<'a>> {
+fn entries<'a>(ctx: &'a Ctx, addresses: &[String]) -> Vec<Entry<'a>> {
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
     let mut add = |tx: &str, sent: Option<&'a Sent>, height: Option<u64>| {
@@ -93,17 +93,18 @@ fn entries<'a>(ctx: &'a Ctx, address: &str) -> Vec<Entry<'a>> {
         }
     };
 
-    for sent in ctx.settings.sent.iter().filter(|sent| sent.from == address) {
+    for sent in ctx.settings.sent.iter().filter(|sent| addresses.contains(&sent.from)) {
         add(&sent.id, Some(sent), None);
     }
 
-    for mention in ctx.chain.mentions.get(address).into_iter().flatten() {
+    for mention in addresses.iter().flat_map(|address| ctx.chain.mentions.get(address).into_iter().flatten()) {
         add(&mention.tx, None, Some(mention.height));
     }
 
-    // What was proven before, whether or not the node still lists it.
+    // What was proven before, whether or not the node still lists it. A move between two of the
+    // account's own addresses moved nothing for it, but shows: one of them sent it.
     for (tx, checked) in &ctx.settings.checked {
-        if checked.sender == address || checked.for_holder(address).next().is_some() {
+        if addresses.contains(&checked.sender) || checked.for_account(addresses).next().is_some() {
             add(tx, None, None);
         }
     }
@@ -113,11 +114,11 @@ fn entries<'a>(ctx: &'a Ctx, address: &str) -> Vec<Entry<'a>> {
     entries
 }
 
-fn line(ui: &mut Ui, ctx: &Ctx, address: &str, entry: &Entry) {
+fn line(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry) {
     let palette = *ctx.palette;
     let id = ui.make_persistent_id(("activity", &entry.tx));
     let open = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
-    let (title, detail, amount, incoming) = summary(ctx, address, entry);
+    let (title, detail, amount, incoming) = summary(ctx, addresses, entry);
     let (status, color) = status(ctx, entry);
     // The amount and the pill keep their column on the right, however narrow the screen.
     let words = (ui.available_width() - 150.0).max(120.0);
@@ -142,7 +143,8 @@ fn line(ui: &mut Ui, ctx: &Ctx, address: &str, entry: &Entry) {
                             Some(true) => ("+", palette.good),
                             _ => ("−", palette.ink),
                         };
-                        ui.label(theme::strong(format!("{sign}{brief}"), 14.5).color(color)).on_hover_text(full);
+                        ui.set_max_width(150.0);
+                        theme::fitted(ui, &format!("{sign}{brief}"), 14.5, 10.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), color).on_hover_text(full);
                     }
 
                     theme::pill(ui, status, color);
@@ -161,20 +163,20 @@ fn line(ui: &mut Ui, ctx: &Ctx, address: &str, entry: &Entry) {
     }
 
     if open {
-        ui.indent(id, |ui| details(ui, ctx, address, entry));
+        ui.indent(id, |ui| details(ui, ctx, addresses, entry));
     }
 }
 
 /// A line's title, what it says under it, the amount it moved for this account, cut short and in
 /// full, and whether that came in.
-fn summary(ctx: &Ctx, address: &str, entry: &Entry) -> (String, String, Option<(String, String)>, Option<bool>) {
+fn summary(ctx: &Ctx, addresses: &[String], entry: &Entry) -> (String, String, Option<(String, String)>, Option<bool>) {
     let when = |checked: &Checked| match checked.time {
         0 => format!("block {}", format::thousands(&checked.height.to_string())),
         time => format::ago(time, ctx.now),
     };
 
     match (entry.checked, entry.sent) {
-        (Some(checked), _) => match checked.for_holder(address).next() {
+        (Some(checked), _) => match checked.for_account(addresses).next() {
             Some((true, moved)) => {
                 let token = moved.token.as_deref();
                 let from = moved.from.as_deref().map_or_else(|| "minted".to_string(), |from| format!("from {}", format::short(from)));
@@ -190,7 +192,7 @@ fn summary(ctx: &Ctx, address: &str, entry: &Entry) -> (String, String, Option<(
                 ("Sent".to_string(), format!("{to} · {}", when(checked)), Some(amount), Some(false))
             }
             None => {
-                let by = match checked.sender == address {
+                let by = match addresses.contains(&checked.sender) {
                     true => String::new(),
                     false => format!("by {} · ", format::short(&checked.sender)),
                 };
@@ -227,7 +229,7 @@ fn status(ctx: &Ctx, entry: &Entry) -> (&'static str, egui::Color32) {
     }
 }
 
-fn details(ui: &mut Ui, ctx: &Ctx, address: &str, entry: &Entry) {
+fn details(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry) {
     let palette = *ctx.palette;
     ui.add_space(4.0);
     super::row(ui, &palette, "Transaction", |ui| super::address(ui, &palette, &entry.tx));
@@ -251,7 +253,7 @@ fn details(ui: &mut Ui, ctx: &Ctx, address: &str, entry: &Entry) {
             ui.label(&checked.action);
         });
 
-        for (incoming, moved) in checked.for_holder(address) {
+        for (incoming, moved) in checked.for_account(addresses) {
             let other = match incoming {
                 true => moved.from.as_deref().map_or_else(|| "minted".to_string(), |from| format!("from {}", format::short(from))),
                 false => moved.to.as_deref().map_or_else(|| "burned".to_string(), |to| format!("to {}", format::short(to))),
@@ -261,7 +263,7 @@ fn details(ui: &mut Ui, ctx: &Ctx, address: &str, entry: &Entry) {
             });
         }
 
-        if checked.sender == address {
+        if addresses.contains(&checked.sender) {
             super::row(ui, &palette, "Fee", |ui| {
                 ui.label(format!("{} · nonce {}", ctx.amount(None, &checked.fee), checked.nonce));
             });

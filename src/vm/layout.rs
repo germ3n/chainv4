@@ -95,13 +95,13 @@ pub enum Kind {
     #[document(summary = "u256: 32 bytes, little-endian, as the SDK's U256 writes one.")]
     #[wincode(tag = 8)]
     U256,
-    #[document(summary = "address: 33 bytes, the kind's tag then its 32, as the SDK's Address::encode writes one.")]
+    #[document(summary = "address: 33 bytes, the kind's tag then its bytes, zeros after secp256k1's 20, as the SDK's Address::encode writes one.")]
     #[wincode(tag = 9)]
     Address,
     #[document(summary = "address-text: an address in its text form, such as ed25519:0x…, as Address:text writes one and address.parse reads it.")]
     #[wincode(tag = 10)]
     AddressText,
-    #[document(summary = "address-hex: 0x and 64 hex digits, as Address:hex writes one.")]
+    #[document(summary = "address-hex: 0x and 64 hex digits, or 40 for secp256k1, as Address:hex writes one.")]
     #[wincode(tag = 11)]
     AddressHex,
 }
@@ -161,10 +161,10 @@ impl Kind {
             Kind::I64 | Kind::U64 => value.len() == 8,
             Kind::U128 => value.len() == 16,
             Kind::U256 => value.len() == 32,
-            Kind::Address => value.len() == 33 && wincode::deserialize::<Address>(value).is_ok(),
+            Kind::Address => Address::from_abi(value).is_some(),
             Kind::AddressText => text().is_some_and(|text| text.parse::<Address>().is_ok()),
             Kind::AddressHex => text().is_some_and(|text| {
-                text.strip_prefix("0x").is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                text.strip_prefix("0x").is_some_and(|hex| matches!(hex.len(), 40 | 64) && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
             }),
         }
     }

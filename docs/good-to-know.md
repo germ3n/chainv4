@@ -86,10 +86,18 @@ other pages explain each part in full; this one is the short list to keep in min
   signed transactions go to the node. Serve the web app from the node itself with
   `--explorer explorer/dist`, or allow the page's origin with `--cors`. See [Explorer](explorer.md).
 - **The wallet keeps its keys sealed on the device.** A password seals them, and nothing opens
-  them without it: export each key somewhere safe. In the browser they live in the page origin's
-  storage, which clearing the site's data deletes. It trusts the genesis a node first shows it,
-  and proves everything else. `--wallet wallet/dist` serves it from the node's `/wallet/`. See
-  [Wallet](wallet.md).
+  them without it. Its accounts come from 12 seed-phrase words, which bring them all back on any
+  device: write them down. In the browser they live in the page origin's storage, which clearing
+  the site's data deletes. It trusts the genesis a node first shows it, and proves everything
+  else. `--wallet wallet/dist` serves it from the node's `/wallet/`. See [Wallet](wallet.md).
+- **One account, three addresses.** A seed-phrase account has an Ed25519, an EdBlake and an
+  Ethereum (secp256k1) address, each with its own balance and nonce. Coins at one are not at the
+  others: the wallet adds them up on Home, but a transaction is sent from one address.
+- **secp256k1 addresses are Ethereum's.** `secp256k1:0x` and 20 bytes, the same as Ethereum's for
+  the same key, and the same words give MetaMask's accounts. But chainv4 signs its own
+  transactions, so an Ethereum wallet can hold the key yet not sign for chainv4, and a
+  secp256k1 address cannot be checked as a curve point: a mistyped one takes coins for good.
+  See [Crypto](crypto.md#keys-and-signatures).
 - **The Android wallet is built with xbuild, not Gradle.** `wallet/build-android.sh` needs clang,
   lld and llvm-ar, and no NDK. Without a key it signs with xbuild's debug key, the same for
   everyone: Android updates an app only with one signed by the same key, so pick your own key

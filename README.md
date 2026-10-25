@@ -187,8 +187,9 @@ trust. The explorer runs the same client and shows the balances it proved. See
 
 ### The wallet
 
-`wallet/` is a light wallet for the desktop and the browser, in egui. Its keys are sealed with a
-password on the device, and it shows only what it proved itself:
+`wallet/` is a light wallet for the desktop, the browser and Android, in egui. Its accounts come
+from a seed phrase, each with an Ed25519, an EdBlake and an Ethereum address; its keys are sealed
+with a password on the device, and it shows only what it proved itself:
 
 ```sh
 cd wallet && cargo run --release -- --node http://127.0.0.1:8080
@@ -196,19 +197,28 @@ cd wallet && trunk build --release    # then: chainv4 --http … --index-address
 wallet/build-android.sh --install     # an Android APK, built with xbuild
 ```
 
-Balances of the coin and every listed token, sending with a reviewed fee, receiving with a QR
-code, several accounts, and a history from the node's address index. CI builds the APKs on every
-push, and attaches them to `v*` releases. See [Wallet](docs/wallet.md).
+Balances of the coin and every listed token at each address, sending with a reviewed fee from the
+address picked, receiving with a QR code, several accounts and several wallets, and a history from
+the node's address index. CI builds the APKs on every push, and attaches them to `v*` releases.
+See [Wallet](docs/wallet.md).
 
 ## Keys
 
 ```sh
-chainv4 keygen [--scheme ed25519|edblake] [--out PATH]
+chainv4 keygen [--scheme ed25519|edblake|secp256k1] [--out PATH]
+chainv4 keygen --phrase [--words 12|24] [--account N] [--passphrase]
+chainv4 keygen --from-phrase [--account N] [--passphrase] < words.txt
 ```
 
 Writes a new key to `PATH` (default `chainv4.key`) and prints its address. The file holds one
-line, `ed25519:0x…`, the scheme and the 32-byte seed in hex. It is created readable by you
+line, `ed25519:0x…`, the scheme and the 32-byte secret in hex. It is created readable by you
 only and is never overwritten, but it is not encrypted: guard it.
+
+`secp256k1` is Ethereum's scheme: its addresses are Ethereum's 20 bytes, `secp256k1:0x…`, and a
+key has the same `0x…` address here as there. `--phrase` makes new seed-phrase words, printed once,
+and writes account `N`'s key from them; `--from-phrase` reads words from standard input instead.
+The same words give the same keys as the wallet, and the same secp256k1 accounts as Ethereum's
+wallets. See [Crypto](docs/crypto.md#seed-phrases).
 
 ## Sending transactions
 
@@ -310,7 +320,7 @@ Arguments are `type:value`:
 | `bool` | `bool:true` |
 | `string` | `string:hello` |
 | `bytes` | `bytes:0x00ff` |
-| `address` | `address:ed25519:0x…`, `address:contract:0x…` |
+| `address` | `address:ed25519:0x…`, `address:secp256k1:0x…`, `address:contract:0x…` |
 | `nil` | `nil`, alone: no value, Lua's `nil` |
 
 ## Contract lifecycle
@@ -653,4 +663,4 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "�
 | `GET /tokens` | The token registry by symbol, paged, with a search by how a symbol starts. |
 
 Amounts and large integers are decimal strings, hashes and bytes are `0x` hex, and addresses
-are their kind and hex, such as `ed25519:0x…` or `contract:0x…`.
+are their kind and hex, such as `ed25519:0x…`, `secp256k1:0x…` or `contract:0x…`.

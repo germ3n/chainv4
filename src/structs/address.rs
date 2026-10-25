@@ -31,28 +31,68 @@ pub enum Address {
     #[document(summary = "An address backed by a 32-byte EdBlake public key.")]
     #[wincode(tag = 2)]
     EdBlake([u8; 32]),
+    #[document(
+        summary = "An address of a secp256k1 key, as Ethereum makes it: the last 20 bytes of the keccak256 of the key's point. The same key has the same 0x address here as on Ethereum.",
+        see_also = "PublicKey::address",
+    )]
+    #[wincode(tag = 3)]
+    Secp256k1([u8; 20]),
 }
 
 impl Address {
     #[document(
         parent = "Address",
-        summary = "The 32 bytes behind the address, without saying which kind it is.",
+        summary = "The bytes behind the address, without saying which kind it is: 32, or 20 for secp256k1.",
     )]
-    pub fn bytes(&self) -> &[u8; 32] {
+    pub fn bytes(&self) -> &[u8] {
         match self {
             Address::Ed25519(bytes) | Address::Contract(bytes) | Address::EdBlake(bytes) => bytes,
+            Address::Secp256k1(bytes) => bytes,
         }
     }
 
     #[document(
         parent = "Address",
-        summary = "The name of the address's kind, as its text form begins: ed25519, edblake or contract.",
+        summary = "The 33 bytes a WebAssembly contract's memory holds an address in: its kind's tag, its bytes, and zeros after a kind shorter than 32, as the SDK's Address::encode writes them.",
+        see_also = "Address::from_abi",
+    )]
+    pub fn to_abi(&self) -> [u8; 33] {
+        let mut out = [0; 33];
+        let tag = self.hashable_bytes_with_tag()[0];
+        out[0] = tag;
+        out[1..1 + self.bytes().len()].copy_from_slice(self.bytes());
+
+        out
+    }
+
+    #[document(
+        parent = "Address",
+        summary = "Reads the 33 bytes to_abi writes. None for an unknown kind, or a shorter kind not followed by zeros, so one address has one form.",
+        see_also = "Address::to_abi",
+    )]
+    pub fn from_abi(bytes: &[u8]) -> Option<Address> {
+        let bytes: &[u8; 33] = bytes.try_into().ok()?;
+        let wide = || <[u8; 32]>::try_from(&bytes[1..]).ok();
+
+        match bytes[0] {
+            0 => wide().map(Address::Ed25519),
+            1 => wide().map(Address::Contract),
+            2 => wide().map(Address::EdBlake),
+            3 if bytes[21..].iter().all(|byte| *byte == 0) => bytes[1..21].try_into().ok().map(Address::Secp256k1),
+            _ => None,
+        }
+    }
+
+    #[document(
+        parent = "Address",
+        summary = "The name of the address's kind, as its text form begins: ed25519, edblake, secp256k1 or contract.",
     )]
     pub fn kind(&self) -> &'static str {
         match self {
             Address::Ed25519(_) => "ed25519",
             Address::Contract(_) => "contract",
             Address::EdBlake(_) => "edblake",
+            Address::Secp256k1(_) => "secp256k1",
         }
     }
 }
@@ -69,21 +109,21 @@ impl FromStr for Address {
 
     fn from_str(text: &str) -> Result<Address, ParseAddressError> {
         let (kind, hex) = text.split_once(':').ok_or(ParseAddressError)?;
-        let bytes: [u8; 32] = from_hex(hex)
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or(ParseAddressError)?;
+        let bytes = from_hex(hex).ok_or(ParseAddressError)?;
+        let wide = || <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| ParseAddressError);
 
         match kind {
-            "ed25519" => Ok(Address::Ed25519(bytes)),
-            "contract" => Ok(Address::Contract(bytes)),
-            "edblake" => Ok(Address::EdBlake(bytes)),
+            "ed25519" => Ok(Address::Ed25519(wide()?)),
+            "contract" => Ok(Address::Contract(wide()?)),
+            "edblake" => Ok(Address::EdBlake(wide()?)),
+            "secp256k1" => bytes.try_into().map(Address::Secp256k1).map_err(|_| ParseAddressError),
             _ => Err(ParseAddressError),
         }
     }
 }
 
 #[document(
-    summary = "Text that is not an address: it must be a kind, a colon and 64 hex digits, such as ed25519:0x3b6a….",
+    summary = "Text that is not an address: it must be a kind, a colon and 64 hex digits, such as ed25519:0x3b6a…, or 40 for secp256k1.",
     category = "Primitives",
     see_also = "Address::kind",
 )]
@@ -92,7 +132,7 @@ pub struct ParseAddressError;
 
 impl fmt::Display for ParseAddressError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "an address is ed25519:, edblake: or contract: and 64 hex digits")
+        write!(f, "an address is ed25519:, edblake: or contract: and 64 hex digits, or secp256k1: and 40")
     }
 }
 
@@ -101,13 +141,13 @@ impl std::error::Error for ParseAddressError {}
 impl Verifiable for Address {
     #[document(
         parent = "Address",
-        summary = "Checks that an Ed25519 or EdBlake key is a point on the curve and not a weak small-order point, which would accept one signature for almost any message. A contract address is always valid.",
+        summary = "Checks that an Ed25519 or EdBlake key is a point on the curve and not a weak small-order point, which would accept one signature for almost any message. A contract address, and a secp256k1 one, a hash, is always valid.",
         see_also = "VerifyError::InvalidPublicKey",
     )]
     fn verify(&self) -> Result<(), VerifyError> {
         match self {
             Address::Ed25519(key) | Address::EdBlake(key) => curve_point(key),
-            Address::Contract(_) => Ok(()),
+            Address::Contract(_) | Address::Secp256k1(_) => Ok(()),
         }
     }
 }
@@ -121,12 +161,29 @@ mod tests {
 
     #[test]
     fn text_round_trips_for_every_kind() {
-        for address in [Address::Ed25519([1; 32]), Address::Contract([2; 32]), Address::EdBlake([3; 32])] {
+        for address in [Address::Ed25519([1; 32]), Address::Contract([2; 32]), Address::EdBlake([3; 32]), Address::Secp256k1([4; 20])] {
             let text = address.to_string();
 
             assert!(text.starts_with(&format!("{}:0x", address.kind())), "{text}");
             assert_eq!(text.parse(), Ok(address));
         }
+    }
+
+    #[test]
+    fn contracts_memory_holds_every_kind_in_33_bytes() {
+        for address in [Address::Ed25519([1; 32]), Address::Contract([2; 32]), Address::EdBlake([3; 32]), Address::Secp256k1([4; 20])] {
+            let abi = address.to_abi();
+
+            assert_eq!(abi[0], wincode::serialize(&address).unwrap()[0], "the same tag as the encoding");
+            assert_eq!(Address::from_abi(&abi), Some(address));
+        }
+
+        let mut padded = Address::Secp256k1([4; 20]).to_abi();
+        padded[30] = 1;
+
+        assert_eq!(Address::from_abi(&padded), None, "a shorter kind is followed by zeros only");
+        assert_eq!(Address::from_abi(&[9; 33]), None);
+        assert_eq!(Address::from_abi(&[0; 32]), None);
     }
 
     #[test]
@@ -138,5 +195,12 @@ mod tests {
         }
 
         assert_eq!(format!("edblake:{hex}").parse(), Ok(Address::EdBlake([0xab; 32])));
+
+        // secp256k1 addresses are 20 bytes, and only they are.
+        let short = "cd".repeat(20);
+
+        assert_eq!(format!("secp256k1:0x{short}").parse(), Ok(Address::Secp256k1([0xcd; 20])));
+        assert_eq!(format!("secp256k1:{hex}").parse::<Address>(), Err(ParseAddressError));
+        assert_eq!(format!("ed25519:0x{short}").parse::<Address>(), Err(ParseAddressError));
     }
 }

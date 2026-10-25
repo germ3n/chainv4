@@ -29,12 +29,13 @@ impl UserData for LuaAddress {
     }
 }
 
+/// An address from its raw bytes: 32 are an Ed25519 key's, 20 an Ethereum one's.
 fn from_bytes(bytes: &[u8]) -> mlua::Result<LuaAddress> {
-    let key: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| Error::runtime("an address is 32 bytes"))?;
-
-    Ok(LuaAddress(Address::Ed25519(key)))
+    match bytes.len() {
+        32 => Ok(LuaAddress(Address::Ed25519(bytes.try_into().expect("32 bytes")))),
+        20 => Ok(LuaAddress(Address::Secp256k1(bytes.try_into().expect("20 bytes")))),
+        _ => Err(Error::runtime("an address is 32 bytes, or 20 for an Ethereum one")),
+    }
 }
 
 fn parse_text(text: &str) -> mlua::Result<LuaAddress> {
@@ -63,12 +64,12 @@ fn address_lib() {}
     lua,
     parent = "address",
     name = "from_hex",
-    summary = "Reads an Ed25519 address from 64 hex digits, with or without a 0x prefix.",
+    summary = "Reads an address from hex, with or without a 0x prefix: 64 digits are an Ed25519 key's, 40 an Ethereum (secp256k1) one's.",
     params = {
         hex = { ty = "string", desc = "The address in hex." },
     },
     returns = { ty = "Address", desc = "The address. It is not checked; see Address:is_valid." },
-    panics = "Errors when the text is not hex or not 32 bytes long.",
+    panics = "Errors when the text is not hex, or neither 32 nor 20 bytes long.",
     see_also = "address.from_bytes, Address:is_valid",
 )]
 fn address_from_hex() {}
@@ -79,10 +80,10 @@ fn address_from_hex() {}
     name = "parse",
     summary = "Reads an address of any kind from its full text form, as Address:text writes it and the CLI and API show it. The way to store a contract's address and get it back.",
     params = {
-        text = { ty = "string", desc = "Such as ed25519:0x… or contract:0x…." },
+        text = { ty = "string", desc = "Such as ed25519:0x…, secp256k1:0x… or contract:0x…." },
     },
     returns = { ty = "Address", desc = "The address." },
-    panics = "Errors when the kind is unknown or the hex is not 32 bytes.",
+    panics = "Errors when the kind is unknown or the hex is the wrong length for it: 32 bytes, or 20 for secp256k1.",
     see_also = "Address:text",
 )]
 fn address_parse() {}
@@ -91,12 +92,12 @@ fn address_parse() {}
     lua,
     parent = "address",
     name = "from_bytes",
-    summary = "Makes an Ed25519 address from its 32 raw bytes.",
+    summary = "Makes an address from its raw bytes: 32 are an Ed25519 key's, 20 an Ethereum (secp256k1) one's.",
     params = {
-        bytes = { ty = "string", desc = "Exactly 32 bytes." },
+        bytes = { ty = "string", desc = "Exactly 32 bytes, or 20." },
     },
     returns = { ty = "Address", desc = "The address." },
-    panics = "Errors when the string is not 32 bytes long.",
+    panics = "Errors when the string is neither 32 nor 20 bytes long.",
     see_also = "Address:bytes",
 )]
 fn address_from_bytes() {}
@@ -116,7 +117,7 @@ fn address_class() {}
     parent = "Address",
     name = "hex",
     kind = "method",
-    summary = "The address as 0x followed by 64 lowercase hex digits.",
+    summary = "The address as 0x followed by lowercase hex digits: 64, or 40 for secp256k1.",
     returns = { ty = "string", desc = "The hex form." },
 )]
 fn address_hex() {}
@@ -126,8 +127,8 @@ fn address_hex() {}
     parent = "Address",
     name = "bytes",
     kind = "method",
-    summary = "The address's 32 raw bytes.",
-    returns = { ty = "string", desc = "32 bytes." },
+    summary = "The address's raw bytes: 32, or 20 for secp256k1.",
+    returns = { ty = "string", desc = "The bytes." },
 )]
 fn address_bytes() {}
 
@@ -147,7 +148,7 @@ fn address_is_contract() {}
     parent = "Address",
     name = "kind",
     kind = "method",
-    summary = "What kind of address it is: ed25519, edblake or contract.",
+    summary = "What kind of address it is: ed25519, edblake, secp256k1 or contract.",
     returns = { ty = "string", desc = "The kind." },
 )]
 fn address_kind() {}
@@ -168,7 +169,7 @@ fn address_text() {}
     parent = "Address",
     name = "is_valid",
     kind = "method",
-    summary = "Whether the address is a usable public key: a point on the curve that is not a weak small-order point. Funds sent to an invalid address can never be spent.",
+    summary = "Whether the address is a usable public key: a point on the curve that is not a weak small-order point. Funds sent to an invalid address can never be spent. A secp256k1 address is a hash of its key, so nothing can be checked, and it is always valid; so is a contract's.",
     returns = { ty = "boolean", desc = "True when the key is valid." },
 )]
 fn address_is_valid() {}
@@ -273,7 +274,7 @@ mod tests {
     fn bad_input_is_rejected() {
         let lua = setup();
 
-        assert!(lua.load("address('0x1234')").exec().unwrap_err().to_string().contains("32 bytes"));
+        assert!(lua.load("address('0x1234')").exec().unwrap_err().to_string().contains("32 bytes, or 20"));
         assert!(lua.load("address('nothex')").exec().unwrap_err().to_string().contains("not hex"));
         assert!(lua.load("address.from_bytes('short')").exec().is_err());
     }
@@ -287,5 +288,18 @@ mod tests {
 
         assert_eq!((round, kind.as_str(), contract, same), (text, "contract", true, true));
         assert!(lua.load("address.parse('rsa:0x00')").exec().is_err());
+    }
+
+    #[test]
+    fn twenty_bytes_are_an_ethereum_address() {
+        let lua = setup();
+        let hex = "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23";
+        let code = format!(
+            "local a = address('{hex}') return a:text(), a:kind(), a:hex(), #a:bytes(), a == address.from_bytes(a:bytes()), a == address.parse(a:text()), a:is_valid()"
+        );
+        let (text, kind, round, len, bytes, parsed, valid): (String, String, String, u32, bool, bool, bool) = lua.load(code).eval().unwrap();
+
+        assert_eq!((text, kind.as_str(), round.as_str(), len), (format!("secp256k1:{hex}"), "secp256k1", hex, 20));
+        assert!(bytes && parsed && valid);
     }
 }

@@ -163,7 +163,7 @@ A proof of one chain-state entry against the tip's state root (see
 [Chain](chain.md#the-state-root)). `column` is one of `accounts`, `contracts`, `storage`,
 `validators`, `epochs`, `tokens` and `namespaces`; `key` is the entry's key in that column, in hex,
 as [Storage](storage.md#keys-and-encoding) describes. An account's key, for example, is its
-address's tag and 32 bytes.
+address's tag and bytes: 32, or 20 for a secp256k1 address.
 
 `?block=ID` proves at a recent main-chain block rather than the tip, one within the last
 `max_reorg_depth` blocks, whose undo records the node keeps: 404 for any other.

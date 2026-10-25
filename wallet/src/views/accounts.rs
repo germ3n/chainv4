@@ -1,12 +1,15 @@
-//! The accounts this wallet holds keys for: making a new one, bringing one in from a key file or
-//! its text, and naming, using, exporting or removing each. Every change seals the vault again.
+//! The accounts this wallet holds keys for: making a new one, from the seed phrase, with an address
+//! in every scheme, or bringing one in from a key file or its text, and naming, using, exporting or
+//! removing each. Every change seals the vault again.
 
 use {
     super::Ctx,
-    crate::app::Holder,
     crate::format,
+    crate::keys::{self, Holder},
     crate::theme,
-    chainv4::crypto::keypair::Keypair,
+    crate::vault::{Book, Source},
+    chainv4::crypto::keypair::{KeyType, Keypair},
+    chainv4::structs::u256::u256,
     egui::{RichText, Ui},
     std::sync::{Arc, Mutex},
 };
@@ -17,14 +20,27 @@ type Picked = Arc<Mutex<Option<(String, Vec<u8>)>>>;
 #[derive(Default)]
 pub struct AccountsState {
     name: String,
+    /// The scheme of a new account's key, in a wallet without a seed phrase: Ed25519 until another
+    /// is picked.
+    scheme: Option<KeyType>,
     /// A key's text, pasted, and a key file picked, once it is read.
     pasted: String,
     picked: Picked,
     error: Option<String>,
     renaming: Option<(usize, String)>,
-    /// The account whose key shows, and the one asked to be removed.
+    /// The account whose key it asks about showing, the one whose key shows, and the one asked to
+    /// be removed.
+    asking_reveal: Option<usize>,
     revealing: Option<usize>,
     removing: Option<usize>,
+}
+
+impl AccountsState {
+    /// Puts away any keys shown.
+    pub fn hide(&mut self) {
+        self.revealing = None;
+        self.asking_reveal = None;
+    }
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
@@ -36,14 +52,37 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
     if ctx.holders.is_empty() {
         theme::card(ui, &palette, |ui| {
             theme::caps(ui, &palette, "Start here");
-            ui.label(RichText::new("Make a new account, or bring in a key you have. Either way the key stays on this device, sealed.").color(palette.soft));
+            let text = match ctx.book.phrase {
+                Some(_) => "Make a new account from the wallet's words, or bring in a key you have. Either way the keys stay on this device, sealed.",
+                None => "Make a new account, or bring in a key you have. Either way the key stays on this device, sealed.",
+            };
+            ui.label(RichText::new(text).color(palette.soft));
         });
         ui.add_space(14.0);
     }
 
+    // An account asked to go goes once every card is drawn, so none is drawn past the end.
+    let mut removed = None;
+
     for index in 0..ctx.holders.len() {
-        holder(ui, ctx, state, index);
+        if holder(ui, ctx, state, index) {
+            removed = Some(index);
+        }
+
         ui.add_space(10.0);
+    }
+
+    reveal_question(ui, ctx, state);
+
+    if let Some(index) = removed {
+        let mut current = ctx.settings.current().to_string();
+        remove(ctx.holders, &mut current, index);
+        ctx.settings.set_current(current);
+        state.removing = None;
+        state.revealing = None;
+        state.asking_reveal = None;
+        state.renaming = None;
+        *ctx.changed = true;
     }
 
     ui.add_space(4.0);
@@ -52,9 +91,36 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
         ui.add_space(4.0);
         ui.add(egui::TextEdit::singleline(&mut state.name).hint_text("name, such as Spending").desired_width(f32::INFINITY));
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+
+        match ctx.book.phrase {
+            Some(_) => {
+                let number = keys::unused(ctx.holders);
+                ui.label(
+                    RichText::new(format!("A new account is the words' index {number}: an Ed25519, an EdBlake and an Ethereum address, all from the same words."))
+                        .small()
+                        .color(palette.muted),
+                );
+            }
+            // Without words, a new account is one key, in the scheme picked.
+            None => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Scheme").color(palette.soft));
+
+                    let picked = *state.scheme.get_or_insert(KeyType::Ed25519);
+
+                    for scheme in KeyType::ALL {
+                        if ui.selectable_label(picked == *scheme, keys::label(*scheme)).clicked() {
+                            state.scheme = Some(*scheme);
+                        }
+                    }
+                });
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
             if theme::primary(ui, &palette, "New account", true).clicked() {
-                let made = Keypair::generate(Keypair::development().public().key_type()).map_err(|err| format!("no randomness for a key: {err}"));
+                let made = new_account(ctx.book, ctx.holders, state.scheme.unwrap_or(KeyType::Ed25519));
                 add(ctx, state, made);
             }
 
@@ -67,14 +133,18 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
 
         ui.add_space(10.0);
         ui.label(RichText::new("Or paste a key, as chainv4 keygen writes it:").small().color(palette.muted));
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut state.pasted).password(true).hint_text("ed25519:0x…").desired_width(ui.available_width() - 90.0));
+        let import = super::beside(
+            ui,
+            |ui| theme::quiet(ui, &palette, "Import").clicked(),
+            |ui, width| {
+                ui.add(egui::TextEdit::singleline(&mut state.pasted).password(true).hint_text("ed25519:0x…, secp256k1:0x…").desired_width(width));
+            },
+        );
 
-            if theme::quiet(ui, &palette, "Import").clicked() {
-                let read = Keypair::from_key_file(&state.pasted);
-                add(ctx, state, read);
-            }
-        });
+        if import {
+            let read = Keypair::from_key_file(state.pasted.trim()).map(brought_in);
+            add(ctx, state, read);
+        }
 
         ui.add_space(10.0);
         egui::CollapsingHeader::new(RichText::new("Development key").color(palette.soft)).id_salt("development").show(ui, |ui| {
@@ -89,7 +159,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
                     state.name = "Development".to_string();
                 }
 
-                add(ctx, state, Ok(Keypair::development()));
+                add(ctx, state, Ok(brought_in(Keypair::development())));
             }
         });
 
@@ -100,10 +170,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
     });
 }
 
-fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) {
+/// One account's card. Returns whether it was asked to go.
+fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -> bool {
     let palette = *ctx.palette;
-    let address = ctx.holders[index].address.to_string();
+    let addresses = ctx.holders[index].addresses();
+    let number = ctx.holders[index].number();
     let current = index == ctx.current;
+    let mut remove = false;
 
     theme::card(ui, &palette, |ui| {
         ui.horizontal(|ui| {
@@ -123,7 +196,11 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) {
                     }
                 }
                 _ => {
-                    ui.label(theme::strong(&ctx.holders[index].name, 16.0).color(palette.ink));
+                    let name = ctx.holders[index].name.clone();
+                    ui.scope(|ui| {
+                        ui.set_max_width(ui.available_width() * 0.45);
+                        ui.add(egui::Label::new(theme::strong(&name, 16.0).color(palette.ink)).truncate());
+                    });
                 }
             }
 
@@ -131,20 +208,47 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) {
                 theme::pill(ui, "In use", palette.accent);
             }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match ctx.chain.account(&address) {
-                Some(proven) => {
-                    ui.label(format::amount(&proven.value.balance.to_string(), ctx.coin.decimals, &ctx.coin.symbol));
+            // The coin at all its addresses, once each is proven.
+            let proven: Vec<_> = addresses.iter().filter_map(|address| ctx.chain.account(&address.to_string())).collect();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match proven.len() == addresses.len() {
+                true => {
+                    let raw = proven.iter().fold(u256::ZERO, |sum, proven| sum.saturating_add(proven.value.balance)).to_string();
+                    let shown = format!("{} {}", format::compact(&raw, ctx.coin.decimals, 4), ctx.coin.symbol);
+                    theme::fitted(ui, &shown, 14.5, 10.0, egui::FontFamily::Proportional, palette.soft)
+                        .on_hover_text(format::amount(&raw, ctx.coin.decimals, &ctx.coin.symbol));
                 }
-                None => {
+                false => {
                     ui.label(RichText::new("not proven yet").small().color(palette.muted));
                 }
             });
         });
-        super::address(ui, &palette, &address);
+
+        let from = match number {
+            Some(number) => format!("From the words · index {number}"),
+            None => "A key brought in".to_string(),
+        };
+        ui.label(RichText::new(from).small().color(palette.muted));
+        ui.add_space(4.0);
+
+        for address in &addresses {
+            let text = address.to_string();
+            ui.horizontal(|ui| {
+                ui.add_sized([64.0, 18.0], egui::Label::new(RichText::new(super::scheme(address)).small().color(palette.muted)));
+                super::address(ui, &palette, &text);
+
+                if let Some(proven) = ctx.chain.account(&text) {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        theme::fitted(ui, &ctx.brief(None, &proven.value.balance.to_string()), 12.5, 9.0, egui::FontFamily::Proportional, palette.muted);
+                    });
+                }
+            });
+        }
+
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        // On a narrow screen the buttons go on to a second line rather than past the edge.
+        ui.horizontal_wrapped(|ui| {
             if !current && theme::quiet(ui, &palette, "Use").clicked() {
-                ctx.settings.current = address.clone();
+                ctx.settings.set_current(ctx.holders[index].id());
             }
 
             if theme::quiet(ui, &palette, "Rename").clicked() {
@@ -152,9 +256,19 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) {
             }
 
             let revealed = state.revealing == Some(index);
+            let export = match (revealed, addresses.len() > 1) {
+                (true, true) => "Hide keys",
+                (true, false) => "Hide key",
+                (false, true) => "Export keys",
+                (false, false) => "Export key",
+            };
 
-            if theme::quiet(ui, &palette, if revealed { "Hide key" } else { "Export key" }).clicked() {
-                state.revealing = (!revealed).then_some(index);
+            // Hiding them needs no asking; showing them does.
+            if theme::quiet(ui, &palette, export).clicked() {
+                match revealed {
+                    true => state.revealing = None,
+                    false => state.asking_reveal = Some(index),
+                }
             }
 
             if theme::quiet(ui, &palette, "Remove").clicked() {
@@ -163,26 +277,30 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) {
         });
 
         if state.revealing == Some(index) {
-            let key = ctx.holders[index].key.to_key_file();
             ui.add_space(8.0);
-            ui.label(RichText::new("Anyone who sees this key can spend from the account. Keep it somewhere only you can read.").small().color(palette.warn));
-            ui.label(theme::mono(&key).color(palette.soft));
-            super::copy(ui, &palette, &key);
+            ui.label(RichText::new("Anyone who sees these keys can spend from the account. Keep them somewhere only you can read.").small().color(palette.warn));
+
+            for key in &ctx.holders[index].keys {
+                let file = key.to_key_file();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    theme::caps(ui, &palette, keys::label(key.public().key_type()));
+                    super::copy(ui, &palette, &file);
+                });
+                ui.add(egui::Label::new(theme::mono(&file).color(palette.soft)).wrap());
+            }
         }
 
         if state.removing == Some(index) {
             ui.add_space(8.0);
-            ui.label(RichText::new("Its key leaves this wallet. Without a copy of it, what the account holds is out of reach for good.").color(palette.bad));
+            let warning = match number {
+                Some(_) => "It leaves this list. Its keys still come from the words: New account brings it back first.",
+                None => "Its key leaves this wallet. Without a copy of it, what the account holds is out of reach for good.",
+            };
+            ui.label(RichText::new(warning).color(palette.bad));
             ui.horizontal(|ui| {
                 if theme::primary(ui, &palette, "Remove it", true).clicked() {
-                    ctx.holders.remove(index);
-                    state.removing = None;
-                    state.revealing = None;
-                    *ctx.changed = true;
-
-                    if current {
-                        ctx.settings.current = ctx.holders.first().map(|holder| holder.address.to_string()).unwrap_or_default();
-                    }
+                    remove = true;
                 }
 
                 if theme::quiet(ui, &palette, "Keep it").clicked() {
@@ -191,32 +309,118 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) {
             });
         }
     });
+
+    remove
 }
 
-/// Adds an account with the name typed, unless the wallet has it already.
-fn add(ctx: &mut Ctx, state: &mut AccountsState, key: Result<Keypair, String>) {
-    let key = match key {
-        Ok(key) => key,
+/// Asks, in a box over the page, whether to show an account's private key, which anyone who sees it
+/// can spend from.
+fn reveal_question(ui: &mut Ui, ctx: &Ctx, state: &mut AccountsState) {
+    let Some(index) = state.asking_reveal else {
+        return;
+    };
+    let Some(holder) = ctx.holders.get(index) else {
+        state.asking_reveal = None;
+
+        return;
+    };
+    let palette = *ctx.palette;
+    let name = holder.name.clone();
+    let mut answer = None;
+
+    let modal = egui::Modal::new(ui.make_persistent_id("reveal key"))
+        .frame(egui::Frame::new().fill(palette.card).stroke(egui::Stroke::new(1.0, palette.line)).corner_radius(12.0).inner_margin(egui::Margin::same(20)))
+        .show(ui.ctx(), |ui| {
+            ui.set_max_width(360.0);
+            theme::caps(ui, &palette, "Show the private keys?");
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("Anyone who sees the keys of {name} can take everything it holds, now and later.")).color(palette.ink));
+            ui.label(
+                RichText::new("Show it only to copy it somewhere safe, with no one watching your screen and nothing recording it.")
+                    .small()
+                    .color(palette.muted),
+            );
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if theme::primary(ui, &palette, "Show them", true).clicked() {
+                    answer = Some(true);
+                }
+
+                if theme::quiet(ui, &palette, "Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+
+    match answer {
+        Some(true) => {
+            state.revealing = Some(index);
+            state.asking_reveal = None;
+        }
+        Some(false) => state.asking_reveal = None,
+        None if modal.should_close() => state.asking_reveal = None,
+        None => {}
+    }
+}
+
+/// Takes an account out, and moves the one in use to the first left when it was that one.
+fn remove(holders: &mut Vec<Holder>, current: &mut String, index: usize) {
+    let removed = holders.remove(index);
+
+    if *current == removed.id() || current.is_empty() {
+        *current = holders.first().map(Holder::id).unwrap_or_default();
+    }
+}
+
+/// A new account: the words' next, with a key in every scheme, or, without words, a random key in
+/// the scheme picked. Its name comes when it is added.
+fn new_account(book: &Book, holders: &[Holder], scheme: KeyType) -> Result<Holder, String> {
+    match keys::seed(book) {
+        Some(seed) => {
+            let account = keys::unused(holders);
+
+            Ok(Holder {
+                name: String::new(),
+                source: Source::Phrase { account },
+                keys: keys::derive(&seed, account),
+            })
+        }
+        None => Keypair::generate(scheme).map(brought_in).map_err(|err| format!("no randomness for a key: {err}")),
+    }
+}
+
+/// An account of one key, brought in.
+fn brought_in(key: Keypair) -> Holder {
+    Holder {
+        name: String::new(),
+        source: Source::Key { key: key.to_key_file() },
+        keys: vec![key],
+    }
+}
+
+/// Adds an account with the name typed, unless the wallet has one of its addresses already.
+fn add(ctx: &mut Ctx, state: &mut AccountsState, made: Result<Holder, String>) {
+    let mut made = match made {
+        Ok(made) => made,
         Err(why) => {
             state.error = Some(why);
 
             return;
         }
     };
-    let address = key.public().address();
 
-    if ctx.holders.iter().any(|holder| holder.address == address) {
-        state.error = Some(format!("{} is in this wallet already", format::short(&address.to_string())));
+    if let Some(held) = made.addresses().into_iter().find(|address| ctx.holders.iter().any(|holder| holder.key(address).is_some())) {
+        state.error = Some(format!("{} is in this wallet already", format::short(&held.to_string())));
 
         return;
     }
 
-    let name = match state.name.trim() {
+    made.name = match state.name.trim() {
         "" => format!("Account {}", ctx.holders.len() + 1),
         name => name.to_string(),
     };
-    ctx.holders.push(Holder { name, key, address });
-    ctx.settings.current = address.to_string();
+    ctx.settings.set_current(made.id());
+    ctx.holders.push(made);
     *ctx.changed = true;
     state.name.clear();
     state.pasted.clear();
@@ -254,7 +458,8 @@ fn take_picked(ctx: &mut Ctx, state: &mut AccountsState) {
     if let Some((name, bytes)) = picked {
         let read = String::from_utf8(bytes)
             .map_err(|_| "it is not text".to_string())
-            .and_then(|text| Keypair::from_key_file(&text))
+            .and_then(|text| Keypair::from_key_file(text.trim()))
+            .map(brought_in)
             .map_err(|why| format!("{name}: {why}"));
 
         if state.name.trim().is_empty() {
@@ -262,5 +467,61 @@ fn take_picked(ctx: &mut Ctx, state: &mut AccountsState) {
         }
 
         add(ctx, state, read);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, crate::vault::Words};
+
+    fn holder(name: &str) -> Holder {
+        Holder {
+            name: name.to_string(),
+            ..brought_in(Keypair::generate(KeyType::Ed25519).unwrap())
+        }
+    }
+
+    #[test]
+    fn removing_an_account_keeps_the_rest_and_moves_off_one_in_use() {
+        let mut holders = vec![holder("a"), holder("b"), holder("c")];
+        let (a, c) = (holders[0].id(), holders[2].id());
+        let mut current = a.clone();
+
+        remove(&mut holders, &mut current, 0);
+
+        assert_eq!(holders.iter().map(|holder| holder.name.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+        assert_eq!(current, holders[0].id(), "the one in use went, so the first left is");
+
+        current = c.clone();
+        remove(&mut holders, &mut current, 0);
+
+        assert_eq!(current, c, "another went: the one in use stays");
+
+        remove(&mut holders, &mut current, 0);
+
+        assert!(holders.is_empty());
+        assert_eq!(current, "", "none left to use");
+    }
+
+    #[test]
+    fn a_new_account_comes_from_the_words_when_there_are_some() {
+        let words = Book {
+            phrase: Some(Words {
+                words: "test test test test test test test test test test test junk".to_string(),
+                passphrase: String::new(),
+            }),
+            accounts: Vec::new(),
+        };
+        let first = new_account(&words, &[], KeyType::Ed25519).unwrap();
+        let second = new_account(&words, std::slice::from_ref(&first), KeyType::Ed25519).unwrap();
+
+        assert_eq!((first.number(), second.number()), (Some(0), Some(1)));
+        assert_eq!(first.addresses().len(), 3, "an address in every scheme");
+        assert_eq!(first.addresses()[2].to_string(), "secp256k1:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+
+        let without = new_account(&Book::default(), &[], KeyType::Secp256k1).unwrap();
+
+        assert_eq!(without.number(), None);
+        assert_eq!(without.addresses().iter().map(|address| address.kind()).collect::<Vec<_>>(), ["secp256k1"]);
     }
 }

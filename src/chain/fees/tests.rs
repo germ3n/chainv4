@@ -4,7 +4,7 @@
 use super::*;
 use crate::chain::*;
 use crate::consensus::{AuthorityProducer, DevAuthority, Producer};
-use crate::crypto::keypair::{Keypair, PrivateKey};
+use crate::crypto::keypair::Keypair;
 use crate::db::MemoryDb;
 use crate::registry::Accounts;
 use crate::registry::contracts::contract_address;
@@ -56,12 +56,7 @@ return M
 "#;
 
 fn key(seed: u8) -> Keypair {
-    #[cfg(feature = "ed25519")]
-    let private = PrivateKey::Ed25519([seed; 32]);
-    #[cfg(not(feature = "ed25519"))]
-    let private = PrivateKey::EdBlake([seed; 32]);
-
-    Keypair::from_private(private)
+    Keypair::from_seed([seed; 32])
 }
 
 /// The development key, which produces every block here, so fees' producer share goes to it.

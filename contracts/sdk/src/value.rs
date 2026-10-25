@@ -2,7 +2,7 @@
 
 use alloc::{string::String, vec::Vec};
 
-/// An address: its kind and 32 bytes.
+/// An address: its kind and its bytes, 32 of them, or 20 for secp256k1 with the rest zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address {
     pub kind: AddressKind,
@@ -15,29 +15,63 @@ pub enum AddressKind {
     Ed25519 = 0,
     Contract = 1,
     EdBlake = 2,
+    /// Ethereum's: 20 bytes of keccak256 of a secp256k1 key.
+    Secp256k1 = 3,
+}
+
+impl AddressKind {
+    fn from_tag(tag: u8) -> Option<AddressKind> {
+        match tag {
+            0 => Some(AddressKind::Ed25519),
+            1 => Some(AddressKind::Contract),
+            2 => Some(AddressKind::EdBlake),
+            3 => Some(AddressKind::Secp256k1),
+            _ => None,
+        }
+    }
+
+    /// How many bytes an address of this kind has: 32, or 20 for secp256k1.
+    pub fn width(self) -> usize {
+        match self {
+            AddressKind::Secp256k1 => 20,
+            _ => 32,
+        }
+    }
 }
 
 impl Address {
-    /// The 33 bytes the host reads and writes: kind, then bytes.
+    /// An address of a kind from its bytes, as many as the kind has.
+    pub fn new(kind: AddressKind, bytes: &[u8]) -> Option<Address> {
+        let mut out = [0; 32];
+        out.get_mut(..kind.width())?.copy_from_slice(bytes.get(..kind.width()).filter(|_| bytes.len() == kind.width())?);
+
+        Some(Address { kind, bytes: out })
+    }
+
+    /// Its bytes: 32, or 20 for secp256k1.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.kind.width()]
+    }
+
+    /// The 33 bytes the host reads and writes: the kind, its bytes, and zeros after a shorter
+    /// kind's.
     pub fn encode(&self) -> [u8; 33] {
         let mut out = [0; 33];
         out[0] = self.kind as u8;
-        out[1..].copy_from_slice(&self.bytes);
+        out[1..1 + self.kind.width()].copy_from_slice(self.as_bytes());
 
         out
     }
 
     pub fn decode(bytes: &[u8; 33]) -> Option<Address> {
-        let kind = match bytes[0] {
-            0 => AddressKind::Ed25519,
-            1 => AddressKind::Contract,
-            2 => AddressKind::EdBlake,
-            _ => return None,
-        };
-        let mut out = [0; 32];
-        out.copy_from_slice(&bytes[1..]);
+        let kind = AddressKind::from_tag(bytes[0])?;
 
-        Some(Address { kind, bytes: out })
+        // One address, one form: zeros after a shorter kind's bytes.
+        if bytes[1 + kind.width()..].iter().any(|byte| *byte != 0) {
+            return None;
+        }
+
+        Address::new(kind, &bytes[1..1 + kind.width()])
     }
 
     /// The address in its text form, as the node writes it: its kind, a colon and 0x hex, such
@@ -48,12 +82,13 @@ impl Address {
             AddressKind::Ed25519 => "ed25519",
             AddressKind::Contract => "contract",
             AddressKind::EdBlake => "edblake",
+            AddressKind::Secp256k1 => "secp256k1",
         };
         let mut out = String::with_capacity(kind.len() + 67);
         out.push_str(kind);
         out.push_str(":0x");
 
-        for byte in self.bytes {
+        for byte in self.as_bytes() {
             out.push(HEX[usize::from(byte >> 4)] as char);
             out.push(HEX[usize::from(byte & 15)] as char);
         }
@@ -223,8 +258,8 @@ pub fn encode(values: &[Value]) -> Vec<u8> {
     for value in values {
         match value {
             Value::Address(address) => {
-                out.push(0);
-                out.extend_from_slice(&address.encode());
+                out.extend_from_slice(&[0, address.kind as u8]);
+                out.extend_from_slice(address.as_bytes());
             }
             Value::Amount(Amount::U128(amount)) => {
                 out.extend_from_slice(&[1, 0]);
@@ -284,7 +319,11 @@ pub fn decode(bytes: &[u8]) -> Option<Vec<Value>> {
 
     for _ in 0..count {
         let value = match reader.byte()? {
-            0 => Value::Address(Address::decode(&reader.array()?)?),
+            0 => {
+                let kind = AddressKind::from_tag(reader.byte()?)?;
+
+                Value::Address(Address::new(kind, reader.take(kind.width())?)?)
+            }
             1 => match reader.byte()? {
                 0 => Value::Amount(Amount::U128(u128::from_le_bytes(reader.array()?))),
                 1 => Value::Amount(Amount::U256(reader.array()?)),
@@ -372,6 +411,7 @@ mod tests {
     fn values_round_trip() {
         let values = vec![
             Value::Address(Address { kind: AddressKind::EdBlake, bytes: [3; 32] }),
+            Value::Address(Address::new(AddressKind::Secp256k1, &[4; 20]).unwrap()),
             Value::Amount(Amount::U128(7)),
             Value::Bytes(vec![1, 2]),
             Value::Bool(true),
@@ -384,5 +424,26 @@ mod tests {
 
         assert_eq!(decode(&encode(&values)), Some(values));
         assert_eq!(decode(&[1, 0, 0, 0, 0, 0, 0, 0, 99]), None);
+    }
+
+    #[test]
+    fn a_secp256k1_address_is_20_bytes_in_values_and_padded_in_memory() {
+        let address = Address::new(AddressKind::Secp256k1, &[4; 20]).unwrap();
+        let encoded = encode(&[Value::Address(address)]);
+
+        // As the node encodes it: the value's tag, the kind's, and its 20 bytes.
+        assert_eq!(&encoded[8..], &[&[0, 3][..], &[4; 20]].concat()[..]);
+        assert_eq!(address.text(), alloc::format!("secp256k1:0x{}", "04".repeat(20)));
+
+        let slot = address.encode();
+
+        assert_eq!((&slot[1..21], &slot[21..]), (&[4; 20][..], &[0; 12][..]));
+        assert_eq!(Address::decode(&slot), Some(address));
+
+        let mut padded = slot;
+        padded[25] = 1;
+
+        assert_eq!(Address::decode(&padded), None, "zeros after the 20 bytes, so one address has one form");
+        assert_eq!(Address::new(AddressKind::Secp256k1, &[4; 32]), None);
     }
 }

@@ -90,17 +90,15 @@ impl Checked {
         }
     }
 
-    /// What it moved for this account: each amount with whether it came in.
-    pub fn for_holder<'a>(&'a self, holder: &'a str) -> impl Iterator<Item = (bool, &'a Move)> + 'a {
-        self.moves.iter().filter_map(move |moved| {
-            let (from, to) = (moved.from.as_deref() == Some(holder), moved.to.as_deref() == Some(holder));
+    /// What it moved for an account of these addresses: each amount with whether it came in.
+    pub fn for_account<'a>(&'a self, addresses: &'a [String]) -> impl Iterator<Item = (bool, &'a Move)> + 'a {
+        let ours = move |party: &Option<String>| party.as_ref().is_some_and(|party| addresses.contains(party));
 
-            match (from, to) {
-                // To itself: nothing moved, as far as it is concerned.
-                (true, true) | (false, false) => None,
-                (false, true) => Some((true, moved)),
-                (true, false) => Some((false, moved)),
-            }
+        self.moves.iter().filter_map(move |moved| match (ours(&moved.from), ours(&moved.to)) {
+            (false, true) => Some((true, moved)),
+            (true, false) => Some((false, moved)),
+            // Between two of its addresses, or none: nothing moved, as far as it is concerned.
+            _ => None,
         })
     }
 }
@@ -116,7 +114,7 @@ fn token_move(event: &Event) -> Option<Move> {
         return None;
     }
 
-    let party = |address: &Address| (address.bytes() != &[0; 32]).then(|| address.to_string());
+    let party = |address: &Address| address.bytes().iter().any(|byte| *byte != 0).then(|| address.to_string());
 
     Some(Move {
         token: Some(event.contract.to_string()),
@@ -231,9 +229,10 @@ mod tests {
         let checked = Checked::of(&landed(Tx::Transfer { from: me, to: them, amount: Amount::U128(15) }, CommittedOutcome::Done, Vec::new()));
 
         assert_eq!((checked.height, checked.nonce, checked.fee.as_str(), checked.action.as_str()), (9, 4, "21", "Transfer"));
-        assert_eq!(checked.for_holder(&them.to_string()).map(|(incoming, moved)| (incoming, moved.amount.as_str())).collect::<Vec<_>>(), [(true, "15")]);
-        assert_eq!(checked.for_holder(&me.to_string()).map(|(incoming, _)| incoming).collect::<Vec<_>>(), [false]);
-        assert_eq!(checked.for_holder("ed25519:0x00").count(), 0, "it touched neither");
+        assert_eq!(checked.for_account(&[them.to_string()]).map(|(incoming, moved)| (incoming, moved.amount.as_str())).collect::<Vec<_>>(), [(true, "15")]);
+        assert_eq!(checked.for_account(&[me.to_string()]).map(|(incoming, _)| incoming).collect::<Vec<_>>(), [false]);
+        assert_eq!(checked.for_account(&["ed25519:0x00".to_string()]).count(), 0, "it touched neither");
+        assert_eq!(checked.for_account(&[me.to_string(), them.to_string()]).count(), 0, "between one account's own addresses");
     }
 
     #[test]
@@ -256,7 +255,7 @@ mod tests {
 
         assert_eq!((moved.token.clone(), moved.amount.as_str()), (Some(token.to_string()), "200"));
         assert!(checked.action.starts_with("Called transfer on contract:0x050505"), "{}", checked.action);
-        assert_eq!(checked.for_holder(&them.to_string()).count(), 1);
+        assert_eq!(checked.for_account(&[them.to_string()]).count(), 1);
         assert!(checked.events[0].starts_with("Transfer ed25519:0x"));
 
         let failed = Checked::of(&landed(call(), CommittedOutcome::Failed, Vec::new()));

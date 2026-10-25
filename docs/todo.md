@@ -347,8 +347,16 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   Framework, would bring them.
 - [ ] **xbuild is pinned to a commit.** It has had no release since 0.2.0; move to one when it
   does. It cannot add a network security config or other resources either.
-- [ ] **The wallet has no seed phrase.** Each account is a key of its own; a mnemonic and derived
-  accounts would make one backup cover them all.
+- [x] **Seed phrases.** BIP39 words with an optional passphrase; each account derives an Ed25519
+  and an EdBlake key by SLIP-0010 and a secp256k1 key on Ethereum's path, in the library, `chainv4
+  keygen --phrase` and the wallet, which holds several wallets, each with its own words and password.
+- [x] **secp256k1, Ethereum's scheme,** behind the `secp256k1` feature: low-s ECDSA over keccak256,
+  and Ethereum's 20-byte addresses, in transactions, contracts (33-byte ABI slots) and the wallet.
+- [ ] **Ethereum wallets cannot sign for chainv4.** A secp256k1 key signs chainv4's own transaction
+  encoding. An EIP-712 typed-data form of a transaction would let MetaMask and hardware wallets sign
+  one.
+- [ ] **The wallet keeps its words as plain strings while unlocked.** The vault seals them at rest,
+  but in memory they are ordinary `String`s, not zeroized when the wallet locks.
 - [ ] **The wallet proves only the registry's first page of tokens,** 100 by symbol, as the
   explorer's holdings do.
 - [ ] **CI does not build the web bundles.** It lints the explorer's and the wallet's wasm32 builds

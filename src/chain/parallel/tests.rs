@@ -1,6 +1,6 @@
 use super::*;
 use crate::chain::fees::FeeConfig;
-use crate::crypto::keypair::{Keypair, PrivateKey};
+use crate::crypto::keypair::Keypair;
 use crate::db::{Database, MemoryDb};
 use crate::registry::contracts::contract_address;
 use crate::structs::address::Address;
@@ -23,12 +23,7 @@ return M
 "#;
 
 fn key(seed: u8) -> Keypair {
-    #[cfg(feature = "ed25519")]
-    let private = PrivateKey::Ed25519([seed; 32]);
-    #[cfg(not(feature = "ed25519"))]
-    let private = PrivateKey::EdBlake([seed; 32]);
-
-    Keypair::from_private(private)
+    Keypair::from_seed([seed; 32])
 }
 
 fn rules() -> Rules {

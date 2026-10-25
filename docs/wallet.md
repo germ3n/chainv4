@@ -2,11 +2,12 @@
 
 The wallet (`wallet/`) is a light wallet, built with egui, for the desktop, the browser and
 Android:
-- **Keys:** several accounts, sealed with a password on the device.
-- **Balances:** the coin and every listed token, proven by the light client.
-- **Sending:** the coin or a token, with the fee shown before you sign.
-- **Receiving:** the address, with a QR code.
-- **Activity:** every transaction an account sent or that touched it, proven.
+- **Keys:** wallets of accounts from a seed phrase, each sealed with a password on the device.
+  Every account has an Ed25519, an EdBlake and an Ethereum address, all from the same words.
+- **Balances:** the coin and every listed token at each address, proven by the light client.
+- **Sending:** the coin or a token, from the address picked, with the fee shown before you sign.
+- **Receiving:** any of the account's addresses, with a QR code.
+- **Activity:** every transaction an account sent or that touched one of its addresses, proven.
 
 It trusts a genesis id and nothing else. A node tells it where to look, and it shows only what it
 proved, checking each answer against headers it checked itself. A node can withhold things from it,
@@ -51,10 +52,31 @@ wallet/build-android.sh --install         # an APK for arm64, put on the device 
 node's address index, so start the node with `--index-addresses`. Without one, it falls back to
 the event index (`--index-events`), which lists only transactions whose events name the account.
 
+## Wallets and words
+
+**A wallet** is a seed phrase, the accounts made from it, and a password that seals them. The lock
+screen (`wallet/src/lock.rs`) makes the first, and holds them all:
+- **New wallet:** a name, a password twice, and under Advanced an optional BIP39 passphrase. The
+  wallet makes 12 words and shows them once, to write down, then asks for three of them back
+  before it opens.
+- **Restore from words:** 12 or 24 words written down before, from this wallet or any that
+  follows BIP39, with their passphrase if they had one.
+- **Several wallets:** "Add a wallet" makes another. With more than one, the lock screen asks
+  which to unlock; each has its own password. The one last opened comes first.
+
+**An account, three addresses.** Account *n* of the words has a key in every scheme, derived as
+[Crypto](crypto.md#seed-phrases) says: Ed25519 and EdBlake by SLIP-0010, and secp256k1 at
+Ethereum's `m/44'/60'/0'/0/n`. So its Ethereum address is the one MetaMask shows for the same
+words and account. `chainv4 keygen --from-phrase --account n` gives the same keys.
+
+**Settings** shows the words, once the wallet's password is typed again, renames the wallet, and
+removes it, also after the password. A wallet from before seed phrases has none: Settings makes
+new words for it or takes words you have, and from then on new accounts come from them.
+
 ## Keys
 
-**The vault.** On first start the wallet asks for a password, at least 8 characters. Its accounts
-are kept in app storage, sealed with it (`wallet/src/vault.rs`):
+**The vault.** Each wallet's words and accounts are kept in app storage, sealed with its password,
+at least 8 characters (`wallet/src/vault.rs`):
 - **Stretching:** Argon2id stretches the password into a key, with a random salt of the vault's
   own.
 - **Sealing:** ChaCha20-Poly1305 seals the accounts with that key, under a fresh nonce each time
@@ -64,7 +86,7 @@ are kept in app storage, sealed with it (`wallet/src/vault.rs`):
 
 **Where it is kept:** the app's storage directory on the desktop, the page origin's
 `localStorage` in the browser, and a file in the app's private data folder on Android. Clearing
-the site's data, or the app's, deletes the keys, so export each one somewhere safe.
+the site's data, or the app's, deletes the keys, so keep the words written down.
 
 **Unlocking:** the password opens the vault. While unlocked, the wallet keeps the stretched key in
 memory, so every change seals the accounts again without asking. Locking drops the keys and that
@@ -73,14 +95,20 @@ key alike.
 **Locking:** the Lock button, or 15 minutes without input. Settings changes the time, or turns it
 off.
 
-**Accounts** (`wallet/src/views/accounts.rs`):
-- **New account:** a fresh Ed25519 key from the system's randomness.
-- **Open key file / paste a key:** a key file as `chainv4 keygen` writes it, `ed25519:0x…` or
-  `edblake:0x…`.
+**Accounts** (`wallet/src/views/accounts.rs`, `wallet/src/keys.rs`):
+- **New account:** the words' next account, the lowest number the wallet does not hold, with its
+  three addresses. A wallet without words makes one random key instead, in the scheme picked.
+- **Open key file / paste a key:** a key file as `chainv4 keygen` writes it, `ed25519:0x…`,
+  `edblake:0x…` or `secp256k1:0x…`. An account brought in has that one key, and one address.
 - **Development key:** the dev chains' well-known key, which holds their genesis coin. Anyone can
   spend from it.
-- **Use, rename, export and remove.** Export shows the key's text to copy. Removing an account
-  with no copy of its key puts what it holds out of reach for good.
+- **Use, rename, export and remove.** Export asks first, then shows each key's text to copy;
+  leaving the page hides them again. Removing an account from the words only takes it off the
+  list: the next New account brings it back. Removing a key brought in, with no copy of it, puts
+  what it holds out of reach for good.
+
+**From before seed phrases:** a vault the wallet sealed before it had words opens as a wallet
+named Wallet 1, its accounts keys brought in.
 
 **Changing the password:** the current one, then the new one twice. The accounts are sealed again
 under a new salt.
@@ -106,18 +134,23 @@ pinned one. "Forget it" trusts whatever the node shows next, and starts over.
 The [light client](light-client.md) follows the node from the pinned genesis. Every header is
 checked by consensus, and finality by the voters it proved (`wallet/src/chain.rs`).
 
-**Balances:** every few seconds, for every account, at the tip and at the finalized block:
-- **The coin:** the account's entry in `Column::Accounts`, with its nonce.
+**Balances:** every few seconds, for every address of every account, at the tip and at the
+finalized block:
+- **The coin:** the address's entry in `Column::Accounts`, with its nonce.
 - **Tokens:** each listed token's registry entry in `Column::Tokens`, for its name, symbol and
-  decimals. Then each account's balance of it, by the token standard's
+  decimals. Then each address's balance of it, by the token standard's
   [provable balances](token-standard.md#provable-balances).
+
+Home shows the coin added up across the account's addresses, then each address with what it
+holds of the coin and of each token.
 
 **How far each is trusted** shows beside it:
 - **Final:** proven at a final block. Nothing can undo it.
 - **Proven:** proven at the tip, which a reorg could still undo.
 
-**Activity:** for the account in use, the node's address index lists the transactions that
-touched it (`GET /accounts/{address}/txs`). The wallet proves each one with
+**Activity:** for each address of the account in use, the node's address index lists the
+transactions that touched it (`GET /accounts/{address}/txs`), and the page merges them, newest
+first. The wallet proves each one with
 `GET /proofs/receipts/{id}`:
 - **Who sent what:** the signed transaction, against its block's `tx_root`, with `check_tx`.
 - **What it did:** its receipt, against the `receipts_root`, with `check_receipt`.
@@ -125,6 +158,9 @@ touched it (`GET /accounts/{address}/txs`). The wallet proves each one with
 From those it works out what moved for the account (`wallet/src/history.rs`):
 - the coin, from a transfer, a mint, a burn or a call's value;
 - tokens, from the standard's `Transfer` events.
+
+A move between two of the account's own addresses moved nothing for it, so its line says what the
+transaction did instead of an amount.
 
 Each line says Received, Sent, or what the transaction did. The line opens to show the block, the
 sender, the fee, and every event it emitted.
@@ -141,7 +177,9 @@ a time, and proves each by its link to the one above (see
 ## Sending
 
 The Send page (`wallet/src/views/send.rs`):
-1. **What, to whom, how much:** the coin, or a token the account holds. The amount is in the
+1. **From, what, to whom, how much:** the address it is sent from, one of the account's, then the
+   coin or a token that address holds. Each address has its own balance and nonce. To takes any
+   address, or an Ethereum one as Ethereum writes it, `0x` and 40 hex digits. The amount is in the
    token's decimals, and checked against the proven balance.
 2. **Review.** The wallet builds the transaction from what it proved:
    - **The nonce:** the proven one, past any it sent that is still waiting.
@@ -160,20 +198,21 @@ holding its nonce, so the next transaction takes that nonce again.
 
 ## Receiving
 
-The Receive page shows the account's address, to copy, and as a QR code, dark on white in either
-theme so any camera reads it. The coin and every token arrive at the same address.
+The Receive page shows one of the account's addresses, picked by its scheme, to copy and as a QR
+code, dark on white in either theme so any camera reads it, and lists them all below. The coin and
+every token arrive at any of them; each keeps its own balance.
 
 ## What it remembers
 
 Everything is in app storage under one key, `chainv4-wallet`, saved by eframe every 30 seconds,
 on exit, and when Android sends the app to the background:
 - the node, and the genesis pinned at each node;
-- the vault;
+- each wallet: its name, its vault, and the account in use in it;
 - the light client's state, by genesis, to resume from the finalized block, not genesis;
 - what it sent that is not final yet, and what it proved, the newest 2,000;
-- the account in use, the lock time, and the theme.
+- the wallet last opened, the lock time, and the theme.
 
-Only the vault is secret.
+Only the vaults are secret.
 
 ## Look
 
@@ -258,8 +297,13 @@ attaches both to its release.
 
 ## What to keep in mind
 
-- **Lose the password, lose the keys.** Nothing can open the vault without it. Export each
-  account's key and keep it safe.
+- **Keep the words.** They bring every account back, on any device. Without them, a lost device
+  or a forgotten password loses the wallet: nothing opens a vault without its password.
+- **A passphrase is part of the wallet.** The same words with another passphrase, or none, make
+  other accounts, all empty.
+- **The Ethereum address is not on Ethereum.** It is the address Ethereum's wallets show for the
+  same words, and what is sent to it on this chain stays on this chain. Ether sent to it on
+  Ethereum is on Ethereum, out of this wallet's sight.
 - **Browser storage is per origin.** The wallet served from one node's `/wallet/` and the same
   wallet from another address keep separate vaults.
 - **A node can withhold, not lie.** It can leave tokens off its list, or transactions out of its

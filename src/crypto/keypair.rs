@@ -18,14 +18,17 @@ use ed25519_dalek::{Signer, SigningKey};
 #[cfg(feature = "edblake")]
 use crate::crypto::edblake;
 
-#[cfg(not(any(feature = "ed25519", feature = "edblake")))]
-compile_error!("enable at least one key feature: ed25519 or edblake");
+#[cfg(feature = "secp256k1")]
+use crate::crypto::secp256k1;
+
+#[cfg(not(any(feature = "ed25519", feature = "edblake", feature = "secp256k1")))]
+compile_error!("enable at least one key feature: ed25519, edblake or secp256k1");
 
 #[document(
     summary = "A signature scheme.",
     category = "Keys",
     see_also = "Keypair, PublicKey, Signature",
-    note = "Each scheme sits behind a cargo feature of the same name, ed25519 and edblake, both on by default. Tags are pinned.",
+    note = "Each scheme sits behind a cargo feature of the same name, ed25519, edblake and secp256k1, all on by default. Tags are pinned.",
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
@@ -38,6 +41,47 @@ pub enum KeyType {
     #[cfg(feature = "edblake")]
     #[wincode(tag = 1)]
     EdBlake,
+    #[document(summary = "Ethereum's: ECDSA on secp256k1 over keccak256, with a low s, and addresses of keccak256's last 20 bytes.")]
+    #[cfg(feature = "secp256k1")]
+    #[wincode(tag = 2)]
+    Secp256k1,
+}
+
+impl KeyType {
+    #[document(parent = "KeyType", summary = "Every scheme this build has.")]
+    pub const ALL: &[KeyType] = &[
+        #[cfg(feature = "ed25519")]
+        KeyType::Ed25519,
+        #[cfg(feature = "edblake")]
+        KeyType::EdBlake,
+        #[cfg(feature = "secp256k1")]
+        KeyType::Secp256k1,
+    ];
+
+    #[document(parent = "KeyType", summary = "Its name, as key files and addresses begin: ed25519, edblake or secp256k1.")]
+    pub fn name(self) -> &'static str {
+        match self {
+            #[cfg(feature = "ed25519")]
+            KeyType::Ed25519 => "ed25519",
+            #[cfg(feature = "edblake")]
+            KeyType::EdBlake => "edblake",
+            #[cfg(feature = "secp256k1")]
+            KeyType::Secp256k1 => "secp256k1",
+        }
+    }
+}
+
+/// Reads a scheme's name.
+impl std::str::FromStr for KeyType {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<KeyType, String> {
+        KeyType::ALL
+            .iter()
+            .copied()
+            .find(|scheme| scheme.name() == text)
+            .ok_or_else(|| format!("unknown scheme {text}: this build has {}", KeyType::ALL.iter().map(|scheme| scheme.name()).collect::<Vec<_>>().join(", ")))
+    }
 }
 
 #[document(
@@ -56,12 +100,16 @@ pub enum PublicKey {
     #[cfg(feature = "edblake")]
     #[wincode(tag = 1)]
     EdBlake([u8; 32]),
+    #[document(summary = "A secp256k1 public key, compressed.")]
+    #[cfg(feature = "secp256k1")]
+    #[wincode(tag = 2)]
+    Secp256k1([u8; 33]),
 }
 
 impl PublicKey {
     #[document(
         parent = "PublicKey",
-        summary = "The account this key controls: the key itself, tagged with its scheme.",
+        summary = "The account this key controls: under Ed25519 and EdBlake the key itself, under secp256k1 the last 20 bytes of the keccak256 of its point, as Ethereum's; each tagged with its scheme.",
     )]
     pub fn address(&self) -> Address {
         match self {
@@ -69,6 +117,9 @@ impl PublicKey {
             PublicKey::Ed25519(key) => Address::Ed25519(*key),
             #[cfg(feature = "edblake")]
             PublicKey::EdBlake(key) => Address::EdBlake(*key),
+            // A key that is no point has no account; it never verifies anything either.
+            #[cfg(feature = "secp256k1")]
+            PublicKey::Secp256k1(key) => Address::Secp256k1(secp256k1::address(key).unwrap_or_default()),
         }
     }
 
@@ -82,6 +133,8 @@ impl PublicKey {
             PublicKey::Ed25519(_) => KeyType::Ed25519,
             #[cfg(feature = "edblake")]
             PublicKey::EdBlake(_) => KeyType::EdBlake,
+            #[cfg(feature = "secp256k1")]
+            PublicKey::Secp256k1(_) => KeyType::Secp256k1,
         }
     }
 
@@ -109,6 +162,10 @@ impl PublicKey {
             (PublicKey::EdBlake(key), Signature::EdBlake(signature)) => {
                 edblake::verify(key, message, signature)
             }
+            #[cfg(feature = "secp256k1")]
+            (PublicKey::Secp256k1(key), Signature::Secp256k1(signature)) => {
+                secp256k1::verify(key, message, signature)
+            }
             #[allow(unreachable_patterns)]
             _ => false,
         };
@@ -124,7 +181,7 @@ impl PublicKey {
 impl Verifiable for PublicKey {
     #[document(
         parent = "PublicKey",
-        summary = "Checks that the key is a point on the curve and not a weak small-order point.",
+        summary = "Checks that the key is a point on its curve, and for the Edwards schemes not a weak small-order point.",
         see_also = "VerifyError::InvalidPublicKey",
     )]
     fn verify(&self) -> Result<(), VerifyError> {
@@ -133,6 +190,11 @@ impl Verifiable for PublicKey {
             PublicKey::Ed25519(key) => curve_point(key),
             #[cfg(feature = "edblake")]
             PublicKey::EdBlake(key) => curve_point(key),
+            #[cfg(feature = "secp256k1")]
+            PublicKey::Secp256k1(key) => match secp256k1::valid_key(key) {
+                true => Ok(()),
+                false => Err(VerifyError::InvalidPublicKey),
+            },
         }
     }
 }
@@ -141,18 +203,32 @@ impl Hashable for PublicKey {
     const TAG_LEN: usize = 1;
 }
 
-/// The same text as the key's address, such as ed25519:0x3b6a….
+/// The scheme, a colon and the key in hex: the same text as the key's address under the Edwards
+/// schemes, such as ed25519:0x3b6a…, and the compressed point under secp256k1, which is 33 bytes
+/// where its address is 20.
 impl fmt::Display for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.address().fmt(f)
+        match self {
+            #[cfg(feature = "secp256k1")]
+            PublicKey::Secp256k1(key) => write!(f, "secp256k1:{}", to_hex(key)),
+            #[allow(unreachable_patterns)]
+            _ => self.address().fmt(f),
+        }
     }
 }
 
-/// Reads the text Display writes. A contract address is not a key.
+/// Reads the text Display writes. A contract address, or a secp256k1 address, is not a key.
 impl std::str::FromStr for PublicKey {
     type Err = crate::structs::address::ParseAddressError;
 
     fn from_str(text: &str) -> Result<PublicKey, Self::Err> {
+        #[cfg(feature = "secp256k1")]
+        if let Some(hex) = text.strip_prefix("secp256k1:")
+            && let Some(key) = from_hex(hex).and_then(|bytes| <[u8; 33]>::try_from(bytes).ok())
+        {
+            return Ok(PublicKey::Secp256k1(key));
+        }
+
         match text.parse::<Address>()? {
             #[cfg(feature = "ed25519")]
             Address::Ed25519(key) => Ok(PublicKey::Ed25519(key)),
@@ -187,6 +263,10 @@ pub enum PrivateKey {
     #[cfg(feature = "edblake")]
     #[wincode(tag = 1)]
     EdBlake([u8; 32]),
+    #[document(summary = "A secp256k1 scalar: above zero, and below the group's order.")]
+    #[cfg(feature = "secp256k1")]
+    #[wincode(tag = 2)]
+    Secp256k1([u8; 32]),
 }
 
 impl PrivateKey {
@@ -200,6 +280,8 @@ impl PrivateKey {
             PrivateKey::Ed25519(_) => KeyType::Ed25519,
             #[cfg(feature = "edblake")]
             PrivateKey::EdBlake(_) => KeyType::EdBlake,
+            #[cfg(feature = "secp256k1")]
+            PrivateKey::Secp256k1(_) => KeyType::Secp256k1,
         }
     }
 
@@ -215,6 +297,10 @@ impl PrivateKey {
             }
             #[cfg(feature = "edblake")]
             PrivateKey::EdBlake(seed) => PublicKey::EdBlake(edblake::public_key(seed)),
+            #[cfg(feature = "secp256k1")]
+            PrivateKey::Secp256k1(secret) => {
+                PublicKey::Secp256k1(secp256k1::public_key(secret).expect("a secp256k1 private key is a valid scalar"))
+            }
         }
     }
 
@@ -232,6 +318,8 @@ impl PrivateKey {
             }
             #[cfg(feature = "edblake")]
             PrivateKey::EdBlake(seed) => Signature::EdBlake(edblake::sign(seed, message)),
+            #[cfg(feature = "secp256k1")]
+            PrivateKey::Secp256k1(secret) => Signature::Secp256k1(secp256k1::sign(secret, message)),
         }
     }
 }
@@ -243,6 +331,8 @@ impl Drop for PrivateKey {
             PrivateKey::Ed25519(seed) => seed.zeroize(),
             #[cfg(feature = "edblake")]
             PrivateKey::EdBlake(seed) => seed.zeroize(),
+            #[cfg(feature = "secp256k1")]
+            PrivateKey::Secp256k1(secret) => secret.zeroize(),
         }
     }
 }
@@ -263,6 +353,10 @@ pub enum Signature {
     #[cfg(feature = "edblake")]
     #[wincode(tag = 1)]
     EdBlake([u8; 64]),
+    #[document(summary = "A secp256k1 ECDSA signature: r, then s, which is always low.")]
+    #[cfg(feature = "secp256k1")]
+    #[wincode(tag = 2)]
+    Secp256k1([u8; 64]),
 }
 
 impl Hashable for Signature {
@@ -277,6 +371,8 @@ impl fmt::Display for Signature {
             Signature::Ed25519(bytes) => f.write_str(&to_hex(bytes)),
             #[cfg(feature = "edblake")]
             Signature::EdBlake(bytes) => f.write_str(&to_hex(bytes)),
+            #[cfg(feature = "secp256k1")]
+            Signature::Secp256k1(bytes) => f.write_str(&to_hex(bytes)),
         }
     }
 }
@@ -306,14 +402,28 @@ pub const DEV_SEED: [u8; 32] = *b"chainv4 dev authority, not safe!";
 impl Keypair {
     #[document(
         parent = "Keypair",
-        summary = "The well-known development key: Ed25519 when built in, else EdBlake. Never use it for anything of value: its seed is in the source.",
-        see_also = "DEV_SEED, DevAuthority::dev_keypair",
+        summary = "The well-known development key: Ed25519 when built in, else EdBlake, else secp256k1. Never use it for anything of value: its seed is in the source.",
+        see_also = "DEV_SEED, DevAuthority::dev_keypair, Keypair::from_seed",
     )]
     pub fn development() -> Keypair {
-        #[cfg(feature = "ed25519")]
-        let private = PrivateKey::Ed25519(DEV_SEED);
-        #[cfg(not(feature = "ed25519"))]
-        let private = PrivateKey::EdBlake(DEV_SEED);
+        Keypair::from_seed(DEV_SEED)
+    }
+
+    #[document(
+        parent = "Keypair",
+        summary = "A key from a fixed 32-byte seed, in the first scheme this build has: Ed25519, else EdBlake, else secp256k1. For the development key and tests, never for keys of value: a seed is a key only when it is secret and random.",
+        params = { seed = "The seed. For secp256k1 it must be a valid secret: not zero, and below the group's order, as every seed of 32 equal bytes but 0x00 and 0xff is." },
+        see_also = "Keypair::development, Keypair::generate",
+    )]
+    pub fn from_seed(seed: [u8; 32]) -> Keypair {
+        let private = match KeyType::ALL[0] {
+            #[cfg(feature = "ed25519")]
+            KeyType::Ed25519 => PrivateKey::Ed25519(seed),
+            #[cfg(feature = "edblake")]
+            KeyType::EdBlake => PrivateKey::EdBlake(seed),
+            #[cfg(feature = "secp256k1")]
+            KeyType::Secp256k1 => PrivateKey::Secp256k1(seed),
+        };
 
         Keypair::from_private(private)
     }
@@ -327,11 +437,20 @@ impl Keypair {
     pub fn generate(key_type: KeyType) -> Result<Keypair, getrandom::Error> {
         let mut seed = [0; 32];
         getrandom::fill(&mut seed)?;
+
+        // A secp256k1 key must be below the group's order: all but one in 2^128 draws are.
+        #[cfg(feature = "secp256k1")]
+        while key_type == KeyType::Secp256k1 && !secp256k1::valid_secret(&seed) {
+            getrandom::fill(&mut seed)?;
+        }
+
         let private = match key_type {
             #[cfg(feature = "ed25519")]
             KeyType::Ed25519 => PrivateKey::Ed25519(seed),
             #[cfg(feature = "edblake")]
             KeyType::EdBlake => PrivateKey::EdBlake(seed),
+            #[cfg(feature = "secp256k1")]
+            KeyType::Secp256k1 => PrivateKey::Secp256k1(seed),
         };
         seed.zeroize();
 
@@ -365,6 +484,10 @@ impl Keypair {
             "ed25519" => Ok(PrivateKey::Ed25519(seed)),
             #[cfg(feature = "edblake")]
             "edblake" => Ok(PrivateKey::EdBlake(seed)),
+            #[cfg(feature = "secp256k1")]
+            "secp256k1" if secp256k1::valid_secret(&seed) => Ok(PrivateKey::Secp256k1(seed)),
+            #[cfg(feature = "secp256k1")]
+            "secp256k1" => Err("it is not a secp256k1 key: zero, or past the group's order".to_string()),
             other => Err(format!("unknown scheme {other}")),
         };
         seed.zeroize();
@@ -383,6 +506,8 @@ impl Keypair {
             PrivateKey::Ed25519(seed) => ("ed25519", seed),
             #[cfg(feature = "edblake")]
             PrivateKey::EdBlake(seed) => ("edblake", seed),
+            #[cfg(feature = "secp256k1")]
+            PrivateKey::Secp256k1(secret) => ("secp256k1", secret),
         };
 
         format!("{scheme}:{}", to_hex(seed))
@@ -421,19 +546,16 @@ mod tests {
         super::KeyType,
         super::Keypair,
         super::PrivateKey,
-        super::PublicKey,
         super::Signature,
         crate::crypto::verifiable::Verifiable,
         crate::crypto::verifiable::VerifyError,
     };
+    // Only the Edwards schemes' known-answer tests name a public key.
+    #[cfg(any(feature = "ed25519", feature = "edblake"))]
+    use super::PublicKey;
 
     /// Every scheme this build has.
-    const KEY_TYPES: &[KeyType] = &[
-        #[cfg(feature = "ed25519")]
-        KeyType::Ed25519,
-        #[cfg(feature = "edblake")]
-        KeyType::EdBlake,
-    ];
+    const KEY_TYPES: &[KeyType] = KeyType::ALL;
 
     #[cfg(any(feature = "ed25519", feature = "edblake"))]
     fn hex<const N: usize>(text: &str) -> [u8; N] {
@@ -459,6 +581,11 @@ mod tests {
             Signature::EdBlake(mut bytes) => {
                 bytes[40] ^= 1;
                 Signature::EdBlake(bytes)
+            }
+            #[cfg(feature = "secp256k1")]
+            Signature::Secp256k1(mut bytes) => {
+                bytes[40] ^= 1;
+                Signature::Secp256k1(bytes)
             }
         }
     }

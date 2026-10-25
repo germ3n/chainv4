@@ -706,7 +706,8 @@ fn conforms_to_the_token_standard(code: Code) {
         .unwrap();
     let initial = u256::from(1_000_000u64) * u256::from(10u64).pow(18);
     let zero = address(Address::Ed25519([0; 32]));
-    let (alice, bob, carol) = (Address::Ed25519([0xa; 32]), Address::Ed25519([0xb; 32]), Address::Ed25519([0xc; 32]));
+    // Carol holds an Ethereum address: tokens move to it, and prove under its text, the same.
+    let (alice, bob, carol) = (Address::Ed25519([0xa; 32]), Address::Ed25519([0xb; 32]), Address::Secp256k1([0xc; 20]));
     let amount = |value: u64| TxCallArgumentType::U256(u256::from(value));
     let yes = [TxCallArgumentType::Bool(true)];
     let ok = |sender: Address, function: &str, args: &[TxCallArgumentType]| {

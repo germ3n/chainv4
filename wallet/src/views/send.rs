@@ -1,5 +1,5 @@
-//! Sending the coin or a token. The wallet builds and signs the transaction itself, from what it
-//! proved: the account's nonce and balance. The node only prices it, from a probe signed with no
+//! Sending the coin or a token, from one of the account's addresses. The wallet builds and signs
+//! the transaction itself, from what it proved: that address's nonce and balance. The node only prices it, from a probe signed with no
 //! fee offer, as `chainv4 send` does, and takes it in. Nothing is signed for real before the
 //! review shows what it costs at most.
 
@@ -26,6 +26,8 @@ const PENDING_FOR: u64 = super::activity::UNSEEN_AFTER;
 
 #[derive(Default)]
 pub struct SendState {
+    /// The address it is sent from: one of the account's, the first until another is picked.
+    from: Option<Address>,
     /// What to send: None for the coin, or a token's address.
     token: Option<String>,
     to: String,
@@ -122,9 +124,35 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     }
 
     let busy = matches!(state.step, Step::Pricing { .. } | Step::Sending { .. });
-    let address = ctx.address();
+    let addresses = ctx.holder().map(|holder| holder.addresses()).unwrap_or_default();
+
+    if !state.from.is_some_and(|from| addresses.contains(&from)) {
+        state.from = addresses.first().copied();
+    }
+
+    let address = state.from.map(|from| from.to_string()).unwrap_or_default();
 
     theme::card(ui, &palette, |ui| {
+        if addresses.len() > 1 {
+            theme::caps(ui, &palette, "From");
+            let before = state.from;
+            egui::ComboBox::from_id_salt("from")
+                .selected_text(paying(ctx, state.from.as_ref()))
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for from in &addresses {
+                        ui.selectable_value(&mut state.from, Some(*from), paying(ctx, Some(from)));
+                    }
+                });
+
+            // A token held at one address may not be at another.
+            if state.from != before {
+                state.token = None;
+            }
+
+            ui.add_space(10.0);
+        }
+
         theme::caps(ui, &palette, "What");
         let shown = match &state.token {
             None => ctx.coin.symbol.clone(),
@@ -155,24 +183,25 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
         ui.add_space(10.0);
         theme::caps(ui, &palette, "To");
-        ui.add(egui::TextEdit::singleline(&mut state.to).hint_text("ed25519:0x…").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+        ui.add(egui::TextEdit::singleline(&mut state.to).hint_text("ed25519:0x…, or an Ethereum 0x…").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
 
-        if !state.to.trim().is_empty() && state.to.trim().parse::<Address>().is_err() {
-            ui.colored_label(palette.bad, "Not an address: one starts with its kind, such as ed25519:0x, and has 32 bytes of hex.");
+        if !state.to.trim().is_empty() && recipient(&state.to).is_none() {
+            ui.colored_label(palette.bad, "Not an address: one starts with its kind, such as ed25519:0x and 32 bytes of hex, or is Ethereum's, 0x and 20 bytes.");
         }
 
         ui.add_space(10.0);
         theme::caps(ui, &palette, "Amount");
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut state.amount).hint_text("0.0").desired_width(ui.available_width() - 70.0));
+        let max = super::beside(
+            ui,
+            |ui| balance.is_some() && state.token.is_some() && theme::quiet(ui, &palette, "Max").clicked(),
+            |ui, width| {
+                ui.add(egui::TextEdit::singleline(&mut state.amount).hint_text("0.0").desired_width(width));
+            },
+        );
 
-            if let Some(raw) = &balance
-                && state.token.is_some()
-                && theme::quiet(ui, &palette, "Max").clicked()
-            {
-                state.amount = format::units(raw, decimals).replace(',', "");
-            }
-        });
+        if max && let Some(raw) = &balance {
+            state.amount = format::units(raw, decimals).replace(',', "");
+        }
 
         ui.add_space(10.0);
         egui::CollapsingHeader::new(RichText::new("Fee").color(palette.soft)).id_salt("fee").show(ui, |ui| {
@@ -208,6 +237,32 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     });
 }
 
+/// An address to pay from, as the picker shows it: its scheme, cut short, and its coin.
+fn paying(ctx: &Ctx, from: Option<&Address>) -> String {
+    let Some(from) = from else {
+        return String::new();
+    };
+    let text = from.to_string();
+    let held = ctx.chain.account(&text).map_or_else(|| "…".to_string(), |proven| ctx.brief(None, &proven.value.balance.to_string()));
+
+    // The scheme leads, so the address goes without its kind.
+    let short = format::short(&text);
+    let hex = short.split_once(':').map_or(short.as_str(), |(_, hex)| hex);
+
+    format!("{} · {hex} · {held}", super::scheme(from))
+}
+
+/// The address to send to, as typed: with its kind, or an Ethereum one as Ethereum writes it, 0x
+/// and 40 hex digits.
+fn recipient(text: &str) -> Option<Address> {
+    let text = text.trim();
+
+    match text.len() == 42 && text.starts_with("0x") {
+        true => format!("secp256k1:{text}").parse().ok(),
+        false => text.parse().ok(),
+    }
+}
+
 /// What can be sent, proven, with its decimals and symbol.
 fn available(ctx: &Ctx, token: Option<&str>, address: &str) -> (Option<String>, u8, String) {
     match token {
@@ -227,10 +282,11 @@ fn available(ctx: &Ctx, token: Option<&str>, address: &str) -> (Option<String>, 
 /// The transaction the form asks for, and the body of POST /offer for its probe.
 fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
     let holder = ctx.holder().ok_or("there is no account to send from")?;
-    let from = holder.address;
+    let from = state.from.ok_or("there is no address to send from")?;
+    let key = holder.key(&from).ok_or("that address is not this account's")?;
     let address = from.to_string();
-    let account = ctx.chain.account(&address).ok_or("the account is not proven yet: wait for the light client")?;
-    let to: Address = state.to.trim().parse().map_err(|_| "the address to send to does not read".to_string())?;
+    let account = ctx.chain.account(&address).ok_or("the address is not proven yet: wait for the light client")?;
+    let to = recipient(&state.to).ok_or("the address to send to does not read")?;
     let (balance, decimals, symbol) = available(ctx, state.token.as_deref(), &address);
     let units = format::parse_units(&state.amount, decimals).ok_or(format!("the amount does not read as {symbol}, with at most {decimals} decimals"))?;
     let units = u256::from_str_radix(&units, 10).map_err(|_| "the amount is too large".to_string())?;
@@ -259,7 +315,7 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
         }
     };
     let nonce = next_nonce(account.value.nonce, &ctx.settings.sent, &address, ctx.now);
-    let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, &holder.key);
+    let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, key);
     let mut body = json!({ "tx": encode(&probe) });
 
     if !state.tip.trim().is_empty() {
@@ -289,7 +345,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Review");
         ui.add_space(4.0);
-        ui.label(RichText::new(&draft.what).font(egui::FontId::new(34.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
+        theme::fitted(ui, &draft.what, 34.0, 16.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
         ui.add_space(8.0);
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &draft.from.to_string()));
         super::row(ui, &palette, "To", |ui| super::address(ui, &palette, &draft.to.to_string()));
@@ -316,9 +372,9 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if theme::primary(ui, &palette, "Sign and send", !short).clicked()
-                && let Some(holder) = ctx.holders.iter().find(|holder| holder.address == draft.from)
+                && let Some(key) = ctx.holders.iter().find_map(|holder| holder.key(&draft.from))
             {
-                let signed = SignedTx::sign(draft.tx.clone(), draft.nonce, fee, &holder.key);
+                let signed = SignedTx::sign(draft.tx.clone(), draft.nonce, fee, key);
                 let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
                 ctx.node.ask(ask.clone());
                 state.step = Step::Sending { draft: draft.clone(), ask };
@@ -437,5 +493,16 @@ mod tests {
         assert!(offer(&json!({ "gas_limit": 1, "max_price": "x", "tip": "0" })).is_err());
         assert_eq!(amount(u256::new(5)), Amount::U128(5));
         assert!(matches!(amount(u256::MAX), Amount::U256(_)));
+    }
+
+    #[test]
+    fn an_ethereum_address_reads_as_ethereum_writes_it() {
+        let ethereum = "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23";
+
+        assert_eq!(recipient(ethereum).map(|to| to.to_string()), Some("secp256k1:0x2c7536e3605d9c16a7a3d7b1898e529396a65c23".to_string()));
+        assert_eq!(recipient(&format!(" secp256k1:{ethereum} ")), recipient(ethereum));
+        assert_eq!(recipient(&format!("ed25519:0x{}", "ab".repeat(32))), Some(Address::Ed25519([0xab; 32])));
+        assert_eq!(recipient("0x1234"), None);
+        assert_eq!(recipient(&format!("0x{}", "ab".repeat(32))), None, "no kind, and not Ethereum's length");
     }
 }

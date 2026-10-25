@@ -6,7 +6,7 @@ description = "A chainv4 explorer: blocks, transactions and their hops, the netw
 
 [dependencies]
 # Only the parts that build for the browser too: transactions, keys and hashes.
-chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake"] }
+chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1"] }
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "accesskit", "persistence"] }
 egui = "0.37.0"
 egui_plot = "0.38.0"

@@ -292,6 +292,36 @@ fn transfers_run_and_failures_still_use_the_nonce() {
     assert_eq!(balance(&chain, &authority().public().address()), funds - u256::new(100));
 }
 
+#[cfg(feature = "secp256k1")]
+#[test]
+fn an_ethereum_key_receives_and_sends_as_any_other() {
+    use crate::crypto::keypair::KeyType;
+    use crate::crypto::verifiable::{Verifiable, VerifyError};
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let eth = Keypair::generate(KeyType::Secp256k1).unwrap();
+    let address = eth.public().address();
+    let me = authority().public().address();
+
+    assert!(matches!(address, Address::Secp256k1(_)), "{address}");
+    let fund = transfer(&chain, &authority(), &address, 1_000);
+
+    assert_eq!(advance(&mut chain, vec![fund])[0].result, Ok(Effect::Done));
+
+    let back = transfer(&chain, &eth, &me, 400);
+
+    assert_eq!(back.verify(), Ok(()));
+    assert_eq!(advance(&mut chain, vec![back])[0].result, Ok(Effect::Done));
+    assert_eq!((balance(&chain, &address), nonce(&chain, &eth)), (u256::new(600), 1));
+
+    // Signed by another key in the address's name, it never verifies.
+    let mut forged = transfer(&chain, &stranger(), &me, 1);
+    forged.signer = eth.public();
+
+    assert_eq!(forged.verify(), Err(VerifyError::InvalidSignature));
+}
+
 #[test]
 fn only_the_authority_mints() {
     let db = Arc::new(MemoryDb::default());

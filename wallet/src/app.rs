@@ -1,15 +1,16 @@
-//! The wallet: a vault of accounts sealed with a password, a node it talks to but never trusts, and
-//! the light client that checks everything the node says. Each frame takes what arrived, asks for
-//! what is due, and draws the page.
+//! The wallet: vaults of accounts, each sealed with a password of its own, a node it talks to but
+//! never trusts, and the light client that checks everything the node says. Each frame takes what
+//! arrived, asks for what is due, and draws the page.
 
 use {
     crate::chain::{Chain, Trust},
     crate::history::Checked,
+    crate::keys::{self, Holder},
+    crate::lock::{self, Lock, Opened},
     crate::node::{Ask, Node},
     crate::theme::{self, DARK, LIGHT, Palette},
-    crate::vault::{Sealed, Stored, Vault, key_of},
+    crate::vault::{Book, Sealed, StoredAccount, Vault},
     crate::views::{self, Ctx, Page},
-    chainv4::crypto::keypair::Keypair,
     chainv4::structs::address::Address,
     egui::{RichText, Ui},
     serde::{Deserialize, Serialize},
@@ -38,18 +39,34 @@ pub struct Settings {
     pub pinned: HashMap<String, String>,
     /// What the light client checked, by genesis id, encoded, to resume from.
     pub light: HashMap<String, String>,
-    /// The accounts, sealed with the password.
-    pub vault: Option<Sealed>,
+    /// The wallets on this device, each its accounts sealed with a password of its own.
+    pub wallets: Vec<WalletEntry>,
+    /// The wallet last opened, by its place among them.
+    pub wallet: usize,
     /// Transactions this wallet sent that are not final yet, oldest first.
     pub sent: Vec<Sent>,
     /// Transactions the light client proved, by id.
     pub checked: HashMap<String, Checked>,
-    /// The account in use, by address.
-    pub current: String,
     /// Minutes without input before the wallet locks itself; 0 for never.
     pub lock_after: u32,
     /// The light palette rather than the dark one.
     pub light_theme: bool,
+    /// What a wallet from before there could be several kept: its one vault, and the account in
+    /// use. Read, to become the first wallet, and never written again.
+    #[serde(skip_serializing)]
+    vault: Option<Sealed>,
+    #[serde(skip_serializing)]
+    current: String,
+}
+
+/// A wallet on this device.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletEntry {
+    pub name: String,
+    /// Its seed phrase and accounts, sealed with its password.
+    pub vault: Sealed,
+    /// The account in use, by its first address.
+    pub current: String,
 }
 
 impl Default for Settings {
@@ -58,12 +75,44 @@ impl Default for Settings {
             node: String::new(),
             pinned: HashMap::new(),
             light: HashMap::new(),
-            vault: None,
+            wallets: Vec::new(),
+            wallet: 0,
             sent: Vec::new(),
             checked: HashMap::new(),
-            current: String::new(),
             lock_after: 15,
             light_theme: false,
+            vault: None,
+            current: String::new(),
+        }
+    }
+}
+
+impl Settings {
+    /// Settings as kept, with the vault of a wallet from before there could be several made the
+    /// first wallet.
+    fn migrated(mut self) -> Settings {
+        if let Some(vault) = self.vault.take() {
+            self.wallets.insert(0, WalletEntry {
+                name: "Wallet 1".to_string(),
+                vault,
+                current: std::mem::take(&mut self.current),
+            });
+            self.wallet = 0;
+        }
+
+        self.wallet = self.wallet.min(self.wallets.len().saturating_sub(1));
+
+        self
+    }
+
+    /// The account in use in the wallet open, by its first address.
+    pub fn current(&self) -> &str {
+        self.wallets.get(self.wallet).map_or("", |entry| entry.current.as_str())
+    }
+
+    pub fn set_current(&mut self, id: String) {
+        if let Some(entry) = self.wallets.get_mut(self.wallet) {
+            entry.current = id;
         }
     }
 }
@@ -81,26 +130,11 @@ pub struct Sent {
     pub at: u64,
 }
 
-/// An unlocked account.
-pub struct Holder {
-    pub name: String,
-    pub key: Keypair,
-    pub address: Address,
-}
-
 /// The chain's coin, as the node names it.
 #[derive(Clone, Debug)]
 pub struct Coin {
     pub symbol: String,
     pub decimals: u8,
-}
-
-/// Whether the vault is open.
-enum Lock {
-    /// No vault yet: choosing a password.
-    Setup { first: String, second: String, error: Option<String> },
-    Locked { password: String, error: Option<String> },
-    Open,
 }
 
 pub struct Wallet {
@@ -109,7 +143,9 @@ pub struct Wallet {
     node: Node,
     chain: Chain,
     lock: Lock,
+    /// The wallet open: its vault, what the vault holds, and its accounts, unlocked.
     vault: Option<Vault>,
+    book: Book,
     holders: Vec<Holder>,
     page: Page,
     coin: Coin,
@@ -118,12 +154,19 @@ pub struct Wallet {
     asked_history: f64,
     /// When the wallet last saw input, for locking itself.
     active: f64,
+    /// The lock screen's width, and the tallest it has been at it: what places its card, so a
+    /// keyboard taking the bottom of the screen does not move the field under a finger.
+    lock_room: (f32, f32),
     views: views::States,
 }
 
 impl Wallet {
     pub fn new(creation: &eframe::CreationContext, node: Option<String>, fallback: &str) -> Wallet {
-        let mut settings: Settings = creation.storage.and_then(|storage| eframe::get_value(storage, STORAGE_KEY)).unwrap_or_default();
+        let mut settings = creation
+            .storage
+            .and_then(|storage| eframe::get_value::<Settings>(storage, STORAGE_KEY))
+            .unwrap_or_default()
+            .migrated();
         settings.node = node
             .or_else(|| Some(settings.node.clone()).filter(|node| !node.is_empty()))
             .unwrap_or_else(|| fallback.to_string())
@@ -133,14 +176,7 @@ impl Wallet {
         let palette = if settings.light_theme { LIGHT } else { DARK };
         theme::install_fonts(&creation.egui_ctx);
         theme::apply(&creation.egui_ctx, &palette);
-        let lock = match settings.vault {
-            Some(_) => Lock::Locked { password: String::new(), error: None },
-            None => Lock::Setup {
-                first: String::new(),
-                second: String::new(),
-                error: None,
-            },
-        };
+        let lock = Lock::start(&settings);
 
         Wallet {
             node: Node::new(&settings.node, creation.egui_ctx.clone()),
@@ -149,6 +185,7 @@ impl Wallet {
             chain: Chain::default(),
             lock,
             vault: None,
+            book: Book::default(),
             holders: Vec::new(),
             page: Page::Overview,
             coin: Coin {
@@ -159,6 +196,7 @@ impl Wallet {
             asked_status: None,
             asked_history: 0.0,
             active: 0.0,
+            lock_room: (0.0, 0.0),
             views: views::States::default(),
         }
     }
@@ -172,36 +210,37 @@ impl Wallet {
         self.asked_history = 0.0;
     }
 
-    /// Seals the accounts again after a change.
+    /// Seals the wallet's accounts again after a change.
     fn store(&mut self) -> Result<(), String> {
         let vault = self.vault.as_ref().ok_or("the wallet is locked")?;
-        let stored: Vec<Stored> = self
+        self.book.accounts = self
             .holders
             .iter()
-            .map(|holder| Stored {
+            .map(|holder| StoredAccount {
                 name: holder.name.clone(),
-                key: holder.key.to_key_file(),
+                source: holder.source.clone(),
             })
             .collect();
-        self.settings.vault = Some(vault.seal(&stored)?);
+        let sealed = vault.seal(&self.book)?;
+        self.settings.wallets.get_mut(self.settings.wallet).ok_or("the wallet is gone")?.vault = sealed;
 
         Ok(())
     }
 
     /// The account in use: the one chosen, or else the first.
     fn current(&self) -> Option<&Holder> {
-        self.holders
-            .iter()
-            .find(|holder| holder.address.to_string() == self.settings.current)
-            .or_else(|| self.holders.first())
+        let chosen = self.settings.current();
+
+        self.holders.iter().find(|holder| holder.id() == chosen).or_else(|| self.holders.first())
     }
 
     /// Drops the keys, and asks for the password again.
     fn lock(&mut self) {
         self.vault = None;
+        self.book = Book::default();
         self.holders.clear();
         self.views = views::States::default();
-        self.lock = Lock::Locked { password: String::new(), error: None };
+        self.lock = Lock::start(&self.settings);
     }
 
     /// Takes everything that arrived.
@@ -269,13 +308,13 @@ impl Wallet {
             self.node.ask(Ask::Status);
         }
 
-        let addresses: Vec<Address> = self.holders.iter().map(|holder| holder.address).collect();
+        let addresses: Vec<Address> = self.holders.iter().flat_map(Holder::addresses).collect();
 
         for ask in self.chain.proofs_due(&addresses, time) {
             self.node.ask(ask);
         }
 
-        let Some(current) = self.current().map(|holder| holder.address.to_string()) else {
+        let Some(current) = self.current().map(|holder| holder.addresses().iter().map(Address::to_string).collect::<Vec<_>>()) else {
             return;
         };
 
@@ -285,16 +324,18 @@ impl Wallet {
 
         self.asked_history = time;
 
-        // The address index lists everything that touched it; without one, the event index lists
-        // at least what mentions it.
-        match (self.chain.indexes_addresses, self.chain.indexes_events) {
-            (Some(false), Some(false)) => {}
-            (Some(false), _) => self.node.ask(Ask::Events(current.clone())),
-            _ => self.node.ask(Ask::History(current.clone())),
+        // The address index lists everything that touched an address; without one, the event index
+        // lists at least what mentions it.
+        for address in &current {
+            match (self.chain.indexes_addresses, self.chain.indexes_events) {
+                (Some(false), Some(false)) => {}
+                (Some(false), _) => self.node.ask(Ask::Events(address.clone())),
+                _ => self.node.ask(Ask::History(address.clone())),
+            }
         }
 
-        let mentioned = self.chain.mentions.get(&current).into_iter().flatten().map(|mention| mention.tx.clone());
-        let sent = self.settings.sent.iter().filter(|sent| sent.from == current).map(|sent| sent.id.clone());
+        let mentioned = current.iter().flat_map(|address| self.chain.mentions.get(address).into_iter().flatten()).map(|mention| mention.tx.clone());
+        let sent = self.settings.sent.iter().filter(|sent| current.contains(&sent.from)).map(|sent| sent.id.clone());
         let unsettled: Vec<String> = sent
             .chain(mentioned)
             // Final ones are settled; the rest are proven again until they are.
@@ -309,93 +350,44 @@ impl Wallet {
 
     fn lock_screen(&mut self, ui: &mut Ui) {
         let palette = self.palette;
-        let mut opened: Option<Result<(Vault, Vec<Stored>), String>> = None;
+        let (width, height) = (ui.available_width(), ui.available_height());
 
-        ui.vertical_centered(|ui| {
-            ui.add_space((ui.available_height() * 0.2).max(24.0));
-            ui.set_max_width(ui.available_width().min(380.0));
-            ui.label(RichText::new("chainv4").font(egui::FontId::new(44.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
-            theme::caps(ui, &palette, "Light wallet");
-            ui.add_space(26.0);
+        if self.lock_room.0 != width {
+            self.lock_room = (width, height);
+        }
 
-            theme::card(ui, &palette, |ui| match &mut self.lock {
-                Lock::Setup { first, second, error } => {
-                    theme::caps(ui, &palette, "Choose a password");
-                    ui.label(RichText::new("It seals your keys on this device. Nothing opens them without it, so keep it safe.").color(palette.muted));
-                    ui.add_space(8.0);
-                    ui.add(egui::TextEdit::singleline(first).password(true).hint_text("password").desired_width(f32::INFINITY));
-                    let enter = ui
-                        .add(egui::TextEdit::singleline(second).password(true).hint_text("the same again").desired_width(f32::INFINITY))
-                        .lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        self.lock_room.1 = self.lock_room.1.max(height);
+        let tallest = self.lock_room.1;
+        let mut opened = None;
 
-                    if let Some(error) = error {
-                        ui.colored_label(palette.bad, error.as_str());
-                    }
-
-                    ui.add_space(6.0);
-
-                    if theme::primary(ui, &palette, "Create wallet", !first.is_empty()).clicked() || enter {
-                        opened = Some(match (first.len() >= 8, first == second) {
-                            (false, _) => Err("use at least 8 characters".to_string()),
-                            (_, false) => Err("the two do not match".to_string()),
-                            (true, true) => Vault::create(first).map(|vault| (vault, Vec::new())),
-                        });
-                    }
-                }
-                Lock::Locked { password, error } => {
-                    theme::caps(ui, &palette, "Unlock");
-                    let field = ui.add(egui::TextEdit::singleline(password).password(true).hint_text("password").desired_width(f32::INFINITY));
-                    let enter = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-
-                    if let Some(error) = error {
-                        ui.colored_label(palette.bad, error.as_str());
-                    }
-
-                    ui.add_space(6.0);
-
-                    if theme::primary(ui, &palette, "Unlock", !password.is_empty()).clicked() || enter {
-                        opened = Some(match &self.settings.vault {
-                            Some(sealed) => Vault::open(sealed, password),
-                            None => Err("there is no vault".to_string()),
-                        });
-                    }
-                }
-                Lock::Open => {}
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space((tallest * 0.16).max(24.0));
+                ui.set_max_width(ui.available_width().min(380.0));
+                ui.label(RichText::new("chainv4").font(egui::FontId::new(44.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
+                theme::caps(ui, &palette, "Light wallet");
+                ui.add_space(26.0);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    opened = lock::show(ui, &palette, &mut self.settings, &mut self.lock);
+                });
+                ui.add_space(12.0);
+                ui.label(RichText::new(format!("Node {}", self.settings.node)).small().color(palette.muted));
+                ui.add_space(24.0);
             });
-
-            ui.add_space(12.0);
-            ui.label(RichText::new(format!("Node {}", self.settings.node)).small().color(palette.muted));
         });
 
-        match opened {
-            Some(Ok((vault, stored))) => {
-                self.holders = stored
-                    .iter()
-                    .filter_map(|stored| {
-                        let key = key_of(stored).ok()?;
+        if let Some(Opened { vault, book }) = opened {
+            self.holders = keys::open(&book);
+            self.book = book;
+            self.vault = Some(vault);
+            self.lock = Lock::Open;
+            self.page = Page::Overview;
 
-                        Some(Holder {
-                            name: stored.name.clone(),
-                            address: key.public().address(),
-                            key,
-                        })
-                    })
-                    .collect();
-                self.vault = Some(vault);
-                self.lock = Lock::Open;
-                self.page = Page::Overview;
-
-                if self.settings.vault.is_none() {
-                    let _ = self.store();
-                    self.page = Page::Accounts;
-                }
+            if let Some(first) = self.holders.first().map(Holder::id)
+                && !self.holders.iter().any(|holder| holder.id() == self.settings.current())
+            {
+                self.settings.set_current(first);
             }
-            Some(Err(error)) => match &mut self.lock {
-                Lock::Setup { error: shown, .. } | Lock::Locked { error: shown, .. } => *shown = Some(error),
-                Lock::Open => {}
-            },
-            None => {}
         }
     }
 
@@ -463,16 +455,15 @@ impl Wallet {
         let Some(current) = self.current() else {
             return;
         };
-        let (address, name) = (current.address.to_string(), current.name.clone());
-        egui::ComboBox::from_id_salt("account").selected_text(name).width(width).show_ui(ui, |ui| {
+        let mut chosen = current.id();
+        egui::ComboBox::from_id_salt("account").selected_text(current.name.clone()).width(width).show_ui(ui, |ui| {
             for holder in &self.holders {
-                let text = format!("{}  ·  {}", holder.name, crate::format::short(&holder.address.to_string()));
-                ui.selectable_value(&mut self.settings.current, holder.address.to_string(), text);
+                ui.selectable_value(&mut chosen, holder.id(), &holder.name);
             }
         });
 
-        if self.settings.current.is_empty() {
-            self.settings.current = address;
+        if chosen != self.settings.current() {
+            self.settings.set_current(chosen);
         }
     }
 
@@ -570,11 +561,9 @@ impl eframe::App for Wallet {
 
         let mut connect = None;
         let mut changed = false;
-        let current = self
-            .holders
-            .iter()
-            .position(|holder| holder.address.to_string() == self.settings.current)
-            .unwrap_or(0);
+        let mut leave = false;
+        let chosen = self.settings.current().to_string();
+        let current = self.holders.iter().position(|holder| holder.id() == chosen).unwrap_or(0);
         let margin = if narrow { egui::Margin::symmetric(14, 0) } else { egui::Margin::ZERO };
         egui::CentralPanel::default().frame(egui::Frame::new().fill(palette.paper).inner_margin(margin)).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -589,6 +578,7 @@ impl eframe::App for Wallet {
                             node: &mut self.node,
                             holders: &mut self.holders,
                             current,
+                            book: &mut self.book,
                             coin: &self.coin,
                             settings: &mut self.settings,
                             now,
@@ -596,6 +586,7 @@ impl eframe::App for Wallet {
                             connect: &mut connect,
                             changed: &mut changed,
                             vault: &mut self.vault,
+                            leave: &mut leave,
                             wake: &self.wake,
                         };
                         views::show(ui, &mut ctx, &mut self.views);
@@ -605,7 +596,10 @@ impl eframe::App for Wallet {
             });
         });
 
-        if changed && let Err(error) = self.store() {
+        // A wallet removed is locked away without sealing it again: its place is another's now.
+        if leave {
+            self.lock();
+        } else if changed && let Err(error) = self.store() {
             log::warn!("could not seal the accounts: {error}");
         }
 
@@ -635,4 +629,32 @@ impl eframe::App for Wallet {
 
 fn now_ms() -> u64 {
     web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, serde_json::json};
+
+    #[test]
+    fn the_vault_of_a_wallet_from_before_several_becomes_the_first() {
+        let sealed = Sealed {
+            salt: "0x00".to_string(),
+            nonce: "0x01".to_string(),
+            sealed: "0x02".to_string(),
+        };
+        let old = json!({ "node": "http://node", "vault": sealed, "current": "ed25519:0x01", "lock_after": 5 });
+        let settings = serde_json::from_value::<Settings>(old).unwrap().migrated();
+
+        assert_eq!(settings.wallets, vec![WalletEntry {
+            name: "Wallet 1".to_string(),
+            vault: sealed,
+            current: "ed25519:0x01".to_string(),
+        }]);
+        assert_eq!((settings.wallet, settings.current(), settings.lock_after), (0, "ed25519:0x01", 5));
+
+        let kept = serde_json::to_value(&settings).unwrap();
+
+        assert!(kept.get("vault").is_none() && kept.get("current").is_none(), "never written again");
+        assert_eq!(serde_json::from_value::<Settings>(kept).unwrap().migrated().wallets, settings.wallets);
+    }
 }

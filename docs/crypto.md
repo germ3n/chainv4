@@ -37,12 +37,24 @@ Key schemes sit behind features too:
 | --- | --- | --- |
 | `Ed25519` | `ed25519` | Standard Ed25519 (RFC 8032), hashing with SHA-512. |
 | `EdBlake` | `edblake` | Ed25519 hashing with BLAKE3 read out to 64 bytes instead of SHA-512, matching chainv3's keys and signatures. |
+| `Secp256k1` | `secp256k1` | Ethereum's: ECDSA on secp256k1 over the keccak256 of what is signed, deterministic (RFC 6979). |
 
-- **Addresses:** a key's address is its scheme and its 32 bytes, such as `ed25519:0x…`. A
-  contract's address is `contract:0x…`, derived from its deployer and nonce, so no key controls
-  it.
-- **Validity:** an address must be a valid point on its curve; an arbitrary 32 bytes usually is
-  not.
+- **Addresses:** an Edwards key's address is its scheme and its 32 bytes, such as `ed25519:0x…`.
+  A secp256k1 key's is Ethereum's: the last 20 bytes of the keccak256 of its uncompressed point,
+  as `secp256k1:0x` and 40 hex digits. The same key has the same `0x…` address here as on
+  Ethereum. A contract's address is `contract:0x…`, derived from its deployer and nonce, so no key
+  controls it.
+- **Validity:** an Edwards address must be a valid point on its curve; an arbitrary 32 bytes
+  usually is not. A secp256k1 address is a hash, so there is nothing to check until its key signs.
+- **One signature per transaction.** secp256k1 signatures always have a low `s` and verifying
+  refuses a high one, so no one can reshape a signature into a second valid one. Its public key
+  travels compressed, in 33 bytes, and its signature in 64.
+- **Not Ethereum's transactions.** A secp256k1 key signs chainv4's transactions under chainv4's
+  domain, not Ethereum's RLP or EIP-191 messages. An Ethereum wallet can hold the key, but cannot
+  sign for chainv4 itself.
+- **In contracts,** every address takes 33 bytes: its kind's tag, then its bytes, a secp256k1
+  address's 20 padded with zeros. Lua's `address(hex)` reads 40 hex digits as a secp256k1 address
+  and 64 as an Ed25519 one.
 
 ### Signing domains
 
@@ -59,14 +71,48 @@ hash for one thing can never pass for another.
 
 ## Key files
 
-`chainv4 keygen [--scheme ed25519|edblake] [--out PATH]` writes one line: the scheme, a colon,
-and the 32-byte seed in hex.
+`chainv4 keygen [--scheme ed25519|edblake|secp256k1] [--out PATH]` writes one line: the scheme, a
+colon, and the 32-byte secret in hex: an Edwards key's seed, or a secp256k1 key's scalar.
 - It is created readable by its owner only, and never overwritten.
 - It is not encrypted, so guard it.
 - `--key`, `--producer-key` and `--validator-key` read this format.
 
 The development key's seed is in the source. Anyone can sign with it, so it must never hold
 anything of value.
+
+## Seed phrases
+
+The `mnemonic` feature, on by default, makes keys from a seed phrase: BIP39's English words, 12
+of them with 128 bits of randomness, or 24 with 256, the last word carrying a checksum.
+
+- **The seed.** PBKDF2 stretches the words, with an optional passphrase, into a 64-byte seed. The
+  same words with another passphrase are another seed, so a forgotten passphrase loses everything
+  as surely as lost words.
+- **One account, every scheme.** Account *n* of a seed has a key in each scheme:
+
+  | Scheme | Standard | Path |
+  | --- | --- | --- |
+  | Ed25519 | SLIP-0010 | `m/44'/7744'/n'/0'/0'` |
+  | EdBlake | SLIP-0010 | `m/44'/7744'/n'/1'/0'` |
+  | secp256k1 | BIP32 | `m/44'/60'/0'/0/n` |
+
+- **Ethereum's accounts.** The secp256k1 path is Ethereum's, so the same words give the same
+  `0x…` addresses here as in MetaMask and other Ethereum wallets, account for account.
+- **The Edwards paths** are hardened at every step, as SLIP-0010 requires for Ed25519. 7744 is
+  chainv4's coin type, not registered in SLIP-44. Ed25519 and EdBlake take a branch each, so one
+  seed never makes the same secret for both.
+
+`chainv4 keygen` makes keys from words:
+
+```sh
+chainv4 keygen --phrase                          # new words, printed once, and account 0's key
+chainv4 keygen --phrase --words 24
+chainv4 keygen --from-phrase --account 2 --scheme secp256k1 < words.txt
+chainv4 keygen --from-phrase --passphrase        # the words, then the passphrase, on stdin
+```
+
+The light wallet makes its accounts from words the same way: `keygen --from-phrase` with the same
+words and account gives the same key the wallet holds.
 
 ## Encoding
 

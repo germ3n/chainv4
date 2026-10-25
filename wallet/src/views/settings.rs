@@ -1,11 +1,14 @@
-//! Which node to talk to, which chain to trust there, the light client's saved progress, and
-//! how the wallet keeps its keys: when it locks itself, and the password that seals them.
+//! The wallet open: its name, its words, and removing it. Then which node to talk to, which chain
+//! to trust there, the light client's saved progress, and how the wallet keeps its keys: when it
+//! locks itself, and the password that seals them.
 
 use {
     super::Ctx,
     crate::format,
+    crate::lock,
     crate::theme,
-    crate::vault::Vault,
+    crate::vault::{Vault, Words},
+    chainv4::crypto::mnemonic::Phrase,
     chainv4::structs::hex::{from_hex, to_hex},
     egui::{RichText, Ui},
 };
@@ -20,25 +23,52 @@ pub struct SettingsState {
     again: String,
     /// What came of changing the password.
     changed: Option<Result<String, String>>,
+    /// The wallet's name, being typed.
+    name: Option<String>,
+    /// Asking for the password before the words show, and whether they show.
+    asking_words: Option<(String, Option<String>)>,
+    showing_words: bool,
+    /// Words typed for a wallet that has none.
+    words: String,
+    words_error: Option<String>,
+    /// Asking for the password before the wallet is removed.
+    removing: Option<(String, Option<String>)>,
+}
+
+impl SettingsState {
+    /// Puts away the words, if shown, and the password asked for them.
+    pub fn hide(&mut self) {
+        self.showing_words = false;
+        self.asking_words = None;
+    }
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     let palette = *ctx.palette;
     let node = ctx.settings.node.clone();
+
+    theme::title(ui, &palette, "Settings", "This wallet, the node, the chain it trusts there, and how it keeps your keys.");
+
+    wallet(ui, ctx, state);
+    words_question(ui, ctx, state);
     let typed = state.node.get_or_insert_with(|| node.clone());
 
-    theme::title(ui, &palette, "Settings", "The node, the chain this wallet trusts on it, and how it keeps your keys.");
-
+    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Node");
         ui.label(RichText::new("Where the wallet asks. It is never trusted: what it sends shows only once it checks.").small().color(palette.muted));
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(typed).font(egui::TextStyle::Monospace).desired_width(ui.available_width() - 100.0));
+        let other = typed.trim() != node;
+        let connect = super::beside(
+            ui,
+            |ui| theme::primary(ui, &palette, "Connect", other).clicked(),
+            |ui, width| {
+                ui.add(egui::TextEdit::singleline(typed).font(egui::TextStyle::Monospace).desired_width(width));
+            },
+        );
 
-            if theme::primary(ui, &palette, "Connect", typed.trim() != node).clicked() {
-                *ctx.connect = Some(typed.trim().to_string());
-            }
-        });
+        if connect {
+            *ctx.connect = Some(typed.trim().to_string());
+        }
     });
 
     ui.add_space(14.0);
@@ -62,20 +92,24 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         }
 
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut state.genesis).hint_text("a genesis id, 0x…, as someone you trust shows it").font(egui::TextStyle::Monospace).desired_width(ui.available_width() - 90.0));
+        let trust = super::beside(
+            ui,
+            |ui| theme::quiet(ui, &palette, "Trust").clicked(),
+            |ui, width| {
+                ui.add(egui::TextEdit::singleline(&mut state.genesis).hint_text("a genesis id, 0x…, as someone you trust shows it").font(egui::TextStyle::Monospace).desired_width(width));
+            },
+        );
 
-            if theme::quiet(ui, &palette, "Trust").clicked() {
-                match from_hex(state.genesis.trim()) {
-                    Some(bytes) if bytes.len() >= 16 => {
-                        ctx.settings.pinned.insert(node.clone(), to_hex(&bytes));
-                        state.genesis.clear();
-                        *ctx.connect = Some(node.clone());
-                    }
-                    _ => state.genesis = "not a genesis id".to_string(),
+        if trust {
+            match from_hex(state.genesis.trim()) {
+                Some(bytes) if bytes.len() >= 16 => {
+                    ctx.settings.pinned.insert(node.clone(), to_hex(&bytes));
+                    state.genesis.clear();
+                    *ctx.connect = Some(node.clone());
                 }
+                _ => state.genesis = "not a genesis id".to_string(),
             }
-        });
+        }
 
         if pinned.is_some() && theme::quiet(ui, &palette, "Forget it").on_hover_text("Trust whatever genesis the node shows next, and start the light client over").clicked() {
             if let Some(genesis) = ctx.settings.pinned.remove(&node) {
@@ -154,10 +188,212 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     });
 }
 
+/// The wallet open: its name, its words, and removing it.
+fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
+    let palette = *ctx.palette;
+    let Some(entry) = ctx.settings.wallets.get(ctx.settings.wallet) else {
+        return;
+    };
+    let named = entry.name.clone();
+    let others = ctx.settings.wallets.len() - 1;
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Wallet");
+        let name = state.name.get_or_insert_with(|| named.clone());
+        let rename = super::beside(
+            ui,
+            |ui| theme::quiet(ui, &palette, "Rename").clicked(),
+            |ui, width| {
+                ui.add(egui::TextEdit::singleline(name).desired_width(width));
+            },
+        );
+
+        if rename
+            && !name.trim().is_empty()
+            && let Some(entry) = ctx.settings.wallets.get_mut(ctx.settings.wallet)
+        {
+            entry.name = name.trim().to_string();
+        }
+        let more = match others {
+            0 => "The only wallet on this device. Add another from the lock screen.".to_string(),
+            1 => "One more wallet on this device: pick it when unlocking.".to_string(),
+            others => format!("{others} more wallets on this device: pick one when unlocking."),
+        };
+        ui.label(RichText::new(more).small().color(palette.muted));
+
+        ui.add_space(10.0);
+        theme::caps(ui, &palette, "Its words");
+
+        match ctx.book.phrase.clone() {
+            Some(words) => {
+                ui.label(RichText::new("Every account made from them comes back from them, on any device, with any wallet that follows BIP39.").small().color(palette.muted));
+
+                match state.showing_words {
+                    true => {
+                        ui.add_space(6.0);
+
+                        if let Ok(phrase) = Phrase::parse(&words.words) {
+                            lock::words_grid(ui, &palette, &phrase);
+                        }
+
+                        if !words.passphrase.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(format!("With the passphrase: {}", words.passphrase)).monospace().color(palette.warn));
+                        }
+
+                        ui.add_space(6.0);
+
+                        if theme::quiet(ui, &palette, "Hide them").clicked() {
+                            state.showing_words = false;
+                        }
+                    }
+                    false => {
+                        if theme::quiet(ui, &palette, "Show the words").clicked() {
+                            state.asking_words = Some((String::new(), None));
+                        }
+                    }
+                }
+            }
+            None => {
+                ui.label(
+                    RichText::new("This wallet has none: its accounts are keys brought in. Give it words, and new accounts come from them; the keys brought in stay as they are, with their own copies to keep.")
+                        .small()
+                        .color(palette.muted),
+                );
+                ui.add(egui::TextEdit::multiline(&mut state.words).desired_rows(2).desired_width(f32::INFINITY).hint_text("words you have, or none for new ones"));
+                ui.horizontal_wrapped(|ui| {
+                    if theme::quiet(ui, &palette, if state.words.trim().is_empty() { "Make new words" } else { "Use these words" }).clicked() {
+                        let phrase = match state.words.trim() {
+                            "" => Phrase::generate(12),
+                            typed => Phrase::parse(typed),
+                        };
+
+                        match phrase {
+                            Ok(phrase) => {
+                                ctx.book.phrase = Some(Words {
+                                    words: phrase.to_string(),
+                                    passphrase: String::new(),
+                                });
+                                *ctx.changed = true;
+                                // New ones are to be written down now; typed ones are known.
+                                state.showing_words = state.words.trim().is_empty();
+                                state.words.clear();
+                                state.words_error = None;
+                            }
+                            Err(why) => state.words_error = Some(why.to_string()),
+                        }
+                    }
+                });
+
+                if let Some(why) = &state.words_error {
+                    ui.colored_label(palette.bad, why);
+                }
+            }
+        }
+
+        ui.add_space(10.0);
+
+        match &mut state.removing {
+            None => {
+                if theme::quiet(ui, &palette, "Remove this wallet").clicked() {
+                    state.removing = Some((String::new(), None));
+                }
+            }
+            Some((password, error)) => {
+                ui.label(
+                    RichText::new("Its words and keys leave this device. Without the words written down, or copies of its keys, what its accounts hold is out of reach for good.")
+                        .color(palette.bad),
+                );
+                ui.add(egui::TextEdit::singleline(password).password(true).hint_text("its password, to be sure").desired_width(f32::INFINITY));
+
+                if let Some(error) = error {
+                    ui.colored_label(palette.bad, error.as_str());
+                }
+
+                let mut keep = false;
+                ui.horizontal(|ui| {
+                    if theme::primary(ui, &palette, "Remove it", !password.is_empty()).clicked() {
+                        match opens(ctx, password) {
+                            true => {
+                                ctx.settings.wallets.remove(ctx.settings.wallet);
+                                ctx.settings.wallet = 0;
+                                *ctx.leave = true;
+                            }
+                            false => *error = Some("not its password".to_string()),
+                        }
+                    }
+
+                    keep = theme::quiet(ui, &palette, "Keep it").clicked();
+                });
+
+                if keep {
+                    state.removing = None;
+                }
+            }
+        }
+    });
+}
+
+/// Asks, in a box over the page, for the password before the words show.
+fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
+    let Some((password, error)) = &mut state.asking_words else {
+        return;
+    };
+    let palette = *ctx.palette;
+    let mut answer = None;
+
+    let modal = egui::Modal::new(ui.make_persistent_id("show words"))
+        .frame(egui::Frame::new().fill(palette.card).stroke(egui::Stroke::new(1.0, palette.line)).corner_radius(12.0).inner_margin(egui::Margin::same(20)))
+        .show(ui.ctx(), |ui| {
+            ui.set_max_width(360.0);
+            theme::caps(ui, &palette, "Show the words?");
+            ui.add_space(4.0);
+            ui.label(RichText::new("Anyone who sees them can take everything every account holds, now and later.").color(palette.ink));
+            ui.label(RichText::new("Show them only to write them down, with no one watching your screen and nothing recording it.").small().color(palette.muted));
+            ui.add_space(8.0);
+            let field = ui.add(egui::TextEdit::singleline(password).password(true).hint_text("the wallet's password").desired_width(f32::INFINITY));
+            let enter = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+
+            if let Some(error) = error {
+                ui.colored_label(palette.bad, error.as_str());
+            }
+
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if theme::primary(ui, &palette, "Show them", !password.is_empty()).clicked() || enter {
+                    answer = Some(true);
+                }
+
+                if theme::quiet(ui, &palette, "Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+
+    match answer {
+        Some(true) => match opens(ctx, password) {
+            true => {
+                state.showing_words = true;
+                state.asking_words = None;
+            }
+            false => *error = Some("not the wallet's password".to_string()),
+        },
+        Some(false) => state.asking_words = None,
+        None if modal.should_close() => state.asking_words = None,
+        None => {}
+    }
+}
+
+/// Whether the password opens the wallet open.
+fn opens(ctx: &Ctx, password: &str) -> bool {
+    ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| Vault::open(&entry.vault, password).is_ok())
+}
+
 /// Seals the accounts with a new password, once the current one opens them.
 fn change_password(ctx: &mut Ctx, state: &mut SettingsState) -> Result<String, String> {
-    let sealed = ctx.settings.vault.as_ref().ok_or("there is no vault")?;
-    Vault::open(sealed, &state.current).map_err(|_| "the current password is not right".to_string())?;
+    if !opens(ctx, &state.current) {
+        return Err("the current password is not right".to_string());
+    }
 
     if state.new.len() < 8 {
         return Err("use at least 8 characters".to_string());

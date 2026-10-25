@@ -33,17 +33,80 @@ type CliResult<T> = Result<T, Box<dyn Error>>;
 
 #[derive(clap::Args)]
 pub struct KeygenArgs {
-    /// The signature scheme: ed25519 or edblake.
+    /// The signature scheme: ed25519, edblake or secp256k1.
     #[arg(long, default_value = "ed25519", value_parser = parse_scheme)]
     scheme: KeyType,
     /// Where to write the key. An existing file is never overwritten.
     #[arg(long, default_value = "chainv4.key")]
     out: PathBuf,
+    /// Make a new seed phrase, print it once, and write the key of --account from it. Write the
+    /// words down: they are every account's keys.
+    #[cfg(feature = "mnemonic")]
+    #[arg(long, conflicts_with = "from_phrase")]
+    phrase: bool,
+    /// Read a seed phrase from standard input, and write the key of --account from it: the same key
+    /// the wallet derives from the same words.
+    #[cfg(feature = "mnemonic")]
+    #[arg(long)]
+    from_phrase: bool,
+    /// How many words a new phrase has: 12 or 24.
+    #[cfg(feature = "mnemonic")]
+    #[arg(long, default_value_t = 12, requires = "phrase", value_parser = parse_words)]
+    words: usize,
+    /// Which account of the phrase, from 0.
+    #[cfg(feature = "mnemonic")]
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..1 << 31))]
+    account: u32,
+    /// Read BIP39's optional passphrase from standard input too, after any phrase: other words
+    /// for the same phrase, which make other keys.
+    #[cfg(feature = "mnemonic")]
+    #[arg(long)]
+    passphrase: bool,
 }
 
-/// Makes a key and writes it, readable only by its owner.
+/// Makes a key and writes it, readable only by its owner: a fresh one, or one from a seed phrase.
 pub fn keygen(args: KeygenArgs) -> CliResult<()> {
+    keygen_reading(args, &mut std::io::stdin().lock())
+}
+
+/// keygen, reading any phrase and passphrase from input.
+fn keygen_reading(args: KeygenArgs, input: &mut dyn std::io::BufRead) -> CliResult<()> {
+    #[cfg(not(feature = "mnemonic"))]
+    let _ = input;
+    #[cfg(feature = "mnemonic")]
+    let keypair = match (args.phrase, args.from_phrase) {
+        (false, false) => Keypair::generate(args.scheme)?,
+        (made, _) => {
+            use crate::crypto::mnemonic::Phrase;
+
+            let mut lines = std::io::BufRead::lines(&mut *input);
+            let mut ask = |what: &str| -> CliResult<String> {
+                eprint!("{what}: ");
+                std::io::stderr().flush()?;
+
+                Ok(lines.next().transpose()?.unwrap_or_default())
+            };
+            let phrase = match made {
+                true => {
+                    let phrase = Phrase::generate(args.words)?;
+                    println!("phrase {phrase}");
+                    eprintln!("Write these {} words down, in order, and keep them where only you can read them: they are every account's keys.", args.words);
+
+                    phrase
+                }
+                false => Phrase::parse(&ask("the seed phrase")?)?,
+            };
+            let passphrase = match args.passphrase {
+                true => ask("the passphrase")?,
+                false => String::new(),
+            };
+
+            phrase.seed(&passphrase).key(args.scheme, args.account)
+        }
+    };
+    #[cfg(not(feature = "mnemonic"))]
     let keypair = Keypair::generate(args.scheme)?;
+
     write_key(&args.out, &keypair)?;
     println!("wrote {}", args.out.display());
     println!("address {}", keypair.public().address());
@@ -82,12 +145,15 @@ fn read_key(path: &Path) -> CliResult<Keypair> {
 }
 
 fn parse_scheme(text: &str) -> Result<KeyType, String> {
+    text.parse()
+}
+
+#[cfg(feature = "mnemonic")]
+fn parse_words(text: &str) -> Result<usize, String> {
     match text {
-        #[cfg(feature = "ed25519")]
-        "ed25519" => Ok(KeyType::Ed25519),
-        #[cfg(feature = "edblake")]
-        "edblake" => Ok(KeyType::EdBlake),
-        other => Err(format!("unknown scheme {other}")),
+        "12" => Ok(12),
+        "24" => Ok(24),
+        _ => Err("a new phrase has 12 or 24 words".to_string()),
     }
 }
 
