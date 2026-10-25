@@ -355,3 +355,65 @@ fn addresses_are_cut_from_error_text() {
     assert_eq!(without_addresses("sent to ed25519:0xab12, 7: 0x"), "sent to ed25519:0xab12, 7: 0x", "only a value's address");
 }
 
+#[test]
+fn tables_keyed_by_tables_iterate_alike_in_any_state() {
+    let script = r#"
+local M = {}
+
+-- Strings sized like a table, 48 bytes and 56 with its id, take the slots tables would have had,
+-- so the tables made after sit elsewhere; strings have no id, so the tables' ids stay the same.
+function M.order(padding)
+    local held = {}
+
+    for i = 1, padding do
+        held[2 * i - 1] = string.format("%023d", i)
+        held[2 * i] = string.format("%031d", i)
+    end
+
+    local byTable, byFunction = {}, {}
+
+    for i = 1, 16 do
+        byTable[{ i }] = i
+        byFunction[function() return i end] = i
+    end
+
+    local seen = {}
+
+    for _, value in pairs(byTable) do
+        table.insert(seen, value)
+    end
+
+    for _, value in byFunction do
+        table.insert(seen, value)
+    end
+
+    return table.concat(seen, ",")
+end
+
+function M.keyed_by_address()
+    local held = {}
+    held[ctx.sender] = 1
+end
+
+function M.read_by_address()
+    local held = { [ctx.sender:text()] = 1 }
+
+    return held[ctx.sender] == nil
+end
+
+return M
+"#;
+    let run = |name: &str, args: &[TxCallArgumentType]| Contract::load(script, LIMITS).unwrap().call(&func(name), args, host(), LIMITS).result;
+    let order = |padding: i64| run("order", &[TxCallArgumentType::I64(padding)]).unwrap();
+    let first = order(0);
+
+    for padding in 1..12 {
+        assert_eq!(order(padding), first, "hashed by the order they were made in, not where they sit");
+    }
+
+    let refused = run("keyed_by_address", &[]).unwrap_err().to_string();
+
+    assert!(refused.contains("table index is a userdata; use a string or a number"), "{refused}");
+    assert_eq!(run("read_by_address", &[]).unwrap(), [TxCallArgumentType::Bool(true)], "reading by one finds nothing");
+}
+

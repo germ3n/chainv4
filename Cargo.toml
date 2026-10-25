@@ -77,3 +77,8 @@ wat = "1.262.0"
 
 [build-dependencies]
 wiki = { path = "wiki" }
+# TEMPORARY: the Luau fork from the local clone, with tables and functions hashed by creation order
+# and userdata refused as keys, until it is pushed to germ3n/luau-src-rs. Then this goes, and
+# `cargo update -p luau0-src` moves the lockfile to the pushed commit.
+[patch."https://github.com/germ3n/luau-src-rs"]
+luau0-src = { path = "../luau-src-rs" }

@@ -383,8 +383,11 @@ return M
 Nothing reads the clock, the platform or the garbage collector, and nothing gives random
 numbers. Nor does anything show a memory address, which differs from node to node: `tostring` of
 a table, function or userdata without `__tostring` gives its type's name, `table`, and a failure
-raised with such a value reads the same way. `setfenv`, `getfenv`, `load`, `require`,
-`collectgarbage`, `coroutine`, `os`, `io` and `debug` are not there at all.
+raised with such a value reads the same way. A table keyed by tables or functions iterates in the
+order they were made, the same on every node, where plain Luau would follow their addresses; a
+userdata, such as an Address, is refused as a key, since two equal ones would be two keys: key by
+`who:text()`. `setfenv`, `getfenv`, `load`, `require`, `collectgarbage`, `coroutine`, `os`, `io`
+and `debug` are not there at all.
 
 | Library | What it has |
 | --- | --- |

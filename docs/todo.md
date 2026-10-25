@@ -172,10 +172,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **No memory address reaches a result.** `tostring` of a table, function or userdata gives
   its type's name, and failure text has addresses cut, so a script cannot return, store or fail
   with something that differs between nodes.
-- [ ] **Tables keyed by tables iterate in address order.** Luau hashes table, function and
-  userdata keys by their address, so `pairs` over them differs between nodes. The plan: the Luau
-  fork hashes tables, functions and threads by a creation sequence number instead, and refuses
-  userdata keys, where an Address is a new value each time and two equal ones never meet.
+- [x] **Tables keyed by tables iterate alike on every node.** The Luau fork hashes tables and
+  functions by the order they were made, and refuses userdata keys, where an Address is a new
+  value each time and two equal ones never meet.
+- [ ] **The Luau change is in the local clone.** Cargo.toml patches germ3n/luau-src-rs to
+  `../luau-src-rs` until it is pushed; then the patch goes and `cargo update -p luau0-src` moves
+  the lockfile to the pushed commit. CI cannot build until then.
 - [ ] **Lua still computes with floats inside a script.** Luau has no integer type, so `/` makes
   fractions, which only fail once they would leave. An integer division and number type in the
   Luau fork would close that.

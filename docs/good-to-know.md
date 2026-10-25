@@ -249,10 +249,11 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Scripts never see a memory address.** `tostring({})` is `table`, not `table: 0x…`, and
   `error({})` fails with `table`: an address differs from node to node, and a script that
   returned or stored one would split the chain.
-- **Iterating a table keyed by tables or userdata is not yet the same on every node.** Luau
-  hashes such keys by address, so `pairs` over them visits them in an order that differs between
-  nodes. Key by strings and numbers, such as `who:text()`, until the Luau fork hashes them by
-  creation order (see [Todo](todo.md)).
+- **Tables keyed by tables iterate the same everywhere; userdata is no key at all.** Plain Luau
+  hashes such keys by address, so `pairs` would differ between nodes; the Luau fork hashes tables
+  and functions by the order a script made them instead. An Address or u256 as a key fails, "table
+  index is a userdata; use a string or a number", as each is a new value and two equal ones would
+  be two keys: key by `who:text()` or `tostring(n)`.
 - **The `number` kind holds whole numbers, spelled one way.** Digits, within 2^53: write it with
   `ns:set_number` in Lua, not `tostring`, which spells 10^15 as `1e+15`.
 - **Each call in a chain of calls gets its own memory limit.** The worst case is 8 nested calls ×

@@ -153,7 +153,9 @@ These are the rules the code follows. Keep to them when adding to it.
 - **Lua libraries** are one file per library under `src/vm/lvm/libs/`, each registering one
   global table, documented with `#[document]` pages of `kind = "library"`.
 - **mlua and Luau are forks.** chainv4 uses the germ3n forks of mlua and Luau, which add fuel
-  metering. Never swap them for upstream.
+  metering, and keep a script's results the same on every node: Luau's fork hashes tables and
+  functions as keys by the order they were made, not their address, and refuses userdata keys.
+  Never swap them for upstream.
 
 ## Documenting code
 
