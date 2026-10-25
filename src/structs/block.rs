@@ -62,6 +62,13 @@ impl BlockHeader {
 }
 
 #[document(
+    summary = "How much memory a list a block makes may take when it is read or written, 64 MiB: what a sync response holds at most, so nothing that arrives is bigger, and far past wincode's default 4 MiB, which a full block's transactions pass. The length is encoded the same either way.",
+    category = "Chain",
+    see_also = "Block::txs",
+)]
+pub const MAX_LIST_MEMORY: usize = 64 * 1024 * 1024;
+
+#[document(
     summary = "A header, the transactions it commits to, and the seal that proves the producer had the right to make it. Genesis has none: it is defined by the configuration every node starts from.",
     category = "Chain",
     see_also = "BlockHeader, SignedTx",
@@ -70,7 +77,8 @@ impl BlockHeader {
 pub struct Block {
     #[document(summary = "The header.")]
     pub header: BlockHeader,
-    #[document(summary = "The transactions, run in this order.")]
+    #[document(summary = "The transactions, run in this order. Encoded as any list is, but decoded up to 64 MiB of them in memory rather than wincode's default 4 MiB, which a full block passes: a SignedTx takes 352 bytes in memory, so 4 MiB is fewer than 12,000.")]
+    #[wincode(with = "wincode::containers::Vec<SignedTx, wincode::len::BincodeLen<{ crate::structs::block::MAX_LIST_MEMORY }>>")]
     pub txs: Vec<SignedTx>,
     #[document(summary = "Finality proofs for checkpoints on this branch, which pay every voter in them. Each checkpoint is paid for once.")]
     pub proofs: Vec<Justification>,

@@ -161,6 +161,69 @@ pub fn beside(ui: &mut Ui, button: impl FnOnce(&mut Ui) -> bool, field: impl FnO
     .inner
 }
 
+/// Where a proxy is set, in an app's settings: a field with Use, which takes what is typed, then
+/// Orbot, which takes Orbot's port on the device, and Off. Gives the setting to keep, empty to go
+/// direct, once one is chosen that reads as a proxy; why one does not waits in trouble. set is the
+/// setting in use. In the browser, which makes every request itself, it says where to set one.
+pub fn proxy(ui: &mut Ui, palette: &Palette, typed: &mut String, trouble: &mut Option<String>, set: &str) -> Option<String> {
+    let note = |ui: &mut Ui, text: String| ui.add(egui::Label::new(RichText::new(text).small().color(palette.muted)).wrap());
+
+    if cfg!(target_arch = "wasm32") {
+        note(ui, "In the browser, the browser makes every request, through the proxy set in it: to use Tor, open this page in Tor Browser.".to_string());
+
+        return None;
+    }
+
+    let shown = crate::net::Proxy::parse(set).map(|proxy| proxy.shown().to_string());
+    note(ui, match shown {
+        Ok(shown) => format!("Every request goes through the proxy at {shown}, and only through it: while it is down, nothing is sent."),
+        Err(_) => "None: requests go straight to the node. Set one to send them all through it, such as Orbot's to reach the node over Tor.".to_string(),
+    });
+    ui.add_space(4.0);
+
+    let mut chosen = None;
+    let other = typed.trim() != set;
+    let used = beside(
+        ui,
+        |ui| primary(ui, palette, "Use", other).clicked(),
+        |ui, width| {
+            ui.add(egui::TextEdit::singleline(typed).hint_text(crate::net::Proxy::ORBOT).font(TextStyle::Monospace).desired_width(width));
+        },
+    );
+
+    if used {
+        chosen = Some(typed.clone());
+    }
+
+    ui.horizontal(|ui| {
+        if quiet(ui, palette, "Orbot").on_hover_text("Orbot's SOCKS port on this device, which is Tor's own too").clicked() {
+            chosen = Some(crate::net::Proxy::ORBOT.to_string());
+        }
+
+        if !set.is_empty() && quiet(ui, palette, "Off").on_hover_text("Go straight to the node").clicked() {
+            chosen = Some(String::new());
+        }
+    });
+
+    if let Some(trouble) = trouble {
+        ui.colored_label(palette.bad, trouble.as_str());
+    }
+
+    match crate::net::setting(&chosen?) {
+        Ok(setting) => {
+            *typed = setting.clone();
+            *trouble = None;
+
+            Some(setting)
+        }
+        Err(why) => {
+            *trouble = Some(why);
+
+            None
+        }
+    }
+}
+
 fn button_size(ui: &Ui) -> f32 {
     ui.style().text_styles.get(&TextStyle::Button).map_or(14.0, |font| font.size)
 }

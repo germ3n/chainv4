@@ -121,6 +121,12 @@ other pages explain each part in full; this one is the short list to keep in min
   density and type machinery, the widgets and the Android glue; each app picks its own colors,
   fonts and density. A change to a shared widget shows in both. See
   [The ui crate](development.md#the-ui-crate).
+- **The apps' proxy fails closed.** A proxy set under Settings in the wallet or the explorer
+  carries that app's every request, on the desktop and Android, and while it is down nothing goes
+  out. `HTTP_PROXY` and `ALL_PROXY` apply only while none is set, and `NO_PROXY` never exempts a
+  host from one that is. SOCKS5 always resolves names at the proxy, so `.onion` nodes work through
+  Orbot. In the browser, the browser's own proxy applies. See
+  [Through a proxy](wallet.md#through-a-proxy).
 - **Docker puts HTTPS in front, not around peer-to-peer.** nginx terminates TLS for the API,
   the explorer and the wallet; QUIC is TLS 1.3 already, so the p2p port goes straight to the node.
   A chain made from the presets signs with the development key until `docker/config` holds keys
@@ -208,6 +214,26 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Every dev chain has the same genesis id.** A wallet that followed one resumes against the next
   as if it were the same chain, and waits for blocks past where the old one got to: Settings →
   Light client → **Start over**. See [Light client](light-client.md#what-to-keep-in-mind).
+- **`max_block_bytes` gave the dev chains new ids, and left every other chain's alone.** Genesis
+  is hashed for its id, and the field encodes as nothing while unset (`Unset`), so a genesis file
+  without it keeps its chain. The dev chains set 4 MiB, so their databases from before start
+  over. A field added to genesis later must do the same, and come last.
+- **Blocks have no fixed transaction count.** A producer fills a block to genesis's
+  `max_block_bytes`, checked on import, and the gas limit; `MAX_BLOCK_TXS`, 1,000 a block and
+  never checked, is gone. A slow node can cap its own blocks with `--max-block-txs`. With 2 s
+  slots, plain transfers now fill a block to its gas limit, about 13,800.
+- **wincode refuses lists past 4 MiB in memory, encoding too.** A `SignedTx` takes 352 bytes in
+  memory, so a block of 12,000 transfers would not encode, store or gossip. A block's `txs` and
+  its undo record take up to `MAX_LIST_MEMORY`, 64 MiB, with the same encoding
+  (`BincodeLen<…>`); any other list a full block makes needs the same.
+- **Transactions are admitted off the node loop.** The verifier thread's gate checks and inserts
+  them while the loop builds or imports blocks; the loop locks the mempool only to select and
+  prune. Lock it once per statement: `std::sync::Mutex` is not reentrant, and two guards in one
+  expression deadlock.
+- **Gas limits come from dry runs.** `POST /offer` runs a call, deploy or upgrade on a throwaway
+  copy of committed state and offers what it used plus a quarter of what it ran. Read-only calls
+  and dry runs run on blocking threads, since the API answers everything on one. A dry run's
+  state is the committed one: a sender's own pending transactions are not in it.
 - **Light clients trust only a genesis id.** `chainv4 light`, and the explorer, check every
   header by consensus, every justification against voters proven from state, and every value
   against a header they checked. Voters are trusted from a checkpoint's state once that

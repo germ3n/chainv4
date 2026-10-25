@@ -6,7 +6,7 @@ use {
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::to_hex,
     crate::chain::fees::OfferChoice,
-    crate::crypto::keypair::{Keypair, PublicKey},
+    crate::crypto::keypair::PublicKey,
     crate::structs::hex::from_hex,
     crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     crate::structs::u256::u256,
@@ -43,10 +43,14 @@ pub struct SendArgs {
     /// Wait until the transaction's block is finalized, not just deep enough.
     #[arg(long = "final", conflicts_with = "no_wait")]
     pub finalized: bool,
-    /// The most gas it may use. Defaults to its intrinsic cost under the chain's gas schedule,
-    /// plus the chain's fuel cap for calls, deploys and upgrades.
+    /// The most gas it may use. Defaults, for a call, deploy or upgrade, to what a dry run of it
+    /// on the node uses plus a quarter, at most the chain's fuel cap; for anything else, to its
+    /// intrinsic cost. A dry run that fails leaves the fuel cap's worth.
     #[arg(long)]
     pub gas_limit: Option<u64>,
+    /// Send it even though a dry run on the node says it would fail.
+    #[arg(long)]
+    pub anyway: bool,
     /// The most it pays per gas, in the smallest unit. Defaults to twice the base price plus the
     /// tip under a base fee, and to the lowest bid when senders bid.
     #[arg(long, value_parser = parse_amount)]
@@ -193,7 +197,17 @@ pub fn send(args: SendArgs) -> CliResult<()> {
         max_price: args.max_price,
         tip: args.tip,
     };
-    let fee = offer(&status["fees"], &tx, nonce, &keypair, chosen)?;
+    let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, &keypair);
+    let (fee, failure) = offer(&agent, node, &probe, chosen)?;
+
+    if let Some(error) = failure {
+        if !args.anyway {
+            return Err(format!("a dry run says this would fail: {error}. Send it anyway with --anyway").into());
+        }
+
+        eprintln!("a dry run says this would fail: {error}; sending it anyway");
+    }
+
     let signed = SignedTx::sign(tx, nonce, fee, &keypair);
     let body = json!({ "tx": to_hex(&wincode::serialize(&signed)?) }).to_string();
     let submitted = ok(agent
@@ -225,22 +239,37 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     report(&receipt)
 }
 
-/// What to offer for a transaction: on a chain with fees, as the node reports them, the flags
-/// given, and for the rest what is sure to cover it. Nothing on a chain without fees.
-fn offer(fees: &Value, tx: &Tx, nonce: u64, keypair: &Keypair, chosen: OfferChoice) -> CliResult<FeeOffer> {
-    if fees.is_null() {
-        return Ok(FeeOffer::NONE);
+/// What to offer for a transaction, as the node works it out at POST /offer for a probe signed
+/// with none: the flags given, and for the rest what covers it, its gas limit from a dry run. Also
+/// why that dry run failed, if it did.
+fn offer(agent: &Agent, node: &str, probe: &SignedTx, chosen: OfferChoice) -> CliResult<(FeeOffer, Option<String>)> {
+    let mut body = json!({ "tx": to_hex(&wincode::serialize(probe)?) });
+
+    if let Some(gas_limit) = chosen.gas_limit {
+        body["gas_limit"] = gas_limit.into();
     }
 
-    let base = parse_amount(fees["base_price"].as_str().ok_or("the node sent no base price")?)?;
-    let tx_fuel = fees["tx_fuel"].as_u64().ok_or("the node sent no fuel cap")?;
-    // What the node adds to the chain's fee settings, which the settings themselves do not hold.
-    let mut settings = fees.clone();
-    settings.as_object_mut().ok_or("the node sent bad fees")?.retain(|key, _| key != "base_price" && key != "tx_fuel");
-    let config = crate::cli::genesis::fees_from_json(&settings)?;
-    let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, keypair);
+    if let Some(max_price) = chosen.max_price {
+        body["max_price"] = max_price.to_string().into();
+    }
 
-    Ok(config.build().offer(base, tx_fuel, &probe, chosen))
+    if let Some(tip) = chosen.tip {
+        body["tip"] = tip.to_string().into();
+    }
+
+    let answer = ok(agent.post(format!("{node}/offer")).header("content-type", "application/json").send(body.to_string()))?;
+    let wide = |name: &str| -> CliResult<u256> { Ok(parse_amount(answer[name].as_str().ok_or_else(|| format!("the node sent no {name}"))?)?) };
+    let fee = FeeOffer {
+        gas_limit: answer["gas_limit"].as_u64().ok_or("the node sent no gas_limit")?,
+        max_price: wide("max_price")?,
+        tip: wide("tip")?,
+    };
+    let failure = match answer["estimate"]["status"].as_str() {
+        Some("failed") => Some(answer["estimate"]["error"].as_str().unwrap_or("no reason given").to_string()),
+        _ => None,
+    };
+
+    Ok((fee, failure))
 }
 
 /// What a transaction's block must reach before send returns.

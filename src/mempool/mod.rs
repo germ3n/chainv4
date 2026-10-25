@@ -1,7 +1,7 @@
 //! Transactions waiting for a block, keyed by sender and nonce so each sender's run in order.
 
 use {
-    crate::chain::Fees,
+    crate::chain::{Fees, tx_bytes},
     crate::crypto::verifiable::{Verifiable, VerifyError},
     crate::db::{DbError, State},
     crate::registry::Accounts,
@@ -23,6 +23,28 @@ use {
 pub struct Mempool {
     txs: BTreeMap<(Address, u64), SignedTx>,
     capacity: usize,
+}
+
+#[document(
+    summary = "How much a producer takes from the mempool for one block: as many transactions as fit every bound it has. With none, it takes everything that can run.",
+    category = "Node",
+    see_also = "Mempool::select",
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Budget {
+    #[document(summary = "The most transactions, when the node caps them with --max-block-txs.")]
+    pub count: Option<usize>,
+    #[document(summary = "The most bytes they may take, encoded: genesis's max_block_bytes, which blocks are checked against.")]
+    pub bytes: Option<u64>,
+    #[document(summary = "The most their gas limits may add up to. Twice the block gas limit lets running fill the block however little of their limits they use, without running far more than fits.")]
+    pub gas: Option<u64>,
+}
+
+impl Budget {
+    /// Whether a transaction of this size and gas limit still fits, after what is taken so far.
+    fn fits(&self, count: usize, bytes: u64, gas: u64) -> bool {
+        self.count.is_none_or(|most| count <= most) && self.bytes.is_none_or(|most| bytes <= most) && self.gas.is_none_or(|most| gas <= most)
+    }
 }
 
 #[document(
@@ -135,9 +157,25 @@ impl Mempool {
             return Err(MempoolError::Full);
         }
 
+        Mempool::check(&tx, checked, state, fees)?;
+
+        self.insert(tx)
+    }
+
+    #[document(
+        parent = "Mempool",
+        summary = "Checks what admission checks that does not depend on what else waits: the signature, going by what checking it found; that its nonce is not used; and on a chain with fees, that its gas limit could fit a block, its price could be taken and its sender can pay for it now. It needs no mempool, so a node checks off its loop and locks the mempool only to insert.",
+        params = {
+            tx = "The transaction.",
+            checked = "What its verify returned.",
+            state = "The state at the tip.",
+            fees = "The chain's fees, if it has any.",
+        },
+        see_also = "Mempool::insert",
+    )]
+    pub fn check(tx: &SignedTx, checked: Result<(), VerifyError>, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
         checked.map_err(MempoolError::Invalid)?;
-        let sender = tx.sender();
-        let account = Accounts::new(state).get(&sender)?;
+        let account = Accounts::new(state).get(&tx.sender())?;
 
         if tx.nonce < account.nonce {
             return Err(MempoolError::Stale);
@@ -146,7 +184,7 @@ impl Mempool {
         if let Some(fees) = fees {
             let limit = tx.fee.gas_limit;
 
-            if limit < fees.schedule().intrinsic(&tx) || limit > fees.block_gas_limit() {
+            if limit < fees.schedule().intrinsic(tx) || limit > fees.block_gas_limit() {
                 return Err(MempoolError::BadGasLimit);
             }
 
@@ -159,25 +197,39 @@ impl Mempool {
             }
         }
 
-        if self.txs.contains_key(&(sender, tx.nonce)) {
-            return Err(MempoolError::Duplicate);
-        }
-
-        self.txs.insert((sender, tx.nonce), tx);
-
         Ok(())
     }
 
     #[document(
         parent = "Mempool",
-        summary = "Picks transactions for a block, the highest priority first: for each sender, their waiting transactions in nonce order from their current nonce, stopping at the first gap; across senders, whichever sender's next transaction pays the producer most, ties going to the lower address.",
+        summary = "Puts in a transaction that check passed, if there is room and nothing from its sender with its nonce waits already.",
+        see_also = "Mempool::check",
+    )]
+    pub fn insert(&mut self, tx: SignedTx) -> Result<(), MempoolError> {
+        if self.txs.len() >= self.capacity {
+            return Err(MempoolError::Full);
+        }
+
+        match self.txs.entry((tx.sender(), tx.nonce)) {
+            Entry::Occupied(_) => Err(MempoolError::Duplicate),
+            Entry::Vacant(entry) => {
+                entry.insert(tx);
+
+                Ok(())
+            }
+        }
+    }
+
+    #[document(
+        parent = "Mempool",
+        summary = "Picks transactions for a block, the highest priority first: for each sender, their waiting transactions in nonce order from their current nonce, stopping at the first gap; across senders, whichever sender's next transaction pays the producer most, ties going to the lower address. A transaction that would pass the budget is left out with the rest of its sender's, and the others still go on filling it.",
         params = {
             state = "The state at the tip.",
-            max = "The most to pick.",
+            budget = "How much to pick: a count, bytes and gas limits, each if bounded.",
             priority = "What a transaction is worth to the producer, such as Chain::priority.",
         },
     )]
-    pub fn select(&self, state: &State, max: usize, priority: &dyn Fn(&SignedTx) -> u256) -> Result<Vec<SignedTx>, DbError> {
+    pub fn select(&self, state: &State, budget: Budget, priority: &dyn Fn(&SignedTx) -> u256) -> Result<Vec<SignedTx>, DbError> {
         let accounts = Accounts::new(state);
         // Each sender's run: the transactions that can go in order from its next nonce.
         let mut runs: Vec<Vec<&SignedTx>> = Vec::new();
@@ -209,11 +261,21 @@ impl Mempool {
             .collect();
         let mut taken = vec![0; runs.len()];
         let mut picked = Vec::new();
+        let (mut bytes, mut gas) = (0u64, 0u64);
 
-        while picked.len() < max
+        while budget.count.is_none_or(|most| picked.len() < most)
             && let Some((_, Reverse(run))) = heads.pop()
         {
-            picked.push(runs[run][taken[run]].clone());
+            let tx = runs[run][taken[run]];
+            let (more_bytes, more_gas) = (bytes + tx_bytes(tx), gas.saturating_add(tx.fee.gas_limit));
+
+            // Past the budget: the sender's later ones cannot go without it, so its run ends here.
+            if !budget.fits(picked.len() + 1, more_bytes, more_gas) {
+                continue;
+            }
+
+            (bytes, gas) = (more_bytes, more_gas);
+            picked.push(tx.clone());
             taken[run] += 1;
 
             if let Some(next) = runs[run].get(taken[run]) {
@@ -280,6 +342,80 @@ mod tests {
         State::new(Arc::new(MemoryDb::default()))
     }
 
+    /// A transaction with this gas limit and this many bytes of data riding along.
+    fn sized(keypair: &Keypair, nonce: u64, gas_limit: u64, data: usize) -> SignedTx {
+        let tx = Tx::ContractCall {
+            to: crate::structs::address::Address::Contract([3; 32]),
+            func: crate::structs::hash::Hash::Xxh3_64(1),
+            amount: Amount::U128(0),
+            data: vec![crate::structs::tx::TxCallArgumentType::Bytes(vec![0; data])],
+        };
+        let fee = FeeOffer { gas_limit, ..FeeOffer::NONE };
+
+        SignedTx::sign(tx, nonce, fee, keypair)
+    }
+
+    #[test]
+    fn selection_stops_at_each_bound_of_its_budget() {
+        let state = state();
+        let mut mempool = Mempool::new(100);
+        let (one, two) = (keypair(), Keypair::generate(keypair().public().key_type()).unwrap());
+
+        for nonce in 0..5 {
+            mempool.add(sized(&one, nonce, 1_000, 100), &state, None).unwrap();
+            mempool.add(sized(&two, nonce, 1_000, 100), &state, None).unwrap();
+        }
+
+        let size = tx_bytes(&sized(&one, 0, 1_000, 100));
+        let picked = |budget: Budget| mempool.select(&state, budget, &free).unwrap().len();
+
+        assert_eq!(picked(Budget::default()), 10, "no bound: everything that can run");
+        assert_eq!(picked(Budget { count: Some(3), ..Budget::default() }), 3);
+        assert_eq!(picked(Budget { bytes: Some(size * 4 + size / 2), ..Budget::default() }), 4);
+        assert_eq!(picked(Budget { gas: Some(6_500), ..Budget::default() }), 6);
+        assert_eq!(picked(Budget { count: Some(8), bytes: Some(size * 7), gas: Some(9_000) }), 7, "the tightest wins");
+    }
+
+    #[test]
+    fn a_transaction_past_the_budget_ends_its_senders_run_and_others_fill_in() {
+        let state = state();
+        let mut mempool = Mempool::new(100);
+        let (big, small) = (keypair(), Keypair::generate(keypair().public().key_type()).unwrap());
+        // The big sender's first is worth the most, but does not fit; its second cannot go alone.
+        mempool.add(sized(&big, 0, 9_000, 100), &state, None).unwrap();
+        mempool.add(sized(&big, 1, 10, 100), &state, None).unwrap();
+
+        for nonce in 0..4 {
+            mempool.add(sized(&small, nonce, 1_000, 100), &state, None).unwrap();
+        }
+
+        let gas_limit = |tx: &SignedTx| u256::from(tx.fee.gas_limit);
+        let picked = mempool.select(&state, Budget { gas: Some(5_000), ..Budget::default() }, &gas_limit).unwrap();
+
+        assert_eq!(picked.iter().map(|tx| (tx.sender() == small.public().address(), tx.nonce)).collect::<Vec<_>>(), [(true, 0), (true, 1), (true, 2), (true, 3)]);
+    }
+
+    #[test]
+    fn checking_needs_no_mempool_and_inserting_refuses_duplicates_and_a_full_one() {
+        let state = state();
+        let keypair = keypair();
+        let tx = transfer(&keypair, 0);
+
+        assert_eq!(Mempool::check(&tx, Ok(()), &state, None), Ok(()));
+        assert!(matches!(Mempool::check(&tx, Err(VerifyError::InvalidSignature), &state, None), Err(MempoolError::Invalid(_))));
+
+        let mut mempool = Mempool::new(1);
+
+        assert_eq!(mempool.insert(tx.clone()), Ok(()));
+        assert_eq!(mempool.insert(tx), Err(MempoolError::Full));
+
+        let mut roomy = Mempool::new(5);
+        let again = transfer(&keypair, 3);
+        roomy.insert(again.clone()).unwrap();
+
+        assert_eq!(roomy.insert(again), Err(MempoolError::Duplicate));
+    }
+
     #[test]
     fn selection_follows_nonce_order_and_stops_at_gaps() {
         let state = state();
@@ -290,10 +426,10 @@ mod tests {
             mempool.add(transfer(&keypair, nonce), &state, None).unwrap();
         }
 
-        let nonces: Vec<u64> = mempool.select(&state, 10, &free).unwrap().iter().map(|tx| tx.nonce).collect();
+        let nonces: Vec<u64> = mempool.select(&state, Budget { count: Some(10), ..Budget::default() }, &free).unwrap().iter().map(|tx| tx.nonce).collect();
 
         assert_eq!(nonces, [0, 1, 2]);
-        assert_eq!(mempool.select(&state, 2, &free).unwrap().len(), 2);
+        assert_eq!(mempool.select(&state, Budget { count: Some(2), ..Budget::default() }, &free).unwrap().len(), 2);
     }
 
     #[test]
@@ -329,7 +465,7 @@ mod tests {
         mempool.prune(&state).unwrap();
 
         assert_eq!(mempool.len(), 1);
-        assert_eq!(mempool.select(&state, 10, &free).unwrap()[0].nonce, 1);
+        assert_eq!(mempool.select(&state, Budget { count: Some(10), ..Budget::default() }, &free).unwrap()[0].nonce, 1);
     }
 
     #[test]
@@ -368,7 +504,7 @@ mod tests {
         add(&mut mempool, signed(&rich, 1, offer(100_000, price, 50))).unwrap();
         add(&mut mempool, signed(&other, 0, offer(100_000, price, 9))).unwrap();
         let base = floor;
-        let picked = mempool.select(&state, 10, &|tx| fees.priority(base, &tx.fee)).unwrap();
+        let picked = mempool.select(&state, Budget { count: Some(10), ..Budget::default() }, &|tx| fees.priority(base, &tx.fee)).unwrap();
         let order: Vec<(Address, u64)> = picked.iter().map(|tx| (tx.sender(), tx.nonce)).collect();
 
         assert_eq!(order, [

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+pub mod guides;
 mod html;
 mod item;
 mod parse;
@@ -871,13 +872,18 @@ fn walk(dir: &Path, pages: &mut Vec<Page>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn render(pages: &[Page]) -> String {
-    html::render(pages)
+pub fn render(pages: &[Page], guides: &[guides::Guide]) -> String {
+    html::render(pages, guides)
 }
 
 pub fn generate(src: &Path, dest: &Path) -> Result<(), String> {
     let pages = scan(src)?;
-    let html = render(&pages);
+    // The guides live beside src: docs/ and the README of the same repository.
+    let guides = match src.parent() {
+        Some(root) => guides::read(root)?,
+        None => Vec::new(),
+    };
+    let html = render(&pages, &guides);
 
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)

@@ -1,8 +1,10 @@
-//! Talking to a node's HTTP API, in the background on the desktop and in the browser alike.
-//! Answers wait in an inbox the app empties each frame, and each wakes the UI. The node is never
-//! trusted: everything it sends that the wallet shows as proven, the light client checked.
+//! Talking to a node's HTTP API, in the background on the desktop and in the browser alike, and
+//! through the proxy set, if one is, and never around it. Answers wait in an inbox the app empties
+//! each frame, and each wakes the UI. The node is never trusted: everything it sends that the
+//! wallet shows as proven, the light client checked.
 
 use {
+    chainv4_ui::net::{Answer, Client},
     serde_json::Value,
     std::collections::HashSet,
     std::sync::{Arc, Mutex},
@@ -77,15 +79,19 @@ type Inbox = Arc<Mutex<Vec<(Ask, Result<Value, Failure>)>>>;
 
 pub struct Node {
     base: String,
+    /// What every request goes out through, or why none can: a proxy set that does not build
+    /// sends nothing rather than go direct.
+    client: Result<Client, String>,
     inbox: Inbox,
     asking: HashSet<Ask>,
     wake: egui::Context,
 }
 
 impl Node {
-    pub fn new(base: &str, wake: egui::Context) -> Node {
+    pub fn new(base: &str, client: Result<Client, String>, wake: egui::Context) -> Node {
         Node {
             base: base.trim().trim_end_matches('/').to_string(),
+            client,
             inbox: Arc::default(),
             asking: HashSet::new(),
             wake,
@@ -99,21 +105,22 @@ impl Node {
         }
 
         let url = format!("{}{}", self.base, ask.path());
-        let request = match ask.body() {
-            Some(body) => ehttp::Request::post(url, body.as_bytes().to_vec()),
-            None => ehttp::Request::get(url),
-        };
+        let body = ask.body().map(|body| body.as_bytes().to_vec());
         let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
-
-        ehttp::fetch(request, move |response| {
-            let result = match response {
-                Ok(response) => read(&response),
+        let done = move |answer: Result<Answer, String>| {
+            let result = match answer {
+                Ok(answer) => read(&answer),
                 Err(message) => Err(Failure { status: 0, message }),
             };
 
             inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((ask, result));
             wake.request_repaint();
-        });
+        };
+
+        match &self.client {
+            Ok(client) => client.fetch(url, body, done),
+            Err(why) => done(Err(format!("the proxy set does not work: {why}"))),
+        }
     }
 
     /// Everything that arrived since last time.
@@ -129,7 +136,7 @@ impl Node {
 }
 
 /// An answer's JSON, or the API's {"error": …} as a failure.
-fn read(response: &ehttp::Response) -> Result<Value, Failure> {
+fn read(response: &Answer) -> Result<Value, Failure> {
     let value: Option<Value> = serde_json::from_slice(&response.bytes).ok();
 
     match (response.ok, value) {
@@ -142,5 +149,23 @@ fn read(response: &ehttp::Response) -> Result<Value, Failure> {
                 .and_then(Value::as_str)
                 .map_or_else(|| format!("{} {}", response.status, response.status_text), str::to_string),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_a_proxy_that_does_not_work_nothing_is_sent_and_the_answer_says_why() {
+        let mut node = Node::new("http://127.0.0.1:1", Err("not a port: 0".to_string()), egui::Context::default());
+        node.ask(Ask::Status);
+        let answers = node.answers();
+
+        assert_eq!(answers, vec![(Ask::Status, Err(Failure {
+            status: 0,
+            message: "the proxy set does not work: not a port: 0".to_string(),
+        }))]);
+        assert!(!node.asking.contains(&Ask::Status), "answered, so asked again later");
     }
 }

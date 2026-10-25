@@ -217,6 +217,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "max_reorg_depth": genesis.max_reorg_depth,
         "finality": genesis.finality.as_ref().map(finality_json),
         "fees": genesis.fees.as_ref().map(fees_json),
+        "max_block_bytes": genesis.max_block_bytes,
     })
 }
 
@@ -492,6 +493,8 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
     let max_reorg_depth = root.whole("max_reorg_depth")?;
     let finality = root.optional_object("finality")?.map(finality_from_json).transpose()?;
     let fees = root.optional_object("fees")?.map(fees_from_fields).transpose()?;
+    // Absent from files written before it: those chains keep their id, bounded by gas alone.
+    let max_block_bytes = root.later_whole("max_block_bytes")?;
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -506,6 +509,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         max_reorg_depth,
         finality,
         fees,
+        max_block_bytes,
     };
     root.done()?;
 
@@ -623,6 +627,14 @@ impl<'a> Fields<'a> {
         }
     }
 
+    /// A field added after genesis files were first written: one without it means None.
+    fn later_whole(&mut self, key: &'a str) -> Result<Option<u64>, String> {
+        match self.map.contains_key(key) {
+            true => self.optional_whole(key),
+            false => Ok(None),
+        }
+    }
+
     /// A hash algorithm by name, such as blake3 or sha256.
     fn hash(&mut self, key: &'a str) -> Result<HashType, String> {
         let name = self.name(key);
@@ -694,6 +706,80 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_genesis_from_before_max_block_bytes_keeps_its_id() {
+        let mut genesis = dev(DevChain::Authority);
+        genesis.max_block_bytes = None;
+        let mut value = to_json(&genesis);
+        value.as_object_mut().unwrap().remove("max_block_bytes");
+        let read = from_json(&value).unwrap();
+
+        /// Genesis as it was before the field, field for field.
+        #[derive(wincode::SchemaWrite)]
+        struct Before {
+            timestamp: u64,
+            hash: HashType,
+            coin: Coin,
+            consensus: ConsensusConfig,
+            reward: Reward,
+            minter: Option<Address>,
+            allocations: Vec<Allocation>,
+            engines: Vec<Engine>,
+            tx_limits: Limits,
+            token_functions: Vec<String>,
+            max_reorg_depth: u64,
+            finality: Option<FinalityConfig>,
+            fees: Option<FeeConfig>,
+        }
+
+        let before = Before {
+            timestamp: read.timestamp,
+            hash: read.hash,
+            coin: read.coin.clone(),
+            consensus: read.consensus.clone(),
+            reward: read.reward,
+            minter: read.minter,
+            allocations: read.allocations.clone(),
+            engines: read.engines.clone(),
+            tx_limits: read.tx_limits,
+            token_functions: read.token_functions.clone(),
+            max_reorg_depth: read.max_reorg_depth,
+            finality: read.finality.clone(),
+            fees: read.fees.clone(),
+        };
+
+        // Unset, it adds nothing to what the id is hashed from, in any build.
+        assert_eq!(read.max_block_bytes, None, "a file without it reads as unbounded");
+        assert_eq!(wincode::serialize(&read).unwrap(), wincode::serialize(&before).unwrap());
+        assert_eq!(from_json(&to_json(&read)).unwrap(), read, "null reads back as unset too");
+
+        // The development authority chain's id from before the field, in the build it was taken
+        // from: its hash, key, engines and finality all go into it.
+        if cfg!(all(
+            feature = "blake3",
+            feature = "ed25519",
+            feature = "lvm",
+            feature = "wasm",
+            feature = "finality-ffg",
+            feature = "finality-authority",
+            feature = "finality-depth"
+        )) {
+            assert_eq!(read.block().id().to_string(), "0xf55e42d5e8776e763713812686978872028563a6640412515a05d6d64043b181");
+        }
+
+        // Set, it is part of the chain: the dev chains now have their own ids.
+        let bounded = dev(DevChain::Authority);
+
+        assert_eq!(bounded.max_block_bytes, Some(crate::chain::DEV_MAX_BLOCK_BYTES));
+        assert_ne!(bounded.block().id(), read.block().id());
+        assert_eq!(from_json(&to_json(&bounded)).unwrap(), bounded);
+
+        let mut other = bounded.clone();
+        other.max_block_bytes = Some(8 * 1024 * 1024);
+
+        assert_ne!(other.block().id(), bounded.block().id());
     }
 
     #[test]
@@ -784,6 +870,7 @@ mod tests {
             #[cfg(feature = "finality-ffg")]
             ("/finality/checkpont_interval", json!(8), "finality.checkpont_interval is not a genesis field"),
             ("/max_reorg_depth", json!("100"), "max_reorg_depth must be a whole number"),
+            ("/max_block_bytes", json!("4 MiB"), "max_block_bytes must be a whole number"),
             ("/engines", json!(["lua", "evm"]), "unknown engine evm"),
             ("/token_functions", json!("transfer"), "token_functions must be a list"),
             ("/consensus/hash", json!("sha1"), "consensus.hash: unknown hash sha1"),

@@ -35,6 +35,9 @@ const NARROW: f32 = 640.0;
 pub struct Settings {
     /// The node's HTTP API.
     pub node: String,
+    /// The proxy every request goes through, as socks5h://host:port or http://host:port, or empty
+    /// to go direct. Never used in the browser, whose own proxy settings apply.
+    pub proxy: String,
     /// The genesis id trusted at each node: the one first seen there, or one pasted.
     pub pinned: HashMap<String, String>,
     /// What the light client checked, by genesis id, encoded, to resume from.
@@ -73,6 +76,7 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             node: String::new(),
+            proxy: String::new(),
             pinned: HashMap::new(),
             light: HashMap::new(),
             wallets: Vec::new(),
@@ -179,7 +183,7 @@ impl Wallet {
         let lock = Lock::start(&settings);
 
         Wallet {
-            node: Node::new(&settings.node, creation.egui_ctx.clone()),
+            node: Node::new(&settings.node, client(&settings), creation.egui_ctx.clone()),
             settings,
             palette,
             chain: Chain::default(),
@@ -201,10 +205,11 @@ impl Wallet {
         }
     }
 
-    /// Starts afresh with a node: its own chain, light client and pinned genesis.
+    /// Starts afresh with a node, through the proxy set: its own chain, light client and pinned
+    /// genesis.
     fn connect(&mut self, node: &str) {
         self.settings.node = node.trim().trim_end_matches('/').to_string();
-        self.node = Node::new(&self.settings.node, self.wake.clone());
+        self.node = Node::new(&self.settings.node, client(&self.settings), self.wake.clone());
         self.chain = Chain::default();
         self.asked_status = None;
         self.asked_history = 0.0;
@@ -371,7 +376,11 @@ impl Wallet {
                     opened = lock::show(ui, &palette, &mut self.settings, &mut self.lock);
                 });
                 ui.add_space(12.0);
-                ui.label(RichText::new(format!("Node {}", self.settings.node)).small().color(palette.muted));
+                let through = match chainv4_ui::net::Proxy::parse(&self.settings.proxy) {
+                    Ok(proxy) if !cfg!(target_arch = "wasm32") => format!(" · through {}", proxy.shown()),
+                    _ => String::new(),
+                };
+                ui.label(RichText::new(format!("Node {}{through}", self.settings.node)).small().color(palette.muted));
                 ui.add_space(24.0);
             });
         });
@@ -628,6 +637,15 @@ impl eframe::App for Wallet {
     }
 }
 
+/// What the wallet's requests go out through: the proxy set, or straight to the node. The browser
+/// makes its own requests, through its own proxy.
+fn client(settings: &Settings) -> Result<chainv4_ui::net::Client, String> {
+    match cfg!(target_arch = "wasm32") {
+        true => Ok(chainv4_ui::net::Client::direct()),
+        false => chainv4_ui::net::Client::for_setting(&settings.proxy),
+    }
+}
+
 fn now_ms() -> u64 {
     web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
 }
@@ -657,5 +675,23 @@ mod tests {
 
         assert!(kept.get("vault").is_none() && kept.get("current").is_none(), "never written again");
         assert_eq!(serde_json::from_value::<Settings>(kept).unwrap().migrated().wallets, settings.wallets);
+    }
+
+    #[test]
+    fn settings_from_before_proxies_go_direct_and_a_proxy_set_is_kept() {
+        let old = serde_json::from_value::<Settings>(json!({ "node": "http://node" })).unwrap();
+
+        assert_eq!(old.proxy, "");
+        assert!(client(&old).unwrap().proxy().is_none());
+
+        let set = Settings {
+            proxy: chainv4_ui::net::Proxy::ORBOT.to_string(),
+            ..Settings::default()
+        };
+        let kept = serde_json::from_value::<Settings>(serde_json::to_value(&set).unwrap()).unwrap();
+
+        assert_eq!(kept.proxy, chainv4_ui::net::Proxy::ORBOT);
+        assert_eq!(client(&kept).unwrap().proxy().map(chainv4_ui::net::Proxy::as_str), Some(chainv4_ui::net::Proxy::ORBOT));
+        assert!(client(&Settings { proxy: "tor".to_string(), ..Settings::default() }).is_err(), "never direct instead");
     }
 }

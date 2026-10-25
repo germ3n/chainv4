@@ -1,6 +1,6 @@
-//! The wallet open: its name, its words, and removing it. Then which node to talk to, which chain
-//! to trust there, the light client's saved progress, and how the wallet keeps its keys: when it
-//! locks itself, and the password that seals them.
+//! The wallet open: its name, its words, and removing it. Then which node to talk to, the proxy
+//! every request goes through, which chain to trust there, the light client's saved progress, and
+//! how the wallet keeps its keys: when it locks itself, and the password that seals them.
 
 use {
     super::Ctx,
@@ -18,6 +18,9 @@ pub struct SettingsState {
     /// The node being typed, and a genesis id to trust instead.
     node: Option<String>,
     genesis: String,
+    /// The proxy being typed, and why the one chosen would not do.
+    proxy: Option<String>,
+    proxy_trouble: Option<String>,
     current: String,
     new: String,
     again: String,
@@ -47,7 +50,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     let palette = *ctx.palette;
     let node = ctx.settings.node.clone();
 
-    theme::title(ui, &palette, "Settings", "This wallet, the node, the chain it trusts there, and how it keeps your keys.");
+    theme::title(ui, &palette, "Settings", "This wallet, the node and the way to it, the chain it trusts there, and how it keeps your keys.");
 
     wallet(ui, ctx, state);
     words_question(ui, ctx, state);
@@ -68,6 +71,18 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
 
         if connect {
             *ctx.connect = Some(typed.trim().to_string());
+        }
+    });
+
+    ui.add_space(14.0);
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Proxy");
+        let set = ctx.settings.proxy.clone();
+        let typed = state.proxy.get_or_insert_with(|| set.clone());
+
+        if let Some(chosen) = chainv4_ui::widgets::proxy(ui, &palette, typed, &mut state.proxy_trouble, &set) {
+            ctx.settings.proxy = chosen;
+            *ctx.connect = Some(node.clone());
         }
     });
 

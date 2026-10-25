@@ -66,15 +66,29 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **Difficulty only looks at the parent.** A miner may set its timestamp up to 15 seconds
   ahead to lower the next difficulty a little. A median-time-past rule, or retargeting over a
   window of blocks, would make that harder.
+- [ ] **Mining runs on CPU threads only.** GPU miners, on CUDA, SPIR-V (Vulkan compute), OpenCL
+  and WebGPU, belong in a library of their own that the node imports and picks one from with a
+  flag, beside `--mine-threads`. Each needs every work hash a genesis may name, so every secure
+  one: SHA-256, BLAKE3, BLAKE2s, BLAKE2b and Keccak-256, each behind its hash's feature. A seal a
+  GPU finds has to be one the CPU check accepts: the same `"chainv4 work"`, block id and nonce,
+  with tests against the CPU's hashes.
 - [ ] **Side branches are never pruned, and bad blocks are only remembered in memory.** With a
   low difficulty, a peer can fill the disk with side blocks cheaply; after a restart, a known-bad
   branch is run again before it is refused.
 - [x] **A block gas limit.** On a chain with fees, a transaction is only taken while its gas
   limit fits what the block has left, and the header's gas used must match, both checked on
   import.
-- [ ] **Other block limits are not consensus rules.** A chain without fees still takes any number
-  of transactions of any size, and `MAX_BLOCK_TXS` only limits the blocks this node builds.
-  Bytes per block would bound blocks on any chain.
+- [x] **Blocks are bounded by bytes on any chain.** Genesis's `max_block_bytes`, checked on
+  import, bounds a block's transactions whether or not the chain has fees; the dev chains have
+  4 MiB, and genesis files from before it keep their ids. The fixed 1,000-transaction cap is gone:
+  producers fill to the bytes and gas limits, or to `--max-block-txs`.
+- [x] **Admission off the node loop.** The verifier's gate checks and inserts transactions, so
+  block building never starves the mempool.
+- [x] **Gas estimation.** `POST /offer` dry-runs calls, deploys and upgrades and offers what they
+  used plus a quarter; the CLI, wallet and explorer warn before sending what would fail.
+- [ ] **A producer has no time budget.** It fills blocks to the bytes and gas limits whatever
+  they take to run, so a slow machine can miss its slot. Those limits are genesis's, alike on
+  every machine; `--max-block-txs` is the only brake a producer sets for its own speed.
 - [x] **Block rewards.** Genesis sets an initial reward and an optional halving interval; each
   block's producer is credited after its transactions run.
 - [x] **Fees.** Every transaction pays for its gas, failed ones too, with what it does not use
@@ -486,3 +500,4 @@ make sure max supply is configurable
 storage seems to save strings only, make it save raw types to save space, etc
 add voting for proposals, like consensus change, etc, upgrades, what not
 scan whole project in order -> scan docs -> go section by section and verify theres nothing that shouldnt be there/stale -> go through each subsytem nad find bugs, stuff that would be good to change -> go through each subsystems tests (all of them), and see if theres something that doesnt make sense/should be added or removed.
+find more hardcoded values that maybe should be confiruable and like be able to be changed, voted on, yada yada

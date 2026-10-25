@@ -119,6 +119,79 @@ fn genesis_funds_the_authority_and_survives_reopening() {
 }
 
 #[test]
+fn a_dry_run_keeps_nothing_and_runs_at_the_next_nonce() {
+    let db = Arc::new(MemoryDb::default());
+    let genesis = genesis();
+    let chain = Chain::open(db.clone(), &genesis).unwrap();
+    let vm = Arc::new(Vm::new(&genesis.engines, genesis.hash).unwrap());
+    let deployer = authority().public().address();
+    // Signed at a nonce far from the sender's: a probe's own nonce does not matter.
+    let probe = SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 99, FeeOffer::NONE, &authority());
+    let ran = dry_run(db.clone(), &genesis.rules(), &vm, &probe, 0, u256::ZERO).unwrap();
+    let state = chain.state();
+
+    assert_eq!(ran.failure, None);
+    assert!(ran.fuel_used > 0, "loading the script ran its top level");
+    assert_eq!(Accounts::new(&state).get(&deployer).unwrap().nonce, 0, "nothing it did was kept");
+    assert!(crate::registry::Contracts::new(&Arc::new(chain.state())).get(&contract_address(&deployer, 0, genesis.hash)).unwrap().is_none());
+
+    let call = Tx::ContractCall { to: Address::Contract([9; 32]), func: Hash::Xxh3_64(selector("nope")), amount: Amount::U128(0), data: Vec::new() };
+    let failing = dry_run(db, &genesis.rules(), &vm, &SignedTx::sign(call, 0, FeeOffer::NONE, &authority()), 0, u256::ZERO).unwrap();
+
+    assert!(failing.failure.is_some_and(|why| why.contains("no contract")), "it says why it would fail");
+}
+
+#[test]
+fn max_block_bytes_must_hold_the_largest_deploy() {
+    let small = Genesis { max_block_bytes: Some(crate::chain::MIN_BLOCK_BYTES - 1), ..genesis() };
+    let err = Chain::open(Arc::new(MemoryDb::default()), &small).err().unwrap();
+
+    assert!(err.to_string().contains("max_block_bytes must be at least 1 MiB"), "{err}");
+    assert!(Chain::open(Arc::new(MemoryDb::default()), &Genesis { max_block_bytes: Some(crate::chain::MIN_BLOCK_BYTES), ..genesis() }).is_ok());
+
+    let big = Genesis { max_block_bytes: Some(crate::chain::MAX_BLOCK_BYTES + 1), ..genesis() };
+    let err = Chain::open(Arc::new(MemoryDb::default()), &big).err().unwrap();
+
+    assert!(err.to_string().contains("at most 6 MiB"), "so a full block fits one gossip message: {err}");
+    assert!(Chain::open(Arc::new(MemoryDb::default()), &Genesis { max_block_bytes: Some(crate::chain::MAX_BLOCK_BYTES), ..genesis() }).is_ok());
+}
+
+#[test]
+fn blocks_past_max_block_bytes_are_refused_and_never_built() {
+    let authority = DevAuthority::dev_keypair();
+    let genesis = Genesis { max_block_bytes: Some(crate::chain::MIN_BLOCK_BYTES), ..genesis() };
+    let mut chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+    // Calls carrying 300 KiB each: four pass the limit.
+    let big = |nonce: u64| {
+        let tx = Tx::ContractCall {
+            to: Address::Contract([9; 32]),
+            func: Hash::Xxh3_64(1),
+            amount: Amount::U128(0),
+            data: vec![TxCallArgumentType::Bytes(vec![7; 300 * 1024])],
+        };
+
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
+    };
+    let txs: Vec<SignedTx> = (0..4).map(big).collect();
+    let total: u64 = txs.iter().map(crate::chain::tx_bytes).sum();
+
+    assert!(total > crate::chain::MIN_BLOCK_BYTES && crate::chain::tx_bytes(&txs[0]) * 3 < crate::chain::MIN_BLOCK_BYTES);
+
+    // Building leaves out what would pass it.
+    let built = chain.build(txs.clone(), Vec::new(), authority.public().address(), 1_000).unwrap();
+
+    assert_eq!(built.txs.len(), 3);
+
+    // A block that holds them all anyway is refused on import, before anything runs.
+    let mut stuffed = built.clone();
+    stuffed.txs = txs;
+    stuffed.header.tx_root = Block::tx_root(chain.hash(), &stuffed.txs);
+    let err = chain.import(&stuffed, 1_000).unwrap_err();
+
+    assert!(matches!(err, ImportError::Invalid(BlockError::TooBig { bytes, limit }) if bytes == total && limit == crate::chain::MIN_BLOCK_BYTES), "{err}");
+}
+
+#[test]
 fn a_different_genesis_is_refused() {
     let db = Arc::new(MemoryDb::default());
     open(&db);
@@ -1466,4 +1539,63 @@ fn a_light_client_follows_proof_of_work_through_a_reorg() {
     headers[2] = forged;
 
     assert!(matches!(fresh.deliver_headers(1, headers, LATER), Err(crate::light::LightError::BadHeader { height: 3, .. })));
+}
+
+#[test]
+fn a_full_block_past_wincodes_default_limit_builds_imports_and_reads_back() {
+    // 16,000 funded senders, each with one transfer: more than 4 MiB of them in memory.
+    let keys: Vec<Keypair> = (0..16_000u64)
+        .map(|index| {
+            let mut seed = [0x5a; 32];
+            seed[..8].copy_from_slice(&index.to_le_bytes());
+
+            Keypair::from_seed(seed)
+        })
+        .collect();
+    let mut genesis = Genesis { max_block_bytes: Some(crate::chain::MAX_BLOCK_BYTES), ..Genesis::dev_authority(authority().public()) };
+    genesis.allocations.extend(keys.iter().map(|key| Allocation { address: key.public().address(), amount: u256::new(10u128.pow(21)) }));
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let base = chain.next_base_price();
+    // An Ed25519 transfer's gas exactly; other schemes' cost less.
+    let gas_limit = 3_620;
+    let txs: Vec<SignedTx> = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let to = keys[(index + 1) % keys.len()].public().address();
+            let fee = FeeOffer { gas_limit, max_price: base * u256::new(100), tip: u256::ZERO };
+
+            SignedTx::sign(Tx::Transfer { from: key.public().address(), to, amount: Amount::U128(1) }, 0, fee, key)
+        })
+        .collect();
+    let now = chain.tip().timestamp + SLOT;
+    let mut block = chain.build(txs, Vec::new(), producer().address(), now).unwrap();
+    block.seal = producer().seal(&block.header).unwrap();
+
+    // The block's gas limit binds, at 13,812 transfers with Ed25519 keys: over 4 MiB in memory.
+    let block_gas_limit = genesis.fees.as_ref().unwrap().block_gas_limit;
+
+    assert!(block.txs.len() < keys.len());
+    assert!(block.header.gas_used + gas_limit > block_gas_limit, "the next would not fit");
+    assert!(block.txs.len() * std::mem::size_of::<SignedTx>() > 4 << 20);
+
+    if cfg!(feature = "ed25519") {
+        assert_eq!(block.txs.len(), 13_812);
+    }
+
+    // Encoded as any list is: the transactions' own encoding right after the header.
+    let bytes = wincode::serialize(&block).unwrap();
+    let header = wincode::serialized_size(&block.header).unwrap() as usize;
+
+    assert!(bytes[header..].starts_with(&wincode::serialize(&block.txs).unwrap_or_else(|_| {
+        // wincode's own Vec refuses this many, which is the point: compare a short prefix instead.
+        let mut prefix = (block.txs.len() as u64).to_le_bytes().to_vec();
+        prefix.extend(wincode::serialize(&block.txs[0]).unwrap());
+        prefix
+    })));
+    assert_eq!(wincode::deserialize::<Block>(&bytes).unwrap(), block);
+
+    assert!(matches!(chain.import(&block, now), Ok(Imported::Extended(receipts)) if receipts.len() == block.txs.len()));
+    assert_eq!(chain.block(&block.id()).unwrap(), Some(block), "and it reads back from the database");
 }

@@ -93,6 +93,9 @@ impl View {
 pub struct Settings {
     /// The node's HTTP API.
     pub node: String,
+    /// The proxy every request goes through, as socks5h://host:port or http://host:port, or empty
+    /// to go direct. Never used in the browser, whose own proxy settings apply.
+    pub proxy: String,
     /// Decimals set by hand per token contract, by chain (its genesis id), then contract.
     pub decimals: HashMap<String, HashMap<String, u8>>,
     /// The genesis id the light client first saw at each node, which it trusts there from then on.

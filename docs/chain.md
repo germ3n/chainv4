@@ -329,4 +329,5 @@ block on, with no maturity period.
 | `block_gas_limit` | genesis fees | The gas one block may use. |
 | `max_reorg_depth` | genesis | How far back the main chain may roll. |
 | `MAX_DRIFT_MS` | 15 seconds | How far ahead of a node's clock a block's timestamp may be. |
-| `MAX_BLOCK_TXS` | 1,000 | The transactions a node puts in a block it builds. Not checked on import. |
+| `max_block_bytes` | genesis | The bytes one block's transactions may take, encoded; checked on import. |
+| `--max-block-txs` | node flag | The transactions in a block this node builds, if it caps them. Not checked on import. |

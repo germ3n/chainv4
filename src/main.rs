@@ -58,6 +58,11 @@ struct NodeArgs {
     /// 10 times in a minute is disconnected.
     #[arg(long, default_value_t = 1_000, value_parser = clap::value_parser!(u32).range(1..))]
     max_gossip_per_peer: u32,
+    /// The most transactions a block this node produces may hold. Without it, blocks fill to the
+    /// chain's max_block_bytes and gas limit, which every node checks; this only caps this node's
+    /// own blocks.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    max_block_txs: Option<u32>,
     /// Which development chain to run: pow, mined by anyone, or authority, where the built-in
     /// development key produces every block.
     #[arg(long, value_enum, default_value_t = cli::genesis::DevChain::Pow)]
@@ -234,7 +239,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         (ConsensusConfig::Authority { .. }, true, _) => return Err("--mine needs a proof-of-work chain".into()),
         (ConsensusConfig::ProofOfWork(_), _, true) => return Err("--produce needs an authority chain".into()),
     };
-    let mut node = Node::new(db.clone(), &genesis, producer, net)?;
+    let mut node = Node::new(db.clone(), &genesis, producer, net)?.max_block_txs(args.max_block_txs.map(|most| most as usize));
 
     if args.snapshot {
         match node.sync_from_snapshot()? {

@@ -148,6 +148,13 @@ impl Node {
             .collect();
         peers.sort_by_key(|peer| peer.since);
 
+        // One lock for both, taken and let go before the rest.
+        let (waiting, waiting_txs) = {
+            let mempool = self.gate.mempool();
+
+            (mempool.len(), mempool.iter().take(txs).cloned().collect())
+        };
+
         NodeReport {
             started: self.started,
             now,
@@ -156,9 +163,9 @@ impl Node {
             validating: self.validator.is_some(),
             peers,
             syncing: self.sync.asking(),
-            waiting: self.mempool.len(),
+            waiting,
             capacity: MEMPOOL_CAPACITY,
-            txs: self.mempool.iter().take(txs).cloned().collect(),
+            txs: waiting_txs,
             counters: Counters {
                 gossip_dropped: self.backlog.dropped(),
                 flooders_disconnected: self.backlog.disconnected(),

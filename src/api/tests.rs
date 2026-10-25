@@ -9,6 +9,7 @@ use crate::structs::code::Code;
 use crate::net::{Backlog, BacklogLimits, NetEvent};
 use crate::node::{Counters, Heard, NodeReport, PeerReport};
 use crate::structs::block::Block;
+use crate::structs::hash::HashType;
 use crate::structs::hex::{from_hex, to_hex};
 use crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType};
 use std::io::{Read as _, Write as _};
@@ -878,7 +879,7 @@ fn offers_cover_what_a_transaction_costs_now() {
     let db = Arc::new(MemoryDb::default());
     let genesis = Genesis::dev_authority(authority.public());
     let chain = Chain::open(db.clone(), &genesis).unwrap();
-    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let address = start(db.clone(), None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let probe = SignedTx::sign(
         Tx::Deploy {
             code: Code::Lua(COUNTER.to_string()),
@@ -887,32 +888,67 @@ fn offers_cover_what_a_transaction_costs_now() {
         FeeOffer::NONE,
         &authority,
     );
-    let body = |extra: Value| {
-        let mut body = json!({ "tx": to_hex(&wincode::serialize(&probe).unwrap()) });
+    let body = |probe: &SignedTx, extra: Value| {
+        let mut body = json!({ "tx": to_hex(&wincode::serialize(probe).unwrap()) });
         body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
 
         body.to_string()
     };
-    let (status, _, offered) = request(address, "POST", "/offer", &body(json!({})));
+    let (status, _, offered) = request(address, "POST", "/offer", &body(&probe, json!({})));
     let fees = genesis.fees.as_ref().unwrap().build();
-    let expected = fees.offer(chain.next_base_price(), genesis.tx_limits.fuel, &probe, OfferChoice::default());
+    let base = chain.next_base_price();
+    let open = fees.offer(base, genesis.tx_limits.fuel, &probe, OfferChoice::default());
+    let vm = Arc::new(crate::vm::Vm::new(&genesis.engines, genesis.hash).unwrap());
+    let ran = crate::chain::dry_run(db.clone(), &genesis.rules(), &vm, &probe, open.gas_limit, base).unwrap();
+    let estimated = FeeOffer { gas_limit: fees.estimated(genesis.tx_limits.fuel, &probe, ran.gas_used), ..open };
 
+    // A deploy's limit is what its dry run used and a quarter more of what it ran, not the cap.
     assert_eq!(status, 200, "{offered}");
-    assert_eq!(offered, json::fee_offer(&expected));
-    assert!(expected.gas_limit > fees.schedule().for_fuel(genesis.tx_limits.fuel));
+    assert_eq!(ran.failure, None);
+    assert!(ran.gas_used > fees.schedule().intrinsic(&probe), "loading and running it cost fuel");
+    assert_eq!(offered["gas_limit"], estimated.gas_limit);
+    assert_eq!((offered["max_price"].clone(), offered["tip"].clone()), (json!(open.max_price.to_string()), json!("0")));
+    assert_eq!(offered["estimate"], json::dry_run(&ran));
+    assert!(estimated.gas_limit < open.gas_limit && estimated.gas_limit >= ran.gas_used);
+    assert!(open.gas_limit > fees.schedule().for_fuel(genesis.tx_limits.fuel), "the cap is what a failing run gets");
 
-    let (_, _, chosen) = request(address, "POST", "/offer", &body(json!({ "gas_limit": 77, "tip": "5" })));
+    let (_, _, chosen) = request(address, "POST", "/offer", &body(&probe, json!({ "gas_limit": 77, "tip": "5" })));
 
-    assert_eq!(chosen["gas_limit"], 77);
+    assert_eq!(chosen["gas_limit"], 77, "a limit the sender chose stands");
     assert_eq!(chosen["tip"], "5");
-    assert_eq!(request(address, "POST", "/offer", &body(json!({ "tip": 5 }))).0, 400);
+    assert_eq!(request(address, "POST", "/offer", &body(&probe, json!({ "tip": 5 }))).0, 400);
+
+    // A transfer needs no dry run: its intrinsic cost is all it uses.
+    let transfer = SignedTx::sign(
+        Tx::Transfer { from: authority.public().address(), to: Keypair::generate(authority.public().key_type()).unwrap().public().address(), amount: Amount::U128(1) },
+        0,
+        FeeOffer::NONE,
+        &authority,
+    );
+    let (_, _, plain) = request(address, "POST", "/offer", &body(&transfer, json!({})));
+
+    assert_eq!(plain["estimate"], Value::Null);
+    assert_eq!(plain["gas_limit"], fees.schedule().intrinsic(&transfer));
+
+    // A call that would fail says why, and keeps the cap, since things may change before it lands.
+    let missing = SignedTx::sign(
+        Tx::ContractCall { to: contract_address(&authority.public().address(), 41, genesis.hash), func: crate::crypto::hasher::Hasher::digest(HashType::Xxh3_64, b"nope"), amount: Amount::U128(0), data: Vec::new() },
+        0,
+        FeeOffer::NONE,
+        &authority,
+    );
+    let (status, _, failing) = request(address, "POST", "/offer", &body(&missing, json!({})));
+
+    assert_eq!(status, 200);
+    assert_eq!(failing["estimate"]["status"], "failed");
+    assert!(failing["estimate"]["error"].as_str().unwrap().contains("no contract"), "{failing}");
+    assert_eq!(failing["gas_limit"], fees.offer(base, genesis.tx_limits.fuel, &missing, OfferChoice::default()).gas_limit);
 
     let free = serve();
+    let offered_free = request(free.address, "POST", "/offer", &body(&probe, json!({}))).2;
 
-    assert_eq!(
-        request(free.address, "POST", "/offer", &body(json!({}))).2,
-        json!({ "gas_limit": 0, "max_price": "0", "tip": "0" })
-    );
+    assert_eq!((offered_free["gas_limit"].clone(), offered_free["max_price"].clone()), (json!(0), json!("0")), "no fees, no gas");
+    assert_eq!(offered_free["estimate"]["status"], "ok", "but still a dry run, to say whether it would fail");
 }
 
 #[test]

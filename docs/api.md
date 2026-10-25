@@ -40,6 +40,7 @@ Where the chain stands:
 | `token_functions` | The functions that make a contract a token on this chain, as genesis names them; `[]` when it keeps no token registry. |
 | `finality` | `null`, or `type`, `epoch`, `checkpoint_interval`, and the `justified` and `finalized` checkpoints, each with `epoch`, `block` and `height`. |
 | `fees` | `null`, or the fee settings as genesis files write them, with `base_price`, what a transaction sent now must offer at least, and `tx_fuel`, the chain's fuel cap per transaction. |
+| `max_block_bytes` | The most bytes a block's transactions may take, encoded, or `null` when genesis sets none. |
 
 ### `GET /blocks?before=H&limit=N`
 
@@ -219,8 +220,15 @@ field of an offer has a fixed size, so it weighs what the real one will. `gas_li
   plus the tip when senders bid;
 - a tip of 0.
 
-It answers `gas_limit`, `max_price` and `tip`: all zero on a chain without fees. Clients that
-cannot run the chain's fee code, such as the [explorer](explorer.md) in a browser, use it.
+**A dry run** of a call, deploy or upgrade comes first: it runs on a throwaway copy of the
+committed state, as its sender at their next nonce, on a thread apart from the rest of the API.
+Unless the sender chose a gas limit, the offer's is what the run used plus a quarter of what it
+ran past its intrinsic cost, at most the fuel cap's worth; a run that fails gets the cap.
+
+It answers `gas_limit`, `max_price` and `tip`, all zero on a chain without fees, and `estimate`:
+the dry run's `gas_used` and `fuel_used`, and `status`, `ok` or `failed` with `error`; `null` for
+anything else. Clients that cannot run the chain's fee code, such as the
+[explorer](explorer.md) in a browser, use it, and warn before sending what would fail.
 
 ### `POST /call`
 

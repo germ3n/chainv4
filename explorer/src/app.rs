@@ -15,7 +15,8 @@ use {
     crate::store::{PAGE, Store},
     crate::theme::{self, DARK, LIGHT, Roles},
     crate::views::{
-        self, Ctx, Look, Settings, View, account::AccountState, hops::HopState, map::MapState, network::Streaming, send::SendState, tokens::TokensState,
+        self, Ctx, Look, Settings, View, account::AccountState, hops::HopState, map::MapState, network::Streaming, send::SendState,
+        settings::SettingsState, tokens::TokensState,
     },
     chainv4_ui::{Palette, layout, widgets},
     egui::{RichText, Ui},
@@ -67,6 +68,7 @@ pub struct Explorer {
     account: AccountState,
     tokens: TokensState,
     send: SendState,
+    settings_page: SettingsState,
     /// The light client, which checks what the node says about balances.
     light: Light,
     /// Something to tell the person, and whether it is bad news.
@@ -90,10 +92,11 @@ impl Explorer {
             .or_else(|| Some(settings.node.clone()).filter(|node| !node.is_empty()))
             .unwrap_or_else(|| fallback.to_string());
         let wake = creation.egui_ctx.clone();
+        let api = Api::new(&node, client(&settings), wake.clone());
         let mut explorer = Explorer {
             settings,
             address: node.clone(),
-            api: Api::new(&node, wake.clone()),
+            api,
             wake,
             store: Store::default(),
             view: View::Overview,
@@ -107,6 +110,7 @@ impl Explorer {
             account: AccountState::default(),
             tokens: TokensState::default(),
             send: SendState::default(),
+            settings_page: SettingsState::default(),
             light: Light::default(),
             notice: None,
             palette,
@@ -117,10 +121,10 @@ impl Explorer {
         explorer
     }
 
-    /// Starts afresh with another node.
+    /// Starts afresh with another node, or the same one through another proxy.
     fn connect(&mut self, node: &str) {
         let node = node.trim().trim_end_matches('/').to_string();
-        self.api = Api::new(&node, self.wake.clone());
+        self.api = Api::new(&node, client(&self.settings), self.wake.clone());
         self.store = Store::default();
         self.map = MapState::default();
         self.light = Light::default();
@@ -697,7 +701,7 @@ impl Explorer {
                         View::Tokens => views::tokens::show(ui, &mut ctx, &mut self.tokens),
                         View::Finality => views::finality::show(ui, &mut ctx),
                         View::Send => views::send::show(ui, &mut ctx, &mut self.send),
-                        View::Settings => views::settings::show(ui, &mut ctx, &mut self.address, &self.streaming, &mut connect),
+                        View::Settings => views::settings::show(ui, &mut ctx, &mut self.address, &mut self.settings_page, &self.streaming, &mut connect),
                         View::More => views::more::show(ui, &mut ctx),
                     });
                     ui.add_space(24.0);
@@ -780,6 +784,15 @@ fn parse<T: serde::de::DeserializeOwned>(value: Value) -> Option<T> {
 }
 
 /// The time, in milliseconds since the Unix epoch.
+/// What the explorer's requests go out through: the proxy set, or straight to the node. The
+/// browser makes its own requests, through its own proxy.
+fn client(settings: &Settings) -> Result<chainv4_ui::net::Client, String> {
+    match cfg!(target_arch = "wasm32") {
+        true => Ok(chainv4_ui::net::Client::direct()),
+        false => chainv4_ui::net::Client::for_setting(&settings.proxy),
+    }
+}
+
 fn now_ms() -> u64 {
     web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)

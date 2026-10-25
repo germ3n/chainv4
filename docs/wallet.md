@@ -52,6 +52,40 @@ wallet/build-android.sh --install         # an APK for arm64, put on the device 
 node's address index, so start the node with `--index-addresses`. Without one, it falls back to
 the event index (`--index-events`), which lists only transactions whose events name the account.
 
+## Through a proxy
+
+On the desktop and on Android, **Settings → Proxy** sends every request the wallet makes through
+a proxy, and only through it:
+- **SOCKS5:** `socks5h://host:port`. `socks5://` is read as `socks5h://`: the proxy looks up the
+  node's name too, so no lookup leaves the device, and a `.onion` node is reached through Tor.
+  `user:password@` may come before the host; messages show the host and port only.
+- **HTTP:** `http://host:port`. Every request goes through a CONNECT tunnel, https or not.
+- **Orbot** fills in `socks5h://127.0.0.1:9050`: Orbot's SOCKS port on a phone, and Tor's own on a
+  desktop. Start Orbot, or Tor, first. Tor Browser's Tor listens on 9150 instead.
+- **Off** goes straight to the node again.
+
+**It fails closed.** While a proxy is set, nothing goes out any other way. With the proxy stopped,
+every request fails with `through the proxy at 127.0.0.1:9050: …` rather than going direct. A kept
+setting that no longer reads as a proxy sends nothing either.
+
+Changing it starts afresh with the node, as **Connect** does; the light client resumes from what
+it saved. The lock screen names the proxy beside the node: `Node http://… · through
+127.0.0.1:9050`.
+
+**In the browser** there is no setting: the browser makes every request, through the proxy set
+in it. To reach a node over Tor, open the wallet in Tor Browser.
+
+**A node over Tor:** give the node an onion service in its machine's `torrc`, pointing at the
+API's port:
+
+```
+HiddenServiceDir /var/lib/tor/chainv4/
+HiddenServicePort 80 127.0.0.1:8080
+```
+
+Tor writes the address to `/var/lib/tor/chainv4/hostname`. In the wallet, set the proxy to Orbot
+and the node to `http://<that address>.onion`.
+
 ## Wallets and words
 
 **A wallet** is a seed phrase, the accounts made from it, and a password that seals them. The lock
@@ -188,6 +222,8 @@ The Send page (`wallet/src/views/send.rs`):
      `chainv4 send` does. An optional tip per gas, in the coin, goes along.
    - **What the review shows:** the most it can cost, gas limit × max price. It refuses to go on
      if the balance does not cover that and the amount.
+   - **A token transfer that would fail:** the node dry-runs it to size its gas limit, and when
+     the run fails, the review says why in red and the button reads **Send anyway**.
 3. **Sign and send.** It signs with the offer and submits it.
 4. **Tracking:** the transaction goes into Activity as Pending, then Proven, then Final once the
    light client proves its block final.
@@ -211,7 +247,7 @@ copies the one shown.
 
 Everything is in app storage under one key, `chainv4-wallet`, saved by eframe every 30 seconds,
 on exit, and when Android sends the app to the background:
-- the node, and the genesis pinned at each node;
+- the node, the proxy, and the genesis pinned at each node;
 - each wallet: its name, its vault, and the account in use in it;
 - the light client's state, by genesis, to resume from the finalized block, not genesis;
 - what it sent that is not final yet, and what it proved, the newest 2,000;
@@ -352,3 +388,7 @@ out when it builds without one, as Android refuses an app that declares code it 
   → Light client → **Start over** follows the new one. Its keys and wallets stay.
 - **The API is plain HTTP.** What the wallet sends is signed and public anyway, but keep the node
   on a trusted network all the same.
+- **A proxy carries plain HTTP as it is.** It can read the wallet's requests to an `http://` node,
+  and so can a Tor exit relay. The light client still checks every answer. A `.onion` node is
+  reached without leaving Tor, end to end encrypted, and the node never learns where the wallet
+  is.

@@ -1,9 +1,11 @@
-//! Talking to a node's HTTP API. Every request runs in the background, on the desktop and in the
-//! browser alike; answers wait in an inbox the app empties each frame, and each one wakes the UI.
-//! The same question is never asked twice at once.
+//! Talking to a node's HTTP API, through the proxy set, if one is, and never around it. Every
+//! request runs in the background, on the desktop and in the browser alike; answers wait in an
+//! inbox the app empties each frame, and each one wakes the UI. The same question is never asked
+//! twice at once.
 
 use {
     crate::sse,
+    chainv4_ui::net::{Answer, Client, Piece},
     serde_json::{Value, json},
     std::collections::HashSet,
     std::ops::ControlFlow,
@@ -202,6 +204,9 @@ pub enum News {
 
 pub struct Api {
     base: String,
+    /// What every request goes out through, or why none can: a proxy set that does not build
+    /// sends nothing rather than go direct.
+    client: Result<Client, String>,
     inbox: Arc<Mutex<Vec<Reply>>>,
     asking: HashSet<Ask>,
     wake: egui::Context,
@@ -210,10 +215,12 @@ pub struct Api {
 }
 
 impl Api {
-    /// An API at base, such as http://127.0.0.1:8080, that wakes the UI when answers come.
-    pub fn new(base: &str, wake: egui::Context) -> Api {
+    /// An API at base, such as http://127.0.0.1:8080, reached through client, that wakes the UI
+    /// when answers come.
+    pub fn new(base: &str, client: Result<Client, String>, wake: egui::Context) -> Api {
         Api {
             base: base.trim_end_matches('/').to_string(),
+            client,
             inbox: Arc::default(),
             asking: HashSet::new(),
             wake,
@@ -232,21 +239,22 @@ impl Api {
         }
 
         let url = format!("{}{}", self.base, ask.path());
-        let request = match ask.body() {
-            Some(body) => ehttp::Request::post(url, body.into_bytes()),
-            None => ehttp::Request::get(url),
-        };
+        let body = ask.body().map(String::into_bytes);
         let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
-
-        ehttp::fetch(request, move |response| {
-            let result = match response {
-                Ok(response) => read(&response),
+        let done = move |answer: Result<Answer, String>| {
+            let result = match answer {
+                Ok(answer) => read(&answer),
                 Err(message) => Err(Failure { status: 0, message }),
             };
 
             lock(&inbox).push(Reply::Answer { ask, result });
             wake.request_repaint();
-        });
+        };
+
+        match &self.client {
+            Ok(client) => client.fetch(url, body, done),
+            Err(why) => done(Err(unusable(why))),
+        }
     }
 
     /// Whether this question is out.
@@ -272,12 +280,10 @@ impl Api {
         self.hang_up();
         let hang_up = Arc::new(AtomicBool::new(false));
         self.hang_up = Some(hang_up.clone());
-        let mut request = ehttp::Request::get(format!("{}/stream", self.base));
-        request.timeout = None;
+        let url = format!("{}/stream", self.base);
         let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
         let parser = Mutex::new(sse::Parser::default());
-
-        ehttp::streaming::fetch(request, move |part| {
+        let on = move |piece: Result<Piece, String>| {
             let tell = |news: News| {
                 lock(&inbox).push(Reply::Stream(news));
                 wake.request_repaint();
@@ -287,17 +293,17 @@ impl Api {
                 return ControlFlow::Break(());
             }
 
-            match part {
-                Ok(ehttp::streaming::Part::Response(response)) if response.ok => tell(News::Open),
-                Ok(ehttp::streaming::Part::Response(response)) => {
+            match piece {
+                Ok(Piece::Head { ok: true, .. }) => tell(News::Open),
+                Ok(Piece::Head { status, status_text, .. }) => {
                     tell(News::Closed {
-                        why: format!("{} {}", response.status, response.status_text),
-                        unsupported: response.status == 404,
+                        why: format!("{status} {status_text}"),
+                        unsupported: status == 404,
                     });
 
                     return ControlFlow::Break(());
                 }
-                Ok(ehttp::streaming::Part::Chunk(bytes)) if bytes.is_empty() => {
+                Ok(Piece::Chunk(bytes)) if bytes.is_empty() => {
                     tell(News::Closed {
                         why: "the node closed the stream".to_string(),
                         unsupported: false,
@@ -305,7 +311,7 @@ impl Api {
 
                     return ControlFlow::Break(());
                 }
-                Ok(ehttp::streaming::Part::Chunk(bytes)) => {
+                Ok(Piece::Chunk(bytes)) => {
                     for event in lock(&parser).feed(&bytes) {
                         let data = serde_json::from_str(&event.data).unwrap_or(Value::String(event.data));
                         tell(News::Event { name: event.name, data });
@@ -319,7 +325,14 @@ impl Api {
             }
 
             ControlFlow::Continue(())
-        });
+        };
+
+        match &self.client {
+            Ok(client) => client.stream(url, on),
+            Err(why) => {
+                let _ = on(Err(unusable(why)));
+            }
+        }
     }
 
     /// Ends the open stream, if any.
@@ -336,8 +349,13 @@ impl Drop for Api {
     }
 }
 
+/// Why nothing was sent: the proxy set does not build, and nothing goes around it.
+fn unusable(why: &str) -> String {
+    format!("the proxy set does not work: {why}")
+}
+
 /// An answer's JSON, or the API's {"error": …} as a failure.
-fn read(response: &ehttp::Response) -> Result<Value, Failure> {
+fn read(response: &Answer) -> Result<Value, Failure> {
     let value: Option<Value> = serde_json::from_slice(&response.bytes).ok();
 
     match (response.ok, value) {
@@ -393,6 +411,18 @@ mod tests {
 
         assert_eq!(newest.path(), "/accounts/ed25519:0x01/txs?limit=50");
         assert_eq!(older.path(), "/accounts/ed25519:0x01/txs?limit=50&cursor=0x00ff");
+    }
+
+    #[test]
+    fn with_a_proxy_that_does_not_work_nothing_is_sent_and_everything_says_why() {
+        let mut api = Api::new("http://127.0.0.1:1", Err("not a port: 0".to_string()), egui::Context::default());
+        api.ask(Ask::Status);
+        api.listen();
+        let replies = api.replies();
+
+        assert!(matches!(&replies[0], Reply::Answer { ask: Ask::Status, result: Err(Failure { status: 0, message }) } if message == "the proxy set does not work: not a port: 0"));
+        assert!(matches!(&replies[1], Reply::Stream(News::Closed { why, unsupported: false }) if why.starts_with("the proxy set does not work")));
+        assert!(!api.asking(&Ask::Status), "answered, so asked again later");
     }
 
     #[test]

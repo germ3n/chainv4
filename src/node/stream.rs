@@ -44,7 +44,9 @@ impl Node {
         params = { backlog = "How many events a subscriber may fall behind by before it misses some." },
     )]
     pub fn stream(mut self, backlog: usize) -> Node {
-        self.events = Some(broadcast::channel(backlog.max(1)).0);
+        let events = broadcast::channel(backlog.max(1)).0;
+        self.gate.stream(events.clone());
+        self.events = Some(events);
         self
     }
 

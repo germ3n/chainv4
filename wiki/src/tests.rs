@@ -380,7 +380,7 @@ fn realms_can_be_combined() {
 fn combined_realms_serialize_as_a_list_the_page_splits() {
     let source = CREATE.replace("\"server\"", "\"client, menu\"");
     let pages = assemble(parse_lua_source("sample.lua", &source).unwrap()).unwrap();
-    let html = render(&pages);
+    let html = render(&pages, &[]);
 
     assert!(html.contains("\"realm\":\"client,menu\""), "{html}");
     assert!(html.contains("realm.split(\",\")"), "page script must split combined realms");
@@ -440,7 +440,7 @@ fn tidy_spaces_types_like_rustfmt() {
 #[test]
 fn page_ships_language_switch_realm_filter_search_and_copy_controls() {
     let pages = assemble(parse_lua_source("sample.lua", CREATE).unwrap()).unwrap();
-    let html = render(&pages);
+    let html = render(&pages, &[]);
 
     for marker in [
         "id=\"lang-switch\"",
@@ -460,7 +460,7 @@ fn page_ships_language_switch_realm_filter_search_and_copy_controls() {
 #[test]
 fn sidebar_title_links_home() {
     let pages = assemble(parse_lua_source("sample.lua", CREATE).unwrap()).unwrap();
-    let html = render(&pages);
+    let html = render(&pages, &[]);
 
     assert!(
         html.contains("<a class=\"brand\" href=\"#\""),
@@ -471,7 +471,7 @@ fn sidebar_title_links_home() {
 #[test]
 fn render_contains_signature_realm_lang_and_example() {
     let pages = assemble(parse_lua_source("sample.lua", CREATE).unwrap()).unwrap();
-    let html = render(&pages);
+    let html = render(&pages, &[]);
 
     assert!(html.contains("ents.create(string class)"), "{html}");
     assert!(html.contains("\"realm\":\"server\""), "{html}");

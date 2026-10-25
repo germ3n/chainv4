@@ -1,4 +1,5 @@
 use crate::Page;
+use crate::guides::Guide;
 
 const HEAD: &str = r####"<!DOCTYPE html>
 <html lang="en">
@@ -677,12 +678,13 @@ pre.sig .kw { color: var(--kw); }
   background: var(--card);
 }
 .lang-tab {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 5px 10px;
+  gap: 5px;
+  padding: 5px 6px;
   border-radius: 999px;
   color: var(--muted);
   text-decoration: none;
@@ -691,7 +693,7 @@ pre.sig .kw { color: var(--kw); }
   letter-spacing: 0.06em;
   transition: color 0.12s, background 0.12s;
 }
-.lang-tab em { font-style: normal; font-family: var(--mono); font-size: 10.5px; font-weight: 400; opacity: 0.7; }
+.lang-tab em { font-style: normal; font-family: var(--mono); font-size: 9.5px; font-weight: 400; opacity: 0.7; }
 .lang-tab:hover { color: var(--ink); }
 .lang-tab.on { background: var(--accent-soft); color: var(--accent); }
 .realm-filter:empty { display: none; }
@@ -704,6 +706,61 @@ ul.seealso li > * { min-width: 0; }
 ul.seealso a { overflow-wrap: anywhere; }
 ul.seealso li span { color: var(--muted); }
 @media (max-width: 860px) { ul.seealso li { grid-template-columns: 1fr; gap: 2px; } }
+/* Guides: docs/*.md and the README, rendered as prose. */
+article.guide { max-width: 860px; }
+.prose { margin-top: 18px; color: var(--soft); font-size: 15.5px; line-height: 1.75; }
+.prose > h1:first-child { display: none; }
+.prose h2 {
+  margin: 58px 0 14px;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 30px;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.prose h2, .prose h3, .prose h4 { scroll-margin-top: 24px; }
+.prose h4 { margin: 30px 0 8px; font-size: 14.5px; font-weight: 600; color: var(--ink); }
+.prose p { margin: 14px 0; max-width: 72ch; }
+.prose ul, .prose ol { margin: 12px 0; padding-left: 22px; max-width: 72ch; }
+.prose li { margin: 6px 0; }
+.prose li > ul, .prose li > ol { margin: 4px 0; }
+.prose li::marker { color: var(--muted); }
+.prose a { color: var(--accent); text-decoration: none; }
+.prose a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.prose strong { color: var(--ink); font-weight: 600; }
+.prose code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  color: var(--ink);
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.prose pre code { background: none; border: 0; padding: 0; font-size: inherit; color: inherit; }
+.prose .codewrap { margin: 18px 0; }
+.prose pre.code { overflow-x: auto; }
+.prose table { display: block; overflow-x: auto; border-collapse: collapse; margin: 20px 0; font-size: 14px; }
+.prose th {
+  text-align: left;
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0 18px 10px 0;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.prose td { padding: 10px 18px 10px 0; vertical-align: top; border-bottom: 1px solid var(--row); line-height: 1.6; }
+.prose tr:last-child td { border-bottom: 0; }
+.prose blockquote { margin: 18px 0; padding: 2px 18px; border-left: 2px solid var(--accent); color: var(--muted); }
+.prose hr { border: 0; height: 1px; background: var(--line); margin: 44px 0; }
+.prose .repo-path { font-family: var(--mono); font-size: 0.9em; color: var(--ink); }
+.prose input[type="checkbox"] { margin: 0 8px 0 0; accent-color: var(--accent); }
+.nav-link.heading { font-size: 12.5px; color: var(--muted); }
+.nav-link.heading.deep { padding-left: 26px; }
 @media (max-width: 1100px) {
   main { padding: 52px 40px 100px; }
   h1 { font-size: 40px; }
@@ -736,7 +793,7 @@ ul.seealso li span { color: var(--muted); }
 <aside id="sidebar">
   <div class="brand-row"><a class="brand" href="#" title="Back to the homepage"><strong>Wiki</strong><span id="brand-sub">Rust API</span></a><button id="theme" type="button" aria-pressed="true">Light</button></div>
   <div class="lang-switch" id="lang-switch" role="group" aria-label="Language"></div>
-  <div class="search-wrap"><input id="search" type="search" placeholder="Search the reference" autocomplete="off" aria-label="Search"><kbd>/</kbd></div>
+  <div class="search-wrap"><input id="search" type="search" placeholder="Search" autocomplete="off" aria-label="Search"><kbd>/</kbd></div>
   <div class="realm-filter" id="realm-filter" role="group" aria-label="Filter by realm"></div>
   <nav id="nav"></nav>
 </aside>
@@ -761,18 +818,22 @@ const TAIL: &str = r####"</script>
   var idx;
 
   var TITLE = "chainv4 Wiki";
-  var LANGS = ["rust", "lua", "wasm"];
-  var LANG_LABELS = { rust: "Rust", lua: "Lua", wasm: "WASM" };
+  var LANGS = ["guide", "rust", "lua", "wasm"];
+  var LANG_LABELS = { guide: "Guides", rust: "Rust", lua: "Lua", wasm: "WASM" };
+  /* docs/README.md: the guides' home, not a page in the sidebar. */
+  var GUIDE_HOME = "index";
   var REALM_NAMES = ["client", "server", "menu"];
   var CONTAINERS = { library: true, class: true, module: true, struct: true, enum: true, trait: true };
   /* Top-level pages without a category land in a section named after their kind. These come
      after every category, in this order. */
   var SECTION_OF = {
+    guide: {},
     rust: { module: "Modules", struct: "Types", enum: "Types", trait: "Types", type: "Types", function: "Functions", constant: "Constants" },
     lua: { class: "Classes", library: "Libraries", function: "Functions" },
     wasm: { library: "Imports", function: "Functions" }
   };
   var SECTION_ORDER = {
+    guide: [],
     rust: ["Modules", "Types", "Functions", "Constants"],
     lua: ["Classes", "Libraries", "Functions"],
     wasm: ["Imports", "Functions"]
@@ -787,11 +848,13 @@ const TAIL: &str = r####"</script>
     ["hook", "Hooks"]
   ];
   var LEDES = {
+    guide: "How chainv4 works, part by part: running a node, writing contracts, and what to keep in mind.",
     rust: "Rust reference for chainv4. Types are the structs, enums and traits the chain is built from. Modules group free functions and constants.",
     lua: "Lua scripting reference. Classes are values you call with a colon. Libraries are tables of functions. Hooks are callbacks you put on an object.",
     wasm: "WebAssembly contract reference: the host functions a module imports, with pointers and lengths as i32s into its exported memory. Write contracts in Rust with chainv4-sdk, which wraps every one of them."
   };
   var EMPTY = {
+    guide: "No guides yet. Write them in Markdown in <code>docs/</code>.",
     rust: "Nothing is documented in Rust yet. Put <code>#[document(summary = \"…\")]</code> on an item.",
     lua: "Nothing is documented in Lua yet. Write a <code>--[=[document … ]=]</code> block in a .lua file, or add <code>lua</code> to a <code>#[document]</code> on the Rust side of a binding.",
     wasm: "Nothing is documented for WebAssembly yet. Add <code>wasm</code> to a <code>#[document]</code> on the Rust side of a host function."
@@ -985,6 +1048,11 @@ const TAIL: &str = r####"</script>
       return null;
     }
 
+    // A guide's address may go on to a heading: #guide/contracts/storage-layouts.
+    if (here.lang === "guide" && here.id.indexOf("/") !== -1 && byKey["guide/" + here.id.slice(0, here.id.indexOf("/"))]) {
+      return byKey["guide/" + here.id.slice(0, here.id.indexOf("/"))];
+    }
+
     if (byKey[here.lang + "/" + here.id]) {
       return byKey[here.lang + "/" + here.id];
     }
@@ -1002,6 +1070,13 @@ const TAIL: &str = r####"</script>
 
   function currentPage() {
     return lookup(route());
+  }
+
+  /* The heading a guide's address goes on to, if any. */
+  function guideAnchor(here) {
+    var cut = here.id.indexOf("/");
+
+    return here.lang === "guide" && cut !== -1 ? here.id.slice(cut + 1) : "";
   }
 
   function currentKey() {
@@ -1063,6 +1138,8 @@ const TAIL: &str = r####"</script>
     var id = page.id.toLowerCase();
     var summary = page.summary.toLowerCase();
     var category = (page.category || "").toLowerCase();
+    var heads = page.kind === "guide" ? page.headings.map(function (heading) { return heading.text; }).join(" ").toLowerCase() : "";
+    var text = page.kind === "guide" ? page.text.toLowerCase() : "";
     var total = 0;
 
     for (var tokIdx = 0; tokIdx < toks.length; tokIdx++) {
@@ -1074,9 +1151,11 @@ const TAIL: &str = r####"</script>
       else if (new RegExp("[.:_]" + reEsc(tok)).test(id)) points = 65;
       else if (name.indexOf(tok) !== -1) points = 50;
       else if (id.indexOf(tok) !== -1) points = 40;
+      else if (heads.indexOf(tok) !== -1) points = 30;
       else if (category.indexOf(tok) !== -1) points = 25;
       else if (summary.indexOf(tok) !== -1) points = 20;
       else if (paramHit(page, tok)) points = 15;
+      else if (text.indexOf(tok) !== -1) points = 10;
 
       if (!points) {
         return 0;
@@ -1156,6 +1235,10 @@ const TAIL: &str = r####"</script>
   /* Top-level pages of the current language, grouped by category. Pages without one fall into
      a section named after their kind. */
   function sections() {
+    if (lang === "guide") {
+      return guideSections();
+    }
+
     var named = {};
     var categories = [];
     var itemIdx;
@@ -1192,6 +1275,42 @@ const TAIL: &str = r####"</script>
     return order.map(function (title) {
       return { title: title, pages: named[title].sort(byName) };
     });
+  }
+
+  /* The guides in the order docs lay them out, each section where its first guide is. */
+  function guideSections() {
+    var guides = data.filter(function (page) { return page.lang === "guide" && page.id !== GUIDE_HOME; });
+    var order = [];
+    var named = {};
+
+    guides.sort(function (a, b) { return a.order - b.order || (a.name < b.name ? -1 : 1); });
+    guides.forEach(function (page) {
+      if (!named[page.category]) {
+        named[page.category] = [];
+        order.push(page.category);
+      }
+
+      named[page.category].push(page);
+    });
+
+    return order.map(function (title) {
+      return { title: title, pages: named[title] };
+    });
+  }
+
+  /* A guide in the sidebar, with its headings under it while it is open. */
+  function guideLink(page, here) {
+    if (!here || keyOf(here) !== keyOf(page) || !page.headings.length) {
+      return link(page, page.name);
+    }
+
+    var kids = page.headings.map(function (heading) {
+      var deep = heading.level > 2 ? " deep" : "";
+
+      return '<a class="nav-link heading' + deep + '" href="#guide/' + encodeURIComponent(page.id) + "/" + encodeURIComponent(heading.id) + '"><span>' + esc(heading.text) + "</span></a>";
+    }).join("");
+
+    return '<div class="branch open">' + link(page, page.name) + '<div class="kids"><div class="folder">' + kids + "</div></div></div>";
   }
 
   function accessPill(page) {
@@ -1257,6 +1376,13 @@ const TAIL: &str = r####"</script>
 
     for (var itemIdx = 0; itemIdx < pages.length; itemIdx++) {
       var page = pages[itemIdx];
+
+      if (page.kind === "guide") {
+        blocks += guideLink(page, here);
+
+        continue;
+      }
+
       var kids = children(page);
       var visible = [];
       var childIdx;
@@ -1396,7 +1522,7 @@ const TAIL: &str = r####"</script>
     });
 
     langSwitch.innerHTML = html;
-    brandSub.textContent = LANG_LABELS[lang] + " API";
+    brandSub.textContent = lang === "guide" ? "Guides" : LANG_LABELS[lang] + " API";
   }
 
   function renderRealmFilter() {
@@ -1619,7 +1745,7 @@ const TAIL: &str = r####"</script>
   /* Ids already join a member to its parent the way its language does: Entity:spawn,
      ents.create, Tx::hash, Tx.from. */
   function titleOf(page) {
-    return page.id;
+    return page.kind === "guide" ? page.name : page.id;
   }
 
   function realms(realm) {
@@ -1639,6 +1765,10 @@ const TAIL: &str = r####"</script>
   }
 
   function crumbs(page) {
+    if (page.kind === "guide") {
+      return '<a href="#guide">Guides</a> <span>/</span> <span>' + esc(page.name) + "</span>";
+    }
+
     var html = '<a href="#' + page.lang + '">' + LANG_LABELS[page.lang] + "</a>";
     var parent = page.parent ? byKey[page.lang + "/" + page.parent] : null;
 
@@ -1883,6 +2013,60 @@ const TAIL: &str = r####"</script>
     return html;
   }
 
+  function guideArticle(page) {
+    var html = "<article class='guide'>";
+
+    if (page.id !== GUIDE_HOME) {
+      html += '<p class="crumbs">' + crumbs(page) + "</p>";
+    }
+
+    html += '<div class="title-row"><div><p class="eyebrow">' + esc(page.id === GUIDE_HOME ? "Guides" : page.category) + "</p><h1>" + esc(page.name) + "</h1></div></div>";
+    html += '<div class="prose">' + page.html + "</div></article>";
+
+    return html;
+  }
+
+  /* Gives a guide's code blocks the reference's look: highlighting for Lua and Rust, and a
+     copy button. */
+  function enhanceGuide() {
+    var blocks = main.querySelectorAll(".prose pre > code");
+
+    for (var blockIdx = 0; blockIdx < blocks.length; blockIdx++) {
+      var code = blocks[blockIdx];
+      var pre = code.parentNode;
+      var which = /language-(lua|luau)\b/.test(code.className) ? "lua" : /language-rust\b/.test(code.className) ? "rust" : null;
+      var wrap = document.createElement("div");
+      var button = document.createElement("button");
+
+      if (which) {
+        code.innerHTML = highlight(code.textContent, which);
+      }
+
+      pre.className = "code";
+      wrap.className = "codewrap";
+      button.type = "button";
+      button.className = "copy";
+      button.textContent = "Copy";
+      button.setAttribute("aria-label", "Copy the code");
+      pre.parentNode.insertBefore(wrap, pre);
+      wrap.appendChild(button);
+      wrap.appendChild(pre);
+    }
+  }
+
+  /* Scrolls to the heading the address names, inside the page only, since an id like search is
+     the shell's too. */
+  function scrollToAnchor(anchor) {
+    var target = anchor ? main.querySelector('[id="' + anchor.replace(/["\\]/g, "\\$&") + '"]') : null;
+
+    // At once: a smooth scroll would still be under way as the page settles.
+    if (target) {
+      target.scrollIntoView({ block: "start", behavior: "instant" });
+    } else {
+      window.scrollTo(0, 0);
+    }
+  }
+
   function cardRow(title, pages) {
     var html = "<h3>" + esc(title) + "</h3><div class='cards'>";
     var itemIdx;
@@ -1900,6 +2084,10 @@ const TAIL: &str = r####"</script>
   }
 
   function home() {
+    if (lang === "guide" && byKey["guide/" + GUIDE_HOME]) {
+      return guideArticle(byKey["guide/" + GUIDE_HOME]);
+    }
+
     var groups = sections();
     var html = "<article class='home'>";
     html += "<header class='hero'><p class='eyebrow'>Reference</p><h1>" + LANG_LABELS[lang] + " <em>Wiki</em></h1>";
@@ -1929,6 +2117,8 @@ const TAIL: &str = r####"</script>
     if (!here.id) {
       document.title = LANG_LABELS[lang] + " — " + TITLE;
       main.innerHTML = home();
+      enhanceGuide();
+      window.scrollTo(0, 0);
 
       return;
     }
@@ -1941,6 +2131,15 @@ const TAIL: &str = r####"</script>
     }
 
     document.title = titleOf(page) + " — " + TITLE;
+
+    if (page.kind === "guide") {
+      main.innerHTML = guideArticle(page);
+      enhanceGuide();
+      scrollToAnchor(guideAnchor(here));
+
+      return;
+    }
+
     main.innerHTML = article(page);
     window.scrollTo(0, 0);
   }
@@ -2100,8 +2299,10 @@ const TAIL: &str = r####"</script>
 </html>
 "####;
 
-pub fn render(pages: &[Page]) -> String {
-    let mut json = serde_json::to_string(pages).expect("wiki json");
+pub fn render(pages: &[Page], guides: &[Guide]) -> String {
+    let mut all: Vec<serde_json::Value> = pages.iter().map(|page| serde_json::to_value(page).expect("wiki json")).collect();
+    all.extend(guides.iter().map(|guide| serde_json::to_value(guide).expect("wiki json")));
+    let mut json = serde_json::to_string(&all).expect("wiki json");
     json = json.replace('<', "\\u003c");
     let head = HEAD.replacen("/*__WIKI_FONTS__*/", &font_css(), 1);
     let mut html = String::with_capacity(head.len() + json.len() + TAIL.len());

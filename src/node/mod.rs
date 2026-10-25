@@ -9,9 +9,8 @@ use {
     crate::chain::{Chain, ChainError, FinalityError, FinalityUpdate, Genesis, ImportError, Imported, IndexKind, KeepFrom},
     crate::consensus::Producer,
     crate::crypto::keypair::Keypair,
-    crate::crypto::verifiable::VerifyError,
     crate::db::{Database, DbError},
-    crate::mempool::{Mempool, MempoolError},
+    crate::mempool::{Budget, Mempool, MempoolError},
     crate::net::{Admission, Backlog, MAX_SYNC_BLOCKS, MAX_SYNC_ENTRIES, MAX_SYNC_HEADERS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, Origin, SyncRequest, SyncResponse},
     crate::structs::block::Block,
     crate::structs::hash::Hash,
@@ -28,9 +27,11 @@ use {
     std::time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     sync::SyncState,
     tokio::sync::{broadcast, mpsc as async_mpsc, oneshot},
+    gate::{Gate, Tally},
     verifier::Arrival,
 };
 
+mod gate;
 mod report;
 mod snapshot;
 mod stream;
@@ -42,8 +43,9 @@ pub use stream::NodeEvent;
 
 /// The most events handled per pass, so a flood cannot starve block production.
 const EVENT_BUDGET: usize = 256;
-/// The most transactions one block carries.
-const MAX_BLOCK_TXS: usize = 1_000;
+/// The most transactions a block carries on a chain that bounds blocks by neither bytes nor gas,
+/// so its producer never tries to run the whole mempool at once.
+const UNBOUNDED_CHAIN_TXS: usize = 1_000;
 /// The most transactions waiting at once.
 const MEMPOOL_CAPACITY: usize = 50_000;
 /// The longest the loop sleeps with nothing scheduled, so it still notices a dead network.
@@ -61,7 +63,8 @@ const TEMPLATE_REFRESH: u64 = 2_000;
 )]
 pub struct Node {
     chain: Chain,
-    mempool: Mempool,
+    /// The mempool, and what admits transactions to it off the loop.
+    gate: Arc<Gate>,
     producer: Option<Box<dyn Producer>>,
     /// The block the producer is sealing, until its seal arrives or the tip moves on.
     template: Option<Block>,
@@ -87,6 +90,8 @@ pub struct Node {
     events: Option<broadcast::Sender<NodeEvent>>,
     /// The indexes with catching up left, which keeps the loop from sleeping.
     catching_up: HashSet<IndexKind>,
+    /// The most transactions this node puts in a block it produces, if it caps them.
+    max_block_txs: Option<usize>,
 }
 
 #[document(
@@ -235,7 +240,7 @@ impl Node {
         producer: Option<Box<dyn Producer>>,
         net: NetLink,
     ) -> Result<Node, NodeError> {
-        let chain = Chain::open(db, genesis).map_err(NodeError::Chain)?;
+        let chain = Chain::open(db.clone(), genesis).map_err(NodeError::Chain)?;
         let NetLink {
             commands,
             events,
@@ -243,17 +248,19 @@ impl Node {
             check_inline,
             backlog,
         } = net;
-        // The verifier takes the network's events, and the node reads what it checked.
+        let gate = Arc::new(Gate::new(Mempool::new(MEMPOOL_CAPACITY), db, chain.shared_fees(), chain.hash(), commands.clone(), backlog.clone()));
+        // The verifier takes the network's events, has the gate admit transactions, and the node
+        // reads the rest and what came of them.
         let arrivals = match check_inline {
             true => Arrivals::Unchecked(events),
             false => Arrivals::Checked(
-                verifier::spawn(events, chain.workers()).map_err(|err| NodeError::Thread(format!("the verifier: {err}")))?,
+                verifier::spawn(events, chain.workers(), gate.clone()).map_err(|err| NodeError::Thread(format!("the verifier: {err}")))?,
             ),
         };
 
         Ok(Node {
             chain,
-            mempool: Mempool::new(MEMPOOL_CAPACITY),
+            gate,
             producer,
             template: None,
             commands,
@@ -270,7 +277,28 @@ impl Node {
             counters: Counters::default(),
             events: None,
             catching_up: HashSet::new(),
+            max_block_txs: None,
         })
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Caps the transactions in each block this node produces. Without a cap, blocks fill to the chain's max_block_bytes and gas limit; a chain that bounds neither takes 1,000 a block.",
+        params = { most = "The most, or None for no cap of this node's own." },
+    )]
+    pub fn max_block_txs(mut self, most: Option<usize>) -> Node {
+        self.max_block_txs = most;
+        self
+    }
+
+    /// How much the producer takes from the mempool for a block: whatever the chain's limits let
+    /// in, with the gas limits allowed twice the block's, since few use all of theirs.
+    fn budget(&self) -> Budget {
+        let bytes = self.chain.max_block_bytes();
+        let gas = self.chain.fees().map(|fees| fees.block_gas_limit().saturating_mul(2));
+        let unbounded = (bytes.is_none() && gas.is_none()).then_some(UNBOUNDED_CHAIN_TXS);
+
+        Budget { count: self.max_block_txs.or(unbounded), bytes, gas }
     }
 
     #[document(
@@ -328,9 +356,9 @@ impl Node {
         &self.chain
     }
 
-    #[document(parent = "Node", summary = "The transactions waiting for a block.")]
-    pub fn mempool(&self) -> &Mempool {
-        &self.mempool
+    #[document(parent = "Node", summary = "The transactions waiting for a block, locked while the guard lives: the gate admits more off the loop.")]
+    pub fn mempool(&self) -> std::sync::MutexGuard<'_, Mempool> {
+        self.gate.mempool()
     }
 
     #[document(
@@ -372,6 +400,8 @@ impl Node {
             self.started = now;
         }
 
+        self.gate.set_syncing(self.snapshotting());
+
         for _ in 0..EVENT_BUDGET {
             let Some(arrival) = self.held.take().or_else(|| self.arrivals.try_next()) else {
                 break;
@@ -395,48 +425,43 @@ impl Node {
         summary = "Admits a transaction submitted to this node and gossips it.",
     )]
     pub fn submit(&mut self, tx: SignedTx) -> Result<(), MempoolError> {
-        self.submit_checked(tx, None)
+        self.gate.submit(tx, None).map(|_| ())
     }
 
-    /// Admits a submitted transaction, checking its signature unless the verifier did, and
-    /// gossips it.
-    fn submit_checked(&mut self, tx: SignedTx, checked: Option<Result<(), VerifyError>>) -> Result<(), MempoolError> {
-        self.admit(tx.clone(), checked)?;
-        log::info!("[node] accepted transaction {} from {}", tx.id(self.chain.hash()), tx.sender());
-        self.publish(|| NodeEvent::Queued(Arc::new(tx.clone())));
-        self.send(NetCommand::PublishTx(tx));
+    /// Counts what came of transactions the gate took.
+    fn count(&mut self, tally: Tally) {
+        self.counters.txs_submitted += tally.submitted;
+        self.counters.txs_refused += tally.refused;
 
-        Ok(())
-    }
-
-    /// Puts a transaction in the mempool, going by what the verifier found when it checked it.
-    fn admit(&mut self, tx: SignedTx, checked: Option<Result<(), VerifyError>>) -> Result<(), MempoolError> {
-        let state = self.chain.state();
-
-        match checked {
-            Some(checked) => self.mempool.add_checked(tx, checked, &state, self.chain.fees()),
-            None => self.mempool.add(tx, &state, self.chain.fees()),
+        for peer in tally.heard {
+            self.counters.txs_heard += 1;
+            self.heard(&peer, |heard| heard.txs += 1);
         }
     }
 
     fn on_event(&mut self, arrival: Arrival, now: u64) -> Result<(), NodeError> {
-        let Arrival { event, checked } = arrival;
+        // Transactions go to the gate: here only on a link that checks inline, whose transactions
+        // the verifier never saw.
+        let event = match self.gate.take(arrival) {
+            Ok(tally) | Err(Arrival::Admitted(tally)) => {
+                self.count(tally);
+
+                return Ok(());
+            }
+            Err(Arrival::Event { event, .. }) => *event,
+        };
 
         // Handled now, whatever comes of it, so it no longer counts against its peer.
         match &event {
-            NetEvent::Tx { from, .. } | NetEvent::Vote { from, .. } => self.backlog.release(Origin::Peer(*from)),
-            NetEvent::Submitted { .. } => self.backlog.release(Origin::Local),
+            NetEvent::Vote { from, .. } => self.backlog.release(Origin::Peer(*from)),
             NetEvent::PeerDown(peer) => self.backlog.forget(peer),
             _ => {}
         }
 
         match event {
             // While it takes a snapshot its state is half the pivot's: nothing can be run on it.
-            NetEvent::Block { from, .. } | NetEvent::Vote { from, .. } | NetEvent::Tx { from, .. } if self.snapshotting() => {
+            NetEvent::Block { from, .. } | NetEvent::Vote { from, .. } if self.snapshotting() => {
                 log::debug!("[node] ignored gossip from {from} while syncing from a snapshot");
-            }
-            NetEvent::Submitted { reply, .. } if self.snapshotting() => {
-                let _ = reply.send(Err(MempoolError::Syncing));
             }
             NetEvent::Block { from, block } => {
                 let height = block.header.height;
@@ -472,22 +497,7 @@ impl Node {
                     Err(err) => log::debug!("[node] ignored a vote from {from}: {err}"),
                 }
             }
-            NetEvent::Tx { from, tx } => {
-                let id = tx.id(self.chain.hash());
-                self.counters.txs_heard += 1;
-                self.heard(&from, |heard| heard.txs += 1);
-
-                match self.admit(tx.clone(), checked) {
-                    Ok(()) => {
-                        log::debug!("[node] queued transaction {id} from {from}");
-                        self.publish(|| NodeEvent::Queued(Arc::new(tx)));
-                    }
-                    Err(err) => {
-                        self.counters.txs_refused += 1;
-                        log::debug!("[node] refused transaction {id} from {from}: {err}");
-                    }
-                }
-            }
+            NetEvent::Tx { .. } | NetEvent::Submitted { .. } => unreachable!("the gate takes every transaction"),
             NetEvent::Request { peer, id, request } => {
                 log::debug!("[node] {peer} asked for {request:?}");
                 self.counters.requests_served += 1;
@@ -522,21 +532,6 @@ impl Node {
                 self.publish(|| NodeEvent::PeerDown(peer));
                 log::info!("[node] peer {peer} disconnected ({} peers)", self.peers.len());
                 self.peer_failed(peer)?;
-            }
-            NetEvent::Submitted { tx, reply } => {
-                let id = tx.id(self.chain.hash());
-                let verdict = self.submit_checked(tx, checked).map(|()| id);
-
-                match &verdict {
-                    Ok(_) => self.counters.txs_submitted += 1,
-                    Err(err) => {
-                        self.counters.txs_refused += 1;
-                        log::info!("[node] refused submitted transaction {id}: {err}");
-                    }
-                }
-
-                // The client may have stopped waiting; the transaction stands either way.
-                let _ = reply.send(verdict);
             }
             NetEvent::Listening(address) => self.listening.push(address),
             NetEvent::Report { txs, reply } => {
@@ -625,10 +620,10 @@ impl Node {
             let state = self.chain.state();
 
             for tx in undone.into_iter().flat_map(|block| block.txs) {
-                let _ = self.mempool.add(tx, &state, self.chain.fees());
+                let _ = self.gate.mempool().add(tx, &state, self.chain.fees());
             }
 
-            self.mempool.prune(&self.chain.state())?;
+            self.gate.mempool().prune(&self.chain.state())?;
         }
 
         Ok(())
@@ -696,12 +691,12 @@ impl Node {
 
                 for tx in undone.into_iter().flat_map(|block| block.txs) {
                     // Most will be back in the new branch or used up; the rest wait again.
-                    let _ = self.mempool.add(tx, &state, self.chain.fees());
+                    let _ = self.gate.mempool().add(tx, &state, self.chain.fees());
                 }
             }
         }
 
-        self.mempool.prune(&self.chain.state())?;
+        self.gate.mempool().prune(&self.chain.state())?;
 
         // The main chain moved, so votes held back may count now.
         match self.chain.retry_votes() {
@@ -714,6 +709,7 @@ impl Node {
     /// Builds a block for the producer once it may produce, and starts sealing it. A miner keeps
     /// one template at a time, rebuilt when the tip moves or TEMPLATE_REFRESH passes.
     fn produce_if_due(&mut self, now: u64) -> Result<(), NodeError> {
+        let budget = self.budget();
         let Some(producer) = self.producer.as_mut() else {
             return Ok(());
         };
@@ -730,7 +726,7 @@ impl Node {
             return Ok(());
         }
 
-        let txs = self.mempool.select(&self.chain.state(), MAX_BLOCK_TXS, &|tx| self.chain.priority(tx))?;
+        let txs = self.gate.mempool().select(&self.chain.state(), budget, &|tx| self.chain.priority(tx))?;
         let proofs = self.chain.unpaid_proofs()?;
         let mut block = self.chain.build(txs, proofs, producer.address(), now)?;
 
@@ -779,7 +775,7 @@ impl Node {
                     block: Arc::new(block.clone()),
                     main: true,
                 });
-                self.mempool.prune(&self.chain.state())?;
+                self.gate.mempool().prune(&self.chain.state())?;
                 self.send(NetCommand::PublishBlock(block));
 
                 match self.chain.retry_votes() {
@@ -836,7 +832,7 @@ impl Node {
             self.chain.tip().height,
             self.chain.tip().id(),
             self.peers.len(),
-            self.mempool.len()
+            self.gate.mempool().len()
         );
 
         if let Some(snapshot) = &self.sync.snapshot {

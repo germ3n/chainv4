@@ -293,6 +293,24 @@ impl Fees {
 
     #[document(
         parent = "Fees",
+        summary = "A gas limit for a transaction from what a dry run of it used: its intrinsic cost, plus a quarter more than the rest, for what it does by the time it lands. Never more than the limit offer leaves open, the fuel cap's worth, nor than a block holds.",
+        params = {
+            tx_fuel = "The chain's fuel cap per transaction.",
+            probe = "The transaction, signed with any offer.",
+            gas_used = "What the dry run used.",
+        },
+        see_also = "Fees::offer, dry_run",
+    )]
+    pub fn estimated(&self, tx_fuel: u64, probe: &SignedTx, gas_used: u64) -> u64 {
+        let intrinsic = self.schedule.intrinsic(probe);
+        let ran = gas_used.saturating_sub(intrinsic);
+        let open = self.offer(u256::ZERO, tx_fuel, probe, OfferChoice::default()).gas_limit;
+
+        intrinsic.saturating_add(ran).saturating_add(ran.div_ceil(4)).min(open)
+    }
+
+    #[document(
+        parent = "Fees",
         summary = "Splits a fee once a transaction ran: the base price times the gas charged for is the base part, of which burn_permille burns and the rest goes to the producer, as does everything paid above it.",
         params = {
             base = "The block's base price.",

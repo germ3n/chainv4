@@ -1,4 +1,5 @@
-//! Which node the explorer reads, how it looks, and what its light client trusts there.
+//! Which node the explorer reads, the proxy every request goes through, how it looks, and what its
+//! light client trusts there.
 
 use {
     super::{Ctx, network::Streaming},
@@ -8,12 +9,19 @@ use {
     egui::{RichText, Ui},
 };
 
+/// The proxy being typed, and why the one chosen would not do.
+#[derive(Default)]
+pub struct SettingsState {
+    proxy: Option<String>,
+    proxy_trouble: Option<String>,
+}
+
 /// The settings page. The node being typed lives with the app, which connects to what is asked
-/// once the page is drawn.
-pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, streaming: &Streaming, connect: &mut Option<String>) {
+/// once the page is drawn, through the proxy then set.
+pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut SettingsState, streaming: &Streaming, connect: &mut Option<String>) {
     let look = ctx.look;
     let palette = look.palette;
-    super::heading(ui, look, "Settings", "The node the explorer reads, how it looks, and what it trusts.", |_| {});
+    super::heading(ui, look, "Settings", "The node the explorer reads and the way to it, how it looks, and what it trusts.", |_| {});
 
     super::section(ui, look, "Node", |ui| {
         super::note(ui, look, "Its HTTP API. The explorer reads everything from it, and checks what it can with its light client.");
@@ -53,6 +61,16 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, streaming: &Stream
                 facts.text("height", format::thousands(&status.height.to_string()));
             }
         });
+    });
+
+    super::section(ui, look, "Proxy", |ui| {
+        let set = ctx.settings.proxy.clone();
+        let typed = state.proxy.get_or_insert_with(|| set.clone());
+
+        if let Some(chosen) = widgets::proxy(ui, &palette, typed, &mut state.proxy_trouble, &set) {
+            ctx.settings.proxy = chosen;
+            *connect = Some(ctx.settings.node.clone());
+        }
     });
 
     super::section(ui, look, "Appearance", |ui| {

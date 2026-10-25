@@ -5,7 +5,7 @@
 use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
-        Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, stored_address_txs, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        DryRun, Rules, dry_run, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, stored_address_txs, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
         stored_light_update, stored_state_at,
     },
@@ -26,7 +26,7 @@ use {
     crate::structs::block::Block,
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::{from_hex, to_hex},
-    crate::structs::tx::{FeeOffer, SignedTx},
+    crate::structs::tx::{FeeOffer, SignedTx, Tx},
     crate::structs::u256::u256,
     axum::body::Bytes,
     axum::extract::{DefaultBodyLimit, Path, Query, Request, State as Shared},
@@ -105,6 +105,10 @@ struct Api {
     wallet: Option<Arc<PathBuf>>,
     /// What light clients need to follow the chain.
     light: Arc<LightParams>,
+    /// The rules transactions run under, for dry runs.
+    rules: Arc<Rules>,
+    /// The most bytes a block's transactions may take, if genesis bounds them.
+    max_block_bytes: Option<u64>,
 }
 
 #[document(
@@ -148,6 +152,7 @@ pub fn start(
     let fees = genesis.fees.as_ref().map(|config| Arc::new(config.build()));
     let (hash, tx_fuel, coin, limits) = (genesis.hash, genesis.tx_limits.fuel, genesis.coin.clone(), genesis.tx_limits);
     let token_functions = genesis.token_functions.clone().into();
+    let (rules, max_block_bytes) = (Arc::new(genesis.rules()), genesis.max_block_bytes);
     let vm = Arc::new(
         Vm::new(&genesis.engines, genesis.hash)
             .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?,
@@ -181,6 +186,8 @@ pub fn start(
                     explorer: options.explorer.map(Arc::new),
                     wallet: options.wallet.map(Arc::new),
                     light,
+                    rules,
+                    max_block_bytes,
                 })).await {
                     log::error!("[http] {err}");
                 }
@@ -399,6 +406,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "token_functions": &*api.token_functions,
         "finality": finality,
         "fees": fees,
+        "max_block_bytes": api.max_block_bytes,
     })))
 }
 
@@ -963,9 +971,6 @@ async fn submit(Shared(api): Shared<Api>, body: Bytes) -> Result<(StatusCode, Js
 async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     let body = json_body(&body)?;
     let probe = signed_tx(&body)?;
-    let Some(fees) = &api.fees else {
-        return Ok(Json(json::fee_offer(&FeeOffer::NONE)));
-    };
     let amount = |name: &str| {
         body.get(name)
             .map(|value| {
@@ -980,15 +985,39 @@ async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
         .get("gas_limit")
         .map(|value| value.as_u64().ok_or_else(|| ApiError::BadRequest("gas_limit must be a whole number".to_string())))
         .transpose()?;
-    let chosen = OfferChoice {
-        gas_limit,
-        max_price: amount("max_price")?,
-        tip: amount("tip")?,
-    };
+    let (max_price, tip_chosen) = (amount("max_price")?, amount("tip")?);
     let header = tip(&*api.db)?.header;
-    let base = fees.pricing().next_price(header.base_price, header.gas_used, fees.block_gas_limit());
+    let base = api.fees.as_ref().map_or(u256::ZERO, |fees| fees.pricing().next_price(header.base_price, header.gas_used, fees.block_gas_limit()));
+    let open = api.fees.as_ref().map_or(0, |fees| fees.offer(base, api.tx_fuel, &probe, OfferChoice::default()).gas_limit);
+    // What runs code is tried first: what it would use, and whether it would fail at all.
+    let ran = match probe.tx {
+        Tx::ContractCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
+        _ => None,
+    };
+    let offer = match &api.fees {
+        None => FeeOffer::NONE,
+        Some(fees) => {
+            // A run that fails says nothing of what a later one needs: that gets the fuel cap.
+            let estimated = ran.as_ref().filter(|ran| ran.failure.is_none()).map(|ran| fees.estimated(api.tx_fuel, &probe, ran.gas_used));
+            let chosen = OfferChoice { gas_limit: gas_limit.or(estimated), max_price, tip: tip_chosen };
 
-    Ok(Json(json::fee_offer(&fees.offer(base, api.tx_fuel, &probe, chosen))))
+            fees.offer(base, api.tx_fuel, &probe, chosen)
+        }
+    };
+    let mut answer = json::fee_offer(&offer);
+    answer["estimate"] = ran.as_ref().map_or(Value::Null, json::dry_run);
+
+    Ok(Json(answer))
+}
+
+/// Runs a dry run on a blocking thread, since the API answers everything on one.
+async fn dry_run_off_loop(api: &Api, probe: SignedTx, gas_limit: u64, base: u256) -> Result<DryRun, ApiError> {
+    let (db, rules, vm) = (api.db.clone(), api.rules.clone(), api.vm.clone());
+
+    tokio::task::spawn_blocking(move || dry_run(db, &rules, &vm, &probe, gas_limit, base))
+        .await
+        .map_err(|err| ApiError::Unavailable(format!("the dry run stopped: {err}")))?
+        .map_err(ApiError::Db)
 }
 
 /// Runs a contract function as a transaction would call it, but on a throwaway copy of the
@@ -1008,16 +1037,23 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
             .collect::<Result<_, _>>()?,
         Some(_) => return Err(ApiError::BadRequest("args must be a list".to_string())),
     };
-    let state = Arc::new(State::new(api.db.clone()));
-    let record = Contracts::new(&state)
-        .get(&contract)?
-        .ok_or_else(|| ApiError::NotFound(format!("no contract at {contract}")))?;
-    let context = CallContext {
-        sender,
-        contract,
-        value: u256::ZERO,
-    };
-    let outcome = api.vm.call(&state, &record, context, &Hash::Xxh3_64(selector(function)), &args, api.limits);
+    let (db, vm, limits, function) = (api.db.clone(), api.vm.clone(), api.limits, Hash::Xxh3_64(selector(function)));
+    // On a blocking thread, since the API answers everything on one.
+    let outcome = tokio::task::spawn_blocking(move || {
+        let state = Arc::new(State::new(db));
+        let record = Contracts::new(&state)
+            .get(&contract)?
+            .ok_or_else(|| ApiError::NotFound(format!("no contract at {contract}")))?;
+        let context = CallContext {
+            sender,
+            contract,
+            value: u256::ZERO,
+        };
+
+        Ok::<_, ApiError>(vm.call(&state, &record, context, &function, &args, limits))
+    })
+    .await
+    .map_err(|err| ApiError::Unavailable(format!("the call stopped: {err}")))??;
 
     if let Err(VmError::Storage(err)) = &outcome.result {
         return Err(ApiError::Db(err.clone()));

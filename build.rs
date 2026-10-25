@@ -5,13 +5,16 @@ fn main() {
     write_wiki();
 }
 
-/// Builds target/wiki/index.html from every `#[document]` in src. A broken page fails the build
-/// the same way the attribute itself does.
+/// Builds target/wiki/index.html from every `#[document]` in src and the guides in docs/ and the
+/// README. A broken page, or a link to a guide or heading that is not there, fails the build the
+/// same way the attribute itself does.
 fn write_wiki() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let src = manifest_dir.join("src");
     // Cargo watches a directory recursively, so a file that gains its first doc is picked up too.
     println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-changed={}", manifest_dir.join("docs").display());
+    println!("cargo:rerun-if-changed={}", manifest_dir.join("README.md").display());
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());

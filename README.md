@@ -67,6 +67,7 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--peer ADDR` | | A peer to dial at startup; repeat for several. Nodes on the same network also find each other through mDNS. |
 | `--max-gossip-backlog N` | `10000` | The most gossiped transactions and votes, and submitted transactions, that may wait for the node. More are dropped; submissions get 503. |
 | `--max-gossip-per-peer N` | `1000` | The most of those from any one peer. More are dropped, and a peer that goes over 10 times in a minute is disconnected. |
+| `--max-block-txs N` | | The most transactions a block this node produces holds. Without it, blocks fill to the chain's `max_block_bytes` and gas limit. |
 | `--consensus pow\|authority` | `pow` | Which development chain to run. |
 | `--genesis FILE` | | Run the chain a [genesis file](#your-own-chain) describes instead. |
 | `--mine` | | Mine blocks (pow). |

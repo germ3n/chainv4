@@ -69,6 +69,27 @@ pub const DEV_TX_LIMITS: Limits = Limits {
 pub const DEV_MAX_REORG_DEPTH: u64 = 100;
 
 #[document(
+    summary = "The development chains' max_block_bytes, 4 MiB: about 14,000 transfers, more than their gas limit lets in, so gas binds first for transfers and bytes for big deploys.",
+    category = "Chain",
+    see_also = "Genesis::max_block_bytes",
+)]
+pub const DEV_MAX_BLOCK_BYTES: u64 = 4 * 1024 * 1024;
+
+#[document(
+    summary = "The least max_block_bytes a genesis may set, 1 MiB, so a block still holds the largest transaction there is: a deploy of a 512 KiB WebAssembly module.",
+    category = "Chain",
+    see_also = "Genesis::max_block_bytes",
+)]
+pub const MIN_BLOCK_BYTES: u64 = 1024 * 1024;
+
+#[document(
+    summary = "The most max_block_bytes a genesis may set, 6 MiB, so a full block, with its header and finality proofs, still fits one gossip message of 8 MiB.",
+    category = "Chain",
+    see_also = "Genesis::max_block_bytes",
+)]
+pub const MAX_BLOCK_BYTES: u64 = 6 * 1024 * 1024;
+
+#[document(
     summary = "The layout this node keeps its database in. It goes up whenever a stored record changes shape, so a node never reads a database it would misread.",
     category = "Chain",
     see_also = "ChainError::OldFormat",
@@ -141,7 +162,9 @@ impl Reward {
     category = "Chain",
     see_also = "Chain::open, ConsensusConfig",
 )]
-#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+// Hashed for its id and read from JSON, never decoded: so it encodes, but does not decode, and
+// fields added since chains launched can encode as nothing while unset.
+#[derive(Clone, Debug, PartialEq, SchemaWrite)]
 pub struct Genesis {
     #[document(summary = "The genesis block's timestamp, in milliseconds since the Unix epoch.")]
     pub timestamp: u64,
@@ -169,9 +192,38 @@ pub struct Genesis {
     pub finality: Option<FinalityConfig>,
     #[document(summary = "What transactions pay for gas, and the block gas limit, or None for a chain where transactions are free and blocks unbounded.")]
     pub fees: Option<FeeConfig>,
+    #[document(summary = "The most bytes a block's transactions may take, encoded, from MIN_BLOCK_BYTES to MAX_BLOCK_BYTES: a consensus rule, so a block past it is refused on import. None bounds blocks by gas alone, or on a chain without fees, by nothing. Chains made before it keep their genesis id, since unset it adds nothing to genesis's encoding.")]
+    #[wincode(with = "Unset")]
+    pub max_block_bytes: Option<u64>,
 }
 
 impl Hashable for Genesis {}
+
+#[document(
+    summary = "Encodes a genesis field added after chains launched: as nothing at all while it is None, so a genesis without it encodes and hashes as it did before the field existed, and as Option's encoding, a 1 and the value, once it is Some. Only for genesis's last fields, since genesis is hashed and never decoded.",
+    category = "Chain",
+    see_also = "Genesis::max_block_bytes",
+)]
+pub struct Unset;
+
+// SAFETY: size_of is exactly what write writes: nothing for None, nine bytes for Some.
+unsafe impl<C: wincode::config::ConfigCore> SchemaWrite<C> for Unset {
+    type Src = Option<u64>;
+
+    fn size_of(src: &Option<u64>) -> wincode::WriteResult<usize> {
+        Ok(if src.is_some() { 9 } else { 0 })
+    }
+
+    fn write(writer: impl wincode::io::Writer, src: &Option<u64>) -> wincode::WriteResult<()> {
+        let Some(value) = src else {
+            return Ok(());
+        };
+        let mut bytes = [1; 9];
+        bytes[1..].copy_from_slice(&value.to_le_bytes());
+
+        <[u8; 9] as SchemaWrite<C>>::write(writer, &bytes)
+    }
+}
 
 #[document(
     summary = "How the chain's own coin is named and shown, so every client shows balances alike. Only displays read it: balances, fees and rewards are always counted in whole units.",
@@ -219,6 +271,68 @@ pub fn standard_token_functions() -> Vec<String> {
     STANDARD_TOKEN_FUNCTIONS.map(str::to_string).to_vec()
 }
 
+#[document(
+    summary = "What running a transaction now would do, as dry_run found.",
+    category = "Chain",
+    see_also = "dry_run",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DryRun {
+    #[document(summary = "The gas it used, intrinsic cost included; 0 on a chain without fees.")]
+    pub gas_used: u64,
+    #[document(summary = "The fuel its contracts burned.")]
+    pub fuel_used: u64,
+    #[document(summary = "Why it would fail, or could not run at all; None when it would go through.")]
+    pub failure: Option<String>,
+}
+
+#[document(
+    summary = "Runs a transaction as the next block would, on a throwaway layer over the committed state, to see what gas it uses and whether it would fail; nothing it does is kept. It runs at its sender's next nonce whatever its own says, with the gas limit given at the base price, so a probe signed with any offer will do. Its signature is not checked.",
+    category = "Chain",
+    params = {
+        db = "The node's database.",
+        rules = "The chain's rules, Genesis::rules.",
+        vm = "The chain's engines.",
+        probe = "The transaction.",
+        gas_limit = "What it may use: the most a real one would get, such as the fuel cap's worth.",
+        base_price = "The next block's base price.",
+    },
+    returns = "What it did, or the database failure that kept it from running.",
+    see_also = "DryRun, Fees::estimated",
+)]
+pub fn dry_run(db: Arc<dyn Database>, rules: &Rules, vm: &Arc<Vm>, probe: &SignedTx, gas_limit: u64, base_price: u256) -> Result<DryRun, DbError> {
+    let layer = Arc::new(State::new(db.clone()));
+    let mut tx = probe.clone();
+    tx.nonce = Accounts::new(&layer).get(&tx.sender())?.nonce;
+    tx.fee = crate::structs::tx::FeeOffer { gas_limit, max_price: base_price, tip: u256::ZERO };
+    let height = stored_tip(&*db)?.map_or(0, |tip| tip.header.height) + 1;
+    let context = BlockContext { height, producer: Address::Ed25519([0; 32]), base_price };
+
+    match execute::execute_verified(&layer, &tx, rules, vm, &context) {
+        Ok(executed) => Ok(DryRun {
+            gas_used: executed.receipt.gas_used,
+            fuel_used: executed.receipt.fuel_used,
+            failure: executed.receipt.result.err().map(|failure| failure.to_string()),
+        }),
+        Err(execute::ExecuteError::Invalid(err)) => Ok(DryRun { gas_used: 0, fuel_used: 0, failure: Some(err.to_string()) }),
+        Err(execute::ExecuteError::Db(err)) => Err(err),
+    }
+}
+
+#[document(
+    summary = "How many bytes a transaction takes in a block: its encoding, what max_block_bytes counts.",
+    category = "Chain",
+    see_also = "Genesis::max_block_bytes",
+)]
+pub fn tx_bytes(tx: &SignedTx) -> u64 {
+    wincode::serialized_size(tx).expect("a signed transaction always encodes")
+}
+
+/// What a block's transactions take, encoded.
+fn txs_bytes(txs: &[SignedTx]) -> u64 {
+    txs.iter().map(tx_bytes).sum()
+}
+
 /// A million coins at 18 decimals.
 fn dev_funds() -> u256 {
     u256::from(1_000_000u64) * u256::from(10u64).pow(18)
@@ -251,6 +365,7 @@ impl Genesis {
             max_reorg_depth: DEV_MAX_REORG_DEPTH,
             finality: FinalityConfig::dev(authority),
             fees: Some(FeeConfig::dev()),
+            max_block_bytes: Some(DEV_MAX_BLOCK_BYTES),
         }
     }
 
@@ -285,6 +400,7 @@ impl Genesis {
             max_reorg_depth: DEV_MAX_REORG_DEPTH,
             finality: FinalityConfig::dev(dev),
             fees: Some(FeeConfig::dev()),
+            max_block_bytes: Some(DEV_MAX_BLOCK_BYTES),
         }
     }
 
@@ -393,6 +509,14 @@ impl Genesis {
             return Some("token_functions must name each function once");
         }
 
+        if self.max_block_bytes.is_some_and(|bytes| bytes < MIN_BLOCK_BYTES) {
+            return Some("max_block_bytes must be at least 1 MiB, 1048576, so a block holds the largest deploy");
+        }
+
+        if self.max_block_bytes.is_some_and(|bytes| bytes > MAX_BLOCK_BYTES) {
+            return Some("max_block_bytes must be at most 6 MiB, 6291456, so a full block fits one gossip message");
+        }
+
         self.coin
             .problem()
             .or_else(|| self.finality.as_ref().and_then(FinalityConfig::problem))
@@ -483,6 +607,8 @@ pub enum BlockError {
     ReceiptsRoot,
     #[document(summary = "Its state_root is not the state tree's root once it has run.")]
     StateRoot { expected: Hash, got: Hash },
+    #[document(summary = "Its transactions take more bytes, encoded, than genesis's max_block_bytes.")]
+    TooBig { bytes: u64, limit: u64 },
 }
 
 impl fmt::Display for BlockError {
@@ -502,6 +628,7 @@ impl fmt::Display for BlockError {
             BlockError::Fee(why) => write!(f, "paying the producer its fees: {why}"),
             BlockError::ReceiptsRoot => write!(f, "receipts_root does not match what its transactions did"),
             BlockError::StateRoot { expected, got } => write!(f, "state_root {got}, but running it reaches {expected}"),
+            BlockError::TooBig { bytes, limit } => write!(f, "its transactions take {bytes} bytes, past the {limit} a block may hold"),
         }
     }
 }
@@ -537,6 +664,8 @@ pub struct Chain {
     tip: BlockHeader,
     tip_work: u256,
     max_reorg_depth: u64,
+    /// The most bytes a block's transactions may take, encoded, if genesis bounds them.
+    max_block_bytes: Option<u64>,
     /// Blocks that failed to run, and so their descendants too. Forgotten on restart, when the
     /// branch would fail again the same way.
     bad: HashSet<Hash>,
@@ -639,6 +768,7 @@ impl Chain {
             tip: tip.header,
             tip_work,
             max_reorg_depth: genesis.max_reorg_depth,
+            max_block_bytes: genesis.max_block_bytes,
             bad: HashSet::new(),
             tips: tips.into_iter().collect(),
             finality_config: genesis.finality.clone(),
@@ -870,6 +1000,7 @@ impl Chain {
             producer,
             base_price: self.base_price_after(parent),
         };
+        let txs = self.within_bytes(txs);
         let ran = match self.runner().run(layer, &txs, &context, Unfit::Skip) {
             Ok(ran) => ran,
             Err(ImportError::Db(err)) => return Err(err),
@@ -1073,6 +1204,36 @@ impl Chain {
         self.rules.fees.as_deref()
     }
 
+    /// The chain's fees, shared, for what checks transactions off the node loop.
+    pub(crate) fn shared_fees(&self) -> Option<Arc<Fees>> {
+        self.rules.fees.clone()
+    }
+
+    #[document(parent = "Chain", summary = "The most bytes a block's transactions may take, encoded, if genesis bounds them.")]
+    pub fn max_block_bytes(&self) -> Option<u64> {
+        self.max_block_bytes
+    }
+
+    /// The transactions a block can hold within max_block_bytes, in order. One that would pass
+    /// it is left out and the rest still tried: a sender's later ones then fail at their nonce and
+    /// are left out by running too.
+    fn within_bytes(&self, txs: Vec<SignedTx>) -> Vec<SignedTx> {
+        let Some(limit) = self.max_block_bytes else {
+            return txs;
+        };
+        let mut used = 0u64;
+
+        txs.into_iter()
+            .filter(|tx| {
+                let bytes = tx_bytes(tx);
+                let fits = used + bytes <= limit;
+                used += if fits { bytes } else { 0 };
+
+                fits
+            })
+            .collect()
+    }
+
     #[document(parent = "Chain", summary = "The base price of gas in the next block, the one on the tip: what a transaction sent now must offer at least.")]
     pub fn next_base_price(&self) -> u256 {
         self.base_price_after(&self.tip)
@@ -1141,6 +1302,14 @@ impl Chain {
 
         if block.header.tx_root != Block::tx_root(self.hash, &block.txs) {
             return Err(ImportError::Invalid(BlockError::TxRoot));
+        }
+
+        if let Some(limit) = self.max_block_bytes {
+            let bytes = txs_bytes(&block.txs);
+
+            if bytes > limit {
+                return Err(ImportError::Invalid(BlockError::TooBig { bytes, limit }));
+            }
         }
 
         if block.header.proof_root != Block::proof_root(self.hash, &block.proofs) {
@@ -1446,6 +1615,8 @@ struct UndoEntry {
 
 #[derive(Clone, Debug, SchemaWrite, SchemaRead)]
 struct Undo {
+    // A full block writes more than wincode's default 4 MiB of these: see Block::txs.
+    #[wincode(with = "wincode::containers::Vec<UndoEntry, wincode::len::BincodeLen<{ crate::structs::block::MAX_LIST_MEMORY }>>")]
     entries: Vec<UndoEntry>,
 }
 

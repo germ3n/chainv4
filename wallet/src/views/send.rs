@@ -57,7 +57,8 @@ enum Step {
     Edit,
     /// Asked the node to price the probe.
     Pricing { draft: Draft, ask: Ask },
-    Review { draft: Draft, fee: FeeOffer },
+    /// Priced; warning is why a dry run on the node says it would fail, if it does.
+    Review { draft: Draft, fee: FeeOffer, warning: Option<String> },
     /// Submitted, signed with the fee.
     Sending { draft: Draft, ask: Ask },
     Sent { id: String },
@@ -71,7 +72,7 @@ impl SendState {
         match (&self.step, result) {
             (Step::Pricing { draft, ask: asked }, Ok(value)) if asked == ask => {
                 self.step = match offer(value) {
-                    Ok(fee) => Step::Review { draft: draft.clone(), fee },
+                    Ok((fee, warning)) => Step::Review { draft: draft.clone(), fee, warning },
                     Err(why) => Step::Failed(why),
                 };
 
@@ -109,9 +110,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     let palette = *ctx.palette;
     theme::title(ui, &palette, "Send", "The wallet signs it from what it proved; the node only prices it and passes it on.");
 
-    if let Step::Review { draft, fee } = &state.step {
-        let (draft, fee) = (draft.clone(), *fee);
-        review(ui, ctx, state, draft, fee);
+    if let Step::Review { draft, fee, warning } = &state.step {
+        let (draft, fee, warning) = (draft.clone(), *fee, warning.clone());
+        review(ui, ctx, state, draft, fee, warning);
 
         return;
     }
@@ -336,7 +337,7 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
 }
 
 /// What the transaction costs at most, and the button that signs and sends it.
-fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: FeeOffer) {
+fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: FeeOffer, warning: Option<String>) {
     let palette = *ctx.palette;
     let most = u256::from(fee.gas_limit) * fee.max_price;
     let balance = ctx.chain.account(&draft.from.to_string()).map(|proven| proven.value.balance);
@@ -369,9 +370,17 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
             ui.colored_label(palette.bad, "The balance does not cover this and its fee.");
         }
 
+        if let Some(warning) = &warning {
+            ui.add_space(6.0);
+            ui.colored_label(palette.bad, format!("A dry run on the node says this would fail: {warning}"));
+            ui.label(RichText::new("Sent anyway, it uses its nonce and pays its fee, unless things change before it lands.").small().color(palette.muted));
+        }
+
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if theme::primary(ui, &palette, "Sign and send", !short).clicked()
+            let send = if warning.is_some() { "Send anyway" } else { "Sign and send" };
+
+            if theme::primary(ui, &palette, send, !short).clicked()
                 && let Some(key) = ctx.holders.iter().find_map(|holder| holder.key(&draft.from))
             {
                 let signed = SignedTx::sign(draft.tx.clone(), draft.nonce, fee, key);
@@ -443,8 +452,9 @@ fn encode(signed: &SignedTx) -> String {
     to_hex(&wincode::serialize(signed).expect("a signed transaction always encodes"))
 }
 
-/// A fee offer as POST /offer answers it.
-fn offer(value: &Value) -> Result<FeeOffer, String> {
+/// A fee offer as POST /offer answers it, and why its dry run says the transaction would fail, if
+/// it does.
+fn offer(value: &Value) -> Result<(FeeOffer, Option<String>), String> {
     let wide = |name: &str| {
         value[name]
             .as_str()
@@ -452,11 +462,14 @@ fn offer(value: &Value) -> Result<FeeOffer, String> {
             .ok_or_else(|| format!("the node sent a bad offer: no {name}"))
     };
 
-    Ok(FeeOffer {
+    let fee = FeeOffer {
         gas_limit: value["gas_limit"].as_u64().ok_or("the node sent a bad offer: no gas_limit")?,
         max_price: wide("max_price")?,
         tip: wide("tip")?,
-    })
+    };
+    let warning = (value["estimate"]["status"] == "failed").then(|| value["estimate"]["error"].as_str().unwrap_or("no reason given").to_string());
+
+    Ok((fee, warning))
 }
 
 #[cfg(test)]
@@ -487,9 +500,18 @@ mod tests {
 
     #[test]
     fn offers_and_amounts_read_as_the_node_and_the_chain_take_them() {
-        let fee = offer(&json!({ "gas_limit": 21000, "max_price": "2000000000", "tip": "3" })).unwrap();
+        let (fee, warning) = offer(&json!({ "gas_limit": 21000, "max_price": "2000000000", "tip": "3" })).unwrap();
 
         assert_eq!((fee.gas_limit, fee.max_price, fee.tip), (21000, u256::new(2_000_000_000), u256::new(3)));
+        assert_eq!(warning, None, "no dry run, as for a transfer");
+
+        let ran = json!({ "gas_limit": 30000, "max_price": "1", "tip": "0", "estimate": { "gas_used": 24000, "fuel_used": 900, "status": "ok", "error": null } });
+
+        assert_eq!(offer(&ran).unwrap(), (FeeOffer { gas_limit: 30000, max_price: u256::ONE, tip: u256::ZERO }, None));
+
+        let failing = json!({ "gas_limit": 10000000, "max_price": "1", "tip": "0", "estimate": { "gas_used": 0, "fuel_used": 0, "status": "failed", "error": "insufficient balance" } });
+
+        assert_eq!(offer(&failing).unwrap().1.as_deref(), Some("insufficient balance"));
         assert!(offer(&json!({ "gas_limit": 1, "max_price": "x", "tip": "0" })).is_err());
         assert_eq!(amount(u256::new(5)), Amount::U128(5));
         assert!(matches!(amount(u256::MAX), Amount::U256(_)));

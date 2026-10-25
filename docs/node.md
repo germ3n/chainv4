@@ -11,18 +11,27 @@
 **The verifier:** events reach the loop through a thread of their own, `verify`
 (`src/node/verifier.rs`). It takes them from the network and from local clients, up to 256 at a
 time, and checks every transaction's signature in the batch side by side on the chain's workers.
-Then it hands them on, in the order they came, with what each check found. The loop never
-spends its time on signatures, and a flood of gossiped transactions is checked on every core.
-`NetLink::pair` links, in tests, check on the loop's own thread instead, so a test's events are
-there the moment it sends them.
+
+**The gate** (`src/node/gate.rs`) then admits the batch's transactions on that same thread:
+- it checks each against the tip's state with no lock held, then locks the mempool only to
+  insert it;
+- it answers the client that submitted it, gossips it, and tells subscribers.
+
+Everything else goes on to the loop in the order it came, and the loop hears only a tally of
+what came of each batch's transactions, for its counters. So a loop busy building or importing a
+block never keeps clients waiting, and the mempool keeps filling while it builds: the loop locks
+the mempool only to pick a block's transactions and to drop what landed. `NetLink::pair` links, in
+tests, check and admit on the loop's own thread instead, so a test's events are there the moment
+it sends them.
 
 Its loop, `Node::run`, repeats two steps. **`step`** does the work:
 1. It handles what arrived, at most 256 events a pass so a flood cannot starve block production:
-   - gossiped blocks, transactions and votes;
+   - gossiped blocks and votes;
+   - the gate's tallies of what came of transactions;
    - peers' requests and answers;
    - peers connecting and leaving;
    - a miner's seal;
-   - transactions submitted through the API, and the API asking for a report.
+   - the API asking for a report.
 2. It produces a block if its slot has come. An authority seals at once; a miner gets a template.
 3. It votes, if it validates and a checkpoint is deep enough.
 4. It catches each index up a step, on a node started with `--index-events` or
@@ -38,7 +47,7 @@ Tests drive `step` with a clock of their own, so they never sleep.
 | Constant | Value | What it bounds |
 | --- | --- | --- |
 | `EVENT_BUDGET` | 256 | Events handled per pass. |
-| `MAX_BLOCK_TXS` | 1,000 | Transactions this node puts in one block. |
+| `UNBOUNDED_CHAIN_TXS` | 1,000 | Transactions in a block on a chain bounded by neither bytes nor gas. |
 | `MEMPOOL_CAPACITY` | 50,000 | Transactions waiting at once. |
 | `TEMPLATE_REFRESH` | 2 s | How long a miner works on one template before it is rebuilt. |
 
@@ -96,6 +105,15 @@ its current nonce, up to the first gap. Across senders it takes whichever sender
 transaction pays the producer most, ties going to the lower address. The block builder then runs
 them and leaves out any that cannot run.
 
+**How many** a block takes is a budget, not a count (`Budget`):
+- the bytes genesis's `max_block_bytes` allows, which every node checks;
+- gas limits adding up to twice the block gas limit: running then fills the block however little
+  of their limits the transactions use, without running far more than fits;
+- `--max-block-txs N`, when this node caps its own blocks.
+
+A transaction past the budget is left out with the rest of its sender's, and the others still
+fill the block. A chain that bounds blocks by neither bytes nor gas takes 1,000 a block.
+
 **Pruning** after each block drops transactions whose nonce is used.
 
 ## Networking
@@ -121,7 +139,8 @@ chains never share topics.
 **Message ids:** a gossip message's id is the chain hash of its bytes, so the same block or
 transaction is one message however many peers send it.
 
-**Size limits:** a gossip message is at most 4 MiB, a sync request 1 KiB, a sync response
+**Size limits:** a gossip message is at most 8 MiB, which a full block at genesis's largest
+`max_block_bytes`, 6 MiB, fits with its header and proofs; a sync request 1 KiB, a sync response
 64 MiB.
 
 **Peers** come from `--peer`, mDNS and Kademlia. There is no bootnode list.
@@ -133,13 +152,15 @@ the node loop: in the verifier's queue, then the loop's. The backlog (`src/net/b
 counts them, so a flood is turned away at the door instead of queueing without end.
 - **Counted in:** the network thread counts a transaction or vote in as it arrives, before it is
   even decoded. A `NodeHandle` counts a submission in.
-- **Counted out:** the node loop counts it out once it handled it, taken or refused.
+- **Counted out:** the gate counts it out once it handled it, taken or refused, and the loop a
+  vote.
 
 **The limits:**
 
 | Flag | Default | What it bounds |
 | --- | --- | --- |
 | `--max-gossip-backlog N` | 10,000 | Everything waiting, submissions included. |
+| `--max-block-txs N` | none | The transactions in each block this node produces; without it, blocks fill to the chain's bytes and gas limits. |
 | `--max-gossip-per-peer N` | 1,000 | What any one peer's may be. |
 
 **Over a limit:**

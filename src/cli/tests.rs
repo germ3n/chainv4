@@ -339,6 +339,7 @@ mod send {
                 timeout: 10,
                 confirmations: 1,
                 gas_limit: None,
+                anyway: false,
                 max_price: None,
                 tip: None,
                 tx,
@@ -491,6 +492,38 @@ mod send {
         // In block 1 or 2, so final once the tip is 5 blocks further.
         assert!(node.chain().tip().height >= 6);
         assert!(node.chain().finalized().unwrap().epoch >= 1);
+    }
+
+    #[test]
+    fn calls_get_a_gas_limit_from_a_dry_run_and_one_that_would_fail_needs_anyway() {
+        let dir = TempDir::new("dry-run");
+        let source = dir.0.join("counter.lua");
+        fs::write(&source, "local M = {}\n\nfunction M.bump(by)\n    local count = tonumber(storage.get(\"count\") or \"0\") + by\n    storage.set(\"count\", tostring(count))\n    return count\nend\n\nfunction M.boom()\n    error(\"boom\")\nend\n\nreturn M\n").unwrap();
+        let running = Running::start(true);
+        let deployer = DevAuthority::dev_keypair().public().address();
+        let contract = deployed_at(&deployer, 0, crate::structs::hash::HashType::default_chain());
+        let call = |function: &str, args: Vec<TxCallArgumentType>| TxArgs::Call { to: contract, function: function.to_string(), amount: u256::ZERO, args };
+
+        send(running.args(TxArgs::Deploy { lua: Some(source), wasm: None })).unwrap();
+        send(running.args(call("bump", vec![TxCallArgumentType::I64(2)]))).unwrap();
+        let refused = send(running.args(call("boom", Vec::new())));
+        let anyway = send(SendArgs { anyway: true, ..running.args(call("boom", Vec::new())) });
+        let node = running.stop();
+
+        assert!(refused.unwrap_err().to_string().contains("a dry run says this would fail"), "nothing is sent without --anyway");
+        assert!(anyway.unwrap_err().to_string().contains("the transaction failed"), "sent anyway, it lands and fails as the dry run said");
+
+        let calls: Vec<crate::structs::tx::SignedTx> = (1..=node.chain().tip().height)
+            .flat_map(|height| node.chain().block_at(height).unwrap().unwrap().txs)
+            .filter(|tx| matches!(tx.tx, crate::structs::tx::Tx::ContractCall { .. }))
+            .collect();
+        let fees = node.chain().fees().unwrap();
+        let cap = |tx: &crate::structs::tx::SignedTx| fees.offer(u256::ZERO, crate::chain::DEV_TX_LIMITS.fuel, tx, crate::chain::fees::OfferChoice::default()).gas_limit;
+
+        assert_eq!(calls.len(), 2, "the bump, and the boom sent anyway");
+        assert!(calls[0].fee.gas_limit < cap(&calls[0]) / 10, "the bump's limit is what it used and a quarter, not the cap: {}", calls[0].fee.gas_limit);
+        assert!(calls[0].fee.gas_limit > fees.schedule().intrinsic(&calls[0]));
+        assert_eq!(calls[1].fee.gas_limit, cap(&calls[1]), "a call that would fail keeps the cap, things may change");
     }
 
     #[test]

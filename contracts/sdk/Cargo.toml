@@ -2,6 +2,7 @@
 name = "chainv4-sdk"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "Write chainv4 contracts in Rust, for the WebAssembly engine."
 
 [features]

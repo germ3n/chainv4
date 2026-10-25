@@ -2,6 +2,7 @@
 name = "chainv4-ui"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "What chainv4's egui apps share: a palette, type and density each app picks for its own look, the widgets their pages are built from, and running on Android."
 
 [dependencies]
@@ -10,6 +11,17 @@ eframe = { version = "0.37.0", default-features = false, features = ["glow"] }
 egui = "0.37.0"
 log = "0.4.34"
 
+# Talking to a node: ureq on the desktop and Android, where a proxy set in an app is the only way
+# out, SOCKS5 included; the browser's fetch in the browser, where its own proxy settings apply.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "3.5.0", default-features = false, features = ["gzip", "socks-proxy"] }
+
+[features]
+default = ["tls"]
+# Nodes at https://, through rustls, whose ring is C: the ui workflow lints Android without it, as
+# it has no Android sysroot, and the apps, built with one, always have it.
+tls = ["ureq/rustls"]
+
 # Picking files: a native dialog on the desktop, the browser's in the browser.
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 rfd = "0.17.2"
@@ -17,6 +29,7 @@ rfd = "0.17.2"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 rfd = "0.17.2"
 wasm-bindgen-futures = "0.4.58"
+ehttp = { version = "0.7.2", features = ["streaming"] }
 
 # Android runs an app in a NativeActivity: no Java of its own.
 [target.'cfg(target_os = "android")'.dependencies]

@@ -195,6 +195,17 @@ pub fn fee_offer(offer: &FeeOffer) -> Value {
     })
 }
 
+/// What a dry run found, as POST /offer answers it: the gas and fuel it used, and whether it
+/// would go through, or why not.
+pub fn dry_run(ran: &crate::chain::DryRun) -> Value {
+    json!({
+        "gas_used": ran.gas_used,
+        "fuel_used": ran.fuel_used,
+        "status": if ran.failure.is_some() { "failed" } else { "ok" },
+        "error": ran.failure,
+    })
+}
+
 /// What a streaming node did: the event's name, and its data.
 #[cfg(feature = "stream")]
 pub fn node_event(event: &crate::node::NodeEvent, hash: HashType) -> (&'static str, Value) {

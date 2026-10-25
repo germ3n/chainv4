@@ -5,8 +5,9 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 - The [README](../README.md) covers the `chainv4` command: running nodes, keys, sending
   transactions and the HTTP API at a glance.
 - These pages explain how each part works and why it is built that way.
-- The wiki every build writes to `target/wiki/index.html` is the reference for every type and
-  function, from the `#[document]` attributes in the code.
+- The wiki every build writes to `target/wiki/index.html`, or `cargo run -p wiki` on its own, is
+  one page that holds these guides and the reference for every type and function, from the
+  `#[document]` attributes in the code. Open it in a browser; it needs nothing else.
 
 | Page | What it covers |
 | --- | --- |

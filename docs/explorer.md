@@ -33,7 +33,8 @@ Where it looks for the node:
 - else the node it talked to last;
 - else `http://127.0.0.1:8080`.
 
-The node can be changed under Settings at any time.
+The node can be changed under Settings at any time, and on the desktop and on Android so can the
+proxy every request goes through, such as Orbot's. See [Through a proxy](#through-a-proxy).
 
 **In the browser,** with [trunk](https://trunkrs.dev):
 
@@ -59,6 +60,18 @@ below.
 ```sh
 explorer/build-android.sh --install       # an APK for arm64, put on the device adb sees
 ```
+
+## Through a proxy
+
+**Settings → Proxy** works as the wallet's (see [Through a proxy](wallet.md#through-a-proxy)):
+`socks5h://host:port`, with `socks5://` read as `socks5h://` so the proxy looks up names too, or
+`http://host:port`. **Orbot** fills in `socks5h://127.0.0.1:9050`, and **Off** goes direct.
+- **Everything goes through it:** every request and the event stream. With the proxy down,
+  nothing is sent: requests fail with `through the proxy at …`, the stream reports itself closed,
+  and the explorer polls in vain until the proxy is back.
+- **Changing it** connects to the node afresh, as **Connect** does.
+- **In the browser** there is no setting: the browser makes the requests, through its own proxy.
+  Tor Browser reaches a `.onion` node.
 
 ## How it stays live
 
@@ -116,7 +129,7 @@ The explorer does not have to take the node's word for balances. It runs the lib
 | Tokens | The token registry by symbol, with a search by how a symbol starts: each token's symbol, decimals, contract and name, and what makes a token on this chain. |
 | Finality | The kind, the epoch, and the justified and finalized checkpoints. Who votes and with what weight, the bonded validators, the signers under authority finality, and any conflicting votes the node caught. |
 | Send | Signs and sends transfers, contract calls, deploys and burns. |
-| Settings | The node, whether it answers and how updates arrive, the chain it is on, dark or light, and the genesis the light client pinned there, which it can forget. |
+| Settings | The node, whether it answers and how updates arrive, the chain it is on, the proxy every request goes through, dark or light, and the genesis the light client pinned there, which it can forget. |
 | More | On a phone, the pages the tabs have no room for. |
 
 ## Getting around
@@ -204,8 +217,10 @@ The send page needs a key, as `chainv4 keygen` writes it, or the development key
 **Steps:**
 1. It asks for the sender's nonce.
 2. It signs a probe of the transaction and asks the node, with `POST /offer`, for a fee offer
-   that covers it now. The gas limit, max price and tip can each be set by hand instead.
-3. It signs with that offer and submits.
+   that covers it now; for a call, deploy or upgrade, its gas limit comes from a dry run. The gas
+   limit, max price and tip can each be set by hand instead.
+3. It signs with that offer and submits. When the dry run failed, it first shows why, and sends
+   only on **Send anyway**.
 4. It waits for a block, then links the transaction.
 
 **Amounts:** a transfer's amount and a call's value are typed in the coin's units, such as
@@ -219,8 +234,8 @@ it cannot find; a deploy that lands and fails says where, in the files it came f
 
 ## What it remembers
 
-The node address, dark or light, any token decimals set by hand, and the genesis the light client
-pinned for each node. It keeps them where eframe keeps app data: the platform's app-data directory
+The node address, the proxy, dark or light, any token decimals set by hand, and the genesis the
+light client pinned for each node. It keeps them where eframe keeps app data: the platform's app-data directory
 on the desktop, the page's local storage in the browser, and `explorer.ron` in the app's data
 folder on Android.
 
@@ -300,7 +315,8 @@ artifacts named `chainv4-explorer-android-ARCH`, and a `v*` tag attaches them to
 ## What to keep in mind
 
 - **The API is plain HTTP.** Keep a node's API, and so the explorer's traffic, on a trusted
-  network. A phone talking to a node over Wi-Fi is on that network too.
+  network. A phone talking to a node over Wi-Fi is on that network too. A proxy, or a Tor exit
+  relay, can read plain HTTP as well; a `.onion` node never leaves Tor.
 - **Read-only calls run on the node.** Each one runs under the chain's fuel cap on the API's
   thread, holding up the API's other requests while it runs.
 - **Side branches show only what the node kept.** `/forks` lists the side blocks the node

@@ -453,6 +453,17 @@ pub struct Offer {
     pub gas_limit: u64,
     pub max_price: String,
     pub tip: String,
+    /// What a dry run found, for what runs code.
+    #[serde(default)]
+    pub estimate: Option<Estimate>,
+}
+
+/// A dry run, as POST /offer reports it.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Estimate {
+    pub status: String,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// The stream's reorganized event.

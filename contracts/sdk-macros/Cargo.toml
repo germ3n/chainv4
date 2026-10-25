@@ -2,6 +2,7 @@
 name = "chainv4-sdk-macros"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "The #[export] attribute for chainv4 contracts. Use it through chainv4-sdk."
 
 [lib]

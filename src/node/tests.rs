@@ -94,6 +94,58 @@ fn published_block(fake: &mut FakeNet) -> Block {
         .expect("a block was published")
 }
 
+/// A producing node on a chain of this genesis.
+fn producing_on(genesis: &Genesis) -> (Node, FakeNet) {
+    let authority = DevAuthority::dev_keypair();
+    let producer = Box::new(AuthorityProducer::new(authority, SLOT)) as Box<dyn Producer>;
+    let (link, fake) = NetLink::pair();
+
+    (Node::new(Arc::new(MemoryDb::default()), genesis, Some(producer), link).unwrap(), fake)
+}
+
+/// The development key's transfers, from this nonce on.
+fn transfers(count: u64) -> impl Iterator<Item = SignedTx> {
+    let authority = DevAuthority::dev_keypair();
+    let to = Keypair::generate(authority.public().key_type()).unwrap().public().address();
+
+    (0..count).map(move |nonce| {
+        let tx = Tx::Transfer { from: authority.public().address(), to, amount: Amount::U128(1) };
+
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
+    })
+}
+
+#[test]
+fn blocks_fill_to_the_chains_limits_not_a_fixed_count() {
+    let authority = DevAuthority::dev_keypair();
+    let bounded = Genesis { fees: None, ..Genesis::dev_authority(authority.public()) };
+
+    // Bounded by max_block_bytes alone, a block holds all 1,500.
+    let (mut producer, mut net) = producing_on(&bounded);
+    transfers(1_500).for_each(|tx| producer.submit(tx).unwrap());
+    producer.step(SLOT).unwrap();
+
+    assert_eq!(published_block(&mut net).txs.len(), 1_500);
+    assert!(producer.mempool().is_empty());
+
+    // The node's own cap holds its blocks to it.
+    let (producer, mut net) = producing_on(&bounded);
+    let mut producer = producer.max_block_txs(Some(100));
+    transfers(300).for_each(|tx| producer.submit(tx).unwrap());
+    producer.step(SLOT).unwrap();
+
+    assert_eq!(published_block(&mut net).txs.len(), 100);
+    assert_eq!(producer.mempool().len(), 200);
+
+    // A chain that bounds blocks by neither bytes nor gas takes 1,000 a block.
+    let unbounded = Genesis { max_block_bytes: None, ..bounded };
+    let (mut producer, mut net) = producing_on(&unbounded);
+    transfers(1_200).for_each(|tx| producer.submit(tx).unwrap());
+    producer.step(SLOT).unwrap();
+
+    assert_eq!(published_block(&mut net).txs.len(), UNBOUNDED_CHAIN_TXS);
+}
+
 #[test]
 fn the_producer_makes_a_block_when_its_slot_comes() {
     let (mut producer, mut net) = node(true);

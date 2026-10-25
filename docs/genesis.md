@@ -38,6 +38,7 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `max_reorg_depth` | How far back the main chain may be rolled. |
 | `finality` | `null`, or the kind and its settings, by `type`: `ffg`, `authority` or `depth`. |
 | `fees` | `null` for free transactions, or the fee settings. |
+| `max_block_bytes` | The most bytes a block's transactions may take, encoded, from 1 MiB (1048576), so a block holds the largest deploy, to 6 MiB (6291456), so a full block fits one gossip message; a block past it is refused. The dev chains have 4 MiB. Left out or `null`, blocks are bounded by gas alone, or by nothing without fees. A file written before it, without it, keeps its chain's genesis id. |
 
 ### coin
 

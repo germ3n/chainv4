@@ -148,12 +148,12 @@ sender's transactions still go in nonce order.
 
 ## Sending with fees
 
-`chainv4 send` reads the fees and the next block's base price from `GET /status` and works out
-an offer. The flags set any part of it.
+`chainv4 send` asks the node for an offer at `POST /offer`, as the wallet and the explorer do.
+The flags set any part of it.
 
 | Flag | Default |
 | --- | --- |
-| `--gas-limit N` | The transaction's intrinsic cost, by the chain's own schedule, plus the gas for `tx_limits.fuel` for calls, deploys and upgrades. |
+| `--gas-limit N` | For a call, deploy or upgrade, what a dry run of it on the node used, plus a quarter of what it ran past its intrinsic cost, at most the gas for `tx_limits.fuel`. For anything else, its intrinsic cost. |
 | `--max-price N` | Twice the base price plus the tip under a base fee; the base price plus the tip under bids. |
 | `--tip N` | 0. |
 
@@ -164,9 +164,13 @@ receipts their gas and fee.
 ## What to keep in mind
 
 - **Accounts need coins to send anything,** the development key included.
-- **Calls reserve far more than they use.** There is no gas estimation, so `send` reserves the
-  whole fuel cap. The reserve comes back, but the sender must hold it.
+- **Gas limits come from a dry run.** The node runs a call, deploy or upgrade on a throwaway
+  copy of its state, as the sender at their next nonce, and offers what it used plus a quarter of
+  what it ran, so blocks fill with what calls really use rather than their caps. A call whose
+  work grows past that by the time it lands runs out and fails, still charged; one the dry run
+  says would fail gets the whole fuel cap, since things may change, and `send` refuses it unless
+  given `--anyway`. The wallet and the explorer show why and ask first.
 - **A transaction that can no longer pay lingers in the mempool** until its nonce is used, and
   every block built tries it again.
-- **A chain without fees is unbounded:** no gas limit and no byte limit.
+- **A chain without fees is bounded by bytes alone,** when its genesis sets `max_block_bytes`.
 - **Fee kinds are not behind cargo features.** Every node has both schedules and both pricings.

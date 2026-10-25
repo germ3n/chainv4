@@ -20,7 +20,7 @@ const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/chainv4/sync/1");
 const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/chainv4/kad/1");
 const IDENTIFY_PROTOCOL: &str = "/chainv4/1";
 /// The largest gossip message: a block with plenty of transactions.
-const MAX_GOSSIP: usize = 4 * 1024 * 1024;
+const MAX_GOSSIP: usize = 8 * 1024 * 1024;
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {

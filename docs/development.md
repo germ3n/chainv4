@@ -11,7 +11,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 You need stable Rust, a C/C++ toolchain and clang: RocksDB and Luau are built from source.
 
 **Building:** the build also writes the wiki, `target/wiki/index.html`, from every
-`#[document]` in `src` (`build.rs`, the `wiki` and `macro` crates).
+`#[document]` in `src` and the guides in `docs/` and the README (`build.rs`, the `wiki` and
+`macro` crates); `cargo run -p wiki` writes it alone. It is one self-contained page: the guides,
+then the Rust, Lua and WebAssembly references, with search. A guide's link to another guide or a
+heading in one becomes a wiki address, and one that leads nowhere fails the build. A link to
+another file of the repository shows as its path, since the repository is private; add a guide to
+`SECTIONS` in `wiki/src/guides.rs` to place it in the sidebar, or it goes under More.
+
+**Third-party notices:** `python3 gen_notices.py` writes `THIRD_PARTY_NOTICES.txt` from the
+Cargo.lock files of the node, the explorer and the wallet: chainv4's own MIT license, the license
+texts and copyright lines of every crate, and the C/C++ and fonts they bundle (Luau, RocksDB and
+its compression libraries, Android GameActivity, the apps' and the wiki's fonts). Run it after
+changing dependencies, and ship the file with any binary. It stops, naming what to update, when a
+crate or file it expects is gone.
 
 **The contracts workspace,** `contracts/`, holds the Rust SDK and the example contracts:
 - it builds for `wasm32-unknown-unknown`, through its own `.cargo/config.toml`;
@@ -53,6 +65,12 @@ take by path. Each app keeps its own look; the crate holds what dresses it:
 - **`layout`:** `NARROW`, the 640 points below which an app lays out for a phone, and
   `suit_touch`, which turns off selecting text on a touch screen so a swipe that starts on text
   scrolls.
+- **`net`:** `Client`, how both apps talk to their node. On the desktop and Android it is ureq,
+  built with the `Proxy` set, socks5h or http, as its only way out, so a request with the proxy
+  down fails rather than going direct; in the browser it is the browser's fetch, through ehttp.
+  `fetch` answers a GET or POST, and `stream` hands over an event stream piece by piece.
+  `widgets::proxy` is the field both apps' Settings set it with. https comes from the default
+  `tls` feature, rustls, whose ring is C.
 - **`files`:** `pick` and `can_pick`, which pick files alike everywhere: rfd's dialog on the
   desktop and in the browser, and on Android the APK's own Java activity,
   `ui/android/Picker.java`, which opens Android's document picker. An APK built without it cannot
@@ -74,7 +92,8 @@ build-tools it then compiles the picker into the APK and signs it again (see
 if an APK comes out without it.
 
 Inside `ui/`: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and clippy for
-`wasm32-unknown-unknown` and `aarch64-linux-android`.
+`wasm32-unknown-unknown` and, with `--no-default-features`, `aarch64-linux-android`: without the
+`tls` feature it needs no Android sysroot for ring's C. The apps' APKs, built with one, keep it.
 
 ## Features
 

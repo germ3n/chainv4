@@ -61,6 +61,8 @@ enum Step {
     Nonce { tx: Tx },
     /// Asked the node for an offer.
     Offer { tx: Tx, nonce: u64, ask: Ask },
+    /// Priced, but a dry run on the node says it would fail: sent only if asked again.
+    Confirm { tx: Tx, nonce: u64, fee: FeeOffer, warning: String },
     /// Submitted.
     Submit { ask: Ask },
     /// Taken by the node: waiting for a block.
@@ -169,13 +171,8 @@ impl SendState {
             (Step::Nonce { .. }, Ask::Account(address), Err(failure)) if *address == sender => Step::Failed(failure.message.clone()),
             (Step::Offer { tx, nonce, ask: asked }, ask, result) if asked == *ask => match result {
                 Ok(value) => match offer(value) {
-                    Ok(fee) => {
-                        let signed = SignedTx::sign(tx, nonce, fee, key);
-                        let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
-                        api.ask(ask.clone());
-
-                        Step::Submit { ask }
-                    }
+                    Ok((fee, None)) => submit(api, key, tx, nonce, fee),
+                    Ok((fee, Some(warning))) => Step::Confirm { tx, nonce, fee, warning },
                     Err(err) => Step::Failed(err),
                 },
                 Err(failure) => Step::Failed(failure.message.clone()),
@@ -283,7 +280,39 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         }
 
         ui.add_space(4.0);
+        confirm(ui, ctx, state, &key);
         outcome(ui, ctx, state);
+    });
+}
+
+/// Signs a transaction with its fee and submits it.
+fn submit(api: &mut crate::api::Api, key: &Keypair, tx: Tx, nonce: u64, fee: FeeOffer) -> Step {
+    let signed = SignedTx::sign(tx, nonce, fee, key);
+    let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
+    api.ask(ask.clone());
+
+    Step::Submit { ask }
+}
+
+/// A transaction a dry run says would fail: the warning, and whether to send it all the same.
+fn confirm(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, key: &Keypair) {
+    let palette = ctx.look.palette;
+    let Step::Confirm { warning, .. } = &state.step else {
+        return;
+    };
+
+    ui.colored_label(palette.bad, format!("A dry run on the node says this would fail: {warning}"));
+    ui.label(RichText::new("Sent anyway, it uses its nonce and pays its fee, unless things change before it lands.").small().color(palette.muted));
+    ui.horizontal(|ui| {
+        if widgets::primary(ui, &palette, "Send anyway", true).clicked()
+            && let Step::Confirm { tx, nonce, fee, .. } = std::mem::replace(&mut state.step, Step::Idle)
+        {
+            state.step = submit(ctx.api, key, tx, nonce, fee);
+        }
+
+        if widgets::quiet(ui, &palette, "Cancel").clicked() {
+            state.step = Step::Idle;
+        }
     });
 }
 
@@ -292,7 +321,7 @@ fn outcome(ui: &mut Ui, ctx: &mut Ctx, state: &SendState) {
     let palette = ctx.look.palette;
 
     match &state.step {
-        Step::Idle => {}
+        Step::Idle | Step::Confirm { .. } => {}
         Step::Nonce { .. } => progress(ui, "Asking for the sender's nonce…"),
         Step::Offer { .. } => progress(ui, "Asking the node for a fee offer…"),
         Step::Submit { .. } => progress(ui, "Submitting…"),
@@ -610,15 +639,22 @@ fn argument(kind: &str, text: &str) -> Result<TxCallArgumentType, String> {
     })
 }
 
-fn offer(value: &Value) -> Result<FeeOffer, String> {
+/// A fee offer as POST /offer answers it, and why its dry run says the transaction would fail, if
+/// it does.
+fn offer(value: &Value) -> Result<(FeeOffer, Option<String>), String> {
     let offer: Offer = serde_json::from_value(value.clone()).map_err(|err| format!("the node sent a bad offer: {err}"))?;
     let wide = |text: &str| u256::from_str_radix(text, 10).map_err(|_| format!("the node sent a bad amount: {text}"));
-
-    Ok(FeeOffer {
+    let fee = FeeOffer {
         gas_limit: offer.gas_limit,
         max_price: wide(&offer.max_price)?,
         tip: wide(&offer.tip)?,
-    })
+    };
+    let warning = offer
+        .estimate
+        .filter(|estimate| estimate.status == "failed")
+        .map(|estimate| estimate.error.unwrap_or_else(|| "no reason given".to_string()));
+
+    Ok((fee, warning))
 }
 
 fn encode(signed: &SignedTx) -> String {
@@ -736,7 +772,7 @@ mod tests {
     #[ignore = "needs a dev node: CHAINV4_NODE=http://127.0.0.1:8080 cargo test -- --ignored"]
     fn a_transfer_goes_through_a_real_node() {
         let node = std::env::var("CHAINV4_NODE").expect("CHAINV4_NODE names a dev node");
-        let mut api = crate::api::Api::new(&node, egui::Context::default());
+        let mut api = crate::api::Api::new(&node, Ok(chainv4_ui::net::Client::direct()), egui::Context::default());
         let key = Keypair::development();
         let mut state = SendState {
             key: Some(key.clone()),
@@ -798,7 +834,7 @@ mod tests {
         assert!(source.contains("-- included lib/balances.lua\nlocal balances = 1\n"), "found by its file name: {source}");
 
         // A deploy that lands and fails says where, in the files it came from.
-        let mut api = crate::api::Api::new("http://127.0.0.1:0", egui::Context::default());
+        let mut api = crate::api::Api::new("http://127.0.0.1:0", Ok(chainv4_ui::net::Client::direct()), egui::Context::default());
         state.bundle = lua_bundle(&state).ok();
         state.step = Step::Waiting { id: "0x01".to_string() };
         state.answered(&Ask::Tx("0x01".to_string()), &Ok(json!({ "status": "failed", "error": "compile error: syntax error: 3: oops" })), &mut api);
@@ -813,9 +849,16 @@ mod tests {
 
     #[test]
     fn an_offer_from_the_node_becomes_a_fee_offer() {
-        let fee = offer(&json!({ "gas_limit": 21000, "max_price": "2000000000", "tip": "3" })).unwrap();
+        let (fee, warning) = offer(&json!({ "gas_limit": 21000, "max_price": "2000000000", "tip": "3" })).unwrap();
 
         assert_eq!((fee.gas_limit, fee.max_price, fee.tip), (21000, u256::from(2_000_000_000u64), u256::from(3u64)));
+        assert_eq!(warning, None);
         assert!(offer(&json!({ "gas_limit": 1, "max_price": "x", "tip": "0" })).is_err());
+
+        let ok = json!({ "gas_limit": 30000, "max_price": "1", "tip": "0", "estimate": { "gas_used": 24000, "fuel_used": 9, "status": "ok", "error": null } });
+        let failing = json!({ "gas_limit": 10000000, "max_price": "1", "tip": "0", "estimate": { "gas_used": 0, "fuel_used": 0, "status": "failed", "error": "aborted: not enough" } });
+
+        assert_eq!(offer(&ok).unwrap().1, None);
+        assert_eq!(offer(&failing).unwrap().1.as_deref(), Some("aborted: not enough"));
     }
 }
