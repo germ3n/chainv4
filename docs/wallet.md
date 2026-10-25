@@ -202,6 +202,10 @@ The Receive page shows one of the account's addresses, picked by its scheme, to 
 code, dark on white in either theme so any camera reads it, and lists them all below. The coin and
 every token arrive at any of them; each keeps its own balance.
 
+**Copying an address:** click or tap it, on any page, and it is copied, with **Copied** beside it
+for a moment. Hovering over a shortened one shows it whole. Receive's **Copy address** button
+copies the one shown.
+
 ## What it remembers
 
 Everything is in app storage under one key, `chainv4-wallet`, saved by eframe every 30 seconds,
@@ -216,7 +220,9 @@ Only the vaults are secret.
 
 ## Look
 
-It follows the look of the wiki every build writes (see [Documenting code](development.md#documenting-code)), quieter:
+It follows the look of the wiki every build writes (see [Documenting code](development.md#documenting-code)), quieter.
+Its palette, fonts and roomy spacing are its own; the widgets they dress come from the `ui` crate
+it shares with the explorer (see [The ui crate](development.md#the-ui-crate)).
 - **Colors:** the wiki's palette, dark or light.
 - **Type:** Manrope for text, JetBrains Mono for addresses and hashes, and Newsreader for titles
   and the big numbers. The fonts and their licences are in `wallet/assets/fonts`.
@@ -240,12 +246,14 @@ trunk build --release
 
 **One app, three starts.** The app is a library (`src/lib.rs`), as Android loads it, so the
 package is `chainv4-wallet`. Its binary, `wallet` (`src/main.rs`), starts it on the desktop and in
-the browser. Android starts the library at `android_main`.
+the browser. Android starts the library at `android_main`, which hands it to the `ui` crate's
+`android::run`.
 
 ## Android
 
 `wallet/build-android.sh` builds the Android app with [xbuild](https://github.com/rust-mobile/xbuild),
-pinned to a commit, which it installs if it is missing:
+pinned to a commit, which it installs if it is missing. It hands over to `ui/build-android.sh`,
+which builds the explorer's app the same way (see [Android](explorer.md#android)):
 
 ```sh
 wallet/build-android.sh                    # wallet/target/android/chainv4-wallet-arm64.apk
@@ -282,10 +290,10 @@ wallet talks to nodes from Rust over sockets of its own.
   cat cert.pem key.pem > signing.pem
   ```
 
-**CI:** `.github/workflows/android.yml` builds both APKs on every push to master and on
-`workflow_dispatch`, and keeps them as artifacts. It signs with the `ANDROID_SIGNING_PEM` secret,
-holding `signing.pem`'s text, when there is one, and with the debug key otherwise. A `v*` tag
-attaches both to its release.
+**CI:** `.github/workflows/android.yml` builds both of the wallet's APKs, and both of the
+explorer's, on every push to master and on `workflow_dispatch`, and keeps them as artifacts. It
+signs with the `ANDROID_SIGNING_PEM` secret, holding `signing.pem`'s text, when there is one, and
+with the debug key otherwise. A `v*` tag attaches all four to its release.
 
 **On the phone:**
 - **The node:** `http://10.0.2.2:8080` at first, which is the machine running the emulator, as the
@@ -294,6 +302,10 @@ attaches both to its release.
 - **The bars:** the app draws behind the status bar, the navigation bar and the keyboard, and keeps
   its content in the part Android says can be seen.
 - **Storage:** it saves when the app goes to the background, and every 30 seconds.
+- **Copying** goes to Android's clipboard, through its ClipboardManager, which the `ui` crate calls
+  over JNI: egui reaches no clipboard there. Android shows what was copied.
+- **Scrolling:** a swipe scrolls the page wherever it starts, text included, as text is not
+  selectable on a touch screen.
 
 ## What to keep in mind
 
@@ -313,8 +325,7 @@ attaches both to its release.
   line. The guestbook's `Tipped` event, for one, does show.
 - **Only the registry's first page of tokens,** 100, is proven. A token past it does not show.
 - **Unlocking takes a moment.** Argon2id is slow on purpose, and slower in the browser.
-- **No Copy, and no key files, on Android yet.** egui reaches neither the clipboard nor a file
-  picker there, so the Copy buttons and "Open key file" are left out. Receive shows the QR code;
-  a key is imported by typing it.
+- **No key files on Android yet.** egui reaches no file picker there, so "Open key file" is left
+  out, and a key is imported by typing it.
 - **The API is plain HTTP.** What the wallet sends is signed and public anyway, but keep the node
   on a trusted network all the same.

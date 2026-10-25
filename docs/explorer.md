@@ -9,12 +9,14 @@ The explorer (`explorer/`) is a window onto a node, built with egui. It shows:
 
 It can also sign and send transactions.
 
-**One code base, two ways to run it:**
+**One code base, three ways to run it:**
 - a desktop app;
-- a web app in the browser, built to WebAssembly.
+- a web app in the browser, built to WebAssembly;
+- an Android app (see [Android](#android)).
 
-Both talk to a node's [HTTP API](api.md) and nothing else, so either works against any node,
-local or remote.
+Each talks to a node's [HTTP API](api.md) and nothing else, so any of them works against any node,
+local or remote. Each lays itself out for the room it has: a sidebar on a wide screen, and tabs
+along the bottom on a phone (see [Getting around](#getting-around)).
 
 ## Running it
 
@@ -31,7 +33,7 @@ Where it looks for the node:
 - else the node it talked to last;
 - else `http://127.0.0.1:8080`.
 
-The address can be changed in the top bar at any time.
+The node can be changed under Settings at any time.
 
 **In the browser,** with [trunk](https://trunkrs.dev):
 
@@ -51,6 +53,13 @@ to the node that served it, with nothing to configure.
 - **While developing:** run `trunk serve --port 8081`, and start the node with
   `--cors http://127.0.0.1:8081`.
 
+**On Android,** with [xbuild](https://github.com/rust-mobile/xbuild): see [Android](#android)
+below.
+
+```sh
+explorer/build-android.sh --install       # an APK for arm64, put on the device adb sees
+```
+
 ## How it stays live
 
 **With a stream:** a node started with `--stream` pushes what it does over `GET /stream`, as it
@@ -60,9 +69,11 @@ happens:
 - transactions joining the mempool;
 - peers coming and going.
 
-The top bar says **live**, and the overview's live feed lists each event.
+The node's state, under the sidebar or as the dot in a phone's top bar, says **live**, and the
+overview's live feed lists each event.
 
-**Polling:** without a stream the explorer polls, and says **polling**. It also polls besides
+**Polling:** without a stream the explorer polls, and says **polling**; Settings and the network
+page say why. It also polls besides
 the stream:
 - `/status` every second, every three while streaming;
 - `/node` every two seconds;
@@ -85,9 +96,9 @@ The explorer does not have to take the node's word for balances. It runs the lib
 - **What it trusts:** the genesis it saw the first time it met the node, which it pins.
 - **What it checks:** every header by consensus, and every justification against voters it proved
   from state. It follows the chain again every few seconds.
-- **The top bar** says whether it is starting, catching up, following, or stopped, with why on
+- **The sidebar** says whether it is starting, catching up, following, or stopped, with why on
   hover: a node now on another chain than the one pinned, or one that sent something that does
-  not check.
+  not check. Settings tells the whole story on any screen, and can forget the pinned genesis.
 - **An account's page** shows the balance it proved, from the node's proofs, at the finalized
   block and at the tip, each marked final or not yet. A proof that does not check is shown in red.
 
@@ -105,13 +116,38 @@ The explorer does not have to take the node's word for balances. It runs the lib
 | Tokens | The token registry by symbol, with a search by how a symbol starts: each token's symbol, decimals, contract and name, and what makes a token on this chain. |
 | Finality | The kind, the epoch, and the justified and finalized checkpoints. Who votes and with what weight, the bonded validators, the signers under authority finality, and any conflicting votes the node caught. |
 | Send | Signs and sends transfers, contract calls, deploys and burns. |
+| Settings | The node, whether it answers and how updates arrive, the chain it is on, dark or light, and the genesis the light client pinned there, which it can forget. |
+| More | On a phone, the pages the tabs have no room for. |
 
-**Getting around:**
+## Getting around
+
+**On a wide screen,** a sidebar lists the pages in three groups: Chain (Overview, Block map,
+Mempool, Tokens), Network (Network, Finality) and Tools (Send, Settings). Under them sit the
+node's address, whether it answers and how, how old its tip is, and the light client's state.
+Over the page are back and forward, the search box and the chain's height.
+
+**On a phone,** below 640 points wide, the sidebar gives way to:
+- **a bar on top:** back, once there is somewhere to go back to, the node's state as a dot, and
+  the search box;
+- **tabs along the bottom:** Home, Blocks (the map), Mempool, Tokens and More, which lists the
+  rest;
+- **pages that stack:** tables become rows of a few lines each, facts sit under their names, and
+  charts one above another.
+
+**Everywhere:**
 - the search box takes a height, a block or transaction id, or an address;
-- every id and address is a link, and right-clicking one copies it;
-- the arrows go back and forward;
-- on the map, drag to pan, scroll or pinch to zoom, click a block to see it and double-click
-  to open it. Panning stops it following the tip until **Reset view**.
+- every block, transaction and address is a link. Right-clicking one, or holding a finger on it,
+  opens a menu to copy it;
+- every other id, such as a hash or a peer, copies when clicked or tapped, and says **Copied**
+  for a moment;
+- a page opened anew starts at its top;
+- a swipe scrolls the page wherever it starts: on a touch screen text is not selectable, and
+  nothing inside a page takes a drag for itself but the map.
+
+**The map:** drag to pan, scroll or pinch to zoom, click a block to see it and double-click
+to open it. Panning stops it following the tip until **Reset view**. It opens at real size, so a
+phone shows the newest blocks large enough to tap; a block picked there shows in a panel at the
+bottom.
 
 ## Hops
 
@@ -132,7 +168,8 @@ They are shown two ways at once.
 - calls blue, transfers green, delegates purple and failures red.
 
 Selecting a hop in either view selects it in the other. A transaction that runs no contract,
-such as a transfer, shows its one step the same way.
+such as a transfer, shows its one step the same way. On a phone the graph only shows: a swipe
+over it scrolls the page.
 
 ## Coins and tokens
 
@@ -152,12 +189,15 @@ contracts are tokens.
 
 ## Sending
 
-The send page needs a key: a key file written by `chainv4 keygen`, or the development key on a
-dev chain.
+The send page needs a key, as `chainv4 keygen` writes it, or the development key on a dev chain.
+
+**Where the key comes from:**
+- **Typed or pasted:** its text, such as `ed25519:0x…`, into the key field, then **Use it**.
+- **A key file:** on the desktop the file picked; in the browser, the file chosen in the page.
+  Android has no file picker the explorer can reach, so there the key is typed.
 
 **Where the key stays:**
-- **The key itself:** it stays in the window. On the desktop it is read from the file picked; in
-  the browser, from the file chosen in the page.
+- **The key itself:** it stays in the window, and is never saved.
 - **Signing:** transactions are built and signed in the explorer with chainv4's own code, the
   same library the node is built from. Only the signed bytes go to the node.
 
@@ -171,7 +211,8 @@ dev chain.
 **Amounts:** a transfer's amount and a call's value are typed in the coin's units, such as
 `1.5`. Call arguments take the API's argument types, and amounts among them are whole units.
 
-**A Lua contract in several files:** "Open Luau files…" takes them all at once. The file that
+**A Lua contract in several files:** "Open Luau files…" takes them all at once, on the desktop
+and in the browser. The file that
 includes the others goes in the editor, and its `--@include` lines take the rest by path, or by
 file name, as a browser gives no folders. Below the editor it says what goes in, or which include
 it cannot find; a deploy that lands and fails says where, in the files it came from. See
@@ -179,9 +220,22 @@ it cannot find; a deploy that lands and fails says where, in the files it came f
 
 ## What it remembers
 
-The node address, any token decimals set by hand, and the genesis the light client pinned for
-each node. It keeps them where eframe keeps app
-data: the platform's app-data directory on the desktop, the page's local storage in the browser.
+The node address, dark or light, any token decimals set by hand, and the genesis the light client
+pinned for each node. It keeps them where eframe keeps app data: the platform's app-data directory
+on the desktop, the page's local storage in the browser, and `explorer.ron` in the app's data
+folder on Android.
+
+## Look
+
+Its own, for scanning a lot at once, unlike the wallet's quieter one:
+- **Colors:** cool slate, dark or light, picked under Settings. Blue is the main chain, amber side
+  branches, teal what is justified and green what is final, on every page, chart and the map.
+- **Type:** IBM Plex Sans for text, and IBM Plex Mono for ids, addresses and numbers to compare.
+  The fonts and their licence are in `explorer/assets/fonts`.
+- **Density:** tight rows, small corners and narrow margins: the `ui` crate's `COMPACT`, where
+  the wallet is `COMFORTABLE` (see [The ui crate](development.md#the-ui-crate)).
+- **Charts:** drawn by the explorer itself, a line or bars over block heights with a scale on the
+  left. Hovering one says the block under the pointer and its value; they never take a drag.
 
 ## Building and testing
 
@@ -191,6 +245,11 @@ browser crates never meet the node's lockfile, and the node's build never compil
 **The chainv4 library:** it links only chainv4's parts that build for the browser too:
 - transactions, keys and hashes;
 - every hash and key feature, and none of the node's.
+
+**One app, three starts.** The app is a library (`src/lib.rs`), as Android loads it, so the
+package is `chainv4-explorer`. Its binary, `explorer` (`src/main.rs`), starts it on the desktop and
+in the browser. Android starts the library at `android_main`, which hands it to the `ui` crate's
+`android::run`.
 
 **Commands:**
 
@@ -202,10 +261,42 @@ cargo clippy --target wasm32-unknown-unknown -- -D warnings
 CHAINV4_NODE=http://127.0.0.1:8080 cargo test -- --ignored   # sends a transfer through a dev node
 ```
 
+## Android
+
+`explorer/build-android.sh` builds the Android app with xbuild, through `ui/build-android.sh`, just
+as the wallet's is built: the same flags, the same tools, and the same signing (see
+[Android](wallet.md#android) in the wallet's guide).
+
+```sh
+explorer/build-android.sh                    # explorer/target/android/chainv4-explorer-arm64.apk
+explorer/build-android.sh --arch x64         # for x86-64 emulators
+explorer/build-android.sh --debug --install  # a debug build, put on the device adb sees
+```
+
+**The app** (`explorer/manifest.yaml`):
+- `org.chainv4.explorer`, for Android 7 (API 24) and up, targeting API 33, so it sits beside the
+  wallet;
+- a NativeActivity with no Java of its own, and the INTERNET permission;
+- `explorer/assets/icon.png` for its icon.
+
+**CI:** `.github/workflows/android.yml` builds its APKs beside the wallet's, keeps them as
+artifacts named `chainv4-explorer-android-ARCH`, and a `v*` tag attaches them to its release.
+
+**On the phone:**
+- **The node:** `http://10.0.2.2:8080` at first, which is the machine running the emulator, as the
+  emulator sees it. On a phone, name the node under Settings, such as `http://192.168.1.20:8080`;
+  a node on another machine listens on `--http 0.0.0.0:8080`.
+- **Copying** goes to Android's clipboard, through the `ui` crate, and Android shows what was
+  copied.
+- **The bars and the keyboard:** the app keeps out from under the status bar, the navigation bar
+  and the keyboard, and the keyboard comes up for a focused field.
+
 ## What to keep in mind
 
 - **The API is plain HTTP.** Keep a node's API, and so the explorer's traffic, on a trusted
-  network.
+  network. A phone talking to a node over Wi-Fi is on that network too.
+- **No files on Android.** Keys are typed there, and contracts deployed from the desktop or the
+  browser, or as Luau typed into the page.
 - **Read-only calls run on the node.** Each one runs under the chain's fuel cap on the API's
   thread, holding up the API's other requests while it runs.
 - **Side branches show only what the node kept.** `/forks` lists the side blocks the node

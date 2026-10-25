@@ -6,7 +6,8 @@ use {
     super::{Ctx, tx},
     crate::api::{Ask, EventQuery},
     crate::format,
-    egui::Ui,
+    chainv4_ui::widgets,
+    egui::{RichText, Ui},
 };
 
 /// How long the newest page stands before it is asked for again, in milliseconds.
@@ -15,6 +16,7 @@ const REFRESH: u64 = 3_000;
 /// The events a query finds, with a button for older ones. The contract column shows only when
 /// the query is not already about one contract.
 pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
+    let look = ctx.look;
     let store = ctx.store;
     let newest = Ask::Events {
         query: query.clone(),
@@ -29,7 +31,7 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
 
     let found = match (found, failed) {
         (_, Some(failure)) if failure.status == 404 => {
-            ui.weak("This node keeps no event index. Start it with --index-events to search events.");
+            super::note(ui, look, "This node keeps no event index. Start it with --index-events to search events.");
 
             return;
         }
@@ -49,36 +51,65 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
         .unwrap_or_default();
 
     if found.items.is_empty() {
-        ui.weak(format!(
-            "None since height {}, where this node's index starts.{still}",
-            format::thousands(&found.indexed_from.to_string())
-        ));
+        super::note(
+            ui,
+            look,
+            format!("None since height {}, where this node's index starts.{still}", format::thousands(&found.indexed_from.to_string())),
+        );
 
         return;
     }
 
     let by_contract = query.contract.is_some();
 
-    egui::Grid::new(("events", query.contract.clone(), query.name.clone(), query.address.clone()))
-        // The data goes last, so it gets the rest of the width.
-        .num_columns(if by_contract { 4 } else { 5 })
-        .striped(true)
-        .show(ui, |ui| {
+    match look.narrow {
+        true => {
             for event in &found.items {
-                super::block(ui, ctx, &event.block, &format::thousands(&event.height.to_string()));
-                super::tx(ui, ctx, &event.tx);
+                super::list_row(ui, look, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(widgets::strong(&event.name, 13.5).color(look.palette.ink));
 
-                if !by_contract {
-                    super::address(ui, ctx, &event.contract);
-                }
-
-                ui.strong(&event.name);
-                tx::event_data(ui, ctx, &event.contract, &event.name, &event.data);
-                ui.end_row();
+                        if !by_contract {
+                            super::address(ui, ctx, &event.contract);
+                        }
+                    });
+                    tx::event_data(ui, ctx, &event.contract, &event.name, &event.data);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("block").small().color(look.palette.muted));
+                        super::block_link(ui, ctx, &event.block, event.height);
+                        super::tx(ui, ctx, &event.tx);
+                    });
+                });
             }
-        });
+        }
+        false => {
+            let mut headings = vec!["block", "transaction"];
 
-    ui.horizontal(|ui| {
+            if !by_contract {
+                headings.push("contract");
+            }
+
+            // The data goes last, so it gets the rest of the width.
+            headings.extend(["event", "data"]);
+            super::table(ui, look, ("events", query.contract.clone(), query.name.clone(), query.address.clone()), &headings, |ui| {
+                for event in &found.items {
+                    super::block_link(ui, ctx, &event.block, event.height);
+                    super::tx(ui, ctx, &event.tx);
+
+                    if !by_contract {
+                        super::address(ui, ctx, &event.contract);
+                    }
+
+                    ui.label(widgets::strong(&event.name, 13.0));
+                    tx::event_data(ui, ctx, &event.contract, &event.name, &event.data);
+                    ui.end_row();
+                }
+            });
+        }
+    }
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
         if let Some(next) = &found.next {
             let older = Ask::Events {
                 query: query.clone(),
@@ -87,15 +118,15 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
 
             if ctx.api.asking(&older) {
                 ui.spinner();
-            } else if ui.button("Older events").clicked() {
+            } else if widgets::quiet(ui, &look.palette, "Older events").clicked() {
                 ctx.api.ask(older);
             }
         }
 
-        ui.weak(format!(
-            "{} shown, indexed from height {}.{still}",
-            found.items.len(),
-            format::thousands(&found.indexed_from.to_string())
-        ));
+        ui.label(
+            RichText::new(format!("{} shown, indexed from height {}.{still}", found.items.len(), format::thousands(&found.indexed_from.to_string())))
+                .small()
+                .color(look.palette.muted),
+        );
     });
 }

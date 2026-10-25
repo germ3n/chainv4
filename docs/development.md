@@ -37,7 +37,33 @@ disconnected.
 way: a lockfile of its own, the chainv4 library with only the hash and key features, and inside
 `wallet/` the same three commands. `trunk build --release` builds its web app into `wallet/dist`,
 which a node serves from `/wallet/` with `--wallet`, and `wallet/build-android.sh` its Android app
-(see [Wallet](wallet.md#android)).
+(see [Wallet](wallet.md#android)). The explorer builds for Android the same way, with
+`explorer/build-android.sh` (see [Explorer](explorer.md#android)).
+
+## The ui crate
+
+`ui/` is what the wallet and the explorer share, a workspace of its own like theirs, which both
+take by path. Each app keeps its own look; the crate holds what dresses it:
+- **`theme`:** a `Palette` of colors, a `Density` for spacing, radii and text sizes, and a
+  `Typeface` of font files. `apply` sets egui's style from them, and `install_fonts` the fonts.
+  The wallet is `COMFORTABLE`, roomy and round; the explorer is `COMPACT`, tight and square.
+- **`widgets`:** the pieces pages are built from, such as cards, pills, buttons and
+  `copy_on_click`, which copies a label's text when it is clicked and says Copied for a moment.
+  They take their corners and margins from the style `apply` set, so each app's density shows.
+- **`layout`:** `NARROW`, the 640 points below which an app lays out for a phone, and
+  `suit_touch`, which turns off selecting text on a touch screen so a swipe that starts on text
+  scrolls.
+- **`android`:** `run` starts an app in Android's NativeActivity, with logging, storage in the
+  app's data folder, and `OnAndroid` around it, which keeps the content out of the system bars
+  and the keyboard, shows the keyboard for a focused field, and copies to Android's clipboard
+  through JNI.
+
+**`ui/build-android.sh APP`** builds either app's APK; `wallet/build-android.sh` and
+`explorer/build-android.sh` call it with their own folder. It reads the package's name from the
+app's `Cargo.toml`, and writes `APP/target/android/PACKAGE-ARCH.apk`.
+
+Inside `ui/`: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and clippy for
+`wasm32-unknown-unknown` and `aarch64-linux-android`.
 
 ## Features
 
@@ -66,11 +92,14 @@ different dev chains, which puts it on a different network.
 - it runs clippy and the tests on the workspace;
 - it runs clippy on the contracts and the SDK's tests;
 - it runs clippy and the tests on the explorer and the wallet, and clippy on their web builds;
+- it runs clippy and the tests on the `ui` crate, and clippy on its web and Android builds. The
+  apps' own Android code is left to the APK builds: linting it would need an Android sysroot for
+  ring's C;
 - it runs clippy and the tests on a matrix of feature subsets.
 
 **Builds** (`.github/workflows/build.yml`, `android.yml`), on every push to master and on tags:
-the node's release binaries with the wiki, the example contracts, and the wallet's APKs, which a
-`v*` tag also attaches to its release.
+the node's release binaries with the wiki, the example contracts, and the wallet's and the
+explorer's APKs, which a `v*` tag also attaches to its release.
 
 The matrix:
 - covers each hash and key scheme on its own;

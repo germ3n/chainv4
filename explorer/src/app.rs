@@ -13,13 +13,19 @@ use {
         Status, Summary, TokensPage, TxView,
     },
     crate::store::{PAGE, Store},
+    crate::theme::{self, DARK, LIGHT, Roles},
     crate::views::{
-        self, Ctx, Settings, View, account::AccountState, hops::HopState, map::MapState, network::Streaming, send::SendState, tokens::TokensState,
+        self, Ctx, Look, Settings, View, account::AccountState, hops::HopState, map::MapState, network::Streaming, send::SendState, tokens::TokensState,
     },
+    chainv4_ui::{Palette, layout, widgets},
     egui::{RichText, Ui},
     serde_json::Value,
     std::time::Duration,
 };
+
+/// How wide the sidebar is, and the widest the page column grows on a big screen.
+const SIDEBAR: f32 = 212.0;
+const COLUMN: f32 = 1400.0;
 
 /// Seconds between asking the same thing again.
 const STATUS_POLLED: f64 = 1.0;
@@ -65,6 +71,9 @@ pub struct Explorer {
     light: Light,
     /// Something to tell the person, and whether it is bad news.
     notice: Option<(String, bool)>,
+    palette: Palette,
+    /// Whether the page changed, so the next one starts at its top.
+    moved: bool,
 }
 
 impl Explorer {
@@ -74,6 +83,9 @@ impl Explorer {
             .storage
             .and_then(|storage| eframe::get_value(storage, eframe::APP_KEY))
             .unwrap_or_default();
+        let palette = if settings.light_theme { LIGHT } else { DARK };
+        theme::install_fonts(&creation.egui_ctx);
+        theme::apply(&creation.egui_ctx, &palette);
         let node = node
             .or_else(|| Some(settings.node.clone()).filter(|node| !node.is_empty()))
             .unwrap_or_else(|| fallback.to_string());
@@ -97,6 +109,8 @@ impl Explorer {
             send: SendState::default(),
             light: Light::default(),
             notice: None,
+            palette,
+            moved: false,
         };
         explorer.connect(&node);
 
@@ -121,6 +135,7 @@ impl Explorer {
         if view != self.view {
             self.back.push(std::mem::replace(&mut self.view, view));
             self.ahead.clear();
+            self.moved = true;
         }
     }
 
@@ -391,79 +406,232 @@ impl Explorer {
         }
     }
 
-    fn top_bar(&mut self, ui: &mut Ui) {
+    fn look(&self, narrow: bool) -> Look {
+        Look {
+            palette: self.palette,
+            roles: Roles::of(&self.palette),
+            narrow,
+        }
+    }
+
+    fn back(&mut self) {
+        if let Some(view) = self.back.pop() {
+            self.ahead.push(std::mem::replace(&mut self.view, view));
+            self.moved = true;
+        }
+    }
+
+    fn forward(&mut self) {
+        if let Some(view) = self.ahead.pop() {
+            self.back.push(std::mem::replace(&mut self.view, view));
+            self.moved = true;
+        }
+    }
+
+    /// Whether the node answers, and the stream and the light client's state, as a color and words.
+    fn health(&self) -> (egui::Color32, String) {
+        let palette = self.palette;
+        let up = self.store.status.is_some() && !self.store.failures.contains_key(&Ask::Status);
+
+        match (up, &self.streaming) {
+            (false, _) => (palette.bad, "not answering".to_string()),
+            (true, Streaming::Live) => (palette.good, "live".to_string()),
+            (true, Streaming::Connecting) => (palette.warn, "connecting".to_string()),
+            (true, _) => (palette.warn, "polling".to_string()),
+        }
+    }
+
+    /// The light client's state: a color, a few words, and the whole story.
+    fn light_state(&self) -> (egui::Color32, &'static str, String) {
+        let palette = self.palette;
+
+        match (&self.light.trouble, self.light.following()) {
+            (Some(trouble), _) => (palette.bad, "light client stopped", trouble.clone()),
+            (None, Some((tip, final_height))) if self.light.caught_up() => (
+                palette.good,
+                "light client following",
+                format!("The light client checked every header to {tip}, and finality to {final_height}, trusting only the genesis it first saw at this node"),
+            ),
+            (None, Some((tip, _))) => (palette.warn, "light client catching up", format!("{tip} headers checked so far")),
+            (None, None) => (palette.muted, "light client starting", "Fetching the chain's light parameters".to_string()),
+        }
+    }
+
+    /// On a wide screen: the name, the pages in groups, and the node's state at the bottom.
+    fn sidebar(&mut self, ui: &mut Ui, now: u64) {
+        let palette = self.palette;
+        ui.add_space(16.0);
         ui.horizontal(|ui| {
-            ui.strong("chainv4");
+            ui.label(widgets::strong("chainv4", 17.0).color(palette.ink));
+            widgets::caps(ui, &palette, "explorer");
+        });
+        ui.add_space(14.0);
 
-            let up = self.store.status.is_some() && !self.store.failures.contains_key(&Ask::Status);
-            views::dot(ui, if up { views::GOOD } else { views::BAD })
-                .on_hover_text(if up { "the node answers" } else { "the node does not answer" });
-            let field = ui.add(egui::TextEdit::singleline(&mut self.address).desired_width(220.0).hint_text("http://127.0.0.1:8080"));
+        for (group, pages) in View::GROUPS {
+            widgets::caps(ui, &palette, group);
+            ui.add_space(2.0);
 
-            if (field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))) || ui.button("Connect").clicked() {
-                let address = self.address.clone();
-                self.connect(&address);
+            for (view, name) in pages {
+                let selected = self.view == *view;
+                let text = RichText::new(*name).color(if selected { palette.ink } else { palette.soft });
+                let button = egui::Button::new(text)
+                    .fill(if selected { palette.row } else { egui::Color32::TRANSPARENT })
+                    .stroke(egui::Stroke::NONE)
+                    .min_size(egui::vec2(ui.available_width(), 28.0));
+                let response = ui.add(button);
+
+                if selected {
+                    let rect = response.rect;
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 6.0), egui::vec2(3.0, rect.height() - 12.0)),
+                        2.0,
+                        palette.accent,
+                    );
+                }
+
+                if response.clicked() {
+                    self.go(view.clone());
+                }
             }
 
-            match &self.streaming {
-                Streaming::Live => views::badge(ui, "live", views::GOOD),
-                Streaming::Connecting => views::badge(ui, "connecting", views::SIDE),
-                _ => views::badge(ui, "polling", views::SIDE),
+            ui.add_space(10.0);
+        }
+
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.add_space(14.0);
+            let (light_color, light_words, light_story) = self.light_state();
+            ui.horizontal(|ui| {
+                views::dot(ui, light_color);
+                ui.label(RichText::new(light_words).small().color(palette.soft));
+            })
+            .response
+            .on_hover_text(light_story);
+
+            let (color, words) = self.health();
+            ui.horizontal(|ui| {
+                views::dot(ui, color);
+                ui.label(RichText::new(words).small().color(palette.soft));
+
+                if let Some(status) = &self.store.status {
+                    ui.label(RichText::new(format!("· {}", format::ago(status.timestamp, now))).small().color(palette.muted));
+                }
+            });
+            ui.add(egui::Label::new(RichText::new(self.api.base()).monospace().small().color(palette.muted)).truncate());
+            widgets::caps(ui, &palette, "Node");
+        });
+    }
+
+    /// On a wide screen, over the page: back and forward, the search, and where the chain is.
+    fn header(&mut self, ui: &mut Ui) {
+        let palette = self.palette;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!self.back.is_empty(), egui::Button::new("‹").min_size(egui::vec2(28.0, 26.0))).on_hover_text("Back").clicked() {
+                self.back();
             }
 
-            let (text, color, hover) = match (&self.light.trouble, self.light.following()) {
-                (Some(trouble), _) => ("light: stopped", views::BAD, trouble.clone()),
-                (None, Some((tip, final_height))) if self.light.caught_up() => (
-                    "light: following",
-                    views::GOOD,
-                    format!("The light client checked every header to {tip}, and finality to {final_height}, trusting only the genesis it first saw at this node"),
-                ),
-                (None, Some((tip, _))) => ("light: catching up", views::SIDE, format!("{tip} headers checked so far")),
-                (None, None) => ("light: starting", views::SIDE, "Fetching the chain's light parameters".to_string()),
-            };
-            ui.scope(|ui| views::badge(ui, text, color)).response.on_hover_text(hover);
-
-            ui.separator();
-
-            if ui.add_enabled(!self.back.is_empty(), egui::Button::new("<")).clicked()
-                && let Some(view) = self.back.pop()
-            {
-                self.ahead.push(std::mem::replace(&mut self.view, view));
+            if ui.add_enabled(!self.ahead.is_empty(), egui::Button::new("›").min_size(egui::vec2(28.0, 26.0))).on_hover_text("Forward").clicked() {
+                self.forward();
             }
 
-            if ui.add_enabled(!self.ahead.is_empty(), egui::Button::new(">")).clicked()
-                && let Some(view) = self.ahead.pop()
-            {
-                self.back.push(std::mem::replace(&mut self.view, view));
+            let height = self.store.status.as_ref().map(|status| format!("height {}", format::thousands(&status.height.to_string())));
+            let room = ui.available_width() - if height.is_some() { 150.0 } else { 0.0 };
+            self.search_field(ui, room.min(640.0));
+
+            if let Some(height) = height {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(height).monospace().color(palette.soft));
+                });
+            }
+        });
+    }
+
+    /// On a phone, over the page: back or the name, the node's state as a dot, and the search.
+    fn bar(&mut self, ui: &mut Ui) {
+        let palette = self.palette;
+        ui.horizontal(|ui| {
+            match self.back.is_empty() {
+                true => {
+                    ui.label(widgets::strong("chainv4", 16.0).color(palette.ink));
+                }
+                false => {
+                    if ui.add(egui::Button::new(RichText::new("‹").size(18.0)).min_size(egui::vec2(34.0, 30.0))).clicked() {
+                        self.back();
+                    }
+                }
             }
 
+            let (color, words) = self.health();
+            views::dot(ui, color).on_hover_text(words);
+            let room = ui.available_width();
+            self.search_field(ui, room);
+        });
+    }
+
+    fn search_field(&mut self, ui: &mut Ui, width: f32) {
+        let search = ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text("Search a height, block or transaction id, or address")
+                .desired_width(width),
+        );
+
+        if search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+            self.find();
+        }
+    }
+
+    /// On a phone, the pages, as tabs along the bottom.
+    fn tabs(&mut self, ui: &mut Ui) {
+        let palette = self.palette;
+        let width = ui.available_width() / View::TABS.len() as f32;
+        let current = self.view.tab();
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.horizontal(|ui| {
             for (view, name) in View::TABS {
-                if ui.selectable_label(self.view == view, name).clicked() {
+                let selected = current == view;
+                let text = widgets::strong(name, 12.0).color(if selected { palette.ink } else { palette.muted });
+                let button = egui::Button::new(text).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
+                let response = ui.add_sized([width, 46.0], button);
+
+                if selected {
+                    let rect = response.rect;
+                    ui.painter().rect_filled(
+                        egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 1.5), egui::vec2(28.0, 3.0)),
+                        2.0,
+                        palette.accent,
+                    );
+                }
+
+                if response.clicked() {
                     self.go(view);
                 }
             }
-
-            ui.separator();
-            let search = ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("height, block or transaction id, address")
-                    .desired_width(ui.available_width().max(160.0)),
-            );
-
-            if search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                self.find();
-            }
         });
+    }
 
-        if let Some((text, bad)) = self.notice.clone() {
-            ui.horizontal(|ui| {
-                ui.colored_label(if bad { views::BAD } else { views::GOOD }, text);
+    /// Something to tell the person, over the page.
+    fn notice(&mut self, ui: &mut Ui) {
+        let Some((text, bad)) = self.notice.clone() else {
+            return;
+        };
+        let palette = self.palette;
+        let color = if bad { palette.bad } else { palette.good };
 
-                if ui.small_button("x").clicked() {
-                    self.notice = None;
-                }
+        egui::Frame::new()
+            .fill(color.gamma_multiply(0.12))
+            .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.5)))
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Dismiss").clicked() {
+                            self.notice = None;
+                        }
+                    });
+                });
             });
-        }
+        ui.add_space(8.0);
     }
 
     /// Goes where the search box says.
@@ -487,10 +655,14 @@ impl Explorer {
         }
 
         self.notice = None;
+        self.search.clear();
     }
 
-    fn page(&mut self, ui: &mut Ui, now: u64) {
+    fn page(&mut self, ui: &mut Ui, now: u64, narrow: bool) {
         let mut go = None;
+        let mut connect = None;
+        let look = self.look(narrow);
+        self.notice(ui);
         let mut ctx = Ctx {
             store: &self.store,
             light: &mut self.light,
@@ -498,23 +670,47 @@ impl Explorer {
             go: &mut go,
             settings: &mut self.settings,
             now,
+            look,
         };
 
-        egui::ScrollArea::vertical().id_salt("page").auto_shrink(false).show(ui, |ui| match &self.view {
-            View::Overview => views::overview::show(ui, &mut ctx),
-            View::Map => views::map::show(ui, &mut ctx, &mut self.map),
-            View::Block(block) => views::block::show(ui, &mut ctx, block),
-            View::Tx(id) => views::tx::show(ui, &mut ctx, id, &mut self.hops),
-            View::Account(address) => views::account::show(ui, &mut ctx, address, &mut self.account),
-            View::Network => views::network::show(ui, &mut ctx, &self.streaming),
-            View::Mempool => views::mempool::show(ui, &mut ctx),
-            View::Tokens => views::tokens::show(ui, &mut ctx, &mut self.tokens),
-            View::Finality => views::finality::show(ui, &mut ctx),
-            View::Send => views::send::show(ui, &mut ctx, &mut self.send),
-        });
+        // The map fills the page itself, and pans and zooms in it rather than scrolling.
+        if self.view == View::Map {
+            views::map::show(ui, &mut ctx, &mut self.map);
+        } else {
+            let mut scroll = egui::ScrollArea::vertical().id_salt("page").auto_shrink(false);
+
+            if std::mem::take(&mut self.moved) {
+                scroll = scroll.vertical_scroll_offset(0.0);
+            }
+
+            scroll.show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(ui.available_width().min(COLUMN));
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| match &self.view {
+                        View::Overview => views::overview::show(ui, &mut ctx),
+                        View::Map => {}
+                        View::Block(block) => views::block::show(ui, &mut ctx, block),
+                        View::Tx(id) => views::tx::show(ui, &mut ctx, id, &mut self.hops),
+                        View::Account(address) => views::account::show(ui, &mut ctx, address, &mut self.account),
+                        View::Network => views::network::show(ui, &mut ctx, &self.streaming),
+                        View::Mempool => views::mempool::show(ui, &mut ctx),
+                        View::Tokens => views::tokens::show(ui, &mut ctx, &mut self.tokens),
+                        View::Finality => views::finality::show(ui, &mut ctx),
+                        View::Send => views::send::show(ui, &mut ctx, &mut self.send),
+                        View::Settings => views::settings::show(ui, &mut ctx, &mut self.address, &self.streaming, &mut connect),
+                        View::More => views::more::show(ui, &mut ctx),
+                    });
+                    ui.add_space(24.0);
+                });
+            });
+        }
 
         if let Some(view) = go {
             self.go(view);
+        }
+
+        if let Some(node) = connect {
+            self.connect(&node);
         }
     }
 }
@@ -525,35 +721,38 @@ impl eframe::App for Explorer {
         let now = now_ms();
         self.take(now, time);
         self.poll(time);
+        layout::suit_touch(ui.ctx());
+        let palette = self.palette;
+        let narrow = layout::is_narrow(ui.available_width());
+        let bar = egui::Frame::new().fill(palette.nav).stroke(egui::Stroke::new(1.0, palette.line));
 
-        egui::Panel::top("top").show(ui, |ui| {
-            ui.add_space(4.0);
-            self.top_bar(ui);
-            ui.add_space(2.0);
-        });
-        egui::Panel::bottom("bottom").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                match &self.store.status {
-                    Some(status) => {
-                        ui.weak(format!(
-                            "height {} · {} · {} · genesis {}",
-                            format::thousands(&status.height.to_string()),
-                            format::ago(status.timestamp, now),
-                            status.hash,
-                            format::short(&status.genesis)
-                        ));
-                    }
-                    None => {
-                        ui.weak(format!("waiting for {}", self.api.base()));
-                    }
-                }
+        match narrow {
+            true => {
+                egui::Panel::top("bar").frame(bar.inner_margin(egui::Margin::symmetric(10, 8))).show(ui, |ui| self.bar(ui));
+                egui::Panel::bottom("tabs").frame(bar).show(ui, |ui| self.tabs(ui));
+            }
+            false => {
+                egui::Panel::left("nav")
+                    .exact_size(SIDEBAR)
+                    .resizable(false)
+                    .frame(bar.inner_margin(egui::Margin::symmetric(12, 0)))
+                    .show(ui, |ui| self.sidebar(ui, now));
+                egui::Panel::top("header")
+                    .frame(egui::Frame::new().fill(palette.paper).inner_margin(egui::Margin::symmetric(16, 10)))
+                    .show(ui, |ui| self.header(ui));
+            }
+        }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak(RichText::new(format!("{} blocks loaded", self.store.blocks.len())).small());
-                });
-            });
-        });
-        egui::CentralPanel::default().show(ui, |ui| self.page(ui, now));
+        let margin = if narrow { egui::Margin::symmetric(10, 10) } else { egui::Margin::symmetric(16, 4) };
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(palette.paper).inner_margin(margin))
+            .show(ui, |ui| self.page(ui, now, narrow));
+
+        // The theme follows the setting, wherever it was changed.
+        if self.palette.dark == self.settings.light_theme {
+            self.palette = if self.settings.light_theme { LIGHT } else { DARK };
+            theme::apply(ui.ctx(), &self.palette);
+        }
 
         // Polls come due even when nothing arrives.
         ui.ctx().request_repaint_after(Duration::from_millis(500));
@@ -561,6 +760,11 @@ impl eframe::App for Explorer {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, &self.settings);
+    }
+
+    /// The paper's color, behind everything: what shows under a phone's status bar.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        self.palette.paper.to_normalized_gamma_f32()
     }
 }
 

@@ -16,6 +16,8 @@ const QUIET: usize = 3;
 #[derive(Default)]
 pub struct ReceiveState {
     shown: usize,
+    /// When the Copy button was last pressed, to say so on it for a moment.
+    copied_at: Option<f64>,
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
@@ -47,11 +49,19 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
             ui.add_space(10.0);
             qr(ui, &shown, 232.0);
             ui.add_space(14.0);
-            ui.add(egui::Label::new(theme::mono(&shown).color(palette.ink).size(13.5)).wrap());
+            let label = egui::Label::new(theme::mono(&shown).color(palette.ink).size(13.5)).wrap();
+            chainv4_ui::widgets::copy_on_click(ui, &palette, label, &shown).on_hover_text("Click to copy");
             ui.add_space(8.0);
+            let now = ui.input(|input| input.time);
+            let copied = state.copied_at.is_some_and(|at| now - at < 1.6);
 
-            if super::CAN_COPY && theme::primary(ui, &palette, "Copy address", true).clicked() {
+            if theme::primary(ui, &palette, if copied { "Copied" } else { "Copy address" }, true).clicked() {
                 ui.ctx().copy_text(shown.clone());
+                state.copied_at = Some(now);
+            }
+
+            if copied {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
             }
         });
     });

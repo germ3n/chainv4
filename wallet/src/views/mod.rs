@@ -150,9 +150,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
     }
 }
 
-/// Whether Copy buttons reach the system's clipboard: egui cannot on Android yet, so they would
-/// copy nowhere.
-pub const CAN_COPY: bool = cfg!(not(target_os = "android"));
+pub use chainv4_ui::widgets::beside;
 
 /// The light client's state, in the sidebar: how far it follows, and how much of that is final.
 pub fn light_status(ui: &mut Ui, palette: &Palette, chain: &Chain) {
@@ -212,40 +210,22 @@ pub fn scheme(address: &Address) -> &'static str {
     keys::scheme_of(address).map_or("Contract", keys::label)
 }
 
-/// An address in the mono face, cut short, with the whole one on hover and a copy button.
+/// An address in the mono face, cut short, with the whole one on hover. Clicking or tapping it
+/// copies it whole.
 pub fn address(ui: &mut Ui, palette: &Palette, address: &str) {
     ui.horizontal(|ui| {
-        ui.label(theme::mono(format::short(address)).color(palette.soft)).on_hover_text(address);
-        copy(ui, palette, address);
+        let label = egui::Label::new(theme::mono(format::short(address)).color(palette.soft));
+        chainv4_ui::widgets::copy_on_click(ui, palette, label, address).on_hover_text(format!("{address}\nClick to copy"));
     });
 }
 
-/// A small button that copies text, where copying works.
+/// A small button that copies text.
 pub fn copy(ui: &mut Ui, palette: &Palette, text: &str) {
-    if !CAN_COPY {
-        return;
-    }
-
     let button = egui::Button::new(RichText::new("Copy").size(11.5).color(palette.muted)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
 
     if ui.add(button).on_hover_text("Copy to the clipboard").clicked() {
         ui.ctx().copy_text(text.to_string());
     }
-}
-
-/// A text field with a button on its right: the button takes the room it needs, and the field the
-/// rest, however narrow the screen. Returns whether the button was pressed.
-pub fn beside(ui: &mut Ui, button: impl FnOnce(&mut Ui) -> bool, field: impl FnOnce(&mut Ui, f32)) -> bool {
-    ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let pressed = button(ui);
-            field(ui, ui.available_width());
-
-            pressed
-        })
-        .inner
-    })
-    .inner
 }
 
 /// A row of a card: a label on the left, what it says on the right.

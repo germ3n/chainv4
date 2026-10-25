@@ -3,11 +3,12 @@
 //! click a block to see it, double-click to open it.
 
 use {
-    super::{Ctx, FINAL, JUSTIFIED, MAIN, SIDE, View},
+    super::{Ctx, Look, View},
     crate::format,
     crate::model::Summary,
     crate::store::Store,
-    egui::{Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2},
+    chainv4_ui::widgets,
+    egui::{Align2, Color32, FontId, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2},
     std::collections::{HashMap, HashSet},
 };
 
@@ -73,6 +74,8 @@ fn place(height: u64, lane: i32) -> Rect {
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
+    let look = ctx.look;
+    let roles = look.roles;
     let store = ctx.store;
     let Some(top) = store.top() else {
         super::waiting(ui, ctx, &crate::api::Ask::Status);
@@ -80,37 +83,45 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
         return;
     };
 
-    ui.horizontal(|ui| {
+    super::heading(
+        ui,
+        look,
+        "Block map",
+        &format!(
+            "{} blocks loaded, {} off the main chain, {} leaves. Drag to pan, pinch or scroll to zoom, tap a block.",
+            store.blocks.len(),
+            store.blocks.len().saturating_sub(store.main.len()),
+            store.tips.len()
+        ),
+        |_| {},
+    );
+    ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut state.follow, "Follow the tip");
 
-        if ui.button("Load older blocks").clicked()
+        if widgets::quiet(ui, &look.palette, "Load older").clicked()
             && let Some(older) = store.older()
         {
             ctx.api.ask(older);
         }
 
-        if ui.button("Reset view").clicked() {
+        if widgets::quiet(ui, &look.palette, "Reset view").clicked() {
             state.followed = None;
             state.follow = true;
+            state.rect = Rect::ZERO;
         }
-
-        ui.separator();
-        legend(ui, MAIN, "main chain");
-        legend(ui, FINAL, "finalized");
-        legend(ui, SIDE, "side branch");
-        legend(ui, JUSTIFIED, "justified checkpoint");
-        ui.separator();
-        ui.weak(format!(
-            "{} blocks loaded, {} off the main chain, {} leaves",
-            store.blocks.len(),
-            store.blocks.len().saturating_sub(store.main.len()),
-            store.tips.len()
-        ));
     });
+    ui.horizontal_wrapped(|ui| {
+        legend(ui, look, roles.main, "main chain");
+        legend(ui, look, roles.final_, "finalized");
+        legend(ui, look, roles.side, "side branch");
+        legend(ui, look, roles.justified, "justified");
+    });
+    ui.add_space(6.0);
 
+    // At first, as large as it is drawn: as many blocks across as the screen has room for.
     if state.follow && state.followed != Some(top) {
-        let width = if state.rect.width() > 0.0 { state.rect.width() } else { STEP * 16.0 };
-        let height = if state.rect.height() > 0.0 { state.rect.height() } else { LANE * 5.0 };
+        let width = if state.rect.width() > 0.0 { state.rect.width() } else { ui.available_width().max(STEP * 3.0) };
+        let height = if state.rect.height() > 0.0 { state.rect.height() } else { ui.available_height().max(LANE * 3.0) };
         let right = top as f32 * STEP + STEP * 2.0;
         state.rect = Rect::from_min_max(pos2(right - width, -height / 2.0), pos2(right, height / 2.0));
         state.followed = Some(top);
@@ -118,11 +129,17 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
 
     let selected = state.selected.as_ref().and_then(|id| store.blocks.get(id)).cloned();
 
+    // The block picked, beside the map, or under it on a phone.
     if let Some(block) = &selected {
-        egui::Panel::right("map_selected").default_size(260.0).show(ui, |ui| {
-            selected_block(ui, ctx, block);
-        });
+        let frame = egui::Frame::new().fill(look.palette.card).stroke(Stroke::new(1.0, look.palette.line)).inner_margin(12);
+
+        match look.narrow {
+            true => egui::Panel::bottom("map_selected").frame(frame).show(ui, |ui| selected_block(ui, ctx, block)),
+            false => egui::Panel::right("map_selected").default_size(270.0).frame(frame).show(ui, |ui| selected_block(ui, ctx, block)),
+        };
     }
+
+    let ink = if look.palette.dark { Color32::WHITE } else { look.palette.ink };
 
     let lanes = lanes(store);
     let (finalized, _) = store.finality_heights();
@@ -147,7 +164,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
             let Some(parent) = store.blocks.get(&block.parent) else { continue };
             let Some(&parent_lane) = lanes.get(&parent.id) else { continue };
             let (from, to) = (place(block.height, lane), place(parent.height, parent_lane));
-            let color = if lane == 0 && parent_lane == 0 { MAIN } else { SIDE };
+            let color = if lane == 0 && parent_lane == 0 { roles.main } else { roles.side };
 
             painter.line_segment([from.left_center(), to.right_center()], Stroke::new(2.0 / zoom.max(0.3), color.gamma_multiply(0.7)));
         }
@@ -157,19 +174,19 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
             let rect = place(block.height, lane);
             let main = lane == 0;
             let base = match (main, block.height <= finalized && finalized > 0) {
-                (true, true) => FINAL,
-                (true, false) => MAIN,
-                (false, _) => SIDE,
+                (true, true) => roles.final_,
+                (true, false) => roles.main,
+                (false, _) => roles.side,
             };
             let busy = (block.tx_count as f32 / 20.0).min(1.0);
             painter.rect_filled(rect, 6.0, base.gamma_multiply(0.45 + 0.55 * busy));
 
             let outline = if state.selected.as_ref() == Some(&block.id) {
-                Some(Stroke::new(3.0, Color32::YELLOW))
+                Some(Stroke::new(3.0, look.palette.warn))
             } else if tip.as_ref() == Some(&block.id) {
-                Some(Stroke::new(2.5, Color32::WHITE))
+                Some(Stroke::new(2.5, look.palette.ink))
             } else if justified.as_ref() == Some(&block.id) {
-                Some(Stroke::new(2.5, JUSTIFIED))
+                Some(Stroke::new(2.5, roles.justified))
             } else {
                 None
             };
@@ -179,14 +196,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
             }
 
             if zoom * SIZE.x > 40.0 {
-                painter.text(rect.center() - vec2(0.0, 7.0), Align2::CENTER_CENTER, block.height, FontId::monospace(11.0), Color32::WHITE);
-                painter.text(
-                    rect.center() + vec2(0.0, 8.0),
-                    Align2::CENTER_CENTER,
-                    format!("{} tx", block.tx_count),
-                    FontId::proportional(9.0),
-                    Color32::from_white_alpha(200),
-                );
+                painter.text(rect.center() - vec2(0.0, 7.0), Align2::CENTER_CENTER, block.height, FontId::monospace(11.0), ink);
+                painter.text(rect.center() + vec2(0.0, 8.0), Align2::CENTER_CENTER, format!("{} tx", block.tx_count), FontId::proportional(9.0), ink.gamma_multiply(0.8));
             }
 
             let response = ui.interact(rect, ui.scope_id().with(("block", &block.id)), Sense::click());
@@ -200,7 +211,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
             }
 
             response.on_hover_ui(|ui| {
-                ui.strong(format!("Block {}", block.height));
+                ui.label(widgets::strong(format!("Block {}", block.height), 13.5));
                 ui.monospace(format::short(&block.id));
                 ui.label(format!("{} transactions, {} gas", block.tx_count, block.gas_used));
                 ui.label(if main { "main chain" } else { "side branch" });
@@ -221,42 +232,37 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
     }
 }
 
-fn legend(ui: &mut Ui, color: Color32, name: &str) {
-    let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
-    ui.painter().rect_filled(rect, 3.0, color);
-    ui.small(name);
+fn legend(ui: &mut Ui, look: Look, color: Color32, name: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, color);
+    ui.label(RichText::new(name).small().color(look.palette.soft));
 }
 
 fn selected_block(ui: &mut Ui, ctx: &mut Ctx, block: &Summary) {
-    super::title(ui, &format!("Block {}", format::thousands(&block.height.to_string())));
+    let look = ctx.look;
+    // On a phone, the facts sit beside each other, so the map keeps most of the screen.
+    let facts_look = Look { narrow: false, ..look };
 
-    match ctx.store.on_main(block) {
-        true => super::badge(ui, "main chain", MAIN),
-        false => super::badge(ui, "side branch", SIDE),
-    }
+    ui.horizontal(|ui| {
+        ui.label(widgets::strong(format!("Block {}", format::thousands(&block.height.to_string())), 16.0).color(look.palette.ink));
 
-    super::facts(ui, "map_block", |ui| {
-        super::fact(ui, "id");
-        super::copyable(ui, &format::short(&block.id));
-        ui.end_row();
-        super::fact(ui, "parent");
-        super::block(ui, ctx, &block.parent, &format::short(&block.parent));
-        ui.end_row();
-        super::fact(ui, "time");
-        ui.label(format!("{} UTC", format::utc(block.timestamp)));
-        ui.end_row();
-        super::fact(ui, "producer");
-        super::address(ui, ctx, &block.producer);
-        ui.end_row();
-        super::fact(ui, "transactions");
-        ui.label(block.tx_count.to_string());
-        ui.end_row();
-        super::fact(ui, "gas used");
-        ui.label(format::thousands(&block.gas_used.to_string()));
-        ui.end_row();
+        match ctx.store.on_main(block) {
+            true => widgets::pill(ui, "main chain", look.roles.main),
+            false => widgets::pill(ui, "side branch", look.roles.side),
+        };
     });
+    ui.add_space(4.0);
+    super::facts(ui, facts_look, "map_block", |facts| {
+        facts.row("id", |ui| super::copyable(ui, &format::short(&block.id)));
+        facts.row("parent", |ui| super::block(ui, ctx, &block.parent, &format::short(&block.parent)));
+        facts.text("time", format!("{} UTC", format::utc(block.timestamp)));
+        facts.row("producer", |ui| super::address(ui, ctx, &block.producer));
+        facts.text("transactions", block.tx_count.to_string());
+        facts.text("gas used", format::thousands(&block.gas_used.to_string()));
+    });
+    ui.add_space(4.0);
 
-    if ui.button("Open block").clicked() {
+    if widgets::primary(ui, &look.palette, "Open block", true).clicked() {
         ctx.go(View::Block(block.id.clone()));
     }
 }

@@ -1,0 +1,166 @@
+//! The pieces pages are built from. Each takes its colors from a palette, and its sizes from the
+//! style apply set: a card is roomy in a comfortable look and tight in a compact one.
+
+use {
+    crate::theme::{DISPLAY, Palette, SEMIBOLD},
+    egui::{Color32, FontFamily, FontId, Frame, Margin, Response, RichText, Stroke, TextStyle, Ui},
+};
+
+/// A page's title, in the display face, with a line under it saying what the page is for.
+pub fn title(ui: &mut Ui, palette: &Palette, title: &str, lead: &str) {
+    let size = ui.style().text_styles.get(&TextStyle::Heading).map_or(26.0, |font| font.size) * 1.15;
+    ui.label(RichText::new(title).font(FontId::new(size, FontFamily::Name(DISPLAY.into()))).color(palette.ink));
+
+    if !lead.is_empty() {
+        ui.add_space(2.0);
+        ui.label(RichText::new(lead).color(palette.muted));
+    }
+
+    ui.add_space(size * 0.55);
+}
+
+/// A small label in capitals, spaced out: a section's heading.
+pub fn caps(ui: &mut Ui, palette: &Palette, text: &str) -> Response {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(&text.to_uppercase(), 0.0, egui::TextFormat {
+        font_id: FontId::new(10.5, FontFamily::Name(SEMIBOLD.into())),
+        color: palette.heading,
+        extra_letter_spacing: 1.6,
+        ..Default::default()
+    });
+
+    ui.label(job)
+}
+
+/// One line of text that shrinks to fit the width there is, down to smallest, and is cut short past
+/// that: a row never grows past the screen, however large what it shows.
+pub fn fitted(ui: &mut Ui, text: &str, size: f32, smallest: f32, family: FontFamily, color: Color32) -> Response {
+    let width = ui.available_width().max(1.0);
+    let natural = ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), FontId::new(size, family.clone()), color).size().x);
+    let size = match natural > width {
+        true => (size * width / natural).max(smallest),
+        false => size,
+    };
+
+    ui.add(egui::Label::new(RichText::new(text).font(FontId::new(size, family)).color(color)).truncate())
+}
+
+/// Text in the semibold face.
+pub fn strong(text: impl Into<String>, size: f32) -> RichText {
+    RichText::new(text.into()).font(FontId::new(size, FontFamily::Name(SEMIBOLD.into())))
+}
+
+/// Text in the monospace face, for addresses, hashes and numbers to compare.
+pub fn mono(text: impl Into<String>) -> RichText {
+    RichText::new(text.into()).monospace()
+}
+
+/// A card: what each part of a page sits in, with the look's radius and margin.
+pub fn card<R>(ui: &mut Ui, palette: &Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let (radius, margin) = (ui.visuals().window_corner_radius, ui.spacing().window_margin);
+
+    Frame::new()
+        .fill(palette.card)
+        .stroke(Stroke::new(1.0, palette.line))
+        .corner_radius(radius)
+        .inner_margin(margin)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// The one button a step leads to, filled with the accent.
+pub fn primary(ui: &mut Ui, palette: &Palette, text: &str, enabled: bool) -> Response {
+    let (size, height) = (button_size(ui), ui.spacing().interact_size.y);
+    let button = egui::Button::new(strong(text, size).color(if enabled { palette.on_accent } else { palette.muted }))
+        .fill(if enabled { palette.accent } else { palette.row })
+        .stroke(Stroke::NONE)
+        .corner_radius(ui.visuals().widgets.inactive.corner_radius)
+        .min_size(egui::vec2(height * 4.0, height + 4.0));
+
+    ui.add_enabled(enabled, button)
+}
+
+/// A quiet button, outlined.
+pub fn quiet(ui: &mut Ui, palette: &Palette, text: &str) -> Response {
+    ui.add(
+        egui::Button::new(RichText::new(text).color(palette.soft))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(1.0, palette.line))
+            .corner_radius(ui.visuals().widgets.inactive.corner_radius),
+    )
+}
+
+/// A rounded tag in a color: a status at a glance.
+pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
+    let size = ui.style().text_styles.get(&TextStyle::Small).map_or(11.5, |font| font.size);
+
+    Frame::new()
+        .fill(color.gamma_multiply(0.14))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.6)))
+        .corner_radius(99.0)
+        .inner_margin(Margin::symmetric(9, 2))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(size).color(color));
+        })
+        .response
+}
+
+/// A small dot in a color, before a status.
+pub fn dot(ui: &mut Ui, color: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 4.0, color);
+
+    response
+}
+
+/// A thin line across, between the parts of a card.
+pub fn rule(ui: &mut Ui, palette: &Palette) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, palette.line);
+}
+
+/// How long a copy says it was done, in seconds.
+const COPIED_FOR: f64 = 1.6;
+
+/// A label that copies some text when clicked or tapped, and says so beside it for a moment. The
+/// label may show less than it copies: an address cut short copies whole.
+pub fn copy_on_click(ui: &mut Ui, palette: &Palette, label: egui::Label, text: &str) -> Response {
+    let response = ui.add(label.sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let id = response.id.with("copied");
+    let now = ui.input(|input| input.time);
+
+    if response.clicked() {
+        ui.ctx().copy_text(text.to_string());
+        ui.data_mut(|data| data.insert_temp(id, now));
+    }
+
+    if ui.data(|data| data.get_temp::<f64>(id)).is_some_and(|at| now - at < COPIED_FOR) {
+        ui.label(RichText::new("Copied").small().color(palette.good));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+    }
+
+    response
+}
+
+/// A text field with a button on its right: the button takes the room it needs, and the field the
+/// rest, however narrow the screen. Returns whether the button was pressed.
+pub fn beside(ui: &mut Ui, button: impl FnOnce(&mut Ui) -> bool, field: impl FnOnce(&mut Ui, f32)) -> bool {
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let pressed = button(ui);
+            field(ui, ui.available_width());
+
+            pressed
+        })
+        .inner
+    })
+    .inner
+}
+
+fn button_size(ui: &Ui) -> f32 {
+    ui.style().text_styles.get(&TextStyle::Button).map_or(14.0, |font| font.size)
+}

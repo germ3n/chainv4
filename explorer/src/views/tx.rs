@@ -2,15 +2,17 @@
 //! where its contracts went.
 
 use {
-    super::{BAD, Ctx, GOOD, hops},
+    super::{Ctx, Facts, Look, hops},
     crate::api::Ask,
     crate::format,
     crate::model::{Argument, EventView, Outcome, TxView},
+    chainv4_ui::widgets,
     egui::{RichText, Ui},
     serde_json::Value,
 };
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, id: &str, state: &mut hops::HopState) {
+    let look = ctx.look;
     let store = ctx.store;
     let receipt = store.receipts.get(id);
 
@@ -24,17 +26,18 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, id: &str, state: &mut hops::HopState) {
         ctx.api.ask(Ask::Block(receipt.block.clone()));
     }
 
-    super::title(ui, "Transaction");
-    super::copyable(ui, id);
-
     let landed = store.tx(id);
     let waiting = store.waiting(id);
     let Some(tx) = landed.map(|(_, tx)| tx).or(waiting) else {
+        super::heading(ui, look, "Transaction", "", |_| {});
+        super::copyable(ui, id);
+        ui.add_space(8.0);
+
         match store.failures.get(&Ask::Tx(id.to_string())) {
             Some(failure) if failure.status == 404 => {
-                ui.weak("Not on the main chain, at least not yet, and not in the mempool as last listed.");
+                super::note(ui, look, "Not on the main chain, at least not yet, and not in the mempool as last listed.");
 
-                if ui.button("Look in the mempool").clicked() {
+                if widgets::quiet(ui, &look.palette, "Look in the mempool").clicked() {
                     ctx.api.ask(Ask::Mempool);
                 }
             }
@@ -45,110 +48,96 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, id: &str, state: &mut hops::HopState) {
     };
     let outcome = receipt.map(|receipt| &receipt.outcome).or(tx.receipt.as_ref());
 
-    super::facts(ui, "tx", |ui| {
-        super::fact(ui, "status");
+    super::heading(ui, look, &format!("Transaction · {}", tx.kind()), "", |ui| match (receipt, waiting) {
+        (Some(receipt), _) => {
+            super::status(ui, look, &receipt.outcome.status);
 
-        match (receipt, waiting) {
-            (Some(receipt), _) => {
-                ui.horizontal(|ui| {
-                    super::status(ui, &receipt.outcome.status);
-                    ui.label(format!("{} confirmations", receipt.confirmations));
-
-                    match receipt.finalized {
-                        true => super::badge(ui, "final", GOOD),
-                        false => super::badge(ui, "not final yet", super::SIDE),
-                    }
-                });
-            }
-            (None, Some(_)) => {
-                ui.weak("waiting in the mempool");
-            }
-            (None, None) => {
-                ui.weak("in a block off the main chain");
-            }
+            match receipt.finalized {
+                true => widgets::pill(ui, "final", look.roles.final_),
+                false => widgets::pill(ui, "not final yet", look.roles.side),
+            };
         }
-
-        ui.end_row();
-
-        if let Some(receipt) = receipt {
-            super::fact(ui, "block");
-            ui.horizontal(|ui| {
-                super::block(ui, ctx, &receipt.block, &format::thousands(&receipt.height.to_string()));
-                ui.weak(format!("transaction {} in it", receipt.index));
-            });
-            ui.end_row();
+        (None, Some(_)) => {
+            widgets::pill(ui, "waiting in the mempool", look.palette.warn);
         }
-
-        if let Some((detail, _)) = landed {
-            super::fact(ui, "time");
-            ui.label(format!("{} UTC ({})", format::utc(detail.summary.timestamp), format::ago(detail.summary.timestamp, ctx.now)));
-            ui.end_row();
-        }
-
-        super::fact(ui, "type");
-        ui.monospace(tx.kind());
-        ui.end_row();
-        super::fact(ui, "sender");
-        super::address(ui, ctx, &tx.sender);
-        ui.end_row();
-        super::fact(ui, "nonce");
-        ui.label(tx.nonce.to_string());
-        ui.end_row();
-        super::fact(ui, "offer");
-        ui.label(format!(
-            "up to {} gas at up to {} units, tip {}",
-            format::thousands(&tx.fee.gas_limit.to_string()),
-            format::thousands(&tx.fee.max_price),
-            format::thousands(&tx.fee.tip)
-        ));
-        ui.end_row();
-
-        if let Some(outcome) = outcome {
-            super::fact(ui, "used");
-            ui.label(format!(
-                "{} gas, {} fuel",
-                format::thousands(&outcome.gas_used.to_string()),
-                format::thousands(&outcome.fuel_used.to_string())
-            ));
-            ui.end_row();
-            super::fact(ui, "fee paid");
-            ui.label(ctx.coins(&outcome.fee));
-            ui.end_row();
-            result(ui, ctx, outcome);
+        (None, None) => {
+            widgets::pill(ui, "off the main chain", look.roles.side);
         }
     });
+    super::copyable(ui, id);
+    ui.add_space(10.0);
 
-    ui.add_space(6.0);
-    ui.strong("Hops");
-    hops::show(ui, ctx, tx, outcome, state);
+    super::section(ui, look, "Summary", |ui| {
+        super::facts(ui, look, "tx", |facts| {
+            if let Some(receipt) = receipt {
+                facts.row("block", |ui| {
+                    super::block_link(ui, ctx, &receipt.block, receipt.height);
+                    ui.label(RichText::new(format!("transaction {} in it · {} confirmations", receipt.index, receipt.confirmations)).color(look.palette.muted));
+                });
+            }
+
+            if let Some((detail, _)) = landed {
+                facts.text("time", format!("{} UTC · {}", format::utc(detail.summary.timestamp), format::ago(detail.summary.timestamp, ctx.now)));
+            }
+
+            facts.row("sender", |ui| super::address(ui, ctx, &tx.sender));
+            facts.text("nonce", tx.nonce.to_string());
+            facts.text(
+                "offer",
+                format!(
+                    "up to {} gas at up to {} units, tip {}",
+                    format::thousands(&tx.fee.gas_limit.to_string()),
+                    format::thousands(&tx.fee.max_price),
+                    format::thousands(&tx.fee.tip)
+                ),
+            );
+
+            if let Some(outcome) = outcome {
+                facts.text(
+                    "used",
+                    format!("{} gas, {} fuel", format::thousands(&outcome.gas_used.to_string()), format::thousands(&outcome.fuel_used.to_string())),
+                );
+                facts.text("fee paid", ctx.coins(&outcome.fee));
+                result(facts, ctx, look, outcome);
+            }
+        });
+    });
+
+    super::section(ui, look, "Hops", |ui| hops::show(ui, ctx, tx, outcome, state));
 
     if let Some(outcome) = outcome
         && !outcome.events.is_empty()
     {
-        ui.add_space(6.0);
-        ui.strong(format!("Events ({})", outcome.events.len()));
-        events(ui, ctx, &outcome.events);
+        super::section_with(
+            ui,
+            look,
+            "Events",
+            |ui| {
+                ui.label(RichText::new(outcome.events.len().to_string()).monospace().color(look.palette.muted));
+            },
+            |ui| events(ui, ctx, &outcome.events),
+        );
     }
 
-    ui.add_space(6.0);
-    egui::CollapsingHeader::new("What it asked").default_open(true).show(ui, |ui| asked(ui, ctx, tx, outcome));
-    signature(ui, tx);
+    super::section(ui, look, "What it asked", |ui| asked(ui, ctx, tx, outcome));
+    super::section(ui, look, "Signature", |ui| signature(ui, look, tx));
 }
 
 /// The transaction's own fields: amounts in the coin, a call's function by name and its
 /// arguments in a row, Luau source as code.
 fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>) {
+    let look = ctx.look;
     // The trace names the function a call ran, which the transaction only names by selector.
     let called = outcome
         .and_then(|outcome| outcome.trace.hops.first())
         .filter(|hop| hop.depth == 0 && !hop.function.is_empty())
         .map(|hop| hop.function.clone());
 
-    super::facts(ui, "asked", |ui| {
-        for (name, value) in tx.tx.as_object().into_iter().flatten().filter(|(name, _)| *name != "type") {
-            super::fact(ui, name);
+    super::facts(ui, look, "asked", |facts| {
+        facts.text("type", tx.kind());
 
-            match (name.as_str(), value) {
+        for (name, value) in tx.tx.as_object().into_iter().flatten().filter(|(name, _)| *name != "type") {
+            facts.row(name, |ui| match (name.as_str(), value) {
                 ("amount", Value::String(raw)) => {
                     ui.label(ctx.coins(raw)).on_hover_text(format!("{raw} units"));
                 }
@@ -159,15 +148,13 @@ fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>) {
                     };
                 }
                 ("data", Value::Array(args)) => {
-                    ui.horizontal_wrapped(|ui| {
-                        if args.is_empty() {
-                            ui.weak("none");
-                        }
+                    if args.is_empty() {
+                        ui.label(RichText::new("none").color(look.palette.muted));
+                    }
 
-                        for arg in args.iter().filter_map(|arg| serde_json::from_value::<Argument>(arg.clone()).ok()) {
-                            super::argument(ui, ctx, &arg);
-                        }
-                    });
+                    for arg in args.iter().filter_map(|arg| serde_json::from_value::<Argument>(arg.clone()).ok()) {
+                        super::argument(ui, ctx, &arg);
+                    }
                 }
                 ("source", Value::String(source)) => {
                     egui::CollapsingHeader::new(format!("{} lines of Luau", source.lines().count())).show(ui, |ui| {
@@ -178,53 +165,63 @@ fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>) {
                 (_, Value::String(text)) if text.contains(':') && text.contains("0x") => super::address(ui, ctx, text),
                 (_, Value::String(text)) => super::copyable(ui, text),
                 (name, other) => super::json_tree(ui, ctx, name, other),
-            }
-
-            ui.end_row();
+            });
         }
     });
 }
 
-fn result(ui: &mut Ui, ctx: &mut Ctx, outcome: &Outcome) {
+fn result(facts: &mut Facts, ctx: &mut Ctx, look: Look, outcome: &Outcome) {
     match outcome.status.as_str() {
         "failed" => {
-            super::fact(ui, "error");
-            ui.colored_label(BAD, outcome.error.as_deref().unwrap_or("?"));
-            ui.end_row();
+            facts.row("error", |ui| {
+                ui.colored_label(look.palette.bad, outcome.error.as_deref().unwrap_or("?"));
+            });
         }
         "deployed" | "upgraded" => {
-            super::fact(ui, "contract");
-
             if let Some(contract) = &outcome.contract {
-                super::address(ui, ctx, contract);
+                facts.row("contract", |ui| super::address(ui, ctx, contract));
             }
-
-            ui.end_row();
         }
         "returned" if !outcome.values.is_empty() => {
-            super::fact(ui, "returned");
-            ui.horizontal_wrapped(|ui| {
+            facts.row("returned", |ui| {
                 for value in &outcome.values {
                     super::argument(ui, ctx, value);
                 }
             });
-            ui.end_row();
         }
         _ => {}
     }
 }
 
-/// Events in a table. A token's Transfer reads as who sent how much to whom, in its decimals.
+/// Events in a list: what each contract emitted, in order. A token's Transfer reads as who sent how
+/// much to whom, in its decimals.
 pub fn events(ui: &mut Ui, ctx: &mut Ctx, events: &[EventView]) {
-    egui::Grid::new("events").num_columns(4).striped(true).show(ui, |ui| {
-        for (index, event) in events.iter().enumerate() {
-            ui.label(index.to_string());
-            super::address(ui, ctx, &event.contract);
-            ui.strong(&event.name);
-            event_data(ui, ctx, &event.contract, &event.name, &event.data);
-            ui.end_row();
+    let look = ctx.look;
+
+    match look.narrow {
+        true => {
+            for event in events {
+                super::list_row(ui, look, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(widgets::strong(&event.name, 13.5).color(look.palette.ink));
+                        super::address(ui, ctx, &event.contract);
+                    });
+                    event_data(ui, ctx, &event.contract, &event.name, &event.data);
+                });
+            }
         }
-    });
+        false => {
+            super::table(ui, look, "events", &["#", "contract", "event", "data"], |ui| {
+                for (index, event) in events.iter().enumerate() {
+                    ui.monospace(index.to_string());
+                    super::address(ui, ctx, &event.contract);
+                    ui.label(widgets::strong(&event.name, 13.0));
+                    event_data(ui, ctx, &event.contract, &event.name, &event.data);
+                    ui.end_row();
+                }
+            });
+        }
+    }
 }
 
 /// An event's data in a row. A token's Transfer reads as who sent how much to whom, and its
@@ -233,7 +230,7 @@ pub fn event_data(ui: &mut Ui, ctx: &mut Ctx, contract: &str, name: &str, data: 
     ui.horizontal_wrapped(|ui| match token_movement(ctx, contract, name, data) {
         Some((from, link, to, amount)) => {
             super::address(ui, ctx, &from);
-            ui.weak(link);
+            ui.label(RichText::new(link).color(ctx.look.palette.muted));
             super::address(ui, ctx, &to);
             ui.label(RichText::new(amount).strong());
         }
@@ -266,16 +263,9 @@ fn token_movement(ctx: &mut Ctx, contract: &str, name: &str, data: &[Argument]) 
     Some((from.text(), link, to.text(), format::amount(&amount.text(), decimals, &symbol)))
 }
 
-fn signature(ui: &mut Ui, tx: &TxView) {
-    egui::CollapsingHeader::new("Signature").show(ui, |ui| {
-        super::facts(ui, "signature", |ui| {
-            super::fact(ui, "signer");
-            super::copyable(ui, &tx.signer);
-            ui.end_row();
-            super::fact(ui, "signature");
-            super::copyable(ui, &tx.signature);
-            ui.end_row();
-        });
+fn signature(ui: &mut Ui, look: Look, tx: &TxView) {
+    super::facts(ui, look, "signature", |facts| {
+        facts.row("signer", |ui| super::copyable(ui, &tx.signer));
+        facts.row("signature", |ui| super::copyable(ui, &tx.signature));
     });
 }
-

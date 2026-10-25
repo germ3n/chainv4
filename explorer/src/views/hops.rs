@@ -3,7 +3,7 @@
 //! hop in one selects it in the other.
 
 use {
-    super::{BAD, Ctx, GOOD, MAIN, View},
+    super::{Ctx, Look, View},
     crate::format,
     crate::model::{Hop, Outcome, TxView},
     egui::{Color32, Pos2, Rect, RichText, Shape, Stroke, Ui, Vec2, pos2, vec2},
@@ -112,12 +112,12 @@ pub fn layout(hops: &[Hop]) -> Vec<(String, Pos2)> {
     placed
 }
 
-fn color(hop: &Hop) -> Color32 {
+fn color(look: Look, hop: &Hop) -> Color32 {
     match (hop.error.is_some(), hop.kind.as_str()) {
-        (true, _) => BAD,
-        (false, "transfer" | "mint" | "burn" | "bond") => GOOD,
-        (false, "delegate") => Color32::from_rgb(190, 130, 230),
-        _ => MAIN,
+        (true, _) => look.palette.bad,
+        (false, "transfer" | "mint" | "burn" | "bond") => look.palette.good,
+        (false, "delegate") => Color32::from_rgb(0xb4, 0x8c, 0xf0),
+        _ => look.roles.main,
     }
 }
 
@@ -140,22 +140,36 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>, 
     let hops = of(tx, outcome);
 
     if let Some(dropped) = outcome.map(|outcome| outcome.trace.dropped).filter(|&dropped| dropped > 0) {
-        ui.colored_label(BAD, format!("{dropped} more hops were made than a receipt keeps; only the first {} are shown.", hops.len()));
+        ui.colored_label(ctx.look.palette.bad, format!("{dropped} more hops were made than a receipt keeps; only the first {} are shown.", hops.len()));
     }
 
-    ui.columns(2, |columns| {
-        tree(&mut columns[0], ctx, &hops, outcome, state);
-        graph(&mut columns[1], ctx, &hops, state);
-    });
+    match ctx.look.narrow {
+        true => {
+            tree(ui, ctx, &hops, outcome, state);
+            ui.add_space(8.0);
+            graph(ui, ctx, &hops, state);
+        }
+        false => {
+            ui.columns(2, |columns| {
+                tree(&mut columns[0], ctx, &hops, outcome, state);
+                graph(&mut columns[1], ctx, &hops, state);
+            });
+        }
+    }
 }
 
 fn tree(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], outcome: Option<&Outcome>, state: &mut HopState) {
-    ui.strong("Call tree");
-    egui::ScrollArea::vertical().id_salt("hop_tree").max_height(420.0).show(ui, |ui| {
+    let look = ctx.look;
+    chainv4_ui::widgets::caps(ui, &look.palette, "Call tree");
+    egui::ScrollArea::both()
+        .id_salt("hop_tree")
+        .max_height(if look.narrow { 260.0 } else { 420.0 })
+        .scroll_source(super::NO_DRAG)
+        .show(ui, |ui| {
         for (index, hop) in hops.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.add_space(f32::from(hop.depth) * 18.0);
-                super::dot(ui, color(hop));
+                super::dot(ui, color(look, hop));
                 let text = format!(
                     "#{index} {} -> {}  {}",
                     format::short(&hop.from),
@@ -168,14 +182,14 @@ fn tree(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], outcome: Option<&Outcome>, sta
                 }
 
                 if hop.fuel_used > 0 {
-                    ui.weak(format!("{} fuel", format::thousands(&hop.fuel_used.to_string())));
+                    ui.label(RichText::new(format!("{} fuel", format::thousands(&hop.fuel_used.to_string()))).small().color(look.palette.muted));
                 }
             });
 
             if let Some(error) = &hop.error {
                 ui.horizontal(|ui| {
                     ui.add_space(f32::from(hop.depth) * 18.0 + 22.0);
-                    ui.colored_label(BAD, RichText::new(error).small());
+                    ui.colored_label(look.palette.bad, RichText::new(error).small());
                 });
             }
 
@@ -183,7 +197,7 @@ fn tree(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], outcome: Option<&Outcome>, sta
                 if let Some(event) = outcome.and_then(|outcome| outcome.events.get(*event as usize)) {
                     ui.horizontal(|ui| {
                         ui.add_space(f32::from(hop.depth) * 18.0 + 22.0);
-                        ui.weak(RichText::new(format!("emitted {}", event.name)).small());
+                        ui.label(RichText::new(format!("emitted {}", event.name)).small().color(look.palette.muted));
                     });
                 }
             }
@@ -191,52 +205,50 @@ fn tree(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], outcome: Option<&Outcome>, sta
     });
 
     if let Some(hop) = state.selected.and_then(|index| hops.get(index)) {
-        ui.separator();
-        super::facts(ui, "hop", |ui| {
-            super::fact(ui, "kind");
-            ui.label(&hop.kind);
-            ui.end_row();
-            super::fact(ui, "from");
-            super::address(ui, ctx, &hop.from);
-            ui.end_row();
-            super::fact(ui, "to");
-            super::address(ui, ctx, &hop.to);
-            ui.end_row();
+        chainv4_ui::widgets::rule(ui, &look.palette);
+        ui.add_space(4.0);
+        super::facts(ui, look, "hop", |facts| {
+            facts.text("kind", hop.kind.clone());
+            facts.row("from", |ui| super::address(ui, ctx, &hop.from));
+            facts.row("to", |ui| super::address(ui, ctx, &hop.to));
 
             if !hop.function.is_empty() {
-                super::fact(ui, "function");
-                ui.monospace(&hop.function);
-                ui.end_row();
+                facts.row("function", |ui| {
+                    ui.monospace(&hop.function);
+                });
             }
 
-            super::fact(ui, "value");
-            ui.label(ctx.coins(&hop.value));
-            ui.end_row();
-            super::fact(ui, "fuel");
-            ui.label(format::thousands(&hop.fuel_used.to_string()));
-            ui.end_row();
-            super::fact(ui, "result");
-
-            match &hop.error {
-                Some(error) => ui.colored_label(BAD, error),
-                None => ui.colored_label(GOOD, "went through"),
-            };
-
-            ui.end_row();
+            facts.text("value", ctx.coins(&hop.value));
+            facts.text("fuel", format::thousands(&hop.fuel_used.to_string()));
+            facts.row("result", |ui| match &hop.error {
+                Some(error) => {
+                    ui.colored_label(look.palette.bad, error);
+                }
+                None => {
+                    ui.colored_label(look.palette.good, "went through");
+                }
+            });
         });
     }
 }
 
 fn graph(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], state: &mut HopState) {
-    ui.strong("Who it touched");
+    let look = ctx.look;
+    chainv4_ui::widgets::caps(ui, &look.palette, "Who it touched");
     let nodes = layout(hops);
     let position: HashMap<&str, Pos2> = nodes.iter().map(|(address, position)| (address.as_str(), *position)).collect();
     let mut chosen = None;
     let mut open = None;
 
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_height(420.0);
-        egui::Scene::new().zoom_range(0.1..=3.0).show(ui, &mut state.rect, |ui| {
+    egui::Frame::new()
+        .fill(look.palette.paper)
+        .stroke(Stroke::new(1.0, look.palette.line))
+        .corner_radius(ui.visuals().widgets.inactive.corner_radius)
+        .show(ui, |ui| {
+        ui.set_height(if look.narrow { 300.0 } else { 420.0 });
+        // On a phone the graph only shows, fitted, so a swipe over it scrolls the page.
+        let sense = if look.narrow { egui::Sense::hover() } else { egui::Sense::click_and_drag() };
+        egui::Scene::new().zoom_range(0.1..=3.0).sense(sense).show(ui, &mut state.rect, |ui| {
             let painter = ui.painter().clone();
             // How many hops join each pair so far, to fan them out.
             let mut between: HashMap<(&str, &str), usize> = HashMap::new();
@@ -254,7 +266,7 @@ fn graph(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], state: &mut HopState) {
                 let fan = *nth as f32 - (totals[&key] as f32 - 1.0) / 2.0;
                 *nth += 1;
                 let selected = state.selected == Some(index);
-                let stroke = Stroke::new(if selected { 3.5 } else { 1.8 }, color(hop));
+                let stroke = Stroke::new(if selected { 3.5 } else { 1.8 }, color(look, hop));
                 let points = curve(from, to, fan);
 
                 match hop.kind.as_str() {
@@ -280,7 +292,7 @@ fn graph(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], state: &mut HopState) {
             for (address, position) in &nodes {
                 let rect = Rect::from_center_size(*position, NODE);
                 let first = hops.first().is_some_and(|hop| &hop.from == address);
-                let fill = if first { MAIN.gamma_multiply(0.5) } else { ui.visuals().widgets.inactive.bg_fill };
+                let fill = if first { look.roles.main.gamma_multiply(0.5) } else { ui.visuals().widgets.inactive.bg_fill };
                 let response = ui.put(rect, egui::Button::new(RichText::new(format::short(address)).monospace()).fill(fill));
 
                 if response.on_hover_text(address).clicked() && address.contains(':') {

@@ -519,6 +519,7 @@ impl eframe::App for Wallet {
         let now = now_ms();
         self.take(now, time);
         self.poll(time);
+        chainv4_ui::layout::suit_touch(ui.ctx());
         let palette = self.palette;
 
         if !matches!(self.lock, Lock::Open) {

@@ -4,6 +4,7 @@
 /explorer/dist
 /wallet/target
 /wallet/dist
+/ui/target
 
 /docker/.env
 /docker/certs/*.pem

@@ -39,6 +39,33 @@ jobs:
           host=$(rustc -vV | sed -n 's/^host: //p')
           cargo test --manifest-path contracts/Cargo.toml -p chainv4-sdk --locked --target "$host"
 
+  # What the wallet and the explorer share: a workspace of its own, for the desktop, the browser
+  # and Android, whose clipboard it reaches through JNI. The apps' own Android code is built by
+  # the android workflow: linting it here would need an Android sysroot for ring's C.
+  ui:
+    name: ui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown, aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui -> target
+      # What winit and egui's clipboard build against on Linux.
+      - name: system libraries
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      - name: clippy
+        run: cargo clippy --manifest-path ui/Cargo.toml --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --manifest-path ui/Cargo.toml --locked
+      - name: clippy (web)
+        run: cargo clippy --manifest-path ui/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
+      - name: clippy (android)
+        run: cargo clippy --manifest-path ui/Cargo.toml --target aarch64-linux-android --locked -- -D warnings
+
   # The explorer is a workspace of its own, for the desktop and the browser.
   explorer:
     name: explorer

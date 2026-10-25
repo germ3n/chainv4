@@ -1,15 +1,7 @@
-//! A chainv4 explorer: blocks on a map, transactions and the hops their contracts made, the
-//! network, the mempool and finality, live. It talks to a node's HTTP API, and runs as a desktop
-//! app or, built with trunk, in the browser.
+//! The explorer on the desktop and in the browser. The app itself is the library, which Android
+//! loads too.
 
-mod api;
-mod app;
-mod format;
-mod light;
-mod model;
-mod sse;
-mod store;
-mod views;
+use chainv4_explorer::explorer;
 
 /// The node the desktop app talks to unless told otherwise.
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,14 +32,14 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("chainv4 explorer")
             .with_inner_size([1360.0, 860.0])
-            .with_min_inner_size([720.0, 480.0]),
+            .with_min_inner_size([360.0, 480.0]),
         ..Default::default()
     };
 
     eframe::run_native(
         "chainv4 explorer",
         options,
-        Box::new(move |creation| Ok(Box::new(app::Explorer::new(creation, node, LOCAL_NODE)))),
+        Box::new(move |creation| Ok(explorer(creation, node, LOCAL_NODE))),
     )
 }
 
@@ -77,7 +69,7 @@ fn main() {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(move |creation| Ok(Box::new(app::Explorer::new(creation, node, &origin)))),
+                Box::new(move |creation| Ok(explorer(creation, node, &origin))),
             )
             .await;
 

@@ -1,105 +1,124 @@
 //! How far finality has come, who votes, and any cheating the node caught.
 
 use {
-    super::{Ctx, FINAL, JUSTIFIED},
+    super::Ctx,
     crate::api::Ask,
     crate::format,
-    egui::Ui,
+    chainv4_ui::widgets,
+    egui::{RichText, Ui},
     serde_json::Value,
 };
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
+    let look = ctx.look;
     let store = ctx.store;
     let Some(status) = &store.status else {
+        super::heading(ui, look, "Finality", "", |_| {});
         super::waiting(ui, ctx, &Ask::Status);
 
         return;
     };
     let Some(finality) = &status.finality else {
-        super::title(ui, "Finality");
-        ui.weak("This chain has no finality: the branch with the most work is the main chain, as far back as max_reorg_depth.");
+        super::heading(ui, look, "Finality", "", |_| {});
+        super::note(ui, look, "This chain has no finality: the branch with the most work is the main chain, as far back as max_reorg_depth.");
 
         return;
     };
     let (finalized, justified) = store.finality_heights();
 
-    super::title(ui, &format!("Finality: {}", finality.kind));
-    super::facts(ui, "finality", |ui| {
-        super::fact(ui, "epoch");
-        ui.label(format!("{} (checkpoints every {} blocks)", finality.epoch, finality.checkpoint_interval));
-        ui.end_row();
-        super::fact(ui, "justified");
-        ui.horizontal(|ui| {
-            super::badge(ui, &format!("epoch {}", finality.justified.epoch), JUSTIFIED);
-            super::block(ui, ctx, &finality.justified.block, &format!("height {justified}"));
+    super::heading(ui, look, "Finality", &format!("{} finality, checkpoints every {} blocks", finality.kind, finality.checkpoint_interval), |ui| {
+        widgets::pill(ui, &format!("epoch {}", finality.epoch), look.palette.soft);
+    });
+
+    super::stats(ui, look, &[
+        (
+            "Justified".to_string(),
+            format::thousands(&justified.to_string()),
+            format!("epoch {}", finality.justified.epoch),
+        ),
+        (
+            "Finalized".to_string(),
+            format::thousands(&finalized.to_string()),
+            format!("epoch {} · {} behind the tip", finality.finalized.epoch, status.height.saturating_sub(finalized)),
+        ),
+    ]);
+
+    super::section(ui, look, "Checkpoints", |ui| {
+        super::facts(ui, look, "finality", |facts| {
+            facts.row("justified", |ui| {
+                widgets::pill(ui, &format!("epoch {}", finality.justified.epoch), look.roles.justified);
+                super::block(ui, ctx, &finality.justified.block, &format::short(&finality.justified.block));
+            });
+            facts.row("finalized", |ui| {
+                widgets::pill(ui, &format!("epoch {}", finality.finalized.epoch), look.roles.final_);
+                super::block(ui, ctx, &finality.finalized.block, &format::short(&finality.finalized.block));
+            });
         });
-        ui.end_row();
-        super::fact(ui, "finalized");
-        ui.horizontal(|ui| {
-            super::badge(ui, &format!("epoch {}", finality.finalized.epoch), FINAL);
-            super::block(ui, ctx, &finality.finalized.block, &format!("height {finalized}"));
-            ui.weak(format!("{} blocks behind the tip", status.height.saturating_sub(finalized)));
-        });
-        ui.end_row();
     });
 
     match finality.kind.as_str() {
         "ffg" | "authority" => voters(ui, ctx),
-        _ => {
-            ui.weak("Depth finality has no voters: a block is final once enough blocks sit on it.");
-        }
+        _ => super::section(ui, look, "Voters", |ui| {
+            super::note(ui, look, "Depth finality has no voters: a block is final once enough blocks sit on it.");
+        }),
     }
 
     if finality.kind == "authority" {
-        ui.add_space(6.0);
-        ui.strong("Signers");
-
-        match &store.signers {
+        super::section(ui, look, "Signers", |ui| match &store.signers {
             Some(signers) => super::json_tree(ui, ctx, "signers", signers),
             None => super::waiting(ui, ctx, &Ask::Signers),
-        }
+        });
     }
 
-    ui.add_space(6.0);
-    ui.strong("Conflicting votes this node caught");
-
-    match store.evidence.as_ref().and_then(|evidence| evidence.get("evidence")).and_then(Value::as_array) {
-        Some(evidence) if evidence.is_empty() => {
-            ui.weak("None.");
-        }
-        Some(evidence) => {
-            for (index, item) in evidence.iter().enumerate() {
-                super::json_tree(ui, ctx, &format!("evidence {index}"), item);
+    super::section(ui, look, "Conflicting votes this node caught", |ui| {
+        match store.evidence.as_ref().and_then(|evidence| evidence.get("evidence")).and_then(Value::as_array) {
+            Some(evidence) if evidence.is_empty() => super::note(ui, look, "None."),
+            Some(evidence) => {
+                for (index, item) in evidence.iter().enumerate() {
+                    super::json_tree(ui, ctx, &format!("evidence {index}"), item);
+                }
             }
+            None => super::waiting(ui, ctx, &Ask::Evidence),
         }
-        None => super::waiting(ui, ctx, &Ask::Evidence),
-    }
+    });
 }
 
 fn voters(ui: &mut Ui, ctx: &mut Ctx) {
+    let look = ctx.look;
     let store = ctx.store;
     let Some(validators) = &store.validators else {
-        super::waiting(ui, ctx, &Ask::Validators);
+        super::section(ui, look, "Voters", |ui| super::waiting(ui, ctx, &Ask::Validators));
 
         return;
     };
     let text = |value: &Value, name: &str| value.get(name).map(|value| value.as_str().map_or(value.to_string(), str::to_string)).unwrap_or_default();
+    let active: Vec<Value> = validators.get("active").and_then(Value::as_array).cloned().unwrap_or_default();
 
-    ui.add_space(6.0);
-    ui.strong(format!("Voting in epoch {}", text(validators, "epoch")));
-    egui::Grid::new("active").num_columns(3).striped(true).show(ui, |ui| {
-        for heading in ["voter", "account", "weight"] {
-            ui.strong(heading);
+    super::section(ui, look, &format!("Voting in epoch {}", text(validators, "epoch")), |ui| {
+        if look.narrow {
+            for member in &active {
+                super::list_row(ui, look, |ui| {
+                    ui.horizontal(|ui| {
+                        super::address(ui, ctx, &text(member, "account"));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(ctx.coins(&text(member, "weight"))).monospace());
+                        });
+                    });
+                    ui.label(RichText::new(format!("votes as {}", format::short(&text(member, "voter")))).small().color(look.palette.muted));
+                });
+            }
+
+            return;
         }
 
-        ui.end_row();
-
-        for member in validators.get("active").and_then(Value::as_array).into_iter().flatten() {
-            super::copyable(ui, &format::short(&text(member, "voter")));
-            super::address(ui, ctx, &text(member, "account"));
-            ui.label(ctx.coins(&text(member, "weight")));
-            ui.end_row();
-        }
+        super::table(ui, look, "active", &["voter", "account", "weight"], |ui| {
+            for member in &active {
+                super::copyable(ui, &format::short(&text(member, "voter")));
+                super::address(ui, ctx, &text(member, "account"));
+                ui.monospace(ctx.coins(&text(member, "weight")));
+                ui.end_row();
+            }
+        });
     });
 
     let bonded = validators.get("validators").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -108,25 +127,46 @@ fn voters(ui: &mut Ui, ctx: &mut Ctx) {
         return;
     }
 
-    ui.add_space(6.0);
-    ui.strong(format!("Bonded validators ({})", bonded.len()));
-    egui::Grid::new("bonded").num_columns(5).striped(true).show(ui, |ui| {
-        for heading in ["voter", "account", "bond", "active", "slashed"] {
-            ui.strong(heading);
+    let slashed = |validator: &Value| match text(validator, "slashed").as_str() {
+        "false" => "not slashed".to_string(),
+        "true" => "slashed".to_string(),
+        other => format!("slashed {other}"),
+    };
+    let active_text = |validator: &Value| match text(validator, "active_until").as_str() {
+        "null" => format!("from epoch {}", text(validator, "active_from")),
+        until => format!("epochs {} to {until}", text(validator, "active_from")),
+    };
+
+    super::section(ui, look, &format!("Bonded validators · {}", bonded.len()), |ui| {
+        if look.narrow {
+            for validator in &bonded {
+                super::list_row(ui, look, |ui| {
+                    ui.horizontal(|ui| {
+                        super::address(ui, ctx, &text(validator, "account"));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(ctx.coins(&text(validator, "bond"))).monospace());
+                        });
+                    });
+                    ui.label(
+                        RichText::new(format!("{} · {}", active_text(validator), slashed(validator)))
+                            .small()
+                            .color(look.palette.muted),
+                    );
+                });
+            }
+
+            return;
         }
 
-        ui.end_row();
-
-        for validator in &bonded {
-            super::copyable(ui, &format::short(&text(validator, "voter")));
-            super::address(ui, ctx, &text(validator, "account"));
-            ui.label(ctx.coins(&text(validator, "bond")));
-            ui.label(match text(validator, "active_until").as_str() {
-                "null" => format!("from epoch {}", text(validator, "active_from")),
-                until => format!("epochs {} to {until}", text(validator, "active_from")),
-            });
-            ui.label(text(validator, "slashed"));
-            ui.end_row();
-        }
+        super::table(ui, look, "bonded", &["voter", "account", "bond", "active", "slashed"], |ui| {
+            for validator in &bonded {
+                super::copyable(ui, &format::short(&text(validator, "voter")));
+                super::address(ui, ctx, &text(validator, "account"));
+                ui.monospace(ctx.coins(&text(validator, "bond")));
+                ui.label(active_text(validator));
+                ui.label(slashed(validator));
+                ui.end_row();
+            }
+        });
     });
 }

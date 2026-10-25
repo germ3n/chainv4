@@ -25,8 +25,8 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Light client](light-client.md) | Following a chain from its genesis id alone: headers by consensus, finality by proven voters, and values by proofs. |
 | [Crypto and encoding](crypto.md) | Hashes, keys, signatures, signing domains and how everything is encoded. |
 | [HTTP API](api.md) | Every route and what it answers. |
-| [Explorer](explorer.md) | The egui explorer for the desktop and the browser: pages, hops, tokens, sending and how it stays live. |
+| [Explorer](explorer.md) | The egui explorer for the desktop, the browser and Android: pages, hops, tokens, sending and how it stays live. |
 | [Wallet](wallet.md) | The egui light wallet: sealed keys, proven balances and history, sending and receiving. |
 | [Docker](docker.md) | A node in a container behind nginx, with HTTPS from your certificate, Let's Encrypt, or a self-signed one. |
-| [Development](development.md) | Building, features, tests, CI, the wiki, and the conventions the code follows. |
+| [Development](development.md) | Building, features, tests, CI, the ui crate the apps share, the wiki, and the conventions the code follows. |
 | [Todo](todo.md) | What is done, what is next, and known gaps. |

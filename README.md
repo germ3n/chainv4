@@ -14,8 +14,8 @@ This page covers the `chainv4` command and how contracts live on the chain.
 - **Contract storage:** how contracts keep state, and the layouts upgrades must keep, in
   [docs/contract-storage.md](docs/contract-storage.md).
 - **Tokens:** they follow the [token standard](docs/token-standard.md).
-- **The explorer:** [explorer/](explorer/), an egui app for the desktop and the browser; see
-  [docs/explorer.md](docs/explorer.md).
+- **The explorer:** [explorer/](explorer/), an egui app for the desktop, the browser and Android;
+  see [docs/explorer.md](docs/explorer.md).
 - **What is left to do:** [docs/todo.md](docs/todo.md).
 
 ## Building
@@ -203,6 +203,22 @@ Balances of the coin and every listed token at each address, sending with a revi
 address picked, receiving with a QR code, several accounts and several wallets, and a history from
 the node's address index. CI builds the APKs on every push, and attaches them to `v*` releases.
 See [Wallet](docs/wallet.md).
+
+### The explorer
+
+`explorer/` is a window onto a node, in egui, for the desktop, the browser and Android: blocks on a
+map, side branches included, transactions and the hops their contracts made, accounts, contracts
+and tokens, the network, the mempool and finality, live. It lays out with a sidebar on a wide
+screen and tabs on a phone:
+
+```sh
+cd explorer && cargo run --release -- --node http://127.0.0.1:8080
+cd explorer && trunk build --release  # then: chainv4 --http … --stream --explorer explorer/dist
+explorer/build-android.sh --install   # an Android APK, built with xbuild
+```
+
+It shares the `ui` crate with the wallet, and CI builds its APKs beside the wallet's. See
+[Explorer](docs/explorer.md).
 
 ## Keys
 

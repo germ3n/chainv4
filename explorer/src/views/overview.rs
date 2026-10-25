@@ -2,27 +2,42 @@
 //! network and finality, charts of the last blocks, and what just happened.
 
 use {
-    super::{Ctx, GOOD, MAIN, View},
+    super::{
+        Ctx, Look, View,
+        chart::{self, Kind, Series},
+    },
     crate::format,
     crate::model::Summary,
+    chainv4_ui::widgets,
     egui::{RichText, Ui},
-    egui_plot::{Bar, BarChart, HLine, Line, Plot, PlotPoints},
 };
 
 /// How many blocks the numbers and charts look back over.
 const WINDOW: usize = 120;
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
+    let look = ctx.look;
     let Some(status) = ctx.store.status.clone() else {
+        super::heading(ui, look, "Overview", "", |_| {});
         super::waiting(ui, ctx, &crate::api::Ask::Status);
 
         return;
     };
-    let recent = ctx.store.recent(WINDOW);
+    // Genesis is left out: its time is when the chain was planned, not when it started, so the gap
+    // after it says nothing of how fast blocks come.
+    let recent: Vec<&Summary> = ctx.store.recent(WINDOW).into_iter().filter(|block| block.height > 0).collect();
     let rates = Rates::of(&recent);
     let (finalized, justified) = ctx.store.finality_heights();
 
-    let mut cards = vec![
+    super::heading(
+        ui,
+        look,
+        "Overview",
+        &format!("{} · {} hashes · genesis {}", status.coin.symbol, status.hash, format::short(&status.genesis)),
+        |_| {},
+    );
+
+    let mut tiles = vec![
         (
             "Height".to_string(),
             format::thousands(&status.height.to_string()),
@@ -50,7 +65,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     ];
 
     if let Some(finality) = &status.finality {
-        cards.push((
+        tiles.push((
             "Finalized".to_string(),
             format::thousands(&finalized.to_string()),
             format!("{} · justified {justified} · epoch {}", finality.kind, finality.epoch),
@@ -58,7 +73,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     }
 
     if status.difficulty != "0" {
-        cards.push((
+        tiles.push((
             "Difficulty".to_string(),
             format::thousands(&status.difficulty),
             format!("total work {}", format::thousands(&status.work)),
@@ -66,37 +81,27 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     }
 
     if let Some(base) = status.base_price() {
-        cards.push(("Base price".to_string(), format::thousands(base), "units per gas".to_string()));
+        tiles.push(("Base price".to_string(), format::thousands(base), "units per gas".to_string()));
     }
 
-    cards.push((
-        "Chain".to_string(),
-        status.hash.clone(),
-        format!("{} · {} decimals", status.coin.symbol, status.coin.decimals),
-    ));
-
-    // As many to a row as fit, so none runs off the edge.
-    let per_row = ((ui.available_width() + 8.0) / (CARD + 8.0)).floor().max(1.0) as usize;
-
-    for row in cards.chunks(per_row) {
-        ui.horizontal(|ui| {
-            for (name, value, note) in row {
-                card(ui, name, value, note);
-            }
-        });
-    }
-
-    ui.add_space(8.0);
+    super::stats(ui, look, &tiles);
 
     if recent.len() > 1 {
-        charts(ui, &recent, status.block_gas_limit());
+        super::section(ui, look, &format!("The last {} blocks", recent.len()), |ui| charts(ui, look, &recent, status.block_gas_limit()));
     }
 
-    ui.add_space(8.0);
-    ui.columns(2, |columns| {
-        latest(&mut columns[0], ctx, &recent);
-        feed(&mut columns[1], ctx);
-    });
+    match look.narrow {
+        true => {
+            latest(ui, ctx, &recent);
+            feed(ui, ctx);
+        }
+        false => {
+            ui.columns(2, |columns| {
+                latest(&mut columns[0], ctx, &recent);
+                feed(&mut columns[1], ctx);
+            });
+        }
+    }
 }
 
 /// How fast the chain went over some blocks.
@@ -122,102 +127,153 @@ impl Rates {
     }
 }
 
-/// How wide a card is.
-const CARD: f32 = 190.0;
-
-fn card(ui: &mut Ui, name: &str, value: &str, note: &str) {
-    egui::Frame::group(ui.style()).inner_margin(10.0).show(ui, |ui| {
-        ui.set_width(CARD - 22.0);
-        ui.vertical(|ui| {
-            ui.weak(name);
-            ui.label(RichText::new(value).size(22.0).strong());
-            ui.small(note);
-        });
-    });
-}
-
-fn charts(ui: &mut Ui, recent: &[&Summary], gas_limit: Option<u64>) {
-    let heights = |value: &dyn Fn(&Summary) -> f64| -> PlotPoints {
-        recent.iter().map(|block| [block.height as f64, value(block)]).collect()
-    };
-    let times: PlotPoints = recent
-        .windows(2)
-        .map(|pair| [pair[1].height as f64, (pair[1].timestamp.saturating_sub(pair[0].timestamp)) as f64 / 1_000.0])
-        .collect();
-    let bars: Vec<Bar> = recent.iter().map(|block| Bar::new(block.height as f64, block.tx_count as f64)).collect();
+fn charts(ui: &mut Ui, look: Look, recent: &[&Summary], gas_limit: Option<u64>) {
+    let roles = look.roles;
+    let each = |value: &dyn Fn(&Summary) -> f64| -> Vec<[f64; 2]> { recent.iter().map(|block| [block.height as f64, value(block)]).collect() };
     let pow = recent.iter().any(|block| block.difficulty != "0");
-
-    ui.columns(2, |columns| {
-        chart(&mut columns[0], "Seconds between blocks", |plot| plot.line(Line::new("block time", times).color(MAIN)));
-        chart(&mut columns[1], "Transactions per block", |plot| {
-            plot.bar_chart(BarChart::new("transactions", bars).color(GOOD));
-        });
-    });
-    ui.columns(2, |columns| {
-        chart(&mut columns[0], "Gas used", |plot| {
-            plot.line(Line::new("gas used", heights(&|block| block.gas_used as f64)));
-
-            if let Some(limit) = gas_limit {
-                plot.hline(HLine::new("block gas limit", limit as f64));
-            }
-        });
-
+    let series = [
+        Series {
+            name: "Seconds between blocks".to_string(),
+            points: recent
+                .windows(2)
+                .map(|pair| [pair[1].height as f64, pair[1].timestamp.saturating_sub(pair[0].timestamp) as f64 / 1_000.0])
+                .collect(),
+            kind: Kind::Line,
+            color: roles.main,
+            limit: None,
+            unit: |seconds| format!("{seconds:.1} s"),
+        },
+        Series {
+            name: "Transactions per block".to_string(),
+            points: each(&|block| block.tx_count as f64),
+            kind: Kind::Bars,
+            color: roles.final_,
+            limit: None,
+            unit: |txs| format!("{txs:.0} transactions"),
+        },
+        Series {
+            name: "Gas used".to_string(),
+            points: each(&|block| block.gas_used as f64),
+            kind: Kind::Bars,
+            color: roles.justified,
+            limit: gas_limit.map(|limit| (limit as f64, "limit")),
+            unit: |gas| format!("{} gas", format::thousands(&format!("{gas:.0}"))),
+        },
         match pow {
-            true => chart(&mut columns[1], "Difficulty", |plot| {
-                plot.line(Line::new("difficulty", heights(&|block| block.difficulty.parse().unwrap_or(0.0))));
-            }),
-            false => chart(&mut columns[1], "Base price (units per gas)", |plot| {
-                plot.line(Line::new("base price", heights(&|block| block.base_price.parse().unwrap_or(0.0))));
-            }),
-        }
-    });
-}
+            true => Series {
+                name: "Difficulty".to_string(),
+                points: each(&|block| block.difficulty.parse().unwrap_or(0.0)),
+                kind: Kind::Line,
+                color: roles.side,
+                limit: None,
+                unit: |difficulty| format::thousands(&format!("{difficulty:.0}")),
+            },
+            false => Series {
+                name: "Base price, units per gas".to_string(),
+                points: each(&|block| block.base_price.parse().unwrap_or(0.0)),
+                kind: Kind::Line,
+                color: roles.side,
+                limit: None,
+                unit: |price| format!("{} units", format::thousands(&format!("{price:.0}"))),
+            },
+        },
+    ];
+    let height = if look.narrow { 84.0 } else { 110.0 };
 
-fn chart<'a>(ui: &mut Ui, name: &str, build: impl FnOnce(&mut egui_plot::PlotUi<'a>) + 'a) {
-    ui.strong(name);
-    Plot::new(name)
-        .height(150.0)
-        .allow_scroll(false)
-        .allow_zoom(false)
-        .allow_drag(false)
-        .show_background(false)
-        .include_y(0.0)
-        .show(ui, build);
+    match look.narrow {
+        true => {
+            for series in &series {
+                chart::chart(ui, look, series, height);
+                ui.add_space(6.0);
+            }
+        }
+        false => {
+            for pair in series.chunks(2) {
+                ui.columns(2, |columns| {
+                    for (column, series) in columns.iter_mut().zip(pair) {
+                        chart::chart(column, look, series, height);
+                    }
+                });
+                ui.add_space(8.0);
+            }
+        }
+    }
 }
 
 fn latest(ui: &mut Ui, ctx: &mut Ctx, recent: &[&Summary]) {
-    ui.strong("Latest blocks");
-    egui::Grid::new("latest").num_columns(5).striped(true).show(ui, |ui| {
-        for block in recent.iter().rev().take(15) {
-            super::block(ui, ctx, &block.id, &format::thousands(&block.height.to_string()));
-            ui.monospace(format::short(&block.id));
-            ui.label(format!("{} txs", block.tx_count));
-            super::address(ui, ctx, &block.producer);
-            ui.weak(format::ago(block.timestamp, ctx.now));
-            ui.end_row();
+    let look = ctx.look;
+    let link = |ui: &mut Ui, go: &mut bool| {
+        if ui.link("Block map").clicked() {
+            *go = true;
         }
+    };
+    let mut open_map = false;
+
+    super::section_with(ui, look, "Latest blocks", |ui| link(ui, &mut open_map), |ui| {
+        let blocks: Vec<&&Summary> = recent.iter().rev().take(if look.narrow { 8 } else { 14 }).collect();
+
+        if look.narrow {
+            for block in blocks {
+                super::list_row(ui, look, |ui| {
+                    ui.horizontal(|ui| {
+                        super::block(ui, ctx, &block.id, &format::thousands(&block.height.to_string()));
+                        ui.label(RichText::new(format!("{} txs", block.tx_count)).color(look.palette.soft));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(format::ago(block.timestamp, ctx.now)).small().color(look.palette.muted));
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format::short(&block.id)).monospace().small().color(look.palette.muted));
+                        ui.label(RichText::new("by").small().color(look.palette.muted));
+                        super::address(ui, ctx, &block.producer);
+                    });
+                });
+            }
+
+            return;
+        }
+
+        super::table(ui, look, "latest", &["height", "id", "txs", "producer", "age"], |ui| {
+            for block in blocks {
+                super::block(ui, ctx, &block.id, &format::thousands(&block.height.to_string()));
+                ui.label(RichText::new(format::short(&block.id)).monospace().color(look.palette.soft));
+                ui.monospace(block.tx_count.to_string());
+                super::address(ui, ctx, &block.producer);
+                ui.label(RichText::new(format::ago(block.timestamp, ctx.now)).color(look.palette.muted));
+                ui.end_row();
+            }
+        });
     });
 
-    if ui.link("Open the block map").clicked() {
+    if open_map {
         ctx.go(View::Map);
     }
 }
 
 fn feed(ui: &mut Ui, ctx: &mut Ctx) {
-    ui.strong("Live");
+    let look = ctx.look;
 
-    if ctx.store.feed.is_empty() {
-        ui.weak("Nothing streamed yet. A node started with --stream pushes blocks, reorgs, finality, transactions and peers here as they happen.");
+    super::section(ui, look, "Live", |ui| {
+        if ctx.store.feed.is_empty() {
+            super::note(ui, look, "Nothing streamed yet. A node started with --stream pushes blocks, reorgs, finality, transactions and peers here as they happen.");
 
-        return;
-    }
+            return;
+        }
 
-    egui::ScrollArea::vertical().id_salt("feed").max_height(320.0).show(ui, |ui| {
-        for live in &ctx.store.feed {
+        // The newest only, with no scrolling of its own to catch a finger scrolling the page.
+        for live in ctx.store.feed.iter().take(if look.narrow { 10 } else { 16 }) {
+            let color = match live.name.as_str() {
+                "block" => look.roles.main,
+                "reorg" | "lagged" | "peer down" => look.palette.bad,
+                "finalized" => look.roles.final_,
+                "justified" => look.roles.justified,
+                _ => look.palette.soft,
+            };
             ui.horizontal(|ui| {
-                ui.weak(format::ago(live.at, ctx.now));
-                ui.strong(&live.name);
-                ui.label(&live.text);
+                ui.add_sized([54.0, 16.0], egui::Label::new(RichText::new(format::ago(live.at, ctx.now)).small().color(look.palette.muted)));
+                widgets::dot(ui, color);
+                ui.label(widgets::strong(&live.name, 12.5).color(look.palette.ink));
+                ui.add(egui::Label::new(RichText::new(&live.text).monospace().small().color(look.palette.soft)).truncate());
             });
         }
     });

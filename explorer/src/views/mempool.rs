@@ -1,13 +1,16 @@
 //! The transactions waiting for a block, by sender and nonce, as the node lists them.
 
 use {
-    super::Ctx,
+    super::{Ctx, TxLine},
     crate::api::Ask,
     crate::format,
-    egui::{RichText, Ui},
+    egui::Ui,
 };
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
+    let look = ctx.look;
+    super::heading(ui, look, "Mempool", "Transactions waiting for a block, by sender and nonce.", |_| {});
+
     let store = ctx.store;
     let Some(mempool) = &store.mempool else {
         super::waiting(ui, ctx, &Ask::Mempool);
@@ -15,41 +18,27 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         return;
     };
 
-    super::title(ui, "Mempool");
-    ui.add(
-        egui::ProgressBar::new(mempool.count as f32 / mempool.capacity.max(1) as f32)
-            .text(format!("{} waiting of {}", format::thousands(&mempool.count.to_string()), format::thousands(&mempool.capacity.to_string()))),
-    );
+    super::section(ui, look, "Waiting", |ui| {
+        super::meter(
+            ui,
+            look,
+            mempool.count as f32 / mempool.capacity.max(1) as f32,
+            &format!("{} of {}", format::thousands(&mempool.count.to_string()), format::thousands(&mempool.capacity.to_string())),
+        );
 
-    if mempool.txs.len() < mempool.count {
-        ui.weak(format!("Showing the first {} by sender and nonce.", mempool.txs.len()));
-    }
+        if mempool.txs.len() < mempool.count {
+            super::note(ui, look, format!("Showing the first {} by sender and nonce.", mempool.txs.len()));
+        }
 
-    egui::ScrollArea::vertical().id_salt("mempool").show(ui, |ui| {
-        egui::Grid::new("mempool").num_columns(7).striped(true).show(ui, |ui| {
-            for heading in ["id", "sender", "nonce", "type", "to", "gas limit", "max price · tip"] {
-                ui.strong(heading);
-            }
+        ui.add_space(4.0);
 
-            ui.end_row();
+        if mempool.txs.is_empty() {
+            super::note(ui, look, "Nothing waits: every transaction the node took is in a block.");
 
-            for tx in &mempool.txs {
-                super::tx(ui, ctx, &tx.id);
-                super::address(ui, ctx, &tx.sender);
-                ui.label(tx.nonce.to_string());
-                ui.label(RichText::new(tx.kind()).monospace());
+            return;
+        }
 
-                match tx.target() {
-                    Some(target) => super::address(ui, ctx, target),
-                    None => {
-                        ui.weak("—");
-                    }
-                }
-
-                ui.label(format::thousands(&tx.fee.gas_limit.to_string()));
-                ui.label(format!("{} · {}", format::thousands(&tx.fee.max_price), format::thousands(&tx.fee.tip)));
-                ui.end_row();
-            }
-        });
+        let lines: Vec<TxLine> = mempool.txs.iter().map(|tx| TxLine { tx, index: None, block: None }).collect();
+        super::tx_list(ui, ctx, "mempool", &lines);
     });
 }

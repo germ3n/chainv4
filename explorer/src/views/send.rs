@@ -3,7 +3,8 @@
 //! The node works out the fee offer, as `chainv4 send` does, for a probe signed with none.
 
 use {
-    super::{BAD, Ctx, GOOD, View},
+    super::{Ctx, View},
+    chainv4_ui::{layout::CAN_PICK_FILES, widgets},
     crate::api::{Ask, Failure},
     crate::format,
     crate::model::{Account, Offer},
@@ -68,6 +69,8 @@ enum Step {
 pub struct SendState {
     key: Option<Keypair>,
     key_name: String,
+    /// A key's text, pasted, as chainv4 keygen writes it.
+    pasted: String,
     picked: Arc<Mutex<Option<Picked>>>,
     kind: Kind,
     to: String,
@@ -93,6 +96,7 @@ impl Default for SendState {
         SendState {
             key: None,
             key_name: String::new(),
+            pasted: String::new(),
             picked: Arc::default(),
             kind: Kind::Transfer,
             to: String::new(),
@@ -195,111 +199,93 @@ impl SendState {
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
+    let look = ctx.look;
+    let palette = look.palette;
     take_picked(state);
-    super::title(ui, "Send a transaction");
-    key(ui, ctx, state);
+    super::heading(ui, look, "Send", "Sign a transaction here and send it to the node: the key never leaves this app.", |_| {});
+    super::section(ui, look, "Signing key", |ui| key(ui, ctx, state));
 
     let Some(key) = state.key.clone() else {
         return;
     };
-
-    ui.separator();
-    ui.horizontal(|ui| {
-        for (kind, name) in [(Kind::Transfer, "Transfer"), (Kind::Call, "Call a contract"), (Kind::Deploy, "Deploy"), (Kind::Burn, "Burn")] {
-            ui.selectable_value(&mut state.kind, kind, name);
-        }
-    });
-    ui.add_space(4.0);
-
     let (decimals, symbol) = ctx.coin();
+    let field = if look.narrow { f32::INFINITY } else { 460.0 };
 
-    super::facts(ui, "send", |ui| {
-        if matches!(state.kind, Kind::Transfer | Kind::Call) {
-            super::fact(ui, if state.kind == Kind::Call { "contract" } else { "to" });
-            ui.add(egui::TextEdit::singleline(&mut state.to).hint_text("ed25519:0x… or contract:0x…").desired_width(420.0));
-            ui.end_row();
-        }
-
-        if state.kind == Kind::Call {
-            super::fact(ui, "function");
-            ui.text_edit_singleline(&mut state.function);
-            ui.end_row();
-            super::fact(ui, "arguments");
-            arguments(ui, &mut state.args);
-            ui.end_row();
-        }
-
-        if state.kind != Kind::Deploy {
-            super::fact(ui, if state.kind == Kind::Call { "value" } else { "amount" });
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut state.amount).hint_text("0").desired_width(160.0));
-                ui.label(&symbol);
-            });
-            ui.end_row();
-        }
-
-        if state.kind == Kind::Deploy {
-            super::fact(ui, "code");
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Load a WebAssembly module…").clicked() {
-                        pick(ui.ctx(), state.picked.clone(), Picking::Wasm);
-                    }
-
-                    if ui.button("Open Luau files…").on_hover_text("A contract split across files: open them all, and --@include \"name.lua\" lines take each by name").clicked() {
-                        pick(ui.ctx(), state.picked.clone(), Picking::Lua);
-                    }
-
-                    if let Some((name, bytes)) = &state.wasm {
-                        ui.label(format!("{name}, {} bytes", format::thousands(&bytes.len().to_string())));
-
-                        if ui.small_button("x").clicked() {
-                            state.wasm = None;
-                        }
-                    }
-                });
-
-                if state.wasm.is_none() {
-                    ui.weak(format!("or Luau source, {}:", state.lua_name));
-                    ui.add(egui::TextEdit::multiline(&mut state.lua).code_editor().desired_rows(10).desired_width(f32::INFINITY));
-                    included(ui, state);
-                }
-            });
-            ui.end_row();
-        }
-    });
-
-    egui::CollapsingHeader::new("Fee (worked out by the node unless set)").show(ui, |ui| {
-        super::facts(ui, "fee", |ui| {
-            for (name, value, hint) in [
-                ("gas limit", &mut state.gas_limit, "auto"),
-                ("max price per gas", &mut state.max_price, "auto, in units"),
-                ("tip per gas", &mut state.tip, "0, in units"),
-            ] {
-                super::fact(ui, name);
-                ui.add(egui::TextEdit::singleline(value).hint_text(hint).desired_width(200.0));
-                ui.end_row();
+    super::section(ui, look, "Transaction", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for (kind, name) in [(Kind::Transfer, "Transfer"), (Kind::Call, "Call"), (Kind::Deploy, "Deploy"), (Kind::Burn, "Burn")] {
+                ui.selectable_value(&mut state.kind, kind, name);
             }
         });
-    });
+        ui.add_space(6.0);
 
-    ui.add_space(6.0);
-    let busy = matches!(state.step, Step::Nonce { .. } | Step::Offer { .. } | Step::Submit { .. });
-
-    if ui.add_enabled(!busy, egui::Button::new(RichText::new("Sign and send").strong())).clicked() {
-        state.bundle = match (state.kind, &state.wasm) {
-            (Kind::Deploy, None) => lua_bundle(state).ok(),
-            _ => None,
-        };
-
-        match build(state, &key, decimals) {
-            Ok(tx) => {
-                ctx.api.ask(Ask::Account(key.public().address().to_string()));
-                state.step = Step::Nonce { tx };
+        super::facts(ui, look, "send", |facts| {
+            if matches!(state.kind, Kind::Transfer | Kind::Call) {
+                facts.row(if state.kind == Kind::Call { "contract" } else { "to" }, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut state.to).hint_text("ed25519:0x… or contract:0x…").desired_width(field));
+                });
             }
-            Err(err) => state.step = Step::Failed(err),
+
+            if state.kind == Kind::Call {
+                facts.row("function", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut state.function).hint_text("transfer").desired_width(field.min(260.0)));
+                });
+                facts.row("arguments", |ui| arguments(ui, &palette, &mut state.args));
+            }
+
+            if state.kind != Kind::Deploy {
+                facts.row(if state.kind == Kind::Call { "value" } else { "amount" }, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut state.amount).hint_text("0").desired_width(160.0));
+                    ui.label(&symbol);
+                });
+            }
+        });
+
+        if state.kind == Kind::Deploy {
+            code(ui, look, state);
         }
-    }
+
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new(RichText::new("Fee: worked out by the node unless set").color(palette.soft)).show(ui, |ui| {
+            super::facts(ui, look, "fee", |facts| {
+                for (name, value, hint) in [
+                    ("gas limit", &mut state.gas_limit, "auto"),
+                    ("max price per gas", &mut state.max_price, "auto, in units"),
+                    ("tip per gas", &mut state.tip, "0, in units"),
+                ] {
+                    facts.row(name, |ui| {
+                        ui.add(egui::TextEdit::singleline(value).hint_text(hint).desired_width(200.0));
+                    });
+                }
+            });
+        });
+
+        ui.add_space(8.0);
+        let busy = matches!(state.step, Step::Nonce { .. } | Step::Offer { .. } | Step::Submit { .. });
+
+        if widgets::primary(ui, &palette, "Sign and send", !busy).clicked() {
+            state.bundle = match (state.kind, &state.wasm) {
+                (Kind::Deploy, None) => lua_bundle(state).ok(),
+                _ => None,
+            };
+
+            match build(state, &key, decimals) {
+                Ok(tx) => {
+                    ctx.api.ask(Ask::Account(key.public().address().to_string()));
+                    state.step = Step::Nonce { tx };
+                }
+                Err(err) => state.step = Step::Failed(err),
+            }
+        }
+
+        ui.add_space(4.0);
+        outcome(ui, ctx, state);
+    });
+}
+
+/// Where sending stands, under the button.
+fn outcome(ui: &mut Ui, ctx: &mut Ctx, state: &SendState) {
+    let palette = ctx.look.palette;
 
     match &state.step {
         Step::Idle => {}
@@ -308,7 +294,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         Step::Submit { .. } => progress(ui, "Submitting…"),
         Step::Waiting { id } => {
             let id = id.clone();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.spinner();
                 ui.label("Taken by the node, waiting for a block:");
                 super::tx(ui, ctx, &id);
@@ -316,83 +302,147 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         }
         Step::Landed { id, failed } => {
             let (id, failed) = (id.clone(), failed.clone());
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 match failed {
-                    None => ui.colored_label(GOOD, "In a block:"),
-                    Some(_) => ui.colored_label(BAD, "In a block, but it failed:"),
+                    None => widgets::pill(ui, "in a block", palette.good),
+                    Some(_) => widgets::pill(ui, "in a block, but it failed", palette.bad),
                 };
                 super::tx(ui, ctx, &id);
 
-                if ui.button("Open").clicked() {
+                if widgets::quiet(ui, &palette, "Open").clicked() {
                     ctx.go(View::Tx(id.clone()));
                 }
             });
 
             if let Some(why) = failed {
-                ui.colored_label(BAD, why);
+                ui.colored_label(palette.bad, why);
             }
         }
         Step::Failed(err) => {
-            ui.colored_label(BAD, err);
+            ui.colored_label(palette.bad, err);
         }
     }
+}
+
+/// A deploy's code: a WebAssembly module, or Luau, typed or opened from its files.
+fn code(ui: &mut Ui, look: super::Look, state: &mut SendState) {
+    let palette = look.palette;
+    ui.add_space(4.0);
+    widgets::caps(ui, &palette, "Code");
+
+    if CAN_PICK_FILES {
+        ui.horizontal_wrapped(|ui| {
+            if widgets::quiet(ui, &palette, "Load a WebAssembly module…").clicked() {
+                pick(ui.ctx(), state.picked.clone(), Picking::Wasm);
+            }
+
+            if widgets::quiet(ui, &palette, "Open Luau files…")
+                .on_hover_text("A contract split across files: open them all, and --@include \"name.lua\" lines take each by name")
+                .clicked()
+            {
+                pick(ui.ctx(), state.picked.clone(), Picking::Lua);
+            }
+        });
+    }
+
+    if let Some((name, bytes)) = &state.wasm {
+        let mut drop = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{name}, {} bytes", format::thousands(&bytes.len().to_string()))).monospace());
+            drop = ui.small_button("✕").clicked();
+        });
+
+        if drop {
+            state.wasm = None;
+        }
+
+        return;
+    }
+
+    ui.label(RichText::new(format!("Luau source, {}:", state.lua_name)).color(palette.muted));
+    ui.add(egui::TextEdit::multiline(&mut state.lua).code_editor().desired_rows(if look.narrow { 8 } else { 12 }).desired_width(f32::INFINITY));
+    included(ui, state);
 }
 
 fn key(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
-    ui.horizontal(|ui| {
-        if ui.button("Load a key file…").clicked() {
-            pick(ui.ctx(), state.picked.clone(), Picking::Key);
-        }
+    let look = ctx.look;
+    let palette = look.palette;
 
-        if ui.button("Use the development key").on_hover_text("Its seed is in chainv4's source: only for dev chains").clicked() {
-            state.key = Some(Keypair::development());
-            state.key_name = "the development key".to_string();
-        }
-
-        if state.key.is_some() && ui.button("Forget the key").clicked() {
-            state.key = None;
-            state.key_name.clear();
-        }
-    });
-
-    match &state.key {
+    match state.key.clone() {
         Some(key) => {
             let address = key.public().address().to_string();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(format!("Signing with {} as", state.key_name));
                 super::address(ui, ctx, &address);
-
-                match ctx.store.accounts.get(&address) {
-                    Some(account) => {
-                        ui.weak(format!("holding {}, next nonce {}", ctx.coins(&account.balance), account.nonce));
-                    }
-                    None => ctx.api.ask(Ask::Account(address.clone())),
-                }
             });
-            ui.weak("The key stays in this window. Only signed transactions leave it.");
+
+            match ctx.store.accounts.get(&address) {
+                Some(account) => super::note(ui, look, format!("Holding {}, next nonce {}.", ctx.coins(&account.balance), account.nonce)),
+                None => ctx.api.ask(Ask::Account(address.clone())),
+            }
+
+            if widgets::quiet(ui, &palette, "Forget the key").clicked() {
+                state.key = None;
+                state.key_name.clear();
+            }
         }
         None => {
-            ui.weak("Load a key file written by chainv4 keygen. The key stays in this window, and only signed transactions leave it.");
+            super::note(ui, look, "A key as chainv4 keygen writes it. It stays in this app, and only signed transactions leave it.");
+            ui.add_space(4.0);
+            let pasted = widgets::beside(
+                ui,
+                |ui| widgets::quiet(ui, &palette, "Use it").clicked(),
+                |ui, width| {
+                    ui.add(egui::TextEdit::singleline(&mut state.pasted).password(true).hint_text("ed25519:0x…").desired_width(width));
+                },
+            );
+
+            if pasted {
+                match Keypair::from_key_file(state.pasted.trim()) {
+                    Ok(key) => {
+                        state.key = Some(key);
+                        state.key_name = "the key pasted".to_string();
+                        state.pasted.clear();
+                    }
+                    Err(err) => state.step = Step::Failed(err),
+                }
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                if CAN_PICK_FILES && widgets::quiet(ui, &palette, "Load a key file…").clicked() {
+                    pick(ui.ctx(), state.picked.clone(), Picking::Key);
+                }
+
+                if widgets::quiet(ui, &palette, "Use the development key").on_hover_text("Its seed is in chainv4's source: only for dev chains").clicked() {
+                    state.key = Some(Keypair::development());
+                    state.key_name = "the development key".to_string();
+                }
+            });
+
+            if let Step::Failed(err) = &state.step {
+                ui.colored_label(palette.bad, err);
+            }
         }
     }
 }
 
-fn arguments(ui: &mut Ui, args: &mut Vec<(String, String)>) {
+fn arguments(ui: &mut Ui, palette: &chainv4_ui::Palette, args: &mut Vec<(String, String)>) {
     ui.vertical(|ui| {
         let mut remove = None;
 
         for (index, (kind, value)) in args.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt(("send_kind", index)).selected_text(kind.as_str()).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt(("send_kind", index)).width(90.0).selected_text(kind.as_str()).show_ui(ui, |ui| {
                     for option in KINDS {
                         ui.selectable_value(kind, option.to_string(), option);
                     }
                 });
-                ui.text_edit_singleline(value);
 
-                if ui.small_button("x").clicked() {
+                if ui.small_button("✕").clicked() {
                     remove = Some(index);
                 }
+
+                ui.add(egui::TextEdit::singleline(value).desired_width(ui.available_width().min(320.0)));
             });
         }
 
@@ -400,7 +450,7 @@ fn arguments(ui: &mut Ui, args: &mut Vec<(String, String)>) {
             args.remove(index);
         }
 
-        if ui.small_button("+ argument").clicked() {
+        if widgets::quiet(ui, palette, "+ argument").clicked() {
             args.push(("u256".to_string(), String::new()));
         }
     });
@@ -466,7 +516,7 @@ fn included(ui: &mut Ui, state: &mut SendState) {
     }
 
     ui.horizontal_wrapped(|ui| {
-        ui.weak("with");
+        ui.label(RichText::new("with").color(ui.visuals().weak_text_color()));
         let mut dropped = None;
 
         for (index, (name, _)) in state.included.iter().enumerate() {
@@ -484,13 +534,17 @@ fn included(ui: &mut Ui, state: &mut SendState) {
 
     match lua_bundle(state) {
         Ok(bundle) if bundle.files.len() > 1 => {
-            ui.weak(format!("Sends {} with {} put in: {} bytes", bundle.files[0], bundle.files[1..].join(", "), format::thousands(&bundle.source.len().to_string())));
+            ui.label(
+                RichText::new(format!("Sends {} with {} put in: {} bytes", bundle.files[0], bundle.files[1..].join(", "), format::thousands(&bundle.source.len().to_string())))
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
         }
         Ok(_) => {
-            ui.weak("It includes none of them yet: a --@include \"name.lua\" line puts one in.");
+            ui.label(RichText::new("It includes none of them yet: a --@include \"name.lua\" line puts one in.").small().color(ui.visuals().weak_text_color()));
         }
         Err(why) => {
-            ui.colored_label(BAD, why);
+            ui.colored_label(ui.visuals().error_fg_color, why);
         }
     }
 }
@@ -590,7 +644,11 @@ fn pick(wake: &egui::Context, picked: Arc<Mutex<Option<Picked>>>, picking: Picki
         wake.request_repaint();
     };
 
-    #[cfg(not(target_arch = "wasm32"))]
+    // Android has no picker an egui app can reach yet: CAN_PICK_FILES keeps its buttons away.
+    #[cfg(target_os = "android")]
+    drop(finish);
+
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     {
         let dialog = match picking {
             Picking::Lua => rfd::FileDialog::new().add_filter("Luau", &["lua", "luau"]),

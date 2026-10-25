@@ -92,7 +92,7 @@ other pages explain each part in full; this one is the short list to keep in min
   is signed: the chain holds one source, and the 128 KiB limit is the whole one's. `send` checks
   it compiles first and names any mistake by file and line. See
   [Contracts](contracts.md#splitting-a-contract-across-files).
-- **The explorer signs where it runs.** Its key stays in the window, desktop or browser, and only
+- **The explorer signs where it runs.** Its key stays in the window, desktop, browser or phone, and only
   signed transactions go to the node. Serve the web app from the node itself with
   `--explorer explorer/dist`, or allow the page's origin with `--cors`. See [Explorer](explorer.md).
 - **The wallet keeps its keys sealed on the device.** A password seals them, and nothing opens
@@ -108,10 +108,15 @@ other pages explain each part in full; this one is the short list to keep in min
   transactions, so an Ethereum wallet can hold the key yet not sign for chainv4, and a
   secp256k1 address cannot be checked as a curve point: a mistyped one takes coins for good.
   See [Crypto](crypto.md#keys-and-signatures).
-- **The Android wallet is built with xbuild, not Gradle.** `wallet/build-android.sh` needs clang,
-  lld and llvm-ar, and no NDK. Without a key it signs with xbuild's debug key, the same for
-  everyone: Android updates an app only with one signed by the same key, so pick your own key
-  (`ANDROID_SIGNING_PEM` in CI) before anyone installs it. It needs Android 7 or newer.
+- **The Android apps are built with xbuild, not Gradle.** `wallet/build-android.sh` and
+  `explorer/build-android.sh`, both through `ui/build-android.sh`, need clang, lld and llvm-ar, and
+  no NDK. Without a key they sign with xbuild's debug key, the same for everyone: Android updates
+  an app only with one signed by the same key, so pick your own key (`ANDROID_SIGNING_PEM` in CI)
+  before anyone installs them. They need Android 7 or newer.
+- **The wallet and the explorer share the `ui` crate, not a look.** `ui/` holds the palette,
+  density and type machinery, the widgets and the Android glue; each app picks its own colors,
+  fonts and density. A change to a shared widget shows in both. See
+  [The ui crate](development.md#the-ui-crate).
 - **Docker puts HTTPS in front, not around peer-to-peer.** nginx terminates TLS for the API,
   the explorer and the wallet; QUIC is TLS 1.3 already, so the p2p port goes straight to the node.
   A chain made from the presets signs with the development key until `docker/config` holds keys

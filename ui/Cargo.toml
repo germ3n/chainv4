@@ -1,0 +1,22 @@
+[package]
+name = "chainv4-ui"
+version = "0.1.0"
+edition = "2024"
+description = "What chainv4's egui apps share: a palette, type and density each app picks for its own look, the widgets their pages are built from, and running on Android."
+
+[dependencies]
+# glow, as both apps render with it: eframe builds with a renderer only.
+eframe = { version = "0.37.0", default-features = false, features = ["glow"] }
+egui = "0.37.0"
+log = "0.4.34"
+
+# Android runs an app in a NativeActivity: no Java of its own.
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.15.1"
+# Copying, through Android's ClipboardManager: egui-winit reaches no clipboard there.
+jni = "0.22.4"
+eframe = { version = "0.37.0", default-features = false, features = ["android-native-activity"] }
+winit = { version = "0.30.13", default-features = false, features = ["android-native-activity"] }
+
+# A workspace of its own, as the wallet and the explorer are, which use it by path.
+[workspace]

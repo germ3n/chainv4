@@ -1,9 +1,10 @@
 name: android
 
-# The wallet's Android app, built with wallet/build-android.sh: an APK for arm64 phones and one for
-# x86-64 emulators. They are signed with the release key in the ANDROID_SIGNING_PEM secret when
-# there is one (a certificate and its PKCS#8 RSA key, see docs/wallet.md), and with xbuild's debug
-# key otherwise. Every run keeps them as artifacts; a v* tag attaches them to its release.
+# The wallet's and the explorer's Android apps, each built with its build-android.sh (which both
+# hand to ui/build-android.sh): an APK for arm64 phones and one for x86-64 emulators. They are
+# signed with the release key in the ANDROID_SIGNING_PEM secret when there is one (a certificate
+# and its PKCS#8 RSA key, see docs/wallet.md), and with xbuild's debug key otherwise. Every run
+# keeps them as artifacts; a v* tag attaches all four to its release.
 on:
   push:
     branches: [main, master]
@@ -19,11 +20,12 @@ env:
 
 jobs:
   apk:
-    name: wallet apk (${{ matrix.arch }})
+    name: ${{ matrix.app }} apk (${{ matrix.arch }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        app: [wallet, explorer]
         arch: [arm64, x64]
     steps:
       - uses: actions/checkout@v7
@@ -32,8 +34,8 @@ jobs:
           targets: aarch64-linux-android, x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: wallet -> target
-          key: android-${{ matrix.arch }}
+          workspaces: ${{ matrix.app }} -> target
+          key: android-${{ matrix.app }}-${{ matrix.arch }}
       # xbuild compiles and links with the host's clang and lld, against an Android sysroot it
       # downloads itself: no NDK.
       - name: LLVM
@@ -47,14 +49,14 @@ jobs:
           else
               echo "::notice::no ANDROID_SIGNING_PEM secret: signing with xbuild's debug key"
           fi
-          wallet/build-android.sh --arch ${{ matrix.arch }}
+          ${{ matrix.app }}/build-android.sh --arch ${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
         with:
-          name: chainv4-wallet-android-${{ matrix.arch }}
-          path: wallet/target/android/chainv4-wallet-${{ matrix.arch }}.apk
+          name: chainv4-${{ matrix.app }}-android-${{ matrix.arch }}
+          path: ${{ matrix.app }}/target/android/chainv4-${{ matrix.app }}-${{ matrix.arch }}.apk
           if-no-files-found: error
 
-  # One job attaches both, so two never race to make the release.
+  # One job attaches them all, so two never race to make the release.
   release:
     name: attach to release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -65,7 +67,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          pattern: chainv4-wallet-android-*
+          pattern: chainv4-*-android-*
           merge-multiple: true
           path: apks
       - name: release

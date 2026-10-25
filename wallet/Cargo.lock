@@ -785,13 +785,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "chainv4-wallet"
+name = "chainv4-ui"
 version = "0.1.0"
 dependencies = [
  "android_logger",
+ "eframe",
+ "egui",
+ "jni",
+ "log",
+ "winit",
+]
+
+[[package]]
+name = "chainv4-wallet"
+version = "0.1.0"
+dependencies = [
  "argon2",
  "chacha20poly1305",
  "chainv4",
+ "chainv4-ui",
  "eframe",
  "egui",
  "ehttp",
@@ -806,7 +818,6 @@ dependencies = [
  "web-sys",
  "web-time",
  "wincode",
- "winit",
 ]
 
 [[package]]

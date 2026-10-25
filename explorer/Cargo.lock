@@ -167,6 +167,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
+name = "android_log-sys"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84521a3cf562bc62942e294181d9eef17eb38ceb8c68677bc49f144e4c3d4f8d"
+
+[[package]]
+name = "android_logger"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbb4e440d04be07da1f1bf44fb4495ebd58669372fe0cffa6e48595ac5bd88a3"
+dependencies = [
+ "android_log-sys",
+ "env_filter 0.1.4",
+ "log",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -679,6 +696,39 @@ dependencies = [
  "wincode",
  "xxhash-rust",
  "zeroize",
+]
+
+[[package]]
+name = "chainv4-explorer"
+version = "0.1.0"
+dependencies = [
+ "chainv4",
+ "chainv4-ui",
+ "eframe",
+ "egui",
+ "ehttp",
+ "env_logger",
+ "getrandom 0.4.3",
+ "log",
+ "rfd",
+ "serde",
+ "serde_json",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+ "wincode",
+]
+
+[[package]]
+name = "chainv4-ui"
+version = "0.1.0"
+dependencies = [
+ "android_logger",
+ "eframe",
+ "egui",
+ "jni",
+ "log",
+ "winit",
 ]
 
 [[package]]
@@ -1211,18 +1261,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui_plot"
-version = "0.38.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c34f8fe086d7e69ce558dcc85f7c7be593092525d01cb30caa560044bc2bbaa"
-dependencies = [
- "ahash",
- "egui",
- "emath",
- "nohash-hasher",
-]
-
-[[package]]
 name = "ehttp"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1314,6 +1352,16 @@ dependencies = [
 
 [[package]]
 name = "env_filter"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bf3c259d255ca70051b30e2e95b5446cdb8949ac4cd22c0d7fd634d89f568e2"
+dependencies = [
+ "log",
+ "regex",
+]
+
+[[package]]
+name = "env_filter"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
@@ -1330,7 +1378,7 @@ checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
 dependencies = [
  "anstream",
  "anstyle",
- "env_filter",
+ "env_filter 2.0.0",
  "jiff",
  "log",
 ]
@@ -1423,27 +1471,6 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
-]
-
-[[package]]
-name = "explorer"
-version = "0.1.0"
-dependencies = [
- "chainv4",
- "eframe",
- "egui",
- "egui_plot",
- "ehttp",
- "env_logger",
- "getrandom 0.4.3",
- "log",
- "rfd",
- "serde",
- "serde_json",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
- "wincode",
 ]
 
 [[package]]

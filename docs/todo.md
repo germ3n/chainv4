@@ -342,9 +342,16 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   NativeActivity with no Java, for Android 7 and up. It keeps to the part of the screen Android
   says can be seen, and swaps the sidebar for tabs on narrow screens. CI builds it for arm64 and
   x86-64 and attaches both to `v*` releases, signed with the `ANDROID_SIGNING_PEM` secret.
-- [ ] **No clipboard or file picker on Android.** egui reaches neither there, so Copy and "Open
-  key file" are left out. A small JNI bridge to ClipboardManager, and the Storage Access
-  Framework, would bring them.
+- [x] **The explorer runs on Android, and on phones.** `explorer/build-android.sh` builds its APK
+  the way the wallet's is built, through the shared `ui/build-android.sh`, and CI builds and
+  releases it beside the wallet's. Below 640 points it swaps its sidebar for tabs, and its tables
+  for stacked rows. Both apps share the `ui` crate: palettes, densities, widgets and Android glue.
+- [x] **Copying on Android.** egui reaches no clipboard there, so the `ui` crate hands what is
+  copied to Android's ClipboardManager over JNI. Addresses copy with a click or a tap in both apps.
+- [ ] **No file picker on Android.** egui reaches none there, so "Open key file" and the explorer's
+  file loading are left out, and keys are typed. The Storage Access Framework would bring them.
+- [ ] **No paste from Android's clipboard.** Copying goes out through JNI, but nothing reads the
+  clipboard back for a long-press paste into a field.
 - [ ] **xbuild is pinned to a commit.** It has had no release since 0.2.0; move to one when it
   does. It cannot add a network security config or other resources either.
 - [x] **Seed phrases.** BIP39 words with an optional passphrase; each account derives an Ed25519
@@ -411,8 +418,8 @@ these hardcoded?
 maybe add ability to use u128 for amounts if not too mcuh effort
 evm
 
-include method for lua scripts when compiling
-build android/ios apps for wallet/explorer
 tighten lua sandbox
 make sure contract addresses start with contract:, then limit which keys can call into it potentailly
 add a thing to storage (At least lua), where we dont have to save addresses as text but can just save it directly
+make a native ens type thing, with fees/params that are from genesis or voted on i guess
+make sure max supply is configurable
