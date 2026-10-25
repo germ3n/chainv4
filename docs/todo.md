@@ -261,9 +261,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **Snapshots come from one peer at a time,** and a pivot only stays servable for
   `max_reorg_depth` blocks. Asking several peers at once, and frozen snapshots kept by serving
   nodes, would suit large states.
-- [x] **Signing offline.** The wallet installs as an online wallet, an offline signer that makes
-  no requests, or a watch-only sender. Pairing, requests and signed transactions travel as QR
-  codes read off photos, or as text.
+- [x] **Signing offline.** The wallet installs as an online wallet or an offline signer that makes
+  no requests; an online one holds watch-only wallets beside ones with keys. Pairing, requests and
+  signed transactions travel as QR codes read off photos, or as text.
 - [x] **Messages too long for one code go as parts,** each photographed in turn and put back
   together in any order. Animated codes, read by a live camera, would take them in one go.
 - [ ] **The explorer pins genesis on first use.** It should also take a genesis id to trust from
@@ -422,9 +422,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   unmigratable.
 - [ ] **Errors a call raises name the bundle's lines.** Only deploys are placed back in their files;
   `chainv4 send call` could do the same when given the contract's files.
-- [ ] **Ethereum wallets cannot sign for chainv4.** A secp256k1 key signs chainv4's own transaction
-  encoding. An EIP-712 typed-data form of a transaction would let MetaMask and hardware wallets sign
-  one.
+- [x] **Ethereum wallets sign for chainv4.** A transaction's EIP-712 typed form, salted with the
+  genesis id, is a signature nodes take: MetaMask and the hardware wallets it drives sign for the
+  browser wallet, and `chainv4 send --eip712` signs it with a key of its own.
+- [ ] **Contract calls show as bytes in MetaMask.** Only transfers and token transfers have typed
+  fields; a call's arguments have no clean EIP-712 form, as it has no unions.
+- [ ] **Hardware wallets reach the wallet through MetaMask alone,** and the desktop and Android apps
+  reach none. WalletConnect, or USB straight to the device, would.
 - [ ] **The wallet keeps its words as plain strings while unlocked.** The vault seals them at rest,
   but in memory they are ordinary `String`s, not zeroized when the wallet locks.
 - [ ] **The wallet proves only the registry's first page of tokens,** 100 by symbol, as the

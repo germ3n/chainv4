@@ -7,7 +7,6 @@ use {
     super::Ctx,
     super::scan::Scan,
     crate::airgap::Message,
-    crate::app::Role,
     crate::format,
     crate::keys::{self, Holder},
     crate::theme,
@@ -40,6 +39,8 @@ pub struct AccountsState {
     removing: Option<usize>,
     /// Reading a signer's account, on a watch-only sender.
     scan: Scan,
+    /// MetaMask's account once it connected, or why it did not.
+    connecting: Arc<Mutex<Option<Result<chainv4::crypto::keypair::PublicKey, String>>>>,
 }
 
 impl AccountsState {
@@ -53,16 +54,29 @@ impl AccountsState {
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
     let palette = *ctx.palette;
     take_picked(ctx, state);
+    let connected = state.connecting.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+
+    match connected {
+        Some(Ok(key)) => {
+            if state.name.trim().is_empty() {
+                state.name = "MetaMask".to_string();
+            }
+
+            add(ctx, state, Ok(Holder::metamask(String::new(), key)));
+        }
+        Some(Err(why)) => state.error = Some(why),
+        None => {}
+    }
 
     theme::title(ui, &palette, "Accounts", "The keys this wallet holds, sealed with your password on this device.");
 
     if ctx.holders.is_empty() {
         theme::card(ui, &palette, |ui| {
             theme::caps(ui, &palette, "Start here");
-            let text = match (ctx.settings.role(), &ctx.book.phrase) {
-                (Role::Sender, _) => "Add an account from the offline signer: on it, open Pair, and read its code below.",
-                (_, Some(_)) => "Make a new account from the wallet's words, or bring in a key you have. Either way the keys stay on this device, sealed.",
-                (_, None) => "Make a new account, or bring in a key you have. Either way the key stays on this device, sealed.",
+            let text = match (ctx.book.watch, &ctx.book.phrase) {
+                (true, _) => "Add an account from the offline signer: on it, open Pair, and read its code below.",
+                (false, Some(_)) => "Make a new account from the wallet's words, or bring in a key you have. Either way the keys stay on this device, sealed.",
+                (false, None) => "Make a new account, or bring in a key you have. Either way the key stays on this device, sealed.",
             };
             ui.label(RichText::new(text).color(palette.soft));
         });
@@ -95,7 +109,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
 
     ui.add_space(4.0);
 
-    if ctx.settings.role() == Role::Sender {
+    if ctx.book.watch {
         from_signer(ui, ctx, state);
 
         return;
@@ -142,6 +156,17 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
             // On Android, only when the APK carries the picker.
             if files::can_pick(ui.ctx()) && theme::quiet(ui, &palette, "Open key file…").clicked() {
                 pick(ctx.wake, state.picked.clone());
+            }
+
+            // In the browser, with MetaMask there.
+            if crate::metamask::available()
+                && theme::quiet(ui, &palette, "Connect MetaMask").on_hover_text("Its account, signed for by MetaMask, or a hardware wallet through it").clicked()
+            {
+                let (inbox, wake) = (state.connecting.clone(), ctx.wake.clone());
+                crate::metamask::connect(move |connected| {
+                    *inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected);
+                    wake.request_repaint();
+                });
             }
         });
 
@@ -239,6 +264,7 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
 
         let watched = ctx.holders[index].keys.is_empty();
         let from = match (number, watched) {
+            _ if ctx.holders[index].by_metamask() => "MetaMask · it signs, in the browser".to_string(),
             (_, true) => "Watched · the offline signer holds its keys".to_string(),
             (Some(number), false) => format!("From the words · index {number}"),
             (None, false) => "A key brought in".to_string(),
@@ -545,6 +571,7 @@ mod tests {
                 passphrase: String::new(),
             }),
             accounts: Vec::new(),
+            watch: false,
         };
         let first = new_account(&words, &[], KeyType::Ed25519).unwrap();
         let second = new_account(&words, std::slice::from_ref(&first), KeyType::Ed25519).unwrap();

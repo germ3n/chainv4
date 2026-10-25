@@ -306,7 +306,8 @@ pub fn dry_run(db: Arc<dyn Database>, rules: &Rules, vm: &Arc<Vm>, probe: &Signe
     tx.nonce = Accounts::new(&layer).get(&tx.sender())?.nonce;
     tx.fee = crate::structs::tx::FeeOffer { gas_limit, max_price: base_price, tip: u256::ZERO };
     let height = stored_tip(&*db)?.map_or(0, |tip| tip.header.height) + 1;
-    let context = BlockContext { height, producer: Address::Ed25519([0; 32]), base_price };
+    let genesis = stored_header_at(&*db, 0)?.map_or_else(|| Hash::zero(rules.hash), |genesis| genesis.id());
+    let context = BlockContext { height, producer: Address::Ed25519([0; 32]), base_price, genesis };
 
     match execute::execute_verified(&layer, &tx, rules, vm, &context) {
         Ok(executed) => Ok(DryRun {
@@ -999,6 +1000,7 @@ impl Chain {
             height: parent.height + 1,
             producer,
             base_price: self.base_price_after(parent),
+            genesis: self.genesis(),
         };
         let txs = self.within_bytes(txs);
         let ran = match self.runner().run(layer, &txs, &context, Unfit::Skip) {
@@ -1496,6 +1498,7 @@ impl Chain {
             height,
             producer: block.header.producer,
             base_price: block.header.base_price,
+            genesis: self.genesis(),
         };
         let ran = self.runner().run(&layer, &block.txs, &context, Unfit::Refuse)?;
         let receipts = ran.receipts;

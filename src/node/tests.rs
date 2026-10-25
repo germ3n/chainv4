@@ -237,6 +237,54 @@ fn followers_import_gossiped_blocks_and_never_produce() {
     assert!(sent(&mut follower_net).is_empty());
 }
 
+#[cfg(feature = "secp256k1")]
+#[test]
+fn a_transfer_signed_as_typed_data_goes_into_a_block_as_any_other() {
+    use crate::chain::Allocation;
+    use crate::crypto::keypair::KeyType;
+
+    let authority = DevAuthority::dev_keypair();
+    let ethereum = Keypair::generate(KeyType::Secp256k1).unwrap();
+    let mut genesis = Genesis {
+        fees: None,
+        ..Genesis::dev_authority(authority.public())
+    };
+    genesis.allocations.push(Allocation { address: ethereum.public().address(), amount: u256::new(1_000) });
+    let start = |producer: Option<Box<dyn Producer>>| {
+        let (link, fake) = NetLink::pair();
+
+        (Node::new(Arc::new(MemoryDb::default()), &genesis, producer, link).unwrap(), fake)
+    };
+    let (mut producer, mut producer_net) = start(Some(Box::new(AuthorityProducer::new(authority, SLOT))));
+    let (mut follower, follower_net) = start(None);
+    let bob = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap().public().address();
+    let transfer = Tx::Transfer {
+        from: ethereum.public().address(),
+        to: bob,
+        amount: Amount::U128(42),
+    };
+
+    // Signed for another chain, it is refused at the door.
+    let elsewhere = Hash::from_bytes(HashType::default_chain(), &[9; 32]).unwrap();
+    let foreign = SignedTx::sign_eip712(transfer.clone(), 0, FeeOffer::NONE, &ethereum, &elsewhere).unwrap();
+
+    assert!(producer.submit(foreign).is_err());
+
+    // For this one, it goes into the producer's block, and the follower imports it.
+    let signed = SignedTx::sign_eip712(transfer, 0, FeeOffer::NONE, &ethereum, &producer.chain().genesis()).unwrap();
+    producer.submit(signed.clone()).unwrap();
+    producer.step(SLOT).unwrap();
+    let block = published_block(&mut producer_net);
+
+    assert_eq!(block.txs, [signed]);
+
+    follower_net.events.send(NetEvent::Block { from: PeerId::random(), block }).unwrap();
+    follower.step(SLOT).unwrap();
+
+    assert_eq!(Accounts::new(&follower.chain().state()).get(&bob).unwrap().balance, u256::new(42));
+    assert_eq!(Accounts::new(&follower.chain().state()).get(&ethereum.public().address()).unwrap().nonce, 1);
+}
+
 #[test]
 fn transactions_travel_to_the_producer_and_into_a_block() {
     let (mut producer, mut producer_net) = node(true);

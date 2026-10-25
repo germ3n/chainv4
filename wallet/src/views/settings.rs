@@ -308,7 +308,7 @@ fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         ui.add_space(10.0);
         theme::caps(ui, &palette, "Its words");
 
-        match (ctx.settings.role() == Role::Sender, ctx.book.phrase.clone()) {
+        match (ctx.book.watch, ctx.book.phrase.clone()) {
             (true, _) => {
                 ui.label(RichText::new("None here: a watch-only wallet holds public keys alone. The words are the signer's, and stay with it.").small().color(palette.muted));
             }

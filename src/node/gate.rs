@@ -9,7 +9,7 @@ use {
     super::stream::NodeEvent,
     super::verifier::Arrival,
     crate::chain::Fees,
-    crate::crypto::verifiable::{Verifiable, VerifyError},
+    crate::crypto::verifiable::VerifyError,
     crate::db::{Database, State},
     crate::mempool::{Mempool, MempoolError},
     crate::net::{Backlog, NetCommand, NetEvent, Origin},
@@ -26,6 +26,8 @@ pub(super) struct Gate {
     db: Arc<dyn Database>,
     fees: Option<Arc<Fees>>,
     hash: HashType,
+    /// The chain's genesis id, which EIP-712 signatures are bound to.
+    genesis: Hash,
     /// Whether the node is taking its state from a snapshot, when nothing can be checked.
     syncing: AtomicBool,
     commands: async_mpsc::UnboundedSender<NetCommand>,
@@ -63,6 +65,7 @@ impl Gate {
         db: Arc<dyn Database>,
         fees: Option<Arc<Fees>>,
         hash: HashType,
+        genesis: Hash,
         commands: async_mpsc::UnboundedSender<NetCommand>,
         backlog: Arc<Backlog>,
     ) -> Gate {
@@ -71,11 +74,17 @@ impl Gate {
             db,
             fees,
             hash,
+            genesis,
             syncing: AtomicBool::new(false),
             commands,
             events: OnceLock::new(),
             backlog,
         }
+    }
+
+    /// The chain's genesis id, which a transaction's signature is checked on.
+    pub(super) fn genesis(&self) -> Hash {
+        self.genesis
     }
 
     /// The mempool, locked: hold it only as long as the work takes.
@@ -163,7 +172,7 @@ impl Gate {
             return Err(MempoolError::Syncing);
         }
 
-        let checked = checked.unwrap_or_else(|| tx.verify());
+        let checked = checked.unwrap_or_else(|| tx.verify_on(&self.genesis));
         Mempool::check(&tx, checked, &State::new(self.db.clone()), self.fees.as_deref())?;
 
         self.mempool().insert(tx)

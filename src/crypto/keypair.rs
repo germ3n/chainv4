@@ -357,6 +357,10 @@ pub enum Signature {
     #[cfg(feature = "secp256k1")]
     #[wincode(tag = 2)]
     Secp256k1([u8; 64]),
+    #[document(summary = "A secp256k1 ECDSA signature over a transaction's EIP-712 typed hash, as MetaMask and hardware wallets sign typed data, bound to one chain by its genesis id: r, then s, which is always low. Only SignedTx::verify_on checks it, knowing the chain; PublicKey::verify_signature refuses it.")]
+    #[cfg(feature = "secp256k1")]
+    #[wincode(tag = 3)]
+    Secp256k1Eip712([u8; 64]),
 }
 
 impl Hashable for Signature {
@@ -372,7 +376,7 @@ impl fmt::Display for Signature {
             #[cfg(feature = "edblake")]
             Signature::EdBlake(bytes) => f.write_str(&to_hex(bytes)),
             #[cfg(feature = "secp256k1")]
-            Signature::Secp256k1(bytes) => f.write_str(&to_hex(bytes)),
+            Signature::Secp256k1(bytes) | Signature::Secp256k1Eip712(bytes) => f.write_str(&to_hex(bytes)),
         }
     }
 }
@@ -586,6 +590,11 @@ mod tests {
             Signature::Secp256k1(mut bytes) => {
                 bytes[40] ^= 1;
                 Signature::Secp256k1(bytes)
+            }
+            #[cfg(feature = "secp256k1")]
+            Signature::Secp256k1Eip712(mut bytes) => {
+                bytes[40] ^= 1;
+                Signature::Secp256k1Eip712(bytes)
             }
         }
     }

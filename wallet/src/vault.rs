@@ -31,6 +31,9 @@ pub struct Sealed {
 pub struct Book {
     pub phrase: Option<Words>,
     pub accounts: Vec<StoredAccount>,
+    /// A watch-only wallet's: its accounts are an offline signer's, each watched, and it holds no
+    /// key and no words.
+    pub watch: bool,
 }
 
 /// A seed phrase, and the BIP39 passphrase it is used with, empty for none.
@@ -58,6 +61,10 @@ pub enum Source {
     /// An account an offline signer holds the keys of, watched: its public keys, as the signer
     /// paired it, and nothing to sign with.
     Watch { keys: Vec<String> },
+    /// An Ethereum account MetaMask holds, or a hardware wallet through it: its public key, and
+    /// nothing to sign with here. MetaMask signs what it sends, in the browser.
+    #[serde(rename = "metamask")]
+    MetaMask { key: String },
 }
 
 /// One account, as vaults from before seed phrases held it.
@@ -164,6 +171,7 @@ mod tests {
                     source: Source::Key { key: Keypair::development().to_key_file() },
                 },
             ],
+            watch: false,
         };
         let vault = Vault::create("correct horse").unwrap();
         let sealed = vault.seal(&book).unwrap();

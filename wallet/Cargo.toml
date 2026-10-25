@@ -47,6 +47,9 @@ eframe = { version = "0.37.0", default-features = false, features = ["accesskit"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 wasm-bindgen-futures = "0.4.58"
 web-sys = { version = "0.3.85", features = ["Document", "Element", "HtmlCanvasElement", "Location", "UrlSearchParams", "Window"] }
+# MetaMask, through the page's window.ethereum: requests made and promises awaited from Rust.
+js-sys = "0.3.106"
+wasm-bindgen = "0.2.129"
 
 # Android runs it in a NativeActivity: no Java of its own, and chainv4-ui does the rest.
 # accesskit does not work with one.

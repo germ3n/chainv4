@@ -65,6 +65,7 @@ fn context() -> BlockContext {
         height: 1,
         producer: producer().public().address(),
         base_price: FeeConfig::dev().build().pricing().genesis_price(),
+        genesis: crate::structs::hash::Hash::zero(crate::structs::hash::HashType::default_chain()),
     }
 }
 

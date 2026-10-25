@@ -129,6 +129,10 @@ other pages explain each part in full; this one is the short list to keep in min
   starts it there without checking what came before; the apps take a node's own only the first
   time they meet it, with no genesis given. Nodes still sync from genesis or `--snapshot`. See
   [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint).
+- **A secp256k1 key signs chainv4's own form or EIP-712's.** Nodes check both, the second bound to
+  the chain by its genesis id (`SignedTx::verify_on`), so MetaMask and hardware wallets sign for
+  the browser wallet. Plain `verify` refuses an EIP-712 signature: it knows no chain. See
+  [Typed data (EIP-712)](crypto.md#typed-data-eip-712).
 - **An offline signer has no network client at all.** The wallet's role is picked once per
   install. A signer's requests fail before they start, and it polls nothing, nor does a new install
   before it picks its role. Transactions travel as QR codes: `CV4:1:` and base45. See

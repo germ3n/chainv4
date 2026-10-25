@@ -12,6 +12,7 @@ mod format;
 mod history;
 mod keys;
 mod lock;
+mod metamask;
 mod node;
 mod theme;
 mod vault;

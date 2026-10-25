@@ -7,5 +7,7 @@ pub mod merkle;
 #[cfg(feature = "mnemonic")]
 pub mod mnemonic;
 #[cfg(feature = "secp256k1")]
+pub mod eip712;
+#[cfg(feature = "secp256k1")]
 pub mod secp256k1;
 pub mod verifiable;

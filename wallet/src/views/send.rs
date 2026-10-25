@@ -5,7 +5,9 @@
 //!
 //! A watch-only sender holds no key: its probe signs nothing, which the node never checks, and
 //! once priced the transaction goes to the offline signer as a code, and comes back signed as
-//! another. The sender sends it only once it is the very one it asked for.
+//! another. The sender sends it only once it is the very one it asked for. An account MetaMask
+//! holds goes to MetaMask instead, as EIP-712 typed data for this chain, and its signature is
+//! checked the same way.
 
 use {
     super::scan::Scan,
@@ -19,7 +21,7 @@ use {
     chainv4::crypto::keypair::PublicKey,
     chainv4::structs::address::Address,
     chainv4::structs::amount::Amount,
-    chainv4::structs::hash::HashType,
+    chainv4::structs::hash::{Hash, HashType},
     chainv4::structs::hex::to_hex,
     chainv4::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     chainv4::structs::u256::u256,
@@ -30,6 +32,9 @@ use {
 /// How long a sent transaction counts as waiting, holding its nonce, before the next one may take
 /// that nonce again, in milliseconds.
 const PENDING_FOR: u64 = super::activity::UNSEEN_AFTER;
+
+/// What MetaMask gave, once it did: its signature, or why there is none.
+type Signed = std::sync::Arc<std::sync::Mutex<Option<Result<[u8; 65], String>>>>;
 
 #[derive(Default)]
 pub struct SendState {
@@ -72,6 +77,8 @@ enum Step {
     Review { draft: Draft, fee: FeeOffer, warning: Option<String> },
     /// Asked of the offline signer, as the code shown, until its signed code is read back.
     Offline { draft: Draft, request: Box<Request>, text: String, scan: Box<Scan> },
+    /// Asked of MetaMask, until it signs or refuses.
+    MetaMask { draft: Draft, fee: FeeOffer, genesis: Hash, signed: Signed },
     /// Submitted, signed with the fee.
     Sending { draft: Draft, ask: Ask },
     Sent { id: String },
@@ -139,6 +146,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
     if matches!(state.step, Step::Offline { .. }) {
         offline(ui, ctx, state);
+
+        return;
+    }
+
+    if matches!(state.step, Step::MetaMask { .. }) {
+        metamask(ui, ctx, state);
 
         return;
     }
@@ -403,15 +416,31 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             let key = ctx.holders.iter().find_map(|holder| holder.key(&draft.from));
-            let send = match (key.is_some(), warning.is_some()) {
-                (true, false) => "Sign and send",
-                (true, true) => "Send anyway",
-                (false, false) => "Sign on the signer",
-                (false, true) => "Sign on the signer anyway",
+            let by_metamask = ctx.holders.iter().any(|holder| holder.by_metamask() && holder.addresses().contains(&draft.from));
+            let send = match (key.is_some(), by_metamask, warning.is_some()) {
+                (true, _, false) => "Sign and send",
+                (true, _, true) => "Send anyway",
+                (false, true, false) => "Sign with MetaMask",
+                (false, true, true) => "Sign with MetaMask anyway",
+                (false, false, false) => "Sign on the signer",
+                (false, false, true) => "Sign on the signer anyway",
             };
 
             if theme::primary(ui, &palette, send, !short).clicked() {
                 match key {
+                    None if by_metamask => match ctx.chain.genesis {
+                        Some(genesis) => {
+                            let signed = Signed::default();
+                            let (inbox, wake) = (signed.clone(), ctx.wake.clone());
+                            let typed = crate::metamask::typed_data(&draft.tx, draft.nonce, &fee, &genesis);
+                            crate::metamask::sign(ethereum(&draft.from), typed, move |answer| {
+                                *inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+                                wake.request_repaint();
+                            });
+                            state.step = Step::MetaMask { draft: draft.clone(), fee, genesis, signed };
+                        }
+                        None => state.step = Step::Failed("The light client has not started: the chain to sign for is not known yet.".to_string()),
+                    },
                     Some(key) => {
                         let signed = SignedTx::sign(draft.tx.clone(), draft.nonce, fee, key);
                         let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
@@ -486,6 +515,70 @@ fn offline(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
     if let Some(next) = next {
         state.step = next;
+    }
+}
+
+/// Waiting for MetaMask, then the transaction it signed, checked and sent.
+fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
+    let palette = *ctx.palette;
+    let Step::MetaMask { draft, fee, genesis, signed } = &state.step else {
+        return;
+    };
+    let answer = signed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+
+    if let Some(answer) = answer {
+        let hash = chainv4::crypto::eip712::transaction_digest(&draft.tx, draft.nonce, fee, genesis);
+        let checked = answer
+            .and_then(|signature| crate::metamask::key_of(&hash, &signature, &ethereum(&draft.from)))
+            .and_then(|(key, low)| {
+                let signed = SignedTx {
+                    tx: draft.tx.clone(),
+                    nonce: draft.nonce,
+                    fee: *fee,
+                    signer: PublicKey::Secp256k1(key),
+                    signature: chainv4::crypto::keypair::Signature::Secp256k1Eip712(low),
+                };
+                signed.verify_on(genesis).map_err(|err| format!("MetaMask's signature does not hold: {err}"))?;
+
+                Ok(signed)
+            });
+
+        state.step = match checked {
+            Ok(signed) => {
+                let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
+                ctx.node.ask(ask.clone());
+
+                Step::Sending { draft: draft.clone(), ask }
+            }
+            Err(why) => Step::Failed(why),
+        };
+
+        return;
+    }
+
+    let waiting = format!("{} to {}: MetaMask shows each field to check before you sign.", draft.what, format::short(&draft.to.to_string()));
+    let mut back = false;
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Sign it in MetaMask");
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new(waiting).color(palette.soft));
+        });
+        ui.add_space(10.0);
+        back = theme::quiet(ui, &palette, "Back").clicked();
+    });
+
+    if back {
+        state.step = Step::Edit;
+    }
+}
+
+/// An Ethereum address as MetaMask names an account: 0x and 40 hex digits.
+fn ethereum(address: &Address) -> String {
+    match address {
+        Address::Secp256k1(bytes) => to_hex(bytes),
+        other => other.to_string(),
     }
 }
 

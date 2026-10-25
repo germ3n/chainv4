@@ -244,25 +244,41 @@ A token transfer is the standard's `transfer(to, amount)`, sending no coin.
 **Dropped transactions:** one no block holds after 10 minutes shows as Not seen, and stops
 holding its nonce, so the next transaction takes that nonce again.
 
+## MetaMask and hardware wallets
+
+In the browser, MetaMask, and a Ledger or Trezor connected to it, can hold an account and sign
+for it. The wallet proves its balance and builds what it sends as for any account; MetaMask signs.
+- **Connecting:** Accounts → **Connect MetaMask**, shown when the page reaches it. MetaMask names
+  an account by its Ethereum address alone, so it is asked to sign one fixed message, which moves
+  nothing: the key that signature recovers to, checked against the address, is the account's.
+  The account sits beside the others, as `metamask` in the vault, with its public key alone.
+- **Sending:** Review reads **Sign with MetaMask**. MetaMask shows the transaction as EIP-712
+  typed data, each field by name: a transfer's from, to, amount, nonce and fee, a token
+  transfer's token too. Its signature is recovered, checked to be the account's and to hold on
+  this chain, and sent.
+- **Bound to the chain:** the typed data's domain is salted with the genesis id, so what MetaMask
+  signs for this chain holds on no other. See [Typed data (EIP-712)](crypto.md#typed-data-eip-712).
+- **The desktop and Android apps** reach no MetaMask: its accounts are the browser's.
+
 ## Signing offline
 
-The keys can live on a device that never goes online. On its first launch, the app asks what
-this install is, and it stays that way: changing it takes removing its wallets, after which the
-lock screen asks again.
+The keys can live on a device that never goes online. On its first launch, the app asks whether
+this install is an offline signer, and it stays that way: changing it takes removing its
+wallets, after which the lock screen asks again.
 
-| Role | What it does |
+| Install | What it does |
 | --- | --- |
-| **Online wallet** | Holds its keys and talks to a node, as above. Installs from before roles are this. |
+| **Online wallet** | Talks to a node, as above. Installs from before roles are this. Its wallets are any mix of two kinds, side by side: ones that hold their keys, from words, and **watch-only** ones, which hold an offline signer's public keys alone, prove their balances, price what to send, and send what the signer signed. |
 | **Offline signer** | Holds its keys and makes no network requests at all: it has no client to make them with, so none can go out, whatever its settings say. It follows no chain, so its pages are Sign, Pair, Receive, Accounts and Settings. |
-| **Watch-only sender** | Holds the signer's public keys alone, never a key that signs. It proves balances, prices what to send, and sends what the signer signed. |
 
 **Pairing:** on the signer, **Pair** shows the account in use as a QR code holding its public
-keys, one per scheme. On the sender, making a wallet starts with **Pair with a signer**, and
-Accounts → **Add from the signer** watches more: read the code, then name and seal the wallet
-with a password, as any other.
+keys, one per scheme. On an online install, the lock screen's **Add a wallet** → **Pair with a
+signer** makes a watch-only wallet from it, beside any others; in that wallet, Accounts → **Add
+from the signer** watches more of the signer's accounts. Read the code, then name and seal the
+wallet with a password, as any other.
 
 **Sending:**
-1. The sender builds the transaction on Send as usual, and the node prices it from a probe whose
+1. The watch-only wallet builds the transaction on Send as usual, and the node prices it from a probe whose
    signature signs nothing: the node checks none for a price.
 2. **Sign on the signer** shows the request as a QR code: the transaction, its nonce and fee
    offer, the key to sign with, and how the node names the coin and the token.
@@ -270,7 +286,7 @@ with a password, as any other.
    and as the raw units signed, from, to, the token's contract, the most the fee comes to, the
    nonce, and everything the transaction holds. It refuses a key none of its accounts holds, and a
    transaction the chain would refuse. **Sign** shows the signed transaction as a code.
-4. The sender reads it back, and sends it only if it is the very transaction it asked for, signed
+4. The watch-only wallet reads it back, and sends it only if it is the very transaction it asked for, signed
    by that key, and the signature holds.
 
 **Reading a code:** **Take a photo** opens the camera on Android; on the desktop and in the

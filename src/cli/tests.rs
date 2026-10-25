@@ -340,6 +340,7 @@ mod send {
                 confirmations: 1,
                 gas_limit: None,
                 anyway: false,
+                eip712: false,
                 max_price: None,
                 tip: None,
                 tx,
@@ -422,6 +423,48 @@ mod send {
         sent.unwrap();
         assert!(node.chain().tip().height >= 3);
         assert!(node.mempool().is_empty());
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn send_signs_as_typed_data_for_the_chain_with_eip712() {
+        use crate::crypto::keypair::{KeyType, Signature};
+        use crate::registry::Accounts;
+
+        let running = Running::start(true);
+        let ethereum = Keypair::generate(KeyType::Secp256k1).unwrap();
+        send(running.args(TxArgs::Transfer { to: ethereum.public().address(), amount: u256::new(10u128.pow(21)) })).unwrap();
+
+        let dir = TempDir::new("eip712");
+        let key = dir.0.join("ethereum.key");
+        fs::write(&key, ethereum.to_key_file()).unwrap();
+        let to = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap().public().address();
+        let sent = send(SendArgs {
+            key: Some(key),
+            eip712: true,
+            ..running.args(TxArgs::Transfer { to, amount: u256::new(9) })
+        });
+
+        // Typed data is Ethereum's: an Ed25519 key cannot sign it.
+        let refused = send(SendArgs {
+            eip712: true,
+            ..running.args(TxArgs::Transfer { to, amount: u256::new(1) })
+        });
+        let node = running.stop();
+
+        sent.unwrap();
+
+        if DevAuthority::dev_keypair().public().key_type() != KeyType::Secp256k1 {
+            assert!(refused.unwrap_err().to_string().contains("needs a secp256k1 key"));
+        }
+        assert_eq!(Accounts::new(&node.chain().state()).get(&to).unwrap().balance, u256::new(9));
+
+        let typed = (1..=node.chain().tip().height)
+            .flat_map(|height| node.chain().block_at(height).unwrap().unwrap().txs)
+            .find(|tx| tx.sender() == ethereum.public().address())
+            .unwrap();
+
+        assert!(matches!(typed.signature, Signature::Secp256k1Eip712(_)), "it went as typed data");
     }
 
     #[test]

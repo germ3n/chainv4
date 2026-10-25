@@ -33,13 +33,13 @@ const NARROW: f32 = 640.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
-    /// Holds its keys and talks to a node: signs and sends.
+    /// Talks to a node. Its wallets hold their keys and sign, or watch an offline signer's
+    /// accounts and send what the signer signed, side by side. An install made a watch-only
+    /// sender before that was a kind of wallet reads as this.
+    #[serde(alias = "sender")]
     Online,
-    /// Holds its keys and never goes online: signs what a sender asks, by QR code.
+    /// Holds its keys and never goes online: signs what a watch-only wallet asks, by QR code.
     Signer,
-    /// Holds an offline signer's public keys alone: proves their balances, and sends what the
-    /// signer signed.
-    Sender,
 }
 
 impl Role {
@@ -47,7 +47,6 @@ impl Role {
         match self {
             Role::Online => "Online wallet",
             Role::Signer => "Offline signer",
-            Role::Sender => "Watch-only sender",
         }
     }
 }
@@ -418,7 +417,6 @@ impl Wallet {
                 ui.label(RichText::new("chainv4").font(egui::FontId::new(44.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
                 theme::caps(ui, &palette, match self.settings.role {
                     Some(Role::Signer) => "Offline signer",
-                    Some(Role::Sender) => "Watch-only",
                     _ => "Light wallet",
                 });
                 ui.add_space(26.0);
@@ -469,10 +467,10 @@ impl Wallet {
             ui.add_space(6.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new("chainv4").font(egui::FontId::new(26.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
-                theme::caps(ui, &palette, match self.settings.role() {
-                    Role::Online => "Light wallet",
-                    Role::Signer => "Offline signer",
-                    Role::Sender => "Watch-only",
+                theme::caps(ui, &palette, match (self.settings.role(), self.book.watch) {
+                    (Role::Signer, _) => "Offline signer",
+                    (Role::Online, true) => "Watch-only",
+                    (Role::Online, false) => "Light wallet",
                 });
             });
         });
@@ -781,7 +779,12 @@ mod tests {
         };
 
         assert_eq!(client(&signer).err().as_deref(), Some("an offline signer makes no requests"), "whatever else is set");
-        assert!(client(&Settings { role: Some(Role::Sender), ..Settings::default() }).is_ok());
+        assert!(client(&Settings { role: Some(Role::Online), ..Settings::default() }).is_ok());
+
+        // Watch-only was a role before it was a kind of wallet: such an install is online now.
+        let sender = serde_json::from_value::<Settings>(json!({ "role": "sender" })).unwrap().migrated();
+
+        assert_eq!(sender.role, Some(Role::Online));
 
         let kept = serde_json::to_value(&signer).unwrap();
 

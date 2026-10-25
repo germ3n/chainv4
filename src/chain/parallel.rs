@@ -19,7 +19,7 @@
 use {
     super::execute::{self, BlockContext, ExecuteError, Executed, Rules},
     super::{BlockError, ImportError, Receipt, TxError},
-    crate::crypto::verifiable::{Verifiable, VerifyError},
+    crate::crypto::verifiable::VerifyError,
     crate::db::{Changes, Column, Key, Keys, State, address_key},
     crate::registry::contracts::contract_address,
     crate::registry::{Accounts, RegistryError},
@@ -283,7 +283,7 @@ impl Runner<'_> {
                 round.iter().for_each(|&index| now[index] = true);
                 let every: Vec<usize> = (0..txs.len()).collect();
                 let first = self.workers.map(&every, |&index| {
-                    let check = txs[index].verify();
+                    let check = txs[index].verify_on(&context.genesis);
 
                     (check, now[index].then(|| self.attempt(layer, &txs[index], check, context)))
                 });

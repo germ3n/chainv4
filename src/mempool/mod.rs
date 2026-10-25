@@ -2,10 +2,11 @@
 
 use {
     crate::chain::{Fees, tx_bytes},
-    crate::crypto::verifiable::{Verifiable, VerifyError},
+    crate::crypto::verifiable::VerifyError,
     crate::db::{DbError, State},
     crate::registry::Accounts,
     crate::structs::address::Address,
+    crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
     crate::structs::u256::u256,
     r#macro::document,
@@ -128,16 +129,17 @@ impl Mempool {
         summary = "Admits a transaction after checking its signature, that its nonce is not already used, and on a chain with fees, that its gas limit could fit a block, its price could be taken, and its sender can pay for it now.",
         params = {
             tx = "The transaction.",
+            genesis = "The chain's genesis id, which its signature is checked on.",
             state = "The state at the tip.",
             fees = "The chain's fees, if it has any.",
         },
     )]
-    pub fn add(&mut self, tx: SignedTx, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
+    pub fn add(&mut self, tx: SignedTx, genesis: &Hash, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
         if self.txs.len() >= self.capacity {
             return Err(MempoolError::Full);
         }
 
-        let checked = tx.verify();
+        let checked = tx.verify_on(genesis);
 
         self.add_checked(tx, checked, state, fees)
     }
@@ -322,6 +324,11 @@ mod tests {
         DevAuthority::dev_keypair()
     }
 
+    /// The chain the tests' transactions are checked on.
+    fn genesis() -> Hash {
+        Hash::zero(crate::structs::hash::HashType::default_chain())
+    }
+
     fn transfer(keypair: &Keypair, nonce: u64) -> SignedTx {
         let from = keypair.public().address();
         let tx = Tx::Transfer {
@@ -362,8 +369,8 @@ mod tests {
         let (one, two) = (keypair(), Keypair::generate(keypair().public().key_type()).unwrap());
 
         for nonce in 0..5 {
-            mempool.add(sized(&one, nonce, 1_000, 100), &state, None).unwrap();
-            mempool.add(sized(&two, nonce, 1_000, 100), &state, None).unwrap();
+            mempool.add(sized(&one, nonce, 1_000, 100), &genesis(), &state, None).unwrap();
+            mempool.add(sized(&two, nonce, 1_000, 100), &genesis(), &state, None).unwrap();
         }
 
         let size = tx_bytes(&sized(&one, 0, 1_000, 100));
@@ -382,11 +389,11 @@ mod tests {
         let mut mempool = Mempool::new(100);
         let (big, small) = (keypair(), Keypair::generate(keypair().public().key_type()).unwrap());
         // The big sender's first is worth the most, but does not fit; its second cannot go alone.
-        mempool.add(sized(&big, 0, 9_000, 100), &state, None).unwrap();
-        mempool.add(sized(&big, 1, 10, 100), &state, None).unwrap();
+        mempool.add(sized(&big, 0, 9_000, 100), &genesis(), &state, None).unwrap();
+        mempool.add(sized(&big, 1, 10, 100), &genesis(), &state, None).unwrap();
 
         for nonce in 0..4 {
-            mempool.add(sized(&small, nonce, 1_000, 100), &state, None).unwrap();
+            mempool.add(sized(&small, nonce, 1_000, 100), &genesis(), &state, None).unwrap();
         }
 
         let gas_limit = |tx: &SignedTx| u256::from(tx.fee.gas_limit);
@@ -423,7 +430,7 @@ mod tests {
         let keypair = keypair();
 
         for nonce in [2, 0, 1, 4] {
-            mempool.add(transfer(&keypair, nonce), &state, None).unwrap();
+            mempool.add(transfer(&keypair, nonce), &genesis(), &state, None).unwrap();
         }
 
         let nonces: Vec<u64> = mempool.select(&state, Budget { count: Some(10), ..Budget::default() }, &free).unwrap().iter().map(|tx| tx.nonce).collect();
@@ -440,15 +447,15 @@ mod tests {
         let mut forged = transfer(&keypair, 0);
         forged.nonce = 1;
 
-        assert!(matches!(mempool.add(forged, &state, None), Err(MempoolError::Invalid(_))));
+        assert!(matches!(mempool.add(forged, &genesis(), &state, None), Err(MempoolError::Invalid(_))));
 
-        mempool.add(transfer(&keypair, 0), &state, None).unwrap();
+        mempool.add(transfer(&keypair, 0), &genesis(), &state, None).unwrap();
 
-        assert_eq!(mempool.add(transfer(&keypair, 0), &state, None), Err(MempoolError::Duplicate));
+        assert_eq!(mempool.add(transfer(&keypair, 0), &genesis(), &state, None), Err(MempoolError::Duplicate));
 
-        mempool.add(transfer(&keypair, 1), &state, None).unwrap();
+        mempool.add(transfer(&keypair, 1), &genesis(), &state, None).unwrap();
 
-        assert_eq!(mempool.add(transfer(&keypair, 2), &state, None), Err(MempoolError::Full));
+        assert_eq!(mempool.add(transfer(&keypair, 2), &genesis(), &state, None), Err(MempoolError::Full));
     }
 
     #[test]
@@ -456,11 +463,11 @@ mod tests {
         let state = state();
         let mut mempool = Mempool::new(10);
         let keypair = keypair();
-        mempool.add(transfer(&keypair, 0), &state, None).unwrap();
-        mempool.add(transfer(&keypair, 1), &state, None).unwrap();
+        mempool.add(transfer(&keypair, 0), &genesis(), &state, None).unwrap();
+        mempool.add(transfer(&keypair, 1), &genesis(), &state, None).unwrap();
         Accounts::new(&state).bump_nonce(&keypair.public().address()).unwrap();
 
-        assert_eq!(mempool.add(transfer(&keypair, 0), &state, None), Err(MempoolError::Stale));
+        assert_eq!(mempool.add(transfer(&keypair, 0), &genesis(), &state, None), Err(MempoolError::Stale));
 
         mempool.prune(&state).unwrap();
 
@@ -489,7 +496,7 @@ mod tests {
 
             SignedTx::sign(tx, nonce, fee, keypair)
         };
-        let add = |mempool: &mut Mempool, tx: SignedTx| mempool.add(tx, &state, Some(&fees));
+        let add = |mempool: &mut Mempool, tx: SignedTx| mempool.add(tx, &genesis(), &state, Some(&fees));
 
         assert_eq!(add(&mut mempool, signed(&rich, 0, offer(10, floor, 0))), Err(MempoolError::BadGasLimit));
         assert_eq!(add(&mut mempool, signed(&rich, 0, offer(u64::MAX, floor, 0))), Err(MempoolError::BadGasLimit));

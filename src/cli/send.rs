@@ -6,7 +6,7 @@ use {
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::to_hex,
     crate::chain::fees::OfferChoice,
-    crate::crypto::keypair::PublicKey,
+    crate::crypto::keypair::{Keypair, PublicKey},
     crate::structs::hex::from_hex,
     crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     crate::structs::u256::u256,
@@ -51,6 +51,10 @@ pub struct SendArgs {
     /// Send it even though a dry run on the node says it would fail.
     #[arg(long)]
     pub anyway: bool,
+    /// Sign it in its EIP-712 typed form for this chain, as MetaMask and hardware wallets sign it,
+    /// rather than chainv4's own. A secp256k1 key alone signs typed data.
+    #[arg(long)]
+    pub eip712: bool,
     /// The most it pays per gas, in the smallest unit. Defaults to twice the base price plus the
     /// tip under a base fee, and to the lowest bid when senders bid.
     #[arg(long, value_parser = parse_amount)]
@@ -182,6 +186,24 @@ pub enum TxArgs {
 /// Signs a transaction with the signer's next nonce, submits it, and unless told not to, waits
 /// until enough blocks hold it and prints what it did. A transaction that ran but failed is an
 /// error, so scripts can tell.
+/// A transaction signed as EIP-712 typed data for the chain the node's status names.
+#[cfg(feature = "secp256k1")]
+fn typed(status: &Value, tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair) -> CliResult<SignedTx> {
+    let hash: HashType = status["hash"].as_str().and_then(|name| name.parse().ok()).ok_or("the node sent no hash")?;
+    let genesis = status["genesis"]
+        .as_str()
+        .and_then(from_hex)
+        .and_then(|bytes| Hash::from_bytes(hash, &bytes))
+        .ok_or("the node sent no genesis id that reads")?;
+
+    Ok(SignedTx::sign_eip712(tx, nonce, fee, keypair, &genesis).ok_or("--eip712 needs a secp256k1 key: typed data is Ethereum's")?)
+}
+
+#[cfg(not(feature = "secp256k1"))]
+fn typed(_: &Value, _: Tx, _: u64, _: FeeOffer, _: &Keypair) -> CliResult<SignedTx> {
+    Err("--eip712 needs a secp256k1 key, and this build has no secp256k1".into())
+}
+
 pub fn send(args: SendArgs) -> CliResult<()> {
     let keypair = signer(args.key.as_deref())?;
     let sender = keypair.public().address();
@@ -208,7 +230,10 @@ pub fn send(args: SendArgs) -> CliResult<()> {
         eprintln!("a dry run says this would fail: {error}; sending it anyway");
     }
 
-    let signed = SignedTx::sign(tx, nonce, fee, &keypair);
+    let signed = match args.eip712 {
+        true => typed(&status, tx, nonce, fee, &keypair)?,
+        false => SignedTx::sign(tx, nonce, fee, &keypair),
+    };
     let body = json!({ "tx": to_hex(&wincode::serialize(&signed)?) }).to_string();
     let submitted = ok(agent
         .post(format!("{node}/txs"))

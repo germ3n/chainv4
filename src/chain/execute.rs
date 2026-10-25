@@ -138,6 +138,8 @@ pub struct BlockContext {
     pub producer: Address,
     #[document(summary = "Its base price of gas.")]
     pub base_price: u256,
+    #[document(summary = "The chain's genesis id, which EIP-712 signatures are bound to.")]
+    pub genesis: Hash,
 }
 
 #[document(
@@ -268,9 +270,7 @@ pub(crate) fn execute(
     vm: &Arc<Vm>,
     context: &BlockContext,
 ) -> Result<Executed, ExecuteError> {
-    use crate::crypto::verifiable::Verifiable;
-
-    tx.verify().map_err(|err| ExecuteError::Invalid(TxError::Invalid(err)))?;
+    tx.verify_on(&context.genesis).map_err(|err| ExecuteError::Invalid(TxError::Invalid(err)))?;
 
     execute_verified(block, tx, rules, vm, context)
 }

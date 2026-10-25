@@ -49,9 +49,10 @@ Key schemes sit behind features too:
 - **One signature per transaction.** secp256k1 signatures always have a low `s` and verifying
   refuses a high one, so no one can reshape a signature into a second valid one. Its public key
   travels compressed, in 33 bytes, and its signature in 64.
-- **Not Ethereum's transactions.** A secp256k1 key signs chainv4's transactions under chainv4's
-  domain, not Ethereum's RLP or EIP-191 messages. An Ethereum wallet can hold the key, but cannot
-  sign for chainv4 itself.
+- **Not Ethereum's transactions,** but its typed data. A secp256k1 key signs chainv4's
+  transactions under chainv4's domain, not Ethereum's RLP. Or it signs them as EIP-712 typed
+  data, as MetaMask and the hardware wallets it drives do: see
+  [Typed data (EIP-712)](#typed-data-eip-712).
 - **In contracts,** every address takes 33 bytes: its kind's tag, then its bytes, a secp256k1
   address's 20 padded with zeros. Lua's `address(hex)` reads 40 hex digits as a secp256k1 address
   and 64 as an Ed25519 one.
@@ -64,10 +65,41 @@ hash for one thing can never pass for another.
 | Domain | What follows |
 | --- | --- |
 | `chainv4 transaction` | The transaction, nonce, fee offer and signer. |
+| EIP-712's `chainv4` | A transaction's typed form, nonce and fee offer, under the genesis id as salt: see [Typed data (EIP-712)](#typed-data-eip-712). |
 | `chainv4 block` | A header's id, signed by the authority. |
 | `chainv4 vote` | The genesis id and a finality vote, so a vote cannot be replayed on another chain. |
 | `chainv4 work` | A block's id and nonce, for the work hash. |
 | `chainv4 contract address` | The deployer and nonce, for a contract's address. |
+
+## Typed data (EIP-712)
+
+An Ethereum wallet signs EIP-712 typed data: each field shown by name, then the keccak256 of
+`0x19 0x01`, the domain's hash and the message's (`crypto::eip712`). So a secp256k1 key can sign
+a chainv4 transaction that way too, with `Signature::Secp256k1Eip712`, and MetaMask, or a Ledger
+or Trezor through it, can sign for chainv4 with the keys it holds.
+
+**The domain:** `name` chainv4, `version` 1, and `salt` the genesis id, so a signature holds on
+one chain alone. Nodes check it with `SignedTx::verify_on(genesis)`, at the gate, on the verifier
+and in every block they run; plain `verify` refuses one, knowing no chain.
+
+**The message,** one typed form per transaction:
+
+| Form | Fields | For |
+| --- | --- | --- |
+| `Transfer` | `string from`, `string to`, `uint256 amount` | A coin transfer, its amount in its narrowest width. |
+| `TokenTransfer` | `string token`, `string to`, `uint256 amount` | The token standard's `transfer` call. |
+| `Transaction` | `string kind`, `bytes data` | Every other: its kind, and its encoding. |
+
+Each ends with `uint64 nonce`, `uint64 gasLimit`, `uint256 maxPrice` and `uint256 tip`. Addresses
+are their text, `ed25519:0x…`, since EIP-712's `address` holds Ethereum's alone. Each form maps
+back to one transaction: a transfer whose amount could be narrower goes as `Transaction`, so no two
+encodings share a signature.
+
+**Checked against the standard and MetaMask:** EIP-712's own example hashes and signs as the
+standard says, and `@metamask/eth-sig-util`, MetaMask's own library, hashes each form as chainv4
+does; its signatures recover to the signer's key.
+
+`chainv4 send --eip712` signs a transaction this way with a secp256k1 key of its own.
 
 ## Key files
 

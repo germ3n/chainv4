@@ -43,7 +43,7 @@ pub enum Page {
 /// nothing to show of one: its pages are for signing.
 pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
     match role {
-        Role::Online | Role::Sender => &[
+        Role::Online => &[
             (Page::Overview, "Overview"),
             (Page::Send, "Send"),
             (Page::Receive, "Receive"),

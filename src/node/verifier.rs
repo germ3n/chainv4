@@ -6,8 +6,9 @@
 use {
     super::gate::{Gate, Tally},
     crate::chain::Workers,
-    crate::crypto::verifiable::{Verifiable, VerifyError},
+    crate::crypto::verifiable::VerifyError,
     crate::net::NetEvent,
+    crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
     std::sync::{Arc, mpsc},
 };
@@ -50,7 +51,7 @@ pub(super) fn spawn(events: mpsc::Receiver<NetEvent>, workers: Arc<Workers>, gat
 
             let mut tally = Tally::default();
 
-            for arrival in check(batch, &workers) {
+            for arrival in check(batch, &workers, &gate.genesis()) {
                 match gate.take(arrival) {
                     Ok(taken) => tally.add(taken),
                     Err(arrival) => {
@@ -70,10 +71,11 @@ pub(super) fn spawn(events: mpsc::Receiver<NetEvent>, workers: Arc<Workers>, gat
     Ok(out)
 }
 
-/// Checks a batch's transactions side by side on the workers, keeping the batch's order.
-pub(super) fn check(batch: Vec<NetEvent>, workers: &Workers) -> Vec<Arrival> {
+/// Checks a batch's transactions side by side on the workers, on the chain of this genesis,
+/// keeping the batch's order.
+pub(super) fn check(batch: Vec<NetEvent>, workers: &Workers, genesis: &Hash) -> Vec<Arrival> {
     let txs: Vec<&SignedTx> = batch.iter().filter_map(carried).collect();
-    let mut found = workers.map(&txs, |tx| tx.verify()).into_iter();
+    let mut found = workers.map(&txs, |tx| tx.verify_on(genesis)).into_iter();
 
     batch
         .into_iter()
@@ -128,7 +130,7 @@ mod tests {
         forged.nonce = 7;
         let peer = PeerId::random();
         let batch = vec![NetEvent::Tx { from: peer, tx: transfer(0) }, NetEvent::PeerDown(peer), NetEvent::Tx { from: peer, tx: forged }];
-        let checked = check(batch, &Workers::new());
+        let checked = check(batch, &Workers::new(), &Hash::zero(HashType::default_chain()));
 
         assert!(matches!(&checked[0], Arrival::Event { event, checked: Some(Ok(())) } if matches!(**event, NetEvent::Tx { .. })));
         assert!(matches!(&checked[1], Arrival::Event { event, checked: None } if matches!(**event, NetEvent::PeerDown(_))));
@@ -144,6 +146,7 @@ mod tests {
             Arc::new(MemoryDb::default()),
             None,
             HashType::default_chain(),
+            Hash::zero(HashType::default_chain()),
             commands,
             Arc::new(Backlog::new(BacklogLimits::default())),
         ));

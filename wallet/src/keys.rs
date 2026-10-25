@@ -40,6 +40,21 @@ impl Holder {
         }
     }
 
+    /// An account MetaMask signs for, by the key it connected with.
+    pub fn metamask(name: String, key: PublicKey) -> Holder {
+        Holder {
+            name,
+            source: Source::MetaMask { key: key.to_string() },
+            publics: vec![key],
+            keys: Vec::new(),
+        }
+    }
+
+    /// Whether MetaMask signs for it.
+    pub fn by_metamask(&self) -> bool {
+        matches!(self.source, Source::MetaMask { .. })
+    }
+
     /// What names the account across runs: its first address.
     pub fn id(&self) -> String {
         self.publics.first().map(|public| public.address().to_string()).unwrap_or_default()
@@ -64,7 +79,7 @@ impl Holder {
     pub fn number(&self) -> Option<u32> {
         match self.source {
             Source::Phrase { account } => Some(account),
-            Source::Key { .. } | Source::Watch { .. } => None,
+            Source::Key { .. } | Source::Watch { .. } | Source::MetaMask { .. } => None,
         }
     }
 }
@@ -121,6 +136,7 @@ pub fn open(book: &Book) -> Vec<Holder> {
 
                     return Some(Holder::watched(stored.name.clone(), publics));
                 }
+                Source::MetaMask { key } => return Some(Holder::metamask(stored.name.clone(), key.parse().ok()?)),
             };
 
             Some(Holder::signing(stored.name.clone(), stored.source.clone(), keys))
@@ -156,6 +172,7 @@ mod tests {
                     source: Source::Key { key: Keypair::development().to_key_file() },
                 },
             ],
+            watch: false,
         };
         let holders = open(&book);
         let kinds = |holder: &Holder| holder.addresses().iter().map(|address| address.kind()).collect::<Vec<_>>();
@@ -183,6 +200,7 @@ mod tests {
                 name: "Main".to_string(),
                 source: Source::Phrase { account: 0 },
             }],
+            watch: false,
         });
         let watched = Holder::watched("Main".to_string(), signer[0].publics.clone());
         let book = Book {
@@ -191,6 +209,7 @@ mod tests {
                 name: watched.name.clone(),
                 source: watched.source.clone(),
             }],
+            watch: true,
         };
         let reopened = open(&serde_json::from_value(serde_json::to_value(&book).unwrap()).unwrap());
         let ethereum = signer[0].addresses()[2];
@@ -208,6 +227,7 @@ mod tests {
                 name: "Broken".to_string(),
                 source: Source::Watch { keys: vec!["not a key".to_string()] },
             }],
+            watch: true,
         };
 
         assert!(open(&broken).is_empty(), "one whose keys do not read is left out");

@@ -274,6 +274,8 @@ transaction that landed but failed exits non-zero.
 | `--gas-limit N` | its cost | The most gas it may use. By default what the chain's gas schedule says it costs, plus the chain's fuel cap for calls, deploys and upgrades. |
 | `--max-price N` | see [Fees](#fees) | The most it pays per gas, in the smallest unit: by default twice the base price plus the tip, or the lowest bid. |
 | `--tip N` | `0` | Under a base fee, what it adds per gas for the producer. |
+| `--anyway` | | Send it even though a dry run on the node says it would fail. |
+| `--eip712` | | Sign it as EIP-712 typed data for this chain, as MetaMask does, rather than in chainv4's own form. A secp256k1 key only. See [Typed data](docs/crypto.md#typed-data-eip-712). |
 
 ### transfer, mint, burn
 

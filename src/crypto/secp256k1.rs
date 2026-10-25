@@ -50,6 +50,47 @@ pub fn verify(key: &[u8; 33], message: &[u8], signature: &[u8; 64]) -> bool {
     key.verify_prehash(&prehash(message), &signature).is_ok()
 }
 
+/// keccak256, as Ethereum hashes: what EIP-712 hashes with.
+pub fn keccak(bytes: &[u8]) -> [u8; 32] {
+    Keccak256::digest(bytes).into()
+}
+
+/// Signs a 32-byte hash as it is, as EIP-712 has a key sign its typed hash: r then s, s always low.
+///
+/// Panics on bytes that are not a private key, which a PrivateKey never holds.
+pub fn sign_hash(secret: &[u8; 32], hash: &[u8; 32]) -> [u8; 64] {
+    let key = SigningKey::from_slice(secret).expect("a secp256k1 private key is a valid scalar");
+    let signature: Signature = key.sign_prehash(hash).expect("signing a 32-byte hash never fails");
+
+    signature.normalize_s().to_bytes().into()
+}
+
+/// Whether a signature was made over a 32-byte hash, as it is, by this public key's private key. A
+/// high s is refused.
+pub fn verify_hash(key: &[u8; 33], hash: &[u8; 32], signature: &[u8; 64]) -> bool {
+    let (Ok(key), Ok(signature)) = (VerifyingKey::from_sec1_bytes(key), Signature::from_slice(signature)) else {
+        return false;
+    };
+
+    key.verify_prehash(hash, &signature).is_ok()
+}
+
+/// The public key that made a signature over a 32-byte hash, from the 65 bytes Ethereum's wallets
+/// give: r, s and v, which is 27 or 28, or 0 or 1. With it, the signature as chainv4 takes it: its
+/// s made low, which signs the same. None for one that recovers no key.
+pub fn recover(hash: &[u8; 32], signature: &[u8; 65]) -> Option<([u8; 33], [u8; 64])> {
+    let parity = match signature[64] {
+        27 | 28 => signature[64] - 27,
+        0 | 1 => signature[64],
+        _ => return None,
+    };
+    let id = k256::ecdsa::RecoveryId::from_byte(parity)?;
+    let signed = Signature::from_slice(&signature[..64]).ok()?;
+    let key = VerifyingKey::recover_from_prehash(hash, &signed, id).ok()?;
+
+    Some((key.to_sec1_point(true).as_bytes().try_into().ok()?, signed.normalize_s().to_bytes().into()))
+}
+
 /// Whether 33 bytes are a compressed point on the curve.
 pub fn valid_key(key: &[u8; 33]) -> bool {
     VerifyingKey::from_sec1_bytes(key).is_ok()

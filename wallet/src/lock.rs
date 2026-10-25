@@ -1,7 +1,7 @@
 //! The lock screen: which wallet, and its password. Or a wallet more: from new words, shown once and
-//! three of them asked back, or from words written down before; on a watch-only sender, from an
-//! offline signer's account, read off its screen. Each wallet is a vault of its own, with a
-//! password of its own. On its first launch, it asks what this install is.
+//! three of them asked back, or from words written down before; or, online, a watch-only one, from
+//! an offline signer's account read off its screen. Each wallet is a vault of its own, with a
+//! password of its own. On its first launch, it asks whether this install is an offline signer.
 
 use {
     crate::airgap::{Message, Pairing},
@@ -90,9 +90,11 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             ui.label(RichText::new("What will it be? It stays that way: changing it takes removing its wallets.").color(palette.soft));
             ui.add_space(10.0);
             let choices = [
-                (Role::Online, "Holds the keys and talks to a node: the usual wallet."),
-                (Role::Signer, "Holds the keys and never goes online. It signs what a watch-only sender asks, by QR code. Keep the device offline."),
-                (Role::Sender, "Holds an offline signer's public keys alone. It proves balances, prices what to send, and sends what the signer signed."),
+                (
+                    Role::Online,
+                    "Talks to a node. Its wallets hold their keys, or watch an offline signer's accounts and send what it signs, side by side.",
+                ),
+                (Role::Signer, "Holds the keys and never goes online. It signs what a watch-only wallet asks, by QR code. Keep the device offline."),
             ];
 
             for (role, what) in choices {
@@ -148,44 +150,34 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             theme::caps(ui, palette, "A wallet");
 
             match role {
-                Role::Sender => {
-                    ui.label(RichText::new("Its accounts are an offline signer's: on the signer, open Pair, and read its code here.").color(palette.soft));
-                    ui.add_space(10.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if theme::primary(ui, palette, "Pair with a signer", true).clicked() {
-                            next = Some(Lock::Pair {
-                                making: Making::default(),
-                                scan: Box::default(),
-                                paired: None,
-                            });
-                        }
+                Role::Online => ui.label(RichText::new("From 12 words: new ones, or ones you wrote down. Or watch-only: an offline signer's account, read off its Pair page.").color(palette.soft)),
+                Role::Signer => ui.label(RichText::new("Its accounts all come from 12 words. Make new ones, or bring a wallet back from words you wrote down.").color(palette.soft)),
+            };
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                if theme::primary(ui, palette, "New wallet", true).clicked() {
+                    next = Some(Lock::New(Making::default()));
+                }
 
-                        if !settings.wallets.is_empty() && theme::quiet(ui, palette, "Back").clicked() {
-                            next = Some(Lock::Locked { password: String::new(), error: None });
-                        }
+                if theme::quiet(ui, palette, "Restore from words").clicked() {
+                    next = Some(Lock::Restore {
+                        making: Making::default(),
+                        words: String::new(),
                     });
                 }
-                Role::Online | Role::Signer => {
-                    ui.label(RichText::new("Its accounts all come from 12 words. Make new ones, or bring a wallet back from words you wrote down.").color(palette.soft));
-                    ui.add_space(10.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if theme::primary(ui, palette, "New wallet", true).clicked() {
-                            next = Some(Lock::New(Making::default()));
-                        }
 
-                        if theme::quiet(ui, palette, "Restore from words").clicked() {
-                            next = Some(Lock::Restore {
-                                making: Making::default(),
-                                words: String::new(),
-                            });
-                        }
-
-                        if !settings.wallets.is_empty() && theme::quiet(ui, palette, "Back").clicked() {
-                            next = Some(Lock::Locked { password: String::new(), error: None });
-                        }
+                if role == Role::Online && theme::quiet(ui, palette, "Pair with a signer").clicked() {
+                    next = Some(Lock::Pair {
+                        making: Making::default(),
+                        scan: Box::default(),
+                        paired: None,
                     });
                 }
-            }
+
+                if !settings.wallets.is_empty() && theme::quiet(ui, palette, "Back").clicked() {
+                    next = Some(Lock::Locked { password: String::new(), error: None });
+                }
+            });
 
             // Only a device with no wallets yet can become something else.
             if settings.wallets.is_empty() {
@@ -436,6 +428,7 @@ fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, pa
             name: "Account 1".to_string(),
             source: Source::Phrase { account: 0 },
         }],
+        watch: false,
     };
 
     match vault.seal(&book) {
@@ -462,6 +455,7 @@ fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &P
             name: pairing.name.clone(),
             source: Source::Watch { keys: pairing.keys.iter().map(ToString::to_string).collect() },
         }],
+        watch: true,
     };
 
     match vault.seal(&book) {
@@ -562,5 +556,34 @@ mod tests {
 
         assert_eq!(password(&short), Err("use a password of at least 8 characters".to_string()));
         assert_eq!(password(&mismatched), Err("the two passwords do not match".to_string()));
+    }
+
+    #[test]
+    fn a_watch_only_wallet_sits_beside_one_with_keys() {
+        let mut settings = Settings::default();
+        settings.role = Some(Role::Online);
+        let phrase = Phrase::generate(12).unwrap();
+        keep(&mut settings, "Mine".to_string(), Vault::create("correct horse").unwrap(), &phrase, String::new());
+        let signer = crate::keys::derive(&phrase.seed(""), 0);
+        let pairing = Pairing {
+            name: "Cold".to_string(),
+            keys: signer.iter().map(|key| key.public()).collect(),
+        };
+        let watched = keep_watched(&mut settings, "Cold storage".to_string(), Vault::create("battery staple").unwrap(), &pairing);
+
+        assert_eq!(settings.wallets.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), ["Mine", "Cold storage"]);
+        assert_eq!(settings.wallet, 1, "the one just paired is in use");
+
+        let (_, mine) = Vault::open(&settings.wallets[0].vault, "correct horse").unwrap();
+        let (_, cold) = Vault::open(&settings.wallets[1].vault, "battery staple").unwrap();
+
+        assert!(!mine.watch && mine.phrase.is_some());
+        assert_eq!(cold, watched.book);
+        assert!(cold.watch && cold.phrase.is_none());
+
+        let holders = crate::keys::open(&cold);
+
+        assert!(holders[0].keys.is_empty(), "nothing to sign with");
+        assert_eq!(holders[0].addresses(), signer.iter().map(|key| key.public().address()).collect::<Vec<_>>());
     }
 }

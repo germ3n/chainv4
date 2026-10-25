@@ -462,10 +462,74 @@ impl Verifiable for SignedTx {
             &self.signature,
         )?;
 
-        match &self.tx {
-            Tx::Transfer { from, .. } | Tx::Burn { from, .. } if *from != self.sender() => {
-                Err(VerifyError::NotSender)
+        self.check_sender()
+    }
+}
+
+impl SignedTx {
+    #[document(
+        parent = "SignedTx",
+        summary = "Checks it as verify does, on a chain: chainv4's own signatures as verify checks them, and an EIP-712 one over the transaction's typed hash under this chain's domain (crypto::eip712), so one signed for another chain does not hold here. Every node's check of a transaction is this one.",
+        params = { genesis = "The chain's genesis id, which an EIP-712 signature is bound to." },
+    )]
+    pub fn verify_on(&self, genesis: &crate::structs::hash::Hash) -> Result<(), VerifyError> {
+        #[cfg(feature = "secp256k1")]
+        if let Signature::Secp256k1Eip712(signature) = &self.signature {
+            self.tx.verify()?;
+            self.signer.verify()?;
+            let key = match &self.signer {
+                PublicKey::Secp256k1(key) => key,
+                #[allow(unreachable_patterns)]
+                _ => return Err(VerifyError::InvalidSignature),
+            };
+            let digest = crate::crypto::eip712::transaction_digest(&self.tx, self.nonce, &self.fee, genesis);
+
+            if !crate::crypto::secp256k1::verify_hash(key, &digest, signature) {
+                return Err(VerifyError::InvalidSignature);
             }
+
+            return self.check_sender();
+        }
+
+        let _ = genesis;
+
+        self.verify()
+    }
+
+    #[document(
+        parent = "SignedTx",
+        summary = "Signs a transaction in its EIP-712 typed form for this chain, as MetaMask or a hardware wallet signs it: what chainv4 send --eip712 does with a key of its own.",
+        params = {
+            tx = "What to do.",
+            nonce = "The sender's next nonce.",
+            fee = "What the sender offers to pay.",
+            keypair = "The sender's keys: secp256k1, Ethereum's, alone sign typed data.",
+            genesis = "The chain's genesis id, which the signature is bound to.",
+        },
+        returns = "The signed transaction, or None for a key of another scheme.",
+    )]
+    #[cfg(feature = "secp256k1")]
+    pub fn sign_eip712(tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair, genesis: &crate::structs::hash::Hash) -> Option<SignedTx> {
+        let secret = match keypair.private() {
+            crate::crypto::keypair::PrivateKey::Secp256k1(secret) => secret,
+            #[allow(unreachable_patterns)]
+            _ => return None,
+        };
+        let digest = crate::crypto::eip712::transaction_digest(&tx, nonce, &fee, genesis);
+
+        Some(SignedTx {
+            tx,
+            nonce,
+            fee,
+            signer: keypair.public(),
+            signature: Signature::Secp256k1Eip712(crate::crypto::secp256k1::sign_hash(secret, &digest)),
+        })
+    }
+
+    /// Whether a transfer or burn takes from its sender alone.
+    fn check_sender(&self) -> Result<(), VerifyError> {
+        match &self.tx {
+            Tx::Transfer { from, .. } | Tx::Burn { from, .. } if *from != self.sender() => Err(VerifyError::NotSender),
             _ => Ok(()),
         }
     }

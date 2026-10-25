@@ -248,7 +248,7 @@ impl Node {
             check_inline,
             backlog,
         } = net;
-        let gate = Arc::new(Gate::new(Mempool::new(MEMPOOL_CAPACITY), db, chain.shared_fees(), chain.hash(), commands.clone(), backlog.clone()));
+        let gate = Arc::new(Gate::new(Mempool::new(MEMPOOL_CAPACITY), db, chain.shared_fees(), chain.hash(), chain.genesis(), commands.clone(), backlog.clone()));
         // The verifier takes the network's events, has the gate admit transactions, and the node
         // reads the rest and what came of them.
         let arrivals = match check_inline {
@@ -620,7 +620,7 @@ impl Node {
             let state = self.chain.state();
 
             for tx in undone.into_iter().flat_map(|block| block.txs) {
-                let _ = self.gate.mempool().add(tx, &state, self.chain.fees());
+                let _ = self.gate.mempool().add(tx, &self.chain.genesis(), &state, self.chain.fees());
             }
 
             self.gate.mempool().prune(&self.chain.state())?;
@@ -691,7 +691,7 @@ impl Node {
 
                 for tx in undone.into_iter().flat_map(|block| block.txs) {
                     // Most will be back in the new branch or used up; the rest wait again.
-                    let _ = self.gate.mempool().add(tx, &state, self.chain.fees());
+                    let _ = self.gate.mempool().add(tx, &self.chain.genesis(), &state, self.chain.fees());
                 }
             }
         }
