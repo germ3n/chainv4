@@ -18,6 +18,9 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
+#[cfg(test)]
+mod example;
+
 /// Where a step under way records how far it got.
 pub(super) const MIGRATING_KEY: &[u8] = b"migrating";
 

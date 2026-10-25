@@ -178,46 +178,49 @@ leaves the database wholly in one format with a step under way:
 - a node refuses to open the chain while a step is under way (`Migrating`).
 
 **Writing one:** bump `STORAGE_FORMAT`, note what changed in its documentation, and add a
-`Migration` to `MIGRATIONS`. A sketch:
+`Migration` to `MIGRATIONS`. `src/chain/migrate/example.rs` is a complete one, tested on a real
+chain's database though not in `MIGRATIONS`: an imagined format 9 whose work records keep their
+block's height beside the total work.
 
 ```rust
-/// Format 9: keeps every receipt's trace in a column of its own.
-struct TracesApart;
+/// Work records as format 8 keeps them, and as format 9 does: the migration's own copies of each
+/// shape, so it still reads format 8 once the chain's WorkRecord has moved on.
+struct WorkV8 { #[wincode(with = "U256Le")] total: u256 }
+struct WorkV9 { #[wincode(with = "U256Le")] total: u256, height: u64 }
 
-impl Migration for TracesApart {
+pub struct WorkHeights;
+
+impl Migration for WorkHeights {
     fn from(&self) -> u32 {
         8
     }
 
     fn describe(&self) -> &'static str {
-        "keeps receipts' traces in a column of their own"
+        "work records keep their block's height"
     }
 
-    /// One chunk: up to at.limit receipts, from where the chunk before stopped.
+    /// Gives each work record in the chunk its block's height, from the block's stored header.
     fn up(&self, at: &At) -> Result<Chunk, DbError> {
+        let records = next_records(at)?;   // up to at.limit of them, from at.cursor
         let mut chunk = Chunk::default();
-        let (mut done, mut last) = (0, None);
-        at.db.scan(Column::Receipts, &[], at.cursor.unwrap_or(&[]), &mut |key, value| {
-            // Put the receipt back without its trace, and the trace under the same key in its
-            // new column, into chunk.changes.
-            done += 1;
-            last = Some(key.to_vec());
 
-            done < at.limit
-        })?;
-        // The next chunk starts just past the last receipt done; there is none once a chunk
-        // comes up short.
-        chunk.next = last.filter(|_| done == at.limit).map(|key| [key, vec![0]].concat());
+        for (key, value) in &records {
+            let old: WorkV8 = decode(value)?;
+            let header: SealedHeader = decode(&at.db.read(Column::Headers, key)?.ok_or(…)?)?;
+            let new = WorkV9 { total: old.total, height: header.header.height };
+            chunk.changes.insert((Column::Work, key.clone()), Some(new.hashable_bytes_with_tag()));
+        }
+
+        chunk.next = after(&records, at.limit);   // past the last key, unless this was the last chunk
 
         Ok(chunk)
     }
 
+    /// Takes the heights back out: format 8 has nowhere to keep them.
     fn down(&self, at: &At) -> Result<Chunk, DbError> {
-        // The same, putting each trace back in its receipt.
+        // The same scan, writing WorkV8 { total } for each WorkV9.
     }
 }
-
-pub const MIGRATIONS: &[&dyn Migration] = &[&TracesApart];
 ```
 
 - **A chunk is all or nothing,** and runs again from its cursor after a crash, so it must read
