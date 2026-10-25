@@ -380,6 +380,39 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   someone builds them.
 - [ ] **Windows builds in CI.** Left out because of RocksDB and Luau build setup.
 
+### Engine script layer
+
+From a review of the Lua layer in `~/engine` (`game/base/src/script`), not chainv4 itself.
+
+- [ ] **Server-sent Lua may run as bytecode.** `script::run_file` checks the network cache first
+  and runs anything starting with `\x1bLJ` as bytecode, which LuaJIT does not verify, so a server
+  could escape the lockdown. Not reachable yet, because the client runs autorun before any
+  `LuaFile` arrives. Load cached files as text; keep binary for the engine's own paks.
+- [ ] **`Vector3` and `Angle3` take any cdata or userdata.** Their `FromLua` reads any userdata as
+  a 24-byte f64 `Vector3` and any cdata, even `1LL`, as three floats. Check with `ffi.istype`
+  through a registry helper.
+- [ ] **One failing hook stops the rest.** `hook.call` runs callbacks without `pcall`, in `pairs`
+  order, which decides who wins first-non-nil hooks like `Move` at random, and adding a hook
+  while its event runs is undefined. Keep insertion order, snapshot the list, `xpcall` each
+  callback, and add `hook.remove`.
+- [ ] **`run_hook` recovers from errors badly.** It compiles a `"return"` chunk on every error,
+  and panics when the return type cannot be built from nil, as `(bool, String, i32)` cannot. Use
+  `R::from_lua_multi(MultiValue::new(), lua)` and only allow types that can come back empty.
+- [ ] **No runaway script guard.** `while true do end` in a hook freezes the frame, and LuaJIT's
+  instruction hooks do not fire inside compiled traces. Needed before third-party addons or
+  server-pushed code run.
+- [ ] **The lua file cache is never cleared.** `cache::clear()` has no callers, so one server's
+  files stay when joining another, and the cache is process-wide statics a listen server shares
+  with its client.
+- [ ] **Nine raw-pointer scopes.** `ScriptEngine` has nine `*_access` `AtomicPtr`s, each with its
+  own scope guard, and `state.rs` builds nine raw pointers per call. One context struct behind one
+  scope would also make it easier to check that no native holds `&mut EntityList` while calling
+  back into Lua.
+- [ ] **`ScriptEngine` repeats its wrappers.** About 15 methods repeat the same `has_ents` check,
+  match and `log::error!`; one helper would do.
+- [ ] **Stale `.luac` beats fresh `.lua`.** `pick_scripts` prefers compiled files at equal mount
+  priority, so an old compiled file wins over source just edited.
+
 add encryption to wallets/keypairs when stored to disk (if passphrase was set/selected)
 add db migration system (upgrade/downgrade calls maybe?)
 maybe have to check the event log not indexing properly in explorer? maybe settings werent properly changed
