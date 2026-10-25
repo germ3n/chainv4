@@ -64,6 +64,15 @@ other pages explain each part in full; this one is the short list to keep in min
     first. `indexed_from` says how far it got.
   - **Staying on:** once on, the database keeps it on, keeping the same blocks until the flag
     says otherwise. `--index-events=off` deletes it.
+- **Histories come from the address index.** `--index-addresses` keeps every transaction under
+  each address it touches: its sender, a transfer's parties, the contract called and every
+  address among the call's arguments, and a deploy's contract. It takes the same `FROM` and
+  `=off` as `--index-events`, on its own: either can be on without the other. A wallet's
+  activity, `chainv4 light history` and the explorer's account page list from it. Coin a contract
+  pays out shows only in the trace, so not here.
+- **Tokens keep balances where light clients can prove them.** The token standard puts each
+  holder's balance in the `balances` namespace under the holder's address text. A token that
+  keeps them elsewhere still works, but no wallet can prove what it holds.
 - **Floods are turned away at the door.** Gossiped transactions and votes, and submissions, count
   against a backlog: 10,000 in all and 1,000 from any one peer by default
   (`--max-gossip-backlog`, `--max-gossip-per-peer`). Past it they are dropped, `POST /txs`
@@ -76,6 +85,11 @@ other pages explain each part in full; this one is the short list to keep in min
 - **The explorer signs where it runs.** Its key stays in the window, desktop or browser, and only
   signed transactions go to the node. Serve the web app from the node itself with
   `--explorer explorer/dist`, or allow the page's origin with `--cors`. See [Explorer](explorer.md).
+- **The wallet keeps its keys sealed on the device.** A password seals them, and nothing opens
+  them without it: export each key somewhere safe. In the browser they live in the page origin's
+  storage, which clearing the site's data deletes. It trusts the genesis a node first shows it,
+  and proves everything else. `--wallet wallet/dist` serves it from the node's `/wallet/`. See
+  [Wallet](wallet.md).
 
 ## Consensus-critical: changing these makes a new chain
 
@@ -110,8 +124,9 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   genesis names refuses the genesis file.
 - **The state root's tree, and what a receipt commits.** Paths, leaf and branch hashes, and which
   columns count (`STATE_COLUMNS`) decide every `state_root`; `CommittedReceipt`'s fields and the
-  RFC 6962 split decide every `receipts_root`. A new chain-state column must join `STATE_COLUMNS`
-  on purpose, and so becomes a new chain.
+  RFC 6962 split decide every `receipts_root`, and each `SignedTx`'s encoding and the same split
+  every `tx_root`. A new chain-state column must join `STATE_COLUMNS` on purpose, and so becomes a
+  new chain. The address index's column does not: it is a node's own.
 
 ## How the chain behaves
 
@@ -134,8 +149,13 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   `GET /proofs/{column}/{key}` and `GET /proofs/receipts/{id}` serve proofs against the tip, and
   `StateProof::verify` and `crypto::merkle::verify` check them. See
   [Chain](chain.md#the-state-root).
-- **Storage format 7.** Headers changed shape, and the database keeps more, so every chain is new:
-  delete old databases, or point `--db` elsewhere.
+- **Storage format 8.** `tx_root` became a Merkle root over the block's transactions, so every
+  block with transactions has a new id, and the address index has a column of its own: delete old
+  databases, or point `--db` elsewhere. Genesis ids stay as they were, since genesis's `tx_root`
+  is the hash of its configuration.
+- **A receipt proof proves the transaction too.** `GET /proofs/receipts/{id}` carries the signed
+  transaction and its path in `tx_root`, so a light client knows who sent what (`check_tx`), not
+  only what it did.
 - **Genesis commits to the light client's parameters.** Its `proof_root` is the hash of
   `light_params()`: the chain hash, consensus and finality's timing. Changing any of them is a new
   chain, as changing genesis always is.

@@ -18,8 +18,16 @@ local function put(key, value)
     storage.set(key, tostring(value))
 end
 
-local function balance_key(owner)
-    return "balance:" .. owner:hex()
+-- Balances live where the token standard says light clients can prove them: the balances
+-- namespace, by the holder's address text, as decimal text.
+local balances = storage.namespace("balances")
+
+local function balance(owner)
+    return u256(balances:get(owner:text()) or "0")
+end
+
+local function set_balance(owner, value)
+    balances:set(owner:text(), tostring(value))
 end
 
 local function allowance_key(owner, spender)
@@ -27,20 +35,20 @@ local function allowance_key(owner, spender)
 end
 
 local function move(from, to, amount)
-    local available = get(balance_key(from))
+    local available = balance(from)
 
     if available < amount then
         error("insufficient balance")
     end
 
-    put(balance_key(from), available - amount)
-    put(balance_key(to), get(balance_key(to)) + amount)
+    set_balance(from, available - amount)
+    set_balance(to, balance(to) + amount)
     events.emit("Transfer", from, to, amount)
 end
 
 local function mint(to, amount)
     put("supply", get("supply") + amount)
-    put(balance_key(to), get(balance_key(to)) + amount)
+    set_balance(to, balance(to) + amount)
     events.emit("Transfer", ZERO, to, amount)
 end
 
@@ -67,7 +75,7 @@ function M.total_supply()
 end
 
 function M.balance_of(owner)
-    return get(balance_key(owner))
+    return balance(owner)
 end
 
 function M.allowance(owner, spender)

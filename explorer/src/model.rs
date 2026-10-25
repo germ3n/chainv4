@@ -376,23 +376,48 @@ pub struct FoundEvent {
     pub position: u32,
 }
 
-impl FoundEvent {
-    /// Where it sits on the chain, to order and tell events apart by.
-    pub fn place(&self) -> (u64, u32, u32) {
+/// What a node's index lists, by where it sits on the chain, to order and tell entries apart by.
+pub trait Placed {
+    fn place(&self) -> (u64, u32, u32);
+}
+
+impl Placed for FoundEvent {
+    fn place(&self) -> (u64, u32, u32) {
         (self.height, self.index, self.position)
     }
 }
 
-/// GET /events.
+/// A transaction the address index found touching an address, as blocks list it, with where it
+/// landed.
 #[derive(Clone, Debug, Deserialize)]
-pub struct EventsPage {
-    pub events: Vec<FoundEvent>,
+pub struct FoundTx {
+    #[serde(flatten)]
+    pub tx: TxView,
+    pub block: String,
+    pub height: u64,
+    pub index: u32,
+}
+
+impl Placed for FoundTx {
+    fn place(&self) -> (u64, u32, u32) {
+        (self.height, self.index, 0)
+    }
+}
+
+/// A page of what one of a node's indexes lists: GET /events, or GET /accounts/{address}/txs.
+#[derive(Clone, Debug, Deserialize)]
+pub struct IndexPage<T> {
+    #[serde(alias = "events", alias = "txs")]
+    pub items: Vec<T>,
     pub next: Option<String>,
     pub indexed_from: u64,
     /// The height the node is still moving the index's low end to, if it is.
     #[serde(default)]
     pub catching_up_to: Option<u64>,
 }
+
+pub type EventsPage = IndexPage<FoundEvent>;
+pub type TxsPage = IndexPage<FoundTx>;
 
 /// POST /call.
 #[derive(Clone, Debug, Deserialize)]
@@ -467,6 +492,26 @@ mod tests {
         assert_eq!(receipt.values[0].text(), "7");
         assert_eq!(receipt.trace.hops[0].events, [0]);
         assert_eq!(receipt.events[0].name, "Transfer");
+    }
+
+    #[test]
+    fn index_pages_read_events_and_transactions_alike() {
+        let txs: TxsPage = serde_json::from_value(json!({
+            "txs": [{
+                "id": "0xdd", "sender": "ed25519:0x01", "nonce": 4, "signer": "ed25519:0x01", "signature": "ed25519:0x02",
+                "fee": { "gas_limit": 0, "max_price": "0", "tip": "0" },
+                "tx": { "type": "transfer", "from": "ed25519:0x01", "to": "ed25519:0x03", "amount": "7" },
+                "block": "0xaa", "height": 9, "index": 2,
+                "receipt": { "status": "done", "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [], "trace": { "hops": [], "dropped": 0 } }
+            }],
+            "next": null, "indexed_from": 0, "catching_up_to": null
+        }))
+        .unwrap();
+        let events: EventsPage = serde_json::from_value(json!({ "events": [], "next": "0x01", "indexed_from": 3 })).unwrap();
+
+        assert_eq!((txs.items[0].place(), txs.items[0].tx.target()), ((9, 2, 0), Some("ed25519:0x03")));
+        assert_eq!(txs.items[0].tx.receipt.as_ref().unwrap().status, "done");
+        assert_eq!((events.items.len(), events.next.as_deref(), events.catching_up_to), (0, Some("0x01"), None));
     }
 
     #[test]

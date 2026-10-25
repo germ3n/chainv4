@@ -109,27 +109,38 @@ fn the_producer_makes_a_block_when_its_slot_comes() {
 }
 
 #[test]
-fn the_loop_catches_the_event_index_up_and_moves_its_window() {
+fn the_loop_catches_each_index_up_and_moves_its_window() {
     let (mut producer, _net) = node(true);
 
     for slot in 1..=3 {
         producer.step(slot * SLOT).unwrap();
     }
 
-    let mut producer = producer.index_events(Some(EventsFrom::Latest(2))).unwrap();
+    let producer = producer.keep_index(IndexKind::Events, Some(KeepFrom::Latest(2))).unwrap();
+    let mut producer = producer.keep_index(IndexKind::Addresses, None).unwrap();
+    let from = |producer: &Node, kind| producer.chain().index_window(kind).unwrap().from;
 
-    assert_eq!(producer.chain().event_index().unwrap().from, 4, "a new index starts empty at the next block");
-    assert!(producer.catching_up, "so the loop does not sleep until it holds heights 2 and 3");
+    assert_eq!(from(&producer, IndexKind::Events), 4, "a new index starts empty at the next block");
+    assert_eq!(from(&producer, IndexKind::Addresses), 4);
+    assert!(producer.catching_up.contains(&IndexKind::Events), "so the loop does not sleep until it holds heights 2 and 3");
+    assert!(producer.catching_up.contains(&IndexKind::Addresses));
 
     producer.step(3 * SLOT + 1).unwrap();
 
-    assert_eq!(producer.chain().event_index().unwrap().from, 2);
-    assert!(!producer.catching_up);
+    assert_eq!(from(&producer, IndexKind::Events), 2);
+    assert_eq!(from(&producer, IndexKind::Addresses), 0, "each to its own window");
+    assert!(producer.catching_up.is_empty());
 
     producer.step(4 * SLOT).unwrap();
 
     assert_eq!(producer.chain().tip().height, 4);
-    assert_eq!(producer.chain().event_index().unwrap().from, 3, "the same pass drops height 2");
+    assert_eq!(from(&producer, IndexKind::Events), 3, "the same pass drops height 2");
+    assert_eq!(from(&producer, IndexKind::Addresses), 0);
+
+    let producer = producer.drop_index(IndexKind::Events).unwrap();
+
+    assert_eq!(producer.chain().index_window(IndexKind::Events), None);
+    assert_eq!(from(&producer, IndexKind::Addresses), 0, "dropping one keeps the other");
 }
 
 #[test]
@@ -844,8 +855,20 @@ fn a_snapshot_whose_pivot_grows_too_old_moves_it_up_and_fetches_only_what_change
     };
     let (mut producer, mut producer_net) = start(true);
     let (mut late, mut late_net) = start(false);
+    // A transfer to a new account in every block, so the state the pivot moves to differs from
+    // what the late node holds in every build, finality's records or not.
+    let pay = |producer: &mut Node, slot: u64| {
+        let to = Keypair::generate(authority.public().key_type()).unwrap().public().address();
+        let tx = Tx::Transfer {
+            from: authority.public().address(),
+            to,
+            amount: Amount::U128(u128::from(slot)),
+        };
+        producer.submit(SignedTx::sign(tx, slot - 1, FeeOffer::NONE, &authority)).unwrap();
+    };
 
     for slot in 1..=60 {
+        pay(&mut producer, slot);
         producer.step(SLOT * slot).unwrap();
     }
 
@@ -870,6 +893,7 @@ fn a_snapshot_whose_pivot_grows_too_old_moves_it_up_and_fetches_only_what_change
     assert_eq!(late.sync.snapshot.as_ref().unwrap().stage(), "taking state at height 50, 0 entries so far");
 
     for slot in 61..=90 {
+        pay(&mut producer, slot);
         producer.step(SLOT * slot).unwrap();
     }
 

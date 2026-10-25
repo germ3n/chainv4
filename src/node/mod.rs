@@ -6,7 +6,7 @@
 //! counts the votes it hears. Catching up with peers lives in sync.rs.
 
 use {
-    crate::chain::{Chain, ChainError, EventsFrom, FinalityError, FinalityUpdate, Genesis, ImportError, Imported},
+    crate::chain::{Chain, ChainError, FinalityError, FinalityUpdate, Genesis, ImportError, Imported, IndexKind, KeepFrom},
     crate::consensus::Producer,
     crate::crypto::keypair::Keypair,
     crate::crypto::verifiable::VerifyError,
@@ -21,7 +21,7 @@ use {
     libp2p::{Multiaddr, PeerId},
     r#macro::document,
     report::Peer,
-    std::collections::HashMap,
+    std::collections::{HashMap, HashSet},
     std::fmt,
     std::sync::Arc,
     std::sync::mpsc::{self, RecvTimeoutError},
@@ -85,8 +85,8 @@ pub struct Node {
     counters: Counters,
     /// Where the node tells what it does, when it streams.
     events: Option<broadcast::Sender<NodeEvent>>,
-    /// Whether the event index has catching up left, which keeps the loop from sleeping.
-    catching_up: bool,
+    /// The indexes with catching up left, which keeps the loop from sleeping.
+    catching_up: HashSet<IndexKind>,
 }
 
 #[document(
@@ -269,7 +269,7 @@ impl Node {
             listening: Vec::new(),
             counters: Counters::default(),
             events: None,
-            catching_up: false,
+            catching_up: HashSet::new(),
         })
     }
 
@@ -285,31 +285,39 @@ impl Node {
 
     #[document(
         parent = "Node",
-        summary = "Makes the node keep the event index. Its loop then catches the index up a step at a time, in between everything else. Once on, the database keeps it on.",
-        params = { keep = "Which blocks to keep; None keeps what the database keeps, or every block for a new index." },
+        summary = "Makes the node keep one of the indexes. Its loop then catches the index up a step at a time, in between everything else. Once on, the database keeps it on.",
+        params = {
+            kind = "Which index.",
+            keep = "Which blocks to keep; None keeps what the database keeps, or every block for a new index.",
+        },
         returns = "The node, or the database failure that kept it from starting.",
-        see_also = "Chain::index_events",
+        see_also = "Chain::keep_index",
     )]
-    pub fn index_events(mut self, keep: Option<EventsFrom>) -> Result<Node, NodeError> {
-        let index = self.chain.index_events(keep)?;
-        self.catching_up = !index.caught_up(self.chain.tip().height);
-        log::info!("[node] indexing the events of {}, held from height {} so far", index.keep, index.from);
+    pub fn keep_index(mut self, kind: IndexKind, keep: Option<KeepFrom>) -> Result<Node, NodeError> {
+        let window = self.chain.keep_index(kind, keep)?;
+
+        if !window.caught_up(self.chain.tip().height) {
+            self.catching_up.insert(kind);
+        }
+
+        log::info!("[node] keeping the {kind} of {}, held from height {} so far", window.keep, window.from);
 
         Ok(self)
     }
 
     #[document(
         parent = "Node",
-        summary = "Makes the node keep no event index, deleting the one its database holds.",
+        summary = "Makes the node keep none of one index, deleting the one its database holds.",
+        params = { kind = "Which index." },
         returns = "The node, or the database failure that kept it from starting.",
-        see_also = "Chain::drop_event_index",
+        see_also = "Chain::drop_index",
     )]
-    pub fn drop_event_index(mut self) -> Result<Node, NodeError> {
-        self.catching_up = false;
+    pub fn drop_index(mut self, kind: IndexKind) -> Result<Node, NodeError> {
+        self.catching_up.remove(&kind);
 
-        match self.chain.drop_event_index()? {
-            true => log::info!("[node] dropped the event index"),
-            false => log::info!("[node] there is no event index to drop"),
+        match self.chain.drop_index(kind)? {
+            true => log::info!("[node] dropped the {kind}"),
+            false => log::info!("[node] there is no {kind} to drop"),
         }
 
         Ok(self)
@@ -374,7 +382,7 @@ impl Node {
         if !self.snapshotting() {
             self.produce_if_due(now)?;
             self.vote_if_due()?;
-            self.catch_up_events()?;
+            self.catch_up_indexes()?;
         }
 
         self.report_if_due(now);
@@ -795,22 +803,28 @@ impl Node {
         }
     }
 
-    /// Logs the height, peers and mempool every REPORT_EVERY, so a quiet node still shows it is alive.
-    /// Catches the event index up a step, and says so when a long catch-up is done.
-    fn catch_up_events(&mut self) -> Result<(), NodeError> {
-        let was = self.catching_up;
-        self.catching_up = self.chain.catch_up_events()?;
+    /// Catches each index up a step, and says so when a long catch-up is done.
+    fn catch_up_indexes(&mut self) -> Result<(), NodeError> {
+        for kind in IndexKind::ALL {
+            let was = self.catching_up.contains(&kind);
 
-        if was
-            && !self.catching_up
-            && let Some(index) = self.chain.event_index()
-        {
-            log::info!("[node] the event index caught up: it holds events from height {}", index.from);
+            match self.chain.catch_up_index(kind)? {
+                true => self.catching_up.insert(kind),
+                false => self.catching_up.remove(&kind),
+            };
+
+            if was
+                && !self.catching_up.contains(&kind)
+                && let Some(window) = self.chain.index_window(kind)
+            {
+                log::info!("[node] the {kind} caught up: it holds blocks from height {}", window.from);
+            }
         }
 
         Ok(())
     }
 
+    /// Logs the height, peers and mempool every REPORT_EVERY, so a quiet node still shows it is alive.
     fn report_if_due(&mut self, now: u64) {
         if now < self.reported.saturating_add(REPORT_EVERY) {
             return;
@@ -829,14 +843,14 @@ impl Node {
             log::info!("[node] syncing from a snapshot: {}", snapshot.stage());
         }
 
-        if self.catching_up
-            && let Some(index) = self.chain.event_index()
-        {
-            log::info!(
-                "[node] indexing events: held from height {}, catching up to {}",
-                index.from,
-                index.keep.lowest(self.chain.tip().height)
-            );
+        for &kind in &self.catching_up {
+            if let Some(window) = self.chain.index_window(kind) {
+                log::info!(
+                    "[node] filling the {kind}: held from height {}, catching up to {}",
+                    window.from,
+                    window.keep.lowest(self.chain.tip().height)
+                );
+            }
         }
     }
 
@@ -846,7 +860,7 @@ impl Node {
             return Err(NodeError::NetworkStopped);
         }
 
-        if self.held.is_some() || self.catching_up {
+        if self.held.is_some() || !self.catching_up.is_empty() {
             return Ok(());
         }
 

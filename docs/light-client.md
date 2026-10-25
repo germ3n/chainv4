@@ -71,10 +71,28 @@ justified checkpoint (`ConflictsWithFinality`).
   rather than the tip, and the client asks at the finalized checkpoint: a value proven there is
   final. A node can prove at blocks within its last `max_reorg_depth`, whose undo records it keeps.
 - **Receipts:** `check_receipt` checks a receipt, and its Merkle path from
-  `GET /proofs/receipts/{id}`, against the block's receipts root.
+  `GET /proofs/receipts/{id}`, against the block's receipts root: what a transaction did.
+- **Transactions:** `check_tx` checks the signed transaction the same answer carries, and its path,
+  against the block's `tx_root`: who sent what, which the receipt does not say. So a plain coin
+  transfer to an account is proven down to its sender and amount.
+- **Token balances:** by the [token standard](token-standard.md#provable-balances), each holder's
+  balance is in the token's `balances` namespace under the holder's address text.
+  `token_balance_key(token, holder)` is its key in `Column::Namespaces`, for `check_state`, and
+  `token_balance(value)` reads what it holds, whichever engine wrote it.
 - **What it says:** each check gives an `Assurance`: the block, its height, and whether it is
   final. A proof that does not check is `BadProof`, and a block the client never followed is
   `NotOnChain`.
+
+## Saving and resuming
+
+`save` gives a `LightState`: everything the client checked, to encode and keep, and `restore`
+takes it back with the genesis id to trust, refusing a state from any other chain
+(`WrongGenesis`). It keeps headers only from the finalized block on, at most 4,096 of them, so it
+stays small:
+- **Older blocks are behind it.** A restored client cannot prove at a block before what it kept;
+  ask for the finalized block or the tip, and keep what was proven before, as the wallet does.
+- **Finality goes on from where it was:** the voters and justified checkpoints it needs come with
+  it, so it does not fetch from genesis again.
 
 ## On the command line
 
@@ -90,13 +108,26 @@ chainv4 light --consensus authority account ed25519:0xa9d1…
 # balance 1000005000000000000000000, nonce 0: proven at block 45 0x7417…, not final yet
 
 chainv4 light --genesis-id 0x5f0d… receipt 0x4b6f…
-# 0x4b6f… done, 0 events, gas 3620, fee 36200000000: proven at block 51 0xdf6d…, not final yet
+# 0x4b6f… from ed25519:0xa9d1…: transfer 5 from ed25519:0xa9d1… to ed25519:0x3b6a…
+# done, 0 events, gas 3620, fee 36200000000: proven at block 51 0xdf6d…, not final yet
+
+chainv4 light history ed25519:0x3b6a… --limit 5   # needs a node started with --index-addresses
+#       51 0x4b6f… transfer 5 from ed25519:0xa9d1… to ed25519:0x3b6a…: done [not final]
 
 chainv4 light entry tokens 0x…            # any chain-state entry, by column and key in hex
 ```
 
 `--node` names the node, which it does not trust. Without `--genesis` or `--genesis-id`, it
 trusts the development chain `--consensus` names, `pow` by default, as a node does.
+
+`history` lists from the node's address index, and proves each transaction and its receipt before
+it prints them: the node only says where to look.
+
+## In the wallet
+
+The [wallet](wallet.md) is built on it: it follows the chain from the genesis it pinned, proves
+every balance, token and transaction it shows, and saves the client between runs, so it resumes
+where it was.
 
 ## In the explorer
 
@@ -108,14 +139,15 @@ The explorer runs the same client against the node it talks to:
 
 ## What to keep in mind
 
-- **It fetches every header from genesis.** Headers are small, but there are as many as blocks,
-  and nothing is kept between runs: the CLI follows the chain afresh each time, and the explorer
-  each time it connects.
+- **It fetches every header from genesis, the first time.** Headers are small, but there are as
+  many as blocks. The CLI and the explorer follow the chain afresh each time; the wallet saves the
+  client and resumes from the finalized block.
 - **Snapshot nodes cannot serve the finality before their pivot.** A node that synced from a
   snapshot never ran the checkpoints before it, so it has no light updates for them. A client
   following finality from genesis needs a node that ran them. Headers and proofs at the tip still
   check against such a node.
 - **Proving at a block takes the node's undo records,** so only the last `max_reorg_depth` blocks
   can be proven at. Final values need the finalized checkpoint to be within that.
-- **Trust on first use, in the explorer.** It trusts whatever genesis it first sees at a node. To
-  trust a chain from the start, give the CLI a genesis file or id.
+- **Trust on first use, in the explorer and the wallet.** They trust whatever genesis they first
+  see at a node; the wallet remembers it, and takes a pasted one instead. To trust a chain from
+  the start, give the CLI a genesis file or id.

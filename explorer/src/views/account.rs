@@ -1,7 +1,8 @@
 //! An address: its balance and nonce, and for a contract, its code, its functions and a way to
 //! call them read-only. A token shows its name, symbol and decimals as the chain's registry holds
 //! them, and its decimals can be set by hand; every account shows what it holds of the registered
-//! tokens: the registry's first page, by symbol, and any other the explorer has met.
+//! tokens: the registry's first page, by symbol, and any other the explorer has met. With the
+//! node's address index, it lists every transaction that touched the address.
 
 use {
     super::{BAD, Ctx, GOOD, events, tokens},
@@ -169,8 +170,114 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
 
     holdings(ui, ctx, address);
     ui.add_space(6.0);
+    egui::CollapsingHeader::new("Transactions").default_open(true).show(ui, |ui| transactions(ui, ctx, address));
+    ui.add_space(6.0);
     egui::CollapsingHeader::new("Events that mention it").default_open(true).show(ui, |ui| {
         events::list(ui, ctx, &EventQuery::mentioning(address));
+    });
+}
+
+/// How long the newest page of transactions stands before it is asked for again, in milliseconds.
+const REFRESH: u64 = 3_000;
+
+/// The transactions that touched an address, newest first, from the node's address index: those
+/// it sent, those that paid it or named it, a page at a time.
+fn transactions(ui: &mut Ui, ctx: &mut Ctx, address: &str) {
+    let store = ctx.store;
+    let newest = Ask::AccountTxs {
+        address: address.to_string(),
+        cursor: None,
+    };
+    let found = store.account_txs.get(address);
+    let failed = store.failures.get(&newest);
+
+    if failed.is_none() && found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH) {
+        ctx.api.ask(newest.clone());
+    }
+
+    let found = match (found, failed) {
+        (_, Some(failure)) if failure.status == 404 => {
+            ui.weak("This node keeps no address index. Start it with --index-addresses to list an address's transactions.");
+
+            return;
+        }
+        (Some(found), _) => found,
+        (None, _) => {
+            super::waiting(ui, ctx, &newest);
+
+            return;
+        }
+    };
+    let still = found
+        .catching_up_to
+        .filter(|to| *to < found.indexed_from)
+        .map(|to| format!(" It is still indexing older blocks, down to height {}.", format::thousands(&to.to_string())))
+        .unwrap_or_default();
+
+    if found.items.is_empty() {
+        ui.weak(format!(
+            "None since height {}, where this node's index starts.{still}",
+            format::thousands(&found.indexed_from.to_string())
+        ));
+
+        return;
+    }
+
+    egui::Grid::new(("account_txs", address)).num_columns(7).striped(true).show(ui, |ui| {
+        for heading in ["block", "id", "type", "from", "to", "status", "fee"] {
+            ui.strong(heading);
+        }
+
+        ui.end_row();
+
+        for found in &found.items {
+            let tx = &found.tx;
+            super::block(ui, ctx, &found.block, &format::thousands(&found.height.to_string()));
+            super::tx(ui, ctx, &tx.id);
+            ui.label(RichText::new(tx.kind()).monospace());
+            super::address(ui, ctx, &tx.sender);
+
+            match tx.target() {
+                Some(target) => super::address(ui, ctx, target),
+                None => {
+                    ui.weak("—");
+                }
+            }
+
+            match &tx.receipt {
+                Some(receipt) => {
+                    super::status(ui, &receipt.status);
+                    ui.label(ctx.coins(&receipt.fee));
+                }
+                None => {
+                    ui.weak("—");
+                    ui.weak("—");
+                }
+            }
+
+            ui.end_row();
+        }
+    });
+
+    ui.horizontal(|ui| {
+        if let Some(next) = &found.next {
+            let older = Ask::AccountTxs {
+                address: address.to_string(),
+                cursor: Some(next.clone()),
+            };
+
+            if ctx.api.asking(&older) {
+                ui.spinner();
+            } else if ui.button("Older transactions").clicked() {
+                ctx.api.ask(older);
+            }
+        }
+
+        ui.weak(format!(
+            "{} shown, indexed from height {}.{still}",
+            found.items.len(),
+            format::thousands(&found.indexed_from.to_string())
+        ));
     });
 }
 

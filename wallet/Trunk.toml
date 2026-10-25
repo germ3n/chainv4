@@ -1,0 +1,7 @@
+# Builds the web app: trunk build --release. The result in dist/ is what a node serves from
+# /wallet/ with --wallet wallet/dist, so the page talks to the node that served it.
+[build]
+target = "index.html"
+dist = "dist"
+# Relative, so the app works from whatever path serves it.
+public_url = "./"

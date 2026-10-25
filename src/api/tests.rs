@@ -918,7 +918,7 @@ fn pages_from_allowed_origins_may_call_the_api() {
     Chain::open(db.clone(), &free()).unwrap();
     let options = ApiOptions {
         cors: vec!["http://app.example".to_string()],
-        explorer: None,
+        ..ApiOptions::default()
     };
     let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
     let (status, head, _) = raw(address, "GET", "/status", "Origin: http://app.example\r\n");
@@ -943,16 +943,21 @@ fn pages_from_allowed_origins_may_call_the_api() {
 }
 
 #[test]
-fn the_explorer_is_served_beside_the_routes() {
+fn the_explorer_and_the_wallet_are_served_beside_the_routes() {
     let dir = std::env::temp_dir().join(format!("chainv4-explorer-{}", std::process::id()));
+    let wallet = std::env::temp_dir().join(format!("chainv4-wallet-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::create_dir_all(&wallet).unwrap();
     std::fs::write(dir.join("index.html"), "<html>explorer</html>").unwrap();
     std::fs::write(dir.join("assets/app.wasm"), b"\0asm").unwrap();
+    std::fs::write(wallet.join("index.html"), "<html>wallet</html>").unwrap();
+    std::fs::write(wallet.join("wallet.js"), "export {}").unwrap();
     let db = Arc::new(MemoryDb::default());
     Chain::open(db.clone(), &free()).unwrap();
     let options = ApiOptions {
         cors: Vec::new(),
         explorer: Some(dir.clone()),
+        wallet: Some(wallet.clone()),
     };
     let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
     let (status, head, body) = raw(address, "GET", "/", "");
@@ -970,7 +975,22 @@ fn the_explorer_is_served_beside_the_routes() {
     assert_eq!(raw(address, "GET", "/missing.js", "").0, 404);
     assert_eq!(ok(address, "/status")["height"], 0);
 
+    // The wallet under /wallet/, its files relative to a page that ends in a slash.
+    let (status, head, _) = raw(address, "GET", "/wallet", "");
+
+    assert_eq!(status, 308);
+    assert!(head.contains("location: /wallet/"), "{head}");
+    assert_eq!(raw(address, "GET", "/wallet/", "").2, b"<html>wallet</html>");
+
+    let (status, head, _) = raw(address, "GET", "/wallet/wallet.js", "");
+
+    assert_eq!(status, 200);
+    assert!(head.contains("content-type: text/javascript"), "{head}");
+    assert_eq!(raw(address, "GET", "/wallet/../index.html", "").0, 404);
+    assert_eq!(raw(address, "GET", "/wallet/missing.js", "").0, 404, "never the explorer's file");
+
     std::fs::remove_dir_all(dir).unwrap();
+    std::fs::remove_dir_all(wallet).unwrap();
 }
 
 #[cfg(feature = "stream")]
@@ -1130,7 +1150,7 @@ fn events_are_listed_from_the_index() {
 
     assert_eq!(get(address, &format!("/events?contract={greeter}")).0, 404, "no index yet");
 
-    chain.index_events(None).unwrap();
+    chain.keep_index(IndexKind::Events, None).unwrap();
     let bob = Keypair::generate(authority.public().key_type()).unwrap().public().address();
     let greet = |nonce: u64| {
         let tx = Tx::ContractCall {
@@ -1178,10 +1198,53 @@ fn events_are_listed_from_the_index() {
         assert_eq!(get(address, bad).0, 400, "{bad}");
     }
 
-    while chain.catch_up_events().unwrap() {}
+    while chain.catch_up_index(IndexKind::Events).unwrap() {}
     let caught_up = ok(address, &format!("/events?contract={greeter}"));
 
     assert_eq!((caught_up["indexed_from"].clone(), caught_up["catching_up_to"].clone()), (json!(0), Value::Null));
+}
+
+#[test]
+fn an_address_s_transactions_are_listed_from_the_index() {
+    let authority = DevAuthority::dev_keypair();
+    let me = authority.public().address();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let bob = Keypair::generate(authority.public().key_type()).unwrap().public().address();
+    let pay = |nonce: u64| SignedTx::sign(Tx::Transfer { from: me, to: bob, amount: Amount::U128(7) }, nonce, FeeOffer::NONE, &authority);
+
+    assert_eq!(get(address, &format!("/accounts/{bob}/txs")).0, 404, "no index yet");
+
+    chain.keep_index(IndexKind::Addresses, None).unwrap();
+    produce(&mut chain, vec![pay(0)]);
+    let last = produce(&mut chain, vec![pay(1)]);
+    let listing = ok(address, &format!("/accounts/{bob}/txs"));
+
+    assert_eq!((listing["indexed_from"].clone(), listing["catching_up_to"].clone()), (json!(1), json!(0)), "genesis is still to come");
+    assert_eq!(listing["next"], Value::Null);
+    assert_eq!(listing["txs"].as_array().unwrap().len(), 2);
+    assert_eq!(listing["txs"][0]["id"], json!(pay(1).id(HashType::default_chain()).to_string()));
+    assert_eq!((listing["txs"][0]["block"].clone(), listing["txs"][0]["height"].clone()), (json!(last.id().to_string()), json!(2)));
+    assert_eq!(listing["txs"][0]["tx"]["type"], "transfer", "{listing}");
+    assert_eq!(listing["txs"][0]["receipt"]["status"], "done");
+    assert_eq!(ok(address, &format!("/accounts/{me}/txs"))["txs"], listing["txs"], "the sender's, too");
+
+    // A page at a time.
+    let first = ok(address, &format!("/accounts/{bob}/txs?limit=1"));
+    let cursor = first["next"].as_str().unwrap();
+    let second = ok(address, &format!("/accounts/{bob}/txs?limit=1&cursor={cursor}"));
+
+    assert_eq!((first["txs"][0]["height"].clone(), second["txs"][0]["height"].clone()), (json!(2), json!(1)));
+    assert_eq!(second["next"], Value::Null);
+
+    for bad in ["/accounts/nope/txs", &format!("/accounts/{bob}/txs?cursor=zz"), &format!("/accounts/{bob}/txs?limit=x")] {
+        assert_eq!(get(address, bad).0, 400, "{bad}");
+    }
+
+    while chain.catch_up_index(IndexKind::Addresses).unwrap() {}
+
+    assert_eq!(ok(address, &format!("/accounts/{bob}/txs"))["catching_up_to"], Value::Null);
 }
 
 #[test]
@@ -1238,41 +1301,23 @@ fn proofs_check_against_the_roots_in_headers() {
         count,
         &path
     ));
+
+    // And the transaction itself, at the same place in tx_root.
+    let signed = from_hex(proof["signed"].as_str().unwrap()).unwrap();
+    let tx_path: Vec<Hash> = proof["tx_path"].as_array().unwrap().iter().map(hash_of).collect();
+
+    assert_eq!(proof["tx_root"], block["tx_root"]);
+    assert!(crate::crypto::merkle::verify(&hash_of(&block["tx_root"]), &crate::crypto::merkle::leaf(hash, &signed), index, count, &tx_path));
+    assert_eq!(wincode::deserialize::<SignedTx>(&signed).unwrap().id(hash).to_string(), tx);
 }
 
 #[test]
 fn a_light_client_follows_the_chain_from_the_api_alone() {
     use crate::db::{Column, StateProof, address_key};
-    use crate::light::{LightClient, LightParams, LightRequest, LightUpdate};
-    use crate::structs::block::SealedHeader;
-    use crate::structs::vote::Justification;
 
     let fixture = serve();
     let decode = |value: &Value| from_hex(value.as_str().unwrap()).unwrap();
-    let start = ok(fixture.address, "/light");
-    let params: LightParams = wincode::deserialize(&decode(&start["params"])).unwrap();
-    let genesis: SealedHeader = wincode::deserialize(&decode(&start["header"])).unwrap();
-    let mut client = LightClient::new(params, genesis, fixture.chain.genesis()).unwrap();
-
-    while let Some(request) = client.next() {
-        match request {
-            LightRequest::Headers { from, count } => {
-                let answer = ok(fixture.address, &format!("/headers?from={from}&count={count}"));
-                let headers: Vec<SealedHeader> = answer["headers"].as_array().unwrap().iter().map(|header| wincode::deserialize(&decode(header)).unwrap()).collect();
-                client.deliver_headers(from, headers, u64::MAX / 2).unwrap();
-            }
-            LightRequest::Update { block } => {
-                let answer = ok(fixture.address, &format!("/light/updates/{block}"));
-                let update: LightUpdate = wincode::deserialize(&decode(&answer["update"])).unwrap();
-                client.take_update(&block, Some(update)).unwrap();
-            }
-            LightRequest::Justifications { from } => {
-                let answer = ok(fixture.address, &format!("/justifications?from={from}"));
-                let found: Vec<Justification> = answer["justifications"].as_array().unwrap().iter().map(|one| wincode::deserialize(&decode(one)).unwrap()).collect();
-                client.deliver_justifications(&found).unwrap();
-            }
-        }
-    }
+    let client = followed(fixture.address, fixture.chain.genesis());
 
     assert_eq!(client.tip().id(), fixture.chain.tip().id());
 
@@ -1293,4 +1338,81 @@ fn a_light_client_follows_the_chain_from_the_api_alone() {
     let (status, _, _) = get(fixture.address, &format!("/proofs/accounts/{}?block=0x{}", to_hex(&key), "00".repeat(32)));
 
     assert_eq!(status, 404, "a block it cannot prove at");
+}
+
+/// A light client that trusts this genesis, caught up with the node behind the API.
+fn followed(address: SocketAddr, genesis: Hash) -> crate::light::LightClient {
+    use crate::light::{LightClient, LightParams, LightRequest, LightUpdate};
+    use crate::structs::block::SealedHeader;
+    use crate::structs::vote::Justification;
+
+    let decode = |value: &Value| from_hex(value.as_str().unwrap()).unwrap();
+    let start = ok(address, "/light");
+    let params: LightParams = wincode::deserialize(&decode(&start["params"])).unwrap();
+    let header: SealedHeader = wincode::deserialize(&decode(&start["header"])).unwrap();
+    let mut client = LightClient::new(params, header, genesis).unwrap();
+
+    while let Some(request) = client.next() {
+        match request {
+            LightRequest::Headers { from, count } => {
+                let answer = ok(address, &format!("/headers?from={from}&count={count}"));
+                let headers: Vec<SealedHeader> = answer["headers"].as_array().unwrap().iter().map(|header| wincode::deserialize(&decode(header)).unwrap()).collect();
+                client.deliver_headers(from, headers, u64::MAX / 2).unwrap();
+            }
+            LightRequest::Update { block } => {
+                let answer = ok(address, &format!("/light/updates/{block}"));
+                let update: LightUpdate = wincode::deserialize(&decode(&answer["update"])).unwrap();
+                client.take_update(&block, Some(update)).unwrap();
+            }
+            LightRequest::Justifications { from } => {
+                let answer = ok(address, &format!("/justifications?from={from}"));
+                let found: Vec<Justification> = answer["justifications"].as_array().unwrap().iter().map(|one| wincode::deserialize(&decode(one)).unwrap()).collect();
+                client.deliver_justifications(&found).unwrap();
+            }
+        }
+    }
+
+    client
+}
+
+#[test]
+fn a_light_client_proves_who_sent_what_one_transaction_at_a_time() {
+    use crate::light::LightError;
+
+    let authority = DevAuthority::dev_keypair();
+    let me = authority.public().address();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let hash = HashType::default_chain();
+    let decode = |value: &Value| from_hex(value.as_str().unwrap()).unwrap();
+    let hashes = |value: &Value| value.as_array().unwrap().iter().map(|one| Hash::from_bytes(hash, &decode(one)).unwrap()).collect::<Vec<_>>();
+    let pays: Vec<SignedTx> = (0..5u64)
+        .map(|nonce| {
+            let to = Keypair::generate(authority.public().key_type()).unwrap().public().address();
+
+            SignedTx::sign(Tx::Transfer { from: me, to, amount: Amount::U128(u128::from(nonce) + 1) }, nonce, FeeOffer::NONE, &authority)
+        })
+        .collect();
+    let block = produce(&mut chain, pays.clone());
+    let client = followed(address, chain.genesis());
+
+    for (index, pay) in pays.iter().enumerate() {
+        let proof = ok(address, &format!("/proofs/receipts/{}", pay.id(hash)));
+        let (block_id, count) = (Hash::from_bytes(hash, &decode(&proof["block"])).unwrap(), proof["count"].as_u64().unwrap() as usize);
+        let (signed, assurance) = client.check_tx(&block_id, &decode(&proof["signed"]), index, count, &hashes(&proof["tx_path"])).unwrap();
+        let (receipt, _) = client.check_receipt(&block_id, &decode(&proof["receipt"]), index, count, &hashes(&proof["path"])).unwrap();
+
+        assert_eq!((&signed, assurance.block, count), (pay, block.id(), 5));
+        assert_eq!(receipt.tx, pay.id(hash));
+
+        // Its bytes at another place, or another's bytes at its place, do not check.
+        let other = (index + 1) % count;
+
+        assert_eq!(client.check_tx(&block_id, &decode(&proof["signed"]), other, count, &hashes(&proof["tx_path"])).err(), Some(LightError::BadProof));
+        assert_eq!(
+            client.check_tx(&block_id, &pays[other].hashable_bytes_with_tag(), index, count, &hashes(&proof["tx_path"])).err(),
+            Some(LightError::BadProof)
+        );
+    }
 }

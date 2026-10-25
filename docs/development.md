@@ -33,6 +33,11 @@ disconnected.
   `cargo clippy --target wasm32-unknown-unknown -- -D warnings` for the web build;
 - `trunk build --release` builds the web app into `explorer/dist`.
 
+**The wallet workspace,** `wallet/`, is the light wallet (see [Wallet](wallet.md)), built the same
+way: a lockfile of its own, the chainv4 library with only the hash and key features, and inside
+`wallet/` the same three commands. `trunk build --release` builds its web app into `wallet/dist`,
+which a node serves from `/wallet/` with `--wallet`.
+
 ## Features
 
 Every piece sits behind a cargo feature, and everything is on by default.
@@ -58,7 +63,7 @@ different dev chains, which puts it on a different network.
 **CI** (`.github/workflows/test.yml`):
 - it runs clippy and the tests on the workspace;
 - it runs clippy on the contracts and the SDK's tests;
-- it runs clippy and the tests on the explorer, and clippy on its web build;
+- it runs clippy and the tests on the explorer and the wallet, and clippy on their web builds;
 - it runs clippy and the tests on a matrix of feature subsets.
 
 The matrix:

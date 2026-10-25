@@ -13,7 +13,8 @@ use {
     crate::structs::block::SealedHeader,
     crate::structs::hash::Hash,
     crate::structs::hex::{from_hex, to_hex},
-    crate::structs::receipt::CommittedOutcome,
+    crate::structs::receipt::{CommittedOutcome, CommittedReceipt},
+    crate::structs::tx::{SignedTx, Tx},
     crate::structs::vote::Justification,
     serde_json::Value,
     std::path::PathBuf,
@@ -47,8 +48,16 @@ enum LightQuery {
     Account { address: Address },
     /// One chain-state entry, proven: its column and its key in hex.
     Entry { column: String, key: String },
-    /// A transaction's receipt, proven.
+    /// A transaction and its receipt, proven: who sent what, and what it did.
     Receipt { tx: String },
+    /// The transactions touching an address, newest first, each with its receipt, proven. The
+    /// node must keep the address index (--index-addresses); it only says where to look.
+    History {
+        address: Address,
+        /// The most to list.
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=200))]
+        limit: u32,
+    },
 }
 
 /// Follows the chain from the trusted genesis, then answers the query with what it proved.
@@ -100,24 +109,89 @@ pub fn light(args: LightArgs) -> CliResult<()> {
             Ok(())
         }
         LightQuery::Receipt { tx } => {
-            let proof = ok(agent.get(format!("{node}/proofs/receipts/{tx}")).call())?;
-            let block = hash(&proof["block"], &client)?;
-            let receipt = from_hex(proof["receipt"].as_str().unwrap_or_default()).ok_or("the node sent a receipt that is not hex")?;
-            let path = proof["path"].as_array().into_iter().flatten().map(|sibling| hash(sibling, &client)).collect::<CliResult<Vec<_>>>()?;
-            let index = proof["index"].as_u64().ok_or("the node sent no index")? as usize;
-            let count = proof["count"].as_u64().ok_or("the node sent no count")? as usize;
-            let (receipt, assurance) = client.check_receipt(&block, &receipt, index, count, &path)?;
-            let outcome = match receipt.outcome {
-                CommittedOutcome::Done => "done".to_string(),
-                CommittedOutcome::Deployed(address) => format!("deployed {address}"),
-                CommittedOutcome::Returned(values) => format!("returned {} values", values.len()),
-                CommittedOutcome::Failed => "failed".to_string(),
-                CommittedOutcome::Upgraded(address) => format!("upgraded {address}"),
-            };
-            println!("{} {outcome}, {} events, gas {}, fee {}: {}", receipt.tx, receipt.events.len(), receipt.gas_used, receipt.fee, described(&assurance));
+            let (signed, receipt, assurance) = proven_tx(&agent, &node, &client, &tx)?;
+            println!("{} from {}: {}", receipt.tx, signed.sender(), summary(&signed.tx));
+            println!(
+                "{}, {} events, gas {}, fee {}: {}",
+                outcome(&receipt.outcome),
+                receipt.events.len(),
+                receipt.gas_used,
+                receipt.fee,
+                described(&assurance)
+            );
 
             Ok(())
         }
+        LightQuery::History { address, limit } => {
+            let listing = match fetch(agent.get(format!("{node}/accounts/{address}/txs?limit={limit}")).call())? {
+                (200, listing) => listing,
+                (404, _) => return Err("the node keeps no address index: it lists histories when started with --index-addresses".into()),
+                (status, answer) => return Err(format!("the node answered {status}: {answer}").into()),
+            };
+            let ids: Vec<&str> = listing["txs"].as_array().into_iter().flatten().filter_map(|tx| tx["id"].as_str()).collect();
+
+            if ids.is_empty() {
+                println!("nothing touched {address}, as far back as height {}", listing["indexed_from"]);
+            }
+
+            for id in ids {
+                let (signed, receipt, assurance) = proven_tx(&agent, &node, &client, id)?;
+                let mark = if assurance.final_ { "final" } else { "not final" };
+                println!("{:>8} {id} {}: {} [{mark}]", assurance.height, summary(&signed.tx), outcome(&receipt.outcome));
+            }
+
+            if listing["next"].is_string() {
+                println!("older ones follow: ask for more with --limit");
+            }
+
+            Ok(())
+        }
+    }
+}
+
+/// A transaction and its receipt, each proven against the block it landed in.
+fn proven_tx(agent: &Agent, node: &str, client: &LightClient, tx: &str) -> CliResult<(SignedTx, CommittedReceipt, Assurance)> {
+    let proof = ok(agent.get(format!("{node}/proofs/receipts/{tx}")).call())?;
+    let block = hash(&proof["block"], client)?;
+    let bytes = |name: &str| from_hex(proof[name].as_str().unwrap_or_default()).ok_or_else(|| format!("the node sent a {name} that is not hex"));
+    let path = |name: &str| proof[name].as_array().into_iter().flatten().map(|sibling| hash(sibling, client)).collect::<CliResult<Vec<_>>>();
+    let index = proof["index"].as_u64().ok_or("the node sent no index")? as usize;
+    let count = proof["count"].as_u64().ok_or("the node sent no count")? as usize;
+    let (receipt, assurance) = client.check_receipt(&block, &bytes("receipt")?, index, count, &path("path")?)?;
+    let (signed, _) = client.check_tx(&block, &bytes("signed")?, index, count, &path("tx_path")?)?;
+
+    if receipt.tx.to_string() != tx || signed.id(client.params().hash) != receipt.tx {
+        return Err(format!("the node proved another transaction than {tx}").into());
+    }
+
+    Ok((signed, receipt, assurance))
+}
+
+/// What a transaction asks for, in a line.
+fn summary(tx: &Tx) -> String {
+    match tx {
+        Tx::Transfer { from, to, amount } => format!("transfer {} from {from} to {to}", amount.to_u256()),
+        Tx::Mint { to, amount } => format!("mint {} to {to}", amount.to_u256()),
+        Tx::Burn { from, amount } => format!("burn {} from {from}", amount.to_u256()),
+        Tx::ContractCall { to, amount, data, .. } => format!("call {to} with {} arguments, sending {}", data.len(), amount.to_u256()),
+        Tx::Deploy { .. } => "deploy a contract".to_string(),
+        Tx::Upgrade { contract, .. } => format!("upgrade {contract}"),
+        Tx::Bond { voter, amount } => format!("bond {} for voter {voter}", amount.to_u256()),
+        Tx::Unbond { voter } => format!("unbond voter {voter}"),
+        Tx::Withdraw { voter } => format!("withdraw voter {voter}'s bond"),
+        Tx::Slash { .. } => "slash a voter that voted twice".to_string(),
+        Tx::ApproveSigners { version, .. } => format!("approve signers version {version}"),
+        Tx::WithdrawApproval { version } => format!("withdraw approval of signers version {version}"),
+    }
+}
+
+fn outcome(outcome: &CommittedOutcome) -> String {
+    match outcome {
+        CommittedOutcome::Done => "done".to_string(),
+        CommittedOutcome::Deployed(address) => format!("deployed {address}"),
+        CommittedOutcome::Returned(values) => format!("returned {} values", values.len()),
+        CommittedOutcome::Failed => "failed".to_string(),
+        CommittedOutcome::Upgraded(address) => format!("upgraded {address}"),
     }
 }
 

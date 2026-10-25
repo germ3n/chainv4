@@ -13,6 +13,8 @@ use {
 
 /// How many tokens a page of the registry asks for.
 pub const TOKEN_PAGE: u64 = 100;
+/// How many of an address's transactions a page holds.
+pub const TX_PAGE: u64 = 50;
 
 /// Something to ask a node, which also names what came back.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -35,6 +37,8 @@ pub enum Ask {
     Evidence,
     /// A page of indexed events, from the newest or from where a cursor says.
     Events { query: EventQuery, cursor: Option<String> },
+    /// A page of the transactions touching an address, from the address index.
+    AccountTxs { address: String, cursor: Option<String> },
     /// A page of the token registry: tokens whose symbol starts with this, or every one for "".
     Tokens { symbol: String, cursor: Option<String> },
     /// A read-only call, with its arguments already written as JSON.
@@ -73,6 +77,15 @@ impl Ask {
             Ask::Evidence => "/evidence".to_string(),
             Ask::Events { query, cursor } => {
                 let mut path = format!("/events?{}", query.params());
+
+                if let Some(cursor) = cursor {
+                    path.push_str(&format!("&cursor={cursor}"));
+                }
+
+                path
+            }
+            Ask::AccountTxs { address, cursor } => {
+                let mut path = format!("/accounts/{address}/txs?limit={TX_PAGE}");
 
                 if let Some(cursor) = cursor {
                     path.push_str(&format!("&cursor={cursor}"));
@@ -365,6 +378,21 @@ mod tests {
             Ask::Events { query: EventQuery::mentioning("ed25519:0x01"), cursor: None }.path(),
             "/events?address=ed25519:0x01"
         );
+    }
+
+    #[test]
+    fn an_address_s_transactions_become_paths() {
+        let newest = Ask::AccountTxs {
+            address: "ed25519:0x01".to_string(),
+            cursor: None,
+        };
+        let older = Ask::AccountTxs {
+            address: "ed25519:0x01".to_string(),
+            cursor: Some("0x00ff".to_string()),
+        };
+
+        assert_eq!(newest.path(), "/accounts/ed25519:0x01/txs?limit=50");
+        assert_eq!(older.path(), "/accounts/ed25519:0x01/txs?limit=50&cursor=0x00ff");
     }
 
     #[test]

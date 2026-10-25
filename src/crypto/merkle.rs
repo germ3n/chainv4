@@ -1,6 +1,7 @@
 //! Merkle trees over lists, as RFC 6962 (Certificate Transparency) builds them: a leaf hashed
 //! with a 0 byte in front, a node over two with a 1, and a list of n split at the largest power
-//! of two below n, so no leaf is ever repeated to fill a level. A block's receipts root is one.
+//! of two below n, so no leaf is ever repeated to fill a level. A block's tx root and receipts root
+//! are each one.
 
 use {
     super::hasher::Hasher,

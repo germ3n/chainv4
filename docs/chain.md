@@ -16,7 +16,7 @@ A block is a header, its transactions, the finality proofs it carries, and a sea
 | `timestamp` | When it was produced, in milliseconds since the Unix epoch. |
 | `producer` | Who produced it. The reward and the producer's share of fees go here. |
 | `difficulty` | The expected hashes to find its seal under proof of work; 0 under the authority. |
-| `tx_root` | The chain hash of its transactions, in order. For genesis, the hash of the genesis configuration. |
+| `tx_root` | The Merkle root of its transactions, in order, so one is proven without the others (see [Receipts](#receipts)). The zero hash for a block without transactions. For genesis, the hash of the genesis configuration. |
 | `proof_root` | The chain hash of its finality proofs, in order. |
 | `receipts_root` | The Merkle root of what its transactions did, in order (see [Receipts](#receipts)). The zero hash for a block without transactions. |
 | `state_root` | The root of the state tree once it has run: every chain-state entry (see [The state root](#the-state-root)). |
@@ -295,13 +295,20 @@ way RFC 6962 (Certificate Transparency) builds one (`crypto::merkle`):
 - **The tree:** a node is the hash of `1` and its two halves', and a list splits at the largest
   power of two below its length, so no leaf is repeated to fill a level.
 
-`GET /proofs/receipts/{id}` serves the path that proves a transaction's receipt is in its block:
-that it is in the chain, and what it did.
+**The transactions** are a Merkle root the same way: `tx_root` is the root over each signed
+transaction's leaf (`SignedTx::leaf`, its whole encoding, signature included), in order. So a
+receipt says what a transaction did, and its leaf at the same place in `tx_root` says who sent
+what, which the receipt does not.
+
+`GET /proofs/receipts/{id}` serves both paths: that the transaction is in its block, who sent
+what, and what it did. A light client checks them with `check_tx` and `check_receipt`.
 
 A node started with `--index-events` also indexes every event by its contract, by its contract
-and name, and by the addresses in its data, in the same commit. Events from before it was turned
-on are read back from the stored receipts (see [Storage](storage.md#the-event-index)). The API
-lists them at `GET /events`.
+and name, and by the addresses in its data, in the same commit; one started with
+`--index-addresses` indexes every transaction under each address it touches. Blocks from before
+an index was turned on are read back from the stored receipts (see
+[Storage](storage.md#the-indexes)). The API lists them at `GET /events` and
+`GET /accounts/{address}/txs`.
 
 ## Rewards
 

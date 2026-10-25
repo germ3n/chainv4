@@ -9,7 +9,7 @@ use {
     crate::format,
     crate::light::Light,
     crate::model::{
-        BlockDetail, Called, Checkpoint, Contract, EventsPage, Forks, Mempool, NodeView, Page, PeerChange, Receipt, Reorganized,
+        BlockDetail, Called, Checkpoint, Contract, EventsPage, Forks, TxsPage, Mempool, NodeView, Page, PeerChange, Receipt, Reorganized,
         Status, Summary, TokensPage, TxView,
     },
     crate::store::{PAGE, Store},
@@ -256,6 +256,11 @@ impl Explorer {
             Ask::Events { query, cursor } => {
                 if let Some(page) = parse::<EventsPage>(value) {
                     store.events.entry(query).or_default().take(page, cursor.is_some(), now);
+                }
+            }
+            Ask::AccountTxs { address, cursor } => {
+                if let Some(page) = parse::<TxsPage>(value) {
+                    store.account_txs.entry(address).or_default().take(page, cursor.is_some(), now);
                 }
             }
             Ask::Offer(_) | Ask::Submit(_) => {}

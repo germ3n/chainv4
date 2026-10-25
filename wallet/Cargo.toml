@@ -1,0 +1,37 @@
+[package]
+name = "wallet"
+version = "0.1.0"
+edition = "2024"
+description = "A chainv4 light wallet: keys sealed with a password, and balances, tokens and receipts it proves itself, trusting only a genesis. Runs as a desktop app or in the browser."
+
+[dependencies]
+# Only the parts that build for the browser too: transactions, keys, hashes and the light client.
+chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake"] }
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "accesskit", "persistence"] }
+egui = "0.37.0"
+ehttp = "0.7.2"
+log = "0.4.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+web-time = "1.1.0"
+wincode = "0.6.3"
+# Sealing keys with a password: Argon2id to stretch it, ChaCha20-Poly1305 to seal.
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+getrandom = "0.4"
+qrcode = { version = "0.14.1", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
+env_logger = "0.11.11"
+rfd = "0.17.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+rfd = "0.17.2"
+wasm-bindgen-futures = "0.4.58"
+web-sys = { version = "0.3.85", features = ["Document", "Element", "HtmlCanvasElement", "Location", "UrlSearchParams", "Window"] }
+
+# A workspace of its own, as the explorer is: egui and the browser crates never meet the node's
+# lockfile.
+[workspace]

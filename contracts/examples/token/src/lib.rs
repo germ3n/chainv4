@@ -48,8 +48,16 @@ fn put(key: &[u8], value: U256) {
     storage::set(key, &value.to_le_bytes());
 }
 
-fn balance_key(owner: &Address) -> Vec<u8> {
-    key(b"balance:", &[owner])
+/// Balances live where the token standard says light clients can prove them: the balances
+/// namespace, by the holder's address text.
+const BALANCES: &[u8] = b"balances";
+
+fn balance(owner: &Address) -> U256 {
+    storage::namespace(BALANCES).get(owner.text().as_bytes()).and_then(|bytes| bytes.try_into().ok()).map(U256::from_le_bytes).unwrap_or_default()
+}
+
+fn set_balance(owner: &Address, value: U256) {
+    storage::namespace(BALANCES).set(owner.text().as_bytes(), &value.to_le_bytes());
 }
 
 fn allowance_key(owner: &Address, spender: &Address) -> Vec<u8> {
@@ -61,24 +69,24 @@ fn owner() -> Option<Address> {
 }
 
 fn move_tokens(from: &Address, to: &Address, amount: U256) {
-    let remaining = get(&balance_key(from))
+    let remaining = balance(from)
         .checked_sub(amount)
         .unwrap_or_else(|| abort("insufficient balance"));
-    put(&balance_key(from), remaining);
-    let received = get(&balance_key(to))
+    set_balance(from, remaining);
+    let received = balance(to)
         .checked_add(amount)
         .unwrap_or_else(|| abort("balance overflow"));
-    put(&balance_key(to), received);
+    set_balance(to, received);
     emit("Transfer", &[Value::Address(*from), Value::Address(*to), amount.into()]);
 }
 
 fn mint_to(to: &Address, amount: U256) {
     let supply = get(SUPPLY).checked_add(amount).unwrap_or_else(|| abort("supply overflow"));
     put(SUPPLY, supply);
-    let balance = get(&balance_key(to))
+    let balance = balance(to)
         .checked_add(amount)
         .unwrap_or_else(|| abort("balance overflow"));
-    put(&balance_key(to), balance);
+    set_balance(to, balance);
     emit("Transfer", &[Value::Address(zero()), Value::Address(*to), amount.into()]);
 }
 
@@ -112,7 +120,7 @@ fn total_supply() -> U256 {
 
 #[export]
 fn balance_of(owner: Address) -> U256 {
-    get(&balance_key(&owner))
+    balance(&owner)
 }
 
 #[export]

@@ -83,6 +83,7 @@ mod send {
     /// A node behind an HTTP API, stepping on a thread of its own until stopped.
     struct Running {
         api: SocketAddr,
+        genesis: crate::structs::hash::Hash,
         stop: Arc<AtomicBool>,
         thread: JoinHandle<(Node, FakeNet)>,
     }
@@ -101,6 +102,11 @@ mod send {
         }
 
         fn launch(produce: bool, validate: bool, finality: Option<FinalityConfig>) -> Running {
+            Running::launch_with(produce, validate, finality, |node| node)
+        }
+
+        /// As launch, with the node set up further before it starts.
+        fn launch_with(produce: bool, validate: bool, finality: Option<FinalityConfig>, set_up: impl FnOnce(Node) -> Node) -> Running {
             const SLOT: u64 = 50;
             let authority = DevAuthority::dev_keypair();
             let genesis = Genesis {
@@ -121,6 +127,7 @@ mod send {
                 node = node.validate(DevAuthority::dev_keypair());
             }
 
+            node = set_up(node);
             let api = crate::api::start(db, Some(node.handle()), &genesis, "127.0.0.1:0".parse().unwrap(), Default::default()).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
             let thread = std::thread::spawn({
@@ -137,7 +144,12 @@ mod send {
                 }
             });
 
-            Running { api, stop, thread }
+            Running {
+                api,
+                genesis: genesis.block().id(),
+                stop,
+                thread,
+            }
         }
 
         fn args(&self, tx: TxArgs) -> SendArgs {
@@ -180,6 +192,42 @@ mod send {
         });
 
         assert!(refused.unwrap_err().to_string().contains("cannot reach the node"));
+    }
+
+    #[test]
+    fn light_history_proves_each_transaction_that_touched_an_address() {
+        use crate::chain::IndexKind;
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Light {
+            #[command(flatten)]
+            args: LightArgs,
+        }
+
+        let running = Running::launch_with(true, false, None, |node| node.keep_index(IndexKind::Addresses, None).unwrap());
+        let to = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap().public().address();
+        send(running.args(TxArgs::Transfer { to, amount: u256::new(9) })).unwrap();
+        let light_args = |query: &[&str]| {
+            let node = format!("http://{}", running.api);
+            let genesis = running.genesis.to_string();
+            let args = ["chainv4", "--node", &node, "--genesis-id", &genesis].into_iter().chain(query.iter().copied());
+
+            Light::try_parse_from(args).unwrap().args
+        };
+        let to_text = to.to_string();
+
+        light(light_args(&["history", &to_text, "--limit", "5"])).unwrap();
+        assert!(Light::try_parse_from(["chainv4", "history", &to_text, "--limit", "0"]).is_err(), "at least one");
+
+        let unindexed = Running::start(true);
+        let node = format!("http://{}", unindexed.api);
+        let genesis = unindexed.genesis.to_string();
+        let refused = light(Light::try_parse_from(["chainv4", "--node", &node, "--genesis-id", &genesis, "history", &to_text]).unwrap().args);
+
+        assert!(refused.unwrap_err().to_string().contains("--index-addresses"));
+        running.stop();
+        unindexed.stop();
     }
 
     #[test]

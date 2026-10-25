@@ -211,9 +211,11 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **Snapshot nodes cannot serve finality before their pivot.** They never ran the checkpoints
   before it, so they have no light updates for them. Fetching those from peers along with the
   state would let them serve light clients from genesis.
-- [ ] **Light clients start from genesis every time.** Nothing they checked is kept between runs,
-  and every header is fetched. Keeping the client's state, or starting from a finalized
-  checkpoint someone trusts, would save that.
+- [x] **Light clients resume.** `LightClient::save` keeps what it checked from the finalized block
+  on, at most 4,096 headers, and `restore` takes it back for the same genesis. The wallet saves it
+  as it goes.
+- [ ] **`chainv4 light` still starts from genesis every run.** It could keep its state in a file
+  the way the wallet keeps it in app storage, or start from a finalized checkpoint someone trusts.
 - [ ] **Snapshots come from one peer at a time,** and a pivot only stays servable for
   `max_reorg_depth` blocks. Asking several peers at once, and frozen snapshots kept by serving
   nodes, would suit large states.
@@ -221,8 +223,18 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   the person, before it meets a node.
 - [ ] **Proofs are against the tip only.** The node keeps one state tree, so it cannot prove what
   an older block's state held; keeping nodes by version, as Jellyfish trees do, would.
-- [ ] **`tx_root` is a flat hash.** A transaction's inclusion is proven through its receipt; a
-  Merkle `tx_root` would prove the signed transaction itself.
+- [x] **A Merkle `tx_root`.** It is the root over each signed transaction's leaf, as the receipts
+  root is over receipts, and `GET /proofs/receipts/{id}` proves the transaction with its receipt:
+  `check_tx` gives who sent what.
+- [x] **An address index.** `--index-addresses` keeps every transaction under each address it
+  touches, with its own window and column, beside the event index, which shares its catch-up.
+  `GET /accounts/{address}/txs`, `chainv4 light history` and the explorer list from it.
+- [x] **Token balances are provable.** By the token standard, each holder's balance is in the
+  token's `balances` namespace under its address text, so a light client proves it with
+  `token_balance_key` and `check_state`.
+- [ ] **Contract payouts are not provable line by line.** Coin a contract pays out shows only in
+  the trace, which the receipts root leaves out, and the address index does not follow it.
+  Committing payments, as events of the chain's own, would let wallets list and prove them.
 - [x] **Commits can be undone.** Each main-chain block keeps an undo record of every value it
   replaced, for the last 100 blocks.
 - [x] **Prefix scans.** `Database::scan` visits a column's keys with a prefix, in order, from a
@@ -313,9 +325,18 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   `--explorer` serves the explorer's web app from the API's own `/`.
 - [x] **The explorer lists tokens.** A Tokens page lists the registry by symbol, token pages read
   their name, symbol and decimals from it, and holdings cover its first 100 tokens.
-- [ ] **CI does not build the explorer's web bundle.** It lints the wasm32 build but never runs
-  `trunk build`, so a broken `index.html` or wasm-bindgen mismatch shows only when someone builds
-  it.
+- [x] **A light wallet.** `wallet/`, built with egui, for the desktop and the browser: accounts
+  sealed with a password (Argon2id and ChaCha20-Poly1305), balances of the coin and every listed
+  token proven at the tip and the final block, sending with a reviewed fee and tip, receiving with
+  a QR code, and a history from the address index, each line proven. It pins the genesis on first
+  use, saves the light client, and `--wallet` serves it from a node's `/wallet/`.
+- [ ] **The wallet has no seed phrase.** Each account is a key of its own; a mnemonic and derived
+  accounts would make one backup cover them all.
+- [ ] **The wallet proves only the registry's first page of tokens,** 100 by symbol, as the
+  explorer's holdings do.
+- [ ] **CI does not build the web bundles.** It lints the explorer's and the wallet's wasm32 builds
+  but never runs `trunk build`, so a broken `index.html` or wasm-bindgen mismatch shows only when
+  someone builds them.
 - [ ] **Windows builds in CI.** Left out because of RocksDB and Luau build setup.
 
 add encryption to wallets/keypairs when stored to disk (if passphrase was set/selected)
@@ -344,3 +365,18 @@ Close, but not quite. A wallet does two jobs, and the light client only does one
 So a light client is what a trustless wallet uses for reading, like old SPV Bitcoin wallets or Helios under an Ethereum wallet. The explorer is now the closest thing to a light wallet here: it signs and sends on its Send page, and its account pages show balances the light client proved.
 
 That also matters for what you asked earlier. There's no separate light process an explorer can point at, because each explorer runs its own light client against the node it's connected to.
+
+
+
+these hardcoded?
+   Ask::Receipt(id) => format!("/proofs/receipts/{id}"),
+            Ask::Tokens => "/tokens?limit=100".to_string(),
+            Ask::History(address) => format!("/accounts/{address}/txs?limit=50"),
+            Ask::Events(address) => format!("/events?address={address}&limit=50")
+
+maybe add ability to use u128 for amounts if not too mcuh effort
+evm
+
+include method for lua scripts when compiling
+build android/ios apps for wallet/explorer
+some wallet clicking doesnt work

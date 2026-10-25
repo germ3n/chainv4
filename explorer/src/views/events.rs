@@ -48,7 +48,7 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
         .map(|to| format!(" It is still indexing older blocks, down to height {}.", format::thousands(&to.to_string())))
         .unwrap_or_default();
 
-    if found.events.is_empty() {
+    if found.items.is_empty() {
         ui.weak(format!(
             "None since height {}, where this node's index starts.{still}",
             format::thousands(&found.indexed_from.to_string())
@@ -64,7 +64,7 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
         .num_columns(if by_contract { 4 } else { 5 })
         .striped(true)
         .show(ui, |ui| {
-            for event in &found.events {
+            for event in &found.items {
                 super::block(ui, ctx, &event.block, &format::thousands(&event.height.to_string()));
                 super::tx(ui, ctx, &event.tx);
 
@@ -94,7 +94,7 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
 
         ui.weak(format!(
             "{} shown, indexed from height {}.{still}",
-            found.events.len(),
+            found.items.len(),
             format::thousands(&found.indexed_from.to_string())
         ));
     });

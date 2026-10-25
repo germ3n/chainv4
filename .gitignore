@@ -2,3 +2,5 @@
 /contracts/target
 /explorer/target
 /explorer/dist
+/wallet/target
+/wallet/dist

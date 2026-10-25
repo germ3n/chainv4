@@ -99,7 +99,7 @@ The explorer does not have to take the node's word for balances. It runs the lib
 | Block map | Every loaded block by height. The main chain runs along the middle, with finalized blocks green. Side branches sit in lanes above and below, each block joined to its parent. The tip and the justified checkpoint are outlined. Brighter blocks hold more transactions. |
 | Block | The header, its roots included, seal and finality proofs, and every transaction with its status and fee. |
 | Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, its events, its fields and its signature. |
-| Account | The balance and nonce, and the balance the light client proved, at the finalized block and the tip. For a contract: its deployer, engine, code size and functions, the storage layout its code declares, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, and the events that mention them, token transfers and approvals in the token's units. Events need a node started with `--index-events`. |
+| Account | The balance and nonce, and the balance the light client proved, at the finalized block and the tip. For a contract: its deployer, engine, code size and functions, the storage layout its code declares, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, every transaction that touched them, with its type, parties, status and fee, and the events that mention them, token transfers and approvals in the token's units. Transactions need a node started with `--index-addresses`, events one started with `--index-events`. |
 | Network | The node's roles, uptime, listening addresses and sync state, its gossip backlog, and what it counted since it started. A graph of its peers, and a table of them with what each gossiped, how much of that was dropped, and how far its chain got. |
 | Mempool | What waits for a block, by sender and nonce. |
 | Tokens | The token registry by symbol, with a search by how a symbol starts: each token's symbol, decimals, contract and name, and what makes a token on this chain. |
@@ -206,7 +206,8 @@ CHAINV4_NODE=http://127.0.0.1:8080 cargo test -- --ignored   # sends a transfer 
   stores, from each leaf back to the main chain. Restarting a node keeps its leaves.
 - **Holdings check at most the registry's first 100 tokens,** by symbol, besides those met
   elsewhere, with a read-only call each on the node.
-- **Events need the node's index.** A node started with `--index-events` lists them, from the
-  lowest height its index holds, and says when it is still indexing older blocks. On any other,
-  the explorer says so instead. A list read to its end starts over once the node has indexed
-  further back.
+- **Events and an account's transactions need the node's indexes.** A node started with
+  `--index-events` lists events, and one started with `--index-addresses` an account's
+  transactions, from the lowest height its index holds, and says when it is still indexing older
+  blocks. On any other, the explorer says so instead. A list read to its end starts over once the
+  node has indexed further back.

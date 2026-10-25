@@ -5,8 +5,8 @@
 use {
     crate::api::{Ask, EventQuery, Failure},
     crate::model::{
-        Account, BlockDetail, Checkpoint, Contract, EventsPage, Forks, FoundEvent, Mempool, NodeView, Page, Peer, PeerChange,
-        Receipt, RegisteredToken, Reorganized, Status, Summary, TokensPage, TxView,
+        Account, BlockDetail, Checkpoint, Contract, Forks, FoundEvent, FoundTx, IndexPage, Mempool, NodeView, Page, Peer,
+        PeerChange, Placed, Receipt, RegisteredToken, Reorganized, Status, Summary, TokensPage, TxView,
     },
     serde_json::Value,
     std::collections::{BTreeMap, HashMap, VecDeque},
@@ -56,10 +56,11 @@ impl TokenList {
     }
 }
 
-/// The indexed events a query found so far, newest first.
-#[derive(Clone, Debug, Default)]
-pub struct EventList {
-    pub events: Vec<FoundEvent>,
+/// What one of a node's indexes listed so far, newest first: the events a query found, or the
+/// transactions that touched an address.
+#[derive(Clone, Debug)]
+pub struct Listing<T> {
+    pub items: Vec<T>,
     /// Where the next older page starts, or None when there is none.
     pub next: Option<String>,
     /// The lowest height the node's index holds.
@@ -70,18 +71,32 @@ pub struct EventList {
     pub refreshed: u64,
 }
 
-impl EventList {
-    /// Takes a page: the newest, which puts any events newer than those held in front, or an
+pub type EventList = Listing<FoundEvent>;
+
+impl<T> Default for Listing<T> {
+    fn default() -> Listing<T> {
+        Listing {
+            items: Vec::new(),
+            next: None,
+            indexed_from: 0,
+            catching_up_to: None,
+            refreshed: 0,
+        }
+    }
+}
+
+impl<T: Placed> Listing<T> {
+    /// Takes a page: the newest, which puts any entries newer than those held in front, or an
     /// older one, which goes after them. A list read to its end starts over from the newest page
-    /// once the node has indexed further back, so the older events can be paged to.
-    pub fn take(&mut self, page: EventsPage, older: bool, now: u64) {
+    /// once the node has indexed further back, so the older entries can be paged to.
+    pub fn take(&mut self, page: IndexPage<T>, older: bool, now: u64) {
         let further_back = !older && self.next.is_none() && page.indexed_from < self.indexed_from;
         self.indexed_from = page.indexed_from;
         self.catching_up_to = page.catching_up_to;
 
         if older {
-            let last = self.events.last().map(FoundEvent::place);
-            self.events.extend(page.events.into_iter().filter(|event| last.is_none_or(|last| event.place() < last)));
+            let last = self.items.last().map(Placed::place);
+            self.items.extend(page.items.into_iter().filter(|item| last.is_none_or(|last| item.place() < last)));
             self.next = page.next;
 
             return;
@@ -89,18 +104,18 @@ impl EventList {
 
         self.refreshed = now;
 
-        match self.events.first().map(FoundEvent::place) {
+        match self.items.first().map(Placed::place) {
             _ if further_back => {
-                self.events = page.events;
+                self.items = page.items;
                 self.next = page.next;
             }
             None => {
-                self.events = page.events;
+                self.items = page.items;
                 self.next = page.next;
             }
             Some(newest) => {
-                let newer: Vec<FoundEvent> = page.events.into_iter().filter(|event| event.place() > newest).collect();
-                self.events.splice(0..0, newer);
+                let newer: Vec<T> = page.items.into_iter().filter(|item| item.place() > newest).collect();
+                self.items.splice(0..0, newer);
             }
         }
     }
@@ -146,6 +161,8 @@ pub struct Store {
     pub calls: HashMap<Ask, Value>,
     /// Indexed events, by what was asked.
     pub events: HashMap<EventQuery, EventList>,
+    /// The transactions the address index found touching an address, by the address.
+    pub account_txs: HashMap<String, Listing<FoundTx>>,
 }
 
 impl Store {
@@ -390,6 +407,7 @@ impl Store {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::model::EventsPage;
 
     pub fn block(height: u64, id: &str, parent: &str) -> Summary {
         Summary {
@@ -492,7 +510,7 @@ pub(crate) mod tests {
 
     fn events_page(events: Vec<FoundEvent>, next: Option<&str>) -> EventsPage {
         EventsPage {
-            events,
+            items: events,
             next: next.map(str::to_string),
             indexed_from: 1,
             catching_up_to: None,
@@ -536,7 +554,7 @@ pub(crate) mod tests {
         // The newest page again, with two new events: only those are added, in front.
         list.take(events_page(vec![found(7, 0), found(6, 0), found(5, 0), found(4, 1)], Some("c2")), false, 30);
 
-        assert_eq!(list.events.iter().map(|event| event.height).collect::<Vec<_>>(), [7, 6, 5, 4, 4, 3, 2]);
+        assert_eq!(list.items.iter().map(|event| event.height).collect::<Vec<_>>(), [7, 6, 5, 4, 4, 3, 2]);
         assert_eq!(list.next, None, "the older pages already read stay read");
         assert_eq!(list.refreshed, 30);
 
@@ -547,7 +565,7 @@ pub(crate) mod tests {
         };
         list.take(further, false, 40);
 
-        assert_eq!(list.events.iter().map(|event| event.height).collect::<Vec<_>>(), [7, 6]);
+        assert_eq!(list.items.iter().map(|event| event.height).collect::<Vec<_>>(), [7, 6]);
         assert_eq!(list.next.as_deref(), Some("c3"));
     }
 }

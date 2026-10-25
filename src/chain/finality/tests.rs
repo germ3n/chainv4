@@ -1106,26 +1106,40 @@ mod voting {
             let who = dev().public().address();
             let key = crate::db::address_key(&who);
             let finalized = client.finalized().block;
-            let at = |block: &Hash| {
+            let at = |chain: &Chain, block: &Hash| {
                 let state = chain.state_at(block).unwrap();
                 let value = state.get(Column::Accounts, &key).unwrap();
                 let proof = StateTree::new(&state, chain.hash()).prove(Column::Accounts, &key).unwrap();
 
                 (value, proof)
             };
-            let (value, proof) = at(&finalized);
+            let (value, proof) = at(&chain, &finalized);
 
             assert!(client.check_state(&finalized, Column::Accounts, &key, value.as_deref(), &proof).unwrap().final_);
-            let (value, proof) = at(&chain.tip().id());
+            let (value, proof) = at(&chain, &chain.tip().id());
             assert!(!client.check_state(&chain.tip().id(), Column::Accounts, &key, value.as_deref(), &proof).unwrap().final_);
             assert_eq!(client.check_state(&chain.tip().id(), Column::Accounts, &key, None, &proof), Err(LightError::BadProof));
 
-            // It keeps following as the chain goes on.
+            // Saved, it keeps only the headers from the finalized block on, and a client restored
+            // from it follows on from there as the chain goes on.
+            let saved = client.save();
+            let finalized_height = client.finalized().epoch * INTERVAL;
+
+            assert_eq!(saved.headers[0].header.height, finalized_height);
+            assert_eq!(saved.headers.len() as u64, chain.tip().height - finalized_height + 1);
+            assert_eq!(LightClient::restore(saved.clone(), Hash::zero(chain.hash())).err(), Some(LightError::WrongGenesis));
+
+            let mut client = LightClient::restore(saved, chain.genesis()).unwrap();
             finalize_through(&mut chain, 7);
             client.refresh();
             serve(&chain, &mut client);
 
+            assert_eq!(client.tip().id(), chain.tip().id());
             assert_eq!(Some(client.finalized()), chain.finalized());
+
+            let (value, proof) = at(&chain, &client.finalized().block);
+
+            assert!(client.check_state(&client.finalized().block, Column::Accounts, &key, value.as_deref(), &proof).unwrap().final_);
 
             // It trusts nothing it cannot check.
             let mut forged = params.clone();

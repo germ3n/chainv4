@@ -78,8 +78,10 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--stream` | | Push what the node does to API clients as it happens, on `GET /stream`. |
 | `--cors ORIGIN` | | Let web pages from this origin call the API, or `*` for any; repeat for several. |
 | `--explorer DIR` | | Serve the [explorer](docs/explorer.md)'s web app, built into `explorer/dist`, from the API's `/`. |
+| `--wallet DIR` | | Serve the [wallet](docs/wallet.md)'s web app, built into `wallet/dist`, from the API's `/wallet/`. |
 | `--snapshot` | | On a fresh database, sync from a snapshot: check every header peers have, take the state of a block 16 below the best tip from them, checking every part against its state root, and run only the blocks after it. See [Syncing from a snapshot](docs/node.md#syncing-from-a-snapshot). |
 | `--index-events[=FROM]` | | Index events by contract, by name and by the addresses in them, for `GET /events`. `FROM` is `genesis` (when left out), a height, or `latest-N` for a window of the latest N blocks. Older blocks are indexed in the background. Once on, it stays on until `--index-events=off` deletes it. |
+| `--index-addresses[=FROM]` | | Index transactions by every address they touch, for `GET /accounts/{address}/txs`: what the [wallet](docs/wallet.md) lists a history from. `FROM` and `=off` as for `--index-events`. |
 
 Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
 
@@ -163,10 +165,25 @@ chainv4 light --consensus authority account ed25519:0xa9d1…
 # balance 1000005000000000000000000, nonce 0: proven at block 45 0x7417…, not final yet
 ```
 
-`status`, `account ADDRESS`, `entry COLUMN KEY` and `receipt TX`; `--genesis FILE` or
+`status`, `account ADDRESS`, `entry COLUMN KEY`, `receipt TX` (who sent what, and what it did)
+and `history ADDRESS`, from a node started with `--index-addresses`; `--genesis FILE` or
 `--genesis-id 0x…` to trust another chain, and `--node URL` for the node, which it does not
 trust. The explorer runs the same client and shows the balances it proved. See
 [Light client](docs/light-client.md).
+
+### The wallet
+
+`wallet/` is a light wallet for the desktop and the browser, in egui. Its keys are sealed with a
+password on the device, and it shows only what it proved itself:
+
+```sh
+cd wallet && cargo run --release -- --node http://127.0.0.1:8080
+cd wallet && trunk build --release    # then: chainv4 --http … --index-addresses --wallet wallet/dist
+```
+
+Balances of the coin and every listed token, sending with a reviewed fee, receiving with a QR
+code, several accounts, and a history from the node's address index. See
+[Wallet](docs/wallet.md).
 
 ## Keys
 
@@ -598,9 +615,10 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "�
 | `GET /blocks/{latest\|height\|id}` | A block, its gas used and base price, its seal, and each transaction with its fee offer and receipt. |
 | `GET /txs/{id}` | Where a transaction landed, its confirmations, whether it is final, its gas used and fee, its result, events and trace of every call its contracts made; 404 until it is on the main chain. |
 | `GET /accounts/{address}` | Nonce and balance. |
+| `GET /accounts/{address}/txs` | The transactions that touched an address, newest first and paged. On nodes started with `--index-addresses`. |
 | `GET /contracts/{address}` | Engine, deployer, exported functions, whether it can be upgraded, its storage layout, and what the token registry holds for it. |
 | `GET /proofs/{column}/{key}` | A proof of one chain-state entry, or that there is none, against the tip's `state_root`, or a recent block's with `?block=`. |
-| `GET /proofs/receipts/{id}` | A proof that a transaction's receipt is in its block's `receipts_root`. |
+| `GET /proofs/receipts/{id}` | A proof that a transaction's receipt is in its block's `receipts_root`, and the signed transaction in its `tx_root`. |
 | `GET /light` | What a light client starts from: the chain's light parameters and genesis header, encoded. |
 | `GET /headers?from=H&count=N` | Main-chain headers with their seals, encoded. |
 | `GET /light/updates/{block}` | Proofs of the voters genesis or a checkpoint fixed, for light clients to follow finality. |

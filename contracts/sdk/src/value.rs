@@ -39,6 +39,27 @@ impl Address {
 
         Some(Address { kind, bytes: out })
     }
+
+    /// The address in its text form, as the node writes it: its kind, a colon and 0x hex, such
+    /// as `ed25519:0x3b6a…`.
+    pub fn text(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let kind = match self.kind {
+            AddressKind::Ed25519 => "ed25519",
+            AddressKind::Contract => "contract",
+            AddressKind::EdBlake => "edblake",
+        };
+        let mut out = String::with_capacity(kind.len() + 67);
+        out.push_str(kind);
+        out.push_str(":0x");
+
+        for byte in self.bytes {
+            out.push(HEX[usize::from(byte >> 4)] as char);
+            out.push(HEX[usize::from(byte & 15)] as char);
+        }
+
+        out
+    }
 }
 
 /// An amount of the chain's currency.

@@ -60,6 +60,24 @@ contract that called the token.
 `from`, `to`, `owner` and `spender` are addresses; `amount` is a `u256`. A client can rebuild
 every balance from `Transfer` events alone.
 
+## Provable balances
+
+A token keeps each holder's balance where any client can find it, and prove it against a header
+alone: in its `balances` [namespace](contracts.md#storage-namespaces), under the holder's address
+text, such as `ed25519:0x3b6a…`.
+- **Lua** writes the balance as decimal text: `storage.namespace("balances")` and
+  `balances:set(owner:text(), tostring(amount))`.
+- **Rust** writes it as 32 bytes, little-endian: `storage::namespace(b"balances")`, keyed by
+  `owner.text().as_bytes()`.
+
+A light client reads the key from `light::token_balance_key(token, holder)`, proves the entry
+with `GET /proofs/namespaces/{key}` and `check_state`, and reads either encoding with
+`light::token_balance`. No entry is a balance of zero. This is how the [wallet](wallet.md) shows
+token balances it proved, without trusting `balance_of` answers from a node.
+
+It is a convention, not something the chain checks: a token that keeps balances elsewhere still
+works, but no light client can prove what it holds. Both reference implementations follow it.
+
 ## The token registry
 
 The chain keeps a registry of tokens (`registry::tokens`), so wallets can list them and tell a

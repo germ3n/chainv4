@@ -175,6 +175,15 @@ fn by_address(address: &Address) -> Vec<u8> {
     [&[BY_ADDRESS][..], &address_key(address)].concat()
 }
 
+#[document(
+    summary = "Where the registry keeps a token's entry, in Column::Tokens: what a light client proves a token's name, symbol and decimals by.",
+    category = "Registries",
+    see_also = "Token",
+)]
+pub fn token_key(address: &Address) -> Vec<u8> {
+    by_address(address)
+}
+
 /// Where symbols starting with this go: ASCII letters in lower case, so a search ignores their
 /// case, and everything else as it is, so no node's Unicode tables decide where a key goes.
 fn symbol_prefix(symbol: &str) -> Vec<u8> {

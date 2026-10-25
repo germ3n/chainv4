@@ -25,12 +25,12 @@ Its loop, `Node::run`, repeats two steps. **`step`** does the work:
    - transactions submitted through the API, and the API asking for a report.
 2. It produces a block if its slot has come. An authority seals at once; a miner gets a template.
 3. It votes, if it validates and a checkpoint is deep enough.
-4. It catches the event index up a step, on a node started with `--index-events` (see
-   [Storage](storage.md#the-event-index)).
+4. It catches each index up a step, on a node started with `--index-events` or
+   `--index-addresses` (see [Storage](storage.md#the-indexes)).
 5. It logs where it stands every 30 seconds.
 
-**`wait`** then sleeps until the next slot, the next event, or a second at most. While the event
-index is still catching up, it does not sleep, so a long catch-up runs a step at a time in
+**`wait`** then sleeps until the next slot, the next event, or a second at most. While an index
+is still catching up, it does not sleep, so a long catch-up runs a step at a time in
 between everything else.
 
 Tests drive `step` with a clock of their own, so they never sleep.
@@ -250,7 +250,7 @@ no state of its own.
 **Afterwards,** it keeps headers alone for the blocks before the pivot:
 - the API shows them marked `pruned`, and the node cannot serve their bodies to peers;
 - it never rolls back past the pivot;
-- its event index reaches back to the block after it, since it has no receipts before;
+- its indexes reach back to the block after it, since it has no receipts before;
 - it has no light updates before it, so light clients following finality from genesis need
   another node.
 
@@ -268,10 +268,11 @@ no state of its own.
 - **No graceful shutdown.** Ctrl-C stops the process mid-loop; commits are atomic, so data is
   safe.
 - **No NAT traversal,** and no limits on connections or requests.
-- **The event index is opt in.** `--index-events` keeps it, from genesis or the height or
-  `latest-N` window given, and once on, the database keeps it on. `--index-events=off` deletes
-  it at startup, in one atomic write however big it is. `GET /events` answers 404 on nodes
-  without one.
+- **The indexes are opt in, each on its own.** `--index-events` and `--index-addresses` keep
+  theirs, from genesis or the height or `latest-N` window given, and once on, the database keeps
+  it on. `=off` deletes one at startup, in one atomic write however big it is, and leaves the
+  other. `GET /events` and `GET /accounts/{address}/txs` answer 404 on nodes without the index
+  they need.
 - **Catching up on a long chain takes a while.** Every older block and its receipts are read
   back. The node keeps syncing and producing meanwhile, and logs how far it got every 30
   seconds.

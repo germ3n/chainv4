@@ -13,6 +13,7 @@ use {
 
 use {
     crate::crypto::hasher::Hasher,
+    crate::crypto::merkle,
     crate::structs::hash::HashType,
 };
 
@@ -33,7 +34,7 @@ pub struct BlockHeader {
     pub producer: Address,
     #[document(summary = "How hard the block was to produce: under proof of work, the expected number of hashes to find its seal; 0 under an authority. Consensus decides what it must be.")]
     pub difficulty: u128,
-    #[document(summary = "The chain hash of the block's transactions, in order. For genesis, the hash of the genesis configuration instead, so chains with different genesis never share a block.")]
+    #[document(summary = "The Merkle root of the block's transactions, in order, from Block::tx_root, so one is proven without the others. For genesis, the hash of the genesis configuration instead, so chains with different genesis never share a block.")]
     pub tx_root: Hash,
     #[document(summary = "The chain hash of the finality proofs the block carries, in order.")]
     pub proof_root: Hash,
@@ -143,21 +144,17 @@ impl Block {
 
     #[document(
         parent = "Block",
-        summary = "What a header's tx_root must be for these transactions.",
+        summary = "What a header's tx_root must be for these transactions: the Merkle root, as RFC 6962 builds one, over their leaves in order, so one transaction is proven without the others; the zero hash for none.",
         params = {
             hash = "The chain's hash.",
             txs = "The transactions, in order.",
         },
+        see_also = "SignedTx::leaf, audit_path",
     )]
     pub fn tx_root(hash: HashType, txs: &[SignedTx]) -> Hash {
-        let mut hasher = Hasher::new(hash);
-        hasher.update(&(txs.len() as u64).to_le_bytes());
+        let leaves: Vec<Hash> = txs.iter().map(|tx| tx.leaf(hash)).collect();
 
-        for tx in txs {
-            wincode::serialize_into(&mut hasher, tx).expect("a hasher never fails a write");
-        }
-
-        hasher.finalize()
+        merkle::root(hash, &leaves)
     }
 
     #[document(

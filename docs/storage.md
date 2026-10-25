@@ -53,6 +53,7 @@ holds addresses that matter.
 | `Headers` | Every stored block's header and seal, by id: a node that synced from a snapshot keeps these alone for the blocks before its pivot. | Node's |
 | `Light` | For genesis and each checkpoint, the light update: proofs of the voters it fixed, against its state root (see [Light client](light-client.md)). | Node's |
 | `StateTree` | The state tree's nodes, by depth and the path bits above them, kept in step with the chain-state columns block by block (see [Chain](chain.md#the-state-root)). Its root is each header's `state_root`. | Node's |
+| `Addresses` | The address index, on a node started with `--index-addresses`: each transaction under every address it touches, newest first. | Node's |
 | `Namespaces` | Contract storage in [namespaces](contracts.md#storage-namespaces) and each contract's own space: by the contract's address, the namespace's name with its length in front (none for the own space), then the contract's own key. Which namespaces a contract's code may use is its [layout](contracts.md#storage-layouts), kept in its `Contracts` record. | Yes |
 
 **Chain state** is what every node computes the same from the blocks.
@@ -62,38 +63,57 @@ holds addresses that matter.
 **`Finality`** is outside the chain's state altogether: it is learned from the network, so two
 nodes can differ in it, and a reorg never touches it.
 
-## The event index
+## The indexes
 
-A node started with `--index-events` keeps an index of every event on the main chain
-(`src/chain/events.rs`):
+A node may keep two indexes, each its own choice: neither is chain state, and two nodes can keep
+different ones. What they share is in `src/chain/index.rs`.
+
+**The event index** (`--index-events`, `src/chain/events.rs`) finds every event on the main chain:
 - **Once:** each event is stored once, under its contract, with its transaction, block, height and
   place.
 - **Pointers:** keys by contract and name, and by every address in its data, point at it.
+
+**The address index** (`--index-addresses`, `src/chain/addresses.rs`) finds every transaction
+that touched an address: what a wallet lists a history from, plain coin transfers to it included,
+which no event tells of. A transaction touches (`touched`):
+- its sender;
+- a transfer's, mint's or burn's parties;
+- the contract it calls or upgrades, and every address among the call's arguments, as
+  `transfer(to, amount)` names its recipient;
+- the contract it deployed.
+
+Each address keeps its own small record (`IndexedTx`: the id, block, height and place), so a
+listing is one scan. It only says where to look: a light client proves the transaction against
+its block's `tx_root` and what it did against the `receipts_root`. Coin a contract pays out, which
+only the trace shows, is not in it.
+
+Both work the same way:
 - **Newest first:** heights and places are stored inverted, so a listing reads forward from where
   the last page stopped.
 - **Reorgs:** a new block's entries go into the same commit as its receipts, so the block's undo
   record takes them off with it.
 
-**Which blocks it holds.** `Meta` keeps two records: the index's low end (`events_from`) and which
-blocks it keeps (`events_keep`), as `--index-events` set them. The index always holds every
-main-chain block from the low end to the tip, and the node moves the low end toward what it keeps:
-- **Down:** it reads older blocks' receipts back, newest first, and indexes their events. A block
+**Which blocks an index holds.** `Meta` keeps two records for each: its low end (`events_from`,
+`addresses_from`) and which blocks it keeps (`events_keep`, `addresses_keep`), as the flag set
+them. An index always holds every main-chain block from its low end to the tip, and the node moves
+the low end toward what it keeps:
+- **Down:** it reads older blocks and their receipts back, newest first, and indexes them. A block
   a reorg could still take off gets those entries added to its undo record, so a reorg takes them
   off too.
-- **Up:** a `latest-N` window drops the oldest block's events once the tip moves past it.
+- **Up:** a `latest-N` window drops the oldest block's entries once the tip moves past it.
   Asking for fewer blocks than are held drops the rest the same way.
 
 **A step at a time:** each step reads at most 500 blocks or 2,000 transactions, and commits the
 new low end together with the entries it wrote or removed. A node stopped mid-way picks up where
-the last commit left off, and the index never has gaps.
+the last commit left off, and an index never has gaps.
 
 **Starting:** a new index starts empty at the block after the tip, and steps down from there.
 Once on, the database keeps it on, even without the flag, keeping the same blocks.
 
-**Turning it off:** `--index-events=off` deletes the whole `Events` column and the two records in
-`Meta` in one atomic write, `Database::clear`: a range delete in RocksDB, so it is quick however
-big the index is. A new index clears the column the same way first, in case anything was left
-behind.
+**Turning one off:** `--index-events=off` or `--index-addresses=off` deletes that index's whole
+column and its two records in `Meta` in one atomic write, `Database::clear`: a range delete in
+RocksDB, so it is quick however big the index is. The other index stays as it was. A new index
+clears its column the same way first, in case anything was left behind.
 
 ## The storage format
 
@@ -110,6 +130,8 @@ behind.
 - **Format 6:** headers commit to a state root and a receipts root, and the state tree is kept.
 - **Format 7:** every header is kept in `Headers`, state tree leaves name their entry's column and
   key, and checkpoints keep light updates.
+- **Format 8:** `tx_root` is a Merkle root, so stored headers changed meaning, and the address
+  index has a column of its own.
 
 There are no migrations: delete the database, or point `--db` elsewhere.
 

@@ -100,6 +100,22 @@ too.
 
 `address`, `nonce` and `balance`. An address never written to reads as nonce 0 and balance 0.
 
+### `GET /accounts/{address}/txs`
+
+The transactions that touched an address, newest first, from the node's address index: those it
+sent, those that paid or minted to it, and every call that named it among its arguments (see
+[Storage](storage.md#the-indexes)). Only a node started with `--index-addresses` keeps one; on any
+other, 404.
+
+**Pages:** `limit` of them (50 by default, at most 200). `next` is the `cursor` for the next,
+older page, or `null` after the last.
+
+**Each transaction** is as `GET /blocks/{block}` lists it, with its `receipt`, plus its `block`,
+`height` and `index`, its place in the block. It is the node's word: a light client proves each
+with `GET /proofs/receipts/{id}`.
+
+**Coverage:** `indexed_from` and `catching_up_to`, as for `GET /events`.
+
 ### `GET /contracts/{address}`
 
 What a contract is:
@@ -167,15 +183,17 @@ and then it answers 503.
 
 ### `GET /proofs/receipts/{id}`
 
-A proof that a transaction's receipt is in its block's receipts root: that the transaction is in
-the chain, and what it did. It answers:
-- `tx`, `block`, `height` and `receipts_root`;
+A proof that a transaction is in its block, who sent what, and what it did: its receipt in the
+block's receipts root, and the signed transaction at the same place in its `tx_root`. It answers:
+- `tx`, `block`, `height`, `receipts_root` and `tx_root`;
 - `index` and `count`: its place among the block's transactions, and how many there are;
-- `receipt`: its `CommittedReceipt`, encoded, in hex;
-- `path`: the Merkle path from its leaf, the deepest sibling first.
+- `receipt`: its `CommittedReceipt`, encoded, in hex, and `path`, the Merkle path from its leaf,
+  the deepest sibling first;
+- `signed`: the `SignedTx`, encoded, in hex, and `tx_path`, its Merkle path in `tx_root`.
 
-`crypto::merkle::verify(root, leaf(hash, receipt), index, count, path)` checks it. It answers 404 for a
-transaction not on the main chain.
+`crypto::merkle::verify(root, leaf(hash, bytes), index, count, path)` checks each, and a light
+client's `check_receipt` and `check_tx` check them against a header it followed. It answers 404
+for a transaction not on the main chain.
 
 ### `POST /txs`
 
@@ -355,6 +373,11 @@ it for several. Allowed pages get the CORS headers, and their preflight question
 **The explorer:** `--explorer DIR` serves the [explorer](explorer.md)'s web app, built with
 `trunk build` into `explorer/dist`, from the API's own `/`. Its files never shadow a route, and
 only plain paths below the directory are served.
+
+**The wallet:** `--wallet DIR` serves the [wallet](wallet.md)'s web app, built with `trunk build`
+into `wallet/dist`, from `/wallet/`, so it talks to the node that served it. `/wallet` redirects
+there, since its files load relative to the page. Nothing under `/wallet/` ever falls through to
+the explorer.
 
 ## What to keep in mind
 

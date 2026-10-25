@@ -422,6 +422,16 @@ impl SignedTx {
     pub fn id(&self, hash: crate::structs::hash::HashType) -> Hash {
         self.hash_with_tag(hash)
     }
+
+    #[document(
+        parent = "SignedTx",
+        summary = "Its leaf in a block's tx_root: its whole encoding, hashed as a Merkle leaf.",
+        params = { hash = "The chain's hash, from genesis." },
+        see_also = "Block::tx_root, leaf",
+    )]
+    pub fn leaf(&self, hash: crate::structs::hash::HashType) -> Hash {
+        crate::crypto::merkle::leaf(hash, &self.hashable_bytes_with_tag())
+    }
 }
 
 fn signing_bytes(tx: &Tx, nonce: u64, fee: &FeeOffer, signer: &PublicKey) -> Vec<u8> {

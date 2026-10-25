@@ -62,6 +62,29 @@ jobs:
       - name: clippy (web)
         run: cargo clippy --manifest-path explorer/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
 
+  # The wallet too: a workspace of its own, for the desktop and the browser.
+  wallet:
+    name: wallet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wallet -> target
+      # What winit and egui's clipboard build against on Linux.
+      - name: system libraries
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      - name: clippy
+        run: cargo clippy --manifest-path wallet/Cargo.toml --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --manifest-path wallet/Cargo.toml --locked
+      - name: clippy (web)
+        run: cargo clippy --manifest-path wallet/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
+
   # Every hash and key scheme sits behind a feature; these make sure each subset still builds,
   # lints clean and passes its tests.
   features:

@@ -5,7 +5,7 @@
 use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
-        Coin, EventFilter, FinalityConfig, Fees, Genesis, stored_event_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, stored_address_txs, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
         stored_light_update, stored_state_at,
     },
@@ -60,6 +60,10 @@ const MAX_FORKS: u64 = 1_000;
 const DEFAULT_EVENTS: u64 = 50;
 /// The most events /events returns.
 const MAX_EVENTS: u64 = 500;
+/// How many transactions /accounts/{address}/txs returns when the client does not say.
+const DEFAULT_ACCOUNT_TXS: u64 = 50;
+/// The most transactions /accounts/{address}/txs returns.
+const MAX_ACCOUNT_TXS: u64 = 200;
 /// How many tokens /tokens returns when the client does not say.
 const DEFAULT_TOKENS: u64 = 50;
 /// The most tokens /tokens returns.
@@ -96,8 +100,9 @@ struct Api {
     limits: Limits,
     /// The browser origins allowed to call the API.
     cors: Arc<Vec<String>>,
-    /// A built explorer web app, served from /.
+    /// A built explorer web app, served from /, and a built wallet, from /wallet/.
     explorer: Option<Arc<PathBuf>>,
+    wallet: Option<Arc<PathBuf>>,
     /// What light clients need to follow the chain.
     light: Arc<LightParams>,
 }
@@ -113,6 +118,8 @@ pub struct ApiOptions {
     pub cors: Vec<String>,
     #[document(summary = "A built explorer web app, trunk's dist directory, to serve from / on the API's own origin. Its files never shadow a route.")]
     pub explorer: Option<PathBuf>,
+    #[document(summary = "A built wallet web app, trunk's dist directory, to serve from /wallet/ on the API's own origin, so it talks to the node that served it.")]
+    pub wallet: Option<PathBuf>,
 }
 
 #[document(
@@ -172,6 +179,7 @@ pub fn start(
                     limits,
                     cors: Arc::new(options.cors),
                     explorer: options.explorer.map(Arc::new),
+                    wallet: options.wallet.map(Arc::new),
                     light,
                 })).await {
                     log::error!("[http] {err}");
@@ -189,6 +197,7 @@ fn router(api: Api) -> Router {
         .route("/blocks", get(blocks))
         .route("/blocks/{block}", get(block))
         .route("/accounts/{address}", get(account))
+        .route("/accounts/{address}/txs", get(account_txs))
         .route("/contracts/{address}", get(contract))
         .route("/light", get(light))
         .route("/light/updates/{block}", get(light_update))
@@ -211,7 +220,7 @@ fn router(api: Api) -> Router {
         .route("/call", post(call));
     #[cfg(feature = "stream")]
     let router = router.route("/stream", get(stream));
-    let router = router.fallback(explorer).layer(DefaultBodyLimit::max(MAX_BODY));
+    let router = router.fallback(apps).layer(DefaultBodyLimit::max(MAX_BODY));
 
     match cors {
         true => router.layer(middleware::from_fn_with_state(api.clone(), allow_origins)).with_state(api),
@@ -248,13 +257,32 @@ async fn allow_origins(Shared(api): Shared<Api>, request: Request, next: Next) -
     response
 }
 
-/// Serves the explorer web app's files for anything that is not a route: / is its index.html.
-async fn explorer(Shared(api): Shared<Api>, uri: Uri) -> Result<Response, ApiError> {
+/// Serves the web apps' files for anything that is not a route: the wallet's under /wallet/, and
+/// the explorer's for the rest, / being its index.html.
+async fn apps(Shared(api): Shared<Api>, uri: Uri) -> Result<Response, ApiError> {
+    let path = uri.path();
+
+    if let Some(root) = &api.wallet {
+        // Its files load relative to the page, so the page must end in a slash.
+        if path == "/wallet" {
+            return Ok((StatusCode::PERMANENT_REDIRECT, [(header::LOCATION, "/wallet/")]).into_response());
+        }
+
+        if let Some(wanted) = path.strip_prefix("/wallet/") {
+            return app_file(root, wanted);
+        }
+    }
+
+    match &api.explorer {
+        Some(root) => app_file(root, path.trim_start_matches('/')),
+        None => Err(ApiError::NotFound("no such route".to_string())),
+    }
+}
+
+/// A web app's file, by its path below the app's directory.
+fn app_file(root: &std::path::Path, wanted: &str) -> Result<Response, ApiError> {
     let missing = || ApiError::NotFound("no such route".to_string());
-    let Some(root) = &api.explorer else {
-        return Err(missing());
-    };
-    let wanted = match uri.path().trim_start_matches('/') {
+    let wanted = match wanted {
         "" => "index.html",
         path => path,
     };
@@ -614,7 +642,7 @@ async fn forks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, Str
 /// address, a page at a time.
 async fn events(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
     let db = api.db;
-    let Some(index) = stored_event_index(&*db)? else {
+    let Some(index) = stored_index(&*db, IndexKind::Events)? else {
         return Err(ApiError::NotFound("this node keeps no event index; start it with --index-events".to_string()));
     };
     let filter = match (query.get("contract"), query.get("name"), query.get("address")) {
@@ -676,6 +704,45 @@ async fn account(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answe
     let account = Accounts::new(&State::new(db)).get(&address)?;
 
     Ok(Json(json::account(&address, &account)))
+}
+
+/// The transactions touching an address, newest first, a page at a time: from the address index,
+/// for a node that keeps one. Each with what it did, as a block lists it.
+async fn account_txs(Shared(api): Shared<Api>, Path(address): Path<String>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let db = api.db;
+    let Some(index) = stored_index(&*db, IndexKind::Addresses)? else {
+        return Err(ApiError::NotFound("this node keeps no address index; start it with --index-addresses".to_string()));
+    };
+    let address = parse_address(&address)?;
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_ACCOUNT_TXS).clamp(1, MAX_ACCOUNT_TXS) as usize;
+    let cursor = query
+        .get("cursor")
+        .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
+        .transpose()?;
+    let (found, next) = stored_address_txs(&*db, &address, cursor.as_deref(), limit)?;
+    let mut txs = Vec::with_capacity(found.len());
+
+    for indexed in &found {
+        let block = stored_block(&*db, &indexed.block)?;
+        let receipt = stored_receipt(&*db, &indexed.tx)?;
+
+        // A reorg between the reads took it off the main chain: the next page read has it right.
+        if let (Some(block), Some(receipt)) = (block, receipt)
+            && receipt.block == indexed.block
+            && let Some(signed) = block.txs.get(indexed.index as usize)
+        {
+            txs.push(json::indexed_tx(indexed, signed, &receipt, api.hash));
+        }
+    }
+
+    let tip = tip(&*db)?.header.height;
+
+    Ok(Json(json!({
+        "txs": txs,
+        "next": next.map(|next| to_hex(&next)),
+        "indexed_from": index.from,
+        "catching_up_to": (!index.caught_up(tip)).then(|| index.keep.lowest(tip)),
+    })))
 }
 
 async fn contract(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
@@ -841,7 +908,11 @@ async fn receipt_proof(Shared(api): Shared<Api>, Path(id): Path<String>) -> Answ
         let path = merkle::audit_path(api.hash, &leaves, index);
 
         if merkle::verify(&block.header.receipts_root, &leaves[index], index, leaves.len(), &path) {
-            return Ok(Json(json::receipt_proof(&block, &committed[index], index, leaves.len(), &path)));
+            // The transaction too, against tx_root: who sent what, which the receipt does not say.
+            let txs: Vec<Hash> = block.txs.iter().map(|tx| tx.leaf(api.hash)).collect();
+            let tx_path = merkle::audit_path(api.hash, &txs, index);
+
+            return Ok(Json(json::receipt_proof(&block, &committed[index], index, leaves.len(), &path, &tx_path)));
         }
     }
 

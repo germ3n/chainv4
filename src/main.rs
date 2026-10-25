@@ -1,5 +1,5 @@
 #[cfg(feature = "node")]
-use chainv4::{chain::IndexEvents, cli, structs};
+use chainv4::{chain::{IndexKind, Indexing}, cli, structs};
 #[cfg(feature = "http")]
 use chainv4::api;
 
@@ -97,6 +97,10 @@ struct NodeArgs {
     #[cfg(feature = "http")]
     #[arg(long, requires = "http")]
     explorer: Option<std::path::PathBuf>,
+    /// Serve the wallet web app built in this directory (trunk's dist) from the API's /wallet/.
+    #[cfg(feature = "http")]
+    #[arg(long, requires = "http")]
+    wallet: Option<std::path::PathBuf>,
     /// Tell clients what the node does as it happens, on the API's GET /stream.
     #[cfg(feature = "stream")]
     #[arg(long, requires = "http")]
@@ -106,7 +110,12 @@ struct NodeArgs {
     /// window of the latest N blocks. Older blocks are indexed in the background. Once on, the
     /// database keeps it on, keeping the same blocks until told otherwise; off deletes it.
     #[arg(long, value_name = "FROM", num_args = 0..=1, require_equals = true, default_missing_value = "genesis")]
-    index_events: Option<IndexEvents>,
+    index_events: Option<Indexing>,
+    /// Keep an index of transactions, by every address they touch, for the API's GET
+    /// /accounts/{address}/txs: what a wallet lists its history from. FROM is as for
+    /// --index-events, and it is kept, and dropped, the same way.
+    #[arg(long, value_name = "FROM", num_args = 0..=1, require_equals = true, default_missing_value = "genesis")]
+    index_addresses: Option<Indexing>,
     /// On a database that holds only genesis, sync from a snapshot: check every header peers have,
     /// take the state of a block 16 below the best tip from them, and run only the blocks after
     /// it. The node then keeps headers alone for the blocks before it.
@@ -242,11 +251,13 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         node = node.stream(STREAM_BACKLOG);
     }
 
-    match args.index_events {
-        Some(IndexEvents::Off) => node = node.drop_event_index()?,
-        Some(IndexEvents::Keep(keep)) => node = node.index_events(Some(keep))?,
-        None if node.chain().event_index().is_some() => node = node.index_events(None)?,
-        None => {}
+    for (kind, asked) in [(IndexKind::Events, args.index_events), (IndexKind::Addresses, args.index_addresses)] {
+        match asked {
+            Some(Indexing::Off) => node = node.drop_index(kind)?,
+            Some(Indexing::Keep(keep)) => node = node.keep_index(kind, Some(keep))?,
+            None if node.chain().index_window(kind).is_some() => node = node.keep_index(kind, None)?,
+            None => {}
+        }
     }
 
     #[cfg(feature = "http")]
@@ -254,6 +265,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         let options = api::ApiOptions {
             cors: args.cors,
             explorer: args.explorer,
+            wallet: args.wallet,
         };
         let address = api::start(db, Some(node.handle()), &genesis, address, options)?;
         log::info!("[http] listening on {address}");

@@ -719,6 +719,12 @@ fn conforms_to_the_token_standard(code: Code) {
         world.call_as(sender, token, function, args).result.unwrap_err().to_string()
     };
     let balance = |owner: Address| ok(DEPLOYER, "balance_of", &[address(owner)]).0;
+    // Where a light client proves it: the balances namespace, by the holder's address text.
+    let provable = |owner: Address| {
+        let kept = world.state.get(Column::Namespaces, &crate::light::token_balance_key(&token, &owner)).unwrap();
+
+        vec![TxCallArgumentType::U256(kept.map_or(u256::ZERO, |value| crate::light::token_balance(&value).unwrap()))]
+    };
     let transfer = |from: TxCallArgumentType, to: Address, value: TxCallArgumentType| {
         ("Transfer".to_string(), vec![from, address(to), value])
     };
@@ -782,6 +788,10 @@ fn conforms_to_the_token_standard(code: Code) {
     assert_eq!(world.upgrade(bob, token, code.clone()), Err(crate::registry::RegistryError::NotPermitted));
     world.upgrade(DEPLOYER, token, code).unwrap();
     assert_eq!(balance(carol), [amount(30)]);
+
+    for holder in [DEPLOYER, alice, bob, carol, Address::Ed25519([0xd; 32])] {
+        assert_eq!(provable(holder), balance(holder), "{holder}");
+    }
 }
 
 /// The six functions that make a token, doing nothing, and a check_perms that lets anyone upgrade.

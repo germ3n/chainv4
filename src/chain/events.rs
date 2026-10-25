@@ -3,40 +3,21 @@
 //! two keys only point at it. Keys sort newest first, so a listing reads forward from where the
 //! last page stopped.
 //!
-//! A node keeps the index only when started with --index-events, and once on it stays on until
-//! --index-events=off drops it. It holds the events of every main-chain block from its low end to
-//! the tip. New blocks' entries go
-//! into the same commit as their receipts, so a reorg takes them off with the block.
-//!
-//! Which blocks it keeps is set apart from where its low end is. The node moves the low end a
-//! step at a time: down by reading older receipts back, newest first, or up by dropping the
-//! oldest blocks' events, as the latest-N window moves with the tip. Each step commits the low
-//! end with its entries, so the index never has gaps.
+//! A node keeps it only when started with --index-events, and once on it stays on until
+//! --index-events=off drops it. How it holds blocks, and catches up, is what every index shares,
+//! in the index module.
 
 use {
-    super::{Undo, UndoEntry, id_key, read_value, stored_block_at, stored_receipt},
     crate::crypto::hashable::Hashable,
-    crate::db::{Column, Database, DbError, Read, State, address_key},
+    crate::db::{Column, Database, DbError, State, address_key},
     crate::structs::address::Address,
     crate::structs::event::Event,
-    crate::structs::hash::{Hash, HashType},
+    crate::structs::hash::Hash,
     crate::structs::tx::TxCallArgumentType,
     r#macro::document,
     std::collections::BTreeSet,
-    std::fmt,
-    std::str::FromStr,
-    std::sync::Arc,
     wincode::{SchemaRead, SchemaWrite},
 };
-
-/// Where in Meta the index's low end is kept.
-pub(super) const FROM_KEY: &[u8] = b"events_from";
-/// Where in Meta which blocks it keeps is kept.
-pub(super) const KEEP_KEY: &[u8] = b"events_keep";
-
-/// The most blocks, and transactions, one step of catching up reads before it commits.
-const STEP_BLOCKS: u64 = 500;
-const STEP_TXS: usize = 2_000;
 
 /// Key kinds: the event itself by contract, and pointers to it by name and by address.
 const BY_CONTRACT: u8 = b'c';
@@ -65,126 +46,6 @@ pub struct IndexedEvent {
 }
 
 impl Hashable for IndexedEvent {}
-
-/// The index's low end.
-#[derive(Clone, Copy, Debug, SchemaWrite, SchemaRead)]
-pub(super) struct IndexedFrom {
-    pub(super) height: u64,
-}
-
-impl Hashable for IndexedFrom {}
-
-#[document(
-    summary = "Which blocks the event index keeps the events of, as --index-events takes it: genesis, a height, or latest-N.",
-    category = "Chain",
-    see_also = "EventIndex, Chain::index_events",
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-#[wincode(tag_encoding = "u8")]
-pub enum EventsFrom {
-    #[document(summary = "Every block from this height on; 0 for every block, from genesis.")]
-    #[wincode(tag = 0)]
-    Height(u64),
-    #[document(summary = "Only the latest this many blocks: as the chain grows, the oldest blocks' events go.")]
-    #[wincode(tag = 1)]
-    Latest(u64),
-}
-
-impl Hashable for EventsFrom {}
-
-impl EventsFrom {
-    #[document(
-        parent = "EventsFrom",
-        summary = "The lowest height the index should hold, with the chain's tip at this height.",
-    )]
-    pub fn lowest(self, tip: u64) -> u64 {
-        match self {
-            EventsFrom::Height(height) => height,
-            EventsFrom::Latest(blocks) => (tip + 1).saturating_sub(blocks),
-        }
-    }
-}
-
-impl FromStr for EventsFrom {
-    type Err = String;
-
-    fn from_str(text: &str) -> Result<EventsFrom, String> {
-        let text = text.trim().to_ascii_lowercase();
-
-        if text == "genesis" {
-            return Ok(EventsFrom::Height(0));
-        }
-
-        if let Some(blocks) = text.strip_prefix("latest-") {
-            return match blocks.parse() {
-                Ok(0) => Err("latest-0 would keep no events".to_string()),
-                Ok(blocks) => Ok(EventsFrom::Latest(blocks)),
-                Err(_) => Err(format!("{blocks} is not a number of blocks")),
-            };
-        }
-
-        text.parse()
-            .map(EventsFrom::Height)
-            .map_err(|_| format!("{text} is not genesis, a height, latest-N such as latest-100000, or off"))
-    }
-}
-
-#[document(
-    summary = "What --index-events asks for: keep the event index, of which blocks, or keep none.",
-    category = "Chain",
-    see_also = "EventsFrom, Chain::index_events, Chain::drop_event_index",
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IndexEvents {
-    #[document(summary = "Keep it, of these blocks.")]
-    Keep(EventsFrom),
-    #[document(summary = "Keep none, dropping the index the database holds.")]
-    Off,
-}
-
-impl FromStr for IndexEvents {
-    type Err = String;
-
-    fn from_str(text: &str) -> Result<IndexEvents, String> {
-        match text.trim().eq_ignore_ascii_case("off") {
-            true => Ok(IndexEvents::Off),
-            false => text.parse().map(IndexEvents::Keep),
-        }
-    }
-}
-
-impl fmt::Display for EventsFrom {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EventsFrom::Height(0) => write!(f, "every block"),
-            EventsFrom::Height(height) => write!(f, "blocks from height {height}"),
-            EventsFrom::Latest(blocks) => write!(f, "the latest {blocks} blocks"),
-        }
-    }
-}
-
-#[document(
-    summary = "What a node's event index holds, and what it keeps.",
-    category = "Chain",
-    see_also = "EventsFrom, stored_event_index",
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EventIndex {
-    #[document(summary = "Its low end: it holds the events of every main-chain block from this height to the tip.")]
-    pub from: u64,
-    #[document(summary = "Which blocks it keeps, which the node moves the low end toward.")]
-    pub keep: EventsFrom,
-}
-
-impl EventIndex {
-    #[document(
-        parent = "EventIndex",
-        summary = "Whether the low end is where it should be, with the chain's tip at this height.",
-    )]
-    pub fn caught_up(self, tip: u64) -> bool {
-        self.from == self.keep.lowest(tip)
-    }
-}
 
 #[document(
     summary = "Which events to list.",
@@ -267,7 +128,7 @@ pub(super) fn index(layer: &State, block: Hash, height: u64, tx: Hash, index: u3
 }
 
 /// Takes one transaction's events back out of the index.
-fn unindex(layer: &State, height: u64, index: u32, events: &[Event]) {
+pub(super) fn unindex(layer: &State, height: u64, index: u32, events: &[Event]) {
     for (position, event) in events.iter().enumerate() {
         let position = u32::try_from(position).unwrap_or(u32::MAX);
         let (primary, pointers) = keys(event, &place(height, index, position));
@@ -276,98 +137,6 @@ fn unindex(layer: &State, height: u64, index: u32, events: &[Event]) {
             layer.delete(Column::Events, key);
         }
     }
-}
-
-/// Moves the index's low end a step toward where it keeps, in one commit: indexing the blocks
-/// below it newest first, or dropping its oldest. Only blocks up to the tip are read; above it
-/// there is nothing to index or drop.
-pub(super) fn catch_up(db: &Arc<dyn Database>, hash: HashType, index: EventIndex, tip: u64, floor: u64) -> Result<u64, DbError> {
-    let lowest = index.keep.lowest(tip).max(floor);
-    let state = Arc::new(State::new(db.clone()));
-    let (mut from, mut blocks, mut txs) = (index.from, 0, 0);
-
-    if from > lowest {
-        from = from.min(tip + 1).max(lowest);
-
-        while from > lowest && blocks < STEP_BLOCKS && txs < STEP_TXS {
-            from -= 1;
-            txs += add_block(&state, hash, from)?;
-            blocks += 1;
-        }
-    } else {
-        while from < lowest.min(tip + 1) && blocks < STEP_BLOCKS && txs < STEP_TXS {
-            txs += drop_block(&state, hash, from)?;
-            from += 1;
-            blocks += 1;
-        }
-
-        if from > tip {
-            from = lowest;
-        }
-    }
-
-    state.put_value(Column::Meta, FROM_KEY.to_vec(), &IndexedFrom { height: from });
-    db.commit(state.take_changes())?;
-
-    Ok(from)
-}
-
-/// Indexes a main-chain block's events from its receipts. A block a reorg can still take off
-/// forgets them with the rest of it: they join its undo record.
-fn add_block(state: &Arc<State>, hash: HashType, height: u64) -> Result<usize, DbError> {
-    let block = stored_block_at(&**state, height)?.ok_or_else(|| DbError::Corrupt(format!("no main-chain block at height {height}")))?;
-    let id = block.id();
-    let layer = State::new(state.clone());
-
-    for (index, tx) in block.txs.iter().enumerate() {
-        let tx_id = tx.id(hash);
-        let receipt = stored_receipt(&**state, &tx_id)?.ok_or_else(|| DbError::Corrupt(format!("transaction {tx_id} has no receipt")))?;
-        self::index(&layer, id, height, tx_id, index as u32, &receipt.events);
-    }
-
-    let changes = layer.take_changes();
-
-    if let Some(mut undo) = read_value::<Undo>(&**state, Column::Undo, &id_key(&id))? {
-        undo.entries.extend(changes.keys().map(|(column, key)| UndoEntry {
-            column: *column,
-            key: key.clone(),
-            value: None,
-        }));
-        state.put_value(Column::Undo, id_key(&id), &undo);
-    }
-
-    state.merge(changes);
-
-    Ok(block.txs.len())
-}
-
-/// Takes a main-chain block's events out of the index.
-fn drop_block(state: &State, hash: HashType, height: u64) -> Result<usize, DbError> {
-    let block = stored_block_at(state, height)?.ok_or_else(|| DbError::Corrupt(format!("no main-chain block at height {height}")))?;
-
-    for (index, tx) in block.txs.iter().enumerate() {
-        let tx_id = tx.id(hash);
-        let receipt = stored_receipt(state, &tx_id)?.ok_or_else(|| DbError::Corrupt(format!("transaction {tx_id} has no receipt")))?;
-        unindex(state, height, index as u32, &receipt.events);
-    }
-
-    Ok(block.txs.len())
-}
-
-#[document(
-    summary = "What the event index holds and keeps, read straight from a database.",
-    category = "Chain",
-    returns = "The index, or None for a node that keeps none.",
-    see_also = "stored_events",
-)]
-pub fn stored_event_index(db: &dyn Read) -> Result<Option<EventIndex>, DbError> {
-    let Some(from) = read_value::<IndexedFrom>(db, Column::Meta, FROM_KEY)? else {
-        return Ok(None);
-    };
-    // An index from before what it keeps was stored kept what it had: from where it was turned on.
-    let keep = read_value(db, Column::Meta, KEEP_KEY)?.unwrap_or(EventsFrom::Height(from.height));
-
-    Ok(Some(EventIndex { from: from.height, keep }))
 }
 
 #[document(
@@ -380,7 +149,7 @@ pub fn stored_event_index(db: &dyn Read) -> Result<Option<EventIndex>, DbError> 
         limit = "The most events to return.",
     },
     returns = "The events, and the cursor for the next page, or None after the last.",
-    see_also = "stored_event_index, IndexedEvent",
+    see_also = "stored_index, IndexedEvent",
 )]
 pub fn stored_events(
     db: &dyn Database,

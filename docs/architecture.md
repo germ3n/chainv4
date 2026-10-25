@@ -5,8 +5,9 @@ works as a client of one. The node is a set of parts with one owner each, talkin
 function calls and two channels.
 
 The library (`src/lib.rs`) holds every part; `src/main.rs` only reads the command line and starts
-them. Other programs link the library too: the [explorer](explorer.md), a workspace of its own,
-builds and signs transactions with the library's structs and keys, in the browser as well.
+them. Other programs link the library too, each a workspace of its own, in the browser as well:
+the [explorer](explorer.md) builds and signs transactions with the library's structs and keys, and
+the [wallet](wallet.md) runs its light client too.
 
 ## The parts
 
@@ -20,12 +21,13 @@ builds and signs transactions with the library's structs and keys, in the browse
 | Registries | `src/registry/` | Accounts, contracts, validators and signers, read and written in state layers. |
 | VM | `src/vm/` | Runs contracts: Luau scripts and WebAssembly modules. |
 | Storage | `src/db/` | The database behind a trait: RocksDB for nodes, memory for tests; the state tree every header's state root is the root of; and the walk a node takes a snapshot of it by. |
-| Light client | `src/light/` | Follows a chain from its genesis id alone, checking headers, finality and proofs; built without the node, so the explorer runs it too. |
+| Light client | `src/light/` | Follows a chain from its genesis id alone, checking headers, finality and proofs; built without the node, so the explorer and the wallet run it too. |
 | Mempool | `src/mempool/` | Transactions waiting for a block. |
 | Network | `src/net/` | libp2p on a thread of its own, behind channels. |
 | API | `src/api/` | JSON over HTTP, on a thread of its own, reading the committed chain. |
 | CLI | `src/cli/` | Keys, genesis files, `send`, which talks to a node's API, `layout`, and `light`, the light client. |
 | Explorer | `explorer/` | An egui app, for the desktop and the browser, that shows a node's chain, network and mempool and sends transactions, all through the API. |
+| Wallet | `wallet/` | An egui light wallet, for the desktop and the browser: keys sealed with a password, and balances, tokens and history it proves itself through the API. |
 | Structs and crypto | `src/structs/`, `src/crypto/` | Blocks, transactions, addresses, amounts, hashes, keys, and Merkle roots over lists. |
 
 Each part has one owner, passed down rather than shared through globals:

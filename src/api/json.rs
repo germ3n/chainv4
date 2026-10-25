@@ -2,7 +2,7 @@
 //! JavaScript numbers lose precision past 2^53; hashes, bytes and signatures are 0x hex.
 
 use {
-    crate::chain::{CommittedReceipt, IndexedEvent, TxReceipt, TxStatus},
+    crate::chain::{CommittedReceipt, IndexedEvent, IndexedTx, TxReceipt, TxStatus},
     crate::crypto::hashable::Hashable,
     crate::db::{Column, StateProof},
     crate::crypto::keypair::PublicKey,
@@ -64,9 +64,9 @@ pub fn state_proof(block: &SealedHeader, column: Column, key: &[u8], value: Opti
     })
 }
 
-/// A proof that a receipt is at its place in a block's receipts root: the receipt as committed,
-/// encoded, and the Merkle path from its leaf.
-pub fn receipt_proof(block: &Block, receipt: &CommittedReceipt, index: usize, count: usize, path: &[Hash]) -> Value {
+/// A proof that a receipt is at its place in a block's receipts root, and its transaction at the
+/// same place in tx_root: each encoded, with the Merkle path from its leaf.
+pub fn receipt_proof(block: &Block, receipt: &CommittedReceipt, index: usize, count: usize, path: &[Hash], tx_path: &[Hash]) -> Value {
     json!({
         "tx": receipt.tx.to_string(),
         "block": block.id().to_string(),
@@ -76,6 +76,9 @@ pub fn receipt_proof(block: &Block, receipt: &CommittedReceipt, index: usize, co
         "count": count,
         "receipt": to_hex(&receipt.hashable_bytes_with_tag()),
         "path": path.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "tx_root": block.header.tx_root.to_string(),
+        "signed": to_hex(&block.txs[index].hashable_bytes_with_tag()),
+        "tx_path": tx_path.iter().map(ToString::to_string).collect::<Vec<_>>(),
     })
 }
 
@@ -296,6 +299,17 @@ pub fn indexed_event(found: &IndexedEvent) -> Value {
     value["height"] = found.height.into();
     value["index"] = found.index.into();
     value["position"] = found.position.into();
+
+    value
+}
+
+/// A transaction the address index found, with where it landed and what it did.
+pub fn indexed_tx(found: &IndexedTx, signed: &SignedTx, receipt: &TxReceipt, hash: HashType) -> Value {
+    let mut value = signed_tx(signed, hash);
+    value["block"] = found.block.to_string().into();
+    value["height"] = found.height.into();
+    value["index"] = found.index.into();
+    value["receipt"] = outcome(receipt);
 
     value
 }

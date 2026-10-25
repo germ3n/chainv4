@@ -1,7 +1,7 @@
 //! A light client: it follows a chain from its headers alone, checking every one by the chain's
 //! consensus, and its finality from justifications, checking each against voters it proved from
-//! the state of a checkpoint it trusts already. Then it checks any value or receipt a node sends,
-//! with its proof, against a header it holds. It trusts nothing but the genesis id it starts
+//! the state of a checkpoint it trusts already. Then it checks any value, receipt or transaction a
+//! node sends, with its proof, against a header it holds. It trusts nothing but the genesis id it starts
 //! from.
 //!
 //! It is sans-IO: next says what to fetch, and the deliver and take methods check what came back,
@@ -12,12 +12,14 @@ use {
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::crypto::merkle,
-    crate::db::{Column, DbError, State, StateProof, StateTree},
+    crate::db::{Column, DbError, State, StateProof, StateTree, namespace_key},
+    crate::structs::address::Address,
     crate::registry::signers::{SignerSet, Signers},
     crate::registry::validators::{ValidatorSet, Validators},
     crate::structs::block::{BlockHeader, SealedHeader},
     crate::structs::hash::{Hash, HashType},
     crate::structs::receipt::CommittedReceipt,
+    crate::structs::tx::SignedTx,
     crate::structs::u256::u256,
     crate::structs::vote::{Checkpoint, Justification},
     r#macro::document,
@@ -29,6 +31,38 @@ use {
 
 #[document(summary = "The most headers a light client asks for at once.", category = "Light client")]
 pub const MAX_LIGHT_HEADERS: u32 = 1_000;
+
+#[document(
+    summary = "Where a token keeps a holder's balance, by the token standard: in Column::Namespaces, the token's balances namespace, by the holder's address text. What a light client proves a token balance by.",
+    params = {
+        token = "The token contract.",
+        holder = "Whose balance.",
+    },
+    category = "Light client",
+    see_also = "token_balance",
+)]
+pub fn token_balance_key(token: &Address, holder: &Address) -> Vec<u8> {
+    namespace_key(token, TOKEN_BALANCES, holder.to_string().as_bytes())
+}
+
+#[document(
+    summary = "A token balance as a token keeps it: decimal text, as Lua tokens write it, or 32 bytes little-endian, as the SDK's U256 writes it.",
+    returns = "The balance, or None for a value that is neither.",
+    category = "Light client",
+    see_also = "token_balance_key",
+)]
+pub fn token_balance(value: &[u8]) -> Option<u256> {
+    let decimal = !value.is_empty() && value.iter().all(u8::is_ascii_digit);
+
+    match (decimal, <[u8; 32]>::try_from(value)) {
+        (true, _) => u256::from_str_radix(std::str::from_utf8(value).ok()?, 10).ok(),
+        (false, Ok(bytes)) => Some(u256::from_le_bytes(bytes)),
+        (false, Err(_)) => None,
+    }
+}
+
+/// The namespace the token standard keeps balances in.
+const TOKEN_BALANCES: &[u8] = b"balances";
 
 #[document(
     summary = "What a light client needs to know about a chain to follow it: its hash, its consensus, and how its finality works. Genesis's proof_root is the hash of these, so a client that trusts a genesis id can check what a node tells it they are.",
@@ -191,6 +225,36 @@ impl LightUpdate {
     }
 }
 
+#[document(
+    summary = "What a light client keeps between runs, from LightClient::save, to restore it from. Only checked data: headers from the finalized block on, and what they prove.",
+    category = "Light client",
+    see_also = "LightClient::save, LightClient::restore",
+)]
+#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+pub struct LightState {
+    #[document(summary = "The chain's light parameters.")]
+    pub params: LightParams,
+    #[document(summary = "Its genesis id.")]
+    pub genesis: Hash,
+    #[document(summary = "The headers kept, from the finalized block, or genesis, on.")]
+    pub headers: Vec<SealedHeader>,
+    #[document(summary = "Each one's total work, 32 bytes little-endian.")]
+    pub work: Vec<[u8; 32]>,
+    #[document(summary = "The voters it learned, by epoch, with the weight their votes must add up to, little-endian.")]
+    pub voters: Vec<(u64, ValidatorSet, [u8; 32])>,
+    #[document(summary = "The justified checkpoints it kept, by epoch.")]
+    pub justified: Vec<(u64, Hash)>,
+    #[document(summary = "The finalized checkpoint.")]
+    pub finalized: Checkpoint,
+    #[document(summary = "The heights of the blocks whose updates it took.")]
+    pub updated: Vec<u64>,
+}
+
+impl Hashable for LightState {}
+
+#[document(summary = "The most headers a saved light client keeps: without finality, or with finality stalled, those far below the tip go.", category = "Light client")]
+pub const MAX_KEPT_HEADERS: u64 = 4_096;
+
 #[document(summary = "Something for the light client's driver to fetch next.", category = "Light client", see_also = "LightClient::next")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LightRequest {
@@ -285,8 +349,10 @@ pub struct LightClient {
     params: LightParams,
     consensus: Box<dyn Consensus>,
     genesis: Hash,
-    /// The chain followed, by height, genesis first.
+    /// The chain followed, by height, from base: genesis, or the finalized block a saved client
+    /// kept headers from.
     headers: Vec<SealedHeader>,
+    base: u64,
     /// Each header's total work.
     work: Vec<u256>,
     heights: HashMap<Hash, u64>,
@@ -330,6 +396,7 @@ impl LightClient {
             heights: HashMap::from([(trusted, 0)]),
             work: vec![u256::ZERO],
             headers: vec![genesis],
+            base: 0,
             voters: BTreeMap::new(),
             justified: BTreeMap::from([(0, trusted)]),
             finalized: Checkpoint { epoch: 0, block: trusted },
@@ -353,7 +420,7 @@ impl LightClient {
 
     #[document(parent = "LightClient", summary = "A followed header by height.")]
     pub fn header_at(&self, height: u64) -> Option<&BlockHeader> {
-        self.headers.get(height as usize).map(|sealed| &sealed.header)
+        self.sealed(height).map(|sealed| &sealed.header)
     }
 
     #[document(parent = "LightClient", summary = "The latest justified checkpoint it checked; genesis's before any.")]
@@ -394,11 +461,12 @@ impl LightClient {
         let finality = self.params.finality?;
         let interval = finality.checkpoint_interval()?;
         let trusted = self.justified().epoch * interval;
+        let first = self.base.div_ceil(interval) * interval;
 
-        for height in (0..=trusted.min(self.tip().height)).step_by(interval as usize) {
+        for height in (first..=trusted.min(self.tip().height)).step_by(interval as usize) {
             if !self.updated.contains(&height) {
                 return Some(LightRequest::Update {
-                    block: self.headers[height as usize].id(),
+                    block: self.sealed(height)?.id(),
                 });
             }
         }
@@ -432,20 +500,26 @@ impl LightClient {
             return Ok(Extended::UpToDate);
         };
 
-        if from == 0 || from > self.tip().height + 1 || first.header.height != from {
+        if from <= self.base || from > self.tip().height + 1 || first.header.height != from {
             return Err(LightError::Misplaced);
         }
 
-        if first.header.parent != self.headers[from as usize - 1].id() {
+        if first.header.parent != self.sealed(from - 1).expect("from is past base").id() {
+            // A chain that leaves even the oldest header kept leaves the finalized block it was
+            // kept from.
+            if from == self.base + 1 {
+                return Err(LightError::ConflictsWithFinality);
+            }
+
             // The node's chain split off below from: look further back.
-            self.back = Some(from.saturating_sub(MAX_LIGHT_HEADERS as u64).max(1));
+            self.back = Some(from.saturating_sub(MAX_LIGHT_HEADERS as u64).max(self.base + 1));
 
             return Ok(Extended::Unlinked);
         }
 
         self.back = None;
-        let mut work = self.work[from as usize - 1];
-        let mut parent = &self.headers[from as usize - 1].header;
+        let mut work = self.work[(from - 1 - self.base) as usize];
+        let mut parent = &self.sealed(from - 1).expect("from is past base").header;
 
         for sealed in &headers {
             let height = sealed.header.height;
@@ -465,9 +539,10 @@ impl LightClient {
         let ours = *self.work.last().expect("genesis is always there");
 
         if fork == self.tip().height {
+            let added = headers.len();
             self.append(headers, from);
 
-            return Ok(Extended::Added(self.headers.len() - from as usize));
+            return Ok(Extended::Added(added));
         }
 
         if work <= ours {
@@ -478,11 +553,11 @@ impl LightClient {
             return Err(LightError::ConflictsWithFinality);
         }
 
-        for dropped in self.headers.drain(from as usize..) {
+        for dropped in self.headers.drain((from - self.base) as usize..) {
             self.heights.remove(&dropped.id());
         }
 
-        self.work.truncate(from as usize);
+        self.work.truncate((from - self.base) as usize);
         self.updated.retain(|height| *height <= fork);
         self.append(headers, from);
 
@@ -490,7 +565,7 @@ impl LightClient {
     }
 
     fn append(&mut self, headers: Vec<SealedHeader>, from: u64) {
-        let mut work = self.work[from as usize - 1];
+        let mut work = self.work[(from - 1 - self.base) as usize];
 
         for sealed in headers {
             work += self.consensus.work(&sealed.header);
@@ -498,6 +573,99 @@ impl LightClient {
             self.work.push(work);
             self.headers.push(sealed);
         }
+    }
+
+    /// A followed header and its seal by height, if the client keeps it.
+    fn sealed(&self, height: u64) -> Option<&SealedHeader> {
+        self.headers.get(usize::try_from(height.checked_sub(self.base)?).ok()?)
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "What the client checked, to keep and restore it from: its headers from the finalized block on, since nothing below can come off, at most MAX_KEPT_HEADERS of them; the voters it learned; and the checkpoints it saw justified and finalized.",
+        see_also = "LightClient::restore",
+    )]
+    pub fn save(&self) -> LightState {
+        let tip = self.tip().height;
+        let final_height = self.final_height().min(tip);
+        let mut keep = match self.params.finality {
+            Some(_) if final_height > 0 => final_height,
+            _ => tip.saturating_sub(MAX_KEPT_HEADERS),
+        };
+        keep = keep.max(tip.saturating_sub(MAX_KEPT_HEADERS)).max(self.base);
+        let from = (keep - self.base) as usize;
+        let justified = self.justified();
+        let interval = self.params.finality.and_then(|finality| finality.checkpoint_interval()).unwrap_or(1);
+
+        LightState {
+            params: self.params.clone(),
+            genesis: self.genesis,
+            headers: self.headers[from..].to_vec(),
+            work: self.work[from..].iter().map(|work| work.to_le_bytes()).collect(),
+            voters: self
+                .voters
+                .iter()
+                .filter(|(epoch, _)| **epoch >= self.finalized.epoch)
+                .map(|(epoch, voters)| (*epoch, voters.set.clone(), voters.needed.to_le_bytes()))
+                .collect(),
+            justified: self
+                .justified
+                .iter()
+                .filter(|(epoch, _)| **epoch * interval >= keep || **epoch == justified.epoch)
+                .map(|(epoch, block)| (*epoch, *block))
+                .collect(),
+            finalized: self.finalized,
+            updated: self.updated.iter().copied().filter(|height| *height >= keep).collect(),
+        }
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "A client from what one saved, to follow on from there rather than from genesis: once it checked the state is for the genesis it trusts, and its headers link up.",
+        params = {
+            state = "What LightClient::save gave.",
+            trusted = "The genesis id the client trusts.",
+        },
+        returns = "The client, WrongGenesis for a state of another chain, Undecodable for one whose headers do not link.",
+    )]
+    pub fn restore(state: LightState, trusted: Hash) -> Result<LightClient, LightError> {
+        if state.genesis != trusted || state.params.hash != trusted.algorithm() {
+            return Err(LightError::WrongGenesis);
+        }
+
+        let Some(first) = state.headers.first() else {
+            return Err(LightError::Undecodable);
+        };
+        let base = first.header.height;
+        let links = state.headers.windows(2).all(|pair| pair[1].header.parent == pair[0].id() && pair[1].header.height == pair[0].header.height + 1);
+
+        if !links || state.work.len() != state.headers.len() || (base == 0 && first.id() != trusted) {
+            return Err(LightError::Undecodable);
+        }
+
+        let heights = state.headers.iter().map(|sealed| (sealed.id(), sealed.header.height)).collect();
+        let mut justified: BTreeMap<u64, Hash> = state.justified.into_iter().collect();
+
+        if justified.is_empty() {
+            justified.insert(0, trusted);
+        }
+
+        Ok(LightClient {
+            consensus: state.params.consensus.rules(),
+            genesis: trusted,
+            headers: state.headers,
+            base,
+            work: state.work.into_iter().map(u256::from_le_bytes).collect(),
+            heights,
+            voters: state.voters.into_iter().map(|(epoch, set, needed)| (epoch, Voters { set, needed: u256::from_le_bytes(needed) })).collect(),
+            justified,
+            finalized: state.finalized,
+            updated: state.updated.into_iter().collect(),
+            headers_done: false,
+            justifications_done: false,
+            back: None,
+            params: state.params,
+        })
     }
 
     fn justified_height(&self) -> u64 {
@@ -533,7 +701,7 @@ impl LightClient {
             return Err(LightError::BadProof);
         }
 
-        let root = self.headers[height as usize].header.state_root;
+        let root = self.sealed(height).ok_or(LightError::NotOnChain)?.header.state_root;
         let mut learned = Vec::new();
 
         for voter in &update.voters {
@@ -594,11 +762,7 @@ impl LightClient {
             .finality
             .and_then(|finality| finality.checkpoint_interval())
             .ok_or(LightError::BadJustification("the chain does not vote"))?;
-        let on_chain = |checkpoint: &Checkpoint| {
-            self.headers
-                .get((checkpoint.epoch * interval) as usize)
-                .is_some_and(|sealed| sealed.id() == checkpoint.block)
-        };
+        let on_chain = |checkpoint: &Checkpoint| self.sealed(checkpoint.epoch * interval).is_some_and(|sealed| sealed.id() == checkpoint.block);
 
         if source.epoch >= target.epoch || !on_chain(&target) || !on_chain(&source) {
             return Err(LightError::BadJustification("its link is not on the chain followed"));
@@ -639,7 +803,7 @@ impl LightClient {
 
     fn assurance(&self, block: &Hash) -> Result<(Assurance, &BlockHeader), LightError> {
         let height = *self.heights.get(block).ok_or(LightError::NotOnChain)?;
-        let header = &self.headers[height as usize].header;
+        let header = &self.sealed(height).ok_or(LightError::NotOnChain)?.header;
 
         Ok((
             Assurance {
@@ -693,6 +857,32 @@ impl LightClient {
         }
 
         let decoded: CommittedReceipt = wincode::deserialize(receipt).map_err(|_| LightError::Undecodable)?;
+
+        Ok((decoded, assurance))
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "Checks a signed transaction a node sent, with its Merkle path, against the tx_root of a block the client followed: who sent what, which its receipt alone does not say.",
+        params = {
+            block = "The block it landed in.",
+            tx = "The SignedTx, encoded.",
+            index = "Its place among the block's transactions.",
+            count = "How many there are.",
+            path = "Its Merkle path.",
+        },
+        returns = "The transaction, and how far to trust it.",
+        see_also = "LightClient::check_receipt, Block::tx_root",
+    )]
+    pub fn check_tx(&self, block: &Hash, tx: &[u8], index: usize, count: usize, path: &[Hash]) -> Result<(SignedTx, Assurance), LightError> {
+        let (assurance, header) = self.assurance(block)?;
+        let leaf = merkle::leaf(self.params.hash, tx);
+
+        if !merkle::verify(&header.tx_root, &leaf, index, count, path) {
+            return Err(LightError::BadProof);
+        }
+
+        let decoded: SignedTx = wincode::deserialize(tx).map_err(|_| LightError::Undecodable)?;
 
         Ok((decoded, assurance))
     }

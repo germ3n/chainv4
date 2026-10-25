@@ -29,14 +29,18 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
+mod addresses;
 mod events;
 mod execute;
 pub mod fees;
 mod finality;
+mod index;
 mod parallel;
 mod receipt;
 
-pub use events::{EventFilter, EventIndex, EventsFrom, IndexEvents, IndexedEvent, stored_event_index, stored_events};
+pub use addresses::{IndexedTx, stored_address_txs, touched};
+pub use events::{EventFilter, IndexedEvent, stored_events};
+pub use index::{IndexKind, IndexWindow, Indexing, KeepFrom, stored_index};
 pub use execute::{BlockContext, Effect, Failure, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
 pub use parallel::Workers;
@@ -67,9 +71,9 @@ pub const DEV_MAX_REORG_DEPTH: u64 = 100;
     summary = "The layout this node keeps its database in. It goes up whenever a stored record changes shape, so a node never reads a database it would misread.",
     category = "Chain",
     see_also = "ChainError::OldFormat",
-    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry. 4: contracts record their storage layout. 5: layouts declare record keys and checked kinds. 6: headers commit to a state root and a receipts root, and the state tree is kept. 7: every header is kept on its own, state tree leaves name their entries, and checkpoints keep what light clients need.",
+    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry. 4: contracts record their storage layout. 5: layouts declare record keys and checked kinds. 6: headers commit to a state root and a receipts root, and the state tree is kept. 7: every header is kept on its own, state tree leaves name their entries, and checkpoints keep what light clients need. 8: tx_root is a Merkle root, and the address index has a column of its own.",
 )]
-pub const STORAGE_FORMAT: u32 = 7;
+pub const STORAGE_FORMAT: u32 = 8;
 
 const TIP_KEY: &[u8] = b"tip";
 const TIPS_KEY: &[u8] = b"tips";
@@ -543,8 +547,9 @@ pub struct Chain {
     light: Option<LightFinality>,
     /// The threads blocks run on, shared with finality to check votes.
     workers: Arc<Workers>,
-    /// The event index, when this node keeps one.
-    events: Option<EventIndex>,
+    /// The event index and the address index, when this node keeps them.
+    events: Option<IndexWindow>,
+    addresses: Option<IndexWindow>,
     /// The height this node took state at, when it synced from a snapshot: it has headers only
     /// below it, and never rolls back past it.
     snapshot: Option<u64>,
@@ -614,7 +619,8 @@ impl Chain {
             Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers))?),
             None => None,
         };
-        let events = events::stored_event_index(&*db)?;
+        let events = index::stored_index(&*db, IndexKind::Events)?;
+        let addresses = index::stored_index(&*db, IndexKind::Addresses)?;
         let snapshot = read_value::<SnapshotRecord>(&*db, Column::Meta, SNAPSHOT_KEY)?.map(|record| record.height);
         let mut chain = Chain {
             db,
@@ -634,6 +640,7 @@ impl Chain {
             light: genesis.light_params().finality,
             workers,
             events,
+            addresses,
             snapshot,
         };
         // In case the node stopped between committing a block and catching finality up with it.
@@ -649,89 +656,105 @@ impl Chain {
 
     #[document(
         parent = "Chain",
-        summary = "Keeps the event index, and sets which blocks it keeps. A new index starts empty at the next block, and catch_up_events fills it in; whatever an index dropped half-way left behind is cleared first. Once on, it stays on until drop_event_index.",
-        params = { keep = "Which blocks to keep; None keeps what the database keeps, or every block for a new index." },
-        returns = "The index.",
-        see_also = "Chain::catch_up_events, stored_events",
+        summary = "Keeps one of the indexes, and sets which blocks it keeps. A new index starts empty at the next block, and catch_up_index fills it in; whatever an index dropped half-way left behind is cleared first. Once on, it stays on until drop_index.",
+        params = {
+            kind = "Which index.",
+            keep = "Which blocks to keep; None keeps what the database keeps, or every block for a new index.",
+        },
+        returns = "The index's window.",
+        see_also = "Chain::catch_up_index, stored_events, stored_address_txs",
     )]
-    pub fn index_events(&mut self, keep: Option<EventsFrom>) -> Result<EventIndex, DbError> {
-        let index = match (self.events, keep) {
-            (Some(index), None) => return Ok(index),
-            (Some(index), Some(keep)) if index.keep == keep => return Ok(index),
-            (Some(index), Some(keep)) => EventIndex { keep, ..index },
+    pub fn keep_index(&mut self, kind: IndexKind, keep: Option<KeepFrom>) -> Result<IndexWindow, DbError> {
+        let tip = self.tip.height;
+        let window = match (self.index_window(kind), keep) {
+            (Some(window), None) => return Ok(window),
+            (Some(window), Some(keep)) if window.keep == keep => return Ok(window),
+            (Some(window), Some(keep)) => IndexWindow { keep, ..window },
             (None, keep) => {
-                let keep = keep.unwrap_or(EventsFrom::Height(0));
+                let keep = keep.unwrap_or(KeepFrom::Height(0));
 
-                EventIndex {
-                    from: keep.lowest(self.tip.height).max(self.tip.height + 1),
+                IndexWindow {
+                    from: keep.lowest(tip).max(tip + 1),
                     keep,
                 }
             }
         };
         let state = State::new(self.db.clone());
-        state.put_value(Column::Meta, events::FROM_KEY.to_vec(), &events::IndexedFrom { height: index.from });
-        state.put_value(Column::Meta, events::KEEP_KEY.to_vec(), &index.keep);
+        state.put_value(Column::Meta, kind.low_end_key().to_vec(), &index::IndexedFrom { height: window.from });
+        state.put_value(Column::Meta, kind.keep_key().to_vec(), &window.keep);
 
-        match self.events {
+        match self.index_window(kind) {
             Some(_) => self.db.commit(state.take_changes())?,
-            None => self.db.clear(Column::Events, state.take_changes())?,
+            None => self.db.clear(kind.column(), state.take_changes())?,
         }
 
-        self.events = Some(index);
+        *self.window(kind) = Some(window);
 
-        Ok(index)
+        Ok(window)
     }
 
     #[document(
         parent = "Chain",
-        summary = "Stops keeping the event index, and deletes it and its records in Meta in one atomic write, quick however big it is.",
+        summary = "Stops keeping one of the indexes, and deletes it and its records in Meta in one atomic write, quick however big it is.",
+        params = { kind = "Which index." },
         returns = "Whether there was an index to drop.",
-        see_also = "Chain::index_events",
+        see_also = "Chain::keep_index",
     )]
-    pub fn drop_event_index(&mut self) -> Result<bool, DbError> {
+    pub fn drop_index(&mut self, kind: IndexKind) -> Result<bool, DbError> {
         let state = State::new(self.db.clone());
-        state.delete(Column::Meta, events::FROM_KEY.to_vec());
-        state.delete(Column::Meta, events::KEEP_KEY.to_vec());
-        self.db.clear(Column::Events, state.take_changes())?;
+        state.delete(Column::Meta, kind.low_end_key().to_vec());
+        state.delete(Column::Meta, kind.keep_key().to_vec());
+        self.db.clear(kind.column(), state.take_changes())?;
 
-        Ok(self.events.take().is_some())
+        Ok(self.window(kind).take().is_some())
     }
 
     #[document(
         parent = "Chain",
-        summary = "Moves the event index's low end a step toward what it keeps: indexing older blocks' events from their receipts, newest first, or dropping the oldest blocks' events. A step reads at most a few hundred blocks and commits once, so the index never has gaps, and a catch-up cut short picks up where it stopped. A node that synced from a snapshot has no receipts up to its pivot, so its index reaches back no further than the block after it.",
+        summary = "Moves an index's low end a step toward what it keeps: indexing older blocks from their receipts, newest first, or dropping the oldest blocks' entries. A step reads at most a few hundred blocks and commits once, so the index never has gaps, and a catch-up cut short picks up where it stopped. A node that synced from a snapshot has no receipts up to its pivot, so its indexes reach back no further than the block after it.",
+        params = { kind = "Which index." },
         returns = "Whether there is more catching up to do.",
-        see_also = "Chain::index_events",
+        see_also = "Chain::keep_index",
     )]
-    pub fn catch_up_events(&mut self) -> Result<bool, DbError> {
-        let Some(index) = self.events else {
+    pub fn catch_up_index(&mut self, kind: IndexKind) -> Result<bool, DbError> {
+        let Some(window) = self.index_window(kind) else {
             return Ok(false);
         };
 
         let floor = self.snapshot.map_or(0, |pivot| pivot + 1);
-        let lowest = index.keep.lowest(self.tip.height).max(floor);
+        let lowest = window.keep.lowest(self.tip.height).max(floor);
 
-        if index.from == lowest {
+        if window.from == lowest {
             return Ok(false);
         }
 
-        let index = EventIndex {
-            from: events::catch_up(&self.db, self.hash, index, self.tip.height, floor)?,
-            ..index
+        let window = IndexWindow {
+            from: index::catch_up(&self.db, self.hash, kind, window, self.tip.height, floor)?,
+            ..window
         };
-        self.events = Some(index);
+        *self.window(kind) = Some(window);
 
-        Ok(index.from != lowest)
+        Ok(window.from != lowest)
+    }
+
+    #[document(parent = "Chain", summary = "What one of the indexes holds and keeps, when this node keeps it.")]
+    pub fn index_window(&self, kind: IndexKind) -> Option<IndexWindow> {
+        match kind {
+            IndexKind::Events => self.events,
+            IndexKind::Addresses => self.addresses,
+        }
+    }
+
+    fn window(&mut self, kind: IndexKind) -> &mut Option<IndexWindow> {
+        match kind {
+            IndexKind::Events => &mut self.events,
+            IndexKind::Addresses => &mut self.addresses,
+        }
     }
 
     #[document(parent = "Chain", summary = "The threads the chain runs blocks and checks signatures on, for others to share.")]
     pub fn workers(&self) -> Arc<Workers> {
         self.workers.clone()
-    }
-
-    #[document(parent = "Chain", summary = "The event index, when this node keeps one.")]
-    pub fn event_index(&self) -> Option<EventIndex> {
-        self.events
     }
 
     #[document(parent = "Chain", summary = "The newest main-chain block's header.")]
@@ -1337,9 +1360,17 @@ impl Chain {
             let tx_id = tx.id(self.hash);
             layer.put_value(Column::Receipts, id_key(&tx_id), &record);
 
-            // Blocks below the low end wait for catch_up_events, or were dropped.
-            if self.events.is_some_and(|events| height >= events.from) {
-                events::index(&layer, id, height, tx_id, index as u32, &receipt.events);
+            // Blocks below an index's low end wait for catch_up_index, or were dropped.
+            for kind in IndexKind::ALL {
+                if self.index_window(kind).is_some_and(|window| height >= window.from) {
+                    let landed = index::Landed {
+                        block: id,
+                        height,
+                        at: index as u32,
+                        tx: tx_id,
+                    };
+                    kind.index(&layer, landed, tx, &record);
+                }
             }
         }
 

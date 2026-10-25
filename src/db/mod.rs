@@ -87,6 +87,9 @@ pub enum Column {
     #[document(summary = "What light clients need to follow finality, by checkpoint block id: proofs, against the block's state root, of the voters it fixed for a later epoch.")]
     #[wincode(tag = 17)]
     Light,
+    #[document(summary = "The address index, for a node that keeps one: each transaction under every address it touches, newest first.")]
+    #[wincode(tag = 18)]
+    Addresses,
 }
 
 impl Hashable for Column {
@@ -94,7 +97,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 18] = [
+    pub const ALL: [Column; 19] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -113,6 +116,7 @@ impl Column {
         Column::StateTree,
         Column::Headers,
         Column::Light,
+        Column::Addresses,
     ];
 
     #[document(
@@ -139,6 +143,7 @@ impl Column {
             Column::StateTree => "state_tree",
             Column::Headers => "headers",
             Column::Light => "light",
+            Column::Addresses => "addresses",
         }
     }
 }
