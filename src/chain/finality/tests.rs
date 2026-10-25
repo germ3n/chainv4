@@ -1141,6 +1141,25 @@ mod voting {
 
             assert!(client.check_state(&client.finalized().block, Column::Accounts, &key, value.as_deref(), &proof).unwrap().final_);
 
+            // A block older than it kept is not on its chain until it takes the headers between,
+            // each proven by the one above it. Then what was in it checks, and is final.
+            let old = 2;
+            let block = stored_header_at(&*chain.db, old).unwrap().unwrap().id();
+            let (value, proof) = at(&chain, &block);
+            let lowest = client.lowest();
+            let between = |to: u64| (old..to).map(|height| stored_header_at(&*chain.db, height).unwrap().unwrap()).collect::<Vec<_>>();
+            let mut forged = between(lowest);
+            forged.last_mut().unwrap().header.timestamp += 1;
+
+            assert_eq!(lowest, finalized_height);
+            assert_eq!(client.check_state(&block, Column::Accounts, &key, value.as_deref(), &proof), Err(LightError::NotOnChain));
+            assert_eq!(client.deliver_ancestors(old, between(lowest - 1)), Err(LightError::Misplaced), "one short of what it holds");
+            assert!(matches!(client.deliver_ancestors(old, forged), Err(LightError::BadHeader { height, .. }) if height == lowest - 1));
+            assert_eq!(client.lowest(), lowest, "nothing taken from a batch that does not link");
+            assert_eq!(client.deliver_ancestors(old, between(lowest)), Ok((lowest - old) as usize));
+            assert_eq!(client.lowest(), old);
+            assert!(client.check_state(&block, Column::Accounts, &key, value.as_deref(), &proof).unwrap().final_);
+
             // It trusts nothing it cannot check.
             let mut forged = params.clone();
             forged.hash = HashType::default_chain();

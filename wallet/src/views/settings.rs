@@ -119,7 +119,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
 
     ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, "Locking");
+        theme::caps(ui, &palette, "On this device");
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Theme").color(palette.soft));
+            ui.selectable_value(&mut ctx.settings.light_theme, false, "Dark");
+            ui.selectable_value(&mut ctx.settings.light_theme, true, "Light");
+        });
         ui.horizontal(|ui| {
             ui.label(RichText::new("Lock after").color(palette.soft));
             ui.add(egui::DragValue::new(&mut ctx.settings.lock_after).range(0..=240).suffix(" min"));

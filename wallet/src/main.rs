@@ -1,24 +1,13 @@
-//! A chainv4 light wallet. Its keys are sealed with a password in app storage, and everything it
-//! shows of the chain it proved itself: it follows the chain from the genesis it trusts with the
-//! light client, and checks every balance, token and transaction a node sends against headers it
-//! checked. It runs as a desktop app or, built with trunk, in the browser.
-
-mod app;
-mod chain;
-mod format;
-mod history;
-mod node;
-mod theme;
-mod vault;
-mod views;
+//! Starts the wallet on the desktop and in the browser. Android loads the library itself, from
+//! `android_main`.
 
 /// The node the desktop app talks to unless told otherwise.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 const LOCAL_NODE: &str = "http://127.0.0.1:8080";
 
 /// Runs the desktop app: `wallet --node http://host:port`, or CHAINV4_NODE, or the node it talked
 /// to last.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -41,14 +30,14 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("chainv4 wallet")
             .with_inner_size([1080.0, 760.0])
-            .with_min_inner_size([760.0, 520.0]),
+            .with_min_inner_size([360.0, 520.0]),
         ..Default::default()
     };
 
     eframe::run_native(
         "chainv4 wallet",
         options,
-        Box::new(move |creation| Ok(Box::new(app::Wallet::new(creation, node, LOCAL_NODE)))),
+        Box::new(move |creation| Ok(chainv4_wallet::wallet(creation, node, LOCAL_NODE))),
     )
 }
 
@@ -78,7 +67,7 @@ fn main() {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(move |creation| Ok(Box::new(app::Wallet::new(creation, node, &origin)))),
+                Box::new(move |creation| Ok(chainv4_wallet::wallet(creation, node, &origin))),
             )
             .await;
 
@@ -87,3 +76,7 @@ fn main() {
         }
     });
 }
+
+/// Android starts the library, never this.
+#[cfg(target_os = "android")]
+fn main() {}

@@ -353,6 +353,9 @@ pub struct LightClient {
     /// kept headers from.
     headers: Vec<SealedHeader>,
     base: u64,
+    /// Headers below base, newest first, each the parent of the one above: what lets a restored
+    /// client check what is in blocks older than it kept. Never saved.
+    ancestors: Vec<SealedHeader>,
     /// Each header's total work.
     work: Vec<u256>,
     heights: HashMap<Hash, u64>,
@@ -397,6 +400,7 @@ impl LightClient {
             work: vec![u256::ZERO],
             headers: vec![genesis],
             base: 0,
+            ancestors: Vec::new(),
             voters: BTreeMap::new(),
             justified: BTreeMap::from([(0, trusted)]),
             finalized: Checkpoint { epoch: 0, block: trusted },
@@ -418,9 +422,61 @@ impl LightClient {
         &self.headers.last().expect("genesis is always there").header
     }
 
-    #[document(parent = "LightClient", summary = "A followed header by height.")]
+    #[document(parent = "LightClient", summary = "A header it holds, by height: one it followed, or an ancestor it took.")]
     pub fn header_at(&self, height: u64) -> Option<&BlockHeader> {
         self.sealed(height).map(|sealed| &sealed.header)
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "The lowest height it holds a header at: 0 for a client that followed from genesis; for a restored one, the block it kept headers from, less the ancestors it took since.",
+        see_also = "LightClient::deliver_ancestors",
+    )]
+    pub fn lowest(&self) -> u64 {
+        self.base - self.ancestors.len() as u64
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "Takes the headers just below the lowest it holds, as a restored client needs to check anything in an older block. Each must be the parent of the one above it, the last the parent of the lowest it holds: the hash chain proves them, since every block above was checked already, so no consensus or finality check is needed. They are not saved.",
+        params = {
+            from = "The first one's height.",
+            headers = "The headers from there on, in order, up to the lowest it holds; at most MAX_LIGHT_HEADERS come from a node at once.",
+        },
+        returns = "How many it took; Misplaced for headers that do not end just below the lowest it holds, BadHeader for one that does not link to the header above it.",
+        see_also = "LightClient::lowest",
+    )]
+    pub fn deliver_ancestors(&mut self, from: u64, headers: Vec<SealedHeader>) -> Result<usize, LightError> {
+        let lowest = self.lowest();
+
+        if headers.is_empty() || from.checked_add(headers.len() as u64) != Some(lowest) {
+            return Err(LightError::Misplaced);
+        }
+
+        // From the top down: each must hash to what the header above names as its parent.
+        let mut parent = self.sealed(lowest).expect("it holds its lowest").header.parent;
+
+        for (offset, sealed) in headers.iter().enumerate().rev() {
+            let height = from + offset as u64;
+
+            if sealed.header.height != height || sealed.id() != parent {
+                return Err(LightError::BadHeader {
+                    height,
+                    why: "it is not the parent of the header above it".to_string(),
+                });
+            }
+
+            parent = sealed.header.parent;
+        }
+
+        let taken = headers.len();
+
+        for sealed in headers.into_iter().rev() {
+            self.heights.insert(sealed.id(), sealed.header.height);
+            self.ancestors.push(sealed);
+        }
+
+        Ok(taken)
     }
 
     #[document(parent = "LightClient", summary = "The latest justified checkpoint it checked; genesis's before any.")]
@@ -575,9 +631,12 @@ impl LightClient {
         }
     }
 
-    /// A followed header and its seal by height, if the client keeps it.
+    /// A header it holds and its seal by height: one it followed, or an ancestor below those.
     fn sealed(&self, height: u64) -> Option<&SealedHeader> {
-        self.headers.get(usize::try_from(height.checked_sub(self.base)?).ok()?)
+        match height.checked_sub(self.base) {
+            Some(above) => self.headers.get(usize::try_from(above).ok()?),
+            None => self.ancestors.get(usize::try_from(self.base - 1 - height).ok()?),
+        }
     }
 
     #[document(
@@ -655,6 +714,7 @@ impl LightClient {
             genesis: trusted,
             headers: state.headers,
             base,
+            ancestors: Vec::new(),
             work: state.work.into_iter().map(u256::from_le_bytes).collect(),
             heights,
             voters: state.voters.into_iter().map(|(epoch, set, needed)| (epoch, Voters { set, needed: u256::from_le_bytes(needed) })).collect(),

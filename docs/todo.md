@@ -214,6 +214,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Light clients resume.** `LightClient::save` keeps what it checked from the finalized block
   on, at most 4,096 headers, and `restore` takes it back for the same genesis. The wallet saves it
   as it goes.
+- [x] **Restored light clients reach older blocks.** `deliver_ancestors` takes the headers below
+  the lowest one a client holds, proven by their hash chain, so a receipt in a block older than
+  it kept still checks.
 - [ ] **`chainv4 light` still starts from genesis every run.** It could keep its state in a file
   the way the wallet keeps it in app storage, or start from a finalized checkpoint someone trusts.
 - [ ] **Snapshots come from one peer at a time,** and a pivot only stays servable for
@@ -299,6 +302,11 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **`chainv4 send` waits for inclusion.** It polls `GET /txs/{id}` until enough blocks hold
   the transaction or `--timeout` passes, then prints the result and events.
 - [x] **A README for the CLI.** Building, running nodes, keys, sending transactions and the API.
+- [x] **Docker.** `docker/compose.yaml` runs a node with every feature, its chain made from
+  presets or a genesis of your own, behind nginx with HTTPS from your certificate, Let's Encrypt
+  through certbot, or a self-signed one.
+- [ ] **No published image.** CI does not build or push the Docker image; it is built where it
+  runs.
 - [ ] **The CLI speaks plain HTTP only.** ureq is built without TLS; add it before pointing
   `send` at a node across the internet.
 - [ ] **Key files are not encrypted.** They are created readable by their owner only, but hold
@@ -330,6 +338,15 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   token proven at the tip and the final block, sending with a reviewed fee and tip, receiving with
   a QR code, and a history from the address index, each line proven. It pins the genesis on first
   use, saves the light client, and `--wallet` serves it from a node's `/wallet/`.
+- [x] **The wallet runs on Android.** `wallet/build-android.sh` builds an APK with xbuild, a
+  NativeActivity with no Java, for Android 7 and up. It keeps to the part of the screen Android
+  says can be seen, and swaps the sidebar for tabs on narrow screens. CI builds it for arm64 and
+  x86-64 and attaches both to `v*` releases, signed with the `ANDROID_SIGNING_PEM` secret.
+- [ ] **No clipboard or file picker on Android.** egui reaches neither there, so Copy and "Open
+  key file" are left out. A small JNI bridge to ClipboardManager, and the Storage Access
+  Framework, would bring them.
+- [ ] **xbuild is pinned to a commit.** It has had no release since 0.2.0; move to one when it
+  does. It cannot add a network security config or other resources either.
 - [ ] **The wallet has no seed phrase.** Each account is a key of its own; a mnemonic and derived
   accounts would make one backup cover them all.
 - [ ] **The wallet proves only the registry's first page of tokens,** 100 by symbol, as the
@@ -379,4 +396,5 @@ evm
 
 include method for lua scripts when compiling
 build android/ios apps for wallet/explorer
-some wallet clicking doesnt work
+some wallet clicking doesnt work'
+add secp256k1 support

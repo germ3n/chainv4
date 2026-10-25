@@ -4,3 +4,8 @@
 /explorer/dist
 /wallet/target
 /wallet/dist
+
+/docker/.env
+/docker/certs/*.pem
+/docker/config/*.key
+/docker/config/genesis.json

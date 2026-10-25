@@ -24,6 +24,9 @@ const HISTORY_EVERY: f64 = 6.0;
 const STORAGE_KEY: &str = "chainv4-wallet";
 /// The most proven transactions kept, the newest; older ones are proven again if asked.
 const MAX_CHECKED: usize = 2_000;
+/// Below this width, in points, as on a phone, the sidebar gives way to a bar on top and tabs at
+/// the bottom.
+const NARROW: f32 = 640.0;
 
 /// Everything the wallet remembers between runs. The accounts are sealed; nothing else is secret.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -310,7 +313,7 @@ impl Wallet {
 
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.2).max(24.0));
-            ui.set_max_width(380.0);
+            ui.set_max_width(ui.available_width().min(380.0));
             ui.label(RichText::new("chainv4").font(egui::FontId::new(44.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
             theme::caps(ui, &palette, "Light wallet");
             ui.add_space(26.0);
@@ -408,20 +411,9 @@ impl Wallet {
         });
         ui.add_space(24.0);
 
-        if let Some(current) = self.current() {
-            let (address, name) = (current.address.to_string(), current.name.clone());
+        if !self.holders.is_empty() {
             theme::caps(ui, &palette, "Account");
-            egui::ComboBox::from_id_salt("account").selected_text(name).width(ui.available_width()).show_ui(ui, |ui| {
-                for holder in &self.holders {
-                    let text = format!("{}  ·  {}", holder.name, crate::format::short(&holder.address.to_string()));
-                    ui.selectable_value(&mut self.settings.current, holder.address.to_string(), text);
-                }
-            });
-
-            if self.settings.current.is_empty() {
-                self.settings.current = address;
-            }
-
+            self.account_picker(ui, ui.available_width());
             ui.add_space(18.0);
         }
 
@@ -453,8 +445,6 @@ impl Wallet {
 
                 if theme::quiet(ui, &palette, theme_name).clicked() {
                     self.settings.light_theme = !self.settings.light_theme;
-                    self.palette = if self.settings.light_theme { LIGHT } else { DARK };
-                    theme::apply(ui.ctx(), &self.palette);
                 }
 
                 if theme::quiet(ui, &palette, "Lock").clicked() {
@@ -465,6 +455,69 @@ impl Wallet {
             views::light_status(ui, &palette, &self.chain);
             ui.add_space(4.0);
             theme::caps(ui, &palette, "Light client");
+        });
+    }
+
+    /// Which account is in use, to pick from.
+    fn account_picker(&mut self, ui: &mut Ui, width: f32) {
+        let Some(current) = self.current() else {
+            return;
+        };
+        let (address, name) = (current.address.to_string(), current.name.clone());
+        egui::ComboBox::from_id_salt("account").selected_text(name).width(width).show_ui(ui, |ui| {
+            for holder in &self.holders {
+                let text = format!("{}  ·  {}", holder.name, crate::format::short(&holder.address.to_string()));
+                ui.selectable_value(&mut self.settings.current, holder.address.to_string(), text);
+            }
+        });
+
+        if self.settings.current.is_empty() {
+            self.settings.current = address;
+        }
+    }
+
+    /// On a narrow screen, what the sidebar holds but the pages: the name, the light client's
+    /// state, the account and the lock.
+    fn top_bar(&mut self, ui: &mut Ui) {
+        let palette = self.palette;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("chainv4").font(egui::FontId::new(21.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
+            views::light_dot(ui, &palette, &self.chain);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::quiet(ui, &palette, "Lock").clicked() {
+                    self.lock();
+                }
+
+                let width = (ui.available_width() - 8.0).clamp(90.0, 180.0);
+                self.account_picker(ui, width);
+            });
+        });
+    }
+
+    /// On a narrow screen, the pages, as tabs along the bottom.
+    fn tabs(&mut self, ui: &mut Ui) {
+        let palette = self.palette;
+        let width = ui.available_width() / Page::NAV.len() as f32;
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.spacing_mut().button_padding = egui::vec2(2.0, 4.0);
+        ui.horizontal(|ui| {
+            for (page, name) in Page::NAV {
+                let selected = self.page == page;
+                let name = if page == Page::Overview { "Home" } else { name };
+                let text = theme::strong(name, 12.0).color(if selected { palette.ink } else { palette.muted });
+                let button = egui::Button::new(text).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
+                let response = ui.add_sized([width, 46.0], button);
+
+                if selected {
+                    let rect = response.rect;
+                    ui.painter()
+                        .rect_filled(egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 1.5), egui::vec2(28.0, 3.0)), 2.0, palette.accent);
+                }
+
+                if response.clicked() {
+                    self.page = page;
+                }
+            }
         });
     }
 }
@@ -478,7 +531,9 @@ impl eframe::App for Wallet {
         let palette = self.palette;
 
         if !matches!(self.lock, Lock::Open) {
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(palette.paper)).show(ui, |ui| self.lock_screen(ui));
+            egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(palette.paper).inner_margin(egui::Margin::symmetric(14, 0)))
+            .show(ui, |ui| self.lock_screen(ui));
             self.active = time;
             ui.ctx().request_repaint_after(Duration::from_millis(500));
 
@@ -496,11 +551,22 @@ impl eframe::App for Wallet {
             return;
         }
 
-        egui::Panel::left("nav")
-            .exact_size(236.0)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(palette.nav).inner_margin(egui::Margin::symmetric(16, 0)).stroke(egui::Stroke::new(1.0, palette.line)))
-            .show(ui, |ui| self.sidebar(ui));
+        let narrow = ui.available_width() < NARROW;
+        let bar = egui::Frame::new().fill(palette.nav).stroke(egui::Stroke::new(1.0, palette.line));
+
+        match narrow {
+            true => {
+                egui::Panel::top("bar").frame(bar.inner_margin(egui::Margin::symmetric(14, 10))).show(ui, |ui| self.top_bar(ui));
+                egui::Panel::bottom("tabs").frame(bar).show(ui, |ui| self.tabs(ui));
+            }
+            false => {
+                egui::Panel::left("nav")
+                    .exact_size(236.0)
+                    .resizable(false)
+                    .frame(bar.inner_margin(egui::Margin::symmetric(16, 0)))
+                    .show(ui, |ui| self.sidebar(ui));
+            }
+        }
 
         let mut connect = None;
         let mut changed = false;
@@ -509,11 +575,13 @@ impl eframe::App for Wallet {
             .iter()
             .position(|holder| holder.address.to_string() == self.settings.current)
             .unwrap_or(0);
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(palette.paper)).show(ui, |ui| {
+        let margin = if narrow { egui::Margin::symmetric(14, 0) } else { egui::Margin::ZERO };
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(palette.paper).inner_margin(margin)).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.set_max_width(760.0);
-                    ui.add_space(34.0);
+                    // Never wider than there is room for: a centered column widens to its width.
+                    ui.set_max_width(ui.available_width().min(760.0));
+                    ui.add_space(if narrow { 18.0 } else { 34.0 });
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         let mut ctx = Ctx {
                             palette: &palette,
@@ -545,12 +613,23 @@ impl eframe::App for Wallet {
             self.connect(&node);
         }
 
+        // The theme follows the setting, wherever it was changed.
+        if self.palette.dark == self.settings.light_theme {
+            self.palette = if self.settings.light_theme { LIGHT } else { DARK };
+            theme::apply(ui.ctx(), &self.palette);
+        }
+
         // What is due comes due even when nothing arrives.
         ui.ctx().request_repaint_after(Duration::from_millis(400));
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, STORAGE_KEY, &self.settings);
+    }
+
+    /// The paper's color, behind everything: what shows under a phone's status bar.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        self.palette.paper.to_normalized_gamma_f32()
     }
 }
 

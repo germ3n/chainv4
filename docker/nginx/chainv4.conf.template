@@ -1,0 +1,56 @@
+# A chainv4 node behind nginx: HTTPS for its API, its explorer at / and its wallet at /wallet/.
+# tls.sh renders this into conf.d at start, filling in the ${...} below.
+
+upstream chainv4 {
+    server ${NODE_UPSTREAM};
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    server_name ${SERVER_NAME};
+
+    # Let's Encrypt's HTTP-01 challenges, answered from certbot's webroot.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host${HTTPS_PORT_SUFFIX}$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${SERVER_NAME};
+
+    ssl_certificate /etc/chainv4/tls/fullchain.pem;
+    ssl_certificate_key /etc/chainv4/tls/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:TLS:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+    ${HSTS}
+
+    # The API takes bodies up to 2 MiB: a deploy's code, in hex.
+    client_max_body_size 4m;
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+
+    # What the node does, as it happens: passed on at once, and kept open.
+    location = /stream {
+        proxy_pass http://chainv4;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+    }
+
+    location / {
+        proxy_pass http://chainv4;
+    }
+}

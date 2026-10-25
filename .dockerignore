@@ -1,0 +1,8 @@
+# What the image never needs: build output, local chains and editor state.
+**/target
+**/dist
+**/*.db
+.git
+.idea
+.vscode
+docker/.env

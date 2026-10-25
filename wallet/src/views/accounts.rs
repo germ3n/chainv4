@@ -58,6 +58,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
                 add(ctx, state, made);
             }
 
+            // Android has no file picker the wallet can reach yet.
+            #[cfg(not(target_os = "android"))]
             if theme::quiet(ui, &palette, "Open key file…").clicked() {
                 pick(ctx.wake, state.picked.clone());
             }
@@ -164,10 +166,8 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) {
             let key = ctx.holders[index].key.to_key_file();
             ui.add_space(8.0);
             ui.label(RichText::new("Anyone who sees this key can spend from the account. Keep it somewhere only you can read.").small().color(palette.warn));
-            ui.horizontal(|ui| {
-                ui.label(theme::mono(&key).color(palette.soft));
-                super::copy(ui, &palette, &key);
-            });
+            ui.label(theme::mono(&key).color(palette.soft));
+            super::copy(ui, &palette, &key);
         }
 
         if state.removing == Some(index) {
@@ -224,6 +224,7 @@ fn add(ctx: &mut Ctx, state: &mut AccountsState, key: Result<Keypair, String>) {
 }
 
 /// Asks for a key file, which arrives later: in the browser, picking one is asynchronous.
+#[cfg(not(target_os = "android"))]
 fn pick(wake: &egui::Context, picked: Picked) {
     let wake = wake.clone();
     let finish = move |name: String, bytes: Vec<u8>| {

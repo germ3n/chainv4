@@ -36,7 +36,8 @@ disconnected.
 **The wallet workspace,** `wallet/`, is the light wallet (see [Wallet](wallet.md)), built the same
 way: a lockfile of its own, the chainv4 library with only the hash and key features, and inside
 `wallet/` the same three commands. `trunk build --release` builds its web app into `wallet/dist`,
-which a node serves from `/wallet/` with `--wallet`.
+which a node serves from `/wallet/` with `--wallet`, and `wallet/build-android.sh` its Android app
+(see [Wallet](wallet.md#android)).
 
 ## Features
 
@@ -65,6 +66,10 @@ different dev chains, which puts it on a different network.
 - it runs clippy on the contracts and the SDK's tests;
 - it runs clippy and the tests on the explorer and the wallet, and clippy on their web builds;
 - it runs clippy and the tests on a matrix of feature subsets.
+
+**Builds** (`.github/workflows/build.yml`, `android.yml`), on every push to master and on tags:
+the node's release binaries with the wiki, the example contracts, and the wallet's APKs, which a
+`v*` tag also attaches to its release.
 
 The matrix:
 - covers each hash and key scheme on its own;

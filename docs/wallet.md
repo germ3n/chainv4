@@ -1,6 +1,7 @@
 # Wallet
 
-The wallet (`wallet/`) is a light wallet, built with egui, for the desktop and the browser:
+The wallet (`wallet/`) is a light wallet, built with egui, for the desktop, the browser and
+Android:
 - **Keys:** several accounts, sealed with a password on the device.
 - **Balances:** the coin and every listed token, proven by the light client.
 - **Sending:** the coin or a token, with the fee shown before you sign.
@@ -39,6 +40,13 @@ Then open `http://127.0.0.1:8080/wallet/`. The node serves the app from its API 
 talks to the node that served it. `?node=http://host:port` in the page's address names another,
 which must allow the page's origin with `--cors`.
 
+**On Android,** with [xbuild](https://github.com/rust-mobile/xbuild): see [Android](#android)
+below.
+
+```sh
+wallet/build-android.sh --install         # an APK for arm64, put on the device adb sees
+```
+
 **The node it wants:** any node will do for balances and sending. The activity comes from the
 node's address index, so start the node with `--index-addresses`. Without one, it falls back to
 the event index (`--index-events`), which lists only transactions whose events name the account.
@@ -54,9 +62,9 @@ are kept in app storage, sealed with it (`wallet/src/vault.rs`):
 - **What storage shows:** without the password, the salt, the nonce, and how long the sealed
   accounts are.
 
-**Where it is kept:** the app's storage directory on the desktop, and the page origin's
-`localStorage` in the browser. Clearing the site's data deletes the keys, so export each one
-somewhere safe.
+**Where it is kept:** the app's storage directory on the desktop, the page origin's
+`localStorage` in the browser, and a file in the app's private data folder on Android. Clearing
+the site's data, or the app's, deletes the keys, so export each one somewhere safe.
 
 **Unlocking:** the password opens the vault. While unlocked, the wallet keeps the stretched key in
 memory, so every change seals the accounts again without asking. Locking drops the keys and that
@@ -121,9 +129,14 @@ From those it works out what moved for the account (`wallet/src/history.rs`):
 Each line says Received, Sent, or what the transaction did. The line opens to show the block, the
 sender, the fee, and every event it emitted.
 
-**Kept once proven.** What was proven is saved, so it shows again at once. The saved light client
-keeps headers only from the finalized block on, and could not prove older blocks again. What is
-not final yet is proven again until it is.
+**Kept once proven.** What was proven is saved, so it shows again at once. What is not final yet
+is proven again until it is.
+
+**Older than what it kept.** The saved light client keeps headers only from the finalized block
+on. A transaction in an older block it never proved, as one it meets for the first time after a
+restart, is in no header it holds. So it fetches the headers between, a stretch of up to 1,000 at
+a time, and proves each by its link to the one above (see
+[Light client](light-client.md#saving-and-resuming)). Then the transaction checks, and is final.
 
 ## Sending
 
@@ -152,8 +165,8 @@ theme so any camera reads it. The coin and every token arrive at the same addres
 
 ## What it remembers
 
-Everything is in app storage under one key, `chainv4-wallet`, saved by eframe every few seconds
-and on exit:
+Everything is in app storage under one key, `chainv4-wallet`, saved by eframe every 30 seconds,
+on exit, and when Android sends the app to the background:
 - the node, and the genesis pinned at each node;
 - the vault;
 - the light client's state, by genesis, to resume from the finalized block, not genesis;
@@ -169,7 +182,8 @@ It follows the look of the wiki every build writes (see [Documenting code](devel
 - **Type:** Manrope for text, JetBrains Mono for addresses and hashes, and Newsreader for titles
   and the big numbers. The fonts and their licences are in `wallet/assets/fonts`.
 - **Layout:** each page is a column of cards beside a sidebar with the account, the pages, and
-  the light client's state.
+  the light client's state. Below 640 points wide, as on a phone, the sidebar gives way to a bar
+  on top with the account, the light client's dot and Lock, and tabs along the bottom.
 
 ## Building and testing
 
@@ -185,6 +199,63 @@ cargo clippy --target wasm32-unknown-unknown -- -D warnings
 trunk build --release
 ```
 
+**One app, three starts.** The app is a library (`src/lib.rs`), as Android loads it, so the
+package is `chainv4-wallet`. Its binary, `wallet` (`src/main.rs`), starts it on the desktop and in
+the browser. Android starts the library at `android_main`.
+
+## Android
+
+`wallet/build-android.sh` builds the Android app with [xbuild](https://github.com/rust-mobile/xbuild),
+pinned to a commit, which it installs if it is missing:
+
+```sh
+wallet/build-android.sh                    # wallet/target/android/chainv4-wallet-arm64.apk
+wallet/build-android.sh --arch x64         # for x86-64 emulators
+wallet/build-android.sh --debug --install  # a debug build, put on the device adb sees
+```
+
+**What it needs:**
+- Rust's Android targets, which it adds;
+- clang, lld and llvm-ar: `brew install llvm lld`, or `apt install clang lld llvm`. Homebrew keeps
+  LLVM off the PATH, and the script looks there.
+
+It needs no NDK and no Android SDK: xbuild downloads an Android sysroot and `android.jar` itself,
+and builds the APK without Gradle. `adb` is only for `--install`.
+
+**The app** (`wallet/manifest.yaml`):
+- `org.chainv4.wallet`, for Android 7 (API 24) and up, targeting API 33;
+- a NativeActivity with no Java of its own, and the INTERNET permission;
+- `wallet/assets/icon.png` for its icon.
+
+Plain-HTTP nodes need nothing more: Android's cleartext rule binds Java's networking, and the
+wallet talks to nodes from Rust over sockets of its own.
+
+**Signing:**
+- **Without a key:** xbuild's debug key, the same for everyone. Fine to sideload, but Android
+  only updates an app with one signed by the same key: moving to your own means uninstalling
+  first, and the vault goes with it.
+- **With your own key:** `--pem FILE`, or `X_PEM` set to the PEM's text: a certificate and its
+  RSA key in PKCS#8. Make one once, and keep it:
+
+  ```sh
+  openssl req -newkey rsa:2048 -new -nodes -x509 -days 10000 -subj "/CN=chainv4 wallet" \
+      -keyout key.pem -out cert.pem
+  cat cert.pem key.pem > signing.pem
+  ```
+
+**CI:** `.github/workflows/android.yml` builds both APKs on every push to master and on
+`workflow_dispatch`, and keeps them as artifacts. It signs with the `ANDROID_SIGNING_PEM` secret,
+holding `signing.pem`'s text, when there is one, and with the debug key otherwise. A `v*` tag
+attaches both to its release.
+
+**On the phone:**
+- **The node:** `http://10.0.2.2:8080` at first, which is the machine running the emulator, as the
+  emulator sees it. On a phone, name the node under Settings, such as `http://192.168.1.20:8080`.
+- **The keyboard** comes up when a field is focused, and its keys arrive as key events.
+- **The bars:** the app draws behind the status bar, the navigation bar and the keyboard, and keeps
+  its content in the part Android says can be seen.
+- **Storage:** it saves when the app goes to the background, and every 30 seconds.
+
 ## What to keep in mind
 
 - **Lose the password, lose the keys.** Nothing can open the vault without it. Export each
@@ -198,5 +269,8 @@ trunk build --release
   line. The guestbook's `Tipped` event, for one, does show.
 - **Only the registry's first page of tokens,** 100, is proven. A token past it does not show.
 - **Unlocking takes a moment.** Argon2id is slow on purpose, and slower in the browser.
+- **No Copy, and no key files, on Android yet.** egui reaches neither the clipboard nor a file
+  picker there, so the Copy buttons and "Open key file" are left out. Receive shows the QR code;
+  a key is imported by typing it.
 - **The API is plain HTTP.** What the wallet sends is signed and public anyway, but keep the node
   on a trusted network all the same.

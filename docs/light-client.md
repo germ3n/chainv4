@@ -89,8 +89,12 @@ justified checkpoint (`ConflictsWithFinality`).
 takes it back with the genesis id to trust, refusing a state from any other chain
 (`WrongGenesis`). It keeps headers only from the finalized block on, at most 4,096 of them, so it
 stays small:
-- **Older blocks are behind it.** A restored client cannot prove at a block before what it kept;
-  ask for the finalized block or the tip, and keep what was proven before, as the wallet does.
+- **Older blocks are behind it,** until it takes their headers back. `deliver_ancestors` takes the
+  headers just below the lowest it holds, from `GET /headers`: each must hash to what the one above
+  names as its parent, the top one to the parent of the lowest it holds. The hash chain proves
+  them, since every block above was checked already. Then `check_receipt`, `check_tx` and
+  `check_state` work at those blocks too, and `lowest` says how far down it holds. Ancestors are
+  not saved. The wallet takes them when a receipt lands below what it holds.
 - **Finality goes on from where it was:** the voters and justified checkpoints it needs come with
   it, so it does not fetch from genesis again.
 

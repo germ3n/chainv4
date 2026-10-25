@@ -16,6 +16,8 @@ pub enum Ask {
     /// What the light client starts from.
     Light,
     Headers { from: u64, count: u32 },
+    /// Headers below the lowest the light client holds, for it to prove by their hash chain.
+    Ancestors { from: u64, count: u32 },
     LightUpdate(String),
     Justifications(u64),
     /// A chain-state entry with its proof, at a block.
@@ -41,7 +43,7 @@ impl Ask {
         match self {
             Ask::Status => "/status".to_string(),
             Ask::Light => "/light".to_string(),
-            Ask::Headers { from, count } => format!("/headers?from={from}&count={count}"),
+            Ask::Headers { from, count } | Ask::Ancestors { from, count } => format!("/headers?from={from}&count={count}"),
             Ask::LightUpdate(block) => format!("/light/updates/{block}"),
             Ask::Justifications(from) => format!("/justifications?from={from}"),
             Ask::Proof { column, key, block } => format!("/proofs/{column}/{key}?block={block}"),

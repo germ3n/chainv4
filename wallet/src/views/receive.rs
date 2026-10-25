@@ -28,7 +28,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
             ui.label(theme::mono(&address).color(palette.ink).size(13.5));
             ui.add_space(8.0);
 
-            if theme::primary(ui, &palette, "Copy address", true).clicked() {
+            if super::CAN_COPY && theme::primary(ui, &palette, "Copy address", true).clicked() {
                 ui.ctx().copy_text(address.clone());
             }
         });

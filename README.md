@@ -151,6 +151,20 @@ addresses: `blake3`, `sha256`, `keccak256`, `blake2s` or `blake2b`, whichever th
 pow chain picks its work hash separately, as `consensus.hash`. `xxh3` is fast but not secure,
 so neither takes it.
 
+### In Docker
+
+`docker/` runs a node with every feature behind nginx, serving the API, the explorer and the
+wallet over HTTPS:
+
+```sh
+cd docker && cp .env.example .env && docker compose up -d --build
+# https://localhost/ and https://localhost/wallet/
+```
+
+`.env` picks the chain (`CHAIN_CONSENSUS=pow|authority`, `CHAIN_FINALITY=ffg|authority|depth|none`,
+`CHAIN_FEES`) and the certificate (`TLS_MODE=self-signed|provided|letsencrypt`). See
+[Docker](docs/docker.md).
+
 ### A light client
 
 `chainv4 light` checks what a node says without running the chain. It trusts only the genesis
@@ -179,11 +193,12 @@ password on the device, and it shows only what it proved itself:
 ```sh
 cd wallet && cargo run --release -- --node http://127.0.0.1:8080
 cd wallet && trunk build --release    # then: chainv4 --http … --index-addresses --wallet wallet/dist
+wallet/build-android.sh --install     # an Android APK, built with xbuild
 ```
 
 Balances of the coin and every listed token, sending with a reviewed fee, receiving with a QR
-code, several accounts, and a history from the node's address index. See
-[Wallet](docs/wallet.md).
+code, several accounts, and a history from the node's address index. CI builds the APKs on every
+push, and attaches them to `v*` releases. See [Wallet](docs/wallet.md).
 
 ## Keys
 

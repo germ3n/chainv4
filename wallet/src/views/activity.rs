@@ -119,6 +119,8 @@ fn line(ui: &mut Ui, ctx: &Ctx, address: &str, entry: &Entry) {
     let open = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
     let (title, detail, amount, incoming) = summary(ctx, address, entry);
     let (status, color) = status(ctx, entry);
+    // The amount and the pill keep their column on the right, however narrow the screen.
+    let words = (ui.available_width() - 150.0).max(120.0);
 
     let response = ui
         .horizontal(|ui| {
@@ -129,19 +131,22 @@ fn line(ui: &mut Ui, ctx: &Ctx, address: &str, entry: &Entry) {
             };
             theme::dot(ui, mark);
             ui.vertical(|ui| {
+                ui.set_max_width(words);
                 ui.label(theme::strong(&title, 14.5).color(palette.ink));
-                ui.label(RichText::new(&detail).small().color(palette.muted));
+                ui.add(egui::Label::new(RichText::new(&detail).small().color(palette.muted)).wrap());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::pill(ui, status, color);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                    if let Some((brief, full)) = &amount {
+                        let (sign, color) = match incoming {
+                            Some(true) => ("+", palette.good),
+                            _ => ("−", palette.ink),
+                        };
+                        ui.label(theme::strong(format!("{sign}{brief}"), 14.5).color(color)).on_hover_text(full);
+                    }
 
-                if let Some(amount) = &amount {
-                    let (sign, color) = match incoming {
-                        Some(true) => ("+", palette.good),
-                        _ => ("−", palette.ink),
-                    };
-                    ui.label(theme::strong(format!("{sign}{amount}"), 14.5).color(color));
-                }
+                    theme::pill(ui, status, color);
+                });
             });
         })
         .response
@@ -160,9 +165,9 @@ fn line(ui: &mut Ui, ctx: &Ctx, address: &str, entry: &Entry) {
     }
 }
 
-/// A line's title, what it says under it, the amount it moved for this account, and whether that
-/// came in.
-fn summary(ctx: &Ctx, address: &str, entry: &Entry) -> (String, String, Option<String>, Option<bool>) {
+/// A line's title, what it says under it, the amount it moved for this account, cut short and in
+/// full, and whether that came in.
+fn summary(ctx: &Ctx, address: &str, entry: &Entry) -> (String, String, Option<(String, String)>, Option<bool>) {
     let when = |checked: &Checked| match checked.time {
         0 => format!("block {}", format::thousands(&checked.height.to_string())),
         time => format::ago(time, ctx.now),
@@ -171,16 +176,18 @@ fn summary(ctx: &Ctx, address: &str, entry: &Entry) -> (String, String, Option<S
     match (entry.checked, entry.sent) {
         (Some(checked), _) => match checked.for_holder(address).next() {
             Some((true, moved)) => {
-                let amount = ctx.amount(moved.token.as_deref(), &moved.amount);
+                let token = moved.token.as_deref();
                 let from = moved.from.as_deref().map_or_else(|| "minted".to_string(), |from| format!("from {}", format::short(from)));
+                let amount = (ctx.brief(token, &moved.amount), ctx.amount(token, &moved.amount));
 
-                (format!("Received {amount}"), format!("{from} · {}", when(checked)), Some(amount), Some(true))
+                ("Received".to_string(), format!("{from} · {}", when(checked)), Some(amount), Some(true))
             }
             Some((false, moved)) => {
-                let amount = ctx.amount(moved.token.as_deref(), &moved.amount);
+                let token = moved.token.as_deref();
                 let to = moved.to.as_deref().map_or_else(|| "burned".to_string(), |to| format!("to {}", format::short(to)));
+                let amount = (ctx.brief(token, &moved.amount), ctx.amount(token, &moved.amount));
 
-                (format!("Sent {amount}"), format!("{to} · {}", when(checked)), Some(amount), Some(false))
+                ("Sent".to_string(), format!("{to} · {}", when(checked)), Some(amount), Some(false))
             }
             None => {
                 let by = match checked.sender == address {
@@ -191,7 +198,12 @@ fn summary(ctx: &Ctx, address: &str, entry: &Entry) -> (String, String, Option<S
                 (checked.action.clone(), format!("{by}{}", when(checked)), None, None)
             }
         },
-        (None, Some(sent)) => (format!("Sending {}", sent.what), format!("to {} · {}", format::short(&sent.to), format::ago(sent.at, ctx.now)), None, Some(false)),
+        (None, Some(sent)) => (
+            "Sending".to_string(),
+            format!("to {} · {}", format::short(&sent.to), format::ago(sent.at, ctx.now)),
+            Some((sent.what.clone(), sent.what.clone())),
+            Some(false),
+        ),
         (None, None) => (
             "Checking…".to_string(),
             entry.height.map_or_else(String::new, |height| format!("block {}", format::thousands(&height.to_string()))),

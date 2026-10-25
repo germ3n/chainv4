@@ -7,7 +7,7 @@
 use {
     crate::node::{Ask, Failure},
     chainv4::db::{Column, StateProof, address_key},
-    chainv4::light::{Assurance, LightClient, LightError, LightParams, LightRequest, LightState, LightUpdate, token_balance, token_balance_key},
+    chainv4::light::{Assurance, LightClient, LightError, LightParams, LightRequest, LightState, LightUpdate, MAX_LIGHT_HEADERS, token_balance, token_balance_key},
     chainv4::registry::tokens::{Token, token_key},
     chainv4::structs::account::Account,
     chainv4::structs::address::Address,
@@ -100,6 +100,9 @@ pub struct Chain {
     targets: HashMap<String, Target>,
     /// Why a proof did not check, by what it was for.
     pub refused: HashMap<String, String>,
+    /// The lowest height a receipt landed at below every header the client holds: what it takes
+    /// ancestors down to, a stretch at a time.
+    wanted_below: Option<u64>,
 }
 
 impl Chain {
@@ -128,10 +131,22 @@ impl Chain {
             client.refresh();
         }
 
-        client.next().map(|request| match request {
-            LightRequest::Headers { from, count } => Ask::Headers { from, count },
-            LightRequest::Update { block } => Ask::LightUpdate(block.to_string()),
-            LightRequest::Justifications { from } => Ask::Justifications(from),
+        if let Some(request) = client.next() {
+            return Some(match request {
+                LightRequest::Headers { from, count } => Ask::Headers { from, count },
+                LightRequest::Update { block } => Ask::LightUpdate(block.to_string()),
+                LightRequest::Justifications { from } => Ask::Justifications(from),
+            });
+        }
+
+        // Caught up: the headers below it that older receipts need, the nearest stretch first.
+        let lowest = client.lowest();
+        let wanted = self.wanted_below.filter(|wanted| *wanted < lowest)?;
+        let from = wanted.max(lowest.saturating_sub(u64::from(MAX_LIGHT_HEADERS)));
+
+        Some(Ask::Ancestors {
+            from,
+            count: (lowest - from) as u32,
         })
     }
 
@@ -200,6 +215,7 @@ impl Chain {
             ask,
             Ask::Light
                 | Ask::Headers { .. }
+                | Ask::Ancestors { .. }
                 | Ask::LightUpdate(_)
                 | Ask::Justifications(_)
                 | Ask::Proof { .. }
@@ -298,6 +314,15 @@ impl Chain {
 
                 self.with_client(|client| client.deliver_headers(*from, headers, now).map(|_| ()).map_err(|err| err.to_string()))
             }
+            Ask::Ancestors { from, .. } => {
+                let headers: Vec<SealedHeader> = list(&value["headers"])?;
+
+                self.with_client(|client| match client.deliver_ancestors(*from, headers) {
+                    // Asked before an earlier stretch came in: the next ask starts lower.
+                    Ok(_) | Err(LightError::Misplaced) => Ok(()),
+                    Err(err) => Err(format!("the node's older headers do not check: {err}")),
+                })
+            }
             Ask::LightUpdate(block) => {
                 let update: LightUpdate = decode(&value["update"])?;
                 self.dirty = true;
@@ -392,8 +417,15 @@ impl Chain {
                 let count = value["count"].as_u64().ok_or("no count")? as usize;
                 let (receipt, assurance) = match client.check_receipt(&block, &bytes("receipt")?, index, count, &path("path")) {
                     Ok(checked) => checked,
-                    // In a block the client has not followed yet: proven at the next round.
-                    Err(LightError::NotOnChain) => return Ok(()),
+                    // In a block the client has not followed yet, or one below every header it
+                    // holds, whose ancestors it takes first: proven at the next round.
+                    Err(LightError::NotOnChain) => {
+                        if let Some(height) = value["height"].as_u64().filter(|height| *height < client.lowest()) {
+                            self.wanted_below = Some(self.wanted_below.map_or(height, |wanted| wanted.min(height)));
+                        }
+
+                        return Ok(());
+                    }
                     Err(err) => return Err(format!("the node's receipt does not check: {err}")),
                 };
                 let (signed, _) = client

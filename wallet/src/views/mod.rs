@@ -60,6 +60,8 @@ pub struct Ctx<'a> {
     /// Whether the accounts changed, so the vault seals them again.
     pub changed: &'a mut bool,
     pub vault: &'a mut Option<Vault>,
+    /// What wakes the app when something arrives later, as a key file picked.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     pub wake: &'a egui::Context,
 }
 
@@ -83,6 +85,16 @@ impl Ctx<'_> {
             ),
             None => (format::short(token), 0),
         }
+    }
+
+    /// An amount cut to four decimals, as a row has room for, with its symbol.
+    pub fn brief(&self, token: Option<&str>, raw: &str) -> String {
+        let (symbol, decimals) = match token {
+            None => (self.coin.symbol.clone(), self.coin.decimals),
+            Some(token) => self.token(token),
+        };
+
+        format!("{} {symbol}", format::brief(raw, decimals, 4))
     }
 
     /// An amount of the coin, or of a token, with its symbol.
@@ -122,20 +134,38 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
     }
 }
 
+/// Whether Copy buttons reach the system's clipboard: egui cannot on Android yet, so they would
+/// copy nowhere.
+pub const CAN_COPY: bool = cfg!(not(target_os = "android"));
+
 /// The light client's state, in the sidebar: how far it follows, and how much of that is final.
 pub fn light_status(ui: &mut Ui, palette: &Palette, chain: &Chain) {
-    let (color, text) = match (&chain.trouble, chain.following(), chain.caught_up()) {
-        (Some(_), _, _) => (palette.bad, "Stopped".to_string()),
-        (None, None, _) => (palette.muted, "Starting".to_string()),
-        (None, Some((tip, _)), false) => (palette.warn, format!("Catching up · {}", format::thousands(&tip.to_string()))),
-        (None, Some((tip, _)), true) => (palette.good, format!("Following · {}", format::thousands(&tip.to_string()))),
-    };
+    let (color, text, detail) = following(palette, chain);
     let response = ui
         .horizontal(|ui| {
             theme::dot(ui, color);
             ui.label(RichText::new(text).color(palette.soft).size(13.0));
         })
         .response;
+    response.on_hover_text(detail);
+}
+
+/// The light client's state as a dot alone, where there is no room for words: they show on a tap.
+pub fn light_dot(ui: &mut Ui, palette: &Palette, chain: &Chain) {
+    let (color, text, detail) = following(palette, chain);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    ui.painter().circle_filled(rect.center(), 4.5, color);
+    response.on_hover_text(format!("{text}. {detail}"));
+}
+
+/// The light client's state: its color, in a word or two, and in full.
+fn following(palette: &Palette, chain: &Chain) -> (egui::Color32, String, String) {
+    let (color, text) = match (&chain.trouble, chain.following(), chain.caught_up()) {
+        (Some(_), _, _) => (palette.bad, "Stopped".to_string()),
+        (None, None, _) => (palette.muted, "Starting".to_string()),
+        (None, Some((tip, _)), false) => (palette.warn, format!("Catching up · {}", format::thousands(&tip.to_string()))),
+        (None, Some((tip, _)), true) => (palette.good, format!("Following · {}", format::thousands(&tip.to_string()))),
+    };
     let detail = match (&chain.trouble, chain.following()) {
         (Some(why), _) => why.clone(),
         (None, Some((tip, final_height))) => format!(
@@ -143,7 +173,8 @@ pub fn light_status(ui: &mut Ui, palette: &Palette, chain: &Chain) {
         ),
         (None, None) => "Asking the node where the chain starts.".to_string(),
     };
-    response.on_hover_text(detail);
+
+    (color, text, detail)
 }
 
 /// How far a proven value is trusted, as a pill.
@@ -168,8 +199,12 @@ pub fn address(ui: &mut Ui, palette: &Palette, address: &str) {
     });
 }
 
-/// A small button that copies text.
+/// A small button that copies text, where copying works.
 pub fn copy(ui: &mut Ui, palette: &Palette, text: &str) {
+    if !CAN_COPY {
+        return;
+    }
+
     let button = egui::Button::new(RichText::new("Copy").size(11.5).color(palette.muted)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
 
     if ui.add(button).on_hover_text("Copy to the clipboard").clicked() {

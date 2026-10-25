@@ -1,0 +1,19 @@
+# What xbuild builds the Android app from: x build --platform android, or build-android.sh. The rest
+# of the app's manifest is xbuild's own: a NativeActivity that loads libchainv4_wallet.so, targeting
+# API 33.
+#
+# Plain-HTTP nodes need nothing more: Android's cleartext rule binds Java's networking, and the
+# wallet talks to nodes from Rust over sockets of its own.
+icon: assets/icon.png
+android:
+  manifest:
+    package: org.chainv4.wallet
+    # Android 7 and up: xbuild signs with APK Signature Scheme v2 alone, which older ones do not read.
+    sdk:
+      min_sdk_version: 24
+    uses_permission:
+      - name: android.permission.INTERNET
+    application:
+      label: chainv4 wallet
+      # No action bar: the app never draws one, but Android would keep room for it all the same.
+      theme: "@android:style/Theme.DeviceDefault.NoActionBar"

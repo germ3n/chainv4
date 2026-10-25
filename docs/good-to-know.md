@@ -90,6 +90,17 @@ other pages explain each part in full; this one is the short list to keep in min
   storage, which clearing the site's data deletes. It trusts the genesis a node first shows it,
   and proves everything else. `--wallet wallet/dist` serves it from the node's `/wallet/`. See
   [Wallet](wallet.md).
+- **The Android wallet is built with xbuild, not Gradle.** `wallet/build-android.sh` needs clang,
+  lld and llvm-ar, and no NDK. Without a key it signs with xbuild's debug key, the same for
+  everyone: Android updates an app only with one signed by the same key, so pick your own key
+  (`ANDROID_SIGNING_PEM` in CI) before anyone installs it. It needs Android 7 or newer.
+- **Docker puts HTTPS in front, not around peer-to-peer.** nginx terminates TLS for the API,
+  the explorer and the wallet; QUIC is TLS 1.3 already, so the p2p port goes straight to the node.
+  A chain made from the presets signs with the development key until `docker/config` holds keys
+  of your own. See [Docker](docker.md).
+- **A restored light client takes old headers on demand.** It keeps headers from the finalized
+  block on; to check something older, `deliver_ancestors` takes the headers between, proven by
+  their hash chain to the lowest it holds.
 
 ## Consensus-critical: changing these makes a new chain
 
