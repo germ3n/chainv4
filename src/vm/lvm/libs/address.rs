@@ -2,7 +2,7 @@ use {
     crate::crypto::verifiable::Verifiable,
     crate::structs::address::Address,
     crate::vm::lvm::{from_hex, to_hex},
-    mlua::{AnyUserData, Error, Lua, MetaMethod, Table, UserData, UserDataMethods},
+    mlua::{Error, Lua, MetaMethod, Table, UserData, UserDataMethods, Value},
     r#macro::document,
 };
 
@@ -21,7 +21,12 @@ impl UserData for LuaAddress {
         methods.add_method("text", |_, this, ()| Ok(this.0.to_string()));
         methods.add_method("encode", |lua, this, ()| lua.create_string(this.0.to_abi()));
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(to_hex(this.0.bytes())));
-        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (AnyUserData, AnyUserData)| {
+        // either side may be a number, which the VM also hands to __eq
+        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Value, Value)| {
+            let (Value::UserData(a), Value::UserData(b)) = (a, b) else {
+                return Ok(false);
+            };
+
             match (a.borrow::<LuaAddress>(), b.borrow::<LuaAddress>()) {
                 (Ok(a), Ok(b)) => Ok(*a == *b),
                 _ => Ok(false),

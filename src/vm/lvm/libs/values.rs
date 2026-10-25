@@ -69,6 +69,7 @@ fn type_name(value: &TxCallArgumentType) -> &'static str {
         TxCallArgumentType::I128(_) => "i128",
         TxCallArgumentType::U128(_) => "u128",
         TxCallArgumentType::U256(_) => "u256",
+        TxCallArgumentType::I256(_) => "i256",
         TxCallArgumentType::Nil => "nil",
     }
 }
@@ -137,7 +138,7 @@ fn values_unpack() {}
     parent = "Values",
     name = "type",
     kind = "method",
-    summary = "What type a value has, as the API names it: address, amount, bytes, bool, string, number, i64, u64, i128, u128, u256 or nil.",
+    summary = "What type a value has, as the API names it: address, amount, bytes, bool, string, number, i64, u64, i128, u128, i256, u256 or nil.",
     params = { index = "Which value, counting from 1." },
     returns = { ty = "string?", desc = "Its type, or nil past the end." },
 )]

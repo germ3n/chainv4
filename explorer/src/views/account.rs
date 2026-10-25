@@ -15,7 +15,7 @@ use {
 };
 
 /// The argument types a read-only call can be given, as the API names them.
-const KINDS: [&str; 12] = ["address", "amount", "u256", "u128", "u64", "i64", "i128", "number", "bool", "string", "bytes", "nil"];
+const KINDS: [&str; 13] = ["address", "amount", "u256", "u128", "u64", "i64", "i128", "i256", "number", "bool", "string", "bytes", "nil"];
 
 #[derive(Default)]
 pub struct AccountState {

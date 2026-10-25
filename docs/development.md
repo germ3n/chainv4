@@ -155,7 +155,15 @@ These are the rules the code follows. Keep to them when adding to it.
 - **mlua and Luau are forks.** chainv4 uses the germ3n forks of mlua and Luau, which add fuel
   metering, and keep a script's results the same on every node: Luau's fork hashes tables and
   functions as keys by the order they were made, not their address, and refuses userdata keys.
-  Never swap them for upstream.
+  It also lets a number and a userdata compare through the userdata's `__eq`, `__lt` and `__le`
+  (`luaV_equalmixed`, `luaV_lessthan`, `luaV_lessequal` and the `JUMPIFEQ`, `JUMPIFNOTEQ` and
+  `JUMPXEQKN` opcodes), and two userdata of different types through the first one's metamethod,
+  or the second's, which is how `u64(5) < u256(6)` works. Never swap them for upstream.
+- **Trying a change to the Luau fork.** Point chainv4 at the clone with a temporary
+  `[patch."https://github.com/germ3n/luau-src-rs"] luau0-src = { path = "../luau-src-rs" }` in
+  `Cargo.toml`. Cargo only notices changes to files rustc reads, never to the C++ sources, so
+  `touch ../luau-src-rs/src/lib.rs` after each edit, or the old Luau stays linked. Once the fork
+  is pushed, drop the patch and `cargo update -p luau0-src`.
 
 ## Documenting code
 

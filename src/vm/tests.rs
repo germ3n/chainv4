@@ -4,6 +4,7 @@ use super::*;
 use crate::db::{Column, MemoryDb, storage_key};
 use crate::registry::Accounts;
 use crate::structs::hex::to_hex;
+use crate::structs::u256::i256;
 use crate::registry::Contracts;
 use crate::registry::tokens::{Token, Tokens};
 use crate::structs::code::Code;
@@ -382,6 +383,81 @@ fn the_callee_burns_the_caller_s_fuel() {
     let through_lua = world.call(lua, "bump_twice", &[address(counter)]).fuel_used;
 
     assert!(through_lua > 2 * (alone + cost::CALL), "{through_lua} vs {alone}");
+}
+
+/// contracts/examples/integers on the WASM engine and contracts/lua/integers.lua, given the same
+/// calls, give the same results, fail alike, and each takes over the storage the other kept.
+#[test]
+fn rust_and_lua_do_integer_math_alike_and_read_each_other_s_integers() {
+    const LUA_INTEGERS: &str = include_str!("../../contracts/lua/integers.lua");
+
+    let mut world = World::new();
+    let rust = world.deploy(Code::Wasm(example("integers")));
+    let lua = world.deploy(Code::Lua(LUA_INTEGERS.to_string()));
+    let signed = |value: i64| TxCallArgumentType::I256(i256::new(i128::from(value)));
+    let flag = TxCallArgumentType::Bool;
+    let held = vec![
+        signed(-300),
+        TxCallArgumentType::U256(u256::MAX - u256::new(10)),
+        TxCallArgumentType::I128(i128::MIN),
+        TxCallArgumentType::U128(u128::MAX),
+    ];
+    let calls = [
+        ("fee", vec![wide(1_000_000), TxCallArgumentType::U64(25)], vec![wide(2500)]),
+        ("fee", vec![wide(399), TxCallArgumentType::U64(25)], vec![wide(0)]),
+        ("settle", vec![signed(-500)], vec![signed(-500)]),
+        ("settle", vec![signed(200)], vec![signed(-300)]),
+        ("mint", vec![TxCallArgumentType::U256(u256::MAX - u256::new(10))], vec![TxCallArgumentType::U256(u256::MAX - u256::new(10))]),
+        (
+            "keep",
+            vec![TxCallArgumentType::I128(i128::MIN), TxCallArgumentType::U128(u128::MAX)],
+            vec![TxCallArgumentType::I128(i128::MIN), TxCallArgumentType::U128(u128::MAX)],
+        ),
+        (
+            "edges",
+            vec![],
+            vec![
+                TxCallArgumentType::Nil,
+                wide(0),
+                wide(0),
+                TxCallArgumentType::Nil,
+                TxCallArgumentType::I256(i256::MIN),
+                signed(-3),
+                signed(-1),
+                TxCallArgumentType::U256(u256::new(10).pow(30)),
+            ],
+        ),
+        ("compare", vec![wide(5000), signed(-1)], vec![flag(true), flag(true), flag(true), flag(false)]),
+        ("compare", vec![wide(5), signed(0)], vec![flag(false), flag(false), flag(false), flag(true)]),
+        ("compare", vec![TxCallArgumentType::U64(1001), TxCallArgumentType::I64(-1)], vec![flag(true), flag(true), flag(true), flag(false)]),
+        ("held", vec![], held.clone()),
+    ];
+
+    for (function, args, expected) in &calls {
+        for (engine, contract) in [("wasm", rust), ("lua", lua)] {
+            assert_eq!(world.call(contract, function, args).result.unwrap(), *expected, "{function} on {engine}");
+        }
+    }
+
+    for (engine, contract) in [("wasm", rust), ("lua", lua)] {
+        let failure = |function: &str, args: &[TxCallArgumentType]| world.call(contract, function, args).result.unwrap_err().to_string();
+
+        assert!(failure("mint", &[wide(11)]).contains("the supply would overflow"), "{engine}");
+        assert!(failure("overflow", &[]).contains("u256 overflow"), "{engine}");
+        assert!(failure("settle", &[TxCallArgumentType::I256(i256::MIN)]).contains("i256 overflow"), "{engine}");
+        assert!(world.call(contract, "fee", &[wide(1), TxCallArgumentType::I64(-1)]).result.is_err(), "{engine}: a negative bps is refused");
+        assert_eq!(world.call(contract, "held", &[]).result.unwrap(), held, "{engine}: a failed call keeps nothing");
+    }
+
+    // Each engine takes over what the other kept, byte for byte the same kinds.
+    world.upgrade(DEPLOYER, rust, Code::Lua(LUA_INTEGERS.to_string())).unwrap();
+    world.upgrade(DEPLOYER, lua, Code::Wasm(example("integers"))).unwrap();
+
+    for (engine, contract) in [("lua, from wasm's storage", rust), ("wasm, from lua's storage", lua)] {
+        assert_eq!(world.call(contract, "held", &[]).result.unwrap(), held, "{engine}");
+        assert_eq!(world.call(contract, "settle", &[signed(300)]).result.unwrap(), [signed(0)], "{engine}");
+        assert_eq!(world.call(contract, "mint", &[wide(10)]).result.unwrap(), [TxCallArgumentType::U256(u256::MAX)], "{engine}");
+    }
 }
 
 /// Builds the SDK's example contracts once per test run, for real, with cargo.
@@ -1453,7 +1529,7 @@ fn values_lists_pass_through_lua_untouched() {
         [
             TxCallArgumentType::I64(-5),
             TxCallArgumentType::String("hi".to_string()),
-            TxCallArgumentType::U256(u256::from(7u64)),
+            TxCallArgumentType::U64(7),
             TxCallArgumentType::U256(u256::from(9u64)),
             TxCallArgumentType::Address(DEPLOYER),
         ]

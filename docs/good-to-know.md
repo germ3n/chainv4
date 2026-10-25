@@ -139,7 +139,9 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   module does and costs. Upgrade on purpose, never with `cargo update`.
 - **The Luau fork.** The germ3n forks of mlua and Luau meter fuel. They are pinned by branch, with
   the commit in `Cargo.lock`; `cargo update` would move them, so pinning a `rev` would be safer.
-  Never swap them for upstream.
+  Never swap them for upstream. Its comparisons are consensus too: a number against a userdata,
+  and two userdata of different types, ask the userdata's metamethods, where plain Luau would
+  fail or call them unequal (see below).
 - **Luau compiler settings.** Optimization level 1, debug level 1, no type information. The
   bytecode, and so every call's fuel, depends on them.
 - **Fuel costs** (`vm::cost`) and every limit: call depth, key and value sizes, event sizes,
@@ -265,9 +267,25 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   survive between calls and make memory limits depend on what a node ran before, which could split
   the chain. Instead, the Lua engine keeps fresh states ready and the WebAssembly engine caches
   compiled modules. Both only change speed, never results.
-- **Lua changes value types; values lists do not.** An `i64` passed through Lua comes back a
-  number, and bytes that read as text a string. To pass values on as they came, forward
-  `ctx.args`, as the Lua proxy does: calls given a values list return one, untouched.
+- **Lua changes few value types; values lists none.** Integers keep their type through Lua, but an
+  amount comes back a `u256`, a `number` an `i64`, and bytes that read as text a string. To pass
+  values on as they came, forward `ctx.args`, as the Lua proxy does: calls given a values list
+  return one, untouched.
+- **Integer arguments arrive in Lua as their own types.** A `u64` is a `U64`, an `i64` an `I64`, up
+  to `I256`, and `ns:get_u64` and the like read back the same way. They used to arrive as a `U256`,
+  or a plain number for the signed ones, so a contract that did `for i = 1, n` with an `i64`
+  argument now needs `n:tonumber()`, or a `number` argument; and chains from before differ.
+- **Signed and unsigned integers do not mix.** `u128(5) + i128(1)` fails, "convert one side",
+  as no type holds both `U256` and `I256`. One signedness widens, `u64 + u256` to a `U256`, and a
+  plain number takes the integer's type. Comparisons mix freely, by the true value.
+- **`/` and `%` round as Rust's do; `//` as Lua's.** For the signed types `i64(-7) / 2` is `-3`
+  and `i64(-7) % 2` is `-1`, as in Rust and the SDK's `I256`, so the two engines agree; `//` rounds
+  down, `-4`. Plain numbers keep Lua's arithmetic.
+- **Numbers compare with integers, in the Luau fork.** `u256(5) == 5`, `x > 1000` and
+  `table.sort` over a mix all ask the integer's metamethods, exactly: past 2^53, with fractions,
+  and against NaN, which orders against nothing. Plain Luau never calls `__eq` across types and
+  fails to order a number against a userdata. A table against a number still behaves as in plain
+  Luau.
 - **Delegate only to code you trust.** It runs with this contract's storage and balance, all but
   the contract's own space, which it can only read.
 - **Storage has namespaces and an own space.** `storage.namespace(name)` and `storage.own`

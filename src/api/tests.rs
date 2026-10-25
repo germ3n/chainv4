@@ -1098,6 +1098,30 @@ fn status_names_the_coin() {
 }
 
 #[test]
+fn every_integer_type_round_trips_through_json_as_text() {
+    use crate::structs::u256::{i256, u256};
+
+    for argument in [
+        TxCallArgumentType::I64(i64::MIN),
+        TxCallArgumentType::U64(u64::MAX),
+        TxCallArgumentType::I128(i128::MIN),
+        TxCallArgumentType::U128(u128::MAX),
+        TxCallArgumentType::I256(i256::MIN),
+        TxCallArgumentType::I256(i256::MAX),
+        TxCallArgumentType::U256(u256::MAX),
+    ] {
+        let written = json::argument(&argument);
+
+        assert!(written["value"].is_string(), "{written}: past 2^53, so text");
+        assert_eq!(json::parse_argument(&written), Ok(argument));
+    }
+
+    assert_eq!(json::argument(&TxCallArgumentType::I256(i256::new(-5))), json!({ "type": "i256", "value": "-5" }));
+    assert_eq!(json::parse_argument(&json!({ "type": "i256", "value": -5 })), Ok(TxCallArgumentType::I256(i256::new(-5))));
+    assert!(json::parse_argument(&json!({ "type": "i256", "value": "five" })).unwrap_err().contains("not an i256: five"));
+}
+
+#[test]
 fn nil_is_written_as_null() {
     assert_eq!(json::argument(&TxCallArgumentType::Nil), json!({ "type": "nil", "value": null }));
     assert_eq!(json::parse_argument(&json!({ "type": "nil" })), Ok(TxCallArgumentType::Nil));

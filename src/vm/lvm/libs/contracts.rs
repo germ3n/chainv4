@@ -1,7 +1,7 @@
 use {
     super::accounts::refused,
     super::address::LuaAddress,
-    super::u256::{LuaU256, operand},
+    super::integers::{LuaInt, exact_as},
     super::values::{Given, LuaValues},
     crate::structs::u256::u256,
     crate::vm::lvm::{charge, value},
@@ -18,7 +18,7 @@ fn call_value(
     lua: &Lua,
     (target, value, function, args): (AnyUserData, Value, String, MultiValue),
 ) -> mlua::Result<MultiValue> {
-    call_with(lua, target, operand(&value)?, function, args)
+    call_with(lua, target, exact_as::<u256>(&value)?, function, args)
 }
 
 fn delegate(lua: &Lua, (target, function, args): (AnyUserData, Value, MultiValue)) -> mlua::Result<MultiValue> {
@@ -34,7 +34,7 @@ fn delegate(lua: &Lua, (target, function, args): (AnyUserData, Value, MultiValue
     let id = match &name {
         Some(name) => FunctionId::Name(name),
         None => FunctionId::Selector(
-            u64::try_from(operand(&function)?).map_err(|_| Error::runtime("a selector fits in 64 bits"))?,
+            exact_as::<u64>(&function).map_err(|_| Error::runtime("a selector is a whole number that fits in 64 bits"))?,
         ),
     };
     let given = Given::read(args).map_err(|err| Error::runtime(format!("contracts.delegate: {err}")))?;
@@ -58,8 +58,8 @@ fn check_layout(lua: &Lua, (from, to): (AnyUserData, AnyUserData)) -> mlua::Resu
     host.check_layout(&from.0, &to.0).map_err(refused)
 }
 
-fn selector_of(_: &Lua, name: String) -> mlua::Result<LuaU256> {
-    Ok(LuaU256(u256::from(selector(&name))))
+fn selector_of(_: &Lua, name: String) -> mlua::Result<LuaInt<u64>> {
+    Ok(LuaInt(selector(&name)))
 }
 
 /// A call's return values as Lua values, or as one values list when it was given one, or its
@@ -159,7 +159,7 @@ fn contracts_call_value() {}
     summary = "Runs another contract's function as this contract's own: on this contract's storage and balance, with ctx.sender, ctx.contract and ctx.value unchanged, and events in this contract's name. The EVM's delegatecall, for proxies. Raises an error when it fails, and nothing it did is kept.",
     params = {
         address = { ty = "Address", desc = "The contract whose code to run." },
-        name = { ty = "string | U256", desc = "The function: its name, or its selector, as fallback receives it." },
+        name = { ty = "string | U64", desc = "The function: its name, or its selector, as fallback receives it." },
         args = { ty = "...", desc = "The arguments.", optional = true },
     },
     returns = { ty = "...", desc = "The function's return values." },
@@ -191,7 +191,7 @@ fn contracts_check_layout() {}
     name = "selector",
     summary = "The selector a call names a function by: XXH3-64 of the name. What fallback receives, for comparing.",
     params = { name = { ty = "string", desc = "The function's name." } },
-    returns = { ty = "U256", desc = "The selector." },
+    returns = { ty = "U64", desc = "The selector." },
     example = "function M.fallback(selector, ...)\n    if selector == contracts.selector(\"admin_only\") then error(\"no\") end\n    return contracts.delegate(implementation(), selector, ...)\nend",
 )]
 fn contracts_selector() {}

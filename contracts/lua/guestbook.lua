@@ -44,7 +44,7 @@ function M.tip()
         error("nobody has signed yet")
     end
 
-    if ctx.value == u256(0) then
+    if ctx.value == 0 then
         error("send something to tip")
     end
 

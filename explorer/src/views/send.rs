@@ -20,14 +20,14 @@ use {
     chainv4::structs::hash::HashType,
     chainv4::structs::hex::{from_hex, to_hex},
     chainv4::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
-    chainv4::structs::u256::u256,
+    chainv4::structs::u256::{i256, u256},
     egui::{RichText, Ui},
     serde_json::{Value, json},
     std::sync::{Arc, Mutex},
 };
 
 /// The argument types a call can be given.
-const KINDS: [&str; 12] = ["address", "amount", "u256", "u128", "u64", "i64", "i128", "number", "bool", "string", "bytes", "nil"];
+const KINDS: [&str; 13] = ["address", "amount", "u256", "u128", "u64", "i64", "i128", "i256", "number", "bool", "string", "bytes", "nil"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -600,6 +600,7 @@ fn argument(kind: &str, text: &str) -> Result<TxCallArgumentType, String> {
         "u64" => TxCallArgumentType::U64(text.parse().map_err(|_| bad())?),
         "i64" => TxCallArgumentType::I64(text.parse().map_err(|_| bad())?),
         "i128" => TxCallArgumentType::I128(text.parse().map_err(|_| bad())?),
+        "i256" => TxCallArgumentType::I256(i256::from_str_radix(text, 10).map_err(|_| bad())?),
         "number" => TxCallArgumentType::Number(text.parse().map_err(|_| bad())?),
         "bool" => TxCallArgumentType::Bool(text.parse().map_err(|_| bad())?),
         "string" => TxCallArgumentType::String(text.to_string()),

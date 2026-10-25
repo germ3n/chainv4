@@ -43,6 +43,7 @@ end
 function M.award(who, amount)
     only_the_owner()
 
+    amount = u256(amount) -- whatever integer type, or whole number, the caller sent
     local most = u256(config:get("max_award"))
 
     if amount > most then

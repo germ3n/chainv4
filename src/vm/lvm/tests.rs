@@ -4,7 +4,7 @@ use crate::db::{MemoryDb, State};
 use crate::structs::address::Address;
 use crate::structs::amount::Amount;
 use crate::structs::hash::HashType;
-use crate::structs::u256::u256;
+use crate::structs::u256::{i256, u256};
 use crate::structs::code::Engine;
 use crate::vm::{CallContext, Vm};
 use std::sync::Arc;
@@ -64,6 +64,43 @@ function M.leak()
     leaked = true
 end
 
+function M.kinds(...)
+    local kinds = {}
+
+    for index = 1, select('#', ...) do
+        kinds[index] = typeof((select(index, ...)))
+    end
+
+    return table.concat(kinds, " ")
+end
+
+-- Every comparison with a 5 of any integer type holds, through the compiled jumps.
+function M.compare(x)
+    local n, m = tonumber("5"), tonumber("6")
+    local hits = 0
+
+    if x == 5 then hits += 1 end
+    if 5 == x then hits += 1 end
+    if x ~= 6 then hits += 1 end
+    if x == n then hits += 1 end
+    if x ~= m then hits += 1 end
+    if x < 6 then hits += 1 end
+    if x > 4 then hits += 1 end
+    if x <= n then hits += 1 end
+    if x >= n then hits += 1 end
+    if x < m then hits += 1 end
+    if x == u64(5) then hits += 1 end
+    if x == i256(5) then hits += 1 end
+    if x < u256(6) and x > i64(4) then hits += 1 end
+    if x ~= 5 or x < 5 or x > 5 or x == 4 then hits += 100 end
+
+    return hits
+end
+
+function M.arithmetic(a, b)
+    return a + b, a - 1, a * 2, a // 2, b:checked_add(a), (a:wrapping_sub(a + 1))
+end
+
 function M.hidden()
     return type(os), type(io), type(debug), type(require), type(loadstring), type(getfenv),
         type(collectgarbage), type(coroutine), type(math.random), type(math.sin)
@@ -109,7 +146,7 @@ fn calls_reach_exported_functions_by_hash() {
         &[TxCallArgumentType::U64(1 << 60), TxCallArgumentType::U64(3)],
     );
 
-    assert!(matches!(sum[..], [TxCallArgumentType::U256(value)] if value == u256::new((1 << 60) + 3)));
+    assert_eq!(sum, [TxCallArgumentType::U64((1 << 60) + 3)]);
     assert_eq!(contract().function_name(&func("add")), Some("add"));
 }
 
@@ -213,10 +250,82 @@ fn numbers_cross_a_contracts_edges_whole() {
 }
 
 #[test]
-fn integers_a_lua_number_would_round_are_refused() {
-    let err = call("echo", &[TxCallArgumentType::I64(i64::MAX)]).result.unwrap_err();
+fn integers_cross_as_their_own_types_and_come_back_exact() {
+    let args = [
+        TxCallArgumentType::U64(u64::MAX),
+        TxCallArgumentType::U128(u128::MAX),
+        TxCallArgumentType::U256(u256::MAX),
+        TxCallArgumentType::I64(i64::MIN),
+        TxCallArgumentType::I128(i128::MIN),
+        TxCallArgumentType::I256(i256::MIN),
+        TxCallArgumentType::I64(i64::MAX),
+        TxCallArgumentType::I256(i256::MAX),
+    ];
 
-    assert!(matches!(err, VmError::BadArgument(_)), "{err:?}");
+    assert_eq!(returns("echo", &args), args);
+
+    let kinds = [
+        args.to_vec(),
+        vec![TxCallArgumentType::Amount(Amount::U128(7)), TxCallArgumentType::Number(3.0)],
+    ]
+    .concat();
+
+    assert_eq!(
+        returns("kinds", &kinds),
+        [TxCallArgumentType::String("U64 U128 U256 I64 I128 I256 I64 I256 U256 number".to_string())]
+    );
+}
+
+#[test]
+fn integers_compare_with_numbers_and_each_other_in_a_contract() {
+    let fives = [
+        TxCallArgumentType::U64(5),
+        TxCallArgumentType::U128(5),
+        TxCallArgumentType::U256(u256::new(5)),
+        TxCallArgumentType::I64(5),
+        TxCallArgumentType::I128(5),
+        TxCallArgumentType::I256(i256::new(5)),
+        TxCallArgumentType::Amount(Amount::U128(5)),
+        TxCallArgumentType::Number(5.0),
+    ];
+
+    for five in fives {
+        assert_eq!(returns("compare", std::slice::from_ref(&five)), [TxCallArgumentType::I64(13)], "{five:?}");
+    }
+}
+
+#[test]
+fn arithmetic_results_leave_as_their_type() {
+    assert_eq!(
+        returns("arithmetic", &[TxCallArgumentType::I64(-7), TxCallArgumentType::I128(i128::MAX)]),
+        [
+            TxCallArgumentType::I128(i128::MAX - 7),
+            TxCallArgumentType::I64(-8),
+            TxCallArgumentType::I64(-14),
+            TxCallArgumentType::I64(-4),
+            TxCallArgumentType::I128(i128::MAX - 7),
+            TxCallArgumentType::I64(-1),
+        ]
+    );
+    assert_eq!(
+        returns("arithmetic", &[TxCallArgumentType::U64(10), TxCallArgumentType::U128(u128::MAX - 10)]),
+        [
+            TxCallArgumentType::U128(u128::MAX),
+            TxCallArgumentType::U64(9),
+            TxCallArgumentType::U64(20),
+            TxCallArgumentType::U64(5),
+            TxCallArgumentType::U128(u128::MAX),
+            TxCallArgumentType::U64(u64::MAX),
+        ]
+    );
+
+    let err = call("arithmetic", &[TxCallArgumentType::U64(u64::MAX), TxCallArgumentType::U64(1)]).result.unwrap_err();
+
+    assert!(err.to_string().contains("u64 overflow"), "{err}");
+
+    let err = call("arithmetic", &[TxCallArgumentType::U64(1), TxCallArgumentType::I64(1)]).result.unwrap_err();
+
+    assert!(err.to_string().contains("U64 and I64 do not mix"), "{err}");
 }
 
 #[test]
@@ -404,7 +513,7 @@ end
 return M
 "#;
     let run = |name: &str, args: &[TxCallArgumentType]| Contract::load(script, LIMITS).unwrap().call(&func(name), args, host(), LIMITS).result;
-    let order = |padding: i64| run("order", &[TxCallArgumentType::I64(padding)]).unwrap();
+    let order = |padding: i64| run("order", &[TxCallArgumentType::Number(padding as f64)]).unwrap();
     let first = order(0);
 
     for padding in 1..12 {

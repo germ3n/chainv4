@@ -347,7 +347,7 @@ Arguments are `type:value`:
 
 | Type | Example |
 | --- | --- |
-| `i64`, `u64`, `i128`, `u128`, `u256` | `i64:-5`, `u256:1000` |
+| `i64`, `u64`, `i128`, `u128`, `i256`, `u256` | `i64:-5`, `i256:-5`, `u256:1000` |
 | `number` | `number:2`: Lua contracts take whole numbers only, and hand them back as `i64` |
 | `amount` | `amount:1000000000000000000` |
 | `bool` | `bool:true` |
@@ -443,8 +443,9 @@ Full proxies are in [contracts/lua/proxy.lua](contracts/lua/proxy.lua) and
 - Delegating only reaches functions the target exports, never its `fallback`, `init` or
   `migrate`. An implementation that needs setting up exports something like `initialize`, called
   through the proxy once it is pointed at it.
-- Values pass through a Lua proxy as Lua values, so a `u64` comes back as a `u256`; a Rust proxy
-  forwards them exactly, and so does a Lua one passing `ctx.args` on.
+- Values pass through a Lua proxy as Lua values, so an `amount` comes back as a `u256` and bytes
+  that read as text as a string; a Rust proxy forwards them exactly, and so does a Lua one
+  passing `ctx.args` on.
 
 ### Storage layouts
 
@@ -466,7 +467,7 @@ In Rust, `chainv4_sdk::namespace!(BALANCES, "balances", "address" => "u256:wei")
 `namespace!(CONFIG, "config", { "owner": "address" });` and `retired!("fees");`.
 
 Kinds are encodings the node checks on every write, and on every access for a map's keys:
-`bytes`, `text`, `number`, `decimal`, `bool`, `i64`, `u64`, `u128`, `u256`, `address`,
+`bytes`, `text`, `number`, `decimal`, `bool`, `i64`, `u64`, `i128`, `u128`, `i256`, `u256`, `address`,
 `address-text` and `address-hex`, each with a unit after a colon or none. Lua writes the text
 kinds and Rust the binary ones, and each engine reads and writes the other's, so a contract can
 move between them and keep its state. Code that declares a layout reaches nothing past it: no

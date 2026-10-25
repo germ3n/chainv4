@@ -203,7 +203,8 @@ for the binary ones:
 | `decimal` | A whole number from 0 in decimal text, up to the largest u256. | `tostring(u256)`, `u256(text)` | `get_decimal`, `set_decimal` |
 | `bool` | One byte, 0 or 1. | `ns:set_bool`, `ns:get_bool` | `get_bool`, `set_bool` |
 | `i64`, `u64` | 8 bytes, little-endian. | `ns:set_i64`, `ns:get_u64`… | `set_i64`, `get_u64`… |
-| `u128`, `u256` | 16 or 32 bytes, little-endian. | `ns:set_u256`, `ns:get_u128`… | `set_u256`, `get_u128`… |
+| `i128`, `u128` | 16 bytes, little-endian. | `ns:set_i128`, `ns:get_u128`… | `set_i128`, `get_u128`… |
+| `i256`, `u256` | 32 bytes, little-endian; `i256` in two's complement. | `ns:set_i256`, `ns:get_u256`… | `set_i256`, `get_u256`… |
 | `address` | 33 bytes: the kind's tag, then its 32, or a secp256k1 address's 20 and 12 zeros. | `ns:set_address`; `who:encode()`, `address.decode` | `set_address`, `Address::encode` |
 | `address-text` | An address in text: `ed25519:0x…`, `secp256k1:0x…`. | `who:text()`, `address.parse` | `get_address_text`, `set_address_text` |
 | `address-hex` | `0x` and 64 hex digits, or 40 for secp256k1. | `who:hex()`, `address(hex)` | `get_address_hex`, `set_address_hex` |
@@ -271,8 +272,8 @@ README's "Proxies" section has a worked example. Keep in mind:
   `check_layout` before it repoints, as the examples do, and the namespaces are checked for you.
 - **Forward with `ctx.args`.** A Lua proxy's fallback passes `ctx.args` on, and returns what
   `delegate` gives back, so every value keeps its type both ways (see
-  [values lists](#values-lists)). Passing `...` instead converts them through Lua, so a `u64`
-  comes back a `u256`. A Rust proxy forwards the encoded values as they are.
+  [values lists](#values-lists)). Passing `...` instead converts them through Lua, so an
+  `amount` comes back a `u256`. A Rust proxy forwards the encoded values as they are.
 
 ## Events
 
@@ -398,8 +399,58 @@ and `debug` are not there at all.
 | `events` | `events.emit(name, ...)`. |
 | `tokens` | `tokens.refresh()`: asks the token registry to ask this token's name, symbol and decimals again once the transaction succeeds. |
 | `address` | `address.parse("ed25519:0x…")`, `address.from_hex`, `address.from_bytes`; methods `hex`, `bytes`, `text`, `kind`, `is_contract`, `is_valid`. |
-| `u256` | `u256(value)` or `u256.new`, `u256.zero`, `u256.max`; arithmetic, comparisons and `hex`. |
+| `u64`, `u128`, `u256`, `i64`, `i128`, `i256` | The integer types: `u256(value)` or `u256.new`, and `zero`, `min`, `max`, for each. See [Integers](#integers). |
 | `hash` | `hash.sha256`, `blake3`, `blake2s`, `blake2b`, `xxh3`, `keccak256`, whichever the node has; the result has `hex`, `bytes`, `algorithm`. |
+
+### Integers
+
+A Lua number is a float: exact to 2^53, then it rounds. Six integer types hold the rest, each its
+own type with its own width, as in Rust: `U64`, `U128`, `U256`, `I64`, `I128` and `I256`.
+
+```lua
+local supply = u256("21000000000000000000000000")   -- text past 2^53, which a number cannot hold
+local fee = supply * 25 / 10000                       -- a number on either side takes the type
+local debt = i256(-5000)
+
+assert(supply > 1000 and 0 > debt)                    -- comparisons go by the true value
+assert(u64(5) == u256(5) and u64(0) > i64(-1))         -- across types too
+
+local total = u64.max:checked_add(1)                  -- nil: + would fail the call
+local capped = u64.max:saturating_add(1)              -- u64.max
+local wrapped = u64.max:wrapping_add(1)               -- 0
+```
+
+- **Making one:** `u256(x)`, short for `u256.new(x)`, takes a whole number within 2^53, decimal or
+  `0x` hex text (after a `-` for the signed types), or any integer the type holds: `u64(u256(5))`.
+  Each library also has `zero`, `min` and `max`.
+- **Arriving:** arguments of the six types arrive as themselves, and amounts and `ctx.value` as a
+  `U256`; `ns:get_u64` and the rest read storage back as their type.
+- **Operators:** `+ - * / // % ^` and unary `-`. None wraps: overflow, underflow and division by
+  zero fail the call, with `u64 overflow`, `u256 underflow` or `division by zero`.
+- **Mixing:** a plain number takes the integer's type, so it must be whole, and not negative for
+  an unsigned type. Two integers of one signedness make the wider: `u64(1) + u256(2)` is a
+  `U256`. A signed and an unsigned one do not mix, since no type holds both `U256` and `I256`:
+  convert one side, `i256(x)` or `u256(x)`.
+- **Division:** `/` rounds toward zero and `%` takes the dividend's sign, as in Rust, so a Lua and
+  a Rust version of a contract agree: `i64(-7) / 2` is `-3`, `i64(-7) % 2` is `-1`. `//` rounds
+  down, as Lua's does: `i64(-7) // 2` is `-4`. Unsigned types round down either way.
+- **Comparisons:** `== ~= < <= > >=` work with any integer type and any number, by the true value:
+  `u256(2) < 2.5`, `u64(0) > -1`, `u256(2) ^ 60 == 2 ^ 60`. NaN equals nothing and orders
+  against nothing; anything else, a string or an address, is never equal and fails to order.
+- **Methods**, under the names Rust gives them:
+
+| Method | Does |
+| --- | --- |
+| `checked_add`, `checked_sub`, `checked_mul`, `checked_div`, `checked_rem`, `checked_pow`, `checked_neg` | What the operator does, or `nil` where it would fail. |
+| `saturating_add`, `saturating_sub`, `saturating_mul`, `saturating_pow`, `saturating_neg` | Stops at the type's `min` and `max`. `saturating_neg` is the signed types'. |
+| `wrapping_add`, `wrapping_sub`, `wrapping_mul`, `wrapping_pow`, `wrapping_neg` | Wraps around modulo 2^bits. |
+| `min`, `max` | The smaller or the larger, as the wider type when they differ. |
+| `abs` | Without its sign; the signed types'. `i64.min:abs()` fails. |
+| `tonumber` | A plain number, for a `for` loop or `string.rep`; fails past 2^53. |
+| `hex` | `0xff`, or `-0x10` below zero. |
+
+`tostring` and `..` write the value in decimal, and `typeof` names its type, `U256`. An integer is
+no table key; key by `tostring(n)`.
 
 ### Splitting a contract across files
 
@@ -450,14 +501,15 @@ chainv4 send deploy --lua contracts/lua/names/names.lua
   before it is sent.
 
 **How values cross into Lua:**
-- unsigned integers and amounts arrive as `u256`, so nothing is rounded;
-- signed integers arrive as numbers and must fit one exactly, within 2^53;
+- integers arrive as their own types, `u64` as a `U64` up to `i256` as an `I256`, and amounts as
+  a `U256`, so nothing is rounded;
+- a `number` arrives as a number, and must be whole, within 2^53;
 - addresses arrive as `address` values;
 - `nil` arrives as `nil`.
 
 **How values come back:**
-- numbers come back as numbers;
-- `u256` values come back as `u256`;
+- numbers come back as `i64`;
+- each integer type comes back as itself: a `U64` as a `u64`, an `I256` as an `i256`;
 - strings come back as strings, or bytes when they are not UTF-8;
 - `nil` comes back as `nil`, so a function may return it, alone or among other values. A
   function that returns nothing returns no values at all.
@@ -468,16 +520,18 @@ chainv4 send deploy --lua contracts/lua/names/names.lua
 But every number a contract hands out, returns, arguments to other contracts, events and values
 lists, goes out as an `i64`, and must be whole and within 2^53 either way: `return 1 / 2` fails
 the call with "0.5: numbers leave a contract whole". A `number` argument coming in must be whole
-too. So no float ever reaches a caller, another contract, a receipt or storage; `u256` is for
-anything larger.
+too. So no float ever reaches a caller, another contract, a receipt or storage; the
+[integer types](#integers) are for anything larger.
 
-Lua has no `u64` and no bytes of its own, so values converted into Lua and back can change type:
+Lua has no bytes and no amounts of its own, so a few values converted into Lua and back change
+type:
 
 | Arrives as | In Lua | Goes back out as |
 | --- | --- | --- |
-| `i64`, `i128`, `number` | a number | `i64` |
-| `u64`, `u128`, `amount` | a `u256` | `u256` |
+| `number` | a number | `i64` |
+| `amount` | a `U256` | `u256` |
 | `bytes` that read as UTF-8 | a string | `string` |
+| `u64` … `i256` | its own type | the same type |
 
 **Keeping types:** a values list keeps values exactly as they came. `ctx.args` is the call's
 arguments as one, without the selector a fallback was given.
@@ -548,9 +602,10 @@ fn transfer(to: Address, amount: U256) -> Result<bool, &'static str> {
 
 **Typed exports:** an exported function's parameters are read from the call's arguments, in
 order, and what it returns becomes the call's return values (`chainv4_sdk::args`).
-- **Parameters** may be any `FromValue` type: `Address`, `U256`, `bool`, `String`, `Vec<u8>`,
-  `i64`, `u64`, `u32`, `u8`, `i128`, `u128`, a `Value` as it came, or an `Option` of any of
-  them. Whole numbers arrive as any integer kind; Lua sends its numbers as `i64`.
+- **Parameters** may be any `FromValue` type: `Address`, `U256`, `I256`, `bool`, `String`,
+  `Vec<u8>`, `i64`, `u64`, `u32`, `u8`, `i128`, `u128`, a `Value` as it came, or an `Option` of
+  any of them. Whole numbers arrive as any integer kind that holds them; Lua sends its numbers as
+  `i64`.
 - **Refused arguments:** a call with too many arguments, one left out, or one of the wrong kind
   aborts, naming the parameter: `amount: expected an amount`, `amount: missing`,
   `transfer takes 2 arguments, not 3`. An `Option` parameter may be left out or passed nil.
@@ -566,9 +621,29 @@ order, and what it returns becomes the call's return values (`chainv4_sdk::args`
 - `call` and `call_with_value`, `delegate`, `check_layout`, `emit`, `hash`, `abort`,
   `refresh_token`, and `storage`, with `storage::namespace(name)` and `storage::own()`;
 - `namespace!` and `retired!`, which declare the storage layout, and typed methods on a
-  namespace for every kind's encoding: `set_i64`, `set_u256`, `set_address`, `set_bool`, and the
+  namespace for every kind's encoding: `set_i64`, `set_i128`, `set_i256`, `set_u256`,
+  `set_address`, `set_bool`, and the
   text kinds Lua writes, `set_decimal`, `set_text`, `set_number`, `set_address_text` and
   `set_address_hex`, each with its `get_` twin.
+
+**Integers:** `u64`, `i64`, `u128` and `i128` are Rust's own. `U256` and `I256` behave the same:
+- `+ - * / %`, `-` for `I256`, and their `+=` forms, with a `u64` or an `i64` on either side, so
+  `amount * 3` and `debt - 5` need no conversion;
+- comparisons with them either way round: `amount > 1000`, `0 > debt`;
+- the operators abort the call on overflow, underflow and division by zero, with Lua's messages,
+  `u256 overflow` and the like, and `/` and `%` round as Rust's do;
+- `checked_`, `saturating_` and `wrapping_` forms of each, `pow`, `abs`, `MIN`, `MAX`, `ZERO`,
+  `ONE`, decimal text both ways and `Display`;
+- `From` the smaller types and `TryFrom` back, which fails with `OutOfRange`.
+
+```rust
+#[export]
+fn settle(change: I256) -> I256 {
+    let balance = LEDGER.get_i256(b"balance").unwrap_or(I256::ZERO) + change;
+    LEDGER.set_i256(b"balance", balance);
+    balance
+}
+```
 
 **Numbers:** floats are refused in modules, and Lua sends its numbers as `i64`. A `number` value
 from a transaction still comes as float bits, so `Value::as_i64` and `Value::as_amount` turn whole
@@ -588,6 +663,7 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 | `contracts/examples/token`, `contracts/lua/token.lua` | The [token standard](token-standard.md), held to it by one shared test. |
 | `contracts/lua/guestbook.lua` | Events with addresses in them, for the event index and the explorer; value passed on with `accounts.transfer`; and a storage layout of a map and a record. |
 | `contracts/lua/names/` | A contract split across files with `--@include`, its storage layout declared in an included file. |
+| `contracts/examples/integers`, `contracts/lua/integers.lua` | The integer types in both engines, with one layout: operators, the `checked_`, `saturating_` and `wrapping_` methods, comparisons with plain numbers, and the `i128`, `u128`, `i256` and `u256` kinds. One test runs both and upgrades each into the other's storage. |
 | `contracts/lua/points/`, `contracts/examples/points` | Three versions of one contract: the second keeps the first's layout, adds to it, retires a key and moves its value in `migrate`; the third is the second in Rust, keeping the Lua version's text kinds and units. [Contract storage](contract-storage.md) walks through them. |
 
 ## What to keep in mind

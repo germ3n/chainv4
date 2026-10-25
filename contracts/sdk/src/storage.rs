@@ -17,7 +17,7 @@
 //! get_address and the like. So a version on one engine keeps what a version on the other kept.
 
 use {
-    crate::{Address, U256, abort, sys},
+    crate::{Address, I256, U256, abort, sys},
     alloc::{string::String, vec, vec::Vec},
 };
 
@@ -42,13 +42,15 @@ pub const MAX_UNIT_LEN: usize = 32;
 /// | `decimal` | a whole number from 0 in decimal text, up to the largest u256 | `get_decimal`, `set_decimal` |
 /// | `bool` | one byte, 0 or 1 | `get_bool`, `set_bool` |
 /// | `i64`, `u64` | 8 bytes, little-endian | `get_i64`, `get_u64`… |
-/// | `u128` | 16 bytes, little-endian | `get_u128`, `set_u128` |
+/// | `i128`, `u128` | 16 bytes, little-endian | `get_i128`, `get_u128`… |
+/// | `i256` | 32 bytes, little-endian, as [I256::to_le_bytes] | `get_i256`, `set_i256` |
 /// | `u256` | 32 bytes, little-endian, as [U256::to_le_bytes] | `get_u256`, `set_u256` |
 /// | `address` | 33 bytes, as [Address::encode] | `get_address`, `set_address` |
 /// | `address-text` | an address in text: `ed25519:0x…`, as [Address::text] | `get_address_text`, `set_address_text` |
 /// | `address-hex` | `0x` and 64 hex digits, or 40, as [Address::hex] | `get_address_hex`, `set_address_hex` |
-pub const KINDS: [&str; 12] = [
-    "bytes", "text", "number", "decimal", "bool", "i64", "u64", "u128", "u256", "address", "address-text", "address-hex",
+pub const KINDS: [&str; 14] = [
+    "bytes", "text", "number", "decimal", "bool", "i64", "u64", "i128", "u128", "i256", "u256", "address", "address-text",
+    "address-hex",
 ];
 
 /// Declares a namespace in the contract's storage layout, and a constant to use it by. A map
@@ -277,6 +279,26 @@ impl Namespace<'_> {
         self.set(key, &[u8::from(value)]);
     }
 
+    /// Reads a value stored as an i128, little-endian: the `i128` kind.
+    pub fn get_i128(&self, key: &[u8]) -> Option<i128> {
+        self.get(key)?.try_into().ok().map(i128::from_le_bytes)
+    }
+
+    /// Writes an i128, little-endian: the `i128` kind.
+    pub fn set_i128(&self, key: &[u8], value: i128) {
+        self.set(key, &value.to_le_bytes());
+    }
+
+    /// Reads a value stored as an I256, little-endian two's complement: the `i256` kind.
+    pub fn get_i256(&self, key: &[u8]) -> Option<I256> {
+        self.get(key)?.try_into().ok().map(I256::from_le_bytes)
+    }
+
+    /// Writes an I256, little-endian two's complement: the `i256` kind.
+    pub fn set_i256(&self, key: &[u8], value: I256) {
+        self.set(key, &value.to_le_bytes());
+    }
+
     /// Reads a value stored as a u128, little-endian: the `u128` kind.
     pub fn get_u128(&self, key: &[u8]) -> Option<u128> {
         self.get(key)?.try_into().ok().map(u128::from_le_bytes)
@@ -468,7 +490,7 @@ mod tests {
         assert!(!is_word("", MAX_NAMESPACE_LEN));
         assert!(!is_word("two words", MAX_NAMESPACE_LEN));
         assert!(!is_word("toolong", 6));
-        assert!(is_kind("address-hex") && is_kind("u256"));
+        assert!(is_kind("address-hex") && is_kind("u256") && is_kind("i128") && is_kind("i256:debt"));
         assert!(!is_kind("counter-v1") && !is_kind("u25"));
         assert!(is_kind("decimal:wei") && is_kind("u64:basis-points") && is_kind("u256:Token.v2_units"));
         assert!(!is_kind("decimal:") && !is_kind("decimal:wei/s") && !is_kind("u25:wei") && !is_kind(":wei"));

@@ -14,7 +14,7 @@ use {
     crate::structs::tx::TxCallArgumentType,
     libs::{
         ctx::CallArgs, register_accounts_lib, register_address_lib, register_contracts_lib, register_ctx_lib,
-        register_events_lib, register_hash_lib, register_storage_lib, register_tokens_lib, register_u256_lib, values::Given,
+        register_events_lib, register_hash_lib, register_storage_lib, register_tokens_lib, register_integer_libs, values::Given,
     },
     mlua::{ChunkMode, Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value},
     r#macro::document,
@@ -41,8 +41,9 @@ const MAX_INSTRUCTION_COST: u64 = 10;
 const GLOBALS: &[&str] = &[
     "assert", "error", "getmetatable", "ipairs", "next", "pairs", "pcall", "print", "rawequal",
     "rawget", "rawlen", "rawset", "select", "setmetatable", "tonumber", "tostring", "type",
-    "typeof", "unpack", "xpcall", "string", "table", "utf8", "bit32", "address", "hash", "u256",
-    "ctx", "storage", "contracts", "accounts", "events", "tokens",
+    "typeof", "unpack", "xpcall", "string", "table", "utf8", "bit32", "address", "hash", "u64",
+    "u128", "u256", "i64", "i128", "i256", "ctx", "storage", "contracts", "accounts", "events",
+    "tokens",
 ];
 
 /// What scripts keep of math: what rounds to and works on whole numbers. Contracts deal in whole
@@ -284,7 +285,7 @@ impl Pristine {
         lua.set_fuel(u64::MAX)?;
         register_address_lib(&lua);
         register_hash_lib(&lua);
-        register_u256_lib(&lua);
+        register_integer_libs(&lua);
         register_ctx_lib(&lua);
         register_storage_lib(&lua);
         register_contracts_lib(&lua);

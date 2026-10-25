@@ -206,9 +206,10 @@ pub fn parse_argument(text: &str) -> Result<TxCallArgumentType, String> {
         "i128" => TxCallArgumentType::I128(value.parse().map_err(bad)?),
         "u128" => TxCallArgumentType::U128(value.parse().map_err(bad)?),
         "u256" => TxCallArgumentType::U256(parse_amount(value)?),
+        "i256" => TxCallArgumentType::I256(crate::structs::u256::i256::from_str_radix(value, 10).map_err(bad)?),
         other => {
             return Err(format!(
-                "unknown type {other}; use address, amount, bytes, bool, string, number, i64, u64, i128, u128, u256, or nil alone"
+                "unknown type {other}; use address, amount, bytes, bool, string, number, i64, u64, i128, u128, i256, u256, or nil alone"
             ));
         }
     };

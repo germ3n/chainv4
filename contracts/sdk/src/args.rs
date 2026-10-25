@@ -7,7 +7,7 @@
 //! left out or passed nil.
 
 use {
-    crate::{Address, U256, Value, abort},
+    crate::{Address, I256, U256, Value, abort},
     alloc::{format, string::String, vec, vec::Vec},
     core::fmt::Display,
 };
@@ -48,6 +48,14 @@ impl FromValue for U256 {
 
     fn from_value(value: &Value) -> Option<U256> {
         value.as_u256()
+    }
+}
+
+impl FromValue for I256 {
+    const EXPECTED: &'static str = "a whole number";
+
+    fn from_value(value: &Value) -> Option<I256> {
+        value.as_i256()
     }
 }
 
@@ -165,6 +173,12 @@ impl IntoValue for Address {
 }
 
 impl IntoValue for U256 {
+    fn into_value(self) -> Value {
+        self.into()
+    }
+}
+
+impl IntoValue for I256 {
     fn into_value(self) -> Value {
         self.into()
     }

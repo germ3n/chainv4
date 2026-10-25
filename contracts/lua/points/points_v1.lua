@@ -27,6 +27,7 @@ function M.award(who, amount)
         error("only the owner awards points")
     end
 
+    amount = u256(amount) -- whatever integer type, or whole number, the caller sent
     local now = u256(points:get(who:text()) or "0") + amount
     points:set(who:text(), tostring(now))
 

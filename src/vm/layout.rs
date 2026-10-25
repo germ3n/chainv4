@@ -244,11 +244,17 @@ pub enum Kind {
     #[document(summary = "address-hex: 0x and 64 hex digits, or 40 for secp256k1, as Address:hex writes one.")]
     #[wincode(tag = 11)]
     AddressHex,
+    #[document(summary = "i128: 16 bytes, two's complement, little-endian.")]
+    #[wincode(tag = 12)]
+    I128,
+    #[document(summary = "i256: 32 bytes, two's complement, little-endian, as the SDK's I256 writes one.")]
+    #[wincode(tag = 13)]
+    I256,
 }
 
 impl Kind {
     /// Every kind, in the order the docs list them.
-    pub const ALL: [Kind; 12] = [
+    pub const ALL: [Kind; 14] = [
         Kind::Bytes,
         Kind::Text,
         Kind::Number,
@@ -256,7 +262,9 @@ impl Kind {
         Kind::Bool,
         Kind::I64,
         Kind::U64,
+        Kind::I128,
         Kind::U128,
+        Kind::I256,
         Kind::U256,
         Kind::Address,
         Kind::AddressText,
@@ -273,7 +281,9 @@ impl Kind {
             Kind::Bool => "bool",
             Kind::I64 => "i64",
             Kind::U64 => "u64",
+            Kind::I128 => "i128",
             Kind::U128 => "u128",
+            Kind::I256 => "i256",
             Kind::U256 => "u256",
             Kind::Address => "address",
             Kind::AddressText => "address-text",
@@ -299,8 +309,8 @@ impl Kind {
             }),
             Kind::Bool => matches!(value, [0] | [1]),
             Kind::I64 | Kind::U64 => value.len() == 8,
-            Kind::U128 => value.len() == 16,
-            Kind::U256 => value.len() == 32,
+            Kind::I128 | Kind::U128 => value.len() == 16,
+            Kind::I256 | Kind::U256 => value.len() == 32,
             Kind::Address => Address::from_abi(value).is_some(),
             Kind::AddressText => text().is_some_and(|text| text.parse::<Address>().is_ok()),
             Kind::AddressHex => text().is_some_and(|text| {
@@ -744,6 +754,16 @@ mod tests {
     }
 
     #[test]
+    fn the_sdk_names_the_same_kinds_in_the_same_order() {
+        let sdk = include_str!("../../contracts/sdk/src/storage.rs");
+        let start = sdk.find("pub const KINDS").expect("the SDK lists its kinds");
+        let list = &sdk[start..start + sdk[start..].find("];").expect("the list ends")];
+        let names: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
+
+        assert_eq!(names, Kind::ALL.map(Kind::name));
+    }
+
+    #[test]
     fn kinds_check_values() {
         let address = Address::Ed25519([7; 32]);
         let (text, encoded) = (address.to_string(), wincode::serialize(&address).unwrap());
@@ -757,7 +777,10 @@ mod tests {
             (Kind::Decimal, &[b"0", b"1000000000000000000000000"], &[b"", b"-1", b"1.5", b"0x10", &[b'9'; 79]]),
             (Kind::Bool, &[b"\x00", b"\x01"], &[b"\x02", b"", b"true"]),
             (Kind::I64, &[&[0; 8]], &[&[0; 7]]),
+            (Kind::U64, &[&[0xff; 8]], &[&[0; 9]]),
+            (Kind::I128, &[&[0; 16], &[0xff; 16]], &[&[0; 8], &[0; 32]]),
             (Kind::U128, &[&[0; 16]], &[&[0; 8]]),
+            (Kind::I256, &[&[0; 32], &[0xff; 32]], &[&[0; 16], &[0; 33]]),
             (Kind::U256, &[&[0; 32]], &[&[0; 33]]),
             (Kind::Address, &[&encoded], &[&[0xff; 33], &[0; 32]]),
             (Kind::AddressText, &[text.as_bytes()], &[b"ed25519:0x12"]),

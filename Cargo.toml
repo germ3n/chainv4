@@ -77,3 +77,7 @@ wat = "1.262.0"
 
 [build-dependencies]
 wiki = { path = "wiki" }
+
+# TEMPORARY: the local Luau clone, until its number/userdata comparisons are pushed
+[patch."https://github.com/germ3n/luau-src-rs"]
+luau0-src = { path = "../luau-src-rs" }

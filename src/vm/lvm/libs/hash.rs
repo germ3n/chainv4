@@ -3,7 +3,7 @@ use {
     crate::structs::hash::{Hash, HashType},
     crate::vm::cost,
     crate::vm::lvm::{charge, to_hex},
-    mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods},
+    mlua::{Lua, MetaMethod, UserData, UserDataMethods, Value},
     r#macro::document,
 };
 
@@ -32,7 +32,12 @@ impl UserData for LuaHash {
         methods.add_method("bytes", |lua, this, ()| lua.create_string(this.0.to_bytes()));
         methods.add_method("algorithm", |_, this, ()| Ok(algorithm_name(this.0.algorithm())));
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(to_hex(&this.0.to_bytes())));
-        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (AnyUserData, AnyUserData)| {
+        // either side may be a number, which the VM also hands to __eq
+        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Value, Value)| {
+            let (Value::UserData(a), Value::UserData(b)) = (a, b) else {
+                return Ok(false);
+            };
+
             match (a.borrow::<LuaHash>(), b.borrow::<LuaHash>()) {
                 (Ok(a), Ok(b)) => Ok(*a == *b),
                 _ => Ok(false),

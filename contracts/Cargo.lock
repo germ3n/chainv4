@@ -26,6 +26,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "integers"
+version = "0.1.0"
+dependencies = [
+ "chainv4-sdk",
+]
+
+[[package]]
 name = "points"
 version = "0.1.0"
 dependencies = [

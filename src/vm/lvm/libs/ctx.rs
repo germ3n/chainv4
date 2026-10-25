@@ -1,6 +1,6 @@
 use {
     super::address::LuaAddress,
-    super::u256::LuaU256,
+    super::integers::LuaInt,
     super::values::LuaValues,
     crate::structs::tx::TxCallArgumentType,
     crate::vm::{CallContext, FALLBACK, Host},
@@ -36,7 +36,7 @@ impl UserData for LuaCtx {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_function_get("sender", |lua, _| Ok(LuaAddress(current(lua)?.sender)));
         fields.add_field_function_get("contract", |lua, _| Ok(LuaAddress(current(lua)?.contract)));
-        fields.add_field_function_get("value", |lua, _| Ok(LuaU256(current(lua)?.value)));
+        fields.add_field_function_get("value", |lua, _| Ok(LuaInt(current(lua)?.value)));
         fields.add_field_function_get("args", |lua, _| {
             let mut call = lua
                 .app_data_mut::<CallArgs>()

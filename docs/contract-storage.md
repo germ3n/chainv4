@@ -159,12 +159,16 @@ map of `decimal` can never hold `"lots"`. Each engine reads and writes every kin
 | `address-hex` | `0x` and 64 hex digits, or 40 for secp256k1. | `who:hex()`, read back with `address(hex)` | `get_address_hex`, `set_address_hex` |
 | `bytes` | Anything. | Any string. | `get`, `set` |
 | `bool` | One byte, 0 or 1. | `ns:set_bool`, `ns:get_bool` | `get_bool`, `set_bool` |
-| `i64`, `u64` | 8 bytes, little-endian. | `ns:set_i64`, `ns:get_u64`… | `get_i64`, `set_u64`… |
-| `u128`, `u256` | 16 or 32 bytes, little-endian. | `ns:set_u256`, `ns:get_u128`…, as a `u256` | `get_u256`, `set_u128`… |
+| `i64`, `u64` | 8 bytes, little-endian. | `ns:set_i64`, `ns:get_u64`…, as an `I64` or a `U64` | `get_i64`, `set_u64`… |
+| `i128`, `u128` | 16 bytes, little-endian. | `ns:set_i128`, `ns:get_u128`…, as an `I128` or a `U128` | `get_i128`, `set_u128`… |
+| `i256`, `u256` | 32 bytes, little-endian, `i256` in two's complement. | `ns:set_i256`, `ns:get_u256`…, as an `I256` or a `U256` | `get_i256`, `set_u256`… |
 | `address` | 33 bytes: the address's tag, then its bytes. | `ns:set_address`, `ns:get_address`; `who:encode()` and `address.decode` for keys | `get_address`, `set_address`; `Address::encode` |
 
 **Which to pick:** `decimal` for amounts, `address-text` for addresses, `text` for words, and
-`number` or `i64` for small counts. The text kinds read well anywhere, in proofs and the explorer
+`number` or `i64` for small counts, and `i256` for a balance that can go below zero. The integer
+kinds take any of Lua's [integer types](contracts.md#integers), or a whole number, that they hold:
+`ns:set_u64(key, u256(5))` writes 5, and `ns:set_u64(key, -1)` fails. The text kinds read well
+anywhere, in proofs and the explorer
 included; the binary ones are smaller. Lua writes `number` with `set_number`, not `tostring`,
 which spells 10^15 as `1e+15`: the kind takes one spelling for each number.
 
@@ -237,6 +241,7 @@ function M.award(who, amount)
         error("only the owner awards points")
     end
 
+    amount = u256(amount) -- whatever integer type, or whole number, the caller sent
     local now = u256(points:get(who:text()) or "0") + amount
     points:set(who:text(), tostring(now))
 

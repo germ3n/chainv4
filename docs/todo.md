@@ -175,9 +175,17 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Tables keyed by tables iterate alike on every node.** The Luau fork hashes tables and
   functions by the order they were made, and refuses userdata keys, where an Address is a new
   value each time and two equal ones never meet.
-- [ ] **Lua still computes with floats inside a script.** Luau has no integer type, so `/` makes
-  fractions, which only fail once they would leave. An integer division and number type in the
-  Luau fork would close that.
+- [ ] **Lua still computes with floats inside a script.** A plain number is a float, so `/` makes
+  fractions, which only fail once they would leave. The integer types do exact math for whoever
+  uses them, but a number type of the fork's own would close it for everyone.
+- [x] **Integer types in Lua.** `U64`, `U128`, `U256`, `I64`, `I128` and `I256`, each overflowing
+  at its own width, with Rust's `checked_`, `saturating_` and `wrapping_` methods; arguments and
+  the integer kinds arrive as their type. The SDK's `U256` and a new `I256` have the same
+  operators and methods, with plain integers on either side.
+- [x] **Numbers compare with integers.** The Luau fork asks a userdata's metamethods for a number
+  on the other side, and for another userdata type, so `u256(5) == 5` and `u64(1) < u256(2)`.
+- [x] **Signed big integers everywhere.** The `i128` and `i256` kinds and an `i256` argument
+  type, in the CLI, the JSON API and the explorer.
 - [ ] **Only one permission exists.** `check_perms` is only ever asked about `"upgrade"`. Other
   privileged actions, such as removal, would ask with their own names.
 - [x] **A token registry.** A contract that exports every function genesis names in
@@ -476,3 +484,5 @@ add a thing to storage (At least lua), where we dont have to save addresses as t
 make a native ens type thing, with fees/params that are from genesis or voted on i guess
 make sure max supply is configurable
 storage seems to save strings only, make it save raw types to save space, etc
+add voting for proposals, like consensus change, etc, upgrades, what not
+scan whole project in order -> scan docs -> go section by section and verify theres nothing that shouldnt be there/stale -> go through each subsytem nad find bugs, stuff that would be good to change -> go through each subsystems tests (all of them), and see if theres something that doesnt make sense/should be added or removed.

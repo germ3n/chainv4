@@ -1,9 +1,9 @@
 use {
     super::accounts::refused,
     super::address::LuaAddress,
-    super::u256::{LuaU256, operand},
+    super::integers::{LuaInt, Prim, exact_as},
     crate::structs::address::Address,
-    crate::structs::u256::u256,
+    crate::structs::u256::{i256, u256},
     crate::vm::lvm::charge,
     crate::vm::{Host, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_VALUE_LEN, Space, cost},
     mlua::{Error, Lua, UserData, UserDataMethods, Value},
@@ -52,48 +52,53 @@ impl UserData for LuaNamespace {
         });
 
         // The binary kinds Rust contracts write, so a Lua version keeps what a Rust one stored.
+        // Each integer kind reads back as its own type, and takes any integer or whole number
+        // it holds.
         methods.add_method("get_u256", |lua, this, key: mlua::String| {
-            Ok(fixed::<32>(lua, &this.0, &key.as_bytes(), "u256")?.map(|bytes| LuaU256(u256::from_le_bytes(bytes))))
+            Ok(fixed::<32>(lua, &this.0, &key.as_bytes(), "u256")?.map(|bytes| LuaInt(u256::from_le_bytes(bytes))))
         });
         methods.add_method("set_u256", |lua, this, (key, value): (mlua::String, Value)| {
-            let bytes = whole(&value, u256::MAX)?.map(u256::to_le_bytes);
+            let bytes = integer::<u256>(&value)?.map(u256::to_le_bytes);
+
+            storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
+        });
+        methods.add_method("get_i256", |lua, this, key: mlua::String| {
+            Ok(fixed::<32>(lua, &this.0, &key.as_bytes(), "i256")?.map(|bytes| LuaInt(i256::from_le_bytes(bytes))))
+        });
+        methods.add_method("set_i256", |lua, this, (key, value): (mlua::String, Value)| {
+            let bytes = integer::<i256>(&value)?.map(i256::to_le_bytes);
 
             storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
         });
         methods.add_method("get_u128", |lua, this, key: mlua::String| {
-            Ok(fixed::<16>(lua, &this.0, &key.as_bytes(), "u128")?.map(|bytes| LuaU256(u256::from(u128::from_le_bytes(bytes)))))
+            Ok(fixed::<16>(lua, &this.0, &key.as_bytes(), "u128")?.map(|bytes| LuaInt(u128::from_le_bytes(bytes))))
         });
         methods.add_method("set_u128", |lua, this, (key, value): (mlua::String, Value)| {
-            let bytes = whole(&value, u256::from(u128::MAX))?.map(|value| value.as_u128().to_le_bytes());
+            let bytes = integer::<u128>(&value)?.map(u128::to_le_bytes);
+
+            storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
+        });
+        methods.add_method("get_i128", |lua, this, key: mlua::String| {
+            Ok(fixed::<16>(lua, &this.0, &key.as_bytes(), "i128")?.map(|bytes| LuaInt(i128::from_le_bytes(bytes))))
+        });
+        methods.add_method("set_i128", |lua, this, (key, value): (mlua::String, Value)| {
+            let bytes = integer::<i128>(&value)?.map(i128::to_le_bytes);
 
             storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
         });
         methods.add_method("get_u64", |lua, this, key: mlua::String| {
-            Ok(fixed::<8>(lua, &this.0, &key.as_bytes(), "u64")?.map(|bytes| LuaU256(u256::from(u64::from_le_bytes(bytes)))))
+            Ok(fixed::<8>(lua, &this.0, &key.as_bytes(), "u64")?.map(|bytes| LuaInt(u64::from_le_bytes(bytes))))
         });
         methods.add_method("set_u64", |lua, this, (key, value): (mlua::String, Value)| {
-            let bytes = whole(&value, u256::from(u64::MAX))?.map(|value| value.as_u64().to_le_bytes());
+            let bytes = integer::<u64>(&value)?.map(u64::to_le_bytes);
 
             storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
         });
         methods.add_method("get_i64", |lua, this, key: mlua::String| {
-            let Some(bytes) = fixed::<8>(lua, &this.0, &key.as_bytes(), "i64")? else {
-                return Ok(None);
-            };
-            let number = i64::from_le_bytes(bytes);
-
-            if !(-EXACT..=EXACT).contains(&number) {
-                return Err(Error::runtime(format!("the i64 {number} is past what a Lua number holds exactly, 2^53")));
-            }
-
-            Ok(Some(number as f64))
+            Ok(fixed::<8>(lua, &this.0, &key.as_bytes(), "i64")?.map(|bytes| LuaInt(i64::from_le_bytes(bytes))))
         });
-        methods.add_method("set_i64", |lua, this, (key, value): (mlua::String, Option<f64>)| {
-            let bytes = match value {
-                None => None,
-                Some(number) if number.fract() == 0.0 && (-EXACT as f64..=EXACT as f64).contains(&number) => Some((number as i64).to_le_bytes()),
-                Some(number) => return Err(Error::runtime(format!("set_i64 takes a whole number within 2^53 either way, not {number}"))),
-            };
+        methods.add_method("set_i64", |lua, this, (key, value): (mlua::String, Value)| {
+            let bytes = integer::<i64>(&value)?.map(i64::to_le_bytes);
 
             storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
         });
@@ -141,23 +146,21 @@ fn fixed<const N: usize>(lua: &Lua, space: &Space, key: &[u8], kind: &str) -> ml
 
     <[u8; N]>::try_from(&*value.as_bytes())
         .map(Some)
-        .map_err(|_| Error::runtime(format!("the value is not a {kind}: {} bytes, not {N}", value.as_bytes().len())))
+        .map_err(|_| {
+            let article = if kind.starts_with(['a', 'i']) { "an" } else { "a" };
+
+            Error::runtime(format!("the value is not {article} {kind}: {} bytes, not {N}", value.as_bytes().len()))
+        })
 }
 
-/// A whole number to write, a U256 or an exact Lua number, no larger than most; None for nil, which
+/// An integer to write, of any type or a whole number, that the kind holds; None for nil, which
 /// deletes.
-fn whole(value: &Value, most: u256) -> mlua::Result<Option<u256>> {
+fn integer<T: Prim>(value: &Value) -> mlua::Result<Option<T>> {
     if value.is_nil() {
         return Ok(None);
     }
 
-    let number = operand(value)?;
-
-    if number > most {
-        return Err(Error::runtime(format!("{number} is more than the kind holds, {most}")));
-    }
-
-    Ok(Some(number))
+    exact_as::<T>(value).map(Some)
 }
 
 fn host(lua: &Lua) -> mlua::Result<Host> {
@@ -311,7 +314,7 @@ fn namespace_set_doc() {}
     parent = "Namespace",
     name = "get_u256",
     kind = "method",
-    summary = "Reads a u256 kind's value: 32 bytes, little-endian, as Rust contracts write one with set_u256. With get_u128, get_u64, get_i64, get_bool and get_address, it lets a Lua version keep the namespaces a Rust version kept, whose kinds are binary; Rust reads the text kinds Lua writes with get_decimal and the like.",
+    summary = "Reads a u256 kind's value: 32 bytes, little-endian, as a U256, as Rust contracts write one with set_u256. With the other integer kinds' getters, get_bool and get_address, it lets a Lua version keep the namespaces a Rust version kept, whose kinds are binary; Rust reads the text kinds Lua writes with get_decimal and the like.",
     params = { key = { ty = "string", desc = "The key." } },
     returns = { ty = "U256?", desc = "The value, or nil when the key has none." },
     panics = "Errors when the value is not 32 bytes long.",
@@ -338,12 +341,13 @@ fn namespace_get_number_doc() {}
     parent = "Namespace",
     name = "set_u256",
     kind = "method",
-    summary = "Writes a u256 kind's value, 32 bytes little-endian, or deletes the key for nil.",
+    summary = "Writes a u256 kind's value, 32 bytes little-endian, or deletes the key for nil. Every integer kind's setter takes any integer type, or a whole number, that the kind holds.",
     params = {
         key = { ty = "string", desc = "The key." },
-        value = { ty = "U256?", desc = "A U256, or a whole number up to 2^53; nil to delete.", optional = true },
+        value = { ty = "Integer?", desc = "Any integer or whole number from 0 to 2^256 - 1; nil to delete.", optional = true },
     },
     returns = { ty = "nil", desc = "" },
+    panics = "Errors on a value the kind does not hold, such as -1.",
     see_also = "Namespace:get_u256",
 )]
 fn namespace_set_u256_doc() {}
@@ -353,37 +357,140 @@ fn namespace_set_u256_doc() {}
     parent = "Namespace",
     name = "get_u128",
     kind = "method",
-    summary = "Reads a u128 kind's value, 16 bytes little-endian, as a U256. set_u128 writes one, from a U256 or a whole number no larger than a u128 holds.",
+    summary = "Reads a u128 kind's value, 16 bytes little-endian, as a U128. set_u128 writes one.",
     params = { key = { ty = "string", desc = "The key." } },
-    returns = { ty = "U256?", desc = "The value, or nil when the key has none." },
-    see_also = "Namespace:get_u256",
+    returns = { ty = "U128?", desc = "The value, or nil when the key has none." },
+    see_also = "Namespace:set_u128",
 )]
 fn namespace_get_u128_doc() {}
 
 #[document(
     lua,
     parent = "Namespace",
+    name = "set_u128",
+    kind = "method",
+    summary = "Writes a u128 kind's value, 16 bytes little-endian, or deletes the key for nil.",
+    params = {
+        key = { ty = "string", desc = "The key." },
+        value = { ty = "Integer?", desc = "Any integer or whole number from 0 to 2^128 - 1; nil to delete.", optional = true },
+    },
+    returns = { ty = "nil", desc = "" },
+    panics = "Errors on a value the kind does not hold.",
+    see_also = "Namespace:get_u128",
+)]
+fn namespace_set_u128_doc() {}
+
+#[document(
+    lua,
+    parent = "Namespace",
+    name = "get_i128",
+    kind = "method",
+    summary = "Reads an i128 kind's value, 16 bytes little-endian, as an I128. set_i128 writes one.",
+    params = { key = { ty = "string", desc = "The key." } },
+    returns = { ty = "I128?", desc = "The value, or nil when the key has none." },
+    see_also = "Namespace:set_i128",
+)]
+fn namespace_get_i128_doc() {}
+
+#[document(
+    lua,
+    parent = "Namespace",
+    name = "set_i128",
+    kind = "method",
+    summary = "Writes an i128 kind's value, 16 bytes little-endian, or deletes the key for nil.",
+    params = {
+        key = { ty = "string", desc = "The key." },
+        value = { ty = "Integer?", desc = "Any integer or whole number from -2^127 to 2^127 - 1; nil to delete.", optional = true },
+    },
+    returns = { ty = "nil", desc = "" },
+    panics = "Errors on a value the kind does not hold.",
+    see_also = "Namespace:get_i128",
+)]
+fn namespace_set_i128_doc() {}
+
+#[document(
+    lua,
+    parent = "Namespace",
     name = "get_u64",
     kind = "method",
-    summary = "Reads a u64 kind's value, 8 bytes little-endian, as a U256, which holds it exactly where a Lua number may not. set_u64 writes one, from a U256 or a whole number no larger than a u64 holds.",
+    summary = "Reads a u64 kind's value, 8 bytes little-endian, as a U64. set_u64 writes one.",
     params = { key = { ty = "string", desc = "The key." } },
-    returns = { ty = "U256?", desc = "The value, or nil when the key has none." },
-    see_also = "Namespace:get_u256",
+    returns = { ty = "U64?", desc = "The value, or nil when the key has none." },
+    see_also = "Namespace:set_u64",
 )]
 fn namespace_get_u64_doc() {}
 
 #[document(
     lua,
     parent = "Namespace",
-    name = "get_i64",
+    name = "set_u64",
     kind = "method",
-    summary = "Reads an i64 kind's value, 8 bytes little-endian, as a number. set_i64 writes one from a whole number.",
-    params = { key = { ty = "string", desc = "The key." } },
-    returns = { ty = "number?", desc = "The value, or nil when the key has none." },
-    panics = "Errors for a value past 2^53 either way, which a Lua number would not hold exactly, and set_i64 for such a number or one with a fraction.",
+    summary = "Writes a u64 kind's value, 8 bytes little-endian, or deletes the key for nil.",
+    params = {
+        key = { ty = "string", desc = "The key." },
+        value = { ty = "Integer?", desc = "Any integer or whole number from 0 to 2^64 - 1; nil to delete.", optional = true },
+    },
+    returns = { ty = "nil", desc = "" },
+    panics = "Errors on a value the kind does not hold.",
     see_also = "Namespace:get_u64",
 )]
+fn namespace_set_u64_doc() {}
+
+#[document(
+    lua,
+    parent = "Namespace",
+    name = "get_i64",
+    kind = "method",
+    summary = "Reads an i64 kind's value, 8 bytes little-endian, as an I64. set_i64 writes one.",
+    params = { key = { ty = "string", desc = "The key." } },
+    returns = { ty = "I64?", desc = "The value, or nil when the key has none." },
+    see_also = "Namespace:set_i64",
+)]
 fn namespace_get_i64_doc() {}
+
+#[document(
+    lua,
+    parent = "Namespace",
+    name = "set_i64",
+    kind = "method",
+    summary = "Writes an i64 kind's value, 8 bytes little-endian, or deletes the key for nil.",
+    params = {
+        key = { ty = "string", desc = "The key." },
+        value = { ty = "Integer?", desc = "Any integer or whole number from -2^63 to 2^63 - 1; nil to delete.", optional = true },
+    },
+    returns = { ty = "nil", desc = "" },
+    panics = "Errors on a value the kind does not hold.",
+    see_also = "Namespace:get_i64",
+)]
+fn namespace_set_i64_doc() {}
+
+#[document(
+    lua,
+    parent = "Namespace",
+    name = "get_i256",
+    kind = "method",
+    summary = "Reads an i256 kind's value, 32 bytes little-endian, two's complement, as an I256. set_i256 writes one.",
+    params = { key = { ty = "string", desc = "The key." } },
+    returns = { ty = "I256?", desc = "The value, or nil when the key has none." },
+    see_also = "Namespace:set_i256",
+)]
+fn namespace_get_i256_doc() {}
+
+#[document(
+    lua,
+    parent = "Namespace",
+    name = "set_i256",
+    kind = "method",
+    summary = "Writes an i256 kind's value, 32 bytes little-endian, two's complement, or deletes the key for nil.",
+    params = {
+        key = { ty = "string", desc = "The key." },
+        value = { ty = "Integer?", desc = "Any integer or whole number from -2^255 to 2^255 - 1; nil to delete.", optional = true },
+    },
+    returns = { ty = "nil", desc = "" },
+    panics = "Errors on a value the kind does not hold.",
+    see_also = "Namespace:get_i256",
+)]
+fn namespace_set_i256_doc() {}
 
 #[document(
     lua,
@@ -568,7 +675,7 @@ mod tests {
     fn the_binary_kinds_round_trip_as_rust_writes_them() {
         let contract = Address::Contract([1; 32]);
         let (lua, state) = setup(contract);
-        super::super::u256::register_u256_lib(&lua);
+        super::super::integers::register_integer_libs(&lua);
         super::super::address::register_address_lib(&lua);
         let code = r#"
             local ns = storage.namespace("binary")
@@ -583,18 +690,18 @@ mod tests {
             local back = address.decode(who:encode())
             local read = {
                 tostring(ns:get_u256("u256")), tostring(ns:get_u128("u128")), tostring(ns:get_u64("u64")),
-                ns:get_i64("i64"), ns:get_bool("bool"), ns:get_address("address"):text(),
+                tostring(ns:get_i64("i64")), ns:get_bool("bool"), ns:get_address("address"):text(),
                 ns:get_address(who:encode()) == who, back == who, ns:get_u256("missing") == nil,
             }
             ns:set_u256("u256", nil)
             return read[1], read[2], read[3], read[4], read[5], read[6], read[7], read[8], read[9], ns:get_u256("u256") == nil
         "#;
-        let read: (String, String, String, f64, bool, String, bool, bool, bool, bool) = lua.load(code).eval().unwrap();
+        let read: (String, String, String, String, bool, String, bool, bool, bool, bool) = lua.load(code).eval().unwrap();
         let stored = |key: &[u8]| state.get(Column::Namespaces, &namespace_key(&contract, b"binary", key)).unwrap().unwrap();
 
         assert_eq!(read.0, "340282366920938463463374607431768211456");
         assert_eq!(read.1, u128::MAX.to_string());
-        assert_eq!((read.2.as_str(), read.3, read.4), ("7", -42.0, true));
+        assert_eq!((read.2.as_str(), read.3.as_str(), read.4), ("7", "-42", true));
         assert_eq!(read.5, "secp256k1:0x00000000000000000000000000000000000000ff");
         assert!(read.6 && read.7 && read.8 && read.9, "{read:?}");
         // Byte for byte what the SDK's set_u64, set_i64, set_bool and set_address write.
@@ -608,15 +715,82 @@ mod tests {
     }
 
     #[test]
+    fn every_integer_kind_reads_back_as_its_own_type() {
+        let contract = Address::Contract([1; 32]);
+        let (lua, state) = setup(contract);
+        super::super::integers::register_integer_libs(&lua);
+        let code = r#"
+            local ns = storage.namespace("ints")
+            ns:set_u64("u64", u64.max)
+            ns:set_i64("i64", i64.min)
+            ns:set_u128("u128", u128.max)
+            ns:set_i128("i128", i128.min)
+            ns:set_u256("u256", u256.max)
+            ns:set_i256("i256", i256.min)
+            -- any integer type or whole number the kind holds
+            ns:set_u64("small", u256(5))
+            ns:set_i256("negative", -5)
+            ns:set_i128("wide", i256(-7))
+            local read = {}
+
+            for _, name in { "u64", "i64", "u128", "i128", "u256", "i256" } do
+                local value = ns["get_" .. name](ns, name)
+                table.insert(read, typeof(value) .. " " .. tostring(value))
+            end
+
+            table.insert(read, typeof(ns:get_u64("small")) .. " " .. tostring(ns:get_u64("small")))
+            table.insert(read, tostring(ns:get_i256("negative")))
+            table.insert(read, tostring(ns:get_i128("wide")))
+            ns:set_i256("i256", nil)
+            table.insert(read, tostring(ns:get_i256("i256")))
+
+            return table.concat(read, ",")
+        "#;
+        let read: String = lua.load(code).eval().unwrap();
+        let stored = |key: &[u8]| state.get(Column::Namespaces, &namespace_key(&contract, b"ints", key)).unwrap().unwrap();
+
+        assert_eq!(
+            read.split(',').collect::<Vec<_>>(),
+            [
+                format!("U64 {}", u64::MAX),
+                format!("I64 {}", i64::MIN),
+                format!("U128 {}", u128::MAX),
+                format!("I128 {}", i128::MIN),
+                format!("U256 {}", u256::MAX),
+                format!("I256 {}", i256::MIN),
+                "U64 5".to_string(),
+                "-5".to_string(),
+                "-7".to_string(),
+                "nil".to_string(),
+            ]
+        );
+        // byte for byte what Rust's to_le_bytes, and so the SDK, writes
+        assert_eq!(stored(b"u64"), u64::MAX.to_le_bytes());
+        assert_eq!(stored(b"i64"), i64::MIN.to_le_bytes());
+        assert_eq!(stored(b"u128"), u128::MAX.to_le_bytes());
+        assert_eq!(stored(b"i128"), i128::MIN.to_le_bytes());
+        assert_eq!(stored(b"u256"), u256::MAX.to_le_bytes());
+        assert_eq!(stored(b"negative"), i256::new(-5).to_le_bytes());
+        assert_eq!(stored(b"negative"), [[0xfb].as_slice(), &[0xff; 31]].concat());
+    }
+
+    #[test]
     fn the_binary_kinds_refuse_what_they_cannot_hold() {
         let (lua, _) = setup(Address::Contract([1; 32]));
-        super::super::u256::register_u256_lib(&lua);
+        super::super::integers::register_integer_libs(&lua);
         super::super::address::register_address_lib(&lua);
         let error = |code: &str| lua.load(code).exec().unwrap_err().to_string();
         lua.load(r#"storage.namespace("n"):set("text", "hello")"#).exec().unwrap();
 
         assert!(error(r#"storage.namespace("n"):get_u256("text")"#).contains("the value is not a u256: 5 bytes, not 32"));
-        assert!(error(r#"storage.namespace("n"):set_u64("k", u256("18446744073709551616"))"#).contains("more than the kind holds"));
+        assert!(error(r#"storage.namespace("n"):set_u64("k", u256("18446744073709551616"))"#).contains("18446744073709551616 is outside what a U64 holds, 0 to 18446744073709551615"));
+        assert!(error(r#"storage.namespace("n"):set_u128("k", i128(-1))"#).contains("-1 is outside what a U128 holds"));
+        assert!(error(r#"storage.namespace("n"):set_i64("k", u64.max)"#).contains("outside what an I64 holds"));
+        assert!(error(r#"storage.namespace("n"):set_i128("k", i256.min)"#).contains("outside what an I128 holds"));
+        assert!(error(r#"storage.namespace("n"):set_i256("k", u256.max)"#).contains("outside what an I256 holds"));
+        assert!(error(r#"storage.namespace("n"):set_i256("k", "5")"#).contains("whole number"));
+        assert!(error(r#"storage.namespace("n"):get_i256("text")"#).contains("the value is not an i256: 5 bytes, not 32"));
+        assert!(error(r#"storage.namespace("n"):get_i128("text")"#).contains("the value is not an i128: 5 bytes, not 16"));
         assert!(error(r#"storage.namespace("n"):set_i64("k", 1.5)"#).contains("whole number"));
         assert!(error(r#"storage.namespace("n"):set_u256("k", -1)"#).contains("non-negative whole number"));
         assert!(error(r#"storage.namespace("n"):set_address("k", u256(1))"#).contains("takes an Address"));

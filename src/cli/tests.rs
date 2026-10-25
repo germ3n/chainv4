@@ -93,6 +93,21 @@ fn arguments_are_typed_by_their_prefix() {
 }
 
 #[test]
+fn i256_arguments_take_a_sign_and_the_full_range() {
+    use crate::structs::u256::i256;
+
+    let min = "-57896044618658097711785492504343953926634992332820282019728792003956564819968";
+
+    assert_eq!(parse_argument("i256:-5"), Ok(TxCallArgumentType::I256(i256::new(-5))));
+    assert_eq!(parse_argument(&format!("i256:{min}")), Ok(TxCallArgumentType::I256(i256::MIN)));
+    assert_eq!(parse_argument(&format!("i256:{}", i256::MAX)), Ok(TxCallArgumentType::I256(i256::MAX)));
+    assert!(parse_argument("i256:57896044618658097711785492504343953926634992332820282019728792003956564819968").is_err());
+    assert!(parse_argument("i256:1.5").is_err());
+    assert!(parse_argument("i256:").is_err());
+    assert!(parse_argument("float:1").unwrap_err().contains("i128, u128, i256, u256"));
+}
+
+#[test]
 fn amounts_pick_the_narrowest_width() {
     let big = "1000000000000000000000000000000000000000";
 

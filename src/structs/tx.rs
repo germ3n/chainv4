@@ -7,7 +7,7 @@ use {
     crate::structs::amount::Amount,
     crate::structs::code::Code,
     crate::structs::hash::Hash,
-    crate::structs::u256::U256Le,
+    crate::structs::u256::{I256Le, U256Le, i256},
     crate::structs::u256::u256,
     crate::structs::vote::SignedVote,
     r#macro::document,
@@ -199,6 +199,9 @@ pub enum TxCallArgumentType {
     #[document(summary = "No value: Lua's nil, JSON's null. A function that returns nil returns it, and one that is given it sees nil.")]
     #[wincode(tag = 11)]
     Nil,
+    #[document(summary = "A signed 256-bit integer.")]
+    #[wincode(tag = 12)]
+    I256(#[wincode(with = "I256Le")] i256),
 }
 
 impl Verifiable for Tx {
@@ -310,6 +313,7 @@ impl Verifiable for TxCallArgumentType {
             | TxCallArgumentType::I128(_)
             | TxCallArgumentType::U128(_)
             | TxCallArgumentType::U256(_)
+            | TxCallArgumentType::I256(_)
             | TxCallArgumentType::Nil => Ok(()),
         }
     }

@@ -758,7 +758,7 @@ return M
 
         SignedTx::sign(tx, nonce, FeeOffer::NONE, &deployer)
     };
-    let ping = call("ping", 1, vec![TxCallArgumentType::I64(2)]);
+    let ping = call("ping", 1, vec![TxCallArgumentType::Number(2.0)]);
     let failing = call("ping_then_fail", 2, Vec::new());
     advance(&mut chain, vec![ping.clone(), failing.clone()]);
     let receipt = chain.receipt(&ping.id(HashType::default_chain())).unwrap().unwrap();

@@ -174,11 +174,19 @@ pub enum Value {
     U256([u8; 32]),
     /// No value: Lua's nil.
     Nil,
+    /// Little-endian, two's complement.
+    I256([u8; 32]),
 }
 
 impl From<crate::U256> for Value {
     fn from(value: crate::U256) -> Value {
         Value::U256(value.to_le_bytes())
+    }
+}
+
+impl From<crate::I256> for Value {
+    fn from(value: crate::I256) -> Value {
+        Value::I256(value.to_le_bytes())
     }
 }
 
@@ -197,7 +205,19 @@ impl Value {
                 (high.iter().all(|byte| *byte == 0) && low >= 0).then_some(low)
             }
             Value::Number(bits) => whole_number(bits),
+            Value::I256(bytes) => i64::try_from(crate::I256::from_le_bytes(bytes)).ok(),
             _ => None,
+        }
+    }
+
+    /// The value as an I256, from any integer variant, an Amount or a whole Number that fits.
+    pub fn as_i256(&self) -> Option<crate::I256> {
+        match *self {
+            Value::I256(bytes) => Some(crate::I256::from_le_bytes(bytes)),
+            Value::I64(value) => Some(crate::I256::from(value)),
+            Value::I128(value) => Some(crate::I256::from(value)),
+            Value::Number(bits) => whole_number(bits).map(crate::I256::from),
+            _ => crate::I256::try_from(self.as_u256()?).ok(),
         }
     }
 
@@ -211,6 +231,7 @@ impl Value {
             Value::I64(value) => u128::try_from(value).ok()?,
             Value::I128(value) => u128::try_from(value).ok()?,
             Value::Number(bits) => u128::try_from(whole_number(bits)?).ok()?,
+            Value::I256(bytes) => return crate::U256::try_from(crate::I256::from_le_bytes(bytes)).ok().map(crate::U256::to_le_bytes),
             _ => return None,
         };
 
@@ -355,6 +376,10 @@ pub fn encode(values: &[Value]) -> Vec<u8> {
                 out.extend_from_slice(number);
             }
             Value::Nil => out.push(11),
+            Value::I256(number) => {
+                out.push(12);
+                out.extend_from_slice(number);
+            }
         }
     }
 
@@ -393,6 +418,7 @@ pub fn decode(bytes: &[u8]) -> Option<Vec<Value>> {
             9 => Value::U128(u128::from_le_bytes(reader.array()?)),
             10 => Value::U256(reader.array()?),
             11 => Value::Nil,
+            12 => Value::I256(reader.array()?),
             _ => return None,
         };
         values.push(value);

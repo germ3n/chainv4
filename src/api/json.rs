@@ -20,7 +20,7 @@ use {
     crate::structs::code::Code,
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::{from_hex, to_hex},
-    crate::structs::u256::u256,
+    crate::structs::u256::{i256, u256},
     crate::vm::{Declared, Outcome},
     crate::structs::trace::{Hop, HopKind, Trace},
     crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
@@ -468,6 +468,7 @@ pub fn argument(argument: &TxCallArgumentType) -> Value {
         TxCallArgumentType::I128(value) => ("i128", value.to_string().into()),
         TxCallArgumentType::U128(value) => ("u128", value.to_string().into()),
         TxCallArgumentType::U256(value) => ("u256", value.to_string().into()),
+        TxCallArgumentType::I256(value) => ("i256", value.to_string().into()),
         TxCallArgumentType::Nil => ("nil", Value::Null),
     };
 
@@ -485,7 +486,8 @@ pub fn parse_argument(value: &Value) -> Result<TxCallArgumentType, String> {
 
     let given = value.get("value").ok_or("an argument needs a value")?;
     let text = given.as_str().map(str::to_string).unwrap_or_else(|| given.to_string());
-    let bad = || format!("not a {kind}: {text}");
+    let article = if kind.starts_with(['a', 'i']) { "an" } else { "a" };
+    let bad = || format!("not {article} {kind}: {text}");
     let argument = match kind {
         "address" => TxCallArgumentType::Address(text.parse().map_err(|_| bad())?),
         "amount" => TxCallArgumentType::Amount(Amount::U256(u256::from_str_radix(&text, 10).map_err(|_| bad())?)),
@@ -498,6 +500,7 @@ pub fn parse_argument(value: &Value) -> Result<TxCallArgumentType, String> {
         "i128" => TxCallArgumentType::I128(text.parse().map_err(|_| bad())?),
         "u128" => TxCallArgumentType::U128(text.parse().map_err(|_| bad())?),
         "u256" => TxCallArgumentType::U256(u256::from_str_radix(&text, 10).map_err(|_| bad())?),
+        "i256" => TxCallArgumentType::I256(i256::from_str_radix(&text, 10).map_err(|_| bad())?),
         other => return Err(format!("unknown argument type {other}")),
     };
 

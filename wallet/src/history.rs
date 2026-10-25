@@ -133,6 +133,7 @@ fn whole(value: &TxCallArgumentType) -> Option<String> {
         TxCallArgumentType::U64(amount) => Some(amount.to_string()),
         TxCallArgumentType::I64(amount) if *amount >= 0 => Some(amount.to_string()),
         TxCallArgumentType::I128(amount) if *amount >= 0 => Some(amount.to_string()),
+        TxCallArgumentType::I256(amount) if *amount >= 0 => Some(amount.to_string()),
         TxCallArgumentType::Number(amount) if *amount >= 0.0 && amount.fract() == 0.0 && *amount < 9.0e15 => Some(format!("{amount:.0}")),
         TxCallArgumentType::String(digits) if !digits.is_empty() && digits.chars().all(|digit| digit.is_ascii_digit()) => Some(digits.clone()),
         _ => None,
