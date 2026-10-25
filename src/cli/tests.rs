@@ -102,6 +102,133 @@ fn amounts_pick_the_narrowest_width() {
     assert!(parse_amount("1.5").is_err());
 }
 
+#[test]
+fn db_migrate_goes_up_freely_and_back_down_only_when_told_to() {
+    use crate::chain::{
+        STORAGE_FORMAT,
+        migrate::{self, At, Chunk, Migration},
+    };
+    use crate::db::{Column, DbError, Read};
+
+    /// Up to this build's format, marks the database; going back, unmarks it.
+    struct Mark;
+
+    impl Migration for Mark {
+        fn from(&self) -> u32 {
+            STORAGE_FORMAT - 1
+        }
+
+        fn describe(&self) -> &'static str {
+            "marks the database"
+        }
+
+        fn up(&self, _: &At) -> Result<Chunk, DbError> {
+            Ok(Chunk {
+                changes: [((Column::Storage, b"marked".to_vec()), Some(b"yes".to_vec()))].into(),
+                next: None,
+            })
+        }
+
+        fn down(&self, _: &At) -> Result<Chunk, DbError> {
+            Ok(Chunk {
+                changes: [((Column::Storage, b"marked".to_vec()), None)].into(),
+                next: None,
+            })
+        }
+    }
+
+    let dir = TempDir::new("migrate");
+    let path = dir.0.join("chain.db");
+    migrate::set_format(&crate::db::RocksDb::open(&path).unwrap(), STORAGE_FORMAT - 1);
+    let migrations: &[&dyn Migration] = &[&Mark];
+    let args = |to: Option<u32>, yes: bool, no_backup: bool| db::MigrateArgs {
+        db: path.clone(),
+        to,
+        yes,
+        no_backup,
+    };
+    let state = || {
+        let db = crate::db::RocksDb::open(&path).unwrap();
+
+        (migrate::format_of(&db).unwrap(), db.read(Column::Storage, b"marked").unwrap().is_some())
+    };
+    let older = STORAGE_FORMAT - 1;
+
+    // Up asks nothing, and copies the database aside first.
+    db::migrate_reading(args(None, false, false), migrations, &mut "".as_bytes()).unwrap();
+
+    assert_eq!(state(), (Some(STORAGE_FORMAT), true));
+    assert!(dir.0.join(format!("chain.db.format-{older}")).is_dir(), "the backup");
+
+    // Down asks, and anything but yes leaves it as it was.
+    let refused = db::migrate_reading(args(Some(older), false, true), migrations, &mut "no\n".as_bytes()).unwrap_err();
+
+    assert!(refused.to_string().contains("is left as it was"), "{refused}");
+    assert_eq!(state(), (Some(STORAGE_FORMAT), true));
+
+    db::migrate_reading(args(Some(older), false, true), migrations, &mut "yes\n".as_bytes()).unwrap();
+
+    assert_eq!(state(), (Some(older), false));
+
+    // --yes answers for you; a second backup takes the next free name.
+    db::migrate_reading(args(None, false, false), migrations, &mut "".as_bytes()).unwrap();
+    db::migrate_reading(args(Some(older), true, false), migrations, &mut "".as_bytes()).unwrap();
+
+    assert_eq!(state(), (Some(older), false));
+    assert!(dir.0.join(format!("chain.db.format-{older}.1")).is_dir());
+    assert!(dir.0.join(format!("chain.db.format-{STORAGE_FORMAT}")).is_dir());
+
+    // Nothing to do, nowhere to go, and nothing there.
+    db::migrate_reading(args(Some(older), false, false), migrations, &mut "".as_bytes()).unwrap();
+    db::format(&path, migrations).unwrap();
+
+    assert!(db::migrate_reading(args(Some(older - 1), true, true), migrations, &mut "".as_bytes()).unwrap_err().to_string().contains("no migration goes from"));
+    assert!(db::migrate_reading(db::MigrateArgs { db: dir.0.join("missing"), ..args(None, false, false) }, migrations, &mut "".as_bytes())
+        .unwrap_err()
+        .to_string()
+        .contains("there is no database at"));
+    assert!(!dir.0.join("missing").exists(), "never made by asking");
+}
+
+#[cfg(feature = "client")]
+#[test]
+fn a_lua_contract_is_put_together_from_its_files_and_checked_as_a_node_would() {
+    use crate::{chain::DEV_TX_LIMITS, structs::code::Engine, structs::hash::HashType, vm::Vm};
+
+    let dir = TempDir::new("include");
+    fs::create_dir_all(dir.0.join("lib")).unwrap();
+    fs::write(dir.0.join("main.lua"), "local M = {}\n--@include \"lib/balances.lua\"\n\nfunction M.balance(owner)\n    return get(owner)\nend\n\nreturn M\n").unwrap();
+    fs::write(
+        dir.0.join("lib/balances.lua"),
+        "--@namespace balances decimal\nlocal balances = storage.namespace(\"balances\")\n\nlocal function get(owner)\n    return balances:get(owner:text()) or \"0\"\nend\n",
+    )
+    .unwrap();
+    fs::write(dir.0.join("broken.lua"), "local M = {}\n--@include \"lib/broken.lua\"\nreturn M\n").unwrap();
+    fs::write(dir.0.join("lib/broken.lua"), "local fine = 1\nlocal broken = )\n").unwrap();
+
+    let source = super::send::lua_source(&dir.0.join("main.lua")).unwrap();
+    let vm = Vm::new(&[Engine::Lua], HashType::default_chain()).unwrap();
+    let loaded = vm.engine(Engine::Lua).unwrap().load(source.as_bytes(), DEV_TX_LIMITS).result.unwrap();
+
+    assert!(source.contains("-- included lib/balances.lua\n--@namespace balances decimal\n"), "{source}");
+    assert_eq!(loaded.functions, ["balance"], "the included local serves the entry's function");
+    assert!(loaded.layout.is_declared(), "the layout the included file declares");
+
+    // A mistake in an included file is named by that file and line, by send and by layout alike.
+    let sent = super::send::lua_source(&dir.0.join("broken.lua")).unwrap_err().to_string();
+    let checked = layout(LayoutArgs {
+        code: dir.0.join("broken.lua"),
+        from: None,
+        node: String::new(),
+    })
+    .unwrap_err()
+    .to_string();
+
+    assert!(sent.contains("syntax error: lib/broken.lua:2:"), "{sent}");
+    assert!(checked.contains("lib/broken.lua:2:"), "{checked}");
+    assert!(super::send::lua_source(&dir.0.join("missing.lua")).is_err());
+}
+
 /// Sending needs a node behind an HTTP API to send to.
 #[cfg(all(feature = "client", feature = "http"))]
 mod send {

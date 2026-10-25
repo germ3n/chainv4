@@ -171,6 +171,12 @@ dev chain.
 **Amounts:** a transfer's amount and a call's value are typed in the coin's units, such as
 `1.5`. Call arguments take the API's argument types, and amounts among them are whole units.
 
+**A Lua contract in several files:** "Open Luau files…" takes them all at once. The file that
+includes the others goes in the editor, and its `--@include` lines take the rest by path, or by
+file name, as a browser gives no folders. Below the editor it says what goes in, or which include
+it cannot find; a deploy that lands and fails says where, in the files it came from. See
+[Splitting a contract across files](contracts.md#splitting-a-contract-across-files).
+
 ## What it remembers
 
 The node address, any token decimals set by hand, and the genesis the light client pinned for

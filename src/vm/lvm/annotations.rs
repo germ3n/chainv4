@@ -37,6 +37,12 @@ pub fn reentrant(source: &str, exported: &[String]) -> Result<Vec<String>, VmErr
         if annotation != "reentrant" {
             match annotation.split_whitespace().next() {
                 Some(word) if LAYOUT_ENTRIES.contains(&word) => continue,
+                Some("include") => {
+                    return Err(error(
+                        index,
+                        format!("{PREFIX}include is for deploying: chainv4 send deploy and the explorer put the files together, so the source on chain never holds one"),
+                    ));
+                }
                 _ => return Err(error(index, format!("unknown annotation {PREFIX}{annotation}"))),
             }
         }
@@ -162,6 +168,7 @@ return M
             ("--@reentrant\nlocal function deposit() end", "right above"),
             ("--@reentrant\nfunction M.hidden() end", "does not export"),
             ("--@reentrant", "right above"),
+            ("--@include \"lib.lua\"", "is for deploying"),
         ];
 
         for (source, expected) in cases {

@@ -2,7 +2,7 @@
 //! version's, worked out here before anything is sent.
 
 use {
-    super::CliResult,
+    super::{CliResult, lua_bundle},
     crate::chain::DEV_TX_LIMITS,
     crate::structs::address::Address,
     crate::structs::code::Engine,
@@ -57,22 +57,24 @@ fn indent(layout: &Layout) -> String {
 }
 
 /// The layout a file's code declares, loaded the way a node loads it at deploy, so code a node
-/// would refuse is refused here too.
+/// would refuse is refused here too. A Lua file is put together with the files it includes first.
 fn read(path: &Path) -> CliResult<Layout> {
-    let engine = match path.extension().and_then(|extension| extension.to_str()) {
-        Some("lua" | "luau") => Engine::Lua,
-        Some("wasm") => Engine::Wasm,
+    let (engine, code, bundle) = match path.extension().and_then(|extension| extension.to_str()) {
+        Some("lua" | "luau") => {
+            let bundle = lua_bundle(path)?;
+
+            (Engine::Lua, bundle.source.clone().into_bytes(), Some(bundle))
+        }
+        Some("wasm") => (Engine::Wasm, std::fs::read(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?, None),
         _ => return Err(format!("{}: give a .lua, .luau or .wasm file", path.display()).into()),
     };
-    let code = std::fs::read(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
     let vm = Vm::new(&[engine], HashType::default_chain())
         .map_err(|engine| format!("this build has no {} engine", engine.name()))?;
-    let loaded = vm
-        .engine(engine)
-        .expect("the vm was built with it")
-        .load(&code, DEV_TX_LIMITS)
-        .result
-        .map_err(|err| format!("{}: {err}", path.display()))?;
+    let loaded = vm.engine(engine).expect("the vm was built with it").load(&code, DEV_TX_LIMITS).result.map_err(|err| {
+        let err = err.to_string();
+
+        format!("{}: {}", path.display(), bundle.as_ref().map_or(err.clone(), |bundle| bundle.explain(&err)))
+    })?;
 
     Ok(loaded.layout)
 }

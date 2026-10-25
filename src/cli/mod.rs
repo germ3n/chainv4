@@ -6,6 +6,7 @@ use {
     crate::crypto::keypair::{KeyType, Keypair},
     crate::structs::address::Address,
     crate::structs::amount::Amount,
+    crate::structs::bundle::{Bundle, bundle},
     crate::structs::hex::from_hex,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
@@ -15,6 +16,7 @@ use {
     std::path::{Path, PathBuf},
 };
 
+pub mod db;
 pub mod genesis;
 mod layout;
 #[cfg(feature = "client")]
@@ -22,6 +24,7 @@ mod light;
 #[cfg(feature = "client")]
 mod send;
 
+pub use db::{DbArgs, db};
 pub use layout::{LayoutArgs, layout};
 
 #[cfg(feature = "client")]
@@ -142,6 +145,16 @@ fn read_key(path: &Path) -> CliResult<Keypair> {
     let text = fs::read_to_string(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
 
     Ok(Keypair::from_key_file(&text).map_err(|err| format!("{}: {err}", path.display()))?)
+}
+
+/// A Lua contract's files put together, from its entry file on disk: each `--@include` read from
+/// beside the file that names it.
+fn lua_bundle(path: &Path) -> CliResult<Bundle> {
+    let source = fs::read_to_string(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+    let folder = path.parent().unwrap_or(Path::new(""));
+    let entry = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
+
+    Ok(bundle(&entry, &source, |included| fs::read_to_string(folder.join(included)).map_err(|err| err.to_string()))?)
 }
 
 fn parse_scheme(text: &str) -> Result<KeyType, String> {

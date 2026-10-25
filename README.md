@@ -11,6 +11,8 @@ This page covers the `chainv4` command and how contracts live on the chain.
 - **How each part works:** the guides in [docs/](docs/README.md), starting with
   [Good to know](docs/good-to-know.md) for what to keep in mind.
 - **The code reference:** the wiki that every build writes to `target/wiki/index.html`.
+- **Contract storage:** how contracts keep state, and the layouts upgrades must keep, in
+  [docs/contract-storage.md](docs/contract-storage.md).
 - **Tokens:** they follow the [token standard](docs/token-standard.md).
 - **The explorer:** [explorer/](explorer/), an egui app for the desktop and the browser; see
   [docs/explorer.md](docs/explorer.md).
@@ -220,6 +222,20 @@ and writes account `N`'s key from them; `--from-phrase` reads words from standar
 The same words give the same keys as the wallet, and the same secp256k1 accounts as Ethereum's
 wallets. See [Crypto](docs/crypto.md#seed-phrases).
 
+## The database
+
+```sh
+chainv4 db format [--db chain.db]
+chainv4 db migrate [--db chain.db] [--to N] [--yes] [--no-backup]
+```
+
+A database records the storage format it is kept in. A node moves an older one up to its own
+format as it starts, after copying it aside as `chain.db.format-N`. `db migrate` does the same by
+hand, and with `--to` takes a database back down to an older chainv4's format: run it with the
+newer chainv4, which lists what it undoes and asks you to type `yes`. Migrations work in
+crash-safe chunks, so a stopped one goes on from where it stopped. See
+[Migrations](docs/storage.md#migrations).
+
 ## Sending transactions
 
 ```sh
@@ -254,6 +270,7 @@ chainv4 send --key alice.key burn --amount 5
 
 ```sh
 chainv4 send deploy --lua counter.lua
+chainv4 send deploy --lua contracts/lua/names/names.lua   # with the files it --@includes put in
 chainv4 send deploy --wasm contracts/target/wasm32-unknown-unknown/release/counter.wasm
 # submitted 0x…
 # contract contract:0x41f0…

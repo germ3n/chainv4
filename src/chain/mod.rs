@@ -35,6 +35,7 @@ mod execute;
 pub mod fees;
 mod finality;
 mod index;
+pub mod migrate;
 mod parallel;
 mod receipt;
 
@@ -71,7 +72,7 @@ pub const DEV_MAX_REORG_DEPTH: u64 = 100;
     summary = "The layout this node keeps its database in. It goes up whenever a stored record changes shape, so a node never reads a database it would misread.",
     category = "Chain",
     see_also = "ChainError::OldFormat",
-    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry. 4: contracts record their storage layout. 5: layouts declare record keys and checked kinds. 6: headers commit to a state root and a receipts root, and the state tree is kept. 7: every header is kept on its own, state tree leaves name their entries, and checkpoints keep what light clients need. 8: tx_root is a Merkle root, and the address index has a column of its own.",
+    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry. 4: contracts record their storage layout. 5: layouts declare record keys and checked kinds. 6: headers commit to a state root and a receipts root, and the state tree is kept. 7: every header is kept on its own, state tree leaves name their entries, and checkpoints keep what light clients need. 8: tx_root is a Merkle root, and the address index has a column of its own. From 8 on, each new format comes with a migration in migrate::MIGRATIONS, from the one before and back.",
 )]
 pub const STORAGE_FORMAT: u32 = 8;
 
@@ -575,6 +576,11 @@ impl Chain {
             Some(stored) if stored != id => return Err(ChainError::WrongGenesis { stored, expected: id }),
             Some(_) => {
                 let found = read_value::<FormatRecord>(&*db, Column::Meta, FORMAT_KEY)?.map(|record| record.format);
+
+                // A step stopped part way leaves a database the format does not describe.
+                if let Some(step) = migrate::under_way(&*db)? {
+                    return Err(ChainError::Migrating { from: step.from, to: step.to });
+                }
 
                 if found != Some(STORAGE_FORMAT) {
                     return Err(ChainError::OldFormat {
@@ -1492,8 +1498,10 @@ pub enum ChainError {
     BadGenesis(String),
     #[document(summary = "The chain allows contracts for an engine this node was built without.")]
     MissingEngine(Engine),
-    #[document(summary = "The database is kept in another layout than STORAGE_FORMAT: found is the one it is in, None for one from before formats were recorded.")]
+    #[document(summary = "The database is kept in another layout than STORAGE_FORMAT, which no migration this node knows reaches: found is the one it is in, None for one from before formats were recorded. A newer one goes back with the newer chainv4's db migrate.")]
     OldFormat { found: Option<u32>, expected: u32 },
+    #[document(summary = "A migration from one format to another stopped part way, and the database is in neither until it finishes.")]
+    Migrating { from: u32, to: u32 },
     #[document(summary = "A snapshot could not be installed, and why.")]
     BadSnapshot(String),
 }
@@ -1513,11 +1521,19 @@ impl fmt::Display for ChainError {
             }
             ChainError::BadGenesis(text) => write!(f, "bad genesis: {text}"),
             ChainError::BadSnapshot(why) => write!(f, "cannot install the snapshot: {why}"),
+            ChainError::OldFormat { found: Some(found), expected } if found > expected => write!(
+                f,
+                "the database is kept in format {found}, newer than this node's {expected}: take it back with `chainv4 db migrate --to {expected}`, run by the chainv4 that wrote it, or delete it or use another --db"
+            ),
             ChainError::OldFormat { found, expected } => {
                 let found = found.map_or("an older one".to_string(), |found| format!("format {found}"));
 
-                write!(f, "the database is kept in {found}, not format {expected}; delete it or use another --db")
+                write!(f, "the database is kept in {found}, not format {expected}, and no migration reaches it; delete it or use another --db")
             }
+            ChainError::Migrating { from, to } => write!(
+                f,
+                "a migration of the database from format {from} to {to} stopped part way: finish it with `chainv4 db migrate`, or start the node to go on to its own format"
+            ),
             ChainError::MissingEngine(engine) => write!(
                 f,
                 "the chain runs {} contracts; build the node with the {} feature",

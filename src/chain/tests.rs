@@ -257,13 +257,27 @@ fn a_database_kept_in_another_format_is_refused() {
     state.put_value(Column::Meta, FORMAT_KEY.to_vec(), &FormatRecord { format: STORAGE_FORMAT + 1 });
     db.commit(state.take_changes()).unwrap();
 
-    assert!(matches!(
-        Chain::open(db.clone(), &genesis()),
-        Err(ChainError::OldFormat { found: Some(found), expected: STORAGE_FORMAT }) if found == STORAGE_FORMAT + 1
-    ));
+    let newer = Chain::open(db.clone(), &genesis()).err().unwrap();
+
+    assert!(matches!(newer, ChainError::OldFormat { found: Some(found), expected: STORAGE_FORMAT } if found == STORAGE_FORMAT + 1));
+    assert!(newer.to_string().contains(&format!("take it back with `chainv4 db migrate --to {STORAGE_FORMAT}`")), "{newer}");
+
+    // A migration stopped part way leaves the format saying what the database no longer wholly is.
+    let state = State::new(db.clone());
+    state.put_value(Column::Meta, FORMAT_KEY.to_vec(), &FormatRecord { format: STORAGE_FORMAT });
+    let stopped = migrate::MigratingRecord {
+        from: STORAGE_FORMAT,
+        to: STORAGE_FORMAT - 1,
+        cursor: Some(b"halfway".to_vec()),
+    };
+    state.put_value(Column::Meta, migrate::MIGRATING_KEY.to_vec(), &stopped);
+    db.commit(state.take_changes()).unwrap();
+
+    assert!(matches!(Chain::open(db.clone(), &genesis()), Err(ChainError::Migrating { from: STORAGE_FORMAT, .. })));
 
     let state = State::new(db.clone());
     state.delete(Column::Meta, FORMAT_KEY.to_vec());
+    state.delete(Column::Meta, migrate::MIGRATING_KEY.to_vec());
     db.commit(state.take_changes()).unwrap();
 
     assert!(matches!(Chain::open(db.clone(), &genesis()), Err(ChainError::OldFormat { found: None, .. })));

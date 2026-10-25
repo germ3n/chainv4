@@ -1,6 +1,7 @@
 use {
-    super::{CliResult, amount, deployed_at, parse_amount, parse_argument, signer},
+    super::{CliResult, amount, deployed_at, lua_bundle, parse_amount, parse_argument, signer},
     crate::structs::address::Address,
+    crate::structs::bundle::Bundle,
     crate::structs::code::Code,
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::to_hex,
@@ -10,9 +11,10 @@ use {
     crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     crate::structs::u256::u256,
     crate::structs::vote::SignedVote,
+    crate::vm::lvm::{annotations, compiler},
     crate::vm::selector,
     serde_json::{Value, json},
-    std::path::PathBuf,
+    std::path::{Path, PathBuf},
     std::time::{Duration, Instant},
     ureq::Agent,
 };
@@ -257,13 +259,35 @@ fn parse_vote(text: &str) -> Result<Box<SignedVote>, String> {
 
 /// Reads contract code from whichever file was given.
 fn code(lua: Option<PathBuf>, wasm: Option<PathBuf>) -> CliResult<Code> {
-    let read_error = |path: &PathBuf, err: std::io::Error| format!("cannot read {}: {err}", path.display());
-
     match (lua, wasm) {
-        (Some(path), _) => Ok(Code::Lua(std::fs::read_to_string(&path).map_err(|err| read_error(&path, err))?)),
-        (None, Some(path)) => Ok(Code::Wasm(std::fs::read(&path).map_err(|err| read_error(&path, err))?)),
+        (Some(path), _) => Ok(Code::Lua(lua_source(&path)?)),
+        (None, Some(path)) => Ok(Code::Wasm(std::fs::read(&path).map_err(|err| format!("cannot read {}: {err}", path.display()))?)),
         (None, None) => Err("give --lua or --wasm".into()),
     }
+}
+
+/// A Lua contract's source: the file, with every file it includes put in, compiled here first so a
+/// mistake names its file and line before anything is sent.
+pub(super) fn lua_source(path: &Path) -> CliResult<String> {
+    let bundle = lua_bundle(path)?;
+
+    if bundle.files.len() > 1 {
+        println!("put together {} with {}: {} bytes", bundle.files[0], bundle.files[1..].join(", "), bundle.source.len());
+    }
+
+    check(&bundle)?;
+
+    Ok(bundle.source)
+}
+
+/// Whether a bundle compiles and its layout reads, as a node will check it, with any mistake
+/// placed in the file it came from.
+fn check(bundle: &Bundle) -> Result<(), String> {
+    let explain = |err: crate::vm::VmError| bundle.explain(&err.to_string());
+    compiler::compile(&bundle.source).map_err(explain)?;
+    annotations::layout(&bundle.source).map_err(explain)?;
+
+    Ok(())
 }
 
 /// Asks the node about the transaction until its block is deep enough, or final when asked, or

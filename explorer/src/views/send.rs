@@ -11,6 +11,7 @@ use {
     chainv4::crypto::keypair::Keypair,
     chainv4::structs::address::Address,
     chainv4::structs::amount::Amount,
+    chainv4::structs::bundle::{Bundle, bundle},
     chainv4::structs::code::Code,
     chainv4::structs::hash::HashType,
     chainv4::structs::hex::{from_hex, to_hex},
@@ -32,10 +33,20 @@ enum Kind {
     Burn,
 }
 
-/// A file the person picked, read.
+/// What a file picker is for.
+#[derive(Clone, Copy)]
+enum Picking {
+    Key,
+    Wasm,
+    Lua,
+}
+
+/// What the person picked, read.
 enum Picked {
     Key { name: String, bytes: Vec<u8> },
-    Code { name: String, bytes: Vec<u8> },
+    Wasm { name: String, bytes: Vec<u8> },
+    /// A Lua contract's files, by name.
+    Lua(Vec<(String, Vec<u8>)>),
 }
 
 /// Where sending stands.
@@ -49,7 +60,8 @@ enum Step {
     Submit { ask: Ask },
     /// Taken by the node: waiting for a block.
     Waiting { id: String },
-    Landed { id: String },
+    /// In a block, and why it failed if it did.
+    Landed { id: String, failed: Option<String> },
     Failed(String),
 }
 
@@ -62,7 +74,13 @@ pub struct SendState {
     amount: String,
     function: String,
     args: Vec<(String, String)>,
+    /// The Lua contract's entry, by name, and its text, as the editor holds it.
+    lua_name: String,
     lua: String,
+    /// The files the entry may --@include, by name.
+    included: Vec<(String, String)>,
+    /// The Lua contract last sent, put together: where its errors' lines came from.
+    bundle: Option<Bundle>,
     wasm: Option<(String, Vec<u8>)>,
     gas_limit: String,
     max_price: String,
@@ -81,7 +99,10 @@ impl Default for SendState {
             amount: String::new(),
             function: String::new(),
             args: Vec::new(),
+            lua_name: "contract.lua".to_string(),
             lua: "local M = {}\n\nfunction M.hello()\n    return \"hi\"\nend\n\nreturn M\n".to_string(),
+            included: Vec::new(),
+            bundle: None,
             wasm: None,
             gas_limit: String::new(),
             max_price: String::new(),
@@ -158,7 +179,16 @@ impl SendState {
                 },
                 Err(failure) => Step::Failed(failure.message.clone()),
             },
-            (Step::Waiting { id }, Ask::Tx(asked), Ok(_)) if *asked == id => Step::Landed { id },
+            (Step::Waiting { id }, Ask::Tx(asked), Ok(value)) if *asked == id => {
+                // A deploy's error names lines of the source as sent: put back in the files they came from.
+                let failed = (value["status"] == "failed").then(|| {
+                    let error = value["error"].as_str().unwrap_or("?");
+
+                    self.bundle.as_ref().map_or_else(|| error.to_string(), |bundle| bundle.explain(error))
+                });
+
+                Step::Landed { id, failed }
+            }
             (step, _, _) => step,
         };
     }
@@ -213,7 +243,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Load a WebAssembly module…").clicked() {
-                        pick(ui.ctx(), state.picked.clone(), false);
+                        pick(ui.ctx(), state.picked.clone(), Picking::Wasm);
+                    }
+
+                    if ui.button("Open Luau files…").on_hover_text("A contract split across files: open them all, and --@include \"name.lua\" lines take each by name").clicked() {
+                        pick(ui.ctx(), state.picked.clone(), Picking::Lua);
                     }
 
                     if let Some((name, bytes)) = &state.wasm {
@@ -226,8 +260,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
                 });
 
                 if state.wasm.is_none() {
-                    ui.weak("or Luau source:");
+                    ui.weak(format!("or Luau source, {}:", state.lua_name));
                     ui.add(egui::TextEdit::multiline(&mut state.lua).code_editor().desired_rows(10).desired_width(f32::INFINITY));
+                    included(ui, state);
                 }
             });
             ui.end_row();
@@ -252,6 +287,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     let busy = matches!(state.step, Step::Nonce { .. } | Step::Offer { .. } | Step::Submit { .. });
 
     if ui.add_enabled(!busy, egui::Button::new(RichText::new("Sign and send").strong())).clicked() {
+        state.bundle = match (state.kind, &state.wasm) {
+            (Kind::Deploy, None) => lua_bundle(state).ok(),
+            _ => None,
+        };
+
         match build(state, &key, decimals) {
             Ok(tx) => {
                 ctx.api.ask(Ask::Account(key.public().address().to_string()));
@@ -274,16 +314,23 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
                 super::tx(ui, ctx, &id);
             });
         }
-        Step::Landed { id } => {
-            let id = id.clone();
+        Step::Landed { id, failed } => {
+            let (id, failed) = (id.clone(), failed.clone());
             ui.horizontal(|ui| {
-                ui.colored_label(GOOD, "In a block:");
+                match failed {
+                    None => ui.colored_label(GOOD, "In a block:"),
+                    Some(_) => ui.colored_label(BAD, "In a block, but it failed:"),
+                };
                 super::tx(ui, ctx, &id);
 
                 if ui.button("Open").clicked() {
                     ctx.go(View::Tx(id.clone()));
                 }
             });
+
+            if let Some(why) = failed {
+                ui.colored_label(BAD, why);
+            }
         }
         Step::Failed(err) => {
             ui.colored_label(BAD, err);
@@ -294,7 +341,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 fn key(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     ui.horizontal(|ui| {
         if ui.button("Load a key file…").clicked() {
-            pick(ui.ctx(), state.picked.clone(), true);
+            pick(ui.ctx(), state.picked.clone(), Picking::Key);
         }
 
         if ui.button("Use the development key").on_hover_text("Its seed is in chainv4's source: only for dev chains").clicked() {
@@ -405,10 +452,80 @@ fn build(state: &SendState, key: &Keypair, decimals: u8) -> Result<Tx, String> {
         Kind::Deploy => Ok(Tx::Deploy {
             code: match &state.wasm {
                 Some((_, bytes)) => Code::Wasm(bytes.clone()),
-                None => Code::Lua(state.lua.clone()),
+                None => Code::Lua(lua_bundle(state)?.source),
             },
         }),
     }
+}
+
+/// The files the entry may include, each with a button to drop it, and what putting them together
+/// gives: how big, or which include does not resolve.
+fn included(ui: &mut Ui, state: &mut SendState) {
+    if state.included.is_empty() {
+        return;
+    }
+
+    ui.horizontal_wrapped(|ui| {
+        ui.weak("with");
+        let mut dropped = None;
+
+        for (index, (name, _)) in state.included.iter().enumerate() {
+            ui.label(name);
+
+            if ui.small_button("x").clicked() {
+                dropped = Some(index);
+            }
+        }
+
+        if let Some(index) = dropped {
+            state.included.remove(index);
+        }
+    });
+
+    match lua_bundle(state) {
+        Ok(bundle) if bundle.files.len() > 1 => {
+            ui.weak(format!("Sends {} with {} put in: {} bytes", bundle.files[0], bundle.files[1..].join(", "), format::thousands(&bundle.source.len().to_string())));
+        }
+        Ok(_) => {
+            ui.weak("It includes none of them yet: a --@include \"name.lua\" line puts one in.");
+        }
+        Err(why) => {
+            ui.colored_label(BAD, why);
+        }
+    }
+}
+
+/// The Lua contract, put together: the editor's source, every --@include in it taken from the
+/// files opened, by path or else by name, as a browser gives no folders.
+fn lua_bundle(state: &SendState) -> Result<Bundle, String> {
+    bundle(&state.lua_name, &state.lua, |path| lookup(&state.included, path)).map_err(|err| err.to_string())
+}
+
+/// A file opened, by the path an include names: that path, or its file name when one file has it.
+fn lookup(files: &[(String, String)], path: &str) -> Result<String, String> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let mut named = files.iter().filter(|(file, _)| file == name);
+    let found = match files.iter().find(|(file, _)| file == path) {
+        Some(file) => Some(file),
+        None => match (named.next(), named.next()) {
+            (Some(file), None) => Some(file),
+            _ => None,
+        },
+    };
+
+    found.map(|(_, text)| text.clone()).ok_or_else(|| format!("no file named {name} is open: open it with the others"))
+}
+
+/// Which of the files opened is the contract: the one that puts in the most of the others, the
+/// first opened when none does.
+fn entry(files: &[(String, String)]) -> usize {
+    let pulls = |index: usize| {
+        let (name, text) = &files[index];
+
+        bundle(name, text, |path| lookup(files, path)).map_or(0, |bundle| bundle.files.len())
+    };
+
+    (0..files.len()).rev().max_by_key(|index| pulls(*index)).unwrap_or(0)
 }
 
 /// A call argument from its type and text. Amounts are whole units, like every other number.
@@ -449,30 +566,60 @@ fn encode(signed: &SignedTx) -> String {
     to_hex(&wincode::serialize(signed).expect("transactions always encode"))
 }
 
-/// Opens a file picker; what is picked arrives in picked, read.
-fn pick(wake: &egui::Context, picked: Arc<Mutex<Option<Picked>>>, key: bool) {
+/// Opens a file picker, for several files when picking Lua's; what is picked arrives in picked,
+/// read.
+fn pick(wake: &egui::Context, picked: Arc<Mutex<Option<Picked>>>, picking: Picking) {
     let wake = wake.clone();
-    let finish = move |name: String, bytes: Vec<u8>| {
-        *picked.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(match key {
-            true => Picked::Key { name, bytes },
-            false => Picked::Code { name, bytes },
-        });
+    let finish = move |mut files: Vec<(String, Vec<u8>)>| {
+        if files.is_empty() {
+            return;
+        }
+
+        let read = match picking {
+            Picking::Lua => Picked::Lua(files),
+            Picking::Key | Picking::Wasm => {
+                let (name, bytes) = files.swap_remove(0);
+
+                match picking {
+                    Picking::Key => Picked::Key { name, bytes },
+                    _ => Picked::Wasm { name, bytes },
+                }
+            }
+        };
+        *picked.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read);
         wake.request_repaint();
     };
 
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(path) = rfd::FileDialog::new().pick_file()
-        && let Ok(bytes) = std::fs::read(&path)
     {
-        finish(path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned()), bytes);
+        let dialog = match picking {
+            Picking::Lua => rfd::FileDialog::new().add_filter("Luau", &["lua", "luau"]),
+            Picking::Key | Picking::Wasm => rfd::FileDialog::new(),
+        };
+        let paths = match picking {
+            Picking::Lua => dialog.pick_files().unwrap_or_default(),
+            Picking::Key | Picking::Wasm => dialog.pick_file().into_iter().collect(),
+        };
+        let files = paths
+            .iter()
+            .filter_map(|path| Some((path.file_name()?.to_string_lossy().into_owned(), std::fs::read(path).ok()?)))
+            .collect();
+        finish(files);
     }
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_futures::spawn_local(async move {
-        if let Some(file) = rfd::AsyncFileDialog::new().pick_file().await {
-            let bytes = file.read().await;
-            finish(file.file_name(), bytes);
+        let handles = match picking {
+            Picking::Lua => rfd::AsyncFileDialog::new().add_filter("Luau", &["lua", "luau"]).pick_files().await.unwrap_or_default(),
+            Picking::Key | Picking::Wasm => rfd::AsyncFileDialog::new().pick_file().await.into_iter().collect(),
+        };
+        let mut files = Vec::new();
+
+        for handle in handles {
+            files.push((handle.file_name(), handle.read().await));
         }
+
+        finish(files);
     });
 }
 
@@ -487,7 +634,24 @@ fn take_picked(state: &mut SendState) {
             }
             Err(err) => state.step = Step::Failed(format!("{name}: {err}")),
         },
-        Some(Picked::Code { name, bytes }) => state.wasm = Some((name, bytes)),
+        Some(Picked::Wasm { name, bytes }) => state.wasm = Some((name, bytes)),
+        Some(Picked::Lua(files)) => {
+            let read: Result<Vec<(String, String)>, String> = files
+                .into_iter()
+                .map(|(name, bytes)| String::from_utf8(bytes).map(|text| (name.clone(), text)).map_err(|_| format!("{name} is not text")))
+                .collect();
+
+            match read {
+                Ok(mut files) => {
+                    let (name, text) = files.remove(entry(&files));
+                    state.lua_name = name;
+                    state.lua = text;
+                    state.included = files;
+                    state.wasm = None;
+                }
+                Err(why) => state.step = Step::Failed(why),
+            }
+        }
         None => {}
     }
 }
@@ -567,6 +731,46 @@ mod tests {
 
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+    }
+
+    #[test]
+    fn a_contract_opened_as_files_is_put_together_before_it_is_signed() {
+        let files = vec![
+            ("token.lua".to_string(), "local M = {}\n--@include \"lib/balances.lua\"\nreturn M\n".to_string()),
+            ("balances.lua".to_string(), "local balances = 1\n".to_string()),
+        ];
+        let reversed: Vec<_> = files.iter().rev().cloned().collect();
+
+        assert_eq!(entry(&files), 0, "the file that puts the other in");
+        assert_eq!(entry(&reversed), 1, "whichever was opened first");
+
+        let key = Keypair::development();
+        let mut state = SendState {
+            kind: Kind::Deploy,
+            key: Some(key.clone()),
+            lua_name: files[0].0.clone(),
+            lua: files[0].1.clone(),
+            included: files[1..].to_vec(),
+            ..SendState::default()
+        };
+        let Ok(Tx::Deploy { code: Code::Lua(source) }) = build(&state, &key, 18) else {
+            panic!("not a Lua deploy");
+        };
+
+        assert!(source.contains("-- included lib/balances.lua\nlocal balances = 1\n"), "found by its file name: {source}");
+
+        // A deploy that lands and fails says where, in the files it came from.
+        let mut api = crate::api::Api::new("http://127.0.0.1:0", egui::Context::default());
+        state.bundle = lua_bundle(&state).ok();
+        state.step = Step::Waiting { id: "0x01".to_string() };
+        state.answered(&Ask::Tx("0x01".to_string()), &Ok(json!({ "status": "failed", "error": "compile error: syntax error: 3: oops" })), &mut api);
+
+        assert!(matches!(&state.step, Step::Landed { failed: Some(why), .. } if why == "compile error: syntax error: lib/balances.lua:1: oops"));
+
+        state.included.clear();
+
+        assert_eq!(build(&state, &key, 18).unwrap_err(), "token.lua:2: cannot include lib/balances.lua: no file named balances.lua is open: open it with the others");
+        assert!(lookup(&[("a.lua".to_string(), String::new()), ("lib/a.lua".to_string(), "x".to_string())], "lib/a.lua").is_ok_and(|text| text == "x"), "a path first");
     }
 
     #[test]

@@ -118,9 +118,12 @@ clears its column the same way first, in case anything was left behind.
 ## The storage format
 
 `STORAGE_FORMAT` names the layout records are kept in, and genesis writes it to `Meta`.
-- **On open:** a node refuses a database kept in another format (`OldFormat`), or in none, as
-  databases from before formats were recorded are. It never misreads one.
-- **When to bump it:** whenever a stored record changes shape.
+- **On open:** a node moves an older database up to its format first, where migrations reach
+  (see [Migrations](#migrations)). It refuses one kept in a format they do not reach
+  (`OldFormat`), or in none, as databases from before formats were recorded are. It never
+  misreads one.
+- **When to bump it:** whenever a stored record changes shape, with a migration to the new
+  format.
 - **Format 1:** receipts carry traces, and the chain keeps its leaf blocks in `Meta`.
 - **Format 2:** authority finality's approvals of a signer change record the epoch they were made
   in, so they can expire.
@@ -133,7 +136,97 @@ clears its column the same way first, in case anything was left behind.
 - **Format 8:** `tx_root` is a Merkle root, so stored headers changed meaning, and the address
   index has a column of its own.
 
-There are no migrations: delete the database, or point `--db` elsewhere.
+Formats before 8 have no migrations: delete such a database, or point `--db` elsewhere.
+
+## Migrations
+
+From format 8 on, each new format comes with a migration that moves a database to it from the
+one before, and back (`chain::migrate`). `MIGRATIONS` lists them, oldest first.
+
+**What a node does as it starts:**
+1. finishes a migration a run before left part way;
+2. finds a database in an older format, copies it aside with a RocksDB checkpoint, beside it as
+   `chain.db.format-8`, and moves it up one format at a time, logging each step;
+3. opens the chain.
+
+A database in a newer format is refused: going back down is only ever asked for, never automatic.
+
+**By hand,** with the node stopped:
+
+```sh
+chainv4 db format --db chain.db              # the format it is in, and what this chainv4 knows
+chainv4 db migrate --db chain.db             # up to this chainv4's format
+chainv4 db migrate --db chain.db --to 8      # back down: shows what it undoes, asks for yes
+chainv4 db migrate --db chain.db --to 8 --yes --no-backup
+```
+
+- **Going back down** takes the chainv4 that wrote the newer format: only it knows how to undo
+  its formats. It lists every step it undoes, and goes on only once you type `yes`, or pass
+  `--yes`.
+- **The backup** is a checkpoint: RocksDB hard-links the files it can, so it is quick, and takes
+  room only as the database moves on. A name already taken gets `.1`, `.2` and so on. Delete it
+  once the node runs well; `--no-backup` skips it.
+- **One-way migrations:** a migration that cannot be undone says why, and a downgrade past it is
+  refused before anything changes.
+
+**Crash-safe, a chunk at a time.** A migration works through the data in chunks of about
+`CHUNK` records, 10,000. Each chunk's changes are committed atomically with where it got to, under
+`Meta`'s `migrating` key, and the format changes only with a step's last chunk. A crash or a stop
+leaves the database wholly in one format with a step under way:
+- the next `db migrate`, or the next start, finishes that step from where it stopped, with no
+  second backup of a half-migrated database;
+- a node refuses to open the chain while a step is under way (`Migrating`).
+
+**Writing one:** bump `STORAGE_FORMAT`, note what changed in its documentation, and add a
+`Migration` to `MIGRATIONS`. A sketch:
+
+```rust
+/// Format 9: keeps every receipt's trace in a column of its own.
+struct TracesApart;
+
+impl Migration for TracesApart {
+    fn from(&self) -> u32 {
+        8
+    }
+
+    fn describe(&self) -> &'static str {
+        "keeps receipts' traces in a column of their own"
+    }
+
+    /// One chunk: up to at.limit receipts, from where the chunk before stopped.
+    fn up(&self, at: &At) -> Result<Chunk, DbError> {
+        let mut chunk = Chunk::default();
+        let (mut done, mut last) = (0, None);
+        at.db.scan(Column::Receipts, &[], at.cursor.unwrap_or(&[]), &mut |key, value| {
+            // Put the receipt back without its trace, and the trace under the same key in its
+            // new column, into chunk.changes.
+            done += 1;
+            last = Some(key.to_vec());
+
+            done < at.limit
+        })?;
+        // The next chunk starts just past the last receipt done; there is none once a chunk
+        // comes up short.
+        chunk.next = last.filter(|_| done == at.limit).map(|key| [key, vec![0]].concat());
+
+        Ok(chunk)
+    }
+
+    fn down(&self, at: &At) -> Result<Chunk, DbError> {
+        // The same, putting each trace back in its receipt.
+    }
+}
+
+pub const MIGRATIONS: &[&dyn Migration] = &[&TracesApart];
+```
+
+- **A chunk is all or nothing,** and runs again from its cursor after a crash, so it must read
+  where it starts from the cursor alone.
+- **Never write `Meta`'s `format` or `migrating`:** the run writes those.
+- **A migration changes how things are kept, never what the chain says.** State roots, ids and
+  hashes stay what they were; a change to those is a new chain, not a new format.
+- **Test both ways,** up and down, on a database big enough for several chunks, and stopped part
+  way: `chain::migrate`'s tests show how.
 
 ## Undo records
 
@@ -175,8 +268,9 @@ Records are stored in the chain's encoding (see [Crypto and encoding](crypto.md)
 
 - **A database belongs to one chain.** Opening one written for another genesis fails with
   `WrongGenesis`.
-- **Formats are checked, not migrated.** A database in another storage format is refused, so it
-  must be deleted after a format change. A genesis change refuses it as well (`WrongGenesis`).
+- **Formats are migrated from 8 on.** A node moves an older database up as it starts, after a
+  backup; one in a format no migration reaches is refused, and must be deleted. A genesis change
+  refuses it as well (`WrongGenesis`).
 - **Commits are not fsynced.** A power cut can lose the last few blocks, though never half of
   one.
 - **No pruning.** Every block and all history are kept, and side branches are never pruned.

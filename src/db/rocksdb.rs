@@ -32,6 +32,17 @@ impl RocksDb {
         Ok(RocksDb { rocks })
     }
 
+    #[document(
+        parent = "RocksDb",
+        summary = "Copies the database as it is now into a new directory, cheaply: RocksDB hard-links the files it can, so the copy takes room only as the two drift apart. The copy opens as a database of its own.",
+        params = { path = "Where the copy goes: a directory that does not exist yet." },
+    )]
+    pub fn checkpoint(&self, path: impl AsRef<Path>) -> Result<(), DbError> {
+        rocksdb::checkpoint::Checkpoint::new(&self.rocks)
+            .and_then(|checkpoint| checkpoint.create_checkpoint(path))
+            .map_err(backend)
+    }
+
     fn column(&self, column: Column) -> &ColumnFamily {
         self.rocks
             .cf_handle(column.name())
@@ -121,5 +132,18 @@ mod tests {
 
         assert_eq!(db.read(Column::Accounts, b"a").unwrap(), Some(b"1".to_vec()));
         assert_eq!(db.read(Column::Storage, b"a").unwrap(), None);
+    }
+
+    #[test]
+    fn a_checkpoint_is_a_database_of_its_own() {
+        let dir = TempDir::new("checkpoint");
+        let db = RocksDb::open(dir.0.join("db")).unwrap();
+        db.commit([((Column::Accounts, b"a".to_vec()), Some(b"1".to_vec()))].into()).unwrap();
+        db.checkpoint(dir.0.join("copy")).unwrap();
+        db.commit([((Column::Accounts, b"a".to_vec()), Some(b"2".to_vec()))].into()).unwrap();
+        let copy = RocksDb::open(dir.0.join("copy")).unwrap();
+
+        assert_eq!(copy.read(Column::Accounts, b"a").unwrap(), Some(b"1".to_vec()), "as it was when copied");
+        assert!(db.checkpoint(dir.0.join("copy")).is_err(), "never over another");
     }
 }

@@ -18,6 +18,7 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Finality](finality.md) | FFG, authority and depth finality, votes, staking, slashing and signer changes. |
 | [Fees](fees.md) | Gas, scorers, base fees and bids, the block gas limit, and where fees go. |
 | [Contracts](contracts.md) | The Lua and WebAssembly engines, fuel, the host API, lifecycle hooks, calls and proxies. |
+| [Contract storage](contract-storage.md) | A guide to how contracts keep state: plain storage, namespaces, the own space, and layouts that upgrades must keep, with a worked example. |
 | [Token standard](token-standard.md) | The interface every token contract follows, and the registry that lists them. |
 | [Storage](storage.md) | The database, its columns, state layers, undo records and scans. |
 | [Node and network](node.md) | The node loop, the mempool, peer-to-peer networking, sync, and syncing from a snapshot. |

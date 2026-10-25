@@ -101,6 +101,10 @@ These are the rules the code follows. Keep to them when adding to it.
 - **Consensus is explicit.** Anything that changes what a block does or costs is consensus:
   encodings, tags, engine settings, fuel costs, hash and key schemes, limits. Changing it means a
   new chain.
+- **Stored shapes change with a migration.** A record kept in a new shape bumps
+  `STORAGE_FORMAT` and adds a `Migration`, up and back, tested both ways and stopped part way (see
+  [Migrations](storage.md#migrations)). What the chain says, its ids, hashes and state roots, never
+  changes this way: that is consensus.
 - **Errors say who is at fault.**
   - A database failure is the node's fault: it stops the import, and never becomes a
     transaction's failure.

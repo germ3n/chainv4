@@ -29,6 +29,9 @@ enum Command {
     /// Shows the storage layout contract code declares, and with --from, checks it keeps an
     /// older version's, as an upgrade or a proxy repointing would.
     Layout(cli::LayoutArgs),
+    /// Which format a database is kept in, and migrating it to another: up, as a node does as it
+    /// starts, or back down to an older chainv4's.
+    Db(cli::DbArgs),
     /// A light client: follows a node's chain from the genesis it trusts alone, checking every
     /// header and justification, and answers only with what it proved.
     #[cfg(feature = "client")]
@@ -143,6 +146,7 @@ fn main() -> std::process::ExitCode {
         Some(Command::Send(args)) => cli::send(*args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
         Some(Command::Layout(args)) => cli::layout(args),
+        Some(Command::Db(args)) => cli::db(args),
         #[cfg(feature = "client")]
         Some(Command::Light(args)) => cli::light(args),
         None => run(cli.node),
@@ -174,7 +178,10 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         Some(path) => cli::genesis::read(path)?,
         None => cli::genesis::dev(args.consensus),
     };
-    let db: Arc<dyn Database> = Arc::new(RocksDb::open(&args.db)?);
+    let rocks = RocksDb::open(&args.db)?;
+    // An older database is moved up to this node's format, after a backup, before anything reads it.
+    cli::db::on_start(&rocks, &args.db)?;
+    let db: Arc<dyn Database> = Arc::new(rocks);
     let network: String = genesis.block().id().to_bytes()[..8]
         .iter()
         .map(|byte| format!("{byte:02x}"))

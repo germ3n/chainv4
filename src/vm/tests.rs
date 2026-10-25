@@ -1594,3 +1594,95 @@ fn the_guestbook_emits_an_event_for_every_signature_and_tip() {
     assert_eq!(tipped.events[0].data, [address(tipper), address(bob), TxCallArgumentType::U256(u256::new(40))]);
     assert_eq!(Accounts::new(&world.state).get(&bob).unwrap().balance, u256::new(40));
 }
+
+#[test]
+fn a_contract_split_across_files_runs_as_one_once_put_together() {
+    let files = [
+        ("lib/checks.lua", include_str!("../../contracts/lua/names/lib/checks.lua")),
+        ("lib/names.lua", include_str!("../../contracts/lua/names/lib/names.lua")),
+    ];
+    let bundle = crate::structs::bundle::bundle("names.lua", include_str!("../../contracts/lua/names/names.lua"), |path| {
+        files.iter().find(|(name, _)| *name == path).map(|(_, text)| text.to_string()).ok_or_else(|| format!("no {path}"))
+    })
+    .unwrap();
+    let mut world = World::new();
+    let registry = world.lua_code(&bundle.source);
+    let (alice, bob) = (Address::Ed25519([0xa; 32]), Address::Ed25519([0xb; 32]));
+    let name = TxCallArgumentType::String("alice".to_string());
+
+    assert_eq!(bundle.files, ["names.lua", "lib/checks.lua", "lib/names.lua"]);
+    assert_eq!(layout_of(&world, registry), "namespace held decimal\nnamespace names address-text\n", "the layout an included file declares");
+
+    let claimed = world.call_as(alice, registry, "claim", std::slice::from_ref(&name));
+
+    assert!(claimed.result.is_ok(), "{:?}", claimed.result);
+    assert_eq!(claimed.events[0].data, [address(alice), name.clone()]);
+    assert_eq!(world.call(registry, "holder", std::slice::from_ref(&name)).result.unwrap(), [address(alice)]);
+    assert!(world.call_as(bob, registry, "claim", std::slice::from_ref(&name)).result.unwrap_err().to_string().contains("alice is taken"));
+    assert!(world.call_as(bob, registry, "hand", &[name.clone(), address(bob)]).result.unwrap_err().to_string().contains("only the holder"));
+
+    world.call_as(alice, registry, "hand", &[name.clone(), address(bob)]).result.unwrap();
+
+    assert_eq!(world.call(registry, "holder", &[name]).result.unwrap(), [address(bob)]);
+    assert_eq!(world.call(registry, "held", &[address(alice)]).result.unwrap(), [TxCallArgumentType::U256(u256::ZERO)]);
+    assert_eq!(world.call(registry, "held", &[address(bob)]).result.unwrap(), [TxCallArgumentType::U256(u256::ONE)]);
+
+    // An error in an included file's code is placed back in it.
+    let refused = world.call_as(bob, registry, "claim", &[TxCallArgumentType::String("No Caps".to_string())]).result.unwrap_err().to_string();
+
+    assert!(bundle.explain(&refused).contains("lib/checks.lua:8:"), "{refused} → {}", bundle.explain(&refused));
+}
+
+/// The walk-through in docs/contract-storage.md: version 1 of the points example, then the upgrades
+/// that are refused, and the one that keeps its layout and migrates.
+#[test]
+fn the_storage_guides_points_example_upgrades_as_the_guide_says() {
+    let v1 = include_str!("../../contracts/lua/points/points_v1.lua");
+    let v2 = include_str!("../../contracts/lua/points/points_v2.lua");
+    let mut world = World::new();
+    let points = world.lua_code(v1);
+    let alice = Address::Ed25519([0xa; 32]);
+    let amount = |value: u64| TxCallArgumentType::U256(u256::new(value.into()));
+
+    assert_eq!(world.call_as(DEPLOYER, points, "award", &[address(alice), amount(100)]).result.unwrap(), [amount(100)]);
+    assert!(world.call_as(alice, points, "award", &[address(alice), amount(1)]).result.unwrap_err().to_string().contains("only the owner awards points"));
+    assert_eq!(layout_of(&world, points), "namespace config\nkey config name text\nkey config owner address-text\nnamespace points decimal\n");
+
+    let refused = |code: String| match world.upgrade(DEPLOYER, points, Code::Lua(code)) {
+        Err(err) => err.to_string(),
+        Ok(_) => panic!("upgraded"),
+    };
+
+    assert!(refused(v2.replace("--@retired config name\n", "")).contains("key name of namespace config is dropped: keep it, or retire it"));
+    assert!(refused(v2.replace("--@namespace points decimal", "--@namespace points number")).contains("namespace points held decimal, and now holds number: retire it and declare another"));
+    assert_eq!(world.call(points, "name", &[]).result.unwrap(), [TxCallArgumentType::String("Points".to_string())], "refused before anything changed");
+
+    // A migrate that writes the retired key fails, and with it the upgrade: in a transaction,
+    // nothing it did is kept. Here, outside one, it is tried on a contract of its own.
+    let other = world.lua_code(v1);
+    let writes_retired = v2.replace("config:set(\"name\", nil)", "config:set(\"name\", \"x\")");
+
+    assert!(
+        world
+            .upgrade(DEPLOYER, other, Code::Lua(writes_retired))
+            .unwrap_err()
+            .to_string()
+            .contains("key name of namespace config is retired: it can be read and cleared, not written")
+    );
+
+    world.upgrade(DEPLOYER, points, Code::Lua(v2.to_string())).unwrap();
+
+    assert_eq!(world.call(points, "title", &[]).result.unwrap(), [TxCallArgumentType::String("Points".to_string())], "migrate moved it");
+    assert_eq!(world.call(points, "points_of", &[address(alice)]).result.unwrap(), [amount(100)], "the map kept its entries");
+    assert!(world.call_as(DEPLOYER, points, "award", &[address(alice), amount(5_000)]).result.unwrap_err().to_string().contains("one award is at most 1000 points"));
+    assert!(world.call(points, "name", &[]).result.is_err(), "version 2 exports no name");
+    assert_eq!(
+        world.state.get(Column::Namespaces, &crate::db::namespace_key(&points, b"config", b"name")).unwrap(),
+        None,
+        "the retired key was cleared"
+    );
+
+    world.call_as(DEPLOYER, points, "give_badge", &[address(alice), TxCallArgumentType::String("early".to_string())]).result.unwrap();
+
+    assert_eq!(world.call(points, "badge_of", &[address(alice)]).result.unwrap(), [TxCallArgumentType::String("early".to_string())]);
+}

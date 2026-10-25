@@ -5,13 +5,18 @@ other pages explain each part in full; this one is the short list to keep in min
 
 ## Running a chain
 
-- **Old `chain.db` files are refused.** Formats change as features land, and nothing migrates
-  them. Delete the database, or point `--db` elsewhere. A node stops with:
+- **Old `chain.db` files are migrated from format 8 on.** A node moves an older database up to its
+  own format as it starts, after copying it aside as `chain.db.format-N`; going back is
+  `chainv4 db migrate --to N`, which asks first (see [Migrations](storage.md#migrations)).
+  Databases from before format 8 are still refused: delete them, or point `--db` elsewhere. A
+  node stops with:
   - `WrongGenesis` on a database written for another genesis. Switching `--consensus`,
     `--genesis` or build features does this, and so did genesis gaining its coin and its
     `token_functions`;
-  - `OldFormat` on a database kept in another storage format (`STORAGE_FORMAT`), such as every
-    database from before the token registry (format 3).
+  - `OldFormat` on a database kept in a storage format (`STORAGE_FORMAT`) no migration reaches,
+    such as every database from before format 8, or one in a newer format;
+  - `Migrating` on one a migration stopped part way through, which `chainv4 db migrate`, or
+    starting the node, finishes.
 - **There are two dev chains, and pow is the default.**
   - `--consensus pow`, mined with `--mine`;
   - `--consensus authority`, produced with `--produce` on exactly one node.
@@ -82,6 +87,11 @@ other pages explain each part in full; this one is the short list to keep in min
   such as the explorer poll.
 - **Read-only calls hold up the API.** `POST /call` runs a contract under the chain's fuel cap on
   the API's one thread, and every other request waits for it.
+- **Lua contracts can be split across files, put together when deploying.** A `--@include
+  "lib.lua"` line is replaced by that file, sharing the includer's scope, before the transaction
+  is signed: the chain holds one source, and the 128 KiB limit is the whole one's. `send` checks
+  it compiles first and names any mistake by file and line. See
+  [Contracts](contracts.md#splitting-a-contract-across-files).
 - **The explorer signs where it runs.** Its key stays in the window, desktop or browser, and only
   signed transactions go to the node. Serve the web app from the node itself with
   `--explorer explorer/dist`, or allow the page's origin with `--cors`. See [Explorer](explorer.md).

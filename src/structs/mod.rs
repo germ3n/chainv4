@@ -3,6 +3,7 @@ pub mod tx;
 pub mod account;
 pub mod address;
 pub mod amount;
+pub mod bundle;
 pub mod code;
 pub mod event;
 pub mod hash;

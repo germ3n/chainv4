@@ -352,6 +352,15 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   keygen --phrase` and the wallet, which holds several wallets, each with its own words and password.
 - [x] **secp256k1, Ethereum's scheme,** behind the `secp256k1` feature: low-s ECDSA over keccak256,
   and Ethereum's 20-byte addresses, in transactions, contracts (33-byte ABI slots) and the wallet.
+- [x] **Lua contracts split across files:** `--@include "path"` lines, put together by `chainv4 send
+  deploy`, `chainv4 layout` and the explorer before signing, with mistakes placed in their files.
+- [x] **Database migrations:** a `Migration` per format from 8 on, up and down in crash-safe chunks;
+  a node migrates up as it starts after a checkpoint backup, and `chainv4 db migrate --to N` goes
+  back down once confirmed.
+- [ ] **No migration exists yet.** The next format change is the first; formats before 8 stay
+  unmigratable.
+- [ ] **Errors a call raises name the bundle's lines.** Only deploys are placed back in their files;
+  `chainv4 send call` could do the same when given the contract's files.
 - [ ] **Ethereum wallets cannot sign for chainv4.** A secp256k1 key signs chainv4's own transaction
   encoding. An EIP-712 typed-data form of a transaction would let MetaMask and hardware wallets sign
   one.
@@ -404,5 +413,6 @@ evm
 
 include method for lua scripts when compiling
 build android/ios apps for wallet/explorer
-some wallet clicking doesnt work'
-add secp256k1 support
+tighten lua sandbox
+make sure contract addresses start with contract:, then limit which keys can call into it potentailly
+add a thing to storage (At least lua), where we dont have to save addresses as text but can just save it directly

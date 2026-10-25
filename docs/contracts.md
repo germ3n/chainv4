@@ -12,7 +12,9 @@ built with those engines.
   optimization level 1, debug level 1, no type information. Contracts are deployed as source,
   never bytecode, because Luau does not check bytecode and loading someone else's can corrupt
   memory. Loading runs the script's top level once. It must return a table of functions, and
-  those are its exports.
+  those are its exports. A contract split across files is put together before it is sent (see
+  [Splitting a contract across files](#splitting-a-contract-across-files)), so the chain holds
+  one source.
 - **A WebAssembly module,** at most 512 KiB:
   - it may only import from `chain`, the host functions below, and must export its memory as
     `memory`;
@@ -121,6 +123,8 @@ address, storage and balance. They:
 If anything fails, nothing changes.
 
 ## Storage namespaces
+
+[Contract storage](contract-storage.md) walks through this section and the next with examples.
 
 A contract's storage has three parts, each with keys of its own: the same key in two of them is
 two entries.
@@ -382,6 +386,54 @@ numbers.
 | `u256` | `u256(value)` or `u256.new`, `u256.zero`, `u256.max`; arithmetic, comparisons and `hex`. |
 | `hash` | `hash.sha256`, `blake3`, `blake2s`, `blake2b`, `xxh3`, `keccak256`, whichever the node has; the result has `hex`, `bytes`, `algorithm`. |
 
+### Splitting a contract across files
+
+A line `--@include "path"` puts another file in where it stands, as C's `#include` does:
+
+```lua
+-- names.lua
+local M = {}
+
+--@include "lib/checks.lua"
+--@include "lib/names.lua"
+
+function M.claim(name)
+    check_name(name)              -- a local of lib/checks.lua
+    give(name, nil, ctx.sender)   -- and one of lib/names.lua
+end
+
+return M
+```
+
+```sh
+chainv4 send deploy --lua contracts/lua/names/names.lua
+# put together names.lua with lib/checks.lua, lib/names.lua: 2505 bytes
+```
+
+- **Put together before sending.** A contract goes on chain as one source, which every node
+  compiles, so no node ever reads your files. `chainv4 send deploy --lua`, `send upgrade --lua`,
+  `chainv4 layout` and the explorer's Send page put the files together first
+  (`chainv4::structs::bundle`), and the chain holds the result, each included file between an
+  `-- included lib/names.lua` line and an `-- end of lib/names.lua` line.
+- **Paths** are relative to the file that includes, with `/` between folders, and `..` may leave
+  the entry's folder.
+- **One scope.** The included text shares the includer's scope: its locals are the includer's
+  from that line on, so include a file above the code that uses it. Luau allows 200 locals in one
+  function, and the top level of every file put together is one function.
+- **Once each.** A second include of a file is left out, with a comment saying so. A file that
+  includes itself, directly or through others, is refused.
+- **Annotations work wherever they are.** A `--@namespace` in an included file declares the
+  contract's layout, and `--@reentrant` sits above its function in whichever file defines it.
+- **Mistakes name their file.** `send` and `layout` compile the bundle before sending, so a
+  syntax error reads `lib/checks.lua:3: …`, and the explorer places a failed deploy's error the
+  same way. An error a call raises later names the line of the source on chain, which the
+  explorer shows.
+- **The 128 KiB limit** is the bundle's.
+- **Whole lines only.** The include is a line of its own, and any such line is replaced, even
+  inside a long string or a `--[[ ]]` comment.
+- **A node refuses** source that still holds a `--@include` line: the files must be put together
+  before it is sent.
+
 **How values cross into Lua:**
 - unsigned integers and amounts arrive as `u256`, so nothing is rounded;
 - signed integers arrive as numbers and must fit one exactly, within 2^53;
@@ -513,6 +565,8 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 | `contracts/examples/upgradable`, `contracts/lua/proxy.lua` | A proxy built on `fallback` and `delegate`, with its owner and implementation in its own space, that checks a new implementation's layout. |
 | `contracts/examples/token`, `contracts/lua/token.lua` | The [token standard](token-standard.md), held to it by one shared test. |
 | `contracts/lua/guestbook.lua` | Events with addresses in them, for the event index and the explorer; value passed on with `accounts.transfer`; and a storage layout of a map and a record. |
+| `contracts/lua/names/` | A contract split across files with `--@include`, its storage layout declared in an included file. |
+| `contracts/lua/points/` | Two versions of one contract: the second keeps the first's layout, adds to it, retires a key and moves its value in `migrate`. [Contract storage](contract-storage.md) walks through them. |
 
 ## What to keep in mind
 
