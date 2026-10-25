@@ -17,3 +17,12 @@ android:
       label: chainv4 explorer
       # No action bar: the app never draws one, but Android would keep room for it all the same.
       theme: "@android:style/Theme.DeviceDefault.NoActionBar"
+      # The file picker, a Java activity ui/build-android.sh compiles into the APK: each line marked
+      # "# picker" goes when it builds without one, as Android refuses an app that declares code it
+      # does not hold. The first activity is the app, which xbuild makes the NativeActivity.
+      has_code: true # picker
+      activities: # picker
+        - {} # picker
+        - name: org.chainv4.ui.Picker # picker
+          exported: false # picker
+          config_changes: "orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|uiMode|density" # picker

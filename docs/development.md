@@ -53,14 +53,25 @@ take by path. Each app keeps its own look; the crate holds what dresses it:
 - **`layout`:** `NARROW`, the 640 points below which an app lays out for a phone, and
   `suit_touch`, which turns off selecting text on a touch screen so a swipe that starts on text
   scrolls.
+- **`files`:** `pick` and `can_pick`, which pick files alike everywhere: rfd's dialog on the
+  desktop and in the browser, and on Android the APK's own Java activity,
+  `ui/android/Picker.java`, which opens Android's document picker. An APK built without it cannot
+  pick files, and `can_pick` says so, so the apps leave their buttons out.
 - **`android`:** `run` starts an app in Android's NativeActivity, with logging, storage in the
   app's data folder, and `OnAndroid` around it, which keeps the content out of the system bars
-  and the keyboard, shows the keyboard for a focused field, and copies to Android's clipboard
-  through JNI.
+  and the keyboard, shows the keyboard for a focused field, copies to and pastes from Android's
+  clipboard through JNI, and starts the picker and takes what it read.
+- **`edit`:** the bar a finger held on a text field brings up, with Paste, Select all, Copy and
+  Cut, and the Paste button over the keyboard. They send the field the events a keyboard would,
+  and keep its selection across the tap that takes its focus. Android only, but its tests run on
+  the host, against a clipboard of their own.
 
 **`ui/build-android.sh APP`** builds either app's APK; `wallet/build-android.sh` and
 `explorer/build-android.sh` call it with their own folder. It reads the package's name from the
-app's `Cargo.toml`, and writes `APP/target/android/PACKAGE-ARCH.apk`.
+app's `Cargo.toml`, and writes `APP/target/android/PACKAGE-ARCH.apk`. With a JDK and Android's
+build-tools it then compiles the picker into the APK and signs it again (see
+[Picking files](wallet.md#picking-files)); `--no-picker` builds without it. CI's Android runs fail
+if an APK comes out without it.
 
 Inside `ui/`: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and clippy for
 `wasm32-unknown-unknown` and `aarch64-linux-android`.

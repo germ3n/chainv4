@@ -1,5 +1,4 @@
-//! What a page needs to know about where it runs: how wide the screen is, and what the platform
-//! can do.
+//! What a page needs to know about where it runs: how wide the screen is, and whether it is touched.
 
 /// Below this width, in points, as on a phone, an app trades its sidebar for a bar on top and tabs
 /// along the bottom, and its tables for stacked rows.
@@ -9,9 +8,6 @@ pub const NARROW: f32 = 640.0;
 pub fn is_narrow(width: f32) -> bool {
     width < NARROW
 }
-
-/// Whether the app can open a file picker: Android has none an egui app can reach yet.
-pub const CAN_PICK_FILES: bool = cfg!(not(target_os = "android"));
 
 /// Suits egui to a touch screen once it finds one: a drag that starts on text scrolls the page,
 /// rather than selecting the text, as egui's labels are selectable by default and selecting would

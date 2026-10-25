@@ -193,8 +193,8 @@ The send page needs a key, as `chainv4 keygen` writes it, or the development key
 
 **Where the key comes from:**
 - **Typed or pasted:** its text, such as `ed25519:0x…`, into the key field, then **Use it**.
-- **A key file:** on the desktop the file picked; in the browser, the file chosen in the page.
-  Android has no file picker the explorer can reach, so there the key is typed.
+- **A key file:** the file picked: from the desktop's dialog, the browser's, or on Android,
+  Android's document picker, when the APK carries it (see [Android](#android)).
 
 **Where the key stays:**
 - **The key itself:** it stays in the window, and is never saved.
@@ -211,8 +211,7 @@ The send page needs a key, as `chainv4 keygen` writes it, or the development key
 **Amounts:** a transfer's amount and a call's value are typed in the coin's units, such as
 `1.5`. Call arguments take the API's argument types, and amounts among them are whole units.
 
-**A Lua contract in several files:** "Open Luau files…" takes them all at once, on the desktop
-and in the browser. The file that
+**A Lua contract in several files:** "Open Luau files…" takes them all at once. The file that
 includes the others goes in the editor, and its `--@include` lines take the rest by path, or by
 file name, as a browser gives no folders. Below the editor it says what goes in, or which include
 it cannot find; a deploy that lands and fails says where, in the files it came from. See
@@ -276,7 +275,9 @@ explorer/build-android.sh --debug --install  # a debug build, put on the device 
 **The app** (`explorer/manifest.yaml`):
 - `org.chainv4.explorer`, for Android 7 (API 24) and up, targeting API 33, so it sits beside the
   wallet;
-- a NativeActivity with no Java of its own, and the INTERNET permission;
+- a NativeActivity, and the INTERNET permission;
+- `org.chainv4.ui.Picker`, the `ui` crate's Java activity for picking files, compiled in when the
+  build finds a JDK and Android's build-tools (see [Picking files](wallet.md#picking-files));
 - `explorer/assets/icon.png` for its icon.
 
 **CI:** `.github/workflows/android.yml` builds its APKs beside the wallet's, keeps them as
@@ -288,6 +289,11 @@ artifacts named `chainv4-explorer-android-ARCH`, and a `v*` tag attaches them to
   a node on another machine listens on `--http 0.0.0.0:8080`.
 - **Copying** goes to Android's clipboard, through the `ui` crate, and Android shows what was
   copied.
+- **Pasting:** hold a finger on a text field for a bar with **Paste**, **Select all**, **Copy**
+  and **Cut**, or tap the **Paste** button over the keyboard: a key, an address or an id copied
+  from anywhere goes straight into the send page or the search box.
+- **Files:** keys, WebAssembly modules and Luau files come from Android's document picker, as on
+  the desktop.
 - **The bars and the keyboard:** the app keeps out from under the status bar, the navigation bar
   and the keyboard, and the keyboard comes up for a focused field.
 
@@ -295,8 +301,6 @@ artifacts named `chainv4-explorer-android-ARCH`, and a `v*` tag attaches them to
 
 - **The API is plain HTTP.** Keep a node's API, and so the explorer's traffic, on a trusted
   network. A phone talking to a node over Wi-Fi is on that network too.
-- **No files on Android.** Keys are typed there, and contracts deployed from the desktop or the
-  browser, or as Luau typed into the page.
 - **Read-only calls run on the node.** Each one runs under the chain's fuel cap on the API's
   thread, holding up the API's other requests while it runs.
 - **Side branches show only what the node kept.** `/forks` lists the side blocks the node

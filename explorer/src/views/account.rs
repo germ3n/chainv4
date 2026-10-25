@@ -371,7 +371,7 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, contract: &str, functions: &[String], state:
                 }
             });
 
-            if ui.small_button("✕").clicked() {
+            if ui.small_button("×").clicked() {
                 remove = Some(index);
             }
 

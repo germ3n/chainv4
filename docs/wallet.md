@@ -99,7 +99,8 @@ off.
 - **New account:** the words' next account, the lowest number the wallet does not hold, with its
   three addresses. A wallet without words makes one random key instead, in the scheme picked.
 - **Open key file / paste a key:** a key file as `chainv4 keygen` writes it, `ed25519:0x…`,
-  `edblake:0x…` or `secp256k1:0x…`. An account brought in has that one key, and one address.
+  `edblake:0x…` or `secp256k1:0x…`, picked or pasted. An account brought in has that one key, and
+  one address, named after the file when no name is typed.
 - **Development key:** the dev chains' well-known key, which holds their genesis coin. Anyone can
   spend from it.
 - **Use, rename, export and remove.** Export asks first, then shows each key's text to copy;
@@ -264,14 +265,19 @@ wallet/build-android.sh --debug --install  # a debug build, put on the device ad
 **What it needs:**
 - Rust's Android targets, which it adds;
 - clang, lld and llvm-ar: `brew install llvm lld`, or `apt install clang lld llvm`. Homebrew keeps
-  LLVM off the PATH, and the script looks there.
+  LLVM off the PATH, and the script looks there;
+- for picking files, a JDK and Android's build-tools, found through `ANDROID_HOME` (or Android
+  Studio's own SDK folder). Without them, or with `--no-picker`, the app is built without
+  **Open key file**, and says so as it builds.
 
 It needs no NDK and no Android SDK: xbuild downloads an Android sysroot and `android.jar` itself,
 and builds the APK without Gradle. `adb` is only for `--install`.
 
 **The app** (`wallet/manifest.yaml`):
 - `org.chainv4.wallet`, for Android 7 (API 24) and up, targeting API 33;
-- a NativeActivity with no Java of its own, and the INTERNET permission;
+- a NativeActivity, and the INTERNET permission;
+- `org.chainv4.ui.Picker`, a small Java activity of the `ui` crate's for picking files (see
+  [Picking files](#picking-files));
 - `wallet/assets/icon.png` for its icon.
 
 Plain-HTTP nodes need nothing more: Android's cleartext rule binds Java's networking, and the
@@ -295,6 +301,17 @@ explorer's, on every push to master and on `workflow_dispatch`, and keeps them a
 signs with the `ANDROID_SIGNING_PEM` secret, holding `signing.pem`'s text, when there is one, and
 with the debug key otherwise. A `v*` tag attaches all four to its release.
 
+### Picking files
+
+Android hands a picked file back to the activity that asked for it, through Java, and a
+NativeActivity drops it. So the APK carries `ui/android/Picker.java`, which the build script
+compiles with `javac` and Android's `d8` after xbuild has built the APK, adds as `classes.dex`,
+and then signs the APK again, with xbuild's own debug key or your release key, so it updates an
+app built without it. The app starts the picker through JNI, the picker opens Android's document
+picker, reads each file picked whole, at most 32 MiB in all, and the app takes what it read once it
+is back. The manifest declares the picker on the lines marked `# picker`, which the script leaves
+out when it builds without one, as Android refuses an app that declares code it does not hold.
+
 **On the phone:**
 - **The node:** `http://10.0.2.2:8080` at first, which is the machine running the emulator, as the
   emulator sees it. On a phone, name the node under Settings, such as `http://192.168.1.20:8080`.
@@ -304,6 +321,11 @@ with the debug key otherwise. A `v*` tag attaches all four to its release.
 - **Storage:** it saves when the app goes to the background, and every 30 seconds.
 - **Copying** goes to Android's clipboard, through its ClipboardManager, which the `ui` crate calls
   over JNI: egui reaches no clipboard there. Android shows what was copied.
+- **Pasting:** hold a finger on a text field for a bar with **Paste** and **Select all**, and
+  **Copy** and **Cut** once some text is selected; a drag across a field's text brings it too.
+  While the keyboard is up, a **Paste** button sits above it whenever the clipboard holds text.
+- **Picking files:** **Open key file** opens Android's own document picker, which shows the
+  phone's files, Downloads and any cloud drives.
 - **Scrolling:** a swipe scrolls the page wherever it starts, text included, as text is not
   selectable on a touch screen.
 
@@ -325,7 +347,5 @@ with the debug key otherwise. A `v*` tag attaches all four to its release.
   line. The guestbook's `Tipped` event, for one, does show.
 - **Only the registry's first page of tokens,** 100, is proven. A token past it does not show.
 - **Unlocking takes a moment.** Argon2id is slow on purpose, and slower in the browser.
-- **No key files on Android yet.** egui reaches no file picker there, so "Open key file" is left
-  out, and a key is imported by typing it.
 - **The API is plain HTTP.** What the wallet sends is signed and public anyway, but keep the node
   on a trusted network all the same.

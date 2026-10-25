@@ -10,10 +10,19 @@ eframe = { version = "0.37.0", default-features = false, features = ["glow"] }
 egui = "0.37.0"
 log = "0.4.34"
 
+# Picking files: a native dialog on the desktop, the browser's in the browser.
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+rfd = "0.17.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rfd = "0.17.2"
+wasm-bindgen-futures = "0.4.58"
+
 # Android runs an app in a NativeActivity: no Java of its own.
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15.1"
-# Copying, through Android's ClipboardManager: egui-winit reaches no clipboard there.
+# Copying and pasting through Android's ClipboardManager, as egui-winit reaches no clipboard there,
+# and picking files through the APK's own Java activity.
 jni = "0.22.4"
 eframe = { version = "0.37.0", default-features = false, features = ["android-native-activity"] }
 winit = { version = "0.30.13", default-features = false, features = ["android-native-activity"] }

@@ -793,6 +793,8 @@ dependencies = [
  "egui",
  "jni",
  "log",
+ "rfd",
+ "wasm-bindgen-futures",
  "winit",
 ]
 
@@ -811,7 +813,6 @@ dependencies = [
  "getrandom 0.4.3",
  "log",
  "qrcode",
- "rfd",
  "serde",
  "serde_json",
  "wasm-bindgen-futures",

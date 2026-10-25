@@ -710,7 +710,6 @@ dependencies = [
  "env_logger",
  "getrandom 0.4.3",
  "log",
- "rfd",
  "serde",
  "serde_json",
  "wasm-bindgen-futures",
@@ -728,6 +727,8 @@ dependencies = [
  "egui",
  "jni",
  "log",
+ "rfd",
+ "wasm-bindgen-futures",
  "winit",
 ]
 

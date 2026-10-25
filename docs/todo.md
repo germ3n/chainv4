@@ -348,10 +348,14 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   for stacked rows. Both apps share the `ui` crate: palettes, densities, widgets and Android glue.
 - [x] **Copying on Android.** egui reaches no clipboard there, so the `ui` crate hands what is
   copied to Android's ClipboardManager over JNI. Addresses copy with a click or a tap in both apps.
-- [ ] **No file picker on Android.** egui reaches none there, so "Open key file" and the explorer's
-  file loading are left out, and keys are typed. The Storage Access Framework would bring them.
-- [ ] **No paste from Android's clipboard.** Copying goes out through JNI, but nothing reads the
-  clipboard back for a long-press paste into a field.
+- [x] **Picking files on Android.** A Java activity of the `ui` crate's, compiled into the APK
+  after xbuild builds it, opens Android's document picker and hands back what it read: key files in
+  both apps, and WebAssembly and Luau files in the explorer.
+- [x] **Pasting on Android.** Holding a text field brings a bar with Paste, Select all, Copy and Cut,
+  and a Paste button sits over the keyboard, reading Android's clipboard through JNI.
+- [ ] **The APK's Java needs the Android SDK's build-tools.** xbuild cannot add a `classes.dex`, so
+  the script repacks and signs again with `d8`, `zipalign` and `apksigner`. An xbuild that took a
+  dex, or a pure Rust dexer and signer, would make the APK build need a JDK alone, or nothing.
 - [ ] **xbuild is pinned to a commit.** It has had no release since 0.2.0; move to one when it
   does. It cannot add a network security config or other resources either.
 - [x] **Seed phrases.** BIP39 words with an optional passphrase; each account derives an Ed25519

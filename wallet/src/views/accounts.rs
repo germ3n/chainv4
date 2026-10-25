@@ -10,12 +10,13 @@ use {
     crate::vault::{Book, Source},
     chainv4::crypto::keypair::{KeyType, Keypair},
     chainv4::structs::u256::u256,
+    chainv4_ui::files::{self, Pick},
     egui::{RichText, Ui},
     std::sync::{Arc, Mutex},
 };
 
-/// A key file picked, by name, once it is read.
-type Picked = Arc<Mutex<Option<(String, Vec<u8>)>>>;
+/// A key file picked, by name, once it is read, or why it could not be.
+type Picked = Arc<Mutex<Option<Result<(String, Vec<u8>), String>>>>;
 
 #[derive(Default)]
 pub struct AccountsState {
@@ -124,9 +125,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
                 add(ctx, state, made);
             }
 
-            // Android has no file picker the wallet can reach yet.
-            #[cfg(not(target_os = "android"))]
-            if theme::quiet(ui, &palette, "Open key file…").clicked() {
+            // On Android, only when the APK carries the picker.
+            if files::can_pick(ui.ctx()) && theme::quiet(ui, &palette, "Open key file…").clicked() {
                 pick(ctx.wake, state.picked.clone());
             }
         });
@@ -427,35 +427,33 @@ fn add(ctx: &mut Ctx, state: &mut AccountsState, made: Result<Holder, String>) {
     state.error = None;
 }
 
-/// Asks for a key file, which arrives later: in the browser, picking one is asynchronous.
-#[cfg(not(target_os = "android"))]
-fn pick(wake: &egui::Context, picked: Picked) {
-    let wake = wake.clone();
-    let finish = move |name: String, bytes: Vec<u8>| {
-        *picked.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((name, bytes));
-        wake.request_repaint();
-    };
+/// Asks for a key file, which arrives later: in the browser and on Android, picking one is
+/// asynchronous.
+fn pick(ctx: &egui::Context, picked: Picked) {
+    files::pick(ctx, Pick::default(), move |files| {
+        let read = match files {
+            Ok(mut files) if !files.is_empty() => {
+                let file = files.swap_remove(0);
 
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(path) = rfd::FileDialog::new().pick_file()
-        && let Ok(bytes) = std::fs::read(&path)
-    {
-        finish(path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned()), bytes);
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_futures::spawn_local(async move {
-        if let Some(file) = rfd::AsyncFileDialog::new().pick_file().await {
-            let bytes = file.read().await;
-            finish(file.file_name(), bytes);
-        }
+                Ok((file.name, file.bytes))
+            }
+            Ok(_) => return,
+            Err(why) => Err(why),
+        };
+        *picked.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read);
     });
 }
 
 fn take_picked(ctx: &mut Ctx, state: &mut AccountsState) {
     let picked = state.picked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
 
-    if let Some((name, bytes)) = picked {
+    if let Some(Err(why)) = picked {
+        state.error = Some(why);
+
+        return;
+    }
+
+    if let Some(Ok((name, bytes))) = picked {
         let read = String::from_utf8(bytes)
             .map_err(|_| "it is not text".to_string())
             .and_then(|text| Keypair::from_key_file(text.trim()))

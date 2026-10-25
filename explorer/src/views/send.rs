@@ -4,7 +4,10 @@
 
 use {
     super::{Ctx, View},
-    chainv4_ui::{layout::CAN_PICK_FILES, widgets},
+    chainv4_ui::{
+        files::{self, Pick},
+        widgets,
+    },
     crate::api::{Ask, Failure},
     crate::format,
     crate::model::{Account, Offer},
@@ -42,12 +45,13 @@ enum Picking {
     Lua,
 }
 
-/// What the person picked, read.
+/// What the person picked, read, or why it could not be.
 enum Picked {
     Key { name: String, bytes: Vec<u8> },
     Wasm { name: String, bytes: Vec<u8> },
     /// A Lua contract's files, by name.
     Lua(Vec<(String, Vec<u8>)>),
+    Failed(String),
 }
 
 /// Where sending stands.
@@ -330,7 +334,7 @@ fn code(ui: &mut Ui, look: super::Look, state: &mut SendState) {
     ui.add_space(4.0);
     widgets::caps(ui, &palette, "Code");
 
-    if CAN_PICK_FILES {
+    if files::can_pick(ui.ctx()) {
         ui.horizontal_wrapped(|ui| {
             if widgets::quiet(ui, &palette, "Load a WebAssembly module…").clicked() {
                 pick(ui.ctx(), state.picked.clone(), Picking::Wasm);
@@ -349,7 +353,7 @@ fn code(ui: &mut Ui, look: super::Look, state: &mut SendState) {
         let mut drop = false;
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{name}, {} bytes", format::thousands(&bytes.len().to_string()))).monospace());
-            drop = ui.small_button("✕").clicked();
+            drop = ui.small_button("×").clicked();
         });
 
         if drop {
@@ -409,7 +413,7 @@ fn key(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
             }
 
             ui.horizontal_wrapped(|ui| {
-                if CAN_PICK_FILES && widgets::quiet(ui, &palette, "Load a key file…").clicked() {
+                if files::can_pick(ui.ctx()) && widgets::quiet(ui, &palette, "Load a key file…").clicked() {
                     pick(ui.ctx(), state.picked.clone(), Picking::Key);
                 }
 
@@ -438,7 +442,7 @@ fn arguments(ui: &mut Ui, palette: &chainv4_ui::Palette, args: &mut Vec<(String,
                     }
                 });
 
-                if ui.small_button("✕").clicked() {
+                if ui.small_button("×").clicked() {
                     remove = Some(index);
                 }
 
@@ -522,7 +526,7 @@ fn included(ui: &mut Ui, state: &mut SendState) {
         for (index, (name, _)) in state.included.iter().enumerate() {
             ui.label(name);
 
-            if ui.small_button("x").clicked() {
+            if ui.small_button("×").clicked() {
                 dropped = Some(index);
             }
         }
@@ -622,62 +626,36 @@ fn encode(signed: &SignedTx) -> String {
 
 /// Opens a file picker, for several files when picking Lua's; what is picked arrives in picked,
 /// read.
-fn pick(wake: &egui::Context, picked: Arc<Mutex<Option<Picked>>>, picking: Picking) {
-    let wake = wake.clone();
-    let finish = move |mut files: Vec<(String, Vec<u8>)>| {
-        if files.is_empty() {
-            return;
-        }
+fn pick(ctx: &egui::Context, picked: Arc<Mutex<Option<Picked>>>, picking: Picking) {
+    let ask = match picking {
+        Picking::Lua => Pick {
+            many: true,
+            kind: Some(("Luau", &["lua", "luau"])),
+        },
+        Picking::Key | Picking::Wasm => Pick::default(),
+    };
 
-        let read = match picking {
-            Picking::Lua => Picked::Lua(files),
-            Picking::Key | Picking::Wasm => {
-                let (name, bytes) = files.swap_remove(0);
+    files::pick(ctx, ask, move |files| {
+        let read = match files {
+            Err(why) => Picked::Failed(why),
+            Ok(files) if files.is_empty() => return,
+            Ok(files) => {
+                let mut files: Vec<(String, Vec<u8>)> = files.into_iter().map(|file| (file.name, file.bytes)).collect();
 
                 match picking {
-                    Picking::Key => Picked::Key { name, bytes },
-                    _ => Picked::Wasm { name, bytes },
+                    Picking::Lua => Picked::Lua(files),
+                    Picking::Key | Picking::Wasm => {
+                        let (name, bytes) = files.swap_remove(0);
+
+                        match picking {
+                            Picking::Key => Picked::Key { name, bytes },
+                            _ => Picked::Wasm { name, bytes },
+                        }
+                    }
                 }
             }
         };
         *picked.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read);
-        wake.request_repaint();
-    };
-
-    // Android has no picker an egui app can reach yet: CAN_PICK_FILES keeps its buttons away.
-    #[cfg(target_os = "android")]
-    drop(finish);
-
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    {
-        let dialog = match picking {
-            Picking::Lua => rfd::FileDialog::new().add_filter("Luau", &["lua", "luau"]),
-            Picking::Key | Picking::Wasm => rfd::FileDialog::new(),
-        };
-        let paths = match picking {
-            Picking::Lua => dialog.pick_files().unwrap_or_default(),
-            Picking::Key | Picking::Wasm => dialog.pick_file().into_iter().collect(),
-        };
-        let files = paths
-            .iter()
-            .filter_map(|path| Some((path.file_name()?.to_string_lossy().into_owned(), std::fs::read(path).ok()?)))
-            .collect();
-        finish(files);
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_futures::spawn_local(async move {
-        let handles = match picking {
-            Picking::Lua => rfd::AsyncFileDialog::new().add_filter("Luau", &["lua", "luau"]).pick_files().await.unwrap_or_default(),
-            Picking::Key | Picking::Wasm => rfd::AsyncFileDialog::new().pick_file().await.into_iter().collect(),
-        };
-        let mut files = Vec::new();
-
-        for handle in handles {
-            files.push((handle.file_name(), handle.read().await));
-        }
-
-        finish(files);
     });
 }
 
@@ -710,6 +688,7 @@ fn take_picked(state: &mut SendState) {
                 Err(why) => state.step = Step::Failed(why),
             }
         }
+        Some(Picked::Failed(why)) => state.step = Step::Failed(why),
         None => {}
     }
 }
