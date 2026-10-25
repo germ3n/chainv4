@@ -51,6 +51,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, block: &str) {
         super::address(ui, ctx, &summary.producer);
         ui.end_row();
 
+        if summary.pruned {
+            super::fact(ui, "body");
+            ui.weak("not kept: this node synced from a snapshot after this block, and holds its header alone");
+            ui.end_row();
+        }
+
         if summary.difficulty != "0" {
             super::fact(ui, "difficulty");
             ui.label(format::thousands(&summary.difficulty));

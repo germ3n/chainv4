@@ -331,3 +331,16 @@ maybe make adjustable?/// come off in a reorg, yet recent enough for peers to se
 pub(super) const PIVOT_DEPTH: u64 = 16;
 /// A chain shorter than this is synced by running its blocks: a snapshot would save nothing.
 pub(super) const MIN_SNAPSHOT_HEIGHT: u64 = 2 * PIVOT_DEPTH;
+
+- A light wallet: build chainv4 wallet, combining keys and send with light-client checks of your balance and receipts.
+
+❯ ohhh light client is wallet right
+
+Close, but not quite. A wallet does two jobs, and the light client only does one of them:
+
+1. Keys and sending: holding a key, signing transactions and submitting them. In chainv4 that's chainv4 keygen and chainv4 send, and the explorer's Send page. The light client holds no keys and sends nothing.
+2. Knowing what's true: your balance, and whether a payment landed and is final. Most wallets just ask a node and trust the answer. The light client is a way to do this part without trusting the node: it checks headers, finality and proofs itself.
+
+So a light client is what a trustless wallet uses for reading, like old SPV Bitcoin wallets or Helios under an Ethereum wallet. The explorer is now the closest thing to a light wallet here: it signs and sends on its Send page, and its account pages show balances the light client proved.
+
+That also matters for what you asked earlier. There's no separate light process an explorer can point at, because each explorer runs its own light client against the node it's connected to.

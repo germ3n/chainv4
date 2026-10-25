@@ -406,6 +406,7 @@ pub(crate) mod tests {
             base_price: "0".to_string(),
             tx_count: 0,
             proof_count: 0,
+            pruned: false,
             main: None,
         }
     }

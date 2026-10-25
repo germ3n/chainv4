@@ -79,11 +79,23 @@ pub struct Summary {
     pub state_root: String,
     pub gas_used: u64,
     pub base_price: String,
+    /// Unknown, so 0, for a pruned block.
+    #[serde(deserialize_with = "count")]
     pub tx_count: usize,
+    #[serde(deserialize_with = "count")]
     pub proof_count: usize,
     /// Whether it is on the main chain, where the API says.
     #[serde(default)]
     pub main: Option<bool>,
+    /// Whether the node keeps its header alone, as one that synced from a snapshot does for the
+    /// blocks before it.
+    #[serde(default)]
+    pub pruned: bool,
+}
+
+/// A count, or 0 where the node does not know it, as for a pruned block.
+fn count<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
+    Ok(Option::<usize>::deserialize(deserializer)?.unwrap_or(0))
 }
 
 /// GET /blocks.
