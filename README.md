@@ -684,6 +684,8 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "â€
 | `GET /proofs/receipts/{id}` | A proof that a transaction's receipt is in its block's `receipts_root`, and the signed transaction in its `tx_root`. |
 | `GET /light` | What a light client starts from: the chain's light parameters and genesis header, encoded. |
 | `GET /headers?from=H&count=N` | Main-chain headers with their seals, encoded. |
+| `GET /light/checkpoint/{block}` | What a light client starts from at a checkpoint rather than genesis; without `{block}`, the node's finalized one. |
+| `GET /light/finality?from=E` | Justifications and light updates, 64 epochs at a time, for light clients to follow finality. |
 | `GET /light/updates/{block}` | Proofs of the voters genesis or a checkpoint fixed, for light clients to follow finality. |
 | `GET /justifications?from=E` | Justifications for main-chain checkpoints, encoded. |
 | `GET /validators` | Every bonded validator, and who votes in the current epoch with what weight: the bonded set under `ffg`, the signers under `authority`; 404 under `depth`. |

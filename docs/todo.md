@@ -254,11 +254,18 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Restored light clients reach older blocks.** `deliver_ancestors` takes the headers below
   the lowest one a client holds, proven by their hash chain, so a receipt in a block older than
   it kept still checks.
-- [ ] **`chainv4 light` still starts from genesis every run.** It could keep its state in a file
-  the way the wallet keeps it in app storage, or start from a finalized checkpoint someone trusts.
+- [x] **Light clients start at a checkpoint.** A finalized checkpoint's block id, given, or a
+  node's own the first time an app meets it, starts a light client there in one request.
+- [ ] **`chainv4 light` still keeps nothing between runs.** It follows from genesis, or from
+  `--checkpoint`, each time; it could keep its state in a file the way the wallet does.
 - [ ] **Snapshots come from one peer at a time,** and a pivot only stays servable for
   `max_reorg_depth` blocks. Asking several peers at once, and frozen snapshots kept by serving
   nodes, would suit large states.
+- [x] **Signing offline.** The wallet installs as an online wallet, an offline signer that makes
+  no requests, or a watch-only sender. Pairing, requests and signed transactions travel as QR
+  codes read off photos, or as text.
+- [x] **Messages too long for one code go as parts,** each photographed in turn and put back
+  together in any order. Animated codes, read by a live camera, would take them in one go.
 - [ ] **The explorer pins genesis on first use.** It should also take a genesis id to trust from
   the person, before it meets a node.
 - [ ] **Proofs are against the tip only.** The node keeps one state tree, so it cannot prove what
@@ -328,6 +335,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   keep it in the data directory so the peer id is stable.
 - [ ] **No bootnode list.** Peers come from `--peer` and mDNS only, and Kademlia warns at startup
   when it has nobody to bootstrap from.
+- [x] **Peers given are dialed again.** A `--peer` with no connection is dialed every 15 seconds,
+  so a node behind NAT finds a restarted server again, and `--no-mdns` keeps a server off its
+  network's multicast. `docker/pow.sh` runs a chain across a VPS and a machine at home.
+- [ ] **Peer ids change every start.** A node makes a new libp2p identity each time, so `--peer`
+  takes addresses alone and nothing can pin a peer by id. A key kept with the database would let
+  a node keep its id.
 - [ ] **No connection or request limits.**
 - [ ] **No NAT traversal** (relay, hole punching, AutoNAT).
 

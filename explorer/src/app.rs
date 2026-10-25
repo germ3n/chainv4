@@ -148,7 +148,13 @@ impl Explorer {
         for reply in self.api.replies() {
             match reply {
                 Reply::Answer { ask, result } => {
-                    if self.light.answered(&ask, &result, &mut self.settings.pinned, &self.settings.node, now, time) {
+                    let trust = crate::light::Trust {
+                        node: &self.settings.node,
+                        pinned: &mut self.settings.pinned,
+                        checkpoints: &self.settings.checkpoints,
+                    };
+
+                    if self.light.answered(&ask, &result, trust, now, time) {
                         continue;
                     }
 
@@ -284,7 +290,7 @@ impl Explorer {
             }
             Ask::Offer(_) | Ask::Submit(_) => {}
             // The light client's own, which it took already.
-            Ask::Light | Ask::Headers { .. } | Ask::LightUpdate(_) | Ask::Justifications(_) | Ask::Proof { .. } => {}
+            Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. } => {}
         }
     }
 

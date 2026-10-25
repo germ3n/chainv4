@@ -6,8 +6,10 @@ use {
     crate::structs::tx::SignedTx,
     crate::structs::vote::SignedVote,
     libp2p::futures::StreamExt,
-    libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent},
-    libp2p::{PeerId, StreamProtocol, SwarmBuilder, gossipsub, identify, kad, mdns, request_response},
+    libp2p::swarm::behaviour::toggle::Toggle,
+    libp2p::swarm::dial_opts::DialOpts,
+    libp2p::swarm::{ConnectionId, NetworkBehaviour, Swarm, SwarmEvent},
+    libp2p::{Multiaddr, PeerId, StreamProtocol, SwarmBuilder, gossipsub, identify, kad, mdns, request_response},
     r#macro::document,
     std::collections::HashMap,
     std::fmt,
@@ -21,12 +23,23 @@ const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/chainv4/kad/1");
 const IDENTIFY_PROTOCOL: &str = "/chainv4/1";
 /// The largest gossip message: a block with plenty of transactions.
 const MAX_GOSSIP: usize = 8 * 1024 * 1024;
+/// How often a peer given with --peer is dialed again while no connection to it stands: after it
+/// restarts, after this node's network comes back, and while it is not up yet.
+const REDIAL_EVERY: Duration = Duration::from_secs(15);
+
+/// A peer given with --peer: its address, and the dial under way to it or the peer it reached. Its
+/// peer id is learned on connecting, as nodes take a new one each start.
+struct Wanted {
+    address: Multiaddr,
+    dialing: Option<ConnectionId>,
+    reached: Option<PeerId>,
+}
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     kad: kad::Behaviour<kad::store::MemoryStore>,
-    mdns: mdns::tokio::Behaviour,
+    mdns: Toggle<mdns::tokio::Behaviour>,
     identify: identify::Behaviour,
     sync: request_response::Behaviour<SyncCodec>,
 }
@@ -112,11 +125,12 @@ struct Net {
     next_id: u64,
     /// What waits for the node, counted in here.
     backlog: Arc<Backlog>,
+    wanted: Vec<Wanted>,
 }
 
 impl Net {
     fn start(config: &NetConfig, backlog: Arc<Backlog>) -> Result<Net, NetError> {
-        let hash = config.hash;
+        let (hash, local) = (config.hash, config.mdns);
         let mut swarm = SwarmBuilder::with_new_identity()
             .with_tokio()
             .with_quic()
@@ -139,7 +153,10 @@ impl Net {
                     kad::Config::new(KAD_PROTOCOL),
                 );
                 kad.set_mode(Some(kad::Mode::Server));
-                let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?;
+                let mdns = match local {
+                    true => Some(mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?),
+                    false => None,
+                };
                 let identify = identify::Behaviour::new(identify::Config::new(
                     IDENTIFY_PROTOCOL.to_string(),
                     key.public(),
@@ -153,7 +170,7 @@ impl Net {
                 Ok(Behaviour {
                     gossipsub,
                     kad,
-                    mdns,
+                    mdns: Toggle::from(mdns),
                     identify,
                     sync,
                 })
@@ -175,11 +192,18 @@ impl Net {
                 .map_err(|err| NetError(format!("cannot listen on {address}: {err:?}")))?;
         }
 
+        let mut wanted = Vec::new();
+
         for address in &config.peers {
             log::info!("[net] dialing {address}");
-            swarm
-                .dial(address.clone())
-                .map_err(|err| NetError(format!("cannot dial {address}: {err}")))?;
+            let dial = DialOpts::unknown_peer_id().address(address.clone()).build();
+            let id = dial.connection_id();
+            swarm.dial(dial).map_err(|err| NetError(format!("cannot dial {address}: {err}")))?;
+            wanted.push(Wanted {
+                address: address.clone(),
+                dialing: Some(id),
+                reached: None,
+            });
         }
 
         Ok(Net {
@@ -190,7 +214,27 @@ impl Net {
             channels: HashMap::new(),
             next_id: 0,
             backlog,
+            wanted,
         })
+    }
+
+    /// Dials each peer given with --peer that no connection stands to, nor a dial under way.
+    fn redial(&mut self) {
+        for wanted in &mut self.wanted {
+            let connected = wanted.reached.is_some_and(|peer| self.swarm.is_connected(&peer));
+
+            if connected || wanted.dialing.is_some() {
+                continue;
+            }
+
+            let dial = DialOpts::unknown_peer_id().address(wanted.address.clone()).build();
+            let id = dial.connection_id();
+
+            match self.swarm.dial(dial) {
+                Ok(()) => wanted.dialing = Some(id),
+                Err(err) => log::debug!("[net] could not dial {} again: {err}", wanted.address),
+            }
+        }
     }
 
     async fn run(
@@ -198,8 +242,12 @@ impl Net {
         mut commands: async_mpsc::UnboundedReceiver<NetCommand>,
         events: mpsc::Sender<NetEvent>,
     ) {
+        let mut redial = tokio::time::interval(REDIAL_EVERY);
+        redial.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
+                _ = redial.tick() => self.redial(),
                 event = self.swarm.select_next_some() => {
                     if !self.on_swarm(event, &events) {
                         return;
@@ -318,10 +366,20 @@ impl Net {
             }
             SwarmEvent::ConnectionEstablished {
                 peer_id,
+                connection_id,
                 endpoint,
                 num_established,
                 ..
-            } if num_established.get() == 1 => {
+            } => {
+                for wanted in self.wanted.iter_mut().filter(|wanted| wanted.dialing == Some(connection_id)) {
+                    log::info!("[net] connected to {peer_id} at {}", wanted.address);
+                    (wanted.dialing, wanted.reached) = (None, Some(peer_id));
+                }
+
+                if num_established.get() != 1 {
+                    return true;
+                }
+
                 let address = endpoint.get_remote_address().clone();
                 log::debug!("[net] connected to {peer_id} at {address}");
 
@@ -338,10 +396,20 @@ impl Net {
 
                 NetEvent::Listening(address)
             }
-            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-                match peer_id {
-                    Some(peer) => log::warn!("[net] could not connect to {peer}: {error}"),
-                    None => log::warn!("[net] could not connect: {error}"),
+            SwarmEvent::OutgoingConnectionError {
+                connection_id,
+                peer_id,
+                error,
+            } => {
+                let wanted = self.wanted.iter_mut().find(|wanted| wanted.dialing == Some(connection_id));
+
+                match (wanted, peer_id) {
+                    (Some(wanted), _) => {
+                        log::warn!("[net] could not reach {}, trying again in {}s: {error}", wanted.address, REDIAL_EVERY.as_secs());
+                        wanted.dialing = None;
+                    }
+                    (None, Some(peer)) => log::warn!("[net] could not connect to {peer}: {error}"),
+                    (None, None) => log::warn!("[net] could not connect: {error}"),
                 }
 
                 return true;
@@ -423,6 +491,7 @@ mod tests {
         NetConfig {
             listen: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
             peers,
+            mdns: true,
             hash: HashType::default_chain(),
             network: network.to_string(),
             backlog,
@@ -441,6 +510,60 @@ mod tests {
                 return found;
             }
         }
+    }
+
+    #[test]
+    #[ignore = "opens real sockets on 127.0.0.1"]
+    fn a_peer_given_is_dialed_again_once_it_comes_back() {
+        use libp2p::multiaddr::Protocol;
+
+        // Without mDNS, which would find the node again on its own: only redialing can.
+        let network = format!("redial-{}", PeerId::random());
+        let alone = |peers: Vec<Multiaddr>| NetConfig {
+            mdns: false,
+            ..config(&network, BacklogLimits::default(), peers)
+        };
+        let first = spawn(alone(Vec::new())).unwrap();
+        let listening = wait_for(&first, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+        // As --peer gives it: no peer id, since a node takes a new one each start.
+        let address: Multiaddr = listening.iter().filter(|part| !matches!(part, Protocol::P2p(_))).collect();
+        let dialer = spawn(alone(vec![address.clone()])).unwrap();
+        let before = wait_for(&dialer, |event| match event {
+            NetEvent::PeerUp { peer, .. } => Some(peer),
+            _ => None,
+        });
+
+        // It stops, and starts again at the same address, as a restarted node with a new id.
+        drop(first);
+        assert_eq!(wait_for(&dialer, |event| match event {
+            NetEvent::PeerDown(peer) => Some(peer),
+            _ => None,
+        }), before);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let again = loop {
+            let mut back = alone(Vec::new());
+            back.listen = vec![address.clone()];
+
+            match spawn(back) {
+                Ok(again) => break again,
+                Err(err) if Instant::now() < deadline => {
+                    log::debug!("the port is not free yet: {err}");
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(err) => panic!("could not listen there again: {err}"),
+            }
+        };
+        let after = wait_for(&dialer, |event| match event {
+            NetEvent::PeerUp { peer, .. } => Some(peer),
+            _ => None,
+        });
+
+        assert_ne!(after, before, "the node that came back, under its new id");
+        drop(again);
     }
 
     #[test]

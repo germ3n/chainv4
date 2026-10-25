@@ -129,7 +129,7 @@ The node never sees libp2p itself.
 | QUIC | The transport. `--listen` picks addresses, `/ip4/0.0.0.0/udp/0/quic-v1` by default; port 0 picks one, and the log shows which. |
 | gossipsub | Blocks, transactions and votes, on topics `/chainv4/{network}/blocks`, `/txs` and `/votes`. |
 | Kademlia | Finding peers, as `/chainv4/kad/1`. |
-| mDNS | Finding peers on the local network. |
+| mDNS | Finding peers on the local network; `--no-mdns` turns it off, as on a server. |
 | identify | Learning peers' addresses, as `/chainv4/1`. |
 | request-response | Sync, as `/chainv4/sync/1`. |
 
@@ -144,6 +144,14 @@ transaction is one message however many peers send it.
 64 MiB.
 
 **Peers** come from `--peer`, mDNS and Kademlia. There is no bootnode list.
+- **`--peer` takes an address alone,** such as `/ip4/203.0.113.7/udp/4001/quic-v1`: a node takes
+  a new peer id each time it starts, so an address with `/p2p/` and an old id would never connect.
+  QUIC learns the id in its handshake.
+- **It is dialed again** every 15 seconds while no connection to it stands: after the peer
+  restarts, after this machine's network drops or it wakes from sleep, and before the peer is up
+  at all. The log says each time it could not be reached.
+- **Names are not looked up.** The node dials `/ip4/` and `/ip6/` addresses, not `/dns4/`: look a
+  name up first, as `docker/pow.sh join` does.
 
 ## The gossip backlog
 

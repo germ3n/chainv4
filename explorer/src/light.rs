@@ -1,17 +1,18 @@
 //! The explorer's light client. It trusts nothing but the genesis it saw the first time it met a
 //! node, follows the chain from the node's headers and justifications, checking every one, and
-//! proves the balances the account page shows, so a node that lies about them is caught.
+//! proves the balances the account page shows, so a node that lies about them is caught. It starts
+//! at a checkpoint pasted in Settings rather than genesis; and the first time it meets a node, at
+//! the node's own finalized one, trusted as far as the genesis it pins then.
 
 use {
     crate::api::{Ask, Failure},
     chainv4::db::{Column, StateProof, address_key},
-    chainv4::light::{Assurance, LightClient, LightParams, LightRequest, LightUpdate},
+    chainv4::light::{Assurance, CheckpointStart, FinalityStep, LightClient, LightParams, LightRequest},
     chainv4::structs::account::Account,
     chainv4::structs::address::Address,
     chainv4::structs::block::SealedHeader,
     chainv4::structs::hash::Hash,
     chainv4::structs::hex::{from_hex, to_hex},
-    chainv4::structs::vote::Justification,
     serde_json::Value,
     std::collections::HashMap,
 };
@@ -29,9 +30,26 @@ pub struct Proven {
     pub assurance: Assurance,
 }
 
+/// What the explorer trusts at a node: the genesis pinned there, and a checkpoint pasted.
+pub struct Trust<'a> {
+    pub node: &'a str,
+    pub pinned: &'a mut HashMap<String, String>,
+    pub checkpoints: &'a HashMap<String, String>,
+}
+
+/// A light client about to start at a checkpoint, from what the node said of its chain.
+struct Starting {
+    params: LightParams,
+    header: SealedHeader,
+    /// The checkpoint pasted; None for the node's own, on first use.
+    checkpoint: Option<Hash>,
+}
+
 #[derive(Default)]
 pub struct Light {
     client: Option<LightClient>,
+    /// Waiting for what starts the client at a checkpoint.
+    starting: Option<Starting>,
     /// What stopped it: a node on another chain than the one trusted, or one that sent something
     /// that does not check.
     pub trouble: Option<String>,
@@ -44,6 +62,12 @@ pub struct Light {
 }
 
 impl Light {
+    /// The lowest header it holds: 0 when it followed from genesis.
+    #[cfg(test)]
+    fn lowest(&self) -> Option<u64> {
+        self.client.as_ref().map(LightClient::lowest)
+    }
+
     /// How far it follows: the tip's height and the height up to which blocks are final.
     pub fn following(&self) -> Option<(u64, u64)> {
         self.client.as_ref().map(|client| (client.tip().height, client.final_height()))
@@ -61,7 +85,10 @@ impl Light {
         }
 
         let Some(client) = &mut self.client else {
-            return Some(Ask::Light);
+            return Some(match &self.starting {
+                Some(starting) => Ask::Checkpoint(starting.checkpoint.map(|block| block.to_string())),
+                None => Ask::Light,
+            });
         };
 
         if client.next().is_none() && time - self.followed >= FOLLOW_EVERY {
@@ -71,8 +98,7 @@ impl Light {
 
         client.next().map(|request| match request {
             LightRequest::Headers { from, count } => Ask::Headers { from, count },
-            LightRequest::Update { block } => Ask::LightUpdate(block.to_string()),
-            LightRequest::Justifications { from } => Ask::Justifications(from),
+            LightRequest::Finality { from } => Ask::Finality(from),
         })
     }
 
@@ -110,8 +136,8 @@ impl Light {
     }
 
     /// Takes an answer to one of its asks. Returns false for an ask that is not its.
-    pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>, pinned: &mut HashMap<String, String>, node: &str, now: u64, time: f64) -> bool {
-        let mine = matches!(ask, Ask::Light | Ask::Headers { .. } | Ask::LightUpdate(_) | Ask::Justifications(_) | Ask::Proof { .. });
+    pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>, trust: Trust, now: u64, time: f64) -> bool {
+        let mine = matches!(ask, Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. });
 
         if !mine {
             return false;
@@ -119,17 +145,14 @@ impl Light {
 
         let value = match (ask, result) {
             (_, Ok(value)) => value,
-            // A block that keeps no update, as one before a snapshot the node synced from.
-            (Ask::LightUpdate(block), Err(failure)) if failure.status == 404 => {
-                let taken = self.with_client(|client| {
-                    let block = id(client, block).ok_or("an update for a block id that does not read")?;
+            // The node's own checkpoint is a shortcut: without one, it follows from genesis.
+            (Ask::Checkpoint(None), Err(failure)) if failure.status != 0 => {
+                self.start_from_genesis();
 
-                    client.take_update(&block, None).map_err(|err| err.to_string())
-                });
-
-                if let Err(why) = taken {
-                    self.trouble = Some(why);
-                }
+                return true;
+            }
+            (Ask::Checkpoint(Some(block)), Err(failure)) if failure.status != 0 => {
+                self.trouble = Some(format!("the node cannot start the light client at checkpoint {block}: {}", failure.message));
 
                 return true;
             }
@@ -140,7 +163,7 @@ impl Light {
             }
         };
 
-        if let Err(why) = self.take(ask, value, pinned, node, now) {
+        if let Err(why) = self.take(ask, value, trust, now) {
             match ask {
                 Ask::Proof { key, .. } => {
                     let address = self.keys.get(key).cloned().unwrap_or_default();
@@ -153,7 +176,19 @@ impl Light {
         true
     }
 
-    fn take(&mut self, ask: &Ask, value: &Value, pinned: &mut HashMap<String, String>, node: &str, now: u64) -> Result<(), String> {
+    /// Starts the client waiting to start at a checkpoint from genesis instead.
+    fn start_from_genesis(&mut self) {
+        if let Some(starting) = self.starting.take() {
+            let genesis = starting.header.id();
+
+            match LightClient::new(starting.params, starting.header, genesis) {
+                Ok(client) => self.client = Some(client),
+                Err(err) => self.trouble = Some(err.to_string()),
+            }
+        }
+    }
+
+    fn take(&mut self, ask: &Ask, value: &Value, trust: Trust, now: u64) -> Result<(), String> {
         match ask {
             Ask::Light => {
                 let params: LightParams = decode(&value["params"])?;
@@ -161,14 +196,49 @@ impl Light {
                 let genesis = header.id().to_string();
 
                 // Trust on first use: the genesis seen the first time this node was met.
-                let trusted = pinned.entry(node.to_string()).or_insert_with(|| genesis.clone()).clone();
+                let first_use = !trust.pinned.contains_key(trust.node);
+                let trusted = trust.pinned.entry(trust.node.to_string()).or_insert_with(|| genesis.clone()).clone();
 
                 if trusted != genesis {
                     return Err(format!("the node is now on chain {genesis}, not {trusted}, which the explorer first saw here"));
                 }
 
-                let trusted = header.id();
-                self.client = Some(LightClient::new(params, header, trusted).map_err(|err| err.to_string())?);
+                let pasted = trust.checkpoints.get(trust.node).and_then(|text| from_hex(text)).and_then(|bytes| Hash::from_bytes(params.hash, &bytes));
+
+                match (pasted, first_use) {
+                    (Some(checkpoint), _) => self.starting = Some(Starting { params, header, checkpoint: Some(checkpoint) }),
+                    (None, true) => self.starting = Some(Starting { params, header, checkpoint: None }),
+                    (None, false) => {
+                        let trusted = header.id();
+                        self.client = Some(LightClient::new(params, header, trusted).map_err(|err| err.to_string())?);
+                    }
+                }
+
+                Ok(())
+            }
+            Ask::Checkpoint(_) => {
+                let starting = self.starting.take().ok_or("a checkpoint nobody asked for")?;
+                let block = value["checkpoint"]["block"]
+                    .as_str()
+                    .and_then(from_hex)
+                    .and_then(|bytes| Hash::from_bytes(starting.params.hash, &bytes))
+                    .ok_or("a checkpoint whose block does not read")?;
+                let start: CheckpointStart = decode(&value["start"])?;
+
+                if starting.checkpoint.is_some_and(|checkpoint| checkpoint != block) {
+                    return Err(format!("the node sent checkpoint {block}, not the one trusted"));
+                }
+
+                let genesis = starting.header.id();
+
+                match LightClient::from_checkpoint(starting.params.clone(), starting.header.clone(), genesis, block, start) {
+                    Ok(client) => self.client = Some(client),
+                    Err(err) if starting.checkpoint.is_some() => return Err(format!("the checkpoint trusted does not check: {err}")),
+                    Err(_) => {
+                        self.starting = Some(starting);
+                        self.start_from_genesis();
+                    }
+                }
 
                 Ok(())
             }
@@ -177,19 +247,10 @@ impl Light {
 
                 self.with_client(|client| client.deliver_headers(*from, headers, now).map(|_| ()).map_err(|err| err.to_string()))
             }
-            Ask::LightUpdate(block) => {
-                let update: LightUpdate = decode(&value["update"])?;
+            Ask::Finality(from) => {
+                let steps: Vec<FinalityStep> = list(&value["steps"])?;
 
-                self.with_client(|client| {
-                    let block = id(client, block).ok_or("an update for a block id that does not read")?;
-
-                    client.take_update(&block, Some(update)).map_err(|err| err.to_string())
-                })
-            }
-            Ask::Justifications(_) => {
-                let justifications: Vec<Justification> = list(&value["justifications"])?;
-
-                self.with_client(|client| client.deliver_justifications(&justifications).map(|_| ()).map_err(|err| err.to_string()))
+                self.with_client(|client| client.deliver_finality(*from, steps).map(|_| ()).map_err(|err| err.to_string()))
             }
             Ask::Proof { key, .. } => {
                 let address = self.keys.get(key).cloned().ok_or("a proof nobody asked for")?;
@@ -254,4 +315,69 @@ where
     T: for<'de> wincode::SchemaRead<'de, wincode::config::DefaultConfig, Dst = T>,
 {
     value.as_array().ok_or("no list")?.iter().map(decode).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::api::{Api, Reply},
+        std::time::{Duration, Instant},
+    };
+
+    /// Drives the light client against the node until it is caught up or stops on trouble, and
+    /// says what it asked.
+    fn follow(light: &mut Light, node: &str, pinned: &mut HashMap<String, String>) -> Vec<Ask> {
+        let mut api = Api::new(node, Ok(chainv4_ui::net::Client::direct()), egui::Context::default());
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut asked = Vec::new();
+
+        while !light.caught_up() && light.trouble.is_none() {
+            assert!(Instant::now() < deadline, "never caught up; asked {asked:?}");
+            let Some(ask) = light.ask(0.0) else {
+                break;
+            };
+            asked.push(ask.clone());
+            api.ask(ask);
+
+            let replies = loop {
+                let replies = api.replies();
+
+                if !replies.is_empty() {
+                    break replies;
+                }
+
+                std::thread::sleep(Duration::from_millis(5));
+            };
+
+            for reply in replies {
+                if let Reply::Answer { ask, result } = reply {
+                    let trust = Trust { node, pinned, checkpoints: &HashMap::new() };
+                    light.answered(&ask, &result, trust, u64::MAX / 2, 0.0);
+                }
+            }
+        }
+
+        asked
+    }
+
+    #[test]
+    #[ignore = "needs a node with voting finality: CHAINV4_NODE=http://127.0.0.1:8080 cargo test -- --ignored"]
+    fn a_node_met_first_starts_the_light_client_at_its_checkpoint_and_one_met_before_at_genesis() {
+        let node = std::env::var("CHAINV4_NODE").expect("CHAINV4_NODE names a node");
+        let mut pinned = HashMap::new();
+        let mut first = Light::default();
+        let asked = follow(&mut first, &node, &mut pinned);
+
+        assert_eq!(asked[..2], [Ask::Light, Ask::Checkpoint(None)]);
+        assert!(first.lowest().is_some_and(|lowest| lowest > 0), "{:?}", first.trouble);
+
+        // The next launch: the genesis pinned, so from it, checking every block.
+        let mut again = Light::default();
+        let asked = follow(&mut again, &node, &mut pinned);
+
+        assert!(!asked.iter().any(|ask| matches!(ask, Ask::Checkpoint(_))));
+        assert_eq!(again.lowest(), Some(0));
+        assert_eq!(again.following().map(|(tip, _)| tip >= first.following().unwrap().0), Some(true));
+    }
 }

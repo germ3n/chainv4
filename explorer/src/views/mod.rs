@@ -100,6 +100,9 @@ pub struct Settings {
     pub decimals: HashMap<String, HashMap<String, u8>>,
     /// The genesis id the light client first saw at each node, which it trusts there from then on.
     pub pinned: HashMap<String, String>,
+    /// A finalized checkpoint's block id to start the light client from at each node, pasted,
+    /// rather than genesis.
+    pub checkpoints: HashMap<String, String>,
     /// The light palette rather than the dark one.
     pub light_theme: bool,
 }

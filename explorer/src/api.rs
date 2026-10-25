@@ -53,10 +53,11 @@ pub enum Ask {
     Light,
     /// Main-chain headers from a height on, encoded.
     Headers { from: u64, count: u32 },
-    /// The light update a block keeps, by its id.
-    LightUpdate(String),
-    /// Justifications from an epoch on, encoded.
-    Justifications(u64),
+    /// Finality from an epoch on, encoded, many epochs to an answer.
+    Finality(u64),
+    /// What the light client starts from at a checkpoint: the one named, or the node's finalized
+    /// one, for a node met for the first time.
+    Checkpoint(Option<String>),
     /// A proof of a chain-state entry, at a block, or at the tip.
     Proof { column: String, key: String, block: Option<String> },
 }
@@ -110,8 +111,9 @@ impl Ask {
             }
             Ask::Light => "/light".to_string(),
             Ask::Headers { from, count } => format!("/headers?from={from}&count={count}"),
-            Ask::LightUpdate(block) => format!("/light/updates/{block}"),
-            Ask::Justifications(from) => format!("/justifications?from={from}"),
+            Ask::Finality(from) => format!("/light/finality?from={from}"),
+            Ask::Checkpoint(Some(block)) => format!("/light/checkpoint/{block}"),
+            Ask::Checkpoint(None) => "/light/checkpoint".to_string(),
             Ask::Proof { column, key, block: Some(block) } => format!("/proofs/{column}/{key}?block={block}"),
             Ask::Proof { column, key, block: None } => format!("/proofs/{column}/{key}"),
             Ask::Call { .. } => "/call".to_string(),

@@ -604,6 +604,23 @@ fn depth_chains_finalize_by_depth() {
     assert_eq!(ok(address, &format!("/txs/{}", id(5)))["final"], false);
     assert_eq!(get(address, "/validators").0, 404);
     assert_eq!(get(address, "/signers").0, 404);
+    assert_eq!(get(address, "/light/finality").0, 404, "nothing votes");
+
+    // Any block is a checkpoint here: the final one, and only it, with nothing to prove voters by.
+    let checkpoint = ok(address, "/light/checkpoint");
+    let start: crate::light::CheckpointStart = wincode::deserialize(&from_hex(checkpoint["start"].as_str().unwrap()).unwrap()).unwrap();
+
+    assert_eq!(checkpoint["checkpoint"]["height"], 3);
+    assert_eq!((start.headers.len(), start.updates.len()), (1, 0));
+
+    let light = ok(address, "/light");
+    let decode = |value: &Value| from_hex(value.as_str().unwrap()).unwrap();
+    let params: crate::light::LightParams = wincode::deserialize(&decode(&light["params"])).unwrap();
+    let genesis: crate::structs::block::SealedHeader = wincode::deserialize(&decode(&light["header"])).unwrap();
+    let block = Hash::from_bytes(HashType::default_chain(), &decode(&checkpoint["checkpoint"]["block"])).unwrap();
+    let client = crate::light::LightClient::from_checkpoint(params, genesis.clone(), genesis.id(), block, start).unwrap();
+
+    assert_eq!((client.lowest(), client.tip().height), (3, 3), "it starts there, and follows on");
 }
 
 #[cfg(feature = "finality-ffg")]
@@ -690,6 +707,77 @@ mod ffg {
         assert_eq!(finality["justified"]["block"], fixture.chain.justified().unwrap().block.to_string());
         assert_eq!(finality["finalized"]["epoch"], 1);
         assert_eq!(finality["finalized"]["height"], 8);
+    }
+
+    #[test]
+    fn light_finality_comes_an_epoch_at_a_time_up_to_the_last_justified() {
+        use crate::light::{FinalityStep, MAX_FINALITY_STEPS};
+
+        let fixture = serve_finalized();
+        let steps = |path: &str| -> Vec<FinalityStep> {
+            ok(fixture.address, path)["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|step| wincode::deserialize(&from_hex(step.as_str().unwrap()).unwrap()).unwrap())
+                .collect()
+        };
+        let all = steps("/light/finality");
+        let checkpoint = |epoch: u64| fixture.chain.block_at(epoch * 8).unwrap().unwrap().id();
+
+        // Genesis, with its update and no justification, then epochs 1 and 2: nothing past the
+        // last justified.
+        assert_eq!(all.len(), 3);
+        assert!(all[0].justification.is_none() && all[0].update.as_ref().is_some_and(|update| update.block == fixture.chain.genesis()));
+
+        for epoch in [1, 2] {
+            let justification = all[epoch as usize].justification.as_ref().unwrap();
+
+            assert_eq!((justification.target.epoch, justification.target.block), (epoch, checkpoint(epoch)));
+            assert_eq!(all[epoch as usize].update.as_ref().unwrap().block, checkpoint(epoch));
+        }
+
+        assert_eq!(steps("/light/finality?from=2"), all[2..]);
+        assert_eq!(steps("/light/finality?from=1&count=1"), all[1..2]);
+        assert_eq!(steps("/light/finality?from=3"), Vec::new());
+        assert_eq!(steps(&format!("/light/finality?count={}", MAX_FINALITY_STEPS * 10)), all, "asking for more than there is");
+    }
+
+    #[test]
+    fn a_light_client_starts_at_the_nodes_final_checkpoint_or_one_named() {
+        use crate::light::{CheckpointStart, LightClient, LightParams};
+        use crate::structs::block::SealedHeader;
+
+        let fixture = serve_finalized();
+        let decode = |value: &Value| from_hex(value.as_str().unwrap()).unwrap();
+        let start = ok(fixture.address, "/light");
+        let params: LightParams = wincode::deserialize(&decode(&start["params"])).unwrap();
+        let genesis: SealedHeader = wincode::deserialize(&decode(&start["header"])).unwrap();
+        let finalized = fixture.chain.finalized().unwrap();
+
+        // The node's own: its finalized checkpoint, epoch 1 at height 8.
+        let own = ok(fixture.address, "/light/checkpoint");
+        let block = Hash::from_bytes(HashType::default_chain(), &decode(&own["checkpoint"]["block"])).unwrap();
+        let sent: CheckpointStart = wincode::deserialize(&decode(&own["start"])).unwrap();
+
+        assert_eq!((own["checkpoint"]["epoch"].as_u64(), own["checkpoint"]["height"].as_u64(), block), (Some(1), Some(8), finalized.block));
+
+        let client = LightClient::from_checkpoint(params.clone(), genesis.clone(), fixture.chain.genesis(), block, sent).unwrap();
+
+        assert_eq!(client.finalized(), finalized);
+
+        // One named: the justified checkpoint at 16, the same as the node's own would be later.
+        let justified = fixture.chain.justified().unwrap();
+        let named = ok(fixture.address, &format!("/light/checkpoint/{}", justified.block));
+        let sent: CheckpointStart = wincode::deserialize(&decode(&named["start"])).unwrap();
+
+        assert_eq!(named["checkpoint"]["height"], 16);
+        assert!(LightClient::from_checkpoint(params, genesis, fixture.chain.genesis(), justified.block, sent).is_ok());
+
+        let off_epoch = fixture.chain.block_at(9).unwrap().unwrap().id();
+
+        assert_eq!(get(fixture.address, &format!("/light/checkpoint/{off_epoch}")).0, 400, "it opens no epoch");
+        assert_eq!(get(fixture.address, &format!("/light/checkpoint/0x{}", "00".repeat(32))).0, 404);
     }
 
     #[test]
@@ -1405,9 +1493,8 @@ fn a_light_client_follows_the_chain_from_the_api_alone() {
 
 /// A light client that trusts this genesis, caught up with the node behind the API.
 fn followed(address: SocketAddr, genesis: Hash) -> crate::light::LightClient {
-    use crate::light::{LightClient, LightParams, LightRequest, LightUpdate};
+    use crate::light::{FinalityStep, LightClient, LightParams, LightRequest};
     use crate::structs::block::SealedHeader;
-    use crate::structs::vote::Justification;
 
     let decode = |value: &Value| from_hex(value.as_str().unwrap()).unwrap();
     let start = ok(address, "/light");
@@ -1422,15 +1509,10 @@ fn followed(address: SocketAddr, genesis: Hash) -> crate::light::LightClient {
                 let headers: Vec<SealedHeader> = answer["headers"].as_array().unwrap().iter().map(|header| wincode::deserialize(&decode(header)).unwrap()).collect();
                 client.deliver_headers(from, headers, u64::MAX / 2).unwrap();
             }
-            LightRequest::Update { block } => {
-                let answer = ok(address, &format!("/light/updates/{block}"));
-                let update: LightUpdate = wincode::deserialize(&decode(&answer["update"])).unwrap();
-                client.take_update(&block, Some(update)).unwrap();
-            }
-            LightRequest::Justifications { from } => {
-                let answer = ok(address, &format!("/justifications?from={from}"));
-                let found: Vec<Justification> = answer["justifications"].as_array().unwrap().iter().map(|one| wincode::deserialize(&decode(one)).unwrap()).collect();
-                client.deliver_justifications(&found).unwrap();
+            LightRequest::Finality { from } => {
+                let answer = ok(address, &format!("/light/finality?from={from}"));
+                let steps: Vec<FinalityStep> = answer["steps"].as_array().unwrap().iter().map(|step| wincode::deserialize(&decode(step)).unwrap()).collect();
+                client.deliver_finality(from, steps).unwrap();
             }
         }
     }

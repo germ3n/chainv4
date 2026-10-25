@@ -26,6 +26,37 @@ the genesis block's `proof_root` is the hash of its `light_params()`. So a clien
 genesis id checks that the genesis header hashes to it and that the parameters hash to its
 `proof_root`, then trusts both. A node cannot give it other parameters for the same id.
 
+## Starting at a checkpoint
+
+A client need not follow from genesis. Given a finalized checkpoint's block id it trusts, as it
+trusts the genesis id, it starts there, one request away (`LightClient::from_checkpoint`), then
+follows on and checks everything from there as before:
+- **What the node sends** (`GET /light/checkpoint/{block}`): the checkpoint's header and those
+  below it back to the checkpoint `activation_delay` epochs before, genesis for the first few,
+  with each of those checkpoints' light updates. A `CheckpointStart`.
+- **What the client checks:** that the headers link up by their hashes to the block id it trusts,
+  so it trusts every one of them, and each update against its header's state root, as
+  `take_update` does. The updates name the voters of the epochs after the checkpoint, so the next
+  justifications check as they would for a client that followed from genesis.
+- **What it refuses:** headers that end at another block, have a gap, or start too late to prove
+  the voters (`WrongCheckpoint`), a forged update (`BadProof`), and under voting finality a block
+  that opens no epoch. Under depth finality, or none, any block is a checkpoint, and it needs that
+  header alone.
+- **What it never does:** go below the checkpoint. It is justified and finalized for the client,
+  as genesis is for one that starts there. It still takes older headers on demand, proven by their
+  hash chain, for receipts below it.
+
+`checkpoint_start(finality, height)` says where a start begins, for nodes and clients alike.
+
+**Where the id comes from:** someone you trust, or the explorer's Finality page and `GET /status`
+of a node you trust (`finality.finalized.block`). The wallet and the explorer also take a node's
+own finalized checkpoint (`GET /light/checkpoint`) the first time they meet it, when they pin its
+genesis on first use too, as their trust in that node is the same then; never once a genesis was
+given by hand.
+
+On the demo chain at 7,900 blocks, `chainv4 light --checkpoint` takes 6 requests where following
+from genesis takes 26.
+
 ## Following the chain
 
 **Headers.** It fetches the node's main-chain headers with their seals (`GET /headers`) from
@@ -42,8 +73,9 @@ finds where they split. It follows the new branch only if it holds more work, an
 justified checkpoint (`ConflictsWithFinality`).
 
 **Finality,** under FFG or authority finality:
-- **Justifications** come from the node (`GET /justifications`). The client checks each as a node
-  does:
+- **Justifications** come from the node, with the light updates, many epochs to a request
+  (`GET /light/finality`, see [Asking in batches](#asking-in-batches)). The client checks each
+  as a node does:
   - its target and source are checkpoints on the client's chain, and its source is justified;
   - the votes are sorted, each one for that link, and each signature checks;
   - they come from the target epoch's voters, and their weight adds up to enough: two thirds of
@@ -57,7 +89,8 @@ justified checkpoint (`ConflictsWithFinality`).
   by genesis for the first few.
   - **Light updates:** when a node runs genesis or a checkpoint, it records one (`LightUpdate`, in
     the `Light` column): proofs of the voters that block fixed, against its state root. It serves
-    it at `GET /light/updates/{block}`.
+    it with the justifications at `GET /light/finality`, and alone at
+    `GET /light/updates/{block}`.
   - **Taking one:** the client takes a block's update once it trusts the block's state, that is,
     once the block is at or below the latest checkpoint it saw justified. So trust runs forward
     from genesis:
@@ -66,6 +99,20 @@ justified checkpoint (`ConflictsWithFinality`).
     3. then its update, with the voters of epoch 1 + `activation_delay`;
     4. and so on.
 - **Depth finality** has no votes: a block is final once `depth` blocks are on top of it.
+
+### Asking in batches
+
+Trust runs forward an epoch at a time: a justification makes its checkpoint's update trusted, and
+the update names the voters of the justifications `activation_delay` epochs on. Asked one by one,
+that was a request per update and one per stretch of justifications: 1,121 requests to follow
+the demo chain's 6,400 blocks, slow from a phone, where each one takes a round trip.
+
+So `LightClient::next` asks for `LightRequest::Finality { from }`, and the node sends 64 epochs
+of both, in order (`FinalityStep`). `deliver_finality` checks each epoch's justification, then its
+update, exactly as `deliver_justifications` and `take_update` do one at a time, and stops without
+an error where the node justified no further, at one past the headers, or at voters it cannot
+know yet. The same chain takes 23 requests: 8 for headers and 14 for finality. A forged update or
+justification is refused as before.
 
 ## Checking values
 
@@ -126,6 +173,12 @@ chainv4 light entry tokens 0x…            # any chain-state entry, by column a
 
 `--node` names the node, which it does not trust. Without `--genesis` or `--genesis-id`, it
 trusts the development chain `--consensus` names, `pow` by default, as a node does.
+`--checkpoint 0x…` starts at a finalized checkpoint you trust rather than at genesis:
+
+```sh
+chainv4 light --genesis genesis.json --checkpoint 0xee85… status
+# followed 16 headers from the checkpoint at 7904 to 7920 0x2de3…, each checked by authority
+```
 
 `history` lists from the node's address index, and proves each transaction and its receipt before
 it prints them: the node only says where to look.
@@ -134,7 +187,8 @@ it prints them: the node only says where to look.
 
 The [wallet](wallet.md) is built on it: it follows the chain from the genesis it pinned, proves
 every balance, token and transaction it shows, and saves the client between runs, so it resumes
-where it was.
+where it was. It starts at a checkpoint pasted in Settings, and the first time it meets a node
+with no genesis given, at the node's own finalized checkpoint.
 
 ## In the explorer
 

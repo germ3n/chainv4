@@ -4,12 +4,15 @@
 mod accounts;
 mod activity;
 mod overview;
+mod pair;
 mod receive;
+pub mod scan;
 pub mod send;
 mod settings;
+mod sign;
 
 use {
-    crate::app::{Coin, Settings},
+    crate::app::{Coin, Role, Settings},
     crate::chain::Chain,
     crate::format,
     crate::keys::{self, Holder},
@@ -30,18 +33,37 @@ pub enum Page {
     Activity,
     Accounts,
     Settings,
+    /// An offline signer's: a request to sign, read off the sender's screen.
+    Sign,
+    /// An offline signer's: an account's public keys, for a sender to watch.
+    Pair,
 }
 
-impl Page {
-    /// The pages the sidebar leads to, in its order.
-    pub const NAV: [(Page, &'static str); 6] = [
-        (Page::Overview, "Overview"),
-        (Page::Send, "Send"),
-        (Page::Receive, "Receive"),
-        (Page::Activity, "Activity"),
-        (Page::Accounts, "Accounts"),
-        (Page::Settings, "Settings"),
-    ];
+/// The pages the sidebar leads to, in its order. An offline signer follows no chain, so it has
+/// nothing to show of one: its pages are for signing.
+pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
+    match role {
+        Role::Online | Role::Sender => &[
+            (Page::Overview, "Overview"),
+            (Page::Send, "Send"),
+            (Page::Receive, "Receive"),
+            (Page::Activity, "Activity"),
+            (Page::Accounts, "Accounts"),
+            (Page::Settings, "Settings"),
+        ],
+        Role::Signer => &[
+            (Page::Sign, "Sign"),
+            (Page::Pair, "Pair"),
+            (Page::Receive, "Receive"),
+            (Page::Accounts, "Accounts"),
+            (Page::Settings, "Settings"),
+        ],
+    }
+}
+
+/// The page a wallet opens on.
+pub fn home(role: Role) -> Page {
+    nav(role)[0].0
 }
 
 /// What a page works with.
@@ -123,12 +145,18 @@ pub struct States {
     receive: receive::ReceiveState,
     accounts: accounts::AccountsState,
     settings: settings::SettingsState,
+    sign: sign::SignState,
 }
 
 /// Draws the page.
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
     if ctx.holders.is_empty() && !matches!(*ctx.page, Page::Accounts | Page::Settings) {
         *ctx.page = Page::Accounts;
+    }
+
+    // A page this install's role has none of, as one left from before the role changed.
+    if !nav(ctx.settings.role()).iter().any(|(page, _)| page == ctx.page) {
+        *ctx.page = home(ctx.settings.role());
     }
 
     // Words and keys shown go out of sight once their page does.
@@ -147,6 +175,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Activity => activity::show(ui, ctx),
         Page::Accounts => accounts::show(ui, ctx, &mut states.accounts),
         Page::Settings => settings::show(ui, ctx, &mut states.settings),
+        Page::Sign => sign::show(ui, ctx, &mut states.sign),
+        Page::Pair => pair::show(ui, ctx),
     }
 }
 
@@ -241,5 +271,45 @@ pub fn waiting(ui: &mut Ui, palette: &Palette, text: &str) {
     ui.horizontal(|ui| {
         ui.spinner();
         ui.label(RichText::new(text).color(palette.muted));
+    });
+}
+
+/// A message for the other device: its QR code, as wide as there is room for up to what a camera
+/// reads comfortably off a screen, or its parts, one at a time, for one too long for a code; and
+/// its whole text to copy, for a file or where there is no camera.
+pub fn code(ui: &mut Ui, palette: &Palette, text: &str) {
+    let codes = crate::airgap::codes(text);
+    let id = egui::Id::unique(("airgap part shown", text));
+    let shown = ui.data(|data| data.get_temp::<usize>(id)).unwrap_or(0).min(codes.len() - 1);
+    let side = ui.available_width().clamp(200.0, 420.0);
+
+    if codes.len() > 1 {
+        theme::caps(ui, palette, &format!("Part {} of {}", shown + 1, codes.len()));
+        ui.label(RichText::new("Too long for one code: read each part, in any order. The other device says which it still needs.").small().color(palette.muted));
+        ui.add_space(6.0);
+    }
+
+    ui.vertical_centered(|ui| receive::qr(ui, &codes[shown], side));
+
+    if codes.len() > 1 {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.add_enabled(shown > 0, egui::Button::new("Back")).clicked() {
+                ui.data_mut(|data| data.insert_temp(id, shown - 1));
+            }
+
+            if ui.add_enabled(shown + 1 < codes.len(), egui::Button::new("Next part")).clicked() {
+                ui.data_mut(|data| data.insert_temp(id, shown + 1));
+            }
+        });
+    }
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if theme::quiet(ui, palette, "Copy as text").on_hover_text("For a file, or where there is no camera").clicked() {
+            ui.ctx().copy_text(text.to_string());
+        }
+
+        ui.label(RichText::new(format!("{} characters", text.len())).small().color(palette.muted));
     });
 }

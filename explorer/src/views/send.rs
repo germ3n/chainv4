@@ -668,6 +668,7 @@ fn pick(ctx: &egui::Context, picked: Arc<Mutex<Option<Picked>>>, picking: Pickin
         Picking::Lua => Pick {
             many: true,
             kind: Some(("Luau", &["lua", "luau"])),
+            ..Pick::default()
         },
         Picking::Key | Picking::Wasm => Pick::default(),
     };

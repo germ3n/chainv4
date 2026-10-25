@@ -121,6 +121,18 @@ other pages explain each part in full; this one is the short list to keep in min
   density and type machinery, the widgets and the Android glue; each app picks its own colors,
   fonts and density. A change to a shared widget shows in both. See
   [The ui crate](development.md#the-ui-crate).
+- **`--peer` is an address, dialed until it answers.** Nodes take a new peer id every start, so
+  give `/ip4/…/udp/4001/quic-v1` with no `/p2p/`, and a name looked up first: the node dials no
+  `/dns4/`. A peer with no connection is dialed again every 15 seconds. See
+  [Docker](docker.md#a-proof-of-work-chain-across-machines) for a chain across a VPS and home.
+- **A light client trusts a checkpoint as it trusts a genesis.** One pasted, or `--checkpoint`,
+  starts it there without checking what came before; the apps take a node's own only the first
+  time they meet it, with no genesis given. Nodes still sync from genesis or `--snapshot`. See
+  [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint).
+- **An offline signer has no network client at all.** The wallet's role is picked once per
+  install. A signer's requests fail before they start, and it polls nothing, nor does a new install
+  before it picks its role. Transactions travel as QR codes: `CV4:1:` and base45. See
+  [Signing offline](wallet.md#signing-offline).
 - **The apps' proxy fails closed.** A proxy set under Settings in the wallet or the explorer
   carries that app's every request, on the desktop and Android, and while it is down nothing goes
   out. `HTTP_PROXY` and `ALL_PROXY` apply only while none is set, and `NO_PROXY` never exempts a

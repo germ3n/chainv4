@@ -1062,6 +1062,11 @@ mod voting {
         assert!(chain.unpaid_proofs().unwrap().is_empty());
     }
 
+    /// The finality a node sends a light client from an epoch on, as GET /light/finality does.
+    fn finality_from(chain: &Chain, from: u64) -> Vec<crate::light::FinalityStep> {
+        crate::chain::stored_light_finality(&*chain.db, INTERVAL, from, crate::light::MAX_FINALITY_STEPS, chain.tip().height).unwrap()
+    }
+
     /// What a node serves a light client, read from a chain's database.
     fn serve(chain: &Chain, client: &mut crate::light::LightClient) {
         use crate::light::LightRequest;
@@ -1072,11 +1077,170 @@ mod voting {
                     let headers = (from..from + u64::from(count)).map_while(|height| stored_header_at(&*chain.db, height).unwrap()).collect();
                     client.deliver_headers(from, headers, LATER).unwrap();
                 }
-                LightRequest::Update { block } => client.take_update(&block, stored_light_update(&*chain.db, &block).unwrap()).unwrap(),
-                LightRequest::Justifications { from } => {
-                    client.deliver_justifications(&chain.justifications_from(from, 64).unwrap()).unwrap();
-                }
+                LightRequest::Finality { from } => client.deliver_finality(from, finality_from(chain, from)).map(|_| ()).unwrap(),
             }
+        }
+    }
+
+    /// A light client of the chain, holding every header the chain has and nothing else.
+    fn with_headers(chain: &Chain, finality: &FinalityConfig) -> crate::light::LightClient {
+        use crate::light::{LightClient, LightRequest};
+
+        let params = genesis_with(Some(finality.clone())).light_params();
+        let genesis = stored_header_at(&*chain.db, 0).unwrap().unwrap();
+        let mut client = LightClient::new(params, genesis, chain.genesis()).unwrap();
+
+        while let Some(LightRequest::Headers { from, count }) = client.next() {
+            let headers = (from..from + u64::from(count)).map_while(|height| stored_header_at(&*chain.db, height).unwrap()).collect();
+            client.deliver_headers(from, headers, LATER).unwrap();
+        }
+
+        client
+    }
+
+    /// What GET /light/checkpoint sends for the main-chain checkpoint at this height.
+    fn start_at(chain: &Chain, finality: &FinalityConfig, height: u64) -> crate::light::CheckpointStart {
+        let params = genesis_with(Some(finality.clone())).light_params();
+        let (_, from) = crate::light::checkpoint_start(params.finality, height).unwrap();
+        let headers: Vec<_> = (from..=height).map(|at| stored_header_at(&*chain.db, at).unwrap().unwrap()).collect();
+        let updates = headers.iter().step_by(INTERVAL as usize).map(|header| stored_light_update(&*chain.db, &header.id()).unwrap()).collect();
+
+        crate::light::CheckpointStart { headers, updates }
+    }
+
+    #[test]
+    fn a_light_client_starts_at_a_checkpoint_it_trusts_and_follows_on_from_there() {
+        use crate::light::LightClient;
+
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            finalize_through(&mut chain, 12);
+            let params = genesis_with(Some(finality.clone())).light_params();
+            let genesis = stored_header_at(&*chain.db, 0).unwrap().unwrap();
+            let height = 8 * INTERVAL;
+            let checkpoint = stored_header_at(&*chain.db, height).unwrap().unwrap().id();
+            let start = start_at(&chain, &finality, height);
+            let mut client = LightClient::from_checkpoint(params, genesis, chain.genesis(), checkpoint, start.clone()).unwrap();
+
+            assert_eq!(client.lowest(), start.headers[0].header.height, "only the headers its voters' updates need");
+            assert!(client.lowest() > 0, "{}: none from genesis", finality.name());
+            assert_eq!((client.justified().epoch, client.finalized().block), (8, checkpoint));
+
+            // From there it follows as any client: headers, then finality, to where the chain is.
+            serve(&chain, &mut client);
+
+            assert_eq!(client.tip().id(), chain.tip().id());
+            assert_eq!(Some(client.justified()), chain.justified());
+            assert_eq!(Some(client.finalized()), chain.finalized());
+
+            // And it keeps and restores as one from genesis does.
+            let restored = LightClient::restore(client.save(), chain.genesis()).unwrap();
+
+            assert_eq!(restored.justified(), client.justified());
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_start_that_does_not_lead_to_the_checkpoint_trusted_is_refused() {
+        use crate::light::{LightClient, LightError};
+
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            finalize_through(&mut chain, 8);
+            let params = genesis_with(Some(finality.clone())).light_params();
+            let genesis = stored_header_at(&*chain.db, 0).unwrap().unwrap();
+            let height = 6 * INTERVAL;
+            let id = |height: u64| stored_header_at(&*chain.db, height).unwrap().unwrap().id();
+            let start = start_at(&chain, &finality, height);
+            let from = |checkpoint, start| LightClient::from_checkpoint(params.clone(), genesis.clone(), chain.genesis(), checkpoint, start).err();
+
+            assert_eq!(from(id(height - INTERVAL), start.clone()), Some(LightError::WrongCheckpoint), "{}: another block trusted", finality.name());
+
+            let mut late = start.clone();
+            late.headers.drain(..INTERVAL as usize);
+            late.updates.remove(0);
+
+            assert_eq!(from(id(height), late), Some(LightError::WrongCheckpoint), "too late to prove the voters");
+
+            let mut gap = start.clone();
+            gap.headers.remove(2);
+
+            assert_eq!(from(id(height), gap), Some(LightError::WrongCheckpoint), "a header missing");
+
+            let mut forged = start.clone();
+            forged.updates[0].as_mut().unwrap().voters[0].value.push(0);
+
+            assert_eq!(from(id(height), forged), Some(LightError::BadProof));
+
+            let mut past = start.clone();
+            past.headers.push(stored_header_at(&*chain.db, height + 1).unwrap().unwrap());
+
+            assert_eq!(from(id(height + 1), past), Some(LightError::WrongCheckpoint), "a block that opens no epoch");
+            assert_eq!(from(id(height), start), None, "and the one sent holds");
+        }
+    }
+
+    #[test]
+    fn finality_comes_many_epochs_to_a_request() {
+        use crate::light::{LightRequest, MAX_FINALITY_STEPS};
+
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            let last = 2 * MAX_FINALITY_STEPS + 5;
+            finalize_through(&mut chain, last);
+            let mut client = with_headers(&chain, &finality);
+            let mut asked = 0;
+
+            while let Some(request) = client.next() {
+                let LightRequest::Finality { from } = request else {
+                    panic!("it holds every header already");
+                };
+
+                asked += 1;
+                client.deliver_finality(from, finality_from(&chain, from)).unwrap();
+            }
+
+            // Genesis and 133 epochs in three answers, where asking for each update on its own
+            // took a request an epoch, and more for the justifications between them.
+            assert_eq!(asked, (last + 1).div_ceil(MAX_FINALITY_STEPS), "{}", finality.name());
+            assert_eq!(Some(client.justified()), chain.justified());
+            assert_eq!(Some(client.finalized()), chain.finalized());
+        }
+    }
+
+    #[test]
+    fn finality_out_of_place_or_tampered_with_is_refused() {
+        use crate::light::LightError;
+
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            finalize_through(&mut chain, 4);
+            let steps = finality_from(&chain, 0);
+
+            // Each step is the epoch it says: these are epoch 1 on, sent as from 2 on.
+            let mut client = with_headers(&chain, &finality);
+            client.deliver_finality(0, steps[..1].to_vec()).unwrap();
+
+            assert_eq!(client.deliver_finality(2, steps[1..].to_vec()), Err(LightError::Misplaced));
+
+            // Voters that are not what genesis kept.
+            let mut forged = steps.clone();
+            forged[0].update.as_mut().unwrap().voters[0].value.push(0);
+
+            assert_eq!(with_headers(&chain, &finality).deliver_finality(0, forged), Err(LightError::BadProof));
+
+            // A justification with too few votes behind it.
+            let mut thin = steps.clone();
+            thin[1].justification.as_mut().unwrap().votes.truncate(1);
+
+            assert!(matches!(with_headers(&chain, &finality).deliver_finality(0, thin), Err(LightError::BadJustification(_))));
+
+            // What does hold is taken, up to where the node justified no further.
+            let mut client = with_headers(&chain, &finality);
+
+            assert_eq!(client.deliver_finality(0, steps), Ok(4));
+            assert_eq!(Some(client.justified()), chain.justified());
+            assert_eq!(client.next(), None, "and it asks for nothing more");
         }
     }
 
@@ -1108,10 +1272,7 @@ mod voting {
                             .collect();
                         client.deliver_headers(from, headers, LATER).unwrap();
                     }
-                    LightRequest::Update { block } => client.take_update(&block, stored_light_update(&*chain.db, &block).unwrap()).unwrap(),
-                    LightRequest::Justifications { from } => {
-                        client.deliver_justifications(&chain.justifications_from(from, 64).unwrap()).unwrap();
-                    }
+                    LightRequest::Finality { from } => client.deliver_finality(from, finality_from(&chain, from)).map(|_| ()).unwrap(),
                 }
             }
 

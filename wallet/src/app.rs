@@ -29,10 +29,35 @@ const MAX_CHECKED: usize = 2_000;
 /// the bottom.
 const NARROW: f32 = 640.0;
 
+/// What this install is, chosen on its first launch. Changing it takes removing its wallets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Holds its keys and talks to a node: signs and sends.
+    Online,
+    /// Holds its keys and never goes online: signs what a sender asks, by QR code.
+    Signer,
+    /// Holds an offline signer's public keys alone: proves their balances, and sends what the
+    /// signer signed.
+    Sender,
+}
+
+impl Role {
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Online => "Online wallet",
+            Role::Signer => "Offline signer",
+            Role::Sender => "Watch-only sender",
+        }
+    }
+}
+
 /// Everything the wallet remembers between runs. The accounts are sealed; nothing else is secret.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// What this install is; None until its first launch asks.
+    pub role: Option<Role>,
     /// The node's HTTP API.
     pub node: String,
     /// The proxy every request goes through, as socks5h://host:port or http://host:port, or empty
@@ -40,6 +65,9 @@ pub struct Settings {
     pub proxy: String,
     /// The genesis id trusted at each node: the one first seen there, or one pasted.
     pub pinned: HashMap<String, String>,
+    /// A finalized checkpoint's block id to start the light client from at each node, pasted,
+    /// rather than genesis.
+    pub checkpoints: HashMap<String, String>,
     /// What the light client checked, by genesis id, encoded, to resume from.
     pub light: HashMap<String, String>,
     /// The wallets on this device, each its accounts sealed with a password of its own.
@@ -75,9 +103,11 @@ pub struct WalletEntry {
 impl Default for Settings {
     fn default() -> Settings {
         Settings {
+            role: None,
             node: String::new(),
             proxy: String::new(),
             pinned: HashMap::new(),
+            checkpoints: HashMap::new(),
             light: HashMap::new(),
             wallets: Vec::new(),
             wallet: 0,
@@ -106,7 +136,17 @@ impl Settings {
 
         self.wallet = self.wallet.min(self.wallets.len().saturating_sub(1));
 
+        // An install from before there were roles, with wallets in it, held its keys online.
+        if self.role.is_none() && !self.wallets.is_empty() {
+            self.role = Some(Role::Online);
+        }
+
         self
+    }
+
+    /// What this install is, online until it chose.
+    pub fn role(&self) -> Role {
+        self.role.unwrap_or(Role::Online)
     }
 
     /// The account in use in the wallet open, by its first address.
@@ -256,6 +296,7 @@ impl Wallet {
             let trust = Trust {
                 node: &node,
                 pinned: &mut self.settings.pinned,
+                checkpoints: &self.settings.checkpoints,
                 saved: &self.settings.light,
             };
 
@@ -302,8 +343,13 @@ impl Wallet {
         }
     }
 
-    /// Asks for what is due.
+    /// Asks for what is due. An offline signer asks for nothing, nor an install before it says
+    /// what it is: it may be about to become one.
     fn poll(&mut self, time: f64) {
+        if matches!(self.settings.role, None | Some(Role::Signer)) {
+            return;
+        }
+
         if let Some(ask) = self.chain.next_ask(time) {
             self.node.ask(ask);
         }
@@ -370,17 +416,33 @@ impl Wallet {
                 ui.add_space((tallest * 0.16).max(24.0));
                 ui.set_max_width(ui.available_width().min(380.0));
                 ui.label(RichText::new("chainv4").font(egui::FontId::new(44.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
-                theme::caps(ui, &palette, "Light wallet");
+                theme::caps(ui, &palette, match self.settings.role {
+                    Some(Role::Signer) => "Offline signer",
+                    Some(Role::Sender) => "Watch-only",
+                    _ => "Light wallet",
+                });
                 ui.add_space(26.0);
+                let role = self.settings.role;
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     opened = lock::show(ui, &palette, &mut self.settings, &mut self.lock);
                 });
+
+                // A role picked: an offline signer is left nothing to send requests by.
+                if self.settings.role != role {
+                    let node = self.settings.node.clone();
+                    self.connect(&node);
+                }
                 ui.add_space(12.0);
                 let through = match chainv4_ui::net::Proxy::parse(&self.settings.proxy) {
                     Ok(proxy) if !cfg!(target_arch = "wasm32") => format!(" · through {}", proxy.shown()),
                     _ => String::new(),
                 };
-                ui.label(RichText::new(format!("Node {}{through}", self.settings.node)).small().color(palette.muted));
+                let footer = match self.settings.role {
+                    Some(Role::Signer) => "Offline signer · makes no network requests".to_string(),
+                    None => String::new(),
+                    Some(_) => format!("Node {}{through}", self.settings.node),
+                };
+                ui.label(RichText::new(footer).small().color(palette.muted));
                 ui.add_space(24.0);
             });
         });
@@ -390,7 +452,7 @@ impl Wallet {
             self.book = book;
             self.vault = Some(vault);
             self.lock = Lock::Open;
-            self.page = Page::Overview;
+            self.page = views::home(self.settings.role());
 
             if let Some(first) = self.holders.first().map(Holder::id)
                 && !self.holders.iter().any(|holder| holder.id() == self.settings.current())
@@ -407,7 +469,11 @@ impl Wallet {
             ui.add_space(6.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new("chainv4").font(egui::FontId::new(26.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
-                theme::caps(ui, &palette, "Light wallet");
+                theme::caps(ui, &palette, match self.settings.role() {
+                    Role::Online => "Light wallet",
+                    Role::Signer => "Offline signer",
+                    Role::Sender => "Watch-only",
+                });
             });
         });
         ui.add_space(24.0);
@@ -418,7 +484,7 @@ impl Wallet {
             ui.add_space(18.0);
         }
 
-        for (page, name) in Page::NAV {
+        for &(page, name) in views::nav(self.settings.role()) {
             let selected = self.page == page;
             let text = theme::strong(name, 14.0).color(if selected { palette.ink } else { palette.soft });
             let button = egui::Button::new(text)
@@ -453,9 +519,20 @@ impl Wallet {
                 }
             });
             ui.add_space(10.0);
-            views::light_status(ui, &palette, &self.chain);
-            ui.add_space(4.0);
-            theme::caps(ui, &palette, "Light client");
+
+            // A signer follows no chain: it says so instead.
+            match self.settings.role() {
+                Role::Signer => {
+                    ui.label(RichText::new("Never online: what it signs goes by QR code.").small().color(palette.muted));
+                    ui.add_space(4.0);
+                    theme::caps(ui, &palette, "Offline");
+                }
+                _ => {
+                    views::light_status(ui, &palette, &self.chain);
+                    ui.add_space(4.0);
+                    theme::caps(ui, &palette, "Light client");
+                }
+            }
         });
     }
 
@@ -482,7 +559,10 @@ impl Wallet {
         let palette = self.palette;
         ui.horizontal(|ui| {
             ui.label(RichText::new("chainv4").font(egui::FontId::new(21.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
-            views::light_dot(ui, &palette, &self.chain);
+
+            if self.settings.role() != Role::Signer {
+                views::light_dot(ui, &palette, &self.chain);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::quiet(ui, &palette, "Lock").clicked() {
                     self.lock();
@@ -497,11 +577,12 @@ impl Wallet {
     /// On a narrow screen, the pages, as tabs along the bottom.
     fn tabs(&mut self, ui: &mut Ui) {
         let palette = self.palette;
-        let width = ui.available_width() / Page::NAV.len() as f32;
+        let nav = views::nav(self.settings.role());
+        let width = ui.available_width() / nav.len() as f32;
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.spacing_mut().button_padding = egui::vec2(2.0, 4.0);
         ui.horizontal(|ui| {
-            for (page, name) in Page::NAV {
+            for &(page, name) in nav {
                 let selected = self.page == page;
                 let name = if page == Page::Overview { "Home" } else { name };
                 let text = theme::strong(name, 12.0).color(if selected { palette.ink } else { palette.muted });
@@ -638,11 +719,13 @@ impl eframe::App for Wallet {
 }
 
 /// What the wallet's requests go out through: the proxy set, or straight to the node. The browser
-/// makes its own requests, through its own proxy.
+/// makes its own requests, through its own proxy. An offline signer has nothing to send them by,
+/// so nothing it might ask can go out.
 fn client(settings: &Settings) -> Result<chainv4_ui::net::Client, String> {
-    match cfg!(target_arch = "wasm32") {
-        true => Ok(chainv4_ui::net::Client::direct()),
-        false => chainv4_ui::net::Client::for_setting(&settings.proxy),
+    match (settings.role, cfg!(target_arch = "wasm32")) {
+        (Some(Role::Signer), _) => Err("an offline signer makes no requests".to_string()),
+        (_, true) => Ok(chainv4_ui::net::Client::direct()),
+        (_, false) => chainv4_ui::net::Client::for_setting(&settings.proxy),
     }
 }
 
@@ -675,6 +758,35 @@ mod tests {
 
         assert!(kept.get("vault").is_none() && kept.get("current").is_none(), "never written again");
         assert_eq!(serde_json::from_value::<Settings>(kept).unwrap().migrated().wallets, settings.wallets);
+    }
+
+    #[test]
+    fn an_install_from_before_roles_was_online_and_a_signer_has_no_way_out() {
+        let sealed = Sealed {
+            salt: "0x00".to_string(),
+            nonce: "0x01".to_string(),
+            sealed: "0x02".to_string(),
+        };
+        let with_wallets = serde_json::from_value::<Settings>(json!({ "node": "http://node", "vault": sealed })).unwrap().migrated();
+        let fresh = serde_json::from_value::<Settings>(json!({})).unwrap().migrated();
+
+        assert_eq!(with_wallets.role, Some(Role::Online), "it held its keys online");
+        assert_eq!(fresh.role, None, "a new install asks");
+        assert_eq!(fresh.role(), Role::Online);
+
+        let signer = Settings {
+            role: Some(Role::Signer),
+            proxy: chainv4_ui::net::Proxy::ORBOT.to_string(),
+            ..Settings::default()
+        };
+
+        assert_eq!(client(&signer).err().as_deref(), Some("an offline signer makes no requests"), "whatever else is set");
+        assert!(client(&Settings { role: Some(Role::Sender), ..Settings::default() }).is_ok());
+
+        let kept = serde_json::to_value(&signer).unwrap();
+
+        assert_eq!(kept["role"], "signer");
+        assert_eq!(serde_json::from_value::<Settings>(kept).unwrap().migrated().role, Some(Role::Signer));
     }
 
     #[test]

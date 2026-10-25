@@ -7,7 +7,7 @@ use {
     super::genesis::DevChain,
     super::send::{agent, fetch, ok},
     crate::db::{Column, STATE_COLUMNS, StateProof, address_key},
-    crate::light::{Assurance, LightClient, LightParams, LightRequest, LightUpdate},
+    crate::light::{Assurance, CheckpointStart, FinalityStep, LightClient, LightParams, LightRequest},
     crate::structs::account::Account,
     crate::structs::address::Address,
     crate::structs::block::SealedHeader,
@@ -15,7 +15,6 @@ use {
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::receipt::{CommittedOutcome, CommittedReceipt},
     crate::structs::tx::{SignedTx, Tx},
-    crate::structs::vote::Justification,
     serde_json::Value,
     std::path::PathBuf,
     std::time::{SystemTime, UNIX_EPOCH},
@@ -36,6 +35,10 @@ pub struct LightArgs {
     /// Without --genesis or --genesis-id, trust this development chain.
     #[arg(long, value_enum, default_value_t = DevChain::Pow)]
     consensus: DevChain,
+    /// Start at this finalized checkpoint, a block id someone you trust shows, rather than follow
+    /// from genesis: the client trusts it, and checks everything from there on.
+    #[arg(long)]
+    checkpoint: Option<String>,
     #[command(subcommand)]
     query: LightQuery,
 }
@@ -60,7 +63,8 @@ enum LightQuery {
     },
 }
 
-/// Follows the chain from the trusted genesis, then answers the query with what it proved.
+/// Follows the chain from the trusted genesis, or a checkpoint given, then answers the query with
+/// what it proved.
 pub fn light(args: LightArgs) -> CliResult<()> {
     let node = args.node.trim_end_matches('/').to_string();
     let agent = agent();
@@ -68,11 +72,32 @@ pub fn light(args: LightArgs) -> CliResult<()> {
     let params: LightParams = decode(&started["params"])?;
     let genesis: SealedHeader = decode(&started["header"])?;
     let trusted = trusted(&args, &params)?;
-    let mut client = LightClient::new(params, genesis, trusted)?;
+    let mut client = match &args.checkpoint {
+        Some(text) => {
+            let bytes = from_hex(text).ok_or("--checkpoint is not hex")?;
+            let checkpoint = Hash::from_bytes(params.hash, &bytes).ok_or("--checkpoint is not as long as the chain's ids")?;
+            let answer = ok(agent.get(format!("{node}/light/checkpoint/{checkpoint}")).call())?;
+            let start: CheckpointStart = decode(&answer["start"])?;
+
+            LightClient::from_checkpoint(params, genesis, trusted, checkpoint, start)?
+        }
+        None => LightClient::new(params, genesis, trusted)?,
+    };
+    // Genesis, or the checkpoint: where following starts.
+    let start = client.tip().height;
     follow(&agent, &node, &mut client)?;
 
     let tip = client.tip();
-    println!("followed {} headers to {} {}, each checked by {}", tip.height, tip.height, tip.id(), client.params().consensus.name());
+    let followed = tip.height - start;
+    match start {
+        0 => println!("followed {followed} headers to {} {}, each checked by {}", tip.height, tip.id(), client.params().consensus.name()),
+        _ => println!(
+            "followed {followed} headers from the checkpoint at {start} to {} {}, each checked by {}",
+            tip.height,
+            tip.id(),
+            client.params().consensus.name()
+        ),
+    }
 
     if client.params().finality.is_some_and(|finality| finality.checkpoint_interval().is_some()) {
         let (justified, finalized) = (client.justified(), client.finalized());
@@ -222,18 +247,10 @@ fn follow(agent: &Agent, node: &str, client: &mut LightClient) -> CliResult<()> 
                 let headers = list(&answer["headers"])?;
                 client.deliver_headers(from, headers, now())?;
             }
-            LightRequest::Update { block } => {
-                let update: Option<LightUpdate> = match fetch(agent.get(format!("{node}/light/updates/{block}")).call())? {
-                    (404, _) => None,
-                    (200, answer) => Some(decode(&answer["update"])?),
-                    (status, answer) => return Err(format!("the node answered {status}: {answer}").into()),
-                };
-                client.take_update(&block, update)?;
-            }
-            LightRequest::Justifications { from } => {
-                let answer = ok(agent.get(format!("{node}/justifications?from={from}")).call())?;
-                let justifications: Vec<Justification> = list(&answer["justifications"])?;
-                client.deliver_justifications(&justifications)?;
+            LightRequest::Finality { from } => {
+                let answer = ok(agent.get(format!("{node}/light/finality?from={from}")).call())?;
+                let steps: Vec<FinalityStep> = list(&answer["steps"])?;
+                client.deliver_finality(from, steps)?;
             }
         }
     }

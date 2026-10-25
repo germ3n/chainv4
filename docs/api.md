@@ -147,6 +147,33 @@ Main-chain headers with their seals, from height `from` (1 by default), at most 
 1,000: `{"headers": ["0x…", …]}`, each a `SealedHeader` encoded. Below the pivot of a node that
 synced from a snapshot, these are all it has.
 
+### `GET /light/finality?from=E&count=N`
+
+What light clients follow finality with, an epoch at a time from epoch `from` on (0, genesis, by
+default), at most `count`, at most 64: `{"steps": ["0x…", …]}`, each a `FinalityStep` encoded:
+- **`justification`:** the justification of the epoch's main-chain checkpoint; none for epoch 0.
+- **`update`:** the light update the checkpoint block keeps, as `GET /light/updates/{block}` serves
+  it; none before a snapshot node's pivot.
+
+It stops before the first checkpoint past genesis it holds no justification for, and at the tip.
+One answer carries a client across 64 epochs: each update a justification makes trusted names the
+voters of the justifications after it, so the client checks them in order, without asking again.
+404 on a chain whose finality does not vote.
+
+### `GET /light/checkpoint/{block}` and `GET /light/checkpoint`
+
+What a light client starts from at a checkpoint rather than genesis: the one named, or this
+node's finalized checkpoint. `{"checkpoint": {"epoch", "height", "block"}, "start": "0x…"}`, a
+`CheckpointStart` encoded:
+- **`headers`:** the checkpoint's header and those below it, back to the checkpoint
+  `activation_delay` epochs before, or genesis, consecutive, with their seals.
+- **`updates`:** each of those checkpoints' light updates, oldest first, null where none is kept.
+  Empty under depth finality or none, where any block is a checkpoint and its header is all.
+
+404 for a block not on the main chain, or before anything past genesis is final; 400 for one that
+opens no epoch under voting finality. See
+[Starting at a checkpoint](light-client.md#starting-at-a-checkpoint).
+
 ### `GET /light/updates/{block}`
 
 The light update genesis or a checkpoint keeps: `{"update": "0x…"}`, a `LightUpdate` encoded, with

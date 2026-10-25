@@ -7,7 +7,10 @@
 use {
     crate::node::{Ask, Failure},
     chainv4::db::{Column, StateProof, address_key},
-    chainv4::light::{Assurance, LightClient, LightError, LightParams, LightRequest, LightState, LightUpdate, MAX_LIGHT_HEADERS, token_balance, token_balance_key},
+    chainv4::light::{
+        Assurance, CheckpointStart, FinalityStep, LightClient, LightError, LightParams, LightRequest, LightState, MAX_LIGHT_HEADERS, token_balance,
+        token_balance_key,
+    },
     chainv4::registry::tokens::{Token, token_key},
     chainv4::structs::account::Account,
     chainv4::structs::address::Address,
@@ -17,7 +20,6 @@ use {
     chainv4::structs::receipt::CommittedReceipt,
     chainv4::structs::tx::SignedTx,
     chainv4::structs::u256::u256,
-    chainv4::structs::vote::Justification,
     serde_json::Value,
     std::collections::HashMap,
 };
@@ -59,19 +61,32 @@ pub struct Landed {
     pub time: u64,
 }
 
-/// What the wallet trusts at a node: the genesis pinned there, and what it saved of the chain it
-/// followed from each.
+/// What the wallet trusts at a node: the genesis pinned there, a checkpoint pasted to start from,
+/// and what it saved of the chain it followed from each.
 pub struct Trust<'a> {
     pub node: &'a str,
     /// Genesis ids by node.
     pub pinned: &'a mut HashMap<String, String>,
+    /// Checkpoint ids by node.
+    pub checkpoints: &'a HashMap<String, String>,
     /// Saved light client states by genesis id.
     pub saved: &'a HashMap<String, String>,
+}
+
+/// A light client about to start at a checkpoint, from what the node said of its chain.
+struct Starting {
+    params: LightParams,
+    header: SealedHeader,
+    genesis: Hash,
+    /// The checkpoint pasted; None for the node's own, on first use.
+    checkpoint: Option<Hash>,
 }
 
 #[derive(Default)]
 pub struct Chain {
     pub client: Option<LightClient>,
+    /// Waiting for what starts the client at a checkpoint.
+    starting: Option<Starting>,
     /// What stopped the light client: a node on another chain than the one trusted, or one that
     /// sent something that does not check.
     pub trouble: Option<String>,
@@ -106,6 +121,16 @@ pub struct Chain {
 }
 
 impl Chain {
+    /// Starts the client waiting to start at a checkpoint from genesis instead.
+    fn start_from_genesis(&mut self) {
+        if let Some(starting) = self.starting.take() {
+            match LightClient::new(starting.params, starting.header, starting.genesis) {
+                Ok(client) => self.client = Some(client),
+                Err(err) => self.trouble = Some(err.to_string()),
+            }
+        }
+    }
+
     /// How far it follows: the tip's height and the height up to which blocks are final.
     pub fn following(&self) -> Option<(u64, u64)> {
         self.client.as_ref().map(|client| (client.tip().height, client.final_height()))
@@ -123,7 +148,10 @@ impl Chain {
         }
 
         let Some(client) = &mut self.client else {
-            return Some(Ask::Light);
+            return Some(match &self.starting {
+                Some(starting) => Ask::Checkpoint(starting.checkpoint.map(|block| block.to_string())),
+                None => Ask::Light,
+            });
         };
 
         if client.next().is_none() && time - self.followed >= FOLLOW_EVERY {
@@ -134,8 +162,7 @@ impl Chain {
         if let Some(request) = client.next() {
             return Some(match request {
                 LightRequest::Headers { from, count } => Ask::Headers { from, count },
-                LightRequest::Update { block } => Ask::LightUpdate(block.to_string()),
-                LightRequest::Justifications { from } => Ask::Justifications(from),
+                LightRequest::Finality { from } => Ask::Finality(from),
             });
         }
 
@@ -216,8 +243,8 @@ impl Chain {
             Ask::Light
                 | Ask::Headers { .. }
                 | Ask::Ancestors { .. }
-                | Ask::LightUpdate(_)
-                | Ask::Justifications(_)
+                | Ask::Finality(_)
+                | Ask::Checkpoint(_)
                 | Ask::Proof { .. }
                 | Ask::Receipt(_)
                 | Ask::Tokens
@@ -231,20 +258,6 @@ impl Chain {
 
         let value = match (ask, result) {
             (_, Ok(value)) => value,
-            // A block that keeps no update, as one before a snapshot the node synced from.
-            (Ask::LightUpdate(block), Err(failure)) if failure.status == 404 => {
-                let taken = self.with_client(|client| {
-                    let block = id(client, block).ok_or("an update for a block id that does not read")?;
-
-                    client.take_update(&block, None).map_err(|err| err.to_string())
-                });
-
-                if let Err(why) = taken {
-                    self.trouble = Some(why);
-                }
-
-                return true;
-            }
             // Not on the chain yet, or a node without the index asked of: nothing to show yet.
             (Ask::Receipt(_) | Ask::Proof { .. }, Err(failure)) if failure.status == 404 => return true,
             (Ask::History(_), Err(failure)) if failure.status == 404 => {
@@ -254,6 +267,18 @@ impl Chain {
             }
             (Ask::Events(_), Err(failure)) if failure.status == 404 => {
                 self.indexes_events = Some(false);
+
+                return true;
+            }
+            // The node's own checkpoint, on first use, is a shortcut: without one, as before
+            // anything is final, the client follows from genesis.
+            (Ask::Checkpoint(None), Err(failure)) if failure.status != 0 => {
+                self.start_from_genesis();
+
+                return true;
+            }
+            (Ask::Checkpoint(Some(block)), Err(failure)) if failure.status != 0 => {
+                self.trouble = Some(format!("the node cannot start the light client at checkpoint {block}: {}", failure.message));
 
                 return true;
             }
@@ -287,6 +312,7 @@ impl Chain {
                 let header: SealedHeader = decode(&value["header"])?;
                 let genesis = header.id();
                 // Trust on first use: the genesis this node showed the first time, or one pasted.
+                let first_use = !trust.pinned.contains_key(trust.node);
                 let trusted = trust.pinned.entry(trust.node.to_string()).or_insert_with(|| genesis.to_string()).clone();
 
                 if trusted != genesis.to_string() {
@@ -299,11 +325,47 @@ impl Chain {
                     .and_then(|hex| from_hex(hex))
                     .and_then(|bytes| wincode::deserialize::<LightState>(&bytes).ok())
                     .and_then(|state| LightClient::restore(state, genesis).ok());
-                self.client = Some(match restored {
-                    Some(client) => client,
-                    None => LightClient::new(params, header, genesis).map_err(|err| err.to_string())?,
-                });
+                let pasted = trust.checkpoints.get(trust.node).and_then(|text| from_hex(text)).and_then(|bytes| Hash::from_bytes(params.hash, &bytes));
+
+                // Saved, it carries on. Else from a checkpoint pasted; else, met for the first time
+                // with no genesis given, from its own finalized checkpoint, trusting it as much as
+                // its genesis; else from genesis.
+                match (restored, pasted, first_use) {
+                    (Some(client), _, _) => self.client = Some(client),
+                    (None, Some(checkpoint), _) => self.starting = Some(Starting { params, header, genesis, checkpoint: Some(checkpoint) }),
+                    (None, None, true) => self.starting = Some(Starting { params, header, genesis, checkpoint: None }),
+                    (None, None, false) => self.client = Some(LightClient::new(params, header, genesis).map_err(|err| err.to_string())?),
+                }
+
                 self.genesis = Some(genesis);
+                self.dirty = true;
+
+                Ok(())
+            }
+            Ask::Checkpoint(_) => {
+                let starting = self.starting.take().ok_or("a checkpoint nobody asked for")?;
+                let block = value["checkpoint"]["block"]
+                    .as_str()
+                    .and_then(from_hex)
+                    .and_then(|bytes| Hash::from_bytes(starting.params.hash, &bytes))
+                    .ok_or("a checkpoint whose block does not read")?;
+                let start: CheckpointStart = decode(&value["start"])?;
+
+                // One pasted must be the one sent; the node's own is whichever it names.
+                if starting.checkpoint.is_some_and(|checkpoint| checkpoint != block) {
+                    return Err(format!("the node sent checkpoint {block}, not the one trusted"));
+                }
+
+                match LightClient::from_checkpoint(starting.params.clone(), starting.header.clone(), starting.genesis, block, start) {
+                    Ok(client) => self.client = Some(client),
+                    Err(err) if starting.checkpoint.is_some() => return Err(format!("the checkpoint trusted does not check: {err}")),
+                    // The node's own does not hold: following from genesis checks everything.
+                    Err(_) => {
+                        self.starting = Some(starting);
+                        self.start_from_genesis();
+                    }
+                }
+
                 self.dirty = true;
 
                 Ok(())
@@ -323,21 +385,11 @@ impl Chain {
                     Err(err) => Err(format!("the node's older headers do not check: {err}")),
                 })
             }
-            Ask::LightUpdate(block) => {
-                let update: LightUpdate = decode(&value["update"])?;
-                self.dirty = true;
+            Ask::Finality(from) => {
+                let steps: Vec<FinalityStep> = list(&value["steps"])?;
+                self.dirty |= !steps.is_empty();
 
-                self.with_client(|client| {
-                    let block = id(client, block).ok_or("an update for a block id that does not read")?;
-
-                    client.take_update(&block, Some(update)).map_err(|err| err.to_string())
-                })
-            }
-            Ask::Justifications(_) => {
-                let justifications: Vec<Justification> = list(&value["justifications"])?;
-                self.dirty |= !justifications.is_empty();
-
-                self.with_client(|client| client.deliver_justifications(&justifications).map(|_| ()).map_err(|err| err.to_string()))
+                self.with_client(|client| client.deliver_finality(*from, steps).map(|_| ()).map_err(|err| err.to_string()))
             }
             Ask::Tokens => {
                 self.listed = value["tokens"]
@@ -537,4 +589,101 @@ where
     T: for<'de> wincode::SchemaRead<'de, wincode::config::DefaultConfig, Dst = T>,
 {
     value.as_array().ok_or("no list")?.iter().map(decode).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::node::Node,
+        std::time::{Duration, Instant},
+    };
+
+    /// Drives the chain against the node until it is caught up, answering each ask, or until it
+    /// stops on trouble. Returns the asks it made, in order.
+    fn follow(chain: &mut Chain, node: &str, pinned: &mut HashMap<String, String>, checkpoints: &HashMap<String, String>) -> Vec<Ask> {
+        let mut link = Node::new(node, Ok(chainv4_ui::net::Client::direct()), egui::Context::default());
+        let saved = HashMap::new();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut asked = Vec::new();
+
+        while !chain.caught_up() && chain.trouble.is_none() {
+            assert!(Instant::now() < deadline, "never caught up; asked {asked:?}");
+            let Some(ask) = chain.next_ask(0.0) else {
+                break;
+            };
+            asked.push(ask.clone());
+            link.ask(ask);
+
+            let answers = loop {
+                let answers = link.answers();
+
+                if !answers.is_empty() {
+                    break answers;
+                }
+
+                std::thread::sleep(Duration::from_millis(5));
+            };
+
+            for (ask, result) in answers {
+                let trust = Trust { node, pinned, checkpoints, saved: &saved };
+                chain.take(&ask, &result, trust, u64::MAX / 2, 0.0);
+            }
+        }
+
+        asked
+    }
+
+    #[test]
+    #[ignore = "needs a node with voting finality: CHAINV4_NODE=http://127.0.0.1:8080 cargo test -- --ignored"]
+    fn a_light_client_starts_where_the_trust_it_was_given_says() {
+        let node = std::env::var("CHAINV4_NODE").expect("CHAINV4_NODE names a node");
+        let status: Value = ureq_get(&format!("{node}/status"));
+        let finalized = &status["finality"]["finalized"];
+        let (checkpoint, height) = (finalized["block"].as_str().unwrap().to_string(), finalized["height"].as_u64().unwrap());
+        let genesis = status["genesis"].as_str().unwrap().to_string();
+        assert!(height > 0, "the node has finalized nothing yet");
+
+        // Met for the first time, with nothing given: from the node's own finalized checkpoint.
+        let mut chain = Chain::default();
+        let mut pinned = HashMap::new();
+        let asked = follow(&mut chain, &node, &mut pinned, &HashMap::new());
+
+        assert_eq!(asked[..2], [Ask::Light, Ask::Checkpoint(None)]);
+        assert!(chain.client.as_ref().unwrap().lowest() > 0, "it never followed from genesis");
+        assert!(chain.following().unwrap().0 >= height);
+        assert_eq!(pinned.get(&node), Some(&genesis), "and pinned the genesis as before");
+
+        // A genesis given, as pasted: from genesis, checking every block.
+        let mut chain = Chain::default();
+        let mut given = HashMap::from([(node.clone(), genesis.clone())]);
+        let asked = follow(&mut chain, &node, &mut given, &HashMap::new());
+
+        assert!(!asked.iter().any(|ask| matches!(ask, Ask::Checkpoint(_))));
+        assert_eq!(chain.client.as_ref().unwrap().lowest(), 0);
+
+        // A checkpoint given: from there, whatever else.
+        let mut chain = Chain::default();
+        let at = HashMap::from([(node.clone(), checkpoint.clone())]);
+        let asked = follow(&mut chain, &node, &mut given, &at);
+
+        assert_eq!(asked[1], Ask::Checkpoint(Some(checkpoint.clone())));
+        assert!(chain.trouble.is_none(), "{:?}", chain.trouble);
+
+        // And a block given that is no checkpoint stops it, rather than following from genesis.
+        let past: Value = ureq_get(&format!("{node}/blocks/{}", height + 1));
+        let mut chain = Chain::default();
+        let wrong = HashMap::from([(node.clone(), past["id"].as_str().unwrap().to_string())]);
+        follow(&mut chain, &node, &mut given, &wrong);
+
+        assert!(chain.trouble.as_deref().is_some_and(|trouble| trouble.contains("cannot start the light client")), "{:?}", chain.trouble);
+        assert!(chain.client.is_none());
+    }
+
+    fn ureq_get(url: &str) -> Value {
+        let (sent, got) = std::sync::mpsc::channel();
+        chainv4_ui::net::Client::direct().fetch(url.to_string(), None, move |answer| sent.send(answer).unwrap());
+
+        serde_json::from_slice(&got.recv_timeout(Duration::from_secs(20)).unwrap().unwrap().bytes).unwrap()
+    }
 }

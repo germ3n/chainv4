@@ -7,10 +7,10 @@ use {
     crate::chain::{
         DryRun, Rules, dry_run, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, stored_address_txs, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
-        stored_light_update, stored_state_at,
+        stored_light_finality, stored_light_update, stored_state_at,
     },
     crate::crypto::hashable::Hashable,
-    crate::light::{LightParams, MAX_LIGHT_HEADERS},
+    crate::light::{CheckpointStart, LightParams, MAX_FINALITY_STEPS, MAX_LIGHT_HEADERS, checkpoint_start},
     crate::crypto::merkle,
     crate::crypto::keypair::PublicKey,
     crate::registry::signers::{Approval, SignerSet, Signers},
@@ -208,6 +208,9 @@ fn router(api: Api) -> Router {
         .route("/contracts/{address}", get(contract))
         .route("/light", get(light))
         .route("/light/updates/{block}", get(light_update))
+        .route("/light/finality", get(light_finality))
+        .route("/light/checkpoint", get(light_checkpoint_final))
+        .route("/light/checkpoint/{block}", get(light_checkpoint))
         .route("/headers", get(headers))
         .route("/justifications", get(justifications))
         .route("/proofs/receipts/{id}", get(receipt_proof))
@@ -803,6 +806,78 @@ async fn light_update(Shared(api): Shared<Api>, Path(block): Path<String>) -> An
         .ok_or_else(|| ApiError::NotFound(format!("block {block} keeps no light update")))?;
 
     Ok(Json(json!({ "update": to_hex(&update.hashable_bytes_with_tag()) })))
+}
+
+/// Finality for light clients, an epoch at a time from ?from= on, at most ?count=: each main-chain
+/// checkpoint's justification, none for genesis, and the light update its block keeps, if any,
+/// encoded. It stops before the first checkpoint past genesis it holds no justification for.
+async fn light_finality(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let interval = api
+        .light
+        .finality
+        .and_then(|finality| finality.checkpoint_interval())
+        .ok_or_else(|| ApiError::NotFound("this chain's finality does not vote".to_string()))?;
+    let from = number(&query, "from")?.unwrap_or(0);
+    let count = number(&query, "count")?.unwrap_or(MAX_FINALITY_STEPS).min(MAX_FINALITY_STEPS);
+    let top = tip(&*api.db)?.header.height;
+    let steps = stored_light_finality(&*api.db, interval, from, count, top)?;
+
+    Ok(Json(json!({ "steps": steps.iter().map(|step| to_hex(&step.hashable_bytes_with_tag())).collect::<Vec<_>>() })))
+}
+
+/// What a light client starts from at this node's finalized checkpoint, for one that takes the
+/// node's on first use. 404 before anything past genesis is final.
+async fn light_checkpoint_final(Shared(api): Shared<Api>) -> Answer {
+    let (_, finalized) = stored_finality(&*api.db)?;
+    let finalized = finalized.ok_or_else(|| ApiError::NotFound("nothing past genesis is final yet".to_string()))?;
+
+    light_checkpoint_at(&api, finalized.block)
+}
+
+/// What a light client starts from at the checkpoint named, rather than at genesis.
+async fn light_checkpoint(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
+    let block = block_id(&block, api.hash)?;
+
+    light_checkpoint_at(&api, block)
+}
+
+/// The checkpoint, and from its epoch's start back, the headers and light updates that let a
+/// light client start there, encoded: a CheckpointStart. 404 for a block not on the main chain,
+/// 400 for one that opens no epoch under voting finality.
+fn light_checkpoint_at(api: &Api, block: Hash) -> Answer {
+    let db = &*api.db;
+    let sealed = stored_header(db, &block)?.ok_or_else(|| ApiError::NotFound(format!("no block {block}")))?;
+    let height = sealed.header.height;
+
+    if stored_header_at(db, height)?.map(|header| header.id()) != Some(block) {
+        return Err(ApiError::NotFound(format!("block {block} is not on the main chain")));
+    }
+
+    let (epoch, from) = checkpoint_start(api.light.finality, height)
+        .ok_or_else(|| ApiError::BadRequest(format!("block {block}, at height {height}, opens no epoch: it is no checkpoint")))?;
+
+    if height - from >= u64::from(MAX_LIGHT_HEADERS) {
+        return Err(ApiError::BadRequest(format!("starting at block {block} takes more than {MAX_LIGHT_HEADERS} headers")));
+    }
+
+    let headers = (from..=height)
+        .map(|at| stored_header_at(db, at)?.ok_or_else(|| ApiError::NotFound(format!("no main-chain header at {at}: this node synced from a snapshot past it"))))
+        .collect::<Result<Vec<_>, _>>()?;
+    let interval = api.light.finality.and_then(|finality| finality.checkpoint_interval().filter(|_| finality.fixed_ahead().is_some()));
+    let updates = match interval {
+        Some(interval) => headers
+            .iter()
+            .step_by(interval as usize)
+            .map(|header| stored_light_update(db, &header.id()))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => Vec::new(),
+    };
+    let start = CheckpointStart { headers, updates };
+
+    Ok(Json(json!({
+        "checkpoint": { "epoch": epoch, "height": height, "block": block.to_string() },
+        "start": to_hex(&start.hashable_bytes_with_tag()),
+    })))
 }
 
 /// The justifications this node holds for main-chain checkpoints from ?from= on, encoded, at most

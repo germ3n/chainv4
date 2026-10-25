@@ -1,5 +1,5 @@
 //! Picking files to read, alike wherever an app runs: rfd's dialog on the desktop and in the
-//! browser, and on Android the system's document picker. Android hands a pick back only to Java,
+//! browser, and on Android the system's document picker, or its camera for a photo. Android hands a pick back only to Java,
 //! so there the APK carries a small activity of its own, `ui/android/Picker.java`, which
 //! `ui/build-android.sh` compiles in when it finds a JDK and Android's build-tools. An APK built
 //! without one cannot pick files, and [`can_pick`] says so.
@@ -17,7 +17,16 @@ pub struct File {
 pub struct Pick {
     pub many: bool,
     pub kind: Option<(&'static str, &'static [&'static str])>,
+    /// A photo to take rather than a file to pick. On Android the system's camera opens, and the
+    /// photo comes back as a JPEG, or on Android 9 and older as the camera's small preview, a PNG.
+    /// The desktop and the browser reach no camera, so they pick an image, which a phone's
+    /// browser offers to take with its camera.
+    pub camera: bool,
 }
+
+/// The images a photo picked on the desktop or in the browser may be.
+#[cfg(not(target_os = "android"))]
+const IMAGES: (&str, &[&str]) = ("Images", &["png", "jpg", "jpeg"]);
 
 /// What a pick comes to: the files, none when nothing was picked, or why they could not be read.
 pub type Picked = Result<Vec<File>, String>;
@@ -53,7 +62,7 @@ pub fn pick(ctx: &egui::Context, pick: Pick, done: impl FnOnce(Picked) + Send + 
     {
         let mut dialog = rfd::FileDialog::new();
 
-        if let Some((name, extensions)) = pick.kind {
+        if let Some((name, extensions)) = pick.kind.or(pick.camera.then_some(IMAGES)) {
             dialog = dialog.add_filter(name, extensions);
         }
 
@@ -80,7 +89,7 @@ pub fn pick(ctx: &egui::Context, pick: Pick, done: impl FnOnce(Picked) + Send + 
     wasm_bindgen_futures::spawn_local(async move {
         let mut dialog = rfd::AsyncFileDialog::new();
 
-        if let Some((name, extensions)) = pick.kind {
+        if let Some((name, extensions)) = pick.kind.or(pick.camera.then_some(IMAGES)) {
             dialog = dialog.add_filter(name, extensions);
         }
 
@@ -116,6 +125,7 @@ pub(crate) mod android {
     /// A pick asked for, for the glue to start.
     pub(crate) struct Asked {
         pub many: bool,
+        pub camera: bool,
         pub done: Done,
     }
 
@@ -128,7 +138,11 @@ pub(crate) mod android {
     }
 
     pub(crate) fn ask(ctx: &egui::Context, pick: Pick, done: Done) {
-        *asks(ctx).0.lock().unwrap_or_else(PoisonError::into_inner) = Some(Asked { many: pick.many, done });
+        *asks(ctx).0.lock().unwrap_or_else(PoisonError::into_inner) = Some(Asked {
+            many: pick.many,
+            camera: pick.camera,
+            done,
+        });
         ctx.request_repaint();
     }
 
@@ -173,10 +187,10 @@ mod tests {
         let (sent, got) = mpsc::channel();
         let first = sent.clone();
         ask(&ctx, Pick::default(), Box::new(move |_| first.send("first").unwrap()));
-        ask(&ctx, Pick { many: true, kind: None }, Box::new(move |_| sent.send("second").unwrap()));
+        ask(&ctx, Pick { many: true, camera: true, ..Pick::default() }, Box::new(move |_| sent.send("second").unwrap()));
         let taken = asked(&ctx).expect("asked");
 
-        assert!(taken.many, "the newest pick takes the place of one not started");
+        assert!(taken.many && taken.camera, "the newest pick takes the place of one not started");
         assert!(asked(&ctx).is_none(), "taken once");
 
         (taken.done)(Ok(Vec::new()));

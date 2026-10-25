@@ -20,8 +20,11 @@ pub enum Ask {
     Headers { from: u64, count: u32 },
     /// Headers below the lowest the light client holds, for it to prove by their hash chain.
     Ancestors { from: u64, count: u32 },
-    LightUpdate(String),
-    Justifications(u64),
+    /// Finality from an epoch on, many epochs to an answer.
+    Finality(u64),
+    /// What the light client starts from at a checkpoint: the one named, or the node's finalized
+    /// one, for a node met for the first time.
+    Checkpoint(Option<String>),
     /// A chain-state entry with its proof, at a block.
     Proof { column: &'static str, key: String, block: String },
     /// A transaction and its receipt, each with its Merkle path.
@@ -46,8 +49,9 @@ impl Ask {
             Ask::Status => "/status".to_string(),
             Ask::Light => "/light".to_string(),
             Ask::Headers { from, count } | Ask::Ancestors { from, count } => format!("/headers?from={from}&count={count}"),
-            Ask::LightUpdate(block) => format!("/light/updates/{block}"),
-            Ask::Justifications(from) => format!("/justifications?from={from}"),
+            Ask::Finality(from) => format!("/light/finality?from={from}"),
+            Ask::Checkpoint(Some(block)) => format!("/light/checkpoint/{block}"),
+            Ask::Checkpoint(None) => "/light/checkpoint".to_string(),
             Ask::Proof { column, key, block } => format!("/proofs/{column}/{key}?block={block}"),
             Ask::Receipt(id) => format!("/proofs/receipts/{id}"),
             Ask::Tokens => "/tokens?limit=100".to_string(),

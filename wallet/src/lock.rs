@@ -1,17 +1,22 @@
 //! The lock screen: which wallet, and its password. Or a wallet more: from new words, shown once and
-//! three of them asked back, or from words written down before. Each wallet is a vault of its own,
-//! with a password of its own.
+//! three of them asked back, or from words written down before; on a watch-only sender, from an
+//! offline signer's account, read off its screen. Each wallet is a vault of its own, with a
+//! password of its own. On its first launch, it asks what this install is.
 
 use {
-    crate::app::{Settings, WalletEntry},
+    crate::airgap::{Message, Pairing},
+    crate::app::{Role, Settings, WalletEntry},
     crate::theme::{self, Palette},
     crate::vault::{Book, Source, StoredAccount, Vault, Words},
+    crate::views::scan::Scan,
     chainv4::crypto::mnemonic::Phrase,
     egui::{RichText, Ui},
 };
 
 /// Where the lock screen is.
 pub enum Lock {
+    /// What this install is, asked once.
+    Role,
     /// Asking for the password of the wallet picked.
     Locked { password: String, error: Option<String> },
     /// Making a wallet: from new words, or from words written down before.
@@ -22,6 +27,8 @@ pub enum Lock {
     /// Three of them, asked back.
     Confirm { made: Made, asked: [usize; 3], answers: [String; 3], error: Option<String> },
     Restore { making: Making, words: String },
+    /// A watch-only wallet from an offline signer's account: read, then named and sealed.
+    Pair { making: Making, scan: Box<Scan>, paired: Option<Pairing> },
     Open,
 }
 
@@ -60,11 +67,13 @@ enum Step {
 }
 
 impl Lock {
-    /// Where to start: the password of the wallet last used, or making the first.
+    /// Where to start: what this install is, the first time; then the password of the wallet last
+    /// used, or making the first.
     pub fn start(settings: &Settings) -> Lock {
-        match settings.wallets.is_empty() {
-            true => Lock::Choose,
-            false => Lock::Locked { password: String::new(), error: None },
+        match (settings.role, settings.wallets.is_empty()) {
+            (None, _) => Lock::Role,
+            (Some(_), true) => Lock::Choose,
+            (Some(_), false) => Lock::Locked { password: String::new(), error: None },
         }
     }
 }
@@ -76,6 +85,26 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
     let mut step = None;
 
     theme::card(ui, palette, |ui| match lock {
+        Lock::Role => {
+            theme::caps(ui, palette, "This device");
+            ui.label(RichText::new("What will it be? It stays that way: changing it takes removing its wallets.").color(palette.soft));
+            ui.add_space(10.0);
+            let choices = [
+                (Role::Online, "Holds the keys and talks to a node: the usual wallet."),
+                (Role::Signer, "Holds the keys and never goes online. It signs what a watch-only sender asks, by QR code. Keep the device offline."),
+                (Role::Sender, "Holds an offline signer's public keys alone. It proves balances, prices what to send, and sends what the signer signed."),
+            ];
+
+            for (role, what) in choices {
+                if theme::quiet(ui, palette, role.name()).clicked() {
+                    settings.role = Some(role);
+                    next = Some(Lock::Choose);
+                }
+
+                ui.label(RichText::new(what).small().color(palette.muted));
+                ui.add_space(8.0);
+            }
+        }
         Lock::Locked { password, error } => {
             if settings.wallets.len() > 1 {
                 theme::caps(ui, palette, "Wallet");
@@ -115,29 +144,108 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             });
         }
         Lock::Choose => {
+            let role = settings.role();
             theme::caps(ui, palette, "A wallet");
-            ui.label(RichText::new("Its accounts all come from 12 words. Make new ones, or bring a wallet back from words you wrote down.").color(palette.soft));
-            ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                if theme::primary(ui, palette, "New wallet", true).clicked() {
-                    next = Some(Lock::New(Making::default()));
-                }
 
-                if theme::quiet(ui, palette, "Restore from words").clicked() {
-                    next = Some(Lock::Restore {
-                        making: Making::default(),
-                        words: String::new(),
+            match role {
+                Role::Sender => {
+                    ui.label(RichText::new("Its accounts are an offline signer's: on the signer, open Pair, and read its code here.").color(palette.soft));
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if theme::primary(ui, palette, "Pair with a signer", true).clicked() {
+                            next = Some(Lock::Pair {
+                                making: Making::default(),
+                                scan: Box::default(),
+                                paired: None,
+                            });
+                        }
+
+                        if !settings.wallets.is_empty() && theme::quiet(ui, palette, "Back").clicked() {
+                            next = Some(Lock::Locked { password: String::new(), error: None });
+                        }
                     });
                 }
+                Role::Online | Role::Signer => {
+                    ui.label(RichText::new("Its accounts all come from 12 words. Make new ones, or bring a wallet back from words you wrote down.").color(palette.soft));
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if theme::primary(ui, palette, "New wallet", true).clicked() {
+                            next = Some(Lock::New(Making::default()));
+                        }
 
-                if !settings.wallets.is_empty() && theme::quiet(ui, palette, "Back").clicked() {
-                    next = Some(Lock::Locked { password: String::new(), error: None });
+                        if theme::quiet(ui, palette, "Restore from words").clicked() {
+                            next = Some(Lock::Restore {
+                                making: Making::default(),
+                                words: String::new(),
+                            });
+                        }
+
+                        if !settings.wallets.is_empty() && theme::quiet(ui, palette, "Back").clicked() {
+                            next = Some(Lock::Locked { password: String::new(), error: None });
+                        }
+                    });
+                }
+            }
+
+            // Only a device with no wallets yet can become something else.
+            if settings.wallets.is_empty() {
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("This device: {}.", role.name())).small().color(palette.muted));
+
+                    if theme::quiet(ui, palette, "Change").clicked() {
+                        next = Some(Lock::Role);
+                    }
+                });
+            }
+        }
+        Lock::Pair { making, scan, paired } => {
+            theme::caps(ui, palette, "Pair with a signer");
+
+            match paired {
+                None => {
+                    ui.label(RichText::new("On the signer, open Pair and show the account. Read its code here.").color(palette.soft));
+                    ui.add_space(10.0);
+
+                    match scan.show(ui, palette) {
+                        Some(Message::Pair(pairing)) => *paired = Some(pairing),
+                        Some(other) => scan.refuse(&other, "an account to pair with"),
+                        None => {}
+                    }
+                }
+                Some(pairing) => {
+                    ui.label(theme::strong(&pairing.name, 16.0).color(palette.ink));
+
+                    for key in &pairing.keys {
+                        ui.label(theme::mono(crate::format::short(&key.address().to_string())).color(palette.soft));
+                    }
+
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("This wallet holds these public keys alone: it signs nothing, and asks the signer for each signature.").small().color(palette.muted));
+                    ui.add_space(6.0);
+                    making_fields(ui, palette, making, settings.wallets.len(), false);
+                    ui.add_space(6.0);
+                }
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                if let Some(pairing) = paired.as_ref()
+                    && theme::primary(ui, palette, "Watch it", true).clicked()
+                {
+                    match password(making).and_then(|password| Vault::create(&password)) {
+                        Ok(vault) => opened = Some(keep_watched(settings, name(making, settings.wallets.len()), vault, pairing)),
+                        Err(why) => making.error = Some(why),
+                    }
+                }
+
+                if theme::quiet(ui, palette, "Back").clicked() {
+                    next = Some(Lock::Choose);
                 }
             });
         }
         Lock::New(making) => {
             theme::caps(ui, palette, "New wallet");
-            making_fields(ui, palette, making, settings.wallets.len());
+            making_fields(ui, palette, making, settings.wallets.len(), true);
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 if theme::primary(ui, palette, "Make the words", true).clicked() {
@@ -201,7 +309,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             ui.label(RichText::new("The 12 or 24 words, in order, with spaces between.").small().color(palette.muted));
             ui.add(egui::TextEdit::multiline(words).desired_rows(3).desired_width(f32::INFINITY).hint_text("word word word …"));
             ui.add_space(6.0);
-            making_fields(ui, palette, making, settings.wallets.len());
+            making_fields(ui, palette, making, settings.wallets.len(), true);
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 if theme::primary(ui, palette, "Restore", true).clicked() {
@@ -249,14 +357,23 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
     opened
 }
 
-/// A name, a password twice, and, put away, BIP39's passphrase.
-fn making_fields(ui: &mut Ui, palette: &Palette, making: &mut Making, wallets: usize) {
+/// A name, a password twice, and, put away, BIP39's passphrase, for a wallet with words.
+fn making_fields(ui: &mut Ui, palette: &Palette, making: &mut Making, wallets: usize, words: bool) {
     ui.add(egui::TextEdit::singleline(&mut making.name).hint_text(format!("name, such as Wallet {}", wallets + 1)).desired_width(f32::INFINITY));
     ui.add_space(4.0);
     ui.label(RichText::new("A password seals the wallet on this device. Nothing opens it without it.").small().color(palette.muted));
     ui.add(egui::TextEdit::singleline(&mut making.first).password(true).hint_text("password").desired_width(f32::INFINITY));
     ui.add(egui::TextEdit::singleline(&mut making.second).password(true).hint_text("the same again").desired_width(f32::INFINITY));
     ui.add_space(4.0);
+
+    if !words {
+        if let Some(error) = &making.error {
+            ui.colored_label(palette.bad, error.as_str());
+        }
+
+        return;
+    }
+
     egui::CollapsingHeader::new(RichText::new("Advanced").color(palette.soft)).id_salt("passphrase").show(ui, |ui| {
         ui.label(
             RichText::new("A BIP39 passphrase, kept with the words: the same words with another passphrase are another wallet. Lose it, and the words alone bring back nothing.")
@@ -318,6 +435,32 @@ fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, pa
         accounts: vec![StoredAccount {
             name: "Account 1".to_string(),
             source: Source::Phrase { account: 0 },
+        }],
+    };
+
+    match vault.seal(&book) {
+        Ok(sealed) => {
+            settings.wallets.push(WalletEntry {
+                name,
+                vault: sealed,
+                current: String::new(),
+            });
+            settings.wallet = settings.wallets.len() - 1;
+        }
+        Err(why) => log::warn!("could not seal the new wallet: {why}"),
+    }
+
+    Opened { vault, book }
+}
+
+/// Seals a new watch-only wallet with the signer's account it read, and keeps it, as the wallet in
+/// use.
+fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &Pairing) -> Opened {
+    let book = Book {
+        phrase: None,
+        accounts: vec![StoredAccount {
+            name: pairing.name.clone(),
+            source: Source::Watch { keys: pairing.keys.iter().map(ToString::to_string).collect() },
         }],
     };
 

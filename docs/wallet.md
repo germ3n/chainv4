@@ -157,6 +157,17 @@ client with an error that names both genesis ids.
 **Trusting another:** Settings takes a genesis id, as someone you trust shows it, in place of the
 pinned one. "Forget it" trusts whatever the node shows next, and starts over.
 
+**Where the light client starts:**
+- **Saved:** where it was, as always.
+- **A checkpoint pasted** under Settings → Trusted chain → Start from a checkpoint: that finalized
+  checkpoint, trusted as the genesis is, rather than genesis. Quick on a long chain. "Forget it"
+  follows from genesis again.
+- **A node met for the first time,** with no genesis given: its own finalized checkpoint, as the
+  wallet trusts that node for the genesis it pins then anyway. Once a genesis was pasted, never.
+- **Otherwise,** and after Start over: from genesis, checking every block.
+
+See [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint).
+
 **What the node is trusted with:** nothing proven. It does say:
 - which tokens exist, from the registry's first page (`GET /tokens`). Each listed token's entry,
   and each balance of it, is then proven;
@@ -232,6 +243,55 @@ A token transfer is the standard's `transfer(to, amount)`, sending no coin.
 
 **Dropped transactions:** one no block holds after 10 minutes shows as Not seen, and stops
 holding its nonce, so the next transaction takes that nonce again.
+
+## Signing offline
+
+The keys can live on a device that never goes online. On its first launch, the app asks what
+this install is, and it stays that way: changing it takes removing its wallets, after which the
+lock screen asks again.
+
+| Role | What it does |
+| --- | --- |
+| **Online wallet** | Holds its keys and talks to a node, as above. Installs from before roles are this. |
+| **Offline signer** | Holds its keys and makes no network requests at all: it has no client to make them with, so none can go out, whatever its settings say. It follows no chain, so its pages are Sign, Pair, Receive, Accounts and Settings. |
+| **Watch-only sender** | Holds the signer's public keys alone, never a key that signs. It proves balances, prices what to send, and sends what the signer signed. |
+
+**Pairing:** on the signer, **Pair** shows the account in use as a QR code holding its public
+keys, one per scheme. On the sender, making a wallet starts with **Pair with a signer**, and
+Accounts → **Add from the signer** watches more: read the code, then name and seal the wallet
+with a password, as any other.
+
+**Sending:**
+1. The sender builds the transaction on Send as usual, and the node prices it from a probe whose
+   signature signs nothing: the node checks none for a price.
+2. **Sign on the signer** shows the request as a QR code: the transaction, its nonce and fee
+   offer, the key to sign with, and how the node names the coin and the token.
+3. On the signer, **Sign** reads it and lays out what it signs: the amount in the asset's units
+   and as the raw units signed, from, to, the token's contract, the most the fee comes to, the
+   nonce, and everything the transaction holds. It refuses a key none of its accounts holds, and a
+   transaction the chain would refuse. **Sign** shows the signed transaction as a code.
+4. The sender reads it back, and sends it only if it is the very transaction it asked for, signed
+   by that key, and the signature holds.
+
+**Reading a code:** **Take a photo** opens the camera on Android; on the desktop and in the
+browser, pick a photo or screenshot of the code, and a phone's browser offers its camera. Hold the
+camera close enough that the code fills most of the photo. **Open a file** reads an image or a
+text file, and every code's text can be copied and pasted instead: **Copy as text** under each.
+
+**What the codes hold:** `CV4:1:`, then `PAIR`, `SIGN` or `SIGNED`, then the message's encoding in
+base45, the 45 characters a QR code packs densest. An account's pairing is about 190 characters,
+a transfer's request about 330, a token transfer's about 420, and a signed transfer about 410.
+Text that is not exactly one message, or has anything past its encoding, is refused.
+
+**Too long for one code:** a message over 600 characters goes as parts, each a code about that
+long: `CV4:1:PART:2/5:`, a hash of the whole text, and a stretch of it. The screen shows one part at
+a time, with **Back** and **Next part**; the other device reads them in any order, says which it
+still needs, starts over on a part of another message, and checks the whole against its hash
+before reading it. Up to 64 parts, so 38,400 characters; **Copy as text** always copies the whole.
+
+**Keep the signer offline:** airplane mode, Wi-Fi and Bluetooth off. On Android 10 and up, a photo
+taken for a code is written to the device's pictures, read, and deleted at once; older ones hand
+back only the camera's small preview, which reads codes held close.
 
 ## Receiving
 
@@ -388,6 +448,10 @@ out when it builds without one, as Android refuses an app that declares code it 
   → Light client → **Start over** follows the new one. Its keys and wallets stay.
 - **The API is plain HTTP.** What the wallet sends is signed and public anyway, but keep the node
   on a trusted network all the same.
+- **A signer trusts the sender for names alone.** What the signer shows of the coin's and token's
+  symbol and decimals is the sender's word, from its node: check the raw units and addresses,
+  which are what is signed. The sender trusts the signer for nothing: what comes back is checked
+  against what it asked.
 - **A proxy carries plain HTTP as it is.** It can read the wallet's requests to an `http://` node,
   and so can a Tor exit relay. The light client still checks every answer. A `.onion` node is
   reached without leaving Tor, end to end encrypted, and the node never learns where the wallet

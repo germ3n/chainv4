@@ -96,6 +96,40 @@ DNS name pointing at the host, and port 80 reachable from the internet.
 1.3, with certificates bound to each peer's id: every connection is encrypted and authenticated
 end to end. nginx could not carry it anyway, as it is UDP.
 
+## A proof-of-work chain across machines
+
+`docker/pow.sh` runs one chain on a VPS and on your own machine: the VPS in Docker with its QUIC
+port open to the internet, and your machine as a node that mines too and dials it. Your machine
+sits behind NAT, so the VPS cannot dial it, but the one connection carries blocks both ways, and
+the node dials the VPS again every 15 seconds while it is cut off.
+
+```sh
+docker/pow.sh init                # here, once: a key of your own, and a genesis that pays it
+docker/pow.sh push user@your-vps  # here: the repository, the genesis and .env, by rsync
+docker/pow.sh up                  # on the VPS, in that copy: build and start the stack
+docker/pow.sh join your-vps       # here: a node of the same chain that mines and dials the VPS
+docker/pow.sh status [url]        # either: the chain, height and peers
+```
+
+1. **`init`** makes a key from new words, printed once: restore them in the [wallet](wallet.md)
+   to hold the account there. The key stays in `~/.chainv4-pow` (`POW_HOME`), never in the
+   repository. It writes a genesis, the development PoW chain with depth finality, so nothing
+   votes, whose coins, minting and mining rewards are that key's, starting now. It copies the
+   genesis to `docker/config/genesis.json` and writes `docker/.env`, both ignored by git: mining
+   rewards to the key, `--no-mdns`, and a self-signed certificate.
+2. **`push`** copies the repository by rsync, without build output, `.git`, databases or keys, to
+   `chainv4/` in the VPS's home (`REMOTE_DIR`).
+3. **`up`** runs `docker compose up -d --build`, warns when the machine has under 4 GiB of memory
+   and swap for the first build, waits for the node, and says which ports to open: **UDP 4001**
+   for peers, TCP 80 and 443 for the explorer and wallet, in `ufw` and in the provider's firewall.
+4. **`join`** builds the node here, keeps a copy of it in `POW_HOME`, looks the VPS's name up,
+   and runs a node with the same genesis that dials `/ip4/…/udp/4001/quic-v1`, mines with
+   `MINE_THREADS`, and serves its API, and the explorer and wallet when they are built, on
+   `127.0.0.1:8090` (`API`). Ctrl-C stops it; `join` again carries on where it was.
+
+Both mine, so both earn rewards, to the same key. `SYMBOL` names the coin at `init`, `P2P_PORT`
+moves the QUIC port, and `docker/pow.sh` alone lists every setting.
+
 ## Keeping it
 
 | Volume | What it holds |
@@ -130,5 +164,7 @@ on, arm64 or amd64.
 - **The CLI speaks plain HTTP only,** so `chainv4 send` and `chainv4 light` cannot reach the node
   through nginx. Run them where they reach the API directly, inside the container:
   `docker compose exec node chainv4 send --node http://127.0.0.1:8080 …`.
+- **A VPS takes the peers' word for nothing.** Its chain is the genesis it was given: a node
+  dialing it with another genesis is on another chain, and neither syncs from the other.
 - **One node per compose project.** Several nodes on one host want their own project names and
   ports: `docker compose -p second …` with other `HTTP_PORT`, `HTTPS_PORT` and `P2P_PORT`.

@@ -55,6 +55,9 @@ pub enum Source {
     Phrase { account: u32 },
     /// One key brought in, as a key file holds it.
     Key { key: String },
+    /// An account an offline signer holds the keys of, watched: its public keys, as the signer
+    /// paired it, and nothing to sign with.
+    Watch { keys: Vec<String> },
 }
 
 /// One account, as vaults from before seed phrases held it.

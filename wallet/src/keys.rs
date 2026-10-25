@@ -1,10 +1,10 @@
 //! Accounts, unlocked. An account from the seed phrase has a key in every scheme, and so an address
 //! in each: Ed25519, EdBlake and Ethereum's secp256k1, all from the same words. An account brought
-//! in as a key has that one.
+//! in as a key has that one. An account watched from an offline signer has its public keys alone.
 
 use {
     crate::vault::{Book, Source},
-    chainv4::crypto::keypair::{KeyType, Keypair},
+    chainv4::crypto::keypair::{KeyType, Keypair, PublicKey},
     chainv4::crypto::mnemonic::{Phrase, Seed},
     chainv4::structs::address::Address,
 };
@@ -13,31 +13,58 @@ use {
 pub struct Holder {
     pub name: String,
     pub source: Source,
-    /// Its keys, in the order schemes are listed: Ed25519, EdBlake, secp256k1.
+    /// Its public keys, in the order schemes are listed: Ed25519, EdBlake, secp256k1.
+    pub publics: Vec<PublicKey>,
+    /// The keys to them, in the same order; none for an account watched from an offline signer.
     pub keys: Vec<Keypair>,
 }
 
 impl Holder {
+    /// An account this wallet signs for, with these keys.
+    pub fn signing(name: String, source: Source, keys: Vec<Keypair>) -> Holder {
+        Holder {
+            name,
+            source,
+            publics: keys.iter().map(Keypair::public).collect(),
+            keys,
+        }
+    }
+
+    /// An account an offline signer signs for, from the public keys it paired.
+    pub fn watched(name: String, publics: Vec<PublicKey>) -> Holder {
+        Holder {
+            name,
+            source: Source::Watch { keys: publics.iter().map(PublicKey::to_string).collect() },
+            publics,
+            keys: Vec::new(),
+        }
+    }
+
     /// What names the account across runs: its first address.
     pub fn id(&self) -> String {
-        self.keys.first().map(|key| key.public().address().to_string()).unwrap_or_default()
+        self.publics.first().map(|public| public.address().to_string()).unwrap_or_default()
     }
 
     /// Its addresses, one per key.
     pub fn addresses(&self) -> Vec<Address> {
-        self.keys.iter().map(|key| key.public().address()).collect()
+        self.publics.iter().map(PublicKey::address).collect()
     }
 
-    /// The key of one of its addresses.
+    /// The key of one of its addresses, when this wallet holds it.
     pub fn key(&self, address: &Address) -> Option<&Keypair> {
         self.keys.iter().find(|key| key.public().address() == *address)
+    }
+
+    /// The public key of one of its addresses.
+    pub fn public(&self, address: &Address) -> Option<PublicKey> {
+        self.publics.iter().copied().find(|public| public.address() == *address)
     }
 
     /// The phrase's number for it, if it comes from the phrase.
     pub fn number(&self) -> Option<u32> {
         match self.source {
             Source::Phrase { account } => Some(account),
-            Source::Key { .. } => None,
+            Source::Key { .. } | Source::Watch { .. } => None,
         }
     }
 }
@@ -89,13 +116,14 @@ pub fn open(book: &Book) -> Vec<Holder> {
             let keys = match &stored.source {
                 Source::Phrase { account } => derive(seed.as_ref()?, *account),
                 Source::Key { key } => vec![Keypair::from_key_file(key).ok()?],
+                Source::Watch { keys } => {
+                    let publics = keys.iter().map(|key| key.parse().ok()).collect::<Option<Vec<PublicKey>>>()?;
+
+                    return Some(Holder::watched(stored.name.clone(), publics));
+                }
             };
 
-            Some(Holder {
-                name: stored.name.clone(),
-                source: stored.source.clone(),
-                keys,
-            })
+            Some(Holder::signing(stored.name.clone(), stored.source.clone(), keys))
         })
         .collect()
 }
@@ -142,5 +170,46 @@ mod tests {
         assert!(holders[0].key(&holders[1].addresses()[1]).is_none());
         assert_eq!(unused(&holders), 2);
         assert_eq!(unused(&holders[1..]), 0, "the first, removed, comes back first");
+    }
+
+    #[test]
+    fn an_account_watched_has_its_public_keys_and_no_key_to_sign_with() {
+        let signer = open(&Book {
+            phrase: Some(Words {
+                words: "test test test test test test test test test test test junk".to_string(),
+                passphrase: String::new(),
+            }),
+            accounts: vec![StoredAccount {
+                name: "Main".to_string(),
+                source: Source::Phrase { account: 0 },
+            }],
+        });
+        let watched = Holder::watched("Main".to_string(), signer[0].publics.clone());
+        let book = Book {
+            phrase: None,
+            accounts: vec![StoredAccount {
+                name: watched.name.clone(),
+                source: watched.source.clone(),
+            }],
+        };
+        let reopened = open(&serde_json::from_value(serde_json::to_value(&book).unwrap()).unwrap());
+        let ethereum = signer[0].addresses()[2];
+
+        assert_eq!(reopened.len(), 1, "it reads back from the vault");
+        assert_eq!(reopened[0].addresses(), signer[0].addresses(), "the signer's addresses, every scheme");
+        assert_eq!(reopened[0].id(), signer[0].id());
+        assert!(reopened[0].keys.is_empty() && reopened[0].key(&ethereum).is_none(), "nothing to sign with");
+        assert_eq!(reopened[0].public(&ethereum), Some(signer[0].keys[2].public()));
+        assert_eq!(reopened[0].number(), None);
+
+        let broken = Book {
+            phrase: None,
+            accounts: vec![StoredAccount {
+                name: "Broken".to_string(),
+                source: Source::Watch { keys: vec!["not a key".to_string()] },
+            }],
+        };
+
+        assert!(open(&broken).is_empty(), "one whose keys do not read is left out");
     }
 }

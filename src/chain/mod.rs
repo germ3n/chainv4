@@ -11,7 +11,7 @@ use {
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::db::{Column, Database, DbError, MemoryDb, Path, Read, SnapshotWalk, State, StatePart, StateTree, WalkError},
-    crate::light::{LightFinality, LightParams, LightUpdate},
+    crate::light::{FinalityStep, LightFinality, LightParams, LightUpdate},
     crate::registry::tokens::STANDARD_TOKEN_FUNCTIONS,
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
@@ -1781,6 +1781,45 @@ pub fn stored_state_at(db: Arc<dyn Read>, id: &Hash) -> Result<Option<Arc<State>
 )]
 pub fn stored_light_update(db: &dyn Read, block: &Hash) -> Result<Option<LightUpdate>, DbError> {
     read_value(db, Column::Light, &id_key(block))
+}
+
+#[document(
+    summary = "Finality for light clients, read straight from a database, an epoch at a time from one on: each main-chain checkpoint's justification, none for genesis, and the light update its block keeps. It stops after count epochs, past top, and before the first checkpoint after genesis without a justification.",
+    category = "Chain",
+    params = {
+        interval = "Blocks between checkpoints.",
+        from = "The first epoch.",
+        count = "The most epochs.",
+        top = "The tip's height: nothing above it is sent.",
+    },
+    see_also = "FinalityStep, LightClient::deliver_finality",
+)]
+pub fn stored_light_finality(db: &dyn Read, interval: u64, from: u64, count: u64, top: u64) -> Result<Vec<FinalityStep>, DbError> {
+    let mut steps = Vec::new();
+
+    for epoch in from..from.saturating_add(count) {
+        let Some(height) = epoch.checked_mul(interval).filter(|height| *height <= top) else {
+            break;
+        };
+        let Some(sealed) = stored_header_at(db, height)? else {
+            break;
+        };
+        let block = sealed.id();
+        let justification = match epoch {
+            0 => None,
+            _ => match stored_justification(db, &block)? {
+                Some(justification) => Some(justification),
+                None => break,
+            },
+        };
+
+        steps.push(FinalityStep {
+            justification,
+            update: stored_light_update(db, &block)?,
+        });
+    }
+
+    Ok(steps)
 }
 
 #[document(

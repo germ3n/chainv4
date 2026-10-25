@@ -3,11 +3,15 @@ package org.chainv4.ui;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Bitmap;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -22,6 +26,12 @@ import java.util.List;
  * each whole away from the main thread, leaves what it read for the app to take, and goes. It
  * draws nothing; its window is the app's own background, so the moment it shows does not flash.
  *
+ * Or it asks the system's camera for a photo. On Android 10 and up the camera writes it full size
+ * to a new image in MediaStore, which this reads and deletes; that needs no permission of the
+ * app's, as the image is its own. Older ones would need a storage permission for that, so there
+ * it takes the small preview the camera hands back instead. The app declares no camera
+ * permission, which is what lets it ask the camera app at all.
+ *
  * chainv4-ui calls start and take through JNI. ui/build-android.sh compiles this into the APK.
  *
  * No anonymous classes: d8 fails on one nested in another as newer javacs write them.
@@ -35,14 +45,21 @@ public final class Picker extends Activity implements Runnable {
     /** What the last pick came to, until the app takes it: {String[] names, byte[][] contents, String failure}. */
     private static Object[] done;
 
-    /** Starts a pick from the app's activity, for several files or one, over the app's background. */
-    public static void start(Activity app, boolean many, int background) {
+    /** Where the camera writes the photo asked for, on Android 10 and up, until it is read. */
+    private Uri shot;
+
+    /**
+     * Starts a pick from the app's activity, for several files or one, or a photo from the camera,
+     * over the app's background.
+     */
+    public static void start(Activity app, boolean many, boolean camera, int background) {
         synchronized (LOCK) {
             done = null;
         }
 
         Intent intent = new Intent(app, Picker.class)
                 .putExtra("many", many)
+                .putExtra("camera", camera)
                 .putExtra("background", background)
                 .addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);
         app.startActivity(intent);
@@ -74,6 +91,14 @@ public final class Picker extends Activity implements Runnable {
 
         // Brought back after Android let it go, it has asked already: the answer is on its way.
         if (saved != null) {
+            shot = saved.getParcelable("shot");
+
+            return;
+        }
+
+        if (getIntent().getBooleanExtra("camera", false)) {
+            capture();
+
             return;
         }
 
@@ -90,8 +115,64 @@ public final class Picker extends Activity implements Runnable {
         }
     }
 
+    /** Keeps where the photo goes, as the camera may run long enough for Android to let this go. */
+    @Override
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        out.putParcelable("shot", shot);
+    }
+
+    /** Asks the camera for a photo: written to a new image of the app's own where it can be. */
+    private void capture() {
+        Intent capture = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+
+        if (Build.VERSION.SDK_INT >= 29) {
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, "chainv4-" + System.currentTimeMillis() + ".jpg");
+            values.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+
+            try {
+                shot = getContentResolver().insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
+            } catch (RuntimeException e) {
+                shot = null;
+            }
+
+            if (shot != null) {
+                capture.putExtra(MediaStore.EXTRA_OUTPUT, shot)
+                        .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            }
+        }
+
+        try {
+            startActivityForResult(capture, 2);
+        } catch (ActivityNotFoundException e) {
+            forget();
+            leave(null, null, "this device has no camera app");
+            close();
+        }
+    }
+
+    /** Deletes the image the camera was to write to, if it is still there. */
+    void forget() {
+        if (shot != null) {
+            try {
+                getContentResolver().delete(shot, null, null);
+            } catch (RuntimeException e) {
+                // Gone already, or not the app's to delete: nothing more to do.
+            }
+
+            shot = null;
+        }
+    }
+
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
+        if (request == 2) {
+            took(result, data);
+
+            return;
+        }
+
         final List<Uri> picked = new ArrayList<Uri>();
 
         if (result == RESULT_OK && data != null) {
@@ -111,9 +192,41 @@ public final class Picker extends Activity implements Runnable {
         new Thread(new Reading(this, picked), "chainv4 picker").start();
     }
 
-    /** Goes, on the main thread, once what was picked is read. */
+    /** What the camera came back with: the photo it wrote, its preview, or nothing. */
+    private void took(int result, Intent data) {
+        if (result != RESULT_OK) {
+            forget();
+            leave(new String[0], new byte[0][], null);
+            close();
+
+            return;
+        }
+
+        if (shot != null) {
+            List<Uri> photo = new ArrayList<Uri>();
+            photo.add(shot);
+            new Thread(new Reading(this, photo), "chainv4 picker").start();
+
+            return;
+        }
+
+        Object preview = data != null && data.getExtras() != null ? data.getExtras().get("data") : null;
+
+        if (preview instanceof Bitmap) {
+            ByteArrayOutputStream png = new ByteArrayOutputStream();
+            ((Bitmap) preview).compress(Bitmap.CompressFormat.PNG, 100, png);
+            leave(new String[] {"photo.png"}, new byte[][] {png.toByteArray()}, null);
+        } else {
+            leave(null, null, "the camera sent no photo back");
+        }
+
+        close();
+    }
+
+    /** Goes, on the main thread, once what was picked is read, deleting a photo it took. */
     @Override
     public void run() {
+        forget();
         close();
     }
 

@@ -4,6 +4,7 @@
 
 use {
     super::Ctx,
+    crate::app::Role,
     crate::format,
     crate::lock,
     crate::theme,
@@ -18,6 +19,8 @@ pub struct SettingsState {
     /// The node being typed, and a genesis id to trust instead.
     node: Option<String>,
     genesis: String,
+    /// A checkpoint's block id to start from, being typed.
+    checkpoint: String,
     /// The proxy being typed, and why the one chosen would not do.
     proxy: Option<String>,
     proxy_trouble: Option<String>,
@@ -54,6 +57,58 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
 
     wallet(ui, ctx, state);
     words_question(ui, ctx, state);
+    // An offline signer follows no node and no chain.
+    if ctx.settings.role() != Role::Signer {
+        online(ui, ctx, state, node);
+    }
+
+    ui.add_space(14.0);
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "On this device");
+        let role = ctx.settings.role();
+        ui.label(RichText::new(match role {
+            Role::Signer => format!("{}: it makes no network requests, and signs what the sender asks by QR code.", role.name()),
+            _ => format!("{}.", role.name()),
+        }).small().color(palette.muted));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Theme").color(palette.soft));
+            ui.selectable_value(&mut ctx.settings.light_theme, false, "Dark");
+            ui.selectable_value(&mut ctx.settings.light_theme, true, "Light");
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Lock after").color(palette.soft));
+            ui.add(egui::DragValue::new(&mut ctx.settings.lock_after).range(0..=240).suffix(" min"));
+            ui.label(RichText::new(if ctx.settings.lock_after == 0 { "never, until you lock it" } else { "without input" }).small().color(palette.muted));
+        });
+
+        ui.add_space(10.0);
+        theme::caps(ui, &palette, "Password");
+
+        for (field, hint) in [(&mut state.current, "current password"), (&mut state.new, "new password"), (&mut state.again, "the new one again")] {
+            ui.add(egui::TextEdit::singleline(field).password(true).hint_text(hint).desired_width(f32::INFINITY));
+        }
+
+        if theme::quiet(ui, &palette, "Change password").clicked() {
+            state.changed = Some(change_password(ctx, state));
+        }
+
+        match &state.changed {
+            Some(Ok(done)) => {
+                ui.colored_label(palette.good, done);
+            }
+            Some(Err(why)) => {
+                ui.colored_label(palette.bad, why);
+            }
+            None => {}
+        }
+    });
+}
+
+/// What an install that goes online sets: the node, the proxy, the chain it trusts there, and the
+/// light client's saved progress.
+fn online(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, node: String) {
+    let palette = *ctx.palette;
     let typed = state.node.get_or_insert_with(|| node.clone());
 
     ui.add_space(14.0);
@@ -133,6 +188,56 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
 
             *ctx.connect = Some(node.clone());
         }
+
+        ui.add_space(12.0);
+        theme::caps(ui, &palette, "Start from a checkpoint");
+        let checkpoint = ctx.settings.checkpoints.get(&node).cloned();
+        let start_over = |settings: &mut crate::app::Settings| {
+            if let Some(genesis) = settings.pinned.get(&node) {
+                settings.light.remove(genesis);
+            }
+        };
+
+        match &checkpoint {
+            Some(checkpoint) => {
+                ui.label(RichText::new("The light client starts at this block, trusted as the genesis is, rather than following from genesis:").small().color(palette.muted));
+                super::address(ui, &palette, checkpoint);
+
+                if theme::quiet(ui, &palette, "Forget it").on_hover_text("Follow from genesis, checking every block").clicked() {
+                    ctx.settings.checkpoints.remove(&node);
+                    start_over(ctx.settings);
+                    *ctx.connect = Some(node.clone());
+                }
+            }
+            None => {
+                ui.label(
+                    RichText::new("A finalized checkpoint's block id, as someone you trust shows it, starts the light client there: quicker than from genesis, trusting that block as you trust the genesis. Met for the first time with no genesis given, it starts at the node's own.")
+                        .small()
+                        .color(palette.muted),
+                );
+            }
+        }
+
+        ui.add_space(6.0);
+        let start = super::beside(
+            ui,
+            |ui| theme::quiet(ui, &palette, "Start there").clicked(),
+            |ui, width| {
+                ui.add(egui::TextEdit::singleline(&mut state.checkpoint).hint_text("a checkpoint's block id, 0x…").font(egui::TextStyle::Monospace).desired_width(width));
+            },
+        );
+
+        if start {
+            match from_hex(state.checkpoint.trim()) {
+                Some(bytes) if bytes.len() >= 16 => {
+                    ctx.settings.checkpoints.insert(node.clone(), to_hex(&bytes));
+                    state.checkpoint.clear();
+                    start_over(ctx.settings);
+                    *ctx.connect = Some(node.clone());
+                }
+                _ => state.checkpoint = "not a block id".to_string(),
+            }
+        }
     });
 
     ui.add_space(14.0);
@@ -163,42 +268,6 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
             }
 
             *ctx.connect = Some(node.clone());
-        }
-    });
-
-    ui.add_space(14.0);
-    theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, "On this device");
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Theme").color(palette.soft));
-            ui.selectable_value(&mut ctx.settings.light_theme, false, "Dark");
-            ui.selectable_value(&mut ctx.settings.light_theme, true, "Light");
-        });
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Lock after").color(palette.soft));
-            ui.add(egui::DragValue::new(&mut ctx.settings.lock_after).range(0..=240).suffix(" min"));
-            ui.label(RichText::new(if ctx.settings.lock_after == 0 { "never, until you lock it" } else { "without input" }).small().color(palette.muted));
-        });
-
-        ui.add_space(10.0);
-        theme::caps(ui, &palette, "Password");
-
-        for (field, hint) in [(&mut state.current, "current password"), (&mut state.new, "new password"), (&mut state.again, "the new one again")] {
-            ui.add(egui::TextEdit::singleline(field).password(true).hint_text(hint).desired_width(f32::INFINITY));
-        }
-
-        if theme::quiet(ui, &palette, "Change password").clicked() {
-            state.changed = Some(change_password(ctx, state));
-        }
-
-        match &state.changed {
-            Some(Ok(done)) => {
-                ui.colored_label(palette.good, done);
-            }
-            Some(Err(why)) => {
-                ui.colored_label(palette.bad, why);
-            }
-            None => {}
         }
     });
 }
@@ -239,8 +308,11 @@ fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         ui.add_space(10.0);
         theme::caps(ui, &palette, "Its words");
 
-        match ctx.book.phrase.clone() {
-            Some(words) => {
+        match (ctx.settings.role() == Role::Sender, ctx.book.phrase.clone()) {
+            (true, _) => {
+                ui.label(RichText::new("None here: a watch-only wallet holds public keys alone. The words are the signer's, and stay with it.").small().color(palette.muted));
+            }
+            (false, Some(words)) => {
                 ui.label(RichText::new("Every account made from them comes back from them, on any device, with any wallet that follows BIP39.").small().color(palette.muted));
 
                 match state.showing_words {
@@ -269,7 +341,7 @@ fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
                     }
                 }
             }
-            None => {
+            (false, None) => {
                 ui.label(
                     RichText::new("This wallet has none: its accounts are keys brought in. Give it words, and new accounts come from them; the keys brought in stay as they are, with their own copies to keep.")
                         .small()

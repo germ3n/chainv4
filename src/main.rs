@@ -47,9 +47,14 @@ struct NodeArgs {
     /// An address to listen on. Repeat to listen on several.
     #[arg(long, default_value = "/ip4/0.0.0.0/udp/0/quic-v1")]
     listen: Vec<libp2p::Multiaddr>,
-    /// A peer to dial at startup. Repeat to dial several.
+    /// A peer to dial at startup, and again every 15 seconds while no connection to it stands.
+    /// Repeat to dial several. No /p2p/ part is needed, as a node takes a new peer id each start.
     #[arg(long)]
     peer: Vec<libp2p::Multiaddr>,
+    /// Do not look for peers on the local network with mDNS: for a server, whose network holds no
+    /// nodes of yours, so peers come from --peer and Kademlia alone.
+    #[arg(long)]
+    no_mdns: bool,
     /// The most gossiped transactions and votes, and submitted transactions, that may wait for
     /// the node at once. More are dropped until it catches up; submissions get 503.
     #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(1..))]
@@ -207,6 +212,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let net = net::spawn(NetConfig {
         listen: args.listen,
         peers: args.peer,
+        mdns: !args.no_mdns,
         hash: genesis.hash,
         network,
         backlog: BacklogLimits {

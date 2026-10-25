@@ -2,14 +2,21 @@
 //! the transaction itself, from what it proved: that address's nonce and balance. The node only prices it, from a probe signed with no
 //! fee offer, as `chainv4 send` does, and takes it in. Nothing is signed for real before the
 //! review shows what it costs at most.
+//!
+//! A watch-only sender holds no key: its probe signs nothing, which the node never checks, and
+//! once priced the transaction goes to the offline signer as a code, and comes back signed as
+//! another. The sender sends it only once it is the very one it asked for.
 
 use {
+    super::scan::Scan,
     super::{Ctx, Page},
+    crate::airgap::{self, Message, Request, Shown},
     crate::app::Sent,
     crate::format,
     crate::node::{Ask, Failure},
     crate::theme,
     chainv4::crypto::hasher::Hasher,
+    chainv4::crypto::keypair::PublicKey,
     chainv4::structs::address::Address,
     chainv4::structs::amount::Amount,
     chainv4::structs::hash::HashType,
@@ -42,9 +49,13 @@ pub struct SendState {
 #[derive(Clone, Debug)]
 struct Draft {
     from: Address,
+    /// The key it is signed with, here or on the offline signer.
+    signer: PublicKey,
     to: Address,
     tx: Tx,
     nonce: u64,
+    /// The token it sends, as the registry names it, for the offline signer to show.
+    token: Option<Shown>,
     /// What it sends, as shown: 1.5 DEV.
     what: String,
     /// What it moves of the coin, beside the fee: what the review checks the balance for.
@@ -59,6 +70,8 @@ enum Step {
     Pricing { draft: Draft, ask: Ask },
     /// Priced; warning is why a dry run on the node says it would fail, if it does.
     Review { draft: Draft, fee: FeeOffer, warning: Option<String> },
+    /// Asked of the offline signer, as the code shown, until its signed code is read back.
+    Offline { draft: Draft, request: Box<Request>, text: String, scan: Box<Scan> },
     /// Submitted, signed with the fee.
     Sending { draft: Draft, ask: Ask },
     Sent { id: String },
@@ -120,6 +133,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     if let Step::Sent { id } = &state.step {
         let id = id.clone();
         sent(ui, ctx, state, &id);
+
+        return;
+    }
+
+    if matches!(state.step, Step::Offline { .. }) {
+        offline(ui, ctx, state);
 
         return;
     }
@@ -284,7 +303,7 @@ fn available(ctx: &Ctx, token: Option<&str>, address: &str) -> (Option<String>, 
 fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
     let holder = ctx.holder().ok_or("there is no account to send from")?;
     let from = state.from.ok_or("there is no address to send from")?;
-    let key = holder.key(&from).ok_or("that address is not this account's")?;
+    let signer = holder.public(&from).ok_or("that address is not this account's")?;
     let address = from.to_string();
     let account = ctx.chain.account(&address).ok_or("the address is not proven yet: wait for the light client")?;
     let to = recipient(&state.to).ok_or("the address to send to does not read")?;
@@ -301,8 +320,8 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
         return Err(format!("that is more than the {} available", format::amount(&held.to_string(), decimals, &symbol)));
     }
 
-    let (tx, coin) = match &state.token {
-        None => (Tx::Transfer { from, to, amount: amount(units) }, units),
+    let (tx, coin, token) = match &state.token {
+        None => (Tx::Transfer { from, to, amount: amount(units) }, units, None),
         Some(token) => {
             let token: Address = token.parse().map_err(|_| "the token's address does not read".to_string())?;
             let tx = Tx::ContractCall {
@@ -312,11 +331,14 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
                 data: vec![TxCallArgumentType::Address(to), TxCallArgumentType::U256(units)],
             };
 
-            (tx, u256::ZERO)
+            (tx, u256::ZERO, Some(Shown { symbol: symbol.clone(), decimals }))
         }
     };
     let nonce = next_nonce(account.value.nonce, &ctx.settings.sent, &address, ctx.now);
-    let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, key);
+    let probe = match holder.key(&from) {
+        Some(key) => SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, key),
+        None => airgap::probe(tx.clone(), nonce, signer),
+    };
     let mut body = json!({ "tx": encode(&probe) });
 
     if !state.tip.trim().is_empty() {
@@ -326,9 +348,11 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
 
     let draft = Draft {
         from,
+        signer,
         to,
         tx,
         nonce,
+        token,
         what: format::amount(&units.to_string(), decimals, &symbol),
         coin,
     };
@@ -378,15 +402,42 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            let send = if warning.is_some() { "Send anyway" } else { "Sign and send" };
+            let key = ctx.holders.iter().find_map(|holder| holder.key(&draft.from));
+            let send = match (key.is_some(), warning.is_some()) {
+                (true, false) => "Sign and send",
+                (true, true) => "Send anyway",
+                (false, false) => "Sign on the signer",
+                (false, true) => "Sign on the signer anyway",
+            };
 
-            if theme::primary(ui, &palette, send, !short).clicked()
-                && let Some(key) = ctx.holders.iter().find_map(|holder| holder.key(&draft.from))
-            {
-                let signed = SignedTx::sign(draft.tx.clone(), draft.nonce, fee, key);
-                let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
-                ctx.node.ask(ask.clone());
-                state.step = Step::Sending { draft: draft.clone(), ask };
+            if theme::primary(ui, &palette, send, !short).clicked() {
+                match key {
+                    Some(key) => {
+                        let signed = SignedTx::sign(draft.tx.clone(), draft.nonce, fee, key);
+                        let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
+                        ctx.node.ask(ask.clone());
+                        state.step = Step::Sending { draft: draft.clone(), ask };
+                    }
+                    None => {
+                        let request = Request {
+                            tx: draft.tx.clone(),
+                            nonce: draft.nonce,
+                            fee,
+                            signer: draft.signer,
+                            coin: Shown {
+                                symbol: ctx.coin.symbol.clone(),
+                                decimals: ctx.coin.decimals,
+                            },
+                            token: draft.token.clone(),
+                        };
+                        state.step = Step::Offline {
+                            draft: draft.clone(),
+                            text: Message::Sign(request.clone()).to_text(),
+                            request: Box::new(request),
+                            scan: Box::default(),
+                        };
+                    }
+                }
             }
 
             if theme::quiet(ui, &palette, "Back").clicked() {
@@ -394,6 +445,48 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
             }
         });
     });
+}
+
+/// The request, as a code for the offline signer, and reading back what it signed: sent once it
+/// is the very transaction asked for, signed by the key asked.
+fn offline(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
+    let palette = *ctx.palette;
+    let Step::Offline { draft, request, text, scan } = &mut state.step else {
+        return;
+    };
+    let mut next = None;
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Sign it on the signer");
+        ui.label(RichText::new(format!("{} to {}: on the offline signer, open Sign and read this code.", draft.what, format::short(&draft.to.to_string()))).color(palette.soft));
+        ui.add_space(10.0);
+        super::code(ui, &palette, text);
+        ui.add_space(14.0);
+        theme::caps(ui, &palette, "Then read what it signed");
+
+        match scan.show(ui, &palette) {
+            Some(Message::Signed(signed)) => match airgap::check(request, &signed) {
+                Ok(()) => {
+                    let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
+                    ctx.node.ask(ask.clone());
+                    next = Some(Step::Sending { draft: draft.clone(), ask });
+                }
+                Err(why) => scan.fail(why),
+            },
+            Some(other) => scan.refuse(&other, "a signed transaction"),
+            None => {}
+        }
+
+        ui.add_space(10.0);
+
+        if theme::quiet(ui, &palette, "Back").clicked() {
+            next = Some(Step::Edit);
+        }
+    });
+
+    if let Some(next) = next {
+        state.step = next;
+    }
 }
 
 /// What became of a transaction just sent.

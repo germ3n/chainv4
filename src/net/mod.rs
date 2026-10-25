@@ -160,8 +160,10 @@ pub enum SyncResponse {
 pub struct NetConfig {
     #[document(summary = "Addresses to listen on, for example /ip4/0.0.0.0/udp/0/quic-v1.")]
     pub listen: Vec<Multiaddr>,
-    #[document(summary = "Peers to dial at startup.")]
+    #[document(summary = "Peers to dial at startup, and again every 15 seconds while no connection to one stands.")]
     pub peers: Vec<Multiaddr>,
+    #[document(summary = "Whether to look for peers on the local network with mDNS.")]
+    pub mdns: bool,
     #[document(summary = "The chain's hash, which gossip messages are told apart by.")]
     pub hash: crate::structs::hash::HashType,
     #[document(summary = "Names the network in gossip topics, so nodes on different chains ignore each other. Usually derived from the genesis id.")]

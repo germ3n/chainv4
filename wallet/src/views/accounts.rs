@@ -1,9 +1,13 @@
 //! The accounts this wallet holds keys for: making a new one, from the seed phrase, with an address
 //! in every scheme, or bringing one in from a key file or its text, and naming, using, exporting or
-//! removing each. Every change seals the vault again.
+//! removing each. On a watch-only sender, the accounts are an offline signer's, each read off its
+//! Pair page. Every change seals the vault again.
 
 use {
     super::Ctx,
+    super::scan::Scan,
+    crate::airgap::Message,
+    crate::app::Role,
     crate::format,
     crate::keys::{self, Holder},
     crate::theme,
@@ -34,6 +38,8 @@ pub struct AccountsState {
     asking_reveal: Option<usize>,
     revealing: Option<usize>,
     removing: Option<usize>,
+    /// Reading a signer's account, on a watch-only sender.
+    scan: Scan,
 }
 
 impl AccountsState {
@@ -53,9 +59,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
     if ctx.holders.is_empty() {
         theme::card(ui, &palette, |ui| {
             theme::caps(ui, &palette, "Start here");
-            let text = match ctx.book.phrase {
-                Some(_) => "Make a new account from the wallet's words, or bring in a key you have. Either way the keys stay on this device, sealed.",
-                None => "Make a new account, or bring in a key you have. Either way the key stays on this device, sealed.",
+            let text = match (ctx.settings.role(), &ctx.book.phrase) {
+                (Role::Sender, _) => "Add an account from the offline signer: on it, open Pair, and read its code below.",
+                (_, Some(_)) => "Make a new account from the wallet's words, or bring in a key you have. Either way the keys stay on this device, sealed.",
+                (_, None) => "Make a new account, or bring in a key you have. Either way the key stays on this device, sealed.",
             };
             ui.label(RichText::new(text).color(palette.soft));
         });
@@ -87,6 +94,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
     }
 
     ui.add_space(4.0);
+
+    if ctx.settings.role() == Role::Sender {
+        from_signer(ui, ctx, state);
+
+        return;
+    }
+
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Add an account");
         ui.add_space(4.0);
@@ -223,9 +237,11 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
             });
         });
 
-        let from = match number {
-            Some(number) => format!("From the words · index {number}"),
-            None => "A key brought in".to_string(),
+        let watched = ctx.holders[index].keys.is_empty();
+        let from = match (number, watched) {
+            (_, true) => "Watched · the offline signer holds its keys".to_string(),
+            (Some(number), false) => format!("From the words · index {number}"),
+            (None, false) => "A key brought in".to_string(),
         };
         ui.label(RichText::new(from).small().color(palette.muted));
         ui.add_space(4.0);
@@ -263,8 +279,8 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
                 (false, false) => "Export key",
             };
 
-            // Hiding them needs no asking; showing them does.
-            if theme::quiet(ui, &palette, export).clicked() {
+            // Hiding them needs no asking; showing them does. A watched account has none here.
+            if !watched && theme::quiet(ui, &palette, export).clicked() {
                 match revealed {
                     true => state.revealing = None,
                     false => state.asking_reveal = Some(index),
@@ -379,11 +395,7 @@ fn new_account(book: &Book, holders: &[Holder], scheme: KeyType) -> Result<Holde
         Some(seed) => {
             let account = keys::unused(holders);
 
-            Ok(Holder {
-                name: String::new(),
-                source: Source::Phrase { account },
-                keys: keys::derive(&seed, account),
-            })
+            Ok(Holder::signing(String::new(), Source::Phrase { account }, keys::derive(&seed, account)))
         }
         None => Keypair::generate(scheme).map(brought_in).map_err(|err| format!("no randomness for a key: {err}")),
     }
@@ -391,11 +403,7 @@ fn new_account(book: &Book, holders: &[Holder], scheme: KeyType) -> Result<Holde
 
 /// An account of one key, brought in.
 fn brought_in(key: Keypair) -> Holder {
-    Holder {
-        name: String::new(),
-        source: Source::Key { key: key.to_key_file() },
-        keys: vec![key],
-    }
+    Holder::signing(String::new(), Source::Key { key: key.to_key_file() }, vec![key])
 }
 
 /// Adds an account with the name typed, unless the wallet has one of its addresses already.
@@ -409,7 +417,7 @@ fn add(ctx: &mut Ctx, state: &mut AccountsState, made: Result<Holder, String>) {
         }
     };
 
-    if let Some(held) = made.addresses().into_iter().find(|address| ctx.holders.iter().any(|holder| holder.key(address).is_some())) {
+    if let Some(held) = made.addresses().into_iter().find(|address| ctx.holders.iter().any(|holder| holder.addresses().contains(address))) {
         state.error = Some(format!("{} is in this wallet already", format::short(&held.to_string())));
 
         return;
@@ -425,6 +433,34 @@ fn add(ctx: &mut Ctx, state: &mut AccountsState, made: Result<Holder, String>) {
     state.name.clear();
     state.pasted.clear();
     state.error = None;
+}
+
+/// On a watch-only sender: an account read off the offline signer's Pair page.
+fn from_signer(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
+    let palette = *ctx.palette;
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Add from the signer");
+        ui.add(egui::TextEdit::singleline(&mut state.name).hint_text("name, or the signer's").desired_width(f32::INFINITY));
+        ui.add_space(8.0);
+
+        match state.scan.show(ui, &palette) {
+            Some(Message::Pair(pairing)) => {
+                if state.name.trim().is_empty() {
+                    state.name = pairing.name.clone();
+                }
+
+                add(ctx, state, Ok(Holder::watched(String::new(), pairing.keys)));
+            }
+            Some(other) => state.scan.refuse(&other, "an account to pair with"),
+            None => {}
+        }
+
+        if let Some(error) = &state.error {
+            ui.add_space(6.0);
+            ui.colored_label(palette.bad, error);
+        }
+    });
 }
 
 /// Asks for a key file, which arrives later: in the browser and on Android, picking one is

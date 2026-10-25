@@ -107,6 +107,9 @@ At most 20,000 main-chain blocks are kept; older ones are let go.
 The explorer does not have to take the node's word for balances. It runs the library's
 [light client](light-client.md) against the node it talks to:
 - **What it trusts:** the genesis it saw the first time it met the node, which it pins.
+- **Where it starts:** from genesis; the first time it meets a node, from the node's own
+  finalized checkpoint; and from a checkpoint pasted under Settings → Light client, each time. See
+  [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint).
 - **What it checks:** every header by consensus, and every justification against voters it proved
   from state. It follows the chain again every few seconds.
 - **The sidebar** says whether it is starting, catching up, following, or stopped, with why on

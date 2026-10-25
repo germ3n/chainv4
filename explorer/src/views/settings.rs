@@ -9,11 +9,12 @@ use {
     egui::{RichText, Ui},
 };
 
-/// The proxy being typed, and why the one chosen would not do.
+/// The proxy being typed, and why the one chosen would not do; and a checkpoint to start from.
 #[derive(Default)]
 pub struct SettingsState {
     proxy: Option<String>,
     proxy_trouble: Option<String>,
+    checkpoint: String,
 }
 
 /// The settings page. The node being typed lives with the app, which connects to what is asked
@@ -107,10 +108,48 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
 
                 if widgets::quiet(ui, &palette, "Forget it").on_hover_text("Trust whatever genesis the node shows next, and start over").clicked() {
                     ctx.settings.pinned.remove(&node);
-                    *connect = Some(node);
+                    *connect = Some(node.clone());
                 }
             }
             None => super::note(ui, look, "It trusts nothing at this node yet: it pins the genesis it sees there first."),
+        }
+
+        ui.add_space(8.0);
+
+        match ctx.settings.checkpoints.get(&node).cloned() {
+            Some(checkpoint) => {
+                super::note(ui, look, "It starts at this checkpoint, trusted as the genesis is, rather than following from genesis:");
+                super::copyable(ui, &checkpoint);
+
+                if widgets::quiet(ui, &palette, "Forget it").on_hover_text("Follow from genesis, checking every block").clicked() {
+                    ctx.settings.checkpoints.remove(&node);
+                    *connect = Some(node.clone());
+                }
+            }
+            None => super::note(
+                ui,
+                look,
+                "It follows from genesis, or from the node's own finalized checkpoint the first time it meets one. A checkpoint's block id, as someone you trust shows it, starts it there each time instead.",
+            ),
+        }
+
+        let start = widgets::beside(
+            ui,
+            |ui| widgets::quiet(ui, &palette, "Start there").clicked(),
+            |ui, width| {
+                ui.add(egui::TextEdit::singleline(&mut state.checkpoint).hint_text("a checkpoint's block id, 0x…").desired_width(width));
+            },
+        );
+
+        if start {
+            match chainv4::structs::hex::from_hex(state.checkpoint.trim()) {
+                Some(bytes) if bytes.len() >= 16 => {
+                    ctx.settings.checkpoints.insert(node.clone(), chainv4::structs::hex::to_hex(&bytes));
+                    state.checkpoint.clear();
+                    *connect = Some(node);
+                }
+                _ => state.checkpoint = "not a block id".to_string(),
+            }
         }
     });
 }

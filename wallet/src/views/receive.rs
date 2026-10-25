@@ -98,9 +98,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
 }
 
 /// The text as a QR code this wide, dark on white whatever the theme, so any camera reads it.
-fn qr(ui: &mut Ui, text: &str, side: f32) {
+pub(super) fn qr(ui: &mut Ui, text: &str, side: f32) {
     let Ok(code) = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M) else {
-        ui.label("This address does not fit a QR code.");
+        ui.label("This does not fit a QR code.");
 
         return;
     };

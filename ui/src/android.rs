@@ -133,7 +133,7 @@ impl OnAndroid {
     /// and finds what was picked when it comes back.
     fn pick(&mut self, ctx: &egui::Context, background: [f32; 4]) {
         if let Some(asked) = files::android::asked(ctx) {
-            match self.start(asked.many, files::android::argb(background)) {
+            match self.start(asked.many, asked.camera, files::android::argb(background)) {
                 Ok(()) => self.waiting = Some(asked.done),
                 Err(err) => (asked.done)(Err(format!("could not open the picker: {err}"))),
             }
@@ -158,16 +158,16 @@ impl OnAndroid {
         }
     }
 
-    /// `Picker.start(activity, many, background)`.
-    fn start(&self, many: bool, background: i32) -> jni::errors::Result<()> {
+    /// `Picker.start(activity, many, camera, background)`.
+    fn start(&self, many: bool, camera: bool, background: i32) -> jni::errors::Result<()> {
         let class = self.picker.as_ref().ok_or(jni::errors::Error::NullPtr("this APK carries no picker"))?;
 
         java(&self.app, |env, activity| {
             env.call_static_method(
                 &**class,
                 jni_str!("start"),
-                jni_sig!("(Landroid/app/Activity;ZI)V"),
-                &[JValue::Object(activity), JValue::Bool(many), JValue::Int(background)],
+                jni_sig!("(Landroid/app/Activity;ZZI)V"),
+                &[JValue::Object(activity), JValue::Bool(many), JValue::Bool(camera), JValue::Int(background)],
             )?;
 
             Ok(())

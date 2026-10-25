@@ -5,6 +5,7 @@
 //! checked. It runs as a desktop app, in the browser built with trunk, and on Android built with
 //! xbuild: the binary starts the first two, and Android loads this library itself.
 
+mod airgap;
 mod app;
 mod chain;
 mod format;
