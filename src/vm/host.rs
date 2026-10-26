@@ -141,6 +141,34 @@ impl Host {
         }
     }
 
+    /// The host an EVM contract calls a native one from, through the native precompile: the
+    /// calling contract's, over a layer with the EVM's changes so far, with the native contracts
+    /// running above the EVM on its stack. Host::call from it makes the call.
+    #[cfg(feature = "evm")]
+    pub(crate) fn from_evm(state: Arc<State>, caller: Address, block: super::BlockAt, memory: usize, vm: Arc<Vm>, mut stack: Vec<Address>) -> Host {
+        stack.push(caller);
+        let context = CallContext {
+            sender: caller,
+            contract: caller,
+            value: u256::ZERO,
+            block,
+        };
+
+        Host { stack, ..Host::root(state, context, memory, vm) }
+    }
+
+    /// The call's state layer, for what a library writes down on the side, such as an alias.
+    #[cfg(feature = "evm")]
+    pub(crate) fn state(&self) -> &Arc<State> {
+        &self.state
+    }
+
+    /// The events the calls made from this host emitted, once they succeeded.
+    #[cfg(feature = "evm")]
+    pub(crate) fn take_events(&self) -> Vec<Event> {
+        std::mem::take(&mut *lock(&self.events))
+    }
+
     #[document(parent = "Host", summary = "Who is calling, which contract, and what they sent.")]
     pub fn context(&self) -> &CallContext {
         &self.context
@@ -265,7 +293,7 @@ impl Host {
             }
 
             crate::registry::names::Names::new(&self.state)
-                .resolve(&name, self.context.time, names.grace_ms)
+                .resolve(&name, self.context.block.time, names.grace_ms)
                 .map_err(|err| self.fail(err))
         }
 
@@ -289,7 +317,7 @@ impl Host {
         #[cfg(feature = "names")]
         {
             crate::registry::names::Names::new(&self.state)
-                .primary(address, self.context.time, names.grace_ms)
+                .primary(address, self.context.block.time, names.grace_ms)
                 .map(|name| name.map(|name| names.display(&name)))
                 .map_err(|err| self.fail(err))
         }
@@ -386,7 +414,7 @@ impl Host {
             sender: self.context.contract,
             contract: *target,
             value,
-            time: self.context.time,
+            block: self.context.block,
         };
         let mut stack = self.stack.clone();
         stack.push(*target);
@@ -419,6 +447,92 @@ impl Host {
         }
 
         outcome
+    }
+
+    #[document(
+        parent = "Host",
+        summary = "Calls an EVM contract, or pays any account, with calldata, sending value from this contract's balance, as Tx::EvmCall does: the EVM sees this contract at its alias, as msg.sender. What it changes, and the value, stay only if it succeeds, and only if this call does. The EVM may call native contracts back through the native precompile, this one among them only through a function marked reentrant.",
+        params = {
+            to = "Whom to call: an EVM contract, or any account, which the EVM reaches at its 20 bytes.",
+            input = "The calldata: a selector and ABI-encoded arguments, or nothing for a plain payment.",
+            value = "What to send; zero for nothing. Engines charge cost::TRANSFER on top of cost::CALL when it is not zero.",
+            fuel = "What it may burn: what the caller has left after paying for the call. EVM gas burns it at the block's fuel_per_gas.",
+        },
+        returns = "What the EVM returned, as one Bytes value, or why it failed: a revert's reason as Runtime(\"reverted: …\"), OutOfFuel when its gas ran out.",
+        panics = "TooDeep past MAX_CALL_DEPTH across engines, Runtime on a chain without the EVM.",
+        see_also = "NATIVE_PRECOMPILE, Bridge",
+    )]
+    pub fn evm_call(&self, to: &Address, input: &[u8], value: u256, fuel: u64) -> Outcome {
+        let hop = self.open(HopKind::Call, *to, "evm", value);
+        let outcome = self.enter_evm(to, input, value, fuel);
+        self.close(hop, &outcome);
+
+        outcome
+    }
+
+    #[cfg(feature = "evm")]
+    fn enter_evm(&self, to: &Address, input: &[u8], value: u256, fuel: u64) -> Outcome {
+        use crate::vm::evm::{self, Bridge, EvmAction, EvmBlock, EvmReturned};
+
+        if !self.vm.runs_evm() {
+            return Outcome::failed(VmError::Runtime("this chain runs no EVM".to_string()));
+        }
+
+        if self.stack.len() >= MAX_CALL_DEPTH {
+            return Outcome::failed(VmError::TooDeep);
+        }
+
+        let me = self.context.contract;
+        let block = self.context.block;
+        let fuel_per_gas = block.fuel_per_gas.max(1);
+        let layer = Arc::new(State::new(self.state.clone()));
+        let nonce = match Accounts::new(&layer).get(&me) {
+            Ok(account) => account.nonce,
+            Err(err) => return Outcome::failed(self.fail(err)),
+        };
+        let evm_block = EvmBlock {
+            height: block.height,
+            timestamp: block.time,
+            producer: block.producer,
+            chain_id: self.vm.chain_id(),
+            names: self.vm.names().cloned(),
+        };
+        let bridge = Bridge {
+            vm: self.vm.clone(),
+            fuel_per_gas,
+            stack: self.stack.clone(),
+        };
+        let action = EvmAction::Call { to: *to, value, input: input.to_vec() };
+        let ran = match evm::run(&layer, &me, nonce, action, &[], fuel / fuel_per_gas, self.memory as u64, evm_block, Some(&bridge)) {
+            Ok(ran) => ran,
+            Err(err) => return Outcome::failed(self.fail(err)),
+        };
+        let fuel_used = ran.gas_used.saturating_mul(fuel_per_gas).min(fuel);
+        let result = match ran.result {
+            Ok(EvmReturned::Output(output)) => {
+                self.state.merge(layer.take_changes());
+                let mut events = lock(&self.events);
+                lock(&self.trace).emitted(self.hop, self.offset + events.len());
+                events.extend(ran.events);
+
+                Ok(vec![TxCallArgumentType::Bytes(output)])
+            }
+            Ok(EvmReturned::Created(_)) => Err(VmError::Runtime("a call created a contract".to_string())),
+            Err(err) => Err(err),
+        };
+
+        Outcome {
+            fuel_used,
+            result,
+            events: Vec::new(),
+            trace: Trace::default(),
+            refresh_tokens: Vec::new(),
+        }
+    }
+
+    #[cfg(not(feature = "evm"))]
+    fn enter_evm(&self, _: &Address, _: &[u8], _: u256, _: u64) -> Outcome {
+        Outcome::failed(VmError::Runtime("this node was built without the EVM".to_string()))
     }
 
     #[document(

@@ -985,9 +985,14 @@ impl Chain {
             return Err(ChainError::BadGenesis(problem.to_string()));
         }
 
-        let vm = Arc::new(Vm::new(&genesis.engines, genesis.hash).map_err(ChainError::MissingEngine)?.with_names(genesis.names.clone()));
         let block = genesis.block();
         let id = block.id();
+        let vm = Arc::new(
+            Vm::new(&genesis.engines, genesis.hash)
+                .map_err(ChainError::MissingEngine)?
+                .with_names(genesis.names.clone())
+                .with_chain_id(crate::crypto::ethereum::chain_id(&id)),
+        );
         let stored: Option<Hash> = read_value(&*db, Column::Heights, &0u64.to_be_bytes())?;
 
         match stored {

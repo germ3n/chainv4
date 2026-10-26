@@ -174,3 +174,20 @@ fn create_addresses_and_aliases_are_ethereums() {
     assert_eq!(evm_address(&Address::Evm([4; 20])), [4; 20]);
     assert_ne!(evm_address(&Address::Ed25519([5; 32])), [5; 20], "anything else goes by its alias");
 }
+
+#[test]
+fn signatures_give_solidity_s_selectors_and_lists_give_none() {
+    // As solc --hashes gives them.
+    let (selector, types) = parse_signature("transfer(address,uint256)").unwrap();
+
+    assert_eq!(selector, Some([0xa9, 0x05, 0x9c, 0xbb]));
+    assert_eq!(types, vec![AbiType::Address, AbiType::Uint(256)]);
+    assert_eq!(parse_signature(" transfer(address, uint) ").unwrap().0, Some([0xa9, 0x05, 0x9c, 0xbb]), "uint is uint256, and spaces go");
+    assert_eq!(parse_signature("count()").unwrap(), (Some([0x06, 0x66, 0x1a, 0xbd]), Vec::new()));
+    assert_eq!(parse_signature("(uint256,(bool,string)[])").unwrap(), (None, vec![ty("uint256"), ty("(bool,string)[]")]));
+
+    assert!(parse_signature("transfer").is_err(), "no types");
+    assert!(parse_signature("2fast(uint256)").is_err(), "no function name");
+    assert!(parse_signature("f(uint7)").is_err(), "no such type");
+    assert!(parse_signature("f(uint256)[]").is_err(), "an array, not a list");
+}

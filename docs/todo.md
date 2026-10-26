@@ -218,6 +218,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   client.
 - [ ] **No governance over fees, rewards or limits.** The same ballot could carry them; each is a
   question of what the chain's rules read from state instead of genesis.
+- [ ] **Changing a running chain's engines.** Which engines a chain runs, Lua, WebAssembly and the
+  EVM, is fixed by genesis's `engines`: adding or dropping any of them today takes a new genesis.
+  A `Change::Engines` by governance naming the whole new set, several engines at once, taking
+  effect at a checkpoint like a consensus change, would let a live chain turn engines on and off,
+  with the node building its `Vm` per era. Open: what becomes of contracts of an engine turned off
+  (refused calls, or frozen but readable), and a node built without an engine the chain turns on
+  stopping with a clear error at that height.
 
 ### Script layer
 
@@ -241,9 +248,17 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   [Ethereum's tools](ethereum.md). The ABI they share is `src/abi/`.
 - [ ] **Proven contract reads.** The apps' reads are dry runs on the node; a light client could
   prove the storage a read touches.
-- [ ] **Calls between the EVM and the other engines.** A precompile the EVM calls Lua and wasm
-  contracts through, and a host function the other way, with values converted at the boundary.
-  Until then they share balances only.
+- [x] **Calls between the EVM and the other engines.** The native precompile at `0x…4e43`
+  calls Lua and wasm contracts with ABI-encoded arguments mapped to native types, and Lua's
+  `evm.call` and the SDK's `evm_call` call the EVM, with `evm.encode` and `evm.decode` for the ABI.
+  Calls nest across engines to `MAX_CALL_DEPTH`, and a revert on either side unwinds both. See
+  [EVM](evm.md#calls-with-lua-and-webassembly-contracts).
+- [ ] **Native calls in EVM traces.** EVM transactions have no trace, so the native calls they
+  make are in none either; revm's inspector could build one with the native hops under it.
+- [ ] **Token refreshes from native calls the EVM makes.** A native contract that asks for
+  `tokens.refresh()` while the EVM calls it is not asked again.
+- [ ] **The wallet's Contracts page calling across engines.** Nothing to do for calls, but a
+  native contract's page could offer the `callNative` calldata for it, for EVM tools.
 - [x] **An alias registered without an EVM transaction.** On a chain with the EVM, any transaction
   writes its sender's alias down, so coin the EVM pays it reaches the account. An account that has
   only received still has none.
@@ -491,6 +506,14 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **No NAT traversal** (relay, hole punching, AutoNAT).
 
 ### Node, API and tooling
+
+- [ ] **Engine pools sized on the node.** Each engine's per-node resources are constants in the
+  code: Lua keeps `POOL_SIZE` (16) pristine Luau states built ahead by `BUILDERS` (2) threads,
+  WebAssembly a module cache of `MODULE_CACHE_BYTES` (32 MiB) and `MODULE_CACHE_ENTRIES` (1024),
+  and the EVM builds its context fresh for every call. Node flags, such as `--lua-pool`,
+  `--lua-builders`, `--wasm-cache-mb` and an EVM equivalent for a pool of contexts kept warm,
+  would let an operator trade memory for throughput. They change no consensus, so each node
+  picks its own; the `Vm` would take them at `Chain::open`.
 
 - [x] **The container's node stops on SIGTERM.** It stops its loop on SIGTERM or SIGINT and
   returns, so `docker/compose.sh stop` takes a second rather than ten and a kill.

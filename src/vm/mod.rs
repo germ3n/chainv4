@@ -156,6 +156,9 @@ pub mod cost {
     /// Resolving a name, or an address's primary name: a few name records read, one for each
     /// label, and the primary name's.
     pub const NAME: u64 = 500;
+    /// Encoding or decoding values in Solidity's ABI, plus 1 for every COPY_BYTES_PER_FUEL bytes
+    /// of signature and data.
+    pub const ABI: u64 = 50;
 }
 
 #[document(
@@ -184,8 +187,37 @@ pub struct CallContext {
     pub contract: Address,
     #[document(summary = "The amount sent with the call. Calls between contracts send nothing.")]
     pub value: u256,
-    #[document(summary = "The time of the block the call runs in, in milliseconds since the Unix epoch: what names expire by. A read-only call runs at the tip's.")]
+    #[document(summary = "The block the call runs in. A read-only call runs at the tip's.")]
+    pub block: BlockAt,
+}
+
+#[document(
+    summary = "The block a call runs in, as contracts see it: what names expire by, and what an EVM call made from a contract reads as its block.",
+    category = "VM",
+    see_also = "CallContext",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockAt {
+    #[document(summary = "Its height.")]
+    pub height: u64,
+    #[document(summary = "Its time, in milliseconds since the Unix epoch.")]
     pub time: u64,
+    #[document(summary = "Who produced it.")]
+    pub producer: Address,
+    #[document(summary = "The fuel one EVM gas burns there: the chain's gas price in fuel, 1 on a chain without fees.")]
+    pub fuel_per_gas: u64,
+}
+
+impl BlockAt {
+    #[document(parent = "BlockAt", summary = "A block at this time and nothing else known of it: height 0, no producer, gas one fuel. For tests and tools.")]
+    pub fn at(time: u64) -> BlockAt {
+        BlockAt {
+            height: 0,
+            time,
+            producer: Address::Ed25519([0; 32]),
+            fuel_per_gas: 1,
+        }
+    }
 }
 
 #[document(
@@ -312,6 +344,8 @@ pub struct Vm {
     hash: HashType,
     /// The chain's names, which contracts resolve, or None on a chain without them.
     names: Option<crate::registry::names::NamesConfig>,
+    /// The chain's id, as the EVM's CHAINID reads it.
+    chain_id: u64,
 }
 
 impl Vm {
@@ -343,13 +377,24 @@ impl Vm {
             engines.push((*kind, engine));
         }
 
-        Ok(Vm { engines, evm, hash, names: None })
+        Ok(Vm { engines, evm, hash, names: None, chain_id: 0 })
     }
 
     #[document(parent = "Vm", summary = "The engines, with the chain's names for contracts to resolve: genesis's names, or None for a chain without them.")]
     pub fn with_names(mut self, names: Option<crate::registry::names::NamesConfig>) -> Vm {
         self.names = names;
         self
+    }
+
+    #[document(parent = "Vm", summary = "The engines, with the chain's id for EVM calls contracts make: chain_id of the genesis block's id.")]
+    pub fn with_chain_id(mut self, chain_id: u64) -> Vm {
+        self.chain_id = chain_id;
+        self
+    }
+
+    #[document(parent = "Vm", summary = "The chain's id, as the EVM's CHAINID reads it; 0 unless with_chain_id set it.")]
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
     }
 
     #[document(parent = "Vm", summary = "The chain's names, which contracts resolve, or None on a chain without them.")]
@@ -531,4 +576,4 @@ impl From<DbError> for VmError {
 }
 
 #[cfg(all(test, feature = "lvm", feature = "wasm"))]
-mod tests;
+pub(crate) mod tests;

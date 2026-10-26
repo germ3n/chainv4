@@ -18,7 +18,7 @@ use {
     crate::registry::validators::Validators,
     crate::structs::vote::Checkpoint,
     crate::db::{Database, DbError, Read, STATE_COLUMNS, State, StateTree},
-    crate::vm::{CallContext, Limits, Vm, VmError, selector},
+    crate::vm::{BlockAt, CallContext, Limits, Vm, VmError, selector},
     crate::mempool::MempoolError,
     crate::node::{NodeHandle, NodeReport, SubmitError},
     crate::registry::tokens::stored_tokens,
@@ -173,7 +173,8 @@ pub fn start(
     let vm = Arc::new(
         Vm::new(&genesis.engines, genesis.hash)
             .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?
-            .with_names(genesis.names.clone()),
+            .with_names(genesis.names.clone())
+            .with_chain_id(crate::crypto::ethereum::chain_id(&genesis.block().id())),
     );
     let listener = std::net::TcpListener::bind(address)?;
     listener.set_nonblocking(true)?;
@@ -1299,7 +1300,13 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
         Some(_) => return Err(ApiError::BadRequest("args must be a list".to_string())),
     };
     let (db, vm, limits, function) = (api.db.clone(), api.vm.clone(), api.limits, Hash::Xxh3_64(selector(function)));
-    let time = tip(&*db)?.header.timestamp;
+    let header = tip(&*db)?.header;
+    let block = BlockAt {
+        height: header.height,
+        time: header.timestamp,
+        producer: header.producer,
+        fuel_per_gas: api.fees.as_ref().map_or(1, |fees| fees.schedule().fuel_for(1).max(1)),
+    };
     // On a blocking thread, since the API answers everything on one.
     let outcome = tokio::task::spawn_blocking(move || {
         let state = Arc::new(State::new(db));
@@ -1310,7 +1317,7 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
             sender,
             contract,
             value: u256::ZERO,
-            time,
+            block,
         };
 
         Ok::<_, ApiError>(vm.call(&state, &record, context, &function, &args, limits))

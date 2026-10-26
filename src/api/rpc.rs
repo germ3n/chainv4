@@ -333,7 +333,13 @@ async fn simulate(api: &Arc<Api>, call: Call) -> Result<EvmRan, RpcError> {
             names: api.rules.names.as_deref().cloned(),
         };
 
-        Ok(evm::run(&state, &sender, nonce, action, &[], call.gas.map_or(cap, |gas| gas.min(cap)), api.rules.limits.memory as u64, block)?)
+        let bridge = evm::Bridge {
+            vm: api.vm.clone(),
+            fuel_per_gas,
+            stack: Vec::new(),
+        };
+
+        Ok(evm::run(&state, &sender, nonce, action, &[], call.gas.map_or(cap, |gas| gas.min(cap)), api.rules.limits.memory as u64, block, Some(&bridge))?)
     })
     .await
     .map_err(|err| RpcError::server(err.to_string()))?

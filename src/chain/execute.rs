@@ -16,7 +16,7 @@ use {
     crate::chain::fees::{Charged, Fees, Scoring},
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
     crate::structs::u256::u256,
-    crate::vm::{CallContext, Limits, Outcome, Vm, VmError},
+    crate::vm::{BlockAt, CallContext, Limits, Outcome, Vm, VmError},
     r#macro::document,
     std::fmt,
     std::sync::Arc,
@@ -452,7 +452,7 @@ fn settle(
         state: block,
         vm,
         limits: rules.limits,
-        time: context.timestamp,
+        block: block_at(rules, context),
     };
     let charged = schedule.charge(&scoring).min(limit);
     let settled = payment.fees.settle(context.base_price, payment.price, gas, charged);
@@ -534,7 +534,7 @@ fn refreshed(
             ..limits
         };
 
-        match contracts.refresh(vm, token, call.sender, left, token_functions, call.time) {
+        match contracts.refresh(vm, token, call.sender, left, token_functions, call.block) {
             Ok((fuel_used, trace)) => {
                 contracted.fuel_used += fuel_used;
                 contracted.trace.append(trace);
@@ -602,7 +602,7 @@ fn run(
                 sender,
                 contract: *to,
                 value,
-                time: context.timestamp,
+                block: block_at(rules, context),
             };
 
             match Contracts::new(layer).call(vm, &call, func, data, limits) {
@@ -612,11 +612,12 @@ fn run(
         }
         #[cfg(feature = "evm")]
         Tx::Deploy { code: crate::structs::code::Code::Evm(init) } if vm.runs_evm() => {
-            evm(layer, signed, sender, rules, limits, context, crate::vm::evm::EvmAction::Create { init: init.clone(), value: u256::ZERO }, &[])
+            evm(layer, vm, signed, sender, rules, limits, context, crate::vm::evm::EvmAction::Create { init: init.clone(), value: u256::ZERO }, &[])
         }
         #[cfg(feature = "evm")]
         Tx::EvmCall { to, value, input } if vm.runs_evm() => evm(
             layer,
+            vm,
             signed,
             sender,
             rules,
@@ -637,7 +638,7 @@ fn run(
                 Some(to) => crate::vm::evm::EvmAction::Call { to: Address::Evm(to), value: ethereum.value, input: ethereum.input },
             };
 
-            evm(layer, signed, sender, rules, limits, context, action, &ethereum.access_list)
+            evm(layer, vm, signed, sender, rules, limits, context, action, &ethereum.access_list)
         }
         Tx::EvmCall { .. } | Tx::Ethereum { .. } => (Err(Failure::EngineNotAllowed(Engine::Evm)), Contracted::default()),
         Tx::Upgrade { code, .. } | Tx::Deploy { code } if code.engine() == Engine::Evm && !vm.runs_evm() => {
@@ -652,7 +653,7 @@ fn run(
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
-            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits, &rules.token_functions, context.timestamp) {
+            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits, &rules.token_functions, block_at(rules, context)) {
                 Ok((address, hooked)) => (Ok(Effect::Deployed(address)), hooked.into()),
                 Err(failed) => failed_hooks(failed),
             }
@@ -662,7 +663,7 @@ fn run(
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
-            match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits, &rules.token_functions, context.timestamp) {
+            match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits, &rules.token_functions, block_at(rules, context)) {
                 Ok(hooked) => (Ok(Effect::Upgraded(*contract)), hooked.into()),
                 Err(failed) => failed_hooks(failed),
             }
@@ -798,6 +799,7 @@ fn run(
 #[allow(clippy::too_many_arguments)]
 fn evm(
     layer: &Arc<State>,
+    vm: &Arc<Vm>,
     signed: &SignedTx,
     sender: Address,
     rules: &Rules,
@@ -808,7 +810,7 @@ fn evm(
 ) -> (Result<Effect, Failure>, Contracted) {
     use crate::vm::evm::{self, EvmBlock, EvmReturned};
 
-    let fuel_per_gas = rules.fees.as_ref().map_or(1, |fees| fees.schedule().fuel_for(1).max(1));
+    let fuel_per_gas = fuel_per_gas(rules);
     let block = EvmBlock {
         height: context.height,
         timestamp: context.timestamp,
@@ -817,7 +819,13 @@ fn evm(
         names: rules.names.as_deref().cloned(),
     };
 
-    match evm::run(layer, &sender, signed.nonce, action, access_list, limits.fuel / fuel_per_gas, limits.memory as u64, block) {
+    let bridge = evm::Bridge {
+        vm: vm.clone(),
+        fuel_per_gas,
+        stack: Vec::new(),
+    };
+
+    match evm::run(layer, &sender, signed.nonce, action, access_list, limits.fuel / fuel_per_gas, limits.memory as u64, block, Some(&bridge)) {
         Ok(ran) => {
             let contracted = Contracted {
                 fuel_used: ran.gas_used.saturating_mul(fuel_per_gas),
@@ -834,6 +842,22 @@ fn evm(
         }
         Err(err) => (Err(Failure::Registry(RegistryError::Db(err))), Contracted::default()),
     }
+}
+
+/// The block as contracts see it: what names expire by, and what an EVM call a contract makes
+/// reads.
+fn block_at(rules: &Rules, context: &BlockContext) -> BlockAt {
+    BlockAt {
+        height: context.height,
+        time: context.timestamp,
+        producer: context.producer,
+        fuel_per_gas: fuel_per_gas(rules),
+    }
+}
+
+/// The fuel one EVM gas burns: gas is the chain's gas one for one.
+fn fuel_per_gas(rules: &Rules) -> u64 {
+    rules.fees.as_ref().map_or(1, |fees| fees.schedule().fuel_for(1).max(1))
 }
 
 fn moved(result: Result<(), RegistryError>) -> Result<Effect, Failure> {

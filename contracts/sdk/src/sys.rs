@@ -50,5 +50,12 @@ unsafe extern "C" {
     pub fn resolve_name(name: *const u8, len: u32, out: *mut u8) -> u32;
     /// The primary name's length, with the name in the result buffer, or -1 for none.
     pub fn name_of(address: *const u8) -> i32;
+    /// 0 when the EVM call succeeded, with what it returned in the result buffer; 1 when it
+    /// reverted or failed, with why there.
+    pub fn evm_call(address: *const u8, value: *const u8, input: *const u8, input_len: u32) -> u32;
+    /// 0 with the ABI-encoded bytes in the result buffer; 1 with why a value does not fit.
+    pub fn abi_encode(signature: *const u8, signature_len: u32, values: *const u8, values_len: u32) -> u32;
+    /// 0 with the decoded values, an encoded list, in the result buffer; 1 with why not.
+    pub fn abi_decode(types: *const u8, types_len: u32, data: *const u8, data_len: u32) -> u32;
     pub fn abort(message: *const u8, len: u32) -> !;
 }

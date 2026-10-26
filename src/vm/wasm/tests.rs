@@ -40,6 +40,9 @@ const IMPORTS: &str = r#"
   (import "chain" "refresh_token" (func $refresh_token))
   (import "chain" "resolve_name" (func $resolve_name (param i32 i32 i32) (result i32)))
   (import "chain" "name_of" (func $name_of (param i32) (result i32)))
+  (import "chain" "evm_call" (func $evm_call (param i32 i32 i32 i32) (result i32)))
+  (import "chain" "abi_encode" (func $abi_encode (param i32 i32 i32 i32) (result i32)))
+  (import "chain" "abi_decode" (func $abi_decode (param i32 i32 i32 i32) (result i32)))
   (import "chain" "abort" (func $abort (param i32 i32)))
 "#;
 
@@ -53,7 +56,7 @@ fn context() -> CallContext {
         sender: Address::Ed25519([1; 32]),
         contract: Address::Contract([2; 32]),
         value: u256::new(500),
-        time: 0,
+        block: crate::vm::BlockAt::at(0),
     }
 }
 

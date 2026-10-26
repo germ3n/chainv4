@@ -281,7 +281,7 @@ impl GasSchedule for ContractScorer {
             sender: scoring.sender,
             contract: self.contract,
             value: u256::ZERO,
-            time: scoring.time,
+            block: scoring.block,
         };
         let limits = Limits {
             fuel: self.fuel,

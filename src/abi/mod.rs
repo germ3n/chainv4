@@ -296,6 +296,35 @@ fn encode_one(ty: &AbiType, value: &AbiValue) -> Result<Vec<u8>, String> {
 }
 
 #[document(
+    summary = "Reads a function's signature, such as transfer(address,uint256), for its selector and its parameters' types; or a list of types alone in parentheses, such as (uint256,bool), which has no selector. Types are written as Solidity writes them; uint and int alone are 256 bits.",
+    category = "ABI",
+    returns = "The selector, None for a list alone, and the types; or why the text is neither.",
+)]
+pub fn parse_signature(text: &str) -> Result<(Option<[u8; 4]>, Vec<AbiType>), String> {
+    let text = text.trim();
+    let open = text.find('(').ok_or_else(|| format!("{text}: write name(types), such as transfer(address,uint256), or (types) alone"))?;
+    let (name, list) = text.split_at(open);
+    let types = match parse_type(list, 0)? {
+        AbiType::Tuple(types) => types,
+        other => return Err(format!("{list} is a {other}, not a list of types in parentheses")),
+    };
+
+    if name.is_empty() {
+        return Ok((None, types));
+    }
+
+    let named = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') && !name.starts_with(|c: char| c.is_ascii_digit());
+
+    if !named {
+        return Err(format!("{name} is not a function name"));
+    }
+
+    let canonical = format!("{name}{}", AbiType::Tuple(types.clone()));
+
+    Ok((Some(keccak(canonical.as_bytes())[..4].try_into().expect("4 bytes")), types))
+}
+
+#[document(
     summary = "Decodes values of these types from a call's result, a log's data, or a function's arguments, checking every offset and length against the bytes there are.",
     category = "ABI",
     returns = "The values, or why the bytes are not of the types.",

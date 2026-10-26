@@ -26,6 +26,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "evm"
+version = "0.1.0"
+dependencies = [
+ "chainv4-sdk",
+]
+
+[[package]]
 name = "integers"
 version = "0.1.0"
 dependencies = [

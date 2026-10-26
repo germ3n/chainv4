@@ -10,7 +10,7 @@ use {
     crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
-    crate::vm::{CHECK_PERMS, CallContext, INIT, Layout, Limits, MIGRATE, Outcome, Vm, VmError},
+    crate::vm::{BlockAt, CHECK_PERMS, CallContext, INIT, Layout, Limits, MIGRATE, Outcome, Vm, VmError},
     r#macro::document,
     std::sync::Arc,
     wincode::{SchemaRead, SchemaWrite},
@@ -85,7 +85,7 @@ impl<'a> Contracts<'a> {
         code: &Code,
         limits: Limits,
         token_functions: &[String],
-        time: u64,
+        block: BlockAt,
     ) -> Result<(Address, Hooked), Failed> {
         let address = contract_address(deployer, nonce, vm.hash());
 
@@ -99,7 +99,7 @@ impl<'a> Contracts<'a> {
             sender: *deployer,
             contract: address,
             value: u256::ZERO,
-            time,
+            block,
         };
         let mut hooked = self
             .hook(vm, &record, context, INIT, spent(limits, loaded))
@@ -134,14 +134,14 @@ impl<'a> Contracts<'a> {
         code: &Code,
         limits: Limits,
         token_functions: &[String],
-        time: u64,
+        block: BlockAt,
     ) -> Result<Hooked, Failed> {
         let current = self.get(contract)?.ok_or(RegistryError::NoSuchContract(*contract))?;
         let context = CallContext {
             sender: *sender,
             contract: *contract,
             value: u256::ZERO,
-            time,
+            block,
         };
         let (asked, mut trace) = self.permits(vm, &current, context, "upgrade", limits)?;
         let (record, loaded) = load(vm, current.deployer, code, spent(limits, asked))
@@ -189,7 +189,7 @@ impl<'a> Contracts<'a> {
         sender: Address,
         limits: Limits,
         token_functions: &[String],
-        time: u64,
+        block: BlockAt,
     ) -> Result<(u64, Trace), Failed> {
         let tokens = Tokens::new(self.state);
 
@@ -210,7 +210,7 @@ impl<'a> Contracts<'a> {
             sender,
             contract: *contract,
             value: u256::ZERO,
-            time,
+            block,
         };
         let scratch = Arc::new(State::new(self.state.clone()));
         let (mut fuel_used, mut trace) = (0, Trace::default());
@@ -259,7 +259,7 @@ impl<'a> Contracts<'a> {
     /// did so far.
     fn register(&self, vm: &Arc<Vm>, context: CallContext, limits: Limits, token_functions: &[String], hooked: &mut Hooked) -> Result<(), Failed> {
         let (asked, trace) = self
-            .refresh(vm, &context.contract, context.sender, spent(limits, hooked.fuel_used), token_functions, context.time)
+            .refresh(vm, &context.contract, context.sender, spent(limits, hooked.fuel_used), token_functions, context.block)
             .map_err(|failed| failed.after(hooked.fuel_used, std::mem::take(&mut hooked.trace)))?;
         hooked.fuel_used += asked;
         hooked.trace.append(trace);
@@ -508,7 +508,7 @@ return M
             sender: DEPLOYER,
             contract,
             value: u256::ZERO,
-            time: 0,
+            block: BlockAt::at(0),
         }
     }
 
@@ -531,7 +531,7 @@ return M
     fn storage_persists_between_calls() {
         let state = state();
         let contracts = Contracts::new(&state);
-        let counter = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], 0).unwrap().0;
+        let counter = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], BlockAt::at(0)).unwrap().0;
 
         assert_eq!(count(increment(&contracts, counter, 2)), 2);
         assert_eq!(count(increment(&contracts, counter, 3)), 5);
@@ -541,7 +541,7 @@ return M
     fn failed_calls_leave_storage_alone() {
         let state = state();
         let contracts = Contracts::new(&state);
-        let counter = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], 0).unwrap().0;
+        let counter = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], BlockAt::at(0)).unwrap().0;
         increment(&contracts, counter, 1);
         let func = Hash::Xxh3_64(selector("fail_after_write"));
         let outcome = contracts.call(&vm(), &context(counter), &func, &[], LIMITS).unwrap();
@@ -554,8 +554,8 @@ return M
     fn each_contract_keeps_its_own_storage() {
         let state = state();
         let contracts = Contracts::new(&state);
-        let first = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], 0).unwrap().0;
-        let second = contracts.deploy(&vm(), &DEPLOYER, 1, &lua(COUNTER), LIMITS, &[], 0).unwrap().0;
+        let first = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], BlockAt::at(0)).unwrap().0;
+        let second = contracts.deploy(&vm(), &DEPLOYER, 1, &lua(COUNTER), LIMITS, &[], BlockAt::at(0)).unwrap().0;
         increment(&contracts, first, 10);
 
         assert_ne!(first, second);
@@ -566,7 +566,7 @@ return M
     fn contracts_survive_a_commit() {
         let db = Arc::new(MemoryDb::default());
         let state = Arc::new(State::new(db.clone()));
-        let counter = Contracts::new(&state).deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], 0).unwrap().0;
+        let counter = Contracts::new(&state).deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], BlockAt::at(0)).unwrap().0;
         increment(&Contracts::new(&state), counter, 4);
         db.commit(state.take_changes()).unwrap();
         let fresh = Arc::new(State::new(db));
@@ -581,14 +581,14 @@ return M
     fn addresses_are_derived_and_unique() {
         let state = state();
         let contracts = Contracts::new(&state);
-        let address = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], 0).unwrap().0;
+        let address = contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], BlockAt::at(0)).unwrap().0;
 
         assert_eq!(address, contract_address(&DEPLOYER, 0, HashType::default_chain()));
         assert!(matches!(address, Address::Contract(_)));
         assert_ne!(address, contract_address(&DEPLOYER, 1, HashType::default_chain()));
         assert_ne!(address, contract_address(&Address::Ed25519([8; 32]), 0, HashType::default_chain()));
         assert_eq!(
-            contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], 0).map(|(address, _)| address).map_err(|failed| failed.error),
+            contracts.deploy(&vm(), &DEPLOYER, 0, &lua(COUNTER), LIMITS, &[], BlockAt::at(0)).map(|(address, _)| address).map_err(|failed| failed.error),
             Err(RegistryError::AlreadyDeployed(address))
         );
     }
@@ -601,7 +601,7 @@ return M
         let func = Hash::Xxh3_64(selector("increment"));
 
         assert!(matches!(
-            contracts.deploy(&vm(), &DEPLOYER, 0, &lua("local = 1"), LIMITS, &[], 0).map_err(|failed| failed.error),
+            contracts.deploy(&vm(), &DEPLOYER, 0, &lua("local = 1"), LIMITS, &[], crate::vm::BlockAt::at(0)).map_err(|failed| failed.error),
             Err(RegistryError::Vm(VmError::Compile(_)))
         ));
         assert_eq!(

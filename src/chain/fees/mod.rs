@@ -146,8 +146,8 @@ pub struct Scoring<'a> {
     pub vm: &'a Arc<Vm>,
     #[document(summary = "The chain's limits on one call.")]
     pub limits: Limits,
-    #[document(summary = "The block's time, in milliseconds since the Unix epoch, which the scorer's call runs at.")]
-    pub time: u64,
+    #[document(summary = "The block, which the scorer's call runs in.")]
+    pub block: crate::vm::BlockAt,
 }
 
 #[document(

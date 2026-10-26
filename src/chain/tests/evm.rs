@@ -529,3 +529,324 @@ fn ethereum_signatures_hold_on_their_own_chain_alone_and_say_what_they_carry() {
 
     assert_eq!(disguised.verify_on(&chain.genesis()), Err(VerifyError::BadEthereum));
 }
+
+const BRIDGE_BIN: &str = include_str!("../../../contracts/evm/Bridge.bin");
+
+/// A native counter for the bridge to call, and to call it back.
+const NATIVE_COUNTER: &str = r#"
+local M = {}
+
+-- Adds to the total, keeping what was sent, and returns the total.
+function M.add(by)
+    local total = u64(storage.get("total") or "0") + by
+    storage.set("total", tostring(total))
+    events.emit("Added", total, ctx.sender, ctx.value)
+    return total
+end
+
+function M.total()
+    return u64(storage.get("total") or "0")
+end
+
+-- Writes, as a view never may.
+function M.touch()
+    storage.set("touched", "yes")
+    return u64(1)
+end
+
+-- Bumps the bridge's count through the EVM, and returns the count.
+function M.poke(bridge, by)
+    return evm.decode("uint256", evm.call(bridge, evm.encode("bump(uint256)", u256(by))))
+end
+
+-- Bumps it, then fails: the EVM's change goes with this call's.
+function M.poke_then_fail(bridge)
+    evm.call(bridge, evm.encode("bump(uint256)", u256(1)))
+    error("then failed")
+end
+
+-- Comes back to a native counter through the bridge: Lua, then the EVM, then Lua.
+function M.round_trip(bridge, target, by)
+    return evm.decode("(uint64)", evm.call(bridge, evm.encode("relay(bytes32,uint64)", target, u64(by))))
+end
+
+return M
+"#;
+
+/// Deploys a Lua contract and returns its address.
+fn deploy_lua(chain: &mut Chain, source: &str) -> Address {
+    let deploy = sign(chain, &authority(), Tx::Deploy { code: Code::Lua(source.to_string()) });
+    let receipt = advance(chain, vec![deploy]).remove(0);
+
+    match receipt.result {
+        Ok(Effect::Deployed(address)) => address,
+        other => panic!("expected a deploy, got {other:?}"),
+    }
+}
+
+/// Deploys the bridge, and two native counters for it.
+fn bridged(chain: &mut Chain) -> (Address, Address, Address) {
+    let bridge = evm::create_address(&authority().public().address(), nonce(chain, &authority()));
+    let deploy = sign(chain, &authority(), Tx::Deploy { code: Code::Evm(crate::structs::hex::from_hex(BRIDGE_BIN.trim()).unwrap()) });
+    assert!(advance(chain, vec![deploy])[0].result.is_ok());
+
+    (bridge, deploy_lua(chain, NATIVE_COUNTER), deploy_lua(chain, NATIVE_COUNTER))
+}
+
+/// A native contract as bytes32, as the bridge takes it.
+fn contract_word(address: &Address) -> Vec<u8> {
+    match address {
+        Address::Contract(bytes) => bytes.to_vec(),
+        other => panic!("{other} is no native contract"),
+    }
+}
+
+fn total(chain: &Chain, counter: &Address) -> Option<String> {
+    chain
+        .state()
+        .get(crate::db::Column::Storage, &crate::db::storage_key(counter, b"total"))
+        .unwrap()
+        .map(|bytes| String::from_utf8(bytes).unwrap())
+}
+
+fn bridge_count(chain: &Chain, bridge: &Address) -> Vec<u8> {
+    let Address::Evm(bytes) = bridge else { unreachable!() };
+
+    evm::storage_word(&chain.state(), *bytes, [0; 32]).unwrap().to_vec()
+}
+
+fn lua_call(chain: &Chain, to: Address, function: &str, data: Vec<TxCallArgumentType>) -> SignedTx {
+    sign(chain, &authority(), Tx::ContractCall { to, func: Hash::Xxh3_64(crate::vm::selector(function)), amount: Amount::U128(0), data })
+}
+
+#[test]
+fn evm_contracts_call_native_ones_and_send_them_coin() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let (bridge, counter, _) = bridged(&mut chain);
+    let add = call(&chain, &authority(), bridge, 300, calldata("add(bytes32,uint64)", &[contract_word(&counter), word(5)]));
+    let receipt = advance(&mut chain, vec![add]).remove(0);
+
+    assert_eq!(returned(&receipt), word(5), "{:?}", receipt.result);
+    assert_eq!(total(&chain, &counter).as_deref(), Some("5"));
+    assert_eq!(balance(&chain, &counter), u256::new(300), "what the EVM call carried reached the native contract");
+    assert_eq!(balance(&chain, &bridge), u256::ZERO);
+    assert_eq!(bridge_count(&chain, &bridge), word(1));
+
+    // The native event comes where the native call ran: before the bridge's own log.
+    let names: Vec<&str> = receipt.events.iter().map(|event| event.name.as_str()).collect();
+
+    assert_eq!(names, ["Added", LOG]);
+    assert_eq!(receipt.events[0].contract, counter);
+    assert_eq!(receipt.events[0].data[1], TxCallArgumentType::Address(bridge), "the bridge called it, at its own address");
+    assert_eq!(receipt.events[1].data[1], TxCallArgumentType::Bytes(word(5)));
+
+    // A native view reads in a static call; a native function that writes is refused there.
+    let peek = call(&chain, &authority(), bridge, 0, calldata("peek(bytes32,string)", &[contract_word(&counter), word(64), word(5), [b"total".to_vec(), vec![0; 27]].concat()]));
+    let touch = next_nonce(call(&chain, &authority(), bridge, 0, calldata("peek(bytes32,string)", &[contract_word(&counter), word(64), word(5), [b"touch".to_vec(), vec![0; 27]].concat()])), &authority());
+    let receipts = advance(&mut chain, vec![peek, touch]);
+
+    assert_eq!(returned(&receipts[0]), word(5));
+    assert!(matches!(&receipts[1].result, Err(failure) if failure.to_string().contains("changed state inside a static call")), "{:?}", receipts[1].result);
+}
+
+#[test]
+fn a_revert_on_either_side_unwinds_both() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let (bridge, counter, _) = bridged(&mut chain);
+    let first = call(&chain, &authority(), bridge, 0, calldata("add(bytes32,uint64)", &[contract_word(&counter), word(2)]));
+    advance(&mut chain, vec![first]);
+
+    // The EVM reverts after the native call: the native addition goes with it.
+    let revert = call(&chain, &authority(), bridge, 0, calldata("addThenRevert(bytes32,uint64)", &[contract_word(&counter), word(7)]));
+    let receipt = advance(&mut chain, vec![revert]).remove(0);
+
+    assert_eq!(receipt.result, Err(Failure::Contract(VmError::Runtime("reverted: changed my mind".to_string()))));
+    assert_eq!(total(&chain, &counter).as_deref(), Some("2"));
+
+    // An inner frame reverts and the outer one carries on: only the inner frame's native call is undone.
+    let tried = call(&chain, &authority(), bridge, 0, calldata("tryAdd(bytes32,uint64)", &[contract_word(&counter), word(7)]));
+    let receipt = advance(&mut chain, vec![tried]).remove(0);
+
+    assert_eq!(returned(&receipt), word(0), "the try caught the revert");
+    assert_eq!(total(&chain, &counter).as_deref(), Some("2"));
+    assert_eq!(bridge_count(&chain, &bridge), word(11));
+    assert!(receipt.events.is_empty(), "{:?}", receipt.events);
+
+    // A native call that fails reverts the EVM's call with why.
+    let nothing = Address::Contract([7; 32]);
+    let missing = call(&chain, &authority(), bridge, 0, calldata("add(bytes32,uint64)", &[contract_word(&nothing), word(1)]));
+    let receipt = advance(&mut chain, vec![missing]).remove(0);
+
+    assert!(matches!(&receipt.result, Err(failure) if failure.to_string().contains("add on contract:")), "{:?}", receipt.result);
+
+    // The other way: a native call fails after its EVM call, and the EVM's change goes too.
+    let failing = lua_call(&chain, counter, "poke_then_fail", vec![TxCallArgumentType::Address(bridge)]);
+    let receipt = advance(&mut chain, vec![failing]).remove(0);
+
+    assert!(receipt.result.is_err());
+    assert_eq!(bridge_count(&chain, &bridge), word(11));
+}
+
+#[test]
+fn native_contracts_call_evm_ones_and_calls_nest_across_engines() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let (bridge, counter, other) = bridged(&mut chain);
+    let poke = lua_call(&chain, counter, "poke", vec![TxCallArgumentType::Address(bridge), TxCallArgumentType::U64(7)]);
+    let receipt = advance(&mut chain, vec![poke]).remove(0);
+
+    assert_eq!(receipt.result, Ok(Effect::Returned(vec![TxCallArgumentType::U256(u256::new(7))])));
+    assert_eq!(bridge_count(&chain, &bridge), word(7));
+
+    // Lua, then the EVM, then another Lua contract: each sees the one before as its sender.
+    let round = lua_call(&chain, counter, "round_trip", vec![TxCallArgumentType::Address(bridge), TxCallArgumentType::Address(other), TxCallArgumentType::U64(4)]);
+    let receipt = advance(&mut chain, vec![round]).remove(0);
+
+    assert_eq!(receipt.result, Ok(Effect::Returned(vec![TxCallArgumentType::U64(4)])), "{:?}", receipt.result);
+    assert_eq!(total(&chain, &other).as_deref(), Some("4"));
+    assert_eq!(bridge_count(&chain, &bridge), word(8));
+    let names: Vec<&str> = receipt.events.iter().map(|event| event.name.as_str()).collect();
+
+    assert_eq!(names, ["Added", LOG]);
+    assert_eq!(receipt.events[0].data[1], TxCallArgumentType::Address(bridge));
+
+    // Coming back to the contract that started it is reentry, which add is not marked for.
+    let back = lua_call(&chain, counter, "round_trip", vec![TxCallArgumentType::Address(bridge), TxCallArgumentType::Address(counter), TxCallArgumentType::U64(1)]);
+    let receipt = advance(&mut chain, vec![back]).remove(0);
+
+    assert!(matches!(&receipt.result, Err(failure) if failure.to_string().contains("reentr")), "{:?}", receipt.result);
+    assert_eq!(total(&chain, &counter), None);
+    assert_eq!(bridge_count(&chain, &bridge), word(8));
+}
+
+/// A native contract whose add calls back into the EVM: the bridge, then this, then the bridge.
+const ECHO: &str = r#"
+local M = {}
+
+function M.set_bridge(bridge)
+    storage.set("bridge", bridge:text())
+end
+
+-- Bumps the bridge's count by as much, from inside the bridge's own call to it.
+function M.add(by)
+    local bridge = address.parse(storage.get("bridge"))
+    evm.call(bridge, evm.encode("bump(uint256)", u256(by)))
+    return by
+end
+
+return M
+"#;
+
+#[test]
+fn the_evm_calls_back_into_itself_through_a_native_contract() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let (bridge, _, _) = bridged(&mut chain);
+    let echo = deploy_lua(&mut chain, ECHO);
+    let set = lua_call(&chain, echo, "set_bridge", vec![TxCallArgumentType::Address(bridge)]);
+    advance(&mut chain, vec![set]);
+
+    // add asks echo, which bumps the count by 3 in an EVM call of its own; add then adds its 1 to
+    // what that left in the journal.
+    let add = call(&chain, &authority(), bridge, 0, calldata("add(bytes32,uint64)", &[contract_word(&echo), word(3)]));
+    let receipt = advance(&mut chain, vec![add]).remove(0);
+
+    assert_eq!(returned(&receipt), word(3), "{:?}", receipt.result);
+    assert_eq!(bridge_count(&chain, &bridge), word(4));
+
+    // Reverted after, the inner EVM call's bump goes too.
+    let revert = call(&chain, &authority(), bridge, 0, calldata("addThenRevert(bytes32,uint64)", &[contract_word(&echo), word(5)]));
+    let tried = next_nonce(call(&chain, &authority(), bridge, 0, calldata("tryAdd(bytes32,uint64)", &[contract_word(&echo), word(5)])), &authority());
+    let receipts = advance(&mut chain, vec![revert, tried]);
+
+    assert!(receipts[0].result.is_err());
+    assert_eq!(returned(&receipts[1]), word(0));
+    assert_eq!(bridge_count(&chain, &bridge), word(14), "only tryAdd's own 10");
+}
+
+#[test]
+#[cfg(all(feature = "lvm", feature = "wasm"))]
+fn webassembly_contracts_call_the_evm_and_speak_its_abi() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let (bridge, _, _) = bridged(&mut chain);
+    let wasm = sign(&chain, &authority(), Tx::Deploy { code: Code::Wasm(crate::vm::tests::example("evm")) });
+    let Ok(Effect::Deployed(caller)) = advance(&mut chain, vec![wasm]).remove(0).result else { panic!("the example deploys") };
+    let bump = lua_call(&chain, caller, "bump", vec![TxCallArgumentType::Address(bridge), TxCallArgumentType::U64(6)]);
+    let receipt = advance(&mut chain, vec![bump]).remove(0);
+
+    assert_eq!(receipt.result, Ok(Effect::Returned(vec![TxCallArgumentType::U256(u256::new(6))])), "{:?}", receipt.result);
+    assert_eq!(bridge_count(&chain, &bridge), word(6));
+
+    // A revert comes back with Solidity's reason read out.
+    let counter = deploy(&mut chain, 0);
+    let why = lua_call(&chain, caller, "why", vec![TxCallArgumentType::Address(counter), TxCallArgumentType::Bytes(calldata("bump(uint256)", &[word(0)]))]);
+    let receipt = advance(&mut chain, vec![why]).remove(0);
+
+    assert!(matches!(&receipt.result, Ok(Effect::Returned(values)) if values == &[TxCallArgumentType::String("reverted: nothing to add".to_string())]), "{:?}", receipt.result);
+}
+
+const ABI_USER: &str = r#"
+local M = {}
+
+-- Calldata for transfer(address,uint256), as Lua writes it.
+function M.transfer(to, amount)
+    return evm.encode("transfer(address,uint256)", to, amount)
+end
+
+-- Arrays and tuples as tables, there and back.
+function M.round_trip()
+    local bytes = evm.encode("(uint64[],(bool,string),bytes2)", { u64(1), 2, 3 }, { true, "hi" }, "ab")
+    local xs, pair, two = evm.decode("(uint64[],(bool,string),bytes2)", bytes)
+    local to, amount = evm.decode("transfer(address,uint256)", evm.encode("transfer(address,uint256)", ctx.sender, u256(9)))
+    return #xs, xs[3], pair[1], pair[2], two, to, amount
+end
+
+-- What does not fit its type is refused.
+function M.too_big()
+    return evm.encode("(uint8)", 256)
+end
+
+return M
+"#;
+
+#[test]
+fn lua_speaks_solidity_s_abi() {
+    use crate::abi::{AbiType, AbiValue, encode_values};
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let user = deploy_lua(&mut chain, ABI_USER);
+    let alice = Keypair::generate(KeyType::Ed25519).unwrap().public().address();
+    let calls = vec![
+        lua_call(&chain, user, "transfer", vec![TxCallArgumentType::Address(alice), TxCallArgumentType::U256(u256::new(5))]),
+        next_nonce(lua_call(&chain, user, "round_trip", Vec::new()), &authority()),
+        next_nonce(next_nonce(lua_call(&chain, user, "too_big", Vec::new()), &authority()), &authority()),
+    ];
+    let receipts = advance(&mut chain, calls);
+    let expected = [
+        selector("transfer(address,uint256)"),
+        encode_values(&[AbiType::Address, AbiType::Uint(256)], &[AbiValue::Address(evm::evm_alias(&alice)), AbiValue::Uint(u256::new(5))]).unwrap(),
+    ]
+    .concat();
+
+    assert_eq!(receipts[0].result, Ok(Effect::Returned(vec![TxCallArgumentType::Bytes(expected)])));
+    assert_eq!(evm::account_of(&chain.state(), evm::evm_alias(&alice)).unwrap(), alice, "encoding her address wrote her alias down");
+    assert_eq!(
+        receipts[1].result,
+        Ok(Effect::Returned(vec![
+            TxCallArgumentType::I64(3),
+            TxCallArgumentType::U64(3),
+            TxCallArgumentType::Bool(true),
+            TxCallArgumentType::String("hi".to_string()),
+            TxCallArgumentType::String("ab".to_string()),
+            TxCallArgumentType::Address(authority().public().address()),
+            TxCallArgumentType::U256(u256::new(9)),
+        ])),
+        "{:?}",
+        receipts[1].result
+    );
+    assert!(matches!(&receipts[2].result, Err(failure) if failure.to_string().contains("uint8")), "{:?}", receipts[2].result);
+}

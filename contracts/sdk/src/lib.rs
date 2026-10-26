@@ -223,6 +223,54 @@ pub fn name_of(address: &Address) -> Option<String> {
     }
 }
 
+/// Calls an EVM contract with calldata, or pays any account, sending value from this contract's
+/// balance: 32 bytes, a little-endian u256. The EVM sees this contract at its alias, as
+/// msg.sender. What it changes is kept only if it succeeds, and only if this call does.
+///
+/// Returns what the EVM returned, or why it reverted or failed.
+pub fn evm_call(target: &Address, value: [u8; 32], input: &[u8]) -> Result<Vec<u8>, String> {
+    let address = target.encode();
+    let status = unsafe { sys::evm_call(address.as_ptr(), value.as_ptr(), input.as_ptr(), input.len() as u32) };
+    let result = result();
+
+    match status {
+        0 => Ok(result),
+        _ => Err(String::from_utf8_lossy(&result).into_owned()),
+    }
+}
+
+/// Encodes values in Solidity's ABI, on the node. A signature with a name,
+/// `transfer(address,uint256)`, gives calldata: the selector, then the arguments; types alone in
+/// parentheses, `(uint256,string)`, give the arguments only. Addresses go as their 20 bytes
+/// inside the EVM.
+///
+/// Returns the bytes, or why a value does not fit its type.
+pub fn abi_encode(signature: &str, values: &[Value]) -> Result<Vec<u8>, String> {
+    let values = value::encode(values);
+    let status = unsafe { sys::abi_encode(signature.as_ptr(), signature.len() as u32, values.as_ptr(), values.len() as u32) };
+    let result = result();
+
+    match status {
+        0 => Ok(result),
+        _ => Err(String::from_utf8_lossy(&result).into_owned()),
+    }
+}
+
+/// Decodes bytes in Solidity's ABI, on the node: what an EVM call returned, by types such as
+/// `(uint256,bool)`, or calldata, by a signature with a name. Integers come back by width, U64
+/// for uint64 and U256 for uint256, and an address as the account behind it.
+///
+/// Returns the values, or why the bytes are not of the types.
+pub fn abi_decode(types: &str, data: &[u8]) -> Result<Vec<Value>, String> {
+    let status = unsafe { sys::abi_decode(types.as_ptr(), types.len() as u32, data.as_ptr(), data.len() as u32) };
+    let result = result();
+
+    match status {
+        0 => Ok(value::decode(&result).unwrap_or_else(|| abort("unreadable values"))),
+        _ => Err(String::from_utf8_lossy(&result).into_owned()),
+    }
+}
+
 /// The selector a call names a function by: XXH3-64 of its name, worked out on the node.
 pub fn selector(name: &str) -> u64 {
     let digest = hash(Algorithm::Xxh3, name.as_bytes());

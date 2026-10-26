@@ -40,6 +40,9 @@ pub(super) const NAMES: &[&str] = &[
     "refresh_token",
     "resolve_name",
     "name_of",
+    "evm_call",
+    "abi_encode",
+    "abi_decode",
     "abort",
 ];
 
@@ -327,6 +330,52 @@ fn chain_name_of() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "evm_call",
+    summary = "Calls an EVM contract with calldata, or pays any account, sending value from this contract's balance, as an EVM call transaction does. The EVM sees this contract at its alias, as msg.sender. What it changes, and the value, are kept only if it succeeds, and only if this call does. Costs 1000 fuel, 1000 more when value is not zero, plus 1 per 64 bytes of calldata, and the EVM gas it burns at the block's rate of fuel to gas.",
+    params = {
+        address = { ty = "i32", desc = "Whom to call: 33 bytes, as sender writes them. An EVM contract, or any account, which the EVM reaches at its 20 bytes." },
+        value = { ty = "i32", desc = "What to send: 32 bytes, a little-endian u256; zero for nothing." },
+        input = { ty = "i32", desc = "The calldata: a selector and ABI-encoded arguments, as abi_encode writes them." },
+        input_len = { ty = "i32", desc = "Its length." },
+    },
+    returns = { ty = "i32", desc = "0 when it succeeded, with what the EVM returned in the result buffer; 1 when it reverted or failed, with why there, a revert's reason read out." },
+    see_also = "chain.abi_encode, chain.abi_decode, rust/Host::evm_call",
+)]
+fn chain_evm_call() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "abi_encode",
+    summary = "Encodes values in Solidity's ABI. A signature with a name, transfer(address,uint256), gives calldata: the selector, then the arguments; types alone in parentheses give the arguments only. Costs 50 fuel, plus 1 per 64 bytes of signature, values and result.",
+    params = {
+        signature = { ty = "i32", desc = "The signature, UTF-8." },
+        signature_len = { ty = "i32", desc = "Its length." },
+        values = { ty = "i32", desc = "The values: an encoded list, one for each type. Any integer for an integer type in range, an address for address, which goes as its 20 bytes inside the EVM, bytes or a string for bytes and string. Arrays and tuples have no value of their own here." },
+        values_len = { ty = "i32", desc = "Their length." },
+    },
+    returns = { ty = "i32", desc = "0 with the bytes in the result buffer; 1 with why a value does not fit there." },
+)]
+fn chain_abi_encode() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "abi_decode",
+    summary = "Decodes bytes in Solidity's ABI: what an EVM call returned, by types in parentheses, or calldata, by a signature with a name, whose selector it checks. Costs 50 fuel, plus 1 per 64 bytes of types and data.",
+    params = {
+        types = { ty = "i32", desc = "The types or the signature, UTF-8." },
+        types_len = { ty = "i32", desc = "Its length." },
+        data = { ty = "i32", desc = "The bytes." },
+        data_len = { ty = "i32", desc = "Their length." },
+    },
+    returns = { ty = "i32", desc = "0 with the values in the result buffer, an encoded list: integers as U64, U128 or U256 and their signed kinds by width, an address as the account behind it, bytes as Bytes; 1 with why the bytes are not of the types, or a type has no value here." },
+)]
+fn chain_abi_decode() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "check_layout",
     summary = "Whether one contract's code keeps another's storage layout, by the rule Tx::Upgrade holds new code to: what a proxy checks before it points at a new implementation. Costs 2000 fuel.",
     params = {
@@ -400,6 +449,9 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "refresh_token", refresh_token).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "resolve_name", resolve_name).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "name_of", name_of).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "evm_call", evm_call).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "abi_encode", abi_encode).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "abi_decode", abi_decode).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
 
     linker
@@ -666,6 +718,112 @@ fn call(
     caller.data_mut().result = result;
 
     Ok(status)
+}
+
+fn evm_call(mut caller: Caller<'_, Run>, address: u32, value: u32, input: u32, input_len: u32) -> Result<u32> {
+    let host = host(&mut caller)?;
+    let target = address_at(&mut caller, address)?;
+    let value = amount_at(&mut caller, value)?;
+    let transfer = if value == u256::ZERO { 0 } else { cost::TRANSFER };
+    charge(&mut caller, cost::CALL + transfer + u64::from(input_len) / cost::COPY_BYTES_PER_FUEL)?;
+    let input = read(&mut caller, input, input_len)?;
+    let fuel = caller.get_fuel()?;
+    let outcome = host.evm_call(&target, &input, value, fuel);
+    caller.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;
+    let (status, result) = match outcome.result {
+        Ok(mut returned) => match returned.pop() {
+            Some(TxCallArgumentType::Bytes(output)) => (0, output),
+            _ => (1, b"the EVM returned no bytes".to_vec()),
+        },
+        Err(VmError::Storage(err)) => return Err(stop(&mut caller, VmError::Storage(err))),
+        Err(err) => (1, err.to_string().into_bytes()),
+    };
+    caller.data_mut().result = result;
+
+    Ok(status)
+}
+
+/// A signature or types, read as UTF-8, or why not.
+fn abi_text(caller: &mut Caller<'_, Run>, ptr: u32, len: u32) -> Result<std::result::Result<String, VmError>> {
+    Ok(String::from_utf8(read(caller, ptr, len)?).map_err(|_| VmError::BadArgument("a signature is UTF-8".to_string())))
+}
+
+fn abi_encode(mut caller: Caller<'_, Run>, signature: u32, signature_len: u32, values: u32, values_len: u32) -> Result<u32> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::ABI + (u64::from(signature_len) + u64::from(values_len)) / cost::COPY_BYTES_PER_FUEL)?;
+    let signature = abi_text(&mut caller, signature, signature_len)?;
+    let values = read(&mut caller, values, values_len)?;
+    let encoded = signature.and_then(|signature| {
+        let values = wincode::deserialize::<Vec<TxCallArgumentType>>(&values).map_err(|err| VmError::BadArgument(err.to_string()))?;
+
+        encode(&host, &signature, &values)
+    });
+    let (status, result) = match encoded {
+        Ok(bytes) => {
+            charge(&mut caller, bytes.len() as u64 / cost::COPY_BYTES_PER_FUEL)?;
+            (0, bytes)
+        }
+        Err(VmError::Storage(err)) => return Err(stop(&mut caller, VmError::Storage(err))),
+        Err(err) => (1, err.to_string().into_bytes()),
+    };
+    caller.data_mut().result = result;
+
+    Ok(status)
+}
+
+fn abi_decode(mut caller: Caller<'_, Run>, types: u32, types_len: u32, data: u32, data_len: u32) -> Result<u32> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::ABI + (u64::from(types_len) + u64::from(data_len)) / cost::COPY_BYTES_PER_FUEL)?;
+    let types = abi_text(&mut caller, types, types_len)?;
+    let data = read(&mut caller, data, data_len)?;
+    let (status, result) = match types.and_then(|types| decode(&host, &types, &data)) {
+        Ok(values) => (0, wincode::serialize(&values).expect("values always encode")),
+        Err(VmError::Storage(err)) => return Err(stop(&mut caller, VmError::Storage(err))),
+        Err(err) => (1, err.to_string().into_bytes()),
+    };
+    caller.data_mut().result = result;
+
+    Ok(status)
+}
+
+#[cfg(feature = "evm")]
+fn encode(host: &Host, signature: &str, values: &[TxCallArgumentType]) -> std::result::Result<Vec<u8>, VmError> {
+    let (selector, types) = crate::abi::parse_signature(signature).map_err(VmError::BadArgument)?;
+
+    if values.len() != types.len() {
+        return Err(VmError::BadArgument(format!("{signature} takes {} values, not {}", types.len(), values.len())));
+    }
+
+    let values = types.iter().zip(values).map(|(ty, value)| crate::vm::evm::abi_value(ty, value, Some(host.state()))).collect::<std::result::Result<Vec<_>, _>>()?;
+    let encoded = crate::abi::encode_values(&types, &values).map_err(VmError::BadArgument)?;
+
+    Ok([selector.map(Vec::from).unwrap_or_default(), encoded].concat())
+}
+
+#[cfg(feature = "evm")]
+fn decode(host: &Host, types: &str, data: &[u8]) -> std::result::Result<Vec<TxCallArgumentType>, VmError> {
+    let text = match types.trim().contains('(') {
+        true => types.to_string(),
+        false => format!("({types})"),
+    };
+    let (selector, types) = crate::abi::parse_signature(&text).map_err(VmError::BadArgument)?;
+    let data = match selector {
+        Some(selector) => data.strip_prefix(&selector[..]).ok_or_else(|| VmError::BadArgument(format!("the calldata is not for {text}")))?,
+        None => data,
+    };
+    let values = crate::abi::decode_values(&types, data).map_err(VmError::BadArgument)?;
+
+    types.iter().zip(values).map(|(ty, value)| crate::vm::evm::native_from_abi(ty, value, host.state())).collect()
+}
+
+#[cfg(not(feature = "evm"))]
+fn encode(_: &Host, _: &str, _: &[TxCallArgumentType]) -> std::result::Result<Vec<u8>, VmError> {
+    Err(VmError::Runtime("this node was built without the EVM".to_string()))
+}
+
+#[cfg(not(feature = "evm"))]
+fn decode(_: &Host, _: &str, _: &[u8]) -> std::result::Result<Vec<TxCallArgumentType>, VmError> {
+    Err(VmError::Runtime("this node was built without the EVM".to_string()))
 }
 
 fn delegate(mut caller: Caller<'_, Run>, address: u32, selector: u64, args: u32, args_len: u32) -> Result<u32> {

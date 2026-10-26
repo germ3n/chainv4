@@ -17,11 +17,8 @@ use {
     crate::db::{DbError, State},
     crate::registry::names::{Names, NamesConfig, name_problem},
     r#macro::document,
-    revm::context_interface::{Cfg, ContextTr},
-    revm::handler::{EthPrecompiles, PrecompileProvider, precompile_output_to_interpreter_result},
-    revm::interpreter::{CallInputs, InterpreterResult},
     revm::precompile::{PrecompileHalt, PrecompileOutput},
-    revm::primitives::{Address as Word, AddressSet, Bytes, U256, keccak256},
+    revm::primitives::{Bytes, U256, keccak256},
     std::cell::RefCell,
     std::sync::Arc,
 };
@@ -50,67 +47,10 @@ pub(super) struct NamesAt<'a> {
     pub fault: RefCell<Option<DbError>>,
 }
 
-/// Ethereum's precompiles, and on a chain with names, the names precompile beside them.
-pub(super) struct ChainPrecompiles<'a> {
-    eth: EthPrecompiles,
-    names: Option<NamesAt<'a>>,
-    warm: AddressSet,
-}
-
-impl<'a> ChainPrecompiles<'a> {
-    pub fn new(eth: EthPrecompiles, names: Option<NamesAt<'a>>) -> ChainPrecompiles<'a> {
-        let warm = warm(&eth, names.is_some());
-
-        ChainPrecompiles { eth, names, warm }
-    }
-
+impl NamesAt<'_> {
     /// The database failure a lookup met, if any.
     pub fn fault(&self) -> Option<DbError> {
-        self.names.as_ref().and_then(|names| names.fault.borrow_mut().take())
-    }
-}
-
-fn warm(eth: &EthPrecompiles, names: bool) -> AddressSet {
-    let mut warm = eth.warm_addresses().clone();
-
-    if names {
-        warm.insert(Word::from(NAMES_PRECOMPILE));
-    }
-
-    warm
-}
-
-impl<CTX: ContextTr> PrecompileProvider<CTX> for ChainPrecompiles<'_> {
-    type Output = InterpreterResult;
-
-    fn set_spec(&mut self, spec: <CTX::Cfg as Cfg>::Spec) -> bool {
-        let changed = <EthPrecompiles as PrecompileProvider<CTX>>::set_spec(&mut self.eth, spec);
-
-        if changed {
-            self.warm = warm(&self.eth, self.names.is_some());
-        }
-
-        changed
-    }
-
-    fn run(&mut self, context: &mut CTX, inputs: &CallInputs) -> Result<Option<InterpreterResult>, String> {
-        match &self.names {
-            Some(names) if inputs.bytecode_address == Word::from(NAMES_PRECOMPILE) => {
-                let input = inputs.input.as_bytes(context);
-                let output = names.answer(&input, inputs.gas_limit, inputs.reservoir);
-
-                Ok(Some(precompile_output_to_interpreter_result(output, inputs.gas_limit)))
-            }
-            _ => self.eth.run(context, inputs),
-        }
-    }
-
-    fn warm_addresses(&self) -> &AddressSet {
-        &self.warm
-    }
-
-    fn contains(&self, address: &Word) -> bool {
-        self.warm.contains(address)
+        self.fault.borrow_mut().take()
     }
 }
 
@@ -120,7 +60,7 @@ fn selector(signature: &str) -> [u8; 4] {
 
 impl NamesAt<'_> {
     /// Answers one call: resolve(string) or name(address). Bad input reverts; too little gas halts.
-    fn answer(&self, input: &[u8], gas_limit: u64, reservoir: u64) -> PrecompileOutput {
+    pub fn answer(&self, input: &[u8], gas_limit: u64, reservoir: u64) -> PrecompileOutput {
         let gas = LOOKUP_GAS + WORD_GAS * (input.len() as u64).div_ceil(32);
 
         if gas > gas_limit {

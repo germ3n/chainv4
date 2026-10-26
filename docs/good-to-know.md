@@ -457,6 +457,26 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 
 ## The EVM
 
+- **Calls between engines go through a precompile and `evm.call`.** The native precompile at
+  `0x…4e43` takes a native contract as `bytes32`, its function by name, the native types of the
+  arguments as text, and the arguments ABI-encoded; what comes back is ABI-encoded inside one
+  `bytes`, as its interface says. See [EVM](evm.md#calls-with-lua-and-webassembly-contracts).
+- **A native call sees what the EVM did so far, and is undone with the frame that made it.** It
+  runs on a copy of revm's journal. Its writes are kept only while a marker it sets in the
+  journal stands, so a `try` that catches a revert undoes the native calls inside it too.
+- **Contracts cross as `bytes32`, other addresses as their 20 bytes.** A Lua or wasm contract
+  only gets an alias once it sends something into the EVM, so callNative names its target by its
+  32 bytes, and a contract a native function returns comes back as `bytes32`. Any address
+  encoded for the EVM, by `evm.encode` or callNative's return, has its alias written down.
+- **Lua numbers cross as `int64`.** A whole number a Lua function returns to the EVM is an
+  `int64`; return a `u64(…)` or `u256(…)` for an unsigned type.
+- **A view cannot write through the precompile.** In a static call, a native function that
+  changes anything, or emits an event, makes callNative revert.
+- **`CallContext.time` is now `CallContext.block`.** A call's context carries the block's height,
+  time, producer and the fuel one EVM gas burns, as `BlockAt`, which `Contracts::deploy`,
+  `upgrade` and `refresh` take in place of the time; `BlockAt::at(time)` gives one with the rest
+  zero, for tests.
+
 - **An Ed25519 account's EVM address is an alias, known only once it sends.** Inside the EVM,
   every account but secp256k1 ones and EVM contracts goes by the last 20 bytes of the keccak256 of
   its key. The chain learns whose alias it is when the account first sends a transaction, of any

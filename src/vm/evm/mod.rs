@@ -17,13 +17,19 @@
 //!
 //! **Logs** become events named "log": each topic as 32 bytes, then the data.
 //!
-//! **Not yet:** calls between EVM contracts and Lua or wasm ones, blob transactions, and the KZG
-//! point evaluation precompile, which needs blobs.
+//! **Native contracts.** EVM contracts call Lua and wasm ones through the native precompile, and
+//! those call EVM contracts back through Host::evm_call, nesting to MAX_CALL_DEPTH across engines;
+//! a revert on either side unwinds both.
+//!
+//! **Not yet:** blob transactions, and the KZG point evaluation precompile, which needs blobs.
 
 #[cfg(feature = "names")]
 mod names;
+mod native;
+mod precompiles;
 #[cfg(feature = "names")]
 pub use names::NAMES_PRECOMPILE;
+pub use native::{Bridge, NATIVE_PRECOMPILE, abi_value, native_from_abi, native_type};
 
 use {
     crate::crypto::ethereum::AccessItem,
@@ -289,11 +295,22 @@ pub enum EvmReturned {
         access_list = "What it says it reads ahead of time, as Ethereum's transactions of type 1 and 2 do: the addresses and slots start warm, at their price. Empty for any other.",
         memory = "The most bytes its memory may grow to, every call frame's together.",
         block = "The block it runs in.",
+        bridge = "How it calls native contracts through the native precompile; None leaves the precompile out, so a call there finds an empty account.",
     },
     returns = "What it did; an error only when the database fails, which is the node's fault.",
 )]
 #[allow(clippy::too_many_arguments)]
-pub fn run(state: &Arc<State>, sender: &Address, nonce: u64, action: EvmAction, access_list: &[AccessItem], gas_limit: u64, memory: u64, block: EvmBlock) -> Result<EvmRan, DbError> {
+pub fn run(
+    state: &Arc<State>,
+    sender: &Address,
+    nonce: u64,
+    action: EvmAction,
+    access_list: &[AccessItem],
+    gas_limit: u64,
+    memory: u64,
+    block: EvmBlock,
+    bridge: Option<&Bridge>,
+) -> Result<EvmRan, DbError> {
     register_alias(state, sender);
     let caller = evm_alias(sender);
     let (kind, value, input) = match action {
@@ -346,27 +363,43 @@ pub fn run(state: &Arc<State>, sender: &Address, nonce: u64, action: EvmAction, 
     };
     let evm = Context::mainnet().with_db(db).with_block(block_env).with_cfg(cfg).build_mainnet();
     #[cfg(feature = "names")]
-    let mut evm = {
-        let names = block.names.clone().map(|config| names::NamesAt {
-            state,
-            config,
-            now: block.timestamp,
-            fault: Default::default(),
-        });
-        let eth = evm.precompiles.clone();
-
-        evm.with_precompiles(names::ChainPrecompiles::new(eth, names))
-    };
-    #[cfg(not(feature = "names"))]
-    let mut evm = evm;
+    let names = block.names.clone().map(|config| names::NamesAt {
+        state,
+        config,
+        now: block.timestamp,
+        fault: Default::default(),
+    });
+    let native = bridge.map(|bridge| native::NativeAt {
+        state,
+        bridge,
+        block: crate::vm::BlockAt {
+            height: block.height,
+            time: block.timestamp,
+            producer: block.producer,
+            fuel_per_gas: bridge.fuel_per_gas,
+        },
+        memory: usize::try_from(memory).unwrap_or(usize::MAX),
+        caller,
+        sender: *sender,
+        crossed: Default::default(),
+        fault: Default::default(),
+    });
+    let eth = evm.precompiles.clone();
+    let mut evm = evm.with_precompiles(precompiles::ChainPrecompiles::new(
+        eth,
+        #[cfg(feature = "names")]
+        names,
+        native,
+    ));
 
     let transacted = evm.transact(tx);
 
     // A lookup the database failed is the node's fault, not the transaction's.
-    #[cfg(feature = "names")]
     if let Some(err) = evm.precompiles.fault() {
         return Err(err);
     }
+
+    let crossed = evm.precompiles.native().map(|native| native.crossed.take()).unwrap_or_default();
 
     let outcome = match transacted {
         Ok(outcome) => outcome,
@@ -384,8 +417,16 @@ pub fn run(state: &Arc<State>, sender: &Address, nonce: u64, action: EvmAction, 
     let gas_used = outcome.result.tx_gas_used();
     let result = match outcome.result {
         ExecutionResult::Success { output, logs, .. } => {
-            apply(state, outcome.state, caller, sender)?;
-            let events = logs
+            // What the native calls that still stand wrote lands first: an EVM contract a nested
+            // call created is there for the EVM's changes to find.
+            let mut standing = native::standing(crossed, &outcome.state);
+
+            for crossed in &standing {
+                state.merge(crossed.changes.clone());
+            }
+
+            apply(state, &outcome.state, caller, sender)?;
+            let logs = logs
                 .iter()
                 .map(|log| Event {
                     contract: Address::Evm(log.address.into_array()),
@@ -398,6 +439,7 @@ pub fn run(state: &Arc<State>, sender: &Address, nonce: u64, action: EvmAction, 
                         .collect(),
                 })
                 .collect();
+            let events = native::interleave(logs, &mut standing);
             let returned = match output {
                 Output::Create(_, Some(created)) => EvmReturned::Created(Address::Evm(created.into_array())),
                 Output::Create(_, None) => return Ok(EvmRan { result: Err(VmError::Runtime("the contract was not created".to_string())), gas_used, events: Vec::new(), reverted: Vec::new() }),
@@ -446,8 +488,9 @@ fn revert_reason(output: &[u8]) -> String {
 }
 
 /// Writes what a successful EVM transaction changed: balances, nonces but the sender's, which the
-/// chain keeps, new contracts' code, and storage.
-fn apply(state: &State, changes: EvmState, caller: [u8; 20], sender: &Address) -> Result<(), DbError> {
+/// chain keeps, new contracts' code, and storage. Also how a native call sees what the EVM did so
+/// far. The native precompile's marker slots are the journal's alone, and never written.
+fn apply(state: &State, changes: &EvmState, caller: [u8; 20], sender: &Address) -> Result<(), DbError> {
     let accounts = Accounts::new(state);
 
     for (bytes, account) in changes {
@@ -456,12 +499,13 @@ fn apply(state: &State, changes: EvmState, caller: [u8; 20], sender: &Address) -
         }
 
         let bytes = bytes.into_array();
+        let marks = bytes == NATIVE_PRECOMPILE;
         let address = match account.is_created() {
             true => Address::Evm(bytes),
             false => account_of(state, bytes)?,
         };
 
-        if account.is_selfdestructed() {
+        if account.is_selfdestructed() && !marks {
             for slot in account.storage.keys() {
                 state.delete(Column::Storage, slot_key(bytes, slot));
             }
@@ -495,7 +539,7 @@ fn apply(state: &State, changes: EvmState, caller: [u8; 20], sender: &Address) -
             state.put_value(Column::Contracts, address_key(&address), &record);
         }
 
-        for (slot, value) in account.changed_storage_slots() {
+        for (slot, value) in account.changed_storage_slots().filter(|_| !marks) {
             let key = slot_key(bytes, slot);
 
             match value.present_value.is_zero() {

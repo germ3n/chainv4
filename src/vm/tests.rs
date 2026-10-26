@@ -183,14 +183,14 @@ impl World {
         self.nonce += 1;
 
         Contracts::new(&self.state)
-            .deploy(&self.vm, &DEPLOYER, self.nonce, &code, LIMITS, &standard(), 0)
+            .deploy(&self.vm, &DEPLOYER, self.nonce, &code, LIMITS, &standard(), crate::vm::BlockAt::at(0))
             .unwrap()
             .0
     }
 
     fn upgrade(&self, sender: Address, contract: Address, code: Code) -> Result<crate::registry::contracts::Hooked, crate::registry::RegistryError> {
         Contracts::new(&self.state)
-            .upgrade(&self.vm, &sender, &contract, &code, LIMITS, &standard(), 0)
+            .upgrade(&self.vm, &sender, &contract, &code, LIMITS, &standard(), crate::vm::BlockAt::at(0))
             .map_err(|failed| failed.error)
     }
 
@@ -211,7 +211,7 @@ impl World {
             sender,
             contract,
             value: u256::ZERO,
-            time: 0,
+            block: crate::vm::BlockAt::at(0),
         };
         let func = Hash::Xxh3_64(selector(function));
 
@@ -462,7 +462,7 @@ fn rust_and_lua_do_integer_math_alike_and_read_each_other_s_integers() {
 }
 
 /// Builds the SDK's example contracts once per test run, for real, with cargo.
-fn example(name: &str) -> Vec<u8> {
+pub(crate) fn example(name: &str) -> Vec<u8> {
     static BUILT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     let dir = BUILT.get_or_init(|| {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -704,7 +704,7 @@ fn init_runs_once_at_deploy_and_only_the_chain_may_run_it() {
     let mut world = World::new();
     world.nonce += 1;
     let (owned, hooked) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(OWNED_V1.to_string()), LIMITS, &standard(), 0)
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(OWNED_V1.to_string()), LIMITS, &standard(), crate::vm::BlockAt::at(0))
         .unwrap();
 
     assert!(hooked.fuel_used > 0);
@@ -779,7 +779,7 @@ fn conforms_to_the_token_standard(code: Code) {
     let mut world = World::new();
     world.nonce += 1;
     let (token, hooked) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &code, LIMITS, &standard(), 0)
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &code, LIMITS, &standard(), crate::vm::BlockAt::at(0))
         .unwrap();
     let initial = u256::from(1_000_000u64) * u256::from(10u64).pow(18);
     let zero = address(Address::Ed25519([0; 32]));
@@ -934,7 +934,7 @@ function M.decimals() return 6 end"#,
     ] {
         world.nonce += 1;
         let failed = Contracts::new(&world.state)
-            .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with(extra, None), LIMITS, &standard(), 0)
+            .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with(extra, None), LIMITS, &standard(), crate::vm::BlockAt::at(0))
             .unwrap_err();
 
         assert!(failed.fuel_used > 0, "{extra}: asking cost fuel");
@@ -957,11 +957,11 @@ function M.decimals() return 6 end"#,
     // Genesis says what makes a token: other functions, or none, which keeps no registry.
     world.nonce += 1;
     let (minimal, _) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", Some("approve")), LIMITS, &["transfer".to_string()], 0)
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", Some("approve")), LIMITS, &["transfer".to_string()], crate::vm::BlockAt::at(0))
         .unwrap();
     world.nonce += 1;
     let (unlisted, _) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", None), LIMITS, &[], 0)
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", None), LIMITS, &[], crate::vm::BlockAt::at(0))
         .unwrap();
 
     assert!(tokens(&world, minimal).is_some());
@@ -1012,7 +1012,7 @@ return M
     assert!(poked.fuel_used >= crate::vm::cost::TOKEN_REFRESH);
 
     // The registry asks again when told to, and the answer stands.
-    Contracts::new(&world.state).refresh(&world.vm, &token, DEPLOYER, LIMITS, &standard(), 0).unwrap();
+    Contracts::new(&world.state).refresh(&world.vm, &token, DEPLOYER, LIMITS, &standard(), crate::vm::BlockAt::at(0)).unwrap();
 
     assert_eq!(Tokens::new(&world.state).get(&token).unwrap().unwrap().name.as_deref(), Some("Third"));
 }
@@ -1572,7 +1572,7 @@ fn deploys_and_upgrades_pay_for_loading_and_for_failing() {
     let deploy = |world: &mut World, source: &str| {
         world.nonce += 1;
 
-        Contracts::new(&world.state).deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(source.to_string()), LIMITS, &standard(), 0)
+        Contracts::new(&world.state).deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(source.to_string()), LIMITS, &standard(), crate::vm::BlockAt::at(0))
     };
 
     // A deploy pays for loading its code as well as for init.
@@ -1600,7 +1600,7 @@ fn deploys_and_upgrades_pay_for_loading_and_for_failing() {
     // check_perms saying no still pays for asking it.
     let stranger = Address::Ed25519([0xb; 32]);
     let refused = Contracts::new(&world.state)
-        .upgrade(&world.vm, &stranger, &owned, &Code::Lua(OWNED_V1.to_string()), LIMITS, &standard(), 0)
+        .upgrade(&world.vm, &stranger, &owned, &Code::Lua(OWNED_V1.to_string()), LIMITS, &standard(), crate::vm::BlockAt::at(0))
         .unwrap_err();
 
     assert_eq!(refused.error, crate::registry::RegistryError::NotPermitted);

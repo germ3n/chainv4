@@ -12,6 +12,9 @@ The EVM shares the chain's state:
   is what it spends in the EVM, and coin an EVM contract pays out lands in the same balance.
 - **EVM code** is a contract record like any other, of engine `evm`, in the contract registry.
 - **EVM storage** lives in the storage column, keyed by the contract and the 32-byte slot.
+- **Calls** go both ways: EVM contracts call Lua and WebAssembly ones through a precompile, and
+  those call EVM contracts with `evm.call`. See
+  [Calls with Lua and WebAssembly contracts](#calls-with-lua-and-webassembly-contracts).
 
 Ethereum's own wallets and tools work with it too: MetaMask, Foundry and ethers sign
 transactions the chain takes as they are, and the node answers Ethereum's JSON-RPC at `POST /rpc`.
@@ -165,6 +168,83 @@ On a chain with [names](names.md), a precompile at `0x00000000000000000000000000
 resolves them: `resolve(string) returns (address)` and `name(address) returns (string)`.
 `contracts/evm/NamePayer.sol` pays a name with it. See [Names in contracts](names.md#names-in-contracts).
 
+## Calls with Lua and WebAssembly contracts
+
+EVM contracts and native ones, Lua and WebAssembly, call each other within one transaction, as
+deep as `MAX_CALL_DEPTH`, 8, across the engines, and a revert on either side unwinds both.
+
+**From the EVM,** a precompile at `0x0000000000000000000000000000000000004e43` calls native
+contracts, on every chain that runs the EVM:
+
+```solidity
+interface Native {
+    function callNative(bytes32 target, string calldata name, string calldata types, bytes calldata args)
+        external payable returns (bytes memory);
+}
+
+bytes memory out = Native(address(0x4e43)).callNative{value: msg.value}(counter, "add", "u64", abi.encode(by));
+uint64 total = abi.decode(out, (uint64));
+```
+
+- `target` is the native contract's 32 bytes, as `contract:0x…` writes them.
+- `types` lists its arguments' native types, comma separated, and `args` holds them ABI-encoded
+  as these:
+
+  | Native | ABI |
+  | --- | --- |
+  | `u64`, `u128`, `u256`, `i64`, `i128`, `i256` | `uint64` … `int256` |
+  | `amount` | `uint256` |
+  | `number` | `int64` |
+  | `bool`, `string`, `bytes` | themselves |
+  | `address` | `address`, read as the account behind those 20 bytes |
+  | `contract` | `bytes32`, a native contract |
+
+- What the function returns comes back ABI-encoded, one value after another, each by the same
+  table: a native contract as `bytes32`, any other address as its 20 bytes inside the EVM.
+- The value sent goes to the native contract. It sees the calling EVM contract as `ctx.sender`.
+- A native call that fails reverts with `Error(string)`, so Solidity passes the reason up. One
+  that runs out of fuel runs the call out of gas. In a static call, as a `view` makes, a native
+  function that writes anything reverts.
+- It costs 2,600 gas and 3 a word of input, then the fuel the native call burns, at the chain's
+  rate of fuel to gas.
+
+**From Lua,** the `evm` library calls EVM contracts and speaks the ABI:
+
+```lua
+function M.bump(counter, by)
+    local output = evm.call(counter, evm.encode("bump(uint256)", u256(by)))
+    return evm.decode("(uint256)", output)
+end
+```
+
+`evm.call(address, calldata, value)` returns what the EVM returned, as bytes, and raises an error,
+with the revert's reason, when it reverts. `evm.encode` takes a signature with a name for
+calldata, or types alone in parentheses for arguments, and `evm.decode` reads either back:
+integers as their own types, addresses as the account behind them, arrays and tuples as tables.
+The EVM sees the Lua contract at its alias.
+
+**From WebAssembly,** the SDK's `evm_call(&address, value, &input)`, `abi_encode(signature,
+&values)` and `abi_decode(types, &data)` do the same; arrays and tuples have no value there.
+`contracts/examples/evm` bumps `Bridge`.
+
+**How unwinding works.** revm keeps the EVM's changes in its journal and reverts a frame's with
+the frame. A native call runs on a layer with the journal written into it, so it sees everything
+the EVM did so far. What it changed that the EVM sees goes back into the journal, and reverts with
+it: balances, nonces, EVM storage and EVM code, which a nested EVM call may have written. Anything
+else is kept aside with a marker slot in the journal. A frame that reverts takes the marker with
+it, and when the transaction ends, only what still has its marker is kept. So if an inner frame
+reverts and the outer one catches it, the native call that frame made is undone, and the rest
+stays.
+
+**Events** from native calls land in the receipt where the calls ran, among the EVM's logs.
+
+**Reentry** follows the native rule: a native contract already running further up, even across the
+EVM, is entered again only through a function marked reentrant.
+
+`contracts/evm/Bridge.sol` calls a native counter, reverts after it, catches a revert, reads in a
+static call, and is called back. `src/chain/tests/evm.rs` drives it through Lua, then the EVM,
+then Lua, and through the EVM, then Lua, then the EVM again.
+
 ## Logs and reverts
 
 **Logs** become events named `log` in the transaction's receipt, emitted by the contract: their
@@ -199,8 +279,9 @@ and calls it with `chainv4 send`.
 
 ## Not yet
 
-- **Calls between engines,** beyond names, which the precompile resolves. An EVM contract cannot call a Lua or wasm contract, nor the other
-  way round. They share balances: coin moves between them through plain payments.
+- **Native calls in traces.** An EVM transaction's receipt has no trace, so the native calls it
+  makes are not in one either.
+- **Token refreshes** a native contract asks for while the EVM calls it are not done.
 - **Blob transactions and the KZG point evaluation precompile,** which needs blobs.
 - **Selfdestruct** only clears what it can in the same transaction, as Ethereum's Cancun rules
   say: elsewhere it only sends the contract's coin.

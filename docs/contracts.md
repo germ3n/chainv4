@@ -404,6 +404,7 @@ and `debug` are not there at all.
 | `events` | `events.emit(name, ...)`. |
 | `tokens` | `tokens.refresh()`: asks the token registry to ask this token's name, symbol and decimals again once the transaction succeeds. |
 | `names` | `names.resolve(name)`, the address a name such as `alice.dev` resolves to, or `nil`; `names.name_of(address)`, the name an address goes by. At the block's time. See [Names](names.md#names-in-contracts). |
+| `evm` | `evm.call(address, calldata, value)` calls an [EVM](evm.md) contract and returns what it returned, as bytes; `evm.encode("transfer(address,uint256)", to, 5)` writes calldata, `evm.encode("(uint256,string)", …)` arguments alone; `evm.decode("(uint256,bool)", bytes)` reads them back. Tables for arrays and tuples. See [EVM](evm.md#calls-with-lua-and-webassembly-contracts). |
 | `address` | `address.parse("ed25519:0x…")`, `address.from_hex`, `address.from_bytes`; methods `hex`, `bytes`, `text`, `kind`, `is_contract`, `is_valid`. |
 | `u64`, `u128`, `u256`, `i64`, `i128`, `i256` | The integer types: `u256(value)` or `u256.new`, and `zero`, `min`, `max`, for each. See [Integers](#integers). |
 | `hash` | `hash.sha256`, `blake3`, `blake2s`, `blake2b`, `xxh3`, `keccak256`, whichever the node has; the result has `hex`, `bytes`, `algorithm`. |
@@ -583,6 +584,8 @@ into its exported memory.
 | `emit` | An event. |
 | `refresh_token` | Asks the token registry to ask this token's name, symbol and decimals again once the transaction succeeds. |
 | `resolve_name`, `name_of` | Names: `resolve_name(name, len, out)` writes the address a name resolves to, returning 1, or returns 0; `name_of(address)` puts an address's primary name in the result buffer and returns its length, or -1. |
+| `evm_call` | Calls an [EVM](evm.md) contract: `evm_call(address, value, input, input_len)`, with what it returned in the result buffer and 0, or why it reverted and 1. |
+| `abi_encode`, `abi_decode` | Solidity's ABI, on the node: `abi_encode(signature, len, values, values_len)` writes calldata or arguments from a list of values, `abi_decode(types, len, data, data_len)` reads them back into one. |
 | `abort` | Stops the call with an error. Only the first 1,024 bytes of the message are kept. |
 
 **The encoding:** arguments and return values travel as the chain's encoding of a list of
@@ -626,7 +629,8 @@ order, and what it returns becomes the call's return values (`chainv4_sdk::args`
 - `#[export(reentrant)]` also marks a function reentrant;
 - `sender`, `this`, `value`, `balance`, `transfer`;
 - `call` and `call_with_value`, `delegate`, `check_layout`, `emit`, `hash`, `abort`,
-  `refresh_token`, `resolve_name` and `name_of`, and `storage`, with `storage::namespace(name)`
+  `refresh_token`, `resolve_name` and `name_of`, `evm_call`, `abi_encode` and `abi_decode`, and
+  `storage`, with `storage::namespace(name)`
   and `storage::own()`;
 - `namespace!` and `retired!`, which declare the storage layout, and typed methods on a
   namespace for every kind's encoding: `set_i64`, `set_i128`, `set_i256`, `set_u256`,
@@ -667,6 +671,7 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 | `contracts/examples/counter` | Storage, arguments and return values, and a storage layout. |
 | `contracts/examples/vault` | Holding and sending funds. |
 | `contracts/examples/names`, `contracts/evm/NamePayer.sol` | Resolving [names](names.md) and paying them, from WebAssembly and the EVM. |
+| `contracts/examples/evm`, `contracts/evm/Bridge.sol` | Calls between engines: WebAssembly and Lua calling the EVM, and the EVM calling them through the native precompile. |
 | `contracts/examples/proxy` | Calling other contracts for a caller, and a reentrant callback. |
 | `contracts/examples/upgradable`, `contracts/lua/proxy.lua` | A proxy built on `fallback` and `delegate`, with its owner and implementation in its own space, that checks a new implementation's layout. |
 | `contracts/examples/token`, `contracts/lua/token.lua` | The [token standard](token-standard.md), held to it by one shared test. |
