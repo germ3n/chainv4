@@ -21,7 +21,7 @@ use {
     category = "Storage",
     see_also = "StateTree, Column",
 )]
-pub const STATE_COLUMNS: [Column; 7] = [
+pub const STATE_COLUMNS: [Column; 8] = [
     Column::Accounts,
     Column::Contracts,
     Column::Storage,
@@ -29,6 +29,7 @@ pub const STATE_COLUMNS: [Column; 7] = [
     Column::Epochs,
     Column::Tokens,
     Column::Namespaces,
+    Column::Names,
 ];
 
 /// Separates entry paths from every other hash the chain takes.

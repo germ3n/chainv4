@@ -235,6 +235,40 @@ pub struct Hop {
 pub struct Account {
     pub nonce: u64,
     pub balance: String,
+    /// Its primary name, such as alice.dev, on a chain with names.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// GET /names/{name}: a name at the tip.
+#[derive(Clone, Debug, Deserialize)]
+pub struct NameView {
+    pub name: String,
+    pub display: String,
+    /// active, grace or available.
+    pub status: String,
+    pub owner: Option<String>,
+    pub target: Option<String>,
+    pub resolves_to: Option<String>,
+    pub expires: Option<u64>,
+    pub grace_ends: Option<u64>,
+    #[serde(default)]
+    pub texts: std::collections::BTreeMap<String, String>,
+    pub price_per_year: Option<String>,
+}
+
+/// One name of GET /accounts/{address}/names.
+#[derive(Clone, Debug, Deserialize)]
+pub struct OwnedName {
+    pub display: String,
+    pub status: String,
+    pub expires: u64,
+}
+
+/// GET /accounts/{address}/names.
+#[derive(Clone, Debug, Deserialize)]
+pub struct OwnedNames {
+    pub names: Vec<OwnedName>,
 }
 
 /// GET /contracts/{address}.

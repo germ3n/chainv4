@@ -3,6 +3,7 @@
 
 mod accounts;
 mod activity;
+mod names;
 mod overview;
 mod pair;
 mod receive;
@@ -31,6 +32,7 @@ pub enum Page {
     Send,
     Receive,
     Activity,
+    Names,
     Accounts,
     Settings,
     /// An offline signer's: a request to sign, read off the sender's screen.
@@ -48,6 +50,7 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             (Page::Send, "Send"),
             (Page::Receive, "Receive"),
             (Page::Activity, "Activity"),
+            (Page::Names, "Names"),
             (Page::Accounts, "Accounts"),
             (Page::Settings, "Settings"),
         ],
@@ -145,10 +148,18 @@ impl Ctx<'_> {
 #[derive(Default)]
 pub struct States {
     pub send: send::SendState,
+    names: names::NamesState,
     receive: receive::ReceiveState,
     accounts: accounts::AccountsState,
     settings: settings::SettingsState,
     sign: sign::SignState,
+}
+
+impl States {
+    /// The names the pages want proven: one typed to send to, and one searched for.
+    pub fn wanted_names(&self) -> Vec<String> {
+        self.send.wanted_name().into_iter().chain(self.names.wanted()).collect()
+    }
 }
 
 /// Draws the page.
@@ -176,6 +187,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Send => send::show(ui, ctx, &mut states.send),
         Page::Receive => receive::show(ui, ctx, &mut states.receive),
         Page::Activity => activity::show(ui, ctx),
+        Page::Names => names::show(ui, ctx, &mut states.names, &mut states.send),
         Page::Accounts => accounts::show(ui, ctx, &mut states.accounts),
         Page::Settings => settings::show(ui, ctx, &mut states.settings),
         Page::Sign => sign::show(ui, ctx, &mut states.sign),

@@ -2,10 +2,10 @@ use {
     crate::crypto::verifiable::VerifyError,
     crate::db::{DbError, State},
     crate::registry::signers::{SignerSet, Signers},
-    crate::registry::changes::Changes,
-    crate::governance::{Change, Governance},
+    crate::registry::names::NamesConfig,
+    crate::governance::Governance,
     crate::chain::FinalityConfig,
-    crate::registry::validators::{Staking, Validators},
+    crate::registry::validators::Staking,
     crate::registry::contracts::{Failed, Hooked},
     crate::registry::{Accounts, Contracts, RegistryError},
     crate::structs::address::Address,
@@ -21,6 +21,13 @@ use {
     std::fmt,
     std::sync::Arc,
 };
+
+#[cfg(any(feature = "governance", feature = "names"))]
+use crate::registry::changes::Changes;
+#[cfg(feature = "governance")]
+use crate::governance::Change;
+#[cfg(feature = "staking")]
+use crate::registry::validators::Validators;
 
 #[document(
     summary = "The chain-wide rules a transaction runs under, from genesis.",
@@ -47,6 +54,8 @@ pub struct Rules {
     pub governance: Option<GovernanceRules>,
     #[document(summary = "Whether the burned share of every fee goes to REWARD_POOL, for vote rewards, rather than vanishing.")]
     pub pooled_fees: bool,
+    #[document(summary = "The chain's names, or None on a chain without them, where name transactions fail.")]
+    pub names: Option<Arc<NamesConfig>>,
 }
 
 #[document(
@@ -150,6 +159,8 @@ pub enum Failure {
     NoGovernance,
     #[document(summary = "Slashing evidence whose signatures do not check out.")]
     BadEvidence,
+    #[document(summary = "A name transaction, or a change of name prices, on a chain without names.")]
+    NoNames,
 }
 
 impl fmt::Display for Failure {
@@ -163,6 +174,7 @@ impl fmt::Display for Failure {
             Failure::NoSigners => write!(f, "this chain has no authority signers"),
             Failure::NoGovernance => write!(f, "this chain has no governance"),
             Failure::BadEvidence => write!(f, "the evidence's signatures do not check out"),
+            Failure::NoNames => write!(f, "this chain has no names"),
         }
     }
 }
@@ -432,6 +444,7 @@ fn settle(
         state: block,
         vm,
         limits: rules.limits,
+        time: context.timestamp,
     };
     let charged = schedule.charge(&scoring).min(limit);
     let settled = payment.fees.settle(context.base_price, payment.price, gas, charged);
@@ -491,7 +504,7 @@ fn failed_hooks(failed: Failed) -> (Result<Effect, Failure>, Contracted) {
 fn refreshed(
     layer: &Arc<State>,
     vm: &Arc<Vm>,
-    sender: Address,
+    call: &CallContext,
     limits: Limits,
     token_functions: &[String],
     outcome: Outcome,
@@ -513,7 +526,7 @@ fn refreshed(
             ..limits
         };
 
-        match contracts.refresh(vm, token, sender, left, token_functions) {
+        match contracts.refresh(vm, token, call.sender, left, token_functions, call.time) {
             Ok((fuel_used, trace)) => {
                 contracted.fuel_used += fuel_used;
                 contracted.trace.append(trace);
@@ -541,6 +554,7 @@ fn run(
 ) -> (Result<Effect, Failure>, Contracted) {
     let height = context.height;
     let accounts = Accounts::new(layer);
+    #[cfg(feature = "staking")]
     let staking = |run: &dyn Fn(&Validators, &StakingRules, u64) -> Result<(), RegistryError>| {
         let Some(finality) = &rules.staking else {
             return (Err(Failure::NoStaking), Contracted::default());
@@ -576,14 +590,15 @@ fn run(
                 return (Err(Failure::Registry(err)), Contracted::default());
             }
 
-            let context = CallContext {
+            let call = CallContext {
                 sender,
                 contract: *to,
                 value,
+                time: context.timestamp,
             };
 
-            match Contracts::new(layer).call(vm, &context, func, data, limits) {
-                Ok(outcome) => refreshed(layer, vm, sender, limits, &rules.token_functions, outcome),
+            match Contracts::new(layer).call(vm, &call, func, data, limits) {
+                Ok(outcome) => refreshed(layer, vm, &call, limits, &rules.token_functions, outcome),
                 Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
             }
         }
@@ -614,7 +629,7 @@ fn run(
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
-            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits, &rules.token_functions) {
+            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits, &rules.token_functions, context.timestamp) {
                 Ok((address, hooked)) => (Ok(Effect::Deployed(address)), hooked.into()),
                 Err(failed) => failed_hooks(failed),
             }
@@ -624,18 +639,24 @@ fn run(
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
-            match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits, &rules.token_functions) {
+            match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits, &rules.token_functions, context.timestamp) {
                 Ok(hooked) => (Ok(Effect::Upgraded(*contract)), hooked.into()),
                 Err(failed) => failed_hooks(failed),
             }
         }
+        #[cfg(feature = "staking")]
         Tx::Bond { voter, amount } => staking(&|validators, finality, epoch| {
             validators.bond(&sender, voter, amount.to_u256(), epoch, &finality.staking)
         }),
+        #[cfg(feature = "staking")]
         Tx::Unbond { voter } => staking(&|validators, finality, epoch| {
             validators.unbond(&sender, voter, epoch, &finality.staking)
         }),
+        #[cfg(feature = "staking")]
         Tx::Withdraw { voter } => staking(&|validators, _, epoch| validators.withdraw(&sender, voter, epoch).map(|_| ())),
+        // A build without staking opens no chain whose validators bond.
+        #[cfg(not(feature = "staking"))]
+        Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } => (Err(Failure::NoStaking), Contracted::default()),
         Tx::Slash { first, second } => {
             let chain = match (&rules.staking, &rules.signers) {
                 (Some(finality), _) => finality.chain,
@@ -655,9 +676,12 @@ fn run(
 
                     (moved(ejected.map(|_| ())), Contracted::default())
                 }
+                #[cfg(feature = "staking")]
                 _ => staking(&|validators, finality, epoch| {
                     validators.slash(&sender, &first.vote.voter, epoch, &finality.staking).map(|_| ())
                 }),
+                #[cfg(not(feature = "staking"))]
+                _ => (Err(Failure::NoStaking), Contracted::default()),
             }
         }
         Tx::ApproveSigners {
@@ -683,24 +707,28 @@ fn run(
 
             (moved(Signers::new(layer).withdraw(&sender, *version, epoch, rules.approval_epochs)), Contracted::default())
         }
+        #[cfg(feature = "governance")]
         Tx::ApproveChange { version, change } => {
-            let Some(rules) = &rules.governance else {
+            let Some(governance) = &rules.governance else {
                 return (Err(Failure::NoGovernance), Contracted::default());
             };
             let problem = match change {
-                Change::Consensus(consensus) => crate::chain::consensus_problem(consensus, Some(&rules.finality)),
+                Change::Consensus(consensus) => crate::chain::consensus_problem(consensus, Some(&governance.finality)),
                 Change::Bootnodes(bootnodes) => crate::governance::bootnodes_problem(bootnodes),
+                Change::NamePrices(_) if rules.names.is_none() => return (Err(Failure::NoNames), Contracted::default()),
+                Change::NamePrices(prices) => crate::registry::names::prices_problem(prices),
             };
 
             if let Some(problem) = problem {
                 return (Err(Failure::Registry(RegistryError::BadChange(problem))), Contracted::default());
             }
 
-            let epoch = height / rules.checkpoint_interval.max(1);
-            let approved = Changes::new(layer).approve(&sender, *version, change.clone(), epoch, rules.approval_epochs, &*rules.governance);
+            let epoch = height / governance.checkpoint_interval.max(1);
+            let approved = Changes::new(layer).approve(&sender, *version, change.clone(), epoch, governance.approval_epochs, &*governance.governance);
 
             (moved(approved.map(|_| ())), Contracted::default())
         }
+        #[cfg(feature = "governance")]
         Tx::WithdrawChange { version } => {
             let Some(rules) = &rules.governance else {
                 return (Err(Failure::NoGovernance), Contracted::default());
@@ -709,6 +737,35 @@ fn run(
 
             (moved(Changes::new(layer).withdraw(&sender, *version, epoch, rules.approval_epochs, &*rules.governance)), Contracted::default())
         }
+        // A build without governance opens no chain that has it.
+        #[cfg(not(feature = "governance"))]
+        Tx::ApproveChange { .. } | Tx::WithdrawChange { .. } => (Err(Failure::NoGovernance), Contracted::default()),
+        #[cfg(feature = "names")]
+        Tx::Name { name, action } => {
+            use crate::registry::names::Names;
+
+            let Some(names) = &rules.names else {
+                return (Err(Failure::NoNames), Contracted::default());
+            };
+            // Governance's prices, once it decided any, else genesis's.
+            let acted = Changes::new(layer)
+                .name_prices()
+                .map_err(RegistryError::Db)
+                .and_then(|prices| Names::new(layer).act(&sender, name, action, context.timestamp, height, names, prices.as_deref().unwrap_or(&names.prices)));
+
+            (moved(acted.map(|_| ())), Contracted::default())
+        }
+        #[cfg(feature = "names")]
+        Tx::PrimaryName { name } => {
+            let Some(names) = &rules.names else {
+                return (Err(Failure::NoNames), Contracted::default());
+            };
+
+            (moved(crate::registry::names::Names::new(layer).set_primary(&sender, name.as_deref(), context.timestamp, names)), Contracted::default())
+        }
+        // A build without names opens no chain that has them.
+        #[cfg(not(feature = "names"))]
+        Tx::Name { .. } | Tx::PrimaryName { .. } => (Err(Failure::NoNames), Contracted::default()),
     }
 }
 
@@ -732,6 +789,7 @@ fn evm(
         timestamp: context.timestamp,
         producer: context.producer,
         chain_id: evm::chain_id(&context.genesis),
+        names: rules.names.as_deref().cloned(),
     };
 
     match evm::run(layer, &sender, signed.nonce, action, limits.fuel / fuel_per_gas, limits.memory as u64, block) {

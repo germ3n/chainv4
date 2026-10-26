@@ -1533,7 +1533,7 @@ mod voting {
 
         assert_eq!(chain.tip().height, switch + 2 * INTERVAL - 1);
         assert_eq!(chain.tip_work(), work + u256::new(2 * 2 * u128::from(INTERVAL)), "in turn, each weighs 2");
-        assert!(matches!(&send_as_staked(&mut chain, rules, &alice, approve(1, to_staked())).result, Err(failure) if failure.to_string().contains("consensus already")));
+        assert!(matches!(&send_as_staked(&mut chain, rules, &alice, approve(1, to_staked())).result, Err(failure) if failure.to_string().contains("decided already")));
 
         // The checkpoints up to the one before the tip's are justified, so a light client learns
         // every epoch's consensus from their updates, and follows the chain across the switch.
@@ -1627,6 +1627,45 @@ mod voting {
         assert!(matches!(&send_as(&mut chain, &alice, Tx::ApproveChange { version: 0, change: to_staked() }).result, Err(failure) if failure.to_string().contains("governance lets approve")));
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: to_staked() }).result, Err(failure) if failure.to_string().contains("decided version is 0")));
         assert_eq!(Changes::new(&chain.state()).decided().unwrap().version, 0);
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council", feature = "names"))]
+    #[test]
+    fn a_council_changes_what_names_cost_from_the_block_that_decides_it() {
+        use crate::governance::{Change, GovernanceConfig};
+        use crate::registry::changes::Changes;
+        use crate::registry::names::{NameAction, NamesConfig};
+        use crate::structs::u256::u256;
+
+        let council = GovernanceConfig::Council {
+            members: vec![dev().public().address(), key(70).public().address()],
+            threshold: 2,
+            approval_epochs: 8,
+        };
+        let mut chain = governed(council);
+        let prices = Change::NamePrices(vec![u256::from(7u64)]);
+        let register = |name: &str| Tx::Name { name: name.to_string(), action: NameAction::Register { years: 2 } };
+        let balance = |chain: &Chain| crate::registry::Accounts::new(&chain.state()).get(&dev().public().address()).unwrap().balance;
+        let paid = |chain: &mut Chain, name: &str| {
+            let before = balance(chain);
+
+            assert_eq!(send_as(chain, &dev(), register(name)).result, Ok(Effect::Done));
+
+            before - balance(chain)
+        };
+
+        assert_eq!(paid(&mut chain, "alice"), NamesConfig::dev().prices[2] * u256::from(2u64), "genesis's price for five characters");
+
+        // A price list no chain could have is refused; one member is not enough; two decide.
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: Change::NamePrices(Vec::new()) }).result, Err(failure) if failure.to_string().contains("at least one price")));
+        assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: prices.clone() }).result, Ok(Effect::Done));
+        assert_eq!(paid(&mut chain, "bobby"), NamesConfig::dev().prices[2] * u256::from(2u64), "not decided yet");
+        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: prices.clone() }).result, Ok(Effect::Done));
+        assert_eq!(Changes::new(&chain.state()).name_prices().unwrap(), Some(vec![u256::from(7u64)]));
+
+        // From the next block on, one price for every length, the shortest too.
+        assert_eq!(paid(&mut chain, "car"), u256::from(14u64));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: prices }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 
     #[cfg(feature = "finality-authority")]

@@ -477,6 +477,36 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **revm brings older crypto crates.** It pins k256 0.13 and sha3 0.11 beside the newer ones
   chainv4 uses, so both are built. It has no KZG precompile, since that needs C.
 
+## Names
+
+- **A name's price is burned, by length, per year.** Its fee is paid on top. A registration that
+  fails burns nothing, and `chainv4 send` dry-runs name transactions, refusing one that would
+  fail before it is sent. See [Names](names.md).
+- **Names expire by block time.** A name expires 365 days a year after the block that registered
+  it, by block timestamps. It stops resolving then, its subnames too, and only its owner may
+  renew it for the grace period. After that anyone may register it, and everything it held is
+  gone.
+- **Transactions carry names in lower case, without the suffix.** Upper case is refused, not
+  folded, so every node reads one name one way; the CLI and the API lower-case and strip what you
+  type.
+- **Paying a name pays the address it resolved to when you sent.** `send transfer --to alice.dev`
+  resolves on the node and sends the address, so a name that changes before the block does not
+  redirect the payment.
+- **A primary name lapses by itself.** It counts only while the name resolves to the account:
+  pointed elsewhere, expired or given away, the account has none.
+- **Contracts resolve names at their block's time.** `names.resolve` in Lua, `resolve_name` in
+  the SDK and the EVM's precompile at `0x…4e53` give what a name resolves to as the block runs.
+  The Lua library and the WebAssembly imports exist in every build and on every chain, so a script
+  behaves alike everywhere; on a chain without names they fail. A Lua contract that used a global
+  of its own called `names` now finds the library there.
+- **The EVM's precompile writes the alias down.** Resolving a name to an Ed25519 account through
+  it registers the account's alias, so `payable(NAMES.resolve("alice.dev"))` reaches her at once.
+- **`staking`, `governance` and `names` are features.** Each is on by default. `finality-ffg`
+  brings `staking`, either governance kind brings `governance`. A build without `names` refuses a
+  chain whose genesis has names.
+- **Names made new dev chains.** The dev genesis has names under `dev` now, so dev chains from
+  before have other ids.
+
 ## Building and testing
 
 - **The end-to-end SDK test needs the wasm32 target.** It builds `contracts/` with cargo:

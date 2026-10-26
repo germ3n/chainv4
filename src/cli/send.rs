@@ -20,6 +20,11 @@ use {
     ureq::Agent,
 };
 
+#[cfg(feature = "names")]
+use crate::registry::names::{NameAction, NamesConfig, name_problem, price};
+#[cfg(feature = "governance")]
+use crate::registry::names::prices_problem;
+
 /// How often send asks whether its transaction landed.
 const POLL: Duration = Duration::from_millis(500);
 
@@ -71,11 +76,11 @@ pub struct SendArgs {
 
 #[derive(clap::Subcommand)]
 pub enum TxArgs {
-    /// Sends funds to an address.
+    /// Sends funds to an address, or to whatever a name resolves to.
     Transfer {
-        /// Who receives them, such as ed25519:0x….
+        /// Who receives them, such as ed25519:0x…, or a name, such as alice.dev.
         #[arg(long)]
-        to: Address,
+        to: Recipient,
         /// A whole amount, in the smallest unit.
         #[arg(long, value_parser = parse_amount)]
         amount: u256,
@@ -126,6 +131,7 @@ pub enum TxArgs {
         #[arg(long)]
         wasm: Option<PathBuf>,
     },
+    #[cfg(feature = "staking")]
     /// Bonds funds from the signer to become a finality validator, voting with --voter.
     Bond {
         /// The voting key, such as the address `chainv4 keygen` prints for a validator key file.
@@ -135,11 +141,13 @@ pub enum TxArgs {
         #[arg(long, value_parser = parse_amount)]
         amount: u256,
     },
+    #[cfg(feature = "staking")]
     /// Stops a validator the signer bonded from voting.
     Unbond {
         #[arg(long)]
         voter: PublicKey,
     },
+    #[cfg(feature = "staking")]
     /// Pays an unbonded validator's bond back to the signer, once it unlocks.
     Withdraw {
         #[arg(long)]
@@ -180,10 +188,11 @@ pub enum TxArgs {
         #[arg(long)]
         version: Option<u64>,
     },
+    #[cfg(feature = "governance")]
     /// Approves a change under the chain's governance: a new consensus, as a genesis file's
     /// consensus object, or new bootnodes. Sign with an account governance lets approve: a
     /// validator's or signer's account under the electorate, a member's under a council.
-    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes"]))]
+    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices"]))]
     ApproveChange {
         /// The new consensus as JSON, such as '{"type":"staked","slot_ms":2000,"schedule":"draw"}'
         /// or '{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1000","min_difficulty":"1000"}'.
@@ -193,10 +202,15 @@ pub enum TxArgs {
         /// /ip4/203.0.113.7/udp/4001/quic-v1, or none to leave the chain with none.
         #[arg(long, value_delimiter = ',')]
         bootnodes: Option<Vec<String>>,
+        /// New prices for a year of a name, in the smallest unit, separated by commas: the first
+        /// for names of 3 characters, the next for 4, and the last for every length from its own.
+        #[arg(long, value_delimiter = ',', value_parser = parse_amount)]
+        name_prices: Option<Vec<u256>>,
         /// The version of the decision this changes. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
     },
+    #[cfg(feature = "governance")]
     /// Takes back the sender's approval of a change under governance.
     WithdrawChange {
         /// The version of the decision the approval was for. Defaults to the one the node reports.
@@ -217,6 +231,12 @@ pub enum TxArgs {
         /// Arguments as type:value, such as i64:5, string:hi or address:ed25519:0x….
         #[arg(value_parser = parse_argument)]
         args: Vec<TxCallArgumentType>,
+    },
+    /// Registers, renews, gives away or changes a name, such as alice.dev.
+    #[cfg(feature = "names")]
+    Name {
+        #[command(subcommand)]
+        action: NameArgs,
     },
     /// Calls an EVM contract, or pays an EVM address, with Solidity calldata.
     EvmCall {
@@ -239,6 +259,154 @@ pub enum TxArgs {
         /// and hex for bytesN.
         args: Vec<String>,
     },
+}
+
+/// What a name transaction does. Names may be given with the chain's suffix or without it.
+#[cfg(feature = "names")]
+#[derive(clap::Subcommand)]
+pub enum NameArgs {
+    /// Registers a name nobody holds, to the signer and pointing at it. Its price is burned.
+    Register {
+        /// The name, such as alice.dev or alice.
+        name: String,
+        /// How many years to hold it.
+        #[arg(long, default_value_t = 1)]
+        years: u32,
+    },
+    /// Holds the signer's name for more years, from when it expires.
+    Renew {
+        name: String,
+        #[arg(long, default_value_t = 1)]
+        years: u32,
+    },
+    /// Gives a name or subname to another account.
+    Transfer {
+        name: String,
+        /// The new owner.
+        #[arg(long)]
+        to: Address,
+    },
+    /// Points a name at an address, or with --none at nothing.
+    Target {
+        name: String,
+        /// The address it resolves to.
+        #[arg(long, conflicts_with = "none", required_unless_present = "none")]
+        to: Option<Address>,
+        /// Resolve to nothing.
+        #[arg(long)]
+        none: bool,
+    },
+    /// Sets one of a name's text records, such as url, avatar or description; without a value,
+    /// clears it.
+    Text {
+        name: String,
+        key: String,
+        value: Option<String>,
+    },
+    /// Creates a subname, LABEL.NAME, for nothing, owned by and pointing at an account: the signer
+    /// unless --owner says otherwise. Creating it again takes it back.
+    Subname {
+        name: String,
+        label: String,
+        #[arg(long)]
+        owner: Option<Address>,
+    },
+    /// Makes a name pointing at the signer its primary name, which the API shows for its address;
+    /// without a name, clears it.
+    Primary { name: Option<String> },
+}
+
+/// Whom a transfer goes to: an address, or a name the node resolves.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Recipient {
+    Address(Address),
+    Name(String),
+}
+
+impl From<Address> for Recipient {
+    fn from(address: Address) -> Recipient {
+        Recipient::Address(address)
+    }
+}
+
+impl std::str::FromStr for Recipient {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Recipient, String> {
+        match text.parse::<Address>() {
+            Ok(address) => Ok(Recipient::Address(address)),
+            Err(_) if !text.contains(':') && text.contains('.') => Ok(Recipient::Name(text.to_string())),
+            Err(err) => Err(format!("{text}: {err}; or give a name, such as alice.dev")),
+        }
+    }
+}
+
+/// The chain's names, from the node.
+#[cfg(feature = "names")]
+fn chain_names(agent: &Agent, node: &str) -> CliResult<NamesConfig> {
+    let answer = ok(agent.get(format!("{node}/names")).call())?;
+
+    Ok(NamesConfig {
+        suffix: answer["suffix"].as_str().ok_or("the node sent no suffix")?.to_string(),
+        prices: super::genesis::prices_from_json(&answer["prices"], "prices")?,
+        grace_ms: answer["grace_ms"].as_u64().ok_or("the node sent no grace_ms")?,
+        max_years: answer["max_years"].as_u64().and_then(|years| u32::try_from(years).ok()).ok_or("the node sent no max_years")?,
+    })
+}
+
+/// A name as transactions carry it: without the suffix, and checked here so a mistake is named
+/// before anything is sent.
+#[cfg(feature = "names")]
+fn name_of(names: &NamesConfig, text: &str) -> CliResult<String> {
+    let name = names.strip(text);
+
+    match name_problem(&name) {
+        Some(problem) => Err(format!("{text} is not a name: {problem}").into()),
+        None => Ok(name),
+    }
+}
+
+/// What a name resolves to now, from the node.
+#[cfg(feature = "names")]
+fn resolve(agent: &Agent, node: &str, name: &str) -> CliResult<Address> {
+    let answer = ok(agent.get(format!("{node}/names/{name}")).call())?;
+    let status = answer["status"].as_str().unwrap_or("unknown");
+    let target = answer["resolves_to"].as_str().ok_or_else(|| format!("{name} resolves to nothing: it is {status}"))?;
+
+    Ok(target.parse()?)
+}
+
+/// A name transaction, saying first what a registration or renewal burns.
+#[cfg(feature = "names")]
+fn name_transaction(action: NameArgs, sender: Address, agent: &Agent, node: &str) -> CliResult<Tx> {
+    let names = chain_names(agent, node)?;
+    let (name, action) = match action {
+        NameArgs::Primary { name } => {
+            let name = name.map(|name| name_of(&names, &name)).transpose()?;
+
+            return Ok(Tx::PrimaryName { name });
+        }
+        NameArgs::Register { name, years } => (name, NameAction::Register { years }),
+        NameArgs::Renew { name, years } => (name, NameAction::Renew { years }),
+        NameArgs::Transfer { name, to } => (name, NameAction::Transfer { to }),
+        NameArgs::Target { name, to, .. } => (name, NameAction::Target { target: to }),
+        NameArgs::Text { name, key, value } => (name, NameAction::Text { key, value }),
+        NameArgs::Subname { name, label, owner } => (name, NameAction::Subname { label, owner: owner.unwrap_or(sender) }),
+    };
+    let name = name_of(&names, &name)?;
+
+    if let Some(problem) = action.problem() {
+        return Err(problem.into());
+    }
+
+    if let NameAction::Register { years } | NameAction::Renew { years } = action {
+        let cost = price(&names.prices, &name, years).ok_or("the price overflows")?;
+        let plural = if years == 1 { "" } else { "s" };
+
+        println!("{} {} for {years} year{plural}: {cost} burned", action.kind(), names.display(&name));
+    }
+
+    Ok(Tx::Name { name, action })
 }
 
 /// An address as --to takes it for the EVM.
@@ -555,8 +723,19 @@ fn report(receipt: &Value) -> CliResult<()> {
 fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliResult<Tx> {
     let tx = match tx {
         TxArgs::Transfer { to, amount: value } => Tx::Transfer {
+            to: match to {
+                Recipient::Address(address) => address,
+                #[cfg(feature = "names")]
+                Recipient::Name(name) => {
+                    let address = resolve(agent, node, &name)?;
+                    println!("{name} resolves to {address}");
+
+                    address
+                }
+                #[cfg(not(feature = "names"))]
+                Recipient::Name(name) => return Err(format!("this build has no names to resolve {name} with").into()),
+            },
             from: sender,
-            to,
             amount: amount(value),
         },
         TxArgs::Mint { to, amount: value } => Tx::Mint { to, amount: amount(value) },
@@ -577,8 +756,11 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
             contract,
             code: code(lua, wasm)?,
         },
+        #[cfg(feature = "staking")]
         TxArgs::Bond { voter, amount: value } => Tx::Bond { voter, amount: amount(value) },
+        #[cfg(feature = "staking")]
         TxArgs::Unbond { voter } => Tx::Unbond { voter },
+        #[cfg(feature = "staking")]
         TxArgs::Withdraw { voter } => Tx::Withdraw { voter },
         TxArgs::Slash { first, second } => Tx::Slash { first, second },
         TxArgs::ApproveSigners {
@@ -658,9 +840,15 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
             Tx::WithdrawApproval { version }
         }
-        TxArgs::ApproveChange { consensus, bootnodes, version } => {
-            let change = match (consensus, bootnodes) {
-                (Some(consensus), _) => {
+        #[cfg(feature = "governance")]
+        TxArgs::ApproveChange {
+            consensus,
+            bootnodes,
+            name_prices,
+            version,
+        } => {
+            let change = match (consensus, bootnodes, name_prices) {
+                (Some(consensus), _, _) => {
                     let value: Value = serde_json::from_str(&consensus).map_err(|err| format!("--consensus is not JSON: {err}"))?;
                     let (consensus, window) = super::genesis::consensus_from_json(&value, "consensus")?;
 
@@ -670,7 +858,7 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
                     crate::governance::Change::Consensus(consensus)
                 }
-                (None, Some(bootnodes)) => {
+                (None, Some(bootnodes), _) => {
                     let bootnodes: Vec<String> = match bootnodes.as_slice() {
                         [none] if none == "none" => Vec::new(),
                         _ => bootnodes.into_iter().map(|address| address.trim().to_string()).collect(),
@@ -682,7 +870,14 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
                     crate::governance::Change::Bootnodes(bootnodes)
                 }
-                (None, None) => unreachable!("clap requires one"),
+                (None, None, Some(prices)) => {
+                    if let Some(problem) = prices_problem(&prices) {
+                        return Err(format!("--name-prices: {problem}").into());
+                    }
+
+                    crate::governance::Change::NamePrices(prices)
+                }
+                (None, None, None) => unreachable!("clap requires one"),
             };
 
             let version = match version {
@@ -694,10 +889,12 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
             match &change {
                 crate::governance::Change::Consensus(consensus) => println!("approving a change to {} consensus, from version {version}", consensus.name()),
                 crate::governance::Change::Bootnodes(bootnodes) => println!("approving {} bootnode{}, from version {version}", bootnodes.len(), if bootnodes.len() == 1 { "" } else { "s" }),
+                crate::governance::Change::NamePrices(prices) => println!("approving {} name price{}, from version {version}", prices.len(), if prices.len() == 1 { "" } else { "s" }),
             }
 
             Tx::ApproveChange { version, change }
         }
+        #[cfg(feature = "governance")]
         TxArgs::WithdrawChange { version } => {
             let version = match version {
                 Some(version) => version,
@@ -709,6 +906,8 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
             Tx::WithdrawChange { version }
         }
+        #[cfg(feature = "names")]
+        TxArgs::Name { action } => name_transaction(action, sender, agent, node)?,
         TxArgs::Call {
             to,
             function,

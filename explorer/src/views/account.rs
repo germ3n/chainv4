@@ -5,7 +5,7 @@
 //! node's address index, it lists every transaction that touched the address.
 
 use {
-    super::{Ctx, TxLine, events, tokens},
+    super::{Ctx, TxLine, View, events, tokens},
     crate::api::{Ask, EventQuery},
     crate::format,
     crate::model::{Called, RegisteredToken},
@@ -61,6 +61,18 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
         widgets::pill(ui, kind, look.palette.soft);
     });
     super::copyable(ui, address);
+
+    // The name it goes by, as the node says: it resolves to it now.
+    if let Some(name) = store.accounts.get(address).and_then(|account| account.name.clone()) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("goes by").small().color(look.palette.muted));
+
+            if ui.link(RichText::new(&name).strong()).clicked() {
+                ctx.go(View::Name(name.clone()));
+            }
+        });
+    }
+
     ui.add_space(10.0);
 
     super::section(ui, look, "Balance", |ui| match store.accounts.get(address) {
@@ -106,6 +118,20 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
         }
         None => super::waiting(ui, ctx, &Ask::Account(address.to_string())),
     });
+
+    if let Some(owned) = store.owned_names.get(address).filter(|owned| !owned.is_empty()) {
+        super::section(ui, look, "Names", |ui| {
+            for owned in owned {
+                ui.horizontal(|ui| {
+                    if ui.link(RichText::new(&owned.display).monospace()).clicked() {
+                        ctx.go(View::Name(owned.display.clone()));
+                    }
+
+                    ui.label(RichText::new(format!("{} · expires {} UTC", owned.status, format::utc(owned.expires))).small().color(look.palette.muted));
+                });
+            }
+        });
+    }
 
     if let Some(contract) = &contract {
         super::section(ui, look, "Contract", |ui| {

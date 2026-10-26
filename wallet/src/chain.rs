@@ -11,6 +11,7 @@ use {
         Assurance, CheckpointStart, FinalityStep, LightClient, LightError, LightParams, LightRequest, LightState, MAX_LIGHT_HEADERS, token_balance,
         token_balance_key,
     },
+    chainv4::registry::names::{FoundName, NameRecord, NameStatus, NamesConfig, PrimaryName, lineage, name_problem, primary_key, record_key, standing},
     chainv4::registry::tokens::{Token, token_key},
     chainv4::structs::account::Account,
     chainv4::structs::address::Address,
@@ -43,6 +44,26 @@ enum Target {
     Account(String),
     Token(String),
     Balance { token: String, holder: String },
+    /// A name's record, by name without the suffix.
+    Name(String),
+    /// An address's primary name.
+    Primary(String),
+}
+
+/// A name looked up from proven records: where it stands at the tip, and how far that is trusted.
+#[derive(Clone, Debug)]
+pub struct Resolved {
+    /// The name, or None when it is available: nobody holds it, or it is past its grace period.
+    pub found: Option<FoundName>,
+    /// The least of its records' assurances.
+    pub assurance: Assurance,
+}
+
+impl Resolved {
+    /// The address it pays: its target while it is active.
+    pub fn target(&self) -> Option<Address> {
+        self.found.as_ref().filter(|found| found.status == NameStatus::Active).and_then(|found| found.record.target)
+    }
 }
 
 /// A transaction the node said touches an address: where to look, not what is there.
@@ -108,6 +129,18 @@ pub struct Chain {
     pub receipts: HashMap<String, Proven<Landed>>,
     /// Transactions the node says touch an address, by address, newest first.
     pub mentions: HashMap<String, Vec<Mention>>,
+    /// The chain's names, as the node said them, once it did; whether it has any, once known.
+    pub names: Option<NamesConfig>,
+    pub has_names: Option<bool>,
+    /// The names the node says each address owns, by address text: where to look.
+    pub owned: HashMap<String, Vec<String>>,
+    /// Name records proven, by name without the suffix: None where there is none.
+    pub records: HashMap<String, Proven<Option<NameRecord>>>,
+    /// Primary names proven, by address text, as chosen: whether each still resolves to its
+    /// address is for resolve to say.
+    pub primaries: HashMap<String, Proven<Option<String>>>,
+    /// When each name's records were last asked for.
+    named: HashMap<String, f64>,
     /// Whether the node keeps an address index, or else an event index, to list them from.
     pub indexes_addresses: Option<bool>,
     pub indexes_events: Option<bool>,
@@ -199,8 +232,17 @@ impl Chain {
         let mut wanted = vec![Ask::Tokens];
         let mut targets = Vec::new();
 
+        if self.has_names != Some(false) {
+            wanted.push(Ask::Names);
+        }
+
         for holder in holders {
             targets.push((Column::Accounts, address_key(holder), Target::Account(holder.to_string()), blocks.clone()));
+
+            if self.has_names == Some(true) {
+                wanted.push(Ask::OwnedNames(holder.to_string()));
+                targets.push((Column::Names, primary_key(holder), Target::Primary(holder.to_string()), vec![tip]));
+            }
 
             for token in &self.listed {
                 let Ok(parsed) = token.parse::<Address>() else {
@@ -236,6 +278,87 @@ impl Chain {
         wanted
     }
 
+    /// The proofs of names asked for, as the pages want them: each name's records, and every one
+    /// above it, at the tip, asked again once they are PROVE_EVERY old. Names the account owns, and
+    /// every account's primary name, are wanted too.
+    pub fn names_due(&mut self, wanted: &[String], time: f64) -> Vec<Ask> {
+        let (Some(names), Some(client)) = (&self.names, &self.client) else {
+            return Vec::new();
+        };
+
+        if !self.caught_up() {
+            return Vec::new();
+        }
+
+        let tip = client.tip().id().to_string();
+        let mut asks = Vec::new();
+        let primaries = self.primaries.values().filter_map(|proven| proven.value.clone());
+        let mut every: Vec<String> = wanted.iter().map(|text| names.strip(text)).chain(self.owned.values().flatten().cloned()).chain(primaries).collect();
+        every.sort();
+        every.dedup();
+
+        for name in every.into_iter().filter(|name| name_problem(name).is_none()) {
+            if self.named.get(&name).is_some_and(|asked| time - asked < PROVE_EVERY) {
+                continue;
+            }
+
+            self.named.insert(name.clone(), time);
+
+            for above in lineage(&name) {
+                let key = to_hex(&record_key(&above));
+                self.targets.insert(key.clone(), Target::Name(above));
+                asks.push(Ask::Proof {
+                    column: Column::Names.name(),
+                    key,
+                    block: tip.clone(),
+                });
+            }
+        }
+
+        asks
+    }
+
+    /// A name looked up from what was proven of it, with or without the suffix: None until every
+    /// record it rests on is proven. Judged at the time of the block they were proven at.
+    pub fn resolve(&self, text: &str) -> Option<Resolved> {
+        let names = self.names.as_ref()?;
+        let client = self.client.as_ref()?;
+        let name = names.strip(text);
+        let mut records = Vec::new();
+        let mut assurance: Option<Assurance> = None;
+
+        for above in lineage(&name) {
+            let proven = self.records.get(&above)?;
+            records.push(proven.value.clone());
+
+            if assurance.as_ref().is_none_or(|least| proven.assurance.height < least.height) {
+                assurance = Some(proven.assurance);
+            }
+
+            // Nothing above a name that is not there matters.
+            if proven.value.is_none() {
+                break;
+            }
+        }
+
+        let assurance = assurance?;
+        let now = client.header_at(assurance.height)?.timestamp;
+
+        Some(Resolved {
+            found: standing(&records, now, names.grace_ms),
+            assurance,
+        })
+    }
+
+    /// An address's primary name with the suffix, proven, while it resolves to the address.
+    pub fn primary(&self, address: &str) -> Option<String> {
+        let names = self.names.as_ref()?;
+        let chosen = self.primaries.get(address)?.value.clone()?;
+        let resolved = self.resolve(&chosen)?;
+
+        (resolved.target().map(|target| target.to_string()).as_deref() == Some(address)).then(|| names.display(&chosen))
+    }
+
     /// Takes an answer meant for the chain. Returns false for one that is not.
     pub fn take(&mut self, ask: &Ask, result: &Result<Value, Failure>, trust: Trust, now: u64, time: f64) -> bool {
         let mine = matches!(
@@ -250,6 +373,8 @@ impl Chain {
                 | Ask::Tokens
                 | Ask::History(_)
                 | Ask::Events(_)
+                | Ask::Names
+                | Ask::OwnedNames(_)
         );
 
         if !mine {
@@ -267,6 +392,11 @@ impl Chain {
             }
             (Ask::Events(_), Err(failure)) if failure.status == 404 => {
                 self.indexes_events = Some(false);
+
+                return true;
+            }
+            (Ask::Names, Err(failure)) if failure.status == 404 => {
+                self.has_names = Some(false);
 
                 return true;
             }
@@ -297,7 +427,7 @@ impl Chain {
                 Ask::Receipt(tx) => {
                     self.refused.insert(tx.clone(), why);
                 }
-                Ask::Tokens | Ask::History(_) | Ask::Events(_) => {}
+                Ask::Tokens | Ask::History(_) | Ask::Events(_) | Ask::Names | Ask::OwnedNames(_) => {}
                 _ => self.trouble = Some(why),
             }
         }
@@ -401,6 +531,34 @@ impl Chain {
 
                 Ok(())
             }
+            Ask::Names => {
+                let config = NamesConfig {
+                    suffix: value["suffix"].as_str().ok_or("names with no suffix")?.to_string(),
+                    prices: value["prices"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|price| price.as_str().and_then(|text| u256::from_str_radix(text, 10).ok()).ok_or("a price that does not read"))
+                        .collect::<Result<_, _>>()?,
+                    grace_ms: value["grace_ms"].as_u64().ok_or("names with no grace_ms")?,
+                    max_years: value["max_years"].as_u64().and_then(|years| u32::try_from(years).ok()).ok_or("names with no max_years")?,
+                };
+
+                if let Some(problem) = config.problem() {
+                    return Err(format!("the node's names do not read: {problem}"));
+                }
+
+                self.names = Some(config);
+                self.has_names = Some(true);
+
+                Ok(())
+            }
+            Ask::OwnedNames(address) => {
+                let owned = value["names"].as_array().into_iter().flatten().filter_map(|name| name["name"].as_str().map(str::to_string)).collect();
+                self.owned.insert(address.clone(), owned);
+
+                Ok(())
+            }
             Ask::History(address) => {
                 self.indexes_addresses = Some(true);
                 self.mentions.insert(address.clone(), mentions(&value["txs"], "id"));
@@ -417,7 +575,7 @@ impl Chain {
                 let target = self.targets.get(key).cloned().ok_or("a proof nobody asked for")?;
                 let client = self.client.as_ref().ok_or("the light client has not started")?;
                 let block = id(client, value["block"].as_str().unwrap_or_default()).ok_or("a proof at a block id that does not read")?;
-                let column = [Column::Accounts, Column::Tokens, Column::Namespaces]
+                let column = [Column::Accounts, Column::Tokens, Column::Namespaces, Column::Names]
                     .into_iter()
                     .find(|known| known.name() == *column)
                     .ok_or("a proof of a column it never asks for")?;
@@ -455,6 +613,18 @@ impl Chain {
                             None => u256::ZERO,
                         };
                         keep(self.balances.entry((token, holder)).or_default(), Proven { value: balance, assurance });
+                    }
+                    Target::Name(name) => {
+                        let record: Option<NameRecord> = held
+                            .map(|bytes| wincode::deserialize(&bytes).map_err(|_| "a name record that does not decode"))
+                            .transpose()?;
+                        self.records.insert(name, Proven { value: record, assurance });
+                    }
+                    Target::Primary(address) => {
+                        let chosen: Option<PrimaryName> = held
+                            .map(|bytes| wincode::deserialize(&bytes).map_err(|_| "a primary name that does not decode"))
+                            .transpose()?;
+                        self.primaries.insert(address, Proven { value: chosen.map(|chosen| chosen.name), assurance });
                     }
                 }
 
@@ -678,6 +848,56 @@ mod tests {
 
         assert!(chain.trouble.as_deref().is_some_and(|trouble| trouble.contains("cannot start the light client")), "{:?}", chain.trouble);
         assert!(chain.client.is_none());
+    }
+
+    /// Asks each of these, and gives the chain every answer.
+    fn answer(chain: &mut Chain, node: &str, pinned: &mut HashMap<String, String>, asks: Vec<Ask>) {
+        let mut link = Node::new(node, Ok(chainv4_ui::net::Client::direct()), egui::Context::default());
+        let (saved, checkpoints) = (HashMap::new(), HashMap::new());
+        let mut waiting = asks.len();
+
+        for ask in asks {
+            link.ask(ask);
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+
+        while waiting > 0 && Instant::now() < deadline {
+            for (ask, result) in link.answers() {
+                waiting -= 1;
+                let trust = Trust { node, pinned, checkpoints: &checkpoints, saved: &saved };
+                chain.take(&ask, &result, trust, u64::MAX / 2, 0.0);
+            }
+
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a node with a name: CHAINV4_NODE=http://127.0.0.1:8080 CHAINV4_NAME=alice.dev CHAINV4_NAME_TARGET=ed25519:0x… cargo test -- --ignored"]
+    fn a_name_resolves_from_its_records_proven_against_the_tip() {
+        let node = std::env::var("CHAINV4_NODE").expect("CHAINV4_NODE names a node");
+        let name = std::env::var("CHAINV4_NAME").expect("CHAINV4_NAME names a name it holds");
+        let target = std::env::var("CHAINV4_NAME_TARGET").expect("CHAINV4_NAME_TARGET is what it resolves to");
+        let mut chain = Chain::default();
+        let mut pinned = HashMap::new();
+        follow(&mut chain, &node, &mut pinned, &HashMap::new());
+
+        // The chain's names first, as the node says them; then the records, proven.
+        let asks = chain.proofs_due(&[], 10.0);
+        answer(&mut chain, &node, &mut pinned, asks);
+        assert!(chain.names.is_some(), "the node has no names");
+
+        let asks = chain.names_due(&[name.clone(), "nobody-at-all.dev".to_string()], 10.0);
+        assert!(!asks.is_empty());
+        answer(&mut chain, &node, &mut pinned, asks);
+
+        let resolved = chain.resolve(&name).expect("every record it rests on, proven");
+
+        assert_eq!(resolved.target().map(|target| target.to_string()), Some(target));
+        assert!(chain.refused.is_empty(), "{:?}", chain.refused);
+        assert!(chain.resolve("nobody-at-all.dev").expect("its absence proven").found.is_none());
+        assert!(chain.names_due(&[name], 11.0).is_empty(), "asked again only once PROVE_EVERY passes");
     }
 
     fn ureq_get(url: &str) -> Value {

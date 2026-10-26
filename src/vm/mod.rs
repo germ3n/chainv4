@@ -153,6 +153,9 @@ pub mod cost {
     pub const TOKEN_REFRESH: u64 = 100;
     /// Comparing two contracts' storage layouts: two contract reads, as a call makes one.
     pub const CHECK_LAYOUT: u64 = 2_000;
+    /// Resolving a name, or an address's primary name: a few name records read, one for each
+    /// label, and the primary name's.
+    pub const NAME: u64 = 500;
 }
 
 #[document(
@@ -181,6 +184,8 @@ pub struct CallContext {
     pub contract: Address,
     #[document(summary = "The amount sent with the call. Calls between contracts send nothing.")]
     pub value: u256,
+    #[document(summary = "The time of the block the call runs in, in milliseconds since the Unix epoch: what names expire by. A read-only call runs at the tip's.")]
+    pub time: u64,
 }
 
 #[document(
@@ -305,6 +310,8 @@ pub struct Vm {
     evm: bool,
     /// The chain's hash, which contract addresses are derived with.
     hash: HashType,
+    /// The chain's names, which contracts resolve, or None on a chain without them.
+    names: Option<crate::registry::names::NamesConfig>,
 }
 
 impl Vm {
@@ -336,7 +343,18 @@ impl Vm {
             engines.push((*kind, engine));
         }
 
-        Ok(Vm { engines, evm, hash })
+        Ok(Vm { engines, evm, hash, names: None })
+    }
+
+    #[document(parent = "Vm", summary = "The engines, with the chain's names for contracts to resolve: genesis's names, or None for a chain without them.")]
+    pub fn with_names(mut self, names: Option<crate::registry::names::NamesConfig>) -> Vm {
+        self.names = names;
+        self
+    }
+
+    #[document(parent = "Vm", summary = "The chain's names, which contracts resolve, or None on a chain without them.")]
+    pub fn names(&self) -> Option<&crate::registry::names::NamesConfig> {
+        self.names.as_ref()
     }
 
     #[document(parent = "Vm", summary = "Whether the chain runs EVM contracts, and this node was built with the evm feature.")]

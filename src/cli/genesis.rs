@@ -25,6 +25,7 @@ use {
     crate::structs::hash::HashType,
     crate::structs::code::Engine,
     crate::structs::u256::u256,
+    crate::registry::names::NamesConfig,
     crate::vm::Limits,
     serde_json::{Map, Value, json},
     std::collections::HashSet,
@@ -61,6 +62,10 @@ pub struct GenesisArgs {
     /// does, to edit; or none, the default.
     #[arg(long, value_parser = parse_governance)]
     pub governance: Option<GovernanceChoice>,
+    /// What the chain's names end in, such as dev for alice.dev, or none for a chain without
+    /// names. Prices and the grace period are the dev chains'; edit the file for others.
+    #[arg(long, default_value = "dev")]
+    pub names: String,
     /// Where to write it. Without one, it goes to stdout.
     #[arg(long)]
     pub out: Option<PathBuf>,
@@ -228,6 +233,15 @@ pub fn write(args: GenesisArgs) -> CliResult<()> {
         genesis.governance = dev_governance(choice);
     }
 
+    genesis.names = match args.names.as_str() {
+        "none" => None,
+        suffix => Some(NamesConfig { suffix: suffix.to_string(), ..NamesConfig::dev() }),
+    };
+
+    if let Some(problem) = genesis.names.as_ref().and_then(NamesConfig::problem) {
+        return Err(format!("--names: {problem}").into());
+    }
+
     let text = serde_json::to_string_pretty(&to_json(&genesis))? + "\n";
 
     match args.out {
@@ -278,7 +292,43 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "vote_reward_source": genesis.vote_reward_source.map(|source| source.name()),
         "governance": genesis.governance.as_ref().map(governance_json),
         "bootnodes": genesis.bootnodes,
+        "names": genesis.names.as_ref().map(names_json),
     })
+}
+
+/// A chain's names as JSON: the shape genesis files and GET /names use, prices as decimal strings.
+pub fn names_json(names: &NamesConfig) -> Value {
+    json!({
+        "suffix": names.suffix,
+        "prices": names.prices.iter().map(u256::to_string).collect::<Vec<_>>(),
+        "grace_ms": names.grace_ms,
+        "max_years": names.max_years,
+    })
+}
+
+/// Prices as a list of decimal strings, as genesis files and approve-change write them.
+pub fn prices_from_json(value: &Value, name: &str) -> Result<Vec<u256>, String> {
+    let items = value.as_array().ok_or_else(|| format!("{name} must be a list of amounts"))?;
+
+    items
+        .iter()
+        .map(|item| match item {
+            Value::String(text) => u256::from_str_radix(text, 10).map_err(|_| format!("{name}: {text} is not a whole amount")),
+            _ => Err(format!("{name} holds amounts as strings, such as \"5000000000000000000\"")),
+        })
+        .collect()
+}
+
+fn names_from_json(mut names: Fields) -> Result<NamesConfig, String> {
+    let config = NamesConfig {
+        suffix: names.text("suffix")?,
+        prices: prices_from_json(names.get("prices")?, "names.prices")?,
+        grace_ms: names.whole("grace_ms")?,
+        max_years: names.small("max_years")?,
+    };
+    names.done()?;
+
+    Ok(config)
 }
 
 /// A consensus as JSON: the shape genesis files, GET /governance and approve-change use.
@@ -693,6 +743,11 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.strings("bootnodes")?,
         false => Vec::new(),
     };
+    // Absent from files written before it: those chains keep their id, with no names.
+    let names = match root.map.contains_key("names") {
+        true => root.optional_object("names")?.map(names_from_json).transpose()?,
+        false => None,
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -712,6 +767,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         governance,
         vote_reward_source,
         bootnodes,
+        names,
     };
     root.done()?;
 
@@ -847,7 +903,6 @@ impl<'a> Fields<'a> {
     }
 
     /// A whole number that fits 32 bits.
-    #[cfg_attr(not(any(feature = "finality-ffg", feature = "finality-authority")), allow(dead_code))]
     fn small(&mut self, key: &'a str) -> Result<u32, String> {
         let name = self.name(key);
 
@@ -1025,8 +1080,9 @@ mod tests {
     fn a_genesis_from_before_max_block_bytes_keeps_its_id() {
         let mut genesis = dev(DevChain::Authority);
         genesis.max_block_bytes = None;
-        // The EVM came later, and joined the dev chains' engines then.
+        // The EVM and names came later, and joined the dev chains then.
         genesis.engines.retain(|engine| *engine != Engine::Evm);
+        genesis.names = None;
         let mut value = to_json(&genesis);
         value.as_object_mut().unwrap().remove("max_block_bytes");
         let read = from_json(&value).unwrap();
@@ -1120,6 +1176,44 @@ mod tests {
             assert_eq!(read.hash, algorithm);
             assert_eq!(read.block().id().algorithm(), algorithm);
         }
+    }
+
+    #[cfg(feature = "names")]
+    #[test]
+    fn names_round_trip_change_the_chain_and_a_file_without_them_has_none() {
+        let genesis = dev(DevChain::Pow);
+        let value = to_json(&genesis);
+
+        assert_eq!(value["names"]["suffix"], "dev");
+        assert_eq!(from_json(&value).unwrap(), genesis);
+
+        let mut other = value.clone();
+        other["names"]["suffix"] = json!("kyn");
+        other["names"]["prices"] = json!(["7"]);
+        let read = from_json(&other).unwrap();
+
+        assert_eq!(read.names.as_ref().map(|names| (names.suffix.as_str(), names.prices.clone())), Some(("kyn", vec![u256::from(7u64)])));
+        assert_ne!(read.block().id(), genesis.block().id());
+
+        // Without the field, as files from before it: no names, and the id of a genesis without.
+        let mut without = value.clone();
+        without.as_object_mut().unwrap().remove("names");
+        let read = from_json(&without).unwrap();
+
+        assert_eq!(read.names, None);
+        assert_eq!(read.block().id(), Genesis { names: None, ..genesis.clone() }.block().id());
+
+        for (field, bad) in [("prices", json!([5])), ("prices", json!("5")), ("grace_ms", json!("90 days")), ("max_years", json!(5_000_000_000u64))] {
+            let mut broken = value.clone();
+            broken["names"][field] = bad;
+
+            assert!(from_json(&broken).is_err(), "{field}");
+        }
+
+        let mut extra = value.clone();
+        extra["names"]["owner"] = json!("me");
+
+        assert_eq!(from_json(&extra).unwrap_err(), "names.owner is not a genesis field");
     }
 
     #[test]

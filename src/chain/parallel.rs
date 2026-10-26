@@ -132,6 +132,7 @@ enum Touch {
     Staking,
     Signers,
     Governance,
+    Names,
 }
 
 fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
@@ -148,6 +149,8 @@ fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
         Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::Slash { .. } => touched.push(Touch::Staking),
         Tx::ApproveSigners { .. } | Tx::WithdrawApproval { .. } => touched.push(Touch::Signers),
         Tx::ApproveChange { .. } | Tx::WithdrawChange { .. } => touched.push(Touch::Governance),
+        // Names share the registry, and a registration reads the prices governance decides.
+        Tx::Name { .. } | Tx::PrimaryName { .. } => touched.extend([Touch::Names, Touch::Governance]),
     }
 
     touched

@@ -200,6 +200,29 @@ pub fn check_layout(from: &Address, to: &Address) -> Result<(), String> {
     }
 }
 
+/// The address a name resolves to at the block's time, such as `alice.dev`, with or without the
+/// chain's suffix, in any case. None for a name nobody holds, one that expired, or text that is
+/// no name. Stops the call on a chain without names.
+pub fn resolve_name(name: &str) -> Option<Address> {
+    let mut out = [0; 33];
+
+    match unsafe { sys::resolve_name(name.as_ptr(), name.len() as u32, out.as_mut_ptr()) } {
+        1 => Some(Address::decode(&out).unwrap_or_else(|| abort("unreadable address"))),
+        _ => None,
+    }
+}
+
+/// The name an address goes by: its primary name with the chain's suffix, such as `alice.dev`,
+/// while that name resolves to it. Stops the call on a chain without names.
+pub fn name_of(address: &Address) -> Option<String> {
+    let address = address.encode();
+
+    match unsafe { sys::name_of(address.as_ptr()) } {
+        len if len < 0 => None,
+        _ => Some(String::from_utf8_lossy(&result()).into_owned()),
+    }
+}
+
 /// The selector a call names a function by: XXH3-64 of its name, worked out on the node.
 pub fn selector(name: &str) -> u64 {
     let digest = hash(Algorithm::Xxh3, name.as_bytes());

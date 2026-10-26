@@ -27,6 +27,7 @@ pub mod more;
 pub mod network;
 pub mod overview;
 pub mod send;
+pub mod name;
 pub mod settings;
 pub mod tokens;
 pub mod tx;
@@ -40,6 +41,8 @@ pub enum View {
     Block(String),
     Tx(String),
     Account(String),
+    /// A name, such as alice.dev.
+    Name(String),
     Network,
     Mempool,
     Tokens,
@@ -78,7 +81,7 @@ impl View {
     /// Which tab a page belongs under on a phone: a page of its own, or More for the rest.
     pub fn tab(&self) -> View {
         match self {
-            View::Overview | View::Block(_) | View::Tx(_) | View::Account(_) => View::Overview,
+            View::Overview | View::Block(_) | View::Tx(_) | View::Account(_) | View::Name(_) => View::Overview,
             View::Map => View::Map,
             View::Mempool => View::Mempool,
             View::Tokens => View::Tokens,

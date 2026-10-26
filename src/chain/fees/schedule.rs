@@ -172,6 +172,8 @@ pub const TX_KINDS: &[&str] = &[
     "withdraw_approval",
     "approve_change",
     "withdraw_change",
+    "name",
+    "primary_name",
 ];
 
 impl ContractScorer {
@@ -223,6 +225,8 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::WithdrawApproval { .. } => ("withdraw_approval", sender),
         Tx::ApproveChange { .. } => ("approve_change", sender),
         Tx::WithdrawChange { .. } => ("withdraw_change", sender),
+        Tx::Name { .. } => ("name", sender),
+        Tx::PrimaryName { .. } => ("primary_name", sender),
     }
 }
 
@@ -275,6 +279,7 @@ impl GasSchedule for ContractScorer {
             sender: scoring.sender,
             contract: self.contract,
             value: u256::ZERO,
+            time: scoring.time,
         };
         let limits = Limits {
             fuel: self.fuel,

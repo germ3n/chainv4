@@ -170,7 +170,8 @@ pub fn start(
     let genesis_bootnodes = Arc::new(genesis.bootnodes.clone());
     let vm = Arc::new(
         Vm::new(&genesis.engines, genesis.hash)
-            .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?,
+            .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?
+            .with_names(genesis.names.clone()),
     );
     let listener = std::net::TcpListener::bind(address)?;
     listener.set_nonblocking(true)?;
@@ -238,15 +239,19 @@ fn router(api: Api) -> Router {
         .route("/validators", get(validators))
         .route("/validators/{voter}", get(validator))
         .route("/signers", get(signers))
-        .route("/governance", get(governance))
         .route("/evidence", get(evidence))
         .route("/forks", get(forks))
         .route("/events", get(events))
         .route("/tokens", get(tokens))
+
         .route("/node", get(node))
         .route("/mempool", get(mempool))
         .route("/offer", post(offer))
         .route("/call", post(call));
+    #[cfg(feature = "governance")]
+    let router = router.route("/governance", get(governance));
+    #[cfg(feature = "names")]
+    let router = router.route("/names", get(names)).route("/names/{name}", get(name)).route("/accounts/{address}/names", get(account_names));
     #[cfg(feature = "stream")]
     let router = router.route("/stream", get(stream));
     let router = router.fallback(apps).layer(DefaultBodyLimit::max(MAX_BODY));
@@ -554,6 +559,7 @@ async fn signers(Shared(api): Shared<Api>) -> Answer {
     })))
 }
 
+#[cfg(feature = "governance")]
 /// Governance: the consensus the tip's epoch runs and the one decided last, and the approvals
 /// that still count in the tip's epoch, each change with what its approvals weigh and need.
 async fn governance(Shared(api): Shared<Api>) -> Answer {
@@ -791,9 +797,121 @@ async fn report(api: &Api, txs: usize) -> Result<NodeReport, ApiError> {
 async fn account(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
     let db = api.db;
     let address = parse_address(&address)?;
-    let account = Accounts::new(&State::new(db)).get(&address)?;
+    let state = State::new(db.clone());
+    let account = Accounts::new(&state).get(&address)?;
+    #[cfg_attr(not(feature = "names"), allow(unused_mut))]
+    let mut answer = json::account(&address, &account);
 
-    Ok(Json(json::account(&address, &account)))
+    // Its primary name, for a reverse lookup, while that name still resolves to it.
+    #[cfg(feature = "names")]
+    if let Some(names) = &api.rules.names {
+        use crate::registry::names::Names;
+
+        let now = tip(&*db)?.header.timestamp;
+        answer["name"] = Names::new(&state).primary(&address, now, names.grace_ms)?.map(|name| names.display(&name)).into();
+    }
+
+    Ok(Json(answer))
+}
+
+/// The chain's names, or a 404 on a chain without them.
+#[cfg(feature = "names")]
+fn names_config(api: &Api) -> Result<&crate::registry::names::NamesConfig, ApiError> {
+    api.rules.names.as_deref().ok_or_else(|| ApiError::NotFound("this chain has no names".to_string()))
+}
+
+/// The prices names are registered and renewed at now: governance's last decided, else genesis's.
+#[cfg(feature = "names")]
+fn name_prices(state: &State, names: &crate::registry::names::NamesConfig) -> Result<Vec<u256>, ApiError> {
+    Ok(Changes::new(state).name_prices()?.unwrap_or_else(|| names.prices.clone()))
+}
+
+/// The chain's names: their suffix, what a year costs by length now and at genesis, the grace
+/// period and the most years ahead a name is held.
+#[cfg(feature = "names")]
+async fn names(Shared(api): Shared<Api>) -> Answer {
+    let names = names_config(&api)?;
+    let state = State::new(api.db.clone());
+    let mut answer = crate::cli::genesis::names_json(names);
+    answer["genesis_prices"] = answer["prices"].clone();
+    answer["prices"] = name_prices(&state, names)?.iter().map(u256::to_string).collect::<Vec<_>>().into();
+
+    Ok(Json(answer))
+}
+
+/// A name, with or without the suffix, at the tip: whether it is active, in its grace period or
+/// available, who holds it, what it resolves to, its text records, and for a name, what a year
+/// of it costs.
+#[cfg(feature = "names")]
+async fn name(Shared(api): Shared<Api>, Path(name): Path<String>) -> Answer {
+    use crate::registry::names::{NameStatus, Names, name_problem, price};
+
+    let names = names_config(&api)?;
+    let name = names.strip(&name);
+
+    if let Some(problem) = name_problem(&name) {
+        return Err(ApiError::BadRequest(format!("{name} is not a name: {problem}")));
+    }
+
+    let db = api.db.clone();
+    let now = tip(&*db)?.header.timestamp;
+    let state = State::new(db);
+    let found = Names::new(&state).lookup(&name, now, names.grace_ms)?;
+    let top_level = !name.contains('.');
+    let per_year = match top_level {
+        true => price(&name_prices(&state, names)?, &name, 1).map(|price| price.to_string()),
+        false => None,
+    };
+    let record = found.as_ref().map(|found| &found.record);
+
+    Ok(Json(json!({
+        "name": name,
+        "display": names.display(&name),
+        "status": found.as_ref().map_or(NameStatus::Available, |found| found.status).name(),
+        "owner": record.map(|record| record.owner.to_string()),
+        "target": record.and_then(|record| record.target).map(|target| target.to_string()),
+        "resolves_to": found.as_ref().filter(|found| found.status == NameStatus::Active).and_then(|found| found.record.target).map(|target| target.to_string()),
+        "expires": found.as_ref().map(|found| found.expires),
+        "grace_ends": found.as_ref().map(|found| found.expires.saturating_add(names.grace_ms)),
+        "texts": record.map_or_else(serde_json::Map::new, |record| record.texts.iter().map(|text| (text.key.clone(), Value::from(text.value.clone()))).collect()),
+        "price_per_year": per_year,
+    })))
+}
+
+/// The names an account owns that still stand, in name order, a page at a time: each with its
+/// status and when it expires.
+#[cfg(feature = "names")]
+async fn account_names(Shared(api): Shared<Api>, Path(address): Path<String>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    use crate::registry::names::{Names, stored_owned_names};
+
+    let names = names_config(&api)?;
+    let address = parse_address(&address)?;
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_ACCOUNT_TXS).clamp(1, MAX_ACCOUNT_TXS) as usize;
+    let start = query.get("cursor").map_or("", String::as_str);
+    let db = api.db.clone();
+    let now = tip(&*db)?.header.timestamp;
+    let (owned, next) = stored_owned_names(&*db, &address, start, limit)?;
+    let state = State::new(db);
+    let registry = Names::new(&state);
+    let mut listed = Vec::new();
+
+    for name in owned {
+        // Listed under it, but expired past its grace period, or a subname of an earlier
+        // registration: no longer its.
+        if let Some(found) = registry.lookup(&name, now, names.grace_ms)?
+            && found.record.owner == address
+        {
+            listed.push(json!({
+                "name": name,
+                "display": names.display(&name),
+                "status": found.status.name(),
+                "target": found.record.target.map(|target| target.to_string()),
+                "expires": found.expires,
+            }));
+        }
+    }
+
+    Ok(Json(json!({ "names": listed, "next": next })))
 }
 
 /// The transactions touching an address, newest first, a page at a time: from the address index,
@@ -1121,9 +1239,9 @@ async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     let header = tip(&*api.db)?.header;
     let base = api.fees.as_ref().map_or(u256::ZERO, |fees| fees.pricing().next_price(header.base_price, header.gas_used, fees.block_gas_limit()));
     let open = api.fees.as_ref().map_or(0, |fees| fees.offer(base, api.tx_fuel, &probe, OfferChoice::default()).gas_limit);
-    // What runs code is tried first: what it would use, and whether it would fail at all.
+    // What runs code, or names, is tried first: what it would use, and whether it would fail.
     let ran = match probe.tx {
-        Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
+        Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Name { .. } | Tx::PrimaryName { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
         _ => None,
     };
     let offer = match &api.fees {
@@ -1170,6 +1288,7 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
         Some(_) => return Err(ApiError::BadRequest("args must be a list".to_string())),
     };
     let (db, vm, limits, function) = (api.db.clone(), api.vm.clone(), api.limits, Hash::Xxh3_64(selector(function)));
+    let time = tip(&*db)?.header.timestamp;
     // On a blocking thread, since the API answers everything on one.
     let outcome = tokio::task::spawn_blocking(move || {
         let state = Arc::new(State::new(db));
@@ -1180,6 +1299,7 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
             sender,
             contract,
             value: u256::ZERO,
+            time,
         };
 
         Ok::<_, ApiError>(vm.call(&state, &record, context, &function, &args, limits))

@@ -20,6 +20,11 @@
 //! **Not yet:** calls between EVM contracts and Lua or wasm ones, blob transactions, and the KZG
 //! point evaluation precompile, which needs blobs.
 
+#[cfg(feature = "names")]
+mod names;
+#[cfg(feature = "names")]
+pub use names::NAMES_PRECOMPILE;
+
 use {
     crate::db::{Column, DbError, State, address_key},
     crate::registry::Accounts,
@@ -214,7 +219,7 @@ pub enum EvmAction {
     category = "VM",
     see_also = "run",
 )]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EvmBlock {
     #[document(summary = "Its height: NUMBER.")]
     pub height: u64,
@@ -224,6 +229,8 @@ pub struct EvmBlock {
     pub producer: Address,
     #[document(summary = "The chain id: CHAINID.")]
     pub chain_id: u64,
+    #[document(summary = "The chain's names, which the names precompile resolves, or None on a chain without them, where there is none.")]
+    pub names: Option<crate::registry::names::NamesConfig>,
 }
 
 #[document(
@@ -307,9 +314,31 @@ pub fn run(state: &Arc<State>, sender: &Address, nonce: u64, action: EvmAction, 
         caller,
         caller_nonce: nonce,
     };
-    let mut evm = Context::mainnet().with_db(db).with_block(block_env).with_cfg(cfg).build_mainnet();
+    let evm = Context::mainnet().with_db(db).with_block(block_env).with_cfg(cfg).build_mainnet();
+    #[cfg(feature = "names")]
+    let mut evm = {
+        let names = block.names.clone().map(|config| names::NamesAt {
+            state,
+            config,
+            now: block.timestamp,
+            fault: Default::default(),
+        });
+        let eth = evm.precompiles.clone();
 
-    let outcome = match evm.transact(tx) {
+        evm.with_precompiles(names::ChainPrecompiles::new(eth, names))
+    };
+    #[cfg(not(feature = "names"))]
+    let mut evm = evm;
+
+    let transacted = evm.transact(tx);
+
+    // A lookup the database failed is the node's fault, not the transaction's.
+    #[cfg(feature = "names")]
+    if let Some(err) = evm.precompiles.fault() {
+        return Err(err);
+    }
+
+    let outcome = match transacted {
         Ok(outcome) => outcome,
         Err(revm::context::result::EVMError::Database(Failing(err))) => return Err(err),
         Err(err) => {

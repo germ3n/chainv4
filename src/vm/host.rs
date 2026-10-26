@@ -13,6 +13,11 @@ use {
     std::sync::{Arc, Mutex},
 };
 
+/// What resolving a name on a chain without names fails with, in every build alike.
+fn no_names() -> VmError {
+    VmError::Runtime("this chain has no names".to_string())
+}
+
 /// The deepest calls between contracts may nest. A transaction's call is depth 1.
 pub const MAX_CALL_DEPTH: usize = 8;
 
@@ -245,6 +250,60 @@ impl Host {
 
     #[document(
         parent = "Host",
+        summary = "The address a name resolves to at the call's block time, the name with or without the chain's suffix, in any case. None for a name nobody holds, one past its expiry, or text that is no name. Engines charge cost::NAME.",
+        panics = "Runtime on a chain without names.",
+    )]
+    pub fn resolve_name(&self, name: &str) -> Result<Option<Address>, VmError> {
+        let names = self.vm.names().ok_or_else(no_names)?;
+
+        #[cfg(feature = "names")]
+        {
+            let name = names.strip(name);
+
+            if crate::registry::names::name_problem(&name).is_some() {
+                return Ok(None);
+            }
+
+            crate::registry::names::Names::new(&self.state)
+                .resolve(&name, self.context.time, names.grace_ms)
+                .map_err(|err| self.fail(err))
+        }
+
+        // A build without names opens no chain that has them.
+        #[cfg(not(feature = "names"))]
+        {
+            let _ = (names, name);
+
+            Err(no_names())
+        }
+    }
+
+    #[document(
+        parent = "Host",
+        summary = "An address's primary name at the call's block time, with the chain's suffix, such as alice.dev: the name it chose, while that name still resolves to it. Engines charge cost::NAME.",
+        panics = "Runtime on a chain without names.",
+    )]
+    pub fn name_of(&self, address: &Address) -> Result<Option<String>, VmError> {
+        let names = self.vm.names().ok_or_else(no_names)?;
+
+        #[cfg(feature = "names")]
+        {
+            crate::registry::names::Names::new(&self.state)
+                .primary(address, self.context.time, names.grace_ms)
+                .map(|name| name.map(|name| names.display(&name)))
+                .map_err(|err| self.fail(err))
+        }
+
+        #[cfg(not(feature = "names"))]
+        {
+            let _ = (names, address);
+
+            Err(no_names())
+        }
+    }
+
+    #[document(
+        parent = "Host",
         summary = "Sends funds from this contract's own balance. Kept only if the call succeeds. Engines charge cost::TRANSFER.",
         params = {
             to = "Who receives them: any address.",
@@ -327,6 +386,7 @@ impl Host {
             sender: self.context.contract,
             contract: *target,
             value,
+            time: self.context.time,
         };
         let mut stack = self.stack.clone();
         stack.push(*target);

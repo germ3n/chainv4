@@ -74,10 +74,14 @@ Each summary has:
 - its `receipt` when the block is on the main chain.
 
 **Each `tx`** has a `type` and that type's fields:
-- `transfer`, `mint`, `burn`, `call`, `deploy`, `upgrade`;
+- `transfer`, `mint`, `burn`, `contract_call`, `evm_call`, `deploy`, `upgrade`;
 - `bond`, `unbond`, `withdraw`, `slash`, `approve_signers`, `withdraw_approval`;
 - `approve_change`, with its `version` and `change`, which holds the new `consensus` as a genesis
-  file writes one, and `withdraw_change`.
+  file writes one, the new `bootnodes`, or the new `name_prices` as decimal strings, and
+  `withdraw_change`;
+- `name`, with the `name`, without the suffix, and its `action`: a `type` of `register` or `renew`
+  with `years`, `transfer` with `to`, `target` with `target`, `text` with `key` and `value`, or
+  `subname` with `label` and `owner`; and `primary_name`, with the `name` or `null`.
 
 ### `GET /txs/{id}`
 
@@ -107,6 +111,8 @@ too.
 ### `GET /accounts/{address}`
 
 `address`, `nonce` and `balance`. An address never written to reads as nonce 0 and balance 0.
+On a chain with [names](names.md), `name` too: the account's primary name with its suffix, such as
+`alice.dev`, while that name resolves to it, or `null`.
 
 ### `GET /accounts/{address}/txs`
 
@@ -199,7 +205,7 @@ holds none for. 404 on a chain whose finality does not vote.
 
 A proof of one chain-state entry against the tip's state root (see
 [Chain](chain.md#the-state-root)). `column` is one of `accounts`, `contracts`, `storage`,
-`validators`, `epochs`, `tokens` and `namespaces`; `key` is the entry's key in that column, in hex,
+`validators`, `epochs`, `tokens`, `namespaces` and `names`; `key` is the entry's key in that column, in hex,
 as [Storage](storage.md#keys-and-encoding) describes. An account's key, for example, is its
 address's tag and bytes: 32, or 20 for a secp256k1 address.
 
@@ -257,7 +263,7 @@ field of an offer has a fixed size, so it weighs what the real one will. `gas_li
   plus the tip when senders bid;
 - a tip of 0.
 
-**A dry run** of a call, EVM call, deploy or upgrade comes first: it runs on a throwaway copy of the
+**A dry run** of a call, EVM call, deploy, upgrade or name transaction comes first: it runs on a throwaway copy of the
 committed state, as its sender at their next nonce, on a thread apart from the rest of the API.
 Unless the sender chose a gas limit, the offer's is what the run used plus a quarter of what it
 ran past its intrinsic cost, at most the fuel cap's worth; a run that fails gets the cap.
@@ -319,6 +325,28 @@ transaction's events (`position`).
 - `catching_up_to` is the height the node is still moving that to, or `null` once it is there.
   It is below `indexed_from` while the node indexes older blocks, and briefly above it on a
   `latest-N` window, as the oldest block leaves.
+
+### `GET /names`
+
+The chain's [names](names.md): their `suffix`, the `prices` a year costs now by length, as decimal
+strings, the `genesis_prices` governance may have replaced, `grace_ms` and `max_years`. 404 on a
+chain without names.
+
+### `GET /names/{name}`
+
+A name at the tip, with or without the suffix, in any case: `name` without the suffix and
+`display` with it; `status`, `active`, `grace` or `available`; its `owner`, `target`, and
+`resolves_to`, the target while it is active; when it `expires` and its `grace_ends`, in
+milliseconds since the Unix epoch, a subname's being its name's; its `texts`, as an object; and
+`price_per_year`, what a year of it costs now, `null` for a subname. An available name has `null`
+for everything it would hold. 400 for what cannot be a name, 404 on a chain without names.
+
+### `GET /accounts/{address}/names`
+
+The names and subnames an address owns that still stand, in name order: each with its `name`,
+`display`, `status`, `target` and when it `expires`. A page at a time: `limit` of them (50 by
+default, at most 200), and `next`, the `cursor` for the next page, or `null`. 404 on a chain
+without names.
 
 ### `GET /tokens`
 
@@ -419,8 +447,8 @@ On a chain with [governance](governance.md):
 - `approval_epochs`, how many epochs an approval counts for, and `needed`, what a change's
   approvals must weigh now;
 - `bootnodes`, the chain's now;
-- the `proposals` with approvals that still count in the tip's epoch, each with its `consensus`
-  or its `bootnodes`, what its approvals `weight` and what they `needed`, and its `approvals`. Each approval has its
+- the `proposals` with approvals that still count in the tip's epoch, each with its `consensus`,
+  its `bootnodes` or its `name_prices`, what its approvals `weight` and what they `needed`, and its `approvals`. Each approval has its
   `account`, what it weighs now, the `epoch` it was made in, and the last epoch it counts in
   (`counts_until`).
 

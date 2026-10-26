@@ -240,6 +240,16 @@ impl Explorer {
                     store.accounts.insert(address, account);
                 }
             }
+            Ask::Name(name) => {
+                if let Some(found) = parse::<crate::model::NameView>(value) {
+                    store.names.insert(name, found);
+                }
+            }
+            Ask::AccountNames(address) => {
+                if let Some(owned) = parse::<crate::model::OwnedNames>(value) {
+                    store.owned_names.insert(address, owned.names);
+                }
+            }
             Ask::Contract(address) => {
                 let contract = parse::<Contract>(value);
 
@@ -400,7 +410,8 @@ impl Explorer {
         let page = match &self.view {
             View::Mempool | View::Tx(_) => vec![Ask::Mempool],
             View::Finality => vec![Ask::Validators, Ask::Signers, Ask::Evidence],
-            View::Account(address) => [Ask::Account(address.clone())].into_iter().chain(self.light.prove(address)).collect(),
+            View::Account(address) => [Ask::Account(address.clone()), Ask::AccountNames(address.clone())].into_iter().chain(self.light.prove(address)).collect(),
+            View::Name(name) => vec![Ask::Name(name.clone())],
             _ => Vec::new(),
         };
 
@@ -662,8 +673,10 @@ impl Explorer {
             self.go(View::Account(wanted));
         } else if wanted.starts_with("0x") {
             self.api.ask(Ask::Lookup(wanted));
+        } else if wanted.contains('.') {
+            self.go(View::Name(wanted.to_ascii_lowercase()));
         } else {
-            self.notice = Some((format!("{wanted} is not a height, an id or an address"), true));
+            self.notice = Some((format!("{wanted} is not a height, an id, an address or a name such as alice.dev"), true));
 
             return;
         }
@@ -706,6 +719,7 @@ impl Explorer {
                         View::Block(block) => views::block::show(ui, &mut ctx, block),
                         View::Tx(id) => views::tx::show(ui, &mut ctx, id, &mut self.hops),
                         View::Account(address) => views::account::show(ui, &mut ctx, address, &mut self.account),
+                        View::Name(name) => views::name::show(ui, &mut ctx, name),
                         View::Network => views::network::show(ui, &mut ctx, &self.streaming),
                         View::Mempool => views::mempool::show(ui, &mut ctx),
                         View::Tokens => views::tokens::show(ui, &mut ctx, &mut self.tokens),

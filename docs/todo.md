@@ -179,6 +179,23 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   phones and the browser included. Inside the pool, senders, recipients and amounts are all
   hidden. A bug can mint money no one sees, so it needs review of its own. Months.
 
+### Names
+
+- [x] **A name registry.** Names such as `alice.dev` (`names` in genesis): registered for years at
+  a price by length, burned; a target, text records, free subnames and primary names; a grace
+  period after expiry; prices changed by governance's `Change::NamePrices`. `chainv4 send name`,
+  `transfer --to NAME`, `GET /names` and `GET /names/{name}`, and accounts show their primary
+  name. See [Names](names.md).
+- [x] **Names in the wallet and explorer.** The wallet proves names, pays them, and manages them
+  on a Names page; the explorer searches them and shows them on pages of their own and accounts'.
+- [x] **Listing an account's names.** An index by owner in the names column, moved with the
+  owner, for `GET /accounts/{address}/names`.
+- [x] **Names inside contracts.** `names.resolve` and `names.name_of` in Lua, `resolve_name` and
+  `name_of` for WebAssembly and the SDK, and the EVM precompile at `0x…4e53`.
+- [x] **Names, staking and governance as features.** `names`, `staking` and `governance`, each
+  on by default.
+- [ ] **Unicode names,** with ENSIP-15's normalization against look-alikes.
+
 ### Governance
 
 - [x] **Governance over the consensus.** Genesis's `governance` names a kind, behind the
@@ -467,6 +484,10 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **No NAT traversal** (relay, hole punching, AutoNAT).
 
 ### Node, API and tooling
+
+- [ ] **The container's node ignores SIGTERM.** It runs as PID 1 and installs no handler, so
+  `docker/compose.sh stop` waits 10 seconds and kills it. `init: true` on the node service, once
+  checked under podman-compose, or a SIGTERM handler that stops the node loop cleanly.
 
 - [x] **Transactions can be submitted from outside.** `POST /txs` takes `{"tx": "0x…"}`, a
   `SignedTx` encoded as the chain encodes it, and hands it to the node's mempool, which gossips

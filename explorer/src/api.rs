@@ -60,6 +60,10 @@ pub enum Ask {
     Checkpoint(Option<String>),
     /// A proof of a chain-state entry, at a block, or at the tip.
     Proof { column: String, key: String, block: Option<String> },
+    /// A name, such as alice.dev, at the tip.
+    Name(String),
+    /// The names an address owns.
+    AccountNames(String),
 }
 
 impl Ask {
@@ -74,6 +78,8 @@ impl Ask {
             Ask::Block(block) | Ask::Lookup(block) => format!("/blocks/{block}"),
             Ask::Tx(id) => format!("/txs/{id}"),
             Ask::Account(address) => format!("/accounts/{address}"),
+            Ask::Name(name) => format!("/names/{}", encode(name)),
+            Ask::AccountNames(address) => format!("/accounts/{address}/names?limit=100"),
             Ask::Contract(address) => format!("/contracts/{address}"),
             Ask::Validators => "/validators".to_string(),
             Ask::Signers => "/signers".to_string(),

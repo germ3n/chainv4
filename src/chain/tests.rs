@@ -1704,3 +1704,5 @@ fn a_full_block_past_wincodes_default_limit_builds_imports_and_reads_back() {
 
 #[cfg(feature = "evm")]
 mod evm;
+#[cfg(feature = "names")]
+mod names;

@@ -11,7 +11,7 @@ members = ["macro", "wiki", "gpu"]
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -39,13 +39,22 @@ stream = ["http", "dep:tokio-stream"]
 client = ["dep:ureq", "dep:serde_json", "node"]
 # Kinds of finality a node can run, as genesis picks: bonded validators voting (FFG), a fixed set
 # of signers voting, or a number of blocks on top.
-finality-ffg = []
+finality-ffg = ["staking"]
 finality-authority = []
 finality-depth = []
 # Kinds of governance a chain can run, as genesis picks: finality's own electorate approving
 # changes, or a council of accounts genesis names.
-governance-electorate = []
-governance-council = []
+governance-electorate = ["governance"]
+governance-council = ["governance"]
+# Validators bonding funds, which FFG finality votes with: Tx::Bond, Unbond, Withdraw and Slash's
+# taking of bonds, the validator registry and its API routes. FFG brings it.
+staking = []
+# Changing what genesis set by transaction: Tx::ApproveChange and WithdrawChange, the change
+# registry and GET /governance. Either kind of governance brings it.
+governance = []
+# The name registry: names such as alice.dev, Tx::Name and PrimaryName, GET /names, chainv4 send
+# name, and resolving names from contracts.
+names = []
 # Mining on the GPU, through wgpu: Vulkan, Metal and WebGPU. --mine-gpu picks it over the threads.
 gpu = ["dep:chainv4-gpu", "node"]
 node = ["dep:rayon", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "dep:serde_json", "dep:hmac", "dep:sha2", "lvm", "rocksdb"]

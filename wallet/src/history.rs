@@ -11,6 +11,7 @@ use {
     chainv4::structs::event::Event,
     chainv4::structs::hash::{Hash, HashType},
     chainv4::structs::receipt::CommittedOutcome,
+    chainv4::registry::names::NameAction,
     chainv4::structs::tx::{Tx, TxCallArgumentType},
     chainv4::structs::u256::u256,
     serde::{Deserialize, Serialize},
@@ -163,6 +164,17 @@ fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::WithdrawApproval { version }, _) => format!("Withdrew approval of signers v{version}"),
         (Tx::ApproveChange { version, .. }, _) => format!("Approved a change from v{version}"),
         (Tx::WithdrawChange { version }, _) => format!("Withdrew approval of a change from v{version}"),
+        (Tx::Name { name, action }, _) => match action {
+            NameAction::Register { years } => format!("Registered the name {name} for {years} year{}", if *years == 1 { "" } else { "s" }),
+            NameAction::Renew { years } => format!("Renewed {name} for {years} year{}", if *years == 1 { "" } else { "s" }),
+            NameAction::Transfer { to } => format!("Gave {name} to {}", format::short(&to.to_string())),
+            NameAction::Target { target: Some(target) } => format!("Pointed {name} at {}", format::short(&target.to_string())),
+            NameAction::Target { target: None } => format!("Pointed {name} at nothing"),
+            NameAction::Text { key, .. } => format!("Set {key} on {name}"),
+            NameAction::Subname { label, .. } => format!("Made {label}.{name}"),
+        },
+        (Tx::PrimaryName { name: Some(name) }, _) => format!("Made {name} the primary name"),
+        (Tx::PrimaryName { name: None }, _) => "Cleared the primary name".to_string(),
     }
 }
 

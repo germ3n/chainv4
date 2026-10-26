@@ -7,6 +7,7 @@ use {
     crate::structs::amount::Amount,
     crate::registry::signers::Signer,
     crate::governance::Change,
+    crate::registry::names::{NameAction, name_problem},
     crate::structs::code::Code,
     crate::structs::hash::Hash,
     crate::structs::u256::{I256Le, U256Le, i256},
@@ -183,6 +184,23 @@ pub enum Tx {
     )]
     #[wincode(tag = 14)]
     EvmCall { to: Address, value: Amount, input: Vec<u8> },
+    #[document(
+        summary = "Registers, renews, transfers or changes a name, such as alice.dev, in the chain's name registry: on a chain whose genesis has names.",
+        params = {
+            name = "The name, without the chain's suffix: alice, or pay.alice for a subname.",
+            action = "What to do with it.",
+        },
+        see_also = "NameAction, Names, NamesConfig",
+    )]
+    #[wincode(tag = 15)]
+    Name { name: String, action: NameAction },
+    #[document(
+        summary = "Sets the sender's primary name, the one reverse lookups give for its address, or clears it. The name must resolve to the sender, and stops being its primary name once it no longer does.",
+        params = { name = "The name, without the chain's suffix, or None to clear it." },
+        see_also = "Names::primary, Tx::Name",
+    )]
+    #[wincode(tag = 16)]
+    PrimaryName { name: Option<String> },
 }
 
 #[document(
@@ -237,7 +255,7 @@ pub enum TxCallArgumentType {
 impl Verifiable for Tx {
     #[document(
         parent = "Tx",
-        summary = "Checks every address and argument inside, that a transfer, mint or burn moves more than zero, and that a contract call names its function by XXH3-64. A contract call may send zero.",
+        summary = "Checks every address and argument inside, that a transfer, mint or burn moves more than zero, that a contract call names its function by XXH3-64, and that a name transaction's name and what it sets could be a name's. A contract call may send zero.",
         see_also = "VerifyError, Hasher::digest",
     )]
     fn verify(&self) -> Result<(), VerifyError> {
@@ -259,6 +277,19 @@ impl Verifiable for Tx {
                 to.verify()?;
                 value.verify()
             }
+            Tx::Name { name, action } => {
+                if name_problem(name).or_else(|| action.problem()).is_some() {
+                    return Err(VerifyError::BadName);
+                }
+
+                match action {
+                    NameAction::Transfer { to } | NameAction::Subname { owner: to, .. } => to.verify(),
+                    NameAction::Target { target: Some(target) } => target.verify(),
+                    _ => Ok(()),
+                }
+            }
+            Tx::PrimaryName { name: Some(name) } if name_problem(name).is_some() => Err(VerifyError::BadName),
+            Tx::PrimaryName { .. } => Ok(()),
             Tx::Burn { from, amount } => {
                 from.verify()?;
                 amount.verify()?;
@@ -299,8 +330,9 @@ impl Verifiable for Tx {
                 crate::consensus::ConsensusConfig::Authority { key, .. } => key.verify(),
                 _ => Ok(()),
             },
-            // Whether the list is one a chain takes is decided when the transaction runs.
-            Tx::ApproveChange { change: Change::Bootnodes(_), .. } => Ok(()),
+            // Whether the list is one a chain takes is decided when the transaction runs, and so are
+            // name prices.
+            Tx::ApproveChange { change: Change::Bootnodes(_) | Change::NamePrices(_), .. } => Ok(()),
             // The signatures are checked when it runs, against the chain's genesis id.
             Tx::Slash { first, second } => {
                 if !first.vote.conflicts(&second.vote) {

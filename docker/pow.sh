@@ -7,10 +7,15 @@
 #   docker/pow.sh init                here, once: a key of your own, and a genesis that pays it,
 #      [--finality ffg|authority|depth]  final by the VPS's votes (ffg, the default), or by depth;
 #      [--governance council|electorate|none]  and who may change it later: you (council)
+#   docker/pow.sh regenesis           here: a new chain for the same keys, with what this build's
+#      [--finality …] [--governance …]  genesis has, such as names; the old genesis and this
+#      [--yes]                          machine's chain move aside, after you say yes
 #   docker/pow.sh push user@host      here: the repository, the genesis and .env, to the VPS;
 #                  [-i KEY] [-p PORT]  -i the SSH private key to log in with, -p its port
 #   docker/pow.sh up                  on the VPS, in that copy: build and start the stack, with
 #                                     Docker or Podman
+#   docker/pow.sh reset [--yes]       on the VPS: stop the node and move its chain and genesis
+#                                     aside, in its volume, for a new genesis; up starts it afresh
 #   docker/pow.sh join host           here: a node of the same chain that mines and dials the VPS,
 #                  [--gpu | --cpu]     on the GPU or the CPU; asked when neither is given
 #   docker/pow.sh token               here, once: the token workers mine for the VPS with; push
@@ -25,6 +30,8 @@
 #
 #   POW_HOME       where the key, genesis, this machine's chain and binary live
 #   SYMBOL         the coin's ticker, for init: DEV unless set
+#   NAMES          the suffix of the names init or regenesis gives the chain, such as dev for
+#                  alice.dev: SYMBOL in lower case unless set; none for a chain without names
 #   FINALITY       init's --finality; GOVERNANCE its --governance
 #   SERVER_NAME    the VPS's domain or address, for init's .env and its certificate
 #   MINE_THREADS   how many threads mine, here and on the VPS: 1 unless set
@@ -129,36 +136,12 @@ init() {
         chmod 600 "$home/validator.key"
     fi
 
-    # The development PoW chain with this finality and governance; then its coins, the minting,
-    # the voters and the members, and the time it starts, are this key's and now.
-    "$chainv4" genesis --consensus pow --finality "$finality" --governance "$governance" --fees base-fee --out "$home/genesis.json" > /dev/null
-    python3 -I - "$home/genesis.json" "$address" "${SYMBOL:-DEV}" "$voter" <<'EOF'
-import json, sys, time
-path, address, symbol, voter = sys.argv[1:]
-with open(path) as f:
-    genesis = json.load(f)
-genesis["allocations"] = [{"address": address, "amount": str(10**6 * 10**genesis["coin"]["decimals"])}]
-# Mint is for development chains alone, signed by the development key.
-genesis["minter"] = None
-genesis["coin"]["symbol"] = symbol
-genesis["timestamp"] = int(time.time() * 1000)
-finality = genesis.get("finality") or {}
-if finality.get("type") == "ffg":
-    finality["validators"] = [{"account": address, "voter": voter, "bond": finality["validators"][0]["bond"]}]
-elif finality.get("type") == "authority":
-    finality["signers"] = [{"account": address, "key": voter}]
-governance = genesis.get("governance") or {}
-if governance.get("type") == "council":
-    governance["members"] = [address]
-with open(path, "w") as f:
-    json.dump(genesis, f, indent=2)
-    f.write("\n")
-EOF
-    cp "$home/genesis.json" "$root/docker/config/genesis.json"
+    make_genesis "$chainv4" "$finality" "$governance" "$address" "$voter"
 
     if [ -n "$voter" ]; then
         (umask 077 && cp "$home/validator.key" "$root/docker/config/validator.key")
     fi
+
 
     token
 
@@ -207,6 +190,109 @@ EOF
     esac
 
     say "next: docker/pow.sh push user@your-vps"
+}
+
+# The development PoW chain with this finality and governance, and names; then its coins, the
+# minting, the voters and the members, and the time it starts, are this key's and now. Written to
+# POW_HOME and docker/config, for push.
+make_genesis() {
+    chainv4=$1 finality=$2 governance=$3 address=$4 voter=$5
+    names=${NAMES:-$(printf %s "${SYMBOL:-DEV}" | tr '[:upper:]' '[:lower:]')}
+    "$chainv4" genesis --consensus pow --finality "$finality" --governance "$governance" --fees base-fee --names "$names" --out "$home/genesis.json" > /dev/null
+    python3 -I - "$home/genesis.json" "$address" "${SYMBOL:-DEV}" "$voter" <<'EOF'
+import json, sys, time
+path, address, symbol, voter = sys.argv[1:]
+with open(path) as f:
+    genesis = json.load(f)
+genesis["allocations"] = [{"address": address, "amount": str(10**6 * 10**genesis["coin"]["decimals"])}]
+# Mint is for development chains alone, signed by the development key.
+genesis["minter"] = None
+genesis["coin"]["symbol"] = symbol
+genesis["timestamp"] = int(time.time() * 1000)
+finality = genesis.get("finality") or {}
+if finality.get("type") == "ffg":
+    finality["validators"] = [{"account": address, "voter": voter, "bond": finality["validators"][0]["bond"]}]
+elif finality.get("type") == "authority":
+    finality["signers"] = [{"account": address, "key": voter}]
+governance = genesis.get("governance") or {}
+if governance.get("type") == "council":
+    governance["members"] = [address]
+with open(path, "w") as f:
+    json.dump(genesis, f, indent=2)
+    f.write("\n")
+EOF
+    cp "$home/genesis.json" "$root/docker/config/genesis.json"
+}
+
+# Asks before what cannot be taken back, unless --yes said so already.
+confirm() {
+    [ "$1" = 1 ] && return
+    [ -t 0 ] || fail "say --yes to go on without a terminal to ask in"
+    printf '[pow] type yes to go on: ' >&2
+    read -r answer || answer=
+    [ "$answer" = yes ] || fail "nothing changed"
+}
+
+# A new chain for the keys init made: the same owner, voter and members, and what this build's
+# genesis has, such as names and the EVM. The old genesis and this machine's chain move aside.
+regenesis() {
+    yes=0 finality= governance=
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --finality) [ $# -ge 2 ] || fail "--finality takes ffg, authority or depth"; finality=$2; shift 2 ;;
+            --governance) [ $# -ge 2 ] || fail "--governance takes council, electorate or none"; governance=$2; shift 2 ;;
+            --yes) yes=1; shift ;;
+            *) fail "regenesis takes --finality, --governance and --yes, not $1" ;;
+        esac
+    done
+
+    address=$(owner)
+    old="$root/docker/config/genesis.json"
+    [ -s "$old" ] || fail "no $old to start again from: run docker/pow.sh init"
+    command -v python3 > /dev/null || fail "regenesis needs python3, to read the old genesis"
+
+    # The old chain's finality, governance and voting key, unless told otherwise.
+    set -- $(python3 -I - "$old" <<'EOF'
+import json, sys
+genesis = json.load(open(sys.argv[1]))
+finality = genesis.get("finality") or {}
+voter = {"ffg": lambda: finality["validators"][0]["voter"], "authority": lambda: finality["signers"][0]["key"]}.get(finality.get("type"), lambda: "-")()
+print(finality.get("type", "depth"), (genesis.get("governance") or {}).get("type", "none"), voter)
+EOF
+)
+    finality=${finality:-$1} governance=${governance:-$2} voter=$3
+    [ "$voter" = - ] && voter=
+    [ "$finality" = depth ] || [ -n "$voter" ] || fail "the old genesis names no voter to keep"
+
+    stamp=$(date +%Y%m%d-%H%M%S)
+    say "a new chain for $address: $finality finality, $governance governance, names under ${NAMES:-$(printf %s "${SYMBOL:-DEV}" | tr '[:upper:]' '[:lower:]')}"
+    say "moves aside, keeping them: $old, $home/genesis.json and $home/chain.db, each to .old-$stamp"
+    say "the VPS needs docker/pow.sh reset before up, and everyone who joined needs the new genesis"
+    confirm "$yes"
+
+    mv "$old" "$old.old-$stamp"
+    [ -e "$home/genesis.json" ] && mv "$home/genesis.json" "$home/genesis.json.old-$stamp"
+    [ -e "$home/chain.db" ] && mv "$home/chain.db" "$home/chain.db.old-$stamp"
+
+    make_genesis "$(binary)" "$finality" "$governance" "$address" "$voter"
+    say "wrote the new genesis: next, docker/pow.sh push user@your-vps, then reset and up there"
+}
+
+# On the VPS: stops the node and moves its chain aside in its volume, for a new genesis, keeping it:
+# the database, and the genesis the entrypoint copied there on the first start and keeps using.
+reset() {
+    yes=0
+    [ "${1:-}" = --yes ] && yes=1
+    compose="$root/docker/compose.sh"
+    stamp=$(date +%Y%m%d-%H%M%S)
+
+    say "stops the node and moves /data/chain.db and /data/genesis.json, in its volume, each to .old-$stamp"
+    confirm "$yes"
+
+    "$compose" stop node
+    "$compose" run --rm --no-deps --entrypoint sh node -c "for kept in chain.db genesis.json; do [ ! -e /data/\$kept ] || mv /data/\$kept /data/\$kept.old-$stamp; done"
+    say "moved; docker/pow.sh up starts the node on the new genesis"
 }
 
 # The token workers mine with: made once, kept in POW_HOME for workers here, and in docker/config
@@ -504,12 +590,14 @@ command=${1:-}
 
 case "$command" in
     init) init "$@" ;;
+    regenesis) regenesis "$@" ;;
     push) push "$@" ;;
     up) up ;;
+    reset) reset "$@" ;;
     join) join "$@" ;;
     token) token ;;
     worker) worker "$@" ;;
     status) status "$@" ;;
     logs) logs ;;
-    *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

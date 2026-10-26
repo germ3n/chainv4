@@ -572,6 +572,7 @@ mod tests {
             sender: Address::Ed25519([0; 32]),
             contract,
             value: u256::ZERO,
+            time: 0,
         };
         lua.set_app_data(Host::root(state.clone(), context, 1 << 20, Arc::new(Vm::new(&[], HashType::default_chain()).unwrap())));
 

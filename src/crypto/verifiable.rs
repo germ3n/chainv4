@@ -45,6 +45,8 @@ pub enum VerifyError {
     BadVote,
     #[document(summary = "Slashing evidence that is not two different, conflicting votes by the same voter.")]
     NotConflicting,
+    #[document(summary = "A name transaction whose name, or what it sets, could never be: see name_problem and NameAction::problem.")]
+    BadName,
 }
 
 impl fmt::Display for VerifyError {
@@ -60,6 +62,7 @@ impl fmt::Display for VerifyError {
             VerifyError::NotSender => write!(f, "only the sender's own funds can move"),
             VerifyError::BadVote => write!(f, "a vote's target must come after its source"),
             VerifyError::NotConflicting => write!(f, "the votes are not conflicting votes by one voter"),
+            VerifyError::BadName => write!(f, "not a name, or not what a name holds: labels of a to z, 0 to 9 and hyphens, the last at least 3 long"),
         }
     }
 }

@@ -140,6 +140,7 @@ mod tests {
             sender: Address::Ed25519([1; 32]),
             contract: Address::Ed25519([2; 32]),
             value: u256::new(7),
+            time: 0,
         };
         let state = Arc::new(State::new(Arc::new(MemoryDb::default())));
         lua.set_app_data(Host::root(state, context, 1 << 20, Arc::new(Vm::new(&[], HashType::default_chain()).unwrap())));

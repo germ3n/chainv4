@@ -143,6 +143,12 @@ revm charges no fee itself and checks no nonce: the chain has done both already.
 **The chain id** is the first 6 bytes of the genesis id, as a number, so every chain has its own
 and it fits JavaScript's numbers. `GET /status` shows the genesis id.
 
+## Names
+
+On a chain with [names](names.md), a precompile at `0x0000000000000000000000000000000000004e53`
+resolves them: `resolve(string) returns (address)` and `name(address) returns (string)`.
+`contracts/evm/NamePayer.sol` pays a name with it. See [Names in contracts](names.md#names-in-contracts).
+
 ## Logs and reverts
 
 **Logs** become events named `log` in the transaction's receipt, emitted by the contract: their
@@ -177,7 +183,7 @@ and calls it with `chainv4 send`.
 
 ## Not yet
 
-- **Calls between engines.** An EVM contract cannot call a Lua or wasm contract, nor the other
+- **Calls between engines,** beyond names, which the precompile resolves. An EVM contract cannot call a Lua or wasm contract, nor the other
   way round. They share balances: coin moves between them through plain payments.
 - **Ethereum-signed transactions and JSON-RPC,** for MetaMask, Foundry and ethers: next.
 - **Blob transactions and the KZG point evaluation precompile,** which needs blobs.

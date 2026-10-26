@@ -199,7 +199,7 @@ impl GovernanceConfig {
 }
 
 #[document(
-    summary = "What a change proposes: a new consensus, which takes effect at an epoch, as a checkpoint fixes it, so blocks either side of the boundary are checked by different rules; or new bootnodes, which nodes dial from the block that decides them on. Every kind shares one ballot and one version.",
+    summary = "What a change proposes: a new consensus, which takes effect at an epoch, as a checkpoint fixes it, so blocks either side of the boundary are checked by different rules; new bootnodes, which nodes dial from the block that decides them on; or new prices for names, which hold from that block on too. Every kind shares one ballot and one version.",
     category = "Governance",
     see_also = "Tx::ApproveChange, Changes",
 )]
@@ -212,6 +212,9 @@ pub enum Change {
     #[document(summary = "New bootnodes, replacing genesis's or the last decided: libp2p addresses such as /ip4/203.0.113.7/udp/4001/quic-v1, at most 32, which nodes of the chain dial to find their first peers. Empty leaves the chain with none. Advice to nodes, not a rule blocks are checked by, so it takes effect at once.")]
     #[wincode(tag = 1)]
     Bootnodes(Vec<String>),
+    #[document(summary = "New prices for names, replacing genesis's or the last decided: what a year costs by a name's length, as NamesConfig::prices lists them. Registrations and renewals pay them from the block that decides them on; names already held keep the years they paid for.")]
+    #[wincode(tag = 2)]
+    NamePrices(#[wincode(with = "crate::structs::u256::U256LeList")] Vec<crate::structs::u256::u256>),
 }
 
 #[document(summary = "The most bootnodes genesis or a change may name.", category = "Governance", see_also = "Change::Bootnodes, Genesis::bootnodes")]
@@ -243,11 +246,12 @@ impl Hashable for Change {
 }
 
 impl Change {
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus or bootnodes.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes or name_prices.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
             Change::Bootnodes(_) => "bootnodes",
+            Change::NamePrices(_) => "name_prices",
         }
     }
 }

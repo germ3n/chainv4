@@ -183,14 +183,14 @@ impl World {
         self.nonce += 1;
 
         Contracts::new(&self.state)
-            .deploy(&self.vm, &DEPLOYER, self.nonce, &code, LIMITS, &standard())
+            .deploy(&self.vm, &DEPLOYER, self.nonce, &code, LIMITS, &standard(), 0)
             .unwrap()
             .0
     }
 
     fn upgrade(&self, sender: Address, contract: Address, code: Code) -> Result<crate::registry::contracts::Hooked, crate::registry::RegistryError> {
         Contracts::new(&self.state)
-            .upgrade(&self.vm, &sender, &contract, &code, LIMITS, &standard())
+            .upgrade(&self.vm, &sender, &contract, &code, LIMITS, &standard(), 0)
             .map_err(|failed| failed.error)
     }
 
@@ -211,6 +211,7 @@ impl World {
             sender,
             contract,
             value: u256::ZERO,
+            time: 0,
         };
         let func = Hash::Xxh3_64(selector(function));
 
@@ -703,7 +704,7 @@ fn init_runs_once_at_deploy_and_only_the_chain_may_run_it() {
     let mut world = World::new();
     world.nonce += 1;
     let (owned, hooked) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(OWNED_V1.to_string()), LIMITS, &standard())
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(OWNED_V1.to_string()), LIMITS, &standard(), 0)
         .unwrap();
 
     assert!(hooked.fuel_used > 0);
@@ -778,7 +779,7 @@ fn conforms_to_the_token_standard(code: Code) {
     let mut world = World::new();
     world.nonce += 1;
     let (token, hooked) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &code, LIMITS, &standard())
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &code, LIMITS, &standard(), 0)
         .unwrap();
     let initial = u256::from(1_000_000u64) * u256::from(10u64).pow(18);
     let zero = address(Address::Ed25519([0; 32]));
@@ -933,7 +934,7 @@ function M.decimals() return 6 end"#,
     ] {
         world.nonce += 1;
         let failed = Contracts::new(&world.state)
-            .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with(extra, None), LIMITS, &standard())
+            .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with(extra, None), LIMITS, &standard(), 0)
             .unwrap_err();
 
         assert!(failed.fuel_used > 0, "{extra}: asking cost fuel");
@@ -956,11 +957,11 @@ function M.decimals() return 6 end"#,
     // Genesis says what makes a token: other functions, or none, which keeps no registry.
     world.nonce += 1;
     let (minimal, _) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", Some("approve")), LIMITS, &["transfer".to_string()])
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", Some("approve")), LIMITS, &["transfer".to_string()], 0)
         .unwrap();
     world.nonce += 1;
     let (unlisted, _) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", None), LIMITS, &[])
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", None), LIMITS, &[], 0)
         .unwrap();
 
     assert!(tokens(&world, minimal).is_some());
@@ -1011,7 +1012,7 @@ return M
     assert!(poked.fuel_used >= crate::vm::cost::TOKEN_REFRESH);
 
     // The registry asks again when told to, and the answer stands.
-    Contracts::new(&world.state).refresh(&world.vm, &token, DEPLOYER, LIMITS, &standard()).unwrap();
+    Contracts::new(&world.state).refresh(&world.vm, &token, DEPLOYER, LIMITS, &standard(), 0).unwrap();
 
     assert_eq!(Tokens::new(&world.state).get(&token).unwrap().unwrap().name.as_deref(), Some("Third"));
 }
@@ -1571,7 +1572,7 @@ fn deploys_and_upgrades_pay_for_loading_and_for_failing() {
     let deploy = |world: &mut World, source: &str| {
         world.nonce += 1;
 
-        Contracts::new(&world.state).deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(source.to_string()), LIMITS, &standard())
+        Contracts::new(&world.state).deploy(&world.vm, &DEPLOYER, world.nonce, &Code::Lua(source.to_string()), LIMITS, &standard(), 0)
     };
 
     // A deploy pays for loading its code as well as for init.
@@ -1599,7 +1600,7 @@ fn deploys_and_upgrades_pay_for_loading_and_for_failing() {
     // check_perms saying no still pays for asking it.
     let stranger = Address::Ed25519([0xb; 32]);
     let refused = Contracts::new(&world.state)
-        .upgrade(&world.vm, &stranger, &owned, &Code::Lua(OWNED_V1.to_string()), LIMITS, &standard())
+        .upgrade(&world.vm, &stranger, &owned, &Code::Lua(OWNED_V1.to_string()), LIMITS, &standard(), 0)
         .unwrap_err();
 
     assert_eq!(refused.error, crate::registry::RegistryError::NotPermitted);
@@ -1814,4 +1815,39 @@ fn the_storage_guides_points_example_upgrades_as_the_guide_says() {
     world.upgrade(DEPLOYER, points, Code::Lua(v2.replace("config:set(\"max_award\", \"1000\")", "").to_string())).unwrap();
 
     assert_eq!(world.call(points, "points_of", &[address(alice)]).result.unwrap(), [amount(150)]);
+}
+
+#[cfg(feature = "names")]
+#[test]
+fn webassembly_contracts_resolve_names_and_subnames_through_the_sdk() {
+    use crate::registry::names::{NameAction, Names, NamesConfig};
+
+    let config = NamesConfig::dev();
+    let mut world = World {
+        vm: Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm], HashType::default_chain()).unwrap().with_names(Some(config.clone()))),
+        ..World::new()
+    };
+    let (alice, bob) = (Address::Ed25519([0xa1; 32]), Address::Ed25519([0xb0; 32]));
+    world.fund(alice, u64::MAX);
+    let names = Names::new(&world.state);
+    let act = |action: NameAction, name: &str| names.act(&alice, name, &action, 0, 1, &config, &config.prices).unwrap();
+    act(NameAction::Register { years: 1 }, "alice");
+    act(NameAction::Subname { label: "pay".into(), owner: bob }, "alice");
+    names.set_primary(&alice, Some("alice"), 0, &config).unwrap();
+    let book = world.deploy(Code::Wasm(example("names")));
+    let string = |text: &str| TxCallArgumentType::String(text.to_string());
+
+    assert_eq!(world.call(book, "lookup", &[string("Alice.dev")]).result, Ok(vec![address(alice)]));
+    assert_eq!(world.call(book, "lookup", &[string("pay.alice")]).result, Ok(vec![address(bob)]), "a subname resolves to its own owner");
+    assert_eq!(world.call(book, "lookup", &[string("nobody.dev")]).result, Ok(vec![TxCallArgumentType::Nil]));
+    assert_eq!(world.call(book, "whois", &[address(alice)]).result, Ok(vec![string("alice.dev")]));
+    assert_eq!(world.call(book, "whois", &[address(bob)]).result, Ok(vec![TxCallArgumentType::Nil]), "bob chose no name");
+    assert_eq!(world.call(book, "pay", &[string("pay.alice.dev")]).result, Ok(vec![address(bob)]));
+    assert!(matches!(world.call(book, "pay", &[string("nobody")]).result, Err(VmError::Runtime(why)) if why.contains("no such name")));
+
+    // The same module on a chain without names: the import is there, and traps.
+    let mut nameless = World::new();
+    let book = nameless.deploy(Code::Wasm(example("names")));
+
+    assert!(matches!(nameless.call(book, "lookup", &[string("alice")]).result, Err(err) if err.to_string().contains("this chain has no names")));
 }

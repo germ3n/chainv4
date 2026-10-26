@@ -277,6 +277,7 @@ The Send page (`wallet/src/views/send.rs`):
    coin or a token that address holds. Each address has its own balance and nonce. To takes any
    address, or an Ethereum one as Ethereum writes it, `0x` and 40 hex digits. The amount is in the
    token's decimals, and checked against the proven balance.
+   To takes a [name](#names) too, such as `alice.dev`, which the wallet proves first.
 2. **Review.** The wallet builds the transaction from what it proved:
    - **The nonce:** the proven one, past any it sent that is still waiting.
    - **The price:** it signs a probe with no fee offer and asks the node to price it, as
@@ -293,6 +294,29 @@ A token transfer is the standard's `transfer(to, amount)`, sending no coin.
 
 **Dropped transactions:** one no block holds after 10 minutes shows as Not seen, and stops
 holding its nonce, so the next transaction takes that nonce again.
+
+## Names
+
+On a chain with [names](names.md), the wallet proves every name it shows or pays
+(`wallet/src/chain.rs`): the name's record and the record of every name above it, as
+`pay.alice.dev` rests on `alice.dev`'s, each from `Column::Names` against the tip the light client
+checked, and judged by that block's time. The node says the chain's suffix, prices and grace
+period, and which names each address owns; what each name is, the wallet proves.
+
+- **Paying a name:** Send's To takes a name. Under it shows what the name was proven to resolve
+  to, with how far that is trusted, or that it resolves to nothing. The review shows the name and
+  the address, and the transaction pays the address.
+- **The Names page:** for the address picked, the name it goes by, a search that finds a name or
+  registers it at its price, and the names it owns, each with what it points at and when it
+  expires. Each opens to renew it, make it the address's primary name, point it, set a text
+  record, make a subname or give it away.
+- **Sending them:** every name transaction goes to the Send page, prepared, for the same review,
+  biometric check, offline signer or MetaMask as a transfer. What a registration or renewal burns
+  counts against the balance in the review.
+- **Overview** shows each address by its primary name, proven still to resolve to it.
+- **The offline signer** shows a name transaction for what it is: registering, renewing,
+  pointing, and so on, with the name and what it sets. It cannot know what a registration burns;
+  the chain charges that as it runs.
 
 ## MetaMask and hardware wallets
 

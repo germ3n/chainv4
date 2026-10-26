@@ -381,6 +381,10 @@ impl Wallet {
             self.node.ask(ask);
         }
 
+        for ask in self.chain.names_due(&self.views.wanted_names(), time) {
+            self.node.ask(ask);
+        }
+
         let Some(current) = self.current().map(|holder| holder.addresses().iter().map(Address::to_string).collect::<Vec<_>>()) else {
             return;
         };

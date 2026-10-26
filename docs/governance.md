@@ -13,6 +13,8 @@ What can change today:
   different slot length.
 - **The bootnodes:** the addresses new nodes dial to find their first peers, which genesis fixes
   with the chain's id (see [Bootnodes](#bootnodes)).
+- **What names cost:** the price of a year of a name by its length (see
+  [Name prices](#name-prices)).
  The finality kind, and the parameters that define
 its epochs, stay what genesis says: the electorate that approves is finality's own, and every
 light client's epoch arithmetic rests on them.
@@ -81,6 +83,23 @@ chainv4 send --key member.key approve-change --bootnodes none   # the chain has 
 - **The list is checked as genesis's is:** at most 32 addresses, each named once, each a libp2p
   path such as `/ip4/…/udp/…/quic-v1`. A node skips, and logs, one libp2p cannot read.
 - **A node's own `--bootnode`s stay beside the chain's,** whatever governance decides.
+
+## Name prices
+
+On a chain with [names](names.md), a change replaces the prices a year of a name costs:
+
+```sh
+chainv4 send --key member.key approve-change --name-prices 1000000000000000000000,200000000000000000000,10000000000000000000
+```
+
+- **The same ballot and version** as the other kinds.
+- **It takes effect at once,** from the block that decides it, as bootnodes do: what a name costs
+  is read when one is registered or renewed, and checks no block.
+- **The list is checked as genesis's is:** 1 to 61 prices, in the smallest unit, the first for
+  names of 3 characters and the last for every length from its own on. A chain without names
+  refuses the change.
+- **Names already held keep the years they paid for.** `GET /names` shows the prices in force
+  and genesis's.
 
 ## What the chain does with it
 

@@ -1,5 +1,6 @@
+#[cfg(feature = "staking")]
+use super::{Accounts, RegistryError};
 use {
-    super::{Accounts, RegistryError},
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::db::{Column, DbError, State},
@@ -165,6 +166,7 @@ impl<'a> Validators<'a> {
         Ok(self.state.get_value(Column::Epochs, VOTERS)?.unwrap_or_default())
     }
 
+    #[cfg(feature = "staking")]
     #[document(
         parent = "Validators",
         summary = "Locks funds from an account as a new validator's bond. It votes from epoch + activation_delay + 1.",
@@ -199,6 +201,7 @@ impl<'a> Validators<'a> {
     }
 
     /// Stores a new validator and adds it to the list of voters. Genesis uses it directly.
+    #[cfg(feature = "staking")]
     pub(crate) fn register(&self, voter: &PublicKey, record: ValidatorRecord, voters: &mut Vec<PublicKey>) {
         if let Err(at) = voters.binary_search(voter) {
             voters.insert(at, *voter);
@@ -208,6 +211,7 @@ impl<'a> Validators<'a> {
         self.state.put_value(Column::Validators, voter_key(voter), &record);
     }
 
+    #[cfg(feature = "staking")]
     #[document(
         parent = "Validators",
         summary = "Stops a validator voting from epoch + activation_delay + 1. Its bond can be withdrawn withdrawal_delay epochs after that.",
@@ -228,6 +232,7 @@ impl<'a> Validators<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "staking")]
     #[document(
         parent = "Validators",
         summary = "Pays an unbonded validator's bond back to its account and forgets it.",
@@ -253,6 +258,7 @@ impl<'a> Validators<'a> {
         Ok(record.bond)
     }
 
+    #[cfg(feature = "staking")]
     #[document(
         parent = "Validators",
         summary = "Takes a cheating validator's whole bond: the reporter gets bond / reporter_divisor, and the rest is burned. The validator stops voting as an unbond would, and can be withdrawn, for nothing, later. It also leaves the sets already fixed for the epochs from two after this one on: this epoch's and the next one's stay as they are, so the next checkpoint's light update, which re-states the sets ahead, reaches light clients by the usual path.",
@@ -283,6 +289,7 @@ impl<'a> Validators<'a> {
     }
 
     /// Takes a voter out of the sets fixed for these epochs, those that are fixed already.
+    #[cfg(feature = "staking")]
     fn drop_from_fixed_sets(&self, voter: &PublicKey, from: u64, through: u64) -> Result<(), DbError> {
         for epoch in from..=through {
             if let Some(mut set) = self.set(epoch)?
@@ -364,6 +371,7 @@ impl<'a> Validators<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "staking")]
     #[document(
         parent = "Validators",
         summary = "The inactivity leak, at a checkpoint while the chain is stalled: every validator in the epoch's set whose vote for the epoch before has not been carried in a block loses leak.permille thousandths of its bond, burned; one that falls under the minimum bond leaves the way an unbond does. The sets already fixed for the epochs after this one are reweighed.",
@@ -415,6 +423,7 @@ impl<'a> Validators<'a> {
     }
 
     /// Fixes again the sets already fixed for these epochs, from the records as they are now.
+    #[cfg(feature = "staking")]
     fn reweigh_fixed_sets(&self, from: u64, through: u64) -> Result<(), DbError> {
         for epoch in from..=through {
             if self.set(epoch)?.is_some() {
@@ -435,11 +444,13 @@ impl<'a> Validators<'a> {
         self.state.put(Column::Epochs, epoch_key(b"paid:", epoch), vec![1]);
     }
 
+    #[cfg(feature = "staking")]
     fn put_voters(&self, voters: &Vec<PublicKey>) {
         let bytes = wincode::serialize(voters).expect("keys always encode");
         self.state.put(Column::Epochs, VOTERS.to_vec(), bytes);
     }
 
+    #[cfg(feature = "staking")]
     fn owned(&self, account: &Address, voter: &PublicKey) -> Result<ValidatorRecord, RegistryError> {
         let record = self.get(voter)?.ok_or(RegistryError::NotBonded)?;
 
@@ -481,7 +492,7 @@ fn epoch_key(prefix: &[u8], epoch: u64) -> Vec<u8> {
     key
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "staking"))]
 mod tests {
     use super::*;
     use crate::db::MemoryDb;

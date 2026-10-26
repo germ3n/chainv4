@@ -60,6 +60,7 @@ pub fn of(tx: &TxView, outcome: Option<&Outcome>) -> Vec<Hop> {
         "mint" => ("mint", field("to"), String::new(), field("amount")),
         "burn" => ("burn", "(burned)".to_string(), String::new(), field("amount")),
         "contract_call" => ("call", field("to"), field("func"), field("amount")),
+        "evm_call" => ("EVM call", field("to"), String::new(), field("value")),
         "deploy" => (
             "deploy",
             outcome.and_then(|outcome| outcome.contract.clone()).unwrap_or_else(|| "(new contract)".to_string()),
@@ -73,6 +74,12 @@ pub fn of(tx: &TxView, outcome: Option<&Outcome>) -> Vec<Hop> {
         "withdraw_approval" => ("withdraw approval", "(signers)".to_string(), String::new(), "0".to_string()),
         "approve_change" => ("approve", "(governance)".to_string(), String::new(), "0".to_string()),
         "withdraw_change" => ("withdraw approval", "(governance)".to_string(), String::new(), "0".to_string()),
+        "name" => {
+            let action = tx.tx.get("action").and_then(|action| action.get("type")).and_then(Value::as_str).unwrap_or("name");
+
+            ("name", format!("{} ({action})", field("name")), String::new(), "0".to_string())
+        }
+        "primary_name" => ("primary name", tx.tx.get("name").and_then(Value::as_str).unwrap_or("(cleared)").to_string(), String::new(), "0".to_string()),
         other => (other, "?".to_string(), String::new(), "0".to_string()),
     };
 

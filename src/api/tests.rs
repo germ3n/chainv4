@@ -1158,6 +1158,90 @@ fn evm_deploys_and_calls_are_dry_run_at_offer_and_read_as_json() {
     );
 }
 
+#[cfg(feature = "names")]
+#[test]
+fn names_are_looked_up_by_name_and_accounts_show_their_primary_one() {
+    use crate::registry::names::{NameAction, NamesConfig, YEAR_MS};
+
+    let authority = DevAuthority::dev_keypair();
+    let me = authority.public().address();
+    let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let txs = [
+        Tx::Name { name: "alice".into(), action: NameAction::Register { years: 1 } },
+        Tx::Name { name: "alice".into(), action: NameAction::Text { key: "url".into(), value: Some("https://alice.example".into()) } },
+        Tx::Name { name: "alice".into(), action: NameAction::Subname { label: "pay".into(), owner: me } },
+        Tx::PrimaryName { name: Some("alice".into()) },
+    ];
+    let now = chain.tip().timestamp + SLOT;
+    let signed: Vec<SignedTx> = txs.into_iter().enumerate().map(|(nonce, tx)| SignedTx::sign(tx, nonce as u64, FeeOffer::NONE, &authority)).collect();
+    let mut block = chain.build(signed, Vec::new(), producer.address(&[]), now).unwrap();
+    block.seal = producer.seal(&block.header).unwrap();
+    chain.import(&block, now).unwrap();
+    let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+
+    let (status, _, names) = request(address, "GET", "/names", "");
+    let dev = NamesConfig::dev();
+
+    assert_eq!(status, 200);
+    assert_eq!(names["suffix"], "dev");
+    assert_eq!(names["prices"], json!(dev.prices.iter().map(|price| price.to_string()).collect::<Vec<_>>()));
+    assert_eq!(names["prices"], names["genesis_prices"], "governance decided none");
+    assert_eq!(names["grace_ms"], dev.grace_ms);
+
+    let (status, _, alice) = request(address, "GET", "/names/Alice.dev", "");
+
+    assert_eq!(status, 200, "{alice}");
+    assert_eq!(alice["name"], "alice", "the suffix and case go");
+    assert_eq!(alice["display"], "alice.dev");
+    assert_eq!(alice["status"], "active");
+    assert_eq!((alice["owner"].clone(), alice["resolves_to"].clone()), (json!(me.to_string()), json!(me.to_string())));
+    assert_eq!(alice["expires"], now + YEAR_MS);
+    assert_eq!(alice["grace_ends"], now + YEAR_MS + dev.grace_ms);
+    assert_eq!(alice["texts"], json!({ "url": "https://alice.example" }));
+    assert_eq!(alice["price_per_year"], dev.prices[2].to_string());
+
+    let (_, _, pay) = request(address, "GET", "/names/pay.alice", "");
+
+    assert_eq!(pay["resolves_to"], me.to_string());
+    assert_eq!(pay["price_per_year"], Value::Null, "subnames are free");
+
+    let (_, _, free_name) = request(address, "GET", "/names/carol", "");
+
+    assert_eq!(free_name["status"], "available");
+    assert_eq!(free_name["owner"], Value::Null);
+    assert_eq!(free_name["price_per_year"], dev.prices[2].to_string(), "what registering it costs");
+    assert_eq!(request(address, "GET", "/names/ab", "").0, 400);
+
+    let (_, _, account) = request(address, "GET", &format!("/accounts/{me}"), "");
+
+    assert_eq!(account["name"], "alice.dev", "the reverse lookup");
+
+    // What it owns: the name and its subname, in name order, a page at a time.
+    let (status, _, owned) = request(address, "GET", &format!("/accounts/{me}/names"), "");
+
+    assert_eq!(status, 200, "{owned}");
+    assert_eq!(owned["names"].as_array().unwrap().iter().map(|name| name["display"].as_str().unwrap()).collect::<Vec<_>>(), ["alice.dev", "pay.alice.dev"]);
+    assert_eq!(owned["names"][0]["status"], "active");
+    assert_eq!(owned["names"][1]["expires"], now + YEAR_MS, "a subname's is its name's");
+
+    let (_, _, first) = request(address, "GET", &format!("/accounts/{me}/names?limit=1"), "");
+    let (_, _, second) = request(address, "GET", &format!("/accounts/{me}/names?limit=1&cursor={}", first["next"].as_str().unwrap()), "");
+
+    assert_eq!((first["names"][0]["name"].clone(), second["names"][0]["name"].clone()), (json!("alice"), json!("pay.alice")));
+    assert_eq!(second["next"], Value::Null);
+
+    // A chain without names says so.
+    let nameless = Genesis { names: None, ..free() };
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &nameless).unwrap();
+    let address = start(db, None, &nameless, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+
+    assert_eq!(request(address, "GET", "/names", "").0, 404);
+    assert_eq!(request(address, "GET", &format!("/accounts/{me}"), "").2.get("name"), None);
+}
+
 #[test]
 fn pages_from_allowed_origins_may_call_the_api() {
     let db = Arc::new(MemoryDb::default());

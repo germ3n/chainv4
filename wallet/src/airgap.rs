@@ -21,6 +21,7 @@ use {
     chainv4::crypto::keypair::{Keypair, PublicKey, Signature},
     chainv4::crypto::verifiable::Verifiable,
     chainv4::structs::hash::HashType,
+    chainv4::registry::names::NameAction,
     chainv4::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     chainv4::structs::u256::u256,
     wincode::{SchemaRead, SchemaWrite},
@@ -370,6 +371,9 @@ pub fn describe(request: &Request) -> Described {
             (format!("Send {}", asset.symbol), Some(shown(*units, &asset)), Some(recipient.to_string()), Some(contract.to_string()))
         }
         Tx::ContractCall { to: contract, .. } => ("Call a contract".to_string(), None, Some(contract.to_string()), None),
+        Tx::Name { name, action } => (name_kind(action), None, Some(name_detail(name, action)), None),
+        Tx::PrimaryName { name: Some(name) } => ("Choose a primary name".to_string(), None, Some(name.clone()), None),
+        Tx::PrimaryName { name: None } => ("Clear the primary name".to_string(), None, None, None),
         other => (format!("{} transaction", variant(other)), None, None, None),
     };
 
@@ -383,6 +387,33 @@ pub fn describe(request: &Request) -> Described {
         gas: format!("{} gas at up to {} per gas", request.fee.gas_limit, format::amount(&request.fee.max_price.to_string(), coin.decimals, &coin.symbol)),
         nonce: request.nonce,
         everything: format!("{:#?}", request.tx),
+    }
+}
+
+/// What a name transaction does, in a few words.
+fn name_kind(action: &NameAction) -> String {
+    match action {
+        NameAction::Register { .. } => "Register a name",
+        NameAction::Renew { .. } => "Renew a name",
+        NameAction::Transfer { .. } => "Give a name away",
+        NameAction::Target { .. } => "Point a name",
+        NameAction::Text { .. } => "Set a name's text record",
+        NameAction::Subname { .. } => "Make a subname",
+    }
+    .to_string()
+}
+
+/// The name, without the chain's suffix, and what the action sets of it: the signer cannot know
+/// the price a registration burns, which the chain charges as it runs.
+fn name_detail(name: &str, action: &NameAction) -> String {
+    match action {
+        NameAction::Register { years } | NameAction::Renew { years } => format!("{name}, for {years} year{}", if *years == 1 { "" } else { "s" }),
+        NameAction::Transfer { to } => format!("{name}, to {to}"),
+        NameAction::Target { target: Some(target) } => format!("{name}, at {target}"),
+        NameAction::Target { target: None } => format!("{name}, at nothing"),
+        NameAction::Text { key, value: Some(value) } => format!("{name}: {key} = {value}"),
+        NameAction::Text { key, value: None } => format!("{name}: clear {key}"),
+        NameAction::Subname { label, owner } => format!("{label}.{name}, owned by {owner}"),
     }
 }
 

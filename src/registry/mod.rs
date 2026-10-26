@@ -14,6 +14,7 @@ use crate::vm::VmError;
 
 pub mod accounts;
 pub mod changes;
+pub mod names;
 pub mod signers;
 pub mod tokens;
 pub mod validators;
@@ -21,6 +22,8 @@ pub mod validators;
 pub mod contracts;
 
 pub use accounts::Accounts;
+#[cfg(feature = "names")]
+pub use names::Names;
 #[cfg(feature = "vm")]
 pub use contracts::Contracts;
 pub use tokens::Tokens;
@@ -80,7 +83,7 @@ pub enum RegistryError {
     StaleChange(u64),
     #[document(summary = "A change that does not fit the chain, and why: a consensus that needs another finality, or settings no chain could run.")]
     BadChange(&'static str),
-    #[document(summary = "A change to the consensus decided already.")]
+    #[document(summary = "A change to what was decided already: the same consensus, bootnodes or name prices.")]
     SameChange,
     #[document(summary = "The contract exports what makes a token on this chain, but its name(), symbol() or decimals() did not answer as the registry needs, and why.")]
     BadToken(String),
@@ -89,6 +92,8 @@ pub enum RegistryError {
     Vm(VmError),
     #[document(summary = "An upgrade's new code does not keep the old code's storage layout, and why.")]
     Layout(String),
+    #[document(summary = "A name transaction that cannot go through, and why: a name taken, not the sender's, expired, or not one at all.")]
+    Name(String),
 }
 
 impl fmt::Display for RegistryError {
@@ -121,11 +126,12 @@ impl fmt::Display for RegistryError {
             RegistryError::NotGoverning => write!(f, "only an account governance lets approve may approve or withdraw a change"),
             RegistryError::StaleChange(version) => write!(f, "the consensus changed since; the decided version is {version}"),
             RegistryError::BadChange(why) => write!(f, "{why}"),
-            RegistryError::SameChange => write!(f, "that is the consensus already"),
+            RegistryError::SameChange => write!(f, "that change was decided already"),
             RegistryError::BadToken(why) => write!(f, "it is a token, but {why}"),
             #[cfg(feature = "vm")]
             RegistryError::Vm(err) => write!(f, "{err}"),
             RegistryError::Layout(why) => write!(f, "the new code does not keep the storage layout: {why}"),
+            RegistryError::Name(why) => write!(f, "{why}"),
         }
     }
 }

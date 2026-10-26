@@ -299,3 +299,77 @@ fn under_fees_evm_gas_is_the_chains_gas_one_for_one() {
     assert_eq!(receipt.gas_used, intrinsic + evm_gas);
     assert!(receipt.fee > u256::ZERO);
 }
+
+/// A string as one ABI argument, for a function taking only it: its offset, length and bytes.
+#[cfg(feature = "names")]
+fn string_arg(text: &str) -> Vec<u8> {
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.resize(text.len().div_ceil(32) * 32, 0);
+
+    [word(32), word(text.len() as u128), bytes].concat()
+}
+
+/// A string an EVM call returned, ABI-decoded.
+#[cfg(feature = "names")]
+fn returned_string(receipt: &Receipt) -> String {
+    let bytes = returned(receipt);
+    let len = u256::from_be_bytes(bytes[32..64].try_into().unwrap()).as_usize();
+
+    String::from_utf8(bytes[64..64 + len].to_vec()).unwrap()
+}
+
+#[cfg(feature = "names")]
+#[test]
+fn evm_contracts_resolve_and_pay_names_through_the_precompile() {
+    use crate::registry::names::NameAction;
+
+    const NAME_PAYER_BIN: &str = include_str!("../../../contracts/evm/NamePayer.bin");
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &genesis()).unwrap();
+    // Alice holds an Ed25519 key, and has never sent an EVM transaction: the EVM knows no alias
+    // of hers until a name resolves to her.
+    let alice = Keypair::generate(KeyType::Ed25519).unwrap();
+    let fund = SignedTx::sign(
+        Tx::Transfer { from: authority().public().address(), to: alice.public().address(), amount: Amount::U128(10u128.pow(21)) },
+        nonce(&chain, &authority()),
+        FeeOffer::NONE,
+        &authority(),
+    );
+    advance(&mut chain, vec![fund]);
+    let register = sign(&chain, &alice, Tx::Name { name: "alice".into(), action: NameAction::Register { years: 1 } });
+    let primary = next_nonce(sign(&chain, &alice, Tx::PrimaryName { name: Some("alice".into()) }), &alice);
+    let payer = evm::create_address(&authority().public().address(), nonce(&chain, &authority()));
+    let deploy = sign(&chain, &authority(), Tx::Deploy { code: Code::Evm(crate::structs::hex::from_hex(NAME_PAYER_BIN.trim()).unwrap()) });
+    let receipts = advance(&mut chain, vec![register, primary, deploy]);
+
+    assert!(receipts.iter().all(|receipt| receipt.result.is_ok()), "{receipts:?}");
+
+    let before = balance(&chain, &alice.public().address());
+    let pay = call(&chain, &authority(), payer, 1_000, calldata("pay(string)", &[string_arg("Alice.dev")]));
+    let lookup = next_nonce(call(&chain, &authority(), payer, 0, calldata("lookup(string)", &[string_arg("alice")])), &authority());
+    let receipts = advance(&mut chain, vec![pay, lookup]);
+
+    assert_eq!(receipts[0].result.as_ref().map(|_| ()), Ok(()), "{:?}", receipts[0].result);
+    assert_eq!(balance(&chain, &alice.public().address()), before + u256::new(1_000), "paid to her own account, through her alias");
+    assert_eq!(returned(&receipts[1])[12..], evm::evm_alias(&alice.public().address()), "the name resolves to her EVM address");
+
+    // The other way: her alias goes by her primary name. Nobody's resolves to nothing.
+    let whois = call(&chain, &authority(), payer, 0, calldata("whois(address)", &[address_word(&alice.public().address())]));
+    let nobody = next_nonce(call(&chain, &authority(), payer, 5, calldata("pay(string)", &[string_arg("nobody.dev")])), &authority());
+    let receipts = advance(&mut chain, vec![whois, nobody]);
+
+    assert_eq!(returned_string(&receipts[0]), "alice.dev");
+    assert!(matches!(&receipts[1].result, Err(failure) if failure.to_string().contains("no such name")), "{:?}", receipts[1].result);
+
+    // On a chain without names there is no precompile at its address: a call there is a call to an
+    // empty account, which returns nothing, so the payer's decoding reverts.
+    let nameless = Genesis { names: None, ..genesis() };
+    let mut chain = Chain::open(Arc::new(MemoryDb::default()), &nameless).unwrap();
+    let payer = evm::create_address(&authority().public().address(), nonce(&chain, &authority()));
+    let deploy = sign(&chain, &authority(), Tx::Deploy { code: Code::Evm(crate::structs::hex::from_hex(NAME_PAYER_BIN.trim()).unwrap()) });
+    advance(&mut chain, vec![deploy]);
+    let lookup = call(&chain, &authority(), payer, 0, calldata("lookup(string)", &[string_arg("alice")]));
+
+    assert!(advance(&mut chain, vec![lookup])[0].result.is_err());
+}

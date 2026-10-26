@@ -374,7 +374,7 @@ mod send {
         let running = Running::start(false);
         let sent = send(SendArgs {
             no_wait: true,
-            ..running.args(TxArgs::Transfer { to: Address::Ed25519([3; 32]), amount: u256::new(9) })
+            ..running.args(TxArgs::Transfer { to: Address::Ed25519([3; 32]).into(), amount: u256::new(9) })
         });
         let node = running.stop();
 
@@ -402,7 +402,7 @@ mod send {
 
         let running = Running::launch_with(true, false, None, |node| node.keep_index(IndexKind::Addresses, None).unwrap());
         let to = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap().public().address();
-        send(running.args(TxArgs::Transfer { to, amount: u256::new(9) })).unwrap();
+        send(running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(9) })).unwrap();
         let light_args = |query: &[&str]| {
             let node = format!("http://{}", running.api);
             let genesis = running.genesis.to_string();
@@ -431,7 +431,7 @@ mod send {
         let to = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap().public().address();
         let sent = send(SendArgs {
             confirmations: 3,
-            ..running.args(TxArgs::Transfer { to, amount: u256::new(9) })
+            ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(9) })
         });
         let node = running.stop();
 
@@ -448,7 +448,7 @@ mod send {
 
         let running = Running::start(true);
         let ethereum = Keypair::generate(KeyType::Secp256k1).unwrap();
-        send(running.args(TxArgs::Transfer { to: ethereum.public().address(), amount: u256::new(10u128.pow(21)) })).unwrap();
+        send(running.args(TxArgs::Transfer { to: ethereum.public().address().into(), amount: u256::new(10u128.pow(21)) })).unwrap();
 
         let dir = TempDir::new("eip712");
         let key = dir.0.join("ethereum.key");
@@ -457,13 +457,13 @@ mod send {
         let sent = send(SendArgs {
             key: Some(key),
             eip712: true,
-            ..running.args(TxArgs::Transfer { to, amount: u256::new(9) })
+            ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(9) })
         });
 
         // Typed data is Ethereum's: an Ed25519 key cannot sign it.
         let refused = send(SendArgs {
             eip712: true,
-            ..running.args(TxArgs::Transfer { to, amount: u256::new(1) })
+            ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(1) })
         });
         let node = running.stop();
 
@@ -570,12 +570,12 @@ mod send {
         // A window stays genesis's; nothing to withdraw before approving; the council of one
         // decides at once, so there is nothing to withdraw after either.
         let bootnode = "/ip4/203.0.113.7/udp/4001/quic-v1".to_string();
-        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, version: None }));
+        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, name_prices: None, version: None }));
         let nothing = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, version: None }));
+        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, name_prices: None, version: None }));
         let decided = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), version: None }));
-        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), version: None }));
+        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, version: None }));
+        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, version: None }));
         let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
         let node = running.stop();
 
@@ -684,17 +684,53 @@ mod send {
         assert!(matches!(&sent[0], Tx::Deploy { code: crate::structs::code::Code::Evm(code) } if code.ends_with(&u256::new(5).to_be_bytes())), "the constructor's argument after the code");
     }
 
+    #[cfg(feature = "names")]
+    #[test]
+    fn names_register_point_and_receive_from_the_cli() {
+        use super::super::send::NameArgs;
+        use crate::registry::names::Names;
+
+        let running = Running::start(true);
+        let me = DevAuthority::dev_keypair().public().address();
+        let bob = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap().public().address();
+        let name = |action: NameArgs| TxArgs::Name { action };
+
+        send(running.args(name(NameArgs::Register { name: "Alice.dev".into(), years: 2 }))).unwrap();
+        send(running.args(name(NameArgs::Subname { name: "alice".into(), label: "pay".into(), owner: Some(bob) }))).unwrap();
+        send(running.args(name(NameArgs::Text { name: "alice.dev".into(), key: "url".into(), value: Some("https://alice.example".into()) }))).unwrap();
+        send(running.args(name(NameArgs::Primary { name: Some("alice.dev".into()) }))).unwrap();
+        // Paid by name: pay.alice.dev resolves to bob.
+        send(running.args(TxArgs::Transfer { to: "pay.alice.dev".parse().unwrap(), amount: u256::new(9) })).unwrap();
+        let taken = send(running.args(name(NameArgs::Register { name: "alice".into(), years: 1 })));
+        let bad = send(running.args(name(NameArgs::Register { name: "al".into(), years: 1 })));
+        let nowhere = send(running.args(TxArgs::Transfer { to: "nobody.dev".parse().unwrap(), amount: u256::new(1) }));
+        let node = running.stop();
+        let state = node.chain().state();
+        let now = node.chain().tip().timestamp;
+        let names = Names::new(&state);
+
+        let taken = taken.unwrap_err().to_string();
+
+        assert!(taken.contains("a dry run says this would fail") && taken.contains("yours already"), "said before anything is sent: {taken}");
+        assert!(bad.unwrap_err().to_string().contains("at least 3"));
+        assert!(nowhere.unwrap_err().to_string().contains("resolves to nothing"));
+        assert_eq!(names.resolve("alice", now, u64::MAX).unwrap(), Some(me));
+        assert_eq!(names.primary(&me, now, u64::MAX).unwrap(), Some("alice".to_string()));
+        assert_eq!(names.record("alice").unwrap().unwrap().texts[0].value, "https://alice.example");
+        assert_eq!(crate::registry::Accounts::new(&state).get(&bob).unwrap().balance, u256::new(9));
+    }
+
     #[test]
     fn send_pays_fees_with_what_the_flags_say() {
         let running = Running::start(true);
         let to = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap().public().address();
         let tipped = send(SendArgs {
             tip: Some(u256::new(7)),
-            ..running.args(TxArgs::Transfer { to, amount: u256::new(9) })
+            ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(9) })
         });
         let starved = send(SendArgs {
             gas_limit: Some(1),
-            ..running.args(TxArgs::Transfer { to, amount: u256::new(9) })
+            ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(9) })
         });
         let node = running.stop();
 

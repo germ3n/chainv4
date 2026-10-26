@@ -111,7 +111,7 @@ snapshot be checked, a light client trust a value with a proof, and later ZK wor
 transitions.
 
 **What it covers:** every column of chain state: `Accounts`, `Contracts`, `Storage`,
-`Namespaces`, `Validators`, `Epochs` and `Tokens` (`STATE_COLUMNS`). Blocks, receipts, the event
+`Namespaces`, `Validators`, `Epochs`, `Tokens` and `Names` (`STATE_COLUMNS`). Blocks, receipts, the event
 index and what finality learned from the network are not chain state, and are left out.
 
 **The tree:** a sparse Merkle tree (`src/db/tree.rs`), binary over 256-bit paths.

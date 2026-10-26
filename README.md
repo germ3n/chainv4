@@ -267,7 +267,7 @@ crash-safe chunks, so a stopped one goes on from where it stopped. See
 ## Sending transactions
 
 ```sh
-chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call|evm-call|bond|unbond|withdraw|slash|approve-signers|withdraw-approval> …
+chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call|evm-call|name|bond|unbond|withdraw|slash|approve-signers|withdraw-approval> …
 ```
 
 `send` looks up the signer's next nonce, signs, posts the transaction to a node, and waits until
@@ -369,6 +369,25 @@ Arguments are `type:value`:
 | `bytes` | `bytes:0x00ff` |
 | `address` | `address:ed25519:0x…`, `address:secp256k1:0x…`, `address:contract:0x…` |
 | `nil` | `nil`, alone: no value, Lua's `nil` |
+
+### Names
+
+On a chain with [names](docs/names.md), the dev chains among them, names such as `alice.dev` point
+at an address. A year costs a price by the name's length, which is burned.
+
+```sh
+chainv4 send name register alice.dev --years 2
+chainv4 send name text alice.dev url https://alice.example
+chainv4 send name subname alice.dev pay --owner ed25519:0x…
+chainv4 send name primary alice.dev
+chainv4 send transfer --to pay.alice.dev --amount 1000
+curl -s localhost:8080/names/alice.dev
+```
+
+`name renew`, `transfer` and `target` change a name its owner holds. A name stops resolving when
+it expires, and after a grace period anyone may register it. Contracts resolve names too:
+`names.resolve` in Lua, `resolve_name` in the SDK, and a precompile in the EVM. The wallet proves
+a name before it pays it.
 
 ### EVM contracts
 

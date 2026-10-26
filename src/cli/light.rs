@@ -212,6 +212,9 @@ fn summary(tx: &Tx) -> String {
         Tx::WithdrawApproval { version } => format!("withdraw approval of signers version {version}"),
         Tx::ApproveChange { version, change } => format!("approve a {} change from version {version}", change.name()),
         Tx::WithdrawChange { version } => format!("withdraw approval of a change from version {version}"),
+        Tx::Name { name, action } => format!("{} the name {name}", action.kind()),
+        Tx::PrimaryName { name: Some(name) } => format!("make {name} the sender's primary name"),
+        Tx::PrimaryName { name: None } => "clear the sender's primary name".to_string(),
     }
 }
 

@@ -13,6 +13,7 @@ use {
     crate::structs::vote::{Checkpoint, Justification, SignedVote},
     crate::registry::contracts::ContractRecord,
     crate::registry::tokens::Token,
+    crate::registry::names::NameAction,
     crate::structs::account::Account,
     crate::structs::address::Address,
     crate::structs::amount::Amount,
@@ -469,7 +470,23 @@ pub fn tx(tx: &Tx) -> Value {
         Tx::WithdrawApproval { version } => json!({ "type": "withdraw_approval", "version": version }),
         Tx::ApproveChange { version, change } => json!({ "type": "approve_change", "version": version, "change": self::change(change) }),
         Tx::WithdrawChange { version } => json!({ "type": "withdraw_change", "version": version }),
+        Tx::Name { name, action } => json!({ "type": "name", "name": name, "action": name_action(action) }),
+        Tx::PrimaryName { name } => json!({ "type": "primary_name", "name": name }),
     }
+}
+
+/// What a name transaction does: its kind, and what it sets.
+pub fn name_action(action: &NameAction) -> Value {
+    let mut value = match action {
+        NameAction::Register { years } | NameAction::Renew { years } => json!({ "years": years }),
+        NameAction::Transfer { to } => json!({ "to": to.to_string() }),
+        NameAction::Target { target } => json!({ "target": target.map(|target| target.to_string()) }),
+        NameAction::Text { key, value } => json!({ "key": key, "value": value }),
+        NameAction::Subname { label, owner } => json!({ "label": label, "owner": owner.to_string() }),
+    };
+    value["type"] = action.kind().into();
+
+    value
 }
 
 /// A change under governance: what it is of, and the new value.
@@ -477,6 +494,7 @@ pub fn change(change: &Change) -> Value {
     match change {
         Change::Consensus(consensus) => json!({ "consensus": crate::cli::genesis::consensus_json(consensus, None) }),
         Change::Bootnodes(bootnodes) => json!({ "bootnodes": bootnodes }),
+        Change::NamePrices(prices) => json!({ "name_prices": prices.iter().map(u256::to_string).collect::<Vec<_>>() }),
     }
 }
 

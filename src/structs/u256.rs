@@ -78,6 +78,42 @@ unsafe impl<'de, C: ConfigCore> SchemaRead<'de, C> for I256Le {
     }
 }
 
+#[document(
+    summary = "Encodes a list of u256 as a list of their 32 little-endian bytes each. Put #[wincode(with = \"U256LeList\")] on any Vec<u256> field.",
+    category = "Primitives",
+    see_also = "U256Le, NamesConfig::prices",
+)]
+pub struct U256LeList;
+
+// SAFETY: both methods defer to the Vec<[u8; 32]> schema, so size_of always matches what write writes.
+unsafe impl<C: wincode::config::Config> SchemaWrite<C> for U256LeList {
+    type Src = Vec<u256>;
+
+    fn size_of(src: &Vec<u256>) -> WriteResult<usize> {
+        <Vec<[u8; 32]> as SchemaWrite<C>>::size_of(&words(src))
+    }
+
+    fn write(writer: impl Writer, src: &Vec<u256>) -> WriteResult<()> {
+        <Vec<[u8; 32]> as SchemaWrite<C>>::write(writer, &words(src))
+    }
+}
+
+// SAFETY: read initializes dst before it returns Ok.
+unsafe impl<'de, C: wincode::config::Config> SchemaRead<'de, C> for U256LeList {
+    type Dst = Vec<u256>;
+
+    fn read(reader: impl Reader<'de>, dst: &mut MaybeUninit<Vec<u256>>) -> ReadResult<()> {
+        let words = <Vec<[u8; 32]> as SchemaRead<'de, C>>::get(reader)?;
+        dst.write(words.into_iter().map(u256::from_le_bytes).collect());
+
+        Ok(())
+    }
+}
+
+fn words(values: &[u256]) -> Vec<[u8; 32]> {
+    values.iter().map(|value| value.to_le_bytes()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use {

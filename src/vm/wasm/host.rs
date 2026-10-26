@@ -38,6 +38,8 @@ pub(super) const NAMES: &[&str] = &[
     "check_layout",
     "emit",
     "refresh_token",
+    "resolve_name",
+    "name_of",
     "abort",
 ];
 
@@ -299,6 +301,32 @@ fn chain_delegate() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "resolve_name",
+    summary = "The address a name resolves to at the block's time, such as alice.dev, with or without the chain's suffix, in any case. Costs 500 fuel, plus 1 per 64 bytes of name. Traps on a chain without names.",
+    params = {
+        name = { ty = "i32", desc = "The name, UTF-8." },
+        len = { ty = "i32", desc = "Its length." },
+        out = { ty = "i32", desc = "Where to write the address: 33 bytes, as sender writes them." },
+    },
+    returns = { ty = "i32", desc = "1 when it resolves, with the address at out; 0 for a name nobody holds, one that expired, or text that is no name." },
+    see_also = "rust/Host::resolve_name",
+)]
+fn chain_resolve_name() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "name_of",
+    summary = "The name an address goes by: its primary name with the chain's suffix, while that name resolves to it. Costs 500 fuel. Traps on a chain without names.",
+    params = { address = { ty = "i32", desc = "Any address: 33 bytes, as sender writes them." } },
+    returns = { ty = "i32", desc = "The name's length, with the name in the result buffer; -1 for none." },
+    see_also = "chain.result_read, rust/Host::name_of",
+)]
+fn chain_name_of() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "check_layout",
     summary = "Whether one contract's code keeps another's storage layout, by the rule Tx::Upgrade holds new code to: what a proxy checks before it points at a new implementation. Costs 2000 fuel.",
     params = {
@@ -370,6 +398,8 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "check_layout", check_layout).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "emit", emit).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "refresh_token", refresh_token).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "resolve_name", resolve_name).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "name_of", name_of).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
 
     linker
@@ -543,6 +573,43 @@ fn transfer(mut caller: Caller<'_, Run>, address: u32, amount: u32) -> Result<u3
 
             Ok(1)
         }
+    }
+}
+
+fn resolve_name(mut caller: Caller<'_, Run>, name: u32, len: u32, out: u32) -> Result<u32> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::NAME + u64::from(len) / cost::COPY_BYTES_PER_FUEL)?;
+    let name = read(&mut caller, name, len)?;
+    // Text that is no name resolves to nothing, as in Lua.
+    let Ok(name) = String::from_utf8(name) else {
+        return Ok(0);
+    };
+
+    match host.resolve_name(&name) {
+        Ok(Some(address)) => {
+            write(&mut caller, out, &address.to_abi())?;
+
+            Ok(1)
+        }
+        Ok(None) => Ok(0),
+        Err(err) => Err(stop(&mut caller, err)),
+    }
+}
+
+fn name_of(mut caller: Caller<'_, Run>, address: u32) -> Result<i32> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::NAME)?;
+    let address = address_at(&mut caller, address)?;
+
+    match host.name_of(&address) {
+        Ok(Some(name)) => {
+            let len = name.len() as i32;
+            caller.data_mut().result = name.into_bytes();
+
+            Ok(len)
+        }
+        Ok(None) => Ok(-1),
+        Err(err) => Err(stop(&mut caller, err)),
     }
 }
 

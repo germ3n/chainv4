@@ -84,6 +84,12 @@ fn held_at(ui: &mut Ui, ctx: &Ctx, address: &Address) {
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, super::scheme(address));
+
+        // The name it goes by, proven: it still resolves to this address.
+        if let Some(name) = ctx.chain.primary(&text) {
+            ui.label(RichText::new(name).color(palette.ink).size(17.0)).on_hover_text("This address's primary name, proven to resolve to it");
+        }
+
         super::address(ui, &palette, &text);
         ui.add_space(6.0);
 

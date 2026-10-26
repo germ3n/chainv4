@@ -19,6 +19,7 @@ use {
     crate::db::{Column, Database, DbError, State, address_key},
     crate::structs::address::Address,
     crate::structs::hash::Hash,
+    crate::registry::names::NameAction,
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
     r#macro::document,
     std::collections::BTreeSet,
@@ -77,6 +78,13 @@ pub fn touched(signed: &SignedTx, status: &TxStatus) -> BTreeSet<Address> {
         Tx::EvmCall { to, .. } => {
             touched.insert(*to);
         }
+        // A name given or pointed at another account shows in that account's history too.
+        Tx::Name { action, .. } => match action {
+            NameAction::Transfer { to } | NameAction::Subname { owner: to, .. } | NameAction::Target { target: Some(to) } => {
+                touched.insert(*to);
+            }
+            _ => {}
+        },
         Tx::Deploy { .. }
         | Tx::Bond { .. }
         | Tx::Unbond { .. }
@@ -85,7 +93,8 @@ pub fn touched(signed: &SignedTx, status: &TxStatus) -> BTreeSet<Address> {
         | Tx::ApproveSigners { .. }
         | Tx::WithdrawApproval { .. }
         | Tx::ApproveChange { .. }
-        | Tx::WithdrawChange { .. } => {}
+        | Tx::WithdrawChange { .. }
+        | Tx::PrimaryName { .. } => {}
     }
 
     if let TxStatus::Deployed(contract) = status {

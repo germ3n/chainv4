@@ -89,6 +89,34 @@ unsafe impl<'de, C: Config> SchemaRead<'de, C> for UnsetList {
     }
 }
 
+#[document(
+    summary = "Encodes any optional value added after chains launched to a type that is hashed but never decoded, such as Genesis: as nothing at all while None, and as a 1 and the value once Some. As Unset, only for a type's last fields.",
+    category = "Chain",
+    see_also = "Unset, Genesis::names",
+)]
+pub struct UnsetOption<T>(std::marker::PhantomData<T>);
+
+// SAFETY: size_of is exactly what write writes: nothing for None, a byte and the encoding for Some.
+unsafe impl<C: Config, T: SchemaWrite<C, Src = T>> SchemaWrite<C> for UnsetOption<T> {
+    type Src = Option<T>;
+
+    fn size_of(src: &Option<T>) -> WriteResult<usize> {
+        match src {
+            Some(value) => Ok(1 + T::size_of(value)?),
+            None => Ok(0),
+        }
+    }
+
+    fn write(mut writer: impl Writer, src: &Option<T>) -> WriteResult<()> {
+        let Some(value) = src else {
+            return Ok(());
+        };
+        <[u8; 1] as SchemaWrite<C>>::write(&mut writer, &[1])?;
+
+        T::write(writer, value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +137,22 @@ mod tests {
         assert_eq!(wincode::serialize(&without).unwrap(), before);
         assert_eq!(wincode::deserialize::<Listed>(&before).unwrap(), without);
         assert_eq!(wincode::deserialize::<Listed>(&wincode::serialize(&with).unwrap()).unwrap(), with);
+    }
+
+    #[derive(SchemaWrite)]
+    struct Optional {
+        first: u32,
+        #[wincode(with = "UnsetOption<String>")]
+        added: Option<String>,
+    }
+
+    #[test]
+    fn an_unset_option_encodes_as_nothing_while_none_and_as_a_one_and_the_value_once_set() {
+        let before = wincode::serialize(&7u32).unwrap();
+        let with = wincode::serialize(&Optional { first: 7, added: Some("dev".to_string()) }).unwrap();
+
+        assert_eq!(wincode::serialize(&Optional { first: 7, added: None }).unwrap(), before);
+        assert_eq!(with, [before, vec![1], wincode::serialize(&"dev".to_string()).unwrap()].concat());
     }
 
     #[derive(SchemaWrite, SchemaRead, PartialEq, Debug)]

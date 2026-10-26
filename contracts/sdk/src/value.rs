@@ -2,7 +2,8 @@
 
 use alloc::{string::String, vec::Vec};
 
-/// An address: its kind and its bytes, 32 of them, or 20 for secp256k1 with the rest zero.
+/// An address: its kind and its bytes, 32 of them, or 20 for secp256k1 and EVM contracts with the
+/// rest zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address {
     pub kind: AddressKind,
@@ -17,6 +18,8 @@ pub enum AddressKind {
     EdBlake = 2,
     /// Ethereum's: 20 bytes of keccak256 of a secp256k1 key.
     Secp256k1 = 3,
+    /// An EVM contract's: the 20 bytes Ethereum's CREATE or CREATE2 gives it.
+    Evm = 4,
 }
 
 impl AddressKind {
@@ -26,14 +29,15 @@ impl AddressKind {
             1 => Some(AddressKind::Contract),
             2 => Some(AddressKind::EdBlake),
             3 => Some(AddressKind::Secp256k1),
+            4 => Some(AddressKind::Evm),
             _ => None,
         }
     }
 
-    /// How many bytes an address of this kind has: 32, or 20 for secp256k1.
+    /// How many bytes an address of this kind has: 32, or 20 for secp256k1 and the EVM.
     pub fn width(self) -> usize {
         match self {
-            AddressKind::Secp256k1 => 20,
+            AddressKind::Secp256k1 | AddressKind::Evm => 20,
             _ => 32,
         }
     }
@@ -82,6 +86,7 @@ impl Address {
             AddressKind::Contract => "contract",
             AddressKind::EdBlake => "edblake",
             AddressKind::Secp256k1 => "secp256k1",
+            AddressKind::Evm => "evm",
         };
         let mut out = String::with_capacity(kind.len() + 67);
         out.push_str(kind);
@@ -100,6 +105,7 @@ impl Address {
             "contract" => AddressKind::Contract,
             "edblake" => AddressKind::EdBlake,
             "secp256k1" => AddressKind::Secp256k1,
+            "evm" => AddressKind::Evm,
             _ => return None,
         };
 

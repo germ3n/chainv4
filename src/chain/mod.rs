@@ -228,6 +228,9 @@ pub struct Genesis {
     #[document(summary = "Where nodes of the chain find their first peers: libp2p addresses, such as /ip4/203.0.113.7/udp/4001/quic-v1, at most 32, which every node dials while it has fewer peers than it wants. Fixed with the chain's id: under governance, Change::Bootnodes replaces them on a live chain, and nodes add their own with --bootnode. Added after chains launched: empty adds nothing to genesis's encoding, so chains from before keep their ids.")]
     #[wincode(with = "crate::structs::unset::UnsetList")]
     pub bootnodes: Vec<String>,
+    #[document(summary = "The name registry: names such as alice.dev, their suffix, their price a year by length, their grace period and the most years ahead they are held; or None for a chain without names, where name transactions fail. Under governance, Change::NamePrices replaces the prices. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<crate::registry::names::NamesConfig>")]
+    pub names: Option<crate::registry::names::NamesConfig>,
 }
 
 impl Hashable for Genesis {}
@@ -486,6 +489,11 @@ fn txs_bytes(txs: &[SignedTx]) -> u64 {
     txs.iter().map(tx_bytes).sum()
 }
 
+/// The dev chains' names, in a build with them.
+fn dev_names() -> Option<crate::registry::names::NamesConfig> {
+    cfg!(feature = "names").then(crate::registry::names::NamesConfig::dev)
+}
+
 /// A million coins at 18 decimals.
 fn dev_funds() -> u256 {
     u256::from(1_000_000u64) * u256::from(10u64).pow(18)
@@ -523,6 +531,7 @@ impl Genesis {
             vote_reward_source: None,
             governance: None,
             bootnodes: Vec::new(),
+            names: dev_names(),
         }
     }
 
@@ -562,6 +571,7 @@ impl Genesis {
             vote_reward_source: None,
             governance: None,
             bootnodes: Vec::new(),
+            names: dev_names(),
         }
     }
 
@@ -754,6 +764,14 @@ impl Genesis {
             return Some(problem);
         }
 
+        if self.names.is_some() && !cfg!(feature = "names") {
+            return Some("names needs a build with the names feature");
+        }
+
+        if let Some(problem) = self.names.as_ref().and_then(crate::registry::names::NamesConfig::problem) {
+            return Some(problem);
+        }
+
         if self.pow_window.is_some() && !matches!(self.consensus, ConsensusConfig::ProofOfWork(_)) {
             return Some("consensus.window is for proof of work alone");
         }
@@ -784,6 +802,7 @@ impl Genesis {
             }),
             fees: self.fees.as_ref().map(|config| Arc::new(config.build())),
             pooled_fees: self.vote_reward_source == Some(VoteRewardSource::Fees),
+            names: self.names.clone().map(Arc::new),
         }
     }
 
@@ -966,7 +985,7 @@ impl Chain {
             return Err(ChainError::BadGenesis(problem.to_string()));
         }
 
-        let vm = Arc::new(Vm::new(&genesis.engines, genesis.hash).map_err(ChainError::MissingEngine)?);
+        let vm = Arc::new(Vm::new(&genesis.engines, genesis.hash).map_err(ChainError::MissingEngine)?.with_names(genesis.names.clone()));
         let block = genesis.block();
         let id = block.id();
         let stored: Option<Hash> = read_value(&*db, Column::Heights, &0u64.to_be_bytes())?;

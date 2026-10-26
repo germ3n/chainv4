@@ -118,6 +118,7 @@ fn context() -> CallContext {
         sender: Address::Ed25519([1; 32]),
         contract: Address::Ed25519([2; 32]),
         value: u256::new(500),
+        time: 0,
     }
 }
 

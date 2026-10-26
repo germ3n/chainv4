@@ -40,6 +40,7 @@ fn rules() -> Rules {
         governance: None,
         fees: Some(Arc::new(FeeConfig::dev().build())),
         pooled_fees: false,
+        names: None,
     }
 }
 

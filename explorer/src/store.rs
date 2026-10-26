@@ -169,6 +169,10 @@ pub struct Store {
     pub events: HashMap<EventQuery, EventList>,
     /// The transactions the address index found touching an address, by the address.
     pub account_txs: HashMap<String, Listing<FoundTx>>,
+    /// Names looked up, by what was searched for.
+    pub names: HashMap<String, crate::model::NameView>,
+    /// The names each address owns.
+    pub owned_names: HashMap<String, Vec<crate::model::OwnedName>>,
 }
 
 impl Store {

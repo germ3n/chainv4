@@ -181,8 +181,36 @@ docker/pow.sh logs                # on the VPS: follow the node's log
    rig. What the workers find pays the VPS's `REWARD_TO`, the same key.
 
 Both mine, so both earn rewards, to the same key. A chain with its own `PROTOCOL` in `.env`
-needs the same `PROTOCOL` set for `join` and `worker`. `SYMBOL` names the coin at `init`, `P2P_PORT`
+needs the same `PROTOCOL` set for `join` and `worker`. `SYMBOL` names the coin at `init`, `NAMES` the
+suffix of its [names](names.md), the symbol in lower case unless set or `none` for none, `P2P_PORT`
 moves the QUIC port, and `docker/pow.sh` alone lists every setting.
+
+### A new chain on the same keys
+
+A genesis is fixed with its chain: what a newer build's genesis adds, such as [names](names.md) or
+the EVM, comes to a running chain only as a new chain. `regenesis` makes one for the keys `init`
+made, so the seed words, the VPS's voting key and the council stay:
+
+```sh
+docker/pow.sh regenesis                 # here: shows what moves aside, and asks for yes
+docker/pow.sh push root@203.0.113.7 -i ~/.ssh/vps
+# on the VPS:
+docker/pow.sh reset                     # stops the node, moves its chain aside in the volume
+docker/pow.sh up
+# here again:
+docker/pow.sh join 203.0.113.7 --gpu
+```
+
+- **What moves aside, kept:** `docker/config/genesis.json`, and `genesis.json` and `chain.db` in
+  `POW_HOME`, each to `.old-` and the time. `reset` moves the VPS's `/data/chain.db` the same
+  way, inside the `chain` volume, and `/data/genesis.json`: the container keeps the genesis it
+  started with there, so a new one in `docker/config` alone would change nothing. Nothing is deleted.
+- **What carries over:** the owner, the voter bonded for it, the council and the coins at genesis,
+  and the finality and governance kinds, unless `--finality` and `--governance` say others. The
+  balances and names of the old chain do not: it is a new chain, from block 0.
+- **Asked first.** Both say what they move and wait for `yes`; `--yes` answers for a script.
+- **Everyone else** on the old chain needs the new genesis, and the wallet's pinned genesis for
+  the node changes: it follows the new chain once you forget the old one in its Settings.
 
 ## Podman
 

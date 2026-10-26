@@ -37,6 +37,11 @@ pub enum Ask {
     /// Events that mention an address, newest first: where it looks on a node with no address
     /// index but an event index.
     Events(String),
+    /// The chain's names: their suffix, prices and grace period, as the node says. Nothing proven
+    /// rests on them but whether a name is in its grace period.
+    Names,
+    /// The names the node says an address owns: where the Names page looks, each one proven.
+    OwnedNames(String),
     /// A fee offer for a signed probe.
     Offer(String),
     /// A signed transaction.
@@ -57,6 +62,8 @@ impl Ask {
             Ask::Tokens => "/tokens?limit=100".to_string(),
             Ask::History(address) => format!("/accounts/{address}/txs?limit=50"),
             Ask::Events(address) => format!("/events?address={address}&limit=50"),
+            Ask::Names => "/names".to_string(),
+            Ask::OwnedNames(address) => format!("/accounts/{address}/names?limit=100"),
             Ask::Offer(_) => "/offer".to_string(),
             Ask::Submit(_) => "/txs".to_string(),
         }

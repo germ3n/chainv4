@@ -3,6 +3,12 @@
 //! fee offer, as `chainv4 send` does, and takes it in. Nothing is signed for real before the
 //! review shows what it costs at most.
 //!
+//! Paid to a name, such as alice.dev, the wallet proves what the name resolves to before it
+//! signs: the name's records, and every one above it, against the tip the light client checked.
+//! The transaction carries the address, so what the review shows is what is paid.
+//!
+//! The Names page hands transactions of its own here, prepared, for the same review and signing.
+//!
 //! A watch-only sender holds no key: its probe signs nothing, which the node never checks, and
 //! once priced the transaction goes to the offline signer as a code, and comes back signed as
 //! another. The sender sends it only once it is the very one it asked for. An account MetaMask
@@ -49,10 +55,24 @@ pub struct SendState {
     /// choice.
     tip: String,
     step: Step,
+    /// A transaction another page made, to review and send instead of the form's.
+    prepared: Option<Prepared>,
     /// The biometric check before a transaction is signed here, while it is under way, and why
     /// the last one failed.
     confirming: Option<Check>,
     confirm_trouble: Option<String>,
+}
+
+/// A transaction another page made, such as registering a name: sent from one of the account's
+/// addresses, shown as what, moving coin of it beside the fee.
+#[derive(Clone, Debug)]
+pub struct Prepared {
+    pub from: Address,
+    pub tx: Tx,
+    pub what: String,
+    /// What it is for, where a transfer shows whom it pays: the name.
+    pub about: String,
+    pub coin: u256,
 }
 
 /// A transaction built and not yet sent.
@@ -61,7 +81,9 @@ struct Draft {
     from: Address,
     /// The key it is signed with, here or on the offline signer.
     signer: PublicKey,
-    to: Address,
+    /// Whom it pays, as shown: an address, a name with the address it resolved to, or what a
+    /// prepared transaction is for.
+    to: String,
     tx: Tx,
     nonce: u64,
     /// The token it sends, as the registry names it, for the offline signer to show.
@@ -91,6 +113,19 @@ enum Step {
 }
 
 impl SendState {
+    /// Sets a transaction another page made to review and send, in place of the form's.
+    pub fn prepare(&mut self, prepared: Prepared) {
+        self.prepared = Some(prepared);
+        self.step = Step::Edit;
+    }
+
+    /// The name the To field holds, if it holds one rather than an address: what to prove.
+    pub fn wanted_name(&self) -> Option<String> {
+        let to = self.to.trim();
+
+        (self.prepared.is_none() && !to.is_empty() && recipient(to).is_none() && !to.contains(':')).then(|| to.to_string())
+    }
+
     /// Takes the node's answer to a pricing or a submission this page asked, and returns the
     /// transaction it sent, once the node took it, for the history to keep.
     pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>, now: u64) -> Option<Sent> {
@@ -108,13 +143,14 @@ impl SendState {
                 let sent = Sent {
                     id: id.clone(),
                     from: draft.from.to_string(),
-                    to: draft.to.to_string(),
+                    to: draft.to.clone(),
                     what: draft.what.clone(),
                     nonce: draft.nonce,
                     at: now,
                 };
                 self.step = Step::Sent { id };
                 self.amount.clear();
+                self.prepared = None;
 
                 Some(sent)
             }
@@ -162,6 +198,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     }
 
     let busy = matches!(state.step, Step::Pricing { .. } | Step::Sending { .. });
+
+    if state.prepared.is_some() {
+        prepared(ui, ctx, state, busy);
+
+        return;
+    }
+
     let addresses = ctx.holder().map(|holder| holder.addresses()).unwrap_or_default();
 
     if !state.from.is_some_and(|from| addresses.contains(&from)) {
@@ -221,10 +264,27 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
         ui.add_space(10.0);
         theme::caps(ui, &palette, "To");
-        ui.add(egui::TextEdit::singleline(&mut state.to).hint_text("ed25519:0x…, or an Ethereum 0x…").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+        ui.add(egui::TextEdit::singleline(&mut state.to).hint_text("ed25519:0x…, an Ethereum 0x…, or a name such as alice.dev").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
 
-        if !state.to.trim().is_empty() && recipient(&state.to).is_none() {
-            ui.colored_label(palette.bad, "Not an address: one starts with its kind, such as ed25519:0x and 32 bytes of hex, or is Ethereum's, 0x and 20 bytes.");
+        match destination(ctx, &state.to) {
+            Destination::Blank | Destination::Address(_) => {}
+            Destination::Named { shown, resolved: Some(resolved) } => match resolved.target() {
+                Some(target) => {
+                    ui.horizontal(|ui| {
+                        super::assurance(ui, &palette, &resolved.assurance);
+                        ui.label(RichText::new(format!("{shown} resolves to {}", format::short(&target.to_string()))).small().color(palette.soft));
+                    });
+                }
+                None => {
+                    ui.colored_label(palette.bad, format!("{shown} resolves to nothing: nobody holds it, it expired, or it points nowhere."));
+                }
+            },
+            Destination::Named { shown, resolved: None } => {
+                ui.label(RichText::new(format!("Proving what {shown} resolves to…")).small().color(palette.muted));
+            }
+            Destination::Bad => {
+                ui.colored_label(palette.bad, "Not an address or a name: an address starts with its kind, such as ed25519:0x and 32 bytes of hex, or is Ethereum's, 0x and 20 bytes; a name is such as alice.dev.");
+            }
         }
 
         ui.add_space(10.0);
@@ -290,9 +350,94 @@ fn paying(ctx: &Ctx, from: Option<&Address>) -> String {
     format!("{} · {hex} · {held}", super::scheme(from))
 }
 
+/// A transaction another page prepared, waiting to be reviewed.
+fn prepared(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, busy: bool) {
+    let palette = *ctx.palette;
+    let Some(prepared) = state.prepared.clone() else {
+        return;
+    };
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "To send");
+        ui.add_space(4.0);
+        theme::fitted(ui, &prepared.what, 26.0, 14.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
+        ui.add_space(8.0);
+        super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &prepared.from.to_string()));
+        super::row(ui, &palette, "For", |ui| {
+            ui.label(RichText::new(&prepared.about).color(palette.ink));
+        });
+
+        if prepared.coin != u256::ZERO {
+            super::row(ui, &palette, "Burned", |ui| {
+                ui.label(ctx.amount(None, &prepared.coin.to_string()));
+            });
+        }
+
+        ui.add_space(12.0);
+
+        if let Step::Failed(why) = &state.step {
+            ui.colored_label(palette.bad, why);
+            ui.add_space(6.0);
+        }
+
+        ui.horizontal(|ui| {
+            if theme::primary(ui, &palette, "Review", !busy).clicked() {
+                state.step = match draft(ctx, state) {
+                    Ok((draft, body)) => {
+                        let ask = Ask::Offer(body);
+                        ctx.node.ask(ask.clone());
+
+                        Step::Pricing { draft, ask }
+                    }
+                    Err(why) => Step::Failed(why),
+                };
+            }
+
+            if theme::quiet(ui, &palette, "Cancel").clicked() {
+                state.prepared = None;
+                state.step = Step::Edit;
+                *ctx.page = Page::Names;
+            }
+
+            if busy {
+                ui.spinner();
+            }
+        });
+    });
+}
+
+/// Whom the To field names.
+enum Destination {
+    Blank,
+    Address(Address),
+    /// A name, as shown with the suffix, and what was proven of it so far.
+    Named { shown: String, resolved: Option<crate::chain::Resolved> },
+    Bad,
+}
+
+fn destination(ctx: &Ctx, text: &str) -> Destination {
+    let text = text.trim();
+
+    if text.is_empty() {
+        return Destination::Blank;
+    }
+
+    if let Some(address) = recipient(text) {
+        return Destination::Address(address);
+    }
+
+    match &ctx.chain.names {
+        Some(names) if !text.contains(':') && chainv4::registry::names::name_problem(&names.strip(text)).is_none() => Destination::Named {
+            shown: names.display(&names.strip(text)),
+            resolved: ctx.chain.resolve(text),
+        },
+        _ => Destination::Bad,
+    }
+}
+
 /// The address to send to, as typed: with its kind, or an Ethereum one as Ethereum writes it, 0x
 /// and 40 hex digits.
-fn recipient(text: &str) -> Option<Address> {
+pub(super) fn recipient(text: &str) -> Option<Address> {
     let text = text.trim();
 
     match text.len() == 42 && text.starts_with("0x") {
@@ -324,7 +469,21 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
     let signer = holder.public(&from).ok_or("that address is not this account's")?;
     let address = from.to_string();
     let account = ctx.chain.account(&address).ok_or("the address is not proven yet: wait for the light client")?;
-    let to = recipient(&state.to).ok_or("the address to send to does not read")?;
+
+    if let Some(prepared) = &state.prepared {
+        return finish(ctx, state, from, signer, prepared.tx.clone(), prepared.coin, None, prepared.about.clone(), prepared.what.clone(), account.value.nonce);
+    }
+
+    let (to, shown) = match destination(ctx, &state.to) {
+        Destination::Address(address) => (address, address.to_string()),
+        Destination::Named { shown, resolved: Some(resolved) } => {
+            let target = resolved.target().ok_or(format!("{shown} resolves to nothing"))?;
+
+            (target, format!("{shown} · {target}"))
+        }
+        Destination::Named { shown, resolved: None } => return Err(format!("{shown} is not proven yet: wait a moment")),
+        Destination::Blank | Destination::Bad => return Err("the address to send to does not read".to_string()),
+    };
     let (balance, decimals, symbol) = available(ctx, state.token.as_deref(), &address);
     let units = format::parse_units(&state.amount, decimals).ok_or(format!("the amount does not read as {symbol}, with at most {decimals} decimals"))?;
     let units = u256::from_str_radix(&units, 10).map_err(|_| "the amount is too large".to_string())?;
@@ -352,7 +511,17 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
             (tx, u256::ZERO, Some(Shown { symbol: symbol.clone(), decimals }))
         }
     };
-    let nonce = next_nonce(account.value.nonce, &ctx.settings.sent, &address, ctx.now);
+    let what = format::amount(&units.to_string(), decimals, &symbol);
+
+    finish(ctx, state, from, signer, tx, coin, token, shown, what, account.value.nonce)
+}
+
+/// The draft of a transaction, and the body of POST /offer for its probe, at the next nonce.
+#[allow(clippy::too_many_arguments)]
+fn finish(ctx: &Ctx, state: &SendState, from: Address, signer: PublicKey, tx: Tx, coin: u256, token: Option<Shown>, to: String, what: String, proven_nonce: u64) -> Result<(Draft, String), String> {
+    let holder = ctx.holder().ok_or("there is no account to send from")?;
+    let address = from.to_string();
+    let nonce = next_nonce(proven_nonce, &ctx.settings.sent, &address, ctx.now);
     let probe = match holder.key(&from) {
         Some(key) => SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, key),
         None => airgap::probe(tx.clone(), nonce, signer),
@@ -371,7 +540,7 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
         tx,
         nonce,
         token,
-        what: format::amount(&units.to_string(), decimals, &symbol),
+        what,
         coin,
     };
 
@@ -409,7 +578,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
         theme::fitted(ui, &draft.what, 34.0, 16.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
         ui.add_space(8.0);
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &draft.from.to_string()));
-        super::row(ui, &palette, "To", |ui| super::address(ui, &palette, &draft.to.to_string()));
+        super::row(ui, &palette, "To", |ui| super::address(ui, &palette, &draft.to));
         super::row(ui, &palette, "Fee, at most", |ui| {
             ui.label(ctx.amount(None, &most.to_string()))
                 .on_hover_text(format!("{} gas at up to {} per gas; what it does not use is refunded", fee.gas_limit, ctx.amount(None, &fee.max_price.to_string())));
@@ -524,7 +693,7 @@ fn offline(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Sign it on the signer");
-        ui.label(RichText::new(format!("{} to {}: on the offline signer, open Sign and read this code.", draft.what, format::short(&draft.to.to_string()))).color(palette.soft));
+        ui.label(RichText::new(format!("{} to {}: on the offline signer, open Sign and read this code.", draft.what, format::short(&draft.to))).color(palette.soft));
         ui.add_space(10.0);
         super::code(ui, &palette, text);
         ui.add_space(14.0);
@@ -593,7 +762,7 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         return;
     }
 
-    let waiting = format!("{} to {}: MetaMask shows each field to check before you sign.", draft.what, format::short(&draft.to.to_string()));
+    let waiting = format!("{} to {}: MetaMask shows each field to check before you sign.", draft.what, format::short(&draft.to));
     let mut back = false;
 
     theme::card(ui, &palette, |ui| {
@@ -643,6 +812,7 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, id: &str) {
             if theme::primary(ui, &palette, "Send another", true).clicked() {
                 state.step = Step::Edit;
             }
+
 
             if theme::quiet(ui, &palette, "Activity").clicked() {
                 *ctx.page = Page::Activity;

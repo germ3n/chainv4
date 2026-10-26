@@ -22,6 +22,7 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Contracts](contracts.md) | The Lua and WebAssembly engines, with the EVM on its own page, fuel, the host API, lifecycle hooks, calls and proxies. |
 | [EVM](evm.md) | Solidity contracts on revm: addresses and aliases, deploying, calling and reading, gas, logs and reverts, and the example counter. |
 | [Contract storage](contract-storage.md) | A guide to how contracts keep state: plain storage, namespaces, the own space, layouts with key kinds and units that upgrades must keep, and moving a contract between engines, with a worked example. |
+| [Names](names.md) | Names such as alice.dev: registering for years at a price by length, burned, records, subnames, primary names, expiry and grace, and prices changed by governance. |
 | [Token standard](token-standard.md) | The interface every token contract follows, and the registry that lists them. |
 | [Storage](storage.md) | The database, its columns, state layers, undo records and scans. |
 | [Node and network](node.md) | The node loop, the mempool, peer-to-peer networking, sync, and syncing from a snapshot. |

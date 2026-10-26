@@ -46,5 +46,9 @@ unsafe extern "C" {
     pub fn emit(name: *const u8, name_len: u32, data: *const u8, data_len: u32);
     /// Asks the token registry to ask this contract's name, symbol and decimals again.
     pub fn refresh_token();
+    /// 1 when the name resolves, with its 33-byte address written to out; 0 when it does not.
+    pub fn resolve_name(name: *const u8, len: u32, out: *mut u8) -> u32;
+    /// The primary name's length, with the name in the result buffer, or -1 for none.
+    pub fn name_of(address: *const u8) -> i32;
     pub fn abort(message: *const u8, len: u32) -> !;
 }

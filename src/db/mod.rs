@@ -90,6 +90,9 @@ pub enum Column {
     #[document(summary = "The address index, for a node that keeps one: each transaction under every address it touches, newest first.")]
     #[wincode(tag = 18)]
     Addresses,
+    #[document(summary = "The name registry: each name's record by name, and each account's primary name by address.")]
+    #[wincode(tag = 19)]
+    Names,
 }
 
 impl Hashable for Column {
@@ -97,7 +100,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 19] = [
+    pub const ALL: [Column; 20] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -117,6 +120,7 @@ impl Column {
         Column::Headers,
         Column::Light,
         Column::Addresses,
+        Column::Names,
     ];
 
     #[document(
@@ -144,6 +148,7 @@ impl Column {
             Column::Headers => "headers",
             Column::Light => "light",
             Column::Addresses => "addresses",
+            Column::Names => "names",
         }
     }
 }
