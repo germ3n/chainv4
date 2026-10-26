@@ -39,7 +39,7 @@ ehttp = { version = "0.7.2", features = ["streaming"] }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 js-sys = "0.3.85"
 wasm-bindgen = "0.2.108"
-web-sys = { version = "0.3.85", features = ["Window", "Navigator", "CredentialsContainer"] }
+web-sys = { version = "0.3.85", features = ["Window", "Navigator", "CredentialsContainer", "Location"] }
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
 
 # Biometrics on macOS: Touch ID through LocalAuthentication, and the secret in the Keychain.

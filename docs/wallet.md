@@ -443,8 +443,10 @@ from `wallet/extension/`:
 - **Storage** is the extension's own `localStorage`, apart from the web app's at any node: wallets
   made in one are not in the other, and removing the extension deletes its wallets. Keep the words.
 
-**Biometrics** are a passkey's here too, made for the extension's own origin, which browsers
-support unevenly: where a browser refuses, the password stays.
+**Biometrics** are a passkey's here too, made for the extension's own origin. Firefox refuses
+WebAuthn to extension pages ("The operation is insecure"), so in its extension the wallet offers
+no biometrics and the password stays; Chrome's may allow them. A browser that refuses them anywhere
+else gets the same plain message rather than its own.
 
 **CI:** `.github/workflows/extension.yml` builds both on every push to master, keeps the zips as
 artifacts, and attaches them to a `v*` tag's release.

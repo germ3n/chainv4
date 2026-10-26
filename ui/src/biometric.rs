@@ -395,6 +395,13 @@ mod web {
     }
 
     pub(super) fn availability() -> Availability {
+        // Firefox refuses WebAuthn to extension pages, as a SecurityError.
+        let protocol = web_sys::window().and_then(|window| window.location().protocol().ok()).unwrap_or_default();
+
+        if protocol == "moz-extension:" {
+            return Availability::Unavailable("Firefox does not let extensions use passkeys".to_string());
+        }
+
         match credentials() {
             Some(_) => Availability::Ready(Kind::Passkey),
             None => Availability::Unavailable("this browser has no passkeys, or the page is not served over HTTPS".to_string()),
@@ -405,6 +412,7 @@ mod web {
     fn failure(err: JsValue) -> Failure {
         match get(&err, "name").as_string().as_deref() {
             Some("NotAllowedError" | "AbortError") => Failure::Canceled,
+            Some("SecurityError") => Failure::Failed("this browser does not allow passkeys here: the page must be served over HTTPS, and some browsers refuse them to extensions".to_string()),
             _ => Failure::Failed(get(&err, "message").as_string().unwrap_or_else(|| format!("{err:?}"))),
         }
     }
