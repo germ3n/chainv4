@@ -79,6 +79,7 @@ pub fn of(tx: &TxView, outcome: Option<&Outcome>) -> Vec<Hop> {
 
             ("name", format!("{} ({action})", field("name")), String::new(), "0".to_string())
         }
+        "ethereum" => ("Ethereum", field("to"), String::new(), field("value")),
         "primary_name" => ("primary name", tx.tx.get("name").and_then(Value::as_str).unwrap_or("(cleared)").to_string(), String::new(), "0".to_string()),
         other => (other, "?".to_string(), String::new(), "0".to_string()),
     };

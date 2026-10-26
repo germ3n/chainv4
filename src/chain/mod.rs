@@ -2174,6 +2174,12 @@ impl Chain {
             let tx_id = tx.id(self.hash);
             layer.put_value(Column::Receipts, id_key(&tx_id), &record);
 
+            // Ethereum's tools find a transaction by the keccak256 of its signed bytes.
+            #[cfg(feature = "ethereum")]
+            if let crate::structs::tx::Tx::Ethereum { raw } = &tx.tx {
+                layer.put_value(Column::Ethereum, crate::crypto::ethereum::tx_hash(raw).to_vec(), &tx_id);
+            }
+
             // Blocks below an index's low end wait for catch_up_index, or were dropped.
             for kind in IndexKind::ALL {
                 if self.index_window(kind).is_some_and(|window| height >= window.from) {
@@ -2639,6 +2645,16 @@ pub fn stored_on_main_chain(db: &dyn Read, block: &Block) -> Result<bool, DbErro
 )]
 pub fn stored_receipt(db: &dyn Read, tx: &Hash) -> Result<Option<TxReceipt>, DbError> {
     read_value(db, Column::Receipts, &id_key(tx))
+}
+
+#[document(
+    summary = "The chainv4 id of the Ethereum-signed transaction whose signed bytes hash to this keccak256, once a block holding it ran here: on the main chain or a branch, which its receipt says.",
+    category = "Chain",
+    see_also = "Tx::Ethereum, stored_receipt",
+)]
+#[cfg(feature = "ethereum")]
+pub fn stored_ethereum_tx(db: &dyn Read, hash: &[u8; 32]) -> Result<Option<Hash>, DbError> {
+    read_value(db, Column::Ethereum, hash)
 }
 
 #[document(

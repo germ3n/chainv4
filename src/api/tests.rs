@@ -1242,6 +1242,139 @@ fn names_are_looked_up_by_name_and_accounts_show_their_primary_one() {
     assert_eq!(request(address, "GET", &format!("/accounts/{me}"), "").2.get("name"), None);
 }
 
+#[cfg(feature = "ethereum")]
+#[test]
+fn ethereum_json_rpc_answers_as_ethereums_tools_ask() {
+    use crate::crypto::ethereum::{EthereumKind, EthereumTx, chain_id, tx_hash};
+    use crate::crypto::keypair::PrivateKey;
+
+    let authority = DevAuthority::dev_keypair();
+    let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let genesis = Genesis::dev_authority(authority.public());
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let secret = [0x46; 32];
+    let sender = Keypair::from_private(PrivateKey::Secp256k1(secret)).public().address();
+    let Address::Secp256k1(from) = sender else { unreachable!() };
+    let chain_id = chain_id(&chain.genesis());
+    let ethereum = |nonce: u64, to: Option<[u8; 20]>, input: Vec<u8>| {
+        EthereumTx {
+            kind: EthereumKind::DynamicFee,
+            chain_id,
+            nonce,
+            max_price: u256::from(10_000_000_000u64),
+            tip: u256::ZERO,
+            gas_limit: 3_000_000,
+            to,
+            value: u256::ZERO,
+            input,
+            access_list: Vec::new(),
+            signature: [0; 64],
+            parity: 0,
+        }
+        .signed(&secret)
+        .encode()
+    };
+    let word = |value: u64| crate::structs::u256::u256::from(value).to_be_bytes().to_vec();
+    let selector = |signature: &str| crate::crypto::secp256k1::keccak(signature.as_bytes())[..4].to_vec();
+    let init = [from_hex(include_str!("../../contracts/evm/Counter.bin").trim()).unwrap(), word(5)].concat();
+    let counter = crate::vm::evm::create_address(&sender, 0);
+    let Address::Evm(counter_bytes) = counter else { unreachable!() };
+    let deploy = ethereum(0, None, init);
+    let bump = ethereum(1, Some(counter_bytes), [selector("bump(uint256)"), word(3)].concat());
+    let fund = SignedTx::sign(
+        Tx::Transfer { from: authority.public().address(), to: sender, amount: Amount::U128(10u128.pow(21)) },
+        0,
+        FeeOffer { gas_limit: 100_000, max_price: u256::from(10_000_000_000u64), tip: u256::ZERO },
+        &authority,
+    );
+    let blocks = [vec![fund], vec![SignedTx::from_ethereum(deploy.clone()).unwrap()], vec![SignedTx::from_ethereum(bump.clone()).unwrap()]];
+
+    for txs in blocks {
+        let now = chain.tip().timestamp + SLOT;
+        let mut block = chain.build(txs, Vec::new(), producer.address(&[]), now).unwrap();
+        block.seal = producer.seal(&block.header).unwrap();
+        chain.import(&block, now).unwrap();
+    }
+
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let rpc = |method: &str, params: Value| {
+        let (status, _, answer) = request(address, "POST", "/rpc", &json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params }).to_string());
+        assert_eq!((status, answer["id"].clone()), (200, json!(7)), "{answer}");
+
+        answer
+    };
+    let hex = |bytes: &[u8]| to_hex(bytes);
+
+    assert_eq!(rpc("eth_chainId", json!([]))["result"], format!("{chain_id:#x}"));
+    assert_eq!(rpc("net_version", json!([]))["result"], chain_id.to_string());
+    assert_eq!(rpc("eth_blockNumber", json!([]))["result"], "0x3");
+    assert_eq!(rpc("eth_getTransactionCount", json!([hex(&from), "latest"]))["result"], "0x2");
+    assert_eq!(rpc("eth_getStorageAt", json!([hex(&counter_bytes), "0x0", "latest"]))["result"], hex(&word(8)), "five and three");
+    assert!(rpc("eth_getCode", json!([hex(&counter_bytes), "latest"]))["result"].as_str().unwrap().len() > 100);
+    assert_eq!(rpc("eth_getCode", json!([hex(&from), "latest"]))["result"], "0x", "an account has none");
+
+    // The deploy's receipt, by the keccak256 of its bytes, and the bump's log.
+    let receipt = rpc("eth_getTransactionReceipt", json!([hex(&tx_hash(&deploy))]))["result"].clone();
+
+    assert_eq!((receipt["status"].clone(), receipt["contractAddress"].clone()), (json!("0x1"), json!(hex(&counter_bytes))));
+    assert_eq!(receipt["from"], hex(&from));
+
+    let bumped = rpc("eth_getTransactionReceipt", json!([hex(&tx_hash(&bump))]))["result"].clone();
+    let log = &bumped["logs"][0];
+
+    assert_eq!(log["address"], hex(&counter_bytes));
+    assert_eq!(log["topics"][0], hex(&crate::crypto::secp256k1::keccak(b"Bumped(address,uint256)")));
+    assert_eq!(log["data"], hex(&word(8)));
+    assert_eq!(rpc("eth_getTransactionReceipt", json!([hex(&[9; 32])]))["result"], Value::Null, "nothing by that hash");
+
+    let tx = rpc("eth_getTransactionByHash", json!([hex(&tx_hash(&bump))]))["result"].clone();
+
+    assert_eq!((tx["nonce"].clone(), tx["to"].clone(), tx["type"].clone()), (json!("0x1"), json!(hex(&counter_bytes)), json!("0x2")));
+
+    let block = rpc("eth_getBlockByNumber", json!(["0x3", false]))["result"].clone();
+
+    assert_eq!(block["transactions"], json!([hex(&tx_hash(&bump))]));
+    assert_eq!(rpc("eth_getBlockByNumber", json!(["0x1", false]))["result"]["transactions"], json!([]), "the native transfer is not listed");
+    assert_eq!(rpc("eth_getBlockByHash", json!([block["hash"], true]))["result"]["transactions"][0]["hash"], hex(&tx_hash(&bump)));
+
+    let logs = rpc("eth_getLogs", json!([{ "fromBlock": "0x0", "toBlock": "latest", "address": hex(&counter_bytes) }]))["result"].clone();
+
+    assert_eq!(logs.as_array().unwrap().len(), 1);
+    assert_eq!(rpc("eth_getLogs", json!([{ "fromBlock": "0x0", "topics": [hex(&[0; 32])] }]))["result"], json!([]));
+
+    // Calls: what count() returns, and a revert with its reason and bytes.
+    let call = |input: Vec<u8>| json!([{ "from": hex(&from), "to": hex(&counter_bytes), "data": hex(&input) }, "latest"]);
+
+    assert_eq!(rpc("eth_call", call(selector("count()")))["result"], hex(&word(8)));
+
+    let reverted = rpc("eth_call", call([selector("bump(uint256)"), word(0)].concat()));
+
+    assert_eq!(reverted["error"]["code"], 3);
+    assert_eq!(reverted["error"]["message"], "execution reverted: nothing to add");
+    assert!(reverted["error"]["data"].as_str().unwrap().starts_with("0x08c379a0"), "Error(string), as Solidity encodes it");
+
+    let estimate = rpc("eth_estimateGas", call([selector("bump(uint256)"), word(1)].concat()))["result"].as_str().unwrap().to_string();
+
+    assert!(u64::from_str_radix(&estimate[2..], 16).unwrap() > 21_000, "{estimate}");
+    assert!(rpc("eth_getBalance", json!([hex(&from), "0x1"]))["error"]["message"].as_str().unwrap().contains("latest"), "no state of old blocks");
+
+    // Sending: one for this chain goes to the node; one for another is refused.
+    let next = ethereum(2, Some([5; 20]), Vec::new());
+
+    assert_eq!(rpc("eth_sendRawTransaction", json!([hex(&next)]))["result"], hex(&tx_hash(&next)));
+
+    let elsewhere = EthereumTx { chain_id: chain_id + 1, ..crate::crypto::ethereum::decode(&next).unwrap() }.signed(&secret).encode();
+
+    assert!(rpc("eth_sendRawTransaction", json!([hex(&elsewhere)]))["error"]["message"].as_str().unwrap().contains("not this one"));
+    assert_eq!(rpc("eth_nope", json!([]))["error"]["code"], -32601);
+
+    // A batch, answered in order.
+    let (_, _, batch) = request(address, "POST", "/rpc", r#"[{"jsonrpc":"2.0","id":1,"method":"eth_chainId"},{"jsonrpc":"2.0","id":2,"method":"eth_syncing"}]"#);
+
+    assert_eq!((batch[0]["id"].clone(), batch[1]["result"].clone()), (json!(1), json!(false)));
+}
+
 #[test]
 fn pages_from_allowed_origins_may_call_the_api() {
     let db = Arc::new(MemoryDb::default());

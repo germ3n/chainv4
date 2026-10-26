@@ -604,7 +604,7 @@ fn run(
         }
         #[cfg(feature = "evm")]
         Tx::Deploy { code: crate::structs::code::Code::Evm(init) } if vm.runs_evm() => {
-            evm(layer, signed, sender, rules, limits, context, crate::vm::evm::EvmAction::Create(init.clone()))
+            evm(layer, signed, sender, rules, limits, context, crate::vm::evm::EvmAction::Create { init: init.clone(), value: u256::ZERO }, &[])
         }
         #[cfg(feature = "evm")]
         Tx::EvmCall { to, value, input } if vm.runs_evm() => evm(
@@ -615,8 +615,23 @@ fn run(
             limits,
             context,
             crate::vm::evm::EvmAction::Call { to: *to, value: value.to_u256(), input: input.clone() },
+            &[],
         ),
-        Tx::EvmCall { .. } => (Err(Failure::EngineNotAllowed(Engine::Evm)), Contracted::default()),
+        // An Ethereum transaction runs as Ethereum runs it: a call, or a create when it has no to.
+        #[cfg(feature = "evm")]
+        Tx::Ethereum { raw } if vm.runs_evm() => {
+            // verify_on read it before any block runs it; a dry run's probe may not have been.
+            let Ok(ethereum) = crate::crypto::ethereum::decode(raw) else {
+                return (Err(Failure::Contract(VmError::Runtime("not an Ethereum transaction".to_string()))), Contracted::default());
+            };
+            let action = match ethereum.to {
+                None => crate::vm::evm::EvmAction::Create { init: ethereum.input, value: ethereum.value },
+                Some(to) => crate::vm::evm::EvmAction::Call { to: Address::Evm(to), value: ethereum.value, input: ethereum.input },
+            };
+
+            evm(layer, signed, sender, rules, limits, context, action, &ethereum.access_list)
+        }
+        Tx::EvmCall { .. } | Tx::Ethereum { .. } => (Err(Failure::EngineNotAllowed(Engine::Evm)), Contracted::default()),
         Tx::Upgrade { code, .. } | Tx::Deploy { code } if code.engine() == Engine::Evm && !vm.runs_evm() => {
             (Err(Failure::EngineNotAllowed(Engine::Evm)), Contracted::default())
         }
@@ -772,6 +787,7 @@ fn run(
 /// Runs an EVM create or call: gas is the chain's gas one for one, so it burns fuel at the chain's
 /// rate, and the EVM may use as much as the fuel left allows.
 #[cfg(feature = "evm")]
+#[allow(clippy::too_many_arguments)]
 fn evm(
     layer: &Arc<State>,
     signed: &SignedTx,
@@ -780,6 +796,7 @@ fn evm(
     limits: Limits,
     context: &BlockContext,
     action: crate::vm::evm::EvmAction,
+    access_list: &[crate::crypto::ethereum::AccessItem],
 ) -> (Result<Effect, Failure>, Contracted) {
     use crate::vm::evm::{self, EvmBlock, EvmReturned};
 
@@ -792,7 +809,7 @@ fn evm(
         names: rules.names.as_deref().cloned(),
     };
 
-    match evm::run(layer, &sender, signed.nonce, action, limits.fuel / fuel_per_gas, limits.memory as u64, block) {
+    match evm::run(layer, &sender, signed.nonce, action, access_list, limits.fuel / fuel_per_gas, limits.memory as u64, block) {
         Ok(ran) => {
             let contracted = Contracted {
                 fuel_used: ran.gas_used.saturating_mul(fuel_per_gas),

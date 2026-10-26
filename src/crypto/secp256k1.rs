@@ -91,6 +91,37 @@ pub fn recover(hash: &[u8; 32], signature: &[u8; 65]) -> Option<([u8; 33], [u8; 
     Some((key.to_sec1_point(true).as_bytes().try_into().ok()?, signed.normalize_s().to_bytes().into()))
 }
 
+/// Signs a 32-byte hash as Ethereum's transactions are signed: r then s, s always low, and the
+/// parity of the point r is the x of, which recovers the key with them.
+///
+/// Panics on bytes that are not a private key, which a PrivateKey never holds.
+pub fn sign_recoverable(secret: &[u8; 32], hash: &[u8; 32]) -> ([u8; 64], u8) {
+    let key = SigningKey::from_slice(secret).expect("a secp256k1 private key is a valid scalar");
+    let (signature, id) = key.sign_prehash_recoverable(hash);
+    let low = signature.normalize_s();
+    // Making s low negates the point, which flips its parity.
+    let parity = (id.to_byte() & 1) ^ u8::from(low != signature);
+
+    (low.to_bytes().into(), parity)
+}
+
+/// The public key that made a signature over a 32-byte hash, from r, s and the parity, as
+/// Ethereum's transactions carry them: None for one that recovers none, and for a high s, which
+/// Ethereum refuses so that no signature can be reshaped into a second one.
+pub fn recover_strict(hash: &[u8; 32], signature: &[u8; 64], parity: u8) -> Option<[u8; 33]> {
+    if parity > 1 {
+        return None;
+    }
+
+    let mut full = [0; 65];
+    full[..64].copy_from_slice(signature);
+    full[64] = parity;
+    let (key, _) = recover(hash, &full)?;
+
+    // verify_hash refuses a high s, which recover made low.
+    verify_hash(&key, hash, signature).then_some(key)
+}
+
 /// Whether 33 bytes are a compressed point on the curve.
 pub fn valid_key(key: &[u8; 33]) -> bool {
     VerifyingKey::from_sec1_bytes(key).is_ok()

@@ -175,6 +175,11 @@ fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         },
         (Tx::PrimaryName { name: Some(name) }, _) => format!("Made {name} the primary name"),
         (Tx::PrimaryName { name: None }, _) => "Cleared the primary name".to_string(),
+        (Tx::Ethereum { .. }, CommittedOutcome::Deployed(contract)) => format!("Deployed {} from an Ethereum wallet", format::short(&contract.to_string())),
+        (Tx::Ethereum { raw }, _) => match chainv4::crypto::ethereum::decode(raw).ok().and_then(|ethereum| ethereum.to) {
+            Some(to) => format!("Sent from an Ethereum wallet to {}", format::short(&chainv4::structs::hex::to_hex(&to))),
+            None => "Deploy from an Ethereum wallet".to_string(),
+        },
     }
 }
 

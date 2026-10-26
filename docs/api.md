@@ -79,6 +79,8 @@ Each summary has:
 - `approve_change`, with its `version` and `change`, which holds the new `consensus` as a genesis
   file writes one, the new `bootnodes`, or the new `name_prices` as decimal strings, and
   `withdraw_change`;
+- `ethereum`, with its signed bytes as `raw`, its Ethereum `hash`, and what they say: `kind`, 0, 1
+  or 2, `chain_id`, `to`, `value` and `input`;
 - `name`, with the `name`, without the suffix, and its `action`: a `type` of `register` or `renew`
   with `years`, `transfer` with `to`, `target` with `target`, `text` with `key` and `value`, or
   `subname` with `label` and `owner`; and `primary_name`, with the `name` or `null`.
@@ -325,6 +327,14 @@ transaction's events (`position`).
 - `catching_up_to` is the height the node is still moving that to, or `null` once it is there.
   It is below `indexed_from` while the node indexes older blocks, and briefly above it on a
   `latest-N` window, as the oldest block leaves.
+
+### `POST /rpc`
+
+Ethereum's JSON-RPC, on a node with the `ethereum` feature: one request or a batch, each answered
+with status 200 and its result or error inside, as JSON-RPC does. `eth_chainId`, balances, nonces,
+code and storage, `eth_call` and `eth_estimateGas`, fees, `eth_sendRawTransaction`, transactions
+and receipts by their keccak hash, blocks, and `eth_getLogs`. Only the latest state is kept. See
+[Ethereum's tools](ethereum.md#json-rpc).
 
 ### `GET /names`
 

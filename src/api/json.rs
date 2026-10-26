@@ -472,7 +472,28 @@ pub fn tx(tx: &Tx) -> Value {
         Tx::WithdrawChange { version } => json!({ "type": "withdraw_change", "version": version }),
         Tx::Name { name, action } => json!({ "type": "name", "name": name, "action": name_action(action) }),
         Tx::PrimaryName { name } => json!({ "type": "primary_name", "name": name }),
+        Tx::Ethereum { raw } => ethereum(raw),
     }
+}
+
+/// An Ethereum-signed transaction: its bytes and hash, and what they say.
+fn ethereum(raw: &[u8]) -> Value {
+    let mut value = json!({ "type": "ethereum", "raw": to_hex(raw) });
+
+    #[cfg(feature = "secp256k1")]
+    {
+        value["hash"] = to_hex(&crate::crypto::ethereum::tx_hash(raw)).into();
+    }
+
+    if let Ok(ethereum) = crate::crypto::ethereum::decode(raw) {
+        value["kind"] = ethereum.kind.number().into();
+        value["chain_id"] = ethereum.chain_id.into();
+        value["to"] = ethereum.to.map(|to| Address::Evm(to).to_string()).into();
+        value["value"] = ethereum.value.to_string().into();
+        value["input"] = to_hex(&ethereum.input).into();
+    }
+
+    value
 }
 
 /// What a name transaction does: its kind, and what it sets.

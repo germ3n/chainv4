@@ -78,6 +78,12 @@ pub fn touched(signed: &SignedTx, status: &TxStatus) -> BTreeSet<Address> {
         Tx::EvmCall { to, .. } => {
             touched.insert(*to);
         }
+        // Whom it pays may be an EVM contract or an Ethereum account: listed under both.
+        Tx::Ethereum { raw } => {
+            if let Some(to) = crate::crypto::ethereum::decode(raw).ok().and_then(|ethereum| ethereum.to) {
+                touched.extend([Address::Evm(to), Address::Secp256k1(to)]);
+            }
+        }
         // A name given or pointed at another account shows in that account's history too.
         Tx::Name { action, .. } => match action {
             NameAction::Transfer { to } | NameAction::Subname { owner: to, .. } | NameAction::Target { target: Some(to) } => {

@@ -47,6 +47,8 @@ pub enum VerifyError {
     NotConflicting,
     #[document(summary = "A name transaction whose name, or what it sets, could never be: see name_problem and NameAction::problem.")]
     BadName,
+    #[document(summary = "An Ethereum-signed transaction that does not read, is for another chain, or whose nonce, fee offer or signer are not what its signed bytes say.")]
+    BadEthereum,
 }
 
 impl fmt::Display for VerifyError {
@@ -63,6 +65,7 @@ impl fmt::Display for VerifyError {
             VerifyError::BadVote => write!(f, "a vote's target must come after its source"),
             VerifyError::NotConflicting => write!(f, "the votes are not conflicting votes by one voter"),
             VerifyError::BadName => write!(f, "not a name, or not what a name holds: labels of a to z, 0 to 9 and hyphens, the last at least 3 long"),
+            VerifyError::BadEthereum => write!(f, "not an Ethereum transaction for this chain, as signed"),
         }
     }
 }

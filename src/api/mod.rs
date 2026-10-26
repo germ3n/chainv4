@@ -48,6 +48,8 @@ use {
 use axum::response::sse::{Event, KeepAlive, Sse};
 
 mod json;
+#[cfg(feature = "ethereum")]
+mod rpc;
 
 /// How many blocks a listing returns when the client does not say.
 const DEFAULT_PAGE: u64 = 20;
@@ -250,6 +252,8 @@ fn router(api: Api) -> Router {
         .route("/call", post(call));
     #[cfg(feature = "governance")]
     let router = router.route("/governance", get(governance));
+    #[cfg(feature = "ethereum")]
+    let router = router.route("/rpc", post(ethereum_rpc));
     #[cfg(feature = "names")]
     let router = router.route("/names", get(names)).route("/names/{name}", get(name)).route("/accounts/{address}/names", get(account_names));
     #[cfg(feature = "stream")]
@@ -433,6 +437,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
 
     Ok(Json(json!({
         "genesis": genesis.id().to_string(),
+        "chain_id": crate::crypto::ethereum::chain_id(&genesis.id()),
         "tip": tip.id().to_string(),
         "height": tip.header.height,
         "timestamp": tip.header.timestamp,
@@ -812,6 +817,12 @@ async fn account(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answe
     }
 
     Ok(Json(answer))
+}
+
+/// Ethereum's JSON-RPC: answers come back with status 200 whatever they hold, as JSON-RPC's do.
+#[cfg(feature = "ethereum")]
+async fn ethereum_rpc(Shared(api): Shared<Api>, body: Bytes) -> Json<Value> {
+    Json(rpc::rpc(Arc::new(api), &body).await)
 }
 
 /// The chain's names, or a 404 on a chain without them.
@@ -1241,7 +1252,7 @@ async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     let open = api.fees.as_ref().map_or(0, |fees| fees.offer(base, api.tx_fuel, &probe, OfferChoice::default()).gas_limit);
     // What runs code, or names, is tried first: what it would use, and whether it would fail.
     let ran = match probe.tx {
-        Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Name { .. } | Tx::PrimaryName { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
+        Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Ethereum { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Name { .. } | Tx::PrimaryName { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
         _ => None,
     };
     let offer = match &api.fees {

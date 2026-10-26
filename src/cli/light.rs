@@ -215,6 +215,7 @@ fn summary(tx: &Tx) -> String {
         Tx::Name { name, action } => format!("{} the name {name}", action.kind()),
         Tx::PrimaryName { name: Some(name) } => format!("make {name} the sender's primary name"),
         Tx::PrimaryName { name: None } => "clear the sender's primary name".to_string(),
+        Tx::Ethereum { raw } => format!("an Ethereum-signed transaction of {} bytes", raw.len()),
     }
 }
 

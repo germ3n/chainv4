@@ -361,6 +361,10 @@ pub enum Signature {
     #[cfg(feature = "secp256k1")]
     #[wincode(tag = 3)]
     Secp256k1Eip712([u8; 64]),
+    #[document(summary = "No signature of its own: the transaction is Tx::Ethereum, whose signed bytes carry Ethereum's signature, which SignedTx::verify_on recovers the signer from. PublicKey::verify_signature refuses it.")]
+    #[cfg(feature = "secp256k1")]
+    #[wincode(tag = 4)]
+    Ethereum,
 }
 
 impl Hashable for Signature {
@@ -377,6 +381,8 @@ impl fmt::Display for Signature {
             Signature::EdBlake(bytes) => f.write_str(&to_hex(bytes)),
             #[cfg(feature = "secp256k1")]
             Signature::Secp256k1(bytes) | Signature::Secp256k1Eip712(bytes) => f.write_str(&to_hex(bytes)),
+            #[cfg(feature = "secp256k1")]
+            Signature::Ethereum => f.write_str("ethereum"),
         }
     }
 }
@@ -596,6 +602,8 @@ mod tests {
                 bytes[40] ^= 1;
                 Signature::Secp256k1Eip712(bytes)
             }
+            #[cfg(feature = "secp256k1")]
+            Signature::Ethereum => Signature::Ethereum,
         }
     }
 

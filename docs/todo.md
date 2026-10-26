@@ -228,9 +228,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   EVM transaction. Balances and nonces are shared, logs become `log` events, EVM gas is chainv4
   gas. `chainv4 send deploy --evm` and `chainv4 send evm-call`, with `--read` for a dry run. See
   [EVM](evm.md).
-- [ ] **Ethereum-signed transactions and JSON-RPC.** Legacy, EIP-155, EIP-2930 and EIP-1559
-  transactions signed by secp256k1 keys, and `eth_*` at `POST /rpc`, for MetaMask, Foundry and
-  ethers.
+- [x] **Ethereum-signed transactions and JSON-RPC.** `Tx::Ethereum` takes legacy EIP-155,
+  EIP-2930 and EIP-1559 transactions as wallets sign them, and `POST /rpc` answers Ethereum's
+  JSON-RPC from an index of them by their keccak hash. See [Ethereum's tools](ethereum.md).
+- [ ] **Old state and pending transactions over JSON-RPC.** Balances and calls at older blocks need
+  state kept for them, and `eth_getTransactionByHash` could answer from the mempool too.
+- [ ] **Blob and EIP-7702 transactions.**
 - [ ] **The EVM in the wallet and explorer.** EVM calls and deploys on their send pages, EVM
   contracts and their logs on their pages; MetaMask and Foundry guides.
 - [ ] **Calls between the EVM and the other engines.** A precompile the EVM calls Lua and wasm

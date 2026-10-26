@@ -402,6 +402,10 @@ chainv4 send evm-call --to 0xc578dcea6338eae42aad8bc6a3411c4df684a4e9 --function
 # 0x0000000000000000000000000000000000000000000000000000000000000008 (8)
 ```
 
+MetaMask, Foundry and ethers work with it as they do with Ethereum: the node answers Ethereum's
+JSON-RPC at `POST /rpc` and takes the transactions they sign. See
+[Ethereum's tools](docs/ethereum.md).
+
 `--function` encodes the static types: `uint`, `int`, `address`, `bool` and `bytes1` to
 `bytes32`. Give `--data` with calldata from `cast calldata` for the rest. `--value N` sends coin
 with the call, and `--read` only runs it on the node and prints what it returns.

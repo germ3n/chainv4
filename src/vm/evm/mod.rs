@@ -26,7 +26,9 @@ mod names;
 pub use names::NAMES_PRECOMPILE;
 
 use {
+    crate::crypto::ethereum::AccessItem,
     crate::db::{Column, DbError, State, address_key},
+    revm::context_interface::transaction::{AccessList, AccessListItem},
     crate::registry::Accounts,
     crate::registry::contracts::ContractRecord,
     crate::structs::address::Address,
@@ -74,18 +76,7 @@ pub fn create_address(deployer: &Address, nonce: u64) -> Address {
     Address::Evm(Word::from(evm_alias(deployer)).create(nonce).into_array())
 }
 
-#[document(
-    summary = "The chain id EVM transactions are signed for, EIP-155's: the first six bytes of the genesis id, so every chain has its own and MetaMask, which holds ids to 53 bits, takes it.",
-    category = "VM",
-    see_also = "evm_alias",
-)]
-pub fn chain_id(genesis: &Hash) -> u64 {
-    let bytes = genesis.to_bytes();
-    let mut id = [0; 8];
-    id[2..].copy_from_slice(&bytes[..6]);
-
-    u64::from_be_bytes(id).max(1)
-}
+pub use crate::crypto::ethereum::chain_id;
 
 fn alias_key(alias: &[u8; 20]) -> Vec<u8> {
     [ALIAS, alias].concat()
@@ -113,6 +104,17 @@ pub fn account_of(state: &State, bytes: [u8; 20]) -> Result<Address, DbError> {
     }
 
     Ok(state.get_value::<Address>(Column::Storage, &alias_key(&bytes))?.unwrap_or(Address::Secp256k1(bytes)))
+}
+
+#[document(
+    summary = "A slot of an EVM contract's storage as its 32 bytes, zero where nothing is kept, as eth_getStorageAt reads it.",
+    category = "VM",
+    see_also = "account_of",
+)]
+pub fn storage_word(state: &State, contract: [u8; 20], slot: [u8; 32]) -> Result<[u8; 32], DbError> {
+    let held = state.get(Column::Storage, &slot_key(contract, &U256::from_be_bytes(slot)))?;
+
+    Ok(held.and_then(|bytes| bytes.try_into().ok()).unwrap_or([0; 32]))
 }
 
 fn slot_key(contract: [u8; 20], slot: &U256) -> Vec<u8> {
@@ -208,8 +210,8 @@ impl Database for ChainDb<'_> {
 )]
 #[derive(Clone, Debug)]
 pub enum EvmAction {
-    #[document(summary = "Runs init code, and keeps what it returns as a new contract's code.")]
-    Create(Vec<u8>),
+    #[document(summary = "Runs init code, sending value to the contract it makes, and keeps what it returns as the contract's code.")]
+    Create { init: Vec<u8>, value: u256 },
     #[document(summary = "Calls an address with calldata, sending value.")]
     Call { to: Address, value: u256, input: Vec<u8> },
 }
@@ -246,6 +248,8 @@ pub struct EvmRan {
     pub gas_used: u64,
     #[document(summary = "Its logs, as events named log; empty when it failed.")]
     pub events: Vec<Event>,
+    #[document(summary = "What a revert returned, as Solidity encodes its reason or a custom error, which eth_call hands back; empty for anything else.")]
+    pub reverted: Vec<u8>,
 }
 
 #[document(
@@ -270,18 +274,29 @@ pub enum EvmReturned {
         nonce = "The sender's nonce for it, before the chain bumped it.",
         action = "A create or a call.",
         gas_limit = "The most EVM gas it may use, intrinsic gas included.",
+        access_list = "What it says it reads ahead of time, as Ethereum's transactions of type 1 and 2 do: the addresses and slots start warm, at their price. Empty for any other.",
         memory = "The most bytes its memory may grow to, every call frame's together.",
         block = "The block it runs in.",
     },
     returns = "What it did; an error only when the database fails, which is the node's fault.",
 )]
-pub fn run(state: &Arc<State>, sender: &Address, nonce: u64, action: EvmAction, gas_limit: u64, memory: u64, block: EvmBlock) -> Result<EvmRan, DbError> {
+#[allow(clippy::too_many_arguments)]
+pub fn run(state: &Arc<State>, sender: &Address, nonce: u64, action: EvmAction, access_list: &[AccessItem], gas_limit: u64, memory: u64, block: EvmBlock) -> Result<EvmRan, DbError> {
     register_alias(state, sender);
     let caller = evm_alias(sender);
     let (kind, value, input) = match action {
-        EvmAction::Create(init) => (TxKind::Create, U256::ZERO, init),
+        EvmAction::Create { init, value } => (TxKind::Create, to_word(value), init),
         EvmAction::Call { to, value, input } => (TxKind::Call(Word::from(evm_alias(&to))), to_word(value), input),
     };
+    let access_list = AccessList(
+        access_list
+            .iter()
+            .map(|item| AccessListItem {
+                address: Word::from(item.address),
+                storage_keys: item.slots.iter().map(|slot| B256::from(*slot)).collect(),
+            })
+            .collect(),
+    );
     let mut cfg = CfgEnv::new_with_spec(SpecId::PRAGUE);
     cfg.chain_id = block.chain_id;
     cfg.disable_nonce_check = true;
@@ -299,6 +314,9 @@ pub fn run(state: &Arc<State>, sender: &Address, nonce: u64, action: EvmAction, 
         ..Default::default()
     };
     let tx = TxEnv {
+        // EIP-2930's type, for one with an access list; the fee is the chain's, so no other.
+        tx_type: u8::from(!access_list.0.is_empty()),
+        access_list,
         caller: Word::from(caller),
         gas_limit,
         gas_price: 0,
@@ -346,6 +364,7 @@ pub fn run(state: &Arc<State>, sender: &Address, nonce: u64, action: EvmAction, 
                 result: Err(VmError::Runtime(format!("the EVM refused it: {err}"))),
                 gas_used: gas_limit,
                 events: Vec::new(),
+                reverted: Vec::new(),
             });
         }
     };
@@ -369,20 +388,27 @@ pub fn run(state: &Arc<State>, sender: &Address, nonce: u64, action: EvmAction, 
                 .collect();
             let returned = match output {
                 Output::Create(_, Some(created)) => EvmReturned::Created(Address::Evm(created.into_array())),
-                Output::Create(_, None) => return Ok(EvmRan { result: Err(VmError::Runtime("the contract was not created".to_string())), gas_used, events: Vec::new() }),
+                Output::Create(_, None) => return Ok(EvmRan { result: Err(VmError::Runtime("the contract was not created".to_string())), gas_used, events: Vec::new(), reverted: Vec::new() }),
                 Output::Call(bytes) => EvmReturned::Output(bytes.to_vec()),
             };
 
-            return Ok(EvmRan { result: Ok(returned), gas_used, events });
+            return Ok(EvmRan { result: Ok(returned), gas_used, events, reverted: Vec::new() });
         }
-        ExecutionResult::Revert { output, .. } => Err(VmError::Runtime(format!("reverted: {}", revert_reason(&output)))),
+        ExecutionResult::Revert { output, .. } => {
+            return Ok(EvmRan {
+                result: Err(VmError::Runtime(format!("reverted: {}", revert_reason(&output)))),
+                gas_used,
+                events: Vec::new(),
+                reverted: output.to_vec(),
+            });
+        }
         ExecutionResult::Halt { reason, .. } => Err(match reason {
             revm::context::result::HaltReason::OutOfGas(_) => VmError::OutOfFuel,
             other => VmError::Runtime(format!("halted: {other:?}")),
         }),
     };
 
-    Ok(EvmRan { result, gas_used, events: Vec::new() })
+    Ok(EvmRan { result, gas_used, events: Vec::new(), reverted: Vec::new() })
 }
 
 /// A revert's reason: Solidity's Error(string) read out, else its bytes in hex.

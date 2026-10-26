@@ -201,6 +201,13 @@ pub enum Tx {
     )]
     #[wincode(tag = 16)]
     PrimaryName { name: Option<String> },
+    #[document(
+        summary = "An Ethereum transaction, as MetaMask, Foundry or ethers signed it: its signed bytes as they are, which the EVM runs as Ethereum would, a call or a create. Its SignedTx carries Signature::Ethereum, the key it recovers as the signer, and the nonce and fee offer its bytes say; verify_on checks them against the bytes, and its chain id against this chain's.",
+        params = { raw = "The signed bytes, as eth_sendRawTransaction takes them: a legacy transaction under EIP-155, or one of type 1 or 2." },
+        see_also = "EthereumTx, SignedTx::from_ethereum",
+    )]
+    #[wincode(tag = 17)]
+    Ethereum { raw: Vec<u8> },
 }
 
 #[document(
@@ -290,6 +297,8 @@ impl Verifiable for Tx {
             }
             Tx::PrimaryName { name: Some(name) } if name_problem(name).is_some() => Err(VerifyError::BadName),
             Tx::PrimaryName { .. } => Ok(()),
+            // Its signed bytes are read and checked with the chain in hand, by SignedTx::verify_on.
+            Tx::Ethereum { .. } => Ok(()),
             Tx::Burn { from, amount } => {
                 from.verify()?;
                 amount.verify()?;
@@ -529,6 +538,11 @@ impl Verifiable for SignedTx {
         see_also = "Tx::verify, VerifyError::NotSender",
     )]
     fn verify(&self) -> Result<(), VerifyError> {
+        // An Ethereum-signed transaction holds only with its chain, as verify_on checks it.
+        if matches!(self.tx, Tx::Ethereum { .. }) {
+            return Err(VerifyError::BadEthereum);
+        }
+
         self.tx.verify()?;
         self.signer.verify()?;
         self.signer.verify_signature(
@@ -547,6 +561,19 @@ impl SignedTx {
         params = { genesis = "The chain's genesis id, which an EIP-712 signature is bound to." },
     )]
     pub fn verify_on(&self, genesis: &crate::structs::hash::Hash) -> Result<(), VerifyError> {
+        #[cfg(feature = "secp256k1")]
+        if let (Signature::Ethereum, Tx::Ethereum { raw }) = (&self.signature, &self.tx) {
+            // What the bytes say, signer and all, must be what the transaction says, on this chain.
+            let held = SignedTx::from_ethereum(raw.clone()).map_err(|_| VerifyError::BadEthereum)?;
+            let ethereum = crate::crypto::ethereum::decode(raw).map_err(|_| VerifyError::BadEthereum)?;
+
+            if held != *self || ethereum.chain_id != crate::crypto::ethereum::chain_id(genesis) {
+                return Err(VerifyError::BadEthereum);
+            }
+
+            return self.signer.verify();
+        }
+
         #[cfg(feature = "secp256k1")]
         if let Signature::Secp256k1Eip712(signature) = &self.signature {
             self.tx.verify()?;
@@ -597,6 +624,30 @@ impl SignedTx {
             fee,
             signer: keypair.public(),
             signature: Signature::Secp256k1Eip712(crate::crypto::secp256k1::sign_hash(secret, &digest)),
+        })
+    }
+
+    #[document(
+        parent = "SignedTx",
+        summary = "An Ethereum transaction as chainv4 carries it, from its signed bytes: Tx::Ethereum with them, the nonce and fee offer they say, the key their signature recovers as the signer, and Signature::Ethereum. An EIP-1559 one offers its max fee per gas and its priority fee as the tip; the others, their gas price as both.",
+        returns = "The transaction, or why the bytes are not one: they do not read, or their signature recovers no key.",
+        see_also = "Tx::Ethereum, EthereumTx",
+    )]
+    #[cfg(feature = "secp256k1")]
+    pub fn from_ethereum(raw: Vec<u8>) -> Result<SignedTx, String> {
+        let ethereum = crate::crypto::ethereum::decode(&raw)?;
+        let key = ethereum.signer().ok_or("its signature recovers no key, or has a high s")?;
+
+        Ok(SignedTx {
+            tx: Tx::Ethereum { raw },
+            nonce: ethereum.nonce,
+            fee: FeeOffer {
+                gas_limit: ethereum.gas_limit,
+                max_price: ethereum.max_price,
+                tip: ethereum.tip,
+            },
+            signer: PublicKey::Secp256k1(key),
+            signature: Signature::Ethereum,
         })
     }
 

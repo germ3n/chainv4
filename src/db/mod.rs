@@ -93,6 +93,9 @@ pub enum Column {
     #[document(summary = "The name registry: each name's record by name, and each account's primary name by address.")]
     #[wincode(tag = 19)]
     Names,
+    #[document(summary = "The Ethereum index, for a node with the ethereum feature: each Ethereum-signed transaction's chainv4 id, by the keccak256 of its signed bytes, which Ethereum's tools name it by. Not chain state: written as blocks run, and never wrong, as the same bytes are always the same transaction.")]
+    #[wincode(tag = 20)]
+    Ethereum,
 }
 
 impl Hashable for Column {
@@ -100,7 +103,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 20] = [
+    pub const ALL: [Column; 21] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -121,6 +124,7 @@ impl Column {
         Column::Light,
         Column::Addresses,
         Column::Names,
+        Column::Ethereum,
     ];
 
     #[document(
@@ -149,6 +153,7 @@ impl Column {
             Column::Light => "light",
             Column::Addresses => "addresses",
             Column::Names => "names",
+            Column::Ethereum => "ethereum",
         }
     }
 }

@@ -373,3 +373,113 @@ fn evm_contracts_resolve_and_pay_names_through_the_precompile() {
 
     assert!(advance(&mut chain, vec![lookup])[0].result.is_err());
 }
+
+/// An Ethereum account with coin to send, funded from the authority.
+fn ethereum_account(chain: &mut Chain, secret: [u8; 32]) -> Address {
+    let address = Keypair::from_private(crate::crypto::keypair::PrivateKey::Secp256k1(secret)).public().address();
+    let fund = SignedTx::sign(
+        Tx::Transfer { from: authority().public().address(), to: address, amount: Amount::U128(10u128.pow(21)) },
+        nonce(chain, &authority()),
+        FeeOffer::NONE,
+        &authority(),
+    );
+    advance(chain, vec![fund]);
+
+    address
+}
+
+/// An Ethereum transaction signed for this chain, of a type, as a wallet signs one.
+fn ethereum(chain: &Chain, secret: &[u8; 32], kind: crate::crypto::ethereum::EthereumKind, nonce: u64, to: Option<[u8; 20]>, value: u128, input: Vec<u8>) -> SignedTx {
+    use crate::crypto::ethereum::{AccessItem, EthereumKind, EthereumTx};
+
+    let unsigned = EthereumTx {
+        kind,
+        chain_id: evm::chain_id(&chain.genesis()),
+        nonce,
+        max_price: u256::ZERO,
+        tip: u256::ZERO,
+        gas_limit: 3_000_000,
+        to,
+        value: u256::new(value),
+        input,
+        access_list: match (kind, to) {
+            (EthereumKind::Legacy, _) | (_, None) => Vec::new(),
+            (_, Some(to)) => vec![AccessItem { address: to, slots: vec![[0; 32]] }],
+        },
+        signature: [0; 64],
+        parity: 0,
+    };
+
+    SignedTx::from_ethereum(unsigned.signed(secret).encode()).unwrap()
+}
+
+#[test]
+fn ethereum_signed_transactions_deploy_call_and_pay_as_on_ethereum() {
+    use crate::crypto::ethereum::EthereumKind;
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &genesis()).unwrap();
+    let secret = [0x46; 32];
+    let sender = ethereum_account(&mut chain, secret);
+    let init = [crate::structs::hex::from_hex(COUNTER_BIN.trim()).unwrap(), word(5)].concat();
+
+    // A create, of EIP-1559's type, lands where Ethereum puts the sender's first contract.
+    let deploy = ethereum(&chain, &secret, EthereumKind::DynamicFee, 0, None, 0, init);
+    let counter = evm::create_address(&sender, 0);
+    let receipts = advance(&mut chain, vec![deploy.clone()]);
+
+    assert_eq!(receipts[0].result, Ok(Effect::Deployed(counter)));
+    assert_eq!(deploy.sender(), sender, "the key its signature recovers sends it");
+    assert_eq!(nonce(&chain, &Keypair::from_private(crate::crypto::keypair::PrivateKey::Secp256k1(secret))), 1, "its nonce is the account's");
+
+    // A legacy call and an EIP-2930 one, with an access list, in one block.
+    let Address::Evm(to) = counter else { unreachable!() };
+    let bump = ethereum(&chain, &secret, EthereumKind::Legacy, 1, Some(to), 0, calldata("bump(uint256)", &[word(3)]));
+    let deposit = ethereum(&chain, &secret, EthereumKind::AccessList, 2, Some(to), 700, calldata("deposit()", &[]));
+    let receipts = advance(&mut chain, vec![bump, deposit]);
+
+    assert!(receipts.iter().all(|receipt| receipt.result.is_ok()), "{receipts:?}");
+    assert_eq!(count(&mut chain, counter), word(8));
+    assert_eq!(balance(&chain, &counter), u256::new(700));
+
+    // A plain payment to another Ethereum account runs through the EVM too.
+    let other = [0x77; 20];
+    let pay = ethereum(&chain, &secret, EthereumKind::DynamicFee, 3, Some(other), 1_000, Vec::new());
+    assert!(advance(&mut chain, vec![pay])[0].result.is_ok());
+    assert_eq!(balance(&chain, &Address::Secp256k1(other)), u256::new(1_000));
+}
+
+#[test]
+fn ethereum_signatures_hold_on_their_own_chain_alone_and_say_what_they_carry() {
+    use crate::crypto::ethereum::{EthereumKind, decode};
+    use crate::crypto::verifiable::VerifyError;
+
+    let db = Arc::new(MemoryDb::default());
+    let chain = Chain::open(db, &genesis()).unwrap();
+    let secret = [0x46; 32];
+    let good = ethereum(&chain, &secret, EthereumKind::DynamicFee, 0, Some([1; 20]), 0, Vec::new());
+
+    assert_eq!(good.verify_on(&chain.genesis()), Ok(()));
+
+    // Signed for another chain.
+    let Tx::Ethereum { raw } = &good.tx else { unreachable!() };
+    let mut elsewhere = decode(raw).unwrap();
+    elsewhere.chain_id += 1;
+    let elsewhere = SignedTx::from_ethereum(elsewhere.signed(&secret).encode()).unwrap();
+
+    assert_eq!(elsewhere.verify_on(&chain.genesis()), Err(VerifyError::BadEthereum));
+
+    // A nonce, fee or signer that is not what the bytes say.
+    let wrong_nonce = SignedTx { nonce: 9, ..good.clone() };
+    let wrong_fee = SignedTx { fee: FeeOffer { gas_limit: 1, ..good.fee }, ..good.clone() };
+    let wrong_signer = SignedTx { signer: Keypair::generate(KeyType::Secp256k1).unwrap().public(), ..good.clone() };
+
+    for wrong in [wrong_nonce, wrong_fee, wrong_signer] {
+        assert_eq!(wrong.verify_on(&chain.genesis()), Err(VerifyError::BadEthereum));
+    }
+
+    // And an Ethereum transaction under a signature of chainv4's own never holds.
+    let disguised = SignedTx::sign(good.tx.clone(), 0, FeeOffer::NONE, &authority());
+
+    assert_eq!(disguised.verify_on(&chain.genesis()), Err(VerifyError::BadEthereum));
+}

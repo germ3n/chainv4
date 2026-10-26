@@ -174,6 +174,7 @@ pub const TX_KINDS: &[&str] = &[
     "withdraw_change",
     "name",
     "primary_name",
+    "ethereum",
 ];
 
 impl ContractScorer {
@@ -227,6 +228,7 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::WithdrawChange { .. } => ("withdraw_change", sender),
         Tx::Name { .. } => ("name", sender),
         Tx::PrimaryName { .. } => ("primary_name", sender),
+        Tx::Ethereum { raw } => ("ethereum", crate::crypto::ethereum::decode(raw).ok().and_then(|ethereum| ethereum.to).map_or(sender, Address::Evm)),
     }
 }
 

@@ -151,6 +151,12 @@ fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
         Tx::ApproveChange { .. } | Tx::WithdrawChange { .. } => touched.push(Touch::Governance),
         // Names share the registry, and a registration reads the prices governance decides.
         Tx::Name { .. } | Tx::PrimaryName { .. } => touched.extend([Touch::Names, Touch::Governance]),
+        Tx::Ethereum { raw } => match crate::crypto::ethereum::decode(raw).map(|ethereum| ethereum.to) {
+            Ok(Some(to)) => touched.extend([Touch::Address(Address::Evm(to)), Touch::Address(Address::Secp256k1(to))]),
+            #[cfg(feature = "evm")]
+            Ok(None) => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, tx.nonce))),
+            _ => {}
+        },
     }
 
     touched

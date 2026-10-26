@@ -474,6 +474,16 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **The EVM made new dev chains.** The dev genesis lists `evm` among its engines now, so dev
   chains from before have other ids, and a build without the `evm` feature is on another dev
   network.
+- **Ethereum's wallets sign transactions the chain takes as they are.** `Tx::Ethereum` holds the
+  signed bytes; the sender is the secp256k1 account their signature recovers, at its own nonce.
+  Legacy ones must carry EIP-155's chain id, and blob and EIP-7702 transactions are refused. See
+  [Ethereum's tools](ethereum.md).
+- **JSON-RPC answers from the latest state alone.** A balance, nonce or call at an older block is
+  refused. Blocks list only Ethereum-signed transactions, and a transaction is found by hash only
+  once a block holds it.
+- **An Ethereum transaction's gas is chainv4's.** Its limit covers its bytes' intrinsic cost and
+  the EVM's gas as fuel, so it differs from what the same transaction takes on Ethereum; wallets
+  ask `eth_estimateGas`, which knows.
 - **revm brings older crypto crates.** It pins k256 0.13 and sha3 0.11 beside the newer ones
   chainv4 uses, so both are built. It has no KZG precompile, since that needs C.
 

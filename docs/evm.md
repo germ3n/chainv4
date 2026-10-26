@@ -13,6 +13,10 @@ The EVM shares the chain's state:
 - **EVM code** is a contract record like any other, of engine `evm`, in the contract registry.
 - **EVM storage** lives in the storage column, keyed by the contract and the 32-byte slot.
 
+Ethereum's own wallets and tools work with it too: MetaMask, Foundry and ethers sign
+transactions the chain takes as they are, and the node answers Ethereum's JSON-RPC at `POST /rpc`.
+See [Ethereum's tools](ethereum.md).
+
 ## Turning it on
 
 Genesis's `engines` must name `evm`, and every node on the chain must be built with the `evm`
@@ -185,7 +189,6 @@ and calls it with `chainv4 send`.
 
 - **Calls between engines,** beyond names, which the precompile resolves. An EVM contract cannot call a Lua or wasm contract, nor the other
   way round. They share balances: coin moves between them through plain payments.
-- **Ethereum-signed transactions and JSON-RPC,** for MetaMask, Foundry and ethers: next.
 - **Blob transactions and the KZG point evaluation precompile,** which needs blobs.
 - **Selfdestruct** only clears what it can in the same transaction, as Ethereum's Cancun rules
   say: elsewhere it only sends the contract's coin.

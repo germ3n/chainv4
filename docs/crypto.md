@@ -49,10 +49,11 @@ Key schemes sit behind features too:
 - **One signature per transaction.** secp256k1 signatures always have a low `s` and verifying
   refuses a high one, so no one can reshape a signature into a second valid one. Its public key
   travels compressed, in 33 bytes, and its signature in 64.
-- **Not Ethereum's transactions,** but its typed data. A secp256k1 key signs chainv4's
-  transactions under chainv4's domain, not Ethereum's RLP. Or it signs them as EIP-712 typed
-  data, as MetaMask and the hardware wallets it drives do: see
-  [Typed data (EIP-712)](#typed-data-eip-712).
+- **Three ways to sign.** A secp256k1 key signs chainv4's transactions under chainv4's domain, or
+  as EIP-712 typed data, as MetaMask and the hardware wallets it drives do (see
+  [Typed data (EIP-712)](#typed-data-eip-712)), or signs Ethereum's own transactions, RLP and
+  all, which the chain takes as `Tx::Ethereum` and runs in the EVM (see
+  [Ethereum's tools](ethereum.md)).
 - **In contracts,** every address takes 33 bytes: its kind's tag, then its bytes, a secp256k1
   address's 20 padded with zeros. Lua's `address(hex)` reads 40 hex digits as a secp256k1 address
   and 64 as an Ed25519 one.
@@ -65,6 +66,7 @@ hash for one thing can never pass for another.
 | Domain | What follows |
 | --- | --- |
 | `chainv4 transaction` | The transaction, nonce, fee offer and signer. |
+| EIP-155's chain id | An Ethereum transaction, signed as Ethereum signs it: bound to this chain by the chain id, the genesis id's first 6 bytes. |
 | EIP-712's `chainv4` | A transaction's typed form, nonce and fee offer, under the genesis id as salt: see [Typed data (EIP-712)](#typed-data-eip-712). |
 | `chainv4 block` | A header's id, signed by the authority. |
 | `chainv4 vote` | The genesis id and a finality vote, so a vote cannot be replayed on another chain. |
