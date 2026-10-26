@@ -74,7 +74,9 @@ Each summary has:
 
 **Each `tx`** has a `type` and that type's fields:
 - `transfer`, `mint`, `burn`, `call`, `deploy`, `upgrade`;
-- `bond`, `unbond`, `withdraw`, `slash`, `approve_signers`, `withdraw_approval`.
+- `bond`, `unbond`, `withdraw`, `slash`, `approve_signers`, `withdraw_approval`;
+- `approve_change`, with its `version` and `change`, which holds the new `consensus` as a genesis
+  file writes one, and `withdraw_change`.
 
 ### `GET /txs/{id}`
 
@@ -401,6 +403,22 @@ Sets show their `signers`, each with its voting `key` and the `account` that spe
 their `threshold` and `change_threshold`. An `approve_signers` transaction shows the same.
 
 404 under any other kind.
+
+### `GET /governance`
+
+On a chain with [governance](governance.md):
+- its `kind`, `electorate` or `council`;
+- `epoch`, the tip's;
+- the `active` consensus, the one fixed for the tip's epoch, and the `decided` one and its
+  `version`, each as a genesis file writes a consensus;
+- `approval_epochs`, how many epochs an approval counts for, and `needed`, what a change's
+  approvals must weigh now;
+- the `proposals` with approvals that still count in the tip's epoch, each with its `consensus`,
+  what its approvals `weight` and what they `needed`, and its `approvals`. Each approval has its
+  `account`, what it weighs now, the `epoch` it was made in, and the last epoch it counts in
+  (`counts_until`).
+
+404 on a chain without governance.
 
 ### `GET /evidence`
 

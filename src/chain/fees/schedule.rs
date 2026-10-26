@@ -170,6 +170,8 @@ pub const TX_KINDS: &[&str] = &[
     "slash",
     "approve_signers",
     "withdraw_approval",
+    "approve_change",
+    "withdraw_change",
 ];
 
 impl ContractScorer {
@@ -218,6 +220,8 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::Slash { .. } => ("slash", sender),
         Tx::ApproveSigners { .. } => ("approve_signers", sender),
         Tx::WithdrawApproval { .. } => ("withdraw_approval", sender),
+        Tx::ApproveChange { .. } => ("approve_change", sender),
+        Tx::WithdrawChange { .. } => ("withdraw_change", sender),
     }
 }
 

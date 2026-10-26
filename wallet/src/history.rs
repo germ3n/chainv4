@@ -159,6 +159,8 @@ fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::Slash { .. }, _) => "Reported a double vote".to_string(),
         (Tx::ApproveSigners { version, .. }, _) => format!("Approved signers v{version}"),
         (Tx::WithdrawApproval { version }, _) => format!("Withdrew approval of signers v{version}"),
+        (Tx::ApproveChange { version, .. }, _) => format!("Approved a change from v{version}"),
+        (Tx::WithdrawChange { version }, _) => format!("Withdrew approval of a change from v{version}"),
     }
 }
 

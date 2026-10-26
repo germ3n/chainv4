@@ -185,7 +185,8 @@ The same votes, from signers each counting once; `threshold` of them justify.
 - **The signers** start as genesis's `signers`. Each epoch's set is fixed in state at the
   checkpoint `activation_delay` epochs before it. Under a rotating authority
   (`consensus.type: rotating`), the same set produces the epoch's blocks in turn (see
-  [Consensus](consensus.md#rotating-authority)).
+  [Consensus](consensus.md#rotating-authority)), as FFG's validator sets do under production
+  by stake (`consensus.type: staked`, see [Consensus](consensus.md#production-by-stake)).
 - **Both thresholds** must be more than half the signers. Then two conflicting checkpoints can
   only both be finalized if some signer voted against itself, and its votes show it.
 - **Changing signers** (`chainv4 send --key account.key approve-signers --add KEY --remove KEY`,

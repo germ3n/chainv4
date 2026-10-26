@@ -6,9 +6,10 @@
 use {
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
-    crate::registry::signers::Signer,
+    crate::registry::validators::Member,
     crate::structs::address::Address,
     crate::structs::block::{BlockHeader, Seal},
+    crate::structs::hash::HashType,
     crate::structs::u256::u256,
     r#macro::document,
     std::fmt,
@@ -20,10 +21,12 @@ pub mod dev;
 pub mod gpu;
 pub mod pow;
 pub mod rotating;
+pub mod staked;
 
 pub use dev::{AuthorityProducer, DevAuthority};
 pub use pow::{Miner, PowConfig, ProofOfWork, meets, work_hash};
 pub use rotating::{Rotating, RotatingProducer};
+pub use staked::{Schedule, Staked, StakedProducer};
 #[cfg(feature = "gpu")]
 pub use gpu::GpuMiner;
 
@@ -63,7 +66,7 @@ pub trait Consensus: Send + Sync {
 
     #[document(
         parent = "Consensus",
-        summary = "Whether check needs the block's epoch's producers, the signers authority finality fixed for it: true for the rotating authority alone. Whoever checks a block hands them over: a node from its state, a light client from the voters it proved.",
+        summary = "Whether check needs the block's epoch's producers, the voters finality fixed for it: the signers under a rotating authority, the bonded validators under production by stake. Whoever checks a block hands them over: a node from its state, a light client from the voters it proved.",
     )]
     fn needs_producers(&self) -> bool {
         false
@@ -86,11 +89,11 @@ pub trait Consensus: Send + Sync {
             header = "The block's header.",
             seal = "The block's seal.",
             ancestors = "The parent first, then its parent, and so on, as difficulty takes them.",
-            producers = "The signers who may produce in the block's epoch, when needs_producers says so; empty otherwise.",
+            producers = "The voters who may produce in the block's epoch, with their weights, when needs_producers says so; empty otherwise.",
             now = "This node's clock, in milliseconds since the Unix epoch.",
         },
     )]
-    fn check(&self, header: &BlockHeader, seal: &Seal, ancestors: &[BlockHeader], producers: &[Signer], now: u64) -> Result<(), ConsensusError>;
+    fn check(&self, header: &BlockHeader, seal: &Seal, ancestors: &[BlockHeader], producers: &[Member], now: u64) -> Result<(), ConsensusError>;
 }
 
 #[document(
@@ -99,24 +102,28 @@ pub trait Consensus: Send + Sync {
     see_also = "Consensus, AuthorityProducer, Miner",
 )]
 pub trait Producer: Send {
-    #[document(parent = "Producer", summary = "Where this node's blocks, and their rewards, are credited.")]
-    fn address(&self) -> Address;
+    #[document(
+        parent = "Producer",
+        summary = "Where this node's blocks, and their rewards, are credited: the address the blocks name as their producer. A staked validator's is the account its bond names, which the epoch's producers tell it.",
+        params = { producers = "The voters who may produce in the next block's epoch, under a consensus that needs them; empty otherwise." },
+    )]
+    fn address(&self, producers: &[Member]) -> Address;
 
     #[document(
         parent = "Producer",
         summary = "The earliest time to build the block after parent, in milliseconds since the Unix epoch; u64::MAX for never, as when this node is not among the epoch's producers.",
         params = {
             parent = "The block to build on.",
-            producers = "The signers who may produce in the next block's epoch, under a consensus that needs them; empty otherwise.",
+            producers = "The voters who may produce in the next block's epoch, with their weights, under a consensus that needs them; empty otherwise.",
         },
     )]
-    fn start_at(&self, parent: &BlockHeader, producers: &[Signer]) -> u64;
+    fn start_at(&self, parent: &BlockHeader, producers: &[Member]) -> u64;
 
     #[document(
         parent = "Producer",
-        summary = "The difficulty the block this producer builds declares, when the producer decides it rather than consensus: a rotating authority's offset in the schedule. None to declare what Consensus::difficulty says.",
+        summary = "The difficulty the block this producer builds declares, when the producer decides it rather than consensus: a rotating authority's or a staked validator's offset in the schedule. None to declare what Consensus::difficulty says.",
     )]
-    fn difficulty(&self, _parent: &BlockHeader, _producers: &[Signer]) -> Option<u128> {
+    fn difficulty(&self, _parent: &BlockHeader, _producers: &[Member]) -> Option<u128> {
         None
     }
 
@@ -154,6 +161,15 @@ pub enum ConsensusConfig {
     )]
     #[wincode(tag = 2)]
     Rotating { slot_ms: u64 },
+    #[document(
+        summary = "The bonded validators of FFG finality produce in slots, weighted by bond: each epoch's validator set, as finality fixed it, is that epoch's producers, and the schedule picks among them by weight. Needs finality of type ffg.",
+        params = {
+            slot_ms = "Milliseconds between blocks, and from a missed slot to the next in line's.",
+            schedule = "How the slot's producer is picked among the set: a weighted draw, or Tendermint's priority rotation.",
+        },
+    )]
+    #[wincode(tag = 3)]
+    Staked { slot_ms: u64, schedule: Schedule },
 }
 
 impl Hashable for ConsensusConfig {
@@ -164,22 +180,28 @@ impl ConsensusConfig {
     #[document(
         parent = "ConsensusConfig",
         summary = "The rules this configuration describes.",
-        params = { pow_window = "Under proof of work, the window difficulty retargets over and timestamps are bounded by, as genesis sets it beside the consensus (Genesis::pow_window); None for the parent-only rule. Ignored by the authority." },
+        params = {
+            hash = "The chain's hash, which production by stake draws its schedule with.",
+            pow_window = "Under proof of work, the window difficulty retargets over and timestamps are bounded by, as genesis sets it beside the consensus (Genesis::pow_window); None for the parent-only rule. Ignored by the others.",
+            checkpoint_interval = "Blocks per finality epoch, which production by stake starts each epoch's priority rotation at; None on a chain without finality. Ignored by the others.",
+        },
     )]
-    pub fn rules(&self, pow_window: Option<u64>) -> Box<dyn Consensus> {
+    pub fn rules(&self, hash: HashType, pow_window: Option<u64>, checkpoint_interval: Option<u64>) -> Box<dyn Consensus> {
         match self {
             ConsensusConfig::Authority { key, slot_ms } => Box::new(DevAuthority::new(*key, *slot_ms)),
             ConsensusConfig::ProofOfWork(config) => Box::new(ProofOfWork::new(config.clone(), pow_window)),
             ConsensusConfig::Rotating { slot_ms } => Box::new(Rotating::new(*slot_ms)),
+            ConsensusConfig::Staked { slot_ms, schedule } => Box::new(Staked::new(*slot_ms, *schedule, hash, checkpoint_interval.unwrap_or(1))),
         }
     }
 
-    #[document(parent = "ConsensusConfig", summary = "The scheme's name: authority, pow or rotating.")]
+    #[document(parent = "ConsensusConfig", summary = "The scheme's name: authority, pow, rotating or staked.")]
     pub fn name(&self) -> &'static str {
         match self {
             ConsensusConfig::Authority { .. } => "authority",
             ConsensusConfig::ProofOfWork(_) => "pow",
             ConsensusConfig::Rotating { .. } => "rotating",
+            ConsensusConfig::Staked { .. } => "staked",
         }
     }
 }

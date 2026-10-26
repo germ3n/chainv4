@@ -3,14 +3,18 @@
 //! FILE` runs a node on it. Every field must be present, and unknown fields are refused, so a
 //! misspelled parameter is an error rather than a silent default.
 
+// A build without any kind of governance has an empty GovernanceConfig, matched on nothing.
+#![cfg_attr(not(any(feature = "governance-electorate", feature = "governance-council")), allow(unreachable_code, unused_variables))]
+
 #[cfg(feature = "finality-authority")]
 use crate::chain::AuthorityConfig;
 #[cfg(feature = "finality-depth")]
 use crate::chain::DepthConfig;
 #[cfg(feature = "finality-ffg")]
 use crate::chain::{FfgConfig, GenesisValidator};
-#[cfg(any(feature = "finality-ffg", feature = "finality-authority"))]
+#[cfg(feature = "finality-ffg")]
 use crate::crypto::keypair::PublicKey;
+use crate::governance::GovernanceConfig;
 use {
     super::CliResult,
     crate::chain::fees::{BaseFee, Bid, ContractScorer, PricingConfig, ScheduleConfig, Weighted},
@@ -52,6 +56,11 @@ pub struct GenesisArgs {
     /// fee feeds a pool voters are paid from.
     #[arg(long)]
     pub vote_rewards: Option<VoteRewardSource>,
+    /// Governance, so the chain can change its consensus by transaction: electorate, where
+    /// finality's own validators or signers approve; council, where the development key alone
+    /// does, to edit; or none, the default.
+    #[arg(long, value_parser = parse_governance)]
+    pub governance: Option<GovernanceChoice>,
     /// Where to write it. Without one, it goes to stdout.
     #[arg(long)]
     pub out: Option<PathBuf>,
@@ -63,6 +72,45 @@ pub enum DevChain {
     Authority,
     #[cfg(feature = "finality-authority")]
     Rotating,
+    #[cfg(feature = "finality-ffg")]
+    Staked,
+}
+
+/// A kind of governance to write a genesis with, with development settings.
+#[derive(Clone, Copy)]
+pub enum GovernanceChoice {
+    #[cfg(feature = "governance-electorate")]
+    Electorate,
+    #[cfg(feature = "governance-council")]
+    Council,
+    None,
+}
+
+fn parse_governance(text: &str) -> Result<GovernanceChoice, String> {
+    match text {
+        #[cfg(feature = "governance-electorate")]
+        "electorate" => Ok(GovernanceChoice::Electorate),
+        #[cfg(feature = "governance-council")]
+        "council" => Ok(GovernanceChoice::Council),
+        "none" => Ok(GovernanceChoice::None),
+        other => Err(format!("unknown governance {other}; use {}", GovernanceConfig::KINDS.iter().chain(["none"].iter()).copied().collect::<Vec<_>>().join(", "))),
+    }
+}
+
+/// Governance with development settings: approvals count for 64 epochs, and a council is the
+/// development key alone.
+pub fn dev_governance(choice: GovernanceChoice) -> Option<GovernanceConfig> {
+    match choice {
+        #[cfg(feature = "governance-electorate")]
+        GovernanceChoice::Electorate => Some(GovernanceConfig::Electorate { approval_epochs: 64 }),
+        #[cfg(feature = "governance-council")]
+        GovernanceChoice::Council => Some(GovernanceConfig::Council {
+            members: vec![crate::consensus::DevAuthority::dev_keypair().public().address()],
+            threshold: 1,
+            approval_epochs: 64,
+        }),
+        GovernanceChoice::None => None,
+    }
 }
 
 /// A kind of finality to write a genesis with, each with development settings.
@@ -156,6 +204,8 @@ pub fn dev(chain: DevChain) -> Genesis {
         DevChain::Authority => Genesis::dev_authority(dev),
         #[cfg(feature = "finality-authority")]
         DevChain::Rotating => Genesis::dev_rotating(dev),
+        #[cfg(feature = "finality-ffg")]
+        DevChain::Staked => Genesis::dev_staked(dev),
     }
 }
 
@@ -173,6 +223,10 @@ pub fn write(args: GenesisArgs) -> CliResult<()> {
 
     genesis.fees = dev_fees(args.fees, args.scorer, args.scorer_kinds);
     genesis.vote_reward_source = args.vote_rewards;
+
+    if let Some(choice) = args.governance {
+        genesis.governance = dev_governance(choice);
+    }
 
     let text = serde_json::to_string_pretty(&to_json(&genesis))? + "\n";
 
@@ -201,30 +255,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "timestamp": genesis.timestamp,
         "hash": genesis.hash.name(),
         "coin": coin_json(&genesis.coin),
-        "consensus": match &genesis.consensus {
-            ConsensusConfig::Authority { key, slot_ms } => json!({
-                "type": "authority",
-                "key": key.to_string(),
-                "slot_ms": slot_ms,
-            }),
-            ConsensusConfig::Rotating { slot_ms } => json!({ "type": "rotating", "slot_ms": slot_ms }),
-            ConsensusConfig::ProofOfWork(pow) => {
-                let mut value = json!({
-                    "type": "pow",
-                    "hash": pow.hash.name(),
-                    "target_block_ms": pow.target_block_ms,
-                    "initial_difficulty": pow.initial_difficulty.to_string(),
-                    "min_difficulty": pow.min_difficulty.to_string(),
-                });
-
-                // A later addition: left out while unset, as files from before it leave it out.
-                if let Some(window) = genesis.pow_window {
-                    value["window"] = window.into();
-                }
-
-                value
-            }
-        },
+        "consensus": consensus_json(&genesis.consensus, genesis.pow_window),
         "reward": {
             "initial": genesis.reward.initial.to_string(),
             "halving_interval": genesis.reward.halving_interval,
@@ -245,7 +276,126 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "fees": genesis.fees.as_ref().map(fees_json),
         "max_block_bytes": genesis.max_block_bytes,
         "vote_reward_source": genesis.vote_reward_source.map(|source| source.name()),
+        "governance": genesis.governance.as_ref().map(governance_json),
     })
+}
+
+/// A consensus as JSON: the shape genesis files, GET /governance and approve-change use.
+pub fn consensus_json(consensus: &ConsensusConfig, pow_window: Option<u64>) -> Value {
+    match consensus {
+        ConsensusConfig::Authority { key, slot_ms } => json!({
+            "type": "authority",
+            "key": key.to_string(),
+            "slot_ms": slot_ms,
+        }),
+        ConsensusConfig::Rotating { slot_ms } => json!({ "type": "rotating", "slot_ms": slot_ms }),
+        ConsensusConfig::Staked { slot_ms, schedule } => json!({ "type": "staked", "slot_ms": slot_ms, "schedule": schedule.name() }),
+        ConsensusConfig::ProofOfWork(pow) => {
+            let mut value = json!({
+                "type": "pow",
+                "hash": pow.hash.name(),
+                "target_block_ms": pow.target_block_ms,
+                "initial_difficulty": pow.initial_difficulty.to_string(),
+                "min_difficulty": pow.min_difficulty.to_string(),
+            });
+
+            // A later addition: left out while unset, as files from before it leave it out.
+            if let Some(window) = pow_window {
+                value["window"] = window.into();
+            }
+
+            value
+        }
+    }
+}
+
+/// A consensus from JSON, as consensus_json writes it: the consensus and, for proof of work, its
+/// window, which genesis keeps beside it.
+pub fn consensus_from_json(value: &Value, path: &str) -> Result<(ConsensusConfig, Option<u64>), String> {
+    let mut consensus = Fields::of(value, path)?;
+    let parsed = match consensus.text("type")?.as_str() {
+        "authority" => {
+            let config = ConsensusConfig::Authority {
+                key: consensus.parse("key")?,
+                slot_ms: consensus.whole("slot_ms")?,
+            };
+
+            (config, None)
+        }
+        "pow" => {
+            let hash = consensus.hash("hash")?;
+            let config = ConsensusConfig::ProofOfWork(PowConfig {
+                hash,
+                target_block_ms: consensus.whole("target_block_ms")?,
+                initial_difficulty: consensus.parse("initial_difficulty")?,
+                min_difficulty: consensus.parse("min_difficulty")?,
+            });
+            let window = consensus.later_whole("window")?;
+
+            (config, window)
+        }
+        "rotating" => {
+            let config = ConsensusConfig::Rotating {
+                slot_ms: consensus.whole("slot_ms")?,
+            };
+
+            (config, None)
+        }
+        "staked" => {
+            let config = ConsensusConfig::Staked {
+                slot_ms: consensus.whole("slot_ms")?,
+                schedule: match consensus.text("schedule")?.as_str() {
+                    "draw" => crate::consensus::Schedule::Draw,
+                    "priority" => crate::consensus::Schedule::Priority,
+                    other => return Err(format!("{path}.schedule: unknown schedule {other}; use draw or priority")),
+                },
+            };
+
+            (config, None)
+        }
+        other => return Err(format!("{path}.type: unknown consensus {other}; use pow, authority, rotating or staked")),
+    };
+    consensus.done()?;
+
+    Ok(parsed)
+}
+
+/// Governance as JSON: the shape genesis files and GET /governance use.
+pub fn governance_json(config: &GovernanceConfig) -> Value {
+    match *config {
+        #[cfg(feature = "governance-electorate")]
+        GovernanceConfig::Electorate { approval_epochs } => json!({ "type": "electorate", "approval_epochs": approval_epochs }),
+        #[cfg(feature = "governance-council")]
+        GovernanceConfig::Council { ref members, threshold, approval_epochs } => json!({
+            "type": "council",
+            "members": members.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "threshold": threshold,
+            "approval_epochs": approval_epochs,
+        }),
+    }
+}
+
+fn governance_from_json(mut governance: Fields) -> Result<GovernanceConfig, String> {
+    let config = match governance.text("type")?.as_str() {
+        #[cfg(feature = "governance-electorate")]
+        "electorate" => GovernanceConfig::Electorate {
+            approval_epochs: governance.whole("approval_epochs")?,
+        },
+        #[cfg(feature = "governance-council")]
+        "council" => GovernanceConfig::Council {
+            members: governance
+                .strings("members")?
+                .iter()
+                .map(|text| text.parse().map_err(|_| format!("governance.members: cannot read {text}")))
+                .collect::<Result<Vec<_>, String>>()?,
+            threshold: governance.small("threshold")?,
+            approval_epochs: governance.whole("approval_epochs")?,
+        },
+        other => return Err(format!("governance.type: unknown governance {other}; use {}", GovernanceConfig::KINDS.join(" or "))),
+    };
+    governance.done()?;
+
+    Ok(config)
 }
 
 /// The coin as JSON: the shape genesis files and GET /status use.
@@ -485,40 +635,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         decimals: u8::try_from(coin.whole("decimals")?).map_err(|_| "coin.decimals is too large".to_string())?,
     };
     coin.done()?;
-    let mut consensus = root.object("consensus")?;
-    let (consensus, pow_window) = match consensus.text("type")?.as_str() {
-        "authority" => {
-            let config = ConsensusConfig::Authority {
-                key: consensus.parse("key")?,
-                slot_ms: consensus.whole("slot_ms")?,
-            };
-            consensus.done()?;
-
-            (config, None)
-        }
-        "pow" => {
-            let hash = consensus.hash("hash")?;
-            let config = ConsensusConfig::ProofOfWork(PowConfig {
-                hash,
-                target_block_ms: consensus.whole("target_block_ms")?,
-                initial_difficulty: consensus.parse("initial_difficulty")?,
-                min_difficulty: consensus.parse("min_difficulty")?,
-            });
-            let window = consensus.later_whole("window")?;
-            consensus.done()?;
-
-            (config, window)
-        }
-        "rotating" => {
-            let config = ConsensusConfig::Rotating {
-                slot_ms: consensus.whole("slot_ms")?,
-            };
-            consensus.done()?;
-
-            (config, None)
-        }
-        other => return Err(format!("consensus.type: unknown consensus {other}; use pow, authority or rotating")),
-    };
+    let (consensus, pow_window) = consensus_from_json(root.get("consensus")?, "consensus")?;
     let mut reward = root.object("reward")?;
     let reward_value = Reward {
         initial: reward.amount("initial")?,
@@ -564,6 +681,11 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.optional_parse("vote_reward_source")?,
         false => None,
     };
+    // Absent from files written before it: those chains keep their id, and nothing changes them.
+    let governance = match root.map.contains_key("governance") {
+        true => root.optional_object("governance")?.map(governance_from_json).transpose()?,
+        false => None,
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -580,6 +702,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         fees,
         max_block_bytes,
         pow_window,
+        governance,
         vote_reward_source,
     };
     root.done()?;
@@ -786,6 +909,55 @@ mod tests {
         to_json(&genesis)
     }
 
+    #[cfg(all(feature = "finality-ffg", feature = "governance-electorate", feature = "governance-council"))]
+    #[test]
+    fn governance_round_trips_and_is_checked() {
+        use crate::db::MemoryDb;
+        use std::sync::Arc;
+
+        for choice in [GovernanceChoice::Electorate, GovernanceChoice::Council, GovernanceChoice::None] {
+            let mut genesis = dev(DevChain::Authority);
+            genesis.governance = dev_governance(choice);
+            let value = to_json(&genesis);
+            let read = from_json(&value).unwrap();
+
+            assert_eq!(read, genesis);
+            assert_eq!(read.block().id(), genesis.block().id());
+            assert_eq!(value["governance"].is_null(), matches!(choice, GovernanceChoice::None));
+        }
+
+        // A file from before the field reads as none, and keeps its id.
+        let mut without = to_json(&dev(DevChain::Authority));
+        without.as_object_mut().unwrap().remove("governance");
+
+        assert_eq!(from_json(&without).unwrap(), dev(DevChain::Authority));
+
+        // Governance needs finality that votes; a council needs members and a threshold they can
+        // reach; unknown kinds are refused by name.
+        let mut depthless = dev(DevChain::Authority);
+        depthless.finality = None;
+        depthless.governance = dev_governance(GovernanceChoice::Electorate);
+
+        let refused = |genesis: &Genesis| match crate::chain::Chain::open(Arc::new(MemoryDb::default()), genesis) {
+            Ok(_) => panic!("opened a chain genesis should refuse"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(refused(&depthless).contains("finality that votes"));
+
+        let mut empty = dev(DevChain::Authority);
+        empty.governance = Some(GovernanceConfig::Council { members: Vec::new(), threshold: 1, approval_epochs: 64 });
+
+        assert!(refused(&empty).contains("at least one account"));
+
+        let mut unknown = to_json(&dev(DevChain::Authority));
+        unknown["governance"] = json!({ "type": "plutocracy" });
+
+        assert!(from_json(&unknown).unwrap_err().contains("unknown governance plutocracy"));
+        assert_eq!(parse_governance("council").map(|choice| dev_governance(choice).unwrap().name()), Ok("council"));
+        assert!(parse_governance("plutocracy").is_err());
+    }
+
     #[test]
     fn genesis_files_round_trip_exactly() {
         let scorer = Address::Contract([5; 32]);
@@ -801,6 +973,8 @@ mod tests {
             DevChain::Authority,
             #[cfg(feature = "finality-authority")]
             DevChain::Rotating,
+            #[cfg(feature = "finality-ffg")]
+            DevChain::Staked,
         ];
 
         for chain in chains {
@@ -934,11 +1108,11 @@ mod tests {
         #[cfg(feature = "finality-authority")]
         {
             let scheme = crate::consensus::DevAuthority::dev_keypair().public().key_type();
-            let signers: Vec<PublicKey> = (0..3)
+            let signers: Vec<crate::crypto::keypair::PublicKey> = (0..3)
                 .map(|_| crate::crypto::keypair::Keypair::generate(scheme).unwrap().public())
                 .collect();
             let mut value = with(FinalityKind::Authority);
-            value["finality"]["signers"] = json!(signers.iter().map(PublicKey::to_string).collect::<Vec<_>>());
+            value["finality"]["signers"] = json!(signers.iter().map(ToString::to_string).collect::<Vec<_>>());
             value["finality"]["threshold"] = json!(2);
             let Some(FinalityConfig::Authority(authority)) = from_json(&value).unwrap().finality else {
                 panic!("not authority")

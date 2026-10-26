@@ -28,7 +28,7 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `timestamp` | The genesis block's timestamp, in milliseconds. |
 | `hash` | The chain hash: block and transaction ids, roots, contract addresses, gossip ids. `blake3`, `sha256`, `keccak256`, `blake2s` or `blake2b`, whichever the build has; never `xxh3`. |
 | `coin` | What the chain's coin is called and how it is shown: `symbol` and `decimals`. |
-| `consensus` | Who may produce, by `type`: `authority`, `pow` or `rotating`. |
+| `consensus` | Who may produce, by `type`: `authority`, `pow`, `rotating` or `staked`. |
 | `reward` | `initial`, what a block mints for its producer, and `halving_interval`, blocks between halvings or `null` for never. |
 | `minter` | The one address allowed to send `Mint`: the development key's, or `null`. `Mint` is a faucet for development chains; a chain of value names nobody, and new coins come from block rewards alone. |
 | `allocations` | Who holds what from the start: a list of `address` and `amount`. |
@@ -40,6 +40,7 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `fees` | `null` for free transactions, or the fee settings. |
 | `max_block_bytes` | The most bytes a block's transactions may take, encoded, from 1 MiB (1048576), so a block holds the largest deploy, to 6 MiB (6291456), so a full block fits one gossip message; a block past it is refused. The dev chains have 4 MiB. Left out or `null`, blocks are bounded by gas alone, or by nothing without fees. A file written before it, without it, keeps its chain's genesis id. |
 | `vote_reward_source` | Where finality's vote rewards come from: `mint`, new supply, or `fees`, the burned share of every fee, pooled and paid out. Needs `fees`. Left out or `null`, `mint`, and a file from before it keeps its id. `chainv4 genesis --vote-rewards fees` sets it. |
+| `governance` | `null`, or how the chain changes its consensus by transaction: the kind and its settings, by `type`: `electorate` or `council`. Needs finality that votes. Left out or `null`, nothing changes, and a file from before it keeps its id. `chainv4 genesis --governance electorate` sets it. See [Governance](governance.md). |
 
 ### coin
 
@@ -61,18 +62,37 @@ field, they are part of the genesis id.
 { "type": "authority", "key": "ed25519:0x…", "slot_ms": 2000 }
 { "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "window": 11 }
 { "type": "rotating", "slot_ms": 2000 }
+{ "type": "staked", "slot_ms": 2000, "schedule": "draw" }
 ```
 
 - `authority`: `key` is the only key that may produce, a block every `slot_ms` at most.
 - `rotating`: the signers of authority finality produce in turn, one every `slot_ms`, the next in
   line stepping in a slot later when one misses. Needs `finality.type: authority`. See
   [Consensus](consensus.md#rotating-authority).
+- `staked`: the bonded validators of FFG finality produce, one every `slot_ms`, each with a share
+  in proportion to its bond, picked by `schedule`: `draw`, a weighted draw by the chain's hash, or
+  `priority`, Tendermint's rotation. Needs `finality.type: ffg`. See
+  [Consensus](consensus.md#production-by-stake).
 - `pow`: `hash` is the work hash, chosen apart from the chain hash and also never `xxh3`.
   Difficulty starts at `initial_difficulty`, follows `target_block_ms`, and never falls below
   `min_difficulty`. `window`, at least 2, makes difficulty retarget over that many blocks and
   bounds each block's timestamp by their median; left out, difficulty follows the parent alone,
   as it did before the field existed, and the chain keeps the id it had. See
   [Consensus](consensus.md).
+
+### governance
+
+```json
+{ "type": "electorate", "approval_epochs": 64 }
+{ "type": "council", "members": ["ed25519:0x…", "ed25519:0x…"], "threshold": 2, "approval_epochs": 64 }
+```
+
+- `electorate`: finality's own validators or signers approve a change, by stake or by signer,
+  two thirds of the stake or `change_threshold` of the signers deciding.
+- `council`: the `members` approve, each weighing one, `threshold` of them deciding. Each is
+  named once, and the threshold is at least 1 and at most the number of members.
+- `approval_epochs`, at least 1, is how many epochs an approval counts for. See
+  [Governance](governance.md).
 
 ### finality
 
@@ -123,7 +143,10 @@ of transaction the scorer is called for, such as `["call", "deploy"]`; left out,
     them.
 - **A `minter`** that is not the development key.
 - **`vote_reward_source: fees`** without fees.
-- **`consensus.type: rotating`** without `finality.type: authority`.
+- **`consensus.type: rotating`** without `finality.type: authority`, or **`staked`** without
+  `finality.type: ffg`.
+- **`governance`** without finality that votes, with an `approval_epochs` of 0, or a council with
+  no members, a member named twice, or a `threshold` of 0 or more than the members.
 - **Fees:**
   - a `block_gas_limit` of 0, a `burn_permille` over 1000, or a `fuel_per_gas` of 0;
   - a scorer's `kinds` naming something that is no kind of transaction, or one twice;
@@ -139,7 +162,7 @@ of transaction the scorer is called for, such as `["call", "deploy"]`; left out,
 
 ## The dev chains
 
-Without `--genesis`, a node runs one of three development chains, picked with `--consensus`.
+Without `--genesis`, a node runs one of four development chains, picked with `--consensus`.
 
 They share these settings:
 - the development key holds a million coins and may mint;
@@ -153,6 +176,9 @@ They differ only in consensus:
 - **authority:** the development key produces a block every two seconds, for no reward.
 - **rotating:** authority finality with the development key as its one signer, which produces
   every block in turn, every two seconds, for no reward. In a build with authority finality.
+- **staked:** FFG finality with the development key as its one validator, bonded from genesis,
+  which produces every block by stake, drawn, every two seconds, for no reward. In a build with
+  FFG.
 
 The dev genesis depends on the build: the engines it allows, the default hash, whether FFG is
 built in. Nodes built with different features are on different dev chains. The development key's

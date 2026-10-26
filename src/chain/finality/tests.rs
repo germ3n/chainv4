@@ -6,6 +6,7 @@ use super::*;
 use crate::chain::*;
 use crate::consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, PowConfig, Producer, meets, work_hash};
 use crate::registry::signers::Signer;
+#[cfg(any(feature = "finality-ffg", feature = "finality-authority"))]
 use crate::consensus::ConsensusError;
 use crate::crypto::keypair::Keypair;
 use crate::db::MemoryDb;
@@ -42,7 +43,7 @@ fn open_with(finality: Option<FinalityConfig>) -> Chain {
 fn advance(chain: &mut Chain, txs: Vec<SignedTx>, proofs: Vec<Justification>) -> Result<Vec<Receipt>, ImportError> {
     let now = chain.tip().timestamp + SLOT;
     let mut producer = AuthorityProducer::new(dev(), SLOT);
-    let mut block = chain.build(txs, proofs, producer.address(), now).unwrap();
+    let mut block = chain.build(txs, proofs, producer.address(&[]), now).unwrap();
     block.seal = producer.seal(&block.header).unwrap();
 
     match chain.import(&block, now)? {
@@ -829,7 +830,11 @@ mod voting {
         // Three equal bonds of 1,000; two make two thirds. Two epochs without a proven checkpoint
         // let bundles in, and from the third on half of a quiet validator's bond leaks at each
         // checkpoint.
-        let FinalityConfig::Ffg(config) = ffg() else { unreachable!() };
+        let config = match ffg() {
+            FinalityConfig::Ffg(config) => config,
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        };
         let mut config = FfgConfig {
             leak: Some(Leak { after_epochs: 2, permille: 500 }),
             ..config
@@ -978,7 +983,7 @@ mod voting {
         // Not two conflicting votes: refused before it runs, so a block holding it is invalid.
         let now = chain.tip().timestamp + SLOT;
         let mut producer = AuthorityProducer::new(dev(), SLOT);
-        let mut block = chain.build(Vec::new(), Vec::new(), producer.address(), now).unwrap();
+        let mut block = chain.build(Vec::new(), Vec::new(), producer.address(&[]), now).unwrap();
         block.txs = vec![slash(honest, honest, 2)];
         block.header.tx_root = Block::tx_root(chain.hash(), &block.txs);
         block.seal = producer.seal(&block.header).unwrap();
@@ -1079,7 +1084,7 @@ mod voting {
     #[cfg(feature = "finality-authority")]
     fn in_turn(chain: &Chain) -> Keypair {
         let producers = chain.producers_for(chain.tip().height + 1).unwrap();
-        let mut keys: Vec<PublicKey> = producers.iter().map(|signer| signer.key).collect();
+        let mut keys: Vec<PublicKey> = producers.iter().map(|signer| signer.voter).collect();
         keys.sort();
         let wanted = keys[((chain.tip().height + 1) % keys.len() as u64) as usize];
 
@@ -1096,7 +1101,7 @@ mod voting {
         let mut producer = RotatingProducer::new(keypair.clone(), keypair.public().address(), SLOT);
         let now = at.unwrap_or_else(|| producer.start_at(&tip, &producers));
         let declared = producer.difficulty(&tip, &producers);
-        let mut block = chain.build_declaring(Vec::new(), Vec::new(), producer.address(), now, None, declared).unwrap();
+        let mut block = chain.build_declaring(Vec::new(), Vec::new(), producer.address(&[]), now, None, declared).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
 
         chain.import(&block, now)
@@ -1158,19 +1163,19 @@ mod voting {
         let producers = chain.producers_for(tip.height + 1).unwrap();
         let mut producer = crate::consensus::RotatingProducer::new(signer.clone(), signer.public().address(), SLOT);
         let now = producer.start_at(&tip, &producers);
-        let mut block = chain.build_declaring(txs, Vec::new(), producer.address(), now, None, producer.difficulty(&tip, &producers)).unwrap();
+        let mut block = chain.build_declaring(txs, Vec::new(), producer.address(&[]), now, None, producer.difficulty(&tip, &producers)).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
         chain.import(&block, now).unwrap();
 
-        while chain.producers_for(chain.tip().height + 1).unwrap().iter().any(|signer| signer.key == carol.public()) {
+        while chain.producers_for(chain.tip().height + 1).unwrap().iter().any(|signer| signer.voter == carol.public()) {
             let signer = in_turn(&chain);
             produce_as(&mut chain, &signer, None).unwrap();
         }
 
         let producers = chain.producers_for(chain.tip().height + 1).unwrap();
 
-        assert!(producers.iter().any(|signer| signer.key == dave.public()));
-        assert!(chain.producers_for(chain.tip().height).unwrap().iter().any(|signer| signer.key == carol.public()) || chain.tip().height.is_multiple_of(INTERVAL));
+        assert!(producers.iter().any(|signer| signer.voter == dave.public()));
+        assert!(chain.producers_for(chain.tip().height).unwrap().iter().any(|signer| signer.voter == carol.public()) || chain.tip().height.is_multiple_of(INTERVAL));
 
         for _ in 0..3 {
             let signer = in_turn(&chain);
@@ -1238,6 +1243,390 @@ mod voting {
 
         assert_eq!(client.tip().id(), chain.tip().id());
         assert_eq!(client.justified().epoch, 1);
+    }
+
+    /// A chain whose FFG validators produce by stake, every two seconds, under a schedule.
+    #[cfg(feature = "finality-ffg")]
+    fn staked(schedule: crate::consensus::Schedule) -> (Chain, crate::consensus::Staked) {
+        let genesis = Genesis {
+            consensus: ConsensusConfig::Staked { slot_ms: SLOT, schedule },
+            ..genesis_with(Some(ffg()))
+        };
+        let chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+        let rules = crate::consensus::Staked::new(SLOT, schedule, chain.hash(), INTERVAL);
+
+        (chain, rules)
+    }
+
+    /// The keypair of a validator's voting key, among the three voters and the newcomer.
+    #[cfg(feature = "finality-ffg")]
+    fn validator_key(voter: &PublicKey) -> Keypair {
+        voters().into_iter().chain([key(60)]).find(|keypair| keypair.public() == *voter).unwrap()
+    }
+
+    /// Builds the next block as a validator, with these transactions, at its slot or at a time
+    /// given, and imports it.
+    #[cfg(feature = "finality-ffg")]
+    fn produce_by_stake(chain: &mut Chain, rules: crate::consensus::Staked, keypair: &Keypair, txs: Vec<SignedTx>, at: Option<u64>) -> Result<Imported, ImportError> {
+        use crate::consensus::StakedProducer;
+
+        let tip = chain.tip().clone();
+        let producers = chain.producers_for(tip.height + 1).unwrap();
+        let mut producer = StakedProducer::new(keypair.clone(), rules);
+        let now = at.unwrap_or_else(|| producer.start_at(&tip, &producers));
+        let declared = producer.difficulty(&tip, &producers);
+        let mut block = chain.build_declaring(txs, Vec::new(), producer.address(&producers), now, None, declared).unwrap();
+        block.seal = producer.seal(&block.header).unwrap();
+
+        chain.import(&block, now)
+    }
+
+    /// Produces the next block as whoever is in turn.
+    #[cfg(feature = "finality-ffg")]
+    fn produce_in_turn(chain: &mut Chain, rules: crate::consensus::Staked, txs: Vec<SignedTx>) -> Keypair {
+        let height = chain.tip().height + 1;
+        let producers = chain.producers_for(height).unwrap();
+        let keypair = validator_key(&rules.producer_at(&producers, height, 0).unwrap().voter);
+
+        assert!(matches!(produce_by_stake(chain, rules, &keypair, txs, None), Ok(Imported::Extended(_))));
+
+        keypair
+    }
+
+    #[cfg(feature = "finality-ffg")]
+    #[test]
+    fn validators_produce_by_stake_and_a_new_bond_joins_the_schedule_from_its_epoch() {
+        use crate::consensus::Schedule;
+        use crate::registry::validators::Validators;
+        use crate::structs::amount::Amount;
+
+        for schedule in [Schedule::Draw, Schedule::Priority] {
+            let (mut chain, rules) = staked(schedule);
+
+            // Ten blocks in turn, each weighing 2, from the three genesis validators alone.
+            for _ in 0..10 {
+                let keypair = produce_in_turn(&mut chain, rules, Vec::new());
+
+                assert_eq!(chain.tip().difficulty, 0);
+                assert_eq!(chain.tip().producer, keypair.public().address());
+                assert!(voters().iter().any(|voter| voter.public() == keypair.public()));
+            }
+
+            assert_eq!(chain.tip_work(), u256::new(20));
+
+            // The next in line is early at its slot less one and steps in at its slot, weighing 1;
+            // a stranger never.
+            let height = chain.tip().height + 1;
+            let producers = chain.producers_for(height).unwrap();
+            let in_turn = rules.producer_at(&producers, height, 0).unwrap();
+            let (wait, next) = (1..).map(|offset| (offset, rules.producer_at(&producers, height, offset).unwrap())).find(|(_, member)| member.voter != in_turn.voter).unwrap();
+            let next = validator_key(&next.voter);
+            let tip = chain.tip().timestamp;
+
+            assert!(matches!(
+                produce_by_stake(&mut chain, rules, &next, Vec::new(), Some(tip + wait * SLOT)),
+                Err(ImportError::Invalid(BlockError::Consensus(ConsensusError::Early)))
+            ));
+            assert!(matches!(produce_by_stake(&mut chain, rules, &next, Vec::new(), Some(tip + (wait + 1) * SLOT)), Ok(Imported::Extended(_))));
+            assert_eq!(chain.tip().difficulty, u128::from(wait));
+            assert_eq!(chain.tip_work(), u256::new(21));
+            assert!(matches!(
+                produce_by_stake(&mut chain, rules, &key(60), Vec::new(), None),
+                Err(ImportError::Invalid(BlockError::Consensus(ConsensusError::WrongProducer)))
+            ));
+
+            // The dev key bonds a newcomer with fifty times the others' stake: it produces from
+            // the epoch its bond first counts in, as the heaviest, and not before.
+            let newcomer = key(60);
+            let bond = Tx::Bond {
+                voter: newcomer.public(),
+                amount: Amount::U128(500),
+            };
+            let signed = SignedTx::sign(bond, nonce(&chain, &dev()), FeeOffer::NONE, &dev());
+            produce_in_turn(&mut chain, rules, vec![signed]);
+            let record = Validators::new(&chain.state()).get(&newcomer.public()).unwrap().unwrap();
+            let joins = record.active_from;
+
+            assert_eq!((record.account, record.bond), (dev().public().address(), u256::new(500)));
+
+            while chain.tip().height + 1 < joins * INTERVAL {
+                let keypair = produce_in_turn(&mut chain, rules, Vec::new());
+
+                assert_ne!(keypair.public(), newcomer.public());
+            }
+
+            let producers = chain.producers_for(joins * INTERVAL).unwrap();
+
+            assert!(producers.iter().any(|member| member.voter == newcomer.public() && member.weight == u256::new(500)));
+
+            let mut turns = 0;
+
+            for _ in 0..INTERVAL {
+                turns += u64::from(produce_in_turn(&mut chain, rules, Vec::new()).public() == newcomer.public());
+            }
+
+            match schedule {
+                Schedule::Priority => assert_eq!(turns, INTERVAL, "fifty times the stake is every turn of a short epoch"),
+                Schedule::Draw => assert!(turns >= INTERVAL / 2, "{turns} of {INTERVAL} turns with fifty times the stake"),
+            }
+        }
+    }
+
+    #[cfg(feature = "finality-ffg")]
+    #[test]
+    fn a_light_client_follows_a_staked_chain_by_the_validators_it_proved() {
+        use crate::consensus::Schedule;
+        use crate::light::{Extended, LightClient, LightRequest};
+
+        let (mut chain, rules) = staked(Schedule::Priority);
+
+        // Three epochs of blocks, and one more: epochs 0 to 2 are fixed at genesis, epoch 3 at
+        // checkpoint 1, whose update a client trusts once epoch 1 is justified.
+        for _ in 0..3 * INTERVAL + 1 {
+            produce_in_turn(&mut chain, rules, Vec::new());
+        }
+
+        for keypair in &voters()[..2] {
+            chain.add_vote(signed(&chain, keypair, start(&chain), checkpoint(&chain, 1))).unwrap();
+        }
+
+        assert_eq!(chain.justified().unwrap().epoch, 1);
+
+        let genesis = chain.block_at(0).unwrap().unwrap();
+        let params = crate::light::LightParams {
+            consensus: ConsensusConfig::Staked { slot_ms: SLOT, schedule: Schedule::Priority },
+            ..genesis_with(Some(ffg())).light_params()
+        };
+        let mut client = LightClient::new(params, genesis.sealed_header(), chain.genesis()).unwrap();
+        let headers_from = |from: u64| -> Vec<SealedHeader> { chain.headers_from(from, 1_000).unwrap() };
+
+        // It cannot check block 1 before genesis's update names epoch 0's validators.
+        assert_eq!(client.deliver_headers(1, headers_from(1), LATER).unwrap(), Extended::Waiting);
+        assert_eq!(client.tip().height, 0);
+        assert_eq!(client.next(), Some(LightRequest::Finality { from: 0 }));
+
+        let steps = |from: u64| stored_light_finality(&*chain.db, INTERVAL, from, 64, chain.tip().height).unwrap();
+        client.deliver_finality(0, steps(0)).unwrap();
+
+        // Now through epoch 2, where it waits for checkpoint 1's update, and then the rest.
+        assert_eq!(client.deliver_headers(1, headers_from(1), LATER).unwrap(), Extended::Added((3 * INTERVAL - 1) as usize));
+
+        while let Some(request) = client.next() {
+            match request {
+                LightRequest::Headers { from, .. } => {
+                    client.deliver_headers(from, headers_from(from), LATER).unwrap();
+                }
+                LightRequest::Finality { from } => {
+                    client.deliver_finality(from, steps(from)).unwrap();
+                }
+            }
+        }
+
+        assert_eq!(client.tip().id(), chain.tip().id());
+        assert_eq!(client.justified().epoch, 1);
+    }
+
+    /// The dev authority chain with FFG finality and governance, so the consensus can change.
+    #[cfg(all(feature = "finality-ffg", any(feature = "governance-electorate", feature = "governance-council")))]
+    fn governed(governance: crate::governance::GovernanceConfig) -> Chain {
+        let genesis = Genesis {
+            governance: Some(governance),
+            ..genesis_with(Some(ffg()))
+        };
+
+        Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap()
+    }
+
+    /// A change to production by stake, drawn.
+    #[cfg(all(feature = "finality-ffg", any(feature = "governance-electorate", feature = "governance-council")))]
+    fn to_staked() -> crate::governance::Change {
+        crate::governance::Change::Consensus(ConsensusConfig::Staked {
+            slot_ms: SLOT,
+            schedule: crate::consensus::Schedule::Draw,
+        })
+    }
+
+    /// Sends a transaction from a key in the next authority block, and returns its receipt.
+    #[cfg(all(feature = "finality-ffg", any(feature = "governance-electorate", feature = "governance-council")))]
+    fn send_as(chain: &mut Chain, keypair: &Keypair, tx: Tx) -> Receipt {
+        let signed = SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair);
+
+        advance(chain, vec![signed], Vec::new()).unwrap().remove(0)
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "governance-electorate"))]
+    #[test]
+    fn the_electorate_changes_the_consensus_and_the_change_takes_effect_epochs_later() {
+        use crate::consensus::Schedule;
+        use crate::governance::{Change, GovernanceConfig};
+        use crate::light::{Extended, LightClient, LightRequest};
+        use crate::registry::changes::Changes;
+
+        let mut chain = governed(GovernanceConfig::Electorate { approval_epochs: 8 });
+        let [alice, bob, _] = voters();
+        let rules = crate::consensus::Staked::new(SLOT, Schedule::Draw, chain.hash(), INTERVAL);
+        let approve = |version: u64, change: Change| Tx::ApproveChange { version, change };
+
+        assert_eq!(chain.consensus_config_at(1).unwrap(), genesis_with(None).consensus);
+
+        // The dev key holds the funds but no stake; a rotating authority needs other finality;
+        // Alice's approval alone is a third of the stake.
+        let refused = send_as(&mut chain, &dev(), approve(0, to_staked()));
+
+        assert!(matches!(&refused.result, Err(failure) if failure.to_string().contains("governance lets approve")), "{:?}", refused.result);
+
+        let unfit = send_as(&mut chain, &alice, approve(0, Change::Consensus(ConsensusConfig::Rotating { slot_ms: SLOT })));
+
+        assert!(matches!(&unfit.result, Err(failure) if failure.to_string().contains("needs finality of type authority")), "{:?}", unfit.result);
+        assert_eq!(send_as(&mut chain, &alice, approve(0, to_staked())).result, Ok(Effect::Done));
+
+        let ballot = Changes::new(&chain.state()).ballot().unwrap();
+
+        assert_eq!(ballot.approvers(&to_staked()), [alice.public().address()]);
+        assert_eq!(Changes::new(&chain.state()).decided().unwrap().version, 0);
+
+        // Bob's makes two thirds: decided, version 1. The epochs fixed already keep the
+        // authority; the checkpoint after the decision fixes stake for the epoch two ahead.
+        assert_eq!(send_as(&mut chain, &bob, approve(0, to_staked())).result, Ok(Effect::Done));
+
+        let decided = Changes::new(&chain.state()).decided().unwrap();
+        let Change::Consensus(staked) = to_staked();
+
+        assert_eq!((decided.version, &decided.consensus), (1, &staked));
+
+        // The checkpoint after the decision, the block it landed in when that is one, fixes it
+        // activation_delay epochs ahead.
+        let checkpoint = chain.tip().height.div_ceil(INTERVAL) * INTERVAL;
+        let switch = checkpoint + 2 * INTERVAL;
+        // Two voters vote whenever a checkpoint is due, so every checkpoint is justified in turn,
+        // as a light client needs them.
+        let vote = |chain: &mut Chain| {
+            while chain.vote_for(&voters()[0].public()).unwrap().is_some() {
+                for keypair in &voters()[..2] {
+                    let vote = honest_vote(chain, keypair);
+                    chain.add_vote(vote).unwrap();
+                }
+            }
+        };
+
+        while chain.tip().height < switch - 1 {
+            advance(&mut chain, Vec::new(), Vec::new()).unwrap();
+            vote(&mut chain);
+        }
+
+        for height in [1, chain.tip().height] {
+            assert_eq!(chain.consensus_config_at(height).unwrap(), genesis_with(None).consensus, "the authority through height {height}");
+        }
+
+        assert_eq!(chain.consensus_config_at(switch).unwrap(), staked);
+
+        // The authority may not produce the switch block; a validator in turn may, and the chain
+        // weighs its blocks as the new rules say.
+        let work = chain.tip_work();
+
+        assert!(matches!(advance(&mut chain, Vec::new(), Vec::new()), Err(ImportError::Invalid(BlockError::Consensus(ConsensusError::WrongProducer)))));
+
+        for _ in 0..2 * INTERVAL {
+            produce_in_turn(&mut chain, rules, Vec::new());
+            vote(&mut chain);
+        }
+
+        assert_eq!(chain.tip().height, switch + 2 * INTERVAL - 1);
+        assert_eq!(chain.tip_work(), work + u256::new(2 * 2 * u128::from(INTERVAL)), "in turn, each weighs 2");
+        assert!(matches!(&send_as_staked(&mut chain, rules, &alice, approve(1, to_staked())).result, Err(failure) if failure.to_string().contains("consensus already")));
+
+        // The checkpoints up to the one before the tip's are justified, so a light client learns
+        // every epoch's consensus from their updates, and follows the chain across the switch.
+        assert_eq!(chain.justified().unwrap().epoch + 1, chain.tip().height / INTERVAL);
+
+        let genesis = chain.block_at(0).unwrap().unwrap();
+        let params = Genesis {
+            governance: Some(GovernanceConfig::Electorate { approval_epochs: 8 }),
+            ..genesis_with(Some(ffg()))
+        }
+        .light_params();
+
+        assert_eq!(params.governance, Some(crate::governance::GovernanceKind::Electorate));
+
+        let mut client = LightClient::new(params, genesis.sealed_header(), chain.genesis()).unwrap();
+        let headers_from = |from: u64| -> Vec<SealedHeader> { chain.headers_from(from, 1_000).unwrap() };
+        let steps = |from: u64| stored_light_finality(&*chain.db, INTERVAL, from, 64, chain.tip().height).unwrap();
+
+        // Under governance even the first epoch's rules come from genesis's update.
+        assert_eq!(client.deliver_headers(1, headers_from(1), LATER).unwrap(), Extended::Waiting);
+        assert_eq!(client.consensus_at(1), None);
+
+        while let Some(request) = client.next() {
+            match request {
+                LightRequest::Headers { from, .. } => {
+                    client.deliver_headers(from, headers_from(from), LATER).unwrap();
+                }
+                LightRequest::Finality { from } => {
+                    client.deliver_finality(from, steps(from)).unwrap();
+                }
+            }
+        }
+
+        assert_eq!(client.tip().id(), chain.tip().id());
+        assert_eq!(client.consensus_at(1), Some(&genesis_with(None).consensus));
+        assert_eq!(client.consensus_at(switch), Some(&staked));
+
+        // Saved and restored, it keeps the eras it needs and follows on.
+        let restored = LightClient::restore(client.save(), chain.genesis()).unwrap();
+
+        assert_eq!(restored.consensus_at(chain.tip().height), Some(&staked));
+        assert_eq!(restored.tip().id(), chain.tip().id());
+    }
+
+    /// Sends a transaction in the next block produced by stake.
+    #[cfg(all(feature = "finality-ffg", feature = "governance-electorate"))]
+    fn send_as_staked(chain: &mut Chain, rules: crate::consensus::Staked, keypair: &Keypair, tx: Tx) -> Receipt {
+        let signed = SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair);
+        let height = chain.tip().height + 1;
+        let producers = chain.producers_for(height).unwrap();
+        let producer = validator_key(&rules.producer_at(&producers, height, 0).unwrap().voter);
+
+        match produce_by_stake(chain, rules, &producer, vec![signed], None).unwrap() {
+            Imported::Extended(mut receipts) => receipts.remove(0),
+            other => panic!("expected the tip to be extended, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+    #[test]
+    fn a_council_decides_alone_and_an_approval_is_withdrawn_or_moved() {
+        use crate::governance::{Change, GovernanceConfig};
+        use crate::registry::changes::Changes;
+
+        let council = GovernanceConfig::Council {
+            members: vec![dev().public().address(), key(70).public().address()],
+            threshold: 2,
+            approval_epochs: 8,
+        };
+        let mut chain = governed(council);
+        let other = Change::Consensus(ConsensusConfig::Staked {
+            slot_ms: 2 * SLOT,
+            schedule: crate::consensus::Schedule::Priority,
+        });
+
+        // Nothing to withdraw yet; one of two approves; moving it leaves the first change empty.
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::WithdrawChange { version: 0 }).result, Err(failure) if failure.to_string().contains("no approval")));
+        assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: to_staked() }).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: other.clone() }).result, Ok(Effect::Done));
+
+        let ballot = Changes::new(&chain.state()).ballot().unwrap();
+
+        assert!(ballot.approvers(&to_staked()).is_empty());
+        assert_eq!(ballot.approvers(&other), [dev().public().address()]);
+        assert_eq!(send_as(&mut chain, &dev(), Tx::WithdrawChange { version: 0 }).result, Ok(Effect::Done));
+        assert!(Changes::new(&chain.state()).ballot().unwrap().approvals.is_empty());
+
+        // A validator's account is no council member here, and a stale version is refused.
+        let [alice, ..] = voters();
+
+        assert!(matches!(&send_as(&mut chain, &alice, Tx::ApproveChange { version: 0, change: to_staked() }).result, Err(failure) if failure.to_string().contains("governance lets approve")));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: to_staked() }).result, Err(failure) if failure.to_string().contains("decided version is 0")));
+        assert_eq!(Changes::new(&chain.state()).decided().unwrap().version, 0);
     }
 
     #[cfg(feature = "finality-authority")]

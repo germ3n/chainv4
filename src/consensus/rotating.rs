@@ -8,7 +8,7 @@
 use {
     super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer, seal_bytes},
     crate::crypto::keypair::Keypair,
-    crate::registry::signers::Signer,
+    crate::registry::validators::Member,
     crate::structs::address::Address,
     crate::structs::block::{BlockHeader, Seal},
     crate::structs::u256::u256,
@@ -32,16 +32,16 @@ impl Rotating {
 }
 
 /// The epoch's signers in schedule order: by key.
-fn schedule(producers: &[Signer]) -> Vec<Signer> {
+fn schedule(producers: &[Member]) -> Vec<Member> {
     let mut sorted = producers.to_vec();
-    sorted.sort_by_key(|signer| signer.key);
+    sorted.sort_by_key(|signer| signer.voter);
 
     sorted
 }
 
 /// Where a signer stands in the schedule for a height: 0 when in turn, else how many slots it
 /// must wait. None for one not in the schedule.
-fn offset(schedule: &[Signer], height: u64, is: impl Fn(&Signer) -> bool) -> Option<u64> {
+fn offset(schedule: &[Member], height: u64, is: impl Fn(&Member) -> bool) -> Option<u64> {
     let n = schedule.len() as u64;
     let index = schedule.iter().position(is)? as u64;
     let in_turn = height % n;
@@ -72,7 +72,7 @@ impl Consensus for Rotating {
         u128::from((timestamp.saturating_sub(parent.timestamp) / self.slot_ms.max(1)).saturating_sub(1))
     }
 
-    fn check(&self, header: &BlockHeader, seal: &Seal, ancestors: &[BlockHeader], producers: &[Signer], now: u64) -> Result<(), ConsensusError> {
+    fn check(&self, header: &BlockHeader, seal: &Seal, ancestors: &[BlockHeader], producers: &[Member], now: u64) -> Result<(), ConsensusError> {
         let Some(parent) = ancestors.first() else {
             return Err(ConsensusError::NoAncestors);
         };
@@ -104,7 +104,7 @@ impl Consensus for Rotating {
         let Seal::Signature(signature) = seal else {
             return Err(ConsensusError::BadSeal);
         };
-        let key = schedule.iter().find(|signer| signer.account == header.producer).expect("found above").key;
+        let key = schedule.iter().find(|signer| signer.account == header.producer).expect("found above").voter;
 
         key.verify_signature(&seal_bytes(header), signature).map_err(|_| ConsensusError::BadSeal)
     }
@@ -137,13 +137,13 @@ impl RotatingProducer {
 }
 
 impl Producer for RotatingProducer {
-    fn address(&self) -> Address {
+    fn address(&self, _producers: &[Member]) -> Address {
         self.account
     }
 
     /// Its slot: the parent's time plus one slot when in turn, and one more for each signer
     /// before it in line. Never, when it is not among the epoch's signers.
-    fn start_at(&self, parent: &BlockHeader, producers: &[Signer]) -> u64 {
+    fn start_at(&self, parent: &BlockHeader, producers: &[Member]) -> u64 {
         match self.difficulty(parent, producers) {
             Some(offset) => parent.timestamp.saturating_add(self.slot_ms.saturating_mul(offset as u64 + 1)),
             None => u64::MAX,
@@ -151,10 +151,10 @@ impl Producer for RotatingProducer {
     }
 
     /// Its offset in the schedule, which the block declares.
-    fn difficulty(&self, parent: &BlockHeader, producers: &[Signer]) -> Option<u128> {
+    fn difficulty(&self, parent: &BlockHeader, producers: &[Member]) -> Option<u128> {
         let key = self.keypair.public();
 
-        offset(&schedule(producers), parent.height + 1, |signer| signer.key == key).map(u128::from)
+        offset(&schedule(producers), parent.height + 1, |signer| signer.voter == key).map(u128::from)
     }
 
     fn seal(&mut self, header: &BlockHeader) -> Option<Seal> {
@@ -173,9 +173,14 @@ mod tests {
         Keypair::from_seed([seed; 32])
     }
 
-    /// Three signers, the third with an account of its own.
-    fn signers() -> Vec<Signer> {
-        vec![Signer::own(key(1).public()), Signer::own(key(2).public()), Signer { key: key(3).public(), account: key(9).public().address() }]
+    /// Three signers, the third with an account of its own, each weighing one as a signer set's
+    /// validators do.
+    fn signers() -> Vec<Member> {
+        use crate::registry::signers::{Signer, SignerSet};
+
+        SignerSet::new(vec![Signer::own(key(1).public()), Signer::own(key(2).public()), Signer { key: key(3).public(), account: key(9).public().address() }], 2, 2)
+            .validators()
+            .members
     }
 
     fn parent() -> BlockHeader {
@@ -197,8 +202,8 @@ mod tests {
     }
 
     /// The block after the parent by a signer, at a time, declaring its offset, sealed.
-    fn block(keypair: &Keypair, timestamp: u64, producers: &[Signer]) -> (BlockHeader, Seal) {
-        let account = producers.iter().find(|signer| signer.key == keypair.public()).map_or(keypair.public().address(), |signer| signer.account);
+    fn block(keypair: &Keypair, timestamp: u64, producers: &[Member]) -> (BlockHeader, Seal) {
+        let account = producers.iter().find(|signer| signer.voter == keypair.public()).map_or(keypair.public().address(), |signer| signer.account);
         let mut producer = RotatingProducer::new(keypair.clone(), account, SLOT);
         let header = BlockHeader {
             parent: parent().id(),
@@ -221,8 +226,8 @@ mod tests {
         // Height 5 of 3 signers: the signer at index 2 of the sorted schedule is in turn.
         let in_turn = sorted[2];
         let next = sorted[0];
-        let in_turn_key = [key(1), key(2), key(3)].into_iter().find(|keypair| keypair.public() == in_turn.key).unwrap();
-        let next_key = [key(1), key(2), key(3)].into_iter().find(|keypair| keypair.public() == next.key).unwrap();
+        let in_turn_key = [key(1), key(2), key(3)].into_iter().find(|keypair| keypair.public() == in_turn.voter).unwrap();
+        let next_key = [key(1), key(2), key(3)].into_iter().find(|keypair| keypair.public() == next.voter).unwrap();
         let (header, seal) = block(&in_turn_key, 10_000 + SLOT, &signers);
 
         assert_eq!(rules.check(&header, &seal, &[parent()], &signers, 12_000), Ok(()));
@@ -248,7 +253,7 @@ mod tests {
 
         assert_eq!(producer.start_at(&parent(), &signers), 10_000 + 2 * SLOT);
         assert_eq!(RotatingProducer::new(key(7), key(7).public().address(), SLOT).start_at(&parent(), &signers), u64::MAX);
-        assert_eq!(producer.address(), next.account);
+        assert_eq!(producer.address(&signers), next.account);
         assert!(producer.seal(&stepped).is_some());
     }
 
@@ -257,14 +262,14 @@ mod tests {
         let rules = Rotating::new(SLOT);
         let signers = signers();
         let sorted = schedule(&signers);
-        let in_turn = [key(1), key(2), key(3)].into_iter().find(|keypair| keypair.public() == sorted[2].key).unwrap();
+        let in_turn = [key(1), key(2), key(3)].into_iter().find(|keypair| keypair.public() == sorted[2].voter).unwrap();
         let (good, seal) = block(&in_turn, 10_000 + SLOT, &signers);
 
         // A stranger, a wrong offset, the wrong key's signature, no seal, no signers, no parent,
         // and the future.
         let (stranger, stranger_seal) = block(&key(7), 10_000 + SLOT, &signers);
         let wrong_offset = BlockHeader { difficulty: 1, ..good.clone() };
-        let other = [key(1), key(2), key(3)].into_iter().find(|keypair| keypair.public() == sorted[0].key).unwrap();
+        let other = [key(1), key(2), key(3)].into_iter().find(|keypair| keypair.public() == sorted[0].voter).unwrap();
         let forged = Seal::Signature(other.sign(&seal_bytes(&good)));
         let future = BlockHeader { timestamp: 10_000 + SLOT + MAX_DRIFT_MS + 1, ..good.clone() };
 

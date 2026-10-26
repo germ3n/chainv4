@@ -79,7 +79,14 @@ client only knows once it proved them: from genesis's update for the first epoch
 update of the checkpoint `activation_delay` epochs before, trusted once that checkpoint is
 justified. A header it cannot check yet stops the batch (`Extended::Waiting`, or fewer added);
 the client keeps what it checked, asks for finality, and asks for those headers again once the
-signers are known. So it follows the chain `activation_delay` epochs behind finality.
+signers are known. So it follows the chain `activation_delay` epochs behind finality. Production
+by stake works the same way, with the epoch's validators and their weights.
+
+**Under governance** (`LightParams::governance`), the chain's consensus may change, so each
+epoch's consensus comes from a light update too (`EraProof`), fixed and trusted as the epoch's
+voters are, and a header whose epoch's consensus the client does not know yet waits the same way.
+The client builds the rules for each consensus it learns, checks every header by its own epoch's,
+and keeps the eras it learned in its saved state (`LightClient::consensus_at`).
 
 **Reorgs.** When the node's chain no longer links to the client's, the client steps back until it
 finds where they split. It follows the new branch only if it holds more work, and never past a

@@ -131,6 +131,7 @@ enum Touch {
     Address(Address),
     Staking,
     Signers,
+    Governance,
 }
 
 fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
@@ -144,6 +145,7 @@ fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
         Tx::Burn { .. } => {}
         Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::Slash { .. } => touched.push(Touch::Staking),
         Tx::ApproveSigners { .. } | Tx::WithdrawApproval { .. } => touched.push(Touch::Signers),
+        Tx::ApproveChange { .. } | Tx::WithdrawChange { .. } => touched.push(Touch::Governance),
     }
 
     touched

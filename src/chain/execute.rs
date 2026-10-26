@@ -2,6 +2,9 @@ use {
     crate::crypto::verifiable::VerifyError,
     crate::db::{DbError, State},
     crate::registry::signers::{SignerSet, Signers},
+    crate::registry::changes::Changes,
+    crate::governance::{Change, Governance},
+    crate::chain::FinalityConfig,
     crate::registry::validators::{Staking, Validators},
     crate::registry::contracts::{Failed, Hooked},
     crate::registry::{Accounts, Contracts, RegistryError},
@@ -40,6 +43,8 @@ pub struct Rules {
     pub staking: Option<StakingRules>,
     #[document(summary = "What signer changes run under, or None on a chain without authority finality, where they fail.")]
     pub signers: Option<SignerRules>,
+    #[document(summary = "What changes under governance run under, or None on a chain without governance, where they fail.")]
+    pub governance: Option<GovernanceRules>,
     #[document(summary = "Whether the burned share of every fee goes to REWARD_POOL, for vote rewards, rather than vanishing.")]
     pub pooled_fees: bool,
 }
@@ -61,6 +66,33 @@ pub struct SignerRules {
     pub activation_delay: u64,
     #[document(summary = "The chain's genesis id, which votes, and so evidence, are signed over.")]
     pub chain: Hash,
+}
+
+#[document(
+    summary = "The settings changes run under, on a chain with governance.",
+    category = "Chain",
+    see_also = "Rules, GovernanceConfig, Tx::ApproveChange",
+)]
+#[derive(Clone)]
+pub struct GovernanceRules {
+    #[document(summary = "Who may approve, and what it takes.")]
+    pub governance: Arc<dyn Governance>,
+    #[document(summary = "How many epochs an approval counts for.")]
+    pub approval_epochs: u64,
+    #[document(summary = "Blocks per epoch, to tell which epoch an approval is made in.")]
+    pub checkpoint_interval: u64,
+    #[document(summary = "The chain's finality, which a proposed consensus must fit.")]
+    pub finality: FinalityConfig,
+}
+
+impl fmt::Debug for GovernanceRules {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GovernanceRules")
+            .field("governance", &self.governance.name())
+            .field("approval_epochs", &self.approval_epochs)
+            .field("checkpoint_interval", &self.checkpoint_interval)
+            .finish_non_exhaustive()
+    }
 }
 
 #[document(
@@ -114,6 +146,8 @@ pub enum Failure {
     NoStaking,
     #[document(summary = "A signer change on a chain without authority finality.")]
     NoSigners,
+    #[document(summary = "A change approved or withdrawn on a chain without governance.")]
+    NoGovernance,
     #[document(summary = "Slashing evidence whose signatures do not check out.")]
     BadEvidence,
 }
@@ -127,6 +161,7 @@ impl fmt::Display for Failure {
             Failure::EngineNotAllowed(engine) => write!(f, "this chain does not run {} contracts", engine.name()),
             Failure::NoStaking => write!(f, "this chain has no staking"),
             Failure::NoSigners => write!(f, "this chain has no authority signers"),
+            Failure::NoGovernance => write!(f, "this chain has no governance"),
             Failure::BadEvidence => write!(f, "the evidence's signatures do not check out"),
         }
     }
@@ -618,6 +653,29 @@ fn run(
             let epoch = height / rules.checkpoint_interval.max(1);
 
             (moved(Signers::new(layer).withdraw(&sender, *version, epoch, rules.approval_epochs)), Contracted::default())
+        }
+        Tx::ApproveChange { version, change } => {
+            let Some(rules) = &rules.governance else {
+                return (Err(Failure::NoGovernance), Contracted::default());
+            };
+            let Change::Consensus(consensus) = change;
+
+            if let Some(problem) = crate::chain::consensus_problem(consensus, Some(&rules.finality)) {
+                return (Err(Failure::Registry(RegistryError::BadChange(problem))), Contracted::default());
+            }
+
+            let epoch = height / rules.checkpoint_interval.max(1);
+            let approved = Changes::new(layer).approve(&sender, *version, change.clone(), epoch, rules.approval_epochs, &*rules.governance);
+
+            (moved(approved.map(|_| ())), Contracted::default())
+        }
+        Tx::WithdrawChange { version } => {
+            let Some(rules) = &rules.governance else {
+                return (Err(Failure::NoGovernance), Contracted::default());
+            };
+            let epoch = height / rules.checkpoint_interval.max(1);
+
+            (moved(Changes::new(layer).withdraw(&sender, *version, epoch, rules.approval_epochs, &*rules.governance)), Contracted::default())
         }
     }
 }

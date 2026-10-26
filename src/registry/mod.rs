@@ -13,6 +13,7 @@ use {
 use crate::vm::VmError;
 
 pub mod accounts;
+pub mod changes;
 pub mod signers;
 pub mod tokens;
 pub mod validators;
@@ -73,6 +74,14 @@ pub enum RegistryError {
     NoApproval,
     #[document(summary = "The voting key is not one of the decided signers.")]
     UnknownSigner,
+    #[document(summary = "A change approved or withdrawn by an account governance does not let approve.")]
+    NotGoverning,
+    #[document(summary = "A change approved or withdrawn for an older version than the consensus decided last; the decided version.")]
+    StaleChange(u64),
+    #[document(summary = "A change that does not fit the chain, and why: a consensus that needs another finality, or settings no chain could run.")]
+    BadChange(&'static str),
+    #[document(summary = "A change to the consensus decided already.")]
+    SameChange,
     #[document(summary = "The contract exports what makes a token on this chain, but its name(), symbol() or decimals() did not answer as the registry needs, and why.")]
     BadToken(String),
     #[document(summary = "The contract would not load, or this node lacks its engine.")]
@@ -109,6 +118,10 @@ impl fmt::Display for RegistryError {
             RegistryError::SameSigners => write!(f, "those are the signers already"),
             RegistryError::NoApproval => write!(f, "no approval of this signer's counts to withdraw"),
             RegistryError::UnknownSigner => write!(f, "not one of the decided signers"),
+            RegistryError::NotGoverning => write!(f, "only an account governance lets approve may approve or withdraw a change"),
+            RegistryError::StaleChange(version) => write!(f, "the consensus changed since; the decided version is {version}"),
+            RegistryError::BadChange(why) => write!(f, "{why}"),
+            RegistryError::SameChange => write!(f, "that is the consensus already"),
             RegistryError::BadToken(why) => write!(f, "it is a token, but {why}"),
             #[cfg(feature = "vm")]
             RegistryError::Vm(err) => write!(f, "{err}"),

@@ -2,6 +2,7 @@
 //! JavaScript numbers lose precision past 2^53; hashes, bytes and signatures are 0x hex.
 
 use {
+    crate::governance::Change,
     crate::chain::{CommittedReceipt, IndexedEvent, IndexedTx, Reward, TxReceipt, TxStatus},
     crate::crypto::hashable::Hashable,
     crate::db::{Column, StateProof},
@@ -429,6 +430,15 @@ pub fn tx(tx: &Tx) -> Value {
             value
         }
         Tx::WithdrawApproval { version } => json!({ "type": "withdraw_approval", "version": version }),
+        Tx::ApproveChange { version, change } => json!({ "type": "approve_change", "version": version, "change": self::change(change) }),
+        Tx::WithdrawChange { version } => json!({ "type": "withdraw_change", "version": version }),
+    }
+}
+
+/// A change under governance: what it is of, and the new value.
+pub fn change(change: &Change) -> Value {
+    match change {
+        Change::Consensus(consensus) => json!({ "consensus": crate::cli::genesis::consensus_json(consensus, None) }),
     }
 }
 

@@ -118,7 +118,7 @@ fn signed(chain: &Chain, keypair: &Keypair, txs: Vec<Tx>, fee: FeeOffer) -> Vec<
 fn advance(chain: &mut Chain, txs: Vec<SignedTx>) -> (Block, Vec<Receipt>) {
     let now = chain.tip().timestamp + SLOT;
     let mut producer = AuthorityProducer::new(dev(), SLOT);
-    let mut block = chain.build(txs, Vec::new(), producer.address(), now).unwrap();
+    let mut block = chain.build(txs, Vec::new(), producer.address(&[]), now).unwrap();
     block.seal = producer.seal(&block.header).unwrap();
 
     match chain.import(&block, now).unwrap() {
@@ -132,7 +132,7 @@ fn advance(chain: &mut Chain, txs: Vec<SignedTx>) -> (Block, Vec<Receipt>) {
 fn forced(chain: &mut Chain, txs: Vec<SignedTx>, tamper: impl FnOnce(&mut BlockHeader)) -> Result<Imported, ImportError> {
     let now = chain.tip().timestamp + SLOT;
     let mut producer = AuthorityProducer::new(dev(), SLOT);
-    let mut block = chain.build(Vec::new(), Vec::new(), producer.address(), now).unwrap();
+    let mut block = chain.build(Vec::new(), Vec::new(), producer.address(&[]), now).unwrap();
     block.header.tx_root = Block::tx_root(chain.hash(), &txs);
     block.txs = txs;
     tamper(&mut block.header);

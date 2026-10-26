@@ -68,9 +68,9 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--max-gossip-backlog N` | `10000` | The most gossiped transactions and votes, and submitted transactions, that may wait for the node. More are dropped; submissions get 503. |
 | `--max-gossip-per-peer N` | `1000` | The most of those from any one peer. More are dropped, and a peer that goes over 10 times in a minute is disconnected. |
 | `--max-block-txs N` | | The most transactions a block this node produces holds. Without it, blocks fill to the chain's `max_block_bytes` and gas limit. |
-| `--consensus pow\|authority` | `pow` | Which development chain to run. |
+| `--consensus pow\|authority\|rotating\|staked` | `pow` | Which development chain to run. |
 | `--genesis FILE` | | Run the chain a [genesis file](#your-own-chain) describes instead. |
-| `--mine` | | Mine blocks (pow). |
+| `--mine` | | Mine blocks (pow). With `--produce` too, the node does whichever the chain runs, as a chain with [governance](docs/governance.md) may change it. |
 | `--reward-to ADDR` | dev key | Where mining rewards go. |
 | `--mine-threads N` | `1` | How many threads to mine on. |
 | `--produce` | | Produce blocks (authority). |
@@ -88,7 +88,7 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 
 Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
 
-### The two dev chains
+### The dev chains
 
 - **pow** (default): anyone may mine. Blocks aim for one every two seconds and difficulty
   follows. A block mints 50 coins for its miner, halving every 210,000 blocks. The heaviest
@@ -96,13 +96,16 @@ Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
   100 blocks back.
 - **authority**: the development key produces a block every two seconds, with `--produce` on
   exactly one node. No rewards, no forks. Handy for tests and demos.
+- **rotating**: authority finality's signers produce in turn, the development key being the one
+  signer; **staked**: FFG's validators produce by stake, the development key being the one
+  validator. Each with `--produce`, for no reward: the multi-producer schemes, run alone.
 
-Both give the development key a million coins and let it mint, and make it the one FFG
-validator, bonded with 10,000 coins: run one node with `--validate` and the chain finalizes
-every 8 blocks. Both charge [fees](#fees), starting at 1 gwei of gas, which `send` works out on
-its own; an account needs coins to send anything. Its seed is in the source, so never use either
-chain for anything of value. A dev chain also allows every contract engine the node was built
-with, so nodes built with different features are on different chains.
+All give the development key a million coins and let it mint, and all but `rotating` make it
+the one FFG validator, bonded with 10,000 coins: run one node with `--validate` and the chain
+finalizes every 8 blocks. All charge [fees](#fees), starting at 1 gwei of gas, which `send`
+works out on its own; an account needs coins to send anything. Its seed is in the source, so
+never use a dev chain for anything of value. A dev chain also allows every contract engine the
+node was built with, so nodes built with different features are on different chains.
 
 ### Several nodes
 

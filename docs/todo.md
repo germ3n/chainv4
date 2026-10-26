@@ -19,12 +19,23 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   produce in turn, one per slot, the next in line stepping in a slot later, in-turn blocks
   weighing 2 and others 1; the producers are the signers fixed for each epoch, so they change by
   approval and leave with an ejection. Light clients learn them from finality's updates and so
-  follow `activation_delay` epochs behind it, and snapshot sync is refused on such a chain.
-- [ ] **No production by stake.** Stake only finalizes. Producing blocks by stake, or
-  Tendermint-style instant finality, which replaces block production, would be a consensus
-  scheme of its own.
-- [ ] **Snapshot sync on a rotating chain.** It would have to learn the signers as a light client
-  does, from finality's updates, before it could check headers; today it is refused there.
+  follow `activation_delay` epochs behind it, as does snapshot sync, which checks headers as a
+  light client does.
+- [x] **Production by stake.** `consensus.type: staked` has FFG's bonded validators, as fixed for
+  each epoch, produce in slots with a share each in proportion to its bond, under a `schedule`
+  genesis picks: `draw`, a weighted draw by the chain's hash over the set, height and slot, or
+  `priority`, Tendermint's proposer rotation replayed from the epoch's start. Blocks declare the
+  slots waited as difficulty, weigh 2 in turn and 1 otherwise, and are sealed by the voting key
+  for the bond's account. Consensus takes its producers as weighted members now, so light
+  clients and snapshot sync cover it as they cover a rotating authority.
+- [ ] **No Tendermint-style instant finality.** It replaces both block production and finality:
+  rounds of prevotes and precommits, locking, every block final once two thirds precommit, and
+  no fork choice. A consensus and finality kind of its own, for a batch of its own.
+- [x] **Snapshot sync on a rotating or staked chain.** Snapshot sync checks headers through a
+  `LightClient` of the node's own chain, fed over the peer protocol, which learns each epoch's
+  producers from the finality peers serve (`SyncRequest::Finality`) and checks on once it knows
+  them; the pivot is taken among the headers it could check, and the checkpoint the node holds
+  final is the trusted one or a later one the client saw finalized.
 - [x] **Finality.** Casper FFG-style: validators bond on chain (`Tx::Bond`, `Unbond`,
   `Withdraw`) with a separate voting key, and vote at each epoch's checkpoint. Two thirds by
   bond justify a checkpoint, and a justified direct child finalizes its parent. Votes are
@@ -130,6 +141,29 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Minting is for development chains.** Genesis's `minter` may be the development key or
   nobody, so `Mint` is a dev faucet and a chain of value gets coins from rewards and allocations
   alone.
+
+### Governance
+
+- [x] **Governance over the consensus.** Genesis's `governance` names a kind, behind the
+  `Governance` trait: `electorate`, finality's own validators by stake or signers by
+  `change_threshold`, or `council`, accounts genesis names with a threshold. `Tx::ApproveChange`
+  proposes and approves a new consensus, one approval per account, moved by approving another
+  and taken back by `Tx::WithdrawChange`, expiring after `approval_epochs`; once the approvals
+  weigh enough it is decided, and the next checkpoint fixes it `activation_delay` epochs ahead
+  as finality fixes its voters. Blocks are checked by their own epoch's rules, light updates carry
+  each epoch's consensus with a proof, light clients and snapshot sync wait for it as they wait
+  for producers, and a node started with `--mine` and `--produce` builds the producer for
+  whatever the chain runs. `GET /governance` shows the ballot.
+- [ ] **Finality's parameters by governance.** A `Change::Finality` with the same kind's tunable
+  settings: thresholds, rewards, bonds, the leak, and the delays other than the epoch ones.
+  `checkpoint_interval` and `activation_delay` define the epochs light clients and the
+  fixed-ahead sets rest on, so they stay.
+- [ ] **Switching the finality kind by governance.** The hardest change: a switch to FFG or
+  authority has to name the new validators or signers in the proposal, and a switch to depth
+  dissolves the electorate. Finality would become per era in the chain, the votes and the light
+  client.
+- [ ] **No governance over fees, rewards or limits.** The same ballot could carry them; each is a
+  question of what the chain's rules read from state instead of genesis.
 
 ### Script layer
 
@@ -538,3 +572,7 @@ storage seems to save strings only, make it save raw types to save space, etc
 add voting for proposals, like consensus change, etc, upgrades, what not
 scan whole project in order -> scan docs -> go section by section and verify theres nothing that shouldnt be there/stale -> go through each subsytem nad find bugs, stuff that would be good to change -> go through each subsystems tests (all of them), and see if theres something that doesnt make sense/should be added or removed.
 find more hardcoded values that maybe should be confiruable and like be able to be changed, voted on, yada yada
+nice governance, voting visuals in explorer
+
+
+On running the PoW consensus on a real network: the protocol side is complete and tested: a configurable secure work hash, Bitcoin-style windowed retargeting with median-time-past and clamped intervals, fork choice by work bounded by max_reorg_depth, optional FFG checkpoints on top, GPU mining, and a VPS-plus-home run from the earlier batch. What I would not call ready: it has had no outside audit, sync pulls from one peer at a time, there is no selfish-mining mitigation beyond what Bitcoin has, and without finality a partition longer than max_reorg_depth blocks never heals on its own. Usable for a test network or a small launch; treat value on it as at risk until audited.

@@ -11,7 +11,7 @@ members = ["macro", "wiki", "gpu"]
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "mnemonic", "lvm", "wasm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "mnemonic", "lvm", "wasm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -39,6 +39,10 @@ client = ["dep:ureq", "dep:serde_json", "node"]
 finality-ffg = []
 finality-authority = []
 finality-depth = []
+# Kinds of governance a chain can run, as genesis picks: finality's own electorate approving
+# changes, or a council of accounts genesis names.
+governance-electorate = []
+governance-council = []
 # Mining on the GPU, through wgpu: Vulkan, Metal and WebGPU. --mine-gpu picks it over the threads.
 gpu = ["dep:chainv4-gpu", "node"]
 node = ["dep:rayon", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "dep:serde_json", "lvm", "rocksdb"]

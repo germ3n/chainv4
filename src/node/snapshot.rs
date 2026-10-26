@@ -3,12 +3,18 @@
 //! part against that block's state root, and makes the block its tip. Then it syncs the rest as
 //! usual. While it takes state, it imports, produces, votes on and admits nothing, since its state
 //! is half the pivot's.
+//!
+//! The headers are checked by a light client of the node's own chain, fed over the peer protocol:
+//! consensus checks each as a node would, and under a consensus whose producers finality names, a
+//! rotating authority or production by stake, the client learns each epoch's producers from the
+//! finality peers serve it, as any light client does, and checks on once it knows them.
 
 use {
     super::{Node, NodeError},
     crate::db::{Path, SnapshotWalk, WalkError},
-    crate::net::{MAX_SYNC_HEADERS, NetCommand, SyncRequest, SyncResponse},
-    crate::structs::block::{Block, BlockHeader, SealedHeader},
+    crate::light::{Extended, LightClient, LightError, LightRequest, MAX_LIGHT_HEADERS},
+    crate::net::{MAX_SYNC_FINALITY, MAX_SYNC_HEADERS, NetCommand, SyncRequest, SyncResponse},
+    crate::structs::block::{Block, SealedHeader},
     crate::structs::hash::Hash,
     crate::structs::u256::u256,
     crate::structs::vote::Checkpoint,
@@ -29,15 +35,13 @@ pub(super) const MIN_SNAPSHOT_HEIGHT: u64 = 2 * PIVOT_DEPTH;
 
 /// Where taking a snapshot stands.
 pub(super) struct SnapshotSync {
-    /// Every header checked so far, genesis first, or the checkpoint start's first header, and
-    /// each one's total work.
-    headers: Vec<SealedHeader>,
-    work: Vec<u256>,
-    /// The height of the first header held: 0 from genesis, the start's first for a checkpoint.
-    base: u64,
-    /// The checkpoint this node trusts, if it starts at one rather than at genesis, and the
-    /// headers it came with, which are never dropped.
-    checkpoint: Option<(Hash, usize)>,
+    /// The light client that checks the headers: of the chain from genesis, or from the
+    /// checkpoint start once a peer sent it.
+    light: Option<LightClient>,
+    /// The checkpoint this node trusts, if it starts at one rather than at genesis, and its total
+    /// work as the peer that served the start said, less what the light client counts to it: what
+    /// the client's figures lack.
+    checkpoint: Option<(Hash, u256)>,
     phase: Phase,
     /// The peer asked, and what, while its answer is outstanding.
     asking: Option<(PeerId, Asked)>,
@@ -50,7 +54,7 @@ pub(super) struct SnapshotSync {
 enum Phase {
     /// Fetching the checkpoint start: the trusted block's header and those below it.
     Checkpoint,
-    /// Checking headers, up to the heaviest peer's tip.
+    /// Checking headers, and learning finality, up to the heaviest peer's tip.
     Headers,
     /// Taking the state of the block at this height.
     State { pivot: u64, walk: SnapshotWalk },
@@ -61,18 +65,20 @@ enum Phase {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Asked {
     Checkpoint,
-    Headers,
+    Headers { from: u64 },
+    Finality { from: u64 },
     State { depth: u16, prefix: Path },
     Block,
 }
 
 impl SnapshotSync {
-    pub(super) fn new(genesis: SealedHeader, checkpoint: Option<Hash>) -> SnapshotSync {
+    pub(super) fn new(light: LightClient, checkpoint: Option<Hash>) -> SnapshotSync {
         SnapshotSync {
-            headers: vec![genesis],
-            work: vec![u256::ZERO],
-            base: 0,
-            checkpoint: checkpoint.map(|block| (block, 0)),
+            light: match checkpoint {
+                Some(_) => None,
+                None => Some(light),
+            },
+            checkpoint: checkpoint.map(|block| (block, u256::ZERO)),
             phase: match checkpoint {
                 Some(_) => Phase::Checkpoint,
                 None => Phase::Headers,
@@ -83,14 +89,32 @@ impl SnapshotSync {
         }
     }
 
-    /// Where a header at a height sits among those held.
-    fn at(&self, height: u64) -> usize {
-        (height - self.base) as usize
+    /// The light client, once the chain it checks is known.
+    fn light(&self) -> &LightClient {
+        self.light.as_ref().expect("the checkpoint start is in")
     }
 
-    /// The height just past the last header held.
-    fn next_height(&self) -> u64 {
-        self.base + self.headers.len() as u64
+    fn light_mut(&mut self) -> &mut LightClient {
+        self.light.as_mut().expect("the checkpoint start is in")
+    }
+
+    /// The height of the newest header checked.
+    fn checked(&self) -> u64 {
+        self.light.as_ref().map_or(0, |light| light.tip().height)
+    }
+
+    /// The total work of a checked header: the light client's count, and the checkpoint's own
+    /// below it when the node started there.
+    fn work_at(&self, height: u64) -> u256 {
+        self.checkpoint.map_or(u256::ZERO, |(_, below)| below) + self.light().work_at(height).expect("a checked header")
+    }
+
+    /// The height of the trusted checkpoint, when the node starts at one.
+    fn checkpoint_height(&self) -> Option<u64> {
+        let (block, _) = self.checkpoint?;
+        let light = self.light();
+
+        (light.lowest()..=light.tip().height).find(|height| light.sealed_at(*height).is_some_and(|sealed| sealed.id() == block))
     }
 
     /// Whether this node starts at a checkpoint, so it never falls back to running from genesis.
@@ -113,7 +137,7 @@ impl SnapshotSync {
     pub(super) fn stage(&self) -> String {
         match &self.phase {
             Phase::Checkpoint => "fetching the checkpoint".to_string(),
-            Phase::Headers => format!("checking headers, {} so far", self.next_height().saturating_sub(1)),
+            Phase::Headers => format!("checking headers, {} so far", self.checked()),
             Phase::State { pivot, walk } => format!("taking state at height {pivot}, {} entries so far", walk.taken()),
             Phase::Block { pivot } => format!("fetching block {pivot}"),
         }
@@ -123,7 +147,7 @@ impl SnapshotSync {
 impl Node {
     #[document(
         parent = "Node",
-        summary = "Syncs from a snapshot rather than running every block: checks every header its peers have, takes the state of a block PIVOT_DEPTH below the best tip a part at a time, and makes that block its tip. Only for a node that holds genesis alone; on a chain shorter than MIN_SNAPSHOT_HEIGHT it syncs as usual. Given a checkpoint it trusts, it fetches no header below it: it takes the checkpoint's headers from a peer, trusted by their hashes alone, holds the checkpoint as finalized, and checks on from there, so a long-range fork below the checkpoint cannot reach it; it then never falls back to running from genesis.",
+        summary = "Syncs from a snapshot rather than running every block: checks every header its peers have, as a light client of its own chain fed over the peer protocol, takes the state of a block PIVOT_DEPTH below the best tip a part at a time, and makes that block its tip. Only for a node that holds genesis alone; on a chain shorter than MIN_SNAPSHOT_HEIGHT it syncs as usual. Under a rotating authority or production by stake it learns each epoch's producers from the finality peers serve, as a light client does, and takes the pivot among the headers it could check. Given a checkpoint it trusts, it fetches no header below it: it takes the checkpoint's headers from a peer, trusted by their hashes alone, holds the checkpoint as finalized, and checks on from there, so a long-range fork below the checkpoint cannot reach it; it then never falls back to running from genesis.",
         params = { checkpoint = "A finalized checkpoint's block id, from someone the operator trusts, or None to check every header from genesis." },
         returns = "Whether it will: false for a node past genesis.",
     )]
@@ -132,16 +156,9 @@ impl Node {
             return Ok(false);
         }
 
-        // Its headers can only be checked against the signers fixed in state, which it has none
-        // of until the snapshot is in: such a chain syncs by running its blocks.
-        if self.chain.consensus().needs_producers() {
-            return Err(NodeError::Chain(crate::chain::ChainError::BadSnapshot(
-                "a rotating authority's headers are checked against signers in state, which a snapshot has none of yet; sync by running blocks".to_string(),
-            )));
-        }
-
         let genesis = self.chain.headers_from(0, 1)?.pop().ok_or(NodeError::Db(crate::db::DbError::Corrupt("no genesis header".to_string())))?;
-        self.sync.snapshot = Some(SnapshotSync::new(genesis, checkpoint));
+        let light = LightClient::new(self.chain.light_params(), genesis, self.chain.genesis()).map_err(bad_snapshot)?;
+        self.sync.snapshot = Some(SnapshotSync::new(light, checkpoint));
 
         Ok(true)
     }
@@ -171,18 +188,25 @@ impl Node {
         else {
             return Ok(());
         };
-        let pivot_id = |pivot: u64| snapshot.headers[snapshot.at(pivot)].id();
+        // Every header the peers have is checked, as far as finality lets it: pick the pivot.
+        if matches!(snapshot.phase, Phase::Headers) && snapshot.light().next().is_none() {
+            return self.pick_pivot();
+        }
+
         let (asked, request) = match &snapshot.phase {
             Phase::Checkpoint => (Asked::Checkpoint, SyncRequest::Checkpoint {
                 block: snapshot.checkpoint.expect("fetching one").0,
             }),
-            Phase::Headers => (Asked::Headers, SyncRequest::Headers {
-                from: snapshot.next_height(),
-                count: MAX_SYNC_HEADERS,
-            }),
+            Phase::Headers => match snapshot.light().next().expect("checked above") {
+                LightRequest::Headers { from, .. } => (Asked::Headers { from }, SyncRequest::Headers {
+                    from,
+                    count: MAX_SYNC_HEADERS.min(MAX_LIGHT_HEADERS),
+                }),
+                LightRequest::Finality { from } => (Asked::Finality { from }, SyncRequest::Finality { from, count: MAX_SYNC_FINALITY }),
+            },
             Phase::Block { pivot } => (Asked::Block, SyncRequest::Blocks { from: *pivot, count: 1 }),
             Phase::State { pivot, .. } => {
-                let block = pivot_id(*pivot);
+                let block = snapshot.light().sealed_at(*pivot).expect("a checked header").id();
                 let snapshot = self.sync.snapshot.as_mut().expect("still taking one");
                 let Phase::State { pivot, walk } = &mut snapshot.phase else { unreachable!("taking state") };
 
@@ -206,7 +230,7 @@ impl Node {
         Ok(())
     }
 
-    /// Takes a peer's headers, state or block while syncing from a snapshot.
+    /// Takes a peer's headers, finality, state or block while syncing from a snapshot.
     pub(super) fn on_snapshot_response(&mut self, peer: PeerId, response: SyncResponse, now: u64) -> Result<(), NodeError> {
         let Some(snapshot) = self.sync.snapshot.as_mut() else {
             return Ok(());
@@ -220,11 +244,19 @@ impl Node {
         match (asked, response) {
             (Asked::Checkpoint, SyncResponse::Checkpoint(answer)) => {
                 snapshot.asking = None;
-                self.take_checkpoint(peer, answer);
+                self.take_checkpoint(peer, answer)?;
             }
-            (Asked::Headers, SyncResponse::Headers(headers)) => {
+            (Asked::Headers { from }, SyncResponse::Headers(headers)) => {
                 snapshot.asking = None;
-                self.take_headers(peer, headers, now);
+                self.take_headers(peer, from, headers, now);
+            }
+            (Asked::Finality { from }, SyncResponse::Finality(steps)) => {
+                snapshot.asking = None;
+
+                if let Err(err) = snapshot.light_mut().deliver_finality(from, steps) {
+                    log::warn!("[node] {peer} sent finality that does not check: {err}; asking others");
+                    snapshot.distrusted.insert(peer);
+                }
             }
             (Asked::State { depth, prefix }, SyncResponse::State(part)) => {
                 snapshot.asking = None;
@@ -246,6 +278,7 @@ impl Node {
                         walk.retry();
                         snapshot.moves += 1;
                         snapshot.phase = Phase::Headers;
+                        snapshot.light_mut().refresh();
                     }
                     Some(part) => match self.chain.take_snapshot_part(walk, depth, prefix, part) {
                         Ok(()) => {}
@@ -264,9 +297,9 @@ impl Node {
                 let Phase::Block { pivot } = snapshot.phase else {
                     return Ok(());
                 };
-                let expected = &snapshot.headers[snapshot.at(pivot)];
+                let expected = snapshot.light().sealed_at(pivot).expect("a checked header").clone();
 
-                match blocks.into_iter().next().filter(|block| fits(block, expected, self.chain.hash())) {
+                match blocks.into_iter().next().filter(|block| fits(block, &expected, self.chain.hash())) {
                     Some(block) => self.install(block, pivot)?,
                     None => {
                         log::warn!("[node] {peer} sent a block that is not the pivot; asking others");
@@ -286,121 +319,106 @@ impl Node {
 
     /// Takes the checkpoint start a peer sent: headers that link up by their hashes to the block
     /// this node trusts, so every one of them is trusted too, and the checkpoint's total work,
-    /// taken on the peer's word. From there, checking goes on as from genesis.
-    fn take_checkpoint(&mut self, peer: PeerId, answer: Option<crate::net::CheckpointAnswer>) {
+    /// taken on the peer's word. The light client starts there, and checking goes on as from
+    /// genesis.
+    fn take_checkpoint(&mut self, peer: PeerId, answer: Option<crate::net::CheckpointAnswer>) -> Result<(), NodeError> {
         let snapshot = self.sync.snapshot.as_mut().expect("taking one");
         let (trusted, _) = snapshot.checkpoint.expect("fetching one");
         let Some(answer) = answer else {
             log::warn!("[node] {peer} does not serve checkpoint {trusted}; asking others");
             snapshot.distrusted.insert(peer);
 
-            return;
+            return Ok(());
         };
-        let headers = answer.start.headers;
-        let links = headers.windows(2).all(|pair| pair[1].header.parent == pair[0].id() && pair[1].header.height == pair[0].header.height + 1);
+        let genesis = self.chain.headers_from(0, 1)?.pop().ok_or(NodeError::Db(crate::db::DbError::Corrupt("no genesis header".to_string())))?;
 
-        if headers.last().map(SealedHeader::id) != Some(trusted) || !links || headers.first().is_some_and(|first| first.header.height == 0) {
-            log::warn!("[node] {peer} sent a checkpoint start that does not lead to {trusted}; asking others");
-            snapshot.distrusted.insert(peer);
-
-            return;
+        match LightClient::from_checkpoint(self.chain.light_params(), genesis, self.chain.genesis(), trusted, answer.start) {
+            Ok(light) => {
+                let height = light.tip().height;
+                let counted = light.work_at(height).expect("the checkpoint is followed");
+                log::info!("[node] starting at checkpoint {trusted}, height {height}, with headers from {} from {peer}", light.lowest());
+                snapshot.checkpoint = Some((trusted, answer.work.saturating_sub(counted)));
+                snapshot.light = Some(light);
+                snapshot.phase = Phase::Headers;
+            }
+            Err(err) => {
+                log::warn!("[node] {peer} sent a checkpoint start that does not lead to {trusted}: {err}; asking others");
+                snapshot.distrusted.insert(peer);
+            }
         }
 
-        // Work below the checkpoint runs backwards from its total: each header's is the next
-        // one's less what the next one weighs.
-        let consensus = self.chain.consensus();
-        let mut work = vec![u256::ZERO; headers.len()];
-        work[headers.len() - 1] = answer.work;
-
-        for index in (0..headers.len() - 1).rev() {
-            work[index] = work[index + 1].saturating_sub(consensus.work(&headers[index + 1].header));
-        }
-
-        let height = headers.last().expect("checked above").header.height;
-        log::info!("[node] starting at checkpoint {trusted}, height {height}, with {} headers from {peer}", headers.len());
-        snapshot.base = headers[0].header.height;
-        snapshot.checkpoint = Some((trusted, headers.len()));
-        snapshot.headers = headers;
-        snapshot.work = work;
-        snapshot.phase = Phase::Headers;
+        Ok(())
     }
 
-    /// Checks headers a peer sent by consensus and keeps them; once it has no more, picks the pivot.
-    fn take_headers(&mut self, peer: PeerId, headers: Vec<SealedHeader>, now: u64) {
-        let depth = PIVOT_DEPTH.min(self.chain.max_reorg_depth() / 2);
-        let consensus = self.chain.consensus();
+    /// Hands headers a peer sent to the light client, which checks them by consensus and keeps
+    /// them; a peer whose headers do not check, or whose chain is lighter than what it claims, is
+    /// not asked again.
+    fn take_headers(&mut self, peer: PeerId, from: u64, headers: Vec<SealedHeader>, now: u64) {
         let snapshot = self.sync.snapshot.as_mut().expect("taking one");
-        let full = headers.len() as u32 == MAX_SYNC_HEADERS;
 
-        if let Some(first) = headers.first()
-            && first.header.parent != snapshot.headers.last().expect("genesis").id()
-        {
-            // Its chain split off below what was checked: step a batch back and ask again, but
-            // never below the checkpoint start, which is trusted.
-            let least = snapshot.checkpoint.map_or(1, |(_, held)| held);
-            let keep = snapshot.headers.len().saturating_sub(MAX_SYNC_HEADERS as usize).max(least);
-            snapshot.headers.truncate(keep);
-            snapshot.work.truncate(keep);
-
-            return;
-        }
-
-        for sealed in headers {
-            // The parent first, then as many below as consensus looks at.
-            let ancestors: Vec<BlockHeader> = snapshot.headers.iter().rev().take(consensus.lookback().max(1)).map(|sealed| sealed.header.clone()).collect();
-            let parent = ancestors.first().expect("genesis");
-
-            if sealed.header.height != parent.height + 1 || sealed.header.parent != parent.id() || consensus.check(&sealed.header, &sealed.seal, &ancestors, &[], now).is_err() {
-                log::warn!("[node] {peer} sent header {} that does not check; asking others", sealed.header.height);
+        match snapshot.light_mut().deliver_headers(from, headers, now) {
+            Ok(Extended::Lighter) => {
+                log::warn!("[node] {peer} claims more work than the headers it sends hold; asking others");
                 snapshot.distrusted.insert(peer);
-
-                return;
             }
-
-            let work = *snapshot.work.last().expect("genesis") + consensus.work(&sealed.header);
-            snapshot.work.push(work);
-            snapshot.headers.push(sealed);
+            Ok(_) => {}
+            Err(err) => {
+                log::warn!("[node] {peer} sent headers that do not check: {err}; asking others");
+                snapshot.distrusted.insert(peer);
+            }
         }
+    }
 
-        if full {
-            return;
-        }
-
-        let height = snapshot.next_height() - 1;
+    /// Picks the pivot once every header is checked: PIVOT_DEPTH below the newest, never below
+    /// the checkpoint, and starts taking its state. A chain too short for a snapshot is run instead.
+    fn pick_pivot(&mut self) -> Result<(), NodeError> {
+        let depth = PIVOT_DEPTH.min(self.chain.max_reorg_depth() / 2);
+        let snapshot = self.sync.snapshot.as_mut().expect("taking one");
+        let height = snapshot.checked();
 
         if height < MIN_SNAPSHOT_HEIGHT && !snapshot.starts_at_checkpoint() {
             log::info!("[node] the chain is only {height} blocks long: syncing by running them instead");
             self.sync.snapshot = None;
 
-            return;
+            return self.sync_next();
         }
 
         // Never below the checkpoint: its state is the first this node can hold.
-        let least = snapshot.checkpoint.map_or(0, |(_, held)| snapshot.base + held as u64 - 1);
+        let least = snapshot.checkpoint_height().unwrap_or(0);
         let pivot = height.saturating_sub(depth).max(least);
-        let root = snapshot.headers[snapshot.at(pivot)].header.state_root;
+        let root = snapshot.light().sealed_at(pivot).expect("a checked header").header.state_root;
         log::info!("[node] checked {height} headers; taking state at height {pivot}");
         snapshot.phase = Phase::State {
             pivot,
             walk: SnapshotWalk::new(root),
         };
+
+        self.snapshot_next()
     }
 
     /// Makes the pivot the tip, and goes back to syncing as usual from it.
     fn install(&mut self, block: Block, pivot: u64) -> Result<(), NodeError> {
         let snapshot = self.sync.snapshot.take().expect("taking one");
-        // From genesis, the headers after it; from a checkpoint, every one held.
-        let first = if snapshot.base == 0 { 1 } else { 0 };
-        let headers = &snapshot.headers[first..=snapshot.at(pivot)];
-        let checkpoint = snapshot.checkpoint.map(|(block, held)| {
-            let height = snapshot.base + held as u64 - 1;
+        let light = snapshot.light();
+        // From genesis, the headers after it; from a checkpoint, every one held, the trusted ones
+        // below the checkpoint included.
+        let first = light.lowest().max(1);
+        let headers: Vec<SealedHeader> = (first..=pivot).map(|height| light.sealed_at(height).expect("a checked header").clone()).collect();
+        let interval = self.chain.finality_config().map_or(1, |config| config.checkpoint_interval().max(1));
+        // The checkpoint the node holds as final: the one it trusts, or a later one the light
+        // client saw finalized among the headers installed.
+        let trusted = snapshot.checkpoint.and_then(|(block, _)| {
+            let height = snapshot.checkpoint_height()?;
 
-            Checkpoint {
-                epoch: height / self.chain.finality_config().map_or(1, |config| config.checkpoint_interval().max(1)),
-                block,
-            }
+            Some(Checkpoint { epoch: height / interval, block })
         });
-        self.chain.install_snapshot(headers, &block, snapshot.work[snapshot.at(pivot)], checkpoint).map_err(NodeError::Chain)?;
+        let seen = Some(light.finalized()).filter(|finalized| finalized.epoch > 0 && finalized.epoch * interval <= pivot);
+        let checkpoint = match (trusted, seen) {
+            (Some(trusted), Some(seen)) if seen.epoch > trusted.epoch => Some(seen),
+            (Some(trusted), _) => Some(trusted),
+            (None, seen) => seen,
+        };
+        self.chain.install_snapshot(&headers, &block, snapshot.work_at(pivot), checkpoint).map_err(NodeError::Chain)?;
         log::info!("[node] synced from a snapshot to height {pivot} {}", block.id());
 
         // What peers said was before the pivot moved, perhaps: ask them where they are now.
@@ -415,6 +433,11 @@ impl Node {
 
         Ok(())
     }
+}
+
+/// A light client that could not start on this node's own chain: the chain's fault, never a peer's.
+fn bad_snapshot(err: LightError) -> NodeError {
+    NodeError::Chain(crate::chain::ChainError::BadSnapshot(format!("a light client of this chain cannot start: {err}")))
 }
 
 /// Whether a block is the one a checked header names, its body included.

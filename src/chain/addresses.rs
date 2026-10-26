@@ -80,7 +80,9 @@ pub fn touched(signed: &SignedTx, status: &TxStatus) -> BTreeSet<Address> {
         | Tx::Withdraw { .. }
         | Tx::Slash { .. }
         | Tx::ApproveSigners { .. }
-        | Tx::WithdrawApproval { .. } => {}
+        | Tx::WithdrawApproval { .. }
+        | Tx::ApproveChange { .. }
+        | Tx::WithdrawChange { .. } => {}
     }
 
     if let TxStatus::Deployed(contract) = status {

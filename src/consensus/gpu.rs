@@ -5,7 +5,7 @@
 use {
     super::pow::{Shared, work_prefix, work_target},
     super::Producer,
-    crate::registry::signers::Signer,
+    crate::registry::validators::Member,
     crate::structs::address::Address,
     crate::structs::block::{BlockHeader, Seal},
     crate::structs::hash::{Hash, HashType},
@@ -73,12 +73,12 @@ fn work_hash(hash: HashType) -> Option<WorkHash> {
 }
 
 impl Producer for GpuMiner {
-    fn address(&self) -> Address {
+    fn address(&self, _producers: &[Member]) -> Address {
         self.address
     }
 
     /// Timestamps must move forward, so the next millisecond after the parent's.
-    fn start_at(&self, parent: &BlockHeader, _producers: &[Signer]) -> u64 {
+    fn start_at(&self, parent: &BlockHeader, _producers: &[Member]) -> u64 {
         parent.timestamp + 1
     }
 

@@ -154,7 +154,7 @@ mod tests {
 
         for _ in 0..25 {
             let now = chain.tip().timestamp + 2_000;
-            let mut block = chain.build(Vec::new(), Vec::new(), producer.address(), now).unwrap();
+            let mut block = chain.build(Vec::new(), Vec::new(), producer.address(&[]), now).unwrap();
             block.seal = producer.seal(&block.header).unwrap();
             chain.import(&block, now).unwrap();
         }

@@ -37,6 +37,7 @@ fn rules() -> Rules {
         token_functions: crate::chain::standard_token_functions().into(),
         staking: None,
         signers: None,
+        governance: None,
         fees: Some(Arc::new(FeeConfig::dev().build())),
         pooled_fees: false,
     }

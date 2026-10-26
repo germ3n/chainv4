@@ -15,8 +15,9 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Architecture](architecture.md) | The parts and how a transaction and a block travel through them. |
 | [Chain](chain.md) | Blocks, transactions, importing, running a block, fork choice, reorgs, receipts and rewards. |
 | [Genesis](genesis.md) | Every field of a genesis file, and the rules a node checks them against. |
-| [Consensus](consensus.md) | Who may produce blocks: the development authority and proof of work. |
+| [Consensus](consensus.md) | Who may produce blocks: the development authority, proof of work, a rotating authority and production by stake. |
 | [Finality](finality.md) | FFG, authority and depth finality, votes, staking, slashing and signer changes. |
+| [Governance](governance.md) | Changing the consensus on a running chain: the electorate and council kinds, approvals, and how a change takes effect. |
 | [Fees](fees.md) | Gas, scorers, base fees and bids, the block gas limit, and where fees go. |
 | [Contracts](contracts.md) | The Lua and WebAssembly engines, fuel, the host API, lifecycle hooks, calls and proxies. |
 | [Contract storage](contract-storage.md) | A guide to how contracts keep state: plain storage, namespaces, the own space, layouts with key kinds and units that upgrades must keep, and moving a contract between engines, with a worked example. |

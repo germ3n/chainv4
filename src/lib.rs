@@ -10,6 +10,7 @@ pub mod cli;
 pub mod consensus;
 pub mod crypto;
 pub mod db;
+pub mod governance;
 pub mod light;
 #[cfg(feature = "node")]
 pub mod mempool;

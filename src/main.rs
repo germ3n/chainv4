@@ -75,15 +75,17 @@ struct NodeArgs {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     max_build_ms: Option<u64>,
     /// Which development chain to run: pow, mined by anyone; authority, where the built-in
-    /// development key produces every block; or rotating, where the authority finality signers
-    /// produce in turn, the development key being the one signer.
+    /// development key produces every block; rotating, where the authority finality signers
+    /// produce in turn, the development key being the one signer; or staked, where the FFG
+    /// validators produce by stake, the development key being the one validator.
     #[arg(long, value_enum, default_value_t = cli::genesis::DevChain::Pow)]
     consensus: cli::genesis::DevChain,
     /// Run the chain a genesis file describes instead of a development chain.
     #[arg(long, conflicts_with = "consensus")]
     genesis: Option<std::path::PathBuf>,
-    /// Mine blocks (pow chains).
-    #[arg(long, conflicts_with = "produce")]
+    /// Mine blocks (pow chains, and chains whose governance may move to pow). With --produce
+    /// too, the node does whichever the chain runs.
+    #[arg(long)]
     mine: bool,
     /// Where mining rewards go. Defaults to the development key's address.
     #[arg(long, requires = "mine")]
@@ -95,11 +97,11 @@ struct NodeArgs {
     /// with the gpu feature.
     #[arg(long, requires = "mine", conflicts_with = "mine_threads")]
     mine_gpu: bool,
-    /// Produce blocks (authority and rotating chains), with the development key unless
-    /// --producer-key names the authority's, or a signer's voting, key file.
+    /// Produce blocks (authority, rotating and staked chains), with the development key unless
+    /// --producer-key names the authority's, or a signer's or validator's voting, key file.
     #[arg(long)]
     produce: bool,
-    /// The authority's key file, for --produce.
+    /// The authority's, or the signer's or validator's voting, key file, for --produce.
     #[arg(long, requires = "produce")]
     producer_key: Option<std::path::PathBuf>,
     /// Vote on finality, with the development key unless --validator-key names a voting key file.
@@ -193,10 +195,10 @@ fn main() -> std::process::ExitCode {
 fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     use {
         chainv4::chain::{self, Genesis},
-        chainv4::consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, Miner, Producer},
+        chainv4::consensus::{ConsensusConfig, DevAuthority},
         chainv4::db::{Database, RocksDb},
-        chainv4::net::{self, BacklogLimits, NetConfig, NetEvent},
-        chainv4::node::Node,
+        chainv4::net::{self, BacklogLimits, NetConfig},
+        chainv4::node::{Mining, Node, Producing},
         std::sync::Arc,
     };
 
@@ -237,63 +239,35 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             per_peer: args.max_gossip_per_peer as usize,
         },
     })?;
-    let producer: Option<Box<dyn Producer>> = match (&genesis.consensus, args.mine, args.produce) {
-        (_, false, false) => None,
-        (ConsensusConfig::Authority { key, slot_ms }, false, true) => {
-            let keypair = cli::signer(args.producer_key.as_deref())?;
-
-            if keypair.public() != *key {
-                return Err(format!("the chain's authority is {key}, not {}", keypair.public()).into());
-            }
-
-            log::info!("[node] producing blocks as {}", keypair.public().address());
-
-            Some(Box::new(AuthorityProducer::new(keypair, *slot_ms)))
-        }
-        (ConsensusConfig::ProofOfWork(config), true, false) => {
-            let reward_to = args.reward_to.unwrap_or(dev.public().address());
-            let inbox = net.inbox.clone();
-            let found = move |block, seal| {
-                let _ = inbox.send(NetEvent::Sealed { block, seal });
-            };
-
-            if args.mine_gpu {
-                #[cfg(feature = "gpu")]
-                {
-                    log::info!("[node] mining on the GPU, rewards to {reward_to}");
-
-                    Some(Box::new(chainv4::consensus::GpuMiner::new(reward_to, config.hash, found)?) as Box<dyn Producer>)
-                }
-                #[cfg(not(feature = "gpu"))]
-                {
-                    let _ = found;
-
-                    return Err("--mine-gpu needs a build with the gpu feature: cargo build --features gpu".into());
-                }
-            } else {
-                log::info!("[node] mining on {} threads, rewards to {reward_to}", args.mine_threads.max(1));
-
-                Some(Box::new(Miner::new(reward_to, config.hash, args.mine_threads, found)))
-            }
-        }
-        (ConsensusConfig::Rotating { slot_ms }, false, true) => {
-            // The signer's voting key signs its blocks; the blocks name its account.
-            let keypair = cli::signer(args.producer_key.as_deref())?;
-            let account = genesis
-                .finality
-                .as_ref()
-                .and_then(|finality| finality.signer_account(&keypair.public()))
-                .unwrap_or_else(|| keypair.public().address());
-            log::info!("[node] producing blocks in turn as {}, for {account}", keypair.public());
-
-            Some(Box::new(chainv4::consensus::RotatingProducer::new(keypair, account, *slot_ms)))
-        }
-        (ConsensusConfig::Authority { .. } | ConsensusConfig::Rotating { .. }, true, _) => return Err("--mine needs a proof-of-work chain".into()),
-        (ConsensusConfig::ProofOfWork(_), _, true) => return Err("--produce needs an authority or rotating chain".into()),
+    // What this node produces with: a miner's settings, a signing key, or both. The node builds
+    // the producer for whatever consensus the chain runs, and again when governance changes it.
+    let mine = args.mine.then(|| Mining {
+        reward_to: args.reward_to.unwrap_or(dev.public().address()),
+        threads: args.mine_threads,
+        gpu: args.mine_gpu,
+    });
+    let sign = match args.produce {
+        true => Some(cli::signer(args.producer_key.as_deref())?),
+        false => None,
     };
-    let mut node = Node::new(db.clone(), &genesis, producer, net)?
+    let pow = matches!(genesis.consensus, ConsensusConfig::ProofOfWork(_));
+
+    if mine.is_some() && !pow && genesis.governance.is_none() {
+        return Err("--mine needs a proof-of-work chain, or one whose governance may make it one".into());
+    }
+
+    if sign.is_some() && pow && genesis.governance.is_none() {
+        return Err("--produce needs an authority, rotating or staked chain, or one whose governance may make it one".into());
+    }
+
+    let producing = (mine.is_some() || sign.is_some()).then_some(Producing { mine, sign });
+    let mut node = Node::new(db.clone(), &genesis, None, net)?
         .max_block_txs(args.max_block_txs.map(|most| most as usize))
         .max_build_ms(args.max_build_ms);
+
+    if let Some(producing) = producing {
+        node = node.producing(producing);
+    }
 
     if args.snapshot {
         let checkpoint = match &args.checkpoint {

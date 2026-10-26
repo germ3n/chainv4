@@ -260,9 +260,14 @@ state of one recent block, the pivot, checking it against that block's state roo
 the tip. Then it syncs the rest as usual.
 
 1. **Headers.** It asks the heaviest peer for its headers, 1,024 at a time, and checks each by
-   consensus: that it follows its parent, its producer, timing, difficulty and seal. It adds up
-   total work as it goes. When a batch does not link, the peer's chain split off earlier, so it
-   steps a batch back.
+   consensus: that it follows its parent, its producer, timing, difficulty and seal. The checking
+   is a light client's (`LightClient`) of the node's own chain, fed over the peer protocol: it
+   adds up total work as it goes, and when a batch does not link, the peer's chain split off
+   earlier, so it steps a batch back. Under a rotating authority, production by stake or
+   governance, the client needs each epoch's producers or rules, which finality's light updates
+   name: it asks the peer for finality (`Finality`, as `GET /light/finality` serves it), an epoch
+   at a time, and checks on once it knows them, so it follows `activation_delay` epochs behind
+   what finality has justified, as any light client does.
 2. **The pivot.** Once a peer has no more, the pivot is the block `PIVOT_DEPTH` (16) below the
    last header, or half `max_reorg_depth` below when that is less. Deep enough not to come off in
    a reorg, and recent enough for peers to serve: they rebuild state at any of their last
@@ -287,11 +292,9 @@ the tip. Then it syncs the rest as usual.
    - it asks every peer for its status again, since what they said may be from before the pivot
      moved.
 6. **The rest.** From there it syncs blocks from the pivot on as usual, and justifications from
-   genesis on, which it checks against the headers and the voters in its state.
-
-**A rotating chain takes no snapshot.** Its headers are checked against the signers fixed in
-state, which a node taking a snapshot has none of yet, so `--snapshot` is refused there and the
-node syncs by running blocks.
+   the checkpoint it holds final on, which it checks against the headers and the voters in its
+   state. The checkpoint it holds final is the one it was told to trust, or a later one the light
+   client saw finalized among the headers it installed.
 
 **Starting at a checkpoint** (`--snapshot --checkpoint 0x…`) skips step 1 below the checkpoint.
 Given a finalized checkpoint's block id from someone the operator trusts, as a light client takes

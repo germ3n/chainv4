@@ -142,6 +142,10 @@ jobs:
           - http,client,blake3,ed25519,finality-ffg
           - http,client,sha256,edblake,finality-authority
           - http,client,keccak256,ed25519,finality-depth
+          # Governance, each kind on its own, on the finality it needs an electorate from; and a
+          # node with no governance at all.
+          - http,client,blake3,ed25519,finality-ffg,governance-electorate
+          - http,client,sha256,edblake,finality-authority,governance-council
           # Mining on the GPU through wgpu: builds everywhere, and its tests skip without a GPU.
           - node,blake3,ed25519,gpu
     steps:

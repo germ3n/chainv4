@@ -1050,6 +1050,167 @@ fn a_node_starting_at_a_checkpoint_fetches_nothing_below_it_and_holds_it_final()
     assert!(matches!(late.chain.import(&below, SLOT * blocks), Err(ImportError::Invalid(BlockError::ConflictsWithFinality))));
 }
 
+/// Syncs a late node from a snapshot of a chain whose producers finality names, from genesis or
+/// from a trusted checkpoint, and checks it got there: the producer votes, so finality's updates
+/// name each epoch's producers to the late node's light client.
+#[cfg(any(feature = "finality-authority", feature = "finality-ffg"))]
+fn snapshot_of_a_chain_with_producers_from_finality(genesis: Genesis, producer: Box<dyn Producer>, checkpoint: Option<u64>) {
+    use super::snapshot::PIVOT_DEPTH;
+
+    let dev = DevAuthority::dev_keypair();
+    let (link, mut producer_net) = NetLink::pair();
+    let mut producer = Node::new(Arc::new(MemoryDb::default()), &genesis, Some(producer), link).unwrap().validate(dev.clone());
+    let blocks = 60;
+    let mut paid = Vec::new();
+
+    for slot in 1..=blocks {
+        if slot % 2 == 0 {
+            let to = Keypair::generate(dev.public().key_type()).unwrap().public().address();
+            let tx = Tx::Transfer { from: dev.public().address(), to, amount: Amount::U128(u128::from(slot)) };
+            producer.submit(SignedTx::sign(tx, slot / 2 - 1, FeeOffer::NONE, &dev)).unwrap();
+            paid.push((to, slot));
+        }
+
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    assert_eq!(producer.chain().tip().height, blocks);
+    assert_eq!(producer.chain().justified().unwrap().epoch, 7, "it voted for every checkpoint two blocks deep");
+    sent(&mut producer_net);
+    let trusted = checkpoint.map(|height| producer.chain().block_at(height).unwrap().unwrap().id());
+    let (link, mut late_net) = NetLink::pair();
+    let mut late = Node::new(Arc::new(MemoryDb::default()), &genesis, None, link).unwrap();
+
+    assert!(late.sync_from_snapshot(trusted).unwrap());
+
+    let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
+    late_net.events.send(NetEvent::PeerUp { peer: producer_peer, address: Multiaddr::empty() }).unwrap();
+    late.step(SLOT * blocks).unwrap();
+    relay(
+        Side { node: &mut late, net: &mut late_net, peer: late_peer },
+        Side { node: &mut producer, net: &mut producer_net, peer: producer_peer },
+        SLOT * blocks,
+    );
+    let pivot = blocks - PIVOT_DEPTH;
+
+    assert_eq!(late.chain().tip().id(), producer.chain().tip().id(), "it ran the blocks after the pivot");
+    assert_eq!(late.chain().snapshot(), Some(pivot));
+    assert_eq!(late.chain().tip_work(), producer.chain().tip_work());
+    assert!(late.chain().block_at(pivot - 1).unwrap().is_none(), "it never ran the blocks before the pivot");
+
+    for (to, amount) in &paid {
+        assert_eq!(Accounts::new(&late.chain().state()).get(to).unwrap().balance, u256::new(u128::from(*amount)));
+    }
+
+    match checkpoint {
+        // The start reaches back to the checkpoint activation_delay epochs before: from epoch 5's
+        // to epoch 3's, height 32 for 40, and no further.
+        Some(height) => {
+            assert!(late.chain().headers_from(height - 9, 1).unwrap().is_empty(), "nothing below the start");
+            assert_eq!(late.chain().headers_from(height - 8, 1).unwrap().len(), 1, "the start reaches back activation_delay epochs");
+        }
+        None => assert_eq!(late.chain().headers_from(1, 1_000).unwrap().len() as u64, blocks),
+    }
+
+    // The late node goes on producing nothing, but checks the producer's next blocks against the
+    // producers it holds in state now.
+    for slot in blocks + 1..=blocks + 3 {
+        producer.step(SLOT * slot).unwrap();
+        let block = published_block(&mut producer_net);
+        late_net.events.send(NetEvent::Block { from: producer_peer, block }).unwrap();
+        late.step(SLOT * slot).unwrap();
+    }
+
+    assert_eq!(late.chain().tip().height, blocks + 3);
+}
+
+#[cfg(feature = "finality-authority")]
+#[test]
+fn a_rotating_chain_syncs_from_a_snapshot_by_learning_its_signers_from_finality() {
+    use crate::consensus::RotatingProducer;
+
+    let dev = DevAuthority::dev_keypair();
+    let genesis = Genesis { fees: None, ..Genesis::dev_rotating(dev.public()) };
+    let producer = || Box::new(RotatingProducer::new(dev.clone(), dev.public().address(), SLOT)) as Box<dyn Producer>;
+
+    snapshot_of_a_chain_with_producers_from_finality(genesis.clone(), producer(), None);
+    snapshot_of_a_chain_with_producers_from_finality(genesis, producer(), Some(40));
+}
+
+#[cfg(feature = "finality-ffg")]
+#[test]
+fn a_staked_chain_syncs_from_a_snapshot_by_learning_its_validators_from_finality() {
+    use crate::consensus::{Schedule, Staked, StakedProducer};
+
+    let dev = DevAuthority::dev_keypair();
+    let genesis = Genesis { fees: None, ..Genesis::dev_staked(dev.public()) };
+    let hash = genesis.hash;
+    let producer = || Box::new(StakedProducer::new(dev.clone(), Staked::new(SLOT, Schedule::Draw, hash, 8))) as Box<dyn Producer>;
+
+    snapshot_of_a_chain_with_producers_from_finality(genesis.clone(), producer(), None);
+    snapshot_of_a_chain_with_producers_from_finality(genesis, producer(), Some(40));
+}
+
+#[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+#[test]
+fn a_node_switches_its_producer_when_governance_changes_the_consensus() {
+    use crate::consensus::Schedule;
+    use crate::governance::{Change, GovernanceConfig};
+
+    let dev = DevAuthority::dev_keypair();
+    // The dev key is the authority, the one FFG validator, and the council: it decides alone.
+    let genesis = Genesis {
+        fees: None,
+        governance: Some(GovernanceConfig::Council {
+            members: vec![dev.public().address()],
+            threshold: 1,
+            approval_epochs: 64,
+        }),
+        ..Genesis::dev_authority(dev.public())
+    };
+    let staked = ConsensusConfig::Staked { slot_ms: SLOT, schedule: Schedule::Draw };
+    let (link, mut net) = NetLink::pair();
+    let mut node = Node::new(Arc::new(MemoryDb::default()), &genesis, None, link)
+        .unwrap()
+        .producing(Producing { mine: None, sign: Some(dev.clone()) })
+        .validate(dev.clone());
+    let (link, follower_net) = NetLink::pair();
+    let mut follower = Node::new(Arc::new(MemoryDb::default()), &genesis, None, link).unwrap();
+    let peer = PeerId::random();
+    let relay = |follower: &mut Node, net: &mut FakeNet, now: u64| {
+        for block in sent(net).into_iter().filter_map(|command| match command {
+            NetCommand::PublishBlock(block) => Some(block),
+            _ => None,
+        }) {
+            follower_net.events.send(NetEvent::Block { from: peer, block }).unwrap();
+            follower.step(now).unwrap();
+        }
+    };
+
+    // Three authority blocks, then the council approves stake in block 4, a checkpoint under
+    // the dev chain's finality of 8-block epochs: fixed for epoch 1 + 2, from height 24 on.
+    for slot in 1..=3 {
+        node.step(SLOT * slot).unwrap();
+        relay(&mut follower, &mut net, SLOT * slot);
+    }
+
+    assert_eq!(node.chain().tip().difficulty, 0);
+    assert_eq!(node.chain().tip_work(), u256::new(3), "authority blocks weigh 1");
+    node.submit(SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Consensus(staked.clone()) }, 0, FeeOffer::NONE, &dev)).unwrap();
+
+    for slot in 4..=30 {
+        node.step(SLOT * slot).unwrap();
+        relay(&mut follower, &mut net, SLOT * slot);
+    }
+
+    assert_eq!(node.chain().tip().height, 30, "it produced through the switch without a pause");
+    assert_eq!(node.chain().consensus_config_at(23).unwrap(), genesis.consensus);
+    assert_eq!(node.chain().consensus_config_at(24).unwrap(), staked);
+    assert_eq!(node.chain().block_at(4).unwrap().unwrap().txs.len(), 1);
+    assert_eq!(node.chain().tip_work(), u256::new(23 + 7 * 2), "23 authority blocks weighing 1, then 7 staked ones in turn weighing 2");
+    assert_eq!(follower.chain().tip().id(), node.chain().tip().id(), "a following node checks the new blocks by the fixed consensus too");
+}
+
 #[test]
 fn a_snapshot_whose_pivot_grows_too_old_moves_it_up_and_fetches_only_what_changed() {
     let authority = DevAuthority::dev_keypair();

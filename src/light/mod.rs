@@ -9,14 +9,16 @@
 
 use {
     crate::consensus::{Consensus, ConsensusConfig, ConsensusError},
+    crate::governance::GovernanceKind,
     crate::structs::unset::Unset,
+    crate::registry::changes::Changes,
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::crypto::merkle,
     crate::db::{Column, DbError, State, StateProof, StateTree, namespace_key},
     crate::structs::address::Address,
-    crate::registry::signers::{Signer, SignerSet, Signers},
-    crate::registry::validators::{ValidatorSet, Validators},
+    crate::registry::signers::{SignerSet, Signers},
+    crate::registry::validators::{Member, ValidatorSet, Validators},
     crate::structs::block::{BlockHeader, SealedHeader},
     crate::structs::hash::{Hash, HashType},
     crate::structs::receipt::CommittedReceipt,
@@ -69,7 +71,7 @@ pub fn token_balance(value: &[u8]) -> Option<u256> {
 const TOKEN_BALANCES: &[u8] = b"balances";
 
 #[document(
-    summary = "What a light client needs to know about a chain to follow it: its hash, its consensus, and how its finality works. Genesis's proof_root is the hash of these, so a client that trusts a genesis id can check what a node tells it they are.",
+    summary = "What a light client needs to know about a chain to follow it: its hash, its consensus, how its finality works, and whether governance may change the consensus. Genesis's proof_root is the hash of these, so a client that trusts a genesis id can check what a node tells it they are.",
     category = "Light client",
     see_also = "LightClient, Genesis::light_params",
 )]
@@ -77,16 +79,19 @@ const TOKEN_BALANCES: &[u8] = b"balances";
 pub struct LightParams {
     #[document(summary = "The chain hash.")]
     pub hash: HashType,
-    #[document(summary = "The chain's consensus, which every header is checked by.")]
+    #[document(summary = "The chain's consensus from genesis, which every header is checked by, until governance changes it.")]
     pub consensus: ConsensusConfig,
     #[document(summary = "How finality works on the chain, or None for a chain without.")]
     pub finality: Option<LightFinality>,
     #[document(summary = "The proof-of-work window, as Genesis::pow_window. Hashed as nothing while None, so chains from before it keep the proof_root their genesis commits to; on the wire and in saved state it is a plain Option.")]
     pub pow_window: Option<u64>,
+    #[document(summary = "The kind of governance the chain runs, or None for one where nothing changes. With one, each epoch's consensus comes from a light update, as its voters do, and the client waits for it before checking the epoch's headers. Hashed as nothing while None, as the window is.")]
+    pub governance: Option<GovernanceKind>,
 }
 
-/// The parameters as genesis commits to them: the window encodes as nothing while unset, so a
-/// chain from before the window hashes as it always did.
+/// The parameters as genesis commits to them: the window and the governance kind encode as
+/// nothing while unset, so a chain from before either hashes as it always did. Only hashed, never
+/// decoded, so the two trailing fields need no telling apart.
 #[derive(SchemaWrite)]
 struct CommittedLightParams {
     hash: HashType,
@@ -94,9 +99,36 @@ struct CommittedLightParams {
     finality: Option<LightFinality>,
     #[wincode(with = "Unset")]
     pow_window: Option<u64>,
+    #[wincode(with = "UnsetKind")]
+    governance: Option<GovernanceKind>,
 }
 
 impl Hashable for CommittedLightParams {}
+
+/// Encodes the governance kind as nothing while None, and as a 2 and its tag once set, for the
+/// committed parameters alone.
+struct UnsetKind;
+
+// SAFETY: size_of is exactly what write writes: nothing for None, two bytes for Some.
+unsafe impl<C: wincode::config::ConfigCore> SchemaWrite<C> for UnsetKind {
+    type Src = Option<GovernanceKind>;
+
+    fn size_of(src: &Option<GovernanceKind>) -> wincode::WriteResult<usize> {
+        Ok(if src.is_some() { 2 } else { 0 })
+    }
+
+    fn write(writer: impl wincode::io::Writer, src: &Option<GovernanceKind>) -> wincode::WriteResult<()> {
+        let Some(kind) = src else {
+            return Ok(());
+        };
+        let tag = match kind {
+            GovernanceKind::Electorate => 0,
+            GovernanceKind::Council => 1,
+        };
+
+        <[u8; 2] as SchemaWrite<C>>::write(writer, &[2, tag])
+    }
+}
 
 impl LightParams {
     fn committed(&self) -> CommittedLightParams {
@@ -105,22 +137,13 @@ impl LightParams {
             consensus: self.consensus.clone(),
             finality: self.finality,
             pow_window: self.pow_window,
+            governance: self.governance,
         }
-    }
-
-    #[document(parent = "LightParams", summary = "The consensus rules headers are checked by, the window included.")]
-    pub fn rules(&self) -> Box<dyn Consensus> {
-        self.consensus.rules(self.pow_window)
-    }
-
-    #[document(parent = "LightParams", summary = "How many ancestors consensus looks at when checking a header: what a client must hold below any header it checks.")]
-    pub fn lookback(&self) -> usize {
-        self.rules().lookback()
     }
 }
 
-// Hashed as genesis commits to them, with the window encoding as nothing while unset; the derived
-// encoding, which decodes, is what goes on the wire.
+// Hashed as genesis commits to them, with the window and the governance kind encoding as nothing
+// while unset; the derived encoding, which decodes, is what goes on the wire.
 impl Hashable for LightParams {
     fn hash(&self, algorithm: HashType) -> Hash {
         self.committed().hash(algorithm)
@@ -136,6 +159,23 @@ impl Hashable for LightParams {
 
     fn hashable_bytes_with_tag(&self) -> Vec<u8> {
         self.committed().hashable_bytes_with_tag()
+    }
+}
+
+impl LightParams {
+    #[document(parent = "LightParams", summary = "The consensus rules headers are checked by from genesis, the window and the finality's epochs included.")]
+    pub fn rules(&self) -> Box<dyn Consensus> {
+        self.rules_of(&self.consensus)
+    }
+
+    #[document(parent = "LightParams", summary = "The rules of a consensus governance fixed for an epoch, built as genesis's are: with the chain's hash, its window and its finality's epochs.")]
+    pub fn rules_of(&self, consensus: &ConsensusConfig) -> Box<dyn Consensus> {
+        consensus.rules(self.hash, self.pow_window, self.finality.and_then(|finality| finality.checkpoint_interval()))
+    }
+
+    #[document(parent = "LightParams", summary = "How many ancestors genesis's consensus looks at when checking a header: what a client must hold below any header it checks.")]
+    pub fn lookback(&self) -> usize {
+        self.rules().lookback()
     }
 }
 
@@ -241,9 +281,79 @@ pub struct LightUpdate {
     pub block: Hash,
     #[document(summary = "The voters it fixed, each with its proof.")]
     pub voters: Vec<VoterProof>,
+    #[document(summary = "Under governance, the consensus it fixed for the same epochs, each with its proof; empty on a chain without. Added after chains launched: an update stored before it reads as one with none, through stored_light_update.")]
+    pub eras: Vec<EraProof>,
 }
 
 impl Hashable for LightUpdate {}
+
+#[document(
+    summary = "A light update as nodes stored them before eras: what stored_light_update falls back to reading.",
+    category = "Light client",
+    see_also = "LightUpdate",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct LegacyLightUpdate {
+    #[document(summary = "The block whose state root the proofs are against.")]
+    pub block: Hash,
+    #[document(summary = "The voters it fixed, each with its proof.")]
+    pub voters: Vec<VoterProof>,
+}
+
+impl From<LegacyLightUpdate> for LightUpdate {
+    fn from(legacy: LegacyLightUpdate) -> LightUpdate {
+        LightUpdate {
+            block: legacy.block,
+            voters: legacy.voters,
+            eras: Vec::new(),
+        }
+    }
+}
+
+#[document(summary = "One epoch's consensus, as kept in state under governance, with the proof it is there.", category = "Light client", see_also = "LightUpdate, Changes::consensus_key")]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct EraProof {
+    #[document(summary = "The epoch it is fixed for.")]
+    pub epoch: u64,
+    #[document(summary = "The consensus, encoded as kept at Changes::consensus_key.")]
+    pub value: Vec<u8>,
+    #[document(summary = "The proof of it, against the block's state root.")]
+    pub proof: StateProof,
+}
+
+/// Encodes a saved client's eras as nothing while empty, as UnsetEras does its proofs, so a state
+/// saved before the field restores. Only as a last field.
+pub struct UnsetEraList;
+
+// SAFETY: size_of is exactly what write writes: nothing when empty, the list's encoding otherwise.
+unsafe impl<C: wincode::config::Config> wincode::SchemaWrite<C> for UnsetEraList {
+    type Src = Vec<(u64, ConsensusConfig)>;
+
+    fn size_of(src: &Vec<(u64, ConsensusConfig)>) -> wincode::WriteResult<usize> {
+        match src.is_empty() {
+            true => Ok(0),
+            false => <Vec<(u64, ConsensusConfig)> as wincode::SchemaWrite<C>>::size_of(src),
+        }
+    }
+
+    fn write(writer: impl wincode::io::Writer, src: &Vec<(u64, ConsensusConfig)>) -> wincode::WriteResult<()> {
+        match src.is_empty() {
+            true => Ok(()),
+            false => <Vec<(u64, ConsensusConfig)> as wincode::SchemaWrite<C>>::write(writer, src),
+        }
+    }
+}
+
+// SAFETY: read initializes dst before it returns Ok. An exhausted reader is the empty list.
+unsafe impl<'de, C: wincode::config::Config> wincode::SchemaRead<'de, C> for UnsetEraList {
+    type Dst = Vec<(u64, ConsensusConfig)>;
+
+    fn read(reader: impl wincode::io::Reader<'de>, dst: &mut std::mem::MaybeUninit<Vec<(u64, ConsensusConfig)>>) -> wincode::ReadResult<()> {
+        dst.write(<Vec<(u64, ConsensusConfig)> as wincode::SchemaRead<'de, C>>::get(reader).unwrap_or_default());
+
+        Ok(())
+    }
+}
 
 #[document(
     summary = "One epoch of finality, as a node sends it to light clients: the justification of the epoch's checkpoint, and the light update the checkpoint block keeps. Sent many epochs at once, in order, since each update a justification makes trusted names the voters of justifications further on.",
@@ -279,16 +389,30 @@ impl LightUpdate {
             state = "The state once the block ran, its state tree followed.",
             hash = "The chain's hash.",
             finality = "How finality works on the chain.",
+            governed = "Whether governance may change the consensus, so the update carries each epoch's consensus too.",
             block = "The block's id.",
             height = "Its height.",
         },
     )]
-    pub fn of(state: &State, hash: HashType, finality: &LightFinality, block: Hash, height: u64) -> Result<Option<LightUpdate>, DbError> {
+    pub fn of(state: &State, hash: HashType, finality: &LightFinality, governed: bool, block: Hash, height: u64) -> Result<Option<LightUpdate>, DbError> {
         let Some(epochs) = finality.fixed_at(height) else {
             return Ok(None);
         };
         let tree = StateTree::new(state, hash);
         let mut voters = Vec::new();
+        let mut eras = Vec::new();
+
+        for epoch in epochs.clone() {
+            let key = Changes::consensus_key(epoch);
+
+            if governed && let Some(value) = state.get(Column::Epochs, &key)? {
+                eras.push(EraProof {
+                    epoch,
+                    value,
+                    proof: tree.prove(Column::Epochs, &key)?,
+                });
+            }
+        }
 
         for epoch in epochs {
             let key = finality.voters_key(epoch).expect("kinds that fix voters keep them");
@@ -302,7 +426,7 @@ impl LightUpdate {
             }
         }
 
-        Ok(Some(LightUpdate { block, voters }))
+        Ok(Some(LightUpdate { block, voters, eras }))
     }
 }
 
@@ -331,6 +455,9 @@ pub struct LightState {
     pub updated: Vec<u64>,
     #[document(summary = "The headers just below the first kept, newest first, as many as consensus looks at when checking a header, so the first header the restored client checks is checked as any other.")]
     pub ancestors: Vec<SealedHeader>,
+    #[document(summary = "Under governance, the consensus it learned for each epoch, from the finalized one on. Added after chains launched: empty, it adds nothing to the encoding.")]
+    #[wincode(with = "UnsetEraList")]
+    pub eras: Vec<(u64, ConsensusConfig)>,
 }
 
 impl Hashable for LightState {}
@@ -472,7 +599,7 @@ pub enum Extended {
     Unlinked,
     #[document(summary = "None: the client has every header the node has.")]
     UpToDate,
-    #[document(summary = "None yet: under a consensus whose producers finality names, the client cannot check them until it has proved their epoch's voters; it asks for finality first, and for them again after.")]
+    #[document(summary = "None yet: under a consensus whose producers finality names, or governance that may change the consensus, the client cannot check them until it has proved their epoch's voters, or learned their epoch's consensus; it asks for finality first, and for them again after.")]
     Waiting,
 }
 
@@ -484,7 +611,12 @@ pub enum Extended {
 )]
 pub struct LightClient {
     params: LightParams,
+    /// Genesis's consensus rules: every header's, on a chain without governance.
     consensus: Box<dyn Consensus>,
+    /// Under governance, the consensus learned for each epoch, from light updates, and the rules
+    /// built for each consensus seen.
+    eras: BTreeMap<u64, ConsensusConfig>,
+    rules: Vec<(ConsensusConfig, Box<dyn Consensus>)>,
     genesis: Hash,
     /// The chain followed, by height, from base: genesis, or the finalized block a saved client
     /// kept headers from.
@@ -535,6 +667,8 @@ impl LightClient {
 
         Ok(LightClient {
             consensus,
+            eras: BTreeMap::new(),
+            rules: Vec::new(),
             genesis: trusted,
             heights: HashMap::from([(trusted, 0)]),
             work: vec![u256::ZERO],
@@ -680,16 +814,60 @@ impl LightClient {
     }
 
     /// Who may produce at a height, under a consensus that takes its producers from finality: the
-    /// voters of the height's epoch, once proved; None until then. Empty under any other consensus.
-    fn producers_for(&self, height: u64) -> Option<Vec<Signer>> {
-        if !self.consensus.needs_producers() {
+    /// voters of the height's epoch, with their weights, once proved; None until then, or until
+    /// the height's rules are known under governance. Empty under any other consensus.
+    fn producers_for(&self, height: u64) -> Option<Vec<Member>> {
+        if !self.rules_for(height)?.needs_producers() {
             return Some(Vec::new());
         }
 
         let interval = self.params.finality?.checkpoint_interval()?;
         let voters = self.voters.get(&(height / interval))?;
 
-        Some(voters.set.members.iter().map(|member| Signer { key: member.voter, account: member.account }).collect())
+        Some(voters.set.members.clone())
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "The consensus rules a height's header is checked by: genesis's, or, under governance, the consensus the height's epoch was fixed, learned from a light update as the epoch's voters are. None until it is: a header whose rules are not known yet waits, as one whose producers are not.",
+    )]
+    pub fn rules_for(&self, height: u64) -> Option<&dyn Consensus> {
+        if self.params.governance.is_none() {
+            return Some(&*self.consensus);
+        }
+
+        let interval = self.params.finality?.checkpoint_interval()?;
+        let config = self.eras.get(&(height / interval))?;
+
+        self.rules.iter().find(|(known, _)| known == config).map(|(_, rules)| &**rules)
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "The consensus the height's epoch runs, as rules_for takes it: genesis's, or what governance fixed for the epoch; None until that is known.",
+    )]
+    pub fn consensus_at(&self, height: u64) -> Option<&ConsensusConfig> {
+        if self.params.governance.is_none() {
+            return Some(&self.params.consensus);
+        }
+
+        let interval = self.params.finality?.checkpoint_interval()?;
+
+        self.eras.get(&(height / interval))
+    }
+
+    /// Learns an epoch's consensus, and builds its rules unless it has them.
+    fn learn_era(&mut self, epoch: u64, config: ConsensusConfig) {
+        if !self.rules.iter().any(|(known, _)| *known == config) {
+            self.rules.push((config.clone(), self.params.rules_of(&config)));
+        }
+
+        self.eras.insert(epoch, config);
+    }
+
+    /// The most ancestors any rules known look at when checking a header.
+    fn lookback(&self) -> usize {
+        self.rules.iter().map(|(_, rules)| rules.lookback()).chain([self.consensus.lookback()]).max().unwrap_or(1).max(1)
     }
 
     #[document(
@@ -732,7 +910,7 @@ impl LightClient {
         let mut work = self.work[(from - 1 - self.base) as usize];
         // What consensus looks at: the parent first, then as many below as it wants and the
         // client holds.
-        let lookback = self.consensus.lookback().max(1);
+        let lookback = self.lookback();
         let mut ancestors: Vec<BlockHeader> = (1..=lookback as u64)
             .map_while(|back| from.checked_sub(back))
             .map_while(|height| self.sealed(height).map(|sealed| sealed.header.clone()))
@@ -757,10 +935,11 @@ impl LightClient {
                 break;
             };
 
-            self.consensus
+            let rules = self.rules_for(height).expect("producers_for found them");
+            rules
                 .check(&sealed.header, &sealed.seal, &ancestors, &producers, now)
                 .map_err(|err: ConsensusError| LightError::BadHeader { height, why: err.to_string() })?;
-            work += self.consensus.work(&sealed.header);
+            work += rules.work(&sealed.header);
             ancestors.insert(0, sealed.header.clone());
             ancestors.truncate(lookback);
             checked += 1;
@@ -807,11 +986,27 @@ impl LightClient {
         self.justifications_done = false;
 
         for sealed in headers {
-            work += self.consensus.work(&sealed.header);
+            work += self.rules_for(sealed.header.height).expect("checked before appended").work(&sealed.header);
             self.heights.insert(sealed.id(), sealed.header.height);
             self.work.push(work);
             self.headers.push(sealed);
         }
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "A header it holds and its seal, by height: one it followed and checked, or an ancestor below those, trusted by its hash. None above the tip or below the lowest held.",
+    )]
+    pub fn sealed_at(&self, height: u64) -> Option<&SealedHeader> {
+        self.sealed(height)
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "The total work of the header it followed at a height, counted from the first one it followed: from genesis, or from the first header of a checkpoint start, whose own work counts as nothing. None for a height it did not follow.",
+    )]
+    pub fn work_at(&self, height: u64) -> Option<u256> {
+        self.work.get(usize::try_from(height.checked_sub(self.base)?).ok()?).copied()
     }
 
     /// A header it holds and its seal by height: one it followed, or an ancestor below those.
@@ -858,9 +1053,15 @@ impl LightClient {
                 .collect(),
             finalized: self.finalized,
             updated: self.updated.iter().copied().filter(|height| *height >= keep).collect(),
-            ancestors: (1..self.consensus.lookback().max(1) as u64)
+            ancestors: (1..self.lookback() as u64)
                 .map_while(|back| keep.checked_sub(back))
                 .map_while(|height| self.sealed(height).cloned())
+                .collect(),
+            eras: self
+                .eras
+                .iter()
+                .filter(|(epoch, _)| **epoch >= self.finalized.epoch)
+                .map(|(epoch, config)| (*epoch, config.clone()))
                 .collect(),
         }
     }
@@ -908,8 +1109,10 @@ impl LightClient {
             justified.insert(0, trusted);
         }
 
-        Ok(LightClient {
+        let mut client = LightClient {
             consensus: state.params.rules(),
+            eras: BTreeMap::new(),
+            rules: Vec::new(),
             genesis: trusted,
             headers: state.headers,
             base,
@@ -925,7 +1128,13 @@ impl LightClient {
             back: None,
             stalled: None,
             params: state.params,
-        })
+        };
+
+        for (epoch, config) in state.eras {
+            client.learn_era(epoch, config);
+        }
+
+        Ok(client)
     }
 
     #[document(
@@ -941,6 +1150,8 @@ impl LightClient {
         returns = "The client, or WrongCheckpoint for headers that do not end at the checkpoint or start too late, and what take_update finds of an update.",
     )]
     pub fn from_checkpoint(params: LightParams, genesis: SealedHeader, trusted: Hash, checkpoint: Hash, start: CheckpointStart) -> Result<LightClient, LightError> {
+        // The start's own work is counted by genesis's rules: it is never compared with anything,
+        // since nothing below the checkpoint is followed.
         let consensus = LightClient::new(params.clone(), genesis, trusted)?.consensus;
         let CheckpointStart { headers, updates } = start;
         let (Some(first), Some(last)) = (headers.first(), headers.last()) else {
@@ -990,6 +1201,7 @@ impl LightClient {
                 finalized: at,
                 updated: Vec::new(),
                 ancestors,
+                eras: Vec::new(),
             },
             trusted,
         )?;
@@ -1050,7 +1262,24 @@ impl LightClient {
             learned.push((voter.epoch, finality.voters(&voter.value).ok_or(LightError::Undecodable)?));
         }
 
+        let mut eras = Vec::new();
+
+        for era in &update.eras {
+            let key = Changes::consensus_key(era.epoch);
+
+            if !fixed.contains(&era.epoch) || !era.proof.verify(&root, Column::Epochs, &key, Some(&era.value)) {
+                return Err(LightError::BadProof);
+            }
+
+            eras.push((era.epoch, wincode::deserialize::<ConsensusConfig>(&era.value).map_err(|_| LightError::Undecodable)?));
+        }
+
         self.voters.extend(learned);
+
+        for (epoch, config) in eras {
+            self.learn_era(epoch, config);
+        }
+
         self.updated.insert(height);
 
         Ok(())

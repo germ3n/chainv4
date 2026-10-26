@@ -99,8 +99,59 @@ genesis, or takes the key's own address. A node whose key is not among the epoch
 update of the checkpoint `activation_delay` epochs before, trusted once that checkpoint is
 justified (see [Light client](light-client.md#following-the-chain)). So they follow headers
 `activation_delay` epochs behind finality, and wait for it. **Snapshot sync** checks headers
-before it has any state to take signers from, so it is refused on a rotating chain: such a chain
-syncs by running its blocks.
+through a light client of the node's own chain, fed over the peer protocol, so it learns the
+signers the same way and takes its pivot among the headers it could check (see
+[Node](node.md#syncing-from-a-snapshot)).
+
+## Production by stake
+
+The bonded validators of FFG finality produce the blocks, each with a share in proportion to its
+bond (`Staked`, `StakedProducer`). Genesis names `consensus.type: staked` with a `slot_ms` and a
+`schedule`, and needs `finality.type: ffg`: the validator set finality fixes for each epoch (see
+[Finality](finality.md#ffg)) is that epoch's producers, so a validator produces from the epoch
+its bond first counts in and stops with the epoch it leaves, and a slashed one goes with it.
+
+- **Who, and when:** the schedule names, for each height, the validator in turn and the one each
+  slot that passes hands the height to. The one in turn may produce from `slot_ms` after the
+  parent, the next from one more slot on, and so on. A block names the account the validator's
+  bond names as its producer, where its rewards go, and its seal is the validator's voting key's
+  signature over the header's id, as its votes are signed.
+- **The schedules**, picked in genesis:
+  - **`draw`:** the chain's hash over the epoch's set, the height and the slot draws a validator
+    with a chance in proportion to its bond, and every slot that passes draws again. Stateless,
+    so checking a block takes the set alone. A validator may be drawn for several slots of a
+    height in a row, and a missed slot costs the chain one slot's wait. A validator looks
+    `MAX_DRAW_WAIT` (1,024) slots ahead for its turn and no further.
+  - **`priority`:** Tendermint's proposer rotation. From the epoch's first height on, each
+    validator's priority grows by its bond every height; the highest produces, ties going to the
+    lower key, and its priority falls by the set's whole weight. Over an epoch each validator is
+    in turn its bond's share of the heights, exactly when the weights add up to the epoch's
+    length, and the order at each height, the next in line stepping in, is known in advance.
+    Checking a block replays the epoch's heights before it: `checkpoint_interval` rounds over the
+    set, which is cheap for the epochs chains run.
+- **Difficulty** is how many slots the producer waited, 0 in turn, which the producer declares and
+  the rules check against the schedule and the time. **Weight** is as under a rotating authority:
+  an in-turn block weighs 2, a later one 1.
+- **Where the validators come from:** as a rotating authority's signers, from whoever checks the
+  block: a node from the set fixed in its state for the block's epoch, a light client from the
+  voters it proved. An account that bonded more than one voting key produces with each, at each
+  one's turn.
+
+Run it with `--produce` on each validator's node, with `--producer-key` naming the validator's
+voting key file, the same key `--validate` votes with; the node takes the account from the
+epoch's set. A node whose key is not among the epoch's validators waits. Light clients and
+snapshot sync follow a staked chain as they follow a rotating one.
+
+## Changing consensus
+
+A chain with [governance](governance.md) can change its consensus by transaction: start under
+proof of work, say, and move to production by stake once enough validators have bonded. The
+decided consensus is fixed in state for each epoch `activation_delay` epochs ahead, at
+checkpoints, as finality fixes its voters, so a block is checked by the rules of its own epoch
+(`Chain::consensus_at`), light clients learn each epoch's rules from a light update, and a node
+started with `--mine`, `--produce` or both builds the producer for whatever consensus the chain
+runs now. The finality kind stays what genesis names, and a change must fit it: `rotating` needs
+authority finality, `staked` needs FFG.
 
 **Mining** (`--mine`, `--mine-threads`, `--reward-to`):
 1. The node builds a template block.
@@ -133,8 +184,14 @@ and the log says so. CUDA has no kernel of its own: NVIDIA cards mine through Vu
 - **Forks are normal under proof of work.** A node reorganizes to a heavier branch, up to
   `max_reorg_depth` blocks back. Finality stops it going further (see [Chain](chain.md)).
 - **The authority is a development key.** Its seed is in the source. A chain with several
-  producers runs a rotating authority; producing by stake would be another `Consensus` and
-  `Producer`.
-- **A rotating chain lags for light clients, and takes no snapshot.** Its blocks are checked
-  against signers in state, so a light client follows `activation_delay` epochs behind what
-  finality has justified, and a new node syncs by running every block.
+  producers runs a rotating authority or production by stake.
+- **A rotating or staked chain lags for light clients.** Its blocks are checked against voters in
+  state, so a light client follows `activation_delay` epochs behind what finality has justified,
+  and so does a node syncing from a snapshot, which checks headers as a light client does.
+- **Under the draw, a validator's turn is luck per slot.** A validator with a thousandth of the
+  stake is in turn one height in a thousand, and, when the one in turn misses, drawn next with
+  the same chance; the priority schedule gives exact shares and a known order instead, for the
+  cost of replaying the epoch when checking.
+- **Switching consensus needs its producers ready.** A move to stake needs validators in the
+  switch epoch's set with nodes producing; a chain that switches to a scheme nobody serves stops
+  (see [Governance](governance.md)).

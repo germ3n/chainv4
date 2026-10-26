@@ -168,6 +168,24 @@ pub enum TxArgs {
         #[arg(long)]
         version: Option<u64>,
     },
+    /// Approves a change under the chain's governance: a new consensus, as a genesis file's
+    /// consensus object. Sign with an account governance lets approve: a validator's or signer's
+    /// account under the electorate, a member's under a council.
+    ApproveChange {
+        /// The new consensus as JSON, such as '{"type":"staked","slot_ms":2000,"schedule":"draw"}'
+        /// or '{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1000","min_difficulty":"1000"}'.
+        #[arg(long)]
+        consensus: String,
+        /// The version of the decision this changes. Defaults to the one the node reports.
+        #[arg(long)]
+        version: Option<u64>,
+    },
+    /// Takes back the sender's approval of a change under governance.
+    WithdrawChange {
+        /// The version of the decision the approval was for. Defaults to the one the node reports.
+        #[arg(long)]
+        version: Option<u64>,
+    },
     /// Calls a function on a contract.
     Call {
         /// The contract, such as contract:0x….
@@ -531,6 +549,38 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
             println!("withdrawing this signer's approval for version {version}");
 
             Tx::WithdrawApproval { version }
+        }
+        TxArgs::ApproveChange { consensus, version } => {
+            let value: Value = serde_json::from_str(&consensus).map_err(|err| format!("--consensus is not JSON: {err}"))?;
+            let (consensus, window) = super::genesis::consensus_from_json(&value, "consensus")?;
+
+            if window.is_some() {
+                return Err("--consensus: a change keeps the chain's window; leave it out".into());
+            }
+
+            let version = match version {
+                Some(version) => version,
+                None => ok(agent.get(format!("{node}/governance")).call())?["version"]
+                    .as_u64()
+                    .ok_or("the node sent no version")?,
+            };
+            println!("approving a change to {} consensus, from version {version}", consensus.name());
+
+            Tx::ApproveChange {
+                version,
+                change: crate::governance::Change::Consensus(consensus),
+            }
+        }
+        TxArgs::WithdrawChange { version } => {
+            let version = match version {
+                Some(version) => version,
+                None => ok(agent.get(format!("{node}/governance")).call())?["version"]
+                    .as_u64()
+                    .ok_or("the node sent no version")?,
+            };
+            println!("withdrawing this account's approval of a change from version {version}");
+
+            Tx::WithdrawChange { version }
         }
         TxArgs::Call {
             to,

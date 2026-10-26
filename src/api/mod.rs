@@ -14,6 +14,7 @@ use {
     crate::crypto::merkle,
     crate::crypto::keypair::PublicKey,
     crate::registry::signers::{Approval, SignerSet, Signers},
+    crate::registry::changes::Changes,
     crate::registry::validators::Validators,
     crate::structs::vote::Checkpoint,
     crate::db::{Database, DbError, Read, STATE_COLUMNS, State, StateTree},
@@ -226,6 +227,7 @@ fn router(api: Api) -> Router {
         .route("/validators", get(validators))
         .route("/validators/{voter}", get(validator))
         .route("/signers", get(signers))
+        .route("/governance", get(governance))
         .route("/evidence", get(evidence))
         .route("/forks", get(forks))
         .route("/events", get(events))
@@ -537,6 +539,53 @@ async fn signers(Shared(api): Shared<Api>) -> Answer {
 
             value
         }).collect::<Vec<_>>(),
+    })))
+}
+
+/// Governance: the consensus the tip's epoch runs and the one decided last, and the approvals
+/// that still count in the tip's epoch, each change with what its approvals weigh and need.
+async fn governance(Shared(api): Shared<Api>) -> Answer {
+    let Some(rules) = &api.rules.governance else {
+        return Err(ApiError::NotFound("this chain has no governance".to_string()));
+    };
+    let db = api.db;
+    let height = tip(&*db)?.header.height;
+    let epoch = rules.finality.epoch_of(height);
+    let state = State::new(db);
+    let changes = Changes::new(&state);
+    let decided = changes.decided()?;
+    let ballot = changes.ballot()?.counting(epoch, rules.approval_epochs);
+    let needed = rules.governance.needed(&state, epoch)?;
+    let mut proposals = Vec::new();
+
+    for change in ballot.changes() {
+        let approvals: Vec<Value> = ballot
+            .approvals
+            .iter()
+            .filter(|approval| approval.change == change)
+            .map(|approval| json!({
+                "account": approval.account.to_string(),
+                "weight": rules.governance.weight(&state, epoch, &approval.account).ok().flatten().map_or_else(|| "0".to_string(), |weight| weight.to_string()),
+                "epoch": approval.epoch,
+                "counts_until": approval.epoch + rules.approval_epochs - 1,
+            }))
+            .collect();
+        let mut value = json::change(&change);
+        value["weight"] = changes.weight_of(&ballot, &change, epoch, &*rules.governance)?.to_string().into();
+        value["needed"] = needed.to_string().into();
+        value["approvals"] = approvals.into();
+        proposals.push(value);
+    }
+
+    Ok(Json(json!({
+        "kind": rules.governance.name(),
+        "epoch": epoch,
+        "active": changes.consensus_for(epoch)?.as_ref().map(|consensus| crate::cli::genesis::consensus_json(consensus, api.light.pow_window)),
+        "version": decided.version,
+        "decided": crate::cli::genesis::consensus_json(&decided.consensus, api.light.pow_window),
+        "approval_epochs": rules.approval_epochs,
+        "needed": needed.to_string(),
+        "proposals": proposals,
     })))
 }
 

@@ -1,7 +1,7 @@
 use {
     super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer},
     crate::crypto::hashable::Hashable,
-    crate::registry::signers::Signer,
+    crate::registry::validators::Member,
     crate::structs::address::Address,
     crate::structs::block::{BlockHeader, Seal},
     crate::crypto::hasher::Hasher,
@@ -155,7 +155,7 @@ impl Consensus for ProofOfWork {
         }
     }
 
-    fn check(&self, header: &BlockHeader, seal: &Seal, ancestors: &[BlockHeader], _producers: &[Signer], now: u64) -> Result<(), ConsensusError> {
+    fn check(&self, header: &BlockHeader, seal: &Seal, ancestors: &[BlockHeader], _producers: &[Member], now: u64) -> Result<(), ConsensusError> {
         let Some(parent) = ancestors.first() else {
             return Err(ConsensusError::NoAncestors);
         };
@@ -369,12 +369,12 @@ impl Miner {
 }
 
 impl Producer for Miner {
-    fn address(&self) -> Address {
+    fn address(&self, _producers: &[Member]) -> Address {
         self.address
     }
 
     /// Timestamps must move forward, so the next millisecond after the parent's.
-    fn start_at(&self, parent: &BlockHeader, _producers: &[Signer]) -> u64 {
+    fn start_at(&self, parent: &BlockHeader, _producers: &[Member]) -> u64 {
         parent.timestamp + 1
     }
 

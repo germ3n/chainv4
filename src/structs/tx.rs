@@ -6,6 +6,7 @@ use {
     crate::structs::address::Address,
     crate::structs::amount::Amount,
     crate::registry::signers::Signer,
+    crate::governance::Change,
     crate::structs::code::Code,
     crate::structs::hash::Hash,
     crate::structs::u256::{I256Le, U256Le, i256},
@@ -154,6 +155,23 @@ pub enum Tx {
     )]
     #[wincode(tag = 11)]
     WithdrawApproval { version: u64 },
+    #[document(
+        summary = "Approves a change to what genesis set, under the chain's governance: today, a new consensus. Only an account governance lets approve may send it: a validator's or signer's account under the electorate, a member's under a council. Once the approvals for the same change weigh enough, it is decided, and the next checkpoint fixes it for the epoch activation_delay ahead.",
+        params = {
+            version = "The version of the decision this changes: how many changes were decided before, as GET /governance reports.",
+            change = "The change it approves.",
+        },
+        see_also = "Changes::approve, GovernanceConfig, Change",
+    )]
+    #[wincode(tag = 12)]
+    ApproveChange { version: u64, change: Change },
+    #[document(
+        summary = "Takes back the sender's approval of a change, so it backs none. Only an account governance lets approve may send it, while its approval still counts.",
+        params = { version = "The version of the decision its approval was for." },
+        see_also = "Changes::withdraw, Tx::ApproveChange",
+    )]
+    #[wincode(tag = 13)]
+    WithdrawChange { version: u64 },
 }
 
 #[document(
@@ -259,7 +277,13 @@ impl Verifiable for Tx {
             }
             Tx::Unbond { voter } | Tx::Withdraw { voter } => voter.verify(),
             Tx::ApproveSigners { signers, .. } => signers.iter().try_for_each(|signer| signer.key.verify()),
-            Tx::WithdrawApproval { .. } => Ok(()),
+            Tx::WithdrawApproval { .. } | Tx::WithdrawChange { .. } => Ok(()),
+            // Whether the consensus fits the chain is decided when the transaction runs; an
+            // authority's key is checked here.
+            Tx::ApproveChange { change: Change::Consensus(consensus), .. } => match consensus {
+                crate::consensus::ConsensusConfig::Authority { key, .. } => key.verify(),
+                _ => Ok(()),
+            },
             // The signatures are checked when it runs, against the chain's genesis id.
             Tx::Slash { first, second } => {
                 if !first.vote.conflicts(&second.vote) {

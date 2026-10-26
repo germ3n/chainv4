@@ -6,7 +6,7 @@
 use {
     crate::mempool::MempoolError,
     crate::db::{Path, StatePart},
-    crate::light::CheckpointStart,
+    crate::light::{CheckpointStart, FinalityStep},
     crate::structs::block::{Block, Seal, SealedHeader},
     crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
@@ -33,6 +33,8 @@ pub const MAX_SYNC_BLOCKS: u32 = 128;
 pub const MAX_SYNC_JUSTIFICATIONS: u32 = 64;
 /// The most headers one sync response carries.
 pub const MAX_SYNC_HEADERS: u32 = 1_024;
+#[document(summary = "The most epochs of finality one SyncRequest::Finality answers with: what light clients get at once, MAX_FINALITY_STEPS.", category = "Node")]
+pub const MAX_SYNC_FINALITY: u32 = crate::light::MAX_FINALITY_STEPS as u32;
 /// The most chain-state entries one sync response carries. Values are at most 64 KiB, so the
 /// largest answer still fits a response.
 pub const MAX_SYNC_ENTRIES: usize = 512;
@@ -121,6 +123,9 @@ pub enum SyncRequest {
     #[document(summary = "What a node starting at a trusted checkpoint needs: the checkpoint's header and those below it that consensus and finality look at, as a light client's CheckpointStart, and the checkpoint's total work.")]
     #[wincode(tag = 5)]
     Checkpoint { block: Hash },
+    #[document(summary = "The peer's finality from an epoch on, at most MAX_SYNC_FINALITY epochs, as it serves light clients: each main-chain checkpoint's justification and light update. What a node syncing from a snapshot learns the producers of a rotating or staked chain from.")]
+    #[wincode(tag = 6)]
+    Finality { from: u64, count: u32 },
 }
 
 #[document(
@@ -156,6 +161,9 @@ pub enum SyncResponse {
     #[document(summary = "The checkpoint start asked for and the checkpoint's total work, or None when the block is not a checkpoint on the peer's main chain, or it lacks the headers.")]
     #[wincode(tag = 5)]
     Checkpoint(Option<CheckpointAnswer>),
+    #[document(summary = "The finality asked for, an epoch at a time from the one asked, stopping before the first checkpoint past genesis the peer holds no justification for; empty on a chain whose finality does not vote.")]
+    #[wincode(tag = 6)]
+    Finality(Vec<FinalityStep>),
 }
 
 #[document(

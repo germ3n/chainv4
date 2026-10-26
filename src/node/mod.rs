@@ -7,11 +7,12 @@
 
 use {
     crate::chain::{Chain, ChainError, FinalityError, FinalityUpdate, Genesis, ImportError, Imported, IndexKind, KeepFrom},
-    crate::consensus::Producer,
+    crate::consensus::{ConsensusConfig, Producer},
     crate::crypto::keypair::Keypair,
     crate::db::{Database, DbError},
     crate::mempool::{Budget, Mempool, MempoolError},
-    crate::net::{Admission, Backlog, MAX_SYNC_BLOCKS, MAX_SYNC_ENTRIES, MAX_SYNC_HEADERS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, Origin, SyncRequest, SyncResponse},
+    crate::net::{Admission, Backlog, MAX_SYNC_BLOCKS, MAX_SYNC_ENTRIES, MAX_SYNC_FINALITY, MAX_SYNC_HEADERS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, Origin, SyncRequest, SyncResponse},
+    crate::structs::address::Address,
     crate::structs::block::Block,
     crate::structs::hash::Hash,
     crate::structs::hex::to_hex,
@@ -66,6 +67,10 @@ pub struct Node {
     /// The mempool, and what admits transactions to it off the loop.
     gate: Arc<Gate>,
     producer: Option<Box<dyn Producer>>,
+    /// What this node can produce with, when it builds its producer for whatever consensus the
+    /// chain runs, and the consensus the producer it holds serves.
+    producing: Option<Producing>,
+    producer_for: Option<ConsensusConfig>,
     /// The block the producer is sealing, until its seal arrives or the tip moves on.
     template: Option<Block>,
     /// What the node asks the network to do.
@@ -95,6 +100,120 @@ pub struct Node {
     /// How long this node runs transactions for a block it builds before it seals what it has, if
     /// it bounds that.
     max_build_ms: Option<u64>,
+}
+
+#[document(
+    summary = "What a node can produce blocks with: a miner's settings for proof of work, a key for the schemes that sign, or both, so the node serves whatever consensus the chain runs now, and whatever governance moves it to. Node::producing takes one.",
+    category = "Node",
+    see_also = "Node::producing, Mining, Producer",
+)]
+pub struct Producing {
+    #[document(summary = "How to mine, under proof of work, or None to never mine.")]
+    pub mine: Option<Mining>,
+    #[document(summary = "The key to sign blocks with under an authority, a rotating authority or production by stake: the authority's key, or a signer's or validator's voting key. None to never sign.")]
+    pub sign: Option<Keypair>,
+}
+
+#[document(
+    summary = "How a node mines, under proof of work.",
+    category = "Node",
+    see_also = "Producing, Miner",
+)]
+#[derive(Clone, Debug)]
+pub struct Mining {
+    #[document(summary = "Where the rewards go.")]
+    pub reward_to: Address,
+    #[document(summary = "How many threads mine.")]
+    pub threads: usize,
+    #[document(summary = "Whether to mine on the GPU instead, in a build with the gpu feature.")]
+    pub gpu: bool,
+}
+
+impl Producing {
+    /// The producer for a consensus, when the setup can serve it: None when the chain runs a
+    /// scheme the setup has nothing for, or the key is not the authority's.
+    fn build(
+        &self,
+        config: &ConsensusConfig,
+        hash: crate::structs::hash::HashType,
+        checkpoint_interval: u64,
+        finality: Option<&crate::chain::FinalityConfig>,
+        found: impl Fn(Hash, crate::structs::block::Seal) + Send + Sync + 'static,
+    ) -> Result<Option<Box<dyn Producer>>, NodeError> {
+        use crate::consensus::{AuthorityProducer, Miner, RotatingProducer, Staked, StakedProducer};
+
+        Ok(match config {
+            ConsensusConfig::ProofOfWork(_) => match &self.mine {
+                Some(mining) if mining.gpu => {
+                    #[cfg(feature = "gpu")]
+                    {
+                        log::info!("[node] mining on the GPU, rewards to {}", mining.reward_to);
+
+                        Some(Box::new(crate::consensus::GpuMiner::new(mining.reward_to, hash, found).map_err(NodeError::Thread)?) as Box<dyn Producer>)
+                    }
+                    #[cfg(not(feature = "gpu"))]
+                    {
+                        let _ = found;
+
+                        return Err(NodeError::Thread("--mine-gpu needs a build with the gpu feature: cargo build --features gpu".to_string()));
+                    }
+                }
+                Some(mining) => {
+                    log::info!("[node] mining on {} threads, rewards to {}", mining.threads.max(1), mining.reward_to);
+
+                    Some(Box::new(Miner::new(mining.reward_to, hash, mining.threads, found)))
+                }
+                None => {
+                    log::info!("[node] the chain runs proof of work, which this node has no --mine for: following only");
+
+                    None
+                }
+            },
+            ConsensusConfig::Authority { key, slot_ms } => match &self.sign {
+                Some(keypair) if keypair.public() == *key => {
+                    log::info!("[node] producing blocks as {}", keypair.public().address());
+
+                    Some(Box::new(AuthorityProducer::new(keypair.clone(), *slot_ms)))
+                }
+                Some(keypair) => {
+                    log::warn!("[node] the chain's authority is {key}, not {}: following only", keypair.public());
+
+                    None
+                }
+                None => {
+                    log::info!("[node] the chain runs an authority, which this node has no --produce for: following only");
+
+                    None
+                }
+            },
+            ConsensusConfig::Rotating { slot_ms } => match &self.sign {
+                Some(keypair) => {
+                    // The signer's voting key signs its blocks; the blocks name its account.
+                    let account = finality.and_then(|finality| finality.signer_account(&keypair.public())).unwrap_or_else(|| keypair.public().address());
+                    log::info!("[node] producing blocks in turn as {}, for {account}", keypair.public());
+
+                    Some(Box::new(RotatingProducer::new(keypair.clone(), account, *slot_ms)))
+                }
+                None => {
+                    log::info!("[node] the chain runs a rotating authority, which this node has no --produce for: following only");
+
+                    None
+                }
+            },
+            ConsensusConfig::Staked { slot_ms, schedule } => match &self.sign {
+                Some(keypair) => {
+                    log::info!("[node] producing blocks by stake as {}", keypair.public());
+
+                    Some(Box::new(StakedProducer::new(keypair.clone(), Staked::new(*slot_ms, *schedule, hash, checkpoint_interval))))
+                }
+                None => {
+                    log::info!("[node] the chain runs production by stake, which this node has no --produce for: following only");
+
+                    None
+                }
+            },
+        })
+    }
 }
 
 #[document(
@@ -265,6 +384,8 @@ impl Node {
             chain,
             gate,
             producer,
+            producing: None,
+            producer_for: None,
             template: None,
             commands,
             inbox,
@@ -283,6 +404,42 @@ impl Node {
             max_block_txs: None,
             max_build_ms: None,
         })
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Produces with whatever the setup can, for whatever consensus the chain runs: the node builds its producer from the setup for the consensus of each block it is about to build, and again when governance changes it, so a node started with --mine and --produce follows a chain from proof of work into production by stake. What new was given as the producer is replaced.",
+        params = { setup = "The keys and settings to produce with." },
+    )]
+    pub fn producing(mut self, setup: Producing) -> Node {
+        self.producing = Some(setup);
+        self.producer = None;
+        self.producer_for = None;
+        self
+    }
+
+    /// Builds the producer for the next block's consensus, when the node has a setup to build
+    /// from and holds none for that consensus yet.
+    fn ensure_producer(&mut self) -> Result<(), NodeError> {
+        let Some(setup) = &self.producing else {
+            return Ok(());
+        };
+        let config = self.chain.consensus_config_at(self.chain.tip().height + 1)?;
+
+        if self.producer_for.as_ref() == Some(&config) {
+            return Ok(());
+        }
+
+        let inbox = self.inbox.clone();
+        let found = move |block, seal| {
+            let _ = inbox.send(NetEvent::Sealed { block, seal });
+        };
+        let interval = self.chain.finality_config().map_or(1, |finality| finality.checkpoint_interval());
+        self.producer = setup.build(&config, self.chain.hash(), interval, self.chain.finality_config(), found)?;
+        self.producer_for = Some(config);
+        self.template = None;
+
+        Ok(())
     }
 
     #[document(
@@ -593,6 +750,7 @@ impl Node {
                     .checkpoint_answer(&block)?
                     .map(|(start, work)| crate::net::CheckpointAnswer { start, work }),
             ),
+            SyncRequest::Finality { from, count } => SyncResponse::Finality(self.chain.light_finality_from(from, u64::from(count.min(MAX_SYNC_FINALITY)))?),
         };
 
         Ok(response)
@@ -740,6 +898,7 @@ impl Node {
     /// Builds a block for the producer once it may produce, and starts sealing it. A miner keeps
     /// one template at a time, rebuilt when the tip moves or TEMPLATE_REFRESH passes.
     fn produce_if_due(&mut self, now: u64) -> Result<(), NodeError> {
+        self.ensure_producer()?;
         let budget = self.budget();
         let Some(producer) = self.producer.as_mut() else {
             return Ok(());
@@ -753,7 +912,8 @@ impl Node {
             return Ok(());
         }
 
-        // Under a rotating authority, who may produce the next block, and so when this node may.
+        // Under a rotating authority or production by stake, who may produce the next block, and
+        // so when this node may.
         let producers = self.chain.producers_for(tip.height + 1)?;
 
         if now < producer.start_at(&tip, &producers) {
@@ -764,7 +924,7 @@ impl Node {
         let proofs = self.chain.unpaid_proofs()?;
         let deadline = self.max_build_ms.map(|most| Instant::now() + Duration::from_millis(most));
         let declared = producer.difficulty(&tip, &producers);
-        let mut block = self.chain.build_declaring(txs, proofs, producer.address(), now, deadline, declared)?;
+        let mut block = self.chain.build_declaring(txs, proofs, producer.address(&producers), now, deadline, declared)?;
 
         match producer.seal(&block.header) {
             Some(seal) => {
@@ -896,6 +1056,7 @@ impl Node {
             return Ok(());
         }
 
+        self.ensure_producer()?;
         let wake = match (&self.producer, &self.template) {
             (Some(_), Some(template)) => Some(template.header.timestamp + TEMPLATE_REFRESH),
             (Some(producer), None) => Some(producer.start_at(self.chain.tip(), &self.chain.producers_for(self.chain.tip().height + 1)?)),

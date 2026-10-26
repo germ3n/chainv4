@@ -17,8 +17,9 @@ the [wallet](wallet.md) runs its light client too.
 | Chain | `src/chain/` | The blocks, which branch is the main chain, and the rules blocks run under. |
 | Consensus | `src/consensus/` | Who may produce, how blocks are sealed, and how much each weighs. |
 | Finality | `src/chain/finality/` | When blocks can no longer come off. |
+| Governance | `src/governance/` | Who may change the consensus of a running chain, and what their approvals must weigh. |
 | Fees | `src/chain/fees/` | What transactions pay, and the block gas limit. |
-| Registries | `src/registry/` | Accounts, contracts, validators and signers, read and written in state layers. |
+| Registries | `src/registry/` | Accounts, contracts, validators, signers and governance's changes, read and written in state layers. |
 | VM | `src/vm/` | Runs contracts: Luau scripts and WebAssembly modules. |
 | Storage | `src/db/` | The database behind a trait: RocksDB for nodes, memory for tests; the state tree every header's state root is the root of; and the walk a node takes a snapshot of it by. |
 | Light client | `src/light/` | Follows a chain from its genesis id alone, checking headers, finality and proofs; built without the node, so the explorer and the wallet run it too. |

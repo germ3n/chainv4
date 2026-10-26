@@ -1,7 +1,7 @@
 use {
     super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer, seal_bytes},
     crate::crypto::keypair::{Keypair, PublicKey},
-    crate::registry::signers::Signer,
+    crate::registry::validators::Member,
     crate::structs::address::Address,
     crate::structs::block::{BlockHeader, Seal},
     crate::structs::u256::u256,
@@ -49,7 +49,7 @@ impl Consensus for DevAuthority {
         0
     }
 
-    fn check(&self, header: &BlockHeader, seal: &Seal, ancestors: &[BlockHeader], _producers: &[Signer], now: u64) -> Result<(), ConsensusError> {
+    fn check(&self, header: &BlockHeader, seal: &Seal, ancestors: &[BlockHeader], _producers: &[Member], now: u64) -> Result<(), ConsensusError> {
         let Some(parent) = ancestors.first() else {
             return Err(ConsensusError::NoAncestors);
         };
@@ -108,11 +108,11 @@ impl AuthorityProducer {
 }
 
 impl Producer for AuthorityProducer {
-    fn address(&self) -> Address {
+    fn address(&self, _producers: &[Member]) -> Address {
         self.keypair.public().address()
     }
 
-    fn start_at(&self, parent: &BlockHeader, _producers: &[Signer]) -> u64 {
+    fn start_at(&self, parent: &BlockHeader, _producers: &[Member]) -> u64 {
         parent.timestamp + self.slot_ms
     }
 
@@ -172,7 +172,7 @@ mod tests {
         let header = child(12_000);
 
         assert_eq!(producer().start_at(&parent(), &[]), 12_000);
-        assert_eq!(producer().address(), parent().producer);
+        assert_eq!(producer().address(&[]), parent().producer);
         assert_eq!(rules().check(&header, &sealed(&header), &[parent()], &[], 12_000), Ok(()));
         assert_eq!(rules().work(&header), u256::ONE);
     }

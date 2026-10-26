@@ -285,6 +285,17 @@ mod send {
 
         /// As launch, with the node set up further before it starts.
         fn launch_with(produce: bool, validate: bool, finality: Option<FinalityConfig>, set_up: impl FnOnce(Node) -> Node) -> Running {
+            Running::launch_governed(produce, validate, finality, None, set_up)
+        }
+
+        /// As launch_with, on a chain with this governance.
+        fn launch_governed(
+            produce: bool,
+            validate: bool,
+            finality: Option<FinalityConfig>,
+            governance: Option<crate::governance::GovernanceConfig>,
+            set_up: impl FnOnce(Node) -> Node,
+        ) -> Running {
             const SLOT: u64 = 50;
             let authority = DevAuthority::dev_keypair();
             let genesis = Genesis {
@@ -294,6 +305,7 @@ mod send {
                 },
                 timestamp: now_ms(),
                 finality,
+                governance,
                 ..Genesis::dev_authority(authority.public())
             };
             let producer = produce.then(|| Box::new(AuthorityProducer::new(authority, SLOT)) as Box<dyn Producer>);
@@ -535,6 +547,42 @@ mod send {
         // In block 1 or 2, so final once the tip is 5 blocks further.
         assert!(node.chain().tip().height >= 6);
         assert!(node.chain().finalized().unwrap().epoch >= 1);
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+    #[test]
+    fn approve_change_and_withdraw_change_go_through_governance() {
+        use crate::governance::GovernanceConfig;
+
+        let dev = DevAuthority::dev_keypair();
+        let council = GovernanceConfig::Council {
+            members: vec![dev.public().address()],
+            threshold: 1,
+            approval_epochs: 64,
+        };
+        let running = Running::launch_governed(true, false, Some(FinalityConfig::Ffg(crate::chain::FfgConfig::dev(dev.public()))), Some(council), |node| node);
+        let staked = r#"{"type":"staked","slot_ms":2000,"schedule":"draw"}"#.to_string();
+        let windowed = r#"{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1","min_difficulty":"1","window":5}"#.to_string();
+
+        // A window stays genesis's; nothing to withdraw before approving; the council of one
+        // decides at once, so there is nothing to withdraw after either.
+        let kept = send(running.args(TxArgs::ApproveChange { consensus: windowed, version: None }));
+        let nothing = send(running.args(TxArgs::WithdrawChange { version: None }));
+        let approved = send(running.args(TxArgs::ApproveChange { consensus: staked, version: None }));
+        let decided = send(running.args(TxArgs::WithdrawChange { version: None }));
+        let governance = crate::cli::send::ok(crate::cli::send::agent().get(format!("http://{}/governance", running.api)).call()).unwrap();
+        let node = running.stop();
+
+        assert!(kept.unwrap_err().to_string().contains("keeps the chain's window"));
+        let nothing = nothing.unwrap_err().to_string();
+        let decided = decided.unwrap_err().to_string();
+
+        assert!(nothing.contains("no approval"), "{nothing}");
+        approved.unwrap();
+        assert!(decided.contains("no approval"), "{decided}");
+        assert_eq!(governance["version"], 1);
+        assert_eq!(governance["decided"]["type"], "staked");
+        assert!(node.chain().tip().height >= 2);
     }
 
     #[test]

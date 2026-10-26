@@ -207,6 +207,8 @@ fn summary(tx: &Tx) -> String {
         Tx::Slash { .. } => "slash a voter that voted twice".to_string(),
         Tx::ApproveSigners { version, .. } => format!("approve signers version {version}"),
         Tx::WithdrawApproval { version } => format!("withdraw approval of signers version {version}"),
+        Tx::ApproveChange { version, change } => format!("approve a {} change from version {version}", change.name()),
+        Tx::WithdrawChange { version } => format!("withdraw approval of a change from version {version}"),
     }
 }
 

@@ -51,7 +51,7 @@ fn open(db: &Arc<MemoryDb>) -> Chain {
 
 fn next_block(chain: &Chain, txs: Vec<SignedTx>) -> (Block, u64) {
     let now = chain.tip().timestamp + SLOT;
-    let mut block = chain.build(txs, Vec::new(), producer().address(), now).unwrap();
+    let mut block = chain.build(txs, Vec::new(), producer().address(&[]), now).unwrap();
     block.seal = producer().seal(&block.header).unwrap();
 
     (block, now)
@@ -1636,7 +1636,7 @@ fn a_full_block_past_wincodes_default_limit_builds_imports_and_reads_back() {
         })
         .collect();
     let now = chain.tip().timestamp + SLOT;
-    let mut block = chain.build(txs, Vec::new(), producer().address(), now).unwrap();
+    let mut block = chain.build(txs, Vec::new(), producer().address(&[]), now).unwrap();
     block.seal = producer().seal(&block.header).unwrap();
 
     // The block's gas limit binds, at 13,812 transfers with Ed25519 keys: over 4 MiB in memory.

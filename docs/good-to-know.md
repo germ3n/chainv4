@@ -19,7 +19,9 @@ other pages explain each part in full; this one is the short list to keep in min
     starting the node, finishes.
 - **There are two dev chains, and pow is the default.**
   - `--consensus pow`, mined with `--mine`;
-  - `--consensus authority`, produced with `--produce` on exactly one node.
+  - `--consensus authority`, produced with `--produce` on exactly one node;
+  - `--consensus rotating` and `--consensus staked`, produced with `--produce` on each signer's
+    or validator's node, the development key being the only one on the dev chains.
 
   Each is its own genesis and network.
 - **The development key is public.** Its seed is in the source. It holds a million coins on both
@@ -248,10 +250,23 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   `chainv4-gpu` and wgpu; `--mine --mine-gpu` then mines on Vulkan, Metal or WebGPU. wgpu is
   held at 24 there, since the node's libp2p pins the wasm crates newer versions want past. The
   crate's tests skip where no GPU is found, as on CI.
-- **A rotating authority's producers are its finality signers.** `consensus.type: rotating`
-  checks each block against the signers fixed for its epoch, so header checks need state: light
-  clients follow `activation_delay` epochs behind finality, and `--snapshot` is refused. The
-  dev chain `--consensus rotating` runs it with the development key as the one signer.
+- **A rotating authority's producers are its finality signers, and a staked chain's its FFG
+  validators.** `consensus.type: rotating` and `staked` check each block against the voters
+  fixed for its epoch, so header checks need state: light clients follow `activation_delay`
+  epochs behind finality, and so does a node syncing from a snapshot, which checks headers as a
+  light client does and learns the voters from the finality its peers serve. The dev chains
+  `--consensus rotating` and `--consensus staked` run them with the development key alone.
+- **Under `staked`, pick the schedule for the chain.** `draw` is stateless and cheap to check, but
+  a validator's turn is luck per slot; `priority` gives each validator its exact share and a known
+  order, and checking a block replays its epoch's heights, `checkpoint_interval` rounds over the
+  set. Both weigh an in-turn block 2 and a stepped-in one 1.
+- **Governance changes the consensus, and only that, for now.** With `governance` in genesis,
+  `Tx::ApproveChange` from the electorate or the council decides a new consensus, fixed
+  `activation_delay` epochs ahead at the next checkpoint; the finality kind and its epochs stay.
+  A node started with `--mine` and `--produce` together serves whichever the chain runs. Light
+  clients then wait for each epoch's consensus from a light update, on any chain with governance,
+  so they follow `activation_delay` epochs behind finality. A chain that switches to a scheme
+  nobody produces for stops; have the producers ready first.
 - **Mint is for development chains.** Genesis's `minter` may name the development key or
   nobody; a genesis file naming any other address is refused as `BadGenesis`. Coins on a chain
   of value come from block rewards and allocations alone.

@@ -8,12 +8,14 @@
 
 use {
     crate::consensus::{Consensus, ConsensusConfig, ConsensusError, PowConfig},
+    crate::governance::GovernanceConfig,
+    crate::registry::changes::Changes,
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::{Keypair, PublicKey},
     crate::db::{Column, Database, DbError, MemoryDb, Path, Read, SnapshotWalk, State, StatePart, StateTree, WalkError},
     crate::light::{CheckpointStart, FinalityStep, LightFinality, LightParams, LightUpdate},
     crate::registry::tokens::STANDARD_TOKEN_FUNCTIONS,
-    crate::registry::signers::Signer,
+    crate::registry::validators::Member,
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
     crate::structs::block::{Block, BlockHeader, Seal, SealedHeader},
@@ -27,7 +29,7 @@ use {
     r#macro::document,
     std::collections::{HashSet, VecDeque},
     std::fmt,
-    std::sync::Arc,
+    std::sync::{Arc, Mutex},
     std::time::Instant,
     wincode::{SchemaRead, SchemaWrite},
 };
@@ -45,7 +47,7 @@ mod receipt;
 pub use addresses::{IndexedTx, stored_address_txs, touched};
 pub use events::{EventFilter, IndexedEvent, stored_events};
 pub use index::{IndexKind, IndexWindow, Indexing, KeepFrom, stored_index};
-pub use execute::{BlockContext, Effect, Failure, Receipt, Rules, SignerRules, StakingRules, TxError};
+pub use execute::{BlockContext, Effect, Failure, GovernanceRules, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
 pub use parallel::Workers;
 use parallel::{Runner, Unfit};
@@ -220,9 +222,75 @@ pub struct Genesis {
     #[document(summary = "Where vote rewards come from: minted, as when None, or from the reward pool, REWARD_POOL, which the burned share of every fee then feeds instead of vanishing. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
     #[wincode(with = "UnsetSource")]
     pub vote_reward_source: Option<VoteRewardSource>,
+    #[document(summary = "How the chain changes what genesis set, or None for a chain where nothing does: which kind of governance approves a change, and its settings. Needs finality that votes. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
+    #[wincode(with = "UnsetGovernance")]
+    pub governance: Option<GovernanceConfig>,
 }
 
 impl Hashable for Genesis {}
+
+/// Encodes Genesis::governance as nothing while None, and as a 1 and its encoding once set, so a
+/// genesis from before the field hashes as it did. Genesis is never decoded.
+pub struct UnsetGovernance;
+
+// SAFETY: size_of is exactly what write writes: nothing for None, a byte and the encoding for Some.
+unsafe impl<C: wincode::config::Config> SchemaWrite<C> for UnsetGovernance {
+    type Src = Option<GovernanceConfig>;
+
+    fn size_of(src: &Option<GovernanceConfig>) -> wincode::WriteResult<usize> {
+        match src {
+            Some(config) => Ok(1 + <GovernanceConfig as SchemaWrite<C>>::size_of(config)?),
+            None => Ok(0),
+        }
+    }
+
+    fn write(mut writer: impl wincode::io::Writer, src: &Option<GovernanceConfig>) -> wincode::WriteResult<()> {
+        let Some(config) = src else {
+            return Ok(());
+        };
+        <[u8; 1] as SchemaWrite<C>>::write(&mut writer, &[1])?;
+
+        <GovernanceConfig as SchemaWrite<C>>::write(writer, config)
+    }
+}
+
+#[document(
+    summary = "Why a consensus cannot run with a finality: a rotating authority needs authority finality, whose signers produce, and production by stake needs FFG, whose validators do. What genesis checks, and what a change approved under governance must pass too.",
+    category = "Chain",
+    see_also = "Genesis, Change::Consensus",
+)]
+#[cfg_attr(not(any(feature = "finality-ffg", feature = "finality-authority")), allow(unused_variables))]
+pub fn consensus_problem(consensus: &ConsensusConfig, finality: Option<&FinalityConfig>) -> Option<&'static str> {
+    if let ConsensusConfig::ProofOfWork(pow) = consensus
+        && !pow.hash.secure()
+    {
+        return Some("the proof-of-work hash must be a secure 256-bit one, not xxh3");
+    }
+
+    if matches!(consensus, ConsensusConfig::Rotating { .. }) {
+        #[cfg(feature = "finality-authority")]
+        let rotating_ok = matches!(finality, Some(FinalityConfig::Authority(_)));
+        #[cfg(not(feature = "finality-authority"))]
+        let rotating_ok = false;
+
+        if !rotating_ok {
+            return Some("consensus rotating needs finality of type authority, whose signers produce the blocks");
+        }
+    }
+
+    if matches!(consensus, ConsensusConfig::Staked { .. }) {
+        #[cfg(feature = "finality-ffg")]
+        let staked_ok = matches!(finality, Some(FinalityConfig::Ffg(_)));
+        #[cfg(not(feature = "finality-ffg"))]
+        let staked_ok = false;
+
+        if !staked_ok {
+            return Some("consensus staked needs finality of type ffg, whose validators produce the blocks");
+        }
+    }
+
+    None
+}
 
 #[document(
     summary = "Where the rewards for finality votes come from.",
@@ -445,6 +513,7 @@ impl Genesis {
             max_block_bytes: Some(DEV_MAX_BLOCK_BYTES),
             pow_window: None,
             vote_reward_source: None,
+            governance: None,
         }
     }
 
@@ -482,6 +551,7 @@ impl Genesis {
             max_block_bytes: Some(DEV_MAX_BLOCK_BYTES),
             pow_window: Some(DEV_POW_WINDOW),
             vote_reward_source: None,
+            governance: None,
         }
     }
 
@@ -501,10 +571,26 @@ impl Genesis {
 
     #[document(
         parent = "Genesis",
-        summary = "The consensus rules this chain's blocks are checked against: its consensus with its proof-of-work window, if any.",
+        summary = "A development chain whose FFG validators produce the blocks by stake, a block every two seconds, picked by a weighted draw: the development key is its one validator, bonded from genesis, so it produces every block, and votes. Otherwise as dev_authority.",
+        params = { validator = "The one validator, usually DevAuthority::dev_keypair, which both owns the bond and votes." },
+    )]
+    #[cfg(feature = "finality-ffg")]
+    pub fn dev_staked(validator: PublicKey) -> Genesis {
+        Genesis {
+            consensus: ConsensusConfig::Staked {
+                slot_ms: 2_000,
+                schedule: crate::consensus::Schedule::Draw,
+            },
+            ..Genesis::dev_authority(validator)
+        }
+    }
+
+    #[document(
+        parent = "Genesis",
+        summary = "The consensus rules this chain's blocks are checked against: its consensus with its proof-of-work window, if any, drawing with its hash and starting each priority rotation at its finality's epochs.",
     )]
     pub fn consensus_rules(&self) -> Box<dyn Consensus> {
-        self.consensus.rules(self.pow_window)
+        self.consensus.rules(self.hash, self.pow_window, self.finality.as_ref().map(FinalityConfig::checkpoint_interval))
     }
 
     #[document(
@@ -514,7 +600,7 @@ impl Genesis {
     pub fn block(&self) -> Block {
         let producer = match &self.consensus {
             ConsensusConfig::Authority { key, .. } => key.address(),
-            ConsensusConfig::ProofOfWork(_) | ConsensusConfig::Rotating { .. } => Address::Ed25519([0; 32]),
+            ConsensusConfig::ProofOfWork(_) | ConsensusConfig::Rotating { .. } | ConsensusConfig::Staked { .. } => Address::Ed25519([0; 32]),
         };
 
         Block {
@@ -563,6 +649,7 @@ impl Genesis {
             consensus: self.consensus.clone(),
             finality,
             pow_window: self.pow_window,
+            governance: self.governance.as_ref().map(GovernanceConfig::kind),
         }
     }
 
@@ -580,7 +667,19 @@ impl Genesis {
             config.write_genesis(state)?;
         }
 
+        if self.governance.is_some() {
+            crate::registry::changes::Changes::new(state).write_genesis(&self.consensus, self.fixed_ahead())?;
+        }
+
         Ok(())
+    }
+
+    #[document(
+        parent = "Genesis",
+        summary = "How many epochs ahead finality fixes each epoch's voters, and governance the consensus: activation_delay under the kinds that vote, 0 otherwise.",
+    )]
+    pub fn fixed_ahead(&self) -> u64 {
+        self.light_params().finality.and_then(|finality| finality.fixed_ahead()).unwrap_or(0)
     }
 
     /// The root of the state the chain starts from. A genesis whose state cannot be written has
@@ -600,10 +699,18 @@ impl Genesis {
             return Some("the chain's hash must be a secure 256-bit one, not xxh3");
         }
 
-        if let ConsensusConfig::ProofOfWork(pow) = &self.consensus
-            && !pow.hash.secure()
-        {
-            return Some("the proof-of-work hash must be a secure 256-bit one, not xxh3");
+        if let Some(problem) = consensus_problem(&self.consensus, self.finality.as_ref()) {
+            return Some(problem);
+        }
+
+        if let Some(governance) = &self.governance {
+            if !self.finality.as_ref().is_some_and(FinalityConfig::votes) {
+                return Some("governance needs finality that votes, whose light updates carry its decisions to light clients");
+            }
+
+            if let Some(problem) = governance.problem() {
+                return Some(problem);
+            }
         }
 
         let mut token_functions: Vec<&String> = self.token_functions.iter().collect();
@@ -619,17 +726,6 @@ impl Genesis {
 
         if self.max_block_bytes.is_some_and(|bytes| bytes > MAX_BLOCK_BYTES) {
             return Some("max_block_bytes must be at most 6 MiB, 6291456, so a full block fits one gossip message");
-        }
-
-        if matches!(self.consensus, ConsensusConfig::Rotating { .. }) {
-            #[cfg(feature = "finality-authority")]
-            let rotating_ok = matches!(self.finality, Some(FinalityConfig::Authority(_)));
-            #[cfg(not(feature = "finality-authority"))]
-            let rotating_ok = false;
-
-            if !rotating_ok {
-                return Some("consensus rotating needs finality of type authority, whose signers produce the blocks");
-            }
         }
 
         if self.minter.is_some_and(|minter| minter != Keypair::development().public().address()) {
@@ -666,6 +762,12 @@ impl Genesis {
             token_functions: self.token_functions.clone().into(),
             staking: self.finality.as_ref().and_then(|config| config.staking(self.block().id())),
             signers: self.finality.as_ref().and_then(|config| config.signer_rules(self.block().id())),
+            governance: self.governance.as_ref().zip(self.finality.as_ref()).map(|(governance, finality)| GovernanceRules {
+                governance: governance.build(finality),
+                approval_epochs: governance.approval_epochs(),
+                checkpoint_interval: finality.checkpoint_interval(),
+                finality: finality.clone(),
+            }),
             fees: self.fees.as_ref().map(|config| Arc::new(config.build())),
             pooled_fees: self.vote_reward_source == Some(VoteRewardSource::Fees),
         }
@@ -795,7 +897,16 @@ pub struct Chain {
     rules: Rules,
     hash: HashType,
     vm: Arc<Vm>,
-    consensus: Box<dyn Consensus>,
+    /// Genesis's consensus rules: every block's, on a chain without governance.
+    consensus: Arc<dyn Consensus>,
+    /// Whether governance may change the consensus, so each epoch's rules come from state.
+    governed: bool,
+    /// The rules built for each consensus governance fixed, by its configuration.
+    rules_cache: Mutex<Vec<(ConsensusConfig, Arc<dyn Consensus>)>>,
+    /// What rules are built with: the proof-of-work window and the finality's epochs.
+    pow_window: Option<u64>,
+    /// How many epochs ahead each epoch's consensus is fixed, under governance.
+    fixed_ahead: u64,
     reward: Reward,
     genesis: Hash,
     tip: BlockHeader,
@@ -868,7 +979,7 @@ impl Chain {
                 debug_assert_eq!(root, block.header.state_root, "genesis's state is the one its block commits to");
 
                 if let Some(finality) = genesis.light_params().finality
-                    && let Some(update) = LightUpdate::of(&state, genesis.hash, &finality, id, 0)?
+                    && let Some(update) = LightUpdate::of(&state, genesis.hash, &finality, genesis.governance.is_some(), id, 0)?
                 {
                     state.put_value(Column::Light, id_key(&id), &update);
                 }
@@ -906,7 +1017,11 @@ impl Chain {
             rules: genesis.rules(),
             hash: genesis.hash,
             vm,
-            consensus: genesis.consensus_rules(),
+            consensus: Arc::from(genesis.consensus_rules()),
+            governed: genesis.governance.is_some(),
+            rules_cache: Mutex::new(Vec::new()),
+            pow_window: genesis.pow_window,
+            fixed_ahead: genesis.fixed_ahead(),
             reward: genesis.reward,
             genesis: id,
             tip: tip.header,
@@ -1053,6 +1168,11 @@ impl Chain {
     #[document(parent = "Chain", summary = "The chain's hash, from genesis: what block and transaction ids, roots and contract addresses are hashed with.")]
     pub fn hash(&self) -> HashType {
         self.hash
+    }
+
+    #[document(parent = "Chain", summary = "What a light client needs to follow this chain, from genesis: what a node syncing from a snapshot checks headers with.")]
+    pub fn light_params(&self) -> LightParams {
+        self.light_params.clone()
     }
 
     #[document(parent = "Chain", summary = "The genesis block's id, which names the chain.")]
@@ -1294,6 +1414,18 @@ impl Chain {
         }
     }
 
+    #[document(
+        parent = "Chain",
+        summary = "Finality for light clients, an epoch at a time from an epoch on: each main-chain checkpoint's justification and the light update its block keeps, as stored_light_finality reads them, up to the tip. Empty on a chain whose finality does not vote. What a peer syncing from a snapshot learns the producers of a rotating or staked chain from.",
+    )]
+    pub fn light_finality_from(&self, from: u64, count: u64) -> Result<Vec<FinalityStep>, DbError> {
+        let Some(interval) = self.light_params.finality.and_then(|finality| finality.checkpoint_interval()) else {
+            return Ok(Vec::new());
+        };
+
+        stored_light_finality(&*self.db, interval, from, count, self.tip.height)
+    }
+
     #[document(parent = "Chain", summary = "Main-chain headers with their seals, from a height on: what a peer syncing from a snapshot checks first.")]
     pub fn headers_from(&self, from: u64, count: u32) -> Result<Vec<SealedHeader>, DbError> {
         let mut headers = Vec::new();
@@ -1498,8 +1630,9 @@ impl Chain {
     /// then its parent, and so on, as many as consensus wants and the chain has.
     fn ancestors(&self, parent: &BlockHeader) -> Result<Vec<BlockHeader>, DbError> {
         let mut ancestors = vec![parent.clone()];
+        let lookback = self.consensus_at(parent.height + 1)?.lookback();
 
-        while ancestors.len() < self.consensus.lookback() {
+        while ancestors.len() < lookback {
             let last = ancestors.last().expect("starts with the parent");
 
             if last.height == 0 {
@@ -1520,32 +1653,69 @@ impl Chain {
         summary = "The difficulty the block after a stored block must declare, given its timestamp: what consensus says from that block and the ancestors it looks at.",
     )]
     pub fn difficulty_after(&self, parent: &BlockHeader, timestamp: u64) -> Result<u128, DbError> {
-        Ok(self.consensus.difficulty(&self.ancestors(parent)?, timestamp))
+        Ok(self.consensus_at(parent.height + 1)?.difficulty(&self.ancestors(parent)?, timestamp))
     }
 
     #[document(
         parent = "Chain",
-        summary = "Who may produce the block at a height, under a consensus that takes its producers from finality: the authority signers fixed for the height's epoch, in the state at the tip. Empty under any other consensus, or when no set is fixed for the epoch yet.",
+        summary = "The consensus rules the block at a height is checked by: genesis's, or, under governance, the consensus fixed for the height's epoch in the state at the tip, which the checkpoint fixed_ahead epochs before it fixed, so every branch that split off since agrees. Past the epochs fixed so far, the consensus decided last.",
     )]
-    pub fn producers_for(&self, height: u64) -> Result<Vec<Signer>, DbError> {
-        if !self.consensus.needs_producers() {
+    pub fn consensus_at(&self, height: u64) -> Result<Arc<dyn Consensus>, DbError> {
+        if !self.governed {
+            return Ok(self.consensus.clone());
+        }
+
+        let config = self.consensus_config_at(height)?;
+        let mut cache = self.rules_cache.lock().expect("no panic holds it");
+
+        if let Some((_, rules)) = cache.iter().find(|(known, _)| *known == config) {
+            return Ok(rules.clone());
+        }
+
+        let rules: Arc<dyn Consensus> = Arc::from(config.rules(self.hash, self.pow_window, self.finality_config.as_ref().map(FinalityConfig::checkpoint_interval)));
+        cache.push((config, rules.clone()));
+
+        Ok(rules)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "The consensus the block at a height runs under, as consensus_at takes it: what a producing node picks its producer by.",
+    )]
+    pub fn consensus_config_at(&self, height: u64) -> Result<ConsensusConfig, DbError> {
+        if !self.governed {
+            return Ok(self.light_params.consensus.clone());
+        }
+
+        let state = self.state();
+        let changes = Changes::new(&state);
+        let epoch = self.finality_config.as_ref().map_or(height, |config| config.epoch_of(height));
+
+        match changes.consensus_for(epoch)? {
+            Some(config) => Ok(config),
+            None => Ok(changes.decided()?.consensus),
+        }
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Who may produce the block at a height, under a consensus that takes its producers from finality: the voters fixed for the height's epoch, in the state at the tip, the authority signers under a rotating authority and the bonded validators, weighted by bond, under production by stake. Empty under any other consensus, or when no set is fixed for the epoch yet.",
+    )]
+    pub fn producers_for(&self, height: u64) -> Result<Vec<Member>, DbError> {
+        if !self.consensus_at(height)?.needs_producers() {
             return Ok(Vec::new());
         }
 
         self.producers_in(&self.state(), height)
     }
 
-    /// The producers for a height, in a state.
-    #[cfg_attr(not(feature = "finality-authority"), allow(unused_variables))]
-    fn producers_in(&self, state: &State, height: u64) -> Result<Vec<Signer>, DbError> {
-        #[cfg(feature = "finality-authority")]
-        if let Some(config) = &self.finality_config {
-            let epoch = height / config.checkpoint_interval().max(1);
+    /// The producers for a height, in a state: the epoch's voters.
+    fn producers_in(&self, state: &State, height: u64) -> Result<Vec<Member>, DbError> {
+        let Some(config) = &self.finality_config else {
+            return Ok(Vec::new());
+        };
 
-            return Ok(crate::registry::signers::Signers::new(state).set(epoch)?.map(|set| set.signers).unwrap_or_default());
-        }
-
-        Ok(Vec::new())
+        Ok(config.voters(state, config.epoch_of(height))?.map(|set| set.members).unwrap_or_default())
     }
 
     fn runner(&self) -> Runner<'_> {
@@ -1622,14 +1792,15 @@ impl Chain {
             }));
         }
 
-        let producers = match self.consensus.needs_producers() {
+        let consensus = self.consensus_at(block.header.height)?;
+        let producers = match consensus.needs_producers() {
             true => self.producers_for(block.header.height)?,
             false => Vec::new(),
         };
-        self.consensus
+        consensus
             .check(&block.header, &block.seal, &self.ancestors(&parent.header)?, &producers, now)
             .map_err(|err| ImportError::Invalid(BlockError::Consensus(err)))?;
-        let work = work_of(&*self.db, &parent_id)? + self.consensus.work(&block.header);
+        let work = work_of(&*self.db, &parent_id)? + consensus.work(&block.header);
         let state = Arc::new(State::new(self.db.clone()));
         state.put_value(Column::Blocks, id_key(&id), block);
         state.put_value(Column::Headers, id_key(&id), &block.sealed_header());
@@ -1880,10 +2051,21 @@ impl Chain {
         }
 
         match &self.finality {
-            Some(finality) => finality.apply(layer, block),
-            None if !block.proofs.is_empty() => Err(ImportError::Invalid(BlockError::Proof("this chain has no finality".to_string()))),
-            None => Ok(()),
+            Some(finality) => finality.apply(layer, block)?,
+            None if !block.proofs.is_empty() => return Err(ImportError::Invalid(BlockError::Proof("this chain has no finality".to_string()))),
+            None => {}
         }
+
+        // Each checkpoint fixes the consensus decided last for the epoch fixed_ahead ahead, as
+        // finality fixes its voters.
+        if self.governed
+            && let Some(config) = &self.finality_config
+            && block.header.height.is_multiple_of(config.checkpoint_interval().max(1))
+        {
+            Changes::new(layer).fix(config.epoch_of(block.header.height) + self.fixed_ahead)?;
+        }
+
+        Ok(())
     }
 
     /// Runs a block on top of below and makes it the tip there, keeping an undo record of every
@@ -1926,7 +2108,7 @@ impl Chain {
         }
 
         if let Some(finality) = &self.light
-            && let Some(update) = LightUpdate::of(&layer, self.hash, finality, id, height)?
+            && let Some(update) = LightUpdate::of(&layer, self.hash, finality, self.governed, id, height)?
         {
             layer.put_value(Column::Light, id_key(&id), &update);
         }
@@ -2201,7 +2383,19 @@ pub fn stored_state_at(db: Arc<dyn Read>, id: &Hash) -> Result<Option<Arc<State>
     see_also = "LightUpdate",
 )]
 pub fn stored_light_update(db: &dyn Read, block: &Hash) -> Result<Option<LightUpdate>, DbError> {
-    read_value(db, Column::Light, &id_key(block))
+    let Some(bytes) = db.read(Column::Light, &id_key(block))? else {
+        return Ok(None);
+    };
+
+    // Updates stored before eras were added lack the field.
+    match wincode::deserialize::<LightUpdate>(&bytes) {
+        Ok(update) => Ok(Some(update)),
+        Err(_) => Ok(Some(
+            wincode::deserialize::<crate::light::LegacyLightUpdate>(&bytes)
+                .map_err(|err| DbError::Corrupt(format!("light update {block}: {err}")))?
+                .into(),
+        )),
+    }
 }
 
 #[document(

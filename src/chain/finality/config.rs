@@ -87,6 +87,7 @@ impl FinalityConfig {
         parent = "FinalityConfig",
         summary = "The account a genesis signer's key speaks through, under authority finality: what a rotating producer with that key names as its blocks' producer. None under any other kind, or for a key genesis does not name; a signer added since has its account in the decided set.",
     )]
+    #[cfg_attr(not(feature = "finality-authority"), allow(unused_variables))]
     pub fn signer_account(&self, key: &PublicKey) -> Option<crate::structs::address::Address> {
         match *self {
             #[cfg(feature = "finality-authority")]
@@ -169,6 +170,7 @@ impl FinalityConfig {
         parent = "FinalityConfig",
         summary = "The rules signer changes run under, for authority finality.",
     )]
+    #[cfg_attr(not(feature = "finality-authority"), allow(unused_variables))]
     pub fn signer_rules(&self, chain: Hash) -> Option<SignerRules> {
         match *self {
             #[cfg(feature = "finality-ffg")]

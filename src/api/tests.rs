@@ -62,7 +62,7 @@ fn serve() -> Fixture {
     for (nonce, tx) in [transfer, deploy].into_iter().enumerate() {
         let now = chain.tip().timestamp + SLOT;
         let signed = SignedTx::sign(tx, nonce as u64, FeeOffer::NONE, &authority);
-        let mut block = chain.build(vec![signed], Vec::new(), producer.address(), now).unwrap();
+        let mut block = chain.build(vec![signed], Vec::new(), producer.address(&[]), now).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
         chain.import(&block, now).unwrap();
     }
@@ -136,7 +136,7 @@ fn fake_report(txs: usize) -> NodeReport {
 fn produce(chain: &mut Chain, txs: Vec<SignedTx>) -> Block {
     let mut producer = AuthorityProducer::new(DevAuthority::dev_keypair(), SLOT);
     let now = chain.tip().timestamp + SLOT;
-    let mut block = chain.build(txs, Vec::new(), producer.address(), now).unwrap();
+    let mut block = chain.build(txs, Vec::new(), producer.address(&[]), now).unwrap();
     block.seal = producer.seal(&block.header).unwrap();
     chain.import(&block, now).unwrap();
 
@@ -417,7 +417,7 @@ fn fees_show_in_status_blocks_and_receipts() {
         amount: Amount::U128(10),
     };
     let now = chain.tip().timestamp + SLOT;
-    let mut block = chain.build(vec![SignedTx::sign(transfer, 0, fee, &authority)], Vec::new(), producer.address(), now).unwrap();
+    let mut block = chain.build(vec![SignedTx::sign(transfer, 0, fee, &authority)], Vec::new(), producer.address(&[]), now).unwrap();
     block.seal = producer.seal(&block.header).unwrap();
     chain.import(&block, now).unwrap();
     let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
@@ -480,7 +480,7 @@ fn serve_with(finality: crate::chain::FinalityConfig, height: u64, txs: impl Fn(
 
     for height in 1..=height {
         let now = chain.tip().timestamp + SLOT;
-        let mut block = chain.build(txs(height), Vec::new(), producer.address(), now).unwrap();
+        let mut block = chain.build(txs(height), Vec::new(), producer.address(&[]), now).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
         chain.import(&block, now).unwrap();
     }
@@ -575,6 +575,68 @@ fn authority_chains_list_their_signers_and_changes() {
             "approvals": [{ "signer": keys[0].public().to_string(), "epoch": 0, "counts_until": 63 }],
         }])
     );
+}
+
+#[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+#[test]
+fn governance_lists_the_decision_and_the_ballot() {
+    use crate::consensus::{ConsensusConfig, Schedule};
+    use crate::governance::{Change, GovernanceConfig};
+
+    let dev = DevAuthority::dev_keypair();
+    let other = Keypair::generate(dev.public().key_type()).unwrap();
+    let genesis = Genesis {
+        governance: Some(GovernanceConfig::Council {
+            members: vec![dev.public().address(), other.public().address()],
+            threshold: 2,
+            approval_epochs: 16,
+        }),
+        ..free()
+    };
+    let staked = ConsensusConfig::Staked { slot_ms: SLOT, schedule: Schedule::Priority };
+    let approve = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Consensus(staked.clone()) }, 0, FeeOffer::NONE, &dev);
+    let mut producer = AuthorityProducer::new(dev.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+
+    for height in 1..=2 {
+        let now = chain.tip().timestamp + SLOT;
+        let txs = match height {
+            1 => vec![approve.clone()],
+            _ => Vec::new(),
+        };
+        let mut block = chain.build(txs, Vec::new(), producer.address(&[]), now).unwrap();
+        block.seal = producer.seal(&block.header).unwrap();
+        chain.import(&block, now).unwrap();
+    }
+
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let listing = ok(address, "/governance");
+    let consensus = |config: &ConsensusConfig| crate::cli::genesis::consensus_json(config, None);
+
+    assert_eq!(listing["kind"], "council");
+    assert_eq!(listing["epoch"], 0);
+    assert_eq!(listing["version"], 0);
+    assert_eq!(listing["needed"], "2");
+    assert_eq!(listing["approval_epochs"], 16);
+    assert_eq!(listing["active"], consensus(&genesis.consensus));
+    assert_eq!(listing["decided"], consensus(&genesis.consensus));
+    assert_eq!(
+        listing["proposals"],
+        json!([{
+            "consensus": consensus(&staked),
+            "weight": "1",
+            "needed": "2",
+            "approvals": [{ "account": dev.public().address().to_string(), "weight": "1", "epoch": 0, "counts_until": 15 }],
+        }])
+    );
+
+    let tx = &ok(address, "/blocks/1")["txs"][0]["tx"];
+
+    assert_eq!(tx["type"], "approve_change");
+    assert_eq!(tx["version"], 0);
+    assert_eq!(tx["change"]["consensus"], consensus(&staked));
+    assert_eq!(get(serve().address, "/governance").0, 404, "the plain dev chain has none");
 }
 
 #[cfg(feature = "finality-depth")]
@@ -674,7 +736,7 @@ mod ffg {
                 _ => Vec::new(),
             };
             let proofs = chain.unpaid_proofs().unwrap();
-            let mut block = chain.build(txs, proofs, producer.address(), now).unwrap();
+            let mut block = chain.build(txs, proofs, producer.address(&[]), now).unwrap();
             block.seal = producer.seal(&block.header).unwrap();
             chain.import(&block, now).unwrap();
 
@@ -1583,7 +1645,7 @@ fn blocks_say_what_they_minted() {
 
     for _ in 0..3 {
         let now = chain.tip().timestamp + SLOT;
-        let mut block = chain.build(Vec::new(), Vec::new(), producer.address(), now).unwrap();
+        let mut block = chain.build(Vec::new(), Vec::new(), producer.address(&[]), now).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
         chain.import(&block, now).unwrap();
     }
