@@ -108,7 +108,7 @@ the node dials the VPS again every 15 seconds while it is cut off.
 
 ```sh
 docker/pow.sh init                # here, once: a key of your own, and a genesis that pays it
-docker/pow.sh push user@your-vps  # here: the repository, the genesis and .env, by rsync
+docker/pow.sh push user@your-vps -i ~/.ssh/vps  # here: the repository, genesis and .env
 docker/pow.sh up                  # on the VPS, in that copy: build and start the stack
 docker/pow.sh join your-vps       # here: a node of the same chain that mines and dials the VPS
 docker/pow.sh status [url]        # either: the chain, height and peers
@@ -120,7 +120,8 @@ docker/pow.sh status [url]        # either: the chain, height and peers
    votes, whose coins, minting and mining rewards are that key's, starting now. It copies the
    genesis to `docker/config/genesis.json` and writes `docker/.env`, both ignored by git: mining
    rewards to the key, `--no-mdns`, and a self-signed certificate.
-2. **`push`** copies the repository by rsync, without build output, `.git`, databases or keys, to
+2. **`push`** copies the repository by rsync, logging in with `-i KEY` and `-p PORT` when given
+   (or `SSH_KEY` and `SSH_PORT`), without build output, `.git`, databases or keys, to
    `chainv4/` in the VPS's home (`REMOTE_DIR`).
 3. **`up`** runs `docker/compose.sh up -d --build`, on Docker or Podman, warns when the machine has under 4 GiB of memory
    and swap for the first build, waits for the node, and says which ports to open: **UDP 4001**

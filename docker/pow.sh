@@ -5,7 +5,8 @@
 # --peer again every 15 seconds while it is cut off. Run from anywhere:
 #
 #   docker/pow.sh init                here, once: a key of your own, and a genesis that pays it
-#   docker/pow.sh push user@host      here: the repository, the genesis and .env, to the VPS
+#   docker/pow.sh push user@host      here: the repository, the genesis and .env, to the VPS;
+#                  [-i KEY] [-p PORT]  -i the SSH private key to log in with, -p its port
 #   docker/pow.sh up                  on the VPS, in that copy: build and start the stack, with
 #                                     Docker or Podman
 #   docker/pow.sh join host           here: a node of the same chain that mines and dials the VPS
@@ -21,6 +22,7 @@
 #   P2P_PORT       the VPS's QUIC port: 4001 unless set
 #   API            this machine's API, for join and status: 127.0.0.1:8090 unless set
 #   REMOTE_DIR     where push puts the repository on the VPS: chainv4 under its home
+#   SSH_KEY        push's SSH private key, as -i gives it; SSH_PORT its port, as -p
 #   EXTRA_ARGS     anything else for join's node, such as --no-mdns
 #   CONTAINER_ENGINE  docker or podman, for up: as docker/compose.sh picks it, unset
 set -eu
@@ -118,19 +120,43 @@ EOF
 }
 
 push() {
-    target=${1:-}
-    [ -n "$target" ] || fail "push to where? docker/pow.sh push user@host"
+    target=
+    key=${SSH_KEY:-}
+    port=${SSH_PORT:-}
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -i) [ $# -ge 2 ] || fail "-i takes the SSH private key's file"; key=$2; shift 2 ;;
+            -p) [ $# -ge 2 ] || fail "-p takes the SSH port"; port=$2; shift 2 ;;
+            -*) fail "push takes user@host, -i KEY and -p PORT, not $1" ;;
+            *) target=$1; shift ;;
+        esac
+    done
+
+    [ -n "$target" ] || fail "push to where? docker/pow.sh push user@host [-i KEY] [-p PORT]"
     [ -s "$root/docker/config/genesis.json" ] || fail "no docker/config/genesis.json: run docker/pow.sh init first"
     command -v rsync > /dev/null || fail "push needs rsync, here and on the VPS"
     dir=${REMOTE_DIR:-chainv4}
 
+    # How rsync reaches the VPS: ssh, with the key and port given.
+    ssh="ssh"
+
+    if [ -n "$key" ]; then
+        [ -r "$key" ] || fail "cannot read the SSH key $key"
+        ssh="$ssh -i '$key' -o IdentitiesOnly=yes"
+    fi
+
+    if [ -n "$port" ]; then
+        ssh="$ssh -p $port"
+    fi
+
     # What the image builds from, and the chain's settings; no build output, no keys.
     say "copying the repository to $target:$dir"
-    rsync -az \
+    rsync -az -e "$ssh" \
         --exclude 'target/' --exclude 'dist/' --exclude '.git/' --exclude '*.db/' \
         --exclude '*.key' --exclude '/docker/certs/*.pem' \
         "$root/" "$target:$dir/"
-    say "next, on the VPS: cd $dir && docker/pow.sh up"
+    say "next, on the VPS: $ssh $target, then cd $dir && docker/pow.sh up"
 }
 
 up() {
@@ -234,5 +260,5 @@ case "$command" in
     up) up ;;
     join) join "$@" ;;
     status) status "$@" ;;
-    *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
