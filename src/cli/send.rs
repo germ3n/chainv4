@@ -171,13 +171,18 @@ pub enum TxArgs {
         version: Option<u64>,
     },
     /// Approves a change under the chain's governance: a new consensus, as a genesis file's
-    /// consensus object. Sign with an account governance lets approve: a validator's or signer's
-    /// account under the electorate, a member's under a council.
+    /// consensus object, or new bootnodes. Sign with an account governance lets approve: a
+    /// validator's or signer's account under the electorate, a member's under a council.
+    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes"]))]
     ApproveChange {
         /// The new consensus as JSON, such as '{"type":"staked","slot_ms":2000,"schedule":"draw"}'
         /// or '{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1000","min_difficulty":"1000"}'.
         #[arg(long)]
-        consensus: String,
+        consensus: Option<String>,
+        /// The new bootnodes, replacing the chain's: libp2p addresses separated by commas, such as
+        /// /ip4/203.0.113.7/udp/4001/quic-v1, or none to leave the chain with none.
+        #[arg(long, value_delimiter = ',')]
+        bootnodes: Option<Vec<String>>,
         /// The version of the decision this changes. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
@@ -552,13 +557,32 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
             Tx::WithdrawApproval { version }
         }
-        TxArgs::ApproveChange { consensus, version } => {
-            let value: Value = serde_json::from_str(&consensus).map_err(|err| format!("--consensus is not JSON: {err}"))?;
-            let (consensus, window) = super::genesis::consensus_from_json(&value, "consensus")?;
+        TxArgs::ApproveChange { consensus, bootnodes, version } => {
+            let change = match (consensus, bootnodes) {
+                (Some(consensus), _) => {
+                    let value: Value = serde_json::from_str(&consensus).map_err(|err| format!("--consensus is not JSON: {err}"))?;
+                    let (consensus, window) = super::genesis::consensus_from_json(&value, "consensus")?;
 
-            if window.is_some() {
-                return Err("--consensus: a change keeps the chain's window; leave it out".into());
-            }
+                    if window.is_some() {
+                        return Err("--consensus: a change keeps the chain's window; leave it out".into());
+                    }
+
+                    crate::governance::Change::Consensus(consensus)
+                }
+                (None, Some(bootnodes)) => {
+                    let bootnodes: Vec<String> = match bootnodes.as_slice() {
+                        [none] if none == "none" => Vec::new(),
+                        _ => bootnodes.into_iter().map(|address| address.trim().to_string()).collect(),
+                    };
+
+                    if let Some(problem) = crate::governance::bootnodes_problem(&bootnodes) {
+                        return Err(format!("--bootnodes: {problem}").into());
+                    }
+
+                    crate::governance::Change::Bootnodes(bootnodes)
+                }
+                (None, None) => unreachable!("clap requires one"),
+            };
 
             let version = match version {
                 Some(version) => version,
@@ -566,12 +590,12 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
                     .as_u64()
                     .ok_or("the node sent no version")?,
             };
-            println!("approving a change to {} consensus, from version {version}", consensus.name());
-
-            Tx::ApproveChange {
-                version,
-                change: crate::governance::Change::Consensus(consensus),
+            match &change {
+                crate::governance::Change::Consensus(consensus) => println!("approving a change to {} consensus, from version {version}", consensus.name()),
+                crate::governance::Change::Bootnodes(bootnodes) => println!("approving {} bootnode{}, from version {version}", bootnodes.len(), if bootnodes.len() == 1 { "" } else { "s" }),
             }
+
+            Tx::ApproveChange { version, change }
         }
         TxArgs::WithdrawChange { version } => {
             let version = match version {

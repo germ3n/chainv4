@@ -284,6 +284,8 @@ impl Verifiable for Tx {
                 crate::consensus::ConsensusConfig::Authority { key, .. } => key.verify(),
                 _ => Ok(()),
             },
+            // Whether the list is one a chain takes is decided when the transaction runs.
+            Tx::ApproveChange { change: Change::Bootnodes(_), .. } => Ok(()),
             // The signatures are checked when it runs, against the chain's genesis id.
             Tx::Slash { first, second } => {
                 if !first.vote.conflicts(&second.vote) {

@@ -1490,7 +1490,7 @@ mod voting {
         assert_eq!(send_as(&mut chain, &bob, approve(0, to_staked())).result, Ok(Effect::Done));
 
         let decided = Changes::new(&chain.state()).decided().unwrap();
-        let Change::Consensus(staked) = to_staked();
+        let Change::Consensus(staked) = to_staked() else { unreachable!() };
 
         assert_eq!((decided.version, &decided.consensus), (1, &staked));
 

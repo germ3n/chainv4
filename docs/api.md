@@ -42,6 +42,7 @@ Where the chain stands:
 | `fees` | `null`, or the fee settings as genesis files write them, with `base_price`, what a transaction sent now must offer at least, and `tx_fuel`, the chain's fuel cap per transaction. |
 | `vote_rewards` | Where vote rewards come from: `source` `mint`, or `fees` with the `pool` address and its `balance`. |
 | `max_block_bytes` | The most bytes a block's transactions may take, encoded, or `null` when genesis sets none. |
+| `bootnodes` | The chain's bootnodes at the tip: the ones governance decided last, or genesis's. |
 
 ### `GET /blocks?before=H&limit=N`
 
@@ -414,8 +415,9 @@ On a chain with [governance](governance.md):
   `version`, each as a genesis file writes a consensus;
 - `approval_epochs`, how many epochs an approval counts for, and `needed`, what a change's
   approvals must weigh now;
-- the `proposals` with approvals that still count in the tip's epoch, each with its `consensus`,
-  what its approvals `weight` and what they `needed`, and its `approvals`. Each approval has its
+- `bootnodes`, the chain's now;
+- the `proposals` with approvals that still count in the tip's epoch, each with its `consensus`
+  or its `bootnodes`, what its approvals `weight` and what they `needed`, and its `approvals`. Each approval has its
   `account`, what it weighs now, the `epoch` it was made in, and the last epoch it counts in
   (`counts_until`).
 

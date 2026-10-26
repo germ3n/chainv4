@@ -10,6 +10,8 @@ description = "What chainv4's egui apps share: a palette, type and density each 
 eframe = { version = "0.37.0", default-features = false, features = ["glow"] }
 egui = "0.37.0"
 log = "0.4.34"
+# Names for biometric keys, and the passkey salt in the browser.
+getrandom = "0.4"
 
 # Talking to a node: ureq on the desktop and Android, where a proxy set in an app is the only way
 # out, SOCKS5 included; the browser's fetch in the browser, where its own proxy settings apply.
@@ -30,6 +32,21 @@ rfd = "0.17.2"
 rfd = "0.17.2"
 wasm-bindgen-futures = "0.4.58"
 ehttp = { version = "0.7.2", features = ["streaming"] }
+# Biometrics in the browser: a passkey, through WebAuthn and its PRF extension, whose output wraps
+# the secret.
+getrandom = { version = "0.4", features = ["wasm_js"] }
+js-sys = "0.3.85"
+wasm-bindgen = "0.2.108"
+web-sys = { version = "0.3.85", features = ["Window", "Navigator", "CredentialsContainer"] }
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+
+# Biometrics on macOS: Touch ID through LocalAuthentication, and the secret in the Keychain.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSError", "NSData"] }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "block2", "LAContext", "LAError"] }
+block2 = "0.6.2"
+security-framework = "3.5.1"
 
 # Android runs an app in a NativeActivity: no Java of its own.
 [target.'cfg(target_os = "android")'.dependencies]

@@ -30,6 +30,7 @@ services:
       MINING_TOKEN: ${MINING_TOKEN:-}
       PROTOCOL: ${PROTOCOL:-}
       PEERS: ${PEERS:-}
+      BOOTNODES: ${BOOTNODES:-}
       INDEX_EVENTS: ${INDEX_EVENTS:-genesis}
       INDEX_ADDRESSES: ${INDEX_ADDRESSES:-genesis}
       EXTRA_ARGS: ${EXTRA_ARGS:-}

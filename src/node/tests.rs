@@ -687,6 +687,33 @@ fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
 }
 
 #[test]
+fn the_node_tells_the_network_the_chains_bootnodes_once() {
+    let genesis = Genesis {
+        bootnodes: vec!["/ip4/203.0.113.7/udp/4001/quic-v1".to_string(), "/not-a/protocol".to_string()],
+        ..easy_pow()
+    };
+    let (link, mut net) = NetLink::pair();
+    let mut node = Node::new(Arc::new(MemoryDb::default()), &genesis, None, link).unwrap();
+    node.step(LATER).unwrap();
+    node.step(LATER).unwrap();
+    let told: Vec<Vec<Multiaddr>> = sent(&mut net)
+        .into_iter()
+        .filter_map(|command| match command {
+            NetCommand::Bootnodes(bootnodes) => Some(bootnodes),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(told, [vec!["/ip4/203.0.113.7/udp/4001/quic-v1".parse::<Multiaddr>().unwrap()]], "once, skipping what libp2p cannot read");
+
+    // A chain without bootnodes tells the network nothing.
+    let (mut quiet, mut quiet_net) = pow_node();
+    quiet.step(LATER).unwrap();
+
+    assert!(!sent(&mut quiet_net).iter().any(|command| matches!(command, NetCommand::Bootnodes(_))));
+}
+
+#[test]
 fn forked_nodes_settle_on_the_heavier_chain() {
     let (mut heavy, mut heavy_net) = pow_node();
     let (mut light, mut light_net) = pow_node();

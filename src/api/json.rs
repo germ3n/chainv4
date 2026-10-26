@@ -462,6 +462,7 @@ pub fn tx(tx: &Tx) -> Value {
 pub fn change(change: &Change) -> Value {
     match change {
         Change::Consensus(consensus) => json!({ "consensus": crate::cli::genesis::consensus_json(consensus, None) }),
+        Change::Bootnodes(bootnodes) => json!({ "bootnodes": bootnodes }),
     }
 }
 

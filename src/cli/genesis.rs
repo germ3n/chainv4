@@ -277,6 +277,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "max_block_bytes": genesis.max_block_bytes,
         "vote_reward_source": genesis.vote_reward_source.map(|source| source.name()),
         "governance": genesis.governance.as_ref().map(governance_json),
+        "bootnodes": genesis.bootnodes,
     })
 }
 
@@ -686,6 +687,11 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.optional_object("governance")?.map(governance_from_json).transpose()?,
         false => None,
     };
+    // Absent from files written before it: those chains keep their id, with no bootnodes.
+    let bootnodes = match root.map.contains_key("bootnodes") {
+        true => root.strings("bootnodes")?,
+        false => Vec::new(),
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -704,6 +710,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         pow_window,
         governance,
         vote_reward_source,
+        bootnodes,
     };
     root.done()?;
 
@@ -901,6 +908,27 @@ mod tests {
         FinalityKind::Depth,
         FinalityKind::None,
     ];
+
+    #[test]
+    fn bootnodes_round_trip_and_leave_a_chain_without_them_its_id() {
+        let plain = dev(DevChain::Pow);
+        let mut booted = plain.clone();
+        booted.bootnodes = vec!["/ip4/203.0.113.7/udp/4001/quic-v1".to_string()];
+        let value = to_json(&booted);
+
+        assert_eq!(from_json(&value).unwrap(), booted);
+        assert_ne!(booted.block().id(), plain.block().id(), "a chain's bootnodes are part of it");
+
+        // A file from before the field reads as none, and keeps its id.
+        let mut without = to_json(&plain);
+        without.as_object_mut().unwrap().remove("bootnodes");
+
+        assert_eq!(from_json(&without).unwrap().block().id(), plain.block().id());
+
+        booted.bootnodes.push("203.0.113.8:4001".to_string());
+
+        assert!(crate::chain::Chain::open(std::sync::Arc::new(crate::db::MemoryDb::default()), &booted).is_err());
+    }
 
     fn with(kind: FinalityKind) -> Value {
         let mut genesis = dev(DevChain::Authority);

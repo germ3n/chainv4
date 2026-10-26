@@ -62,6 +62,14 @@ struct NodeArgs {
     /// Peers under another name, or another genesis, are disconnected. Workers give the same.
     #[arg(long, default_value = chainv4::net::DEFAULT_PROTOCOL, value_parser = chainv4::net::protocol_name)]
     protocol: String,
+    /// A bootnode of this node's own, beside the chain's from genesis and governance: dialed while
+    /// the node has fewer peers than --target-peers, at most once a minute. Repeat for several.
+    #[arg(long)]
+    bootnode: Vec<libp2p::Multiaddr>,
+    /// How many peers to look for: while it has fewer, the node dials bootnodes and peers it
+    /// learns of from the others, a few at a time. Peers that dial in are taken regardless.
+    #[arg(long, default_value_t = chainv4::net::DEFAULT_TARGET_PEERS as u32, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    target_peers: u32,
     /// Do not look for peers on the local network with mDNS: for a server, whose network holds no
     /// nodes of yours, so peers come from --peer and Kademlia alone.
     #[arg(long)]
@@ -256,6 +264,8 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let net = net::spawn(NetConfig {
         listen: args.listen,
         peers: args.peer,
+        bootnodes: args.bootnode,
+        target_peers: args.target_peers as usize,
         mdns: !args.no_mdns,
         hash: genesis.hash,
         network,

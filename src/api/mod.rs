@@ -114,6 +114,15 @@ struct Api {
     reward: Reward,
     /// Where vote rewards come from, and so whether the pool is worth showing.
     vote_rewards: VoteRewardSource,
+    /// Genesis's bootnodes, which stand until governance decides others.
+    genesis_bootnodes: Arc<Vec<String>>,
+}
+
+impl Api {
+    /// The chain's bootnodes now: the ones governance decided last, or genesis's.
+    fn bootnodes(&self, state: &State) -> Result<Vec<String>, ApiError> {
+        Ok(Changes::new(state).bootnodes()?.unwrap_or_else(|| (*self.genesis_bootnodes).clone()))
+    }
 }
 
 #[document(
@@ -158,6 +167,7 @@ pub fn start(
     let (hash, tx_fuel, coin, limits) = (genesis.hash, genesis.tx_limits.fuel, genesis.coin.clone(), genesis.tx_limits);
     let token_functions = genesis.token_functions.clone().into();
     let (rules, max_block_bytes, reward, vote_rewards) = (Arc::new(genesis.rules()), genesis.max_block_bytes, genesis.reward, genesis.vote_rewards());
+    let genesis_bootnodes = Arc::new(genesis.bootnodes.clone());
     let vm = Arc::new(
         Vm::new(&genesis.engines, genesis.hash)
             .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?,
@@ -195,6 +205,7 @@ pub fn start(
                     max_block_bytes,
                     reward,
                     vote_rewards,
+                    genesis_bootnodes,
                 })).await {
                     log::error!("[http] {err}");
                 }
@@ -429,6 +440,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "fees": fees,
         "vote_rewards": vote_rewards,
         "max_block_bytes": api.max_block_bytes,
+        "bootnodes": api.bootnodes(&State::new(db.clone()))?,
     })))
 }
 
@@ -548,7 +560,7 @@ async fn governance(Shared(api): Shared<Api>) -> Answer {
     let Some(rules) = &api.rules.governance else {
         return Err(ApiError::NotFound("this chain has no governance".to_string()));
     };
-    let db = api.db;
+    let db = api.db.clone();
     let height = tip(&*db)?.header.height;
     let epoch = rules.finality.epoch_of(height);
     let state = State::new(db);
@@ -585,6 +597,7 @@ async fn governance(Shared(api): Shared<Api>) -> Answer {
         "decided": crate::cli::genesis::consensus_json(&decided.consensus, api.light.pow_window),
         "approval_epochs": rules.approval_epochs,
         "needed": needed.to_string(),
+        "bootnodes": api.bootnodes(&state)?,
         "proposals": proposals,
     })))
 }

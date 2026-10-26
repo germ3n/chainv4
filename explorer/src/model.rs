@@ -24,6 +24,10 @@ pub struct Status {
     pub finality: Option<Finality>,
     /// The fee settings as genesis files write them, with base_price and tx_fuel.
     pub fees: Option<Value>,
+    /// Where the chain's nodes find their first peers, from genesis or governance; none from older
+    /// nodes.
+    #[serde(default)]
+    pub bootnodes: Vec<String>,
 }
 
 impl Status {

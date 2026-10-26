@@ -7,9 +7,13 @@ by transaction, decided once the approvals weigh enough, and fixed in state for 
 the next checkpoint, the way finality fixes its voters, so every branch and every light client
 learns it the same way.
 
-What can change today is the consensus: who produces blocks, and how. A chain can launch under
-proof of work and move to production by stake once enough validators have bonded, or move a
-rotating authority to a different slot length. The finality kind, and the parameters that define
+What can change today:
+- **The consensus:** who produces blocks, and how. A chain can launch under proof of work and move
+  to production by stake once enough validators have bonded, or move a rotating authority to a
+  different slot length.
+- **The bootnodes:** the addresses new nodes dial to find their first peers, which genesis fixes
+  with the chain's id (see [Bootnodes](#bootnodes)).
+ The finality kind, and the parameters that define
 its epochs, stay what genesis says: the electorate that approves is finality's own, and every
 light client's epoch arithmetic rests on them.
 
@@ -36,10 +40,10 @@ through finality's light updates; genesis refuses it with depth finality or none
 ## A change
 
 1. **Proposing and approving** are one transaction: `Tx::ApproveChange` names the `version` of
-   the decision it changes, how many changes were decided before, and the `change`, today
-   `consensus` with a whole new consensus. `chainv4 send --key account.key approve-change
-   --consensus '{"type":"staked","slot_ms":2000,"schedule":"draw"}'` sends one, taking the version
-   from the node. The consensus must fit the chain's finality as genesis's must: `rotating` needs
+   the decision it changes, how many changes of any kind were decided before, and the `change`:
+   `consensus` with a whole new consensus, or `bootnodes` with a whole new list. `chainv4 send
+   --key account.key approve-change --consensus '{"type":"staked","slot_ms":2000,"schedule":"draw"}'`
+   sends one, taking the version from the node. The consensus must fit the chain's finality as genesis's must: `rotating` needs
    authority finality, `staked` needs FFG; `pow` keeps the chain's window, if genesis set one.
 2. **Counting.** The ballot holds at most one approval per account; an account that approves
    another change moves its approval there, and `Tx::WithdrawChange` (`send withdraw-change`)
@@ -57,6 +61,26 @@ through finality's light updates; genesis refuses it with depth finality or none
 
 `GET /governance` shows the kind, the consensus the tip's epoch runs and the one decided last,
 and the approvals that still count, each change with what its approvals weigh and need.
+
+## Bootnodes
+
+Genesis's `bootnodes` are part of the chain's id, so they cannot change without a new chain; on a
+chain with governance, a change replaces them:
+
+```sh
+chainv4 send --key member.key approve-change --bootnodes /ip4/203.0.113.7/udp/4001/quic-v1,/ip4/198.51.100.2/udp/4001/quic-v1
+chainv4 send --key member.key approve-change --bootnodes none   # the chain has none from then on
+```
+
+- **The same ballot and version as consensus changes.** An account backs one change at a time,
+  of either kind, and deciding one moves the version, so approvals of the other for the old
+  version stop counting.
+- **It takes effect at once.** Nothing checks blocks by the bootnodes, so no epoch need be fixed
+  for them: from the block that decides them, `Chain::bootnodes` gives the new list, every node
+  that imports the block tells its network so, and `GET /status` and `GET /governance` show it.
+- **The list is checked as genesis's is:** at most 32 addresses, each named once, each a libp2p
+  path such as `/ip4/…/udp/…/quic-v1`. A node skips, and logs, one libp2p cannot read.
+- **A node's own `--bootnode`s stay beside the chain's,** whatever governance decides.
 
 ## What the chain does with it
 
@@ -94,4 +118,7 @@ and the approvals that still count, each change with what its approvals weigh an
 - **The finality kind does not change,** nor `checkpoint_interval` or `activation_delay`.
   Changing finality's other parameters, and switching its kind, are batches of their own.
 - **A genesis file from before governance keeps its id:** `governance` encodes as nothing while
-  unset, and so does the governance kind in the light parameters.
+  unset, and so does the governance kind in the light parameters. `bootnodes`, after it, does the
+  same while empty.
+- **Light clients do not follow bootnodes.** They are advice to nodes, kept in state but carried
+  in no light update.

@@ -93,6 +93,8 @@ pub enum NetCommand {
     PublishVote(SignedVote),
     #[document(summary = "Ask one peer for something.")]
     Request { peer: PeerId, request: SyncRequest },
+    #[document(summary = "The chain's bootnodes now, from genesis or governance: they replace the ones the chain gave before, beside those --bootnode gave.")]
+    Bootnodes(Vec<Multiaddr>),
     #[document(summary = "Answer the request with this id.")]
     Respond { id: u64, response: SyncResponse },
 }
@@ -181,6 +183,13 @@ pub struct CheckpointAnswer {
 }
 
 #[document(
+    summary = "How many peers a node looks for unless --target-peers says otherwise: while it has fewer, it dials bootnodes and peers Kademlia knows, a few at a time.",
+    category = "Node",
+    see_also = "NetConfig::target_peers",
+)]
+pub const DEFAULT_TARGET_PEERS: usize = 15;
+
+#[document(
     summary = "The protocol name a node uses unless --protocol gives another.",
     category = "Node",
     see_also = "NetConfig::protocol, protocol_name",
@@ -215,6 +224,10 @@ pub struct NetConfig {
     pub listen: Vec<Multiaddr>,
     #[document(summary = "Peers to dial at startup, and again every 15 seconds while no connection to one stands.")]
     pub peers: Vec<Multiaddr>,
+    #[document(summary = "Bootnodes of the node's own, from --bootnode, beside the chain's: dialed while the node has fewer peers than it wants, each at most once a minute.")]
+    pub bootnodes: Vec<Multiaddr>,
+    #[document(summary = "How many peers the node looks for: while it has fewer, it dials bootnodes and peers Kademlia knows. Peers that dial in are taken however many it has.")]
+    pub target_peers: usize,
     #[document(summary = "Whether to look for peers on the local network with mDNS.")]
     pub mdns: bool,
     #[document(summary = "The chain's hash, which gossip messages are told apart by.")]

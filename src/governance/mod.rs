@@ -6,9 +6,10 @@
 //! epoch `activation_delay` ahead at the next checkpoint, as finality fixes its voters, so every
 //! branch and every light client learns it the same way, from the chain and its light updates.
 //!
-//! What can change today is the consensus: who produces blocks, and how. The finality kind, and
-//! the parameters that define epochs, stay what genesis says: the electorate that approves is
-//! finality's own, and every light client's epoch arithmetic rests on them.
+//! What can change today is the consensus, who produces blocks and how, and the bootnodes, the
+//! addresses new nodes dial first. The finality kind, and the parameters that define epochs, stay
+//! what genesis says: the electorate that approves is finality's own, and every light client's
+//! epoch arithmetic rests on them.
 
 // A build without any kind has an empty GovernanceConfig, whose methods all match on nothing.
 #![cfg_attr(not(any(feature = "governance-electorate", feature = "governance-council")), allow(unreachable_code, unused_variables))]
@@ -198,7 +199,7 @@ impl GovernanceConfig {
 }
 
 #[document(
-    summary = "What a change proposes: today, a new consensus. Each kind of change takes effect at an epoch, as a checkpoint fixes it, so blocks either side of the boundary are checked by different rules.",
+    summary = "What a change proposes: a new consensus, which takes effect at an epoch, as a checkpoint fixes it, so blocks either side of the boundary are checked by different rules; or new bootnodes, which nodes dial from the block that decides them on. Every kind shares one ballot and one version.",
     category = "Governance",
     see_also = "Tx::ApproveChange, Changes",
 )]
@@ -208,6 +209,33 @@ pub enum Change {
     #[document(summary = "A new consensus: who produces blocks, and how. It must fit the chain's finality as genesis's must: rotating needs authority finality, staked needs FFG. A proof-of-work consensus keeps genesis's window, if any.")]
     #[wincode(tag = 0)]
     Consensus(ConsensusConfig),
+    #[document(summary = "New bootnodes, replacing genesis's or the last decided: libp2p addresses such as /ip4/203.0.113.7/udp/4001/quic-v1, at most 32, which nodes of the chain dial to find their first peers. Empty leaves the chain with none. Advice to nodes, not a rule blocks are checked by, so it takes effect at once.")]
+    #[wincode(tag = 1)]
+    Bootnodes(Vec<String>),
+}
+
+#[document(summary = "The most bootnodes genesis or a change may name.", category = "Governance", see_also = "Change::Bootnodes, Genesis::bootnodes")]
+pub const MOST_BOOTNODES: usize = 32;
+
+#[document(
+    summary = "Why a list of bootnodes cannot be a chain's: more than MOST_BOOTNODES, one named twice, or one that is empty, longer than 256 bytes, or not a path starting with /. Whether each is an address libp2p dials is for nodes to find, which skip one that is not.",
+    category = "Governance",
+    see_also = "Change::Bootnodes, Genesis::bootnodes",
+)]
+pub fn bootnodes_problem(bootnodes: &[String]) -> Option<&'static str> {
+    let mut sorted: Vec<&String> = bootnodes.iter().collect();
+    sorted.sort();
+    sorted.dedup();
+
+    if bootnodes.len() > MOST_BOOTNODES {
+        Some("bootnodes holds at most 32 addresses")
+    } else if sorted.len() != bootnodes.len() {
+        Some("bootnodes names an address twice")
+    } else if bootnodes.iter().any(|address| !address.starts_with('/') || address.len() > 256 || address.chars().any(char::is_whitespace)) {
+        Some("each bootnode is a libp2p address, such as /ip4/203.0.113.7/udp/4001/quic-v1")
+    } else {
+        None
+    }
 }
 
 impl Hashable for Change {
@@ -215,10 +243,30 @@ impl Hashable for Change {
 }
 
 impl Change {
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus or bootnodes.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
+            Change::Bootnodes(_) => "bootnodes",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chains_bootnodes_are_a_short_list_of_addresses_each_named_once() {
+        let address = |port: u16| format!("/ip4/203.0.113.7/udp/{port}/quic-v1");
+
+        assert_eq!(bootnodes_problem(&[]), None);
+        assert_eq!(bootnodes_problem(&[address(4001), address(4002)]), None);
+        assert_eq!(bootnodes_problem(&[address(4001), address(4001)]), Some("bootnodes names an address twice"));
+        assert!(bootnodes_problem(&(0..33).map(address).collect::<Vec<_>>()).is_some());
+
+        for wrong in ["203.0.113.7:4001", "", "/ip4/1.2.3.4 /udp/1", &format!("/{}", "x".repeat(256))] {
+            assert!(bootnodes_problem(&[wrong.to_string()]).is_some(), "{wrong:?}");
         }
     }
 }

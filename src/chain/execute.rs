@@ -658,9 +658,12 @@ fn run(
             let Some(rules) = &rules.governance else {
                 return (Err(Failure::NoGovernance), Contracted::default());
             };
-            let Change::Consensus(consensus) = change;
+            let problem = match change {
+                Change::Consensus(consensus) => crate::chain::consensus_problem(consensus, Some(&rules.finality)),
+                Change::Bootnodes(bootnodes) => crate::governance::bootnodes_problem(bootnodes),
+            };
 
-            if let Some(problem) = crate::chain::consensus_problem(consensus, Some(&rules.finality)) {
+            if let Some(problem) = problem {
                 return (Err(Failure::Registry(RegistryError::BadChange(problem))), Contracted::default());
             }
 

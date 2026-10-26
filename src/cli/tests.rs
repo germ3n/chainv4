@@ -569,12 +569,20 @@ mod send {
 
         // A window stays genesis's; nothing to withdraw before approving; the council of one
         // decides at once, so there is nothing to withdraw after either.
-        let kept = send(running.args(TxArgs::ApproveChange { consensus: windowed, version: None }));
+        let bootnode = "/ip4/203.0.113.7/udp/4001/quic-v1".to_string();
+        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, version: None }));
         let nothing = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let approved = send(running.args(TxArgs::ApproveChange { consensus: staked, version: None }));
+        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, version: None }));
         let decided = send(running.args(TxArgs::WithdrawChange { version: None }));
+        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), version: None }));
+        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), version: None }));
         let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
         let node = running.stop();
+
+        assert!(unreadable.unwrap_err().to_string().contains("each bootnode is a libp2p address"));
+        booted.unwrap();
+        assert_eq!(node.chain().bootnodes().unwrap(), std::slice::from_ref(&bootnode), "decided at once");
+        assert_eq!(governance["bootnodes"], serde_json::json!([bootnode]));
 
         assert!(kept.unwrap_err().to_string().contains("keeps the chain's window"));
         let nothing = nothing.unwrap_err().to_string();
@@ -583,7 +591,7 @@ mod send {
         assert!(nothing.contains("no approval"), "{nothing}");
         approved.unwrap();
         assert!(decided.contains("no approval"), "{decided}");
-        assert_eq!(governance["version"], 1);
+        assert_eq!(governance["version"], 2, "the consensus, then the bootnodes");
         assert_eq!(governance["decided"]["type"], "staked");
         assert!(node.chain().tip().height >= 2);
     }

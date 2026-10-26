@@ -3,8 +3,10 @@
 //! their pages are built from, which take their sizes from the look, picking files, talking to a
 //! node, through a proxy when one is set, and running on Android, where an app keeps clear of the
 //! system's bars and keyboard, copies and pastes through Android's clipboard, and picks files
-//! through a Java activity of its own.
+//! through a Java activity of its own; and biometrics, which keep a secret behind a fingerprint,
+//! a face, Touch ID or a passkey.
 
+pub mod biometric;
 pub mod files;
 pub mod layout;
 pub mod net;

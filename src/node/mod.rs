@@ -89,6 +89,9 @@ pub struct Node {
     validator: Option<Keypair>,
     /// When the loop first ran; 0 before.
     started: u64,
+    /// The tip the chain's bootnodes were last read at, and the ones the network was told.
+    bootnodes_at: Option<Hash>,
+    bootnodes: Vec<String>,
     /// Where the network listens.
     listening: Vec<Multiaddr>,
     counters: Counters,
@@ -441,6 +444,8 @@ impl Node {
             reported: 0,
             validator: None,
             started: 0,
+            bootnodes_at: None,
+            bootnodes: Vec::new(),
             listening: Vec::new(),
             counters: Counters::default(),
             events: None,
@@ -634,6 +639,40 @@ impl Node {
         }
 
         self.report_if_due(now);
+        self.announce_bootnodes()?;
+
+        Ok(())
+    }
+
+    /// Tells the network the chain's bootnodes whenever they change: as the node starts, from
+    /// genesis, and once a block governance decides others in is imported.
+    fn announce_bootnodes(&mut self) -> Result<(), NodeError> {
+        let tip = self.chain.tip().id();
+
+        if self.bootnodes_at == Some(tip) {
+            return Ok(());
+        }
+
+        self.bootnodes_at = Some(tip);
+        let bootnodes = self.chain.bootnodes()?;
+
+        if bootnodes == self.bootnodes {
+            return Ok(());
+        }
+
+        let addresses = bootnodes
+            .iter()
+            .filter_map(|text| match text.parse::<Multiaddr>() {
+                Ok(address) => Some(address),
+                Err(err) => {
+                    log::warn!("[node] the chain's bootnode {text} is not an address libp2p reads, so it is skipped: {err}");
+
+                    None
+                }
+            })
+            .collect();
+        self.send(NetCommand::Bootnodes(addresses));
+        self.bootnodes = bootnodes;
 
         Ok(())
     }

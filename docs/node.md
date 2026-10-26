@@ -168,7 +168,35 @@ transaction is one message however many peers send it.
 `max_block_bytes`, 6 MiB, fits with its header and proofs; a sync request 1 KiB, a sync response
 64 MiB.
 
-**Peers** come from `--peer`, mDNS and Kademlia. There is no bootnode list.
+## Finding peers
+
+A node finds peers five ways:
+- **`--peer`:** dialed at startup, and again every 15 seconds while no connection to it stands.
+- **Bootnodes:** the chain's, from genesis's `bootnodes` or the ones governance decided last,
+  and the node's own, from `--bootnode`. Dialed while the node has fewer peers than
+  `--target-peers` (15 by default), each at most once a minute.
+- **Kademlia:** every peer it connects to tells it, through identify, where it listens, and
+  Kademlia keeps those addresses; it looks for peers near the node when the first one connects
+  and every 2 minutes, asking the peers it knows for theirs. While the node is short of peers it
+  dials 3 of those it knows every 15 seconds, each at most once in 5 minutes. So a node given one
+  bootnode meets the peers the bootnode knows, and theirs.
+- **mDNS** on the local network, unless `--no-mdns`.
+- **Peers that dial in,** however many it has: `--target-peers` bounds only what it looks for.
+
+Only nodes of the same chain take part: Kademlia speaks `/{protocol}/{network}/kad/1`, so the DHT
+holds the chain's nodes alone, and a peer of another chain is dropped once identify says so.
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--peer ADDR` | none | A peer to keep a connection to; repeat for several. |
+| `--bootnode ADDR` | none | A bootnode of this node's own, beside the chain's; repeat for several. |
+| `--target-peers N` | 15 | How many peers to look for. |
+| `--no-mdns` | off | Do not look on the local network, as on a server. |
+
+**Peers remembered:** none yet. A restarted node starts from its `--peer`s and bootnodes again;
+the DHT refills from them within a minute.
+
+**About addresses:**
 - **`--peer` takes an address alone,** such as `/ip4/203.0.113.7/udp/4001/quic-v1`: a node takes
   a new peer id each time it starts, so an address with `/p2p/` and an old id would never connect.
   QUIC learns the id in its handshake.

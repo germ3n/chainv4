@@ -265,6 +265,20 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **`--ca-cert` wants a certificate that is not a CA.** rustls refuses a server certificate marked
   as a CA, which is what `openssl req -x509` makes unless told otherwise; `docker/nginx/tls.sh`
   now makes its self-signed one with `CA:FALSE`, and makes again one an older version made.
+- **Genesis bootnodes are as permanent as the chain.** They are hashed into its id. On a chain
+  with governance, `Change::Bootnodes` replaces them on the live chain, at once, on the same ballot
+  and version as consensus changes, so deciding one moves the version for the other too; without
+  governance, `--bootnode` and `BOOTNODES` add a node's own, which change with no vote.
+- **Discovery dials only while short.** A node with `--target-peers` (15) peers or more stops
+  dialing bootnodes and Kademlia's peers, but still takes peers that dial in. Kademlia bootstraps
+  every 2 minutes either way.
+- **A pow.sh chain's voting key lives on the VPS alone.** `init --finality ffg` bonds a voting key
+  of its own for your account; only the VPS votes with it, since two nodes voting with one key on
+  different forks sign a slashable pair. Your own key never leaves your machine.
+- **pow.sh chains made before this have a minter, which nodes now refuse.** `init` used to name
+  your account as `minter`; genesis allows only the development key there since minting became a
+  development-chain faucet, so such a chain no longer opens. `init` now writes none: make the
+  chain again.
 - **`GET /node` has `mining`,** null for a node that does not mine: the total `rate`, the node's
   `devices`, `listening` for workers, and `workers`, each with its devices, `found` and `refused`.
 - **A rotating authority's producers are its finality signers, and a staked chain's its FFG

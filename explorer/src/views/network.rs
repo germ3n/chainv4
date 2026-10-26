@@ -144,6 +144,19 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                     }
                 });
             });
+
+            let bootnodes = ctx.store.status.as_ref().map(|status| status.bootnodes.as_slice()).unwrap_or_default();
+            facts.row("chain's bootnodes", |ui| {
+                ui.vertical(|ui| {
+                    if bootnodes.is_empty() {
+                        ui.label(RichText::new("none: nodes find each other through --peer, --bootnode and mDNS").color(palette.muted));
+                    }
+
+                    for address in bootnodes {
+                        super::copyable(ui, address);
+                    }
+                });
+            });
         });
     });
 }

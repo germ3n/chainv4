@@ -54,9 +54,17 @@ key, whose seed is public, and says so in its log. The node runs as uid 10001: o
 key files readable to it.
 
 **Workers:** with `docker/config/mining.token` (or `MINING_TOKEN` naming another file), a mining
-node takes workers on TCP 4002, `MINING_PORT` on the host. The node must be able to read it, as
-the keys; `docker/pow.sh up` makes it readable. A token someone else reads lets them mine for the
-node, which pays the node, or report made-up hashrates, and nothing more: every nonce is checked.
+node takes workers on TCP 4002, `MINING_PORT` on the host. A token someone else reads lets them
+mine for the node, which pays the node, or report made-up hashrates, and nothing more: every nonce
+is checked.
+
+**Who reads the secrets:** `docker/pow.sh up` gives the token and `validator.key` to the node's
+user in its container, uid 10001, with `podman unshare` under rootless Podman and as root
+otherwise, readable by nobody else; where it can do neither, it leaves them readable to every user
+and says so. The entrypoint stops with a message when a key is still unreadable, rather than leave
+the node failing.
+
+**Bootnodes:** `BOOTNODES`, separated by spaces, are this node's own, beside the chain's.
 `PROTOCOL` names the chain's protocols (see [Node](node.md#networking)).
 
 **More:** `PEERS` (multiaddrs to dial), `MINE_THREADS`, `REWARD_TO`, `INDEX_EVENTS` and
@@ -119,6 +127,7 @@ the node dials the VPS again every 15 seconds while it is cut off.
 
 ```sh
 docker/pow.sh init                # here, once: a key of your own, and a genesis that pays it
+                                  #   [--finality ffg|authority|depth] [--governance council|electorate|none]
 docker/pow.sh push user@your-vps -i ~/.ssh/vps  # here: the repository, genesis and .env
 docker/pow.sh up                  # on the VPS, in that copy: build and start the stack
 docker/pow.sh join your-vps --gpu # here: a node of the same chain that mines and dials the VPS
@@ -129,11 +138,25 @@ docker/pow.sh logs                # on the VPS: follow the node's log
 
 1. **`init`** makes a key from new words, printed once: restore them in the [wallet](wallet.md)
    to hold the account there. The key stays in `~/.chainv4-pow` (`POW_HOME`), never in the
-   repository. It writes a genesis, the development PoW chain with depth finality, so nothing
-   votes, whose coins, minting and mining rewards are that key's, starting now. It copies the
-   genesis to `docker/config/genesis.json` and writes `docker/.env`, both ignored by git: mining
-   rewards to the key, `--no-mdns`, and a self-signed certificate. It makes the mining token too,
-   as `token` does.
+   repository. It writes a genesis, the development PoW chain, whose coins and mining rewards are
+   that key's, starting now, with no minter. It copies the genesis to
+   `docker/config/genesis.json` and writes `docker/.env`, both ignored by git: mining rewards to
+   the key, `--no-mdns`, and a self-signed certificate. It makes the mining token too, as `token`
+   does. **Finality** (`--finality`, `FINALITY`):
+   - **`ffg`** (the default): blocks go final by votes, in minutes. `init` makes a second key, a
+     voting key, bonded at genesis for your account, and copies it to
+     `docker/config/validator.key`; `push` takes that one key to the VPS, whose node votes with it
+     around the clock. A stolen VPS can sign votes with it, never move your coins.
+   - **`authority`**: the same voting key as the chain's one finality signer, for your account.
+   - **`depth`**: blocks count as final once deep enough, and nothing votes, as before.
+
+   Only the VPS votes: a second node voting with the same key could sign conflicting votes while
+   the two are on different forks, which is slashable. `join` mines and does not vote.
+   **Governance** (`--governance`, `GOVERNANCE`), under `ffg` or `authority`: `council` (the
+   default) makes your account its one member, so you alone approve changes, such as new
+   [bootnodes](governance.md#bootnodes), with `chainv4 send --key ~/.chainv4-pow/owner.key
+   approve-change …`; `electorate` lets the validators approve by stake; `none` fixes the chain
+   as genesis says.
 2. **`push`** copies the repository by rsync, logging in with `-i KEY` and `-p PORT` when given
    (or `SSH_KEY` and `SSH_PORT`), without build output, `.git`, databases or keys, to
    `chainv4/` in the VPS's home (`REMOTE_DIR`).

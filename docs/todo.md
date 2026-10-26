@@ -398,9 +398,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   share can cut off an honest peer relaying a burst.
 - [ ] **The node's identity changes on every start.** The libp2p key is generated fresh each run;
   keep it in the data directory so the peer id is stable.
-- [ ] **No bootnode list, and no discovery past the peers given.** Peers come from `--peer`, mDNS
-  and nodes that dial in. Kademlia keeps the addresses identify tells it, but the node never
-  bootstraps or dials them, so two nodes that both dial a third never meet.
+- [x] **Bootnodes, and discovery past the peers given.** Genesis's `bootnodes`, replaced on a live
+  chain by `Change::Bootnodes`, and `--bootnode`, are dialed while a node has fewer than
+  `--target-peers`; Kademlia bootstraps every 2 minutes, and the node dials a few of the peers it
+  knows, so two nodes that dial a third meet.
+- [ ] **Peers are not remembered.** A restarted node starts from its `--peer`s and bootnodes;
+  keeping the peers it met with the database would let it reconnect with none.
 - [x] **Chains keep apart by protocol name and genesis.** Every protocol and topic is
   `/{protocol}/{network}/…`, `--protocol` naming the first; identify tells a node a peer of
   another chain, which it disconnects and forgets.

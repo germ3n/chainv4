@@ -4,7 +4,9 @@
 # through this machine's NAT, but the one connection carries blocks both ways, and a node dials a
 # --peer again every 15 seconds while it is cut off. Run from anywhere:
 #
-#   docker/pow.sh init                here, once: a key of your own, and a genesis that pays it
+#   docker/pow.sh init                here, once: a key of your own, and a genesis that pays it,
+#      [--finality ffg|authority|depth]  final by the VPS's votes (ffg, the default), or by depth;
+#      [--governance council|electorate|none]  and who may change it later: you (council)
 #   docker/pow.sh push user@host      here: the repository, the genesis and .env, to the VPS;
 #                  [-i KEY] [-p PORT]  -i the SSH private key to log in with, -p its port
 #   docker/pow.sh up                  on the VPS, in that copy: build and start the stack, with
@@ -23,6 +25,7 @@
 #
 #   POW_HOME       where the key, genesis, this machine's chain and binary live
 #   SYMBOL         the coin's ticker, for init: DEV unless set
+#   FINALITY       init's --finality; GOVERNANCE its --governance
 #   SERVER_NAME    the VPS's domain or address, for init's .env and its certificate
 #   MINE_THREADS   how many threads mine, here and on the VPS: 1 unless set
 #   GPU            1 to mine on the GPU at join, 0 on the CPU, as --gpu and --cpu
@@ -74,6 +77,31 @@ owner() {
 }
 
 init() {
+    finality=${FINALITY:-ffg}
+    governance=${GOVERNANCE:-}
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --finality) [ $# -ge 2 ] || fail "--finality takes ffg, authority or depth"; finality=$2; shift 2 ;;
+            --governance) [ $# -ge 2 ] || fail "--governance takes council, electorate or none"; governance=$2; shift 2 ;;
+            *) fail "init takes --finality and --governance, not $1" ;;
+        esac
+    done
+
+    case "$finality" in
+        ffg | authority) governance=${governance:-council} ;;
+        depth)
+            [ "${governance:-none}" = none ] || fail "governance needs finality that votes: --finality ffg or authority"
+            governance=none
+            ;;
+        *) fail "--finality is ffg, authority or depth, not $finality" ;;
+    esac
+
+    case "$governance" in
+        council | electorate | none) ;;
+        *) fail "--governance is council, electorate or none, not $governance" ;;
+    esac
+
     command -v python3 > /dev/null || fail "init needs python3, to write the genesis"
     [ -e "$home/owner.key" ] && fail "$home/owner.key is there already: this machine's chain is made. Remove $home to start another"
     [ -s "$root/docker/config/genesis.json" ] && fail "docker/config/genesis.json is there already, for another chain: move it away first"
@@ -90,23 +118,48 @@ init() {
     chmod 600 "$home/owner.key"
     address=$(owner)
 
-    # The development PoW chain, with depth finality, nothing to vote; then its coins, the minting
-    # and the time it starts are this key's and now.
-    "$chainv4" genesis --consensus pow --finality depth --fees base-fee --out "$home/genesis.json" > /dev/null
-    python3 -I - "$home/genesis.json" "$address" "${SYMBOL:-DEV}" <<'EOF'
+    # A voting key of its own, for the VPS to vote with around the clock: bonded at genesis for
+    # your account, so a stolen VPS can sign votes, never move your coins.
+    voter=
+    if [ "$finality" != depth ]; then
+        "$chainv4" keygen --out "$home/validator.key" > "$home/keygen.out"
+        voter=$(sed -n 's/^address //p' "$home/keygen.out")
+        rm -f "$home/keygen.out"
+        [ -n "$voter" ] && [ -s "$home/validator.key" ] || fail "the voting key was not made"
+        chmod 600 "$home/validator.key"
+    fi
+
+    # The development PoW chain with this finality and governance; then its coins, the minting,
+    # the voters and the members, and the time it starts, are this key's and now.
+    "$chainv4" genesis --consensus pow --finality "$finality" --governance "$governance" --fees base-fee --out "$home/genesis.json" > /dev/null
+    python3 -I - "$home/genesis.json" "$address" "${SYMBOL:-DEV}" "$voter" <<'EOF'
 import json, sys, time
-path, address, symbol = sys.argv[1:]
+path, address, symbol, voter = sys.argv[1:]
 with open(path) as f:
     genesis = json.load(f)
 genesis["allocations"] = [{"address": address, "amount": str(10**6 * 10**genesis["coin"]["decimals"])}]
-genesis["minter"] = address
+# Mint is for development chains alone, signed by the development key.
+genesis["minter"] = None
 genesis["coin"]["symbol"] = symbol
 genesis["timestamp"] = int(time.time() * 1000)
+finality = genesis.get("finality") or {}
+if finality.get("type") == "ffg":
+    finality["validators"] = [{"account": address, "voter": voter, "bond": finality["validators"][0]["bond"]}]
+elif finality.get("type") == "authority":
+    finality["signers"] = [{"account": address, "key": voter}]
+governance = genesis.get("governance") or {}
+if governance.get("type") == "council":
+    governance["members"] = [address]
 with open(path, "w") as f:
     json.dump(genesis, f, indent=2)
     f.write("\n")
 EOF
     cp "$home/genesis.json" "$root/docker/config/genesis.json"
+
+    if [ -n "$voter" ]; then
+        (umask 077 && cp "$home/validator.key" "$root/docker/config/validator.key")
+    fi
+
     token
 
     if [ -e "$root/docker/.env" ]; then
@@ -114,7 +167,8 @@ EOF
     else
         cat > "$root/docker/.env" <<EOF
 # Written by docker/pow.sh init. The chain is docker/config/genesis.json: a proof-of-work chain
-# with depth finality, so the node mines and never votes.
+# with $finality finality and $governance governance. Under ffg or authority the node votes with
+# docker/config/validator.key, as the entrypoint finds it.
 # docker or podman, as docker/compose.sh runs it; unset, whichever the VPS has.
 CONTAINER_ENGINE=${CONTAINER_ENGINE:-}
 REWARD_TO=$address
@@ -140,6 +194,18 @@ EOF
 
     say "made $home: the key (owner.key, which never leaves this machine) and the genesis"
     say "coins and mining rewards go to $address"
+
+    case "$finality" in
+        ffg) say "blocks go final by the VPS's votes, with validator.key, bonded for your account; push takes it there" ;;
+        authority) say "blocks go final by the VPS's votes, with validator.key, the one signer, for your account; push takes it there" ;;
+        depth) say "blocks count as final once they are deep enough; nothing votes" ;;
+    esac
+
+    case "$governance" in
+        council) say "you alone approve changes, such as new bootnodes: chainv4 send --key $home/owner.key approve-change …" ;;
+        electorate) say "the validators approve changes by stake" ;;
+    esac
+
     say "next: docker/pow.sh push user@your-vps"
 }
 
@@ -194,11 +260,34 @@ push() {
 
     # What the image builds from, and the chain's settings; no build output, no keys.
     say "copying the repository to $target:$dir"
+    # The voting key goes, for the VPS to vote with; your own key never does.
     rsync -az -e "$ssh" \
+        --include '/docker/config/validator.key' \
         --exclude 'target/' --exclude 'dist/' --exclude '.git/' --exclude '*.db/' \
         --exclude '*.key' --exclude '/docker/certs/*.pem' \
         "$root/" "$target:$dir/"
     say "next, on the VPS: $ssh $target, then cd $dir && docker/pow.sh up"
+}
+
+# Makes a file the node's alone, as its container sees it: uid 10001, read by nobody else. Rootless
+# Podman maps that uid to one of the user's subordinate ids, which podman unshare reaches; Docker,
+# and rootful Podman, need root. Without either, the file is left readable to everyone here.
+node_owns() {
+    engine=${CONTAINER_ENGINE:-$(sed -n 's/^CONTAINER_ENGINE=\([a-z]*\).*/\1/p' "$root/docker/.env" 2>/dev/null | tail -n 1)}
+    if [ -z "$engine" ]; then
+        if command -v docker > /dev/null; then engine=docker; else engine=podman; fi
+    fi
+
+    chmod 600 "$1"
+
+    if [ "$engine" = podman ] && [ "$(podman info --format '{{.Host.Security.Rootless}}' 2> /dev/null)" = true ]; then
+        podman unshare chown 10001:10001 "$1" && return
+    elif [ "$(id -u)" = 0 ]; then
+        chown 10001:10001 "$1" && return
+    fi
+
+    say "cannot give $1 to the node's user here: leaving it readable to every user of this machine"
+    chmod 644 "$1"
 }
 
 up() {
@@ -206,11 +295,10 @@ up() {
     [ -s "$root/docker/config/genesis.json" ] || fail "no docker/config/genesis.json: run docker/pow.sh init on your machine, then push"
     [ -s "$root/docker/.env" ] || fail "no docker/.env: run docker/pow.sh init on your machine, then push"
 
-    # The node runs as another user in its container: it must read the token. Anyone on the VPS
-    # who can then may mine for the node too, which pays the node, and nothing else.
-    if [ -s "$root/docker/config/mining.token" ]; then
-        chmod 644 "$root/docker/config/mining.token"
-    fi
+    # The node runs as uid 10001 in its container: the voting key and the token become its.
+    for secret in "$root/docker/config/validator.key" "$root/docker/config/mining.token"; do
+        if [ -s "$secret" ]; then node_owns "$secret"; fi
+    done
 
     # The first build compiles RocksDB, Luau and both web apps: a machine with little memory runs
     # out without swap.
@@ -408,7 +496,7 @@ command=${1:-}
 [ $# -gt 0 ] && shift
 
 case "$command" in
-    init) init ;;
+    init) init "$@" ;;
     push) push "$@" ;;
     up) up ;;
     join) join "$@" ;;
@@ -416,5 +504,5 @@ case "$command" in
     worker) worker "$@" ;;
     status) status "$@" ;;
     logs) logs ;;
-    *) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

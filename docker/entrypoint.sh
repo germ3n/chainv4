@@ -20,6 +20,7 @@
 #                    one, a mining node takes workers (chainv4 worker) on TCP 4002
 #   PROTOCOL         the name every protocol and topic starts with: chainv4 unless set
 #   PEERS            multiaddrs to dial, separated by spaces
+#   BOOTNODES        this node's own bootnodes, beside the chain's, separated by spaces
 #   INDEX_EVENTS     which blocks the event index keeps: genesis (the default), a height,
 #   INDEX_ADDRESSES  latest-N, or off; the same for the address index
 #   EXTRA_ARGS       anything else, passed on to chainv4
@@ -128,6 +129,18 @@ fi
 
 for peer in ${PEERS:-}; do
     set -- "$@" --peer "$peer"
+done
+
+for bootnode in ${BOOTNODES:-}; do
+    set -- "$@" --bootnode "$bootnode"
+done
+
+# The node runs as uid 10001: a key it cannot read would stop it, so say why first.
+for key in "${PRODUCER_KEY:-}" "${VALIDATOR_KEY:-}"; do
+    if [ -n "$key" ] && [ ! -r "$key" ]; then
+        echo "[docker] cannot read $key as uid $(id -u): give it to that user (docker/pow.sh up does)" >&2
+        exit 1
+    fi
 done
 
 # Word-split on purpose: EXTRA_ARGS holds several arguments.

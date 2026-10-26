@@ -43,15 +43,49 @@ impl Names {
 /// The largest gossip message: a block with plenty of transactions.
 const MAX_GOSSIP: usize = 8 * 1024 * 1024;
 /// How often a peer given with --peer is dialed again while no connection to it stands: after it
-/// restarts, after this node's network comes back, and while it is not up yet.
+/// restarts, after this node's network comes back, and while it is not up yet. Discovery runs on
+/// the same tick.
 const REDIAL_EVERY: Duration = Duration::from_secs(15);
+/// How often Kademlia looks for peers near this node, which fills its table with the network's.
+const BOOTSTRAP_EVERY: Duration = Duration::from_secs(120);
+/// How often a bootnode is dialed at most, while the node has fewer peers than it wants.
+const BOOTNODE_EVERY: Duration = Duration::from_secs(60);
+/// How many peers Kademlia knows the node dials at once, while it has fewer than it wants.
+const DIALS_AT_ONCE: usize = 3;
+/// How long before a peer Kademlia knows, dialed once, is dialed again.
+const RETRY_PEER_AFTER: Duration = Duration::from_secs(300);
 
-/// A peer given with --peer: its address, and the dial under way to it or the peer it reached. Its
-/// peer id is learned on connecting, as nodes take a new one each start.
+/// Where an address to dial came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Given {
+    /// --peer: dialed again whenever no connection to it stands.
+    Peer,
+    /// A bootnode, from --bootnode or, for chain, from genesis or governance: dialed while the
+    /// node has fewer peers than it wants.
+    Bootnode { chain: bool },
+}
+
+/// An address to dial: its kind, and the dial under way to it or the peer it reached. Its peer id
+/// is learned on connecting, as nodes take a new one each start.
 struct Wanted {
     address: Multiaddr,
+    given: Given,
     dialing: Option<ConnectionId>,
     reached: Option<PeerId>,
+    /// When it was last dialed.
+    tried: Option<Instant>,
+}
+
+impl Wanted {
+    fn new(address: Multiaddr, given: Given) -> Wanted {
+        Wanted {
+            address,
+            given,
+            dialing: None,
+            reached: None,
+            tried: None,
+        }
+    }
 }
 
 #[derive(NetworkBehaviour)]
@@ -147,6 +181,10 @@ struct Net {
     /// What waits for the node, counted in here.
     backlog: Arc<Backlog>,
     wanted: Vec<Wanted>,
+    /// How many peers the node looks for.
+    target_peers: usize,
+    /// The peers Kademlia knows that discovery dialed, and when, so it moves on to others.
+    tried: HashMap<PeerId, Instant>,
 }
 
 impl Net {
@@ -170,11 +208,9 @@ impl Net {
                     gossipsub::MessageAuthenticity::Signed(key.clone()),
                     gossip_config,
                 )?;
-                let mut kad = kad::Behaviour::with_config(
-                    peer_id,
-                    kad::store::MemoryStore::new(peer_id),
-                    kad::Config::new(kad_protocol),
-                );
+                let mut kad_config = kad::Config::new(kad_protocol);
+                kad_config.set_periodic_bootstrap_interval(Some(BOOTSTRAP_EVERY));
+                let mut kad = kad::Behaviour::with_config(peer_id, kad::store::MemoryStore::new(peer_id), kad_config);
                 kad.set_mode(Some(kad::Mode::Server));
                 let mdns = match local {
                     true => Some(mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?),
@@ -223,12 +259,13 @@ impl Net {
             let dial = DialOpts::unknown_peer_id().address(address.clone()).build();
             let id = dial.connection_id();
             swarm.dial(dial).map_err(|err| NetError(format!("cannot dial {address}: {err}")))?;
-            wanted.push(Wanted {
-                address: address.clone(),
-                dialing: Some(id),
-                reached: None,
-            });
+            let mut peer = Wanted::new(address.clone(), Given::Peer);
+            (peer.dialing, peer.tried) = (Some(id), Some(Instant::now()));
+            wanted.push(peer);
         }
+
+        // Dialed on the first tick, as the node has no peers yet.
+        wanted.extend(config.bootnodes.iter().map(|address| Wanted::new(address.clone(), Given::Bootnode { chain: false })));
 
         Ok(Net {
             swarm,
@@ -240,11 +277,17 @@ impl Net {
             next_id: 0,
             backlog,
             wanted,
+            target_peers: config.target_peers,
+            tried: HashMap::new(),
         })
     }
 
-    /// Dials each peer given with --peer that no connection stands to, nor a dial under way.
+    /// Dials each peer given with --peer that no connection stands to, nor a dial under way; and
+    /// while the node has fewer peers than it wants, the bootnodes not dialed in the last minute,
+    /// and a few of the peers Kademlia knows.
     fn redial(&mut self) {
+        let short = self.swarm.connected_peers().count() < self.target_peers;
+
         for wanted in &mut self.wanted {
             let connected = wanted.reached.is_some_and(|peer| self.swarm.is_connected(&peer));
 
@@ -252,14 +295,67 @@ impl Net {
                 continue;
             }
 
+            if matches!(wanted.given, Given::Bootnode { .. }) && (!short || wanted.tried.is_some_and(|tried| tried.elapsed() < BOOTNODE_EVERY)) {
+                continue;
+            }
+
             let dial = DialOpts::unknown_peer_id().address(wanted.address.clone()).build();
             let id = dial.connection_id();
+            wanted.tried = Some(Instant::now());
 
             match self.swarm.dial(dial) {
                 Ok(()) => wanted.dialing = Some(id),
                 Err(err) => log::debug!("[net] could not dial {} again: {err}", wanted.address),
             }
         }
+
+        if short {
+            self.discover();
+        }
+    }
+
+    /// Dials a few of the peers Kademlia knows that no connection stands to and that were not
+    /// dialed lately: how a node meets the peers its peers know, past the ones it was given.
+    fn discover(&mut self) {
+        let missing = self.target_peers.saturating_sub(self.swarm.connected_peers().count());
+        self.tried.retain(|_, tried| tried.elapsed() < RETRY_PEER_AFTER);
+        let local = *self.swarm.local_peer_id();
+        let mut known = Vec::new();
+
+        for bucket in self.swarm.behaviour_mut().kad.kbuckets() {
+            for entry in bucket.iter() {
+                known.push((*entry.node.key.preimage(), entry.node.value.iter().cloned().collect::<Vec<_>>()));
+            }
+        }
+
+        let fresh: Vec<_> = known
+            .into_iter()
+            .filter(|(peer, addresses)| *peer != local && !addresses.is_empty() && !self.swarm.is_connected(peer) && !self.tried.contains_key(peer))
+            .take(missing.min(DIALS_AT_ONCE))
+            .collect();
+
+        for (peer, addresses) in fresh {
+            log::debug!("[net] dialing {peer}, which Kademlia knows");
+            self.tried.insert(peer, Instant::now());
+
+            if let Err(err) = self.swarm.dial(DialOpts::peer_id(peer).addresses(addresses).build()) {
+                log::debug!("[net] could not dial {peer}: {err}");
+            }
+        }
+    }
+
+    /// Takes the chain's bootnodes, from genesis or governance, in place of those it gave before.
+    fn bootnodes(&mut self, bootnodes: Vec<Multiaddr>) {
+        self.wanted.retain(|wanted| wanted.given != Given::Bootnode { chain: true } || bootnodes.contains(&wanted.address));
+
+        for address in bootnodes {
+            if !self.wanted.iter().any(|wanted| wanted.address == address) {
+                log::info!("[net] bootnode {address}");
+                self.wanted.push(Wanted::new(address, Given::Bootnode { chain: true }));
+            }
+        }
+
+        self.redial();
     }
 
     async fn run(
@@ -439,10 +535,16 @@ impl Net {
                 let wanted = self.wanted.iter_mut().find(|wanted| wanted.dialing == Some(connection_id));
 
                 match (wanted, peer_id) {
-                    (Some(wanted), _) => {
+                    (Some(wanted), _) if wanted.given == Given::Peer => {
                         log::warn!("[net] could not reach {}, trying again in {}s: {error}", wanted.address, REDIAL_EVERY.as_secs());
                         wanted.dialing = None;
                     }
+                    (Some(wanted), _) => {
+                        log::info!("[net] could not reach bootnode {}, trying again within {}s while short of peers: {error}", wanted.address, BOOTNODE_EVERY.as_secs());
+                        wanted.dialing = None;
+                    }
+                    // A peer Kademlia knew, which may well be gone or behind NAT.
+                    (None, Some(peer)) if self.tried.contains_key(&peer) => log::debug!("[net] could not connect to {peer}: {error}"),
                     (None, Some(peer)) => log::warn!("[net] could not connect to {peer}: {error}"),
                     (None, None) => log::warn!("[net] could not connect: {error}"),
                 }
@@ -494,6 +596,7 @@ impl Net {
                     let _ = self.swarm.behaviour_mut().sync.send_response(channel, response);
                 }
             }
+            NetCommand::Bootnodes(bootnodes) => self.bootnodes(bootnodes),
         }
     }
 
@@ -530,6 +633,8 @@ mod tests {
             hash: HashType::default_chain(),
             network: network.to_string(),
             protocol: crate::net::DEFAULT_PROTOCOL.to_string(),
+            bootnodes: Vec::new(),
+            target_peers: crate::net::DEFAULT_TARGET_PEERS,
             backlog,
         }
     }
@@ -547,6 +652,45 @@ mod tests {
         for wrong in ["", "MyChain", "-chain", "a/b", "chain name", &"x".repeat(33)] {
             assert!(crate::net::protocol_name(wrong).is_err(), "{wrong:?}");
         }
+    }
+
+    #[test]
+    #[ignore = "opens real sockets on 127.0.0.1"]
+    fn two_nodes_given_only_a_bootnode_find_each_other_through_it() {
+        let network = format!("discovery-{}", PeerId::random());
+        let node = |bootnodes: Vec<Multiaddr>| NetConfig {
+            mdns: false,
+            bootnodes,
+            ..config(&network, BacklogLimits::default(), Vec::new())
+        };
+        let bootnode = spawn(node(Vec::new())).unwrap();
+        let address = wait_for(&bootnode, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+        let address: Multiaddr = address.iter().filter(|part| !matches!(part, libp2p::multiaddr::Protocol::P2p(_))).collect();
+        let first = spawn(node(vec![address.clone()])).unwrap();
+        let first_id = wait_for(&bootnode, |event| match event {
+            NetEvent::PeerUp { peer, .. } => Some(peer),
+            _ => None,
+        });
+        let second = spawn(node(vec![address])).unwrap();
+
+        // The second meets the bootnode, then, through Kademlia, the first, which it was never
+        // given: discovery runs every 15 seconds while it is short of peers.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut met = Vec::new();
+
+        while !met.contains(&first_id) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "never met the first node: met {met:?}");
+
+            if let Ok(NetEvent::PeerUp { peer, .. }) = second.events.recv_timeout(left) {
+                met.push(peer);
+            }
+        }
+
+        drop((first, second));
     }
 
     #[test]

@@ -225,6 +225,9 @@ pub struct Genesis {
     #[document(summary = "How the chain changes what genesis set, or None for a chain where nothing does: which kind of governance approves a change, and its settings. Needs finality that votes. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
     #[wincode(with = "UnsetGovernance")]
     pub governance: Option<GovernanceConfig>,
+    #[document(summary = "Where nodes of the chain find their first peers: libp2p addresses, such as /ip4/203.0.113.7/udp/4001/quic-v1, at most 32, which every node dials while it has fewer peers than it wants. Fixed with the chain's id: under governance, Change::Bootnodes replaces them on a live chain, and nodes add their own with --bootnode. Added after chains launched: empty adds nothing to genesis's encoding, so chains from before keep their ids.")]
+    #[wincode(with = "crate::structs::unset::UnsetList")]
+    pub bootnodes: Vec<String>,
 }
 
 impl Hashable for Genesis {}
@@ -514,6 +517,7 @@ impl Genesis {
             pow_window: None,
             vote_reward_source: None,
             governance: None,
+            bootnodes: Vec::new(),
         }
     }
 
@@ -552,6 +556,7 @@ impl Genesis {
             pow_window: Some(DEV_POW_WINDOW),
             vote_reward_source: None,
             governance: None,
+            bootnodes: Vec::new(),
         }
     }
 
@@ -740,6 +745,10 @@ impl Genesis {
             return Some("consensus.window must be at least 2 blocks, one interval to measure");
         }
 
+        if let Some(problem) = crate::governance::bootnodes_problem(&self.bootnodes) {
+            return Some(problem);
+        }
+
         if self.pow_window.is_some() && !matches!(self.consensus, ConsensusConfig::ProofOfWork(_)) {
             return Some("consensus.window is for proof of work alone");
         }
@@ -907,6 +916,8 @@ pub struct Chain {
     pow_window: Option<u64>,
     /// How many epochs ahead each epoch's consensus is fixed, under governance.
     fixed_ahead: u64,
+    /// Genesis's bootnodes, which stand until governance decides others.
+    bootnodes: Vec<String>,
     reward: Reward,
     genesis: Hash,
     tip: BlockHeader,
@@ -1022,6 +1033,7 @@ impl Chain {
             rules_cache: Mutex::new(Vec::new()),
             pow_window: genesis.pow_window,
             fixed_ahead: genesis.fixed_ahead(),
+            bootnodes: genesis.bootnodes.clone(),
             reward: genesis.reward,
             genesis: id,
             tip: tip.header,
@@ -1562,6 +1574,18 @@ impl Chain {
     /// The chain's fees, shared, for what checks transactions off the node loop.
     pub(crate) fn shared_fees(&self) -> Option<Arc<Fees>> {
         self.rules.fees.clone()
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "The chain's bootnodes at the tip: the ones governance decided last, or genesis's while it decided none.",
+    )]
+    pub fn bootnodes(&self) -> Result<Vec<String>, DbError> {
+        if !self.governed {
+            return Ok(self.bootnodes.clone());
+        }
+
+        Ok(Changes::new(&self.state()).bootnodes()?.unwrap_or_else(|| self.bootnodes.clone()))
     }
 
     #[document(parent = "Chain", summary = "The most bytes a block's transactions may take, encoded, if genesis bounds them.")]

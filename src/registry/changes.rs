@@ -1,6 +1,7 @@
-//! Governance's records, in chain state: the consensus decided last and the ballot for changing
-//! it, in Column::Validators beside the signers' records, and the consensus fixed for each epoch,
-//! in Column::Epochs beside each epoch's voters, which is what a light client asks a proof of.
+//! Governance's records, in chain state: the consensus decided last, the bootnodes decided last,
+//! and the ballot for changing either, in Column::Validators beside the signers' records, and the
+//! consensus fixed for each epoch, in Column::Epochs beside each epoch's voters, which is what a
+//! light client asks a proof of.
 
 use {
     super::RegistryError,
@@ -16,9 +17,10 @@ use {
 
 const DECIDED: &[u8] = b"change:decided";
 const BALLOT: &[u8] = b"change:ballot";
+const BOOTNODES: &[u8] = b"change:bootnodes";
 
 #[document(
-    summary = "The consensus decided last, and how many changes came before it.",
+    summary = "The consensus decided last, and how many changes of any kind came before it.",
     category = "Governance",
     see_also = "Changes",
 )]
@@ -31,6 +33,19 @@ pub struct DecidedChange {
 }
 
 impl Hashable for DecidedChange {}
+
+#[document(
+    summary = "The bootnodes governance decided last, which replace genesis's.",
+    category = "Governance",
+    see_also = "Changes::bootnodes, Change::Bootnodes",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct DecidedBootnodes {
+    #[document(summary = "The addresses, as the change named them.")]
+    pub bootnodes: Vec<String>,
+}
+
+impl Hashable for DecidedBootnodes {}
 
 #[document(
     summary = "One account's approval of a change.",
@@ -168,7 +183,15 @@ impl<'a> Changes<'a> {
         Ok(())
     }
 
-    #[document(parent = "Changes", summary = "The consensus decided last, and its version.")]
+    #[document(
+        parent = "Changes",
+        summary = "The bootnodes decided last, or None while governance never decided any, when genesis's stand.",
+    )]
+    pub fn bootnodes(&self) -> Result<Option<Vec<String>>, DbError> {
+        Ok(self.state.get_value::<DecidedBootnodes>(Column::Validators, BOOTNODES)?.map(|decided| decided.bootnodes))
+    }
+
+    #[document(parent = "Changes", summary = "The consensus decided last, and its version: the count of every change decided, of any kind.")]
     pub fn decided(&self) -> Result<DecidedChange, DbError> {
         self.state
             .get_value(Column::Validators, DECIDED)?
@@ -218,13 +241,16 @@ impl<'a> Changes<'a> {
             approval_epochs = "How many epochs an approval counts for.",
             governance = "Who may approve, and what it takes.",
         },
-        returns = "Whether that decided it. NotGoverning for a sender that may not approve, StaleChange for an older version, SameChange for the consensus already decided.",
+        returns = "Whether that decided it. NotGoverning for a sender that may not approve, StaleChange for an older version, SameChange for the consensus already decided, or the bootnodes already decided.",
     )]
     pub fn approve(&self, sender: &Address, version: u64, change: Change, epoch: u64, approval_epochs: u64, governance: &dyn Governance) -> Result<ChangeApproved, RegistryError> {
         let decided = self.standing(sender, version, epoch, governance)?;
-        let Change::Consensus(consensus) = &change;
+        let same = match &change {
+            Change::Consensus(consensus) => *consensus == decided.consensus,
+            Change::Bootnodes(bootnodes) => self.bootnodes()?.as_ref() == Some(bootnodes),
+        };
 
-        if *consensus == decided.consensus {
+        if same {
             return Err(RegistryError::SameChange);
         }
 
@@ -245,7 +271,15 @@ impl<'a> Changes<'a> {
         }
 
         let version = decided.version + 1;
-        let Change::Consensus(consensus) = change;
+        let consensus = match change {
+            Change::Consensus(consensus) => consensus,
+            // Bootnodes take effect at once: nothing checks blocks by them.
+            Change::Bootnodes(bootnodes) => {
+                self.state.put_value(Column::Validators, BOOTNODES.to_vec(), &DecidedBootnodes { bootnodes });
+
+                decided.consensus
+            }
+        };
         self.state.put_value(Column::Validators, DECIDED.to_vec(), &DecidedChange { version, consensus });
         self.state.delete(Column::Validators, BALLOT.to_vec());
 
@@ -370,7 +404,7 @@ mod tests {
         assert_eq!(changes.ballot().unwrap().changes(), [staked()]);
         assert_eq!(changes.approve(&member(1), 0, staked(), 2, 4, &Weighted), Ok(ChangeApproved::DecidedChange(1)));
 
-        let Change::Consensus(consensus) = staked();
+        let Change::Consensus(consensus) = staked() else { unreachable!() };
 
         assert_eq!(changes.decided().unwrap(), DecidedChange { version: 1, consensus: consensus.clone() });
         assert!(changes.ballot().unwrap().approvals.is_empty());
@@ -380,6 +414,34 @@ mod tests {
 
         assert_eq!(changes.consensus_for(5).unwrap(), Some(consensus));
         assert_eq!(changes.consensus_for(2).unwrap(), Some(pow()));
+    }
+
+    #[test]
+    fn bootnodes_are_decided_on_the_same_ballot_and_leave_the_consensus_be() {
+        let state = State::new(Arc::new(MemoryDb::default()));
+        let changes = Changes::new(&state);
+        changes.write_genesis(&pow(), 2).unwrap();
+        let bootnodes = Change::Bootnodes(vec!["/ip4/203.0.113.7/udp/4001/quic-v1".to_string()]);
+
+        assert_eq!(changes.bootnodes().unwrap(), None, "genesis's stand until governance decides");
+
+        changes.approve(&member(2), 0, bootnodes.clone(), 1, 4, &Weighted).unwrap();
+        // Bootnodes and a consensus on one ballot: an account backs one change at a time.
+        changes.approve(&member(3), 0, staked(), 1, 4, &Weighted).unwrap();
+
+        assert_eq!(changes.ballot().unwrap().changes(), [bootnodes.clone(), staked()]);
+        assert_eq!(changes.approve(&member(1), 0, bootnodes.clone(), 1, 4, &Weighted), Ok(ChangeApproved::DecidedChange(1)));
+        assert_eq!(changes.bootnodes().unwrap(), Some(vec!["/ip4/203.0.113.7/udp/4001/quic-v1".to_string()]));
+        assert_eq!(changes.decided().unwrap(), DecidedChange { version: 1, consensus: pow() }, "the consensus stays, the version moves");
+        assert!(changes.ballot().unwrap().approvals.is_empty(), "the other change's approvals were for version 0");
+        assert_eq!(changes.approve(&member(1), 1, bootnodes, 1, 4, &Weighted), Err(RegistryError::SameChange));
+
+        // An empty list is a change too: the chain has no bootnodes from then on.
+        changes.approve(&member(1), 1, Change::Bootnodes(Vec::new()), 1, 4, &Weighted).unwrap();
+        changes.approve(&member(2), 1, Change::Bootnodes(Vec::new()), 1, 4, &Weighted).unwrap();
+
+        assert_eq!(changes.bootnodes().unwrap(), Some(Vec::new()));
+        assert_eq!(changes.decided().unwrap().version, 2);
     }
 
     #[test]
