@@ -620,19 +620,24 @@ impl Node {
 
     #[document(
         parent = "Node",
-        summary = "Runs until something fatal happens: the database fails or the network stops.",
+        summary = "Runs until stop is set, as a SIGTERM or SIGINT sets it, and returns, so the database closes cleanly; or until something fatal happens: the database fails or the network stops. It notices stop within a second, the longest it waits for anything.",
+        params = { stop = "Set to stop it." },
     )]
-    pub fn run(mut self) -> Result<(), NodeError> {
+    pub fn run(mut self, stop: Arc<std::sync::atomic::AtomicBool>) -> Result<(), NodeError> {
         log::info!(
             "[node] following {} at height {}",
             self.chain.genesis(),
             self.chain.tip().height
         );
 
-        loop {
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
             self.step(now_ms())?;
             self.wait(now_ms())?;
         }
+
+        log::info!("[node] stopping at height {}", self.chain.tip().height);
+
+        Ok(())
     }
 
     #[document(

@@ -65,7 +65,7 @@ JSON-RPC does: an error is in the answer.
 | `eth_estimateGas` | The gas a transaction of the call needs on this chain: its bytes' intrinsic cost and the EVM's gas, with a quarter more of what ran. |
 | `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory` | Twice the next block's base price; a tip of 0; and each block's base price and how full it was. |
 | `eth_sendRawTransaction` | Takes a signed transaction to the node's mempool, and answers its hash. |
-| `eth_getTransactionByHash`, `eth_getTransactionReceipt` | A transaction on the main chain, by its hash, and what it did: status, gas used, the price paid, a created contract's address, and its logs. |
+| `eth_getTransactionByHash`, `eth_getTransactionReceipt` | A transaction on the main chain, by its hash, and what it did: status, gas used, the price paid, a created contract's address, and its logs. `eth_getTransactionByHash` finds one waiting in the mempool too, its block fields null; its receipt is null until a block holds it. |
 | `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getBlockTransactionCountBy…` | A main-chain block: its header's fields and its Ethereum-signed transactions, as hashes or in full. |
 | `eth_getLogs` | EVM logs by block range or block hash, address and topics: up to 10,000 blocks at once. |
 | `eth_accounts`, `eth_syncing`, `net_listening`, `web3_clientVersion` | None, false, true, and `chainv4/` and the version. |
@@ -78,7 +78,8 @@ JSON-RPC does: an error is in the answer.
   calls sent the chainv4 way are in `eth_getLogs`, under their chainv4 id.
 - **Blocks' Ethereum fields** that chainv4 has none of are zero: `nonce`, `mixHash`, `logsBloom`
   and the uncles. A block hash is the chainv4 block id. Gas is chainv4's.
-- **A transaction waiting in the mempool** is not found by hash until a block holds it.
+- **A transaction waiting in the mempool** is found by hash, with no block, by looking through the
+  whole mempool, which is slow next to the index once a node holds thousands.
 
 ## MetaMask
 

@@ -224,15 +224,16 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **The EVM.** revm runs Solidity and Vyper contracts beside Lua and WebAssembly (`evm`
   feature, `evm` in genesis's `engines`): `Code::Evm` deploys, `Tx::EvmCall` calls or pays,
   `Address::Evm` holds what the EVM creates, and every other account takes part at its 20 bytes,
-  secp256k1 as itself and the rest under a keccak256 alias written down when it first sends an
-  EVM transaction. Balances and nonces are shared, logs become `log` events, EVM gas is chainv4
+  secp256k1 as itself and the rest under a keccak256 alias written down when it first sends a
+  transaction. Balances and nonces are shared, logs become `log` events, EVM gas is chainv4
   gas. `chainv4 send deploy --evm` and `chainv4 send evm-call`, with `--read` for a dry run. See
   [EVM](evm.md).
 - [x] **Ethereum-signed transactions and JSON-RPC.** `Tx::Ethereum` takes legacy EIP-155,
   EIP-2930 and EIP-1559 transactions as wallets sign them, and `POST /rpc` answers Ethereum's
   JSON-RPC from an index of them by their keccak hash. See [Ethereum's tools](ethereum.md).
-- [ ] **Old state and pending transactions over JSON-RPC.** Balances and calls at older blocks need
-  state kept for them, and `eth_getTransactionByHash` could answer from the mempool too.
+- [x] **Pending transactions over JSON-RPC.** `eth_getTransactionByHash` finds one waiting in the
+  mempool, with no block yet.
+- [ ] **Old state over JSON-RPC.** Balances and calls at older blocks need state kept for them.
 - [ ] **Blob and EIP-7702 transactions.**
 - [x] **The EVM in the wallet and explorer.** The wallet's Contracts page reads, calls and deploys
   contracts of every engine, EVM ones by their ABI; the explorer reads EVM contracts with
@@ -243,10 +244,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **Calls between the EVM and the other engines.** A precompile the EVM calls Lua and wasm
   contracts through, and a host function the other way, with values converted at the boundary.
   Until then they share balances only.
-- [ ] **An alias registered without an EVM transaction.** Coin the EVM sends to an Ed25519
-  account's alias before the account has sent an EVM transaction goes to the secp256k1 account
-  with those bytes. A cheap `Tx` that only registers it, or registering at the first transaction
-  of any kind, would close that gap.
+- [x] **An alias registered without an EVM transaction.** On a chain with the EVM, any transaction
+  writes its sender's alias down, so coin the EVM pays it reaches the account. An account that has
+  only received still has none.
 
 - [x] **A nil value.** `TxCallArgumentType::Nil` (tag 11): Lua's `nil` both ways, so functions
   may return it, `null` in the API, `nil` on the command line, `Value::Nil` in the SDK.
@@ -492,9 +492,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ### Node, API and tooling
 
-- [ ] **The container's node ignores SIGTERM.** It runs as PID 1 and installs no handler, so
-  `docker/compose.sh stop` waits 10 seconds and kills it. `init: true` on the node service, once
-  checked under podman-compose, or a SIGTERM handler that stops the node loop cleanly.
+- [x] **The container's node stops on SIGTERM.** It stops its loop on SIGTERM or SIGINT and
+  returns, so `docker/compose.sh stop` takes a second rather than ten and a kill.
 
 - [x] **Transactions can be submitted from outside.** `POST /txs` takes `{"tx": "0x…"}`, a
   `SignedTx` encoded as the chain encodes it, and hands it to the node's mempool, which gossips
@@ -516,8 +515,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Finality in the API and CLI.** `/status` shows the kind and the justified and finalized
   checkpoints, receipts say whether they are final, `/validators` and `/evidence` list validators
   and conflicting votes, and `send` has `bond`, `unbond`, `withdraw`, `slash` and `--final`.
-- [ ] **No graceful shutdown.** Ctrl-C kills the process mid-loop. Commits are atomic, so data is
-  safe, but the network and HTTP threads never close cleanly.
+- [x] **Graceful shutdown.** Ctrl-C or SIGTERM stops the node loop between steps, within a
+  second, and the database closes as the node is dropped. The network and HTTP threads end with
+  the process rather than closing their connections first.
 - [x] **The HTTP API has transaction lookup and receipts.** `GET /txs/{id}`, and each transaction
   in a block carries its receipt.
 - [ ] **The HTTP API serves one request at a time.** A slow read-only call holds up every other

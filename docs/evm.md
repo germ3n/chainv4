@@ -44,12 +44,13 @@ written `evm:0x…`. Each account takes part in the EVM at one 20-byte address:
 `msg.sender`, `tx.origin`, `address(this)`, `block.coinbase` and every address the EVM is given
 or returns are these 20 bytes.
 
-**An alias is written down the first time its account sends an EVM transaction**, a deploy or an
-EVM call. From then on, coin the EVM sends to the alias reaches the account. Until then, the EVM
-has no way to know whose alias it is, and coin sent to those 20 bytes goes to the secp256k1
-account with them, which no one holds the key to. So an Ed25519 account should send one EVM
-transaction before it gives its alias to a contract to pay. Any EVM call will do, even one that
-sends nothing to nothing. secp256k1 accounts and EVM contracts need nothing written down.
+**An alias is written down the first time its account sends a transaction** of any kind on a
+chain that runs the EVM: a transfer, a Lua call, a bond, an EVM call, whether it succeeds or fails.
+A name resolved through the [names precompile](#names) writes it down too. From then on, coin the
+EVM sends to the alias reaches the account. Until then, the EVM has no way to know whose alias it
+is, and coin sent to those 20 bytes goes to the secp256k1 account with them, which no one holds
+the key to. So an account that has only ever received should send something before it gives its
+alias to a contract to pay. secp256k1 accounts and EVM contracts need nothing written down.
 
 A contract the EVM creates lives at Ethereum's address for it: the keccak256 of the RLP of the
 creator's EVM address and nonce, as CREATE gives it, or CREATE2's. A deploy from an Ed25519

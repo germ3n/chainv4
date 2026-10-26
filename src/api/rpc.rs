@@ -213,7 +213,10 @@ async fn answer(api: &Arc<Api>, method: &str, params: &[Value]) -> Answer {
                 Err(err) => Err(RpcError::server(err.to_string())),
             }
         }
-        "eth_getTransactionByHash" => Ok(found(api, param(0))?.map_or(Value::Null, |found| found.tx_json(api))),
+        "eth_getTransactionByHash" => match found(api, param(0))? {
+            Some(found) => Ok(found.tx_json(api)),
+            None => pending(api, param(0)).await,
+        },
         "eth_getTransactionReceipt" => Ok(found(api, param(0))?.map_or(Value::Null, |found| found.receipt_json(api))),
         "eth_getBlockByNumber" => Ok(block_at(api, param(0))?.map_or(Value::Null, |block| block_json(api, &block, param(1).as_bool().unwrap_or(false)))),
         "eth_getBlockByHash" => Ok(block_by_hash(api, param(0))?.map_or(Value::Null, |block| block_json(api, &block, param(1).as_bool().unwrap_or(false)))),
@@ -495,6 +498,25 @@ struct Found {
     receipt: Option<TxReceipt>,
 }
 
+/// A transaction still waiting in the node's mempool, by its hash: with no block, as Ethereum's
+/// nodes show a pending one. Null when none waits by that hash.
+async fn pending(api: &Api, hash: &Value) -> Answer {
+    let hash = bytes(hash, "a transaction hash")?;
+    let Some(node) = &api.node else {
+        return Ok(Value::Null);
+    };
+    let report = node.report(usize::MAX).await.map_err(|err| RpcError::server(err.to_string()))?;
+
+    Ok(report
+        .txs
+        .iter()
+        .find_map(|signed| match &signed.tx {
+            Tx::Ethereum { raw } if tx_hash(raw).as_slice() == hash.as_slice() => Some(ethereum_json(signed, raw, None)),
+            _ => None,
+        })
+        .unwrap_or(Value::Null))
+}
+
 /// The transaction a keccak hash names, once it landed on the main chain.
 fn found(api: &Api, hash: &Value) -> Result<Option<Found>, RpcError> {
     let hash: [u8; 32] = bytes(hash, "a transaction hash")?.try_into().map_err(|_| RpcError::invalid("a transaction hash is 32 bytes"))?;
@@ -527,56 +549,64 @@ fn found(api: &Api, hash: &Value) -> Result<Option<Found>, RpcError> {
 
 impl Found {
     fn tx_json(&self, _api: &Api) -> Value {
-        let Ok(ethereum) = decode(&self.raw) else {
-            return Value::Null;
-        };
-        let header = &self.block.header;
-        let mut value = json!({
-            "hash": to_hex(&tx_hash(&self.raw)),
-            "nonce": quantity(u256::from(ethereum.nonce)),
-            "blockHash": to_hex(&header.id().to_bytes()),
-            "blockNumber": quantity(u256::from(header.height)),
-            "transactionIndex": quantity(u256::from(self.at as u64)),
-            "from": evm_address(&self.signed.sender()),
-            "to": ethereum.to.map(|to| to_hex(&to)),
-            "value": quantity(ethereum.value),
-            "gas": quantity(u256::from(ethereum.gas_limit)),
-            "input": to_hex(&ethereum.input),
-            "type": quantity(u256::from(ethereum.kind.number())),
-            "chainId": quantity(u256::from(ethereum.chain_id)),
-            "r": quantity(u256::from_be_bytes(ethereum.signature[..32].try_into().expect("32 bytes"))),
-            "s": quantity(u256::from_be_bytes(ethereum.signature[32..].try_into().expect("32 bytes"))),
-        });
+        ethereum_json(&self.signed, &self.raw, Some((&self.block.header, self.at)))
+    }
+}
 
-        match ethereum.kind {
-            EthereumKind::Legacy => {
-                value["gasPrice"] = quantity(ethereum.max_price);
-                value["v"] = quantity(u256::from(ethereum.chain_id * 2 + 35 + u64::from(ethereum.parity)));
-            }
-            kind => {
-                value["v"] = quantity(u256::from(ethereum.parity));
-                value["yParity"] = quantity(u256::from(ethereum.parity));
-                value["accessList"] = ethereum
-                    .access_list
-                    .iter()
-                    .map(|item| json!({ "address": to_hex(&item.address), "storageKeys": item.slots.iter().map(|slot| to_hex(slot)).collect::<Vec<_>>() }))
-                    .collect::<Vec<_>>()
-                    .into();
+/// An Ethereum-signed transaction as JSON-RPC shows one: in a block, at its place among the
+/// block's Ethereum-signed ones, or still waiting, with no block.
+fn ethereum_json(signed: &SignedTx, raw: &[u8], place: Option<(&crate::structs::block::BlockHeader, usize)>) -> Value {
+    let Ok(ethereum) = decode(raw) else {
+        return Value::Null;
+    };
+    let mut value = json!({
+        "hash": to_hex(&tx_hash(raw)),
+        "nonce": quantity(u256::from(ethereum.nonce)),
+        "blockHash": place.map(|(header, _)| to_hex(&header.id().to_bytes())),
+        "blockNumber": place.map(|(header, _)| quantity(u256::from(header.height))),
+        "transactionIndex": place.map(|(_, at)| quantity(u256::from(at as u64))),
+        "from": evm_address(&signed.sender()),
+        "to": ethereum.to.map(|to| to_hex(&to)),
+        "value": quantity(ethereum.value),
+        "gas": quantity(u256::from(ethereum.gas_limit)),
+        "input": to_hex(&ethereum.input),
+        "type": quantity(u256::from(ethereum.kind.number())),
+        "chainId": quantity(u256::from(ethereum.chain_id)),
+        "r": quantity(u256::from_be_bytes(ethereum.signature[..32].try_into().expect("32 bytes"))),
+        "s": quantity(u256::from_be_bytes(ethereum.signature[32..].try_into().expect("32 bytes"))),
+    });
 
-                match kind {
-                    EthereumKind::DynamicFee => {
-                        value["maxFeePerGas"] = quantity(ethereum.max_price);
-                        value["maxPriorityFeePerGas"] = quantity(ethereum.tip);
-                        value["gasPrice"] = quantity(ethereum.max_price.min(header.base_price + ethereum.tip));
-                    }
-                    _ => value["gasPrice"] = quantity(ethereum.max_price),
+    match ethereum.kind {
+        EthereumKind::Legacy => {
+            value["gasPrice"] = quantity(ethereum.max_price);
+            value["v"] = quantity(u256::from(ethereum.chain_id * 2 + 35 + u64::from(ethereum.parity)));
+        }
+        kind => {
+            value["v"] = quantity(u256::from(ethereum.parity));
+            value["yParity"] = quantity(u256::from(ethereum.parity));
+            value["accessList"] = ethereum
+                .access_list
+                .iter()
+                .map(|item| json!({ "address": to_hex(&item.address), "storageKeys": item.slots.iter().map(|slot| to_hex(slot)).collect::<Vec<_>>() }))
+                .collect::<Vec<_>>()
+                .into();
+
+            match kind {
+                EthereumKind::DynamicFee => {
+                    value["maxFeePerGas"] = quantity(ethereum.max_price);
+                    value["maxPriorityFeePerGas"] = quantity(ethereum.tip);
+                    // What it pays: its block's base price and its tip, at most its max; waiting, its max.
+                    value["gasPrice"] = quantity(place.map_or(ethereum.max_price, |(header, _)| ethereum.max_price.min(header.base_price + ethereum.tip)));
                 }
+                _ => value["gasPrice"] = quantity(ethereum.max_price),
             }
         }
-
-        value
     }
 
+    value
+}
+
+impl Found {
     fn receipt_json(&self, api: &Api) -> Value {
         let Some(receipt) = &self.receipt else {
             return Value::Null;

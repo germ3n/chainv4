@@ -3066,7 +3066,7 @@ choices, and otherwise the license noted for that crate. MIT-licensed crates use
 the MIT terms reproduced at the top with the copyright lines given here in place
 of chainv4's. Apache-2.0 crates use the Apache License text above.
 
-932 crates.
+933 crates.
 
 accesskit 0.25.1
   MIT OR Apache-2.0
@@ -6766,9 +6766,14 @@ shlex 2.0.1
   Copyright (c) 2015 Nicholas Allegra (comex).
   Copyright 2015 Nicholas Allegra (comex).
 
+signal-hook 0.3.18
+  Apache-2.0 OR MIT
+  Built into: node
+  Copyright (c) 2017 tokio-jsonrpc developers
+
 signal-hook-registry 1.4.8
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2017 tokio-jsonrpc developers
 
 signature 2.2.0

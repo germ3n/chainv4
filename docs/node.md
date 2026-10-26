@@ -378,8 +378,9 @@ no state of its own.
   dropped and fetched again by sync.
 - **A snapshot node keeps no history before its pivot:** headers only, no bodies, receipts,
   events or light updates (see [Syncing from a snapshot](#syncing-from-a-snapshot)).
-- **No graceful shutdown.** Ctrl-C stops the process mid-loop; commits are atomic, so data is
-  safe.
+- **Stopping is between steps.** Ctrl-C or SIGTERM sets a flag the loop checks after each step,
+  within a second, and the node returns and closes its database. Peers and API clients see their
+  connections drop with the process, not a goodbye.
 - **No NAT traversal,** and no limits on connections or requests.
 - **The indexes are opt in, each on its own.** `--index-events` and `--index-addresses` keep
   theirs, from genesis or the height or `latest-N` window given, and once on, the database keeps

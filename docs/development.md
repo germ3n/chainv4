@@ -106,7 +106,7 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `mnemonic` | Seed phrases: BIP39 words, and keys derived from them for every scheme built in. |
 | `lvm`, `wasm`, `evm` | The contract engines; any pulls in `vm`. `evm` is revm, and pulls in `keccak256`. |
 | `rocksdb` | The RocksDB backend. |
-| `node` | The node, the chain and the CLI. |
+| `node` | The node, the chain and the CLI, which stops cleanly on SIGTERM and SIGINT through `signal-hook`. |
 | `http` | The HTTP API. |
 | `stream` | `GET /stream`, and the node's `--stream`. Needs `http`. |
 | `client` | `chainv4 send`, `light` and `layout --from`: HTTP, and HTTPS through rustls, with `--ca-cert` and `--insecure`. |

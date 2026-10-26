@@ -80,6 +80,11 @@ fn fake_node() -> NodeHandle {
 }
 
 fn fake_node_with(limits: BacklogLimits) -> NodeHandle {
+    fake_node_holding(limits, None)
+}
+
+/// A fake node whose mempool, as it reports it, holds these transactions in place of its usual two.
+fn fake_node_holding(limits: BacklogLimits, waiting: Option<Vec<SignedTx>>) -> NodeHandle {
     let (inbox, events) = std::sync::mpsc::channel();
     let backlog = Arc::new(Backlog::new(limits));
     let handled = backlog.clone();
@@ -93,7 +98,13 @@ fn fake_node_with(limits: BacklogLimits) -> NodeHandle {
                     let _ = reply.send(verdict);
                 }
                 NetEvent::Report { txs, reply } => {
-                    let _ = reply.send(fake_report(txs));
+                    let mut report = fake_report(txs);
+
+                    if let Some(waiting) = &waiting {
+                        report.txs = waiting.iter().take(txs).cloned().collect();
+                    }
+
+                    let _ = reply.send(report);
                 }
                 _ => {}
             }
@@ -1297,7 +1308,10 @@ fn ethereum_json_rpc_answers_as_ethereums_tools_ask() {
         chain.import(&block, now).unwrap();
     }
 
-    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    // The node's mempool holds the next one, sent but not yet in a block.
+    let waiting = ethereum(2, Some([6; 20]), Vec::new());
+    let node = fake_node_holding(BacklogLimits::default(), Some(vec![signed(0), SignedTx::from_ethereum(waiting.clone()).unwrap()]));
+    let address = start(db, Some(node), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let rpc = |method: &str, params: Value| {
         let (status, _, answer) = request(address, "POST", "/rpc", &json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params }).to_string());
         assert_eq!((status, answer["id"].clone()), (200, json!(7)), "{answer}");
@@ -1357,6 +1371,14 @@ fn ethereum_json_rpc_answers_as_ethereums_tools_ask() {
     let estimate = rpc("eth_estimateGas", call([selector("bump(uint256)"), word(1)].concat()))["result"].as_str().unwrap().to_string();
 
     assert!(u64::from_str_radix(&estimate[2..], 16).unwrap() > 21_000, "{estimate}");
+    // A transaction waiting in the mempool is found by its hash, in no block yet, with no receipt.
+    let pending = rpc("eth_getTransactionByHash", json!([hex(&tx_hash(&waiting))]))["result"].clone();
+
+    assert_eq!((pending["nonce"].clone(), pending["to"].clone()), (json!("0x2"), json!(hex(&[6; 20]))));
+    assert_eq!((pending["blockHash"].clone(), pending["blockNumber"].clone(), pending["transactionIndex"].clone()), (Value::Null, Value::Null, Value::Null));
+    assert_eq!(rpc("eth_getTransactionReceipt", json!([hex(&tx_hash(&waiting))]))["result"], Value::Null);
+    assert_eq!(rpc("eth_getTransactionByHash", json!([hex(&[8; 32])]))["result"], Value::Null, "nothing by that hash, waiting or landed");
+
     assert!(rpc("eth_getBalance", json!([hex(&from), "0x1"]))["error"]["message"].as_str().unwrap().contains("latest"), "no state of old blocks");
 
     // Sending: one for this chain goes to the node; one for another is refused.

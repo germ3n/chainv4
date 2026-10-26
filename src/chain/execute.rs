@@ -358,6 +358,14 @@ pub(crate) fn execute_verified(
         None => None,
     };
     accounts.bump_nonce(&sender).map_err(node_fault)?;
+
+    // On a chain with the EVM, any transaction makes its sender known there: coin the EVM sends
+    // its alias reaches it from then on. Kept even when the transaction fails, as its nonce is.
+    #[cfg(feature = "evm")]
+    if vm.runs_evm() {
+        crate::vm::evm::remember_alias(block, &sender)?;
+    }
+
     let mut limits = rules.limits;
 
     // The gas limit pays for fuel too: what is left over the intrinsic cost bounds what its

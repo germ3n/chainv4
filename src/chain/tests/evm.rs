@@ -155,6 +155,52 @@ fn the_coin_moves_into_evm_contracts_and_back_out_to_any_account() {
 }
 
 #[test]
+fn any_transaction_writes_its_senders_alias_down_so_the_evm_can_pay_it() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let counter = deploy(&mut chain, 0);
+    let deposit = call(&chain, &authority(), counter, 1_000, calldata("deposit()", &[]));
+    let bob = Keypair::generate(KeyType::Ed25519).unwrap();
+    let carol = Keypair::generate(KeyType::Ed25519).unwrap();
+    let fund = |to: &Keypair, nonce: u64| {
+        SignedTx::sign(
+            Tx::Transfer { from: authority().public().address(), to: to.public().address(), amount: Amount::U128(10u128.pow(21)) },
+            nonce,
+            FeeOffer::NONE,
+            &authority(),
+        )
+    };
+    let first = nonce(&chain, &authority()) + 1;
+    advance(&mut chain, vec![deposit, fund(&bob, first), fund(&carol, first + 1)]);
+
+    // Bob sends a plain transfer, nothing to do with the EVM; Carol sends nothing at all.
+    let plain = SignedTx::sign(
+        Tx::Transfer { from: bob.public().address(), to: authority().public().address(), amount: Amount::U128(1) },
+        nonce(&chain, &bob),
+        FeeOffer::NONE,
+        &bob,
+    );
+    advance(&mut chain, vec![plain]);
+
+    assert_eq!(evm::account_of(&chain.state(), evm::evm_alias(&bob.public().address())).unwrap(), bob.public().address());
+
+    // Paid out to his alias, the coin reaches Bob's own account. Carol's alias is read as the
+    // secp256k1 account of those 20 bytes until she sends something, so what is paid to it lands
+    // there, out of her reach.
+    let bob_before = balance(&chain, &bob.public().address());
+    let carol_before = balance(&chain, &carol.public().address());
+    let pay_bob = call(&chain, &authority(), counter, 0, calldata("pay(address,uint256)", &[address_word(&bob.public().address()), word(300)]));
+    let pay_carol =
+        next_nonce(call(&chain, &authority(), counter, 0, calldata("pay(address,uint256)", &[address_word(&carol.public().address()), word(200)])), &authority());
+    let paid = advance(&mut chain, vec![pay_bob, pay_carol]);
+
+    assert!(paid.iter().all(|receipt| receipt.result.is_ok()), "{paid:?}");
+    assert_eq!(balance(&chain, &bob.public().address()), bob_before + u256::new(300));
+    assert_eq!(balance(&chain, &carol.public().address()), carol_before);
+    assert_eq!(balance(&chain, &Address::Secp256k1(evm::evm_alias(&carol.public().address()))), u256::new(200));
+}
+
+#[test]
 fn an_evm_contract_creates_contracts_and_reads_the_block() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
@@ -327,8 +373,8 @@ fn evm_contracts_resolve_and_pay_names_through_the_precompile() {
 
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db, &genesis()).unwrap();
-    // Alice holds an Ed25519 key, and has never sent an EVM transaction: the EVM knows no alias
-    // of hers until a name resolves to her.
+    // Alice holds an Ed25519 key, and has never sent an EVM transaction: a name resolves to her
+    // alias all the same.
     let alice = Keypair::generate(KeyType::Ed25519).unwrap();
     let fund = SignedTx::sign(
         Tx::Transfer { from: authority().public().address(), to: alice.public().address(), amount: Amount::U128(10u128.pow(21)) },

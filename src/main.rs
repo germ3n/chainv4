@@ -372,7 +372,16 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         log::info!("[http] listening on {address}");
     }
 
-    node.run()?;
+    // A container stops its node with SIGTERM, which a process with no handler ignores as PID 1;
+    // Ctrl-C sends SIGINT. Either stops the loop, and the database closes as the node is dropped.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        signal_hook::flag::register(signal, stop.clone())?;
+    }
+
+    node.run(stop)?;
+    log::info!("[node] stopped");
 
     Ok(())
 }

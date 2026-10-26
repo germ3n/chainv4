@@ -459,10 +459,14 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 
 - **An Ed25519 account's EVM address is an alias, known only once it sends.** Inside the EVM,
   every account but secp256k1 ones and EVM contracts goes by the last 20 bytes of the keccak256 of
-  its key. The chain learns whose alias it is when the account first sends an EVM transaction.
-  Coin the EVM pays to an alias before then goes to the secp256k1 account with those bytes, which
-  no one can spend. Send one EVM call before handing your alias to a contract. See
-  [EVM](evm.md#addresses).
+  its key. The chain learns whose alias it is when the account first sends a transaction, of any
+  kind. Coin the EVM pays to an alias before then goes to the secp256k1 account with those bytes,
+  which no one can spend. An account that has only received should send something before handing
+  its alias to a contract. See [EVM](evm.md#addresses).
+- **Every transaction writes its sender's alias down, on a chain with the EVM.** It used to take an
+  EVM transaction. This changes state, so nodes from before it and after it disagree on the first
+  block where an Ed25519 account sends anything else: update every node of a chain at once. Chains
+  without `evm` in their engines write nothing.
 - **EVM contracts are called with `evm-call`, never `call`.** `Tx::ContractCall` to an `evm:`
   address is refused, and `Tx::Upgrade` cannot replace EVM code: upgradeable EVM contracts use a
   proxy, as on Ethereum.

@@ -1402,3 +1402,22 @@ fn a_snapshot_whose_pivot_grows_too_old_moves_it_up_and_fetches_only_what_change
     assert_eq!(late.chain().snapshot(), Some(80), "the pivot moved up, 10 below the new tip");
     assert_eq!(late.chain().tip().id(), producer.chain().tip().id());
 }
+
+#[test]
+fn a_running_node_returns_once_told_to_stop() {
+    let (node, _fake) = node(false);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let told = stop.clone();
+    let running = std::thread::spawn(move || node.run(told));
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let started = std::time::Instant::now();
+
+    while !running.is_finished() {
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "it notices within a second, the longest it waits");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(running.join().unwrap().is_ok());
+}

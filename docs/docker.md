@@ -169,7 +169,7 @@ docker/pow.sh logs                # on the VPS: follow the node's log
    own, so switching rebuilds neither. It builds the node here, keeps a copy of it in `POW_HOME`, looks the VPS's name up,
    and runs a node with the same genesis that dials `/ip4/…/udp/4001/quic-v1`, mines with
    `MINE_THREADS`, and serves its API, and the explorer and wallet when they are built, on
-   `127.0.0.1:8090` (`API`). Ctrl-C stops it; `join` again carries on where it was.
+   `127.0.0.1:8090` (`API`). Ctrl-C stops it cleanly; `join` again carries on where it was.
 
 5. **`token`** makes the token workers mine with, once: 32 random bytes in hex, in
    `POW_HOME/mining.token` and `docker/config/mining.token` (ignored by git), which `push` takes

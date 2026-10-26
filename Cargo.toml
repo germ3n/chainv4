@@ -64,7 +64,7 @@ ethereum = ["evm", "secp256k1", "http"]
 names = []
 # Mining on the GPU, through wgpu: Vulkan, Metal and WebGPU. --mine-gpu picks it over the threads.
 gpu = ["dep:chainv4-gpu", "node"]
-node = ["dep:rayon", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "dep:serde_json", "dep:hmac", "dep:sha2", "lvm", "rocksdb"]
+node = ["dep:rayon", "dep:signal-hook", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "dep:serde_json", "dep:hmac", "dep:sha2", "lvm", "rocksdb"]
 
 [dependencies]
 rocksdb = { version = "0.25.0", optional = true }
@@ -99,6 +99,8 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls"], opt
 revm = { version = "43.0.3", default-features = false, features = ["std", "optional_fee_charge", "optional_no_base_fee", "optional_block_gas_limit", "memory_limit"], optional = true }
 wasmi = { version = "=2.0.0", default-features = false, features = ["std", "validate", "stable", "auto-dispatch"], optional = true }
 mlua = { git = "https://github.com/germ3n/mlua", branch = "main", features = ["luau", "send"], optional = true }
+# Stopping cleanly on SIGTERM and SIGINT: as a container's PID 1, nothing else would.
+signal-hook = { version = "0.3.18", optional = true }
 
 [dev-dependencies]
 wat = "1.262.0"

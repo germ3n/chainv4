@@ -6,8 +6,8 @@
 //! address for it, as Address::Evm. A secp256k1 account is itself inside the EVM, its 20 bytes
 //! being Ethereum's. Any other account, Ed25519, EdBlake or a Lua or wasm contract, takes part
 //! under an alias: the last 20 bytes of the keccak256 of its key. The alias is written down the
-//! first time the account sends an EVM transaction, so the EVM can pay it back; until then, value
-//! sent to its alias goes to the secp256k1 account with those bytes instead.
+//! first time the account sends a transaction of any kind, so the EVM can pay it back; until then,
+//! value sent to its alias goes to the secp256k1 account with those bytes instead.
 //!
 //! **Running.** revm runs a transaction against a database over the transaction's state layer,
 //! without committing; this module then writes what it changed back, through the registries. The
@@ -88,6 +88,21 @@ pub fn register_alias(state: &State, address: &Address) {
     if !matches!(address, Address::Secp256k1(_) | Address::Evm(_)) {
         state.put_value(Column::Storage, alias_key(&evm_alias(address)), address);
     }
+}
+
+#[document(
+    summary = "Writes an account's alias down unless it is there already, as every transaction on a chain with the EVM does for its sender: from its first transaction of any kind on, coin the EVM sends its alias reaches it.",
+    category = "VM",
+    see_also = "register_alias, evm_alias",
+)]
+pub fn remember_alias(state: &State, address: &Address) -> Result<(), DbError> {
+    if matches!(address, Address::Secp256k1(_) | Address::Evm(_)) || state.get(Column::Storage, &alias_key(&evm_alias(address)))?.is_some() {
+        return Ok(());
+    }
+
+    register_alias(state, address);
+
+    Ok(())
 }
 
 #[document(
