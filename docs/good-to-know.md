@@ -279,6 +279,17 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   your account as `minter`; genesis allows only the development key there since minting became a
   development-chain faucet, so such a chain no longer opens. `init` now writes none: make the
   chain again.
+- **Wallet biometrics keep the vault's key, not the password.** Each platform wraps the key the
+  password stretched to: the Android Keystore, a passkey's PRF output, or the macOS Keychain after
+  Touch ID. Changing the password turns them off, and so does a change in the fingers or faces
+  enrolled. On macOS Touch ID is a check, not a lock on the key, as an unsigned app cannot tie a
+  Keychain item to biometry.
+- **A wallet may have no password.** It is sealed with an empty one and says so on its lock
+  screen; `WalletEntry::unprotected` marks it. Settings adds or removes one.
+- **Wallet secrets are zeroized.** `Vault`'s key, the opened vault's JSON, `Words`, typed
+  passwords and words (`lock::Typed`, a `Zeroizing<String>`), and biometric secrets
+  (`chainv4_ui::biometric::Secret`) are wiped as they drop; the Android glue overwrites Java's copy
+  of a secret once it has read it.
 - **`GET /node` has `mining`,** null for a node that does not mine: the total `rate`, the node's
   `devices`, `listening` for workers, and `workers`, each with its devices, `found` and `refused`.
 - **A rotating authority's producers are its finality signers, and a staked chain's its FFG

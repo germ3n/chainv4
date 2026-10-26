@@ -3,8 +3,8 @@
 # arm64 phones and emulators, or with --arch x64 for x86-64 emulators. It is signed with xbuild's
 # debug key, or with a release key: --pem FILE, or X_PEM set to the PEM's text (a certificate and
 # its PKCS#8 RSA key, as docs/wallet.md shows how to make). --install puts it on the device adb sees.
-# With a JDK and Android's build-tools, found through ANDROID_HOME, the app can pick files, unless
-# --no-picker leaves that out.
+# With a JDK and Android's build-tools, found through ANDROID_HOME, the app can pick files and use
+# biometrics, its Java in ui/android, unless --no-picker leaves that out.
 #
 #   ui/build-android.sh APP [--debug] [--arch arm64|x64] [--pem FILE] [--no-picker] [--install]
 #
@@ -78,9 +78,10 @@ fi
 
 rustup target add "$triple" > /dev/null
 
-# The file picker is a Java activity, ui/android/Picker.java, compiled into the APK after xbuild
-# builds it, which then is signed again. That takes a JDK and Android's build-tools (d8, zipalign
-# and apksigner): without them the app is built without one, and leaves picking files out.
+# The app's Java, ui/android: the file picker, an activity, and biometrics, compiled into the APK
+# after xbuild builds it, which then is signed again. That takes a JDK and Android's build-tools
+# (d8, zipalign and apksigner): without them the app is built without it, and leaves picking files
+# and biometrics out.
 build_tools() {
     for sdk in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
         if [ -n "$sdk" ] && [ -d "$sdk/build-tools" ]; then
@@ -173,7 +174,7 @@ if [ -n "$picker" ]; then
     fi
 
     mkdir -p "$work/classes" "$work/dex" "$work/apk"
-    javac --release 11 -classpath "$jar" -d "$work/classes" "$ui/android/Picker.java"
+    javac --release 11 -classpath "$jar" -d "$work/classes" "$ui"/android/*.java
     "$tools/d8" --release --min-api 24 --lib "$jar" --output "$work/dex" "$work"/classes/org/chainv4/ui/*.class
 
     # Put together again with classes.dex: resources.arsc and the icons stored, as xbuild stores

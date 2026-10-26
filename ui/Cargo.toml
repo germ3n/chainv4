@@ -12,6 +12,8 @@ egui = "0.37.0"
 log = "0.4.34"
 # Names for biometric keys, and the passkey salt in the browser.
 getrandom = "0.4"
+# Wiping the secrets biometrics keep from memory once they are done with.
+zeroize = "1.9.1"
 
 # Talking to a node: ureq on the desktop and Android, where a proxy set in an app is the only way
 # out, SOCKS5 included; the browser's fetch in the browser, where its own proxy settings apply.

@@ -153,6 +153,32 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   nobody, so `Mint` is a dev faucet and a chain of value gets coins from rewards and allocations
   alone.
 
+### Privacy
+
+- [ ] **Hidden recipients: stealth addresses.** A recipient publishes a stealth meta-key; a sender
+  derives a one-time address from it by ECDH and sends an ordinary transfer there, with the
+  ephemeral key the recipient needs, in a field of the transfer or an event. The wallet scans for
+  what is its own and derives each one-time key. Spending from a one-time address needs fees there,
+  and moving funds on can link addresses again. ERC-5564 is the model. Moderate: little or nothing
+  in consensus.
+- [ ] **Hidden amounts: a confidential store for every key.** Beside its public balance, an
+  account holds a confidential one: twisted ElGamal ciphertexts on Ristretto, under an encryption
+  key derived from the account's own, so the words bring it back. Transfers between confidential
+  balances carry range proofs (Bulletproofs) and equality proofs, which validators check; deposits
+  and withdrawals move between the public and confidential balances. Incoming transfers land in a
+  pending balance, applied to the available one by its owner, so a sender proving against its
+  balance never races what arrives. Amounts are split into small chunks, so the owner decrypts
+  them quickly. Made the first time a key uses it, so idle accounts cost no state. Fees stay
+  public, and contracts cannot read confidential balances. Solana's confidential transfers are the
+  model; `curve25519-dalek`, `bulletproofs` and `merlin` have the pieces. Hard: weeks.
+- [ ] **Hidden senders: a shielded pool.** In an account model the sender shows by construction:
+  its nonce, signature and fee. Hiding it takes notes instead of balances, a Merkle tree of note
+  commitments, nullifiers against spending one twice, and a zero-knowledge proof (Halo2 or Plonk,
+  with no trusted setup) that the spender owns an unspent note without saying which; and relayers,
+  or fees paid from inside the pool, so paying gas leaks nothing. Proving must run in the wallet,
+  phones and the browser included. Inside the pool, senders, recipients and amounts are all
+  hidden. A bug can mint money no one sees, so it needs review of its own. Months.
+
 ### Governance
 
 - [x] **Governance over the consensus.** Genesis's `governance` names a kind, behind the
@@ -402,6 +428,10 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   chain by `Change::Bootnodes`, and `--bootnode`, are dialed while a node has fewer than
   `--target-peers`; Kademlia bootstraps every 2 minutes, and the node dials a few of the peers it
   knows, so two nodes that dial a third meet.
+- [ ] **Windows Hello in the wallet.** Biometrics cover Android, the browser's passkeys and
+  macOS; a Windows desktop keeps the password.
+- [ ] **Touch ID guards a check, not the key.** A signed macOS build could tie the Keychain item to
+  biometry with an access control, as Android's Keystore does.
 - [ ] **Peers are not remembered.** A restarted node starts from its `--peer`s and bootnodes;
   keeping the peers it met with the database would let it reconnect with none.
 - [x] **Chains keep apart by protocol name and genesis.** Every protocol and topic is

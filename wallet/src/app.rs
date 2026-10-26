@@ -97,6 +97,13 @@ pub struct WalletEntry {
     pub vault: Sealed,
     /// The account in use, by its first address.
     pub current: String,
+    /// Its vault's key, kept behind biometrics, as the platform keeps it: None while they are off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub biometric: Option<String>,
+    /// Whether it is sealed with no password, so it opens with a tap, and the lock screen says
+    /// anyone who reads app storage could.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unprotected: bool,
 }
 
 impl Default for Settings {
@@ -129,6 +136,8 @@ impl Settings {
                 name: "Wallet 1".to_string(),
                 vault,
                 current: std::mem::take(&mut self.current),
+                biometric: None,
+                unprotected: false,
             });
             self.wallet = 0;
         }
@@ -285,6 +294,12 @@ impl Wallet {
         self.holders.clear();
         self.views = views::States::default();
         self.lock = Lock::start(&self.settings);
+
+        // Biometrics show by themselves as the app starts, not as it locks: whoever locked it, or
+        // left it, may be gone.
+        if let Lock::Locked { prompted, .. } = &mut self.lock {
+            *prompted = Some(self.settings.wallet);
+        }
     }
 
     /// Takes everything that arrived.
@@ -651,6 +666,7 @@ impl eframe::App for Wallet {
         let mut connect = None;
         let mut changed = false;
         let mut leave = false;
+        let mut lock = None;
         let chosen = self.settings.current().to_string();
         let current = self.holders.iter().position(|holder| holder.id() == chosen).unwrap_or(0);
         let margin = if narrow { egui::Margin::symmetric(14, 0) } else { egui::Margin::ZERO };
@@ -676,6 +692,7 @@ impl eframe::App for Wallet {
                             changed: &mut changed,
                             vault: &mut self.vault,
                             leave: &mut leave,
+                            lock: &mut lock,
                             wake: &self.wake,
                         };
                         views::show(ui, &mut ctx, &mut self.views);
@@ -688,8 +705,18 @@ impl eframe::App for Wallet {
         // A wallet removed is locked away without sealing it again: its place is another's now.
         if leave {
             self.lock();
-        } else if changed && let Err(error) = self.store() {
-            log::warn!("could not seal the accounts: {error}");
+        } else {
+            if changed && let Err(error) = self.store() {
+                log::warn!("could not seal the accounts: {error}");
+            }
+
+            if let Some(why) = lock {
+                self.lock();
+
+                if let Lock::Locked { error, .. } = &mut self.lock {
+                    *error = Some(why);
+                }
+            }
         }
 
         if let Some(node) = connect {
@@ -749,6 +776,8 @@ mod tests {
             name: "Wallet 1".to_string(),
             vault: sealed,
             current: "ed25519:0x01".to_string(),
+            biometric: None,
+            unprotected: false,
         }]);
         assert_eq!((settings.wallet, settings.current(), settings.lock_after), (0, "ed25519:0x01", 5));
 
@@ -756,6 +785,30 @@ mod tests {
 
         assert!(kept.get("vault").is_none() && kept.get("current").is_none(), "never written again");
         assert_eq!(serde_json::from_value::<Settings>(kept).unwrap().migrated().wallets, settings.wallets);
+    }
+
+    #[test]
+    fn a_wallets_biometrics_are_kept_with_it_and_absent_while_off() {
+        let entry = WalletEntry {
+            name: "Main".to_string(),
+            vault: Sealed {
+                salt: "0x00".to_string(),
+                nonce: "0x01".to_string(),
+                sealed: "0x02".to_string(),
+            },
+            current: String::new(),
+            biometric: None,
+            unprotected: false,
+        };
+
+        assert!(serde_json::to_value(&entry).unwrap().get("biometric").is_none(), "an entry from before reads the same");
+
+        let on = WalletEntry {
+            biometric: Some("android:chainv4-00:0a:0b".to_string()),
+            ..entry
+        };
+
+        assert_eq!(serde_json::from_value::<WalletEntry>(serde_json::to_value(&on).unwrap()).unwrap(), on);
     }
 
     #[test]

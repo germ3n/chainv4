@@ -31,6 +31,8 @@ wincode = "0.6.3"
 # Sealing keys with a password: Argon2id to stretch it, ChaCha20-Poly1305 to seal.
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+# Wiping keys, the vault opened and passwords typed from memory once done with.
+zeroize = "1.9.1"
 getrandom = "0.4"
 qrcode = { version = "0.14.1", default-features = false }
 # Reading QR codes off photos, for signing on a device that never goes online: JPEG and PNG

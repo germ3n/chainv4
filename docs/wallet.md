@@ -2,7 +2,8 @@
 
 The wallet (`wallet/`) is a light wallet, built with egui, for the desktop, the browser and
 Android:
-- **Keys:** wallets of accounts from a seed phrase, each sealed with a password on the device.
+- **Keys:** wallets of accounts from a seed phrase, each sealed with a password on the device, or
+  none, and opened with a fingerprint, a face, Touch ID or a passkey when biometrics are on.
   Every account has an Ed25519, an EdBlake and an Ethereum address, all from the same words.
 - **Balances:** the coin and every listed token at each address, proven by the light client.
 - **Sending:** the coin or a token, from the address picked, with the fee shown before you sign.
@@ -90,7 +91,8 @@ and the node to `http://<that address>.onion`.
 
 **A wallet** is a seed phrase, the accounts made from it, and a password that seals them. The lock
 screen (`wallet/src/lock.rs`) makes the first, and holds them all:
-- **New wallet:** a name, a password twice, and under Advanced an optional BIP39 passphrase. The
+- **New wallet:** a name, a password twice, or none, and under Advanced an optional BIP39
+  passphrase. The
   wallet makes 12 words and shows them once, to write down, then asks for three of them back
   before it opens.
 - **Restore from words:** 12 or 24 words written down before, from this wallet or any that
@@ -110,7 +112,7 @@ new words for it or takes words you have, and from then on new accounts come fro
 ## Keys
 
 **The vault.** Each wallet's words and accounts are kept in app storage, sealed with its password,
-at least 8 characters (`wallet/src/vault.rs`):
+at least 8 characters, or none (`wallet/src/vault.rs`):
 - **Stretching:** Argon2id stretches the password into a key, with a random salt of the vault's
   own.
 - **Sealing:** ChaCha20-Poly1305 seals the accounts with that key, under a fresh nonce each time
@@ -125,6 +127,16 @@ the site's data, or the app's, deletes the keys, so keep the words written down.
 **Unlocking:** the password opens the vault. While unlocked, the wallet keeps the stretched key in
 memory, so every change seals the accounts again without asking. Locking drops the keys and that
 key alike.
+
+**No password.** Leave both fields empty and the vault is sealed with an empty one: the lock screen
+offers **Open** instead of a field, and says that anyone who can read the app's storage, a phone's
+backup or malware, can open it too. Fine for small sums, or with biometrics on; Settings sets a
+password later, and also takes one away.
+
+**Wiped from memory.** The stretched key, the accounts as they open and seal, the words, and what is
+typed into a password, words or key field are overwritten as they drop (`zeroize`), and so is every
+copy of a key biometrics keep, Java's on Android included. What the browser or the OS hold of what
+was typed, such as a keyboard's own buffer, is out of reach.
 
 **Locking:** the Lock button, or 15 minutes without input. Settings changes the time, or turns it
 off.
@@ -145,8 +157,46 @@ off.
 **From before seed phrases:** a vault the wallet sealed before it had words opens as a wallet
 named Wallet 1, its accounts keys brought in.
 
-**Changing the password:** the current one, then the new one twice. The accounts are sealed again
-under a new salt.
+**Changing the password:** the current one, then the new one twice, or nothing to have none. The
+accounts are sealed again under a new salt. Biometrics kept the key the old password stretched to,
+so they turn off, and are turned on again under the new one.
+
+## Biometrics
+
+A wallet can be opened with a fingerprint or face on Android, Touch ID on macOS, or a passkey in
+the browser, instead of its password; and once they are on, every send it signs, and every
+request an offline signer signs, waits for one more check. Settings turns them on and off for the
+wallet open (`wallet/src/biometrics.rs`; the platforms are in `ui/src/biometric.rs`).
+
+**What they keep:** the key the password stretches to, the one that opens the vault, wrapped so
+only a check gives it back:
+
+| Where | What wraps it | What a check is |
+| --- | --- | --- |
+| Android 9 and up | An AES key in the Android Keystore, usable only right after a strong biometric check, which a fingerprint or face enrolled later invalidates for good. | BiometricPrompt, through `ui/android/Biometric.java`. |
+| The browser | The PRF extension's output of a passkey made for the wallet, which only the passkey's user verification releases. | WebAuthn: Touch ID, Windows Hello, a phone or a security key, whichever holds the passkey. |
+| macOS | Touch ID's check comes first, then the key is read from the login Keychain. The fingers enrolled are remembered, and once they change, the key is forgotten. | LocalAuthentication. |
+
+Linux and Windows desktops keep the password; Windows Hello is not used yet.
+
+**When the fingers or faces change,** biometrics turn off for a wallet the next time they are
+used for it, the lock screen says so, and the password opens the wallet; turning them on again
+keeps the key anew.
+A check that fails that way during a send locks the wallet.
+
+**The lock screen** shows the prompt by itself when the app starts on Android and macOS. After
+**Lock** or the timeout it waits for **Unlock with …**, as whoever locked it may be gone; in the
+browser, which shows a passkey's prompt only right after a tap, it always waits.
+
+**Things to know:**
+- **macOS is weaker than the others.** The Keychain item is guarded by the login, not by Touch ID,
+  as an unsigned app cannot ask the Keychain to tie an item to biometry: Touch ID is a check the
+  wallet makes, not a lock on the key.
+- **A passkey stays with the browser or device** when biometrics are turned off: delete it there.
+  Without the wrapped key the wallet kept, it opens nothing.
+- **A browser or passkey without PRF** cannot keep the key; recent Chrome, Edge and Safari can,
+  with the device's own passkeys. The page must be served over HTTPS, or from localhost.
+- **Android builds without Java have no biometrics**, as they have no file picker: see below.
 
 ## Trust
 
@@ -413,6 +463,20 @@ explorer's, on every push to master and on `workflow_dispatch`, and keeps them a
 signs with the `ANDROID_SIGNING_PEM` secret, holding `signing.pem`'s text, when there is one, and
 with the debug key otherwise. A `v*` tag attaches all four to its release.
 
+### Biometrics on Android
+
+`ui/android/Biometric.java` is compiled in with the picker, and the manifest asks for
+`USE_BIOMETRIC`, granted as the app is installed. It needs Android 9: BiometricPrompt is 28's. The
+app asks it whether strong biometrics can be used as it starts and every few seconds after, so a
+finger enrolled while it runs is noticed. The Keystore key is AES-256-GCM, made with
+`setUserAuthenticationRequired` and `setInvalidatedByBiometricEnrollment`, and on Android 11 and up
+`AUTH_BIOMETRIC_STRONG` for each use.
+
+**On an emulator:** set a PIN (`adb shell locksettings set-pin 1234`), enroll a fingerprint under
+Settings › Security, touching the sensor with `adb emu finger touch 1`, and touch it the same way
+when the wallet's prompt shows. Enrolling another with `adb emu finger touch 2` invalidates the
+key, as a new finger on a phone would.
+
 ### Picking files
 
 Android hands a picked file back to the activity that asked for it, through Java, and a
@@ -444,7 +508,8 @@ out when it builds without one, as Android refuses an app that declares code it 
 ## What to keep in mind
 
 - **Keep the words.** They bring every account back, on any device. Without them, a lost device
-  or a forgotten password loses the wallet: nothing opens a vault without its password.
+  or a forgotten password loses the wallet: nothing opens a vault without its password, and
+  biometrics keep only what the password opens, so they are no way back from a forgotten one.
 - **A passphrase is part of the wallet.** The same words with another passphrase, or none, make
   other accounts, all empty.
 - **The Ethereum address is not on Ethereum.** It is the address Ethereum's wallets show for the

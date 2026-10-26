@@ -3,10 +3,15 @@
 //! safe area, and the app is drawn inside it. The soft keyboard shows while a text field wants it,
 //! and goes once none does. egui reaches no clipboard on Android, so what the app copies is put on
 //! Android's here, and pasting is offered by [`crate::edit`]. Files are picked through the Java
-//! activity the APK carries when it was built with one (see [`crate::files`]).
+//! activity the APK carries when it was built with one (see [`crate::files`]), and biometric
+//! checks made through its Java class for them (see [`crate::biometric`]).
 
 use {
     crate::{
+        biometric::{
+            self, Failure,
+            android::{Asked, Came},
+        },
         edit::{Clipboard, Editing},
         files::{self, File, Picked},
     },
@@ -35,8 +40,12 @@ pub fn run(app: AndroidApp, title: &str, log_tag: &str, storage_file: &str, make
         title,
         options,
         Box::new(|creation| {
-            let picker = picker(&app);
+            let picker = class(&app, "org.chainv4.ui.Picker");
             files::android::set_can_pick(&creation.egui_ctx, picker.is_some());
+            let biometric = class(&app, "org.chainv4.ui.Biometric");
+            // Known before the first frame, so the lock screen can show its prompt at once.
+            let level = biometric.as_ref().map_or(Ok(-1), |class| biometric_level(&app, class));
+            biometric::android::set_level(&creation.egui_ctx, level.unwrap_or(-1));
 
             Ok(Box::new(OnAndroid {
                 inner: make(creation),
@@ -46,6 +55,9 @@ pub fn run(app: AndroidApp, title: &str, log_tag: &str, storage_file: &str, make
                 editing: Editing::default(),
                 picker,
                 waiting: None,
+                biometric,
+                checking: None,
+                level_at: 0.0,
             }))
         }),
     );
@@ -68,6 +80,13 @@ struct OnAndroid {
     picker: Option<Global<JClass<'static>>>,
     /// What a pick is handed to once the picker is done.
     waiting: Option<files::Done>,
+    /// The biometric class, when the APK carries it.
+    biometric: Option<Global<JClass<'static>>>,
+    /// What a biometric check under way is handed to once it is done.
+    checking: Option<Box<dyn FnOnce(Came) + Send>>,
+    /// When the app last asked whether biometrics can be used: someone may enroll a finger while
+    /// it runs.
+    level_at: f64,
 }
 
 impl OnAndroid {
@@ -158,6 +177,151 @@ impl OnAndroid {
         }
     }
 
+    /// Starts the biometric checks the app asked for, forgets the keys it asked to, hands over what
+    /// a check under way came to once it is done, and every few seconds asks again whether
+    /// biometrics can be used.
+    fn check_biometrics(&mut self, ctx: &egui::Context) {
+        let time = ctx.input(|input| input.time);
+
+        if time - self.level_at >= 5.0 {
+            self.level_at = time;
+            biometric::android::set_level(ctx, self.biometric_level().unwrap_or(-1));
+        }
+
+        for asked in biometric::android::asked(ctx) {
+            match asked {
+                Asked::Forget { alias } => {
+                    if let Err(err) = self.forget_key(&alias) {
+                        log::warn!("could not forget the biometric key: {err}");
+                    }
+                }
+                Asked::Check { alias, mode, data, iv, title, subtitle, done } => {
+                    // One prompt at a time: a check asked for while another waits takes its place.
+                    if let Some(earlier) = self.checking.take() {
+                        earlier(Err(Failure::Canceled));
+                    }
+
+                    match self.start_check(&alias, mode as i32, &data, &iv, &title, &subtitle) {
+                        Ok(()) => self.checking = Some(done),
+                        Err(err) => done(Err(Failure::Failed(format!("could not show the prompt: {err}")))),
+                    }
+                }
+            }
+        }
+
+        if self.checking.is_none() {
+            return;
+        }
+
+        match self.take_check() {
+            Ok(Some(came)) => {
+                if let Some(done) = self.checking.take() {
+                    done(came);
+                }
+            }
+            Ok(None) => ctx.request_repaint_after(std::time::Duration::from_millis(150)),
+            Err(err) => {
+                if let Some(done) = self.checking.take() {
+                    done(Err(Failure::Failed(format!("could not read what the prompt came to: {err}"))));
+                }
+            }
+        }
+    }
+
+    fn biometric_class(&self) -> jni::errors::Result<&Global<JClass<'static>>> {
+        self.biometric.as_ref().ok_or(jni::errors::Error::NullPtr("this APK carries no biometrics"))
+    }
+
+    fn biometric_level(&self) -> jni::errors::Result<i32> {
+        biometric_level(&self.app, self.biometric_class()?)
+    }
+
+    /// `Biometric.start(activity, alias, mode, data, iv, title, subtitle)`.
+    fn start_check(&self, alias: &str, mode: i32, data: &[u8], iv: &[u8], title: &str, subtitle: &str) -> jni::errors::Result<()> {
+        let class = self.biometric_class()?;
+
+        java(&self.app, |env, activity| {
+            let alias = env.new_string(alias)?;
+            let data = env.byte_array_from_slice(data)?;
+            let iv = env.byte_array_from_slice(iv)?;
+            let title = env.new_string(title)?;
+            let subtitle = env.new_string(subtitle)?;
+            env.call_static_method(
+                &**class,
+                jni_str!("start"),
+                jni_sig!("(Landroid/app/Activity;Ljava/lang/String;I[B[BLjava/lang/String;Ljava/lang/String;)V"),
+                &[
+                    JValue::Object(activity),
+                    JValue::Object(&alias),
+                    JValue::Int(mode),
+                    JValue::Object(&data),
+                    JValue::Object(&iv),
+                    JValue::Object(&title),
+                    JValue::Object(&subtitle),
+                ],
+            )?;
+
+            Ok(())
+        })
+    }
+
+    /// `Biometric.take()`: the bytes out and the IV, or why not, once the prompt is done.
+    fn take_check(&self) -> jni::errors::Result<Option<Came>> {
+        let class = self.biometric_class()?;
+
+        java(&self.app, |env, _| {
+            let taken = env.call_static_method(&**class, jni_str!("take"), jni_sig!("()[Ljava/lang/Object;"), &[])?.l()?;
+
+            if taken.is_null() {
+                return Ok(None);
+            }
+
+            let taken = env.cast_local::<JObjectArray<JObject>>(taken)?;
+            let failure = taken.get_element(env, 2)?;
+
+            if !failure.is_null() {
+                let failure = env.cast_local::<JString>(failure)?.try_to_string(env)?;
+
+                return Ok(Some(Err(match failure.as_str() {
+                    "canceled" => Failure::Canceled,
+                    "invalidated" => Failure::Invalidated,
+                    _ => Failure::Failed(failure),
+                })));
+            }
+
+            // Read across, and Java's copy overwritten: the bytes out may be the secret.
+            let mut bytes = |index| -> jni::errors::Result<zeroize::Zeroizing<Vec<u8>>> {
+                let element = taken.get_element(env, index)?;
+
+                if element.is_null() {
+                    return Ok(zeroize::Zeroizing::new(Vec::new()));
+                }
+
+                let element = env.cast_local::<JByteArray>(element)?;
+                let read = zeroize::Zeroizing::new(env.convert_byte_array(&element)?);
+                element.set_region(env, 0, &vec![0; read.len()])?;
+
+                Ok(read)
+            };
+            let out = bytes(0)?;
+            let iv = bytes(1)?.to_vec();
+
+            Ok(Some(Ok((out, iv))))
+        })
+    }
+
+    /// `Biometric.forget(alias)`.
+    fn forget_key(&self, alias: &str) -> jni::errors::Result<()> {
+        let class = self.biometric_class()?;
+
+        java(&self.app, |env, _| {
+            let alias = env.new_string(alias)?;
+            env.call_static_method(&**class, jni_str!("forget"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&alias)])?;
+
+            Ok(())
+        })
+    }
+
     /// `Picker.start(activity, many, camera, background)`.
     fn start(&self, many: bool, camera: bool, background: i32) -> jni::errors::Result<()> {
         let class = self.picker.as_ref().ok_or(jni::errors::Error::NullPtr("this APK carries no picker"))?;
@@ -212,13 +376,22 @@ impl OnAndroid {
     }
 }
 
-/// The picker's class, when the APK carries it. It comes from the app's class loader: one a
-/// native thread finds by name comes from the system's, which holds Android's classes alone.
-fn picker(app: &AndroidApp) -> Option<Global<JClass<'static>>> {
+/// `Biometric.available(activity)`: 2 ready, 1 nothing enrolled, 0 none.
+fn biometric_level(app: &AndroidApp, class: &Global<JClass<'static>>) -> jni::errors::Result<i32> {
+    java(app, |env, activity| {
+        env.call_static_method(&**class, jni_str!("available"), jni_sig!("(Landroid/app/Activity;)I"), &[JValue::Object(activity)])?.i()
+    })
+}
+
+/// One of the APK's own Java classes, the picker or biometrics, when it carries it. It comes from
+/// the app's class loader: one a native thread finds by name comes from the system's, which holds
+/// Android's classes alone.
+fn class(app: &AndroidApp, name: &'static str) -> Option<Global<JClass<'static>>> {
     let found = java(app, |env, activity| {
         let loader = env.call_method(activity, jni_str!("getClassLoader"), jni_sig!("()Ljava/lang/ClassLoader;"), &[])?.l()?;
         let loader = env.cast_local::<JClassLoader>(loader)?;
-        let class = LoaderContext::Loader(&loader).load_class(env, jni_str!("org.chainv4.ui.Picker"), true)?;
+        let name = jni::strings::JNIString::from(name);
+        let class = LoaderContext::Loader(&loader).load_class(env, &name, true)?;
 
         env.new_global_ref(class)
     });
@@ -226,7 +399,7 @@ fn picker(app: &AndroidApp) -> Option<Global<JClass<'static>>> {
     match found {
         Ok(class) => Some(class),
         Err(err) => {
-            log::info!("this APK carries no file picker: {err}");
+            log::info!("this APK carries no {name}: {err}");
 
             None
         }
@@ -339,6 +512,7 @@ impl eframe::App for OnAndroid {
         self.keep_keyboard(&ctx);
         self.copy(&ctx);
         self.pick(&ctx, self.inner.clear_color(&ctx.global_style().visuals));
+        self.check_biometrics(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

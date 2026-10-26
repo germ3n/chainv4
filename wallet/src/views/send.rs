@@ -14,6 +14,7 @@ use {
     super::{Ctx, Page},
     crate::airgap::{self, Message, Request, Shown},
     crate::app::Sent,
+    crate::biometrics::{self, Check},
     crate::format,
     crate::node::{Ask, Failure},
     crate::theme,
@@ -48,6 +49,10 @@ pub struct SendState {
     /// choice.
     tip: String,
     step: Step,
+    /// The biometric check before a transaction is signed here, while it is under way, and why
+    /// the last one failed.
+    confirming: Option<Check>,
+    confirm_trouble: Option<String>,
 }
 
 /// A transaction built and not yet sent.
@@ -380,6 +385,24 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
     let balance = ctx.chain.account(&draft.from.to_string()).map(|proven| proven.value.balance);
     let short = balance.is_some_and(|balance| balance < draft.coin.saturating_add(most));
 
+    // What the check before signing came to: passed, it signs; turned down, nothing; the fingers
+    // or faces enrolled changed since, the wallet locks, for its password.
+    let mut confirmed = false;
+
+    if let Some(came) = state.confirming.as_ref().and_then(Check::take) {
+        state.confirming = None;
+
+        match came {
+            Ok(_) => confirmed = true,
+            Err(chainv4_ui::biometric::Failure::Canceled) => {}
+            Err(chainv4_ui::biometric::Failure::Invalidated) => {
+                biometrics::turn_off(ctx.wake, ctx.settings);
+                *ctx.lock = Some(biometrics::CHANGED.to_string());
+            }
+            Err(chainv4_ui::biometric::Failure::Failed(why)) => state.confirm_trouble = Some(why),
+        }
+    }
+
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Review");
         ui.add_space(4.0);
@@ -426,7 +449,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
                 (false, false, true) => "Sign on the signer anyway",
             };
 
-            if theme::primary(ui, &palette, send, !short).clicked() {
+            if theme::primary(ui, &palette, send, !short && state.confirming.is_none()).clicked() || confirmed {
                 match key {
                     None if by_metamask => match ctx.chain.genesis {
                         Some(genesis) => {
@@ -441,6 +464,11 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
                         }
                         None => state.step = Step::Failed("The light client has not started: the chain to sign for is not known yet.".to_string()),
                     },
+                    // With biometrics on, a check first; signing once it passes.
+                    Some(_) if !confirmed && let Some((enrolled, _)) = biometrics::enrolled(ctx.wake, ctx.settings) => {
+                        state.confirm_trouble = None;
+                        state.confirming = Some(Check::start(ctx.wake, &enrolled, &format!("Send {}", draft.what)));
+                    }
                     Some(key) => {
                         let signed = SignedTx::sign(draft.tx.clone(), draft.nonce, fee, key);
                         let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
@@ -471,8 +499,17 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
 
             if theme::quiet(ui, &palette, "Back").clicked() {
                 state.step = Step::Edit;
+                state.confirming = None;
             }
         });
+
+        if state.confirming.is_some() {
+            ui.label(RichText::new("Confirm it on the prompt to sign it.").small().color(palette.muted));
+        }
+
+        if let Some(why) = &state.confirm_trouble {
+            ui.colored_label(palette.bad, why.as_str());
+        }
     });
 }
 

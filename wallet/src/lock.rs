@@ -1,32 +1,41 @@
 //! The lock screen: which wallet, and its password. Or a wallet more: from new words, shown once and
 //! three of them asked back, or from words written down before; or, online, a watch-only one, from
 //! an offline signer's account read off its screen. Each wallet is a vault of its own, with a
-//! password of its own. On its first launch, it asks whether this install is an offline signer.
+//! password of its own. On its first launch, it asks whether this install is an offline signer. A
+//! wallet with biometrics on opens with them too: on Android and macOS the prompt shows as the
+//! screen does, and in the browser, which shows a passkey's only for a tap, at the button.
 
 use {
     crate::airgap::{Message, Pairing},
+    crate::biometrics::{self, Check},
+    chainv4_ui::biometric::Failure,
     crate::app::{Role, Settings, WalletEntry},
     crate::theme::{self, Palette},
     crate::vault::{Book, Source, StoredAccount, Vault, Words},
     crate::views::scan::Scan,
     chainv4::crypto::mnemonic::Phrase,
     egui::{RichText, Ui},
+    zeroize::Zeroizing,
 };
+
+/// What is typed into a password or words field: wiped from memory as it drops.
+pub type Typed = Zeroizing<String>;
 
 /// Where the lock screen is.
 pub enum Lock {
     /// What this install is, asked once.
     Role,
-    /// Asking for the password of the wallet picked.
-    Locked { password: String, error: Option<String> },
+    /// Asking for the password of the wallet picked, or its biometrics: the check under way, and
+    /// the wallet the prompt showed for by itself, so it shows once.
+    Locked { password: Typed, error: Option<String>, check: Option<Check>, prompted: Option<usize> },
     /// Making a wallet: from new words, or from words written down before.
     Choose,
     New(Making),
     /// New words, to write down.
     Words(Made),
     /// Three of them, asked back.
-    Confirm { made: Made, asked: [usize; 3], answers: [String; 3], error: Option<String> },
-    Restore { making: Making, words: String },
+    Confirm { made: Made, asked: [usize; 3], answers: [Typed; 3], error: Option<String> },
+    Restore { making: Making, words: Typed },
     /// A watch-only wallet from an offline signer's account: read, then named and sealed.
     Pair { making: Making, scan: Box<Scan>, paired: Option<Pairing> },
     Open,
@@ -36,9 +45,9 @@ pub enum Lock {
 #[derive(Default)]
 pub struct Making {
     name: String,
-    first: String,
-    second: String,
-    passphrase: String,
+    first: Typed,
+    second: Typed,
+    passphrase: Typed,
     error: Option<String>,
 }
 
@@ -47,7 +56,7 @@ pub struct Made {
     name: String,
     vault: Vault,
     phrase: Phrase,
-    passphrase: String,
+    passphrase: Typed,
 }
 
 /// A wallet the lock screen opened.
@@ -67,13 +76,23 @@ enum Step {
 }
 
 impl Lock {
+    /// Asking for a password, or biometrics, afresh.
+    pub fn locked() -> Lock {
+        Lock::Locked {
+            password: Typed::default(),
+            error: None,
+            check: None,
+            prompted: None,
+        }
+    }
+
     /// Where to start: what this install is, the first time; then the password of the wallet last
     /// used, or making the first.
     pub fn start(settings: &Settings) -> Lock {
         match (settings.role, settings.wallets.is_empty()) {
             (None, _) => Lock::Role,
             (Some(_), true) => Lock::Choose,
-            (Some(_), false) => Lock::Locked { password: String::new(), error: None },
+            (Some(_), false) => Lock::locked(),
         }
     }
 }
@@ -107,7 +126,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                 ui.add_space(8.0);
             }
         }
-        Lock::Locked { password, error } => {
+        Lock::Locked { password, error, check, prompted } => {
             if settings.wallets.len() > 1 {
                 theme::caps(ui, palette, "Wallet");
                 let shown = settings.wallets.get(settings.wallet).map(|entry| entry.name.clone()).unwrap_or_default();
@@ -123,8 +142,59 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             }
 
             theme::caps(ui, palette, "Unlock");
-            let field = ui.add(egui::TextEdit::singleline(password).password(true).hint_text("password").desired_width(f32::INFINITY));
-            let enter = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            let biometric = biometrics::enrolled(ui.ctx(), settings);
+
+            // What a check came to: the vault's key, opening it; or why not.
+            if let Some(came) = check.as_ref().and_then(Check::take) {
+                *check = None;
+
+                match came {
+                    Ok(key) => match settings.wallets.get(settings.wallet).map(|entry| Vault::open_with_key(&entry.vault, &key)) {
+                        Some(Ok((vault, book))) => opened = Some(Opened { vault, book }),
+                        Some(Err(why)) => *error = Some(why),
+                        None => *error = Some("there is no such wallet".to_string()),
+                    },
+                    Err(Failure::Canceled) => {}
+                    Err(Failure::Invalidated) => {
+                        biometrics::turn_off(ui.ctx(), settings);
+                        *error = Some(biometrics::CHANGED.to_string());
+                    }
+                    Err(Failure::Failed(why)) => *error = Some(why),
+                }
+            }
+
+            if let Some((enrolled, kind)) = &biometric {
+                let name = settings.wallets.get(settings.wallet).map(|entry| entry.name.clone()).unwrap_or_default();
+                // The browser shows a passkey's prompt only right after a tap.
+                let by_itself = !cfg!(target_arch = "wasm32") && *prompted != Some(settings.wallet) && opened.is_none();
+                let tapped = theme::primary(ui, palette, &format!("Unlock with {}", kind.name()), check.is_none()).clicked();
+
+                if (by_itself || tapped) && check.is_none() {
+                    *prompted = Some(settings.wallet);
+                    *check = Some(Check::start(ui.ctx(), enrolled, &format!("Unlock {name}")));
+                }
+
+                if check.is_some() {
+                    ui.label(RichText::new(format!("Waiting for {}…", kind.name())).small().color(palette.muted));
+                }
+
+                ui.add_space(6.0);
+                ui.label(RichText::new("Or its password:").small().color(palette.muted));
+            }
+
+            let unprotected = settings.wallets.get(settings.wallet).is_some_and(|entry| entry.unprotected);
+            let enter = match unprotected {
+                // No password to type: it opens with a tap.
+                true => {
+                    ui.label(RichText::new("This wallet has no password: anyone who can read this app's storage can open it. Set one in Settings.").small().color(palette.warn));
+                    false
+                }
+                false => {
+                    let field = ui.add(egui::TextEdit::singleline(&mut **password).password(true).hint_text("password").desired_width(f32::INFINITY));
+
+                    field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                }
+            };
 
             if let Some(error) = error {
                 ui.colored_label(palette.bad, error.as_str());
@@ -132,7 +202,13 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
 
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                if theme::primary(ui, palette, "Unlock", !password.is_empty()).clicked() || enter {
+                let unlock = if unprotected { "Open" } else { "Unlock" };
+
+                if theme::primary(ui, palette, unlock, unprotected || !password.is_empty()).clicked() || enter {
+                    if unprotected {
+                        password.clear();
+                    }
+
                     match settings.wallets.get(settings.wallet).map(|entry| Vault::open(&entry.vault, password)) {
                         Some(Ok((vault, book))) => opened = Some(Opened { vault, book }),
                         Some(Err(why)) => *error = Some(why),
@@ -162,7 +238,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                 if theme::quiet(ui, palette, "Restore from words").clicked() {
                     next = Some(Lock::Restore {
                         making: Making::default(),
-                        words: String::new(),
+                        words: Typed::default(),
                     });
                 }
 
@@ -175,7 +251,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                 }
 
                 if !settings.wallets.is_empty() && theme::quiet(ui, palette, "Back").clicked() {
-                    next = Some(Lock::Locked { password: String::new(), error: None });
+                    next = Some(Lock::locked());
                 }
             });
 
@@ -274,7 +350,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             for (position, answer) in asked.iter().zip(answers.iter_mut()) {
                 ui.horizontal(|ui| {
                     ui.add_sized([72.0, 24.0], egui::Label::new(RichText::new(format!("Word {}", position + 1)).color(palette.muted)));
-                    ui.add(egui::TextEdit::singleline(answer).desired_width(f32::INFINITY));
+                    ui.add(egui::TextEdit::singleline(&mut **answer).desired_width(f32::INFINITY));
                 });
             }
 
@@ -299,7 +375,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
         Lock::Restore { making, words } => {
             theme::caps(ui, palette, "Restore from words");
             ui.label(RichText::new("The 12 or 24 words, in order, with spaces between.").small().color(palette.muted));
-            ui.add(egui::TextEdit::multiline(words).desired_rows(3).desired_width(f32::INFINITY).hint_text("word word word …"));
+            ui.add(egui::TextEdit::multiline(&mut **words).desired_rows(3).desired_width(f32::INFINITY).hint_text("word word word …"));
             ui.add_space(6.0);
             making_fields(ui, palette, making, settings.wallets.len(), true);
             ui.add_space(6.0);
@@ -310,7 +386,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                         .and_then(|phrase| Ok((phrase, Vault::create(&password(making)?)?)));
 
                     match restored {
-                        Ok((phrase, vault)) => opened = Some(keep(settings, name(making, settings.wallets.len()), vault, &phrase, making.passphrase.clone())),
+                        Ok((phrase, vault)) => opened = Some(keep(settings, name(making, settings.wallets.len()), vault, &phrase, making.passphrase.to_string())),
                         Err(why) => making.error = Some(why),
                     }
                 }
@@ -338,7 +414,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             },
             (Step::Reread, Lock::Confirm { made, .. }) => Lock::Words(made),
             (Step::Keep, Lock::Confirm { made, .. }) => {
-                opened = Some(keep(settings, made.name, made.vault, &made.phrase, made.passphrase));
+                opened = Some(keep(settings, made.name, made.vault, &made.phrase, made.passphrase.to_string()));
 
                 Lock::Open
             }
@@ -354,8 +430,16 @@ fn making_fields(ui: &mut Ui, palette: &Palette, making: &mut Making, wallets: u
     ui.add(egui::TextEdit::singleline(&mut making.name).hint_text(format!("name, such as Wallet {}", wallets + 1)).desired_width(f32::INFINITY));
     ui.add_space(4.0);
     ui.label(RichText::new("A password seals the wallet on this device. Nothing opens it without it.").small().color(palette.muted));
-    ui.add(egui::TextEdit::singleline(&mut making.first).password(true).hint_text("password").desired_width(f32::INFINITY));
-    ui.add(egui::TextEdit::singleline(&mut making.second).password(true).hint_text("the same again").desired_width(f32::INFINITY));
+    ui.add(egui::TextEdit::singleline(&mut *making.first).password(true).hint_text("password, or none").desired_width(f32::INFINITY));
+    ui.add(egui::TextEdit::singleline(&mut *making.second).password(true).hint_text("the same again").desired_width(f32::INFINITY));
+
+    if making.first.is_empty() && making.second.is_empty() {
+        ui.label(
+            RichText::new("With none, it opens with a tap, and so does it for anyone who can read this app's storage: a phone's backup, or malware. Fine for small sums; turn biometrics on, or set one later in Settings.")
+                .small()
+                .color(palette.warn),
+        );
+    }
     ui.add_space(4.0);
 
     if !words {
@@ -372,7 +456,7 @@ fn making_fields(ui: &mut Ui, palette: &Palette, making: &mut Making, wallets: u
                 .small()
                 .color(palette.warn),
         );
-        ui.add(egui::TextEdit::singleline(&mut making.passphrase).password(true).hint_text("passphrase, or none").desired_width(f32::INFINITY));
+        ui.add(egui::TextEdit::singleline(&mut *making.passphrase).password(true).hint_text("passphrase, or none").desired_width(f32::INFINITY));
     });
 
     if let Some(error) = &making.error {
@@ -380,10 +464,10 @@ fn making_fields(ui: &mut Ui, palette: &Palette, making: &mut Making, wallets: u
     }
 }
 
-/// The password chosen, once it is long enough and typed the same twice.
-fn password(making: &Making) -> Result<String, String> {
-    match (making.first.len() >= 8, making.first == making.second) {
-        (false, _) => Err("use a password of at least 8 characters".to_string()),
+/// The password chosen: none, or one at least 8 characters long, typed the same twice.
+fn password(making: &Making) -> Result<Typed, String> {
+    match (making.first.is_empty() || making.first.len() >= 8, making.first == making.second) {
+        (false, _) => Err("use a password of at least 8 characters, or none".to_string()),
         (_, false) => Err("the two passwords do not match".to_string()),
         (true, true) => Ok(making.first.clone()),
     }
@@ -410,7 +494,7 @@ fn made(making: &Making, wallets: usize) -> Result<Made, String> {
 }
 
 /// Whether the words asked back are the phrase's, whatever their case and spacing.
-fn right(phrase: &Phrase, asked: &[usize; 3], answers: &[String; 3]) -> bool {
+fn right(phrase: &Phrase, asked: &[usize; 3], answers: &[Typed; 3]) -> bool {
     let words = phrase.words();
 
     asked.iter().zip(answers).all(|(position, answer)| words.get(*position).is_some_and(|word| answer.trim().eq_ignore_ascii_case(word)))
@@ -437,6 +521,8 @@ fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, pa
                 name,
                 vault: sealed,
                 current: String::new(),
+                biometric: None,
+                unprotected: vault.bare(),
             });
             settings.wallet = settings.wallets.len() - 1;
         }
@@ -464,6 +550,8 @@ fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &P
                 name,
                 vault: sealed,
                 current: String::new(),
+                biometric: None,
+                unprotected: vault.bare(),
             });
             settings.wallet = settings.wallets.len() - 1;
         }
@@ -529,8 +617,8 @@ mod tests {
             assert!(asked[0] < asked[1] && asked[1] < asked[2] && asked[2] < 12, "{asked:?}");
         }
 
-        assert!(right(&phrase, &[0, 5, 11], &["test".into(), " TEST ".into(), "junk".into()]));
-        assert!(!right(&phrase, &[0, 5, 11], &["test".into(), "test".into(), "test".into()]));
+        assert!(right(&phrase, &[0, 5, 11], &[Typed::new("test".to_string()), Typed::new(" TEST ".to_string()), Typed::new("junk".to_string())]));
+        assert!(!right(&phrase, &[0, 5, 11], &[Typed::new("test".to_string()), Typed::new("test".to_string()), Typed::new("test".to_string())]));
     }
 
     #[test]
@@ -543,19 +631,30 @@ mod tests {
         assert_eq!(opened.book.accounts[0].source, Source::Phrase { account: 0 });
         assert_eq!(Vault::open(&settings.wallets[0].vault, "correct horse").unwrap().1, opened.book);
 
-        let short = Making {
-            first: "short".into(),
-            second: "short".into(),
-            ..Making::default()
-        };
-        let mismatched = Making {
-            first: "long enough".into(),
-            second: "long enougH".into(),
+        assert!(!settings.wallets[0].unprotected);
+
+        let typed = |first: &str, second: &str| Making {
+            first: Typed::new(first.to_string()),
+            second: Typed::new(second.to_string()),
             ..Making::default()
         };
 
-        assert_eq!(password(&short), Err("use a password of at least 8 characters".to_string()));
-        assert_eq!(password(&mismatched), Err("the two passwords do not match".to_string()));
+        assert_eq!(password(&typed("short", "short")), Err("use a password of at least 8 characters, or none".to_string()));
+        assert_eq!(password(&typed("long enough", "long enougH")), Err("the two passwords do not match".to_string()));
+        assert_eq!(password(&typed("", "")).map(|password| password.is_empty()), Ok(true), "none at all is a choice");
+        assert!(password(&typed("", "something")).is_err());
+    }
+
+    #[test]
+    fn a_wallet_without_a_password_opens_with_none_and_says_so() {
+        let mut settings = Settings::default();
+        let phrase = Phrase::generate(12).unwrap();
+        let opened = keep(&mut settings, "Open".to_string(), Vault::create("").unwrap(), &phrase, String::new());
+
+        assert!(settings.wallets[0].unprotected);
+        assert_eq!(Vault::open(&settings.wallets[0].vault, "").unwrap().1, opened.book);
+        assert!(Vault::open(&settings.wallets[0].vault, "").unwrap().0.bare());
+        assert!(Vault::open(&settings.wallets[0].vault, "a guess").is_err());
     }
 
     #[test]

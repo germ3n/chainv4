@@ -1,12 +1,15 @@
 //! An offline signer's page: a request read off the sender's screen, all it asks laid out to check,
 //! and once signed, the signed transaction as a code for the sender to read back. Nothing here
-//! talks to a node: the request says the nonce and fee, and the sender proves the rest.
+//! talks to a node: the request says the nonce and fee, and the sender proves the rest. With
+//! biometrics on, signing waits for one more check.
 
 use {
     super::Ctx,
     super::scan::Scan,
     crate::airgap::{self, Message, Request},
+    crate::biometrics::{self, Check},
     crate::theme,
+    chainv4_ui::biometric::Failure,
     egui::{RichText, Ui},
 };
 
@@ -14,6 +17,8 @@ use {
 pub struct SignState {
     scan: Scan,
     step: Step,
+    /// The biometric check before signing, while it is under way.
+    confirming: Option<Check>,
 }
 
 #[derive(Default)]
@@ -81,6 +86,24 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
     let described = airgap::describe(request);
     let mut next = None;
 
+    // What the check before signing came to: passed, it signs; the fingers or faces enrolled
+    // changed since, the wallet locks, for its password.
+    let mut confirmed = false;
+
+    if let Some(came) = state.confirming.as_ref().and_then(Check::take) {
+        state.confirming = None;
+
+        match came {
+            Ok(_) => confirmed = true,
+            Err(Failure::Canceled) => {}
+            Err(Failure::Invalidated) => {
+                biometrics::turn_off(ctx.wake, ctx.settings);
+                *ctx.lock = Some(biometrics::CHANGED.to_string());
+            }
+            Err(Failure::Failed(why)) => *trouble = Some(why),
+        }
+    }
+
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &described.kind);
         ui.add_space(4.0);
@@ -124,7 +147,12 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if theme::primary(ui, &palette, "Sign", trouble.is_none()).clicked() {
+            let tapped = theme::primary(ui, &palette, "Sign", trouble.is_none() && state.confirming.is_none()).clicked();
+            let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
+
+            if tapped && !confirmed && let Some((enrolled, _)) = biometric {
+                state.confirming = Some(Check::start(ctx.wake, &enrolled, "Sign this transaction"));
+            } else if tapped || confirmed {
                 let signed = ctx
                     .holders
                     .iter()
@@ -140,6 +168,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 
             if theme::quiet(ui, &palette, "Cancel").clicked() {
                 next = Some(Step::Reading);
+                state.confirming = None;
             }
         });
     });

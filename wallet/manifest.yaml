@@ -13,6 +13,9 @@ android:
       min_sdk_version: 24
     uses_permission:
       - name: android.permission.INTERNET
+      # Unlocking with a fingerprint or face, and confirming sends with one: a normal permission,
+      # granted as the app is installed.
+      - name: android.permission.USE_BIOMETRIC
     application:
       label: chainv4 wallet
       # No action bar: the app never draws one, but Android would keep room for it all the same.

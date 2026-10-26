@@ -2537,7 +2537,7 @@ choices, and otherwise the license noted for that crate. MIT-licensed crates use
 the MIT terms reproduced at the top with the copyright lines given here in place
 of chainv4's. Apache-2.0 crates use the Apache License text above.
 
-751 crates.
+755 crates.
 
 accesskit 0.25.1
   MIT OR Apache-2.0
@@ -2594,7 +2594,7 @@ adler2 2.0.1
 
 aead 0.5.2
   MIT OR Apache-2.0
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2019 The RustCrypto Project Developers
   Copyright (c) 2019 MobileCoin, LLC
 
@@ -3052,7 +3052,7 @@ cgl 0.3.2
 
 chacha20 0.9.1
   Apache-2.0 OR MIT
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2019-2023 The RustCrypto Project Developers
 
 chacha20 0.10.2
@@ -3062,12 +3062,12 @@ chacha20 0.10.2
 
 chacha20poly1305 0.10.1
   Apache-2.0 OR MIT
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2019 The RustCrypto Project Developers
 
 cipher 0.4.4
   MIT OR Apache-2.0
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2016-2020 RustCrypto Developers
 
 clang-sys 1.9.1
@@ -3165,6 +3165,11 @@ core-foundation 0.9.4
   Built into: node, explorer and wallet
   Copyright (c) 2012-2013 Mozilla Foundation
 
+core-foundation 0.10.1
+  MIT OR Apache-2.0
+  Built into: explorer and wallet
+  Copyright (c) 2012-2013 Mozilla Foundation
+
 core-foundation-sys 0.8.7
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
@@ -3187,7 +3192,7 @@ cpubits 0.1.1
 
 cpufeatures 0.2.17
   MIT OR Apache-2.0
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2020-2025 The RustCrypto Project Developers
 
 cpufeatures 0.3.1
@@ -3238,7 +3243,7 @@ crypto-bigint 0.7.8
 
 crypto-common 0.1.7
   MIT OR Apache-2.0
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2021 RustCrypto Developers
 
 crypto-common 0.2.2
@@ -3745,7 +3750,7 @@ g2poly 1.2.2
 
 generic-array 0.14.7
   MIT
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2015 Bartłomiej Kamiński
 
 gethostname 1.1.0
@@ -4079,7 +4084,7 @@ indexmap 2.14.2
 
 inout 0.1.4
   MIT OR Apache-2.0
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2022 The RustCrypto Project Developers
   Copyright (c) 2022 Artyom Pavlov
 
@@ -4712,6 +4717,11 @@ objc2-link-presentation 0.2.2
   Built into: explorer and wallet
   objc2-link-presentation contributors. The package has no separate copyright line.
 
+objc2-local-authentication 0.3.2
+  Zlib OR Apache-2.0 OR MIT
+  Built into: explorer and wallet
+  objc2-local-authentication contributors. The package has no separate copyright line.
+
 objc2-metal 0.2.2
   MIT
   Built into: explorer and wallet
@@ -4764,7 +4774,7 @@ once_cell_polyfill 1.70.2
 
 opaque-debug 0.3.1
   MIT OR Apache-2.0
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2018-2024 The RustCrypto Project Developers
 
 orbclient 0.3.55
@@ -4913,7 +4923,7 @@ pollster 0.4.0
 
 poly1305 0.8.0
   Apache-2.0 OR MIT
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2015-2019 RustCrypto Developers
 
 polycool 0.4.0
@@ -5293,6 +5303,16 @@ sec1 0.8.1
   Apache-2.0 OR MIT
   Built into: node, explorer and wallet
   Copyright (c) 2021-2026 The RustCrypto Project Developers
+
+security-framework 3.7.0
+  MIT OR Apache-2.0
+  Built into: explorer and wallet
+  Copyright (c) 2015 Steven Fackler
+
+security-framework-sys 2.17.0
+  MIT OR Apache-2.0
+  Built into: explorer and wallet
+  Copyright (c) 2015 Steven Fackler
 
 self_cell 1.3.0
   Apache-2.0 OR GPL-2.0-only
@@ -5786,7 +5806,7 @@ unicode-xid 0.2.6
 
 universal-hash 0.5.1
   MIT OR Apache-2.0
-  Built into: wallet
+  Built into: explorer and wallet
   Copyright (c) 2019-2020 RustCrypto Developers
 
 unsigned-varint 0.8.0

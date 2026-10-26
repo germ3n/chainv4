@@ -88,6 +88,9 @@ pub struct Ctx<'a> {
     pub vault: &'a mut Option<Vault>,
     /// Whether to lock once the page is drawn, without sealing again: the wallet open was removed.
     pub leave: &'a mut bool,
+    /// Why to lock once the page is drawn, sealing what changed first, for the lock screen to say:
+    /// as when biometrics found the fingers enrolled changed, so the password is needed again.
+    pub lock: &'a mut Option<String>,
     /// What wakes the app when something arrives later, as a key file picked.
     #[cfg_attr(target_os = "android", allow(dead_code))]
     pub wake: &'a egui::Context,

@@ -277,6 +277,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "winit",
+ "zeroize",
 ]
 
 [[package]]

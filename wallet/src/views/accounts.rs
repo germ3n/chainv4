@@ -27,8 +27,8 @@ pub struct AccountsState {
     /// The scheme of a new account's key, in a wallet without a seed phrase: Ed25519 until another
     /// is picked.
     scheme: Option<KeyType>,
-    /// A key's text, pasted, and a key file picked, once it is read.
-    pasted: String,
+    /// A key's text, pasted, and a key file picked, once it is read: wiped as it drops.
+    pasted: crate::lock::Typed,
     picked: Picked,
     error: Option<String>,
     renaming: Option<(usize, String)>,
@@ -176,7 +176,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
             ui,
             |ui| theme::quiet(ui, &palette, "Import").clicked(),
             |ui, width| {
-                ui.add(egui::TextEdit::singleline(&mut state.pasted).password(true).hint_text("ed25519:0x…, secp256k1:0x…").desired_width(width));
+                ui.add(egui::TextEdit::singleline(&mut *state.pasted).password(true).hint_text("ed25519:0x…, secp256k1:0x…").desired_width(width));
             },
         );
 

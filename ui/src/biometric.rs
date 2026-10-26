@@ -15,10 +15,26 @@
 //! - **Elsewhere:** none, and [`availability`] says so.
 //!
 //! What a check comes to arrives later, through a callback, as the prompt is the system's own;
-//! the app is repainted when it does.
+//! the app is repainted when it does. The secret, and every copy of it on the way, is wiped from
+//! memory once done with: in Rust as it drops, in Java once it was read across.
 
-/// A secret biometrics keep: 32 bytes, such as the key a password stretches to.
-pub type Secret = [u8; 32];
+use zeroize::Zeroizing;
+
+/// A secret biometrics keep: 32 bytes, such as the key a password stretches to, wiped as it drops.
+pub type Secret = Zeroizing<[u8; 32]>;
+
+/// A secret read back as bytes, if it is 32 of them.
+fn secret(bytes: &[u8]) -> Option<Secret> {
+    let mut secret = Zeroizing::new([0; 32]);
+
+    if bytes.len() != secret.len() {
+        return None;
+    }
+
+    secret.copy_from_slice(bytes);
+
+    Some(secret)
+}
 
 /// What biometrics are called here, for the app to name them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,6 +229,7 @@ pub(crate) mod android {
     use {
         super::{Availability, Enrolled, Failure, Kind, Secret},
         std::sync::{Arc, Mutex, PoisonError},
+        zeroize::Zeroizing,
     };
 
     /// What the Java side does: keep a secret under a new key, or open one with its key.
@@ -222,15 +239,18 @@ pub(crate) mod android {
         Open = 1,
     }
 
-    /// What a check came to: the bytes out and, for an enrollment, the IV they were sealed with.
-    pub(crate) type Came = Result<(Vec<u8>, Vec<u8>), Failure>;
+    /// What a check came to: the bytes out, wiped as they drop, as they may be the secret; and,
+    /// for an enrollment, the IV they were sealed with.
+    pub(crate) type Came = Result<(Zeroizing<Vec<u8>>, Vec<u8>), Failure>;
 
     /// A check asked for, for the glue to start, or a key to forget, at once.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) enum Asked {
         Check {
             alias: String,
             mode: Mode,
-            data: Vec<u8>,
+            /// The secret to keep, or what it was sealed to: wiped as it drops.
+            data: Zeroizing<Vec<u8>>,
             iv: Vec<u8>,
             title: String,
             subtitle: String,
@@ -246,7 +266,7 @@ pub(crate) mod android {
     struct Asks(Arc<Mutex<Vec<Asked>>>);
 
     fn asks(ctx: &egui::Context) -> Asks {
-        ctx.data_mut(|data| data.get_temp_mut_or_default::<Asks>(egui::Id::new("chainv4-ui biometric")).clone())
+        ctx.data_mut(|data| data.get_temp_mut_or_default::<Asks>(egui::Id::unique("chainv4-ui biometric")).clone())
     }
 
     fn ask(ctx: &egui::Context, asked: Asked) {
@@ -262,11 +282,11 @@ pub(crate) mod android {
     /// What `Biometric.available` last said: 2 ready, 1 nothing enrolled, 0 no strong biometrics or
     /// Android older than 9; and -1 for an APK without the class.
     pub(crate) fn set_level(ctx: &egui::Context, level: i32) {
-        ctx.data_mut(|data| data.insert_temp(egui::Id::new("chainv4-ui biometric level"), level));
+        ctx.data_mut(|data| data.insert_temp(egui::Id::unique("chainv4-ui biometric level"), level));
     }
 
     pub(crate) fn availability(ctx: &egui::Context) -> Availability {
-        match ctx.data(|data| data.get_temp::<i32>(egui::Id::new("chainv4-ui biometric level"))).unwrap_or(-1) {
+        match ctx.data(|data| data.get_temp::<i32>(egui::Id::unique("chainv4-ui biometric level"))).unwrap_or(-1) {
             2 => Availability::Ready(Kind::Biometrics),
             1 => Availability::Unavailable("no fingerprint or face is enrolled: add one in Android's settings".to_string()),
             0 => Availability::Unavailable("this phone has no strong biometrics, or is older than Android 9".to_string()),
@@ -284,7 +304,7 @@ pub(crate) mod android {
         ask(ctx, Asked::Check {
             alias,
             mode: Mode::Enroll,
-            data: secret.to_vec(),
+            data: Zeroizing::new(secret.to_vec()),
             iv: Vec::new(),
             title: format!("Unlock {name} with your fingerprint or face"),
             subtitle: "Confirm it is you to turn this on".to_string(),
@@ -304,12 +324,12 @@ pub(crate) mod android {
         ask(ctx, Asked::Check {
             alias: parts[0].to_string(),
             mode: Mode::Open,
-            data: sealed,
+            data: Zeroizing::new(sealed),
             iv,
             title: reason.to_string(),
             subtitle: String::new(),
             done: Box::new(move |came: Came| {
-                done(came.and_then(|(secret, _)| secret.try_into().map_err(|_| Failure::Failed("the biometric key gave back something else".to_string()))))
+                done(came.and_then(|(opened, _)| super::secret(&opened).ok_or_else(|| Failure::Failed("the biometric key gave back something else".to_string()))))
             }),
         });
     }
@@ -332,6 +352,7 @@ mod web {
         js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array},
         wasm_bindgen::{JsCast, JsValue},
         wasm_bindgen_futures::JsFuture,
+        zeroize::Zeroizing,
     };
 
     /// How long the browser waits for the person.
@@ -398,14 +419,19 @@ mod web {
     }
 
     /// The PRF extension's output for the salt asked about, when the credential gave one.
-    fn prf_output(credential: &JsValue) -> Result<Option<Vec<u8>>, Failure> {
+    fn prf_output(credential: &JsValue) -> Result<Option<Zeroizing<Vec<u8>>>, Failure> {
         let results: Function = get(credential, "getClientExtensionResults").dyn_into().map_err(failure)?;
         let results = results.call0(credential).map_err(failure)?;
         let prf = get(&results, "prf");
         let first = get(&get(&prf, "results"), "first");
 
         if !first.is_undefined() {
-            return Ok(Some(Uint8Array::new(&first).to_vec()));
+            let output = Uint8Array::new(&first);
+            let read = Zeroizing::new(output.to_vec());
+            // The browser's own copy, overwritten once read.
+            output.fill(0, 0, output.length());
+
+            return Ok(Some(read));
         }
 
         if get(&prf, "enabled").as_bool() == Some(false) || prf.is_undefined() {
@@ -422,7 +448,7 @@ mod web {
     }
 
     /// Asks the passkey for its PRF output for a salt: what wraps the secret.
-    async fn assert(id: &[u8], salt: &[u8]) -> Result<Vec<u8>, Failure> {
+    async fn assert(id: &[u8], salt: &[u8]) -> Result<Zeroizing<Vec<u8>>, Failure> {
         let allowed = Array::of1(&object(&[("type", "public-key".into()), ("id", bytes(id))]));
         let credential = call(
             "get",
@@ -440,9 +466,9 @@ mod web {
     }
 
     fn cipher(key: &[u8]) -> Result<ChaCha20Poly1305, Failure> {
-        let key: [u8; 32] = key.get(..32).and_then(|key| key.try_into().ok()).ok_or_else(|| Failure::Failed("the passkey released too short a key".to_string()))?;
+        let key = key.get(..32).ok_or_else(|| Failure::Failed("the passkey released too short a key".to_string()))?;
 
-        Ok(ChaCha20Poly1305::new(Key::from_slice(&key)))
+        Ok(ChaCha20Poly1305::new(Key::from_slice(key)))
     }
 
     pub(super) async fn enroll(name: &str, secret: Secret) -> Result<Enrolled, Failure> {
@@ -489,11 +515,13 @@ mod web {
         };
         let output = assert(id, salt).await?;
         let nonce: [u8; 12] = nonce.as_slice().try_into().map_err(|_| Failure::Failed("the passkey's record is damaged".to_string()))?;
-        let secret = cipher(&output)?
-            .decrypt(Nonce::from_slice(&nonce), wrapped.as_slice())
-            .map_err(|_| Failure::Failed("that passkey is not the one this was kept with".to_string()))?;
+        let opened = Zeroizing::new(
+            cipher(&output)?
+                .decrypt(Nonce::from_slice(&nonce), wrapped.as_slice())
+                .map_err(|_| Failure::Failed("that passkey is not the one this was kept with".to_string()))?,
+        );
 
-        secret.try_into().map_err(|_| Failure::Failed("the passkey's record is damaged".to_string()))
+        super::secret(&opened).ok_or_else(|| Failure::Failed("the passkey's record is damaged".to_string()))
     }
 }
 
@@ -507,6 +535,7 @@ mod mac {
         objc2_foundation::{NSError, NSString},
         objc2_local_authentication::{LAContext, LAError, LAPolicy},
         std::sync::Mutex,
+        zeroize::Zeroizing,
     };
 
     /// The Keychain service the secrets are kept under, each its own account.
@@ -536,7 +565,9 @@ mod mac {
             };
 
             if ok.as_bool() {
-                // SAFETY: the context was evaluated, which is when it has a domain state.
+                // SAFETY: the context was evaluated, which is when it has a domain state. Its
+                // successor, domainState, is macOS 15's alone; this one reads on every macOS.
+                #[allow(deprecated)]
                 let state = unsafe { held.evaluatedPolicyDomainState() }.map(|data| data.to_vec()).unwrap_or_default();
 
                 return then(Ok(state));
@@ -560,7 +591,8 @@ mod mac {
         check(&format!("turn on Touch ID for {name}"), move |checked| {
             done(checked.and_then(|state| {
                 let account = super::random_name()?;
-                security_framework::passwords::set_generic_password(SERVICE, &account, super::hex(&secret).as_bytes())
+                let text = Zeroizing::new(super::hex(&*secret));
+                security_framework::passwords::set_generic_password(SERVICE, &account, text.as_bytes())
                     .map_err(|err| Failure::Failed(format!("the Keychain refused the secret: {err}")))?;
 
                 Ok(Enrolled(format!("macos:{account}:{}", super::hex(&state))))
@@ -584,13 +616,10 @@ mod mac {
                     return Err(Failure::Invalidated);
                 }
 
-                let kept = security_framework::passwords::get_generic_password(SERVICE, &account).map_err(|_| Failure::Invalidated)?;
+                let kept = Zeroizing::new(security_framework::passwords::get_generic_password(SERVICE, &account).map_err(|_| Failure::Invalidated)?);
+                let read = std::str::from_utf8(&kept).ok().and_then(super::unhex).map(Zeroizing::new);
 
-                std::str::from_utf8(&kept)
-                    .ok()
-                    .and_then(super::unhex)
-                    .and_then(|secret| secret.try_into().ok())
-                    .ok_or_else(|| Failure::Failed("the Keychain item is damaged".to_string()))
+                read.and_then(|read| super::secret(&read)).ok_or_else(|| Failure::Failed("the Keychain item is damaged".to_string()))
             }))
         });
     }
@@ -605,6 +634,23 @@ mod mac {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LocalAuthentication answers whether Touch ID can be used, without a prompt: ready on a Mac
+    /// with a finger enrolled, and why not on one without, or on CI.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn touch_id_says_whether_it_can_without_asking() {
+        match mac::availability() {
+            Availability::Ready(kind) => assert_eq!(kind, Kind::TouchId),
+            Availability::Unavailable(why) => assert!(!why.is_empty()),
+        }
+    }
+
+    #[test]
+    fn a_secret_reads_back_from_exactly_32_bytes() {
+        assert_eq!(secret(&[5; 32]).map(|secret| *secret), Some([5; 32]));
+        assert!(secret(&[5; 31]).is_none() && secret(&[5; 33]).is_none());
+    }
 
     #[test]
     fn records_read_back_and_refuse_another_platforms() {
@@ -632,7 +678,7 @@ mod tests {
         assert_eq!(android::availability(&ctx), Availability::Ready(Kind::Biometrics));
 
         let (sent, got) = mpsc::channel();
-        android::enroll(&ctx, "Main", [7; 32], Box::new(move |enrolled| sent.send(enrolled).unwrap()));
+        android::enroll(&ctx, "Main", Zeroizing::new([7; 32]), Box::new(move |enrolled| sent.send(enrolled).unwrap()));
         let mut asked = android::asked(&ctx);
 
         assert!(android::asked(&ctx).is_empty(), "taken once");
@@ -641,9 +687,9 @@ mod tests {
             panic!("an enrollment to start");
         };
 
-        assert_eq!((mode, data), (android::Mode::Enroll, vec![7; 32]));
+        assert_eq!((mode, data.to_vec()), (android::Mode::Enroll, vec![7; 32]));
 
-        done(Ok((vec![1, 2], vec![3])));
+        done(Ok((Zeroizing::new(vec![1, 2]), vec![3])));
         let enrolled = got.recv().unwrap().unwrap();
 
         assert_eq!(enrolled.0, format!("android:{alias}:03:0102"));
@@ -654,11 +700,11 @@ mod tests {
             panic!("an opening to start");
         };
 
-        assert_eq!((mode, data, iv), (android::Mode::Open, vec![1, 2], vec![3]));
+        assert_eq!((mode, data.to_vec(), iv), (android::Mode::Open, vec![1, 2], vec![3]));
 
-        done(Err(Failure::Invalidated));
+        done(Ok((Zeroizing::new(vec![9; 32]), Vec::new())));
 
-        assert_eq!(got.recv().unwrap(), Err(Failure::Invalidated));
+        assert_eq!(got.recv().unwrap().map(|secret| *secret), Ok([9; 32]));
 
         android::forget(&ctx, &enrolled);
 

@@ -7,6 +7,7 @@
 
 mod airgap;
 mod app;
+mod biometrics;
 mod chain;
 mod format;
 mod history;
