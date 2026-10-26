@@ -99,7 +99,7 @@ pub fn scheme_of(address: &Address) -> Option<KeyType> {
         Address::Ed25519(_) => Some(KeyType::Ed25519),
         Address::EdBlake(_) => Some(KeyType::EdBlake),
         Address::Secp256k1(_) => Some(KeyType::Secp256k1),
-        Address::Contract(_) => None,
+        Address::Contract(_) | Address::Evm(_) => None,
     }
 }
 

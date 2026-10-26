@@ -204,6 +204,26 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ### Script layer
 
+- [x] **The EVM.** revm runs Solidity and Vyper contracts beside Lua and WebAssembly (`evm`
+  feature, `evm` in genesis's `engines`): `Code::Evm` deploys, `Tx::EvmCall` calls or pays,
+  `Address::Evm` holds what the EVM creates, and every other account takes part at its 20 bytes,
+  secp256k1 as itself and the rest under a keccak256 alias written down when it first sends an
+  EVM transaction. Balances and nonces are shared, logs become `log` events, EVM gas is chainv4
+  gas. `chainv4 send deploy --evm` and `chainv4 send evm-call`, with `--read` for a dry run. See
+  [EVM](evm.md).
+- [ ] **Ethereum-signed transactions and JSON-RPC.** Legacy, EIP-155, EIP-2930 and EIP-1559
+  transactions signed by secp256k1 keys, and `eth_*` at `POST /rpc`, for MetaMask, Foundry and
+  ethers.
+- [ ] **The EVM in the wallet and explorer.** EVM calls and deploys on their send pages, EVM
+  contracts and their logs on their pages; MetaMask and Foundry guides.
+- [ ] **Calls between the EVM and the other engines.** A precompile the EVM calls Lua and wasm
+  contracts through, and a host function the other way, with values converted at the boundary.
+  Until then they share balances only.
+- [ ] **An alias registered without an EVM transaction.** Coin the EVM sends to an Ed25519
+  account's alias before the account has sent an EVM transaction goes to the secp256k1 account
+  with those bytes. A cheap `Tx` that only registers it, or registering at the first transaction
+  of any kind, would close that gap.
+
 - [x] **A nil value.** `TxCallArgumentType::Nil` (tag 11): Lua's `nil` both ways, so functions
   may return it, `null` in the API, `nil` on the command line, `Value::Nil` in the SDK.
 - [x] **Contracts can move funds.** `accounts.balance` and `accounts.transfer` in Lua, the
@@ -624,3 +644,15 @@ nice governance, voting visuals in explorer
 
 
 On running the PoW consensus on a real network: the protocol side is complete and tested: a configurable secure work hash, Bitcoin-style windowed retargeting with median-time-past and clamped intervals, fork choice by work bounded by max_reorg_depth, optional FFG checkpoints on top, GPU mining, and a VPS-plus-home run from the earlier batch. What I would not call ready: it has had no outside audit, sync pulls from one peer at a time, there is no selfish-mining mitigation beyond what Bitcoin has, and without finality a partition longer than max_reorg_depth blocks never heals on its own. Usable for a test network or a small launch; treat value on it as at risk until audited.
+
+
+What I'd prioritize next, over new features:
+1. A real testnet: 4 to 6 nodes on separate machines and networks, a couple of miners, running for weeks, with restarts, partitions and clock skew. Most of what broke today would have shown up there.
+2. Multi-node scenario tests in CI: in-process networks that fork, partition, rejoin and race miners. Today's two fixes now have tests; the class of bug needs more.
+3. Fuzzing: block, transaction and gossip decoding, and block import, with cargo-fuzz. Anything peers can send you is attack surface.
+4. The network-hardening items in your todo: persistent peer ids, connection limits, bans, gossip validation before relay. A public chain gets probed quickly.
+5. Protocol versioning: this session alone made two network-breaking changes (protocol names; the old genesis rule). Fine before launch, but you'll want version negotiation and a stability policy before others run nodes.
+6. An outside security review before anything has real value: consensus, finality, the VM and the wallet's key handling.
+
+
+evm cant interact with lua/wasm yet

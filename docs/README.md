@@ -19,7 +19,8 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Finality](finality.md) | FFG, authority and depth finality, votes, staking, slashing and signer changes. |
 | [Governance](governance.md) | Changing the consensus on a running chain: the electorate and council kinds, approvals, and how a change takes effect. |
 | [Fees](fees.md) | Gas, scorers, base fees and bids, the block gas limit, and where fees go. |
-| [Contracts](contracts.md) | The Lua and WebAssembly engines, fuel, the host API, lifecycle hooks, calls and proxies. |
+| [Contracts](contracts.md) | The Lua and WebAssembly engines, with the EVM on its own page, fuel, the host API, lifecycle hooks, calls and proxies. |
+| [EVM](evm.md) | Solidity contracts on revm: addresses and aliases, deploying, calling and reading, gas, logs and reverts, and the example counter. |
 | [Contract storage](contract-storage.md) | A guide to how contracts keep state: plain storage, namespaces, the own space, layouts with key kinds and units that upgrades must keep, and moving a contract between engines, with a worked example. |
 | [Token standard](token-standard.md) | The interface every token contract follows, and the registry that lists them. |
 | [Storage](storage.md) | The database, its columns, state layers, undo records and scans. |

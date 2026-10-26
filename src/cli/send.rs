@@ -95,14 +95,24 @@ pub enum TxArgs {
         #[arg(long, value_parser = parse_amount)]
         amount: u256,
     },
-    /// Deploys a contract from a Luau source file or a WebAssembly module.
+    /// Deploys a contract from a Luau source file, a WebAssembly module or EVM bytecode.
+    #[command(group(clap::ArgGroup::new("code").required(true)))]
     Deploy {
         /// A Luau source file.
-        #[arg(long, conflicts_with = "wasm", required_unless_present = "wasm")]
+        #[arg(long, group = "code")]
         lua: Option<PathBuf>,
         /// A WebAssembly module, such as one built with the SDK.
-        #[arg(long)]
+        #[arg(long, group = "code")]
         wasm: Option<PathBuf>,
+        /// EVM init code, as solc --bin or forge build writes it: hex, or the raw bytes.
+        #[arg(long, group = "code")]
+        evm: Option<PathBuf>,
+        /// The EVM constructor's parameter types, such as "(uint256,address)", for its --arg values.
+        #[arg(long, requires = "evm")]
+        constructor: Option<String>,
+        /// A constructor argument, in --constructor's order. Repeat it for each.
+        #[arg(long = "arg", requires = "constructor")]
+        constructor_args: Vec<String>,
     },
     /// Replaces a contract's code. The contract's check_perms must allow the signer.
     Upgrade {
@@ -208,6 +218,38 @@ pub enum TxArgs {
         #[arg(value_parser = parse_argument)]
         args: Vec<TxCallArgumentType>,
     },
+    /// Calls an EVM contract, or pays an EVM address, with Solidity calldata.
+    EvmCall {
+        /// The contract: 0x and 40 hex digits, or any address, such as secp256k1:0x….
+        #[arg(long, value_parser = evm_address)]
+        to: Address,
+        /// The function's signature, such as "bump(uint256)", for the arguments after it.
+        #[arg(long, conflicts_with = "data")]
+        function: Option<String>,
+        /// Calldata in hex, as cast calldata writes it, for what --function cannot encode.
+        #[arg(long)]
+        data: Option<String>,
+        /// What to send to the contract with the call, in the smallest unit.
+        #[arg(long, default_value = "0", value_parser = parse_amount)]
+        value: u256,
+        /// Only run it on the node and print what it returns, as eth_call does: nothing is sent.
+        #[arg(long)]
+        read: bool,
+        /// The function's arguments, in its signature's order: numbers, true or false, addresses
+        /// and hex for bytesN.
+        args: Vec<String>,
+    },
+}
+
+/// An address as --to takes it for the EVM.
+#[cfg(feature = "evm")]
+fn evm_address(text: &str) -> Result<Address, String> {
+    super::evm::evm_address(text)
+}
+
+#[cfg(not(feature = "evm"))]
+fn evm_address(text: &str) -> Result<Address, String> {
+    text.parse().map_err(|err| format!("{text}: {err}"))
 }
 
 /// Signs a transaction with the signer's next nonce, submits it, and unless told not to, waits
@@ -239,15 +281,23 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     let account = ok(agent.get(format!("{node}/accounts/{sender}")).call())?;
     let nonce = account["nonce"].as_u64().ok_or("the node sent no nonce")?;
     let status = ok(agent.get(format!("{node}/status")).call())?;
+    let reads = matches!(args.tx, TxArgs::EvmCall { read: true, .. });
     let tx = transaction(args.tx, sender, &agent, node)?;
     let deploys = matches!(tx, Tx::Deploy { .. });
+    let deploys_evm = matches!(tx, Tx::Deploy { code: Code::Evm(_) });
     let chosen = OfferChoice {
         gas_limit: args.gas_limit,
         max_price: args.max_price,
         tip: args.tip,
     };
     let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, &keypair);
-    let (fee, failure) = offer(&agent, node, &probe, chosen)?;
+    let (fee, failure, estimate) = offer(&agent, node, &probe, chosen)?;
+
+    if reads {
+        println!("{}", read(&estimate)?);
+
+        return Ok(());
+    }
 
     if let Some(error) = failure {
         if !args.anyway {
@@ -270,7 +320,10 @@ pub fn send(args: SendArgs) -> CliResult<()> {
 
     println!("submitted {id}");
 
-    if deploys {
+    if deploys_evm {
+        #[cfg(feature = "evm")]
+        println!("contract {}", crate::vm::evm::create_address(&sender, nonce));
+    } else if deploys {
         // Contract addresses are derived with the chain's hash, which the node says.
         let hash: HashType = status["hash"]
             .as_str()
@@ -308,8 +361,8 @@ fn parse_signer(text: &str) -> CliResult<Signer> {
 
 /// What to offer for a transaction, as the node works it out at POST /offer for a probe signed
 /// with none: the flags given, and for the rest what covers it, its gas limit from a dry run. Also
-/// why that dry run failed, if it did.
-fn offer(agent: &Agent, node: &str, probe: &SignedTx, chosen: OfferChoice) -> CliResult<(FeeOffer, Option<String>)> {
+/// why that dry run failed, if it did, and the dry run itself.
+fn offer(agent: &Agent, node: &str, probe: &SignedTx, chosen: OfferChoice) -> CliResult<(FeeOffer, Option<String>, Value)> {
     let mut body = json!({ "tx": to_hex(&wincode::serialize(probe)?) });
 
     if let Some(gas_limit) = chosen.gas_limit {
@@ -336,7 +389,24 @@ fn offer(agent: &Agent, node: &str, probe: &SignedTx, chosen: OfferChoice) -> Cl
         _ => None,
     };
 
-    Ok((fee, failure))
+    Ok((fee, failure, answer["estimate"].clone()))
+}
+
+/// What an EVM call's dry run returned, for evm-call --read, and the gas it used. A revert is an
+/// error, with its reason.
+pub(super) fn read(estimate: &Value) -> CliResult<String> {
+    if estimate["status"] == "failed" {
+        return Err(estimate["error"].as_str().unwrap_or("it failed, for no reason given").to_string().into());
+    }
+
+    let output = estimate["returned"][0]["value"].as_str().and_then(from_hex).unwrap_or_default();
+
+    #[cfg(feature = "evm")]
+    let shown = super::evm::shown(&output);
+    #[cfg(not(feature = "evm"))]
+    let shown = to_hex(&output);
+
+    Ok(format!("{shown}\ngas {}", estimate["gas_used"]))
 }
 
 /// What a transaction's block must reach before send returns.
@@ -360,6 +430,29 @@ fn code(lua: Option<PathBuf>, wasm: Option<PathBuf>) -> CliResult<Code> {
         (None, Some(path)) => Ok(Code::Wasm(std::fs::read(&path).map_err(|err| format!("cannot read {}: {err}", path.display()))?)),
         (None, None) => Err("give --lua or --wasm".into()),
     }
+}
+
+/// EVM init code from a file, hex as solc writes it or the raw bytes, with its constructor's
+/// arguments after it.
+fn evm_code(path: &Path, constructor: Option<&str>, args: &[String]) -> CliResult<Code> {
+    let bytes = std::fs::read(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+    let code = match std::str::from_utf8(&bytes).ok().and_then(|text| from_hex(text.trim())) {
+        Some(decoded) => decoded,
+        None => bytes,
+    };
+    let code = match constructor {
+        #[cfg(feature = "evm")]
+        Some(types) => [code, super::evm::encode(types, args)?].concat(),
+        #[cfg(not(feature = "evm"))]
+        Some(types) => return Err(format!("this build has no EVM to encode {types} and {} arguments", args.len()).into()),
+        None => code,
+    };
+
+    if code.is_empty() {
+        return Err(format!("{} holds no code", path.display()).into());
+    }
+
+    Ok(Code::Evm(code))
 }
 
 /// A Lua contract's source: the file, with every file it includes put in, compiled here first so a
@@ -471,7 +564,15 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
             from: sender,
             amount: amount(value),
         },
-        TxArgs::Deploy { lua, wasm } => Tx::Deploy { code: code(lua, wasm)? },
+        TxArgs::Deploy {
+            evm: Some(path),
+            constructor,
+            constructor_args,
+            ..
+        } => Tx::Deploy {
+            code: evm_code(&path, constructor.as_deref(), &constructor_args)?,
+        },
+        TxArgs::Deploy { lua, wasm, .. } => Tx::Deploy { code: code(lua, wasm)? },
         TxArgs::Upgrade { contract, lua, wasm } => Tx::Upgrade {
             contract,
             code: code(lua, wasm)?,
@@ -619,9 +720,36 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
             amount: amount(value),
             data: args,
         },
+        TxArgs::EvmCall {
+            to,
+            function,
+            data,
+            value,
+            args,
+            ..
+        } => Tx::EvmCall {
+            to,
+            value: amount(value),
+            input: evm_input(function.as_deref(), data.as_deref(), &args)?,
+        },
     };
 
     Ok(tx)
+}
+
+/// An EVM call's calldata: the function and its arguments encoded, or the hex given. Neither is
+/// a plain payment.
+fn evm_input(function: Option<&str>, data: Option<&str>, args: &[String]) -> CliResult<Vec<u8>> {
+    match (function, data) {
+        #[cfg(feature = "evm")]
+        (Some(signature), _) => Ok(super::evm::call(signature, args)?),
+        #[cfg(not(feature = "evm"))]
+        (Some(signature), _) => Err(format!("this build has no EVM to encode {signature}; give --data").into()),
+        (None, Some(hex)) if args.is_empty() => Ok(from_hex(hex).ok_or_else(|| format!("--data {hex} is not hex"))?),
+        (None, Some(_)) => Err("--data is the whole calldata: arguments go with --function".into()),
+        (None, None) if args.is_empty() => Ok(Vec::new()),
+        (None, None) => Err("give --function for the arguments".into()),
+    }
 }
 
 type Response = Result<ureq::http::Response<ureq::Body>, ureq::Error>;

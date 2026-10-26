@@ -267,7 +267,7 @@ crash-safe chunks, so a stopped one goes on from where it stopped. See
 ## Sending transactions
 
 ```sh
-chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call|bond|unbond|withdraw|slash|approve-signers|withdraw-approval> …
+chainv4 send [OPTIONS] <transfer|mint|burn|deploy|upgrade|call|evm-call|bond|unbond|withdraw|slash|approve-signers|withdraw-approval> …
 ```
 
 `send` looks up the signer's next nonce, signs, posts the transaction to a node, and waits until
@@ -369,6 +369,23 @@ Arguments are `type:value`:
 | `bytes` | `bytes:0x00ff` |
 | `address` | `address:ed25519:0x…`, `address:secp256k1:0x…`, `address:contract:0x…` |
 | `nil` | `nil`, alone: no value, Lua's `nil` |
+
+### EVM contracts
+
+Solidity and Vyper contracts run on the EVM, built from their init code and called with ABI
+calldata. [EVM](docs/evm.md) covers addresses, gas and what a contract sees.
+
+```sh
+chainv4 send deploy --evm contracts/evm/Counter.bin --constructor "(uint256)" --arg 5
+# contract evm:0xc578dcea6338eae42aad8bc6a3411c4df684a4e9
+chainv4 send evm-call --to 0xc578dcea6338eae42aad8bc6a3411c4df684a4e9 --function "bump(uint256)" 3
+chainv4 send evm-call --to 0xc578dcea6338eae42aad8bc6a3411c4df684a4e9 --function "count()" --read
+# 0x0000000000000000000000000000000000000000000000000000000000000008 (8)
+```
+
+`--function` encodes the static types: `uint`, `int`, `address`, `bool` and `bytes1` to
+`bytes32`. Give `--data` with calldata from `cast calldata` for the rest. `--value N` sends coin
+with the call, and `--read` only runs it on the node and prints what it returns.
 
 ## Contract lifecycle
 

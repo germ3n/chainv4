@@ -139,7 +139,9 @@ fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
     let mut touched = vec![Touch::Address(sender)];
 
     match &tx.tx {
-        Tx::Transfer { to, .. } | Tx::Mint { to, .. } | Tx::ContractCall { to, .. } => touched.push(Touch::Address(*to)),
+        Tx::Transfer { to, .. } | Tx::Mint { to, .. } | Tx::ContractCall { to, .. } | Tx::EvmCall { to, .. } => touched.push(Touch::Address(*to)),
+        #[cfg(feature = "evm")]
+        Tx::Deploy { code: crate::structs::code::Code::Evm(_) } => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, tx.nonce))),
         Tx::Deploy { .. } => touched.push(Touch::Address(contract_address(&sender, tx.nonce, hash))),
         Tx::Upgrade { contract, .. } => touched.push(Touch::Address(*contract)),
         Tx::Burn { .. } => {}

@@ -1124,6 +1124,40 @@ fn offers_cover_what_a_transaction_costs_now() {
     assert_eq!(offered_free["estimate"]["status"], "ok", "but still a dry run, to say whether it would fail");
 }
 
+#[cfg(feature = "evm")]
+#[test]
+fn evm_deploys_and_calls_are_dry_run_at_offer_and_read_as_json() {
+    let authority = DevAuthority::dev_keypair();
+    let db = Arc::new(MemoryDb::default());
+    let genesis = Genesis::dev_authority(authority.public());
+    let _chain = Chain::open(db.clone(), &genesis).unwrap();
+    let address = start(db.clone(), None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let init = [from_hex(include_str!("../../contracts/evm/Counter.bin").trim()).unwrap(), crate::structs::u256::u256::new(5).to_be_bytes().to_vec()].concat();
+    let offer = |tx: Tx| {
+        let probe = SignedTx::sign(tx, 0, FeeOffer::NONE, &authority);
+
+        request(address, "POST", "/offer", &json!({ "tx": to_hex(&wincode::serialize(&probe).unwrap()) }).to_string()).2
+    };
+    let deploy = offer(Tx::Deploy { code: Code::Evm(init) });
+    let fees = genesis.fees.as_ref().unwrap().build();
+    let tx = SignedTx::sign(Tx::EvmCall { to: Address::Evm([7; 20]), value: Amount::U128(3), input: vec![0xb2, 0x0e] }, 0, FeeOffer::NONE, &authority);
+
+    assert_eq!(deploy["estimate"]["status"], "ok", "{deploy}");
+    assert_eq!(deploy["estimate"]["deployed"], crate::vm::evm::create_address(&authority.public().address(), 0).to_string());
+    assert!(deploy["gas_limit"].as_u64().unwrap() > deploy["estimate"]["gas_used"].as_u64().unwrap(), "what it used and a quarter");
+
+    // Nothing lives at the address: the call runs, returns nothing, and pays the 3 there.
+    let paid = offer(tx.tx.clone());
+
+    assert_eq!(paid["estimate"]["status"], "ok", "{paid}");
+    assert_eq!(paid["estimate"]["returned"], json!([{ "type": "bytes", "value": "0x" }]));
+    assert!(paid["gas_limit"].as_u64().unwrap() > fees.schedule().intrinsic(&tx), "an EVM call is offered gas to run, not just its intrinsic cost");
+    assert_eq!(
+        json::tx(&tx.tx),
+        json!({ "type": "evm_call", "to": format!("evm:0x{}", "07".repeat(20)), "value": "3", "input": "0xb20e" })
+    );
+}
+
 #[test]
 fn pages_from_allowed_origins_may_call_the_api() {
     let db = Arc::new(MemoryDb::default());

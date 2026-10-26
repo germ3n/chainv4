@@ -201,6 +201,7 @@ fn summary(tx: &Tx) -> String {
         Tx::Mint { to, amount } => format!("mint {} to {to}", amount.to_u256()),
         Tx::Burn { from, amount } => format!("burn {} from {from}", amount.to_u256()),
         Tx::ContractCall { to, amount, data, .. } => format!("call {to} with {} arguments, sending {}", data.len(), amount.to_u256()),
+        Tx::EvmCall { to, value, input } => format!("EVM call to {to} with {} bytes of input, sending {}", input.len(), value.to_u256()),
         Tx::Deploy { .. } => "deploy a contract".to_string(),
         Tx::Upgrade { contract, .. } => format!("upgrade {contract}"),
         Tx::Bond { voter, amount } => format!("bond {} for voter {voter}", amount.to_u256()),

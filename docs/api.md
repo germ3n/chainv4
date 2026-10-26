@@ -251,19 +251,22 @@ field of an offer has a fixed size, so it weighs what the real one will. `gas_li
 `max_price` and `tip` as decimal strings, keep what the sender chose.
 
 **What it does:** works out the offer `chainv4 send` would make now, for the rest:
-- a gas limit of its intrinsic cost, plus the fuel cap's worth for a call, deploy or upgrade;
+- a gas limit of its intrinsic cost, plus the fuel cap's worth for a call, EVM call, deploy or
+  upgrade;
 - a max price of twice the next base price plus the tip under a base fee, or the base price
   plus the tip when senders bid;
 - a tip of 0.
 
-**A dry run** of a call, deploy or upgrade comes first: it runs on a throwaway copy of the
+**A dry run** of a call, EVM call, deploy or upgrade comes first: it runs on a throwaway copy of the
 committed state, as its sender at their next nonce, on a thread apart from the rest of the API.
 Unless the sender chose a gas limit, the offer's is what the run used plus a quarter of what it
 ran past its intrinsic cost, at most the fuel cap's worth; a run that fails gets the cap.
 
 It answers `gas_limit`, `max_price` and `tip`, all zero on a chain without fees, and `estimate`:
-the dry run's `gas_used` and `fuel_used`, and `status`, `ok` or `failed` with `error`; `null` for
-anything else. Clients that cannot run the chain's fee code, such as the
+the dry run's `gas_used` and `fuel_used`, `status`, `ok` or `failed` with `error`, `returned`,
+the values a call returned, and `deployed`, the address a deploy made, each `null` otherwise;
+`null` for anything else. An EVM call returns one `bytes` value, its return data, so
+`estimate.returned` is how `chainv4 send evm-call --read` reads, as `eth_call` does. Clients that cannot run the chain's fee code, such as the
 [explorer](explorer.md) in a browser, use it, and warn before sending what would fail.
 
 ### `POST /call`

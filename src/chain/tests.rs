@@ -1701,3 +1701,6 @@ fn a_full_block_past_wincodes_default_limit_builds_imports_and_reads_back() {
     assert!(matches!(chain.import(&block, now), Ok(Imported::Extended(receipts)) if receipts.len() == block.txs.len()));
     assert_eq!(chain.block(&block.id()).unwrap(), Some(block), "and it reads back from the database");
 }
+
+#[cfg(feature = "evm")]
+mod evm;

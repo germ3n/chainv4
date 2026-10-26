@@ -37,17 +37,23 @@ pub enum Address {
     )]
     #[wincode(tag = 3)]
     Secp256k1([u8; 20]),
+    #[document(
+        summary = "An EVM contract, at the 20-byte address Ethereum gives it: CREATE's from the deployer's address and nonce, or CREATE2's.",
+        see_also = "Engine::Evm",
+    )]
+    #[wincode(tag = 4)]
+    Evm([u8; 20]),
 }
 
 impl Address {
     #[document(
         parent = "Address",
-        summary = "The bytes behind the address, without saying which kind it is: 32, or 20 for secp256k1.",
+        summary = "The bytes behind the address, without saying which kind it is: 32, or 20 for secp256k1 and EVM contracts.",
     )]
     pub fn bytes(&self) -> &[u8] {
         match self {
             Address::Ed25519(bytes) | Address::Contract(bytes) | Address::EdBlake(bytes) => bytes,
-            Address::Secp256k1(bytes) => bytes,
+            Address::Secp256k1(bytes) | Address::Evm(bytes) => bytes,
         }
     }
 
@@ -79,13 +85,14 @@ impl Address {
             1 => wide().map(Address::Contract),
             2 => wide().map(Address::EdBlake),
             3 if bytes[21..].iter().all(|byte| *byte == 0) => bytes[1..21].try_into().ok().map(Address::Secp256k1),
+            4 if bytes[21..].iter().all(|byte| *byte == 0) => bytes[1..21].try_into().ok().map(Address::Evm),
             _ => None,
         }
     }
 
     #[document(
         parent = "Address",
-        summary = "The name of the address's kind, as its text form begins: ed25519, edblake, secp256k1 or contract.",
+        summary = "The name of the address's kind, as its text form begins: ed25519, edblake, secp256k1, contract or evm.",
     )]
     pub fn kind(&self) -> &'static str {
         match self {
@@ -93,6 +100,7 @@ impl Address {
             Address::Contract(_) => "contract",
             Address::EdBlake(_) => "edblake",
             Address::Secp256k1(_) => "secp256k1",
+            Address::Evm(_) => "evm",
         }
     }
 }
@@ -117,13 +125,14 @@ impl FromStr for Address {
             "contract" => Ok(Address::Contract(wide()?)),
             "edblake" => Ok(Address::EdBlake(wide()?)),
             "secp256k1" => bytes.try_into().map(Address::Secp256k1).map_err(|_| ParseAddressError),
+            "evm" => bytes.try_into().map(Address::Evm).map_err(|_| ParseAddressError),
             _ => Err(ParseAddressError),
         }
     }
 }
 
 #[document(
-    summary = "Text that is not an address: it must be a kind, a colon and 64 hex digits, such as ed25519:0x3b6a…, or 40 for secp256k1.",
+    summary = "Text that is not an address: it must be a kind, a colon and 64 hex digits, such as ed25519:0x3b6a…, or 40 for secp256k1 and evm.",
     category = "Primitives",
     see_also = "Address::kind",
 )]
@@ -132,7 +141,7 @@ pub struct ParseAddressError;
 
 impl fmt::Display for ParseAddressError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "an address is ed25519:, edblake: or contract: and 64 hex digits, or secp256k1: and 40")
+        write!(f, "an address is ed25519:, edblake: or contract: and 64 hex digits, or secp256k1: or evm: and 40")
     }
 }
 
@@ -147,7 +156,7 @@ impl Verifiable for Address {
     fn verify(&self) -> Result<(), VerifyError> {
         match self {
             Address::Ed25519(key) | Address::EdBlake(key) => curve_point(key),
-            Address::Contract(_) | Address::Secp256k1(_) => Ok(()),
+            Address::Contract(_) | Address::Secp256k1(_) | Address::Evm(_) => Ok(()),
         }
     }
 }
@@ -161,7 +170,7 @@ mod tests {
 
     #[test]
     fn text_round_trips_for_every_kind() {
-        for address in [Address::Ed25519([1; 32]), Address::Contract([2; 32]), Address::EdBlake([3; 32]), Address::Secp256k1([4; 20])] {
+        for address in [Address::Ed25519([1; 32]), Address::Contract([2; 32]), Address::EdBlake([3; 32]), Address::Secp256k1([4; 20]), Address::Evm([5; 20])] {
             let text = address.to_string();
 
             assert!(text.starts_with(&format!("{}:0x", address.kind())), "{text}");
@@ -171,7 +180,7 @@ mod tests {
 
     #[test]
     fn contracts_memory_holds_every_kind_in_33_bytes() {
-        for address in [Address::Ed25519([1; 32]), Address::Contract([2; 32]), Address::EdBlake([3; 32]), Address::Secp256k1([4; 20])] {
+        for address in [Address::Ed25519([1; 32]), Address::Contract([2; 32]), Address::EdBlake([3; 32]), Address::Secp256k1([4; 20]), Address::Evm([5; 20])] {
             let abi = address.to_abi();
 
             assert_eq!(abi[0], wincode::serialize(&address).unwrap()[0], "the same tag as the encoding");

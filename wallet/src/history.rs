@@ -150,6 +150,8 @@ fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
             Some(name) => format!("Called {name} on {}", format::short(&to.to_string())),
             None => format!("Called {}", format::short(&to.to_string())),
         },
+        (Tx::EvmCall { to, input, .. }, _) if input.is_empty() => format!("Sent through the EVM to {}", format::short(&to.to_string())),
+        (Tx::EvmCall { to, .. }, _) => format!("Called {} on the EVM", format::short(&to.to_string())),
         (Tx::Deploy { .. }, CommittedOutcome::Deployed(contract)) => format!("Deployed {}", format::short(&contract.to_string())),
         (Tx::Deploy { .. }, _) => "Deploy".to_string(),
         (Tx::Upgrade { contract, .. }, _) => format!("Upgraded {}", format::short(&contract.to_string())),

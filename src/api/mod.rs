@@ -1123,7 +1123,7 @@ async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     let open = api.fees.as_ref().map_or(0, |fees| fees.offer(base, api.tx_fuel, &probe, OfferChoice::default()).gas_limit);
     // What runs code is tried first: what it would use, and whether it would fail at all.
     let ran = match probe.tx {
-        Tx::ContractCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
+        Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
         _ => None,
     };
     let offer = match &api.fees {

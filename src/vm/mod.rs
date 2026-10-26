@@ -25,6 +25,8 @@ mod layout;
 pub mod lvm;
 #[cfg(feature = "wasm")]
 pub mod wasm;
+#[cfg(feature = "evm")]
+pub mod evm;
 
 pub use host::{Host, MAX_CALL_DEPTH, MAX_EVENTS, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_VALUE_LEN, Space};
 pub use layout::{Access, Declared, Entry, Field, Kind, Layout, Shape, Typed, TypedField};
@@ -299,6 +301,8 @@ pub trait ScriptEngine: Send + Sync {
 )]
 pub struct Vm {
     engines: Vec<(Engine, Box<dyn ScriptEngine>)>,
+    /// Whether the chain runs EVM contracts, which go through vm::evm rather than a ScriptEngine.
+    evm: bool,
     /// The chain's hash, which contract addresses are derived with.
     hash: HashType,
 }
@@ -315,9 +319,13 @@ impl Vm {
     )]
     pub fn new(allowed: &[Engine], hash: HashType) -> Result<Vm, Engine> {
         let mut engines: Vec<(Engine, Box<dyn ScriptEngine>)> = Vec::new();
+        // revm runs a transaction start to end itself, so the EVM is no ScriptEngine.
+        let evm = cfg!(feature = "evm") && allowed.contains(&Engine::Evm);
 
         for kind in allowed {
             let engine: Box<dyn ScriptEngine> = match kind {
+                #[cfg(feature = "evm")]
+                Engine::Evm => continue,
                 #[cfg(feature = "lvm")]
                 Engine::Lua => Box::new(lvm::LuaEngine::new()),
                 #[cfg(feature = "wasm")]
@@ -328,7 +336,12 @@ impl Vm {
             engines.push((*kind, engine));
         }
 
-        Ok(Vm { engines, hash })
+        Ok(Vm { engines, evm, hash })
+    }
+
+    #[document(parent = "Vm", summary = "Whether the chain runs EVM contracts, and this node was built with the evm feature.")]
+    pub fn runs_evm(&self) -> bool {
+        self.evm
     }
 
     #[document(parent = "Vm", summary = "The chain's hash.")]

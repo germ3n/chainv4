@@ -208,6 +208,9 @@ def extra_text(p):
     # clipboard-win names error-code's license as its own.
     if p["name"] == "clipboard-win":
         return [os.path.join(crate_dir(crate("error-code")), "LICENSE")]
+    # sha3-asm, in revm's lockfile, ships its BSD text with the CRYPTOGAMS code it wraps.
+    if p["name"] == "sha3-asm":
+        return [os.path.join(crate_dir(p), "cryptogams", "LICENSE")]
 
     return []
 

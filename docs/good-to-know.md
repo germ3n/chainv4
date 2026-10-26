@@ -455,6 +455,28 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   level again, since each runs it fresh, before the call is attached: a top level sees no `ctx`
   or `storage`.
 
+## The EVM
+
+- **An Ed25519 account's EVM address is an alias, known only once it sends.** Inside the EVM,
+  every account but secp256k1 ones and EVM contracts goes by the last 20 bytes of the keccak256 of
+  its key. The chain learns whose alias it is when the account first sends an EVM transaction.
+  Coin the EVM pays to an alias before then goes to the secp256k1 account with those bytes, which
+  no one can spend. Send one EVM call before handing your alias to a contract. See
+  [EVM](evm.md#addresses).
+- **EVM contracts are called with `evm-call`, never `call`.** `Tx::ContractCall` to an `evm:`
+  address is refused, and `Tx::Upgrade` cannot replace EVM code: upgradeable EVM contracts use a
+  proxy, as on Ethereum.
+- **EVM gas includes Ethereum's 21,000 base.** revm counts it on top of chainv4's intrinsic cost,
+  so an EVM payment costs more than a plain `transfer`.
+- **No randomness, no gas price, no base fee inside the EVM.** `block.prevrandao`, `tx.gasprice`
+  and `block.basefee` read as 0, and `block.timestamp` is in seconds.
+- **The chain id is the genesis id's first 6 bytes.** A new genesis is a new chain id.
+- **The EVM made new dev chains.** The dev genesis lists `evm` among its engines now, so dev
+  chains from before have other ids, and a build without the `evm` feature is on another dev
+  network.
+- **revm brings older crypto crates.** It pins k256 0.13 and sha3 0.11 beside the newer ones
+  chainv4 uses, so both are built. It has no KZG precompile, since that needs C.
+
 ## Building and testing
 
 - **The end-to-end SDK test needs the wasm32 target.** It builds `contracts/` with cargo:

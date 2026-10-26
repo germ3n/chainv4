@@ -32,7 +32,7 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `reward` | `initial`, what a block mints for its producer, and `halving_interval`, blocks between halvings or `null` for never. |
 | `minter` | The one address allowed to send `Mint`: the development key's, or `null`. `Mint` is a faucet for development chains; a chain of value names nobody, and new coins come from block rewards alone. |
 | `allocations` | Who holds what from the start: a list of `address` and `amount`. |
-| `engines` | Which engines contracts may be deployed for: `lua`, `wasm`. A node built without one refuses the chain. |
+| `engines` | Which engines contracts may be deployed for: `lua`, `wasm`, `evm`. A node built without one refuses the chain. |
 | `tx_limits` | `fuel` and `memory` one deploy, upgrade or call may use. |
 | `token_functions` | The functions that make a contract a token: one that exports them all is in the [token registry](token-standard.md#the-token-registry). The dev chains name ERC-20's six: `allowance`, `approve`, `balance_of`, `total_supply`, `transfer` and `transfer_from`. `[]` keeps no registry. Each is named once. |
 | `max_reorg_depth` | How far back the main chain may be rolled. |

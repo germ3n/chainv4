@@ -238,6 +238,14 @@ pub fn dry_run(ran: &crate::chain::DryRun) -> Value {
         "fuel_used": ran.fuel_used,
         "status": if ran.failure.is_some() { "failed" } else { "ok" },
         "error": ran.failure,
+        "returned": match &ran.effect {
+            Some(crate::chain::Effect::Returned(values)) => values.iter().map(argument).collect::<Vec<_>>().into(),
+            _ => Value::Null,
+        },
+        "deployed": match &ran.effect {
+            Some(crate::chain::Effect::Deployed(address)) => address.to_string().into(),
+            _ => Value::Null,
+        },
     })
 }
 
@@ -401,6 +409,12 @@ pub fn tx(tx: &Tx) -> Value {
             "type": "burn",
             "from": from.to_string(),
             "amount": decimal(amount),
+        }),
+        Tx::EvmCall { to, value, input } => json!({
+            "type": "evm_call",
+            "to": to.to_string(),
+            "value": decimal(value),
+            "input": crate::structs::hex::to_hex(input),
         }),
         Tx::ContractCall { to, func, amount, data } => json!({
             "type": "contract_call",

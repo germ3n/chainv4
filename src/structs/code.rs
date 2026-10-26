@@ -9,7 +9,7 @@ use {
     summary = "A kind of contract, and the engine that runs it. A chain lists the engines it allows in its genesis, and a node refuses to follow a chain whose engines it was built without.",
     category = "VM",
     see_also = "Code, ScriptEngine, Genesis",
-    note = "Each engine sits behind a cargo feature: lvm for Lua and wasm for WebAssembly, both on by default. Tags are pinned, and every variant exists whatever is compiled in, so any node can decode any block.",
+    note = "Each engine sits behind a cargo feature: lvm for Lua, wasm for WebAssembly and evm for the Ethereum Virtual Machine, all on by default. Tags are pinned, and every variant exists whatever is compiled in, so any node can decode any block.",
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, std::hash::Hash, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
@@ -20,6 +20,9 @@ pub enum Engine {
     #[document(summary = "WebAssembly modules, on wasmi.")]
     #[wincode(tag = 1)]
     Wasm,
+    #[document(summary = "Ethereum Virtual Machine bytecode, on revm: Solidity and Vyper contracts as Ethereum runs them, at 20-byte addresses.")]
+    #[wincode(tag = 2)]
+    Evm,
 }
 
 impl Engine {
@@ -33,17 +36,20 @@ impl Engine {
             Engine::Lua,
             #[cfg(feature = "wasm")]
             Engine::Wasm,
+            #[cfg(feature = "evm")]
+            Engine::Evm,
         ]
     }
 
     #[document(
         parent = "Engine",
-        summary = "The engine's name: lua or wasm.",
+        summary = "The engine's name: lua, wasm or evm.",
     )]
     pub fn name(&self) -> &'static str {
         match self {
             Engine::Lua => "lua",
             Engine::Wasm => "wasm",
+            Engine::Evm => "evm",
         }
     }
 }
@@ -66,6 +72,9 @@ pub enum Code {
     #[document(summary = "A WebAssembly module in the binary format. Nodes validate it before storing it.")]
     #[wincode(tag = 1)]
     Wasm(Vec<u8>),
+    #[document(summary = "EVM init code, as solc --bin writes it: it runs once, and what it returns is the contract's code. A deploy sends no value.")]
+    #[wincode(tag = 2)]
+    Evm(Vec<u8>),
 }
 
 impl Code {
@@ -77,17 +86,18 @@ impl Code {
         match self {
             Code::Lua(_) => Engine::Lua,
             Code::Wasm(_) => Engine::Wasm,
+            Code::Evm(_) => Engine::Evm,
         }
     }
 
     #[document(
         parent = "Code",
-        summary = "The code itself: the source's bytes, or the module.",
+        summary = "The code itself: the source's bytes, the module, or the init code.",
     )]
     pub fn bytes(&self) -> &[u8] {
         match self {
             Code::Lua(source) => source.as_bytes(),
-            Code::Wasm(module) => module,
+            Code::Wasm(module) | Code::Evm(module) => module,
         }
     }
 }

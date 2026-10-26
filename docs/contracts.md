@@ -2,7 +2,8 @@
 
 Contracts are Luau scripts or WebAssembly modules (`src/vm/`), each run by an engine behind
 `ScriptEngine`. Genesis's `engines` says which kinds a chain allows, and every node on it must be
-built with those engines.
+built with those engines. EVM contracts, Solidity's and Vyper's, run on revm and have
+[a page of their own](evm.md).
 
 ## Deploying
 

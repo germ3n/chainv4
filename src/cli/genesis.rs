@@ -663,7 +663,8 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         .map(|name| match name.as_str() {
             "lua" => Ok(Engine::Lua),
             "wasm" => Ok(Engine::Wasm),
-            other => Err(format!("engines: unknown engine {other}; use lua or wasm")),
+            "evm" => Ok(Engine::Evm),
+            other => Err(format!("engines: unknown engine {other}; use lua, wasm or evm")),
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut limits = root.object("tx_limits")?;
@@ -1024,6 +1025,8 @@ mod tests {
     fn a_genesis_from_before_max_block_bytes_keeps_its_id() {
         let mut genesis = dev(DevChain::Authority);
         genesis.max_block_bytes = None;
+        // The EVM came later, and joined the dev chains' engines then.
+        genesis.engines.retain(|engine| *engine != Engine::Evm);
         let mut value = to_json(&genesis);
         value.as_object_mut().unwrap().remove("max_block_bytes");
         let read = from_json(&value).unwrap();
@@ -1196,7 +1199,7 @@ mod tests {
             ("/finality/checkpont_interval", json!(8), "finality.checkpont_interval is not a genesis field"),
             ("/max_reorg_depth", json!("100"), "max_reorg_depth must be a whole number"),
             ("/max_block_bytes", json!("4 MiB"), "max_block_bytes must be a whole number"),
-            ("/engines", json!(["lua", "evm"]), "unknown engine evm"),
+            ("/engines", json!(["lua", "solidity"]), "unknown engine solidity"),
             ("/token_functions", json!("transfer"), "token_functions must be a list"),
             ("/consensus/hash", json!("sha1"), "consensus.hash: unknown hash sha1"),
             ("/allocations/0/amount", json!("-5"), "allocations[0].amount: -5 is not a whole amount"),

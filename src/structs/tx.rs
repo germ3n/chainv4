@@ -172,6 +172,17 @@ pub enum Tx {
     )]
     #[wincode(tag = 13)]
     WithdrawChange { version: u64 },
+    #[document(
+        summary = "Calls an EVM contract with raw calldata, as Ethereum does, or sends the coin to any address through the EVM. The sender takes part in the EVM at its 20-byte address: a secp256k1 account as itself, any other under its alias.",
+        params = {
+            to = "The EVM contract, or any account, which then simply receives value.",
+            value = "What the call sends, in the coin's smallest units.",
+            input = "The calldata: a function selector and ABI-encoded arguments, as Solidity expects.",
+        },
+        see_also = "Code::Evm, evm_alias",
+    )]
+    #[wincode(tag = 14)]
+    EvmCall { to: Address, value: Amount, input: Vec<u8> },
 }
 
 #[document(
@@ -243,6 +254,10 @@ impl Verifiable for Tx {
                 amount.verify()?;
 
                 nonzero(amount)
+            }
+            Tx::EvmCall { to, value, .. } => {
+                to.verify()?;
+                value.verify()
             }
             Tx::Burn { from, amount } => {
                 from.verify()?;

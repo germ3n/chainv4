@@ -17,6 +17,8 @@ use {
 };
 
 pub mod db;
+#[cfg(all(feature = "client", feature = "evm"))]
+mod evm;
 pub mod genesis;
 mod layout;
 #[cfg(feature = "client")]

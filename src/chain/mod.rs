@@ -423,7 +423,7 @@ pub fn standard_token_functions() -> Vec<String> {
     category = "Chain",
     see_also = "dry_run",
 )]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DryRun {
     #[document(summary = "The gas it used, intrinsic cost included; 0 on a chain without fees.")]
     pub gas_used: u64,
@@ -431,6 +431,8 @@ pub struct DryRun {
     pub fuel_used: u64,
     #[document(summary = "Why it would fail, or could not run at all; None when it would go through.")]
     pub failure: Option<String>,
+    #[document(summary = "What a contract call would return, or the address a deploy would make: how a read-only call learns what a contract says, without a transaction.")]
+    pub effect: Option<Effect>,
 }
 
 #[document(
@@ -452,17 +454,20 @@ pub fn dry_run(db: Arc<dyn Database>, rules: &Rules, vm: &Arc<Vm>, probe: &Signe
     let mut tx = probe.clone();
     tx.nonce = Accounts::new(&layer).get(&tx.sender())?.nonce;
     tx.fee = crate::structs::tx::FeeOffer { gas_limit, max_price: base_price, tip: u256::ZERO };
-    let height = stored_tip(&*db)?.map_or(0, |tip| tip.header.height) + 1;
+    let tip = stored_tip(&*db)?;
+    let height = tip.as_ref().map_or(0, |tip| tip.header.height) + 1;
+    let timestamp = tip.as_ref().map_or(0, |tip| tip.header.timestamp) + 1;
     let genesis = stored_header_at(&*db, 0)?.map_or_else(|| Hash::zero(rules.hash), |genesis| genesis.id());
-    let context = BlockContext { height, producer: Address::Ed25519([0; 32]), base_price, genesis };
+    let context = BlockContext { height, timestamp, producer: Address::Ed25519([0; 32]), base_price, genesis };
 
     match execute::execute_verified(&layer, &tx, rules, vm, &context) {
         Ok(executed) => Ok(DryRun {
             gas_used: executed.receipt.gas_used,
             fuel_used: executed.receipt.fuel_used,
-            failure: executed.receipt.result.err().map(|failure| failure.to_string()),
+            failure: executed.receipt.result.as_ref().err().map(|failure| failure.to_string()),
+            effect: executed.receipt.result.ok(),
         }),
-        Err(execute::ExecuteError::Invalid(err)) => Ok(DryRun { gas_used: 0, fuel_used: 0, failure: Some(err.to_string()) }),
+        Err(execute::ExecuteError::Invalid(err)) => Ok(DryRun { gas_used: 0, fuel_used: 0, failure: Some(err.to_string()), effect: None }),
         Err(execute::ExecuteError::Db(err)) => Err(err),
     }
 }
@@ -1309,6 +1314,7 @@ impl Chain {
         let Draft { txs, proofs, producer, timestamp, deadline, difficulty } = draft;
         let context = BlockContext {
             height: parent.height + 1,
+            timestamp,
             producer,
             base_price: self.base_price_after(parent),
             genesis: self.genesis(),
@@ -2106,6 +2112,7 @@ impl Chain {
         let layer = Arc::new(State::new(below.clone()));
         let context = BlockContext {
             height,
+            timestamp: block.header.timestamp,
             producer: block.header.producer,
             base_price: block.header.base_price,
             genesis: self.genesis(),
@@ -2345,6 +2352,7 @@ impl fmt::Display for ChainError {
                 match engine {
                     Engine::Lua => "lvm",
                     Engine::Wasm => "wasm",
+                    Engine::Evm => "evm",
                 }
             ),
         }

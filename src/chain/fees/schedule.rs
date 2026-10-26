@@ -212,6 +212,7 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::Mint { to, .. } => ("mint", *to),
         Tx::Burn { .. } => ("burn", sender),
         Tx::ContractCall { to, .. } => ("call", *to),
+        Tx::EvmCall { to, .. } => ("evm_call", *to),
         Tx::Deploy { .. } => ("deploy", sender),
         Tx::Upgrade { contract, .. } => ("upgrade", *contract),
         Tx::Bond { .. } => ("bond", sender),

@@ -104,7 +104,7 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `sha256`, `blake3`, `blake2s`, `blake2b`, `keccak256`, `xxh3` | Hash algorithms. |
 | `ed25519`, `edblake`, `secp256k1` | Key schemes. |
 | `mnemonic` | Seed phrases: BIP39 words, and keys derived from them for every scheme built in. |
-| `lvm`, `wasm` | The contract engines; either pulls in `vm`. |
+| `lvm`, `wasm`, `evm` | The contract engines; any pulls in `vm`. `evm` is revm, and pulls in `keccak256`. |
 | `rocksdb` | The RocksDB backend. |
 | `node` | The node, the chain and the CLI. |
 | `http` | The HTTP API. |

@@ -175,6 +175,8 @@ impl fmt::Display for Failure {
 pub struct BlockContext {
     #[document(summary = "The block's height.")]
     pub height: u64,
+    #[document(summary = "The block's timestamp, in milliseconds since the Unix epoch: what EVM's TIMESTAMP reads, in seconds.")]
+    pub timestamp: u64,
     #[document(summary = "Who produced it, and so gets its fees.")]
     pub producer: Address,
     #[document(summary = "Its base price of gas.")]
@@ -355,7 +357,7 @@ pub(crate) fn execute_verified(
     }
 
     let layer = Arc::new(State::new(block.clone()));
-    let (result, contracted) = run(&layer, tx, sender, rules, limits, vm, context.height);
+    let (result, contracted) = run(&layer, tx, sender, rules, limits, vm, context);
     let Contracted {
         fuel_used,
         mut events,
@@ -535,8 +537,9 @@ fn run(
     rules: &Rules,
     limits: Limits,
     vm: &Arc<Vm>,
-    height: u64,
+    context: &BlockContext,
 ) -> (Result<Effect, Failure>, Contracted) {
+    let height = context.height;
     let accounts = Accounts::new(layer);
     let staking = |run: &dyn Fn(&Validators, &StakingRules, u64) -> Result<(), RegistryError>| {
         let Some(finality) = &rules.staking else {
@@ -557,6 +560,10 @@ fn run(
             (moved(accounts.credit(to, amount.to_u256()).map(|_| ())), Contracted::default())
         }
         Tx::Burn { from, amount } => (moved(accounts.debit(from, amount.to_u256()).map(|_| ())), Contracted::default()),
+        Tx::ContractCall { to: Address::Evm(_), .. } => (
+            Err(Failure::Contract(VmError::Runtime("an EVM contract is called with an EVM call, with its calldata".to_string()))),
+            Contracted::default(),
+        ),
         Tx::ContractCall {
             to,
             func,
@@ -580,6 +587,28 @@ fn run(
                 Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
             }
         }
+        #[cfg(feature = "evm")]
+        Tx::Deploy { code: crate::structs::code::Code::Evm(init) } if vm.runs_evm() => {
+            evm(layer, signed, sender, rules, limits, context, crate::vm::evm::EvmAction::Create(init.clone()))
+        }
+        #[cfg(feature = "evm")]
+        Tx::EvmCall { to, value, input } if vm.runs_evm() => evm(
+            layer,
+            signed,
+            sender,
+            rules,
+            limits,
+            context,
+            crate::vm::evm::EvmAction::Call { to: *to, value: value.to_u256(), input: input.clone() },
+        ),
+        Tx::EvmCall { .. } => (Err(Failure::EngineNotAllowed(Engine::Evm)), Contracted::default()),
+        Tx::Upgrade { code, .. } | Tx::Deploy { code } if code.engine() == Engine::Evm && !vm.runs_evm() => {
+            (Err(Failure::EngineNotAllowed(Engine::Evm)), Contracted::default())
+        }
+        Tx::Upgrade { contract: Address::Evm(_), .. } | Tx::Upgrade { code: crate::structs::code::Code::Evm(_), .. } => (
+            Err(Failure::Contract(VmError::Runtime("EVM contracts are upgraded as Ethereum's are, through a proxy, not by Upgrade".to_string()))),
+            Contracted::default(),
+        ),
         Tx::Deploy { code } => {
             if vm.engine(code.engine()).is_none() {
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
@@ -680,6 +709,47 @@ fn run(
 
             (moved(Changes::new(layer).withdraw(&sender, *version, epoch, rules.approval_epochs, &*rules.governance)), Contracted::default())
         }
+    }
+}
+
+/// Runs an EVM create or call: gas is the chain's gas one for one, so it burns fuel at the chain's
+/// rate, and the EVM may use as much as the fuel left allows.
+#[cfg(feature = "evm")]
+fn evm(
+    layer: &Arc<State>,
+    signed: &SignedTx,
+    sender: Address,
+    rules: &Rules,
+    limits: Limits,
+    context: &BlockContext,
+    action: crate::vm::evm::EvmAction,
+) -> (Result<Effect, Failure>, Contracted) {
+    use crate::vm::evm::{self, EvmBlock, EvmReturned};
+
+    let fuel_per_gas = rules.fees.as_ref().map_or(1, |fees| fees.schedule().fuel_for(1).max(1));
+    let block = EvmBlock {
+        height: context.height,
+        timestamp: context.timestamp,
+        producer: context.producer,
+        chain_id: evm::chain_id(&context.genesis),
+    };
+
+    match evm::run(layer, &sender, signed.nonce, action, limits.fuel / fuel_per_gas, limits.memory as u64, block) {
+        Ok(ran) => {
+            let contracted = Contracted {
+                fuel_used: ran.gas_used.saturating_mul(fuel_per_gas),
+                events: ran.events,
+                trace: Default::default(),
+            };
+            let result = match ran.result {
+                Ok(EvmReturned::Created(address)) => Ok(Effect::Deployed(address)),
+                Ok(EvmReturned::Output(output)) => Ok(Effect::Returned(vec![TxCallArgumentType::Bytes(output)])),
+                Err(err) => Err(Failure::Contract(err)),
+            };
+
+            (result, contracted)
+        }
+        Err(err) => (Err(Failure::Registry(RegistryError::Db(err))), Contracted::default()),
     }
 }
 

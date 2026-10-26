@@ -74,6 +74,9 @@ pub fn touched(signed: &SignedTx, status: &TxStatus) -> BTreeSet<Address> {
         Tx::Upgrade { contract, .. } => {
             touched.insert(*contract);
         }
+        Tx::EvmCall { to, .. } => {
+            touched.insert(*to);
+        }
         Tx::Deploy { .. }
         | Tx::Bond { .. }
         | Tx::Unbond { .. }

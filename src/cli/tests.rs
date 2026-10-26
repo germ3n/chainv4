@@ -606,7 +606,7 @@ mod send {
         let contract = deployed_at(&deployer, 0, crate::structs::hash::HashType::default_chain());
         let call = |function: &str, args: Vec<TxCallArgumentType>| TxArgs::Call { to: contract, function: function.to_string(), amount: u256::ZERO, args };
 
-        send(running.args(TxArgs::Deploy { lua: Some(source), wasm: None })).unwrap();
+        send(running.args(TxArgs::Deploy { lua: Some(source), wasm: None, evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
         send(running.args(call("bump", vec![TxCallArgumentType::I64(2)]))).unwrap();
         let refused = send(running.args(call("boom", Vec::new())));
         let anyway = send(SendArgs { anyway: true, ..running.args(call("boom", Vec::new())) });
@@ -626,6 +626,62 @@ mod send {
         assert!(calls[0].fee.gas_limit < cap(&calls[0]) / 10, "the bump's limit is what it used and a quarter, not the cap: {}", calls[0].fee.gas_limit);
         assert!(calls[0].fee.gas_limit > fees.schedule().intrinsic(&calls[0]));
         assert_eq!(calls[1].fee.gas_limit, cap(&calls[1]), "a call that would fail keeps the cap, things may change");
+    }
+
+    #[cfg(feature = "evm")]
+    #[test]
+    fn evm_contracts_deploy_take_calls_and_read_from_the_cli() {
+        use crate::structs::tx::{FeeOffer, SignedTx, Tx};
+
+        let running = Running::start(true);
+        let deployer = DevAuthority::dev_keypair();
+        let counter = crate::vm::evm::create_address(&deployer.public().address(), 0);
+        let bin = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/contracts/evm/Counter.bin"));
+        let call = |function: &str, args: &[&str], read: bool| TxArgs::EvmCall {
+            to: counter,
+            function: Some(function.to_string()),
+            data: None,
+            value: u256::ZERO,
+            read,
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+        };
+
+        send(running.args(TxArgs::Deploy {
+            lua: None,
+            wasm: None,
+            evm: Some(bin),
+            constructor: Some("(uint256)".to_string()),
+            constructor_args: vec!["5".to_string()],
+        }))
+        .unwrap();
+        send(running.args(call("bump(uint256)", &["3"], false))).unwrap();
+        send(running.args(call("count()", &[], true))).expect("a read sends nothing and fails at nothing");
+        let refused = send(running.args(call("bump(uint256)", &["0"], false)));
+        let wrong = send(running.args(call("bump(uint256)", &["three"], false)));
+
+        // What --read prints, from the node's dry run of count().
+        let probe = SignedTx::sign(Tx::EvmCall { to: counter, value: Amount::U128(0), input: super::super::evm::call("count()", &[]).unwrap() }, 3, FeeOffer::NONE, &deployer);
+        let answer: serde_json::Value = serde_json::from_str(
+            &ureq::post(format!("http://{}/offer", running.api))
+                .header("content-type", "application/json")
+                .send(serde_json::json!({ "tx": crate::structs::hex::to_hex(&wincode::serialize(&probe).unwrap()) }).to_string())
+                .unwrap()
+                .body_mut()
+                .read_to_string()
+                .unwrap(),
+        )
+        .unwrap();
+        let shown = super::super::send::read(&answer["estimate"]).unwrap();
+        let node = running.stop();
+
+        assert!(shown.starts_with(&format!("0x{:064x} (8)", 8)), "five and three: {shown}");
+        assert!(refused.unwrap_err().to_string().contains("nothing to add"), "the revert's reason, from the dry run");
+        assert!(wrong.unwrap_err().to_string().contains("three as uint256"));
+
+        let sent: Vec<Tx> = (1..=node.chain().tip().height).flat_map(|height| node.chain().block_at(height).unwrap().unwrap().txs).map(|tx| tx.tx).collect();
+
+        assert_eq!(sent.iter().filter(|tx| matches!(tx, Tx::EvmCall { .. })).count(), 1, "the bump alone: the read and the refused were never sent");
+        assert!(matches!(&sent[0], Tx::Deploy { code: crate::structs::code::Code::Evm(code) } if code.ends_with(&u256::new(5).to_be_bytes())), "the constructor's argument after the code");
     }
 
     #[test]

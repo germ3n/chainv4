@@ -277,7 +277,7 @@ impl Fees {
         };
         let gas_limit = chosen.gas_limit.unwrap_or_else(|| {
             let fuel = match probe.tx {
-                Tx::ContractCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } => self.schedule.for_fuel(tx_fuel),
+                Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } => self.schedule.for_fuel(tx_fuel),
                 _ => 0,
             };
 
