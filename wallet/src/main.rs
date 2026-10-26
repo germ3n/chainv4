@@ -1,8 +1,8 @@
 //! Starts the wallet on the desktop and in the browser. Android loads the library itself, from
 //! `android_main`.
 
-/// The node the desktop app talks to unless told otherwise.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+/// The node the desktop app, and the browser extension, talk to unless told otherwise.
+#[cfg(not(target_os = "android"))]
 const LOCAL_NODE: &str = "http://127.0.0.1:8080";
 
 /// Runs the desktop app: `wallet --node http://host:port`, or CHAINV4_NODE, or the node it talked
@@ -42,7 +42,8 @@ fn main() -> eframe::Result {
 }
 
 /// Runs the web app in the page's canvas. It talks to the node in ?node=, or else to the node it
-/// talked to last, or else to the node that served the page.
+/// talked to last, or else to the node that served the page; in the browser extension, which no
+/// node serves, to one on this machine.
 #[cfg(target_arch = "wasm32")]
 fn main() {
     use eframe::wasm_bindgen::JsCast;
@@ -53,6 +54,11 @@ fn main() {
         let window = web_sys::window().expect("a page has a window");
         let location = window.location();
         let origin = location.origin().unwrap_or_default();
+        let served = location.protocol().unwrap_or_default();
+        let fallback = match served.as_str() {
+            "chrome-extension:" | "moz-extension:" => LOCAL_NODE.to_string(),
+            _ => origin,
+        };
         let node = location
             .search()
             .ok()
@@ -67,7 +73,7 @@ fn main() {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(move |creation| Ok(chainv4_wallet::wallet(creation, node, &origin))),
+                Box::new(move |creation| Ok(chainv4_wallet::wallet(creation, node, &fallback))),
             )
             .await;
 

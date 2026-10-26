@@ -226,6 +226,7 @@ impl Wallet {
             .trim_end_matches('/')
             .to_string();
         let palette = if settings.light_theme { LIGHT } else { DARK };
+        announce(&settings.node);
         theme::install_fonts(&creation.egui_ctx);
         theme::apply(&creation.egui_ctx, &palette);
         let lock = Lock::start(&settings);
@@ -257,6 +258,7 @@ impl Wallet {
     /// genesis.
     fn connect(&mut self, node: &str) {
         self.settings.node = node.trim().trim_end_matches('/').to_string();
+        announce(&self.settings.node);
         self.node = Node::new(&self.settings.node, client(&self.settings), self.wake.clone());
         self.chain = Chain::default();
         self.asked_status = None;
@@ -752,6 +754,18 @@ fn client(settings: &Settings) -> Result<chainv4_ui::net::Client, String> {
         (_, true) => Ok(chainv4_ui::net::Client::direct()),
         (_, false) => chainv4_ui::net::Client::for_setting(&settings.proxy),
     }
+}
+
+/// Tells the page which node the wallet talks to, as window.chainv4Node: the browser extension's
+/// page reads it, and asks the browser for leave to reach that node, which an extension needs.
+fn announce(node: &str) {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(window) = web_sys::window() {
+        let _ = js_sys::Reflect::set(&window, &"chainv4Node".into(), &node.into());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = node;
 }
 
 fn now_ms() -> u64 {

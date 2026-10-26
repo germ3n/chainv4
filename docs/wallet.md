@@ -412,6 +412,43 @@ package is `chainv4-wallet`. Its binary, `wallet` (`src/main.rs`), starts it on 
 the browser. Android starts the library at `android_main`, which hands it to the `ui` crate's
 `android::run`.
 
+## Browser extension
+
+`wallet/build-extension.sh` builds the wallet as an extension for Chrome and for Firefox, into
+`wallet/target/extension`: a folder for each, to load unpacked, and a zip of each, for the stores.
+It needs trunk, python3 and zip; `--browser chrome` or `--browser firefox` builds one.
+
+```sh
+wallet/build-extension.sh
+# Chrome: chrome://extensions, Developer mode, Load unpacked, wallet/target/extension/chrome
+# Firefox: about:debugging, This Firefox, Load Temporary Add-on, wallet/target/extension/firefox/manifest.json
+```
+
+**What it is:** trunk's web build, as a node serves from `/wallet/`, with the extension's own files
+from `wallet/extension/`:
+- **Manifest V3** for each browser: `manifest.chrome.json` and `manifest.firefox.json`, the version
+  taken from `wallet/Cargo.toml`. Their CSP lets the page run WebAssembly
+  (`'wasm-unsafe-eval'`) and nothing inline, so the script trunk writes into `index.html`, which
+  starts the wasm, moves to `boot.js`.
+- **Beside the page, not a popup:** the toolbar button opens Chrome's side panel or Firefox's
+  sidebar (`background.js`). It stays open as you browse, so a biometric prompt, a camera scan or
+  MetaMask does not close it, as they would a popup; and at a side panel's width, the wallet
+  takes its phone layout.
+- **Nodes, as they are needed:** the extension asks for no site at install. Its manifest lists
+  every `http` and `https` host as optional; the wallet says which node it talks to
+  (`window.chainv4Node`), and `access.js` shows a bar above it, **Let the wallet reach its node**,
+  whose **Allow** asks the browser for that one host. Until then the node's answers are blocked.
+- **Its default node** is `http://127.0.0.1:8080`, as no node serves the extension's page; name
+  another under Settings.
+- **Storage** is the extension's own `localStorage`, apart from the web app's at any node: wallets
+  made in one are not in the other, and removing the extension deletes its wallets. Keep the words.
+
+**Biometrics** are a passkey's here too, made for the extension's own origin, which browsers
+support unevenly: where a browser refuses, the password stays.
+
+**CI:** `.github/workflows/extension.yml` builds both on every push to master, keeps the zips as
+artifacts, and attaches them to a `v*` tag's release.
+
 ## Android
 
 `wallet/build-android.sh` builds the Android app with [xbuild](https://github.com/rust-mobile/xbuild),

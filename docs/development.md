@@ -128,9 +128,10 @@ different dev chains, which puts it on a different network.
   ring's C;
 - it runs clippy and the tests on a matrix of feature subsets.
 
-**Builds** (`.github/workflows/build.yml`, `android.yml`), on every push to master and on tags:
-the node's release binaries with the wiki, the example contracts, and the wallet's and the
-explorer's APKs, which a `v*` tag also attaches to its release.
+**Builds** (`.github/workflows/build.yml`, `android.yml`, `extension.yml`), on every push to master and on tags:
+the node's release binaries with the wiki, the example contracts, the wallet's and the
+explorer's APKs, and the wallet's Chrome and Firefox extensions, which a `v*` tag also attaches to
+its release.
 
 The matrix:
 - covers each hash and key scheme on its own;

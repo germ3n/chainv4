@@ -198,19 +198,22 @@ trust. The explorer runs the same client and shows the balances it proved. See
 
 ### The wallet
 
-`wallet/` is a light wallet for the desktop, the browser and Android, in egui. Its accounts come
-from a seed phrase, each with an Ed25519, an EdBlake and an Ethereum address; its keys are sealed
-with a password on the device, and it shows only what it proved itself:
+`wallet/` is a light wallet for the desktop, the browser, a Chrome or Firefox extension and
+Android, in egui. Its accounts come from a seed phrase, each with an Ed25519, an EdBlake and an
+Ethereum address; its keys are sealed with a password on the device, or opened with a fingerprint,
+Touch ID or a passkey, and it shows only what it proved itself:
 
 ```sh
 cd wallet && cargo run --release -- --node http://127.0.0.1:8080
 cd wallet && trunk build --release    # then: chainv4 --http … --index-addresses --wallet wallet/dist
 wallet/build-android.sh --install     # an Android APK, built with xbuild
+wallet/build-extension.sh             # Chrome and Firefox extensions, in wallet/target/extension
 ```
 
 Balances of the coin and every listed token at each address, sending with a reviewed fee from the
 address picked, receiving with a QR code, several accounts and several wallets, and a history from
-the node's address index. CI builds the APKs on every push, and attaches them to `v*` releases.
+the node's address index. CI builds the APKs and the extensions on every push, and attaches them to
+`v*` releases.
 See [Wallet](docs/wallet.md).
 
 ### The explorer

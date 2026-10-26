@@ -284,6 +284,11 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   Touch ID. Changing the password turns them off, and so does a change in the fingers or faces
   enrolled. On macOS Touch ID is a check, not a lock on the key, as an unsigned app cannot tie a
   Keychain item to biometry.
+- **The browser extension is the web build in a side panel.** `wallet/build-extension.sh` moves
+  trunk's inline boot script to `boot.js`, as MV3 runs none, and adds manifests for Chrome and
+  Firefox. It asks for each node's host when the wallet first talks to it, from a click, as
+  browsers require. Chrome stable no longer loads unpacked extensions from `--load-extension`;
+  Chromium, or Developer mode's Load unpacked, does.
 - **A wallet may have no password.** It is sealed with an empty one and says so on its lock
   screen; `WalletEntry::unprotected` marks it. Settings adds or removes one.
 - **Wallet secrets are zeroized.** `Vault`'s key, the opened vault's JSON, `Words`, typed
