@@ -1980,13 +1980,19 @@ impl Chain {
     fn reorganize(&mut self, new_tip: &Block, work: u256, justified: bool) -> Result<Imported, ImportError> {
         let mut branch = vec![new_tip.clone()];
         let mut fork = new_tip.header.parent;
+        // How deep a reorg may go is measured from this node's tip, not along the branch, which may
+        // be far longer: a node that mined a few blocks of its own follows a peer's chain that
+        // grew from below them, however long it is.
+        let floor = self.tip.height.saturating_sub(self.max_reorg_depth);
 
         while !self.on_main_chain(&fork)? {
-            if branch.len() as u64 > self.max_reorg_depth {
+            let block = self.block(&fork)?.ok_or_else(|| missing(&fork))?;
+
+            // Its parent, the deepest the split could be, is below the floor.
+            if block.header.height <= floor {
                 break;
             }
 
-            let block = self.block(&fork)?.ok_or_else(|| missing(&fork))?;
             fork = block.header.parent;
             branch.push(block);
         }

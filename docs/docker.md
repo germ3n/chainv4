@@ -160,7 +160,8 @@ docker/pow.sh logs                # on the VPS: follow the node's log
 2. **`push`** copies the repository by rsync, logging in with `-i KEY` and `-p PORT` when given
    (or `SSH_KEY` and `SSH_PORT`), without build output, `.git`, databases or keys, to
    `chainv4/` in the VPS's home (`REMOTE_DIR`).
-3. **`up`** runs `docker/compose.sh up -d --build`, on Docker or Podman, warns when the machine has under 4 GiB of memory
+3. **`up`** runs `docker/compose.sh up -d --build --force-recreate`, on Docker or Podman, so an
+   update restarts on the new image (podman-compose keeps the old one otherwise), warns when the machine has under 4 GiB of memory
    and swap for the first build, waits for the node, and says which ports to open: **UDP 4001**
    for peers, TCP 80 and 443 for the explorer and wallet, in `ufw` and in the provider's firewall.
 4. **`join`** mines on the CPU, or on the GPU with `--gpu` (`GPU=1`), and asks which in a

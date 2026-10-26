@@ -18,6 +18,17 @@ use {
     tokio::sync::mpsc as async_mpsc,
 };
 
+/// Whether an address is on loopback: 127.0.0.0/8 or ::1.
+fn loopback(address: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+
+    match address.iter().next() {
+        Some(Protocol::Ip4(ip)) => ip.is_loopback(),
+        Some(Protocol::Ip6(ip)) => ip.is_loopback(),
+        _ => false,
+    }
+}
+
 /// The names a node's protocols and topics go by: its protocol name and network in each, so nodes
 /// of two chains share no DHT, no sync and no gossip, and tell each other apart on identify.
 struct Names {
@@ -462,7 +473,12 @@ impl Net {
                     return true;
                 }
 
-                for address in info.listen_addrs {
+                // A peer's loopback addresses reach it only from its own machine: kept when the
+                // peer sees this node on loopback too, so nodes on one machine still find each
+                // other, and left out otherwise, so the DHT never hands them to anyone else.
+                let local = loopback(&info.observed_addr);
+
+                for address in info.listen_addrs.into_iter().filter(|address| local || !loopback(address)) {
                     self.swarm.behaviour_mut().kad.add_address(&peer_id, address);
                 }
 
@@ -543,9 +559,9 @@ impl Net {
                         log::info!("[net] could not reach bootnode {}, trying again within {}s while short of peers: {error}", wanted.address, BOOTNODE_EVERY.as_secs());
                         wanted.dialing = None;
                     }
-                    // A peer Kademlia knew, which may well be gone or behind NAT.
-                    (None, Some(peer)) if self.tried.contains_key(&peer) => log::debug!("[net] could not connect to {peer}: {error}"),
-                    (None, Some(peer)) => log::warn!("[net] could not connect to {peer}: {error}"),
+                    // Kademlia's own dials, and discovery's: peers it heard of, often gone or
+                    // behind NAT, so failing is ordinary.
+                    (None, Some(peer)) => log::debug!("[net] could not connect to {peer}: {error}"),
                     (None, None) => log::warn!("[net] could not connect: {error}"),
                 }
 
@@ -636,6 +652,19 @@ mod tests {
             bootnodes: Vec::new(),
             target_peers: crate::net::DEFAULT_TARGET_PEERS,
             backlog,
+        }
+    }
+
+    #[test]
+    fn loopback_addresses_are_told_apart() {
+        for (address, is) in [
+            ("/ip4/127.0.0.1/udp/4001/quic-v1", true),
+            ("/ip4/127.0.2.2/udp/53184/quic-v1", true),
+            ("/ip6/::1/udp/4001/quic-v1", true),
+            ("/ip4/150.40.117.173/udp/4001/quic-v1", false),
+            ("/ip4/192.168.1.20/udp/4001/quic-v1", false),
+        ] {
+            assert_eq!(loopback(&address.parse().unwrap()), is, "{address}");
         }
     }
 

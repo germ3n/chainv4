@@ -159,6 +159,11 @@ authority finality, `staked` needs FFG.
 3. Whichever thread finds one first reports the seal back to the node as an event.
 4. The node rebuilds the template every two seconds, or when the tip moves, so it carries newer
    transactions and a newer timestamp.
+5. **It mines only once it is level with its peers.** While a peer says its chain holds more
+   work, the node syncs instead of mining on a tip the chain has left behind; and just started,
+   with peers connected, it waits up to 10 seconds for one to say how far its chain got. Without
+   that, a fast miner joining a chain mines a branch of its own from genesis in its first seconds.
+   A node with no peers mines at once.
 
 **Mining on the GPU** (`--mine --mine-gpu`, in a build with the `gpu` feature): the
 `chainv4-gpu` crate (`gpu/`) drives the GPU through wgpu, on Vulkan (Linux and Windows, NVIDIA

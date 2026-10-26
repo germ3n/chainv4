@@ -284,6 +284,13 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   Touch ID. Changing the password turns them off, and so does a change in the fingers or faces
   enrolled. On macOS Touch ID is a check, not a lock on the key, as an unsigned app cannot tie a
   Keychain item to biometry.
+- **Reorg depth counts from the tip, not along the branch.** A heavier branch is followed when it
+  splits off at most `max_reorg_depth` blocks below this node's tip, however long the branch is:
+  a node that mined a few blocks of its own switches to a peer's chain that grew from below them.
+  It used to stop walking the branch after `max_reorg_depth` of its blocks, so a long one was
+  refused even when it split off near the tip.
+- **A miner waits for its peers.** Under proof of work a node mines only while no peer reports
+  more work, and, just started with peers connected, not before one reports or 10 seconds pass.
 - **The browser extension is the web build in a side panel.** `wallet/build-extension.sh` moves
   trunk's inline boot script to `boot.js`, as MV3 runs none, and adds manifests for Chrome and
   Firefox. It asks for each node's host when the wallet first talks to it, from a click, as

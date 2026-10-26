@@ -176,7 +176,8 @@ A node finds peers five ways:
   and the node's own, from `--bootnode`. Dialed while the node has fewer peers than
   `--target-peers` (15 by default), each at most once a minute.
 - **Kademlia:** every peer it connects to tells it, through identify, where it listens, and
-  Kademlia keeps those addresses; it looks for peers near the node when the first one connects
+  Kademlia keeps those addresses, leaving out a remote peer's loopback ones, which reach it only
+  from its own machine; it looks for peers near the node when the first one connects
   and every 2 minutes, asking the peers it knows for theirs. While the node is short of peers it
   dials 3 of those it knows every 15 seconds, each at most once in 5 minutes. So a node given one
   bootnode meets the peers the bootnode knows, and theirs.

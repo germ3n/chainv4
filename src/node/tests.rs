@@ -714,6 +714,65 @@ fn the_node_tells_the_network_the_chains_bootnodes_once() {
 }
 
 #[test]
+fn a_miner_hears_its_peers_and_catches_up_before_it_mines() {
+    let mining = || Producing {
+        mine: Some(Mining {
+            reward_to: Address::Ed25519([9; 32]),
+            threads: 1,
+            gpu: false,
+            gpus: None,
+            port: None,
+        }),
+        sign: None,
+    };
+    let status = |node: &Node, work: u128| SyncResponse::Status {
+        genesis: node.chain().genesis(),
+        tip: node.chain().tip().id(),
+        height: 40,
+        work: u256::new(work),
+        justified: 0,
+    };
+    let (link, net) = NetLink::pair();
+    let mut node = Node::new(Arc::new(MemoryDb::default()), &easy_pow(), None, link).unwrap().producing(mining());
+    let peer = PeerId::random();
+    net.events.send(NetEvent::PeerUp { peer, address: Multiaddr::empty() }).unwrap();
+    node.step(LATER).unwrap();
+
+    assert!(node.template.is_none(), "a peer is connected that has not said how far its chain got");
+
+    // A peer ahead: it syncs rather than mine on a tip the chain has left.
+    net.events.send(NetEvent::Response { peer, response: status(&node, 1_000_000) }).unwrap();
+    node.step(LATER + 1).unwrap();
+
+    assert!(node.template.is_none(), "behind a peer");
+
+    // Level with the peer, or ahead of it: it mines.
+    net.events.send(NetEvent::Response { peer, response: status(&node, 0) }).unwrap();
+    node.step(LATER + 2).unwrap();
+
+    assert!(node.template.is_some());
+
+    // A peer that never answers holds a fresh miner back only a few seconds.
+    let (link, net) = NetLink::pair();
+    let mut node = Node::new(Arc::new(MemoryDb::default()), &easy_pow(), None, link).unwrap().producing(mining());
+    net.events.send(NetEvent::PeerUp { peer, address: Multiaddr::empty() }).unwrap();
+    node.step(LATER).unwrap();
+
+    assert!(node.template.is_none());
+
+    node.step(LATER + LISTEN_FIRST_MS).unwrap();
+
+    assert!(node.template.is_some());
+
+    // And a node alone mines at once.
+    let (link, _net) = NetLink::pair();
+    let mut alone = Node::new(Arc::new(MemoryDb::default()), &easy_pow(), None, link).unwrap().producing(mining());
+    alone.step(LATER).unwrap();
+
+    assert!(alone.template.is_some());
+}
+
+#[test]
 fn forked_nodes_settle_on_the_heavier_chain() {
     let (mut heavy, mut heavy_net) = pow_node();
     let (mut light, mut light_net) = pow_node();

@@ -57,6 +57,9 @@ const REPORT_EVERY: u64 = 30_000;
 /// How long a miner works on one template before it is rebuilt with newer transactions and a
 /// newer timestamp, in milliseconds.
 const TEMPLATE_REFRESH: u64 = 2_000;
+/// How long a miner just started, with peers connected, waits to hear how far their chains got
+/// before it mines: long enough for their status, short enough not to matter on a chain of its own.
+const LISTEN_FIRST_MS: u64 = 10_000;
 
 #[document(
     summary = "A running node: the chain, the mempool, the producer if it produces, and the network, owned in one place. Tests can run several in one process.",
@@ -512,6 +515,25 @@ impl Node {
     pub fn max_build_ms(mut self, most: Option<u64>) -> Node {
         self.max_build_ms = most;
         self
+    }
+
+    /// Whether a miner holds off for now: while a peer says its chain holds more work, so it
+    /// catches up rather than mine on a tip the chain has left behind; and, just started with
+    /// peers connected, until one says how far its chain got. Otherwise a fast miner joining a
+    /// chain mines a branch of its own from genesis in its first seconds. Only under proof of
+    /// work: producers with slots never race ahead of the chain.
+    fn mining_should_wait(&self, now: u64) -> bool {
+        if !matches!(self.producer_for, Some(ConsensusConfig::ProofOfWork(_))) {
+            return false;
+        }
+
+        let ours = self.chain.tip_work();
+
+        if self.sync.peers.values().any(|peer| peer.work > ours) {
+            return true;
+        }
+
+        !self.peers.is_empty() && self.sync.peers.is_empty() && now < self.started.saturating_add(LISTEN_FIRST_MS)
     }
 
     /// How much the producer takes from the mempool for a block: whatever the chain's limits let
@@ -985,6 +1007,13 @@ impl Node {
     /// one template at a time, rebuilt when the tip moves or TEMPLATE_REFRESH passes.
     fn produce_if_due(&mut self, now: u64) -> Result<(), NodeError> {
         self.ensure_producer()?;
+
+        if self.mining_should_wait(now) {
+            self.template = None;
+
+            return Ok(());
+        }
+
         let budget = self.budget();
         let Some(producer) = self.producer.as_mut() else {
             return Ok(());

@@ -310,11 +310,13 @@ up() {
     fi
 
     say "building and starting; the first build takes a while"
-    # Let's Encrypt's certbot runs as a profile of its own, when .env asks for it.
+    # Let's Encrypt's certbot runs as a profile of its own, when .env asks for it. Recreated
+    # always: podman-compose keeps a running container on its old image after a build, so an
+    # update would build and change nothing. The chain and certificates are in volumes.
     if grep -q '^TLS_MODE=letsencrypt' "$root/docker/.env"; then
-        "$compose" --profile letsencrypt up -d --build
+        "$compose" --profile letsencrypt up -d --build --force-recreate
     else
-        "$compose" up -d --build
+        "$compose" up -d --build --force-recreate
     fi
 
     say "waiting for the node"

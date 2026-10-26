@@ -615,7 +615,13 @@ fn pow_genesis() -> Genesis {
 /// that does not, or on one never imported, gets zero roots by hand: it is refused for what is
 /// wrong with it before its roots are looked at.
 fn mine_on(chain: &Chain, parent: &Block, txs: Vec<SignedTx>, miner: Address) -> Block {
-    let timestamp = parent.header.timestamp + 1_000;
+    mine_after(chain, parent, 1_000, txs, miner)
+}
+
+/// mine_on, this many milliseconds after the parent: closer than the target raises difficulty
+/// over the window, further lowers it.
+fn mine_after(chain: &Chain, parent: &Block, gap_ms: u64, txs: Vec<SignedTx>, miner: Address) -> Block {
+    let timestamp = parent.header.timestamp + gap_ms;
     let mut block = match chain.build_on(&parent.id(), txs.clone(), Vec::new(), miner, timestamp) {
         Ok(built) if built.txs == txs => built,
         _ => Block {
@@ -839,6 +845,36 @@ fn branches_that_split_off_too_deep_are_never_followed() {
     }
 
     assert_eq!(chain.tip().id(), tip);
+}
+
+#[test]
+fn a_heavier_branch_far_longer_than_the_reorg_depth_is_followed_when_it_splits_off_near_the_tip() {
+    // A node that mined a few heavy blocks of its own, as a fast miner does before it hears its
+    // peers, and a peer's chain from genesis that outweighs them only once it is far longer than
+    // max_reorg_depth. The reorg goes 8 blocks deep, well within it, so the node follows.
+    let mut chain = Chain::open(Arc::new(MemoryDb::default()), &pow_genesis()).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let mut own = genesis.clone();
+
+    for _ in 0..8 {
+        own = mine_after(&chain, &own, 250, Vec::new(), Address::Ed25519([1; 32]));
+        extended(chain.import(&own, LATER));
+    }
+
+    let work = chain.tip_work();
+    let mut peers = genesis;
+    let mut length = 0;
+
+    while chain.tip().id() == own.id() {
+        peers = mine_after(&chain, &peers, 4_000, Vec::new(), Address::Ed25519([2; 32]));
+        chain.import(&peers, LATER).unwrap();
+        length += 1;
+        assert!(length < 1_000, "never followed the heavier branch");
+    }
+
+    assert!(length > DEV_MAX_REORG_DEPTH, "the branch outweighed the node's only at {length} blocks, {work} work");
+    assert_eq!(chain.tip().id(), peers.id());
+    assert_eq!(chain.tip().height, length);
 }
 
 #[test]
