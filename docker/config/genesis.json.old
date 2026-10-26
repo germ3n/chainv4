@@ -1,0 +1,69 @@
+{
+  "allocations": [
+    {
+      "address": "ed25519:0x2da8886291d9c75cfab9a72197e827d4af22a0ba797c2207e84468820a0e6074",
+      "amount": "1000000000000000000000000"
+    }
+  ],
+  "coin": {
+    "decimals": 18,
+    "symbol": "pow"
+  },
+  "consensus": {
+    "hash": "blake3",
+    "initial_difficulty": "100000",
+    "min_difficulty": "1000",
+    "target_block_ms": 2000,
+    "type": "pow",
+    "window": 11
+  },
+  "engines": [
+    "lua",
+    "wasm"
+  ],
+  "fees": {
+    "block_gas_limit": 50000000,
+    "burn_permille": 500,
+    "pricing": {
+      "change_denominator": 8,
+      "elasticity": 2,
+      "initial": "1000000000",
+      "min": "10000000",
+      "type": "base_fee"
+    },
+    "schedule": {
+      "fuel_per_gas": 1,
+      "per_byte": 10,
+      "per_code_byte": 20,
+      "per_tx": 1000,
+      "type": "weighted"
+    }
+  },
+  "finality": {
+    "depth": 6,
+    "type": "depth"
+  },
+  "governance": null,
+  "hash": "blake3",
+  "max_block_bytes": 4194304,
+  "max_reorg_depth": 100,
+  "minter": "ed25519:0x2da8886291d9c75cfab9a72197e827d4af22a0ba797c2207e84468820a0e6074",
+  "reward": {
+    "halving_interval": 210000,
+    "initial": "50000000000000000000"
+  },
+  "timestamp": 1793014846179,
+  "token_functions": [
+    "allowance",
+    "approve",
+    "balance_of",
+    "total_supply",
+    "transfer",
+    "transfer_from"
+  ],
+  "tx_limits": {
+    "fuel": 10000000,
+    "memory": 33554432
+  },
+  "vote_reward_source": null
+}

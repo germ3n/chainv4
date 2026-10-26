@@ -79,7 +79,7 @@ the node failing.
 | --- | --- |
 | `self-signed` (the default) | Made on the first start, for `SERVER_NAME` as a DNS name or an IP address, and kept in the `tls` volume. Made again when it is a day from expiring. |
 | `provided` | Yours: `fullchain.pem` and `privkey.pem` in `docker/certs`. |
-| `letsencrypt` | Let's Encrypt's, for `SERVER_NAME`. Start with `docker/compose.sh --profile letsencrypt up -d`, with `LETSENCRYPT_EMAIL` set. |
+| `letsencrypt` | Let's Encrypt's, for `SERVER_NAME`. Start with `docker/compose.sh --profile letsencrypt up -d`, which `docker/pow.sh up` does when `.env` says `letsencrypt`. `LETSENCRYPT_EMAIL` is optional: Let's Encrypt sends no expiry notices since 2025. With no domain of your own, `203-0-113-7.sslip.io` names the address `203.0.113.7`. |
 
 **How Let's Encrypt works here:**
 - nginx starts with a self-signed stand-in, and answers HTTP-01 challenges on port 80 from a

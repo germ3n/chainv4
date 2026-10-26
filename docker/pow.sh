@@ -310,7 +310,12 @@ up() {
     fi
 
     say "building and starting; the first build takes a while"
-    "$compose" up -d --build
+    # Let's Encrypt's certbot runs as a profile of its own, when .env asks for it.
+    if grep -q '^TLS_MODE=letsencrypt' "$root/docker/.env"; then
+        "$compose" --profile letsencrypt up -d --build
+    else
+        "$compose" up -d --build
+    fi
 
     say "waiting for the node"
     tries=0
