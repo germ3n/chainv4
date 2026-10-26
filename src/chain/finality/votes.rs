@@ -22,6 +22,7 @@ use {
     crate::structs::block::Block,
     crate::structs::hash::Hash,
     crate::structs::u256::u256,
+    crate::chain::{Leak, REWARD_POOL, VoteRewardSource},
     crate::structs::vote::{Checkpoint, Justification, SignedVote, Vote},
     std::collections::{BTreeMap, HashMap, VecDeque},
     std::sync::Arc,
@@ -77,6 +78,13 @@ pub(super) trait Electorate: Send {
     /// Updates state at a checkpoint, such as fixing a later epoch's voters.
     fn at_checkpoint(&self, _state: &Arc<State>, _epoch: u64) -> Result<(), DbError> {
         Ok(())
+    }
+
+    /// The inactivity leak, for kinds with bonds to leak: blocks then carry proofs whether or not
+    /// they pay, so state knows when finality stalls, and bundles of votes that fall short while
+    /// it does, so state knows who still votes.
+    fn leak(&self) -> Option<Leak> {
+        None
     }
 }
 
@@ -158,6 +166,8 @@ fn own_key(voter: &PublicKey) -> Vec<u8> {
 pub(super) struct Votes<E> {
     electorate: E,
     params: VoteParams,
+    /// Where rewards come from: minted, or paid from the reward pool.
+    source: VoteRewardSource,
     genesis: Hash,
     /// The chain's threads, which check a proof's or a justification's signatures all at once.
     workers: Arc<Workers>,
@@ -173,7 +183,7 @@ impl<E: Electorate> Votes<E> {
     /// The finality an electorate makes, with everything this node learned before: the
     /// checkpoints it justified and finalized, and the votes it counted or held back, which it
     /// counts again.
-    pub(super) fn load(electorate: E, chain: &View) -> Result<Votes<E>, DbError> {
+    pub(super) fn load(electorate: E, chain: &View, source: VoteRewardSource) -> Result<Votes<E>, DbError> {
         let db = &**chain.db();
         let start = Checkpoint {
             epoch: 0,
@@ -182,6 +192,7 @@ impl<E: Electorate> Votes<E> {
         let mut votes = Votes {
             params: electorate.params(),
             electorate,
+            source,
             genesis: chain.genesis(),
             workers: chain.workers().clone(),
             justified: read_value(db, Column::Finality, JUSTIFIED_KEY)?.unwrap_or(start),
@@ -450,7 +461,10 @@ impl<E: Electorate> Finality for Votes<E> {
     }
 
     /// Checks the justifications a block carries and pays every voter in them, each checkpoint
-    /// once, then lets the electorate update state at a checkpoint.
+    /// once, then lets the electorate update state at a checkpoint. Under an inactivity leak,
+    /// while no checkpoint has been proven for after_epochs epochs, a proof may fall short of a
+    /// justification: a bundle of votes, which pays nothing and proves nothing, but records who
+    /// still votes, for the leak to spare.
     fn apply(&self, state: &Arc<State>, block: &Block) -> Result<(), ImportError> {
         let bad = |why: String| ImportError::Invalid(BlockError::Proof(why));
 
@@ -459,6 +473,13 @@ impl<E: Electorate> Finality for Votes<E> {
         }
 
         let validators = Validators::new(state);
+        // Bundles are taken from after_epochs epochs without a proven checkpoint, one epoch before
+        // the leak starts, so the first leak already sees who voted.
+        let leak = self.electorate.leak();
+        let bundling = match leak {
+            Some(leak) => self.epoch_of(block.header.height).saturating_sub(validators.proven()?) >= leak.after_epochs,
+            None => false,
+        };
         // Every vote's signature, in every proof, checked at once.
         let genesis = self.genesis;
         let votes: Vec<&SignedVote> = block.proofs.iter().flat_map(|proof| &proof.votes).collect();
@@ -509,18 +530,52 @@ impl<E: Electorate> Finality for Votes<E> {
                 previous = Some(vote.vote.voter);
             }
 
+            if leak.is_some() {
+                for vote in &proof.votes {
+                    validators.mark_participation(&vote.vote.voter, target.epoch)?;
+                }
+            }
+
             if weight < voters.needed {
-                return Err(bad(format!("the proof for epoch {} falls short of a justification", target.epoch)));
+                if !bundling {
+                    return Err(bad(format!("the proof for epoch {} falls short of a justification", target.epoch)));
+                }
+
+                // A bundle: who voted is recorded, and that is all.
+                continue;
+            }
+
+            if leak.is_some() {
+                validators.mark_proven(target.epoch)?;
             }
 
             if self.params.vote_reward > u256::ZERO {
                 let accounts = Accounts::new(state);
+                let registry = |err| match err {
+                    RegistryError::Db(err) => ImportError::Db(err),
+                    other => bad(other.to_string()),
+                };
 
+                // Voters in the proof's order, which is by key: from the pool, each gets as much
+                // of its reward as the pool still holds; minted, each gets it whole.
                 for account in paid {
-                    accounts.credit(&account, self.params.vote_reward).map_err(|err| match err {
-                        RegistryError::Db(err) => ImportError::Db(err),
-                        other => bad(other.to_string()),
-                    })?;
+                    let reward = match self.source {
+                        VoteRewardSource::Mint => self.params.vote_reward,
+                        VoteRewardSource::Fees => {
+                            let pool = accounts.get(&REWARD_POOL).map_err(ImportError::Db)?.balance;
+                            let reward = self.params.vote_reward.min(pool);
+
+                            if reward > u256::ZERO {
+                                accounts.debit(&REWARD_POOL, reward).map_err(registry)?;
+                            }
+
+                            reward
+                        }
+                    };
+
+                    if reward > u256::ZERO {
+                        accounts.credit(&account, reward).map_err(registry)?;
+                    }
                 }
             }
 
@@ -694,13 +749,16 @@ impl<E: Electorate> Finality for Votes<E> {
     }
 
     fn unpaid_proofs(&self, chain: &View) -> Result<Vec<Justification>, DbError> {
-        if self.params.vote_reward == u256::ZERO {
+        let leak = self.electorate.leak();
+
+        if self.params.vote_reward == u256::ZERO && leak.is_none() {
             return Ok(Vec::new());
         }
 
         let state = chain.state();
         let validators = Validators::new(&state);
         let newest = self.justified.epoch;
+        let proven = validators.proven()?;
         let mut proofs = Vec::new();
 
         for epoch in newest.saturating_sub(UNPAID_WINDOW).max(1)..=newest {
@@ -711,12 +769,53 @@ impl<E: Electorate> Finality for Votes<E> {
             let Some(header) = chain.header_at(self.checkpoint_height(epoch))? else {
                 continue;
             };
+            // Unpaid, under a reward; or unproven, under a leak, so state sees finality move.
+            let wanted = (self.params.vote_reward > u256::ZERO && !validators.paid(epoch)?) || (leak.is_some() && epoch > proven);
 
-            if let Some(proof) = stored_justification(&**chain.db(), &header.id())?
-                && !validators.paid(epoch)?
+            if wanted
+                && let Some(proof) = stored_justification(&**chain.db(), &header.id())?
                 && self.main_checkpoint(chain, &proof.source)?
             {
                 proofs.push(proof);
+            }
+        }
+
+        // While finality stalls, bundles of the votes this node counted for checkpoints not yet
+        // proven, whenever they hold a vote state has not seen: who still votes is what the
+        // leak spares.
+        let tip_epoch = self.epoch_of(chain.tip().height);
+
+        if let Some(leak) = leak
+            && tip_epoch.saturating_sub(proven) >= leak.after_epochs
+        {
+            let mut links: Vec<_> = self.links.iter().filter(|((_, target), _)| target.epoch > proven).collect();
+            links.sort_by_key(|((_, target), _)| std::cmp::Reverse(target.epoch));
+
+            for ((source, target), tally) in links {
+                if proofs.len() >= self.params.max_proofs_per_block as usize {
+                    break;
+                }
+
+                // A link that justified is a proof, carried above or stored already; never a bundle.
+                if proofs.iter().any(|proof| proof.target == *target)
+                    || stored_justification(&**chain.db(), &target.block)?.is_some()
+                    || !self.main_checkpoint(chain, target)?
+                    || !self.main_checkpoint(chain, source)?
+                    || !self.is_justified(chain, source)?
+                {
+                    continue;
+                }
+
+                let mut news = false;
+
+                for voter in tally.votes.keys() {
+                    news |= validators.participation(voter)? < target.epoch;
+                }
+
+                if news {
+                    let votes = tally.votes.values().copied().collect();
+                    proofs.push(Justification { source: *source, target: *target, votes });
+                }
             }
         }
 

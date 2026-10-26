@@ -1,6 +1,7 @@
 use {
     super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer},
     crate::crypto::hashable::Hashable,
+    crate::registry::signers::Signer,
     crate::structs::address::Address,
     crate::structs::block::{BlockHeader, Seal},
     crate::crypto::hasher::Hasher,
@@ -18,6 +19,10 @@ const WORK_DOMAIN: &[u8] = b"chainv4 work";
 const ADJUSTMENT: u128 = 64;
 /// The most steps difficulty falls in one block, so one long gap cannot undo it all.
 const MAX_STEPS_DOWN: u64 = 32;
+/// Under a window, how far one interval between blocks may count from the target either way: a
+/// block that came in a quarter of the target, or four times it, counts as that, so one gap or one
+/// timestamp moves difficulty by a bounded share of the window.
+const MAX_SWING: u64 = 4;
 /// How many nonces a mining thread tries before checking whether its job is still current.
 const NONCES_PER_CHECK: u64 = 4_096;
 
@@ -41,28 +46,29 @@ pub struct PowConfig {
 impl Hashable for PowConfig {}
 
 #[document(
-    summary = "The rules of proof of work. Anyone may produce a block whose seal holds a nonce that makes the work hash of the block's id and nonce, read as a big-endian number, at most u256::MAX / difficulty. Difficulty adjusts every block from its parent alone: one step up when a block comes in under the target time, none within one to two targets, and a step down for each further target, at most 32.",
+    summary = "The rules of proof of work. Anyone may produce a block whose seal holds a nonce that makes the work hash of the block's id and nonce, read as a big-endian number, at most u256::MAX / difficulty. Without a window, difficulty adjusts every block from its parent alone: one step up when a block comes in under the target time, none within one to two targets, and a step down for each further target, at most 32. With one, it retargets every block over the window: the work of the window's blocks over the time they took, scaled to the target, each interval counting as between a quarter of the target and four times it, so one block's timestamp moves it by a bounded share of the window; and a block's timestamp must be after the median of the window's, as in Bitcoin, so a producer who sets its clock ahead does not drag the chain's time along.",
     category = "Consensus",
-    see_also = "PowConfig, Miner, Consensus",
+    see_also = "PowConfig, Miner, Consensus, Genesis::pow_window",
     note = "A block weighs its difficulty, so the main chain is the one that took the most work, not the longest.",
 )]
 pub struct ProofOfWork {
     config: PowConfig,
+    /// How many ancestors the window holds, or None for the parent-only rule.
+    window: Option<u64>,
 }
 
 impl ProofOfWork {
-    #[document(parent = "ProofOfWork", summary = "The rules for these parameters.")]
-    pub fn new(config: PowConfig) -> ProofOfWork {
-        ProofOfWork { config }
-    }
-}
-
-impl Consensus for ProofOfWork {
-    fn work(&self, header: &BlockHeader) -> u256 {
-        u256::from(header.difficulty)
+    #[document(
+        parent = "ProofOfWork",
+        summary = "The rules for these parameters.",
+        params = { window = "The retarget and median-time window in blocks, at least 2, or None for the parent-only rule." },
+    )]
+    pub fn new(config: PowConfig, window: Option<u64>) -> ProofOfWork {
+        ProofOfWork { config, window }
     }
 
-    fn difficulty(&self, parent: &BlockHeader, timestamp: u64) -> u128 {
+    /// Difficulty from the parent's alone, by steps of a 64th.
+    fn stepped(&self, parent: &BlockHeader, timestamp: u64) -> u128 {
         if parent.height == 0 {
             return self.config.initial_difficulty.max(self.config.min_difficulty).max(1);
         }
@@ -79,8 +85,88 @@ impl Consensus for ProofOfWork {
         difficulty.max(self.config.min_difficulty).max(1)
     }
 
-    fn check(&self, header: &BlockHeader, seal: &Seal, parent: &BlockHeader, now: u64) -> Result<(), ConsensusError> {
-        if header.timestamp <= parent.timestamp {
+    /// The window's ancestors: those given, at most window of them, and never genesis, whose
+    /// timestamp is whatever the genesis file says.
+    fn windowed<'a>(&self, ancestors: &'a [BlockHeader], window: u64) -> &'a [BlockHeader] {
+        let most = usize::try_from(window).unwrap_or(usize::MAX).min(ancestors.len());
+        let above_genesis = ancestors.iter().position(|header| header.height == 0).unwrap_or(ancestors.len());
+
+        &ancestors[..most.min(above_genesis)]
+    }
+
+    /// Difficulty from the work the window's blocks took over the time they took, scaled to the
+    /// target: the hashrate the window shows, times the target time. Each interval between two
+    /// blocks counts as at least a quarter of the target and at most four times it, so one long
+    /// gap, or one timestamp set ahead, moves difficulty by a bounded share of the window, and a
+    /// timestamp before its parent's, which the median rule allows, counts as a quick block. The
+    /// first two blocks, with no interval to measure, take the initial difficulty.
+    fn retargeted(&self, ancestors: &[BlockHeader], window: u64) -> u128 {
+        let window = self.windowed(ancestors, window);
+        let floor = self.config.min_difficulty.max(1);
+
+        if window.len() < 2 {
+            return self.config.initial_difficulty.max(floor);
+        }
+
+        let target = u128::from(self.config.target_block_ms.max(1));
+        let span: u128 = window
+            .windows(2)
+            .map(|pair| u128::from(pair[0].timestamp.saturating_sub(pair[1].timestamp)).clamp(target / u128::from(MAX_SWING), target * u128::from(MAX_SWING)))
+            .sum();
+        // The blocks produced during the span: every one but the oldest, which starts it.
+        let work: u256 = window[..window.len() - 1].iter().map(|header| u256::from(header.difficulty)).fold(u256::ZERO, |sum, next| sum + next);
+        let difficulty = work * u256::from(target) / u256::from(span.max(1));
+
+        u128::try_from(difficulty).unwrap_or(u128::MAX).max(floor)
+    }
+
+    /// The median timestamp of the window's ancestors: what a block's must be after.
+    fn median_time(&self, ancestors: &[BlockHeader], window: u64) -> Option<u64> {
+        let window = self.windowed(ancestors, window);
+
+        if window.is_empty() {
+            return None;
+        }
+
+        let mut times: Vec<u64> = window.iter().map(|header| header.timestamp).collect();
+        times.sort_unstable();
+
+        Some(times[times.len() / 2])
+    }
+}
+
+impl Consensus for ProofOfWork {
+    fn work(&self, header: &BlockHeader) -> u256 {
+        u256::from(header.difficulty)
+    }
+
+    fn lookback(&self) -> usize {
+        self.window.map_or(1, |window| usize::try_from(window).unwrap_or(usize::MAX).max(1))
+    }
+
+    fn difficulty(&self, ancestors: &[BlockHeader], timestamp: u64) -> u128 {
+        let Some(parent) = ancestors.first() else {
+            return self.config.initial_difficulty.max(self.config.min_difficulty).max(1);
+        };
+
+        match self.window {
+            Some(window) => self.retargeted(ancestors, window),
+            None => self.stepped(parent, timestamp),
+        }
+    }
+
+    fn check(&self, header: &BlockHeader, seal: &Seal, ancestors: &[BlockHeader], _producers: &[Signer], now: u64) -> Result<(), ConsensusError> {
+        let Some(parent) = ancestors.first() else {
+            return Err(ConsensusError::NoAncestors);
+        };
+        // Without a window, after the parent; with one, after the median of the window, or the
+        // parent's for the first block, whose only ancestor is genesis.
+        let after = match self.window {
+            Some(window) => self.median_time(ancestors, window).unwrap_or(parent.timestamp),
+            None => parent.timestamp,
+        };
+
+        if header.timestamp <= after {
             return Err(ConsensusError::Early);
         }
 
@@ -88,7 +174,7 @@ impl Consensus for ProofOfWork {
             return Err(ConsensusError::FromTheFuture);
         }
 
-        let expected = self.difficulty(parent, header.timestamp);
+        let expected = self.difficulty(ancestors, header.timestamp);
 
         if header.difficulty != expected {
             return Err(ConsensusError::WrongDifficulty {
@@ -155,23 +241,85 @@ impl Search {
 }
 
 /// What the mining threads work on.
-struct Job {
+pub(super) struct Job {
     /// Bumped for every new header, so threads notice when theirs is stale.
-    generation: u64,
+    pub(super) generation: u64,
     /// The block id and difficulty to find a nonce for; None once one was found.
-    work: Option<(Hash, u128)>,
-    stopped: bool,
+    pub(super) work: Option<(Hash, u128)>,
+    pub(super) stopped: bool,
 }
 
-struct Shared {
-    job: Mutex<Job>,
-    changed: Condvar,
+pub(super) struct Shared {
+    pub(super) job: Mutex<Job>,
+    pub(super) changed: Condvar,
 }
 
 impl Shared {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Job> {
+    pub(super) fn new() -> Shared {
+        Shared {
+            job: Mutex::new(Job {
+                generation: 0,
+                work: None,
+                stopped: false,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Job> {
         self.job.lock().expect("mining threads never panic holding the job")
     }
+
+    /// Waits for a job newer than the one finished, and returns it; None once the miner stopped.
+    pub(super) fn next_job(&self, finished: u64) -> Option<(u64, Hash, u128)> {
+        let mut job = self.lock();
+
+        while !job.stopped && (job.work.is_none() || job.generation == finished) {
+            job = self.changed.wait(job).expect("mining threads never panic holding the job");
+        }
+
+        if job.stopped {
+            return None;
+        }
+
+        let (id, difficulty) = job.work.expect("checked above");
+
+        Some((job.generation, id, difficulty))
+    }
+
+    /// Whether a job is still the current one, so a thread goes on with it.
+    pub(super) fn current(&self, generation: u64) -> bool {
+        let job = self.lock();
+
+        !job.stopped && job.generation == generation && job.work.is_some()
+    }
+
+    /// Hands in a seal for a job, if it is still the current one: only the first find counts.
+    pub(super) fn finish(&self, generation: u64, id: Hash, nonce: u64, found: &(dyn Fn(Hash, Seal) + Send + Sync)) {
+        let mut job = self.lock();
+
+        if job.generation == generation && job.work.is_some() {
+            job.work = None;
+            drop(job);
+            found(id, Seal::Work { nonce });
+        }
+    }
+}
+
+/// The work message before its nonce: the domain and the block id, 44 bytes.
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+pub(super) fn work_prefix(id: &Hash) -> [u8; 44] {
+    let mut prefix = [0; 44];
+    prefix[..WORK_DOMAIN.len()].copy_from_slice(WORK_DOMAIN);
+    prefix[WORK_DOMAIN.len()..].copy_from_slice(&id.to_bytes());
+
+    prefix
+}
+
+/// The most a work hash may be at a difficulty, as 32 big-endian bytes.
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+pub(super) fn work_target(difficulty: u128) -> [u8; 32] {
+    (u256::MAX / u256::from(difficulty.max(1))).to_be_bytes()
 }
 
 #[document(
@@ -197,14 +345,7 @@ impl Miner {
         },
     )]
     pub fn new(address: Address, hash: HashType, threads: usize, found: impl Fn(Hash, Seal) + Send + Sync + 'static) -> Miner {
-        let shared = Arc::new(Shared {
-            job: Mutex::new(Job {
-                generation: 0,
-                work: None,
-                stopped: false,
-            }),
-            changed: Condvar::new(),
-        });
+        let shared = Arc::new(Shared::new());
         let found = Arc::new(found);
         let count = threads.max(1);
         let threads = (0..count)
@@ -233,7 +374,7 @@ impl Producer for Miner {
     }
 
     /// Timestamps must move forward, so the next millisecond after the parent's.
-    fn start_at(&self, parent: &BlockHeader) -> u64 {
+    fn start_at(&self, parent: &BlockHeader, _producers: &[Signer]) -> u64 {
         parent.timestamp + 1
     }
 
@@ -263,36 +404,14 @@ impl Drop for Miner {
 fn mine(shared: &Shared, hash: HashType, index: u64, stride: u64, found: &(dyn Fn(Hash, Seal) + Send + Sync)) {
     let mut finished = 0;
 
-    loop {
-        let (generation, id, difficulty) = {
-            let mut job = shared.lock();
-
-            while !job.stopped && (job.work.is_none() || job.generation == finished) {
-                job = shared.changed.wait(job).expect("mining threads never panic holding the job");
-            }
-
-            if job.stopped {
-                return;
-            }
-
-            let (id, difficulty) = job.work.expect("checked above");
-
-            (job.generation, id, difficulty)
-        };
+    while let Some((generation, id, difficulty)) = shared.next_job(finished) {
         let search = Search::new(hash, &id);
         let mut nonce = index;
 
         'search: loop {
             for _ in 0..NONCES_PER_CHECK {
                 if meets(search.work(nonce), difficulty) {
-                    let mut job = shared.lock();
-
-                    // Only the first find of a job counts.
-                    if job.generation == generation && job.work.is_some() {
-                        job.work = None;
-                        drop(job);
-                        found(id, Seal::Work { nonce });
-                    }
+                    shared.finish(generation, id, nonce, found);
 
                     break 'search;
                 }
@@ -300,9 +419,7 @@ fn mine(shared: &Shared, hash: HashType, index: u64, stride: u64, found: &(dyn F
                 nonce = nonce.wrapping_add(stride);
             }
 
-            let job = shared.lock();
-
-            if job.stopped || job.generation != generation || job.work.is_none() {
+            if !shared.current(generation) {
                 break;
             }
         }
@@ -325,7 +442,16 @@ mod tests {
             target_block_ms: TARGET,
             initial_difficulty: 1_000,
             min_difficulty: min,
-        })
+        }, None)
+    }
+
+    fn windowed(min: u128, window: u64) -> ProofOfWork {
+        ProofOfWork::new(PowConfig {
+            hash: HashType::default_chain(),
+            target_block_ms: TARGET,
+            initial_difficulty: 1_000,
+            min_difficulty: min,
+        }, Some(window))
     }
 
     /// A header on a chain hashed with the build's default; its algorithm comes from the chain
@@ -363,12 +489,108 @@ mod tests {
         let rules = rules(10);
         let parent = header(5, 10_000, 6_400);
 
-        assert_eq!(rules.difficulty(&header(0, 0, 0), 5), 1_000);
-        assert_eq!(rules.difficulty(&parent, 10_000 + TARGET / 2), 6_500);
-        assert_eq!(rules.difficulty(&parent, 10_000 + TARGET), 6_400);
-        assert_eq!(rules.difficulty(&parent, 10_000 + TARGET * 3), 6_200);
-        assert_eq!(rules.difficulty(&parent, 10_000 + TARGET * 1_000), 6_400 - 100 * 32);
-        assert_eq!(rules.difficulty(&header(5, 10_000, 12), 10_000 + TARGET * 50), 10);
+        assert_eq!(rules.difficulty(&[header(0, 0, 0)], 5), 1_000);
+        assert_eq!(rules.difficulty(std::slice::from_ref(&parent), 10_000 + TARGET / 2), 6_500);
+        assert_eq!(rules.difficulty(std::slice::from_ref(&parent), 10_000 + TARGET), 6_400);
+        assert_eq!(rules.difficulty(std::slice::from_ref(&parent), 10_000 + TARGET * 3), 6_200);
+        assert_eq!(rules.difficulty(std::slice::from_ref(&parent), 10_000 + TARGET * 1_000), 6_400 - 100 * 32);
+        assert_eq!(rules.difficulty(&[header(5, 10_000, 12)], 10_000 + TARGET * 50), 10);
+        assert_eq!(rules.lookback(), 1);
+    }
+
+    /// Ancestors newest first: block heights down from top, this many milliseconds apart, at one
+    /// difficulty, and genesis under them at time 0.
+    fn lineage(top: u64, gap: u64, difficulty: u128) -> Vec<BlockHeader> {
+        (0..=top).rev().map(|height| header(height, height * gap, if height == 0 { 0 } else { difficulty })).collect()
+    }
+
+    #[test]
+    fn a_window_retargets_over_its_blocks_and_bounds_timestamps_by_their_median() {
+        let rules = windowed(10, 5);
+
+        assert_eq!(rules.lookback(), 5);
+
+        // Genesis alone, or block 1 alone: nothing to measure, so the initial difficulty.
+        assert_eq!(rules.difficulty(&lineage(0, TARGET, 0), TARGET), 1_000);
+        assert_eq!(rules.difficulty(&lineage(1, TARGET, 777), 2 * TARGET), 1_000);
+
+        // Blocks on target keep their difficulty, whatever the new block's own timestamp says.
+        let on_target = lineage(9, TARGET, 6_400);
+
+        assert_eq!(rules.difficulty(&on_target, 9 * TARGET + 1), 6_400);
+        assert_eq!(rules.difficulty(&on_target, 9 * TARGET + 100 * TARGET), 6_400);
+
+        // Twice as fast doubles it; twice as slow halves it; the window is the 5 newest only.
+        assert_eq!(rules.difficulty(&lineage(9, TARGET / 2, 6_400), 0), 12_800);
+        assert_eq!(rules.difficulty(&lineage(9, TARGET * 2, 6_400), 0), 3_200);
+
+        let mut mixed = lineage(9, TARGET, 6_400);
+        mixed[5..].iter_mut().for_each(|header| header.timestamp = 0);
+        assert_eq!(rules.difficulty(&mixed, 0), 6_400, "only the 5 newest count");
+
+        // One block 20 targets late in a window of 4 intervals counts as 4 targets late: the span
+        // is 7 targets instead of 4, so difficulty falls to four sevenths, not a sixth.
+        let mut gap = lineage(9, TARGET, 6_400);
+        gap[0].timestamp += 20 * TARGET;
+        assert_eq!(rules.difficulty(&gap, 0), 4 * 6_400 / 7);
+
+        // A block timestamped before its parent counts as a quarter-target block.
+        let mut back = lineage(9, TARGET, 6_400);
+        back[0].timestamp = back[1].timestamp - 1;
+        assert_eq!(rules.difficulty(&back, 0), 4 * 6_400 * 4 / 13);
+
+        // Never under the minimum, and the first blocks of a window that has genesis in it
+        // measure from block 1, not from genesis's arbitrary time.
+        assert_eq!(rules.difficulty(&lineage(9, TARGET * 1_000, 6_400), 0), 1_600, "every interval clamped to four targets: a quarter");
+        assert_eq!(windowed(5_000, 5).difficulty(&lineage(9, TARGET * 4, 6_400), 0), 5_000);
+        let mut early = lineage(2, TARGET, 1_000);
+        early[2].timestamp = 1_000_000_000;
+        assert_eq!(rules.difficulty(&early, 0), 1_000, "two blocks, one interval on target");
+
+        // The median time: a block must come after the median of the window's timestamps, so one
+        // producer's clock far ahead does not drag the next block's along.
+        let mut ahead = lineage(9, TARGET, 6_400);
+        ahead[0].timestamp += 100 * TARGET;
+        let median = ahead[2].timestamp;
+        let mut child = header(10, median, 0);
+        child.parent = ahead[0].id();
+        child.difficulty = rules.difficulty(&ahead, child.timestamp);
+        let seal = Seal::Work { nonce: 0 };
+
+        assert_eq!(rules.check(&child, &seal, &ahead, &[], child.timestamp + 1), Err(ConsensusError::Early), "at the median is too early");
+        child.timestamp = median + 1;
+        child.difficulty = rules.difficulty(&ahead, child.timestamp);
+        assert!(!matches!(rules.check(&child, &seal, &ahead, &[], child.timestamp), Err(ConsensusError::Early)), "just after it is in time, though before its parent");
+        assert_eq!(rules.check(&child, &seal, &[], &[], child.timestamp), Err(ConsensusError::NoAncestors));
+    }
+
+    #[test]
+    fn a_window_settles_after_a_stall_without_collapsing() {
+        // Blocks at difficulty 6,400 every target, then one after a long stall. Mining goes on at
+        // the hashrate the chain had; difficulty falls while the stall is in the window and then
+        // comes back, never below a quarter, and never runs away.
+        let rules = windowed(1, 11);
+        let mut chain = lineage(20, TARGET, 6_400);
+        chain.reverse();
+        let last = chain.last().unwrap().clone();
+        let mut timestamp = last.timestamp + 100 * TARGET;
+        let mut seen = Vec::new();
+
+        for height in 21..60 {
+            let ancestors: Vec<BlockHeader> = chain.iter().rev().take(11).cloned().collect();
+            let difficulty = rules.difficulty(&ancestors, timestamp);
+            seen.push(difficulty);
+            chain.push(header(height, timestamp, difficulty));
+            // At the old hashrate of 6,400 per target, a block takes this long.
+            timestamp += TARGET * difficulty as u64 / 6_400;
+        }
+
+        // The stalled block's own timestamp does not lower its difficulty; the next block sees the
+        // stall in its window as four targets, so 10 blocks' work over 13 targets, and difficulty
+        // stays within a third of where it was until the stall leaves the window.
+        assert_eq!(seen[..2], [6_400, 10 * 6_400 / 13]);
+        assert!(seen.iter().all(|&difficulty| (4_400..=6_700).contains(&difficulty)), "{seen:?}");
+        assert!((6_300..=6_500).contains(seen.last().unwrap()), "{seen:?}");
     }
 
     #[test]
@@ -377,7 +599,7 @@ mod tests {
         let parent = header(5, 10_000, 64);
         let mut child = header(6, 10_100, 0);
         child.parent = parent.id();
-        child.difficulty = rules.difficulty(&parent, child.timestamp);
+        child.difficulty = rules.difficulty(std::slice::from_ref(&parent), child.timestamp);
         let seal = solve(&child);
         let Seal::Work { nonce } = seal else { unreachable!() };
         let wrong = (0..)
@@ -389,11 +611,12 @@ mod tests {
             .unwrap();
         let easy = BlockHeader { difficulty: 1, ..child.clone() };
 
-        assert_eq!(rules.check(&child, &seal, &parent, 10_100), Ok(()));
-        assert_eq!(rules.check(&child, &wrong, &parent, 10_100), Err(ConsensusError::NotEnoughWork));
-        assert!(matches!(rules.check(&easy, &solve(&easy), &parent, 10_100), Err(ConsensusError::WrongDifficulty { .. })));
-        assert_eq!(rules.check(&child, &Seal::None, &parent, 10_100), Err(ConsensusError::BadSeal));
-        assert_eq!(rules.check(&header(6, 10_000, 0), &seal, &parent, 10_100), Err(ConsensusError::Early));
+        assert_eq!(rules.check(&child, &seal, std::slice::from_ref(&parent), &[], 10_100), Ok(()));
+        assert_eq!(rules.check(&child, &wrong, std::slice::from_ref(&parent), &[], 10_100), Err(ConsensusError::NotEnoughWork));
+        assert!(matches!(rules.check(&easy, &solve(&easy), std::slice::from_ref(&parent), &[], 10_100), Err(ConsensusError::WrongDifficulty { .. })));
+        assert_eq!(rules.check(&child, &Seal::None, std::slice::from_ref(&parent), &[], 10_100), Err(ConsensusError::BadSeal));
+        assert_eq!(rules.check(&header(6, 10_000, 0), &seal, std::slice::from_ref(&parent), &[], 10_100), Err(ConsensusError::Early));
+        assert_eq!(rules.check(&child, &seal, &[], &[], 10_100), Err(ConsensusError::NoAncestors));
         assert_eq!(rules.work(&child), u256::from(child.difficulty));
     }
 
@@ -417,7 +640,7 @@ mod tests {
             let (id, seal) = found.recv_timeout(Duration::from_secs(10)).unwrap();
 
             assert_eq!(id, child.id());
-            assert!(matches!(rules.check(&child, &seal, &parent, timestamp), Ok(()) | Err(ConsensusError::WrongDifficulty { .. })));
+            assert!(matches!(rules.check(&child, &seal, std::slice::from_ref(&parent), &[], timestamp), Ok(()) | Err(ConsensusError::WrongDifficulty { .. })));
             assert!(meets(Search::new(HashType::default_chain(), &id).work(match seal {
                 Seal::Work { nonce } => nonce,
                 _ => unreachable!(),
@@ -438,14 +661,14 @@ mod tests {
                 target_block_ms: TARGET,
                 initial_difficulty: 1_000,
                 min_difficulty: 1,
-            });
+            }, None);
             let mut child = header(6, 10_100, 0);
             child.parent = parent.id();
-            child.difficulty = rules.difficulty(&parent, child.timestamp);
+            child.difficulty = rules.difficulty(std::slice::from_ref(&parent), child.timestamp);
             let search = Search::new(algorithm, &child.id());
             let nonce = (0..).find(|nonce| meets(search.work(*nonce), child.difficulty)).unwrap();
 
-            assert_eq!(rules.check(&child, &Seal::Work { nonce }, &parent, 10_100), Ok(()), "{}", algorithm.name());
+            assert_eq!(rules.check(&child, &Seal::Work { nonce }, std::slice::from_ref(&parent), &[], 10_100), Ok(()), "{}", algorithm.name());
             assert_eq!(search.work(nonce), work_hash(algorithm, &child.id(), nonce));
             works.push(search.work(0));
         }

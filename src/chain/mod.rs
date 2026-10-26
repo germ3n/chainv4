@@ -9,10 +9,11 @@
 use {
     crate::consensus::{Consensus, ConsensusConfig, ConsensusError, PowConfig},
     crate::crypto::hashable::Hashable,
-    crate::crypto::keypair::PublicKey,
+    crate::crypto::keypair::{Keypair, PublicKey},
     crate::db::{Column, Database, DbError, MemoryDb, Path, Read, SnapshotWalk, State, StatePart, StateTree, WalkError},
-    crate::light::{FinalityStep, LightFinality, LightParams, LightUpdate},
+    crate::light::{CheckpointStart, FinalityStep, LightFinality, LightParams, LightUpdate},
     crate::registry::tokens::STANDARD_TOKEN_FUNCTIONS,
+    crate::registry::signers::Signer,
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
     crate::structs::block::{Block, BlockHeader, Seal, SealedHeader},
@@ -20,12 +21,14 @@ use {
     crate::structs::hash::{Hash, HashType},
     crate::structs::tx::SignedTx,
     crate::structs::u256::{U256Le, u256},
+    crate::structs::vote::Checkpoint,
     crate::structs::vote::Justification,
     crate::vm::{Limits, Vm},
     r#macro::document,
-    std::collections::HashSet,
+    std::collections::{HashSet, VecDeque},
     std::fmt,
     std::sync::Arc,
+    std::time::Instant,
     wincode::{SchemaRead, SchemaWrite},
 };
 
@@ -55,7 +58,7 @@ pub use finality::{
     stored_justification,
 };
 #[cfg(feature = "finality-ffg")]
-pub use finality::{FfgConfig, GenesisValidator};
+pub use finality::{FfgConfig, GenesisValidator, Leak};
 pub use crate::structs::receipt::{CommittedOutcome, CommittedReceipt, receipts_root};
 pub use receipt::{TxReceipt, TxStatus};
 
@@ -67,6 +70,13 @@ pub const DEV_TX_LIMITS: Limits = Limits {
 
 /// The development chains' reorg limit.
 pub const DEV_MAX_REORG_DEPTH: u64 = 100;
+
+#[document(
+    summary = "The development proof-of-work chain's difficulty window, 11 blocks: Bitcoin's median-time window, and the blocks difficulty retargets over.",
+    category = "Chain",
+    see_also = "Genesis::pow_window",
+)]
+pub const DEV_POW_WINDOW: u64 = 11;
 
 #[document(
     summary = "The development chains' max_block_bytes, 4 MiB: about 14,000 transfers, more than their gas limit lets in, so gas binds first for transfers and bytes for big deploys.",
@@ -102,6 +112,15 @@ const TIPS_KEY: &[u8] = b"tips";
 const FORMAT_KEY: &[u8] = b"format";
 /// Where a node that synced from a snapshot keeps which block it took state at.
 const SNAPSHOT_KEY: &[u8] = b"snapshot";
+/// Where the chain keeps the blocks that failed to run, so a restart refuses them again.
+const BAD_KEY: &[u8] = b"bad";
+
+#[document(
+    summary = "How many blocks that failed to run a node remembers across restarts, newest kept: 1,024. A branch past that is run again before it is refused, as every one was before the memory outlived a restart.",
+    category = "Chain",
+    see_also = "Chain::import, BlockError::Bad",
+)]
+pub const MAX_BAD_BLOCKS: usize = 1_024;
 
 #[document(
     summary = "Funds an address holds from the start.",
@@ -176,7 +195,7 @@ pub struct Genesis {
     pub consensus: ConsensusConfig,
     #[document(summary = "What each block mints for its producer.")]
     pub reward: Reward,
-    #[document(summary = "The one address allowed to send Mint transactions, if any.")]
+    #[document(summary = "The one address allowed to send Mint transactions, if any: the development key's, or None. Mint is a faucet for development chains; a chain of value names nobody, and gets new coins from block rewards alone.")]
     pub minter: Option<Address>,
     #[document(summary = "Who holds what from the start.")]
     pub allocations: Vec<Allocation>,
@@ -195,35 +214,92 @@ pub struct Genesis {
     #[document(summary = "The most bytes a block's transactions may take, encoded, from MIN_BLOCK_BYTES to MAX_BLOCK_BYTES: a consensus rule, so a block past it is refused on import. None bounds blocks by gas alone, or on a chain without fees, by nothing. Chains made before it keep their genesis id, since unset it adds nothing to genesis's encoding.")]
     #[wincode(with = "Unset")]
     pub max_block_bytes: Option<u64>,
+    #[document(summary = "Under proof of work, the window, in blocks, that difficulty retargets over and timestamps are bounded by: a block's difficulty is the window's work over the time it took, scaled to the target, and its timestamp must be after the median of the window's. At least 2; None keeps the rule that looks at the parent alone. Genesis files write it as consensus.window. Chains made before it keep their genesis id, since unset it adds nothing to genesis's encoding, which is why it sits here, last, and not in PowConfig.")]
+    #[wincode(with = "Unset")]
+    pub pow_window: Option<u64>,
+    #[document(summary = "Where vote rewards come from: minted, as when None, or from the reward pool, REWARD_POOL, which the burned share of every fee then feeds instead of vanishing. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
+    #[wincode(with = "UnsetSource")]
+    pub vote_reward_source: Option<VoteRewardSource>,
 }
 
 impl Hashable for Genesis {}
 
 #[document(
-    summary = "Encodes a genesis field added after chains launched: as nothing at all while it is None, so a genesis without it encodes and hashes as it did before the field existed, and as Option's encoding, a 1 and the value, once it is Some. Only for genesis's last fields, since genesis is hashed and never decoded.",
+    summary = "Where the rewards for finality votes come from.",
     category = "Chain",
-    see_also = "Genesis::max_block_bytes",
+    see_also = "Genesis::vote_reward_source, REWARD_POOL",
 )]
-pub struct Unset;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum VoteRewardSource {
+    #[document(summary = "New supply: every reward is minted.")]
+    #[default]
+    #[wincode(tag = 0)]
+    Mint,
+    #[document(summary = "The reward pool: the burned share of every fee goes to REWARD_POOL instead of vanishing, and voters are paid from it, each as much of its reward as the pool holds. Supply then grows by block rewards alone.")]
+    #[wincode(tag = 1)]
+    Fees,
+}
 
-// SAFETY: size_of is exactly what write writes: nothing for None, nine bytes for Some.
-unsafe impl<C: wincode::config::ConfigCore> SchemaWrite<C> for Unset {
-    type Src = Option<u64>;
+impl Hashable for VoteRewardSource {
+    const TAG_LEN: usize = 1;
+}
 
-    fn size_of(src: &Option<u64>) -> wincode::WriteResult<usize> {
-        Ok(if src.is_some() { 9 } else { 0 })
-    }
-
-    fn write(writer: impl wincode::io::Writer, src: &Option<u64>) -> wincode::WriteResult<()> {
-        let Some(value) = src else {
-            return Ok(());
-        };
-        let mut bytes = [1; 9];
-        bytes[1..].copy_from_slice(&value.to_le_bytes());
-
-        <[u8; 9] as SchemaWrite<C>>::write(writer, &bytes)
+impl VoteRewardSource {
+    #[document(parent = "VoteRewardSource", summary = "The name genesis files and the API use: mint or fees.")]
+    pub fn name(&self) -> &'static str {
+        match self {
+            VoteRewardSource::Mint => "mint",
+            VoteRewardSource::Fees => "fees",
+        }
     }
 }
+
+impl std::str::FromStr for VoteRewardSource {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<VoteRewardSource, String> {
+        match text {
+            "mint" => Ok(VoteRewardSource::Mint),
+            "fees" => Ok(VoteRewardSource::Fees),
+            other => Err(format!("unknown vote reward source {other}; use mint or fees")),
+        }
+    }
+}
+
+/// Encodes Genesis::vote_reward_source as nothing while None, and as a 1 and its tag once set, so
+/// a genesis from before the field hashes as it did. Only as a last field; see Unset.
+pub struct UnsetSource;
+
+// SAFETY: size_of is exactly what write writes: nothing for None, two bytes for Some.
+unsafe impl<C: wincode::config::ConfigCore> SchemaWrite<C> for UnsetSource {
+    type Src = Option<VoteRewardSource>;
+
+    fn size_of(src: &Option<VoteRewardSource>) -> wincode::WriteResult<usize> {
+        Ok(if src.is_some() { 2 } else { 0 })
+    }
+
+    fn write(writer: impl wincode::io::Writer, src: &Option<VoteRewardSource>) -> wincode::WriteResult<()> {
+        let Some(source) = src else {
+            return Ok(());
+        };
+        let tag = match source {
+            VoteRewardSource::Mint => 0,
+            VoteRewardSource::Fees => 1,
+        };
+
+        <[u8; 2] as SchemaWrite<C>>::write(writer, &[1, tag])
+    }
+}
+
+#[document(
+    summary = "The account the burned share of fees goes to, and vote rewards are paid from, on a chain whose vote_reward_source is fees. A contract address no contract lives at, so nothing can spend it but the chain itself.",
+    category = "Chain",
+    see_also = "VoteRewardSource",
+)]
+pub const REWARD_POOL: Address = Address::Contract([0; 32]);
+
+pub use crate::structs::unset::Unset;
 
 #[document(
     summary = "How the chain's own coin is named and shown, so every client shows balances alike. Only displays read it: balances, fees and rewards are always counted in whole units.",
@@ -367,6 +443,8 @@ impl Genesis {
             finality: FinalityConfig::dev(authority),
             fees: Some(FeeConfig::dev()),
             max_block_bytes: Some(DEV_MAX_BLOCK_BYTES),
+            pow_window: None,
+            vote_reward_source: None,
         }
     }
 
@@ -402,7 +480,31 @@ impl Genesis {
             finality: FinalityConfig::dev(dev),
             fees: Some(FeeConfig::dev()),
             max_block_bytes: Some(DEV_MAX_BLOCK_BYTES),
+            pow_window: Some(DEV_POW_WINDOW),
+            vote_reward_source: None,
         }
+    }
+
+    #[document(
+        parent = "Genesis",
+        summary = "A development chain whose authority finality signers produce the blocks in turn, a block every two seconds: the development key is its one signer, so it produces every block, and votes. Otherwise as dev_authority.",
+        params = { signer = "The one signer, usually DevAuthority::dev_keypair." },
+    )]
+    #[cfg(feature = "finality-authority")]
+    pub fn dev_rotating(signer: PublicKey) -> Genesis {
+        Genesis {
+            consensus: ConsensusConfig::Rotating { slot_ms: 2_000 },
+            finality: Some(FinalityConfig::Authority(AuthorityConfig::dev(signer))),
+            ..Genesis::dev_authority(signer)
+        }
+    }
+
+    #[document(
+        parent = "Genesis",
+        summary = "The consensus rules this chain's blocks are checked against: its consensus with its proof-of-work window, if any.",
+    )]
+    pub fn consensus_rules(&self) -> Box<dyn Consensus> {
+        self.consensus.rules(self.pow_window)
     }
 
     #[document(
@@ -412,7 +514,7 @@ impl Genesis {
     pub fn block(&self) -> Block {
         let producer = match &self.consensus {
             ConsensusConfig::Authority { key, .. } => key.address(),
-            ConsensusConfig::ProofOfWork(_) => Address::Ed25519([0; 32]),
+            ConsensusConfig::ProofOfWork(_) | ConsensusConfig::Rotating { .. } => Address::Ed25519([0; 32]),
         };
 
         Block {
@@ -460,6 +562,7 @@ impl Genesis {
             hash: self.hash,
             consensus: self.consensus.clone(),
             finality,
+            pow_window: self.pow_window,
         }
     }
 
@@ -518,6 +621,33 @@ impl Genesis {
             return Some("max_block_bytes must be at most 6 MiB, 6291456, so a full block fits one gossip message");
         }
 
+        if matches!(self.consensus, ConsensusConfig::Rotating { .. }) {
+            #[cfg(feature = "finality-authority")]
+            let rotating_ok = matches!(self.finality, Some(FinalityConfig::Authority(_)));
+            #[cfg(not(feature = "finality-authority"))]
+            let rotating_ok = false;
+
+            if !rotating_ok {
+                return Some("consensus rotating needs finality of type authority, whose signers produce the blocks");
+            }
+        }
+
+        if self.minter.is_some_and(|minter| minter != Keypair::development().public().address()) {
+            return Some("minter must be the development key, or null: Mint is for development chains alone");
+        }
+
+        if self.vote_reward_source == Some(VoteRewardSource::Fees) && self.fees.is_none() {
+            return Some("vote_reward_source fees needs fees to fill the pool");
+        }
+
+        if self.pow_window.is_some_and(|window| window < 2) {
+            return Some("consensus.window must be at least 2 blocks, one interval to measure");
+        }
+
+        if self.pow_window.is_some() && !matches!(self.consensus, ConsensusConfig::ProofOfWork(_)) {
+            return Some("consensus.window is for proof of work alone");
+        }
+
         self.coin
             .problem()
             .or_else(|| self.finality.as_ref().and_then(FinalityConfig::problem))
@@ -535,9 +665,15 @@ impl Genesis {
             limits: self.tx_limits,
             token_functions: self.token_functions.clone().into(),
             staking: self.finality.as_ref().and_then(|config| config.staking(self.block().id())),
-            signers: self.finality.as_ref().and_then(FinalityConfig::signer_rules),
+            signers: self.finality.as_ref().and_then(|config| config.signer_rules(self.block().id())),
             fees: self.fees.as_ref().map(|config| Arc::new(config.build())),
+            pooled_fees: self.vote_reward_source == Some(VoteRewardSource::Fees),
         }
+    }
+
+    #[document(parent = "Genesis", summary = "Where vote rewards come from: mint unless genesis says fees.")]
+    pub fn vote_rewards(&self) -> VoteRewardSource {
+        self.vote_reward_source.unwrap_or_default()
     }
 }
 
@@ -667,15 +803,21 @@ pub struct Chain {
     max_reorg_depth: u64,
     /// The most bytes a block's transactions may take, encoded, if genesis bounds them.
     max_block_bytes: Option<u64>,
-    /// Blocks that failed to run, and so their descendants too. Forgotten on restart, when the
-    /// branch would fail again the same way.
+    /// Blocks that failed to run, and so their descendants too, the last MAX_BAD_BLOCKS of them
+    /// kept in Meta so a restart refuses them without running them again. The queue says which
+    /// is oldest.
     bad: HashSet<Hash>,
+    bad_order: VecDeque<Hash>,
     /// Stored blocks no stored block builds on yet, which a justification may move the chain to.
     tips: HashSet<Hash>,
     finality_config: Option<FinalityConfig>,
     finality: Option<Box<dyn Finality>>,
     /// How finality works, as light clients see it, for the light updates blocks keep.
     light: Option<LightFinality>,
+    /// Where vote rewards come from, for finality rebuilt after a snapshot.
+    vote_rewards: VoteRewardSource,
+    /// The chain as light clients see it, for checkpoint starts.
+    light_params: LightParams,
     /// The threads blocks run on, shared with finality to check votes.
     workers: Arc<Workers>,
     /// The event index and the address index, when this node keeps them.
@@ -752,29 +894,33 @@ impl Chain {
         let tips = read_value::<Leaves>(&*db, Column::Meta, TIPS_KEY)?.map_or_else(|| vec![tip_id], |leaves| leaves.blocks);
         let workers = Arc::new(Workers::new());
         let finality = match &genesis.finality {
-            Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers))?),
+            Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers), genesis.vote_rewards())?),
             None => None,
         };
         let events = index::stored_index(&*db, IndexKind::Events)?;
         let addresses = index::stored_index(&*db, IndexKind::Addresses)?;
         let snapshot = read_value::<SnapshotRecord>(&*db, Column::Meta, SNAPSHOT_KEY)?.map(|record| record.height);
+        let bad_order: VecDeque<Hash> = read_value::<BadBlocks>(&*db, Column::Meta, BAD_KEY)?.unwrap_or_default().blocks.into();
         let mut chain = Chain {
             db,
             rules: genesis.rules(),
             hash: genesis.hash,
             vm,
-            consensus: genesis.consensus.rules(),
+            consensus: genesis.consensus_rules(),
             reward: genesis.reward,
             genesis: id,
             tip: tip.header,
             tip_work,
             max_reorg_depth: genesis.max_reorg_depth,
             max_block_bytes: genesis.max_block_bytes,
-            bad: HashSet::new(),
+            bad: bad_order.iter().copied().collect(),
+            bad_order,
             tips: tips.into_iter().collect(),
             finality_config: genesis.finality.clone(),
             finality,
             light: genesis.light_params().finality,
+            vote_rewards: genesis.vote_rewards(),
+            light_params: genesis.light_params(),
             workers,
             events,
             addresses,
@@ -953,9 +1099,48 @@ impl Chain {
         },
     )]
     pub fn build(&self, txs: Vec<SignedTx>, proofs: Vec<Justification>, producer: Address, timestamp: u64) -> Result<Block, DbError> {
+        self.build_within(txs, proofs, producer, timestamp, None)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "The next block on the tip, as build makes it, within a time budget: once the deadline passes, the transactions that went in by then are the block, and the rest are left out unrun. Without a deadline, every transaction given runs.",
+        params = {
+            txs = "The transactions, in order.",
+            proofs = "Finality proofs to carry.",
+            producer = "Who produces it.",
+            timestamp = "When it is made.",
+            deadline = "When to stop running transactions, or None to run them all.",
+        },
+        returns = "The block, and whether the deadline cut it short.",
+    )]
+    pub fn build_within(
+        &self,
+        txs: Vec<SignedTx>,
+        proofs: Vec<Justification>,
+        producer: Address,
+        timestamp: u64,
+        deadline: Option<Instant>,
+    ) -> Result<Block, DbError> {
+        self.build_declaring(txs, proofs, producer, timestamp, deadline, None)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "The next block on the tip, as build_within makes it, declaring the difficulty the producer decides when consensus leaves it to the producer, as a rotating authority's offset in the schedule; None declares what consensus says.",
+    )]
+    pub fn build_declaring(
+        &self,
+        txs: Vec<SignedTx>,
+        proofs: Vec<Justification>,
+        producer: Address,
+        timestamp: u64,
+        deadline: Option<Instant>,
+        difficulty: Option<u128>,
+    ) -> Result<Block, DbError> {
         let layer = Arc::new(State::new(self.db.clone()));
 
-        self.build_in(&layer, &self.tip, txs, proofs, producer, timestamp)
+        self.build_in(&layer, &self.tip, Draft { txs, proofs, producer, timestamp, deadline, difficulty })
     }
 
     #[document(
@@ -981,21 +1166,15 @@ impl Chain {
         let header = self.block(parent)?.ok_or(ImportError::UnknownParent(*parent))?.header;
         let layer = self.state_at(parent)?;
 
-        Ok(self.build_in(&layer, &header, txs, proofs, producer, timestamp)?)
+        Ok(self.build_in(&layer, &header, Draft { txs, proofs, producer, timestamp, deadline: None, difficulty: None })?)
     }
 
     /// Builds the next block on parent in layer, which holds the state at the end of parent. The
     /// transactions run there, to keep only those that can run and fit and learn the gas they
-    /// use, and so do the reward and the proofs, to learn the roots; the layer is thrown away.
-    fn build_in(
-        &self,
-        layer: &Arc<State>,
-        parent: &BlockHeader,
-        txs: Vec<SignedTx>,
-        proofs: Vec<Justification>,
-        producer: Address,
-        timestamp: u64,
-    ) -> Result<Block, DbError> {
+    /// use, and so do the reward and the proofs, to learn the roots; the layer is thrown away. A
+    /// deadline stops the transactions once it passes, and the block holds those that ran by then.
+    fn build_in(&self, layer: &Arc<State>, parent: &BlockHeader, draft: Draft) -> Result<Block, DbError> {
+        let Draft { txs, proofs, producer, timestamp, deadline, difficulty } = draft;
         let context = BlockContext {
             height: parent.height + 1,
             producer,
@@ -1003,11 +1182,21 @@ impl Chain {
             genesis: self.genesis(),
         };
         let txs = self.within_bytes(txs);
-        let ran = match self.runner().run(layer, &txs, &context, Unfit::Skip) {
+        let ran = match self.runner().run(layer, &txs, &context, Unfit::Skip, deadline) {
             Ok(ran) => ran,
             Err(ImportError::Db(err)) => return Err(err),
             Err(err) => unreachable!("building skips what does not fit, so only the database fails it: {err}"),
         };
+
+        if ran.cut {
+            log::info!(
+                "[chain] the time budget cut block {} short: {} of {} transactions went in",
+                context.height,
+                ran.kept.len(),
+                txs.len()
+            );
+        }
+
         let gas_used = ran.gas_used;
         let kept: Vec<SignedTx> = ran.kept.into_iter().map(|index| txs[index].clone()).collect();
         let committed: Vec<CommittedReceipt> = ran.receipts.iter().map(CommittedReceipt::of).collect();
@@ -1017,7 +1206,10 @@ impl Chain {
                 height: context.height,
                 timestamp,
                 producer,
-                difficulty: self.consensus.difficulty(parent, timestamp),
+                difficulty: match difficulty {
+                    Some(declared) => declared,
+                    None => self.difficulty_after(parent, timestamp)?,
+                },
                 tx_root: Block::tx_root(self.hash, &kept),
                 proof_root: Block::proof_root(self.hash, &proofs),
                 receipts_root: receipts_root(self.hash, &committed),
@@ -1089,6 +1281,19 @@ impl Chain {
         self.snapshot
     }
 
+    #[document(
+        parent = "Chain",
+        summary = "What a peer starting at a checkpoint it trusts asks for: the checkpoint start, and the checkpoint's total work; None when the block is no checkpoint on the main chain, or the headers it needs are missing.",
+    )]
+    pub fn checkpoint_answer(&self, block: &Hash) -> Result<Option<(CheckpointStart, u256)>, DbError> {
+        let params = self.light_params.clone();
+
+        match stored_checkpoint_start(&*self.db, &params, block)? {
+            Ok((_, start)) => Ok(Some((start, work_of(&*self.db, block)?))),
+            Err(_) => Ok(None),
+        }
+    }
+
     #[document(parent = "Chain", summary = "Main-chain headers with their seals, from a height on: what a peer syncing from a snapshot checks first.")]
     pub fn headers_from(&self, from: u64, count: u32) -> Result<Vec<SealedHeader>, DbError> {
         let mut headers = Vec::new();
@@ -1146,15 +1351,16 @@ impl Chain {
 
     #[document(
         parent = "Chain",
-        summary = "Makes a block whose state the database already holds, taken from peers, the tip of a chain that held only genesis: stores the headers below it and the block itself, and from then on never rolls back past it. Finality starts over from genesis, and learns again from peers.",
+        summary = "Makes a block whose state the database already holds, taken from peers, the tip of a chain that held only genesis: stores the headers below it and the block itself, and from then on never rolls back past it. Finality starts over from genesis, and learns again from peers; or, for a node that started at a checkpoint it trusts, from that checkpoint, which it holds as justified and finalized.",
         params = {
-            headers = "Every header from height 1 to the block's, checked by consensus.",
+            headers = "Consecutive headers ending at the block's, checked by consensus: from height 1, or from a checkpoint start's first header when a checkpoint is given.",
             pivot = "The block, whose state root the state in the database must have.",
             work = "Its total work.",
+            checkpoint = "The checkpoint the node trusts, among the headers, or None for one that checked every header from genesis.",
         },
-        returns = "BadSnapshot when the chain holds more than genesis, the headers do not end at the block, or the state is not the block's.",
+        returns = "BadSnapshot when the chain holds more than genesis, the headers do not end at the block or start past genesis without a checkpoint, the checkpoint is not among them, or the state is not the block's.",
     )]
-    pub fn install_snapshot(&mut self, headers: &[SealedHeader], pivot: &Block, work: u256) -> Result<(), ChainError> {
+    pub fn install_snapshot(&mut self, headers: &[SealedHeader], pivot: &Block, work: u256, checkpoint: Option<Checkpoint>) -> Result<(), ChainError> {
         let bad = |why: &str| Err(ChainError::BadSnapshot(why.to_string()));
         let id = pivot.id();
 
@@ -1162,8 +1368,19 @@ impl Chain {
             return bad("this chain holds more than genesis");
         }
 
-        if headers.last().map(SealedHeader::id) != Some(id) || headers.len() as u64 != pivot.header.height {
+        let consecutive = headers.windows(2).all(|pair| pair[1].header.parent == pair[0].id() && pair[1].header.height == pair[0].header.height + 1);
+        let first = headers.first().map_or(0, |sealed| sealed.header.height);
+
+        if headers.last().map(SealedHeader::id) != Some(id) || !consecutive || first == 0 {
             return bad("the headers do not lead to the block");
+        }
+
+        match checkpoint {
+            Some(checkpoint) if !headers.iter().any(|sealed| sealed.id() == checkpoint.block) => {
+                return bad("the checkpoint is not among the headers");
+            }
+            None if first != 1 => return bad("the headers do not start at genesis, and no checkpoint is trusted"),
+            _ => {}
         }
 
         let state = State::new(self.db.clone());
@@ -1175,6 +1392,10 @@ impl Chain {
         for sealed in headers {
             state.put_value(Column::Headers, id_key(&sealed.id()), sealed);
             state.put_value(Column::Heights, sealed.header.height.to_be_bytes().to_vec(), &sealed.id());
+        }
+
+        if let Some(checkpoint) = checkpoint {
+            finality::anchor(&state, &checkpoint);
         }
 
         state.put_value(Column::Blocks, id_key(&id), pivot);
@@ -1193,7 +1414,7 @@ impl Chain {
         self.tips = HashSet::from([id]);
         self.snapshot = Some(pivot.header.height);
         self.finality = match &self.finality_config {
-            Some(config) => Some(config.build(&self.view())?),
+            Some(config) => Some(config.build(&self.view(), self.vote_rewards)?),
             None => None,
         };
         self.tip_moved()?;
@@ -1250,6 +1471,20 @@ impl Chain {
             .map_or(u256::ZERO, |fees| fees.priority(self.next_base_price(), &tx.fee))
     }
 
+    #[document(
+        parent = "Chain",
+        summary = "What a transaction is worth to a producer in the next block: its priority, or None when the block cannot take it, as its offer is under the next base price. What producers select from the mempool by.",
+        see_also = "Chain::priority, Mempool::select",
+    )]
+    pub fn worth(&self, tx: &SignedTx) -> Option<u256> {
+        let Some(fees) = self.fees() else {
+            return Some(u256::ZERO);
+        };
+        let base = self.next_base_price();
+
+        fees.pricing().price(base, &tx.fee).map(|_| fees.priority(base, &tx.fee))
+    }
+
     /// The base price of the block after parent.
     fn base_price_after(&self, parent: &BlockHeader) -> u256 {
         match self.fees() {
@@ -1259,6 +1494,60 @@ impl Chain {
     }
 
     /// What a block's transactions run with.
+    /// The headers consensus looks at when checking the block after parent: the parent first,
+    /// then its parent, and so on, as many as consensus wants and the chain has.
+    fn ancestors(&self, parent: &BlockHeader) -> Result<Vec<BlockHeader>, DbError> {
+        let mut ancestors = vec![parent.clone()];
+
+        while ancestors.len() < self.consensus.lookback() {
+            let last = ancestors.last().expect("starts with the parent");
+
+            if last.height == 0 {
+                break;
+            }
+
+            match stored_header(&*self.db, &last.parent)? {
+                Some(sealed) => ancestors.push(sealed.header),
+                None => break,
+            }
+        }
+
+        Ok(ancestors)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "The difficulty the block after a stored block must declare, given its timestamp: what consensus says from that block and the ancestors it looks at.",
+    )]
+    pub fn difficulty_after(&self, parent: &BlockHeader, timestamp: u64) -> Result<u128, DbError> {
+        Ok(self.consensus.difficulty(&self.ancestors(parent)?, timestamp))
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Who may produce the block at a height, under a consensus that takes its producers from finality: the authority signers fixed for the height's epoch, in the state at the tip. Empty under any other consensus, or when no set is fixed for the epoch yet.",
+    )]
+    pub fn producers_for(&self, height: u64) -> Result<Vec<Signer>, DbError> {
+        if !self.consensus.needs_producers() {
+            return Ok(Vec::new());
+        }
+
+        self.producers_in(&self.state(), height)
+    }
+
+    /// The producers for a height, in a state.
+    #[cfg_attr(not(feature = "finality-authority"), allow(unused_variables))]
+    fn producers_in(&self, state: &State, height: u64) -> Result<Vec<Signer>, DbError> {
+        #[cfg(feature = "finality-authority")]
+        if let Some(config) = &self.finality_config {
+            let epoch = height / config.checkpoint_interval().max(1);
+
+            return Ok(crate::registry::signers::Signers::new(state).set(epoch)?.map(|set| set.signers).unwrap_or_default());
+        }
+
+        Ok(Vec::new())
+    }
+
     fn runner(&self) -> Runner<'_> {
         Runner {
             rules: &self.rules,
@@ -1288,12 +1577,18 @@ impl Chain {
             return Err(ImportError::Known);
         }
 
+        // At or below the finalized checkpoint, only the main chain's blocks exist: refused before
+        // anything is fetched for it, so a node never asks for a branch under its finality.
+        if self.finalized_height().is_some_and(|finalized| block.header.height <= finalized) {
+            return Err(ImportError::Invalid(BlockError::ConflictsWithFinality));
+        }
+
         let Some(parent) = self.block(&parent_id)? else {
             return Err(ImportError::UnknownParent(parent_id));
         };
 
         if self.bad.contains(&parent_id) {
-            self.bad.insert(id);
+            self.mark_bad([id])?;
 
             return Err(ImportError::Invalid(BlockError::Bad));
         }
@@ -1327,13 +1622,12 @@ impl Chain {
             }));
         }
 
-        if self.finalized_height().is_some_and(|finalized| block.header.height <= finalized) {
-            // At or below the finalized checkpoint, only the main chain's blocks exist.
-            return Err(ImportError::Invalid(BlockError::ConflictsWithFinality));
-        }
-
+        let producers = match self.consensus.needs_producers() {
+            true => self.producers_for(block.header.height)?,
+            false => Vec::new(),
+        };
         self.consensus
-            .check(&block.header, &block.seal, &parent.header, now)
+            .check(&block.header, &block.seal, &self.ancestors(&parent.header)?, &producers, now)
             .map_err(|err| ImportError::Invalid(BlockError::Consensus(err)))?;
         let work = work_of(&*self.db, &parent_id)? + self.consensus.work(&block.header);
         let state = Arc::new(State::new(self.db.clone()));
@@ -1346,7 +1640,7 @@ impl Chain {
                 Ok(receipts) => receipts,
                 Err(err) => {
                     if matches!(err, ImportError::Invalid(_)) {
-                        self.bad.insert(id);
+                        self.mark_bad([id])?;
                     }
 
                     return Err(err);
@@ -1378,6 +1672,110 @@ impl Chain {
         self.tips.insert(id);
         let blocks = self.tips.iter().copied().collect();
         state.put_value(Column::Meta, TIPS_KEY.to_vec(), &Leaves { blocks });
+    }
+
+    /// Remembers blocks that failed to run, in memory and in Meta, so neither this run nor the
+    /// next tries their branch again. Beyond MAX_BAD_BLOCKS the oldest are let go.
+    fn mark_bad(&mut self, ids: impl IntoIterator<Item = Hash>) -> Result<(), DbError> {
+        for id in ids {
+            if self.bad.insert(id) {
+                self.bad_order.push_back(id);
+            }
+        }
+
+        while self.bad_order.len() > MAX_BAD_BLOCKS {
+            if let Some(oldest) = self.bad_order.pop_front() {
+                self.bad.remove(&oldest);
+            }
+        }
+
+        let state = State::new(self.db.clone());
+        state.put_value(Column::Meta, BAD_KEY.to_vec(), &BadBlocks { blocks: self.bad_order.iter().copied().collect() });
+
+        self.db.commit(state.take_changes())
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "The blocks this node remembers as failing to run, oldest first: it refuses them and anything built on them without running them again. The last MAX_BAD_BLOCKS, kept across restarts.",
+    )]
+    pub fn bad_blocks(&self) -> Vec<Hash> {
+        self.bad_order.iter().copied().collect()
+    }
+
+    /// Deletes the side branches the chain can never follow: those that split off more than
+    /// max_reorg_depth blocks below the tip, below the finalized checkpoint, or below the snapshot
+    /// this node took state at. Run after the tip moves. A branch's blocks go from its leaf down
+    /// to the fork; the blocks on the main chain stay.
+    fn prune_side_branches(&mut self) -> Result<usize, DbError> {
+        let floor = [
+            self.tip.height.saturating_sub(self.max_reorg_depth),
+            self.finalized_height().unwrap_or(0),
+            self.snapshot.unwrap_or(0),
+        ]
+        .into_iter()
+        .max()
+        .expect("three candidates");
+        let state = State::new(self.db.clone());
+        let mut pruned = 0;
+        let mut dropped_leaves = Vec::new();
+
+        for leaf in self.tips.iter().copied() {
+            if leaf == self.tip.id() || self.on_main_chain(&leaf)? {
+                continue;
+            }
+
+            // The branch from its leaf back to where it meets the main chain, if it does above
+            // the floor; else everything stored of it, which can never be followed.
+            let mut branch = Vec::new();
+            let mut current = leaf;
+            let followable = loop {
+                let Some(header) = stored_header(&*self.db, &current)? else {
+                    break false;
+                };
+
+                if self.on_main_chain(&current)? {
+                    break header.header.height >= floor;
+                }
+
+                if header.header.height <= floor {
+                    branch.push(current);
+
+                    break false;
+                }
+
+                branch.push(current);
+                current = header.header.parent;
+            };
+
+            if followable {
+                continue;
+            }
+
+            for id in &branch {
+                state.delete(Column::Blocks, id_key(id));
+                state.delete(Column::Headers, id_key(id));
+                state.delete(Column::Work, id_key(id));
+            }
+
+            pruned += branch.len();
+            dropped_leaves.push(leaf);
+        }
+
+        if dropped_leaves.is_empty() {
+            return Ok(0);
+        }
+
+        for leaf in dropped_leaves {
+            self.tips.remove(&leaf);
+        }
+
+        let blocks = self.tips.iter().copied().collect();
+        state.put_value(Column::Meta, TIPS_KEY.to_vec(), &Leaves { blocks });
+        self.db.commit(state.take_changes())?;
+        log::info!("[chain] pruned {pruned} side blocks on branches the chain can no longer follow");
+
+        Ok(pruned)
     }
 
     /// Makes new_tip the tip: rolls the main chain back to where its branch splits off, then runs
@@ -1449,7 +1847,7 @@ impl Chain {
         for (position, block) in branch.iter().enumerate() {
             if let Err(err) = self.apply(&state, block) {
                 if matches!(err, ImportError::Invalid(_)) {
-                    self.bad.extend(branch[position..].iter().map(Block::id));
+                    self.mark_bad(branch[position..].iter().map(Block::id))?;
                 }
 
                 return Err(err);
@@ -1500,7 +1898,7 @@ impl Chain {
             base_price: block.header.base_price,
             genesis: self.genesis(),
         };
-        let ran = self.runner().run(&layer, &block.txs, &context, Unfit::Refuse)?;
+        let ran = self.runner().run(&layer, &block.txs, &context, Unfit::Refuse, None)?;
         let receipts = ran.receipts;
 
         if ran.gas_used != block.header.gas_used {
@@ -1633,6 +2031,18 @@ struct WorkRecord {
 
 impl Hashable for WorkRecord {}
 
+/// What a block is built from: its transactions and proofs, who produces it and when, and how long
+/// running the transactions may take.
+struct Draft {
+    txs: Vec<SignedTx>,
+    proofs: Vec<Justification>,
+    producer: Address,
+    timestamp: u64,
+    deadline: Option<Instant>,
+    /// The difficulty the producer declares, when consensus leaves it to the producer.
+    difficulty: Option<u128>,
+}
+
 /// The stored blocks no stored block builds on yet.
 #[derive(Clone, Debug, Default, SchemaWrite, SchemaRead)]
 struct Leaves {
@@ -1640,6 +2050,14 @@ struct Leaves {
 }
 
 impl Hashable for Leaves {}
+
+/// The blocks that failed to run, oldest first, as Meta keeps them.
+#[derive(Clone, Debug, Default, SchemaWrite, SchemaRead)]
+struct BadBlocks {
+    blocks: Vec<Hash>,
+}
+
+impl Hashable for BadBlocks {}
 
 /// The block a node that synced from a snapshot took its state at.
 #[derive(Clone, Copy, Debug, SchemaWrite, SchemaRead)]
@@ -1823,6 +2241,89 @@ pub fn stored_light_finality(db: &dyn Read, interval: u64, from: u64, count: u64
     }
 
     Ok(steps)
+}
+
+#[document(
+    summary = "Why a block cannot be a checkpoint start.",
+    category = "Chain",
+    see_also = "stored_checkpoint_start",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartProblem {
+    #[document(summary = "The block is not stored, or not on the main chain.")]
+    NotOnChain,
+    #[document(summary = "Under voting finality, the block opens no epoch.")]
+    NoEpoch,
+    #[document(summary = "Starting there takes more headers than one answer holds.")]
+    TooMany,
+    #[document(summary = "A header below it is missing: this node synced from a snapshot or a checkpoint past it.")]
+    Missing(u64),
+}
+
+impl fmt::Display for StartProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StartProblem::NotOnChain => write!(f, "not on the main chain"),
+            StartProblem::NoEpoch => write!(f, "opens no epoch: it is no checkpoint"),
+            StartProblem::TooMany => write!(f, "starting there takes more than {} headers", crate::light::MAX_LIGHT_HEADERS),
+            StartProblem::Missing(height) => write!(f, "no main-chain header at {height}: this node synced from a snapshot past it"),
+        }
+    }
+}
+
+#[document(
+    summary = "What a client, light or full, starts from at a checkpoint: its epoch, and the headers and light updates back to where consensus and finality need them, read straight from a database. What GET /light/checkpoint and SyncRequest::Checkpoint answer.",
+    category = "Chain",
+    params = {
+        db = "The database.",
+        params = "The chain's light parameters, for its finality's timing and consensus's lookback.",
+        block = "The checkpoint's id.",
+    },
+    returns = "The epoch and the start, or why the block cannot be one.",
+    see_also = "CheckpointStart, checkpoint_start, checkpoint_first_header",
+)]
+pub fn stored_checkpoint_start(db: &dyn Read, params: &LightParams, block: &Hash) -> Result<Result<(u64, CheckpointStart), StartProblem>, DbError> {
+    use crate::light::{checkpoint_first_header, checkpoint_start};
+
+    let Some(sealed) = stored_header(db, block)? else {
+        return Ok(Err(StartProblem::NotOnChain));
+    };
+    let height = sealed.header.height;
+
+    if stored_header_at(db, height)?.map(|header| header.id()) != Some(*block) {
+        return Ok(Err(StartProblem::NotOnChain));
+    }
+
+    let Some((epoch, from)) = checkpoint_start(params.finality, height) else {
+        return Ok(Err(StartProblem::NoEpoch));
+    };
+    // Below the epochs' start, as many headers as consensus looks at when checking a header.
+    let first = checkpoint_first_header(from, height, params.lookback());
+
+    if height - first >= u64::from(crate::light::MAX_LIGHT_HEADERS) {
+        return Ok(Err(StartProblem::TooMany));
+    }
+
+    let mut headers = Vec::new();
+
+    for at in first..=height {
+        match stored_header_at(db, at)? {
+            Some(sealed) => headers.push(sealed),
+            None => return Ok(Err(StartProblem::Missing(at))),
+        }
+    }
+
+    let interval = params.finality.and_then(|finality| finality.checkpoint_interval().filter(|_| finality.fixed_ahead().is_some()));
+    let updates = match interval {
+        Some(interval) => headers[(from - first) as usize..]
+            .iter()
+            .step_by(interval as usize)
+            .map(|header| stored_light_update(db, &header.id()))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => Vec::new(),
+    };
+
+    Ok(Ok((epoch, CheckpointStart { headers, updates })))
 }
 
 #[document(

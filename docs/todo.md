@@ -15,10 +15,16 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Fork choice and reorgs.** Side blocks are stored, and the branch with the most total work
   is the main chain. A heavier branch triggers a reorg: roll back to the fork with undo records,
   run the branch, one commit. A branch that fails to run is dropped, and its descendants refused.
-- [ ] **No other schemes yet.** The authority is still one key whose seed is in the source. Stake
-  now only finalizes; producing blocks by stake, or a rotating authority set, could come next.
-  Tendermint-style instant finality replaces block production, so it would be a consensus scheme,
-  not a finality kind.
+- [x] **A rotating authority.** `consensus.type: rotating` has the authority finality signers
+  produce in turn, one per slot, the next in line stepping in a slot later, in-turn blocks
+  weighing 2 and others 1; the producers are the signers fixed for each epoch, so they change by
+  approval and leave with an ejection. Light clients learn them from finality's updates and so
+  follow `activation_delay` epochs behind it, and snapshot sync is refused on such a chain.
+- [ ] **No production by stake.** Stake only finalizes. Producing blocks by stake, or
+  Tendermint-style instant finality, which replaces block production, would be a consensus
+  scheme of its own.
+- [ ] **Snapshot sync on a rotating chain.** It would have to learn the signers as a light client
+  does, from finality's updates, before it could check headers; today it is refused there.
 - [x] **Finality.** Casper FFG-style: validators bond on chain (`Tx::Bond`, `Unbond`,
   `Withdraw`) with a separate voting key, and vote at each epoch's checkpoint. Two thirds by
   bond justify a checkpoint, and a justified direct child finalizes its parent. Votes are
@@ -36,20 +42,27 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Signer approvals expire and can be withdrawn.** An approval counts for genesis's
   `approval_epochs` epochs from the one it was made in, and only approvals that still count
   decide a change. `Tx::WithdrawApproval` (`send withdraw-approval`) takes one back.
-- [ ] **A signer's key is its account.** Approvals are sent from the address of the signer's
-  voting key, so that key has to sign transactions too, unlike FFG, where the voting key stays
-  apart from the bond's account.
-- [ ] **Conflicting authority votes go unpunished.** They are kept as evidence and logged, but
-  with no bonds there is nothing to take; the remedy is social.
-- [ ] **Depth finality is each node's own.** Nodes split for longer than `depth` blocks finalize
-  different branches and never rejoin, and a node syncing from scratch keeps whichever branch it
-  syncs first.
-- [ ] **A slashed validator keeps its weight in sets already fixed.** Its bond is zero at once,
-  but sets are fixed `activation_delay` epochs ahead, so it counts until it leaves them. Dropping
-  slashed validators from every set would close that window.
-- [ ] **Finality stalls if a third goes quiet.** There is no inactivity leak, and no penalty for
-  not voting, so a chain whose validators drop below two thirds never finalizes again until
-  they return.
+- [x] **A signer is a key and an account.** Each authority signer names the account that approves
+  changes for it and takes its rewards (`Signer`), its own key's address unless genesis or the
+  approved set says otherwise, so the voting key signs nothing but votes, as under FFG.
+  `approve-signers --add KEY@ACCOUNT` names one.
+- [x] **Conflicting authority votes eject the signer.** `Tx::Slash` works under authority
+  finality too: the evidence throws the signer out of the decided set, thresholds kept, version
+  bumped, and out of the sets already fixed from two epochs on; refused when a set would be left
+  unable to reach its thresholds.
+- [x] **Depth finality is each node's own, by design.** It is a rolling checkpoint, as Bitcoin
+  Cash keeps one: nodes split for longer than `depth` blocks never rejoin on their own, and an
+  operator resyncs one side. Kept for development and single-operator chains, and documented as
+  such.
+- [x] **A slashed validator leaves the sets already fixed.** From two epochs after the slash on
+  it is out of every set at once; the slash's epoch and the next keep it, so the next
+  checkpoint's light update, which now re-states the sets of every epoch ahead, reaches light
+  clients by the usual trust path.
+- [x] **An inactivity leak.** FFG genesis's `leak` makes blocks carry every justification, so
+  state sees finality move, and bundles of votes that fall short while it has stalled for
+  `after_epochs` epochs, so state sees who still votes; each stalled checkpoint then burns
+  `permille` thousandths of every quiet validator's bond, reweighing the sets ahead, until the
+  rest hold two thirds again.
 - [x] **Vote tallies are stored.** Every vote a node counts or holds back is kept in the
   Finality column by target epoch and voter, and counted again when the chain opens, so tallies,
   held votes and double-vote detection survive a restart. Counted votes stay 64 epochs behind
@@ -58,23 +71,29 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   counted votes, and, once the vote shows its key votes, against that voter's held ones. Votes
   are remembered only when counted, so throwaway keys can neither grow memory beyond the capped
   held votes nor push real evidence out of the evidence log.
-- [ ] **Vote rewards are minted.** Nothing pays for them but new supply. Fees could fund them
-  instead, from what producers get or what is burned.
-- [ ] **No checkpoint sync.** A new node replays every block from genesis. There is no trusted
-  recent checkpoint to start from, which a long-lived staked chain needs against long-range
-  attacks.
-- [ ] **Difficulty only looks at the parent.** A miner may set its timestamp up to 15 seconds
-  ahead to lower the next difficulty a little. A median-time-past rule, or retargeting over a
-  window of blocks, would make that harder.
-- [ ] **Mining runs on CPU threads only.** GPU miners, on CUDA, SPIR-V (Vulkan compute), OpenCL
-  and WebGPU, belong in a library of their own that the node imports and picks one from with a
-  flag, beside `--mine-threads`. Each needs every work hash a genesis may name, so every secure
-  one: SHA-256, BLAKE3, BLAKE2s, BLAKE2b and Keccak-256, each behind its hash's feature. A seal a
-  GPU finds has to be one the CPU check accepts: the same `"chainv4 work"`, block id and nonce,
-  with tests against the CPU's hashes.
-- [ ] **Side branches are never pruned, and bad blocks are only remembered in memory.** With a
-  low difficulty, a peer can fill the disk with side blocks cheaply; after a restart, a known-bad
-  branch is run again before it is refused.
+- [x] **Vote rewards can come from fees.** Genesis's `vote_reward_source: fees` sends the burned
+  share of every fee to a reward pool and pays voters from it, each as much as the pool holds;
+  `mint`, the default, keeps minting them.
+- [x] **Checkpoint sync.** `--snapshot --checkpoint 0x…` starts a new node at a finalized
+  checkpoint it is told to trust: it takes the checkpoint's headers from a peer by their hashes,
+  holds it as justified and finalized, fetches nothing below it, and syncs on from there, so a
+  long-range fork under it never reaches the node.
+- [x] **Difficulty can retarget over a window.** Genesis's `consensus.window` makes difficulty
+  the window's work over the time it took, each interval counting between a quarter and four
+  targets, and bounds a block's timestamp by the window's median time, as Bitcoin does. The
+  consensus rules take the ancestors they need; the chain, the light client and snapshot sync
+  hand them over, and a checkpoint start carries enough headers. Unset, the parent-only rule
+  stays and the chain keeps its id; the dev pow chain sets 11.
+- [x] **Mining on the GPU.** The `chainv4-gpu` crate mines through wgpu, on Vulkan, Metal and
+  WebGPU, with a WGSL kernel for each of SHA-256, BLAKE3, BLAKE2s, BLAKE2b and Keccak-256, tested
+  against the CPU hashes; `--mine --mine-gpu` picks it in a build with the `gpu` feature.
+- [ ] **No CUDA kernels.** NVIDIA cards mine through Vulkan. Kernels in CUDA C, behind a `cuda`
+  feature, would need a machine with nvcc and a card to write and test on.
+- [x] **Side branches are pruned, and bad blocks are remembered across restarts.** When the tip
+  moves, side branches that split off more than `max_reorg_depth` blocks back, or below the
+  finalized checkpoint, are deleted, so the side blocks a node stores are bounded by the reorg
+  window, each one sealed at the main chain's difficulty. The last 1,024 blocks that failed to
+  run are kept in `Meta`, so a restart refuses their branches without running them again.
 - [x] **A block gas limit.** On a chain with fees, a transaction is only taken while its gas
   limit fits what the block has left, and the header's gas used must match, both checked on
   import.
@@ -86,9 +105,10 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   block building never starves the mempool.
 - [x] **Gas estimation.** `POST /offer` dry-runs calls, deploys and upgrades and offers what they
   used plus a quarter; the CLI, wallet and explorer warn before sending what would fail.
-- [ ] **A producer has no time budget.** It fills blocks to the bytes and gas limits whatever
-  they take to run, so a slow machine can miss its slot. Those limits are genesis's, alike on
-  every machine; `--max-block-txs` is the only brake a producer sets for its own speed.
+- [x] **A producer can set a time budget.** `--max-build-ms` bounds how long a node runs
+  transactions for a block it builds: what went in by then is sealed, and the rest wait for the
+  next block. The bytes and gas limits are genesis's, alike on every machine; this and
+  `--max-block-txs` are the brakes a producer sets for its own speed.
 - [x] **Block rewards.** Genesis sets an initial reward and an optional halving interval; each
   block's producer is credited after its transactions run.
 - [x] **Fees.** Every transaction pays for its gas, failed ones too, with what it does not use
@@ -97,19 +117,19 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   limit and the burned share of the base part; the rest goes to the producer. Producers take the
   best-paying transactions first. New schedules and pricings implement `GasSchedule` and
   `Pricing`.
-- [ ] **No gas estimation.** `send` sizes gas limits from the schedule and the chain's fuel cap,
-  not by running the transaction, so calls reserve far more than they use; the reserve comes
-  back, but the sender must hold it. Read-only calls would allow estimates.
-- [ ] **Transactions that cannot pay linger.** The mempool checks a transaction can pay when it
-  arrives, but one whose sender's funds have gone since, or whose price fell under the base price,
-  waits until its nonce is used, and every block built tries it again.
-- [ ] **A scorer runs for every transaction.** The chain pays its fuel, bounded by its `fuel`
-  setting, so a costly scorer slows every block. It may only read; a scorer that keeps counts
-  would need its writes kept.
-- [ ] **The reward is invisible in the API.** A block's JSON does not say what it minted; clients
-  would have to know the genesis reward schedule.
-- [ ] **Minting belongs to whoever genesis names.** The dev chains name the development key.
-  Decide who may mint on a real chain, if anyone.
+- [x] **Transactions that cannot pay are dropped.** After each block the mempool drops what its
+  sender can no longer pay for, and what has offered under the base price for 32 blocks in a
+  row; selection stops a sender's run at an offer under the next base price, so the builder never
+  runs what it would skip.
+- [x] **A scorer runs for the kinds it names.** A `contract` schedule's `kinds` says which kinds
+  of transaction call `score`; the rest are charged as weighed, with no call. It still only
+  reads; a scorer that keeps counts would need its writes kept.
+- [x] **The reward is visible in the API.** Every block summary, block page and stream event
+  carries `reward`, what the block minted for its producer; the explorer shows it on the block
+  page.
+- [x] **Minting is for development chains.** Genesis's `minter` may be the development key or
+  nobody, so `Mint` is a dev faucet and a chain of value gets coins from rewards and allocations
+  alone.
 
 ### Script layer
 

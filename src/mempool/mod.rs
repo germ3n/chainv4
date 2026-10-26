@@ -22,9 +22,23 @@ use {
     see_also = "SignedTx, Node",
 )]
 pub struct Mempool {
-    txs: BTreeMap<(Address, u64), SignedTx>,
+    txs: BTreeMap<(Address, u64), Waiting>,
     capacity: usize,
 }
+
+/// A transaction waiting for a block, and how long it has waited unable to go in.
+struct Waiting {
+    tx: SignedTx,
+    /// Blocks in a row whose base price its offer was under, so a producer could not take it.
+    underpriced: u32,
+}
+
+#[document(
+    summary = "How many blocks in a row a transaction may offer less than the base price before the mempool drops it: 32, about a minute of 2-second blocks, long enough for a base price that just rose to come back down.",
+    category = "Node",
+    see_also = "Mempool::prune",
+)]
+pub const MAX_UNDERPRICED_BLOCKS: u32 = 32;
 
 #[document(
     summary = "How much a producer takes from the mempool for one block: as many transactions as fit every bound it has. With none, it takes everything that can run.",
@@ -116,7 +130,7 @@ impl Mempool {
 
     #[document(parent = "Mempool", summary = "The transactions waiting, by sender and then nonce.")]
     pub fn iter(&self) -> impl Iterator<Item = &SignedTx> {
-        self.txs.values()
+        self.txs.values().map(|waiting| &waiting.tx)
     }
 
     #[document(parent = "Mempool", summary = "Whether nothing is waiting.")]
@@ -215,7 +229,7 @@ impl Mempool {
         match self.txs.entry((tx.sender(), tx.nonce)) {
             Entry::Occupied(_) => Err(MempoolError::Duplicate),
             Entry::Vacant(entry) => {
-                entry.insert(tx);
+                entry.insert(Waiting { tx, underpriced: 0 });
 
                 Ok(())
             }
@@ -224,20 +238,21 @@ impl Mempool {
 
     #[document(
         parent = "Mempool",
-        summary = "Picks transactions for a block, the highest priority first: for each sender, their waiting transactions in nonce order from their current nonce, stopping at the first gap; across senders, whichever sender's next transaction pays the producer most, ties going to the lower address. A transaction that would pass the budget is left out with the rest of its sender's, and the others still go on filling it.",
+        summary = "Picks transactions for a block, the highest priority first: for each sender, their waiting transactions in nonce order from their current nonce, stopping at the first gap or at the first one the block cannot take; across senders, whichever sender's next transaction pays the producer most, ties going to the lower address. A transaction that would pass the budget is left out with the rest of its sender's, and the others still go on filling it.",
         params = {
             state = "The state at the tip.",
             budget = "How much to pick: a count, bytes and gas limits, each if bounded.",
-            priority = "What a transaction is worth to the producer, such as Chain::priority.",
+            worth = "What a transaction is worth to the producer, or None for one the next block cannot take, as its offer is under the base price: Chain::worth.",
         },
     )]
-    pub fn select(&self, state: &State, budget: Budget, priority: &dyn Fn(&SignedTx) -> u256) -> Result<Vec<SignedTx>, DbError> {
+    pub fn select(&self, state: &State, budget: Budget, worth: &dyn Fn(&SignedTx) -> Option<u256>) -> Result<Vec<SignedTx>, DbError> {
         let accounts = Accounts::new(state);
-        // Each sender's run: the transactions that can go in order from its next nonce.
-        let mut runs: Vec<Vec<&SignedTx>> = Vec::new();
+        // Each sender's run: the transactions that can go in order from its next nonce, each with
+        // what it is worth.
+        let mut runs: Vec<Vec<(&SignedTx, u256)>> = Vec::new();
         let mut current: Option<(Address, u64)> = None;
 
-        for ((sender, nonce), tx) in &self.txs {
+        for ((sender, nonce), waiting) in &self.txs {
             let next = match current {
                 Some((address, next)) if address == *sender => next,
                 _ => {
@@ -246,12 +261,14 @@ impl Mempool {
                 }
             };
 
-            if *nonce == next {
-                runs.last_mut().expect("pushed for this sender").push(tx);
-                current = Some((*sender, next + 1));
-            } else {
-                // A gap, or a nonce already used: nothing after it can run yet.
-                current = Some((*sender, u64::MAX));
+            match (*nonce == next, worth(&waiting.tx)) {
+                (true, Some(priority)) => {
+                    runs.last_mut().expect("pushed for this sender").push((&waiting.tx, priority));
+                    current = Some((*sender, next + 1));
+                }
+                // A gap, a nonce already used, or one the block cannot take: nothing after it
+                // can go yet.
+                _ => current = Some((*sender, u64::MAX)),
             }
         }
 
@@ -259,7 +276,7 @@ impl Mempool {
         let mut heads: BinaryHeap<(u256, Reverse<usize>)> = runs
             .iter()
             .enumerate()
-            .filter_map(|(run, txs)| txs.first().map(|tx| (priority(tx), Reverse(run))))
+            .filter_map(|(run, txs)| txs.first().map(|(_, priority)| (*priority, Reverse(run))))
             .collect();
         let mut taken = vec![0; runs.len()];
         let mut picked = Vec::new();
@@ -268,7 +285,7 @@ impl Mempool {
         while budget.count.is_none_or(|most| picked.len() < most)
             && let Some((_, Reverse(run))) = heads.pop()
         {
-            let tx = runs[run][taken[run]];
+            let (tx, _) = runs[run][taken[run]];
             let (more_bytes, more_gas) = (bytes + tx_bytes(tx), gas.saturating_add(tx.fee.gas_limit));
 
             // Past the budget: the sender's later ones cannot go without it, so its run ends here.
@@ -280,8 +297,8 @@ impl Mempool {
             picked.push(tx.clone());
             taken[run] += 1;
 
-            if let Some(next) = runs[run].get(taken[run]) {
-                heads.push((priority(next), Reverse(run)));
+            if let Some((_, priority)) = runs[run].get(taken[run]) {
+                heads.push((*priority, Reverse(run)));
             }
         }
 
@@ -290,22 +307,46 @@ impl Mempool {
 
     #[document(
         parent = "Mempool",
-        summary = "Drops transactions whose nonce is already used, after a block landed.",
-        params = { state = "The state at the new tip." },
+        summary = "Brings the mempool in line with a new tip: drops transactions whose nonce is used, and on a chain with fees, those that can no longer pay, as their sender's funds went since they were admitted, and those that have offered less than the base price for MAX_UNDERPRICED_BLOCKS blocks in a row. An offer under the base price is kept until then, since the base price moves a step a block and may come back down.",
+        params = {
+            state = "The state at the new tip.",
+            fees = "The chain's fees, if it has any.",
+            base = "The base price of the next block: Chain::next_base_price.",
+        },
+        returns = "How many were dropped for not paying: for a sender that cannot pay, or an offer under the base price for too long.",
     )]
-    pub fn prune(&mut self, state: &State) -> Result<(), DbError> {
+    pub fn prune(&mut self, state: &State, fees: Option<&Fees>, base: u256) -> Result<usize, DbError> {
         let accounts = Accounts::new(state);
-        let mut nonces: BTreeMap<Address, u64> = BTreeMap::new();
+        let mut senders: BTreeMap<Address, (u64, u256)> = BTreeMap::new();
 
         for sender in self.txs.keys().map(|(sender, _)| *sender) {
-            if let Entry::Vacant(entry) = nonces.entry(sender) {
-                entry.insert(accounts.get(&sender)?.nonce);
+            if let Entry::Vacant(entry) = senders.entry(sender) {
+                let account = accounts.get(&sender)?;
+                entry.insert((account.nonce, account.balance));
             }
         }
 
-        self.txs.retain(|(sender, nonce), _| *nonce >= nonces[sender]);
+        self.txs.retain(|(sender, nonce), _| *nonce >= senders[sender].0);
 
-        Ok(())
+        let Some(fees) = fees else {
+            return Ok(0);
+        };
+        let before = self.txs.len();
+
+        self.txs.retain(|(sender, _), waiting| {
+            if waiting.tx.fee.reserve().is_none_or(|reserve| reserve > senders[sender].1) {
+                return false;
+            }
+
+            waiting.underpriced = match fees.pricing().price(base, &waiting.tx.fee) {
+                Some(_) => 0,
+                None => waiting.underpriced + 1,
+            };
+
+            waiting.underpriced <= MAX_UNDERPRICED_BLOCKS
+        });
+
+        Ok(before - self.txs.len())
     }
 }
 
@@ -341,8 +382,8 @@ mod tests {
     }
 
     /// Every transaction worth the same, as on a chain without fees.
-    fn free(_: &SignedTx) -> u256 {
-        u256::ZERO
+    fn free(_: &SignedTx) -> Option<u256> {
+        Some(u256::ZERO)
     }
 
     fn state() -> State {
@@ -396,7 +437,7 @@ mod tests {
             mempool.add(sized(&small, nonce, 1_000, 100), &genesis(), &state, None).unwrap();
         }
 
-        let gas_limit = |tx: &SignedTx| u256::from(tx.fee.gas_limit);
+        let gas_limit = |tx: &SignedTx| Some(u256::from(tx.fee.gas_limit));
         let picked = mempool.select(&state, Budget { gas: Some(5_000), ..Budget::default() }, &gas_limit).unwrap();
 
         assert_eq!(picked.iter().map(|tx| (tx.sender() == small.public().address(), tx.nonce)).collect::<Vec<_>>(), [(true, 0), (true, 1), (true, 2), (true, 3)]);
@@ -469,8 +510,7 @@ mod tests {
 
         assert_eq!(mempool.add(transfer(&keypair, 0), &genesis(), &state, None), Err(MempoolError::Stale));
 
-        mempool.prune(&state).unwrap();
-
+        assert_eq!(mempool.prune(&state, None, u256::ZERO).unwrap(), 0);
         assert_eq!(mempool.len(), 1);
         assert_eq!(mempool.select(&state, Budget { count: Some(10), ..Budget::default() }, &free).unwrap()[0].nonce, 1);
     }
@@ -511,7 +551,7 @@ mod tests {
         add(&mut mempool, signed(&rich, 1, offer(100_000, price, 50))).unwrap();
         add(&mut mempool, signed(&other, 0, offer(100_000, price, 9))).unwrap();
         let base = floor;
-        let picked = mempool.select(&state, Budget { count: Some(10), ..Budget::default() }, &|tx| fees.priority(base, &tx.fee)).unwrap();
+        let picked = mempool.select(&state, Budget { count: Some(10), ..Budget::default() }, &|tx| Some(fees.priority(base, &tx.fee))).unwrap();
         let order: Vec<(Address, u64)> = picked.iter().map(|tx| (tx.sender(), tx.nonce)).collect();
 
         assert_eq!(order, [
@@ -519,5 +559,67 @@ mod tests {
             (rich.public().address(), 0),
             (rich.public().address(), 1),
         ]);
+    }
+
+    #[test]
+    fn what_can_no_longer_pay_is_pruned_and_what_is_underpriced_waits_a_while() {
+        let state = state();
+        let fees = FeeConfig::dev().build();
+        let mut mempool = Mempool::new(10);
+        let (rich, broke) = (keypair(), Keypair::generate(keypair().public().key_type()).unwrap());
+        let floor = fees.pricing().floor();
+        let coin = u256::from(10u64).pow(18);
+        Accounts::new(&state).credit(&rich.public().address(), coin).unwrap();
+        Accounts::new(&state).credit(&broke.public().address(), coin).unwrap();
+        let burn = |keypair: &Keypair, nonce: u64, max_price: u256| {
+            let tx = Tx::Burn {
+                from: keypair.public().address(),
+                amount: Amount::U128(1),
+            };
+            let fee = FeeOffer { gas_limit: 100_000, max_price, tip: u256::ZERO };
+
+            SignedTx::sign(tx, nonce, fee, keypair)
+        };
+        let add = |mempool: &mut Mempool, tx: SignedTx| mempool.add(tx, &genesis(), &state, Some(&fees)).unwrap();
+        add(&mut mempool, burn(&rich, 0, floor * u256::from(4u64)));
+        add(&mut mempool, burn(&rich, 1, floor));
+        add(&mut mempool, burn(&broke, 0, floor * u256::from(4u64)));
+
+        // The base price is twice the floor: rich's second cannot go in the next block, and
+        // selection stops its run there rather than hand the builder what it would skip.
+        let base = floor * u256::from(2u64);
+        let worth = |tx: &SignedTx| fees.pricing().price(base, &tx.fee).map(|_| fees.priority(base, &tx.fee));
+        let picked = mempool.select(&state, Budget::default(), &worth).unwrap();
+        let mut order: Vec<(Address, u64)> = picked.iter().map(|tx| (tx.sender(), tx.nonce)).collect();
+        order.sort();
+        let mut expected = [(broke.public().address(), 0), (rich.public().address(), 0)];
+        expected.sort();
+
+        assert_eq!(order, expected, "both tip nothing, so either may go first");
+
+        // Broke's funds go: the next prune drops its transaction. Rich's underpriced one stays.
+        let debit = Accounts::new(&state).get(&broke.public().address()).unwrap().balance;
+        Accounts::new(&state).debit(&broke.public().address(), debit).unwrap();
+
+        assert_eq!(mempool.prune(&state, Some(&fees), base).unwrap(), 1);
+        assert_eq!(mempool.len(), 2);
+
+        // Underpriced for MAX_UNDERPRICED_BLOCKS blocks, it still waits; one more and it goes.
+        for _ in 1..MAX_UNDERPRICED_BLOCKS {
+            assert_eq!(mempool.prune(&state, Some(&fees), base).unwrap(), 0);
+        }
+
+        assert_eq!(mempool.len(), 2);
+        assert_eq!(mempool.prune(&state, Some(&fees), base).unwrap(), 1);
+        assert_eq!(mempool.iter().map(|tx| tx.nonce).collect::<Vec<_>>(), [0]);
+
+        // A base price that came back down resets the count.
+        add(&mut mempool, burn(&rich, 1, floor));
+        mempool.prune(&state, Some(&fees), base).unwrap();
+        assert_eq!(mempool.prune(&state, Some(&fees), floor).unwrap(), 0);
+        for _ in 0..MAX_UNDERPRICED_BLOCKS {
+            assert_eq!(mempool.prune(&state, Some(&fees), base).unwrap(), 0);
+        }
+        assert_eq!(mempool.len(), 2);
     }
 }

@@ -33,7 +33,8 @@ trusts the genesis id, it starts there, one request away (`LightClient::from_che
 follows on and checks everything from there as before:
 - **What the node sends** (`GET /light/checkpoint/{block}`): the checkpoint's header and those
   below it back to the checkpoint `activation_delay` epochs before, genesis for the first few,
-  with each of those checkpoints' light updates. A `CheckpointStart`.
+  and further back when consensus looks at more ancestors than that leaves, with each of those
+  checkpoints' light updates. A `CheckpointStart`.
 - **What the client checks:** that the headers link up by their hashes to the block id it trusts,
   so it trusts every one of them, and each update against its header's state root, as
   `take_update` does. The updates name the voters of the epochs after the checkpoint, so the next
@@ -46,7 +47,10 @@ follows on and checks everything from there as before:
   as genesis is for one that starts there. It still takes older headers on demand, proven by their
   hash chain, for receipts below it.
 
-`checkpoint_start(finality, height)` says where a start begins, for nodes and clients alike.
+`checkpoint_start(finality, height)` says which epoch a start begins at, and
+`checkpoint_first_header` which header it begins with once consensus's ancestors are counted, for
+nodes and clients alike. The headers below the epochs' start are kept as the client's ancestors:
+trusted by their hashes, looked at by consensus, never followed from.
 
 **Where the id comes from:** someone you trust, or the explorer's Finality page and `GET /status`
 of a node you trust (`finality.finalized.block`). The wallet and the explorer also take a node's
@@ -63,10 +67,19 @@ from genesis takes 26.
 genesis on, and checks each one with the chain's `Consensus::check`, as a node checks a block
 before running it:
 - that it follows its parent;
-- its producer, timing and difficulty;
+- its producer, timing and difficulty, against as many ancestors as consensus looks at
+  (`LightParams::lookback`: the proof-of-work window, or the parent alone);
 - its seal: the authority's signature, or the proof of work.
 
-It adds up total work as it goes.
+It adds up total work as it goes. A saved client keeps the ancestors just below its first header
+(`LightState::ancestors`), so it checks the next header as a node would.
+
+**Under a rotating authority,** a header's producer must be among its epoch's signers, which the
+client only knows once it proved them: from genesis's update for the first epochs, then from the
+update of the checkpoint `activation_delay` epochs before, trusted once that checkpoint is
+justified. A header it cannot check yet stops the batch (`Extended::Waiting`, or fewer added);
+the client keeps what it checked, asks for finality, and asks for those headers again once the
+signers are known. So it follows the chain `activation_delay` epochs behind finality.
 
 **Reorgs.** When the node's chain no longer links to the client's, the client steps back until it
 finds where they split. It follows the new branch only if it holds more work, and never past a
@@ -88,15 +101,19 @@ justified checkpoint (`ConflictsWithFinality`).
   fixed `activation_delay` epochs ahead by the checkpoint `activation_delay` epochs before them, or
   by genesis for the first few.
   - **Light updates:** when a node runs genesis or a checkpoint, it records one (`LightUpdate`, in
-    the `Light` column): proofs of the voters that block fixed, against its state root. It serves
-    it with the justifications at `GET /light/finality`, and alone at
+    the `Light` column): proofs of the voters of the epochs ahead, against its state root. Genesis
+    carries epochs 1 through `activation_delay`; a checkpoint of epoch k carries epochs k + 1
+    through k + `activation_delay`, the last of which it fixed, the rest re-stated, since a slash
+    or an ejection takes a voter out of sets fixed earlier. A client that took them before
+    replaces them. It serves it with the justifications at `GET /light/finality`, and alone at
     `GET /light/updates/{block}`.
   - **Taking one:** the client takes a block's update once it trusts the block's state, that is,
     once the block is at or below the latest checkpoint it saw justified. So trust runs forward
     from genesis:
     1. genesis's voters;
     2. then the first justifications, which make checkpoint 1 trusted;
-    3. then its update, with the voters of epoch 1 + `activation_delay`;
+    3. then its update, with the voters of epochs 2 through 1 + `activation_delay` (genesis's
+       carries epochs 0 through `activation_delay`);
     4. and so on.
 - **Depth finality** has no votes: a block is final once `depth` blocks are on top of it.
 

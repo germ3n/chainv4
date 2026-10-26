@@ -45,7 +45,7 @@ included, hashed with the chain hash.
 | Transaction | Does |
 | --- | --- |
 | `Transfer` | Moves an amount from the sender to an address. |
-| `Mint` | Creates supply for an address. Only the genesis minter may. |
+| `Mint` | Creates supply for an address. Only the genesis minter may, and only the development key can be one: a faucet for development chains. |
 | `Burn` | Destroys supply the sender holds. |
 | `ContractCall` | Calls a contract function by its XXH3-64 selector, with arguments and value. |
 | `Deploy` | Deploys Luau source or a WebAssembly module, at an address from the sender and nonce. |
@@ -63,12 +63,14 @@ included, hashed with the chain hash.
 ## Importing a block
 
 `Chain::import` checks a block against its parent before it stores anything:
-1. that it is not known already, and does not build on a block that failed to run;
-2. that its parent is known (`UnknownParent`, which makes the node ask for the gap);
-3. its height, `tx_root` and `proof_root` (its `receipts_root` and `state_root` are checked once it
+1. that it is not known already;
+2. that it is not at or below the finalized checkpoint (`ConflictsWithFinality`), before anything
+   is fetched for it, so a node never asks for a branch under its finality;
+3. that its parent is known (`UnknownParent`, which makes the node ask for the gap), and did not
+   fail to run;
+4. its height, `tx_root` and `proof_root` (its `receipts_root` and `state_root` are checked once it
    runs);
-4. its base price, which its parent's base price and gas used decide;
-5. that it is not at or below the finalized checkpoint (`ConflictsWithFinality`);
+5. its base price, which its parent's base price and gas used decide;
 6. its seal, producer, timing and difficulty, by consensus.
 
 Then:
@@ -79,7 +81,8 @@ Then:
   to it (`Imported::Reorganized`, with the blocks taken off and put on).
 
 A block that fails to run is remembered as bad, with everything built on it, so the same branch
-is never tried twice. That memory lasts until the node restarts.
+is never tried twice. The last `MAX_BAD_BLOCKS` (1,024) of them are kept in `Meta`, so a restart
+refuses them too, without running them again.
 
 ## Running a block
 
@@ -230,6 +233,11 @@ peer's justification all at once.
 
 A producer runs every block twice: once to build it, once to import it.
 
+`Chain::build_within` builds the same way within a time budget: once its deadline passes, the
+transactions that went in by then are the block, and the rest are left out unrun. The block is
+still the one running those transactions in order gives, since results only ever go in in block
+order. A node sets the budget with `--max-build-ms`.
+
 `Chain::build_on` builds on any stored block instead, the tip or one on a side branch, in the
 state at the end of that block. It works that state out on a throwaway layer the way a reorg
 would: it rolls the main chain back to where the branch splits off, then runs the branch.
@@ -271,6 +279,13 @@ nothing can roll back that far.
 side branch can move the chain to the best block on it. The leaves go into the database with
 each block (`Meta`), so they outlast a restart, and the API's `/forks` finds side branches from
 them.
+
+**Pruning side branches:** whenever the tip moves, the chain deletes every side branch it can
+never follow: one that splits off more than `max_reorg_depth` blocks below the tip, below the
+finalized checkpoint, or below the snapshot the node took state at. Its blocks, headers and work
+go, from the leaf down to the fork, and the leaf leaves `tips`. So what side blocks a node stores
+is bounded by the reorg window, and each of them cost its producer a seal at the main chain's
+difficulty: filling a disk with side blocks costs as much as mining the main chain.
 
 ## Receipts
 

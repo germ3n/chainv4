@@ -6,6 +6,7 @@ use {
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::to_hex,
     crate::chain::fees::OfferChoice,
+    crate::registry::signers::Signer,
     crate::crypto::keypair::{Keypair, PublicKey},
     crate::structs::hex::from_hex,
     crate::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
@@ -140,11 +141,12 @@ pub enum TxArgs {
         second: Box<SignedVote>,
     },
     /// Approves a new set of authority signers, made from the decided one: --add and --remove
-    /// change who signs, and the thresholds stay unless given. Sign with a signer's key.
+    /// change who signs, and the thresholds stay unless given. Sign with a signer's account key.
     ApproveSigners {
-        /// A key to make a signer. Repeat for several.
+        /// A key to make a signer, as KEY, or KEY@ACCOUNT to have another account speak for it,
+        /// approving changes and taking its rewards. Repeat for several.
         #[arg(long)]
-        add: Vec<PublicKey>,
+        add: Vec<String>,
         /// A signer to drop. Repeat for several.
         #[arg(long)]
         remove: Vec<PublicKey>,
@@ -262,6 +264,21 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     };
     let receipt = wait(&agent, node, id, wanted, Duration::from_secs(args.timeout))?;
     report(&receipt)
+}
+
+/// A signer as --add takes it: KEY, or KEY@ACCOUNT.
+fn parse_signer(text: &str) -> CliResult<Signer> {
+    let (key, account) = match text.rsplit_once('@') {
+        Some((key, account)) => (key, Some(account)),
+        None => (text, None),
+    };
+    let key: PublicKey = key.parse().map_err(|_| format!("{key} is not a public key"))?;
+    let account = match account {
+        Some(account) => account.parse().map_err(|_| format!("{account} is not an address"))?,
+        None => key.address(),
+    };
+
+    Ok(Signer { key, account })
 }
 
 /// What to offer for a transaction, as the node works it out at POST /offer for a probe signed
@@ -450,27 +467,34 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
             let number = |value: &Value, what: &str| -> CliResult<u64> {
                 value.as_u64().ok_or_else(|| format!("the node sent no {what}").into())
             };
-            let mut signers: Vec<PublicKey> = decided["signers"]
+            let mut signers: Vec<Signer> = decided["signers"]
                 .as_array()
                 .ok_or("the node sent no signers")?
                 .iter()
-                .map(|signer| signer.as_str().and_then(|text| text.parse().ok()).ok_or("the node sent a bad signer"))
+                .map(|signer| {
+                    let key = signer["key"].as_str().and_then(|text| text.parse().ok());
+                    let account = signer["account"].as_str().and_then(|text| text.parse().ok());
+
+                    key.zip(account).map(|(key, account)| Signer { key, account }).ok_or("the node sent a bad signer")
+                })
                 .collect::<Result<_, _>>()?;
 
             for key in &remove {
-                if !signers.contains(key) {
+                if !signers.iter().any(|signer| signer.key == *key) {
                     return Err(format!("{key} is not a signer").into());
                 }
             }
 
-            signers.retain(|signer| !remove.contains(signer));
+            signers.retain(|signer| !remove.contains(&signer.key));
 
-            for key in add {
-                if signers.contains(&key) {
-                    return Err(format!("{key} is a signer already").into());
+            for text in add {
+                let signer = parse_signer(&text)?;
+
+                if signers.iter().any(|known| known.key == signer.key) {
+                    return Err(format!("{} is a signer already", signer.key).into());
                 }
 
-                signers.push(key);
+                signers.push(signer);
             }
 
             let threshold = match threshold {

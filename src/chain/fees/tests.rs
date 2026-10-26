@@ -379,6 +379,7 @@ fn a_scorer_contract_decides_what_is_charged() {
             weights: Weighted::dev(),
             contract: scorer,
             fuel: 100_000,
+            kinds: Vec::new(),
         }),
         ..FeeConfig::dev()
     };
@@ -422,6 +423,59 @@ fn a_scorer_contract_decides_what_is_charged() {
 }
 
 #[test]
+fn a_scorer_is_only_called_for_the_kinds_it_names() {
+    let alice = alice();
+    let scorer = contract_address(&alice.public().address(), 0, HashType::default_chain());
+    let fees = FeeConfig {
+        schedule: ScheduleConfig::Contract(ContractScorer {
+            weights: Weighted::dev(),
+            contract: scorer,
+            fuel: 100_000,
+            kinds: vec!["transfer".to_string()],
+        }),
+        ..FeeConfig::dev()
+    };
+    let mut chain = open(fees);
+    let charged = |receipt: &Receipt, block: &Block| receipt.fee / block.header.base_price;
+    let deploy = Tx::Deploy {
+        code: Code::Lua(SCORER.to_string()),
+    };
+    let txs = signed(&chain, &alice, vec![deploy], offer(&chain, 1_000_000));
+    advance(&mut chain, txs);
+
+    // The scorer halves transfers; it would charge a burn a billionfold, but burns are not its
+    // to score, so the weights alone count.
+    let burn = Tx::Burn {
+        from: alice.public().address(),
+        amount: Amount::U128(1),
+    };
+    let txs = signed(&chain, &alice, vec![transfer(&key(22), 1), burn], offer(&chain, 100_000));
+    let (block, receipts) = advance(&mut chain, txs);
+
+    assert_eq!(charged(&receipts[0], &block), u256::from(receipts[0].gas_used / 2));
+    assert_eq!(charged(&receipts[1], &block), u256::from(receipts[1].gas_used));
+
+    // Kinds must be kinds, each once.
+    for (kinds, expected) in [(vec!["calls".to_string()], "kinds of transaction"), (vec!["call".to_string(), "call".to_string()], "twice")] {
+        let bad = FeeConfig {
+            schedule: ScheduleConfig::Contract(ContractScorer {
+                weights: Weighted::dev(),
+                contract: scorer,
+                fuel: 100_000,
+                kinds,
+            }),
+            ..FeeConfig::dev()
+        };
+
+        match Chain::open(Arc::new(MemoryDb::default()), &genesis(bad)) {
+            Err(ChainError::BadGenesis(why)) => assert!(why.contains(expected), "{why}"),
+            Err(err) => panic!("expected {expected}, got {err}"),
+            Ok(_) => panic!("expected {expected}, got a chain"),
+        }
+    }
+}
+
+#[test]
 fn fees_split_their_base_part_and_keep_the_rest_for_the_producer() {
     let fees = FeeConfig {
         burn_permille: 250,
@@ -455,7 +509,7 @@ fn fee_settings_that_cannot_work_are_refused() {
         (FeeConfig { pricing: PricingConfig::BaseFee(BaseFee { elasticity: 0, ..base_fee }), ..dev.clone() }, "elasticity"),
         (
             FeeConfig {
-                schedule: ScheduleConfig::Contract(ContractScorer { weights, contract: alice().public().address(), fuel: 1 }),
+                schedule: ScheduleConfig::Contract(ContractScorer { weights, contract: alice().public().address(), fuel: 1, kinds: Vec::new() }),
                 ..dev.clone()
             },
             "contract address",

@@ -1,0 +1,132 @@
+//! A field added to a hashed type after chains launched, encoding as nothing while unset.
+
+use {
+    r#macro::document,
+    std::mem::MaybeUninit,
+    wincode::config::{Config, ConfigCore},
+    wincode::io::{Reader, Writer},
+    wincode::{ReadResult, SchemaRead, SchemaWrite, WriteResult},
+};
+
+#[document(
+    summary = "Encodes a field added after chains launched to a type whose encoding is hashed: as nothing at all while it is None, so a value without it encodes and hashes as it did before the field existed, and as Option's encoding, a 1 and the value, once it is Some. Only for a type's last fields, read by none of its readers but a trailing one: decoding takes whatever bytes follow as the field, so it can only be the last thing in a message.",
+    category = "Chain",
+    see_also = "Genesis::max_block_bytes, Genesis::pow_window, LightParams",
+)]
+pub struct Unset;
+
+// SAFETY: size_of is exactly what write writes: nothing for None, nine bytes for Some.
+unsafe impl<C: ConfigCore> SchemaWrite<C> for Unset {
+    type Src = Option<u64>;
+
+    fn size_of(src: &Option<u64>) -> WriteResult<usize> {
+        Ok(if src.is_some() { 9 } else { 0 })
+    }
+
+    fn write(writer: impl Writer, src: &Option<u64>) -> WriteResult<()> {
+        let Some(value) = src else {
+            return Ok(());
+        };
+        let mut bytes = [1; 9];
+        bytes[1..].copy_from_slice(&value.to_le_bytes());
+
+        <[u8; 9] as SchemaWrite<C>>::write(writer, &bytes)
+    }
+}
+
+// SAFETY: read initializes dst before it returns Ok. An exhausted reader is None, which is how an
+// encoding from before the field reads; so this only ever ends a message.
+unsafe impl<'de, C: ConfigCore> SchemaRead<'de, C> for Unset {
+    type Dst = Option<u64>;
+
+    fn read(mut reader: impl Reader<'de>, dst: &mut MaybeUninit<Option<u64>>) -> ReadResult<()> {
+        let value = match reader.take_byte() {
+            Ok(1) => Some(u64::from_le_bytes(reader.take_array::<8>()?)),
+            Ok(_) => None,
+            Err(_) => None,
+        };
+        dst.write(value);
+
+        Ok(())
+    }
+}
+
+#[document(
+    summary = "Encodes a list of strings added after chains launched to a hashed type: as nothing at all while empty, so a value without it hashes as before, and as a list once it holds anything. As Unset, only for a type's last field, read by nothing but a trailing reader.",
+    category = "Chain",
+    see_also = "Unset, ContractScorer::kinds",
+)]
+pub struct UnsetList;
+
+// SAFETY: size_of is exactly what write writes: nothing when empty, the list's encoding otherwise.
+unsafe impl<C: Config> SchemaWrite<C> for UnsetList {
+    type Src = Vec<String>;
+
+    fn size_of(src: &Vec<String>) -> WriteResult<usize> {
+        match src.is_empty() {
+            true => Ok(0),
+            false => <Vec<String> as SchemaWrite<C>>::size_of(src),
+        }
+    }
+
+    fn write(writer: impl Writer, src: &Vec<String>) -> WriteResult<()> {
+        match src.is_empty() {
+            true => Ok(()),
+            false => <Vec<String> as SchemaWrite<C>>::write(writer, src),
+        }
+    }
+}
+
+// SAFETY: read initializes dst before it returns Ok. An exhausted reader is the empty list, which
+// is how an encoding from before the field reads; so this only ever ends a message.
+unsafe impl<'de, C: Config> SchemaRead<'de, C> for UnsetList {
+    type Dst = Vec<String>;
+
+    fn read(reader: impl Reader<'de>, dst: &mut MaybeUninit<Vec<String>>) -> ReadResult<()> {
+        dst.write(<Vec<String> as SchemaRead<'de, C>>::get(reader).unwrap_or_default());
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(SchemaWrite, SchemaRead, PartialEq, Debug)]
+    struct Listed {
+        first: u32,
+        #[wincode(with = "UnsetList")]
+        added: Vec<String>,
+    }
+
+    #[test]
+    fn an_unset_list_encodes_as_nothing_while_empty() {
+        let before = wincode::serialize(&7u32).unwrap();
+        let without = Listed { first: 7, added: Vec::new() };
+        let with = Listed { first: 7, added: vec!["call".to_string()] };
+
+        assert_eq!(wincode::serialize(&without).unwrap(), before);
+        assert_eq!(wincode::deserialize::<Listed>(&before).unwrap(), without);
+        assert_eq!(wincode::deserialize::<Listed>(&wincode::serialize(&with).unwrap()).unwrap(), with);
+    }
+
+    #[derive(SchemaWrite, SchemaRead, PartialEq, Debug)]
+    struct Tail {
+        first: u32,
+        #[wincode(with = "Unset")]
+        added: Option<u64>,
+    }
+
+    #[test]
+    fn unset_encodes_as_nothing_and_reads_back_either_way() {
+        let before = wincode::serialize(&7u32).unwrap();
+        let without = Tail { first: 7, added: None };
+        let with = Tail { first: 7, added: Some(300) };
+
+        assert_eq!(wincode::serialize(&without).unwrap(), before, "as it was before the field");
+        assert_eq!(wincode::serialize(&with).unwrap().len(), before.len() + 9);
+        assert_eq!(wincode::deserialize::<Tail>(&before).unwrap(), without);
+        assert_eq!(wincode::deserialize::<Tail>(&wincode::serialize(&with).unwrap()).unwrap(), with);
+    }
+}

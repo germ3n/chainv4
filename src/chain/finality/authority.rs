@@ -1,12 +1,13 @@
 //! Authority finality: the votes of FFG, from signers genesis names, each counting once. A
 //! threshold of them voting for one link justifies its target, and justifying the very next
-//! checkpoint finalizes the source, as in FFG. There are no bonds: conflicting votes are kept as
-//! evidence, but nobody can be slashed.
+//! checkpoint finalizes the source, as in FFG. There are no bonds to take: conflicting votes are
+//! evidence that throws the signer out instead.
 //!
 //! The signers change by their own approval: once change_threshold of them approve the same new
 //! set (Tx::ApproveSigners), it is decided, and each checkpoint fixes the decided set for the epoch
 //! activation_delay ahead, as FFG fixes its validator sets. Both thresholds must be more than half
-//! the signers, so two rival checkpoints, or two rival changes, cannot both have enough.
+//! the signers, so two rival checkpoints, or two rival changes, cannot both have enough. A signer
+//! that signs conflicting votes is thrown out by the evidence (Tx::Slash), with no bond to take.
 
 use {
     super::votes::{Electorate, VoteParams, Voters},
@@ -14,7 +15,8 @@ use {
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::db::{DbError, State},
-    crate::registry::signers::{SignerSet, Signers},
+    crate::registry::signers::{Signer, SignerSet, Signers},
+    crate::structs::hash::Hash,
     crate::structs::u256::{U256Le, u256},
     r#macro::document,
     std::sync::Arc,
@@ -36,8 +38,8 @@ pub struct AuthorityConfig {
     pub activation_delay: u64,
     #[document(summary = "The most signers a set may have.")]
     pub max_signers: u32,
-    #[document(summary = "The signers from genesis, each counting once.")]
-    pub signers: Vec<PublicKey>,
+    #[document(summary = "The signers from genesis, each counting once: its voting key and the account that speaks for it.")]
+    pub signers: Vec<Signer>,
     #[document(summary = "How many signers voting for one link justify it: more than half of them, and at most all.")]
     pub threshold: u32,
     #[document(summary = "How many signers must approve a change to the set: more than half of them, and at most all.")]
@@ -57,7 +59,7 @@ impl AuthorityConfig {
     #[document(
         parent = "AuthorityConfig",
         summary = "Development settings: one signer, an epoch every 8 blocks, votes 2 blocks deep, changes after 2 epochs, approvals counting for 64 epochs, up to 100 signers, and no rewards.",
-        params = { signer = "The one key that votes." },
+        params = { signer = "The one key that votes, which is its own account too." },
     )]
     pub fn dev(signer: PublicKey) -> AuthorityConfig {
         AuthorityConfig {
@@ -65,7 +67,7 @@ impl AuthorityConfig {
             vote_depth: 2,
             activation_delay: 2,
             max_signers: 100,
-            signers: vec![signer],
+            signers: vec![Signer::own(signer)],
             threshold: 1,
             change_threshold: 1,
             approval_epochs: 64,
@@ -79,12 +81,18 @@ impl AuthorityConfig {
         SignerSet::new(self.signers.clone(), self.threshold, self.change_threshold)
     }
 
-    #[document(parent = "AuthorityConfig", summary = "The rules signer changes run under.")]
-    pub fn signer_rules(&self) -> SignerRules {
+    #[document(
+        parent = "AuthorityConfig",
+        summary = "The rules signer changes and ejections run under.",
+        params = { chain = "The genesis id, which votes are signed over." },
+    )]
+    pub fn signer_rules(&self, chain: Hash) -> SignerRules {
         SignerRules {
             max_signers: self.max_signers,
             checkpoint_interval: self.checkpoint_interval,
             approval_epochs: self.approval_epochs,
+            activation_delay: self.activation_delay,
+            chain,
         }
     }
 

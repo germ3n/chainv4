@@ -495,9 +495,11 @@ fn serve_with(finality: crate::chain::FinalityConfig, height: u64, txs: impl Fn(
 fn authority_chains_list_their_signers_and_changes() {
     let scheme = DevAuthority::dev_keypair().public().key_type();
     let keys: Vec<Keypair> = (0..3).map(|_| Keypair::generate(scheme).unwrap()).collect();
+    use crate::registry::signers::Signer;
+
     let mut signers: Vec<_> = keys.iter().map(Keypair::public).collect();
     let config = crate::chain::AuthorityConfig {
-        signers: signers.clone(),
+        signers: signers.iter().copied().map(Signer::own).collect(),
         threshold: 2,
         change_threshold: 2,
         ..crate::chain::AuthorityConfig::dev(signers[0])
@@ -506,7 +508,7 @@ fn authority_chains_list_their_signers_and_changes() {
     let approve = SignedTx::sign(
         Tx::ApproveSigners {
             version: 0,
-            signers: proposal.clone(),
+            signers: proposal.iter().copied().map(Signer::own).collect(),
             threshold: 2,
             change_threshold: 2,
         },
@@ -518,7 +520,7 @@ fn authority_chains_list_their_signers_and_changes() {
     let other = SignedTx::sign(
         Tx::ApproveSigners {
             version: 0,
-            signers: vec![signers[1], signers[2]],
+            signers: vec![Signer::own(signers[1]), Signer::own(signers[2])],
             threshold: 2,
             change_threshold: 2,
         },
@@ -536,7 +538,7 @@ fn authority_chains_list_their_signers_and_changes() {
     signers.sort();
     let mut proposed = proposal.clone();
     proposed.sort();
-    let names = |keys: &[crate::crypto::keypair::PublicKey]| keys.iter().map(|key| key.to_string()).collect::<Vec<_>>();
+    let names = |keys: &[crate::crypto::keypair::PublicKey]| keys.iter().map(|key| json!({ "key": key.to_string(), "account": key.address().to_string() })).collect::<Vec<_>>();
 
     assert_eq!(ok(address, "/status")["finality"]["type"], "authority");
     assert_eq!(listing["validators"], json!([]), "nobody bonds");
@@ -1560,4 +1562,39 @@ fn a_light_client_proves_who_sent_what_one_transaction_at_a_time() {
             Some(LightError::BadProof)
         );
     }
+}
+
+#[test]
+fn blocks_say_what_they_minted() {
+    use crate::chain::Reward;
+
+    let authority = DevAuthority::dev_keypair();
+    let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let initial = crate::structs::u256::u256::from(50u64) * crate::structs::u256::u256::from(10u64).pow(18);
+    let genesis = Genesis {
+        reward: Reward {
+            initial,
+            halving_interval: Some(2),
+        },
+        ..free()
+    };
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+
+    for _ in 0..3 {
+        let now = chain.tip().timestamp + SLOT;
+        let mut block = chain.build(Vec::new(), Vec::new(), producer.address(), now).unwrap();
+        block.seal = producer.seal(&block.header).unwrap();
+        chain.import(&block, now).unwrap();
+    }
+
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let page = ok(address, "/blocks?limit=4");
+    let rewards: Vec<&str> = page["blocks"].as_array().unwrap().iter().map(|block| block["reward"].as_str().unwrap()).collect();
+    let half = (initial >> 1u32).to_string();
+
+    assert_eq!(rewards, [half.as_str(), half.as_str(), &initial.to_string(), "0"], "newest first, halving every 2 blocks, and nothing for genesis");
+    assert_eq!(ok(address, "/blocks/1")["reward"], initial.to_string());
+    assert_eq!(ok(address, "/blocks/0")["reward"], "0");
+    assert_eq!(ok(serve().address, "/blocks/1")["reward"], "0", "a chain without a reward");
 }

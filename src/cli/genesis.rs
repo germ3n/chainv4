@@ -14,6 +14,7 @@ use crate::crypto::keypair::PublicKey;
 use {
     super::CliResult,
     crate::chain::fees::{BaseFee, Bid, ContractScorer, PricingConfig, ScheduleConfig, Weighted},
+    crate::chain::VoteRewardSource,
     crate::chain::{Allocation, Coin, FeeConfig, FinalityConfig, Genesis, Reward},
     crate::structs::address::Address,
     crate::consensus::{ConsensusConfig, PowConfig},
@@ -43,6 +44,14 @@ pub struct GenesisArgs {
     /// weighted gas schedule. Deploy it once the chain runs; until then the weights alone count.
     #[arg(long)]
     pub scorer: Option<Address>,
+    /// Which kinds of transaction the scorer is called for, such as call,deploy; the rest are
+    /// charged as weighed, with no call. Without it, every kind.
+    #[arg(long, requires = "scorer", value_delimiter = ',')]
+    pub scorer_kinds: Vec<String>,
+    /// Where vote rewards come from: mint, the default, or fees, where the burned share of every
+    /// fee feeds a pool voters are paid from.
+    #[arg(long)]
+    pub vote_rewards: Option<VoteRewardSource>,
     /// Where to write it. Without one, it goes to stdout.
     #[arg(long)]
     pub out: Option<PathBuf>,
@@ -52,6 +61,8 @@ pub struct GenesisArgs {
 pub enum DevChain {
     Pow,
     Authority,
+    #[cfg(feature = "finality-authority")]
+    Rotating,
 }
 
 /// A kind of finality to write a genesis with, each with development settings.
@@ -111,8 +122,9 @@ pub enum FeeKind {
     Free,
 }
 
-/// Development fees of a kind, with a scorer contract if one is named.
-pub fn dev_fees(kind: FeeKind, scorer: Option<Address>) -> Option<FeeConfig> {
+/// Development fees of a kind, with a scorer contract if one is named, scoring these kinds of
+/// transaction, or every kind when none are named.
+pub fn dev_fees(kind: FeeKind, scorer: Option<Address>, kinds: Vec<String>) -> Option<FeeConfig> {
     let pricing = match kind {
         FeeKind::BaseFee => PricingConfig::BaseFee(BaseFee::dev()),
         FeeKind::Bid => PricingConfig::Bid(Bid::dev()),
@@ -123,6 +135,7 @@ pub fn dev_fees(kind: FeeKind, scorer: Option<Address>) -> Option<FeeConfig> {
             weights: Weighted::dev(),
             contract,
             fuel: 100_000,
+            kinds,
         }),
         None => ScheduleConfig::Weighted(Weighted::dev()),
     };
@@ -141,6 +154,8 @@ pub fn dev(chain: DevChain) -> Genesis {
     match chain {
         DevChain::Pow => Genesis::dev_pow(dev),
         DevChain::Authority => Genesis::dev_authority(dev),
+        #[cfg(feature = "finality-authority")]
+        DevChain::Rotating => Genesis::dev_rotating(dev),
     }
 }
 
@@ -156,7 +171,8 @@ pub fn write(args: GenesisArgs) -> CliResult<()> {
         return Err("--scorer needs fees; leave out --fees free".into());
     }
 
-    genesis.fees = dev_fees(args.fees, args.scorer);
+    genesis.fees = dev_fees(args.fees, args.scorer, args.scorer_kinds);
+    genesis.vote_reward_source = args.vote_rewards;
 
     let text = serde_json::to_string_pretty(&to_json(&genesis))? + "\n";
 
@@ -191,13 +207,23 @@ pub fn to_json(genesis: &Genesis) -> Value {
                 "key": key.to_string(),
                 "slot_ms": slot_ms,
             }),
-            ConsensusConfig::ProofOfWork(pow) => json!({
-                "type": "pow",
-                "hash": pow.hash.name(),
-                "target_block_ms": pow.target_block_ms,
-                "initial_difficulty": pow.initial_difficulty.to_string(),
-                "min_difficulty": pow.min_difficulty.to_string(),
-            }),
+            ConsensusConfig::Rotating { slot_ms } => json!({ "type": "rotating", "slot_ms": slot_ms }),
+            ConsensusConfig::ProofOfWork(pow) => {
+                let mut value = json!({
+                    "type": "pow",
+                    "hash": pow.hash.name(),
+                    "target_block_ms": pow.target_block_ms,
+                    "initial_difficulty": pow.initial_difficulty.to_string(),
+                    "min_difficulty": pow.min_difficulty.to_string(),
+                });
+
+                // A later addition: left out while unset, as files from before it leave it out.
+                if let Some(window) = genesis.pow_window {
+                    value["window"] = window.into();
+                }
+
+                value
+            }
         },
         "reward": {
             "initial": genesis.reward.initial.to_string(),
@@ -218,6 +244,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "finality": genesis.finality.as_ref().map(finality_json),
         "fees": genesis.fees.as_ref().map(fees_json),
         "max_block_bytes": genesis.max_block_bytes,
+        "vote_reward_source": genesis.vote_reward_source.map(|source| source.name()),
     })
 }
 
@@ -242,6 +269,11 @@ pub fn fees_json(fees: &FeeConfig) -> Value {
             let mut value = weights(&scorer.weights);
             value["contract"] = scorer.contract.to_string().into();
             value["fuel"] = scorer.fuel.into();
+
+            // A later addition: left out while empty, as files from before it leave it out.
+            if !scorer.kinds.is_empty() {
+                value["kinds"] = scorer.kinds.clone().into();
+            }
 
             value
         }
@@ -288,6 +320,10 @@ fn fees_from_fields(mut fees: Fields) -> Result<FeeConfig, String> {
             weights,
             contract: schedule.parse("contract")?,
             fuel: schedule.whole("fuel")?,
+            kinds: match schedule.map.contains_key("kinds") {
+                true => schedule.strings("kinds")?,
+                false => Vec::new(),
+            },
         }),
         other => return Err(format!("fees.schedule.type: unknown schedule {other}; use weighted or contract")),
     };
@@ -321,7 +357,8 @@ fn fees_from_fields(mut fees: Fields) -> Result<FeeConfig, String> {
 fn finality_json(config: &FinalityConfig) -> Value {
     match *config {
         #[cfg(feature = "finality-ffg")]
-        FinalityConfig::Ffg(ref ffg) => json!({
+        FinalityConfig::Ffg(ref ffg) => {
+            let mut value = json!({
             "type": "ffg",
             "checkpoint_interval": ffg.checkpoint_interval,
             "vote_depth": ffg.vote_depth,
@@ -337,7 +374,15 @@ fn finality_json(config: &FinalityConfig) -> Value {
                 "voter": validator.voter.to_string(),
                 "bond": validator.bond.to_string(),
             })).collect::<Vec<_>>(),
-        }),
+            });
+
+            // A later addition: left out while unset, as files from before it leave it out.
+            if let Some(leak) = ffg.leak {
+                value["leak"] = json!({ "after_epochs": leak.after_epochs, "permille": leak.permille });
+            }
+
+            value
+        }
         #[cfg(feature = "finality-authority")]
         FinalityConfig::Authority(ref authority) => json!({
             "type": "authority",
@@ -345,7 +390,7 @@ fn finality_json(config: &FinalityConfig) -> Value {
             "vote_depth": authority.vote_depth,
             "activation_delay": authority.activation_delay,
             "max_signers": authority.max_signers,
-            "signers": authority.signers.iter().map(|signer| signer.to_string()).collect::<Vec<_>>(),
+            "signers": authority.signers.iter().map(|signer| json!({ "key": signer.key.to_string(), "account": signer.account.to_string() })).collect::<Vec<_>>(),
             "threshold": authority.threshold,
             "change_threshold": authority.change_threshold,
             "approval_epochs": authority.approval_epochs,
@@ -392,6 +437,21 @@ fn finality_from_json(mut finality: Fields) -> Result<FinalityConfig, String> {
                     Ok(validator)
                 })
                 .collect::<Result<Vec<_>, String>>()?,
+            leak: match finality.map.contains_key("leak") {
+                true => match finality.optional_object("leak")? {
+                    Some(mut leak) => {
+                        let value = crate::chain::Leak {
+                            after_epochs: leak.whole("after_epochs")?,
+                            permille: leak.whole("permille")?,
+                        };
+                        leak.done()?;
+
+                        Some(value)
+                    }
+                    None => None,
+                },
+                false => None,
+            },
         }),
         #[cfg(feature = "finality-authority")]
         "authority" => FinalityConfig::Authority(AuthorityConfig {
@@ -399,11 +459,7 @@ fn finality_from_json(mut finality: Fields) -> Result<FinalityConfig, String> {
             vote_depth: finality.whole("vote_depth")?,
             activation_delay: finality.whole("activation_delay")?,
             max_signers: finality.small("max_signers")?,
-            signers: finality
-                .strings("signers")?
-                .iter()
-                .map(|text| text.parse::<PublicKey>().map_err(|_| format!("finality.signers: cannot read {text}")))
-                .collect::<Result<Vec<_>, String>>()?,
+            signers: finality.signers("signers")?,
             threshold: finality.small("threshold")?,
             change_threshold: finality.small("change_threshold")?,
             approval_epochs: finality.whole("approval_epochs")?,
@@ -430,7 +486,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
     };
     coin.done()?;
     let mut consensus = root.object("consensus")?;
-    let consensus = match consensus.text("type")?.as_str() {
+    let (consensus, pow_window) = match consensus.text("type")?.as_str() {
         "authority" => {
             let config = ConsensusConfig::Authority {
                 key: consensus.parse("key")?,
@@ -438,7 +494,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
             };
             consensus.done()?;
 
-            config
+            (config, None)
         }
         "pow" => {
             let hash = consensus.hash("hash")?;
@@ -448,11 +504,20 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
                 initial_difficulty: consensus.parse("initial_difficulty")?,
                 min_difficulty: consensus.parse("min_difficulty")?,
             });
+            let window = consensus.later_whole("window")?;
             consensus.done()?;
 
-            config
+            (config, window)
         }
-        other => return Err(format!("consensus.type: unknown consensus {other}; use pow or authority")),
+        "rotating" => {
+            let config = ConsensusConfig::Rotating {
+                slot_ms: consensus.whole("slot_ms")?,
+            };
+            consensus.done()?;
+
+            (config, None)
+        }
+        other => return Err(format!("consensus.type: unknown consensus {other}; use pow, authority or rotating")),
     };
     let mut reward = root.object("reward")?;
     let reward_value = Reward {
@@ -495,6 +560,10 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
     let fees = root.optional_object("fees")?.map(fees_from_fields).transpose()?;
     // Absent from files written before it: those chains keep their id, bounded by gas alone.
     let max_block_bytes = root.later_whole("max_block_bytes")?;
+    let vote_reward_source = match root.map.contains_key("vote_reward_source") {
+        true => root.optional_parse("vote_reward_source")?,
+        false => None,
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -510,6 +579,8 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         finality,
         fees,
         max_block_bytes,
+        pow_window,
+        vote_reward_source,
     };
     root.done()?;
 
@@ -568,6 +639,38 @@ impl<'a> Fields<'a> {
             .iter()
             .enumerate()
             .map(|(index, item)| Fields::of(item, &format!("{name}[{index}]")))
+            .collect()
+    }
+
+    /// Authority signers: each a key as a string, its own account, or an object with a key and an
+    /// account.
+    #[cfg_attr(not(feature = "finality-authority"), allow(dead_code))]
+    fn signers(&mut self, key: &'a str) -> Result<Vec<crate::registry::signers::Signer>, String> {
+        use crate::registry::signers::Signer;
+
+        let name = self.name(key);
+        let items = self.get(key)?.as_array().ok_or_else(|| format!("{name} must be a list"))?;
+
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| match item {
+                Value::String(text) => text
+                    .parse::<crate::crypto::keypair::PublicKey>()
+                    .map(Signer::own)
+                    .map_err(|_| format!("{name}[{index}]: cannot read {text}")),
+                Value::Object(_) => {
+                    let mut fields = Fields::of(item, &format!("{name}[{index}]"))?;
+                    let signer = Signer {
+                        key: fields.parse("key")?,
+                        account: fields.parse("account")?,
+                    };
+                    fields.done()?;
+
+                    Ok(signer)
+                }
+                _ => Err(format!("{name}[{index}] must be a key or an object with a key and an account")),
+            })
             .collect()
     }
 
@@ -693,12 +796,19 @@ mod tests {
             (FeeKind::Free, None),
         ];
 
-        for chain in [DevChain::Pow, DevChain::Authority] {
+        let chains = [
+            DevChain::Pow,
+            DevChain::Authority,
+            #[cfg(feature = "finality-authority")]
+            DevChain::Rotating,
+        ];
+
+        for chain in chains {
             for &kind in ALL_FINALITY {
                 for (fees, scorer) in fee_kinds {
                     let mut genesis = dev(chain);
                     genesis.finality = dev_finality(kind);
-                    genesis.fees = dev_fees(fees, scorer);
+                    genesis.fees = dev_fees(fees, scorer, Vec::new());
                     let read = from_json(&to_json(&genesis)).unwrap();
 
                     assert_eq!(read, genesis);
@@ -752,6 +862,8 @@ mod tests {
 
         // Unset, it adds nothing to what the id is hashed from, in any build.
         assert_eq!(read.max_block_bytes, None, "a file without it reads as unbounded");
+        assert_eq!(read.pow_window, None, "nor does a window, which the authority chain has none of");
+        assert_eq!(read.vote_reward_source, None, "nor minted vote rewards");
         assert_eq!(wincode::serialize(&read).unwrap(), wincode::serialize(&before).unwrap());
         assert_eq!(from_json(&to_json(&read)).unwrap(), read, "null reads back as unset too");
 
@@ -832,7 +944,18 @@ mod tests {
                 panic!("not authority")
             };
 
-            assert_eq!((authority.signers, authority.threshold), (signers, 2));
+            assert_eq!((authority.signers.iter().map(|signer| signer.key).collect::<Vec<_>>(), authority.threshold), (signers.clone(), 2));
+            assert!(authority.signers.iter().all(|signer| signer.account == signer.key.address()), "a bare key is its own account");
+
+            // An object names the account that speaks for the key.
+            let owner = crate::crypto::keypair::Keypair::generate(scheme).unwrap().public().address();
+            value["finality"]["signers"][0] = json!({ "key": signers[0].to_string(), "account": owner.to_string() });
+            let Some(FinalityConfig::Authority(authority)) = from_json(&value).unwrap().finality else {
+                panic!("not authority")
+            };
+
+            assert_eq!(authority.signers[0].account, owner);
+            assert_eq!(from_json(&to_json(&from_json(&value).unwrap())).unwrap(), from_json(&value).unwrap());
         }
 
         #[cfg(feature = "finality-depth")]

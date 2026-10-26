@@ -616,12 +616,14 @@ mod send {
             version,
         };
         // The dev key is the one signer, and one approval changes the set.
-        let added = send(running.args(approve(vec![newcomer], None)));
+        let owner = Keypair::generate(dev.key_type()).unwrap().public().address();
+        let added = send(running.args(approve(vec![format!("{newcomer}@{owner}")], None)));
         let stale = send(running.args(approve(Vec::new(), Some(0))));
-        let already = send(running.args(approve(vec![dev], None)));
+        let already = send(running.args(approve(vec![dev.to_string()], None)));
+        let garbled = send(running.args(approve(vec!["nobody@nowhere".to_string()], None)));
         // Now two must approve: the dev key's approval waits, until it takes it back.
         let third = Keypair::generate(dev.key_type()).unwrap().public();
-        let pending = send(running.args(approve(vec![third], None)));
+        let pending = send(running.args(approve(vec![third.to_string()], None)));
         let withdrawn = send(running.args(TxArgs::WithdrawApproval { version: None }));
         let nothing_left = send(running.args(TxArgs::WithdrawApproval { version: None }));
         let node = running.stop();
@@ -632,12 +634,13 @@ mod send {
         added.unwrap();
         assert!(stale.unwrap_err().to_string().contains("the signers changed since"));
         assert!(already.unwrap_err().to_string().contains("is a signer already"));
+        assert!(garbled.unwrap_err().to_string().contains("not a public key"));
         pending.unwrap();
         withdrawn.unwrap();
         assert!(nothing_left.unwrap_err().to_string().contains("no approval"));
         assert_eq!(decided.version, 1);
         assert_eq!(decided.set.signers.len(), 2);
-        assert!(decided.set.signers.contains(&newcomer));
+        assert!(decided.set.signers.contains(&crate::registry::signers::Signer { key: newcomer, account: owner }), "the newcomer speaks through its owner");
         assert!(signers.ballot().unwrap().approvals.is_empty());
     }
 

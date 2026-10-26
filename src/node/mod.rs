@@ -92,6 +92,9 @@ pub struct Node {
     catching_up: HashSet<IndexKind>,
     /// The most transactions this node puts in a block it produces, if it caps them.
     max_block_txs: Option<usize>,
+    /// How long this node runs transactions for a block it builds before it seals what it has, if
+    /// it bounds that.
+    max_build_ms: Option<u64>,
 }
 
 #[document(
@@ -278,6 +281,7 @@ impl Node {
             events: None,
             catching_up: HashSet::new(),
             max_block_txs: None,
+            max_build_ms: None,
         })
     }
 
@@ -288,6 +292,16 @@ impl Node {
     )]
     pub fn max_block_txs(mut self, most: Option<usize>) -> Node {
         self.max_block_txs = most;
+        self
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Bounds how long this node spends running transactions for each block it builds. Once the time is up, the transactions that went in by then are the block, and the rest wait for the next; the bytes and gas limits still apply. A brake for a slow machine, so it does not miss its slot: none by default, so blocks fill to the chain's limits whatever they take to run.",
+        params = { most = "Milliseconds per block, or None for no bound." },
+    )]
+    pub fn max_build_ms(mut self, most: Option<u64>) -> Node {
+        self.max_build_ms = most;
         self
     }
 
@@ -574,6 +588,11 @@ impl Node {
                 true => None,
                 false => self.chain.state_part(&block, depth, &prefix, MAX_SYNC_ENTRIES)?,
             }),
+            SyncRequest::Checkpoint { block } => SyncResponse::Checkpoint(
+                self.chain
+                    .checkpoint_answer(&block)?
+                    .map(|(start, work)| crate::net::CheckpointAnswer { start, work }),
+            ),
         };
 
         Ok(response)
@@ -596,7 +615,7 @@ impl Node {
 
             match self.chain.has_staking() {
                 true => log::warn!(
-                    "[node] validator {} signed conflicting votes; report it with: chainv4 send slash --first {} --second {}",
+                    "[node] voter {} signed conflicting votes; report it with: chainv4 send slash --first {} --second {}",
                     evidence.first.vote.voter,
                     encode(&evidence.first),
                     encode(&evidence.second)
@@ -623,7 +642,19 @@ impl Node {
                 let _ = self.gate.mempool().add(tx, &self.chain.genesis(), &state, self.chain.fees());
             }
 
-            self.gate.mempool().prune(&self.chain.state())?;
+            self.prune_mempool()?;
+        }
+
+        Ok(())
+    }
+
+    /// Brings the mempool in line with the tip: what landed, what can no longer pay and what has
+    /// offered too little for too long leave it.
+    fn prune_mempool(&self) -> Result<(), NodeError> {
+        let dropped = self.gate.mempool().prune(&self.chain.state(), self.chain.fees(), self.chain.next_base_price())?;
+
+        if dropped > 0 {
+            log::debug!("[node] dropped {dropped} transactions that cannot pay or offer too little");
         }
 
         Ok(())
@@ -696,7 +727,7 @@ impl Node {
             }
         }
 
-        self.gate.mempool().prune(&self.chain.state())?;
+        self.prune_mempool()?;
 
         // The main chain moved, so votes held back may count now.
         match self.chain.retry_votes() {
@@ -722,13 +753,18 @@ impl Node {
             return Ok(());
         }
 
-        if now < producer.start_at(&tip) {
+        // Under a rotating authority, who may produce the next block, and so when this node may.
+        let producers = self.chain.producers_for(tip.height + 1)?;
+
+        if now < producer.start_at(&tip, &producers) {
             return Ok(());
         }
 
-        let txs = self.gate.mempool().select(&self.chain.state(), budget, &|tx| self.chain.priority(tx))?;
+        let txs = self.gate.mempool().select(&self.chain.state(), budget, &|tx| self.chain.worth(tx))?;
         let proofs = self.chain.unpaid_proofs()?;
-        let mut block = self.chain.build(txs, proofs, producer.address(), now)?;
+        let deadline = self.max_build_ms.map(|most| Instant::now() + Duration::from_millis(most));
+        let declared = producer.difficulty(&tip, &producers);
+        let mut block = self.chain.build_declaring(txs, proofs, producer.address(), now, deadline, declared)?;
 
         match producer.seal(&block.header) {
             Some(seal) => {
@@ -775,7 +811,7 @@ impl Node {
                     block: Arc::new(block.clone()),
                     main: true,
                 });
-                self.gate.mempool().prune(&self.chain.state())?;
+                self.prune_mempool()?;
                 self.send(NetCommand::PublishBlock(block));
 
                 match self.chain.retry_votes() {
@@ -862,7 +898,7 @@ impl Node {
 
         let wake = match (&self.producer, &self.template) {
             (Some(_), Some(template)) => Some(template.header.timestamp + TEMPLATE_REFRESH),
-            (Some(producer), None) => Some(producer.start_at(self.chain.tip())),
+            (Some(producer), None) => Some(producer.start_at(self.chain.tip(), &self.chain.producers_for(self.chain.tip().height + 1)?)),
             (None, _) => None,
         };
         let wait = match wake {

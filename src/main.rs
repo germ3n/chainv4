@@ -68,8 +68,15 @@ struct NodeArgs {
     /// own blocks.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     max_block_txs: Option<u32>,
-    /// Which development chain to run: pow, mined by anyone, or authority, where the built-in
-    /// development key produces every block.
+    /// How many milliseconds this node spends running transactions for each block it produces.
+    /// Once they are up, what ran by then is the block and the rest wait for the next. A brake for
+    /// a slow machine, so it does not miss its slot; without it, blocks fill to the chain's limits
+    /// whatever they take to run.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    max_build_ms: Option<u64>,
+    /// Which development chain to run: pow, mined by anyone; authority, where the built-in
+    /// development key produces every block; or rotating, where the authority finality signers
+    /// produce in turn, the development key being the one signer.
     #[arg(long, value_enum, default_value_t = cli::genesis::DevChain::Pow)]
     consensus: cli::genesis::DevChain,
     /// Run the chain a genesis file describes instead of a development chain.
@@ -84,8 +91,12 @@ struct NodeArgs {
     /// How many threads to mine on.
     #[arg(long, default_value_t = 1, requires = "mine")]
     mine_threads: usize,
-    /// Produce blocks (authority chains), with the development key unless --producer-key names
-    /// the authority's key file.
+    /// Mine on the GPU instead of threads: through wgpu, on Vulkan, Metal or WebGPU. Needs a build
+    /// with the gpu feature.
+    #[arg(long, requires = "mine", conflicts_with = "mine_threads")]
+    mine_gpu: bool,
+    /// Produce blocks (authority and rotating chains), with the development key unless
+    /// --producer-key names the authority's, or a signer's voting, key file.
     #[arg(long)]
     produce: bool,
     /// The authority's key file, for --produce.
@@ -134,6 +145,12 @@ struct NodeArgs {
     /// it. The node then keeps headers alone for the blocks before it.
     #[arg(long)]
     snapshot: bool,
+    /// With --snapshot, a finalized checkpoint's block id, as 0x hex, from someone you trust: the
+    /// node fetches no header below it, holds it as final, and syncs on from there, so a
+    /// long-range fork below it cannot reach the node. GET /status of a node you trust shows one
+    /// under finality.finalized.block.
+    #[arg(long, requires = "snapshot")]
+    checkpoint: Option<String>,
 }
 
 /// How many events a slow /stream client may fall behind by before it misses some.
@@ -236,19 +253,60 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         (ConsensusConfig::ProofOfWork(config), true, false) => {
             let reward_to = args.reward_to.unwrap_or(dev.public().address());
             let inbox = net.inbox.clone();
-            log::info!("[node] mining on {} threads, rewards to {reward_to}", args.mine_threads.max(1));
-
-            Some(Box::new(Miner::new(reward_to, config.hash, args.mine_threads, move |block, seal| {
+            let found = move |block, seal| {
                 let _ = inbox.send(NetEvent::Sealed { block, seal });
-            })))
+            };
+
+            if args.mine_gpu {
+                #[cfg(feature = "gpu")]
+                {
+                    log::info!("[node] mining on the GPU, rewards to {reward_to}");
+
+                    Some(Box::new(chainv4::consensus::GpuMiner::new(reward_to, config.hash, found)?) as Box<dyn Producer>)
+                }
+                #[cfg(not(feature = "gpu"))]
+                {
+                    let _ = found;
+
+                    return Err("--mine-gpu needs a build with the gpu feature: cargo build --features gpu".into());
+                }
+            } else {
+                log::info!("[node] mining on {} threads, rewards to {reward_to}", args.mine_threads.max(1));
+
+                Some(Box::new(Miner::new(reward_to, config.hash, args.mine_threads, found)))
+            }
         }
-        (ConsensusConfig::Authority { .. }, true, _) => return Err("--mine needs a proof-of-work chain".into()),
-        (ConsensusConfig::ProofOfWork(_), _, true) => return Err("--produce needs an authority chain".into()),
+        (ConsensusConfig::Rotating { slot_ms }, false, true) => {
+            // The signer's voting key signs its blocks; the blocks name its account.
+            let keypair = cli::signer(args.producer_key.as_deref())?;
+            let account = genesis
+                .finality
+                .as_ref()
+                .and_then(|finality| finality.signer_account(&keypair.public()))
+                .unwrap_or_else(|| keypair.public().address());
+            log::info!("[node] producing blocks in turn as {}, for {account}", keypair.public());
+
+            Some(Box::new(chainv4::consensus::RotatingProducer::new(keypair, account, *slot_ms)))
+        }
+        (ConsensusConfig::Authority { .. } | ConsensusConfig::Rotating { .. }, true, _) => return Err("--mine needs a proof-of-work chain".into()),
+        (ConsensusConfig::ProofOfWork(_), _, true) => return Err("--produce needs an authority or rotating chain".into()),
     };
-    let mut node = Node::new(db.clone(), &genesis, producer, net)?.max_block_txs(args.max_block_txs.map(|most| most as usize));
+    let mut node = Node::new(db.clone(), &genesis, producer, net)?
+        .max_block_txs(args.max_block_txs.map(|most| most as usize))
+        .max_build_ms(args.max_build_ms);
 
     if args.snapshot {
-        match node.sync_from_snapshot()? {
+        let checkpoint = match &args.checkpoint {
+            Some(text) => {
+                let bytes = chainv4::structs::hex::from_hex(text).ok_or("--checkpoint is not hex")?;
+
+                Some(chainv4::structs::hash::Hash::from_bytes(genesis.hash, &bytes).ok_or("--checkpoint is not as long as the chain's ids")?)
+            }
+            None => None,
+        };
+
+        match node.sync_from_snapshot(checkpoint)? {
+            true if checkpoint.is_some() => log::info!("[node] syncing from a snapshot, starting at the checkpoint"),
             true => log::info!("[node] syncing from a snapshot"),
             false => log::info!("[node] the database holds more than genesis already: syncing as usual, not from a snapshot"),
         }

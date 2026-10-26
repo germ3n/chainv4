@@ -624,7 +624,7 @@ fn mine_on(chain: &Chain, parent: &Block, txs: Vec<SignedTx>, miner: Address) ->
                 height: parent.header.height + 1,
                 timestamp,
                 producer: miner,
-                difficulty: chain.consensus().difficulty(&parent.header, timestamp),
+                difficulty: chain.difficulty_after(&parent.header, timestamp).unwrap(),
                 tx_root: Block::tx_root(chain.hash(), &txs),
                 proof_root: Block::proof_root(chain.hash(), &[]),
                 receipts_root: Hash::zero(chain.hash()),
@@ -743,6 +743,72 @@ fn a_heavier_branch_that_fails_to_run_is_dropped() {
     assert!(matches!(chain.import(&b3, LATER), Err(ImportError::Invalid(BlockError::Bad))));
     assert_eq!(chain.tip().id(), a1.id());
     assert_eq!(balance(&chain, &bob), u256::new(10));
+}
+
+#[test]
+fn bad_blocks_are_remembered_across_restarts() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &pow_genesis()).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let bob = stranger().public().address();
+    let a1 = mine_on(&chain, &genesis, Vec::new(), Address::Ed25519([1; 32]));
+    let b1 = mine_on(&chain, &genesis, vec![send(&bob, 99, 7)], Address::Ed25519([2; 32]));
+    let b2 = mine_on(&chain, &b1, Vec::new(), Address::Ed25519([2; 32]));
+
+    extended(chain.import(&a1, LATER));
+    assert!(matches!(chain.import(&b1, LATER), Ok(Imported::Side)));
+    assert!(matches!(chain.import(&b2, LATER), Err(ImportError::Invalid(BlockError::Tx { .. }))), "running the branch finds the bad nonce");
+    assert_eq!(chain.bad_blocks(), [b1.id(), b2.id()]);
+
+    // Reopened, the chain refuses the branch without running it again.
+    let mut reopened = Chain::open(db, &pow_genesis()).unwrap();
+    let b3 = mine_on(&reopened, &b2, Vec::new(), Address::Ed25519([2; 32]));
+
+    assert_eq!(reopened.bad_blocks(), [b1.id(), b2.id()]);
+    assert!(matches!(reopened.import(&b2, LATER), Err(ImportError::Invalid(BlockError::Bad))));
+    assert!(matches!(reopened.import(&b3, LATER), Err(ImportError::Invalid(BlockError::Bad))));
+    assert_eq!(reopened.bad_blocks(), [b1.id(), b2.id(), b3.id()]);
+}
+
+#[test]
+fn side_branches_the_chain_can_never_follow_are_pruned() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &pow_genesis()).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let mut main = genesis.clone();
+
+    for _ in 0..DEV_MAX_REORG_DEPTH {
+        main = mine_on(&chain, &main, Vec::new(), Address::Ed25519([1; 32]));
+        extended(chain.import(&main, LATER));
+    }
+
+    // A branch off genesis, exactly max_reorg_depth below the tip: still followable, so it stays
+    // through imports and a tip move, and so does a fresh one off the tip's parent.
+    let old = mine_on(&chain, &genesis, Vec::new(), Address::Ed25519([2; 32]));
+    let old_child = mine_on(&chain, &old, Vec::new(), Address::Ed25519([2; 32]));
+    let fresh = mine_on(&chain, &chain.block_at(DEV_MAX_REORG_DEPTH - 1).unwrap().unwrap(), Vec::new(), Address::Ed25519([3; 32]));
+
+    for side in [&old, &old_child, &fresh] {
+        assert!(matches!(chain.import(side, LATER), Ok(Imported::Side)));
+    }
+
+    assert!(chain.block(&old_child.id()).unwrap().is_some());
+
+    // One more main block puts the old branch's fork past max_reorg_depth: it goes, the fresh one stays.
+    main = mine_on(&chain, &main, Vec::new(), Address::Ed25519([1; 32]));
+    extended(chain.import(&main, LATER));
+
+    assert_eq!(chain.block(&old.id()).unwrap(), None);
+    assert_eq!(chain.block(&old_child.id()).unwrap(), None);
+    assert_eq!(stored_header(&*db, &old_child.id()).unwrap(), None);
+    assert_eq!(stored_work(&*db, &old_child.id()).unwrap(), None);
+    assert!(chain.block(&fresh.id()).unwrap().is_some());
+    assert_eq!(stored_tips(&*db).unwrap().into_iter().collect::<HashSet<_>>(), HashSet::from([main.id(), fresh.id()]));
+    assert_eq!(chain.tips, HashSet::from([main.id(), fresh.id()]));
+
+    // The main chain keeps every block, and a block on the pruned branch is just unknown now.
+    assert!(chain.block_at(0).unwrap().is_some());
+    assert!(matches!(chain.import(&old_child, LATER), Err(ImportError::UnknownParent(_))));
 }
 
 #[test]

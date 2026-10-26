@@ -20,7 +20,7 @@ use super::ffg::{self, FfgConfig};
 use super::votes::Votes;
 use {
     super::{Finality, View},
-    crate::chain::{SignerRules, StakingRules},
+    crate::chain::{SignerRules, StakingRules, VoteRewardSource},
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::db::{DbError, State},
@@ -43,7 +43,7 @@ pub enum FinalityConfig {
     #[cfg(feature = "finality-ffg")]
     #[wincode(tag = 0)]
     Ffg(FfgConfig),
-    #[document(summary = "The same votes, from signers genesis names, a threshold of them justifying, who change by their own approval. No bonds, and nobody can be slashed.")]
+    #[document(summary = "The same votes, from signers genesis names, a threshold of them justifying, who change by their own approval. No bonds: a signer that signs conflicting votes is thrown out instead of slashed.")]
     #[cfg(feature = "finality-authority")]
     #[wincode(tag = 1)]
     Authority(AuthorityConfig),
@@ -81,6 +81,19 @@ impl FinalityConfig {
     #[cfg(not(feature = "finality-ffg"))]
     pub fn dev(_validator: PublicKey) -> Option<FinalityConfig> {
         None
+    }
+
+    #[document(
+        parent = "FinalityConfig",
+        summary = "The account a genesis signer's key speaks through, under authority finality: what a rotating producer with that key names as its blocks' producer. None under any other kind, or for a key genesis does not name; a signer added since has its account in the decided set.",
+    )]
+    pub fn signer_account(&self, key: &PublicKey) -> Option<crate::structs::address::Address> {
+        match *self {
+            #[cfg(feature = "finality-authority")]
+            FinalityConfig::Authority(ref config) => config.signers.iter().find(|signer| signer.key == *key).map(|signer| signer.account),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
     }
 
     #[document(parent = "FinalityConfig", summary = "The kind's name: ffg, authority or depth.")]
@@ -156,12 +169,12 @@ impl FinalityConfig {
         parent = "FinalityConfig",
         summary = "The rules signer changes run under, for authority finality.",
     )]
-    pub fn signer_rules(&self) -> Option<SignerRules> {
+    pub fn signer_rules(&self, chain: Hash) -> Option<SignerRules> {
         match *self {
             #[cfg(feature = "finality-ffg")]
             FinalityConfig::Ffg(_) => None,
             #[cfg(feature = "finality-authority")]
-            FinalityConfig::Authority(ref config) => Some(config.signer_rules()),
+            FinalityConfig::Authority(ref config) => Some(config.signer_rules(chain)),
             #[cfg(feature = "finality-depth")]
             FinalityConfig::Depth(_) => None,
         }
@@ -211,12 +224,12 @@ impl FinalityConfig {
         summary = "The finality these settings describe, with what this node learned before: the votes it counted or held back are counted again.",
         params = { chain = "The chain as it was opened." },
     )]
-    pub fn build(&self, chain: &View) -> Result<Box<dyn Finality>, DbError> {
+    pub fn build(&self, chain: &View, rewards: VoteRewardSource) -> Result<Box<dyn Finality>, DbError> {
         Ok(match *self {
             #[cfg(feature = "finality-ffg")]
-            FinalityConfig::Ffg(ref config) => Box::new(Votes::load(ffg::Staked::new(config.clone()), chain)?),
+            FinalityConfig::Ffg(ref config) => Box::new(Votes::load(ffg::Staked::new(config.clone()), chain, rewards)?),
             #[cfg(feature = "finality-authority")]
-            FinalityConfig::Authority(ref config) => Box::new(Votes::load(authority::Appointed::new(config), chain)?),
+            FinalityConfig::Authority(ref config) => Box::new(Votes::load(authority::Appointed::new(config), chain, rewards)?),
             #[cfg(feature = "finality-depth")]
             FinalityConfig::Depth(ref config) => Box::new(Depth::load(config, &**chain.db(), chain.genesis())?),
         })

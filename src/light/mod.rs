@@ -9,12 +9,13 @@
 
 use {
     crate::consensus::{Consensus, ConsensusConfig, ConsensusError},
+    crate::structs::unset::Unset,
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::crypto::merkle,
     crate::db::{Column, DbError, State, StateProof, StateTree, namespace_key},
     crate::structs::address::Address,
-    crate::registry::signers::{SignerSet, Signers},
+    crate::registry::signers::{Signer, SignerSet, Signers},
     crate::registry::validators::{ValidatorSet, Validators},
     crate::structs::block::{BlockHeader, SealedHeader},
     crate::structs::hash::{Hash, HashType},
@@ -80,9 +81,63 @@ pub struct LightParams {
     pub consensus: ConsensusConfig,
     #[document(summary = "How finality works on the chain, or None for a chain without.")]
     pub finality: Option<LightFinality>,
+    #[document(summary = "The proof-of-work window, as Genesis::pow_window. Hashed as nothing while None, so chains from before it keep the proof_root their genesis commits to; on the wire and in saved state it is a plain Option.")]
+    pub pow_window: Option<u64>,
 }
 
-impl Hashable for LightParams {}
+/// The parameters as genesis commits to them: the window encodes as nothing while unset, so a
+/// chain from before the window hashes as it always did.
+#[derive(SchemaWrite)]
+struct CommittedLightParams {
+    hash: HashType,
+    consensus: ConsensusConfig,
+    finality: Option<LightFinality>,
+    #[wincode(with = "Unset")]
+    pow_window: Option<u64>,
+}
+
+impl Hashable for CommittedLightParams {}
+
+impl LightParams {
+    fn committed(&self) -> CommittedLightParams {
+        CommittedLightParams {
+            hash: self.hash,
+            consensus: self.consensus.clone(),
+            finality: self.finality,
+            pow_window: self.pow_window,
+        }
+    }
+
+    #[document(parent = "LightParams", summary = "The consensus rules headers are checked by, the window included.")]
+    pub fn rules(&self) -> Box<dyn Consensus> {
+        self.consensus.rules(self.pow_window)
+    }
+
+    #[document(parent = "LightParams", summary = "How many ancestors consensus looks at when checking a header: what a client must hold below any header it checks.")]
+    pub fn lookback(&self) -> usize {
+        self.rules().lookback()
+    }
+}
+
+// Hashed as genesis commits to them, with the window encoding as nothing while unset; the derived
+// encoding, which decodes, is what goes on the wire.
+impl Hashable for LightParams {
+    fn hash(&self, algorithm: HashType) -> Hash {
+        self.committed().hash(algorithm)
+    }
+
+    fn hash_with_tag(&self, algorithm: HashType) -> Hash {
+        self.committed().hash_with_tag(algorithm)
+    }
+
+    fn hashable_bytes(&self) -> Vec<u8> {
+        self.committed().hashable_bytes()
+    }
+
+    fn hashable_bytes_with_tag(&self) -> Vec<u8> {
+        self.committed().hashable_bytes_with_tag()
+    }
+}
 
 #[document(
     summary = "How finality works on a chain, as much as a light client needs: when checkpoints come, how far ahead their voters are fixed, and how deep a block is final under depth finality.",
@@ -114,7 +169,7 @@ impl LightFinality {
 
     #[document(
         parent = "LightFinality",
-        summary = "The epochs whose voters a block fixes: those up to fixed_ahead for genesis, epoch plus fixed_ahead for a checkpoint, none for any other block or kind.",
+        summary = "The epochs whose voters a block's light update carries: epoch 0 through fixed_ahead for genesis, so a client knows who produces under a rotating authority from the first block; for a checkpoint, the epochs after its own through the one it fixes, fixed_ahead ahead, since a slash or an ejection takes a voter out of sets fixed earlier, and the next checkpoint re-states them; none for any other block or kind.",
         params = { height = "The block's height." },
     )]
     pub fn fixed_at(&self, height: u64) -> Option<RangeInclusive<u64>> {
@@ -123,11 +178,11 @@ impl LightFinality {
         };
 
         match height {
-            0 => Some(1..=fixed_ahead),
+            0 => Some(0..=fixed_ahead),
             _ if height.is_multiple_of(checkpoint_interval) => {
-                let epoch = height / checkpoint_interval + fixed_ahead;
+                let epoch = height / checkpoint_interval;
 
-                Some(epoch..=epoch)
+                Some(epoch + 1..=epoch + fixed_ahead)
             }
             _ => None,
         }
@@ -274,6 +329,8 @@ pub struct LightState {
     pub finalized: Checkpoint,
     #[document(summary = "The heights of the blocks whose updates it took.")]
     pub updated: Vec<u64>,
+    #[document(summary = "The headers just below the first kept, newest first, as many as consensus looks at when checking a header, so the first header the restored client checks is checked as any other.")]
+    pub ancestors: Vec<SealedHeader>,
 }
 
 impl Hashable for LightState {}
@@ -304,6 +361,20 @@ pub fn checkpoint_start(finality: Option<LightFinality>, height: u64) -> Option<
         Some((interval, ahead)) => height.is_multiple_of(interval).then(|| (height / interval, (height / interval + 1).saturating_sub(ahead) * interval)),
         None => Some((height, height)),
     }
+}
+
+#[document(
+    summary = "The first header a checkpoint start carries: the one checkpoint_start names, or lower when consensus looks at more ancestors than that leaves, so the client checks the header after the checkpoint as a node does.",
+    category = "Light client",
+    params = {
+        from = "The first height checkpoint_start gave.",
+        height = "The checkpoint's height.",
+        lookback = "How many ancestors consensus looks at: LightParams::lookback.",
+    },
+    see_also = "checkpoint_start, CheckpointStart",
+)]
+pub fn checkpoint_first_header(from: u64, height: u64, lookback: usize) -> u64 {
+    from.min((height + 1).saturating_sub(lookback as u64))
 }
 
 #[document(summary = "The most headers a saved light client keeps: without finality, or with finality stalled, those far below the tip go.", category = "Light client")]
@@ -401,6 +472,8 @@ pub enum Extended {
     Unlinked,
     #[document(summary = "None: the client has every header the node has.")]
     UpToDate,
+    #[document(summary = "None yet: under a consensus whose producers finality names, the client cannot check them until it has proved their epoch's voters; it asks for finality first, and for them again after.")]
+    Waiting,
 }
 
 #[document(
@@ -434,6 +507,9 @@ pub struct LightClient {
     justifications_done: bool,
     /// Where to ask for headers from after a branch that did not link.
     back: Option<u64>,
+    /// The height of the first header it could not check yet, under a consensus whose producers it
+    /// learns from finality: it asks again once their epoch's voters are known.
+    stalled: Option<u64>,
 }
 
 impl LightClient {
@@ -455,7 +531,7 @@ impl LightClient {
             return Err(LightError::WrongParams);
         }
 
-        let consensus = params.consensus.rules();
+        let consensus = params.rules();
 
         Ok(LightClient {
             consensus,
@@ -472,6 +548,7 @@ impl LightClient {
             headers_done: false,
             justifications_done: false,
             back: None,
+            stalled: None,
             params,
         })
     }
@@ -572,7 +649,14 @@ impl LightClient {
         summary = "What to fetch next: headers until the node has no more, then, under voting finality, the updates of trusted checkpoints and the justifications after the latest; None once caught up. Call refresh to follow the chain again.",
     )]
     pub fn next(&self) -> Option<LightRequest> {
-        if !self.headers_done {
+        // Headers that waited for their epoch's producers go first, once those are known.
+        if let Some(height) = self.stalled
+            && self.producers_for(height).is_some()
+        {
+            return Some(LightRequest::Headers { from: height, count: MAX_LIGHT_HEADERS });
+        }
+
+        if !self.headers_done && self.stalled.is_none() {
             let from = self.back.unwrap_or(self.tip().height + 1);
 
             return Some(LightRequest::Headers { from, count: MAX_LIGHT_HEADERS });
@@ -593,6 +677,19 @@ impl LightClient {
     pub fn refresh(&mut self) {
         self.headers_done = false;
         self.justifications_done = false;
+    }
+
+    /// Who may produce at a height, under a consensus that takes its producers from finality: the
+    /// voters of the height's epoch, once proved; None until then. Empty under any other consensus.
+    fn producers_for(&self, height: u64) -> Option<Vec<Signer>> {
+        if !self.consensus.needs_producers() {
+            return Some(Vec::new());
+        }
+
+        let interval = self.params.finality?.checkpoint_interval()?;
+        let voters = self.voters.get(&(height / interval))?;
+
+        Some(voters.set.members.iter().map(|member| Signer { key: member.voter, account: member.account }).collect())
     }
 
     #[document(
@@ -616,6 +713,8 @@ impl LightClient {
             return Err(LightError::Misplaced);
         }
 
+        self.stalled = None;
+
         if first.header.parent != self.sealed(from - 1).expect("from is past base").id() {
             // A chain that leaves even the oldest header kept leaves the finalized block it was
             // kept from.
@@ -631,20 +730,46 @@ impl LightClient {
 
         self.back = None;
         let mut work = self.work[(from - 1 - self.base) as usize];
-        let mut parent = &self.sealed(from - 1).expect("from is past base").header;
+        // What consensus looks at: the parent first, then as many below as it wants and the
+        // client holds.
+        let lookback = self.consensus.lookback().max(1);
+        let mut ancestors: Vec<BlockHeader> = (1..=lookback as u64)
+            .map_while(|back| from.checked_sub(back))
+            .map_while(|height| self.sealed(height).map(|sealed| sealed.header.clone()))
+            .collect();
+
+        let mut headers = headers;
+        let mut checked = 0;
 
         for sealed in &headers {
             let height = sealed.header.height;
+            let parent = ancestors.first().expect("from is past base");
 
             if height != parent.height + 1 || sealed.header.parent != parent.id() {
                 return Err(LightError::BadHeader { height, why: "does not follow its parent".to_string() });
             }
 
+            // Producers the client cannot know yet: it keeps what it checked, and asks again once
+            // finality has named them.
+            let Some(producers) = self.producers_for(height) else {
+                self.stalled = Some(height);
+
+                break;
+            };
+
             self.consensus
-                .check(&sealed.header, &sealed.seal, parent, now)
+                .check(&sealed.header, &sealed.seal, &ancestors, &producers, now)
                 .map_err(|err: ConsensusError| LightError::BadHeader { height, why: err.to_string() })?;
             work += self.consensus.work(&sealed.header);
-            parent = &sealed.header;
+            ancestors.insert(0, sealed.header.clone());
+            ancestors.truncate(lookback);
+            checked += 1;
+        }
+
+        headers.truncate(checked);
+
+        if headers.is_empty() {
+            return Ok(Extended::Waiting);
         }
 
         let fork = from - 1;
@@ -678,6 +803,8 @@ impl LightClient {
 
     fn append(&mut self, headers: Vec<SealedHeader>, from: u64) {
         let mut work = self.work[(from - 1 - self.base) as usize];
+        // Justifications that waited for headers past the tip may hold now.
+        self.justifications_done = false;
 
         for sealed in headers {
             work += self.consensus.work(&sealed.header);
@@ -731,6 +858,10 @@ impl LightClient {
                 .collect(),
             finalized: self.finalized,
             updated: self.updated.iter().copied().filter(|height| *height >= keep).collect(),
+            ancestors: (1..self.consensus.lookback().max(1) as u64)
+                .map_while(|back| keep.checked_sub(back))
+                .map_while(|height| self.sealed(height).cloned())
+                .collect(),
         }
     }
 
@@ -758,7 +889,19 @@ impl LightClient {
             return Err(LightError::Undecodable);
         }
 
-        let heights = state.headers.iter().map(|sealed| (sealed.id(), sealed.header.height)).collect();
+        // The ancestors hang off the first header, each the parent of the one above.
+        let mut above = (first.header.parent, base);
+
+        for sealed in &state.ancestors {
+            if sealed.id() != above.0 || sealed.header.height + 1 != above.1 {
+                return Err(LightError::Undecodable);
+            }
+
+            above = (sealed.header.parent, sealed.header.height);
+        }
+
+        let mut heights: HashMap<Hash, u64> = state.headers.iter().map(|sealed| (sealed.id(), sealed.header.height)).collect();
+        heights.extend(state.ancestors.iter().map(|sealed| (sealed.id(), sealed.header.height)));
         let mut justified: BTreeMap<u64, Hash> = state.justified.into_iter().collect();
 
         if justified.is_empty() {
@@ -766,11 +909,11 @@ impl LightClient {
         }
 
         Ok(LightClient {
-            consensus: state.params.consensus.rules(),
+            consensus: state.params.rules(),
             genesis: trusted,
             headers: state.headers,
             base,
-            ancestors: Vec::new(),
+            ancestors: state.ancestors,
             work: state.work.into_iter().map(u256::from_le_bytes).collect(),
             heights,
             voters: state.voters.into_iter().map(|(epoch, set, needed)| (epoch, Voters { set, needed: u256::from_le_bytes(needed) })).collect(),
@@ -780,6 +923,7 @@ impl LightClient {
             headers_done: false,
             justifications_done: false,
             back: None,
+            stalled: None,
             params: state.params,
         })
     }
@@ -813,10 +957,15 @@ impl LightClient {
         let (epoch, from) = checkpoint_start(params.finality, height).ok_or(LightError::WrongCheckpoint)?;
         let wanted = interval.map_or(0, |interval| (height - from) / interval + 1);
 
-        if first.header.height > from || updates.len() as u64 != wanted {
+        if first.header.height > checkpoint_first_header(from, height, consensus.lookback()) || updates.len() as u64 != wanted {
             return Err(LightError::WrongCheckpoint);
         }
 
+        // Headers below the epochs' start are ancestors: held for consensus to look at, trusted by
+        // their hashes alone, and never followed from.
+        let split = (from - first.header.height) as usize;
+        let ancestors: Vec<SealedHeader> = headers[..split].iter().rev().cloned().collect();
+        let headers: Vec<SealedHeader> = headers[split..].to_vec();
         let mut sum = u256::ZERO;
         let work = headers
             .iter()
@@ -840,6 +989,7 @@ impl LightClient {
                 justified: vec![(epoch, checkpoint)],
                 finalized: at,
                 updated: Vec::new(),
+                ancestors,
             },
             trusted,
         )?;

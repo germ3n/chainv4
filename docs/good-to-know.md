@@ -225,8 +225,9 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   takes the state of a block 16 below the best tip, then runs the blocks after it. Before the
   pivot it has no bodies, receipts, events or light updates, and it never rolls back past it.
   Peers can serve state only at their last `max_reorg_depth` blocks, so a pivot that grows too
-  old moves up, and the walk fetches only what changed. See
-  [Node](node.md#syncing-from-a-snapshot).
+  old moves up, and the walk fetches only what changed. With `--checkpoint 0x…` it fetches
+  nothing below a finalized checkpoint it is told to trust, and holds it as final: the answer to
+  long-range forks on a staked chain. See [Node](node.md#syncing-from-a-snapshot).
 - **Every dev chain has the same genesis id.** A wallet that followed one resumes against the next
   as if it were the same chain, and waits for blocks past where the old one got to: Settings →
   Light client → **Start over**. See [Light client](light-client.md#what-to-keep-in-mind).
@@ -234,9 +235,38 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   is hashed for its id, and the field encodes as nothing while unset (`Unset`), so a genesis file
   without it keeps its chain. The dev chains set 4 MiB, so their databases from before start
   over. A field added to genesis later must do the same, and come last.
+- **`consensus.window` gave the dev proof-of-work chain a new id, and left every other chain's
+  alone.** Like `max_block_bytes`, it is `Genesis::pow_window`, a last field that encodes as
+  nothing while unset, so a genesis file without it keeps its id and the parent-only difficulty
+  rule. The light parameters hash the same way (`LightParams`), so the `proof_root` genesis
+  commits to holds too; on the wire they are a plain encoding. A saved light client state from
+  before has no `ancestors` and does not decode, so the wallet and explorer start over.
+- **`vote_reward_source`, FFG's `leak` and a scorer's `kinds` are later genesis additions too,** encoding as
+  nothing while unset, so files from before keep their ids. Under `fees`, the burned share of
+  fees sits at `REWARD_POOL`, `contract:0x00…`, a balance nothing but proofs can move.
+- **GPU mining is a feature and a crate of its own.** `cargo build --features gpu` pulls in
+  `chainv4-gpu` and wgpu; `--mine --mine-gpu` then mines on Vulkan, Metal or WebGPU. wgpu is
+  held at 24 there, since the node's libp2p pins the wasm crates newer versions want past. The
+  crate's tests skip where no GPU is found, as on CI.
+- **A rotating authority's producers are its finality signers.** `consensus.type: rotating`
+  checks each block against the signers fixed for its epoch, so header checks need state: light
+  clients follow `activation_delay` epochs behind finality, and `--snapshot` is refused. The
+  dev chain `--consensus rotating` runs it with the development key as the one signer.
+- **Mint is for development chains.** Genesis's `minter` may name the development key or
+  nobody; a genesis file naming any other address is refused as `BadGenesis`. Coins on a chain
+  of value come from block rewards and allocations alone.
+- **Depth finality splits for good.** Nodes apart for longer than `depth` blocks never rejoin on
+  their own, as under Bitcoin Cash's rolling checkpoints; resync one side.
+- **Authority signers have accounts, which gave authority-finality chains new ids.** A signer
+  set holds each signer's key and account (`Signer`), in genesis, in state and in
+  `Tx::ApproveSigners`, so the genesis state root of every chain with `finality.type` `authority`
+  changed, and with it the genesis id: such databases start over, and an `approve_signers`
+  transaction from before does not decode. The dev chains use FFG, so theirs stood. A genesis
+  file naming signers as bare keys still reads, each key its own account.
 - **Blocks have no fixed transaction count.** A producer fills a block to genesis's
   `max_block_bytes`, checked on import, and the gas limit; `MAX_BLOCK_TXS`, 1,000 a block and
-  never checked, is gone. A slow node can cap its own blocks with `--max-block-txs`. With 2 s
+  never checked, is gone. A slow node can cap its own blocks with `--max-block-txs`, or bound
+  the time it spends building one with `--max-build-ms`, which seals what ran by then. With 2 s
   slots, plain transfers now fill a block to its gas limit, about 13,800.
 - **wincode refuses lists past 4 MiB in memory, encoding too.** A `SignedTx` takes 352 bytes in
   memory, so a block of 12,000 transfers would not encode, store or gossip. A block's `txs` and
@@ -257,7 +287,8 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Coin decimals are for display only.** Genesis names the coin's symbol and decimals, but the
   chain counts every balance, fee and reward in whole units.
 - **Rewards have no coinbase transaction.** The chain credits the producer after a block's
-  transactions run, and a reorg takes it back. A reward can be spent from the next block on.
+  transactions run, and a reorg takes it back. A reward can be spent from the next block on. The
+  API says what each block minted as its `reward`.
 - **Reorgs reach back at most `max_reorg_depth` blocks**, 100 on the dev chains. Finality bounds
   them further: nothing at or below the finalized checkpoint comes off, and work alone only moves
   the chain to branches that hold the justified checkpoint.

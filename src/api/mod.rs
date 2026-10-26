@@ -5,12 +5,12 @@
 use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
-        DryRun, Rules, dry_run, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, stored_address_txs, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        DryRun, Rules, dry_run, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, Reward, VoteRewardSource, stored_address_txs, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
-        stored_light_finality, stored_light_update, stored_state_at,
+        stored_light_finality, stored_light_update, stored_state_at, stored_checkpoint_start, StartProblem,
     },
     crate::crypto::hashable::Hashable,
-    crate::light::{CheckpointStart, LightParams, MAX_FINALITY_STEPS, MAX_LIGHT_HEADERS, checkpoint_start},
+    crate::light::{LightParams, MAX_FINALITY_STEPS, MAX_LIGHT_HEADERS},
     crate::crypto::merkle,
     crate::crypto::keypair::PublicKey,
     crate::registry::signers::{Approval, SignerSet, Signers},
@@ -109,6 +109,10 @@ struct Api {
     rules: Arc<Rules>,
     /// The most bytes a block's transactions may take, if genesis bounds them.
     max_block_bytes: Option<u64>,
+    /// What each block mints for its producer, to show with the block.
+    reward: Reward,
+    /// Where vote rewards come from, and so whether the pool is worth showing.
+    vote_rewards: VoteRewardSource,
 }
 
 #[document(
@@ -152,7 +156,7 @@ pub fn start(
     let fees = genesis.fees.as_ref().map(|config| Arc::new(config.build()));
     let (hash, tx_fuel, coin, limits) = (genesis.hash, genesis.tx_limits.fuel, genesis.coin.clone(), genesis.tx_limits);
     let token_functions = genesis.token_functions.clone().into();
-    let (rules, max_block_bytes) = (Arc::new(genesis.rules()), genesis.max_block_bytes);
+    let (rules, max_block_bytes, reward, vote_rewards) = (Arc::new(genesis.rules()), genesis.max_block_bytes, genesis.reward, genesis.vote_rewards());
     let vm = Arc::new(
         Vm::new(&genesis.engines, genesis.hash)
             .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?,
@@ -188,6 +192,8 @@ pub fn start(
                     light,
                     rules,
                     max_block_bytes,
+                    reward,
+                    vote_rewards,
                 })).await {
                     log::error!("[http] {err}");
                 }
@@ -397,6 +403,16 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         None => Value::Null,
     };
 
+    // Where vote rewards come from, and what the pool holds when they come from it.
+    let vote_rewards = match api.vote_rewards {
+        VoteRewardSource::Mint => json!({ "source": "mint" }),
+        VoteRewardSource::Fees => {
+            let pool = crate::registry::Accounts::new(&State::new(db.clone())).get(&REWARD_POOL)?.balance;
+
+            json!({ "source": "fees", "pool": REWARD_POOL.to_string(), "balance": pool.to_string() })
+        }
+    };
+
     Ok(Json(json!({
         "genesis": genesis.id().to_string(),
         "tip": tip.id().to_string(),
@@ -409,6 +425,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "token_functions": &*api.token_functions,
         "finality": finality,
         "fees": fees,
+        "vote_rewards": vote_rewards,
         "max_block_bytes": api.max_block_bytes,
     })))
 }
@@ -486,7 +503,7 @@ async fn signers(Shared(api): Shared<Api>) -> Answer {
     let Some(config) = &api.finality else {
         return Err(ApiError::NotFound("this chain has no finality".to_string()));
     };
-    let Some(rules) = config.signer_rules() else {
+    let Some(rules) = api.rules.signers else {
         return Err(ApiError::NotFound(format!("{} finality has no signers", config.name())));
     };
 
@@ -563,9 +580,9 @@ async fn blocks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
 
     for height in (first..before).rev() {
         summaries.push(match stored_block_at(&*db, height)? {
-            Some(block) => json::summary(&block),
+            Some(block) => json::summary(&block, &api.reward),
             // Before the snapshot this node synced from, it keeps headers alone.
-            None => json::pruned(&stored_header_at(&*db, height)?.ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("no block at height {height}"))))?),
+            None => json::pruned(&stored_header_at(&*db, height)?.ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("no block at height {height}"))))?, &api.reward),
         });
     }
 
@@ -593,7 +610,7 @@ async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
     let found = match (found, header) {
         (Some(found), _) => found,
         // Before the snapshot this node synced from, it keeps headers alone.
-        (None, Some(sealed)) => return Ok(Json(json::pruned(&sealed))),
+        (None, Some(sealed)) => return Ok(Json(json::pruned(&sealed, &api.reward))),
         (None, None) => return Err(ApiError::NotFound(format!("no block {block}"))),
     };
 
@@ -605,7 +622,7 @@ async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
         receipts.push(stored_receipt(&*db, &tx.id(hash))?.filter(|receipt| receipt.block == id));
     }
 
-    let mut value = json::block(&found, &receipts, hash);
+    let mut value = json::block(&found, &receipts, hash, &api.reward);
     value["main"] = stored_on_main_chain(&*db, &found)?.into();
 
     Ok(Json(value))
@@ -644,7 +661,7 @@ async fn forks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, Str
     let tips: Vec<String> = stored_tips(&*db)?.iter().map(Hash::to_string).collect();
 
     Ok(Json(json!({
-        "blocks": side.iter().map(json::summary).collect::<Vec<_>>(),
+        "blocks": side.iter().map(|block| json::summary(block, &api.reward)).collect::<Vec<_>>(),
         "tips": tips,
     })))
 }
@@ -778,7 +795,7 @@ async fn light(Shared(api): Shared<Api>) -> Answer {
 
     Ok(Json(json!({
         "genesis": genesis.id().to_string(),
-        "params": to_hex(&api.light.hashable_bytes_with_tag()),
+        "params": to_hex(&wincode::serialize(&*api.light).expect("parameters always encode")),
         "header": to_hex(&genesis.hashable_bytes_with_tag()),
     })))
 }
@@ -845,34 +862,12 @@ async fn light_checkpoint(Shared(api): Shared<Api>, Path(block): Path<String>) -
 /// light client start there, encoded: a CheckpointStart. 404 for a block not on the main chain,
 /// 400 for one that opens no epoch under voting finality.
 fn light_checkpoint_at(api: &Api, block: Hash) -> Answer {
-    let db = &*api.db;
-    let sealed = stored_header(db, &block)?.ok_or_else(|| ApiError::NotFound(format!("no block {block}")))?;
-    let height = sealed.header.height;
-
-    if stored_header_at(db, height)?.map(|header| header.id()) != Some(block) {
-        return Err(ApiError::NotFound(format!("block {block} is not on the main chain")));
-    }
-
-    let (epoch, from) = checkpoint_start(api.light.finality, height)
-        .ok_or_else(|| ApiError::BadRequest(format!("block {block}, at height {height}, opens no epoch: it is no checkpoint")))?;
-
-    if height - from >= u64::from(MAX_LIGHT_HEADERS) {
-        return Err(ApiError::BadRequest(format!("starting at block {block} takes more than {MAX_LIGHT_HEADERS} headers")));
-    }
-
-    let headers = (from..=height)
-        .map(|at| stored_header_at(db, at)?.ok_or_else(|| ApiError::NotFound(format!("no main-chain header at {at}: this node synced from a snapshot past it"))))
-        .collect::<Result<Vec<_>, _>>()?;
-    let interval = api.light.finality.and_then(|finality| finality.checkpoint_interval().filter(|_| finality.fixed_ahead().is_some()));
-    let updates = match interval {
-        Some(interval) => headers
-            .iter()
-            .step_by(interval as usize)
-            .map(|header| stored_light_update(db, &header.id()))
-            .collect::<Result<Vec<_>, _>>()?,
-        None => Vec::new(),
+    let (epoch, start) = match stored_checkpoint_start(&*api.db, &api.light, &block)? {
+        Ok(found) => found,
+        Err(problem @ (StartProblem::NotOnChain | StartProblem::Missing(_))) => return Err(ApiError::NotFound(format!("block {block}: {problem}"))),
+        Err(problem) => return Err(ApiError::BadRequest(format!("block {block}: {problem}"))),
     };
-    let start = CheckpointStart { headers, updates };
+    let height = start.headers.last().map_or(0, |sealed| sealed.header.height);
 
     Ok(Json(json!({
         "checkpoint": { "epoch": epoch, "height": height, "block": block.to_string() },
@@ -1151,10 +1146,10 @@ async fn stream(
         .as_ref()
         .and_then(NodeHandle::subscribe)
         .ok_or_else(|| ApiError::NotFound("this node does not stream; start it with --stream".to_string()))?;
-    let hash = api.hash;
+    let (hash, reward) = (api.hash, api.reward);
     let events = BroadcastStream::new(events).map(move |event| {
         let (name, data) = match event {
-            Ok(event) => json::node_event(&event, hash),
+            Ok(event) => json::node_event(&event, hash, &reward),
             Err(BroadcastStreamRecvError::Lagged(missed)) => ("lagged", json!({ "missed": missed })),
         };
 

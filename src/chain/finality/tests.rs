@@ -5,6 +5,8 @@
 use super::*;
 use crate::chain::*;
 use crate::consensus::{AuthorityProducer, ConsensusConfig, DevAuthority, PowConfig, Producer, meets, work_hash};
+use crate::registry::signers::Signer;
+use crate::consensus::ConsensusError;
 use crate::crypto::keypair::Keypair;
 use crate::db::MemoryDb;
 use crate::structs::address::Address;
@@ -132,6 +134,7 @@ mod voting {
                     bond: u256::new(10),
                 })
                 .collect(),
+            leak: None,
         })
     }
 
@@ -143,7 +146,7 @@ mod voting {
             vote_depth: 1,
             activation_delay: 2,
             max_signers: 10,
-            signers: voters().iter().map(Keypair::public).collect(),
+            signers: voters().iter().map(|keypair| Signer::own(keypair.public())).collect(),
             threshold: 2,
             change_threshold: 2,
             approval_epochs: 64,
@@ -634,6 +637,76 @@ mod voting {
     }
 
     #[test]
+    fn vote_rewards_come_from_the_pool_when_genesis_says_so() {
+        use crate::chain::{FeeConfig, REWARD_POOL, VoteRewardSource};
+        use crate::structs::amount::Amount;
+
+        for finality in kinds() {
+            // Fees on, half of every base part pooled rather than burned, and a reward no pool
+            // of a few fees can cover, so the pool runs dry on the first voter.
+            let huge = u256::new(10u128.pow(30));
+            let finality = match finality {
+                #[cfg(feature = "finality-ffg")]
+                FinalityConfig::Ffg(config) => FinalityConfig::Ffg(FfgConfig { vote_reward: huge, ..config }),
+                #[cfg(feature = "finality-authority")]
+                FinalityConfig::Authority(config) => FinalityConfig::Authority(AuthorityConfig { vote_reward: huge, ..config }),
+                #[cfg(feature = "finality-depth")]
+                other => other,
+            };
+            let genesis = Genesis {
+                fees: Some(FeeConfig::dev()),
+                vote_reward_source: Some(VoteRewardSource::Fees),
+                ..genesis_with(Some(finality))
+            };
+            let mut chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+            let pool = |chain: &Chain| balance(chain, &REWARD_POOL);
+            let supply = |chain: &Chain| {
+                let voters: u256 = voters().iter().map(|keypair| balance(chain, &keypair.public().address())).fold(u256::ZERO, |sum, next| sum + next);
+
+                voters + balance(chain, &dev().public().address()) + pool(chain) + balance(chain, &key(99).public().address())
+            };
+            let before = supply(&chain);
+
+            // A fee-paying transfer: the burned half of its base part lands in the pool.
+            let fee = FeeOffer {
+                gas_limit: 100_000,
+                max_price: chain.next_base_price() * u256::new(2),
+                tip: u256::ZERO,
+            };
+            let tx = Tx::Transfer {
+                from: dev().public().address(),
+                to: key(99).public().address(),
+                amount: Amount::U128(1),
+            };
+            let signed = SignedTx::sign(tx, nonce(&chain, &dev()), fee, &dev());
+            let receipts = advance(&mut chain, vec![signed], Vec::new()).unwrap();
+            let fed = pool(&chain);
+
+            assert_eq!(receipts[0].result, Ok(Effect::Done));
+            assert!(fed > u256::ZERO, "the pool got the burned half");
+            assert_eq!(supply(&chain), before, "nothing burned, nothing minted");
+
+            // The proof pays its first voter, by key, all the pool holds, and the rest nothing.
+            finalize_through(&mut chain, 1);
+            let proofs = chain.unpaid_proofs().unwrap();
+            let mut voted: Vec<PublicKey> = proofs[0].votes.iter().map(|vote| vote.vote.voter).collect();
+            voted.sort();
+            let balances = |chain: &Chain| voted.iter().map(|voter| balance(chain, &voter.address())).collect::<Vec<_>>();
+            let fed = pool(&chain);
+            let owed = balances(&chain);
+            let before = supply(&chain);
+
+            advance(&mut chain, Vec::new(), proofs).unwrap();
+            let paid = balances(&chain);
+
+            assert_eq!(pool(&chain), u256::ZERO);
+            assert_eq!(paid[0], owed[0] + fed);
+            assert_eq!(&paid[1..], &owed[1..]);
+            assert_eq!(supply(&chain), before, "paid from the pool, not minted");
+        }
+    }
+
+    #[test]
     fn a_peer_s_justification_is_checked_before_it_counts() {
         for finality in kinds() {
             let mut voted = open(&finality);
@@ -749,6 +822,94 @@ mod voting {
 
     #[cfg(feature = "finality-ffg")]
     #[test]
+    fn quiet_validators_leak_until_the_rest_can_finalize_again() {
+        use crate::chain::Leak;
+        use crate::registry::validators::Validators;
+
+        // Three equal bonds of 1,000; two make two thirds. Two epochs without a proven checkpoint
+        // let bundles in, and from the third on half of a quiet validator's bond leaks at each
+        // checkpoint.
+        let FinalityConfig::Ffg(config) = ffg() else { unreachable!() };
+        let mut config = FfgConfig {
+            leak: Some(Leak { after_epochs: 2, permille: 500 }),
+            ..config
+        };
+        config.validators.iter_mut().for_each(|validator| validator.bond = u256::new(1_000));
+        let mut chain = open(&FinalityConfig::Ffg(config));
+        let [alice, bob, carol] = voters();
+        let bond = |chain: &Chain, keypair: &Keypair| Validators::new(&chain.state()).get(&keypair.public()).unwrap().unwrap().bond;
+        // Grows the chain to a height, every block carrying what proofs the node has for it.
+        let grow = |chain: &mut Chain, height: u64| {
+            while chain.tip().height < height {
+                let proofs = chain.unpaid_proofs().unwrap();
+                advance(chain, Vec::new(), proofs).unwrap();
+            }
+        };
+
+        // Epoch 1 is justified by two voters, and the next block proves it to the chain's state.
+        grow(&mut chain, INTERVAL + 1);
+
+        for keypair in [&alice, &bob] {
+            chain.add_vote(honest_vote(&chain, keypair)).unwrap();
+        }
+
+        grow(&mut chain, INTERVAL + 2);
+        assert_eq!(Validators::new(&chain.state()).proven().unwrap(), 1);
+
+        // From then on Alice alone votes: a third, so nothing justifies, and bundles of her votes
+        // land in blocks once two epochs have passed unproven, which no block takes before.
+        grow(&mut chain, 2 * INTERVAL + 1);
+        chain.add_vote(honest_vote(&chain, &alice)).unwrap();
+        let early = Justification {
+            source: checkpoint(&chain, 1),
+            target: checkpoint(&chain, 2),
+            votes: vec![signed(&chain, &alice, checkpoint(&chain, 1), checkpoint(&chain, 2))],
+        };
+
+        assert!(chain.unpaid_proofs().unwrap().is_empty(), "not stalled yet");
+        assert!(matches!(
+            advance(&mut chain, Vec::new(), vec![early]),
+            Err(ImportError::Invalid(BlockError::Proof(why))) if why.contains("falls short")
+        ));
+
+        let mut justified_again = None;
+
+        for epoch in 3..=12 {
+            grow(&mut chain, epoch * INTERVAL + 1);
+            chain.add_vote(honest_vote(&chain, &alice)).unwrap();
+            grow(&mut chain, epoch * INTERVAL + 2);
+
+            if chain.justified().unwrap().epoch > 1 {
+                justified_again = Some(epoch);
+
+                break;
+            }
+        }
+
+        // Bob's and Carol's bonds leaked by half at each stalled checkpoint; Alice's did not. Once
+        // her 1,000 are two thirds of what is left, her votes alone justify, and the chain finalizes
+        // again.
+        let leaked = justified_again.expect("Alice alone comes to justify");
+
+        assert_eq!(bond(&chain, &alice), u256::new(1_000));
+        assert!(bond(&chain, &bob) <= u256::new(250), "{}", bond(&chain, &bob));
+        assert_eq!(bond(&chain, &bob), bond(&chain, &carol));
+        assert!(Validators::new(&chain.state()).participation(&alice.public()).unwrap() >= leaked - 1);
+        assert_eq!(Validators::new(&chain.state()).participation(&bob.public()).unwrap(), 1);
+
+        grow(&mut chain, (leaked + 1) * INTERVAL + 1);
+        chain.add_vote(honest_vote(&chain, &alice)).unwrap();
+
+        assert_eq!(chain.finalized().unwrap().epoch, leaked, "the next checkpoint finalizes the one before");
+
+        // Under the minimum bond, a leaked validator is on its way out, as if it had unbonded.
+        let record = Validators::new(&chain.state()).get(&bob.public()).unwrap().unwrap();
+
+        assert!(record.active_until.is_some() == (record.bond < u256::new(100)));
+    }
+
+    #[cfg(feature = "finality-ffg")]
+    #[test]
     fn slashing_costs_the_bond_and_pays_the_reporter() {
         use crate::registry::validators::Validators;
         use crate::structs::amount::Amount;
@@ -792,6 +953,27 @@ mod voting {
         assert!(record.slashed);
         assert_eq!(record.bond, u256::ZERO);
         assert!(chain.has_staking());
+
+        // Slashed in epoch 2, with sets fixed through epoch 4: she keeps her weight in epochs 2
+        // and 3, and is out of epoch 4's set at once. Checkpoint 3's light update re-states the
+        // sets of epochs 4 and 5, so a light client learns it the usual way.
+        let in_set = |epoch: u64| Validators::new(&chain.state()).set(epoch).unwrap().unwrap().member(&carol.public()).is_some();
+
+        assert!(in_set(2) && in_set(3) && !in_set(4));
+
+        grow_to(&mut chain, 3 * INTERVAL);
+        let checkpoint = chain.block_at(3 * INTERVAL).unwrap().unwrap().id();
+        let update = stored_light_update(&*chain.db, &checkpoint).unwrap().unwrap();
+        let epochs: Vec<u64> = update.voters.iter().map(|voter| voter.epoch).collect();
+        let set_of = |epoch: u64| {
+            let proof = update.voters.iter().find(|voter| voter.epoch == epoch).unwrap();
+
+            wincode::deserialize::<crate::registry::validators::ValidatorSet>(&proof.value).unwrap()
+        };
+
+        assert_eq!(epochs, [4, 5]);
+        assert!(set_of(4).member(&carol.public()).is_none());
+        assert!(set_of(5).member(&carol.public()).is_none());
 
         // Not two conflicting votes: refused before it runs, so a block holding it is invalid.
         let now = chain.tip().timestamp + SLOT;
@@ -882,9 +1064,186 @@ mod voting {
         assert_eq!(chain.add_vote(honest_vote(&chain, &carol)).unwrap().justified, [checkpoint(&chain, 1)]);
     }
 
+    /// A chain whose signers produce in turn, every two seconds.
+    #[cfg(feature = "finality-authority")]
+    fn rotating() -> Chain {
+        let genesis = Genesis {
+            consensus: ConsensusConfig::Rotating { slot_ms: SLOT },
+            ..genesis_with(Some(authority()))
+        };
+
+        Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap()
+    }
+
+    /// The signer whose turn the next block is, among the three voters.
+    #[cfg(feature = "finality-authority")]
+    fn in_turn(chain: &Chain) -> Keypair {
+        let producers = chain.producers_for(chain.tip().height + 1).unwrap();
+        let mut keys: Vec<PublicKey> = producers.iter().map(|signer| signer.key).collect();
+        keys.sort();
+        let wanted = keys[((chain.tip().height + 1) % keys.len() as u64) as usize];
+
+        voters().into_iter().chain([key(14)]).find(|keypair| keypair.public() == wanted).unwrap()
+    }
+
+    /// Builds the next block as a signer, at its slot or at a time given, and imports it.
+    #[cfg(feature = "finality-authority")]
+    fn produce_as(chain: &mut Chain, keypair: &Keypair, at: Option<u64>) -> Result<Imported, ImportError> {
+        use crate::consensus::RotatingProducer;
+
+        let tip = chain.tip().clone();
+        let producers = chain.producers_for(tip.height + 1).unwrap();
+        let mut producer = RotatingProducer::new(keypair.clone(), keypair.public().address(), SLOT);
+        let now = at.unwrap_or_else(|| producer.start_at(&tip, &producers));
+        let declared = producer.difficulty(&tip, &producers);
+        let mut block = chain.build_declaring(Vec::new(), Vec::new(), producer.address(), now, None, declared).unwrap();
+        block.seal = producer.seal(&block.header).unwrap();
+
+        chain.import(&block, now)
+    }
+
     #[cfg(feature = "finality-authority")]
     #[test]
-    fn signers_cannot_stake_or_be_slashed() {
+    fn signers_produce_in_turn_and_step_in_for_one_that_misses() {
+        let mut chain = rotating();
+        let [alice, bob, carol] = voters();
+
+        // Ten blocks in turn, each weighing 2.
+        for _ in 0..10 {
+            let signer = in_turn(&chain);
+
+            assert!(matches!(produce_as(&mut chain, &signer, None), Ok(Imported::Extended(_))));
+            assert_eq!(chain.tip().difficulty, 0);
+            assert_eq!(chain.tip().producer, signer.public().address());
+        }
+
+        assert_eq!(chain.tip_work(), u256::new(20));
+
+        // The next in line is early at one slot and steps in at two, weighing 1; a stranger never.
+        let signer = in_turn(&chain);
+        let next = [alice.clone(), bob.clone(), carol.clone()]
+            .into_iter()
+            .find(|keypair| {
+                let mut keys: Vec<PublicKey> = voters().iter().map(Keypair::public).collect();
+                keys.sort();
+                let index = keys.iter().position(|key| *key == signer.public()).unwrap();
+
+                keypair.public() == keys[(index + 1) % 3]
+            })
+            .unwrap();
+        let tip = chain.tip().timestamp;
+
+        assert!(matches!(produce_as(&mut chain, &next, Some(tip + SLOT)), Err(ImportError::Invalid(BlockError::Consensus(ConsensusError::Early)))));
+        assert!(matches!(produce_as(&mut chain, &next, Some(tip + 2 * SLOT)), Ok(Imported::Extended(_))));
+        assert_eq!(chain.tip().difficulty, 1);
+        assert_eq!(chain.tip_work(), u256::new(21));
+        assert!(matches!(produce_as(&mut chain, &key(60), None), Err(ImportError::Invalid(BlockError::Consensus(ConsensusError::WrongProducer)))));
+
+        // The set the schedule follows is the epoch's: once Dave replaces Carol, Dave produces
+        // and Carol may not, from the epoch the change is fixed for.
+        let dave = key(14);
+        let approve = |chain: &Chain, keypair: &Keypair| {
+            let tx = Tx::ApproveSigners {
+                version: 0,
+                signers: vec![Signer::own(alice.public()), Signer::own(bob.public()), Signer::own(dave.public())],
+                threshold: 2,
+                change_threshold: 2,
+            };
+
+            SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair)
+        };
+        let txs = vec![approve(&chain, &alice), approve(&chain, &bob)];
+        let tip = chain.tip().clone();
+        let signer = in_turn(&chain);
+        let producers = chain.producers_for(tip.height + 1).unwrap();
+        let mut producer = crate::consensus::RotatingProducer::new(signer.clone(), signer.public().address(), SLOT);
+        let now = producer.start_at(&tip, &producers);
+        let mut block = chain.build_declaring(txs, Vec::new(), producer.address(), now, None, producer.difficulty(&tip, &producers)).unwrap();
+        block.seal = producer.seal(&block.header).unwrap();
+        chain.import(&block, now).unwrap();
+
+        while chain.producers_for(chain.tip().height + 1).unwrap().iter().any(|signer| signer.key == carol.public()) {
+            let signer = in_turn(&chain);
+            produce_as(&mut chain, &signer, None).unwrap();
+        }
+
+        let producers = chain.producers_for(chain.tip().height + 1).unwrap();
+
+        assert!(producers.iter().any(|signer| signer.key == dave.public()));
+        assert!(chain.producers_for(chain.tip().height).unwrap().iter().any(|signer| signer.key == carol.public()) || chain.tip().height.is_multiple_of(INTERVAL));
+
+        for _ in 0..3 {
+            let signer = in_turn(&chain);
+
+            assert_ne!(signer.public(), carol.public());
+            produce_as(&mut chain, &signer, None).unwrap();
+        }
+    }
+
+    #[cfg(feature = "finality-authority")]
+    #[test]
+    fn a_light_client_waits_for_the_voters_before_it_checks_their_blocks() {
+        use crate::light::{Extended, LightClient, LightRequest};
+
+        let mut chain = rotating();
+
+        // Three epochs of blocks, and one more: epochs 0 to 2 are fixed at genesis, epoch 3 at
+        // checkpoint 1, whose update a client trusts once epoch 1 is justified.
+        for _ in 0..3 * INTERVAL + 1 {
+            let signer = in_turn(&chain);
+            produce_as(&mut chain, &signer, None).unwrap();
+        }
+
+        for keypair in &voters()[..2] {
+            chain.add_vote(signed(&chain, keypair, start(&chain), checkpoint(&chain, 1))).unwrap();
+        }
+
+        assert_eq!(chain.justified().unwrap().epoch, 1);
+
+        let genesis = chain.block_at(0).unwrap().unwrap();
+        let params = genesis_with(Some(authority())).light_params();
+        let params = crate::light::LightParams {
+            consensus: ConsensusConfig::Rotating { slot_ms: SLOT },
+            ..params
+        };
+        let mut client = LightClient::new(params, genesis.sealed_header(), chain.genesis()).unwrap();
+        let headers_from = |from: u64| -> Vec<SealedHeader> { chain.headers_from(from, 1_000).unwrap() };
+
+        // It cannot check block 1 before genesis's update names epoch 0's signers.
+        assert_eq!(client.next(), Some(LightRequest::Headers { from: 1, count: crate::light::MAX_LIGHT_HEADERS }));
+        assert_eq!(client.deliver_headers(1, headers_from(1), LATER).unwrap(), Extended::Waiting);
+        assert_eq!(client.tip().height, 0);
+        assert_eq!(client.next(), Some(LightRequest::Finality { from: 0 }));
+
+        let steps = |from: u64| stored_light_finality(&*chain.db, INTERVAL, from, 64, chain.tip().height).unwrap();
+        client.deliver_finality(0, steps(0)).unwrap();
+
+        // Now through epoch 2, where it waits for checkpoint 1's update: epoch 1's justification
+        // makes it trusted, and the rest follows.
+        assert_eq!(client.next(), Some(LightRequest::Headers { from: 1, count: crate::light::MAX_LIGHT_HEADERS }));
+        assert_eq!(client.deliver_headers(1, headers_from(1), LATER).unwrap(), Extended::Added((3 * INTERVAL - 1) as usize));
+        assert_eq!(client.tip().height, 3 * INTERVAL - 1);
+        assert!(matches!(client.next(), Some(LightRequest::Finality { .. })));
+
+        while let Some(request) = client.next() {
+            match request {
+                LightRequest::Headers { from, .. } => {
+                    client.deliver_headers(from, headers_from(from), LATER).unwrap();
+                }
+                LightRequest::Finality { from } => {
+                    client.deliver_finality(from, steps(from)).unwrap();
+                }
+            }
+        }
+
+        assert_eq!(client.tip().id(), chain.tip().id());
+        assert_eq!(client.justified().epoch, 1);
+    }
+
+    #[cfg(feature = "finality-authority")]
+    #[test]
+    fn signers_cannot_stake_but_a_double_voter_is_thrown_out() {
+        use crate::registry::signers::Signers;
         use crate::structs::amount::Amount;
 
         let mut chain = open(&authority());
@@ -907,9 +1266,42 @@ mod voting {
 
         assert!(!chain.has_staking());
 
-        for tx in [bond, slash, Tx::Unbond { voter: carol.public() }] {
+        // Anyone may report her, here in epoch 2: she leaves the decided set, version 1, and
+        // epoch 4's set, while epochs 2 and 3 keep her; the thresholds stay two of the two left.
+        assert_eq!(send(&mut chain, slash.clone())[0].result, Ok(Effect::Done));
+
+        for tx in [bond, Tx::Unbond { voter: carol.public() }] {
             assert_eq!(send(&mut chain, tx)[0].result, Err(Failure::NoStaking));
         }
+
+        let decided = Signers::new(&chain.state()).decided().unwrap();
+        let in_set = |epoch: u64| Signers::new(&chain.state()).set(epoch).unwrap().unwrap().keys().contains(&carol.public());
+
+        assert_eq!(decided.version, 1);
+        assert_eq!(decided.set.keys().len(), 2);
+        assert!(!decided.set.keys().contains(&carol.public()));
+        assert_eq!((decided.set.threshold, decided.set.change_threshold), (2, 2));
+        assert!(in_set(2) && in_set(3) && !in_set(4));
+        assert!(matches!(&send(&mut chain, slash)[0].result, Err(failure) if failure.to_string().contains("not one of the decided signers")));
+
+        // Evidence whose signatures are for another chain is refused for what it is.
+        let forged = Tx::Slash {
+            first: Box::new(SignedVote::sign(honest.vote, carol, &Hash::zero(chain.hash()))),
+            second: Box::new(double),
+        };
+
+        assert_eq!(send(&mut chain, forged)[0].result, Err(Failure::BadEvidence));
+
+        // Two of two justify now: neither can go without leaving the threshold out of reach.
+        grow_to(&mut chain, 3 * INTERVAL + 1);
+        let bob = &voters()[1];
+        let bob_double = Tx::Slash {
+            first: Box::new(signed(&chain, bob, start(&chain), checkpoint(&chain, 3))),
+            second: Box::new(signed(&chain, bob, start(&chain), Checkpoint { epoch: 3, block: Hash::zero(chain.hash()) })),
+        };
+
+        assert!(matches!(&send(&mut chain, bob_double)[0].result, Err(failure) if failure.to_string().contains("threshold")));
+        assert_eq!(Signers::new(&chain.state()).decided().unwrap().version, 1);
     }
 
     #[cfg(feature = "finality-authority")]
@@ -921,7 +1313,8 @@ mod voting {
             (AuthorityConfig { threshold: 1, ..good.clone() }, "more than half"),
             (AuthorityConfig { threshold: 4, ..good.clone() }, "at most all"),
             (AuthorityConfig { signers: Vec::new(), ..good.clone() }, "at least one signer"),
-            (AuthorityConfig { signers: vec![signer, signer], threshold: 2, ..good.clone() }, "named twice"),
+            (AuthorityConfig { signers: vec![Signer::own(signer), Signer::own(signer)], threshold: 2, ..good.clone() }, "named twice"),
+            (AuthorityConfig { signers: vec![Signer::own(signer), Signer { key: key(14).public(), account: signer.address() }], ..good.clone() }, "share an account"),
             (AuthorityConfig { checkpoint_interval: 0, ..good.clone() }, "checkpoint_interval"),
             (AuthorityConfig { activation_delay: 0, ..good.clone() }, "activation_delay"),
             (AuthorityConfig { approval_epochs: 0, ..good.clone() }, "approval_epochs"),
@@ -941,7 +1334,7 @@ mod voting {
 
         // An even split needs more than half: two of two, or three of four.
         let even = AuthorityConfig {
-            signers: voters().iter().map(Keypair::public).chain([key(14).public()]).collect(),
+            signers: voters().iter().map(Keypair::public).chain([key(14).public()]).map(Signer::own).collect(),
             threshold: 3,
             change_threshold: 3,
             ..good
@@ -962,7 +1355,7 @@ mod voting {
         let approve = |keypair: &Keypair, chain: &Chain| {
             let tx = Tx::ApproveSigners {
                 version: 0,
-                signers: vec![alice.public(), bob.public(), dave.public()],
+                signers: vec![Signer::own(alice.public()), Signer::own(bob.public()), Signer::own(dave.public())],
                 threshold: 2,
                 change_threshold: 2,
             };
@@ -983,15 +1376,15 @@ mod voting {
         let decided = Signers::new(&chain.state()).decided().unwrap();
 
         assert_eq!(decided.version, 1);
-        assert!(decided.set.signers.contains(&dave.public()) && !decided.set.signers.contains(&carol.public()));
+        assert!(decided.set.keys().contains(&dave.public()) && !decided.set.keys().contains(&carol.public()));
 
         // Decided in epoch 0, fixed at epoch 1's checkpoint for epoch 1 + 2: until then the old
         // signers vote.
         finalize_through(&mut chain, 2);
         let fixed = |epoch: u64| Signers::new(&chain.state()).set(epoch).unwrap().unwrap();
 
-        assert!(fixed(2).signers.contains(&carol.public()));
-        assert!(fixed(3).signers.contains(&dave.public()));
+        assert!(fixed(2).keys().contains(&carol.public()));
+        assert!(fixed(3).keys().contains(&dave.public()));
 
         grow_to(&mut chain, 3 * INTERVAL + 1);
 
@@ -1019,7 +1412,7 @@ mod voting {
         let [alice, bob, _] = voters();
         let approve = Tx::ApproveSigners {
             version: 0,
-            signers: vec![alice.public(), bob.public(), key(14).public()],
+            signers: vec![Signer::own(alice.public()), Signer::own(bob.public()), Signer::own(key(14).public())],
             threshold: 2,
             change_threshold: 2,
         };
@@ -1418,7 +1811,7 @@ fn staking_needs_staking() {
     let approve = SignedTx::sign(
         Tx::ApproveSigners {
             version: 0,
-            signers: vec![key(11).public()],
+            signers: vec![Signer::own(key(11).public())],
             threshold: 1,
             change_threshold: 1,
         },

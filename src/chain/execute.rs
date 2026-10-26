@@ -40,6 +40,8 @@ pub struct Rules {
     pub staking: Option<StakingRules>,
     #[document(summary = "What signer changes run under, or None on a chain without authority finality, where they fail.")]
     pub signers: Option<SignerRules>,
+    #[document(summary = "Whether the burned share of every fee goes to REWARD_POOL, for vote rewards, rather than vanishing.")]
+    pub pooled_fees: bool,
 }
 
 #[document(
@@ -55,6 +57,10 @@ pub struct SignerRules {
     pub checkpoint_interval: u64,
     #[document(summary = "How many epochs an approval counts for.")]
     pub approval_epochs: u64,
+    #[document(summary = "How many epochs ahead each epoch's signers are fixed, which ejecting a cheater reaches into.")]
+    pub activation_delay: u64,
+    #[document(summary = "The chain's genesis id, which votes, and so evidence, are signed over.")]
+    pub chain: Hash,
 }
 
 #[document(
@@ -258,6 +264,8 @@ fn payment<'a>(fees: &'a Fees, tx: &SignedTx, sender: &Address, accounts: &Accou
 pub(crate) struct Executed {
     pub(crate) receipt: Receipt,
     pub(crate) to_producer: u256,
+    /// The burned share of its fee, which goes to the reward pool on a chain that keeps one.
+    pub(crate) burned: u256,
 }
 
 /// Checks a transaction's form and signature, then runs it on top of its block's state, the way
@@ -356,6 +364,7 @@ pub(crate) fn execute_verified(
     Ok(Executed {
         receipt,
         to_producer: charged.to_producer,
+        burned: charged.burned,
     })
 }
 
@@ -564,15 +573,28 @@ fn run(
         }),
         Tx::Withdraw { voter } => staking(&|validators, _, epoch| validators.withdraw(&sender, voter, epoch).map(|_| ())),
         Tx::Slash { first, second } => {
-            if let Some(finality) = &rules.staking
-                && (first.verify(&finality.chain).is_err() || second.verify(&finality.chain).is_err())
-            {
+            let chain = match (&rules.staking, &rules.signers) {
+                (Some(finality), _) => finality.chain,
+                (None, Some(signers)) => signers.chain,
+                (None, None) => return (Err(Failure::NoStaking), Contracted::default()),
+            };
+
+            if first.verify(&chain).is_err() || second.verify(&chain).is_err() {
                 return (Err(Failure::BadEvidence), Contracted::default());
             }
 
-            staking(&|validators, finality, epoch| {
-                validators.slash(&sender, &first.vote.voter, epoch, &finality.staking).map(|_| ())
-            })
+            // Under FFG the bond goes; under authority finality the signer is thrown out.
+            match &rules.signers {
+                Some(signers) if rules.staking.is_none() => {
+                    let epoch = height / signers.checkpoint_interval.max(1);
+                    let ejected = Signers::new(layer).eject(&first.vote.voter, epoch, signers.activation_delay, signers.max_signers);
+
+                    (moved(ejected.map(|_| ())), Contracted::default())
+                }
+                _ => staking(&|validators, finality, epoch| {
+                    validators.slash(&sender, &first.vote.voter, epoch, &finality.staking).map(|_| ())
+                }),
+            }
         }
         Tx::ApproveSigners {
             version,

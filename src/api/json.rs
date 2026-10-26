@@ -2,7 +2,7 @@
 //! JavaScript numbers lose precision past 2^53; hashes, bytes and signatures are 0x hex.
 
 use {
-    crate::chain::{CommittedReceipt, IndexedEvent, IndexedTx, TxReceipt, TxStatus},
+    crate::chain::{CommittedReceipt, IndexedEvent, IndexedTx, Reward, TxReceipt, TxStatus},
     crate::crypto::hashable::Hashable,
     crate::db::{Column, StateProof},
     crate::crypto::keypair::PublicKey,
@@ -27,8 +27,8 @@ use {
     serde_json::{Value, json},
 };
 
-/// A block's id and header, and how many transactions it holds.
-pub fn summary(block: &Block) -> Value {
+/// A block's id and header, how many transactions it holds, and what it minted for its producer.
+pub fn summary(block: &Block, reward: &Reward) -> Value {
     let header = &block.header;
 
     json!({
@@ -43,9 +43,19 @@ pub fn summary(block: &Block) -> Value {
         "state_root": header.state_root.to_string(),
         "gas_used": header.gas_used,
         "base_price": header.base_price.to_string(),
+        "reward": minted(reward, header.height).to_string(),
         "tx_count": block.txs.len(),
         "proof_count": block.proofs.len(),
     })
+}
+
+/// What a block at a height minted for its producer: the reward schedule's figure, and nothing
+/// for genesis, which no producer made.
+pub fn minted(reward: &Reward, height: u64) -> u256 {
+    match height {
+        0 => u256::ZERO,
+        height => reward.at(height),
+    }
 }
 
 /// A proof of one chain-state entry against a block's state root, with what it proves: the entry's
@@ -84,7 +94,7 @@ pub fn receipt_proof(block: &Block, receipt: &CommittedReceipt, index: usize, co
 
 /// A block this node keeps the header of alone, as one that synced from a snapshot does for those
 /// before it: the summary but for what the body holds, marked pruned, with its seal.
-pub fn pruned(sealed: &SealedHeader) -> Value {
+pub fn pruned(sealed: &SealedHeader, reward: &Reward) -> Value {
     let header = &sealed.header;
 
     json!({
@@ -99,6 +109,7 @@ pub fn pruned(sealed: &SealedHeader) -> Value {
         "state_root": header.state_root.to_string(),
         "gas_used": header.gas_used,
         "base_price": header.base_price.to_string(),
+        "reward": minted(reward, header.height).to_string(),
         "tx_count": Value::Null,
         "proof_count": Value::Null,
         "pruned": true,
@@ -111,8 +122,8 @@ pub fn pruned(sealed: &SealedHeader) -> Value {
 
 /// The summary, the seal and every transaction, each with its receipt when the block is on the
 /// main chain.
-pub fn block(block: &Block, receipts: &[Option<TxReceipt>], hash: HashType) -> Value {
-    let mut value = summary(block);
+pub fn block(block: &Block, receipts: &[Option<TxReceipt>], hash: HashType, reward: &Reward) -> Value {
+    let mut value = summary(block, reward);
     value["seal"] = seal(&block.seal);
     value["txs"] = block
         .txs
@@ -208,12 +219,12 @@ pub fn dry_run(ran: &crate::chain::DryRun) -> Value {
 
 /// What a streaming node did: the event's name, and its data.
 #[cfg(feature = "stream")]
-pub fn node_event(event: &crate::node::NodeEvent, hash: HashType) -> (&'static str, Value) {
+pub fn node_event(event: &crate::node::NodeEvent, hash: HashType, reward: &Reward) -> (&'static str, Value) {
     use crate::node::NodeEvent;
 
     match event {
         NodeEvent::Block { block, main } => {
-            let mut value = summary(block);
+            let mut value = summary(block, reward);
             value["main"] = (*main).into();
 
             ("block", value)
@@ -222,7 +233,7 @@ pub fn node_event(event: &crate::node::NodeEvent, hash: HashType) -> (&'static s
             "reorganized",
             json!({
                 "undone": undone.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                "applied": applied.iter().map(|block| summary(block)).collect::<Vec<_>>(),
+                "applied": applied.iter().map(|block| summary(block, reward)).collect::<Vec<_>>(),
             }),
         ),
         NodeEvent::Justified(checkpoint) => ("justified", self::checkpoint(checkpoint)),
@@ -421,10 +432,10 @@ pub fn tx(tx: &Tx) -> Value {
     }
 }
 
-/// A set of authority signers, with its two thresholds.
+/// A set of authority signers, each with its key and account, with its two thresholds.
 pub fn signer_set(set: &SignerSet) -> Value {
     json!({
-        "signers": set.signers.iter().map(|signer| signer.to_string()).collect::<Vec<_>>(),
+        "signers": set.signers.iter().map(|signer| json!({ "key": signer.key.to_string(), "account": signer.account.to_string() })).collect::<Vec<_>>(),
         "threshold": set.threshold,
         "change_threshold": set.change_threshold,
     })

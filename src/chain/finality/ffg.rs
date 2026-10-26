@@ -64,9 +64,61 @@ pub struct FfgConfig {
     pub max_proofs_per_block: u32,
     #[document(summary = "Validators bonded from the start. With none, nothing finalizes until someone bonds.")]
     pub validators: Vec<GenesisValidator>,
+    #[document(summary = "The inactivity leak, or None for none: once no checkpoint has been proven in a block for after_epochs epochs, each checkpoint takes permille thousandths of the bond of every validator that has not voted since, until those that do vote hold two thirds again. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
+    #[wincode(with = "UnsetLeak")]
+    pub leak: Option<Leak>,
 }
 
 impl Hashable for FfgConfig {}
+
+pub use crate::registry::validators::Leak;
+
+/// Encodes FfgConfig::leak as nothing while None, and as a 1 and the leak once set, so a genesis
+/// from before the field hashes as it did. Only as a last field; see Unset.
+pub struct UnsetLeak;
+
+// SAFETY: size_of is exactly what write writes: nothing for None, seventeen bytes for Some.
+unsafe impl<C: wincode::config::ConfigCore> SchemaWrite<C> for UnsetLeak {
+    type Src = Option<Leak>;
+
+    fn size_of(src: &Option<Leak>) -> wincode::WriteResult<usize> {
+        Ok(if src.is_some() { 17 } else { 0 })
+    }
+
+    fn write(writer: impl wincode::io::Writer, src: &Option<Leak>) -> wincode::WriteResult<()> {
+        let Some(leak) = src else {
+            return Ok(());
+        };
+        let mut bytes = [1; 17];
+        bytes[1..9].copy_from_slice(&leak.after_epochs.to_le_bytes());
+        bytes[9..].copy_from_slice(&leak.permille.to_le_bytes());
+
+        <[u8; 17] as SchemaWrite<C>>::write(writer, &bytes)
+    }
+}
+
+// SAFETY: read initializes dst before it returns Ok. An exhausted reader is None, which is how an
+// encoding from before the field reads; so this only ever ends a message.
+unsafe impl<'de, C: wincode::config::ConfigCore> SchemaRead<'de, C> for UnsetLeak {
+    type Dst = Option<Leak>;
+
+    fn read(mut reader: impl wincode::io::Reader<'de>, dst: &mut std::mem::MaybeUninit<Option<Leak>>) -> wincode::ReadResult<()> {
+        let value = match reader.take_byte() {
+            Ok(1) => {
+                let rest = reader.take_array::<16>()?;
+
+                Some(Leak {
+                    after_epochs: u64::from_le_bytes(rest[..8].try_into().expect("eight bytes")),
+                    permille: u64::from_le_bytes(rest[8..].try_into().expect("eight bytes")),
+                })
+            }
+            _ => None,
+        };
+        dst.write(value);
+
+        Ok(())
+    }
+}
 
 /// Coins at 18 decimals.
 fn coins(count: u64) -> u256 {
@@ -95,6 +147,7 @@ impl FfgConfig {
                 voter: validator,
                 bond: coins(10_000),
             }],
+            leak: None,
         }
     }
 
@@ -125,6 +178,14 @@ impl FfgConfig {
 
         if self.validators.len() > self.max_validators as usize {
             return Some("more genesis validators than max_validators");
+        }
+
+        if self.leak.is_some_and(|leak| leak.after_epochs == 0) {
+            return Some("leak.after_epochs must be at least 1");
+        }
+
+        if self.leak.is_some_and(|leak| leak.permille > 1000) {
+            return Some("leak.permille must be at most 1000");
         }
 
         None
@@ -192,8 +253,21 @@ impl Electorate for Staked {
         self.config.activation_delay
     }
 
-    /// Each checkpoint fixes the validator set activation_delay epochs ahead.
+    fn leak(&self) -> Option<Leak> {
+        self.config.leak
+    }
+
+    /// Each checkpoint leaks the bonds of validators that stopped voting while the chain is
+    /// stalled, then fixes the validator set activation_delay epochs ahead.
     fn at_checkpoint(&self, state: &Arc<State>, epoch: u64) -> Result<(), DbError> {
-        Validators::new(state).fix_set(epoch + self.config.activation_delay).map(|_| ())
+        let validators = Validators::new(state);
+
+        if let Some(leak) = self.config.leak
+            && epoch.saturating_sub(validators.proven()?) > leak.after_epochs
+        {
+            validators.leak(epoch, &leak, &self.config.staking())?;
+        }
+
+        validators.fix_set(epoch + self.config.activation_delay).map(|_| ())
     }
 }

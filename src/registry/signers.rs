@@ -16,14 +16,36 @@ const DECIDED: &[u8] = b"signers:decided";
 const BALLOT: &[u8] = b"signers:ballot";
 
 #[document(
+    summary = "One signer under authority finality: the key that signs its votes, and the account that speaks for it on chain, which sends its approvals of changes and gets its rewards. The account is the key's own address unless genesis or the approved set names another, so the voting key can stay on the validating node and sign nothing but votes, as an FFG voter's does.",
+    category = "Finality",
+    see_also = "SignerSet, GenesisValidator",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct Signer {
+    #[document(summary = "The key that signs its votes.")]
+    pub key: PublicKey,
+    #[document(summary = "The account that approves changes for it and is paid its rewards.")]
+    pub account: Address,
+}
+
+impl Hashable for Signer {}
+
+impl Signer {
+    #[document(parent = "Signer", summary = "A signer whose account is its own key's address.")]
+    pub fn own(key: PublicKey) -> Signer {
+        Signer { key, account: key.address() }
+    }
+}
+
+#[document(
     summary = "Who signs under authority finality, and what it takes: how many of them justify a checkpoint, and how many change the set.",
     category = "Finality",
-    see_also = "Signers, AuthorityConfig, Tx::ApproveSigners",
+    see_also = "Signers, Signer, AuthorityConfig, Tx::ApproveSigners",
 )]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct SignerSet {
-    #[document(summary = "The signers' keys, sorted, each counting once.")]
-    pub signers: Vec<PublicKey>,
+    #[document(summary = "The signers, sorted by key, each counting once.")]
+    pub signers: Vec<Signer>,
     #[document(summary = "How many of them voting for one link justify it.")]
     pub threshold: u32,
     #[document(summary = "How many of them must approve a change to the set.")]
@@ -35,10 +57,10 @@ impl Hashable for SignerSet {}
 impl SignerSet {
     #[document(
         parent = "SignerSet",
-        summary = "A set with its signers sorted, which is how sets are compared and stored.",
+        summary = "A set with its signers sorted by key, which is how sets are compared and stored.",
     )]
-    pub fn new(mut signers: Vec<PublicKey>, threshold: u32, change_threshold: u32) -> SignerSet {
-        signers.sort();
+    pub fn new(mut signers: Vec<Signer>, threshold: u32, change_threshold: u32) -> SignerSet {
+        signers.sort_by_key(|signer| signer.key);
 
         SignerSet {
             signers,
@@ -47,17 +69,29 @@ impl SignerSet {
         }
     }
 
+    #[document(parent = "SignerSet", summary = "The signers' keys, in the set's order.")]
+    pub fn keys(&self) -> Vec<PublicKey> {
+        self.signers.iter().map(|signer| signer.key).collect()
+    }
+
     #[document(
         parent = "SignerSet",
-        summary = "Why no chain could use this set, if it is unusable: no signers, a signer named twice, more than max_signers, or a threshold that is not more than half the signers.",
+        summary = "Why no chain could use this set, if it is unusable: no signers, a signer named twice, two sharing an account, more than max_signers, or a threshold that is not more than half the signers.",
     )]
     pub fn problem(&self, max_signers: u32) -> Option<&'static str> {
         if self.signers.is_empty() {
             return Some("authority finality needs at least one signer");
         }
 
-        if self.signers.windows(2).any(|pair| pair[0] == pair[1]) {
+        if self.signers.windows(2).any(|pair| pair[0].key == pair[1].key) {
             return Some("a signer is named twice");
+        }
+
+        let mut accounts: Vec<Address> = self.signers.iter().map(|signer| signer.account).collect();
+        accounts.sort();
+
+        if accounts.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Some("two signers share an account");
         }
 
         if self.signers.len() > max_signers as usize {
@@ -79,14 +113,14 @@ impl SignerSet {
         None
     }
 
-    #[document(parent = "SignerSet", summary = "The signer whose key has this address, if one does.")]
+    #[document(parent = "SignerSet", summary = "The key of the signer whose account this address is, if one's is.")]
     pub fn signer_at(&self, address: &Address) -> Option<PublicKey> {
-        self.signers.iter().copied().find(|signer| signer.address() == *address)
+        self.signers.iter().find(|signer| signer.account == *address).map(|signer| signer.key)
     }
 
     #[document(
         parent = "SignerSet",
-        summary = "The signers as a validator set: each weighs one, and is paid at its own address.",
+        summary = "The signers as a validator set: each weighs one, votes with its key and is paid at its account.",
     )]
     pub fn validators(&self) -> ValidatorSet {
         ValidatorSet {
@@ -94,8 +128,8 @@ impl SignerSet {
                 .signers
                 .iter()
                 .map(|signer| Member {
-                    voter: *signer,
-                    account: signer.address(),
+                    voter: signer.key,
+                    account: signer.account,
                     weight: u256::ONE,
                 })
                 .collect(),
@@ -271,7 +305,7 @@ impl<'a> Signers<'a> {
         parent = "Signers",
         summary = "Counts a signer's approval of a new set. Once change_threshold of the decided set's signers approve the same one with approvals that still count, it becomes the decided set, and the checkpoints that follow fix it for later epochs.",
         params = {
-            sender = "Who sent the approval: one of the decided set's signers, by its key's address.",
+            sender = "Who sent the approval: the account of one of the decided set's signers.",
             version = "The version it changes, which must be the decided one's.",
             proposal = "The set it approves.",
             max_signers = "The most signers a set may have.",
@@ -327,7 +361,7 @@ impl<'a> Signers<'a> {
         parent = "Signers",
         summary = "Takes back a signer's approval, while it still counts, so it backs no change.",
         params = {
-            sender = "The signer, by its key's address.",
+            sender = "The signer's account.",
             version = "The version its approval was for, which must be the decided one's.",
             epoch = "The epoch it is withdrawn in.",
             approval_epochs = "How many epochs an approval counts for.",
@@ -352,7 +386,57 @@ impl<'a> Signers<'a> {
         Ok(())
     }
 
-    /// The decided set and the sender's key in it, for a ballot on the decided version.
+    #[document(
+        parent = "Signers",
+        summary = "Throws a signer that signed conflicting votes out: it leaves the decided set, which keeps its thresholds and takes a new version, emptying the ballot, and the sets already fixed for the epochs from two after this one on, as a slashed FFG validator does. Refused when a set it leaves could no longer reach its thresholds.",
+        params = {
+            voter = "The cheating signer's voting key.",
+            epoch = "The epoch the evidence runs in.",
+            activation_delay = "How many epochs ahead sets are fixed.",
+            max_signers = "The most signers a set may have.",
+        },
+        returns = "The new version. UnknownSigner for a key not in the decided set, BadSigners when a set would be left unusable.",
+    )]
+    pub fn eject(&self, voter: &PublicKey, epoch: u64, activation_delay: u64, max_signers: u32) -> Result<u64, RegistryError> {
+        let decided = self.decided()?;
+
+        if !decided.set.signers.iter().any(|signer| signer.key == *voter) {
+            return Err(RegistryError::UnknownSigner);
+        }
+
+        let without = |set: &SignerSet| -> Result<SignerSet, RegistryError> {
+            let signers = set.signers.iter().copied().filter(|signer| signer.key != *voter).collect();
+            let set = SignerSet::new(signers, set.threshold, set.change_threshold);
+
+            match set.problem(max_signers) {
+                Some(problem) => Err(RegistryError::BadSigners(problem)),
+                None => Ok(set),
+            }
+        };
+        let set = without(&decided.set)?;
+        let mut fixed = Vec::new();
+
+        for epoch in epoch + 2..=epoch + activation_delay {
+            if let Some(current) = self.set(epoch)?
+                && current.signers.iter().any(|signer| signer.key == *voter)
+            {
+                fixed.push((epoch, without(&current)?));
+            }
+        }
+
+        let version = decided.version + 1;
+        self.state.put_value(Column::Validators, DECIDED.to_vec(), &Decided { version, set });
+        self.state.delete(Column::Validators, BALLOT.to_vec());
+
+        for (epoch, set) in fixed {
+            self.state.put_value(Column::Epochs, epoch_key(epoch), &set);
+        }
+
+        Ok(version)
+    }
+
+    /// The decided set and the key of the signer whose account sent, for a ballot on the decided
+    /// version.
     fn signer(&self, sender: &Address, version: u64) -> Result<(Decided, PublicKey), RegistryError> {
         let decided = self.decided()?;
 
@@ -384,17 +468,22 @@ mod tests {
         crate::crypto::keypair::Keypair::from_seed([seed; 32]).public()
     }
 
+    /// Signers whose accounts are their own keys' addresses.
+    fn own(keys: impl IntoIterator<Item = PublicKey>) -> Vec<Signer> {
+        keys.into_iter().map(Signer::own).collect()
+    }
+
     /// Three signers, two of whom justify and two of whom change the set.
     fn genesis() -> (State, SignerSet) {
         let state = State::new(Arc::new(MemoryDb::default()));
-        let set = SignerSet::new(vec![key(1), key(2), key(3)], 2, 2);
+        let set = SignerSet::new(own([key(1), key(2), key(3)]), 2, 2);
         Signers::new(&state).write_genesis(&set, 2).unwrap();
 
         (state, set)
     }
 
     fn with_fourth() -> SignerSet {
-        SignerSet::new(vec![key(1), key(2), key(3), key(4)], 3, 3)
+        SignerSet::new(own([key(1), key(2), key(3), key(4)]), 3, 3)
     }
 
     /// How many epochs approvals count for in these tests.
@@ -438,7 +527,7 @@ mod tests {
     fn a_signer_has_one_approval_at_a_time() {
         let (state, _) = genesis();
         let signers = Signers::new(&state);
-        let without_third = SignerSet::new(vec![key(1), key(2)], 2, 2);
+        let without_third = SignerSet::new(own([key(1), key(2)]), 2, 2);
         signers.approve(&key(1).address(), 0, with_fourth(), 10, 0, WINDOW).unwrap();
         signers.approve(&key(1).address(), 0, without_third.clone(), 10, 0, WINDOW).unwrap();
         let ballot = signers.ballot().unwrap();
@@ -467,10 +556,11 @@ mod tests {
 
         let cases = [
             (SignerSet::new(Vec::new(), 1, 1), "at least one signer"),
-            (SignerSet::new(vec![key(1), key(1)], 2, 2), "named twice"),
-            (SignerSet::new((1..=5).map(key).collect(), 3, 3), "max_signers"),
-            (SignerSet::new(vec![key(1), key(2), key(3), key(4)], 2, 3), "threshold must"),
-            (SignerSet::new(vec![key(1), key(2), key(3), key(4)], 3, 5), "change_threshold must"),
+            (SignerSet::new(own([key(1), key(1)]), 2, 2), "named twice"),
+            (SignerSet::new(vec![Signer::own(key(1)), Signer { key: key(2), account: key(1).address() }], 2, 2), "share an account"),
+            (SignerSet::new(own((1..=5).map(key)), 3, 3), "max_signers"),
+            (SignerSet::new(own([key(1), key(2), key(3), key(4)]), 2, 3), "threshold must"),
+            (SignerSet::new(own([key(1), key(2), key(3), key(4)]), 3, 5), "change_threshold must"),
         ];
 
         for (proposal, expected) in cases {
@@ -521,7 +611,7 @@ mod tests {
         let (state, _) = genesis();
         let signers = Signers::new(&state);
         signers.approve(&key(1).address(), 0, with_fourth(), 10, 0, WINDOW).unwrap();
-        signers.approve(&key(2).address(), 0, SignerSet::new(vec![key(1), key(2)], 2, 2), 10, 0, WINDOW).unwrap();
+        signers.approve(&key(2).address(), 0, SignerSet::new(own([key(1), key(2)]), 2, 2), 10, 0, WINDOW).unwrap();
 
         signers.withdraw(&key(1).address(), 0, 1, WINDOW).unwrap();
 
@@ -537,5 +627,55 @@ mod tests {
         signers.withdraw(&key(2).address(), 0, 1, WINDOW).unwrap();
 
         assert_eq!(signers.ballot().unwrap(), Ballot::default());
+    }
+
+    #[test]
+    fn a_signer_with_an_account_of_its_own_speaks_through_it() {
+        let state = State::new(Arc::new(MemoryDb::default()));
+        let owner = key(7).address();
+        let set = SignerSet::new(vec![Signer { key: key(1), account: owner }, Signer::own(key(2)), Signer::own(key(3))], 2, 2);
+        Signers::new(&state).write_genesis(&set, 2).unwrap();
+        let signers = Signers::new(&state);
+
+        // Its key's address is nobody here; its account approves, withdraws and is paid.
+        assert_eq!(set.signer_at(&owner), Some(key(1)));
+        assert_eq!(set.signer_at(&key(1).address()), None);
+        assert_eq!(set.validators().member(&key(1)).unwrap().account, owner);
+        let (mut keys, mut expected) = (set.keys(), vec![key(1), key(2), key(3)]);
+        keys.sort();
+        expected.sort();
+        assert_eq!(keys, expected);
+        assert_eq!(signers.approve(&key(1).address(), 0, with_fourth(), 10, 0, WINDOW), Err(RegistryError::NotSigner));
+        assert_eq!(signers.approve(&owner, 0, with_fourth(), 10, 0, WINDOW).unwrap(), Approved::Counted { approvals: 1, needed: 2 });
+        assert_eq!(signers.ballot().unwrap().approvers(&with_fourth()), [key(1)]);
+        signers.withdraw(&owner, 0, 0, WINDOW).unwrap();
+        assert_eq!(signers.ballot().unwrap(), Ballot::default());
+    }
+
+    #[test]
+    fn a_cheating_signer_is_ejected_unless_the_set_would_break() {
+        let (state, set) = genesis();
+        let signers = Signers::new(&state);
+        signers.approve(&key(1).address(), 0, with_fourth(), 10, 0, WINDOW).unwrap();
+
+        for epoch in 3..=4 {
+            signers.fix_set(epoch).unwrap();
+        }
+
+        // Three signers, two justifying: without key 3, two of two still do.
+        assert_eq!(signers.eject(&key(3), 2, 2, 10).unwrap(), 1);
+        let decided = signers.decided().unwrap();
+
+        assert_eq!(decided.version, 1);
+        assert_eq!(decided.set, SignerSet::new(own([key(1), key(2)]), 2, 2));
+        assert!(signers.ballot().unwrap().approvals.is_empty(), "a new version empties the ballot");
+        assert_eq!(signers.set(2).unwrap(), Some(set.clone()), "this epoch keeps it");
+        assert_eq!(signers.set(3).unwrap(), Some(set), "and so does the next");
+        assert_eq!(signers.set(4).unwrap(), Some(decided.set), "from two epochs on it is gone");
+        assert_eq!(signers.eject(&key(3), 2, 2, 10), Err(RegistryError::UnknownSigner));
+
+        // Two of two: neither can go without leaving the threshold out of reach.
+        assert!(matches!(signers.eject(&key(1), 2, 2, 10), Err(RegistryError::BadSigners(why)) if why.contains("threshold")));
+        assert_eq!(signers.decided().unwrap().version, 1, "nothing changed");
     }
 }

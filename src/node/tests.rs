@@ -147,6 +147,60 @@ fn blocks_fill_to_the_chains_limits_not_a_fixed_count() {
 }
 
 #[test]
+fn a_time_budget_seals_what_ran_by_then_and_the_rest_wait() {
+    let authority = DevAuthority::dev_keypair();
+    let genesis = Genesis { fees: None, ..Genesis::dev_authority(authority.public()) };
+
+    // A budget of a millisecond: 1,500 transfers take longer, so the block is cut short and the
+    // rest stay for the next block, which gets the time it needs.
+    let (producer, mut net) = producing_on(&genesis);
+    let mut producer = producer.max_build_ms(Some(1));
+    transfers(1_500).for_each(|tx| producer.submit(tx).unwrap());
+    producer.step(SLOT).unwrap();
+
+    let first = published_block(&mut net);
+
+    assert!(!first.txs.is_empty() && first.txs.len() < 1_500, "{} went in", first.txs.len());
+    assert_eq!(producer.mempool().len(), 1_500 - first.txs.len());
+    assert_eq!(producer.chain().tip().height, 1);
+
+    let mut producer = producer.max_build_ms(None);
+    producer.step(2 * SLOT).unwrap();
+
+    assert_eq!(published_block(&mut net).txs.len(), 1_500 - first.txs.len());
+    assert!(producer.mempool().is_empty());
+}
+
+#[cfg(feature = "finality-authority")]
+#[test]
+fn a_rotating_authority_s_one_signer_produces_every_slot() {
+    use crate::consensus::RotatingProducer;
+
+    let dev = DevAuthority::dev_keypair();
+    let genesis = Genesis::dev_rotating(dev.public());
+    let producer = Box::new(RotatingProducer::new(dev.clone(), dev.public().address(), SLOT)) as Box<dyn Producer>;
+    let (link, mut net) = NetLink::pair();
+    let mut node = Node::new(Arc::new(MemoryDb::default()), &genesis, Some(producer), link).unwrap();
+
+    node.step(SLOT - 1).unwrap();
+    assert_eq!(node.chain().tip().height, 0);
+    node.step(SLOT).unwrap();
+    assert_eq!(node.chain().tip().height, 1);
+    assert_eq!(published_block(&mut net).header.producer, dev.public().address());
+    node.step(2 * SLOT).unwrap();
+    assert_eq!((node.chain().tip().height, node.chain().tip().difficulty), (2, 0));
+    assert_eq!(node.chain().tip_work(), u256::new(4), "in turn, each weighs 2");
+
+    // A node whose key is no signer never produces.
+    let stranger = Keypair::generate(dev.public().key_type()).unwrap();
+    let producer = Box::new(RotatingProducer::new(stranger.clone(), stranger.public().address(), SLOT)) as Box<dyn Producer>;
+    let (link, _net) = NetLink::pair();
+    let mut idle = Node::new(Arc::new(MemoryDb::default()), &genesis, Some(producer), link).unwrap();
+    idle.step(10 * SLOT).unwrap();
+    assert_eq!(idle.chain().tip().height, 0);
+}
+
+#[test]
 fn the_producer_makes_a_block_when_its_slot_comes() {
     let (mut producer, mut net) = node(true);
     producer.step(SLOT - 1).unwrap();
@@ -912,7 +966,7 @@ fn a_new_node_syncs_from_a_snapshot_and_runs_only_the_blocks_after_it() {
     sent(&mut producer_net);
     let (mut late, mut late_net) = node(false);
 
-    assert!(late.sync_from_snapshot().unwrap());
+    assert!(late.sync_from_snapshot(None).unwrap());
 
     let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
     late_net.events.send(NetEvent::PeerUp { peer: producer_peer, address: Multiaddr::empty() }).unwrap();
@@ -936,6 +990,64 @@ fn a_new_node_syncs_from_a_snapshot_and_runs_only_the_blocks_after_it() {
     assert!(late.chain().block_at(pivot - 1).unwrap().is_none());
     assert!(late.chain().block_at(pivot).unwrap().is_some());
     assert_eq!(late.chain().headers_from(1, 1_000).unwrap().len() as u64, blocks);
+}
+
+// The dev chain's FFG finality makes height 40 a checkpoint that opens an epoch; without it,
+// any block is one and the start holds that header alone.
+#[cfg(feature = "finality-ffg")]
+#[test]
+fn a_node_starting_at_a_checkpoint_fetches_nothing_below_it_and_holds_it_final() {
+    use super::snapshot::PIVOT_DEPTH;
+    use crate::chain::{BlockError, ImportError};
+    use crate::structs::vote::Checkpoint;
+
+    let (mut producer, mut producer_net) = node(true);
+    let authority = DevAuthority::dev_keypair();
+    let blocks = 60;
+
+    for slot in 1..=blocks {
+        if slot % 2 == 0 {
+            let to = Keypair::generate(authority.public().key_type()).unwrap().public().address();
+            let tx = Tx::Transfer { from: authority.public().address(), to, amount: Amount::U128(u128::from(slot)) };
+            producer.submit(SignedTx::sign(tx, slot / 2 - 1, FeeOffer::NONE, &authority)).unwrap();
+        }
+
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    sent(&mut producer_net);
+    // Epochs are 8 blocks long on the dev chain: height 40 opens epoch 5. The operator trusts it.
+    let trusted = producer.chain().block_at(40).unwrap().unwrap().id();
+    let (mut late, mut late_net) = node(false);
+
+    assert!(late.sync_from_snapshot(Some(trusted)).unwrap());
+    assert_eq!(late.sync.snapshot.as_ref().unwrap().stage(), "fetching the checkpoint");
+
+    let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
+    late_net.events.send(NetEvent::PeerUp { peer: producer_peer, address: Multiaddr::empty() }).unwrap();
+    late.step(SLOT * blocks).unwrap();
+    relay(
+        Side { node: &mut late, net: &mut late_net, peer: late_peer },
+        Side { node: &mut producer, net: &mut producer_net, peer: producer_peer },
+        SLOT * blocks,
+    );
+    let pivot = blocks - PIVOT_DEPTH;
+
+    assert_eq!(late.chain().tip().id(), producer.chain().tip().id(), "it ran the blocks after the pivot");
+    assert_eq!(late.chain().snapshot(), Some(pivot));
+    assert_eq!(late.chain().tip_work(), producer.chain().tip_work(), "its work counts from the peer's figure at the checkpoint");
+    assert_eq!(late.chain().finalized(), Some(Checkpoint { epoch: 5, block: trusted }));
+    assert_eq!(late.chain().justified(), Some(Checkpoint { epoch: 5, block: trusted }));
+
+    // The start reaches back to the checkpoint activation_delay epochs before, height 32, and no
+    // further: nothing below is fetched, and the chain never goes there.
+    assert!(late.chain().headers_from(31, 1).unwrap().is_empty());
+    assert_eq!(late.chain().headers_from(32, 1_000).unwrap().len() as u64, blocks - 32 + 1);
+    assert!(late.chain().block_at(pivot - 1).unwrap().is_none());
+
+    let below = producer.chain().block_at(39).unwrap().unwrap();
+
+    assert!(matches!(late.chain.import(&below, SLOT * blocks), Err(ImportError::Invalid(BlockError::ConflictsWithFinality))));
 }
 
 #[test]
@@ -973,7 +1085,7 @@ fn a_snapshot_whose_pivot_grows_too_old_moves_it_up_and_fetches_only_what_change
     }
 
     sent(&mut producer_net);
-    assert!(late.sync_from_snapshot().unwrap());
+    assert!(late.sync_from_snapshot(None).unwrap());
     let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
     late_net.events.send(NetEvent::PeerUp { peer: producer_peer, address: Multiaddr::empty() }).unwrap();
     late.step(SLOT * 60).unwrap();

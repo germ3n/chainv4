@@ -5,6 +5,7 @@ use {
     crate::crypto::verifiable::VerifyError,
     crate::structs::address::Address,
     crate::structs::amount::Amount,
+    crate::registry::signers::Signer,
     crate::structs::code::Code,
     crate::structs::hash::Hash,
     crate::structs::u256::{I256Le, U256Le, i256},
@@ -120,7 +121,7 @@ pub enum Tx {
     #[wincode(tag = 8)]
     Withdraw { voter: PublicKey },
     #[document(
-        summary = "Reports a validator that signed two conflicting votes. Its whole bond is taken: a share goes to the sender, the rest is burned.",
+        summary = "Reports a voter that signed two conflicting votes. Under FFG its whole bond is taken: a share goes to the sender, the rest is burned. Under authority finality the signer is thrown out of the decided set and the sets already fixed two epochs on.",
         params = {
             first = "One of the votes.",
             second = "The other, by the same voter, conflicting with the first.",
@@ -130,7 +131,7 @@ pub enum Tx {
     #[wincode(tag = 9)]
     Slash { first: Box<SignedVote>, second: Box<SignedVote> },
     #[document(
-        summary = "Approves a new set of signers for authority finality. Only one of the decided signers may send it, from its key's address. Once change_threshold of them approve the same set for the same version, it is decided, and the checkpoints that follow fix it for epochs activation_delay on.",
+        summary = "Approves a new set of signers for authority finality. Only one of the decided signers may send it, from its account. Once change_threshold of them approve the same set for the same version, it is decided, and the checkpoints that follow fix it for epochs activation_delay on.",
         params = {
             version = "The version of the decided set this changes, so an approval never counts toward a later change.",
             signers = "Every signer of the new set.",
@@ -142,7 +143,7 @@ pub enum Tx {
     #[wincode(tag = 10)]
     ApproveSigners {
         version: u64,
-        signers: Vec<PublicKey>,
+        signers: Vec<Signer>,
         threshold: u32,
         change_threshold: u32,
     },
@@ -257,7 +258,7 @@ impl Verifiable for Tx {
                 nonzero(amount)
             }
             Tx::Unbond { voter } | Tx::Withdraw { voter } => voter.verify(),
-            Tx::ApproveSigners { signers, .. } => signers.iter().try_for_each(Verifiable::verify),
+            Tx::ApproveSigners { signers, .. } => signers.iter().try_for_each(|signer| signer.key.verify()),
             Tx::WithdrawApproval { .. } => Ok(()),
             // The signatures are checked when it runs, against the chain's genesis id.
             Tx::Slash { first, second } => {

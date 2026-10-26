@@ -422,6 +422,7 @@ pub(crate) mod tests {
             state_root: "0x00".to_string(),
             gas_used: 0,
             base_price: "0".to_string(),
+            reward: "0".to_string(),
             tx_count: 0,
             proof_count: 0,
             pruned: false,

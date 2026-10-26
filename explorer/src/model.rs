@@ -79,6 +79,9 @@ pub struct Summary {
     pub state_root: String,
     pub gas_used: u64,
     pub base_price: String,
+    /// What it minted for its producer; empty from older nodes.
+    #[serde(default)]
+    pub reward: String,
     /// Unknown, so 0, for a pruned block.
     #[serde(deserialize_with = "count")]
     pub tx_count: usize,

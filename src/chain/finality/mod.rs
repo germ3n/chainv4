@@ -52,7 +52,7 @@ pub use config::FinalityConfig;
 #[cfg(feature = "finality-depth")]
 pub use depth::DepthConfig;
 #[cfg(feature = "finality-ffg")]
-pub use ffg::{FfgConfig, GenesisValidator};
+pub use ffg::{FfgConfig, GenesisValidator, Leak};
 
 const JUSTIFIED_KEY: &[u8] = b"justified";
 const FINALIZED_KEY: &[u8] = b"finalized";
@@ -384,6 +384,13 @@ impl fmt::Display for FinalityError {
 
 impl std::error::Error for FinalityError {}
 
+/// Writes a checkpoint as both the justified and the finalized one, for a node that starts at
+/// a checkpoint it trusts: finality then loads it as its anchors, as a light client does.
+pub(in crate::chain) fn anchor(state: &State, checkpoint: &Checkpoint) {
+    state.put_value(Column::Finality, JUSTIFIED_KEY.to_vec(), checkpoint);
+    state.put_value(Column::Finality, FINALIZED_KEY.to_vec(), checkpoint);
+}
+
 fn justification_key(block: &Hash) -> Vec<u8> {
     let mut key = b"j:".to_vec();
     key.extend_from_slice(&id_key(block));
@@ -439,12 +446,14 @@ impl Chain {
         (finality.as_deref_mut(), View::new(db, tip, *genesis, *max_reorg_depth, workers))
     }
 
-    /// Lets finality catch up with the tip.
+    /// Lets finality catch up with the tip, then lets go of the side branches the chain can no
+    /// longer follow.
     pub(super) fn tip_moved(&mut self) -> Result<(), DbError> {
-        match self.parts() {
-            (Some(finality), view) => finality.tip_moved(&view),
-            (None, _) => Ok(()),
+        if let (Some(finality), view) = self.parts() {
+            finality.tip_moved(&view)?;
         }
+
+        self.prune_side_branches().map(|_| ())
     }
 
     /// The height no block may be added at or below, and no reorg may reach: the finalized

@@ -71,6 +71,8 @@ pub enum RegistryError {
     SameSigners,
     #[document(summary = "The signer has no approval that still counts to withdraw.")]
     NoApproval,
+    #[document(summary = "The voting key is not one of the decided signers.")]
+    UnknownSigner,
     #[document(summary = "The contract exports what makes a token on this chain, but its name(), symbol() or decimals() did not answer as the registry needs, and why.")]
     BadToken(String),
     #[document(summary = "The contract would not load, or this node lacks its engine.")]
@@ -106,6 +108,7 @@ impl fmt::Display for RegistryError {
             RegistryError::BadSigners(why) => write!(f, "{why}"),
             RegistryError::SameSigners => write!(f, "those are the signers already"),
             RegistryError::NoApproval => write!(f, "no approval of this signer's counts to withdraw"),
+            RegistryError::UnknownSigner => write!(f, "not one of the decided signers"),
             RegistryError::BadToken(why) => write!(f, "it is a token, but {why}"),
             #[cfg(feature = "vm")]
             RegistryError::Vm(err) => write!(f, "{err}"),

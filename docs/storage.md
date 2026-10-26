@@ -41,7 +41,7 @@ holds addresses that matter.
 | `Storage` | Contract storage, by the contract's address followed by the contract's own key. | Yes |
 | `Blocks` | Every block this node accepted, by id, on the main chain or a side branch. | Node's |
 | `Heights` | Main-chain block id by height, big-endian so heights sort in order. | Node's |
-| `Meta` | Bookkeeping: the tip (`tip`), every leaf block (`tips`), the storage format (`format`), and the block a node that synced from a snapshot took state at (`snapshot`). | Node's |
+| `Meta` | Bookkeeping: the tip (`tip`), every leaf block (`tips`), the last blocks that failed to run (`bad`), the storage format (`format`), and the block a node that synced from a snapshot took state at (`snapshot`). | Node's |
 | `Work` | Total work of the chain ending at each block, which fork choice compares. | Node's |
 | `Undo` | What each recent main-chain block replaced, for reorgs. | Node's |
 | `Receipts` | Where each transaction landed and what it did, by id. | Node's |
@@ -276,6 +276,9 @@ Records are stored in the chain's encoding (see [Crypto and encoding](crypto.md)
   refuses it as well (`WrongGenesis`).
 - **Commits are not fsynced.** A power cut can lose the last few blocks, though never half of
   one.
-- **No pruning.** Every block and all history are kept, and side branches are never pruned.
+- **The main chain is never pruned.** Every main-chain block and all history are kept. Side
+  branches go once the chain can no longer follow them: when they split off more than
+  `max_reorg_depth` blocks below the tip, or below the finalized checkpoint (see
+  [Chain](chain.md#reorganizing)).
 - **API reads are not snapshot-consistent.** The API reads the database while the node writes it,
   so a request that reads several keys can see two different tips.

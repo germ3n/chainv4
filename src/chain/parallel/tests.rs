@@ -38,6 +38,7 @@ fn rules() -> Rules {
         staking: None,
         signers: None,
         fees: Some(Arc::new(FeeConfig::dev().build())),
+        pooled_fees: false,
     }
 }
 
@@ -186,11 +187,12 @@ fn running_side_by_side_gives_what_running_one_by_one_does() {
     // Threads finish in any order, so run it a few times.
     for _ in 0..5 {
         let layer = Arc::new(State::new(db.clone()));
-        let ran = runner.run(&layer, &txs, &context(), Unfit::Skip).unwrap();
+        let ran = runner.run(&layer, &txs, &context(), Unfit::Skip, None).unwrap();
 
         // Every dependency here is one the transactions name, so each waited for what it
         // depends on and nothing ran twice.
         assert!(ran.again.is_empty(), "{:?} ran again", ran.again);
+        assert!(!ran.cut);
         assert_eq!(ran.kept, expected.kept);
         assert_eq!(ran.receipts, expected.receipts);
         assert_eq!(ran.gas_used, expected.gas_used);
@@ -199,7 +201,7 @@ fn running_side_by_side_gives_what_running_one_by_one_does() {
 
     // Importing refuses the block at the same transaction, for the same reason.
     let layer = Arc::new(State::new(db.clone()));
-    let refused = runner.run(&layer, &txs, &context(), Unfit::Refuse).unwrap_err();
+    let refused = runner.run(&layer, &txs, &context(), Unfit::Refuse, None).unwrap_err();
     let reference = Arc::new(State::new(db));
     let expected = one_by_one(&rules, &vm, &reference, &txs, &context(), Unfit::Refuse).unwrap_err();
 
@@ -257,7 +259,7 @@ fn a_contract_reaching_what_nobody_named_makes_only_the_reader_run_again() {
     let reference = Arc::new(State::new(db.clone()));
     let expected = one_by_one(&rules, &vm, &reference, &txs, &context(), Unfit::Skip).unwrap();
     let layer = Arc::new(State::new(db));
-    let ran = runner.run(&layer, &txs, &context(), Unfit::Skip).unwrap();
+    let ran = runner.run(&layer, &txs, &context(), Unfit::Skip, None).unwrap();
 
     assert_eq!(ran.again, [2], "only the spend read what the payment wrote");
     assert_eq!(ran.receipts, expected.receipts);
@@ -272,4 +274,42 @@ fn workers_keep_the_order_of_what_they_map() {
     assert_eq!(workers.map(&numbers, |n| n * 2), numbers.iter().map(|n| n * 2).collect::<Vec<_>>());
     assert_eq!(workers.map(&[7u64], |n| n + 1), [8]);
     assert!(workers.map(&[] as &[u64], |n| *n).is_empty());
+}
+
+#[test]
+fn a_deadline_keeps_what_went_in_by_then_and_leaves_the_rest_out() {
+    use std::time::{Duration, Instant};
+
+    let rules = rules();
+    let vm = Arc::new(Vm::new(&[Engine::Lua], rules.hash).unwrap());
+    let workers = Workers::new();
+    let runner = Runner {
+        rules: &rules,
+        vm: &vm,
+        workers: &workers,
+    };
+    let db = funded();
+    let txs = tangled();
+
+    // A deadline already passed: the first transaction to go in is the last.
+    let layer = Arc::new(State::new(db.clone()));
+    let cut = runner.run(&layer, &txs, &context(), Unfit::Skip, Some(Instant::now())).unwrap();
+    let reference = Arc::new(State::new(db.clone()));
+    let expected = one_by_one(&rules, &vm, &reference, &txs[..1], &context(), Unfit::Skip).unwrap();
+
+    assert!(cut.cut);
+    assert_eq!(cut.kept, [0]);
+    assert_eq!(cut.receipts, expected.receipts);
+    assert_eq!(cut.gas_used, expected.gas_used);
+    assert_eq!(layer.take_changes(), reference.take_changes(), "the state is that of the transactions kept, and nothing of the rest");
+
+    // One far off changes nothing.
+    let layer = Arc::new(State::new(db.clone()));
+    let whole = runner.run(&layer, &txs, &context(), Unfit::Skip, Some(Instant::now() + Duration::from_secs(3_600))).unwrap();
+    let reference = Arc::new(State::new(db));
+    let expected = one_by_one(&rules, &vm, &reference, &txs, &context(), Unfit::Skip).unwrap();
+
+    assert!(!whole.cut);
+    assert_eq!(whole.kept, expected.kept);
+    assert_eq!(layer.take_changes(), reference.take_changes());
 }

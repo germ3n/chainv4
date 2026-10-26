@@ -33,7 +33,7 @@ mod schedule;
 mod tests;
 
 pub use pricing::{BaseFee, Bid, PricingConfig};
-pub use schedule::{ContractScorer, ScheduleConfig, Weighted};
+pub use schedule::{ContractScorer, ScheduleConfig, TX_KINDS, Weighted};
 
 #[document(
     summary = "Every parameter of a chain's fees, set in genesis.",

@@ -107,7 +107,15 @@ push real evidence out of the log.
 When `vote_reward` is above zero, a producer puts justifications whose voters have not been paid
 yet into its block, at most `max_proofs_per_block`. Every voter in a proof gets `vote_reward`, and
 each epoch pays once. A proof that does not check out makes the block invalid. With no reward,
-blocks carry no proofs. Rewards are minted.
+blocks carry no proofs.
+
+**Where rewards come from** is genesis's `vote_reward_source`:
+- `mint`, the default: every reward is new supply.
+- `fees`: the burned share of every fee (`burn_permille` of its base part) goes to the reward
+  pool, `REWARD_POOL`, a contract address no contract lives at, instead of vanishing, and voters
+  are paid from it. A proof pays its voters in order of key, each as much of `vote_reward` as the
+  pool still holds, so a dry pool pays nothing and mints nothing. Supply then grows by block
+  rewards alone. `GET /status` shows the source and the pool's balance under `vote_rewards`.
 
 ### Learning from peers
 
@@ -137,10 +145,31 @@ justify.
   votes, as `GET /evidence` encodes them.
   - The validator's whole bond is gone at once.
   - The reporter gets 1/`reporter_divisor` of it, and the rest is burned.
-  - The validator leaves the set the way an unbond does, `activation_delay` epochs on.
+  - The validator leaves the sets already fixed for the epochs from two after the slash on, at
+    once. It keeps its weight in the slash's epoch and the next, whose sets stay as they were, so
+    the next checkpoint's light update, which re-states the sets ahead, reaches light clients by
+    the usual path (see [Light client](light-client.md#following-the-chain)). Sets fixed after
+    the slash never hold it.
 - **Limits:** at most `max_validators` are registered at once.
 - **Genesis validators** are bonded from the start. Their bonds are minted on top of the
   allocations, not taken from them.
+- **The inactivity leak** (`leak`, with `after_epochs` and `permille`; none without it): a
+  chain whose voters drop under two thirds would never finalize again, so bonds that stop voting
+  leak until those that still vote are two thirds of what is left.
+  - **What state sees:** with a leak, blocks carry every justification whether or not it pays, so
+    state knows the newest checkpoint proven justified; and once no checkpoint has been proven for
+    `after_epochs` epochs, they may carry *bundles*, proofs whose votes fall short of a
+    justification. A bundle pays nothing and proves nothing, but records that its voters voted
+    for its target epoch. A producer puts in the votes it counted for checkpoints not yet proven
+    whenever one of them is new to state.
+  - **What leaks:** from one epoch later on, the stall, so the first leak already sees who voted,
+    at each checkpoint every validator in the epoch's set whose
+    vote for the epoch before has not been carried in a block loses `permille` thousandths of
+    its bond, burned. The sets already fixed for the epochs after are reweighed, so the quiet
+    weight falls out of the denominator at once. One that falls under `min_bond` leaves the way
+    an unbond does.
+  - **What it costs the honest:** nothing, as long as their votes reach a producer. A validator
+    whose node is up but cut off from every producer leaks like a quiet one.
 
 Staking transactions fail with "this chain has no staking" under any other kind.
 
@@ -148,13 +177,21 @@ Staking transactions fail with "this chain has no staking" under any other kind.
 
 The same votes, from signers each counting once; `threshold` of them justify.
 
+- **A signer** is a voting key and an account (`Signer`): the key signs its votes, and the
+  account speaks for it on chain, sending its approvals of changes and taking its rewards. Named
+  as a bare key, a signer's account is the key's own address; named as `{ "key", "account" }`, the
+  account is another, so the voting key can stay on the validating node and sign nothing but
+  votes, as an FFG voter's does. Two signers never share an account.
 - **The signers** start as genesis's `signers`. Each epoch's set is fixed in state at the
-  checkpoint `activation_delay` epochs before it.
+  checkpoint `activation_delay` epochs before it. Under a rotating authority
+  (`consensus.type: rotating`), the same set produces the epoch's blocks in turn (see
+  [Consensus](consensus.md#rotating-authority)).
 - **Both thresholds** must be more than half the signers. Then two conflicting checkpoints can
   only both be finalized if some signer voted against itself, and its votes show it.
-- **Changing signers** (`chainv4 send --key signer.key approve-signers --add KEY --remove KEY`):
-  1. A signer approves a whole new set and both of its thresholds (`Tx::ApproveSigners`),
-     naming the version of the decided set it changes.
+- **Changing signers** (`chainv4 send --key account.key approve-signers --add KEY --remove KEY`,
+  signed by a signer's account; `--add KEY@ACCOUNT` gives a new signer an account of its own):
+  1. A signer's account approves a whole new set, each signer with its key and account, and both
+     thresholds (`Tx::ApproveSigners`), naming the version of the decided set it changes.
   2. Once `change_threshold` of the decided signers approve the same set for the same version,
      with approvals that still count, it is decided, and the version goes up by one.
   3. The checkpoint after a decision fixes the new set for the epoch `activation_delay` ahead, so
@@ -164,7 +201,7 @@ The same votes, from signers each counting once; `threshold` of them justify.
 - **What makes an approval count:**
   - **One per signer:** a signer that approves another set moves its approval there.
   - **Withdrawing:** a signer can take its approval back (`Tx::WithdrawApproval`,
-    `chainv4 send --key signer.key withdraw-approval`), so it backs no change. It fails when the
+    `chainv4 send --key account.key withdraw-approval`), so it backs no change. It fails when the
     signer has no approval that still counts.
   - **Expiry:** an approval counts for `approval_epochs` epochs, the one it was made in included:
     made in epoch k, it counts through epoch k + `approval_epochs` - 1. A change is only decided
@@ -173,8 +210,12 @@ The same votes, from signers each counting once; `threshold` of them justify.
     are let go the next time the ballot is written.
   - **Versions:** approvals for an older version never count. Deciding any change empties the
     ballot.
-- **Rewards:** `vote_reward`, 0 in the dev settings, pays each signer's own address.
-- **No slashing:** there are no bonds, so conflicting votes are only logged and listed.
+- **Rewards:** `vote_reward`, 0 in the dev settings, pays each signer's account.
+- **Ejection:** there are no bonds to take, so `Tx::Slash` with a signer's two conflicting votes
+  throws it out instead: it leaves the decided set, which keeps its thresholds and takes a new
+  version, emptying the ballot, and the sets already fixed from two epochs on, as a slashed
+  validator does. The evidence is refused when a set it would leave could no longer reach its
+  thresholds, such as two of two signers: then the remedy is a change the other signers approve.
 
 ## Depth
 
@@ -182,9 +223,14 @@ No votes. A main-chain block is final once `depth` blocks are on top of it, and 
 reorganizes past it. Every block is a checkpoint, so the finalized checkpoint's epoch is its
 height. `depth` 0 makes every block final as soon as it is the tip.
 
-This finality is each node's own view. Nodes kept apart for longer than `depth` blocks, by a
-partition or a private fork, finalize different branches and never come back together, and a
-node syncing from scratch keeps whichever branch it syncs first. `--validate` is refused.
+This finality is each node's own view, a rolling checkpoint as Bitcoin Cash keeps one ten blocks
+deep, with the same trade: it stops deep reorganizations, at the cost of liveness across a split.
+Bitcoin itself has no such rule, so its nodes always rejoin on the heaviest chain. Nodes kept
+apart for longer than `depth` blocks, by a partition or a private fork, finalize different
+branches and never come back together, and a node syncing from scratch keeps whichever branch it
+syncs first. When that happens, an operator resyncs one side from an empty database. It is a
+scheme for development and for chains one operator runs; a chain with many producers wants votes.
+`--validate` is refused.
 
 ## Running a validator
 
@@ -199,9 +245,19 @@ or signer, of the dev settings.
 
 ## What to keep in mind
 
-- **No inactivity leak.** A chain whose voters drop under what justifies never finalizes again
-  until they return.
-- **A slashed validator keeps its weight in sets already fixed,** until `activation_delay`
-  passes.
-- **No checkpoint sync.** A new node replays every block from genesis.
-- **Vote rewards are minted,** not paid from fees.
+- **Set a leak on a chain of value.** Without one, a chain whose voters drop under two thirds
+  never finalizes again until they return. Authority finality has no bonds to leak: its remedy
+  is a change the remaining signers approve, which needs more than half of them.
+- **A slashed or ejected voter keeps its weight for two epochs:** the slash's and the next,
+  whose sets stay fixed. From two epochs on it is out of every set.
+- **A light client learns a slash from the next justified checkpoint.** Its update re-states
+  the sets ahead. Should every epoch between the slash and a justification be skipped, and that
+  justification's margin be thinner than the slashed weight, a client that followed through the
+  slash holds the old set and refuses it; starting it over at a checkpoint takes the sets as
+  they are.
+- **Start new nodes at a checkpoint on a chain of value.** `--snapshot --checkpoint 0x…` trusts
+  a finalized checkpoint as a light client does, and fetches nothing below it, so no fork built
+  by keys that have since unbonded can reach it (see [Node](node.md#syncing-from-a-snapshot)).
+  A node that replays from genesis instead trusts every validator set since genesis.
+- **Vote rewards are minted unless genesis says `fees`,** which pays them from the burned share
+  of fees and no more.

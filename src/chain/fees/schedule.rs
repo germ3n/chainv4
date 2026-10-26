@@ -3,6 +3,7 @@
 //! chain what to charge.
 
 use {
+    crate::structs::unset::UnsetList,
     super::{GasSchedule, Scoring},
     crate::crypto::hashable::Hashable,
     crate::db::State,
@@ -51,7 +52,7 @@ impl ScheduleConfig {
     pub fn build(&self) -> Box<dyn GasSchedule> {
         match self {
             ScheduleConfig::Weighted(weighted) => Box::new(*weighted),
-            ScheduleConfig::Contract(scorer) => Box::new(*scorer),
+            ScheduleConfig::Contract(scorer) => Box::new(scorer.clone()),
         }
     }
 
@@ -131,12 +132,12 @@ impl GasSchedule for Weighted {
 }
 
 #[document(
-    summary = "A scorer that weighs a transaction as Weighted does, then calls score on a contract to say what the sender is charged. The contract can make some transactions cheaper or dearer: by sender, by what they touch, by anything in chain state. Until a contract lives there, or when it fails, the weighted figure stands.",
+    summary = "A scorer that weighs a transaction as Weighted does, then calls score on a contract to say what the sender is charged, for the kinds of transaction it names, or every kind. The contract can make some transactions cheaper or dearer: by sender, by what they touch, by anything in chain state. Until a contract lives there, or when it fails, the weighted figure stands.",
     category = "Fees",
     see_also = "ScheduleConfig, GasSchedule::charge",
     note = "score is called as score(sender: address, kind: string, target: address, bytes: u64, fuel: u64, gas: u64, failed: bool) and returns the gas to charge as a whole number. kind is the transaction's type as the API names it, such as transfer or call; target is what it is sent to, or the sender. Nothing the call writes or emits is kept, it gets fuel of its own, and what it returns is capped at the transaction's gas limit.",
 )]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct ContractScorer {
     #[document(summary = "The weights for the gas a transaction uses, which bound what it may run and count against the block's limit.")]
     pub weights: Weighted,
@@ -144,9 +145,32 @@ pub struct ContractScorer {
     pub contract: Address,
     #[document(summary = "Fuel each score call may burn. The chain pays for it, not the sender.")]
     pub fuel: u64,
+    #[document(summary = "The kinds of transaction score is called for, as the API names them, such as call or deploy; any other kind is charged what the weights say, with no call. Empty scores every kind. Added after chains launched: empty, it adds nothing to genesis's encoding, so chains from before keep their ids.")]
+    #[wincode(with = "UnsetList")]
+    pub kinds: Vec<String>,
 }
 
 impl Hashable for ContractScorer {}
+
+#[document(
+    summary = "Every kind of transaction, as the API and a scorer's kind argument name them.",
+    category = "Fees",
+    see_also = "ContractScorer::kinds",
+)]
+pub const TX_KINDS: &[&str] = &[
+    "transfer",
+    "mint",
+    "burn",
+    "call",
+    "deploy",
+    "upgrade",
+    "bond",
+    "unbond",
+    "withdraw",
+    "slash",
+    "approve_signers",
+    "withdraw_approval",
+];
 
 impl ContractScorer {
     fn problem(&self) -> Option<&'static str> {
@@ -158,7 +182,24 @@ impl ContractScorer {
             return Some("the scorer's fuel must be at least 1");
         }
 
+        if self.kinds.iter().any(|kind| !TX_KINDS.contains(&kind.as_str())) {
+            return Some("the scorer's kinds must be kinds of transaction, such as call or deploy");
+        }
+
+        let mut kinds = self.kinds.clone();
+        kinds.sort();
+        kinds.dedup();
+
+        if kinds.len() != self.kinds.len() {
+            return Some("the scorer's kinds name a kind twice");
+        }
+
         self.weights.problem()
+    }
+
+    #[document(parent = "ContractScorer", summary = "Whether score is called for this kind of transaction.")]
+    pub fn scores(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|named| named == kind)
     }
 }
 
@@ -211,6 +252,11 @@ impl GasSchedule for ContractScorer {
 
     fn charge(&self, scoring: &Scoring) -> u64 {
         let (kind, target) = describe(&scoring.tx.tx, scoring.sender);
+
+        if !self.scores(kind) {
+            return scoring.gas;
+        }
+
         let args = [
             TxCallArgumentType::Address(scoring.sender),
             TxCallArgumentType::String(kind.to_string()),

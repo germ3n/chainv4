@@ -142,6 +142,8 @@ jobs:
           - http,client,blake3,ed25519,finality-ffg
           - http,client,sha256,edblake,finality-authority
           - http,client,keccak256,ed25519,finality-depth
+          # Mining on the GPU through wgpu: builds everywhere, and its tests skip without a GPU.
+          - node,blake3,ed25519,gpu
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

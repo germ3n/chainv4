@@ -101,7 +101,8 @@ sender's go in order.
   sender can pay (see [Fees](fees.md)).
 
 **Selection** for a block takes, for each sender, the waiting transactions in nonce order from
-its current nonce, up to the first gap. Across senders it takes whichever sender's next
+its current nonce, up to the first gap, or the first one the next block cannot take because its
+offer is under the base price (`Chain::worth`). Across senders it takes whichever sender's next
 transaction pays the producer most, ties going to the lower address. The block builder then runs
 them and leaves out any that cannot run.
 
@@ -114,7 +115,20 @@ them and leaves out any that cannot run.
 A transaction past the budget is left out with the rest of its sender's, and the others still
 fill the block. A chain that bounds blocks by neither bytes nor gas takes 1,000 a block.
 
-**Pruning** after each block drops transactions whose nonce is used.
+**How long** building may take is `--max-build-ms N`, when this node bounds it. The block builder
+runs the selected transactions in order, and once the time is up, those that went in by then are
+the block: the rest are left out unrun and wait for the next block. It is a brake for a slow
+machine, so it seals something before its slot is gone, rather than a limit every node checks:
+the bytes and gas limits still apply. Without it, blocks fill to the chain's limits whatever
+they take to run.
+
+**Pruning** after each block drops:
+- transactions whose nonce is used;
+- on a chain with fees, those whose sender can no longer cover their reserve, as its funds went
+  since they were admitted;
+- those that have offered less than the base price for `MAX_UNDERPRICED_BLOCKS` (32) blocks in a
+  row. An offer under the base price is kept until then, since the base price moves a step a
+  block and may come back down; a block it can go in resets the count.
 
 ## Networking
 
@@ -169,6 +183,8 @@ counts them, so a flood is turned away at the door instead of queueing without e
 | --- | --- | --- |
 | `--max-gossip-backlog N` | 10,000 | Everything waiting, submissions included. |
 | `--max-block-txs N` | none | The transactions in each block this node produces; without it, blocks fill to the chain's bytes and gas limits. |
+| `--max-build-ms N` | none | How long this node runs transactions for each block it produces; what ran by then is sealed, the rest wait. |
+| `--mine-gpu` | off | Mine on the GPU through wgpu rather than on `--mine-threads`; needs a build with the `gpu` feature (see [Consensus](consensus.md#proof-of-work)). |
 | `--max-gossip-per-peer N` | 1,000 | What any one peer's may be. |
 
 **Over a limit:**
@@ -232,6 +248,7 @@ A node catches up from its peers on its own (`src/node/sync.rs`).
 | `Justifications { from, count }` | Up to 64 justifications for main-chain checkpoints, oldest first. |
 | `Headers { from, count }` | Up to 1,024 consecutive main-chain headers with their seals. |
 | `State { block, depth, prefix }` | One position of the state tree at a recent main-chain block: its entries, at most 512, or its two halves' hashes. `None` for a block it cannot serve. |
+| `Checkpoint { block }` | What a node starting at that checkpoint needs: the `CheckpointStart` a light client would get at `GET /light/checkpoint`, and the checkpoint's total work. `None` for a block that is no checkpoint on its main chain, or whose headers it lacks. |
 
 Kinds of finality that take no votes never ask for justifications.
 
@@ -272,6 +289,29 @@ the tip. Then it syncs the rest as usual.
 6. **The rest.** From there it syncs blocks from the pivot on as usual, and justifications from
    genesis on, which it checks against the headers and the voters in its state.
 
+**A rotating chain takes no snapshot.** Its headers are checked against the signers fixed in
+state, which a node taking a snapshot has none of yet, so `--snapshot` is refused there and the
+node syncs by running blocks.
+
+**Starting at a checkpoint** (`--snapshot --checkpoint 0x…`) skips step 1 below the checkpoint.
+Given a finalized checkpoint's block id from someone the operator trusts, as a light client takes
+one, the node:
+1. asks a peer for the checkpoint start (`Checkpoint`): the checkpoint's header and those below
+   it that consensus and finality look at, back to the checkpoint `activation_delay` epochs
+   before, and the checkpoint's total work. The headers link up by their hashes to the id it
+   trusts, so it trusts every one of them without checking them by consensus; the work it takes
+   on the peer's word, and a peer that lies about it only loses the node's requests, since
+   gossip still brings every block and work is compared from there on;
+2. checks headers on from the checkpoint as usual, picks the pivot no lower than the checkpoint,
+   and takes state as before, never falling back to running blocks from genesis;
+3. installs the pivot with the checkpoint as its justified and finalized checkpoint, so it never
+   asks for, imports or rolls back to anything below it, and syncs justifications from the
+   checkpoint's epoch on.
+
+A long-range fork, one built below the checkpoint by keys that have since left, cannot reach it:
+the node holds no headers below the checkpoint to compare against, and refuses any block at or
+below it. `GET /status` of a node you trust shows a checkpoint under `finality.finalized.block`.
+
 **While it takes state,** its state is half the pivot's. So it imports, produces, votes on and
 admits nothing: gossip is ignored, submitted transactions answer `Syncing` (503), and it serves
 no state of its own.
@@ -281,7 +321,9 @@ no state of its own.
 - it never rolls back past the pivot;
 - its indexes reach back to the block after it, since it has no receipts before;
 - it has no light updates before it, so light clients following finality from genesis need
-  another node.
+  another node;
+- one that started at a checkpoint holds no headers below the checkpoint start either, so it
+  cannot serve a checkpoint start, or a light client's older headers, from there down.
 
 ## What to keep in mind
 

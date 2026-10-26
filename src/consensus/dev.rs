@@ -1,15 +1,12 @@
 use {
-    super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer},
-    crate::crypto::hashable::Hashable,
+    super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer, seal_bytes},
     crate::crypto::keypair::{Keypair, PublicKey},
+    crate::registry::signers::Signer,
     crate::structs::address::Address,
     crate::structs::block::{BlockHeader, Seal},
     crate::structs::u256::u256,
     r#macro::document,
 };
-
-/// Separates block seals from anything else a key might sign.
-const SEAL_DOMAIN: &[u8] = b"chainv4 block";
 
 #[document(
     summary = "The rules of a chain where one known key produces every block, one per slot. For development and tests: blocks come at a steady pace, and forks never happen.",
@@ -43,23 +40,20 @@ impl DevAuthority {
     }
 }
 
-fn seal_bytes(header: &BlockHeader) -> Vec<u8> {
-    let mut bytes = SEAL_DOMAIN.to_vec();
-    bytes.extend_from_slice(&header.id().hashable_bytes_with_tag());
-
-    bytes
-}
-
 impl Consensus for DevAuthority {
     fn work(&self, _header: &BlockHeader) -> u256 {
         u256::ONE
     }
 
-    fn difficulty(&self, _parent: &BlockHeader, _timestamp: u64) -> u128 {
+    fn difficulty(&self, _ancestors: &[BlockHeader], _timestamp: u64) -> u128 {
         0
     }
 
-    fn check(&self, header: &BlockHeader, seal: &Seal, parent: &BlockHeader, now: u64) -> Result<(), ConsensusError> {
+    fn check(&self, header: &BlockHeader, seal: &Seal, ancestors: &[BlockHeader], _producers: &[Signer], now: u64) -> Result<(), ConsensusError> {
+        let Some(parent) = ancestors.first() else {
+            return Err(ConsensusError::NoAncestors);
+        };
+
         if header.producer != self.authority.address() {
             return Err(ConsensusError::WrongProducer);
         }
@@ -118,7 +112,7 @@ impl Producer for AuthorityProducer {
         self.keypair.public().address()
     }
 
-    fn start_at(&self, parent: &BlockHeader) -> u64 {
+    fn start_at(&self, parent: &BlockHeader, _producers: &[Signer]) -> u64 {
         parent.timestamp + self.slot_ms
     }
 
@@ -177,9 +171,9 @@ mod tests {
     fn the_authority_produces_once_per_slot() {
         let header = child(12_000);
 
-        assert_eq!(producer().start_at(&parent()), 12_000);
+        assert_eq!(producer().start_at(&parent(), &[]), 12_000);
         assert_eq!(producer().address(), parent().producer);
-        assert_eq!(rules().check(&header, &sealed(&header), &parent(), 12_000), Ok(()));
+        assert_eq!(rules().check(&header, &sealed(&header), &[parent()], &[], 12_000), Ok(()));
         assert_eq!(rules().work(&header), u256::ONE);
     }
 
@@ -194,13 +188,14 @@ mod tests {
             ..child(12_000)
         };
 
-        assert_eq!(rules.check(&early, &sealed(&early), &parent(), 12_000), Err(ConsensusError::Early));
-        assert_eq!(rules.check(&future, &sealed(&future), &parent(), 12_000), Err(ConsensusError::FromTheFuture));
-        assert_eq!(rules.check(&header, &Seal::None, &parent(), 12_000), Err(ConsensusError::BadSeal));
-        assert_eq!(rules.check(&header, &Seal::Work { nonce: 1 }, &parent(), 12_000), Err(ConsensusError::BadSeal));
-        assert_eq!(rules.check(&header, &sealed(&child(13_000)), &parent(), 12_000), Err(ConsensusError::BadSeal));
+        assert_eq!(rules.check(&early, &sealed(&early), &[parent()], &[], 12_000), Err(ConsensusError::Early));
+        assert_eq!(rules.check(&future, &sealed(&future), &[parent()], &[], 12_000), Err(ConsensusError::FromTheFuture));
+        assert_eq!(rules.check(&header, &Seal::None, &[parent()], &[], 12_000), Err(ConsensusError::BadSeal));
+        assert_eq!(rules.check(&header, &Seal::Work { nonce: 1 }, &[parent()], &[], 12_000), Err(ConsensusError::BadSeal));
+        assert_eq!(rules.check(&header, &sealed(&child(13_000)), &[parent()], &[], 12_000), Err(ConsensusError::BadSeal));
+        assert_eq!(rules.check(&header, &sealed(&header), &[], &[], 12_000), Err(ConsensusError::NoAncestors));
         assert!(matches!(
-            rules.check(&hard, &sealed(&hard), &parent(), 12_000),
+            rules.check(&hard, &sealed(&hard), &[parent()], &[], 12_000),
             Err(ConsensusError::WrongDifficulty { .. })
         ));
 
@@ -211,6 +206,7 @@ mod tests {
         };
         let forged_seal = Seal::Signature(stranger.sign(&seal_bytes(&forged)));
 
-        assert_eq!(rules.check(&forged, &forged_seal, &parent(), 12_000), Err(ConsensusError::WrongProducer));
+        assert_eq!(rules.check(&forged, &forged_seal, &[parent()], &[], 12_000), Err(ConsensusError::WrongProducer));
+        assert_eq!(rules.lookback(), 1);
     }
 }

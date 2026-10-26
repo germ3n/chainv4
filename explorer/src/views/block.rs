@@ -63,6 +63,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, block: &str) {
                 facts.text("difficulty", format::thousands(&summary.difficulty));
             }
 
+            if !summary.reward.is_empty() && summary.reward != "0" {
+                facts.text("reward", ctx.coins(&summary.reward));
+            }
+
             facts.text("gas used", format::thousands(&summary.gas_used.to_string()));
             facts.text("base price", format!("{} units per gas", format::thousands(&summary.base_price)));
             facts.row("transaction root", |ui| super::copyable(ui, &summary.tx_root));

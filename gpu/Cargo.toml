@@ -1,0 +1,18 @@
+[package]
+name = "chainv4-gpu"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Proof-of-work mining for chainv4 on the GPU, through wgpu: Vulkan, Metal and WebGPU."
+
+[dependencies]
+# 24, not newer: the node's libp2p pins the wasm crates newer wgpu versions want past.
+# Its defaults: Vulkan always, Metal and DX12 where they are, WebGPU on the web, WGSL kernels.
+wgpu = "24.0.5"
+pollster = "0.4.0"
+
+[dev-dependencies]
+sha2 = "0.11.1"
+blake3 = "1.8.7"
+blake2 = "0.11.0"
+sha3 = "0.12.0"

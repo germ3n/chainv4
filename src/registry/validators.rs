@@ -65,6 +65,21 @@ impl ValidatorRecord {
 }
 
 #[document(
+    summary = "How an FFG chain leaks the bonds of validators that stop voting, so finality comes back once they are a small enough share of the weight.",
+    category = "Finality",
+    see_also = "FfgConfig::leak, Validators::leak",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct Leak {
+    #[document(summary = "How many epochs without a checkpoint proven in a block count as a stall. At least 1.")]
+    pub after_epochs: u64,
+    #[document(summary = "What share of a quiet validator's bond each checkpoint takes while the chain is stalled, in thousandths. At most 1000.")]
+    pub permille: u64,
+}
+
+impl Hashable for Leak {}
+
+#[document(
     summary = "One validator in an epoch's set.",
     category = "Finality",
     see_also = "ValidatorSet",
@@ -240,7 +255,7 @@ impl<'a> Validators<'a> {
 
     #[document(
         parent = "Validators",
-        summary = "Takes a cheating validator's whole bond: the reporter gets bond / reporter_divisor, and the rest is burned. The validator stops voting as an unbond would, and can be withdrawn, for nothing, later.",
+        summary = "Takes a cheating validator's whole bond: the reporter gets bond / reporter_divisor, and the rest is burned. The validator stops voting as an unbond would, and can be withdrawn, for nothing, later. It also leaves the sets already fixed for the epochs from two after this one on: this epoch's and the next one's stay as they are, so the next checkpoint's light update, which re-states the sets ahead, reaches light clients by the usual path.",
         returns = "What the reporter got.",
         panics = "NotBonded, AlreadySlashed.",
     )]
@@ -258,12 +273,27 @@ impl<'a> Validators<'a> {
         record.active_until = Some(record.active_until.map_or(until, |current| current.min(until)));
         record.withdrawable_from = Some(record.active_until.expect("set above") + staking.withdrawal_delay);
         self.state.put_value(Column::Validators, voter_key(voter), &record);
+        self.drop_from_fixed_sets(voter, epoch + 2, epoch + staking.activation_delay)?;
 
         if reward > u256::ZERO {
             Accounts::new(self.state).credit(reporter, reward)?;
         }
 
         Ok(reward)
+    }
+
+    /// Takes a voter out of the sets fixed for these epochs, those that are fixed already.
+    fn drop_from_fixed_sets(&self, voter: &PublicKey, from: u64, through: u64) -> Result<(), DbError> {
+        for epoch in from..=through {
+            if let Some(mut set) = self.set(epoch)?
+                && set.members.iter().any(|member| member.voter == *voter)
+            {
+                set.members.retain(|member| member.voter != *voter);
+                self.state.put_value(Column::Epochs, epoch_key(b"set:", epoch), &set);
+            }
+        }
+
+        Ok(())
     }
 
     #[document(
@@ -306,6 +336,95 @@ impl<'a> Validators<'a> {
         epoch_key(b"set:", epoch)
     }
 
+    #[document(parent = "Validators", summary = "The newest epoch whose checkpoint a block proved justified, by a proof it carried: 0 before any. What the inactivity leak measures a stall from.")]
+    pub fn proven(&self) -> Result<u64, DbError> {
+        Ok(self.state.get_value::<EpochMark>(Column::Epochs, PROVEN)?.map_or(0, |mark| mark.epoch))
+    }
+
+    #[document(parent = "Validators", summary = "Records that a block proved an epoch's checkpoint justified.")]
+    pub fn mark_proven(&self, epoch: u64) -> Result<(), DbError> {
+        if epoch > self.proven()? {
+            self.state.put_value(Column::Epochs, PROVEN.to_vec(), &EpochMark { epoch });
+        }
+
+        Ok(())
+    }
+
+    #[document(parent = "Validators", summary = "The newest epoch a validator's vote for was carried in a block, in a proof or a bundle: 0 before any.")]
+    pub fn participation(&self, voter: &PublicKey) -> Result<u64, DbError> {
+        Ok(self.state.get_value::<EpochMark>(Column::Validators, &voted_key(voter))?.map_or(0, |mark| mark.epoch))
+    }
+
+    #[document(parent = "Validators", summary = "Records that a block carried a validator's vote for an epoch's checkpoint.")]
+    pub fn mark_participation(&self, voter: &PublicKey, epoch: u64) -> Result<(), DbError> {
+        if epoch > self.participation(voter)? {
+            self.state.put_value(Column::Validators, voted_key(voter), &EpochMark { epoch });
+        }
+
+        Ok(())
+    }
+
+    #[document(
+        parent = "Validators",
+        summary = "The inactivity leak, at a checkpoint while the chain is stalled: every validator in the epoch's set whose vote for the epoch before has not been carried in a block loses leak.permille thousandths of its bond, burned; one that falls under the minimum bond leaves the way an unbond does. The sets already fixed for the epochs after this one are reweighed.",
+        params = {
+            epoch = "The checkpoint's epoch.",
+            leak = "How much to take.",
+            staking = "The chain's staking rules.",
+        },
+        returns = "What was burned.",
+    )]
+    pub fn leak(&self, epoch: u64, leak: &Leak, staking: &Staking) -> Result<u256, DbError> {
+        let Some(set) = self.set(epoch)? else {
+            return Ok(u256::ZERO);
+        };
+        let mut burned = u256::ZERO;
+        let (thousand, permille) = (u256::from(1000u64), u256::from(leak.permille.min(1000)));
+
+        for member in &set.members {
+            if self.participation(&member.voter)? + 1 >= epoch {
+                continue;
+            }
+
+            let Some(mut record) = self.get(&member.voter)? else {
+                continue;
+            };
+
+            if record.slashed || record.bond == u256::ZERO {
+                continue;
+            }
+
+            let taken = record.bond / thousand * permille + record.bond % thousand * permille / thousand;
+            record.bond -= taken;
+            burned += taken;
+
+            if record.bond < staking.min_bond && record.active_until.is_none() {
+                let until = epoch + staking.activation_delay + 1;
+                record.active_until = Some(until);
+                record.withdrawable_from = Some(until + staking.withdrawal_delay);
+            }
+
+            self.state.put_value(Column::Validators, voter_key(&member.voter), &record);
+        }
+
+        if burned > u256::ZERO {
+            self.reweigh_fixed_sets(epoch + 1, epoch + staking.activation_delay)?;
+        }
+
+        Ok(burned)
+    }
+
+    /// Fixes again the sets already fixed for these epochs, from the records as they are now.
+    fn reweigh_fixed_sets(&self, from: u64, through: u64) -> Result<(), DbError> {
+        for epoch in from..=through {
+            if self.set(epoch)?.is_some() {
+                self.fix_set(epoch)?;
+            }
+        }
+
+        Ok(())
+    }
+
     #[document(parent = "Validators", summary = "Whether the voters of an epoch's checkpoint have been paid.")]
     pub fn paid(&self, epoch: u64) -> Result<bool, DbError> {
         Ok(self.state.get(Column::Epochs, &epoch_key(b"paid:", epoch))?.is_some())
@@ -330,6 +449,25 @@ impl<'a> Validators<'a> {
 
         Ok(record)
     }
+}
+
+/// Where the newest proven epoch is kept, in Column::Epochs.
+const PROVEN: &[u8] = b"proven";
+
+/// An epoch, as the proven and participation records keep one.
+#[derive(Clone, Copy, Debug, SchemaWrite, SchemaRead)]
+struct EpochMark {
+    epoch: u64,
+}
+
+impl Hashable for EpochMark {}
+
+/// Where a validator's newest carried vote is kept, in Column::Validators.
+fn voted_key(voter: &PublicKey) -> Vec<u8> {
+    let mut key = b"voted:".to_vec();
+    key.extend_from_slice(&voter.hashable_bytes_with_tag());
+
+    key
 }
 
 fn voter_key(voter: &PublicKey) -> Vec<u8> {
@@ -404,6 +542,32 @@ mod tests {
         validators.bond(&ALICE, &voter(2), u256::new(100), 0, &STAKING).unwrap();
         assert_eq!(validators.bond(&ALICE, &voter(3), u256::new(100), 0, &STAKING), Err(RegistryError::TooManyValidators));
         assert_eq!(validators.bond(&BOB, &voter(3), u256::new(100), 0, &STAKING).unwrap_err(), RegistryError::TooManyValidators);
+    }
+
+    #[test]
+    fn a_slashed_validator_leaves_the_sets_fixed_two_epochs_on() {
+        let state = state();
+        let validators = Validators::new(&state);
+        let staking = Staking { activation_delay: 3, ..STAKING };
+        let mut voters = Vec::new();
+
+        for seed in [1, 2] {
+            Accounts::new(&state).credit(&Address::Ed25519([seed; 32]), u256::new(1_000)).unwrap();
+            validators.bond(&Address::Ed25519([seed; 32]), &voter(seed), u256::new(500), 0, &staking).unwrap();
+            voters.push(voter(seed));
+        }
+
+        // Sets fixed through epoch 7, as checkpoint 4 would have left them.
+        for epoch in 4..=7 {
+            validators.fix_set(epoch).unwrap();
+        }
+
+        validators.slash(&Address::Ed25519([9; 32]), &voter(1), 4, &staking).unwrap();
+        let has = |epoch: u64| validators.set(epoch).unwrap().unwrap().member(&voter(1)).is_some();
+
+        assert!(has(4) && has(5), "this epoch and the next keep it");
+        assert!(!has(6) && !has(7), "from two epochs on it is gone");
+        assert_eq!(validators.set(6).unwrap().unwrap().total(), u256::new(500));
     }
 
     #[test]

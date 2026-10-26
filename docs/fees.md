@@ -39,7 +39,9 @@ A transaction carries a signed fee offer:
 
 Of what it paid:
 - the block's base price times the gas charged is the **base part**: `burn_permille` of it is
-  burned, and the producer gets the rest;
+  burned, and the producer gets the rest; on a chain whose `vote_reward_source` is `fees`, that
+  share goes to the reward pool instead, which pays finality's voters (see
+  [Finality](finality.md#rewards));
 - whatever it paid **above the base price** goes to the producer whole.
 
 ## Scorers
@@ -62,7 +64,7 @@ Two kinds ship; a new one is a new implementation.
 
 **`contract`** weighs a transaction as `weighted` does, with the same fields, then calls
 `score` on the contract at `contract`, with `fuel` of its own, to say what the sender is
-charged.
+charged, for the kinds of transaction `kinds` names, or every kind when it is empty.
 
 ```lua
 local M = {}
@@ -88,13 +90,19 @@ return M
   - `gas` is what the weights say.
 - **Limits:** what it returns is capped at the transaction's gas limit. The chain pays its fuel,
   bounded by `fuel`.
+- **Which transactions:** `kinds`, such as `["call", "deploy"]`, names the kinds it is called
+  for; any other kind is charged as weighed, with no call, so a scorer with an opinion on calls
+  alone costs transfers nothing. Empty scores every kind. `chainv4 genesis --scorer-kinds
+  call,deploy` sets it. Added after chains launched, it adds nothing to genesis's encoding while
+  empty, so chains from before keep their ids.
 - **Read-only:** nothing it writes or emits is kept.
 - **Fallback:** until a contract lives at `contract`, or when it fails or returns something other
   than a whole number, the weights alone count.
 - **What counts against a block:** blocks always count the gas used, by the weights, whatever the
   scorer charges. A scorer can change what senders pay, but not how much a block holds.
 
-Deploy the scorer once the chain runs. `chainv4 genesis --scorer ADDRESS` names it ahead of time.
+Deploy the scorer once the chain runs. `chainv4 genesis --scorer ADDRESS` names it ahead of time,
+and `--scorer-kinds` which kinds it scores.
 The address a deploy lands at is fixed by the deployer and its nonce, so it can be worked out
 before the deploy.
 
@@ -144,7 +152,12 @@ The mempool admits a transaction only when:
 
 Producers take the best-paying transactions first. The priority is what a transaction pays above
 the base price, per gas: its tip under a base fee, its bid above the minimum under bids. Each
-sender's transactions still go in nonce order.
+sender's transactions still go in nonce order, and one whose offer is under the next block's
+base price stops its sender's run: the builder is never handed what it would skip.
+
+After each block, the mempool drops what can no longer pay: a transaction whose sender's funds
+went since it was admitted goes at once, and one under the base price goes after 32 blocks of
+that in a row (see [Node](node.md#the-mempool)).
 
 ## Sending with fees
 
@@ -170,7 +183,5 @@ receipts their gas and fee.
   work grows past that by the time it lands runs out and fails, still charged; one the dry run
   says would fail gets the whole fuel cap, since things may change, and `send` refuses it unless
   given `--anyway`. The wallet and the explorer show why and ask first.
-- **A transaction that can no longer pay lingers in the mempool** until its nonce is used, and
-  every block built tries it again.
 - **A chain without fees is bounded by bytes alone,** when its genesis sets `max_block_bytes`.
 - **Fee kinds are not behind cargo features.** Every node has both schedules and both pricings.

@@ -6,6 +6,7 @@
 use {
     crate::mempool::MempoolError,
     crate::db::{Path, StatePart},
+    crate::light::CheckpointStart,
     crate::structs::block::{Block, Seal, SealedHeader},
     crate::structs::hash::Hash,
     crate::structs::tx::SignedTx,
@@ -117,6 +118,9 @@ pub enum SyncRequest {
     #[document(summary = "One position of the state tree as it was at a recent main-chain block: its entries, at most MAX_SYNC_ENTRIES, or its two halves' hashes.")]
     #[wincode(tag = 4)]
     State { block: Hash, depth: u16, prefix: Path },
+    #[document(summary = "What a node starting at a trusted checkpoint needs: the checkpoint's header and those below it that consensus and finality look at, as a light client's CheckpointStart, and the checkpoint's total work.")]
+    #[wincode(tag = 5)]
+    Checkpoint { block: Hash },
 }
 
 #[document(
@@ -149,6 +153,23 @@ pub enum SyncResponse {
     #[document(summary = "The part of the state tree asked for, or None when the peer cannot serve it: the block is not on its main chain, or older than its undo records reach.")]
     #[wincode(tag = 4)]
     State(Option<StatePart>),
+    #[document(summary = "The checkpoint start asked for and the checkpoint's total work, or None when the block is not a checkpoint on the peer's main chain, or it lacks the headers.")]
+    #[wincode(tag = 5)]
+    Checkpoint(Option<CheckpointAnswer>),
+}
+
+#[document(
+    summary = "A peer's answer to SyncRequest::Checkpoint: the headers and updates a light client would start from, and the checkpoint's total work, which the node takes on the peer's word.",
+    category = "Node",
+    see_also = "SyncRequest::Checkpoint, CheckpointStart",
+)]
+#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+pub struct CheckpointAnswer {
+    #[document(summary = "The checkpoint's header, those below it, and their updates.")]
+    pub start: CheckpointStart,
+    #[document(summary = "The total work of the chain ending at the checkpoint.")]
+    #[wincode(with = "crate::structs::u256::U256Le")]
+    pub work: crate::structs::u256::u256,
 }
 
 #[document(

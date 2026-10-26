@@ -40,6 +40,7 @@ Where the chain stands:
 | `token_functions` | The functions that make a contract a token on this chain, as genesis names them; `[]` when it keeps no token registry. |
 | `finality` | `null`, or `type`, `epoch`, `checkpoint_interval`, and the `justified` and `finalized` checkpoints, each with `epoch`, `block` and `height`. |
 | `fees` | `null`, or the fee settings as genesis files write them, with `base_price`, what a transaction sent now must offer at least, and `tx_fuel`, the chain's fuel cap per transaction. |
+| `vote_rewards` | Where vote rewards come from: `source` `mint`, or `fees` with the `pool` address and its `balance`. |
 | `max_block_bytes` | The most bytes a block's transactions may take, encoded, or `null` when genesis sets none. |
 
 ### `GET /blocks?before=H&limit=N`
@@ -50,6 +51,8 @@ Block summaries, newest first, below height `before`, `limit` of them: 20 by def
 Each summary has:
 - `id`, `height`, `parent`, `timestamp`, `producer`;
 - `difficulty`, `tx_root`, `receipts_root`, `state_root`, `gas_used`, `base_price`;
+- `reward`, what it minted for its producer by the genesis reward schedule, `"0"` for genesis
+  and on a chain without a reward;
 - `tx_count` and `proof_count`.
 
 ### `GET /blocks/{block}`
@@ -139,7 +142,8 @@ What a contract is:
 What a [light client](light-client.md) starts from: the chain's `genesis` id, its light
 parameters (`params`) and its genesis header with seal (`header`), each encoded, in hex. A client
 checks that the header hashes to the genesis id it trusts, and the parameters to the header's
-`proof_root`.
+`proof_root`. The parameters hash as genesis commits to them, the proof-of-work window encoding
+as nothing while unset, so chains from before the window keep their `proof_root`.
 
 ### `GET /headers?from=H&count=N`
 
@@ -166,7 +170,8 @@ What a light client starts from at a checkpoint rather than genesis: the one nam
 node's finalized checkpoint. `{"checkpoint": {"epoch", "height", "block"}, "start": "0x…"}`, a
 `CheckpointStart` encoded:
 - **`headers`:** the checkpoint's header and those below it, back to the checkpoint
-  `activation_delay` epochs before, or genesis, consecutive, with their seals.
+  `activation_delay` epochs before, or genesis, and further back when consensus looks at more
+  ancestors than that leaves (the proof-of-work window), consecutive, with their seals.
 - **`updates`:** each of those checkpoints' light updates, oldest first, null where none is kept.
   Empty under depth finality or none, where any block is a checkpoint and its header is all.
 
@@ -177,7 +182,8 @@ opens no epoch under voting finality. See
 ### `GET /light/updates/{block}`
 
 The light update genesis or a checkpoint keeps: `{"update": "0x…"}`, a `LightUpdate` encoded, with
-proofs of the voters it fixed against its state root. 404 for any other block, and for those
+proofs of the voters of the epochs ahead of it, the one it fixed and those re-stated, against its
+state root. 404 for any other block, and for those
 before a snapshot node's pivot.
 
 ### `GET /justifications?from=E&count=N`
@@ -391,7 +397,8 @@ Under `authority`:
   `threshold`, `change_threshold` and `approvals`. Each approval has its `signer`, the `epoch`
   it was made in, and the last epoch it counts in (`counts_until`).
 
-Sets show their `signers`, `threshold` and `change_threshold`.
+Sets show their `signers`, each with its voting `key` and the `account` that speaks for it, and
+their `threshold` and `change_threshold`. An `approve_signers` transaction shows the same.
 
 404 under any other kind.
 

@@ -28,9 +28,9 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `timestamp` | The genesis block's timestamp, in milliseconds. |
 | `hash` | The chain hash: block and transaction ids, roots, contract addresses, gossip ids. `blake3`, `sha256`, `keccak256`, `blake2s` or `blake2b`, whichever the build has; never `xxh3`. |
 | `coin` | What the chain's coin is called and how it is shown: `symbol` and `decimals`. |
-| `consensus` | Who may produce, by `type`: `authority` or `pow`. |
+| `consensus` | Who may produce, by `type`: `authority`, `pow` or `rotating`. |
 | `reward` | `initial`, what a block mints for its producer, and `halving_interval`, blocks between halvings or `null` for never. |
-| `minter` | The one address allowed to send `Mint`, or `null`. |
+| `minter` | The one address allowed to send `Mint`: the development key's, or `null`. `Mint` is a faucet for development chains; a chain of value names nobody, and new coins come from block rewards alone. |
 | `allocations` | Who holds what from the start: a list of `address` and `amount`. |
 | `engines` | Which engines contracts may be deployed for: `lua`, `wasm`. A node built without one refuses the chain. |
 | `tx_limits` | `fuel` and `memory` one deploy, upgrade or call may use. |
@@ -39,6 +39,7 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `finality` | `null`, or the kind and its settings, by `type`: `ffg`, `authority` or `depth`. |
 | `fees` | `null` for free transactions, or the fee settings. |
 | `max_block_bytes` | The most bytes a block's transactions may take, encoded, from 1 MiB (1048576), so a block holds the largest deploy, to 6 MiB (6291456), so a full block fits one gossip message; a block past it is refused. The dev chains have 4 MiB. Left out or `null`, blocks are bounded by gas alone, or by nothing without fees. A file written before it, without it, keeps its chain's genesis id. |
+| `vote_reward_source` | Where finality's vote rewards come from: `mint`, new supply, or `fees`, the burned share of every fee, pooled and paid out. Needs `fees`. Left out or `null`, `mint`, and a file from before it keeps its id. `chainv4 genesis --vote-rewards fees` sets it. |
 
 ### coin
 
@@ -58,13 +59,20 @@ field, they are part of the genesis id.
 
 ```json
 { "type": "authority", "key": "ed25519:0x…", "slot_ms": 2000 }
-{ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000" }
+{ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "window": 11 }
+{ "type": "rotating", "slot_ms": 2000 }
 ```
 
 - `authority`: `key` is the only key that may produce, a block every `slot_ms` at most.
+- `rotating`: the signers of authority finality produce in turn, one every `slot_ms`, the next in
+  line stepping in a slot later when one misses. Needs `finality.type: authority`. See
+  [Consensus](consensus.md#rotating-authority).
 - `pow`: `hash` is the work hash, chosen apart from the chain hash and also never `xxh3`.
   Difficulty starts at `initial_difficulty`, follows `target_block_ms`, and never falls below
-  `min_difficulty`. See [Consensus](consensus.md).
+  `min_difficulty`. `window`, at least 2, makes difficulty retarget over that many blocks and
+  bounds each block's timestamp by their median; left out, difficulty follows the parent alone,
+  as it did before the field existed, and the chain keeps the id it had. See
+  [Consensus](consensus.md).
 
 ### finality
 
@@ -72,14 +80,18 @@ field, they are part of the genesis id.
 { "type": "ffg", "checkpoint_interval": 8, "vote_depth": 2, "min_bond": "100000000000000000000",
   "activation_delay": 2, "withdrawal_delay": 64, "reporter_divisor": 16, "max_validators": 1000,
   "vote_reward": "1000000000000000000", "max_proofs_per_block": 4,
-  "validators": [{ "account": "ed25519:0x…", "voter": "ed25519:0x…", "bond": "10000000000000000000000" }] }
+  "validators": [{ "account": "ed25519:0x…", "voter": "ed25519:0x…", "bond": "10000000000000000000000" }],
+  "leak": { "after_epochs": 4, "permille": 50 } }
 { "type": "authority", "checkpoint_interval": 8, "vote_depth": 2, "activation_delay": 2, "max_signers": 100,
-  "signers": ["ed25519:0x…"], "threshold": 1, "change_threshold": 1, "approval_epochs": 64,
+  "signers": ["ed25519:0x…", { "key": "ed25519:0x…", "account": "ed25519:0x…" }],
+  "threshold": 2, "change_threshold": 2, "approval_epochs": 64,
   "vote_reward": "0", "max_proofs_per_block": 4 }
 { "type": "depth", "depth": 6 }
 ```
 
-What each field means is in [Finality](finality.md).
+What each field means is in [Finality](finality.md). An authority signer is a bare key, which is
+its own account, or a `key` with the `account` that approves changes for it and takes its rewards.
+FFG's `leak` is a later addition: left out, there is none, and a file from before it keeps its id.
 
 ### fees
 
@@ -89,8 +101,9 @@ What each field means is in [Finality](finality.md).
   "pricing": { "type": "base_fee", "initial": "1000000000", "min": "10000000", "elasticity": 2, "change_denominator": 8 } }
 ```
 
-A `contract` schedule adds `contract` and `fuel` to the weighted fields, and a `bid` pricing
-has only `min_price`. What each field means is in [Fees](fees.md).
+A `contract` schedule adds `contract` and `fuel` to the weighted fields, and `kinds`, the kinds
+of transaction the scorer is called for, such as `["call", "deploy"]`; left out, every kind. A
+`bid` pricing has only `min_price`. What each field means is in [Fees](fees.md).
 
 ## What a node refuses
 
@@ -99,16 +112,21 @@ has only `min_price`. What each field means is in [Fees](fees.md).
 - **Hashes:** a chain or work hash that is not secure: `xxh3`.
 - **The coin:** a symbol that is empty, longer than 12, or not ASCII letters and digits, or more
   than 77 decimals.
-- **FFG:** a `checkpoint_interval`, `activation_delay` or `reporter_divisor` of 0, or more genesis
-  validators than `max_validators`.
+- **FFG:** a `checkpoint_interval`, `activation_delay` or `reporter_divisor` of 0, more genesis
+  validators than `max_validators`, or a `leak` with `after_epochs` 0 or `permille` over 1000.
 - **Authority finality:**
   - a `checkpoint_interval` or `activation_delay` of 0;
-  - no signers, a signer named twice, or more signers than `max_signers`;
+  - no signers, a signer named twice, two signers sharing an account, or more signers than
+    `max_signers`;
   - an `approval_epochs` of 0;
   - a `threshold` or `change_threshold` that is not more than half the signers and at most all of
     them.
+- **A `minter`** that is not the development key.
+- **`vote_reward_source: fees`** without fees.
+- **`consensus.type: rotating`** without `finality.type: authority`.
 - **Fees:**
   - a `block_gas_limit` of 0, a `burn_permille` over 1000, or a `fuel_per_gas` of 0;
+  - a scorer's `kinds` naming something that is no kind of transaction, or one twice;
   - a base fee `min` of 0, an `initial` under `min`, or an `elasticity` or `change_denominator`
     of 0;
   - a scorer that is not a contract address, or that has no fuel.
@@ -121,7 +139,7 @@ has only `min_price`. What each field means is in [Fees](fees.md).
 
 ## The dev chains
 
-Without `--genesis`, a node runs one of two development chains, picked with `--consensus`.
+Without `--genesis`, a node runs one of three development chains, picked with `--consensus`.
 
 They share these settings:
 - the development key holds a million coins and may mint;
@@ -133,6 +151,8 @@ They share these settings:
 They differ only in consensus:
 - **pow:** mined, 50 coins a block, halving every 210,000 blocks.
 - **authority:** the development key produces a block every two seconds, for no reward.
+- **rotating:** authority finality with the development key as its one signer, which produces
+  every block in turn, every two seconds, for no reward. In a build with authority finality.
 
 The dev genesis depends on the build: the engines it allows, the default hash, whether FFG is
 built in. Nodes built with different features are on different dev chains. The development key's

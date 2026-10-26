@@ -22,6 +22,7 @@ use {
     crate::crypto::verifiable::VerifyError,
     crate::db::{Changes, Column, Key, Keys, State, address_key},
     crate::registry::contracts::contract_address,
+    crate::chain::REWARD_POOL,
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
     crate::structs::hash::HashType,
@@ -32,6 +33,7 @@ use {
     rayon::prelude::*,
     std::collections::{BTreeMap, BTreeSet, HashMap},
     std::sync::{Arc, OnceLock},
+    std::time::Instant,
 };
 
 #[document(
@@ -103,6 +105,9 @@ pub(super) struct Ran {
     /// Which ran more than once, by position: those that touched what no transaction before them
     /// named, and read what one of those wrote.
     pub(super) again: Vec<usize>,
+    /// Whether the deadline cut the block short: the transactions after the last kept one were
+    /// left out unrun, not because they could not run.
+    pub(super) cut: bool,
 }
 
 /// What a block's transactions run with: the chain's rules and engines, and its workers.
@@ -147,16 +152,18 @@ fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
 /// For each transaction, the last one before it that names something it names, which it waits
 /// for. Every transaction pays the producer under fees, so one naming the producer waits for the
 /// one right before it, and with it for all of them.
-fn waits(txs: &[SignedTx], hash: HashType, paid: Option<Address>) -> Vec<Option<usize>> {
+fn waits(txs: &[SignedTx], hash: HashType, paid: &[Address]) -> Vec<Option<usize>> {
     let mut last: HashMap<Touch, usize> = HashMap::new();
 
     txs.iter()
         .enumerate()
         .map(|(index, tx)| {
             let touched = touches(tx, hash);
-            let mut wait = match paid {
-                Some(producer) if touched.contains(&Touch::Address(producer)) => index.checked_sub(1),
-                _ => None,
+            // The producer, and the reward pool on a chain that keeps one, are credited after
+            // every transaction: one that names them waits for the one before it.
+            let mut wait = match paid.iter().any(|account| touched.contains(&Touch::Address(*account))) {
+                true => index.checked_sub(1),
+                false => None,
             };
 
             for touch in touched {
@@ -265,15 +272,34 @@ impl Schedule {
 impl Runner<'_> {
     /// Runs transactions in order on a block's layer, on every core, crediting the producer its
     /// share of each fee as soon as each is in. The result is exactly what running them one by
-    /// one gives.
-    pub(super) fn run(&self, layer: &Arc<State>, txs: &[SignedTx], context: &BlockContext, unfit: Unfit) -> Result<Ran, ImportError> {
-        let paid = self.rules.fees.is_some().then_some(context.producer);
-        let mut schedule = Schedule::new(waits(txs, self.rules.hash, paid));
+    /// one gives. A deadline, which only building a block sets, stops it once passed: what went
+    /// in by then is the block, and the rest is left out unrun, with Ran.cut set.
+    pub(super) fn run(
+        &self,
+        layer: &Arc<State>,
+        txs: &[SignedTx],
+        context: &BlockContext,
+        unfit: Unfit,
+        deadline: Option<Instant>,
+    ) -> Result<Ran, ImportError> {
+        debug_assert!(deadline.is_none() || unfit == Unfit::Skip, "importing runs every transaction");
+
+        let mut paid = Vec::new();
+
+        if self.rules.fees.is_some() {
+            paid.push(context.producer);
+
+            if self.rules.pooled_fees {
+                paid.push(REWARD_POOL);
+            }
+        }
+
+        let mut schedule = Schedule::new(waits(txs, self.rules.hash, &paid));
         let mut checked: Vec<Result<(), VerifyError>> = Vec::with_capacity(txs.len());
         let mut ran = Ran::default();
         let mut turn = 0;
 
-        while turn < txs.len() {
+        'rounds: while turn < txs.len() {
             let round = schedule.round(turn);
 
             if checked.is_empty() {
@@ -320,6 +346,7 @@ impl Runner<'_> {
                             written.extend(attempt.changes.keys().cloned());
                             layer.merge(attempt.changes);
                             self.pay_producer(layer, context, executed.to_producer, &mut written)?;
+                            self.pool_burned(layer, executed.burned, &mut written)?;
                             ran.gas_used += executed.receipt.gas_used;
                             ran.kept.push(turn);
                             ran.receipts.push(executed.receipt);
@@ -335,6 +362,12 @@ impl Runner<'_> {
 
                 schedule.done(turn, &written);
                 turn += 1;
+
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) && turn < txs.len() {
+                    ran.cut = true;
+
+                    break 'rounds;
+                }
             }
         }
 
@@ -377,6 +410,22 @@ impl Runner<'_> {
             other => ImportError::Invalid(BlockError::Fee(other.to_string())),
         })?;
         written.insert((Column::Accounts, address_key(&context.producer)));
+
+        Ok(())
+    }
+
+    /// Puts the burned share of a fee in the reward pool, on a chain that keeps one, as a write
+    /// later transactions may have read.
+    fn pool_burned(&self, layer: &Arc<State>, amount: u256, written: &mut Keys) -> Result<(), ImportError> {
+        if !self.rules.pooled_fees || amount == u256::ZERO {
+            return Ok(());
+        }
+
+        Accounts::new(layer).credit(&REWARD_POOL, amount).map_err(|err| match err {
+            RegistryError::Db(err) => ImportError::Db(err),
+            other => ImportError::Invalid(BlockError::Fee(other.to_string())),
+        })?;
+        written.insert((Column::Accounts, address_key(&REWARD_POOL)));
 
         Ok(())
     }
