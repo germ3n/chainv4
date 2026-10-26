@@ -163,7 +163,7 @@ so neither takes it.
 wallet over HTTPS:
 
 ```sh
-cd docker && cp .env.example .env && docker compose up -d --build
+cp docker/.env.example docker/.env && docker/compose.sh up -d --build   # CONTAINER_ENGINE=podman for Podman
 # https://localhost/ and https://localhost/wallet/
 ```
 

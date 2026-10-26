@@ -6,7 +6,8 @@
 #
 #   docker/pow.sh init                here, once: a key of your own, and a genesis that pays it
 #   docker/pow.sh push user@host      here: the repository, the genesis and .env, to the VPS
-#   docker/pow.sh up                  on the VPS, in that copy: build and start the stack
+#   docker/pow.sh up                  on the VPS, in that copy: build and start the stack, with
+#                                     Docker or Podman
 #   docker/pow.sh join host           here: a node of the same chain that mines and dials the VPS
 #   docker/pow.sh status [url]        either: the node's chain, height and peers
 #
@@ -21,6 +22,7 @@
 #   API            this machine's API, for join and status: 127.0.0.1:8090 unless set
 #   REMOTE_DIR     where push puts the repository on the VPS: chainv4 under its home
 #   EXTRA_ARGS     anything else for join's node, such as --no-mdns
+#   CONTAINER_ENGINE  docker or podman, for up: as docker/compose.sh picks it, unset
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -91,6 +93,8 @@ EOF
         cat > "$root/docker/.env" <<EOF
 # Written by docker/pow.sh init. The chain is docker/config/genesis.json: a proof-of-work chain
 # with depth finality, so the node mines and never votes.
+# docker or podman, as docker/compose.sh runs it; unset, whichever the VPS has.
+CONTAINER_ENGINE=${CONTAINER_ENGINE:-}
 REWARD_TO=$address
 MINE_THREADS=${MINE_THREADS:-1}
 PEERS=
@@ -130,8 +134,7 @@ push() {
 }
 
 up() {
-    command -v docker > /dev/null || fail "no docker here: install Docker Engine and its compose plugin first"
-    docker compose version > /dev/null 2>&1 || fail "no docker compose: install the compose plugin"
+    compose="$root/docker/compose.sh"
     [ -s "$root/docker/config/genesis.json" ] || fail "no docker/config/genesis.json: run docker/pow.sh init on your machine, then push"
     [ -s "$root/docker/.env" ] || fail "no docker/.env: run docker/pow.sh init on your machine, then push"
 
@@ -145,17 +148,17 @@ up() {
     fi
 
     say "building and starting; the first build takes a while"
-    (cd "$root/docker" && docker compose up -d --build)
+    "$compose" up -d --build
 
     say "waiting for the node"
     tries=0
-    until (cd "$root/docker" && docker compose exec -T node curl -fs http://127.0.0.1:8080/status > /dev/null 2>&1); do
+    until "$compose" exec -T node curl -fs http://127.0.0.1:8080/status > /dev/null 2>&1; do
         tries=$((tries + 1))
-        [ $tries -lt 60 ] || fail "the node did not come up: docker compose -f docker/compose.yaml logs node"
+        [ $tries -lt 60 ] || fail "the node did not come up: docker/compose.sh logs node"
         sleep 2
     done
 
-    (cd "$root/docker" && docker compose exec -T node curl -fs http://127.0.0.1:8080/status) | summary
+    "$compose" exec -T node curl -fs http://127.0.0.1:8080/status | summary
 
     if command -v ufw > /dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
         say "ufw is on: open the ports with  sudo ufw allow $p2p_port/udp && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp"
@@ -231,5 +234,5 @@ case "$command" in
     up) up ;;
     join) join "$@" ;;
     status) status "$@" ;;
-    *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

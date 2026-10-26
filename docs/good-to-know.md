@@ -123,6 +123,9 @@ other pages explain each part in full; this one is the short list to keep in min
   density and type machinery, the widgets and the Android glue; each app picks its own colors,
   fonts and density. A change to a shared widget shows in both. See
   [The ui crate](development.md#the-ui-crate).
+- **Docker or Podman, by `CONTAINER_ENGINE`.** `docker/compose.sh` and `docker/pow.sh up` run
+  either; rootless Podman needs the unprivileged port bound lowered to 80, or `HTTP_PORT` and
+  `HTTPS_PORT` above 1024. See [Podman](docker.md#podman).
 - **`--peer` is an address, dialed until it answers.** Nodes take a new peer id every start, so
   give `/ip4/…/udp/4001/quic-v1` with no `/p2p/`, and a name looked up first: the node dials no
   `/dns4/`. A peer with no connection is dialed again every 15 seconds. See

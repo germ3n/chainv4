@@ -4,15 +4,17 @@
 # serve from / and /wallet/. Built from the repository's root:
 #
 #   docker build -f docker/Dockerfile -t chainv4 .
+#   podman build --format docker -f docker/Dockerfile -t chainv4 .
 #
-# docker/compose.yaml runs it behind nginx; see docs/docker.md.
+# docker/compose.yaml runs it behind nginx, with Docker or Podman (docker/compose.sh); see
+# docs/docker.md. Images are named with their registry, as Podman wants them.
 
 ARG RUST_VERSION=1.98.1
 ARG DEBIAN=bookworm
 ARG TRUNK_VERSION=0.22.0
 
 # The node. RocksDB and Luau build from source, and bindgen needs libclang.
-FROM rust:${RUST_VERSION}-${DEBIAN} AS node
+FROM docker.io/library/rust:${RUST_VERSION}-${DEBIAN} AS node
 RUN apt-get update \
     && apt-get install -y --no-install-recommends clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -26,12 +28,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # The web apps, built with trunk, which fetches wasm-bindgen and wasm-opt to suit. Its static musl
 # build, as the glibc one wants a newer glibc than Debian's.
-FROM rust:${RUST_VERSION}-${DEBIAN} AS web
+FROM docker.io/library/rust:${RUST_VERSION}-${DEBIAN} AS web
 ARG TRUNK_VERSION
 ARG TARGETARCH
 RUN rustup target add wasm32-unknown-unknown
 RUN set -eu; \
-    case "$TARGETARCH" in arm64) arch=aarch64 ;; amd64) arch=x86_64 ;; *) echo "no trunk for $TARGETARCH" >&2; exit 1 ;; esac; \
+    target=${TARGETARCH:-$(dpkg --print-architecture)}; \
+    case "$target" in arm64) arch=aarch64 ;; amd64) arch=x86_64 ;; *) echo "no trunk for $target" >&2; exit 1 ;; esac; \
     file="trunk-$arch-unknown-linux-musl.tar.gz"; \
     url="https://github.com/trunk-rs/trunk/releases/download/v$TRUNK_VERSION/$file"; \
     cd /tmp; \
@@ -49,7 +52,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cd /src/explorer && trunk build --release \
     && cd /src/wallet && trunk build --release
 
-FROM debian:${DEBIAN}-slim
+FROM docker.io/library/debian:${DEBIAN}-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl jq \
     && rm -rf /var/lib/apt/lists/* \

@@ -1,21 +1,24 @@
 # Docker
 
 `docker/` runs a chainv4 node behind nginx, with HTTPS from a certificate you give it, one from
-Let's Encrypt, or one it makes itself. Three services, in `docker/compose.yaml`:
+Let's Encrypt, or one it makes itself, on Docker or Podman (see [Podman](#podman)). Three
+services, in `docker/compose.yaml`:
 
 | Service | What it does |
 | --- | --- |
-| `node` | A node built with every feature: both consensus kinds, every kind of finality, both engines, the HTTP API with `--stream`, and both indexes. It serves the [explorer](explorer.md) at `/` and the [wallet](wallet.md) at `/wallet/`. |
+| `node` | A node built with every feature: every kind of consensus and finality, both engines, the HTTP API with `--stream`, and both indexes. It serves the [explorer](explorer.md) at `/` and the [wallet](wallet.md) at `/wallet/`. |
 | `nginx` | HTTPS in front of all of it, and port 80 for Let's Encrypt's challenges and a redirect to HTTPS. |
 | `certbot` | Gets and renews the Let's Encrypt certificate. It only runs with `--profile letsencrypt`. |
 
 ## Quick start
 
 ```sh
-cd docker
-cp .env.example .env              # then set what you need
-docker compose up -d --build
+cp docker/.env.example docker/.env    # then set what you need
+docker/compose.sh up -d --build
 ```
+
+`docker/compose.sh` runs Docker's compose, or Podman's when `CONTAINER_ENGINE=podman`; from
+`docker/`, `docker compose` and `podman compose` take the file as it is too.
 
 Then open `https://localhost/` for the explorer and `https://localhost/wallet/` for the wallet. The
 certificate is self-signed at first, so the browser asks once.
@@ -38,7 +41,7 @@ the chain stays the same across restarts:
 one and you edit it (see [Genesis](genesis.md)).
 
 **Changing the chain later** means a new chain: remove the `chain` volume, `docker volume rm
-chainv4_chain`. `docker compose down -v` removes the certificates' volumes too.
+chainv4_chain`. `docker/compose.sh down -v` removes the certificates' volumes too.
 
 **What the node does** follows from the genesis:
 - **`BLOCKS=auto`:** it mines under proof of work, and produces under an authority. Or `mine`,
@@ -62,7 +65,7 @@ key files readable to it.
 | --- | --- |
 | `self-signed` (the default) | Made on the first start, for `SERVER_NAME` as a DNS name or an IP address, and kept in the `tls` volume. Made again when it is a day from expiring. |
 | `provided` | Yours: `fullchain.pem` and `privkey.pem` in `docker/certs`. |
-| `letsencrypt` | Let's Encrypt's, for `SERVER_NAME`. Start with `docker compose --profile letsencrypt up -d`, with `LETSENCRYPT_EMAIL` set. |
+| `letsencrypt` | Let's Encrypt's, for `SERVER_NAME`. Start with `docker/compose.sh --profile letsencrypt up -d`, with `LETSENCRYPT_EMAIL` set. |
 
 **How Let's Encrypt works here:**
 - nginx starts with a self-signed stand-in, and answers HTTP-01 challenges on port 80 from a
@@ -119,7 +122,7 @@ docker/pow.sh status [url]        # either: the chain, height and peers
    rewards to the key, `--no-mdns`, and a self-signed certificate.
 2. **`push`** copies the repository by rsync, without build output, `.git`, databases or keys, to
    `chainv4/` in the VPS's home (`REMOTE_DIR`).
-3. **`up`** runs `docker compose up -d --build`, warns when the machine has under 4 GiB of memory
+3. **`up`** runs `docker/compose.sh up -d --build`, on Docker or Podman, warns when the machine has under 4 GiB of memory
    and swap for the first build, waits for the node, and says which ports to open: **UDP 4001**
    for peers, TCP 80 and 443 for the explorer and wallet, in `ufw` and in the provider's firewall.
 4. **`join`** builds the node here, keeps a copy of it in `POW_HOME`, looks the VPS's name up,
@@ -129,6 +132,30 @@ docker/pow.sh status [url]        # either: the chain, height and peers
 
 Both mine, so both earn rewards, to the same key. `SYMBOL` names the coin at `init`, `P2P_PORT`
 moves the QUIC port, and `docker/pow.sh` alone lists every setting.
+
+## Podman
+
+`CONTAINER_ENGINE=podman`, in the environment or `docker/.env`, has `docker/compose.sh` and
+`docker/pow.sh up` run Podman: `podman compose`, or `podman-compose` where that is missing.
+Unset, they take Docker if it is installed, else Podman. The files are the same for both:
+- **Images are named with their registry,** `docker.io/library/rust` and so on, as Podman refuses
+  short names it cannot resolve without asking.
+- **The health check is in the compose file too,** since an image Podman builds in OCI's format
+  keeps no `HEALTHCHECK`, and nginx waits for the node to be healthy. `compose.sh` builds in
+  Docker's format all the same (`BUILDAH_FORMAT=docker`).
+- **Bind mounts carry `:z`,** which relabels them for SELinux on Fedora and RHEL hosts, Podman's
+  usual ones, and changes nothing elsewhere.
+- **The build's architecture** comes from the build machine when the builder sets no
+  `TARGETARCH`, as older Buildah does not.
+
+**Rootless Podman binds no port below 1024** by default, so not nginx's 80 and 443. Either lower
+the bound, `sudo sysctl net.ipv4.ip_unprivileged_port_start=80` and the same in `/etc/sysctl.d`,
+or set `HTTP_PORT=8080` and `HTTPS_PORT=8443`; `compose.sh` says so when it would fail. The
+node's UDP port, 4001, is above it.
+
+**Restarting after a reboot:** `restart: unless-stopped` brings containers back only once
+Podman's restart service runs: `systemctl --user enable podman-restart.service`, with
+`loginctl enable-linger` for the user, so it runs without a login.
 
 ## Keeping it
 
@@ -163,8 +190,8 @@ on, arm64 or amd64.
   desktop explorer and wallet will not take it: use `provided` or `letsencrypt` for them.
 - **The CLI speaks plain HTTP only,** so `chainv4 send` and `chainv4 light` cannot reach the node
   through nginx. Run them where they reach the API directly, inside the container:
-  `docker compose exec node chainv4 send --node http://127.0.0.1:8080 …`.
+  `docker/compose.sh exec node chainv4 send --node http://127.0.0.1:8080 …`.
 - **A VPS takes the peers' word for nothing.** Its chain is the genesis it was given: a node
   dialing it with another genesis is on another chain, and neither syncs from the other.
 - **One node per compose project.** Several nodes on one host want their own project names and
-  ports: `docker compose -p second …` with other `HTTP_PORT`, `HTTPS_PORT` and `P2P_PORT`.
+  ports: `docker/compose.sh -p second …` with other `HTTP_PORT`, `HTTPS_PORT` and `P2P_PORT`.
