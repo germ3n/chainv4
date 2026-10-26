@@ -4,6 +4,7 @@
 mod accounts;
 mod activity;
 mod contracts;
+pub mod dapp;
 mod names;
 mod overview;
 mod pair;
@@ -157,6 +158,7 @@ pub struct States {
     accounts: accounts::AccountsState,
     settings: settings::SettingsState,
     sign: sign::SignState,
+    pub dapp: dapp::DappState,
 }
 
 impl States {
@@ -173,6 +175,11 @@ impl States {
 
 /// Draws the page.
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
+    // What a site asks comes before any page.
+    if ctx.settings.role() == Role::Online && dapp::show(ui, ctx, &mut states.dapp) {
+        return;
+    }
+
     if ctx.holders.is_empty() && !matches!(*ctx.page, Page::Accounts | Page::Settings) {
         *ctx.page = Page::Accounts;
     }

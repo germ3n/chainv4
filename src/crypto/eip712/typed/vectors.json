@@ -1,0 +1,180 @@
+{
+ "mail": {
+  "json": {
+   "types": {
+    "EIP712Domain": [
+     {
+      "name": "name",
+      "type": "string"
+     },
+     {
+      "name": "version",
+      "type": "string"
+     },
+     {
+      "name": "chainId",
+      "type": "uint256"
+     },
+     {
+      "name": "verifyingContract",
+      "type": "address"
+     }
+    ],
+    "Person": [
+     {
+      "name": "name",
+      "type": "string"
+     },
+     {
+      "name": "wallet",
+      "type": "address"
+     }
+    ],
+    "Mail": [
+     {
+      "name": "from",
+      "type": "Person"
+     },
+     {
+      "name": "to",
+      "type": "Person"
+     },
+     {
+      "name": "contents",
+      "type": "string"
+     }
+    ]
+   },
+   "primaryType": "Mail",
+   "domain": {
+    "name": "Ether Mail",
+    "version": "1",
+    "chainId": 1,
+    "verifyingContract": "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"
+   },
+   "message": {
+    "from": {
+     "name": "Cow",
+     "wallet": "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826"
+    },
+    "to": {
+     "name": "Bob",
+     "wallet": "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB"
+    },
+    "contents": "Hello, Bob!"
+   }
+  },
+  "digest": "0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2",
+  "order": "Mail(Person from,Person to,string contents)Person(string name,address wallet)",
+  "signature": "0x4355c47d63924e8a72e509b65029052eb6c299d53a04e167c5775fd466751c9d07299936d304c153f6443dfa05f40ff007d72911b6f72307f996231605b915621c"
+ },
+ "hard": {
+  "json": {
+   "types": {
+    "EIP712Domain": [
+     {
+      "name": "name",
+      "type": "string"
+     },
+     {
+      "name": "chainId",
+      "type": "uint256"
+     },
+     {
+      "name": "salt",
+      "type": "bytes32"
+     }
+    ],
+    "Item": [
+     {
+      "name": "id",
+      "type": "uint8"
+     },
+     {
+      "name": "tag",
+      "type": "bytes4"
+     },
+     {
+      "name": "owners",
+      "type": "address[]"
+     }
+    ],
+    "Order": [
+     {
+      "name": "items",
+      "type": "Item[]"
+     },
+     {
+      "name": "grid",
+      "type": "int16[2][]"
+     },
+     {
+      "name": "note",
+      "type": "bytes"
+     },
+     {
+      "name": "low",
+      "type": "int8"
+     },
+     {
+      "name": "high",
+      "type": "uint256"
+     },
+     {
+      "name": "ok",
+      "type": "bool"
+     },
+     {
+      "name": "spare",
+      "type": "Item"
+     }
+    ]
+   },
+   "primaryType": "Order",
+   "domain": {
+    "name": "Shop",
+    "chainId": "0x22cc9b2a910f",
+    "salt": "0xabababababababababababababababababababababababababababababababab"
+   },
+   "message": {
+    "items": [
+     {
+      "id": 7,
+      "tag": "0xdeadbeef",
+      "owners": [
+       "0x1111111111111111111111111111111111111111",
+       "0x2222222222222222222222222222222222222222"
+      ]
+     },
+     {
+      "id": "255",
+      "tag": "0x01",
+      "owners": []
+     }
+    ],
+    "grid": [
+     [
+      -1,
+      2
+     ],
+     [
+      "-32768",
+      "32767"
+     ]
+    ],
+    "note": "0x00ff",
+    "low": -128,
+    "high": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+    "ok": true,
+    "spare": null
+   }
+  },
+  "digest": "0x1f753e6d0cc2e0e5de0babc50e245a2bddd47704916a36c71ca91636d64d3179",
+  "order": "Order(Item[] items,int16[2][] grid,bytes note,int8 low,uint256 high,bool ok,Item spare)Item(uint8 id,bytes4 tag,address[] owners)",
+  "signature": "0x767eff96f28f8f5e02558c3524068a79e559745c4ee5f4c489bb8c65ef3b4e560e64083a044d3742492e47098d029d2cedd2c65aeaf947a638ac523224fab3261b"
+ },
+ "personal": {
+  "message": "0x5369676e20696e20746f20636861696e7634",
+  "signature": "0x0026da8ec6c2acddd6f533c20b2926819ac72f6d305e97c4367c71290d5925917a5ec56d275caf7c7d0775507e84a03f079076d8524acdf3b63d480efdfb22fe1b"
+ }
+}

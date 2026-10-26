@@ -455,6 +455,21 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   level again, since each runs it fresh, before the call is attached: a top level sees no `ctx`
   or `storage`.
 
+## The extension's window.ethereum
+
+- **Sites see Ethereum accounts alone.** Only secp256k1 accounts the wallet holds keys for are
+  offered: Ethereum's tools know no Ed25519 address. Watched and MetaMask accounts are not offered.
+- **The provider is off by default.** It needs the browser's leave for every site, asked from a
+  click in the wallet's Settings; until then no page gets `window.ethereum`.
+- **A site's reads are not proven.** They are the node's word at `POST /rpc`, as any dApp's are;
+  only what the wallet itself shows as proven was checked by its light client.
+- **What sites may see is kept by the extension,** in its storage, by origin, apart from the
+  wallets: removing a wallet does not disconnect sites, and a connected site loses an account the
+  wallet no longer has.
+- **Typed data is hashed as MetaMask hashes it.** `chainv4::crypto::eip712::typed` follows
+  eth-sig-util's version 4, checked against it byte for byte: arrays of anything, a struct left out
+  as zero, and the domain's own fields when its types leave EIP712Domain out.
+
 ## The EVM
 
 - **Calls between engines go through a precompile and `evm.call`.** The native precompile at

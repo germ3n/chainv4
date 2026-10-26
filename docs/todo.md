@@ -600,6 +600,16 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   browser wallet, and `chainv4 send --eip712` signs it with a key of its own.
 - [ ] **Contract calls show as bytes in MetaMask.** Only transfers and token transfers have typed
   fields; a call's arguments have no clean EIP-712 form, as it has no unions.
+- [x] **Sites reach the wallet through window.ethereum.** The browser extension gives dApps an
+  EIP-1193 provider, announced by EIP-6963, once Settings let sites ask: reads go to the node,
+  connecting, sending as an Ethereum transaction, `personal_sign` and `eth_signTypedData_v4` are
+  approved in the wallet. See [Wallet](wallet.md#sites).
+- [ ] **Sites on the desktop and Android apps,** which have no extension: WalletConnect would bring
+  them.
+- [ ] **wallet_watchAsset and several chains for sites.** The wallet follows one node's chain, and
+  shows tokens as the registry lists them.
+- [ ] **The offline signer as MetaMask's QR hardware wallet,** ERC-4527: pairing by
+  `ur:crypto-hdkey`, signing `ur:eth-sign-request`s read off MetaMask's animated codes.
 - [ ] **Hardware wallets reach the wallet through MetaMask alone,** and the desktop and Android apps
   reach none. WalletConnect, or USB straight to the device, would.
 - [ ] **The wallet keeps its words as plain strings while unlocked.** The vault seals them at rest,

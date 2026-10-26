@@ -8,7 +8,9 @@
 #
 # The web app is trunk's build, as the node serves from /wallet/. MV3 runs no inline script, so the
 # script trunk writes into index.html moves to boot.js; extension/ holds the manifests, the
-# background script that opens the panel, and access.js, which asks for the node.
+# background script that opens the panel and routes sites' requests, access.js, which asks for the
+# node, bridge.js, between the wallet and the background, and inpage.js and content.js, which give
+# sites window.ethereum once the wallet's Settings let them.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -50,14 +52,14 @@ scripts = re.findall(r'<script type="module">(.*?)</script>', html, re.S)
 if len(scripts) != 1:
     sys.exit(f"expected trunk's one inline script in {page}, found {len(scripts)}")
 (page.parent / "boot.js").write_text(scripts[0].strip() + "\n")
-html = re.sub(r'<script type="module">.*?</script>', '<script type="module" src="./boot.js"></script>\n<script src="./access.js" defer></script>', html, flags=re.S)
+html = re.sub(r'<script type="module">.*?</script>', '<script type="module" src="./boot.js"></script>\n<script src="./access.js" defer></script>\n<script src="./bridge.js" defer></script>', html, flags=re.S)
 page.write_text(html)
 PY
 
 for browser in $browsers; do
     dir="$out/$browser"
     cp -R "$out/web" "$dir"
-    cp -R extension/background.js extension/access.js extension/icons "$dir/"
+    cp -R extension/background.js extension/access.js extension/bridge.js extension/inpage.js extension/content.js extension/icons "$dir/"
     sed "s/VERSION/$version/" "extension/manifest.$browser.json" > "$dir/manifest.json"
     (cd "$dir" && zip -q -X -r "../chainv4-wallet-$browser.zip" .)
     echo "built $here/$dir, and $here/$out/chainv4-wallet-$browser.zip"

@@ -52,6 +52,9 @@ pub enum Ask {
     Offer(String),
     /// A signed transaction.
     Submit(String),
+    /// A JSON-RPC request to POST /rpc, as its body: what a site's transaction is priced and sent
+    /// by, as Ethereum's tools do.
+    Rpc(String),
 }
 
 impl Ask {
@@ -75,12 +78,13 @@ impl Ask {
             Ask::Read(_) => "/offer".to_string(),
             Ask::Offer(_) => "/offer".to_string(),
             Ask::Submit(_) => "/txs".to_string(),
+            Ask::Rpc(_) => "/rpc".to_string(),
         }
     }
 
     fn body(&self) -> Option<&str> {
         match self {
-            Ask::Offer(body) | Ask::Submit(body) | Ask::Call(body) | Ask::Read(body) => Some(body),
+            Ask::Offer(body) | Ask::Submit(body) | Ask::Call(body) | Ask::Read(body) | Ask::Rpc(body) => Some(body),
             _ => None,
         }
     }

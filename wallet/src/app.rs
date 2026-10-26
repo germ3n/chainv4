@@ -345,6 +345,7 @@ impl Wallet {
                     }
                 }
                 (Ask::Contract(_) | Ask::Call(_) | Ask::Read(_), _) => self.views.answered(&ask, &result, &self.settings.contracts),
+                (Ask::Rpc(body), _) => self.views.dapp.answered(body, &result),
                 (Ask::Offer(_) | Ask::Submit(_), _) => {
                     if let Some(sent) = self.views.send.answered(&ask, &result, now) {
                         self.settings.sent.push(sent);
@@ -432,6 +433,31 @@ impl Wallet {
 
         for tx in unsettled {
             self.node.ask(Ask::Receipt(tx));
+        }
+    }
+
+    /// Tells the browser extension what the wallet is, for the sites it answers, and takes what
+    /// they ask, once the wallet is open. Nothing outside the extension.
+    fn sites(&mut self) {
+        if !crate::dapp::available() || self.settings.role() != Role::Online {
+            return;
+        }
+
+        let unlocked = matches!(self.lock, Lock::Open);
+        let accounts: Vec<[u8; 20]> = self
+            .holders
+            .iter()
+            .flat_map(|holder| &holder.keys)
+            .filter_map(|key| match key.public().address() {
+                Address::Secp256k1(bytes) => Some(bytes),
+                _ => None,
+            })
+            .collect();
+        let chain = self.chain.genesis.map(|genesis| chainv4::crypto::ethereum::chain_id(&genesis));
+        crate::dapp::report(&crate::dapp::state(&self.settings.node, chain, &accounts, unlocked));
+
+        if unlocked {
+            self.views.dapp.take(crate::dapp::pending());
         }
     }
 
@@ -644,6 +670,7 @@ impl eframe::App for Wallet {
         let now = now_ms();
         self.take(now, time);
         self.poll(time);
+        self.sites();
         chainv4_ui::layout::suit_touch(ui.ctx());
         let palette = self.palette;
 

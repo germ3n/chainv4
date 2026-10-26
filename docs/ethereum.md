@@ -96,6 +96,13 @@ An account MetaMask holds is a secp256k1 account here: its address on the chain 
 `secp256k1:` and the address MetaMask shows. Pay it from chainv4 with
 `chainv4 send transfer --to secp256k1:0x…`, and it sends, deploys and calls from MetaMask.
 
+## dApps
+
+A dApp in the browser reaches the chain through the wallet's browser extension, as it would
+MetaMask: the extension gives it `window.ethereum`, announced by EIP-6963, once the wallet's
+Settings let sites ask. Reads go to the wallet's node; connecting, sending and signing are
+approved in the wallet. See [Wallet](wallet.md#sites).
+
 ## Foundry and ethers
 
 ```sh

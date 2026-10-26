@@ -187,5 +187,8 @@ pub fn transaction_digest(tx: &Tx, nonce: u64, fee: &FeeOffer, genesis: &Hash) -
     digest(&domain(genesis), &message(tx, nonce, fee))
 }
 
+#[cfg(feature = "abi")]
+pub mod typed;
+
 #[cfg(test)]
 mod tests;

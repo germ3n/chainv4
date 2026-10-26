@@ -66,6 +66,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     // An offline signer follows no node and no chain.
     if ctx.settings.role() != Role::Signer {
         online(ui, ctx, state, node);
+        ui.add_space(14.0);
+        super::dapp::settings(ui, ctx);
     }
 
     ui.add_space(14.0);

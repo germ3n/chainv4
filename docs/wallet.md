@@ -457,6 +457,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo clippy --target wasm32-unknown-unknown -- -D warnings
 trunk build --release
+node --test extension/test.mjs   # the extension's scripts, in a browser of mocks
 ```
 
 **One app, three starts.** The app is a library (`src/lib.rs`), as Android loads it, so the
@@ -500,8 +501,42 @@ WebAuthn to extension pages ("The operation is insecure"), so in its extension t
 no biometrics and the password stays; Chrome's may allow them. A browser that refuses them anywhere
 else gets the same plain message rather than its own.
 
-**CI:** `.github/workflows/extension.yml` builds both on every push to master, keeps the zips as
+**CI:** `.github/workflows/extension.yml` runs the extension's script tests
+(`node --test wallet/extension/test.mjs`), builds both on every push to master, keeps the zips as
 artifacts, and attaches them to a `v*` tag's release.
+
+### Sites
+
+The extension gives sites `window.ethereum`, so a dApp that speaks to MetaMask speaks to the
+wallet: it connects, sends Ethereum transactions, and signs messages and typed data, from the
+wallet's Ethereum accounts, the secp256k1 ones it holds keys for.
+
+- **Off until you turn it on.** Settings, **Sites**, **Let sites ask to connect** shows a bar above
+  the wallet whose **Allow** asks the browser for every site, once; then `inpage.js` and
+  `content.js` run on every page. Turned off, they go, and so does that leave.
+- **Beside MetaMask.** It announces itself by EIP-6963, which dApps list wallets by, as
+  **chainv4 wallet**, and takes `window.ethereum` only when no other wallet did first.
+- **Reads** a site makes, `eth_call`, `eth_getBalance`, blocks, receipts and logs, go to the wallet's
+  node, at `POST /rpc`, from the extension's background, whether the wallet is open or not. They
+  are the node's word, as any dApp's reads are.
+- **One chain:** the wallet's node's. `eth_chainId` says it, and `wallet_switchEthereumChain` to
+  any other fails with 4902: switch the node under Settings instead.
+- **Approving:** a site's connect, send or signature waits for the wallet. An unlocked wallet that
+  is open, in the side panel or a tab, shows it over its page; otherwise a small window of the
+  wallet opens, unlocks, shows it, and closes once nothing is left. Closing it rejects what waits.
+  - **Connect** ticks which Ethereum accounts the site sees; it sees only those, and asks to sign
+    with only those.
+  - **Send** prices what the site left out on the node, its nonce, gas and gas price, and shows the
+    recipient, the amount, a call by name when the contract is kept with its ABI on the Contracts
+    page, and the most it can cost. It goes as an EIP-1559 Ethereum transaction.
+  - **Sign a message** is `personal_sign`, shown as text, or hex when it is not; **sign typed
+    data** is `eth_signTypedData_v4`, its domain and message laid out, with a warning when it
+    names another chain.
+  - With biometrics on, each send and signature waits for them too.
+- **Connected sites** are listed under Settings, **Sites**, each with **Disconnect**. A site may
+  disconnect itself with `wallet_revokePermissions`.
+- **Never:** `eth_sign`, `eth_signTransaction` and the older typed data versions, which sign what
+  cannot be read, are refused with 4200.
 
 ## Android
 

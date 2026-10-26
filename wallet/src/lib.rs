@@ -9,6 +9,7 @@ mod airgap;
 mod app;
 mod biometrics;
 mod chain;
+mod dapp;
 mod format;
 mod history;
 mod keys;
