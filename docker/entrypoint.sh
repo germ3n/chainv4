@@ -15,7 +15,10 @@
 #   VALIDATOR_KEY    the voting key file: /config/validator.key when there is one, else the
 #                    development key
 #   REWARD_TO        where mining rewards go
-#   MINE_THREADS     how many threads mine, 1 by default
+#   MINE_THREADS     how many threads mine, 1 by default; 0 for none, when workers mine
+#   MINING_TOKEN     the token workers must know: /config/mining.token when there is one. With
+#                    one, a mining node takes workers (chainv4 worker) on TCP 4002
+#   PROTOCOL         the name every protocol and topic starts with: chainv4 unless set
 #   PEERS            multiaddrs to dial, separated by spaces
 #   INDEX_EVENTS     which blocks the event index keeps: genesis (the default), a height,
 #   INDEX_ADDRESSES  latest-N, or off; the same for the address index
@@ -43,6 +46,10 @@ if [ -z "${VALIDATOR_KEY:-}" ] && [ -s "$config/validator.key" ]; then
     VALIDATOR_KEY=$config/validator.key
 fi
 
+if [ -z "${MINING_TOKEN:-}" ] && [ -s "$config/mining.token" ]; then
+    MINING_TOKEN=$config/mining.token
+fi
+
 if [ ! -s "$genesis" ]; then
     chainv4 genesis --consensus "$consensus" --finality "$finality" --fees "$fees" --out "$genesis"
     echo "[docker] wrote $genesis: $consensus blocks, $finality finality, $fees fees"
@@ -63,6 +70,8 @@ set -- --db "$data/chain.db" \
     --index-events="${INDEX_EVENTS:-genesis}" \
     --index-addresses="${INDEX_ADDRESSES:-genesis}"
 
+if [ -n "${PROTOCOL:-}" ]; then set -- "$@" --protocol "$PROTOCOL"; fi
+
 blocks=${BLOCKS:-auto}
 
 if [ "$blocks" = auto ]; then
@@ -79,6 +88,13 @@ case "$blocks" in
     mine)
         set -- "$@" --mine --mine-threads "${MINE_THREADS:-1}"
         if [ -n "${REWARD_TO:-}" ]; then set -- "$@" --reward-to "$REWARD_TO"; fi
+
+        if [ -n "${MINING_TOKEN:-}" ] && [ ! -r "$MINING_TOKEN" ]; then
+            echo "[docker] cannot read $MINING_TOKEN as uid $(id -u): taking no workers. Make it readable (docker/pow.sh up does)" >&2
+        elif [ -n "${MINING_TOKEN:-}" ]; then
+            set -- "$@" --mining 0.0.0.0:4002 --mining-token "$MINING_TOKEN"
+            echo "[docker] taking workers on TCP 4002"
+        fi
         ;;
     produce)
         set -- "$@" --produce

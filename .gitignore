@@ -9,4 +9,5 @@
 /docker/.env
 /docker/certs/*.pem
 /docker/config/*.key
+/docker/config/mining.token
 /docker/config/genesis.json

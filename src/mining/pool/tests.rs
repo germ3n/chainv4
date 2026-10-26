@@ -1,0 +1,263 @@
+use {
+    super::*,
+    crate::consensus::{Consensus, Miner, PowConfig, ProofOfWork},
+    crate::mining::worker::{Devices, Worker, WorkerConfig},
+    crate::structs::u256::u256,
+    std::sync::mpsc,
+    std::time::Instant,
+};
+
+const TOKEN: &[u8] = b"0123456789abcdef0123456789abcdef";
+
+/// A header on a chain hashed with the build's default.
+fn header(height: u64, timestamp: u64, difficulty: u128) -> BlockHeader {
+    let chain = HashType::default_chain();
+
+    BlockHeader {
+        parent: Hash::from_bytes(chain, &[height as u8; 32]).unwrap(),
+        height,
+        timestamp,
+        producer: Address::Ed25519([1; 32]),
+        difficulty,
+        tx_root: Hash::zero(chain),
+        proof_root: Hash::zero(chain),
+        receipts_root: Hash::zero(chain),
+        state_root: Hash::zero(chain),
+        gas_used: 0,
+        base_price: u256::ZERO,
+    }
+}
+
+fn port() -> MiningPort {
+    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string() }
+}
+
+/// A pool on a port of its own, its seals coming out of the channel.
+fn pool() -> (Pool, mpsc::Receiver<(Hash, Seal)>) {
+    let (sender, seals) = mpsc::channel();
+    let sender = Mutex::new(sender);
+    let found: Found = Arc::new(move |id, seal| {
+        let _ = State::lock(&sender).send((id, seal));
+    });
+
+    (Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), port(), found).unwrap(), seals)
+}
+
+/// A worker's side of a connection, past the handshake.
+fn raw(pool: &Pool, name: &str) -> (Sender, Receiver) {
+    let stream = TcpStream::connect(pool.listening()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+
+    protocol::connect(stream, TOKEN, "chainv4", name).unwrap()
+}
+
+/// The next message of a type, past pings.
+fn next(receiver: &mut Receiver, kind: &str) -> Value {
+    loop {
+        let message = receiver.receive().unwrap();
+
+        if message["type"] == kind {
+            return message;
+        }
+    }
+}
+
+/// Waits for the pool's report to show what is asked.
+fn until(pool: &Pool, what: impl Fn(&MiningReport) -> bool) -> MiningReport {
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    loop {
+        let report = pool.mining().unwrap();
+
+        if what(&report) {
+            return report;
+        }
+
+        assert!(Instant::now() < deadline, "the report never showed it: {report:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn rules() -> ProofOfWork {
+    ProofOfWork::new(
+        PowConfig {
+            hash: HashType::default_chain(),
+            target_block_ms: 1_000,
+            initial_difficulty: 1_000,
+            min_difficulty: 1,
+        },
+        None,
+    )
+}
+
+/// The child of a parent at the difficulty the rules give it.
+fn child(parent: &BlockHeader, timestamp: u64) -> BlockHeader {
+    let mut child = header(parent.height + 1, timestamp, 0);
+    child.parent = parent.id();
+    child.difficulty = rules().difficulty(std::slice::from_ref(parent), timestamp);
+
+    child
+}
+
+#[test]
+fn a_worker_on_another_thread_seals_blocks_the_rules_accept() {
+    let (mut pool, seals) = pool();
+    let worker = Worker::start(WorkerConfig {
+        node: pool.listening().to_string(),
+        token: TOKEN.to_vec(),
+        name: "rig 1".to_string(),
+        protocol: "chainv4".to_string(),
+        devices: Devices::Cpu(2),
+    })
+    .unwrap();
+    let parent = header(5, 10_000, 500);
+
+    until(&pool, |report| report.workers.len() == 1);
+
+    for timestamp in [10_100, 10_200] {
+        let child = child(&parent, timestamp);
+
+        assert_eq!(pool.start_at(&parent, &[]), 10_001);
+        assert_eq!(pool.seal(&child), None);
+
+        let (id, seal) = seals.recv_timeout(Duration::from_secs(30)).unwrap();
+        let Seal::Work { nonce } = seal else { panic!("not a work seal") };
+
+        assert_eq!(id, child.id());
+        assert!(nonce >= FIRST_RANGE, "a worker's nonce is in its range, above the node's own");
+        assert_eq!(rules().check(&child, &seal, std::slice::from_ref(&parent), &[], timestamp), Ok(()));
+    }
+
+    let report = until(&pool, |report| report.workers.first().is_some_and(|worker| worker.found == 2 && !worker.devices.is_empty()));
+    let worker_report = &report.workers[0];
+
+    assert_eq!((worker_report.name.as_str(), worker_report.refused), ("rig 1", 0));
+    assert_eq!(worker_report.devices[0].name, "CPU, 2 threads");
+    assert_eq!(report.listening, Some(pool.listening().to_string()));
+    assert!(report.devices.is_empty(), "the pool has no devices of its own");
+    assert_eq!(worker.devices().len(), 1);
+
+    drop(worker);
+    until(&pool, |report| report.workers.is_empty());
+}
+
+#[test]
+fn a_worker_without_the_token_gets_no_work() {
+    let (mut pool, _seals) = pool();
+    pool.seal(&header(1, 1, 1_000));
+    let stream = TcpStream::connect(pool.listening()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+
+    assert_eq!(protocol::connect(stream, b"a guess at the token, long enough", "chainv4", "thief").err().as_deref(), Some("the node refused the token"));
+    assert!(pool.mining().unwrap().workers.is_empty());
+}
+
+#[test]
+fn a_worker_of_another_protocol_name_is_told_apart() {
+    let (pool, _seals) = pool();
+    let stream = TcpStream::connect(pool.listening()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+
+    assert_eq!(
+        protocol::connect(stream, TOKEN, "otherchain", "stray").err().as_deref(),
+        Some("a node speaking \"chainv4-mining/1\", not otherchain-mining/1")
+    );
+    assert!(pool.mining().unwrap().workers.is_empty());
+}
+
+#[test]
+fn every_worker_gets_a_range_of_its_own_and_new_work_with_each_header() {
+    let (mut pool, _seals) = pool();
+    let (_to_first, mut first) = raw(&pool, "first");
+    let (_to_second, mut second) = raw(&pool, "second");
+    let one = header(1, 1, 1_000);
+    pool.seal(&one);
+
+    let (a, b) = (next(&mut first, "work"), next(&mut second, "work"));
+    let starts = [a["start"].as_u64().unwrap(), b["start"].as_u64().unwrap()];
+
+    assert_eq!(a["id"], crate::structs::hex::to_hex(&one.id().to_bytes()));
+    assert_eq!((a["difficulty"].as_str(), a["span"].as_u64()), (Some("1000"), Some(SPAN)));
+    assert_eq!(a["hash"], HashType::default_chain().name());
+    assert_eq!(starts[0].abs_diff(starts[1]), SPAN, "{starts:?}");
+    assert!(starts.iter().all(|start| *start >= FIRST_RANGE));
+
+    let two = header(2, 2, 2_000);
+    pool.seal(&two);
+    let again = next(&mut first, "work");
+
+    assert_eq!(again["id"], crate::structs::hex::to_hex(&two.id().to_bytes()));
+    assert_eq!(again["job"].as_u64(), a["job"].as_u64().map(|job| job + 1));
+    assert_eq!(again["start"].as_u64(), Some(starts[0]), "a worker keeps its range");
+}
+
+#[test]
+fn nonces_that_miss_or_come_late_are_refused_and_counted() {
+    let (mut pool, seals) = pool();
+    let (mut to_node, mut from_node) = raw(&pool, "sloppy");
+    // So hard no nonce meets it.
+    pool.seal(&header(1, 1, u128::MAX));
+    let job = next(&mut from_node, "work")["job"].as_u64().unwrap();
+
+    to_node.send(&json!({ "type": "found", "job": job, "nonce": 1 })).unwrap();
+    let short = next(&mut from_node, "verdict");
+    to_node.send(&json!({ "type": "found", "job": job - 1, "nonce": 1 })).unwrap();
+    let stale = next(&mut from_node, "verdict");
+
+    assert_eq!((short["took"].clone(), short["why"].clone()), (json!(false), json!("it does not meet the difficulty")));
+    assert_eq!(stale["took"], false);
+    assert!(seals.try_recv().is_err());
+    until(&pool, |report| report.workers.first().is_some_and(|worker| worker.refused == 2 && worker.found == 0));
+}
+
+#[test]
+fn a_workers_rates_show_in_the_report_and_add_up() {
+    let (pool, _seals) = pool();
+    let (mut to_node, _from_node) = raw(&pool, "rig");
+
+    to_node
+        .send(&json!({ "type": "rate", "devices": [{ "name": "GPU 0", "rate": 200e6 }, { "name": "GPU 1\u{7}", "rate": -5.0 }] }))
+        .unwrap();
+
+    let report = until(&pool, |report| report.workers.first().is_some_and(|worker| worker.devices.len() == 2));
+
+    assert_eq!(report.workers[0].devices[1], DeviceReport { name: "GPU 1".to_string(), rate: 0.0 }, "names are cleaned and rates kept sane");
+    assert_eq!(report.rate(), 200e6);
+}
+
+#[test]
+fn the_nodes_own_miner_mines_beside_the_workers_and_ends_their_work() {
+    let (pool, seals) = pool();
+    let local = Miner::new(Address::Ed25519([1; 32]), HashType::default_chain(), 1, pool.finder());
+    let mut pool = pool.mining_too(Box::new(local));
+    let (mut to_node, mut from_node) = raw(&pool, "late");
+    let parent = header(5, 10_000, 500);
+    let child = child(&parent, 10_100);
+    pool.seal(&child);
+    let job = next(&mut from_node, "work")["job"].as_u64().unwrap();
+
+    let (id, seal) = seals.recv_timeout(Duration::from_secs(30)).unwrap();
+    let Seal::Work { nonce } = seal else { panic!("not a work seal") };
+
+    assert_eq!(id, child.id());
+    assert!(nonce < FIRST_RANGE, "the node's own nonces start at 0");
+    assert_eq!(pool.mining().unwrap().devices[0].name, "CPU, 1 thread");
+
+    // The worker's copy of the same nonce comes after the node found it.
+    to_node.send(&json!({ "type": "found", "job": job, "nonce": nonce })).unwrap();
+
+    assert_eq!(next(&mut from_node, "verdict")["took"], false);
+}
+
+#[test]
+fn dropping_the_pool_closes_its_port_and_its_workers() {
+    let (pool, _seals) = pool();
+    let listening = pool.listening();
+    let (_to_node, mut from_node) = raw(&pool, "rig");
+    until(&pool, |report| report.workers.len() == 1);
+    drop(pool);
+
+    // Past the pings sent before, the connection closed.
+    assert!((0..10).any(|_| from_node.receive().is_err()), "the worker's connection closed");
+    TcpListener::bind(listening).expect("the port is free again");
+}

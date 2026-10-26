@@ -250,9 +250,23 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   nothing while unset, so files from before keep their ids. Under `fees`, the burned share of
   fees sits at `REWARD_POOL`, `contract:0x00…`, a balance nothing but proofs can move.
 - **GPU mining is a feature and a crate of its own.** `cargo build --features gpu` pulls in
-  `chainv4-gpu` and wgpu; `--mine --mine-gpu` then mines on Vulkan, Metal or WebGPU. wgpu is
-  held at 24 there, since the node's libp2p pins the wasm crates newer versions want past. The
-  crate's tests skip where no GPU is found, as on CI.
+  `chainv4-gpu` and wgpu; `--mine --mine-gpu` then mines on Vulkan, Metal or WebGPU, on every GPU
+  unless `--gpus` picks. wgpu is held at 24 there, since the node's libp2p pins the wasm crates
+  newer versions want past. The crate's tests skip where no GPU is found, as on CI.
+- **Workers mine for a node, not for a chain.** `chainv4 worker` keeps no blocks and no genesis:
+  the node tells it the work hash with each job. Rewards go to the node's `--reward-to`, and the
+  node checks every nonce a worker sends, so a worker with the token can waste its own power and
+  nothing else. Worker nonces start at 2^60 and the node's own at 0, so a seal says which found
+  it.
+- **The protocol names changed for everyone.** Sync, Kademlia and identify were `/chainv4/sync/1`,
+  `/chainv4/kad/1` and `/chainv4/1`; they now carry the genesis id, as `/chainv4/{network}/sync/1`
+  and so on, as the gossip topics did already. Nodes from before this change and after it do not talk: upgrade
+  every node of a chain together. `--protocol` replaces `chainv4` in them all.
+- **`--ca-cert` wants a certificate that is not a CA.** rustls refuses a server certificate marked
+  as a CA, which is what `openssl req -x509` makes unless told otherwise; `docker/nginx/tls.sh`
+  now makes its self-signed one with `CA:FALSE`, and makes again one an older version made.
+- **`GET /node` has `mining`,** null for a node that does not mine: the total `rate`, the node's
+  `devices`, `listening` for workers, and `workers`, each with its devices, `found` and `refused`.
 - **A rotating authority's producers are its finality signers, and a staked chain's its FFG
   validators.** `consensus.type: rotating` and `staked` check each block against the voters
   fixed for its epoch, so header checks need state: light clients follow `activation_delay`

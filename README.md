@@ -72,7 +72,10 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--genesis FILE` | | Run the chain a [genesis file](#your-own-chain) describes instead. |
 | `--mine` | | Mine blocks (pow). With `--produce` too, the node does whichever the chain runs, as a chain with [governance](docs/governance.md) may change it. |
 | `--reward-to ADDR` | dev key | Where mining rewards go. |
-| `--mine-threads N` | `1` | How many threads to mine on. |
+| `--mine-threads N` | `1` | How many threads to mine on; `0` for none, when workers mine for the node. |
+| `--mine-gpu` | | Mine on every GPU instead, in a build with `--features gpu`; `--gpus 0,2` picks some, by the numbers `chainv4 gpus` lists. |
+| `--mining ADDR` | | Take [workers](docs/consensus.md#mining-with-workers) on this TCP address, such as `0.0.0.0:4002`, with `--mining-token FILE`: machines running `chainv4 worker` that mine for this node with no chain of their own. |
+| `--protocol NAME` | `chainv4` | The name every protocol and gossip topic starts with, beside the genesis id: give a chain of your own one, so its nodes never mix with another's. Peers under another name are disconnected. |
 | `--produce` | | Produce blocks (authority). |
 | `--producer-key PATH` | dev key | The authority's key file, for `--produce`. |
 | `--validate` | | Vote on [finality](#finality), on chains whose finality takes votes. |

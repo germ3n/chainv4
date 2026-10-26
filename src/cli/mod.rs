@@ -23,14 +23,19 @@ mod layout;
 mod light;
 #[cfg(feature = "client")]
 mod send;
+mod worker;
 
 pub use db::{DbArgs, db};
 pub use layout::{LayoutArgs, layout};
+pub use worker::{WorkerArgs, worker};
+
+#[cfg(feature = "gpu")]
+pub use worker::gpus;
 
 #[cfg(feature = "client")]
 pub use light::{LightArgs, light};
 #[cfg(feature = "client")]
-pub use send::{SendArgs, TxArgs, send};
+pub use send::{SendArgs, TlsArgs, TxArgs, send};
 
 type CliResult<T> = Result<T, Box<dyn Error>>;
 

@@ -45,7 +45,7 @@ governance-electorate = []
 governance-council = []
 # Mining on the GPU, through wgpu: Vulkan, Metal and WebGPU. --mine-gpu picks it over the threads.
 gpu = ["dep:chainv4-gpu", "node"]
-node = ["dep:rayon", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "dep:serde_json", "lvm", "rocksdb"]
+node = ["dep:rayon", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "dep:serde_json", "dep:hmac", "dep:sha2", "lvm", "rocksdb"]
 
 [dependencies]
 rocksdb = { version = "0.25.0", optional = true }
@@ -75,7 +75,7 @@ env_logger = { version = "0.11.11", optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"], optional = true }
 serde_json = { version = "1.0.154", optional = true }
 tokio-stream = { version = "0.1.19", features = ["sync"], optional = true }
-ureq = { version = "3.4.2", default-features = false, optional = true }
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"], optional = true }
 # The interpreter is consensus: an upgrade can change what a module costs, so it is pinned.
 wasmi = { version = "=2.0.0", default-features = false, features = ["std", "validate", "stable", "auto-dispatch"], optional = true }
 mlua = { git = "https://github.com/germ3n/mlua", branch = "main", features = ["luau", "send"], optional = true }

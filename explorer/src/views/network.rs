@@ -5,7 +5,7 @@ use {
     super::{Ctx, Look},
     crate::api::Ask,
     crate::format,
-    crate::model::{NodeView, Peer},
+    crate::model::{Device, MiningView, NodeView, Peer},
     chainv4_ui::{Palette, widgets},
     egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Ui, pos2, vec2},
 };
@@ -55,6 +55,18 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, streaming: &Streaming) {
                 super::section(&mut columns[1], look, "Peers at a glance", |ui| graph(ui, look, node, height));
             });
         }
+    }
+
+    if let Some(mining) = &node.mining {
+        super::section_with(
+            ui,
+            look,
+            "Mining",
+            |ui| {
+                ui.label(RichText::new(format::hashrate(mining.rate)).monospace().color(look.palette.good));
+            },
+            |ui| self::mining(ui, ctx, mining),
+        );
     }
 
     super::section_with(
@@ -133,6 +145,130 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                 });
             });
         });
+    });
+}
+
+/// The node's mining: the hashrate over the last minutes, its own devices, and its workers.
+fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
+    let look = ctx.look;
+    let palette = look.palette;
+    let history = &ctx.store.hashrates;
+
+    if history.len() > 1 {
+        let first = history.front().map_or(0, |(at, _)| *at);
+        let series = super::chart::Series {
+            name: "Hashrate, every device and worker".to_string(),
+            points: history.iter().map(|(at, rate)| [(at - first) as f64, *rate]).collect(),
+            kind: super::chart::Kind::Line,
+            color: look.roles.side,
+            limit: None,
+            unit: format::hashrate,
+            across: |since| format!("{} in", format::span(since as u64)),
+        };
+        super::chart::chart(ui, look, &series, if look.narrow { 84.0 } else { 110.0 });
+        ui.add_space(8.0);
+    }
+
+    let fastest = mining.devices.iter().chain(mining.workers.iter().flat_map(|worker| &worker.devices)).map(|device| device.rate).fold(0.0, f64::max);
+
+    super::facts(ui, look, "mining", |facts| {
+        facts.text("hashrate", format::hashrate(mining.rate));
+
+        match &mining.listening {
+            Some(listening) => facts.row("workers on", |ui| super::copyable(ui, listening)),
+            None => facts.row("workers on", |ui| {
+                ui.label(RichText::new("no mining port: start the node with --mining to take workers").color(palette.muted));
+            }),
+        }
+
+        facts.row("this node", |ui| {
+            ui.vertical(|ui| {
+                if mining.devices.is_empty() {
+                    ui.label(RichText::new("no devices of its own: its workers mine").color(palette.muted));
+                }
+
+                for device in &mining.devices {
+                    self::device(ui, look, device, fastest);
+                }
+            });
+        });
+    });
+
+    ui.add_space(6.0);
+
+    if mining.workers.is_empty() {
+        if mining.listening.is_some() {
+            super::note(ui, look, "No workers connected. Run chainv4 worker --node HOST:PORT --token FILE on a rig to add its GPUs or threads.");
+        }
+
+        return;
+    }
+
+    let found = |worker: &crate::model::MiningWorker| match worker.refused {
+        0 => format!("{} found", worker.found),
+        refused => format!("{} found · {refused} refused", worker.found),
+    };
+
+    if look.narrow {
+        for worker in &mining.workers {
+            super::list_row(ui, look, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&worker.name).strong().color(palette.ink));
+                    ui.label(RichText::new(format::hashrate(worker.rate)).monospace().color(palette.good));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format::ago(worker.since, ctx.now)).small().color(palette.muted));
+                    });
+                });
+                ui.label(RichText::new(&worker.address).monospace().small().color(palette.soft));
+                ui.label(RichText::new(found(worker)).small().color(palette.muted));
+
+                for device in &worker.devices {
+                    self::device(ui, look, device, fastest);
+                }
+            });
+        }
+
+        return;
+    }
+
+    super::table(ui, look, "workers", &["worker", "address", "connected", "hashrate", "devices", "seals"], |ui| {
+        for worker in &mining.workers {
+            ui.label(RichText::new(&worker.name).strong());
+            ui.monospace(&worker.address);
+            ui.label(RichText::new(format::ago(worker.since, ctx.now)).color(palette.muted));
+            ui.monospace(format::hashrate(worker.rate));
+            ui.vertical(|ui| {
+                if worker.devices.is_empty() {
+                    ui.label(RichText::new("not told yet").color(palette.muted));
+                }
+
+                for device in &worker.devices {
+                    self::device(ui, look, device, fastest);
+                }
+            });
+            ui.label(found(worker));
+            ui.end_row();
+        }
+    });
+}
+
+/// A device and its hashrate on one line, and under it a bar as long as its share of the fastest
+/// device's: a fixed width, so a narrow table cell squeezes neither.
+fn device(ui: &mut Ui, look: Look, device: &Device, fastest: f64) {
+    ui.vertical(|ui| {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!("{} · {}", device.name, format::hashrate(device.rate)))
+                    .small()
+                    .color(look.palette.ink),
+            )
+            .extend(),
+        );
+        let (rect, _) = ui.allocate_exact_size(vec2(160.0, 4.0), Sense::hover());
+        ui.painter().rect_filled(rect, 2.0, look.palette.row);
+        let share = (device.rate / fastest.max(1.0)).clamp(0.0, 1.0) as f32;
+        let filled = egui::Rect::from_min_size(rect.min, vec2(rect.width() * share, rect.height()));
+        ui.painter().rect_filled(filled, 2.0, look.palette.good);
     });
 }
 

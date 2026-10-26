@@ -23,9 +23,11 @@ use {
 
 #[derive(clap::Args)]
 pub struct LightArgs {
-    /// The node to follow. It is not trusted: everything it sends is checked.
+    /// The node to follow, http:// or https://. It is not trusted: everything it sends is checked.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     node: String,
+    #[command(flatten)]
+    tls: super::TlsArgs,
     /// Trust the chain a genesis file describes.
     #[arg(long, conflicts_with = "genesis_id")]
     genesis: Option<PathBuf>,
@@ -67,7 +69,7 @@ enum LightQuery {
 /// what it proved.
 pub fn light(args: LightArgs) -> CliResult<()> {
     let node = args.node.trim_end_matches('/').to_string();
-    let agent = agent();
+    let agent = agent(&args.tls)?;
     let started = ok(agent.get(format!("{node}/light")).call())?;
     let params: LightParams = decode(&started["params"])?;
     let genesis: SealedHeader = decode(&started["header"])?;

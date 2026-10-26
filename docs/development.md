@@ -109,7 +109,8 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `node` | The node, the chain and the CLI. |
 | `http` | The HTTP API. |
 | `stream` | `GET /stream`, and the node's `--stream`. Needs `http`. |
-| `client` | `chainv4 send`. |
+| `client` | `chainv4 send`, `light` and `layout --from`: HTTP, and HTTPS through rustls, with `--ca-cert` and `--insecure`. |
+| `gpu` | Off by default: mining on the GPU, through the `chainv4-gpu` crate and wgpu, for `--mine-gpu`, `chainv4 worker --gpu` and `chainv4 gpus`. |
 | `finality-ffg`, `finality-authority`, `finality-depth` | Kinds of finality. |
 
 **What a build must have:** at least one key scheme, and for contracts and nodes, at least one

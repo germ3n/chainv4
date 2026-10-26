@@ -18,6 +18,9 @@ const MAX_MAIN: usize = 20_000;
 const MAX_FEED: usize = 200;
 /// The most waiting transactions kept when the stream adds them.
 const MAX_WAITING: usize = 1_000;
+/// How many node reports' hashrates the mining chart keeps: ten minutes of them, at one every two
+/// seconds.
+const MAX_HASHRATES: usize = 300;
 /// How many blocks a page asks for at most, as the API allows.
 pub const PAGE: u64 = 100;
 
@@ -155,6 +158,9 @@ pub struct Store {
     pub signers: Option<Value>,
     pub evidence: Option<Value>,
     pub feed: VecDeque<Live>,
+    /// The node's total hashrate each time it reported, oldest first, with when: what the mining
+    /// chart draws.
+    pub hashrates: VecDeque<(u64, f64)>,
     /// Why the last asking of something failed, until it succeeds.
     pub failures: HashMap<Ask, Failure>,
     /// What read-only calls answered.
@@ -356,6 +362,28 @@ impl Store {
         }
     }
 
+    /// A node report: the latest, and its hashrate kept for the chart.
+    pub fn node_report(&mut self, node: NodeView, now: u64) {
+        match &node.mining {
+            // Two reports in one frame are one sample: the chart needs time between them.
+            Some(mining) if self.hashrates.back().is_some_and(|(at, _)| *at == now) => {
+                if let Some(last) = self.hashrates.back_mut() {
+                    last.1 = mining.rate;
+                }
+            }
+            Some(mining) => {
+                if self.hashrates.len() == MAX_HASHRATES {
+                    self.hashrates.pop_front();
+                }
+
+                self.hashrates.push_back((now, mining.rate));
+            }
+            None => self.hashrates.clear(),
+        }
+
+        self.node = Some(node);
+    }
+
     /// A peer the stream says came or went.
     pub fn peer(&mut self, change: PeerChange, up: bool, now: u64) {
         let Some(node) = &mut self.node else {
@@ -408,6 +436,37 @@ impl Store {
 pub(crate) mod tests {
     use super::*;
     use crate::model::EventsPage;
+
+    fn mining_node(rate: Option<f64>) -> NodeView {
+        serde_json::from_value(serde_json::json!({
+            "uptime_ms": 1, "listening": [], "producing": true, "validating": false,
+            "mempool": { "count": 0, "capacity": 1 }, "syncing": null, "counters": {}, "peers": [],
+            "mining": rate.map(|rate| serde_json::json!({ "rate": rate, "devices": [], "listening": null, "workers": [] })),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_hashrate_is_kept_for_the_chart_a_sample_a_report() {
+        let mut store = Store::default();
+
+        for at in 0..(MAX_HASHRATES as u64 + 5) {
+            store.node_report(mining_node(Some(at as f64)), at * 2_000);
+        }
+
+        assert_eq!(store.hashrates.len(), MAX_HASHRATES, "the oldest go");
+        assert_eq!(store.hashrates.front(), Some(&(5 * 2_000, 5.0)));
+
+        let last = store.hashrates.back().unwrap().0;
+        store.node_report(mining_node(Some(1e9)), last);
+
+        assert_eq!((store.hashrates.len(), store.hashrates.back()), (MAX_HASHRATES, Some(&(last, 1e9))), "one frame, one sample");
+
+        store.node_report(mining_node(None), last + 2_000);
+
+        assert!(store.hashrates.is_empty(), "a node that stopped mining starts the chart over");
+        assert!(store.node.is_some());
+    }
 
     pub fn block(height: u64, id: &str, parent: &str) -> Summary {
         Summary {

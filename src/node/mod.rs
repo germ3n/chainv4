@@ -39,6 +39,7 @@ mod stream;
 mod sync;
 mod verifier;
 
+pub use crate::mining::pool::MiningPort;
 pub use report::{Counters, Heard, NodeReport, PeerReport};
 pub use stream::NodeEvent;
 
@@ -115,18 +116,79 @@ pub struct Producing {
 }
 
 #[document(
-    summary = "How a node mines, under proof of work.",
+    summary = "How a node mines, under proof of work: on its own CPU threads or GPUs, with workers over its mining port, or both.",
     category = "Node",
-    see_also = "Producing, Miner",
+    see_also = "Producing, Miner, GpuMiner, Pool",
 )]
 #[derive(Clone, Debug)]
 pub struct Mining {
     #[document(summary = "Where the rewards go.")]
     pub reward_to: Address,
-    #[document(summary = "How many threads mine.")]
+    #[document(summary = "How many threads mine; 0 for none, when workers mine for the node instead.")]
     pub threads: usize,
     #[document(summary = "Whether to mine on the GPU instead, in a build with the gpu feature.")]
     pub gpu: bool,
+    #[document(summary = "The GPUs to mine on, by their place in chainv4_gpu::list; None for every one.")]
+    pub gpus: Option<Vec<usize>>,
+    #[document(summary = "The mining port to take workers on, or None to take none.")]
+    pub port: Option<MiningPort>,
+}
+
+impl Mining {
+    /// The producer for proof of work: the node's own miner, a pool for workers, or a pool with
+    /// the node's own miner in it.
+    fn producer(&self, hash: crate::structs::hash::HashType, found: impl Fn(Hash, crate::structs::block::Seal) + Send + Sync + 'static) -> Result<Box<dyn Producer>, NodeError> {
+        use crate::mining::pool::{Found, Pool};
+
+        let found: Found = Arc::new(found);
+        let pool = match &self.port {
+            Some(port) => Some(Pool::new(self.reward_to, hash, port.clone(), found.clone()).map_err(NodeError::Thread)?),
+            None => None,
+        };
+        // The node's own miner, its seals going through the pool when there is one.
+        let finder: Found = match &pool {
+            Some(pool) => Arc::new(pool.finder()),
+            None => found,
+        };
+        let local = self.local(hash, move |id, seal| finder(id, seal))?;
+
+        match (pool, local) {
+            (Some(pool), Some(local)) => Ok(Box::new(pool.mining_too(local))),
+            (Some(pool), None) => {
+                log::info!("[node] mining with workers only, rewards to {}", self.reward_to);
+
+                Ok(Box::new(pool))
+            }
+            (None, Some(local)) => Ok(local),
+            (None, None) => Err(NodeError::Thread("no threads to mine on and no mining port for workers: give --mine-threads 1 or more, or --mining".to_string())),
+        }
+    }
+
+    /// The node's own miner, on its GPUs or CPU threads; None for no threads.
+    fn local(&self, hash: crate::structs::hash::HashType, found: impl Fn(Hash, crate::structs::block::Seal) + Send + Sync + 'static) -> Result<Option<Box<dyn Producer>>, NodeError> {
+        if self.gpu {
+            #[cfg(feature = "gpu")]
+            {
+                log::info!("[node] mining on the GPU, rewards to {}", self.reward_to);
+
+                return Ok(Some(Box::new(crate::consensus::GpuMiner::new(self.reward_to, hash, self.gpus.as_deref(), found).map_err(NodeError::Thread)?)));
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let _ = found;
+
+                return Err(NodeError::Thread("--mine-gpu needs a build with the gpu feature: cargo build --features gpu".to_string()));
+            }
+        }
+
+        if self.threads == 0 {
+            return Ok(None);
+        }
+
+        log::info!("[node] mining on {} threads, rewards to {}", self.threads, self.reward_to);
+
+        Ok(Some(Box::new(crate::consensus::Miner::new(self.reward_to, hash, self.threads, found))))
+    }
 }
 
 impl Producing {
@@ -140,29 +202,11 @@ impl Producing {
         finality: Option<&crate::chain::FinalityConfig>,
         found: impl Fn(Hash, crate::structs::block::Seal) + Send + Sync + 'static,
     ) -> Result<Option<Box<dyn Producer>>, NodeError> {
-        use crate::consensus::{AuthorityProducer, Miner, RotatingProducer, Staked, StakedProducer};
+        use crate::consensus::{AuthorityProducer, RotatingProducer, Staked, StakedProducer};
 
         Ok(match config {
             ConsensusConfig::ProofOfWork(_) => match &self.mine {
-                Some(mining) if mining.gpu => {
-                    #[cfg(feature = "gpu")]
-                    {
-                        log::info!("[node] mining on the GPU, rewards to {}", mining.reward_to);
-
-                        Some(Box::new(crate::consensus::GpuMiner::new(mining.reward_to, hash, found).map_err(NodeError::Thread)?) as Box<dyn Producer>)
-                    }
-                    #[cfg(not(feature = "gpu"))]
-                    {
-                        let _ = found;
-
-                        return Err(NodeError::Thread("--mine-gpu needs a build with the gpu feature: cargo build --features gpu".to_string()));
-                    }
-                }
-                Some(mining) => {
-                    log::info!("[node] mining on {} threads, rewards to {}", mining.threads.max(1), mining.reward_to);
-
-                    Some(Box::new(Miner::new(mining.reward_to, hash, mining.threads, found)))
-                }
+                Some(mining) => Some(mining.producer(hash, found)?),
                 None => {
                     log::info!("[node] the chain runs proof of work, which this node has no --mine for: following only");
 
@@ -435,6 +479,9 @@ impl Node {
             let _ = inbox.send(NetEvent::Sealed { block, seal });
         };
         let interval = self.chain.finality_config().map_or(1, |finality| finality.checkpoint_interval());
+        // The old producer goes first: its threads stop, and a pool lets go of its mining port for
+        // the new one to take.
+        self.producer = None;
         self.producer = setup.build(&config, self.chain.hash(), interval, self.chain.finality_config(), found)?;
         self.producer_for = Some(config);
         self.template = None;

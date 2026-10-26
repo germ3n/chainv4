@@ -18,9 +18,28 @@ use {
     tokio::sync::mpsc as async_mpsc,
 };
 
-const SYNC_PROTOCOL: StreamProtocol = StreamProtocol::new("/chainv4/sync/1");
-const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/chainv4/kad/1");
-const IDENTIFY_PROTOCOL: &str = "/chainv4/1";
+/// The names a node's protocols and topics go by: its protocol name and network in each, so nodes
+/// of two chains share no DHT, no sync and no gossip, and tell each other apart on identify.
+struct Names {
+    sync: StreamProtocol,
+    kad: StreamProtocol,
+    identify: String,
+    topic: String,
+}
+
+impl Names {
+    fn new(protocol: &str, network: &str) -> Result<Names, NetError> {
+        let stream = |name: String| StreamProtocol::try_from_owned(name).map_err(|err| NetError(format!("a protocol name that does not fit: {err}")));
+        let base = format!("/{protocol}/{network}");
+
+        Ok(Names {
+            sync: stream(format!("{base}/sync/1"))?,
+            kad: stream(format!("{base}/kad/1"))?,
+            identify: format!("{base}/1"),
+            topic: base,
+        })
+    }
+}
 /// The largest gossip message: a block with plenty of transactions.
 const MAX_GOSSIP: usize = 8 * 1024 * 1024;
 /// How often a peer given with --peer is dialed again while no connection to it stands: after it
@@ -121,6 +140,8 @@ struct Net {
     blocks: gossipsub::IdentTopic,
     txs: gossipsub::IdentTopic,
     votes: gossipsub::IdentTopic,
+    /// What identify says this node runs: a peer saying otherwise is on another chain.
+    identify: String,
     channels: HashMap<u64, request_response::ResponseChannel<SyncResponse>>,
     next_id: u64,
     /// What waits for the node, counted in here.
@@ -131,6 +152,8 @@ struct Net {
 impl Net {
     fn start(config: &NetConfig, backlog: Arc<Backlog>) -> Result<Net, NetError> {
         let (hash, local) = (config.hash, config.mdns);
+        let names = Names::new(&config.protocol, &config.network)?;
+        let (sync_protocol, kad_protocol, identify_protocol) = (names.sync.clone(), names.kad.clone(), names.identify.clone());
         let mut swarm = SwarmBuilder::with_new_identity()
             .with_tokio()
             .with_quic()
@@ -150,7 +173,7 @@ impl Net {
                 let mut kad = kad::Behaviour::with_config(
                     peer_id,
                     kad::store::MemoryStore::new(peer_id),
-                    kad::Config::new(KAD_PROTOCOL),
+                    kad::Config::new(kad_protocol),
                 );
                 kad.set_mode(Some(kad::Mode::Server));
                 let mdns = match local {
@@ -158,12 +181,12 @@ impl Net {
                     false => None,
                 };
                 let identify = identify::Behaviour::new(identify::Config::new(
-                    IDENTIFY_PROTOCOL.to_string(),
+                    identify_protocol,
                     key.public(),
                 ));
                 let sync = request_response::Behaviour::with_codec(
                     SyncCodec,
-                    [(SYNC_PROTOCOL, request_response::ProtocolSupport::Full)],
+                    [(sync_protocol, request_response::ProtocolSupport::Full)],
                     request_response::Config::default().with_request_timeout(Duration::from_secs(30)),
                 );
 
@@ -178,9 +201,10 @@ impl Net {
             .map_err(net_error)?
             .with_swarm_config(|swarm| swarm.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
-        let blocks = gossipsub::IdentTopic::new(format!("/chainv4/{}/blocks", config.network));
-        let txs = gossipsub::IdentTopic::new(format!("/chainv4/{}/txs", config.network));
-        let votes = gossipsub::IdentTopic::new(format!("/chainv4/{}/votes", config.network));
+        let blocks = gossipsub::IdentTopic::new(format!("{}/blocks", names.topic));
+        let txs = gossipsub::IdentTopic::new(format!("{}/txs", names.topic));
+        let votes = gossipsub::IdentTopic::new(format!("{}/votes", names.topic));
+        log::info!("[net] protocols {}/…", names.topic);
         swarm.behaviour_mut().gossipsub.subscribe(&blocks).map_err(net_error)?;
         swarm.behaviour_mut().gossipsub.subscribe(&txs).map_err(net_error)?;
         swarm.behaviour_mut().gossipsub.subscribe(&votes).map_err(net_error)?;
@@ -211,6 +235,7 @@ impl Net {
             blocks,
             txs,
             votes,
+            identify: names.identify,
             channels: HashMap::new(),
             next_id: 0,
             backlog,
@@ -331,6 +356,16 @@ impl Net {
                 info,
                 ..
             })) => {
+                // A node of another chain, or of this code under another protocol name: found on
+                // the local network, or dialed by mistake. It shares nothing with this one.
+                if info.protocol_version != self.identify {
+                    log::info!("[net] {peer_id} runs {}, not {}: disconnecting", info.protocol_version, self.identify);
+                    self.swarm.behaviour_mut().kad.remove_peer(&peer_id);
+                    let _ = self.swarm.disconnect_peer_id(peer_id);
+
+                    return true;
+                }
+
                 for address in info.listen_addrs {
                     self.swarm.behaviour_mut().kad.add_address(&peer_id, address);
                 }
@@ -494,8 +529,51 @@ mod tests {
             mdns: true,
             hash: HashType::default_chain(),
             network: network.to_string(),
+            protocol: crate::net::DEFAULT_PROTOCOL.to_string(),
             backlog,
         }
+    }
+
+    #[test]
+    fn protocols_and_topics_carry_the_name_and_the_network() {
+        let names = Names::new("mychain", "00aa11bb22cc33dd").unwrap();
+
+        assert_eq!(names.sync.as_ref(), "/mychain/00aa11bb22cc33dd/sync/1");
+        assert_eq!(names.kad.as_ref(), "/mychain/00aa11bb22cc33dd/kad/1");
+        assert_eq!(names.identify, "/mychain/00aa11bb22cc33dd/1");
+        assert_eq!(names.topic, "/mychain/00aa11bb22cc33dd");
+        assert_eq!(crate::net::protocol_name("my-chain.v2_test").as_deref(), Ok("my-chain.v2_test"));
+
+        for wrong in ["", "MyChain", "-chain", "a/b", "chain name", &"x".repeat(33)] {
+            assert!(crate::net::protocol_name(wrong).is_err(), "{wrong:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "opens real sockets on 127.0.0.1"]
+    fn a_peer_under_another_protocol_name_is_disconnected() {
+        let network = format!("names-{}", PeerId::random());
+        let alone = |protocol: &str, peers: Vec<Multiaddr>| NetConfig {
+            mdns: false,
+            protocol: protocol.to_string(),
+            ..config(&network, BacklogLimits::default(), peers)
+        };
+        let ours = spawn(alone("chainv4", Vec::new())).unwrap();
+        let address = wait_for(&ours, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+        let theirs = spawn(alone("otherchain", vec![address])).unwrap();
+        let peer = wait_for(&ours, |event| match event {
+            NetEvent::PeerUp { peer, .. } => Some(peer),
+            _ => None,
+        });
+
+        assert_eq!(wait_for(&ours, |event| match event {
+            NetEvent::PeerDown(down) => Some(down),
+            _ => None,
+        }), peer, "identify told them apart");
+        drop(theirs);
     }
 
     /// The next event matching, waiting up to a deadline.

@@ -181,6 +181,30 @@ pub struct CheckpointAnswer {
 }
 
 #[document(
+    summary = "The protocol name a node uses unless --protocol gives another.",
+    category = "Node",
+    see_also = "NetConfig::protocol, protocol_name",
+)]
+pub const DEFAULT_PROTOCOL: &str = "chainv4";
+
+#[document(
+    summary = "Checks a protocol name: 1 to 32 lowercase letters, digits, dashes, dots or underscores, starting with a letter or digit, so it reads the same in every protocol id and topic.",
+    category = "Node",
+    see_also = "NetConfig::protocol",
+    returns = "The name, or why it is not one.",
+)]
+pub fn protocol_name(text: &str) -> Result<String, String> {
+    let fits = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_');
+
+    match text.chars().next() {
+        _ if text.is_empty() || text.len() > 32 => Err(format!("a protocol name is 1 to 32 characters, not {}", text.len())),
+        Some(first) if !first.is_ascii_alphanumeric() => Err("a protocol name starts with a letter or digit".to_string()),
+        _ if !text.chars().all(fits) => Err("a protocol name holds lowercase letters, digits, dashes, dots and underscores only".to_string()),
+        _ => Ok(text.to_string()),
+    }
+}
+
+#[document(
     summary = "Where and how to network.",
     category = "Node",
     see_also = "spawn",
@@ -195,8 +219,10 @@ pub struct NetConfig {
     pub mdns: bool,
     #[document(summary = "The chain's hash, which gossip messages are told apart by.")]
     pub hash: crate::structs::hash::HashType,
-    #[document(summary = "Names the network in gossip topics, so nodes on different chains ignore each other. Usually derived from the genesis id.")]
+    #[document(summary = "Names the network in gossip topics and the sync, Kademlia and identify protocols, so nodes on different chains ignore each other. Usually derived from the genesis id.")]
     pub network: String,
+    #[document(summary = "The name every protocol and topic starts with: chainv4 unless --protocol gives another, so chains built from this code can keep apart even on the same genesis. A peer whose name or network differs is disconnected once identify says so.")]
+    pub protocol: String,
     #[document(summary = "How much gossip may wait for the node, in all and from any one peer.")]
     pub backlog: BacklogLimits,
 }

@@ -246,6 +246,8 @@ pub(super) struct Job {
     pub(super) generation: u64,
     /// The block id and difficulty to find a nonce for; None once one was found.
     pub(super) work: Option<(Hash, u128)>,
+    /// The first nonce to try: 0 for a node's own miner, and the start of its range for a worker.
+    pub(super) start: u64,
     pub(super) stopped: bool,
 }
 
@@ -260,6 +262,7 @@ impl Shared {
             job: Mutex::new(Job {
                 generation: 0,
                 work: None,
+                start: 0,
                 stopped: false,
             }),
             changed: Condvar::new(),
@@ -270,8 +273,9 @@ impl Shared {
         self.job.lock().expect("mining threads never panic holding the job")
     }
 
-    /// Waits for a job newer than the one finished, and returns it; None once the miner stopped.
-    pub(super) fn next_job(&self, finished: u64) -> Option<(u64, Hash, u128)> {
+    /// Waits for a job newer than the one finished, and returns its generation, block id,
+    /// difficulty and first nonce; None once the miner stopped.
+    pub(super) fn next_job(&self, finished: u64) -> Option<(u64, Hash, u128, u64)> {
         let mut job = self.lock();
 
         while !job.stopped && (job.work.is_none() || job.generation == finished) {
@@ -284,7 +288,7 @@ impl Shared {
 
         let (id, difficulty) = job.work.expect("checked above");
 
-        Some((job.generation, id, difficulty))
+        Some((job.generation, id, difficulty, job.start))
     }
 
     /// Whether a job is still the current one, so a thread goes on with it.
@@ -323,14 +327,101 @@ pub(super) fn work_target(difficulty: u128) -> [u8; 32] {
 }
 
 #[document(
+    summary = "The devices mining on threads of their own: a CPU's threads, or GPUs. work hands every thread a block id to find a nonce for, each trying its own share of the nonces, and returns at once; whichever finds one first reports it through the callback. New work replaces the old, and dropping the rig stops the threads. Miner and GpuMiner mine on one for the node, and a worker on one for the node it mines for.",
+    category = "Consensus",
+    see_also = "Miner, GpuMiner, DeviceReport",
+)]
+pub struct Rig {
+    pub(super) shared: Arc<Shared>,
+    pub(super) threads: Vec<JoinHandle<()>>,
+    /// Each device's name and the nonces it tried.
+    pub(super) devices: Vec<(String, Arc<super::Meter>)>,
+}
+
+impl Rig {
+    #[document(
+        parent = "Rig",
+        summary = "Starts mining threads on the CPU, idle until the first work.",
+        params = {
+            hash = "The chain's work hash, from genesis.",
+            threads = "How many threads to mine on; at least one.",
+            found = "Called from a mining thread with the block id and its seal when a nonce is found.",
+        },
+    )]
+    pub fn cpu(hash: HashType, threads: usize, found: impl Fn(Hash, Seal) + Send + Sync + 'static) -> Rig {
+        let shared = Arc::new(Shared::new());
+        let found = Arc::new(found);
+        let meter = Arc::new(super::Meter::default());
+        let count = threads.max(1);
+        let threads = (0..count)
+            .map(|index| {
+                let (shared, found, meter) = (shared.clone(), found.clone(), meter.clone());
+
+                std::thread::Builder::new()
+                    .name(format!("miner-{index}"))
+                    .spawn(move || mine(&shared, hash, index as u64, count as u64, &*found, &meter))
+                    .expect("the mining thread starts")
+            })
+            .collect();
+        let name = format!("CPU, {count} thread{}", if count == 1 { "" } else { "s" });
+
+        Rig {
+            shared,
+            threads,
+            devices: vec![(name, meter)],
+        }
+    }
+
+    #[document(
+        parent = "Rig",
+        summary = "Mines a block id: every thread drops what it had and starts on this.",
+        params = {
+            id = "The block id to find a nonce for.",
+            difficulty = "What its work hash must meet.",
+            start = "The first nonce to try; the threads go up from it.",
+        },
+    )]
+    pub fn work(&self, id: Hash, difficulty: u128, start: u64) {
+        let mut job = self.shared.lock();
+        job.generation += 1;
+        job.work = Some((id, difficulty));
+        job.start = start;
+        self.shared.changed.notify_all();
+    }
+
+    #[document(parent = "Rig", summary = "Stops mining until the next work, as when the node it mines for is gone.")]
+    pub fn rest(&self) {
+        let mut job = self.shared.lock();
+        job.generation += 1;
+        job.work = None;
+        self.shared.changed.notify_all();
+    }
+
+    #[document(parent = "Rig", summary = "Each device and its hashrate.")]
+    pub fn devices(&self) -> Vec<super::DeviceReport> {
+        self.devices.iter().map(|(name, meter)| super::DeviceReport { name: name.clone(), rate: meter.rate() }).collect()
+    }
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.shared.lock().stopped = true;
+        self.shared.changed.notify_all();
+
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[document(
     summary = "Mines on threads of its own. seal hands the header to every thread, each trying its own share of the nonces, and returns at once; whichever thread finds a nonce first reports it through the callback. A new header replaces the old one, and dropping the miner stops the threads.",
     category = "Consensus",
-    see_also = "ProofOfWork, Producer",
+    see_also = "ProofOfWork, Producer, Rig",
 )]
 pub struct Miner {
     address: Address,
-    shared: Arc<Shared>,
-    threads: Vec<JoinHandle<()>>,
+    rig: Rig,
 }
 
 impl Miner {
@@ -345,25 +436,9 @@ impl Miner {
         },
     )]
     pub fn new(address: Address, hash: HashType, threads: usize, found: impl Fn(Hash, Seal) + Send + Sync + 'static) -> Miner {
-        let shared = Arc::new(Shared::new());
-        let found = Arc::new(found);
-        let count = threads.max(1);
-        let threads = (0..count)
-            .map(|index| {
-                let shared = shared.clone();
-                let found = found.clone();
-
-                std::thread::Builder::new()
-                    .name(format!("miner-{index}"))
-                    .spawn(move || mine(&shared, hash, index as u64, count as u64, &*found))
-                    .expect("the mining thread starts")
-            })
-            .collect();
-
         Miner {
             address,
-            shared,
-            threads,
+            rig: Rig::cpu(hash, threads, found),
         }
     }
 }
@@ -379,34 +454,27 @@ impl Producer for Miner {
     }
 
     fn seal(&mut self, header: &BlockHeader) -> Option<Seal> {
-        let mut job = self.shared.lock();
-        job.generation += 1;
-        job.work = Some((header.id(), header.difficulty));
-        self.shared.changed.notify_all();
+        self.rig.work(header.id(), header.difficulty, 0);
 
         None
     }
-}
 
-impl Drop for Miner {
-    fn drop(&mut self) {
-        self.shared.lock().stopped = true;
-        self.shared.changed.notify_all();
-
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
-        }
+    fn mining(&self) -> Option<super::MiningReport> {
+        Some(super::MiningReport {
+            devices: self.rig.devices(),
+            ..Default::default()
+        })
     }
 }
 
-/// One mining thread: tries nonces index, index + stride, … on the current job until it finds
-/// one, the job changes, or the miner stops.
-fn mine(shared: &Shared, hash: HashType, index: u64, stride: u64, found: &(dyn Fn(Hash, Seal) + Send + Sync)) {
+/// One mining thread: tries nonces start + index, start + index + stride, … on the current job
+/// until it finds one, the job changes, or the miner stops.
+fn mine(shared: &Shared, hash: HashType, index: u64, stride: u64, found: &(dyn Fn(Hash, Seal) + Send + Sync), meter: &super::Meter) {
     let mut finished = 0;
 
-    while let Some((generation, id, difficulty)) = shared.next_job(finished) {
+    while let Some((generation, id, difficulty, start)) = shared.next_job(finished) {
         let search = Search::new(hash, &id);
-        let mut nonce = index;
+        let mut nonce = start.wrapping_add(index);
 
         'search: loop {
             for _ in 0..NONCES_PER_CHECK {
@@ -418,6 +486,8 @@ fn mine(shared: &Shared, hash: HashType, index: u64, stride: u64, found: &(dyn F
 
                 nonce = nonce.wrapping_add(stride);
             }
+
+            meter.add(NONCES_PER_CHECK);
 
             if !shared.current(generation) {
                 break;

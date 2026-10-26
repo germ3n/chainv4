@@ -15,6 +15,8 @@ pub mod light;
 #[cfg(feature = "node")]
 pub mod mempool;
 #[cfg(feature = "node")]
+pub mod mining;
+#[cfg(feature = "node")]
 pub mod net;
 #[cfg(feature = "node")]
 pub mod node;

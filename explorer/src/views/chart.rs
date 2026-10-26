@@ -25,6 +25,13 @@ pub struct Series {
     pub limit: Option<(f64, &'static str)>,
     /// How a value reads.
     pub unit: fn(f64) -> String,
+    /// How a point's place along reads: a block's height, or a time.
+    pub across: fn(f64) -> String,
+}
+
+/// A point's place along, as a block height.
+pub fn block(height: f64) -> String {
+    format!("block {}", height as u64)
 }
 
 /// The highest value a scale must reach, rounded up to one with a single significant digit or two,
@@ -136,7 +143,7 @@ pub fn chart(ui: &mut Ui, look: Look, series: &Series, height: f32) {
         painter.line_segment([pos2(point.x, plot.top()), pos2(point.x, plot.bottom())], Stroke::new(1.0, palette.soft.gamma_multiply(0.4)));
         painter.circle_filled(point, 3.0, series.color);
         response.on_hover_ui_at_pointer(|ui| {
-            ui.label(RichText::new(format!("block {}", nearest[0] as u64)).small().color(palette.muted));
+            ui.label(RichText::new((series.across)(nearest[0])).small().color(palette.muted));
             ui.label(RichText::new((series.unit)(nearest[1])).monospace());
         });
     }

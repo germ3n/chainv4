@@ -164,12 +164,90 @@ authority finality, `staked` needs FFG.
 `chainv4-gpu` crate (`gpu/`) drives the GPU through wgpu, on Vulkan (Linux and Windows, NVIDIA
 and AMD alike), Metal (macOS) and WebGPU, with one compute kernel in WGSL for every work hash a
 genesis may name: SHA-256, BLAKE3, BLAKE2s, BLAKE2b and Keccak-256. The `GpuMiner` is a
-`Producer` like the `Miner`, but with one thread that hands the GPU the template's work a million
-nonces at a time (`Gpu::search`) and reports the lowest one that meets the target, which is the
-one the threads would have found first. The GPU hashes exactly what the CPU does, the same
+`Producer` like the `Miner`, but with a thread for each GPU that hands it the template's work a
+million nonces at a time (`Gpu::search`) and reports the lowest one that meets the target, which
+is the one the threads would have found first. The GPU hashes exactly what the CPU does, the same
 `"chainv4 work"`, block id and nonce, and the crate's tests hash against the CPU crates on
 whatever GPU runs them. It logs its hashrate every 30 seconds; a GPU that fails stops mining,
-and the log says so. CUDA has no kernel of its own: NVIDIA cards mine through Vulkan.
+and the log says so, while the others go on. CUDA has no kernel of its own: NVIDIA cards mine
+through Vulkan.
+
+**Every GPU, or those picked.** `--mine-gpu` mines on every GPU the machine has; `--gpus 0,2`
+picks some, by the numbers `chainv4 gpus` lists. The node logs the same list as it starts. GPU
+*i* of *n* takes every *n*-th batch of a million nonces from the *i*-th, so no two try the same.
+A GPU listed through two backends, such as Vulkan and GL, is listed once, by its native one, and
+software rasterizers are left out.
+
+**The rig.** `Miner` and `GpuMiner` are both a `Rig`, its threads and devices, with an address
+for the blocks; a worker mines on a `Rig` too, with no blocks of its own. `Rig::work` hands every
+thread a block id, its difficulty and the nonce to start from; `Rig::devices` says each device's
+hashrate, measured by a `Meter` over the last three seconds.
+
+**Mining flags:**
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--mine` | off | Mine, under proof of work. |
+| `--reward-to ADDRESS` | the development key's | Where the block rewards go. |
+| `--mine-threads N` | 1 | CPU threads to mine on; 0 for none, when workers mine for the node. |
+| `--mine-gpu` | off | Mine on the GPUs instead, in a build with the `gpu` feature. |
+| `--gpus 0,2` | every one | The GPUs `--mine-gpu` mines on. |
+| `--mining ADDR` | none | Take workers on this TCP address, such as `0.0.0.0:4002`. |
+| `--mining-token FILE` | none | The token workers must know, for `--mining`: at least 32 characters. |
+
+## Mining with workers
+
+A node with many GPUs across machines needs only one node: the others run `chainv4 worker`,
+which mines for it over its **mining port** and keeps no chain at all.
+
+```sh
+openssl rand -hex 32 > mining.token        # once; give the workers a copy
+chainv4 --mine --mine-threads 0 --mining 0.0.0.0:4002 --mining-token mining.token …
+chainv4 worker --node 203.0.113.7:4002 --token mining.token --gpu          # every GPU
+chainv4 worker --node 203.0.113.7:4002 --token mining.token --gpu --gpus 1 # one of them
+chainv4 worker --node 203.0.113.7:4002 --token mining.token --threads 8    # CPU threads
+```
+
+**How it goes:**
+1. The node's producer is a `Pool`: the node's own miner, if it has threads or GPUs, and the
+   workers connected.
+2. Each new template's work goes to every worker as a `work` message: the job's number, the block
+   id, its difficulty, the work hash, and the start of the worker's **range** of nonces.
+3. The ranges start at 2^60, far above anything the node's own devices reach, and are 2^48 apart,
+   one for each connection, so no two workers try the same nonces. A worker splits its range
+   among its own GPUs or threads the way a node does.
+4. A worker sends `found` with a nonce. The node checks it meets the difficulty before it becomes
+   the seal: a worker cannot make the node publish a bad block. A nonce that misses, or comes for
+   a job already over, is refused and counted.
+5. Every five seconds a worker sends its devices and their hashrates (`rate`), for the node's
+   report and the explorer.
+6. The node pings a worker it sent nothing to in 20 seconds; either side takes the other for
+   gone after 60 seconds of silence, and the worker connects again every 5 seconds until it is
+   back.
+
+**The protocol** is lines of JSON over TCP (`src/mining/protocol.rs`):
+- **The handshake proves the token without sending it.** The node sends a random challenge; the
+  worker answers with its name, a nonce of its own, and an HMAC-SHA256 of both under the token;
+  the node answers with its own HMAC, so the worker knows it found the node meant. Both say the
+  protocol, `{name}-mining/1` for the `--protocol` name, and a worker of another name is turned
+  away before anything else.
+- **Every message after carries an HMAC** under a session key both derive from the token and
+  both randoms, over its direction, its number in that direction and its text. A message changed,
+  made up, replayed or dropped does not check, and the connection ends.
+- **It is not encrypted.** Anyone on the path sees the work and the nonces, which only matter
+  until the block is out, and cannot change them. Put the port behind a VPN or an SSH tunnel to
+  hide even that.
+
+**What it does not do:**
+- **No shares.** Workers send only nonces that meet the block's difficulty, so a slow worker's
+  part shows in its hashrate, not in what it found. The node pays nobody; the rewards go to its
+  `--reward-to`, and splitting them among owners is up to them.
+- **The node's limits:** at most 256 connections, handshakes included, each with 10 seconds to
+  finish it.
+
+`GET /node` reports it all under `mining`: the node's devices, `listening`, and each worker with
+its address, when it connected, its devices, and what it found and had refused. The explorer's
+Network page shows it with a hashrate chart, and the Overview a tile.
 
 ## Things to keep in mind
 

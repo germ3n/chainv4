@@ -13,7 +13,8 @@ mode=${TLS_MODE:-self-signed}
 name=${SERVER_NAME:-localhost}
 mkdir -p "$tls"
 
-# A certificate for this name alone, by IP address or DNS name, as it is.
+# A certificate for this name alone, by IP address or DNS name, as it is. It is no CA, which
+# rustls, and so chainv4 send --ca-cert, refuses to take as a server's own certificate.
 self_sign() {
     case "$name" in
         *[!0-9.]*) alt="DNS:$name" ;;
@@ -21,13 +22,16 @@ self_sign() {
     esac
 
     openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$name" \
-        -addext "subjectAltName=$alt" -keyout "$tls/privkey.pem" -out "$tls/fullchain.pem" 2> /dev/null
+        -addext "subjectAltName=$alt" -addext "basicConstraints=critical,CA:FALSE" \
+        -addext "extendedKeyUsage=serverAuth" -keyout "$tls/privkey.pem" -out "$tls/fullchain.pem" 2> /dev/null
     echo "[tls] made a self-signed certificate for $name"
 }
 
 case "$mode" in
     self-signed)
-        if [ ! -s "$tls/fullchain.pem" ] || ! openssl x509 -in "$tls/fullchain.pem" -noout -checkend 86400 > /dev/null; then
+        # Made again when it is missing, about to expire, or made by an older tls.sh as a CA.
+        if [ ! -s "$tls/fullchain.pem" ] || ! openssl x509 -in "$tls/fullchain.pem" -noout -checkend 86400 > /dev/null \
+            || openssl x509 -in "$tls/fullchain.pem" -noout -text | grep -q 'CA:TRUE'; then
             self_sign
         fi
         ;;

@@ -180,6 +180,29 @@ pub fn node(report: &NodeReport) -> Value {
             "per_peer": report.backlog.1.per_peer,
         },
         "peers": report.peers.iter().map(peer).collect::<Vec<_>>(),
+        "mining": report.mining.as_ref().map(mining),
+    })
+}
+
+/// How a node's mining goes: its devices, the workers mining for it, and the total hashrate.
+fn mining(report: &crate::consensus::MiningReport) -> Value {
+    let devices = |devices: &[crate::consensus::DeviceReport]| -> Vec<Value> {
+        devices.iter().map(|device| json!({ "name": device.name, "rate": device.rate })).collect()
+    };
+
+    json!({
+        "rate": report.rate(),
+        "devices": devices(&report.devices),
+        "listening": report.listening,
+        "workers": report.workers.iter().map(|worker| json!({
+            "name": worker.name,
+            "address": worker.address,
+            "since": worker.since,
+            "rate": worker.devices.iter().map(|device| device.rate).sum::<f64>(),
+            "devices": devices(&worker.devices),
+            "found": worker.found,
+            "refused": worker.refused,
+        })).collect::<Vec<_>>(),
     })
 }
 

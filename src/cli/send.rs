@@ -25,9 +25,11 @@ const POLL: Duration = Duration::from_millis(500);
 
 #[derive(clap::Args)]
 pub struct SendArgs {
-    /// The node's HTTP API.
+    /// The node's HTTP API: http://, or https:// behind TLS.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub node: String,
+    #[command(flatten)]
+    pub tls: TlsArgs,
     /// The key file to sign with, from keygen. Without one, the well-known development key signs.
     #[arg(long)]
     pub key: Option<PathBuf>,
@@ -228,7 +230,7 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     let keypair = signer(args.key.as_deref())?;
     let sender = keypair.public().address();
     let node = args.node.trim_end_matches('/');
-    let agent = agent();
+    let agent = agent(&args.tls)?;
     let account = ok(agent.get(format!("{node}/accounts/{sender}")).call())?;
     let nonce = account["nonce"].as_u64().ok_or("the node sent no nonce")?;
     let status = ok(agent.get(format!("{node}/status")).call())?;
@@ -600,13 +602,52 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
 type Response = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
 
+/// How to trust a node's HTTPS certificate: Mozilla's roots by default, as a browser would.
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct TlsArgs {
+    /// Trust the certificates in this PEM file instead of the usual roots: a node's self-signed
+    /// one (docker/nginx makes it as fullchain.pem), or a private CA's.
+    #[arg(long, value_name = "FILE")]
+    pub ca_cert: Option<PathBuf>,
+    /// Do not check the node's certificate at all. Anyone between you and the node could read and
+    /// change what you send: only for trying a node out on a network you trust.
+    #[arg(long, conflicts_with = "ca_cert")]
+    pub insecure: bool,
+}
+
 /// A client for a node's API: errors come back as answers, so their message can be shown.
-pub(super) fn agent() -> Agent {
-    Agent::config_builder()
+pub(super) fn agent(tls: &TlsArgs) -> CliResult<Agent> {
+    let mut config = ureq::tls::TlsConfig::builder();
+
+    if let Some(path) = &tls.ca_cert {
+        let pem = std::fs::read(path).map_err(|err| format!("--ca-cert {}: {err}", path.display()))?;
+        let certs = ureq::tls::parse_pem(&pem)
+            .filter_map(|item| match item {
+                Ok(ureq::tls::PemItem::Certificate(cert)) => Some(Ok(cert)),
+                Ok(_) => None,
+                Err(err) => Some(Err(err)),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("--ca-cert {}: {err}", path.display()))?;
+
+        if certs.is_empty() {
+            return Err(format!("--ca-cert {} holds no certificate", path.display()).into());
+        }
+
+        config = config.root_certs(ureq::tls::RootCerts::new_with_certs(&certs));
+    }
+
+    if tls.insecure {
+        log::warn!("--insecure: the node's certificate is not checked");
+        config = config.disable_verification(true);
+    }
+
+    Ok(Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(30)))
+        .tls_config(config.build())
         .build()
-        .into()
+        .into())
 }
 
 /// The JSON a request came back with, or the node's error.

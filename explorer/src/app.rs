@@ -198,7 +198,11 @@ impl Explorer {
                     store.status = Some(status);
                 }
             }
-            Ask::Node => store.node = parse::<NodeView>(value),
+            Ask::Node => {
+                if let Some(node) = parse::<NodeView>(value) {
+                    store.node_report(node, now);
+                }
+            }
             Ask::Mempool => store.mempool = parse::<Mempool>(value),
             Ask::Forks => {
                 if let Some(forks) = parse::<Forks>(value) {

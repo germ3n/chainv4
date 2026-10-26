@@ -9,8 +9,14 @@
 #                  [-i KEY] [-p PORT]  -i the SSH private key to log in with, -p its port
 #   docker/pow.sh up                  on the VPS, in that copy: build and start the stack, with
 #                                     Docker or Podman
-#   docker/pow.sh join host           here: a node of the same chain that mines and dials the VPS
-#   docker/pow.sh status [url]        either: the node's chain, height and peers
+#   docker/pow.sh join host           here: a node of the same chain that mines and dials the VPS,
+#                  [--gpu | --cpu]     on the GPU or the CPU; asked when neither is given
+#   docker/pow.sh token               here, once: the token workers mine for the VPS with; push
+#                                     takes it there, and up starts taking workers
+#   docker/pow.sh worker host         any rig: mine for the VPS's node over its mining port, with
+#      [--gpu [--gpus 0,2] | --cpu]    no chain of its own: every GPU, those picked, or threads
+#   docker/pow.sh status [url]        either: the node's chain, height, peers and mining
+#   docker/pow.sh logs                on the VPS: follow the node's log
 #
 # The key stays here, in POW_HOME (~/.chainv4-pow): of what init makes, only the genesis goes to
 # the VPS. Settings, all optional:
@@ -19,10 +25,14 @@
 #   SYMBOL         the coin's ticker, for init: DEV unless set
 #   SERVER_NAME    the VPS's domain or address, for init's .env and its certificate
 #   MINE_THREADS   how many threads mine, here and on the VPS: 1 unless set
+#   GPU            1 to mine on the GPU at join, 0 on the CPU, as --gpu and --cpu
 #   P2P_PORT       the VPS's QUIC port: 4001 unless set
 #   API            this machine's API, for join and status: 127.0.0.1:8090 unless set
 #   REMOTE_DIR     where push puts the repository on the VPS: chainv4 under its home
 #   SSH_KEY        push's SSH private key, as -i gives it; SSH_PORT its port, as -p
+#   MINING_PORT    the VPS's mining port, for worker: 4002 unless set
+#   TOKEN          worker's token file: POW_HOME's mining.token, else docker/config's
+#   PROTOCOL       the chain's protocol name, for join and worker, as the VPS's .env has it
 #   EXTRA_ARGS     anything else for join's node, such as --no-mdns
 #   CONTAINER_ENGINE  docker or podman, for up: as docker/compose.sh picks it, unset
 set -eu
@@ -30,6 +40,7 @@ set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 home=${POW_HOME:-$HOME/.chainv4-pow}
 p2p_port=${P2P_PORT:-4001}
+mining_port=${MINING_PORT:-4002}
 
 say() { printf '[pow] %s\n' "$*" >&2; }
 fail() { printf '[pow] %s\n' "$*" >&2; exit 1; }
@@ -37,16 +48,24 @@ fail() { printf '[pow] %s\n' "$*" >&2; exit 1; }
 # The release node, built here and kept in POW_HOME: an editor's cargo check may clear target/,
 # and a running node keeps its binary anyway. Copied in by renaming, as macOS kills a binary run
 # again after it was overwritten where it lay.
+# With gpu, the build with the gpu feature, in a target folder of its own, so switching between
+# the two rebuilds neither.
 binary() {
-    if [ ! -x "$home/bin/chainv4" ] || [ "$root/target/release/chainv4" -nt "$home/bin/chainv4" ] || [ "${REBUILD:-}" = 1 ]; then
-        say "building the node"
-        (cd "$root" && cargo build --release --locked --quiet)
+    case "${1:-}" in
+        gpu) name=chainv4-gpu; built="$root/target/gpu/release/chainv4"; flags="--features gpu --target-dir $root/target/gpu" ;;
+        *) name=chainv4; built="$root/target/release/chainv4"; flags= ;;
+    esac
+
+    if [ ! -x "$home/bin/$name" ] || [ "$built" -nt "$home/bin/$name" ] || [ "${REBUILD:-}" = 1 ]; then
+        say "building the node${flags:+ with GPU mining}"
+        # shellcheck disable=SC2086
+        (cd "$root" && cargo build --release --locked --quiet $flags)
         mkdir -p "$home/bin"
-        cp "$root/target/release/chainv4" "$home/bin/chainv4.new"
-        mv -f "$home/bin/chainv4.new" "$home/bin/chainv4"
+        cp "$built" "$home/bin/$name.new"
+        mv -f "$home/bin/$name.new" "$home/bin/$name"
     fi
 
-    echo "$home/bin/chainv4"
+    echo "$home/bin/$name"
 }
 
 owner() {
@@ -88,6 +107,7 @@ with open(path, "w") as f:
     f.write("\n")
 EOF
     cp "$home/genesis.json" "$root/docker/config/genesis.json"
+    token
 
     if [ -e "$root/docker/.env" ]; then
         say "docker/.env is there already: set REWARD_TO=$address in it"
@@ -105,18 +125,40 @@ INDEX_ADDRESSES=genesis
 # A VPS's network holds none of your nodes: peers dial it.
 EXTRA_ARGS=--no-mdns
 
+# The name every protocol starts with; join and worker need the same, as PROTOCOL.
+PROTOCOL=${PROTOCOL:-}
+
 # HTTPS in front: self-signed until you give the VPS a domain and use letsencrypt.
 TLS_MODE=self-signed
 SERVER_NAME=${SERVER_NAME:-localhost}
 HTTP_PORT=80
 HTTPS_PORT=443
 P2P_PORT=$p2p_port
+MINING_PORT=$mining_port
 EOF
     fi
 
     say "made $home: the key (owner.key, which never leaves this machine) and the genesis"
     say "coins and mining rewards go to $address"
     say "next: docker/pow.sh push user@your-vps"
+}
+
+# The token workers mine with: made once, kept in POW_HOME for workers here, and in docker/config
+# for push to take to the VPS.
+token() {
+    if [ ! -s "$home/mining.token" ]; then
+        mkdir -p "$home"
+        chmod 700 "$home"
+        # 32 random bytes, in hex: what openssl rand -hex 32 makes, without needing openssl.
+        (umask 077 && od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$home/mining.token")
+        [ "$(wc -c < "$home/mining.token")" -eq 64 ] || fail "the mining token was not made"
+        say "made a mining token, $home/mining.token: workers that have it may mine for your node"
+    fi
+
+    if ! cmp -s "$home/mining.token" "$root/docker/config/mining.token" 2>/dev/null; then
+        (umask 077 && cp "$home/mining.token" "$root/docker/config/mining.token")
+        say "copied it to docker/config/mining.token, for push to take to the VPS"
+    fi
 }
 
 push() {
@@ -164,6 +206,12 @@ up() {
     [ -s "$root/docker/config/genesis.json" ] || fail "no docker/config/genesis.json: run docker/pow.sh init on your machine, then push"
     [ -s "$root/docker/.env" ] || fail "no docker/.env: run docker/pow.sh init on your machine, then push"
 
+    # The node runs as another user in its container: it must read the token. Anyone on the VPS
+    # who can then may mine for the node too, which pays the node, and nothing else.
+    if [ -s "$root/docker/config/mining.token" ]; then
+        chmod 644 "$root/docker/config/mining.token"
+    fi
+
     # The first build compiles RocksDB, Luau and both web apps: a machine with little memory runs
     # out without swap.
     memory=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || echo 0)
@@ -190,16 +238,43 @@ up() {
         say "ufw is on: open the ports with  sudo ufw allow $p2p_port/udp && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp"
     fi
 
+    if [ -s "$root/docker/config/mining.token" ]; then
+        say "it takes workers on TCP $mining_port: open that too, for docker/pow.sh worker"
+    fi
+
     say "open UDP $p2p_port to the internet (and TCP 80 and 443 for the explorer and wallet), in the VPS's firewall too"
     say "next, on your machine: docker/pow.sh join <this VPS's address>"
 }
 
 join() {
-    host=${1:-}
-    [ -n "$host" ] || fail "join which VPS? docker/pow.sh join host"
+    host=
+    gpu=${GPU:-}
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --gpu) gpu=1; shift ;;
+            --cpu) gpu=0; shift ;;
+            -*) fail "join takes a host, and --gpu or --cpu, not $1" ;;
+            *) host=$1; shift ;;
+        esac
+    done
+
+    [ -n "$host" ] || fail "join which VPS? docker/pow.sh join host [--gpu | --cpu]"
     [ -s "$home/genesis.json" ] || fail "no $home/genesis.json: run docker/pow.sh init first"
     address=$(owner)
-    chainv4=$(binary)
+
+    # Asked, in a terminal, when neither was given.
+    if [ -z "$gpu" ] && [ -t 0 ]; then
+        printf '[pow] mine on the GPU rather than %s CPU thread(s)? [y/N] ' "${MINE_THREADS:-1}" >&2
+        read -r answer || answer=
+        case "$answer" in y | Y | yes) gpu=1 ;; *) gpu=0 ;; esac
+    fi
+
+    case "${gpu:-0}" in
+        1) chainv4=$(binary gpu); mining="--mine --mine-gpu"; how="on the GPU" ;;
+        0) chainv4=$(binary); mining="--mine --mine-threads ${MINE_THREADS:-1}"; how="on ${MINE_THREADS:-1} CPU thread(s)" ;;
+        *) fail "GPU is 1 or 0, not $gpu" ;;
+    esac
 
     # QUIC dials an address, not a name: look the name up here.
     case "$host" in
@@ -214,7 +289,7 @@ join() {
     set -- --db "$home/chain.db" \
         --genesis "$home/genesis.json" \
         --peer "$peer" \
-        --mine --mine-threads "${MINE_THREADS:-1}" --reward-to "$address" \
+        --reward-to "$address" \
         --http "${API:-127.0.0.1:8090}" \
         --stream --index-events --index-addresses
 
@@ -222,11 +297,73 @@ join() {
     if [ -s "$root/explorer/dist/index.html" ]; then set -- "$@" --explorer "$root/explorer/dist"; fi
     if [ -s "$root/wallet/dist/index.html" ]; then set -- "$@" --wallet "$root/wallet/dist"; fi
 
-    say "mining here, rewards to $address, dialing the VPS at $peer"
+    if [ -n "${PROTOCOL:-}" ]; then set -- "$@" --protocol "$PROTOCOL"; fi
+
+    say "mining here $how, rewards to $address, dialing the VPS at $peer"
     say "the API is at http://${API:-127.0.0.1:8090}; Ctrl-C stops the node, and join starts it again where it was"
     # Word-split on purpose: EXTRA_ARGS holds several arguments.
     # shellcheck disable=SC2086
-    exec "$chainv4" "$@" ${EXTRA_ARGS:-}
+    exec "$chainv4" "$@" $mining ${EXTRA_ARGS:-}
+}
+
+# A rig mining for the VPS's node, with no chain of its own: on the GPUs or threads here, with
+# the mining token, until Ctrl-C.
+worker() {
+    host=
+    gpu=${GPU:-}
+    gpus=
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --gpu) gpu=1; shift ;;
+            --cpu) gpu=0; shift ;;
+            --gpus) [ $# -ge 2 ] || fail "--gpus takes their numbers, such as 0,2"; gpu=1; gpus=$2; shift 2 ;;
+            -*) fail "worker takes a host, and --gpu, --gpus or --cpu, not $1" ;;
+            *) host=$1; shift ;;
+        esac
+    done
+
+    [ -n "$host" ] || fail "mine for which node? docker/pow.sh worker host [--gpu [--gpus 0,2] | --cpu]"
+    token=${TOKEN:-}
+
+    if [ -z "$token" ]; then
+        for candidate in "$home/mining.token" "$root/docker/config/mining.token"; do
+            if [ -s "$candidate" ]; then token=$candidate; break; fi
+        done
+    fi
+
+    [ -n "$token" ] && [ -s "$token" ] || fail "no mining token: copy the one docker/pow.sh token made to $home/mining.token, or give TOKEN"
+
+    if [ -z "$gpu" ] && [ -t 0 ]; then
+        printf '[pow] mine on the GPUs rather than %s CPU thread(s)? [y/N] ' "${MINE_THREADS:-1}" >&2
+        read -r answer || answer=
+        case "$answer" in y | Y | yes) gpu=1 ;; *) gpu=0 ;; esac
+    fi
+
+    case "${gpu:-0}" in
+        1)
+            chainv4=$(binary gpu)
+            "$chainv4" gpus >&2 || fail "no GPU here: docker/pow.sh worker $host --cpu"
+            set -- --gpu
+            if [ -n "$gpus" ]; then set -- "$@" --gpus "$gpus"; fi
+            ;;
+        0) chainv4=$(binary); set -- --threads "${MINE_THREADS:-1}" ;;
+        *) fail "GPU is 1 or 0, not $gpu" ;;
+    esac
+
+    if [ -n "${PROTOCOL:-}" ]; then set -- "$@" --protocol "$PROTOCOL"; fi
+
+    case "$host" in
+        *:*:*) node="[$host]:$mining_port" ;;
+        *) node="$host:$mining_port" ;;
+    esac
+
+    say "mining for $node; the block rewards go to the node's REWARD_TO. Ctrl-C stops"
+    exec "$chainv4" worker --node "$node" --token "$token" "$@"
+}
+
+logs() {
+    exec "$root/docker/compose.sh" logs -f --tail "${LINES:-200}" node
 }
 
 # The chain, height and peers a node's /status and /node say.
@@ -248,6 +385,22 @@ peers = node.get("peers", [])
 print("[pow] %d peer%s" % (len(peers), "" if len(peers) == 1 else "s"))
 for peer in peers:
     print("[pow]   %s" % (peer.get("address") or peer.get("id") or peer))
+
+def rate(hashes):
+    for unit in ["H/s", "kH/s", "MH/s", "GH/s", "TH/s"]:
+        if hashes < 1000 or unit == "TH/s":
+            return "%.1f %s" % (hashes, unit)
+        hashes /= 1000
+
+mining = node.get("mining")
+if mining:
+    print("[pow] mining at %s%s" % (rate(mining["rate"]), ", workers on " + mining["listening"] if mining.get("listening") else ""))
+    for device in mining["devices"]:
+        print("[pow]   %s: %s" % (device["name"], rate(device["rate"])))
+    for worker in mining["workers"]:
+        print("[pow]   worker %s at %s: %s, %d found" % (worker["name"], worker["address"], rate(worker["rate"]), worker["found"]))
+        for device in worker["devices"]:
+            print("[pow]     %s: %s" % (device["name"], rate(device["rate"])))
 '
 }
 
@@ -259,6 +412,9 @@ case "$command" in
     push) push "$@" ;;
     up) up ;;
     join) join "$@" ;;
+    token) token ;;
+    worker) worker "$@" ;;
     status) status "$@" ;;
-    *) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    logs) logs ;;
+    *) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

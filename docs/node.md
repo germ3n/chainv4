@@ -141,14 +141,25 @@ The node never sees libp2p itself.
 | Piece | What it does |
 | --- | --- |
 | QUIC | The transport. `--listen` picks addresses, `/ip4/0.0.0.0/udp/0/quic-v1` by default; port 0 picks one, and the log shows which. |
-| gossipsub | Blocks, transactions and votes, on topics `/chainv4/{network}/blocks`, `/txs` and `/votes`. |
-| Kademlia | Finding peers, as `/chainv4/kad/1`. |
+| gossipsub | Blocks, transactions and votes, on topics `/{protocol}/{network}/blocks`, `/txs` and `/votes`. |
+| Kademlia | Finding peers, as `/{protocol}/{network}/kad/1`. |
 | mDNS | Finding peers on the local network; `--no-mdns` turns it off, as on a server. |
-| identify | Learning peers' addresses, as `/chainv4/1`. |
-| request-response | Sync, as `/chainv4/sync/1`. |
+| identify | Learning peers' addresses, and which chain they are on, as `/{protocol}/{network}/1`. |
+| request-response | Sync, as `/{protocol}/{network}/sync/1`. |
 
-**Topics:** `{network}` is the first eight bytes of the genesis id in hex, so nodes on different
-chains never share topics.
+**Names:** `{network}` is the first eight bytes of the genesis id in hex, and `{protocol}` is
+`chainv4` unless `--protocol` names another: 1 to 32 lowercase letters, digits, dashes, dots and
+underscores. With both in every name, nodes of two chains share no topic, no DHT and no sync, even
+when they find each other.
+- **A peer of another chain is disconnected.** Once identify says a peer runs another protocol
+  name or another genesis, the node drops it and forgets it in Kademlia, so mDNS on a shared
+  network, or a `--peer` pointed at the wrong node, pulls in nothing. The log says which it ran.
+- **Give a chain of your own a name of its own** when it is built from this code: its genesis
+  already keeps it apart, and the name keeps it apart from any other chainv4 chain that happens to
+  share the genesis, such as two development chains. Workers (`chainv4 worker --protocol`) and
+  every node of the chain give the same.
+- **Changing it is a split.** Nodes under the old name and the new one no longer talk; change it
+  on every node at once.
 
 **Message ids:** a gossip message's id is the chain hash of its bytes, so the same block or
 transaction is one message however many peers send it.
@@ -184,7 +195,6 @@ counts them, so a flood is turned away at the door instead of queueing without e
 | `--max-gossip-backlog N` | 10,000 | Everything waiting, submissions included. |
 | `--max-block-txs N` | none | The transactions in each block this node produces; without it, blocks fill to the chain's bytes and gas limits. |
 | `--max-build-ms N` | none | How long this node runs transactions for each block it produces; what ran by then is sealed, the rest wait. |
-| `--mine-gpu` | off | Mine on the GPU through wgpu rather than on `--mine-threads`; needs a build with the `gpu` feature (see [Consensus](consensus.md#proof-of-work)). |
 | `--max-gossip-per-peer N` | 1,000 | What any one peer's may be. |
 
 **Over a limit:**

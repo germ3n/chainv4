@@ -322,6 +322,39 @@ pub struct NodeView {
     /// Gossip and submissions waiting for the node, and its limits; none from older nodes.
     #[serde(default)]
     pub backlog: Option<Backlog>,
+    /// How its mining goes, when it mines; none from older nodes.
+    #[serde(default)]
+    pub mining: Option<MiningView>,
+}
+
+/// A node's mining: its own devices, the workers mining for it, and their hashrates.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MiningView {
+    /// Hashes a second, every device's and worker's added up.
+    pub rate: f64,
+    pub devices: Vec<Device>,
+    /// Where workers connect, when it takes them.
+    pub listening: Option<String>,
+    pub workers: Vec<MiningWorker>,
+}
+
+/// A GPU, or a CPU's threads, and its hashrate.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Device {
+    pub name: String,
+    pub rate: f64,
+}
+
+/// A worker mining for the node over its mining port.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MiningWorker {
+    pub name: String,
+    pub address: String,
+    pub since: u64,
+    pub rate: f64,
+    pub devices: Vec<Device>,
+    pub found: u64,
+    pub refused: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -588,5 +621,19 @@ mod tests {
         assert_eq!(node.counters["blocks_heard"], 9);
         assert_eq!(node.syncing.unwrap().from, 40);
         assert_eq!(node.peers[0].heard.votes, 3);
+        assert!(node.mining.is_none(), "an older node, or one that does not mine, says nothing of it");
+
+        let node: NodeView = serde_json::from_value(json!({
+            "uptime_ms": 1, "listening": [], "producing": true, "validating": false,
+            "mempool": { "count": 0, "capacity": 1 }, "syncing": null, "counters": {}, "peers": [],
+            "mining": { "rate": 3e8, "devices": [{ "name": "Apple M3 Pro (Metal)", "rate": 2e8 }], "listening": "0.0.0.0:4002",
+                        "workers": [{ "name": "rig", "address": "10.0.0.3:5000", "since": 1, "rate": 1e8,
+                                      "devices": [{ "name": "GPU 0", "rate": 1e8 }], "found": 2, "refused": 0 }] }
+        }))
+        .unwrap();
+        let mining = node.mining.unwrap();
+
+        assert_eq!((mining.rate, mining.devices[0].name.as_str()), (3e8, "Apple M3 Pro (Metal)"));
+        assert_eq!((mining.workers[0].found, mining.workers[0].devices[0].rate), (2, 1e8));
     }
 }

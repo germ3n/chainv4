@@ -347,6 +347,7 @@ How the node behind the API is doing. 503 when no node runs behind it.
 | `counters` | What it heard and did since it started: blocks heard, imported, stored on side branches, rejected and produced; reorgs; transactions heard, submitted and refused; votes heard and cast; sync requests served, sent and failed; connections; gossip and submissions the backlog dropped (`gossip_dropped`), and peers disconnected for flooding (`flooders_disconnected`). |
 | `backlog` | What waits for the node loop now (`waiting`), and the backlog's limits, `total` and `per_peer` (see [Node](node.md#the-gossip-backlog)). |
 | `peers` | Each connected peer's `id`, `address` and `since`, what it gossiped (`heard`: `blocks`, `txs`, `votes`), how much of it the backlog `dropped`, and its `chain` from its last status (`height`, `work`, `justified`), or `null`. |
+| `mining` | `null` for a node that does not mine. Otherwise the hashes a second of everything mining for it (`rate`); its own `devices`, each a `name` and `rate`, its GPUs or CPU threads; where it takes workers (`listening`), or `null`; and its `workers`, each with its `name`, `address`, `since`, `rate`, `devices`, the seals it `found` and the nonces `refused` (see [Mining with workers](consensus.md#mining-with-workers)). Rates are measured over the last few seconds. |
 
 ### `GET /mempool?limit=N`
 

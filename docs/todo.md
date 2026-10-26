@@ -98,6 +98,17 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Mining on the GPU.** The `chainv4-gpu` crate mines through wgpu, on Vulkan, Metal and
   WebGPU, with a WGSL kernel for each of SHA-256, BLAKE3, BLAKE2s, BLAKE2b and Keccak-256, tested
   against the CPU hashes; `--mine --mine-gpu` picks it in a build with the `gpu` feature.
+- [x] **Every GPU, and workers.** `--mine-gpu` mines on every GPU, or those `--gpus` picks, each
+  on its own share of the nonces. A node with `--mining` takes workers, `chainv4 worker` on any
+  machine, which mine for it over a TCP port authenticated with a token, each in a range of nonces
+  of its own, with no chain of their own; the node checks every nonce, and reports each device's
+  and worker's hashrate on `GET /node` and the explorer.
+- [ ] **Workers find no shares.** A worker sends only nonces that meet the block's difficulty, so
+  the node cannot tell how much each worker did beyond its own word, and pays nobody: rewards go
+  to the node's address. Shares at a lower difficulty would measure the work, for a pool that
+  pays out.
+- [ ] **The mining port is not encrypted.** Its messages are authenticated with the token; TLS
+  on it would hide the work and nonces too, which matter only until the block is out.
 - [ ] **No CUDA kernels.** NVIDIA cards mine through Vulkan. Kernels in CUDA C, behind a `cuda`
   feature, would need a machine with nvcc and a card to write and test on.
 - [x] **Side branches are pruned, and bad blocks are remembered across restarts.** When the tip
@@ -387,8 +398,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   share can cut off an honest peer relaying a burst.
 - [ ] **The node's identity changes on every start.** The libp2p key is generated fresh each run;
   keep it in the data directory so the peer id is stable.
-- [ ] **No bootnode list.** Peers come from `--peer` and mDNS only, and Kademlia warns at startup
-  when it has nobody to bootstrap from.
+- [ ] **No bootnode list, and no discovery past the peers given.** Peers come from `--peer`, mDNS
+  and nodes that dial in. Kademlia keeps the addresses identify tells it, but the node never
+  bootstraps or dials them, so two nodes that both dial a third never meet.
+- [x] **Chains keep apart by protocol name and genesis.** Every protocol and topic is
+  `/{protocol}/{network}/…`, `--protocol` naming the first; identify tells a node a peer of
+  another chain, which it disconnects and forgets.
 - [x] **Peers given are dialed again.** A `--peer` with no connection is dialed every 15 seconds,
   so a node behind NAT finds a restarted server again, and `--no-mdns` keeps a server off its
   network's multicast. `docker/pow.sh` runs a chain across a VPS and a machine at home.

@@ -28,6 +28,8 @@ pub struct NodeReport {
     pub producing: bool,
     #[document(summary = "Whether it votes on finality.")]
     pub validating: bool,
+    #[document(summary = "How its mining goes, when it mines: its own devices' hashrates and the workers mining for it.")]
+    pub mining: Option<crate::consensus::MiningReport>,
     #[document(summary = "The peers connected now.")]
     pub peers: Vec<PeerReport>,
     #[document(summary = "The peer it is fetching blocks from, and from which height, while it catches up.")]
@@ -160,6 +162,7 @@ impl Node {
             now,
             listening: self.listening.clone(),
             producing: self.producer.is_some(),
+            mining: self.producer.as_ref().and_then(|producer| producer.mining()),
             validating: self.validator.is_some(),
             peers,
             syncing: self.sync.asking(),

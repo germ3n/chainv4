@@ -20,11 +20,13 @@ pub mod dev;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod pow;
+pub mod rates;
 pub mod rotating;
 pub mod staked;
 
 pub use dev::{AuthorityProducer, DevAuthority};
-pub use pow::{Miner, PowConfig, ProofOfWork, meets, work_hash};
+pub use pow::{Miner, PowConfig, ProofOfWork, Rig, meets, work_hash};
+pub use rates::{DeviceReport, Meter, MiningReport, WorkerReport};
 pub use rotating::{Rotating, RotatingProducer};
 pub use staked::{Schedule, Staked, StakedProducer};
 #[cfg(feature = "gpu")]
@@ -133,6 +135,14 @@ pub trait Producer: Send {
         returns = "The seal when it is ready at once, or None when it will arrive later through the callback the producer was made with.",
     )]
     fn seal(&mut self, header: &BlockHeader) -> Option<Seal>;
+
+    #[document(
+        parent = "Producer",
+        summary = "How its mining is going: each of its devices' hashrates, and the workers mining for it. None for a producer that does not mine.",
+    )]
+    fn mining(&self) -> Option<MiningReport> {
+        None
+    }
 }
 
 #[document(

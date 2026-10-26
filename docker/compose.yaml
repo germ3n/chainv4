@@ -27,17 +27,22 @@ services:
       VALIDATOR_KEY: ${VALIDATOR_KEY:-}
       REWARD_TO: ${REWARD_TO:-}
       MINE_THREADS: ${MINE_THREADS:-1}
+      MINING_TOKEN: ${MINING_TOKEN:-}
+      PROTOCOL: ${PROTOCOL:-}
       PEERS: ${PEERS:-}
       INDEX_EVENTS: ${INDEX_EVENTS:-genesis}
       INDEX_ADDRESSES: ${INDEX_ADDRESSES:-genesis}
       EXTRA_ARGS: ${EXTRA_ARGS:-}
     volumes:
       - chain:/data
-      # A genesis.json to start from, and producer.key and validator.key to sign with.
+      # A genesis.json to start from, producer.key and validator.key to sign with, and
+      # mining.token for workers to mine with.
       - ./config:/config:ro,z
     # Peer-to-peer goes straight to the node: QUIC is TLS 1.3 already, with keys bound to peer ids.
     ports:
       - "${P2P_PORT:-4001}:4001/udp"
+      # Workers, when there is a mining.token: their messages are authenticated with it.
+      - "${MINING_PORT:-4002}:4002/tcp"
     # The image's own, here too: an image Podman builds in OCI's format keeps no HEALTHCHECK.
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://127.0.0.1:8080/status > /dev/null || exit 1"]

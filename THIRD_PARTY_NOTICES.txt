@@ -2142,6 +2142,50 @@ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
 OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
+rqrr 0.11.0
+  (MIT OR Apache-2.0) AND ISC
+
+Copyright 2019 Moritz Wanzenböck <moritz@wanzenbug.xyz>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject
+to the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+quirc -- QR-code recognition library
+Copyright (C) 2010-2012 Daniel Beer <dlbeer@gmail.com>
+
+ISC License
+===========
+
+Permission to use, copy, modify, and/or distribute this software for
+any purpose with or without fee is hereby granted, provided that the
+above copyright notice and this permission notice appear in all
+copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
+AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL
+DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
+PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+
 rustls-webpki 0.103.16
   ISC
 
@@ -2484,15 +2528,16 @@ Rust crates from the Cargo.lock files
 
 Every third-party crate in the Cargo.lock files of the node, the explorer and
 the wallet is listed below, for every target platform, with what it is built
-into. Local crates chainv4, chainv4-explorer, chainv4-ui, chainv4-wallet, macro
-and wiki are chainv4 itself, covered by the MIT license at the top.
+into. Local crates chainv4, chainv4-explorer, chainv4-gpu, chainv4-ui,
+chainv4-wallet, macro and wiki are chainv4 itself, covered by the MIT license at
+the top.
 
 Where a crate offers a choice, this distribution uses MIT if MIT is one of the
 choices, and otherwise the license noted for that crate. MIT-licensed crates use
 the MIT terms reproduced at the top with the copyright lines given here in place
 of chainv4's. Apache-2.0 crates use the Apache License text above.
 
-708 crates.
+751 crates.
 
 accesskit 0.25.1
   MIT OR Apache-2.0
@@ -2587,6 +2632,12 @@ android_logger 0.15.1
   Copyright (c) 2016 The android_logger Developers
   Copyright 2016 The android_logger Developers
 
+android_system_properties 0.1.6
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) 2013 Nicolas Silva
+  Copyright 2016 Nicolas Silva
+
 anstream 1.0.0
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
@@ -2636,6 +2687,12 @@ as-raw-xcb-connection 1.0.1
   MIT OR Apache-2.0
   Built into: explorer and wallet
   Copyright 2019 as-raw-xcb-connection Contributers
+
+ash 0.38.0+1.3.281
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) 2016 ASH
+  Copyright 2016 Maik Klein
 
 asn1-rs 0.7.2
   MIT OR Apache-2.0
@@ -2818,10 +2875,20 @@ bip39 3.0.0
   Built into: node and wallet
   Authors: Steven Roose. The package has no separate copyright line.
 
+bit-set 0.8.0
+  Apache-2.0 OR MIT
+  Built into: node
+  Copyright (c) 2023 The Rust Project Developers
+
 bit-set 0.10.0
   Apache-2.0 OR MIT
   Built into: explorer and wallet
   Copyright (c) 2026 The Rust Project Developers
+
+bit-vec 0.8.0
+  Apache-2.0 OR MIT
+  Built into: node
+  Copyright (c) 2023 The Rust Project Developers
 
 bit-vec 0.9.1
   Apache-2.0 OR MIT
@@ -2860,6 +2927,11 @@ blake3 1.8.7
   CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception
   Built into: node, explorer and wallet
   Copyright 2019 Jack O'Connor and Samuel Neves
+
+block 0.1.6
+  MIT
+  Built into: node
+  Authors: Steven Sheldon. The package has no separate copyright line.
 
 block-buffer 0.10.4
   MIT OR Apache-2.0
@@ -2904,12 +2976,12 @@ bumpalo 3.20.3
 
 bytemuck 1.25.2
   Zlib OR Apache-2.0 OR MIT
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2019 Daniel "Lokathor" Gee.
 
 bytemuck_derive 1.12.1
   Zlib OR Apache-2.0 OR MIT
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2019 Daniel "Lokathor" Gee.
 
 byteorder 1.5.0
@@ -3042,6 +3114,11 @@ cmov 0.5.4
   Built into: node, explorer and wallet
   Copyright (c) 2022-2026 The RustCrypto Project Developers
 
+codespan-reporting 0.11.1
+  Apache-2.0
+  Built into: node
+  Authors: Brendan Zabarauskas. The package has no separate copyright line.
+
 codespan-reporting 0.13.1
   Apache-2.0
   Built into: explorer and wallet
@@ -3100,7 +3177,7 @@ core-graphics 0.23.2
 
 core-graphics-types 0.1.3
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2012-2013 Mozilla Foundation
 
 cpubits 0.1.1
@@ -3288,7 +3365,7 @@ dlib 0.5.3
 
 document-features 0.2.12
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2020 Olivier Goffart <ogoffart@sixtyfps.io>
 
 downcast-rs 1.2.1
@@ -3549,17 +3626,17 @@ font-types 0.12.7
 
 foreign-types 0.5.0
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2017 The foreign-types Developers
 
 foreign-types-macros 0.2.4
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2017 The foreign-types Developers
 
 foreign-types-shared 0.3.1
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2017 The foreign-types Developers
 
 form_urlencoded 1.2.2
@@ -3648,6 +3725,24 @@ futures-util 0.3.34
   Copyright (c) 2016 Alex Crichton
   Copyright (c) 2017 The Tokio Authors
 
+g2gen 1.2.2
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2018 Moritz 'WanzenBug' Wanzenböck
+  Copyright 2018 Moritz 'WanzenBug' Wanzenböck
+
+g2p 1.2.2
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2018 Moritz 'WanzenBug' Wanzenböck
+  Copyright 2018 Moritz 'WanzenBug' Wanzenböck
+
+g2poly 1.2.2
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2018 Moritz 'WanzenBug' Wanzenböck
+  Copyright 2018 Moritz 'WanzenBug' Wanzenböck
+
 generic-array 0.14.7
   MIT
   Built into: wallet
@@ -3678,7 +3773,7 @@ getrandom 0.4.3
 
 gl_generator 0.14.0
   Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Authors: Brendan Zabarauskas, Corey Richardson, Arseny Kapoulkine. The package
   has no separate copyright line.
 
@@ -3696,6 +3791,12 @@ gloo-timers 0.2.6
   MIT OR Apache-2.0
   Built into: node
   Authors: Rust and WebAssembly Working Group. The package has no separate
+  copyright line.
+
+glow 0.16.0
+  MIT OR Apache-2.0 OR Zlib
+  Built into: node
+  Authors: Joshua Groves, Dzmitry Malyshau. The package has no separate
   copyright line.
 
 glow 0.17.0
@@ -3726,8 +3827,34 @@ glutin_glx_sys 0.6.1
 
 glutin_wgl_sys 0.6.1
   Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright 2022 Kirill Chibisov
+
+gpu-alloc 0.6.2
+  MIT OR Apache-2.0
+  Built into: node
+  Authors: Zakarum. The package has no separate copyright line.
+
+gpu-alloc-types 0.3.1
+  MIT OR Apache-2.0
+  Built into: node
+  Authors: Zakarum. The package has no separate copyright line.
+
+gpu-allocator 0.27.0
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) 2021 Traverse Research B.V.
+  Copyright 2021 Traverse Research B.V.
+
+gpu-descriptor 0.3.2
+  MIT OR Apache-2.0
+  Built into: node
+  Authors: Zakarum. The package has no separate copyright line.
+
+gpu-descriptor-types 0.2.0
+  MIT OR Apache-2.0
+  Built into: node
+  Authors: Zakarum. The package has no separate copyright line.
 
 group 0.14.0
   MIT OR Apache-2.0
@@ -3797,6 +3924,11 @@ hex_fmt 0.3.0
   MIT OR Apache-2.0
   Built into: node
   Copyright (c) 2018, POA Networks, Ltd.
+
+hexf-parse 0.2.1
+  CC0-1.0
+  Built into: node
+  Authors: Kang Seonghoon. The package has no separate copyright line.
 
 hickory-net 0.26.3
   MIT OR Apache-2.0
@@ -4008,7 +4140,7 @@ jni-macros 0.22.4
 
 jni-sys 0.3.1
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2015 The rust-jni-sys Developers
 
 jni-sys 0.4.1
@@ -4046,9 +4178,15 @@ keccak 0.2.2
   Built into: node, explorer and wallet
   Copyright (c) 2018-2026 The RustCrypto Project Developers
 
+khronos-egl 6.0.0
+  MIT OR Apache-2.0
+  Built into: node
+  Authors: Timothée Haudebourg, Sean Kerr. The package has no separate copyright
+  line.
+
 khronos_api 3.1.0
   Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Authors: Brendan Zabarauskas, Corey Richardson, Arseny Kapoulkine, Pierre
   Krieger. The package has no separate copyright line.
 
@@ -4221,7 +4359,7 @@ litemap 0.8.3
 
 litrs 1.0.1
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2020 Project Developers
 
 lock_api 0.4.14
@@ -4233,6 +4371,11 @@ log 0.4.34
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
   Copyright (c) 2014 The Rust Project Developers
+
+lru 0.18.5
+  MIT
+  Built into: wallet
+  Copyright (c) 2016 Jerome Froelich
 
 lru-slab 0.1.3
   MIT OR Apache-2.0 OR Zlib
@@ -4253,6 +4396,11 @@ lz4-sys 1.11.1+lz4-1.10.0
   Built into: node
   Copyright (c) 2015 Artem V. Navrotskiy
   Bundles the LZ4 library; see the compression libraries section.
+
+malloc_buf 0.0.6
+  MIT
+  Built into: node
+  Authors: Steven Sheldon. The package has no separate copyright line.
 
 match-lookup 0.1.3
   MIT
@@ -4281,6 +4429,11 @@ memoffset 0.9.1
   MIT
   Built into: explorer and wallet
   Copyright (c) 2017 Gilad Naaman
+
+metal 0.31.0
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) 2010 The Rust Project Developers
 
 mime 0.3.17
   MIT OR Apache-2.0
@@ -4359,6 +4512,11 @@ multistream-select 0.14.0
   Built into: node
   Authors: Parity Technologies. The package has no separate copyright line.
 
+naga 24.0.0
+  MIT OR Apache-2.0
+  Built into: node
+  Authors: gfx-rs developers. The package has no separate copyright line.
+
 naga 30.0.1
   MIT OR Apache-2.0
   Built into: explorer and wallet
@@ -4378,6 +4536,12 @@ ndk 0.9.0
 ndk-context 0.1.1
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
+  Authors: The Rust Windowing contributors. The package has no separate
+  copyright line.
+
+ndk-sys 0.5.0+25.2.9519653
+  MIT OR Apache-2.0
+  Built into: node
   Authors: The Rust Windowing contributors. The package has no separate
   copyright line.
 
@@ -4456,6 +4620,11 @@ num_enum_derive 0.7.6
   BSD-3-Clause OR MIT OR Apache-2.0
   Built into: explorer and wallet
   Copyright (c) 2018, Daniel Wagner-Hall
+
+objc 0.2.7
+  MIT
+  Built into: node
+  Copyright (c) Steven Sheldon
 
 objc-sys 0.3.5
   MIT
@@ -4603,6 +4772,11 @@ orbclient 0.3.55
   Built into: explorer and wallet
   Copyright (c) 2015-2019 Jeremy Soller
 
+ordered-float 4.6.0
+  MIT
+  Built into: node
+  Copyright (c) 2015 Jonathan Reem
+
 ordered-stream 0.2.0
   MIT OR Apache-2.0
   Built into: explorer and wallet
@@ -4734,7 +4908,7 @@ polling 3.11.0
 
 pollster 0.4.0
   Apache-2.0 OR MIT
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2020-2021 Joshua Barretto
 
 poly1305 0.8.0
@@ -4774,6 +4948,11 @@ prefix-trie 0.8.4
   Copyright 2022 Tibor Schneider
   Copyright 2017 Juniper Networks, Inc.
 
+presser 0.3.1
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) 2019 Embark Studios
+
 primefield 0.14.0
   Apache-2.0 OR MIT
   Built into: node, explorer and wallet
@@ -4797,7 +4976,7 @@ proc-macro2 1.0.107
 
 profiling 1.0.18
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Authors: Philip Degarmo. The package has no separate copyright line.
 
 prometheus-client 0.25.1
@@ -4913,9 +5092,14 @@ rand_pcg 0.10.2
   Copyright (c) 2014-2017 Melissa O'Neill and PCG Project contributors
   Copyright 2018 Developers of the Rand project
 
+range-alloc 0.1.5
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) 2023 The gfx-rs developers
+
 raw-window-handle 0.6.2
   MIT OR Apache-2.0 OR Zlib
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2019 Osspial
   Copyright (c) 2020 Osspial
 
@@ -4972,7 +5156,7 @@ regex-syntax 0.8.11
 
 renderdoc-sys 1.1.0
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2022 Eyal Kalderon
 
 resolv-conf 0.7.6
@@ -5009,6 +5193,13 @@ ron 0.12.2
   Built into: explorer and wallet
   Copyright (c) 2017 RON developers
 
+rqrr 0.11.0
+  (MIT OR Apache-2.0) AND ISC
+  Built into: wallet
+  Copyright 2019 Moritz Wanzenböck <moritz@wanzenbug.xyz>
+  Copyright (c) 2019 Moritz Wanzenböck <moritz@wanzenbug.xyz>
+  Copyright (C) 2010-2012 Daniel Beer <dlbeer@gmail.com>
+
 rtnetlink 0.20.0
   MIT
   Built into: node
@@ -5016,7 +5207,7 @@ rtnetlink 0.20.0
 
 rustc-hash 1.1.0
   Apache-2.0 OR MIT
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Authors: The Rust Project Developers. The package has no separate copyright
   line.
 
@@ -5239,7 +5430,7 @@ slab 0.4.12
 
 slotmap 1.1.1
   Zlib
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2021 Orson Peters <orsonpeters@gmail.com>
 
 smallvec 1.16.3
@@ -5282,6 +5473,11 @@ spin 0.9.9
   Built into: node
   Copyright (c) 2014 Mathijs van de Nes
 
+spirv 0.3.0+sdk-1.3.268.0
+  Apache-2.0
+  Built into: node
+  Authors: Lei Zhang. The package has no separate copyright line.
+
 spki 0.8.1
   Apache-2.0 OR MIT
   Built into: node, explorer and wallet
@@ -5314,6 +5510,16 @@ strsim 0.11.1
   Copyright (c) 2015 Danny Guo
   Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
   Copyright (c) 2018 Akash Kurdekar
+
+strum 0.26.3
+  MIT
+  Built into: node
+  Copyright (c) 2019 Peter Glotfelty
+
+strum_macros 0.26.4
+  MIT
+  Built into: node
+  Copyright (c) 2019 Peter Glotfelty
 
 subtle 2.6.1
   BSD-3-Clause
@@ -5366,6 +5572,11 @@ tempfile 3.27.0
   MIT OR Apache-2.0
   Built into: explorer and wallet
   Copyright (c) 2015 Steven Allen
+
+termcolor 1.4.1
+  Unlicense OR MIT
+  Built into: node
+  Copyright (c) 2015 Andrew Gallant
 
 thiserror 1.0.69
   MIT OR Apache-2.0
@@ -5558,9 +5769,19 @@ unicode-segmentation 1.13.3
   Built into: explorer and wallet
   Copyright (c) 2015 The Rust Project Developers
 
+unicode-width 0.1.14
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) 2015 The Rust Project Developers
+
 unicode-width 0.2.2
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
+  Copyright (c) 2015 The Rust Project Developers
+
+unicode-xid 0.2.6
+  MIT OR Apache-2.0
+  Built into: node
   Copyright (c) 2015 The Rust Project Developers
 
 universal-hash 0.5.1
@@ -5632,7 +5853,7 @@ vello_cpu 0.2.0
 
 version_check 0.9.5
   MIT OR Apache-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   Copyright (c) 2017-2018 Sergio Benitez
 
 walkdir 2.5.0
@@ -5834,7 +6055,7 @@ webbrowser 1.2.5
 
 webpki-roots 1.0.11
   CDLA-Permissive-2.0
-  Built into: explorer and wallet
+  Built into: node, explorer and wallet
   webpki-roots contributors. The package has no separate copyright line.
 
 weezl 0.1.12
@@ -5842,10 +6063,20 @@ weezl 0.1.12
   Built into: explorer and wallet
   Copyright (c) HeroicKatora 2020
 
+wgpu 24.0.5
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) 2021 The gfx-rs developers
+
 wgpu 30.0.1
   MIT OR Apache-2.0
   Built into: explorer and wallet
   Copyright (c) 2025 The gfx-rs developers
+
+wgpu-core 24.0.5
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) 2021 The gfx-rs developers
 
 wgpu-core 30.0.1
   MIT OR Apache-2.0
@@ -5857,6 +6088,11 @@ wgpu-core-deps-windows-linux-android 30.0.1
   Built into: explorer and wallet
   Copyright (c) 2025 The gfx-rs developers
 
+wgpu-hal 24.0.4
+  MIT OR Apache-2.0
+  Built into: node
+  Authors: gfx-rs developers. The package has no separate copyright line.
+
 wgpu-hal 30.0.1
   MIT OR Apache-2.0
   Built into: explorer and wallet
@@ -5866,6 +6102,11 @@ wgpu-naga-bridge 30.0.1
   MIT OR Apache-2.0
   Built into: explorer and wallet
   Copyright (c) 2025 The gfx-rs developers
+
+wgpu-types 24.0.0
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) 2021 The gfx-rs developers
 
 wgpu-types 30.0.1
   MIT OR Apache-2.0
@@ -5892,6 +6133,11 @@ wincode-derive 0.5.1
   Built into: node, explorer and wallet
   Authors: Anza Maintainers. The package has no separate copyright line.
 
+windows 0.58.0
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) Microsoft Corporation.
+
 windows 0.62.2
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
@@ -5900,6 +6146,11 @@ windows 0.62.2
 windows-collections 0.3.2
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
+  Copyright (c) Microsoft Corporation.
+
+windows-core 0.58.0
+  MIT OR Apache-2.0
+  Built into: node
   Copyright (c) Microsoft Corporation.
 
 windows-core 0.62.2
@@ -5912,9 +6163,19 @@ windows-future 0.3.2
   Built into: node, explorer and wallet
   Copyright (c) Microsoft Corporation.
 
+windows-implement 0.58.0
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) Microsoft Corporation.
+
 windows-implement 0.60.2
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
+  Copyright (c) Microsoft Corporation.
+
+windows-interface 0.58.0
+  MIT OR Apache-2.0
+  Built into: node
   Copyright (c) Microsoft Corporation.
 
 windows-interface 0.59.3
@@ -5937,9 +6198,19 @@ windows-registry 0.6.1
   Built into: node
   Copyright (c) Microsoft Corporation.
 
+windows-result 0.2.0
+  MIT OR Apache-2.0
+  Built into: node
+  Copyright (c) Microsoft Corporation.
+
 windows-result 0.4.1
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
+  Copyright (c) Microsoft Corporation.
+
+windows-strings 0.1.0
+  MIT OR Apache-2.0
+  Built into: node
   Copyright (c) Microsoft Corporation.
 
 windows-strings 0.5.1

@@ -22,6 +22,9 @@ pub struct LayoutArgs {
     /// The node's HTTP API, for --from a contract.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub(super) node: String,
+    #[cfg(feature = "client")]
+    #[command(flatten)]
+    pub(super) tls: super::TlsArgs,
 }
 
 /// Shows the layout code declares, and with --from, fails unless it keeps the older one, by the
@@ -31,11 +34,11 @@ pub fn layout(args: LayoutArgs) -> CliResult<()> {
     let new = read(&args.code)?;
     print(&shown, &new);
 
-    let Some(from) = args.from else {
+    let Some(from) = args.from.clone() else {
         return Ok(());
     };
     let (older, old) = match from.parse::<Address>() {
-        Ok(address) => (address.to_string(), deployed(&args.node, &address)?),
+        Ok(address) => (address.to_string(), deployed(&args, &address)?),
         Err(_) => (from.clone(), read(Path::new(&from))?),
     };
     print(&older, &old);
@@ -82,8 +85,8 @@ fn read(path: &Path) -> CliResult<Layout> {
 /// The layout of a deployed contract, from the node's GET /contracts/{address}, read back from
 /// the entries it would be declared with.
 #[cfg(feature = "client")]
-fn deployed(node: &str, address: &Address) -> CliResult<Layout> {
-    let agent = super::send::agent();
+fn deployed(args: &LayoutArgs, address: &Address) -> CliResult<Layout> {
+    let (node, agent) = (&args.node, super::send::agent(&args.tls)?);
     let contract = super::send::ok(agent.get(format!("{}/contracts/{address}", node.trim_end_matches('/'))).call())?;
     let namespaces = contract["layout"].as_array().ok_or("the node sent no layout; is it older than layouts?")?;
     let text = |value: &serde_json::Value, what: &str| value.as_str().map(str::to_string).ok_or(format!("the node sent a namespace without {what}"));
@@ -115,6 +118,6 @@ fn deployed(node: &str, address: &Address) -> CliResult<Layout> {
 }
 
 #[cfg(not(feature = "client"))]
-fn deployed(_: &str, _: &Address) -> CliResult<Layout> {
+fn deployed(_: &LayoutArgs, _: &Address) -> CliResult<Layout> {
     Err("this build has no client to ask a node with; give the older code as a file".into())
 }

@@ -651,6 +651,42 @@ fn a_miner_seals_on_its_own_threads_and_publishes() {
 }
 
 #[test]
+fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
+    use crate::mining::worker::{Devices, Worker, WorkerConfig};
+
+    // A free port, as the pool reports none to the node's owner.
+    let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let token = b"0123456789abcdef0123456789abcdef".to_vec();
+    let (link, _net) = NetLink::pair();
+    let mut node = Node::new(Arc::new(MemoryDb::default()), &easy_pow(), None, link).unwrap().producing(Producing {
+        mine: Some(Mining {
+            reward_to: Address::Ed25519([9; 32]),
+            threads: 0,
+            gpu: false,
+            gpus: None,
+            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string() }),
+        }),
+        sign: None,
+    });
+    node.step(now_ms()).unwrap();
+    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1) }).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
+    while node.chain().tip().height < 2 {
+        assert!(std::time::Instant::now() < deadline, "no block was mined");
+        node.step(now_ms()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    let report = node.report(now_ms(), 0).mining.unwrap();
+
+    assert!(report.devices.is_empty());
+    assert_eq!(report.listening, Some(listen.to_string()));
+    assert_eq!(report.workers[0].name, "rig");
+    assert!(Accounts::new(&node.chain().state()).get(&Address::Ed25519([9; 32])).unwrap().balance >= u256::new(10));
+}
+
+#[test]
 fn forked_nodes_settle_on_the_heavier_chain() {
     let (mut heavy, mut heavy_net) = pow_node();
     let (mut light, mut light_net) = pow_node();

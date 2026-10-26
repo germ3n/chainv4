@@ -36,6 +36,12 @@ enum Command {
     /// header and justification, and answers only with what it proved.
     #[cfg(feature = "client")]
     Light(cli::LightArgs),
+    /// Mines for a node over its mining port, on this machine's CPU threads or GPUs, with no chain
+    /// of its own: for rigs that add their hashrate to one node.
+    Worker(cli::WorkerArgs),
+    /// Lists this machine's GPUs, by the numbers --gpus takes.
+    #[cfg(feature = "gpu")]
+    Gpus,
 }
 
 #[cfg(feature = "node")]
@@ -51,6 +57,11 @@ struct NodeArgs {
     /// Repeat to dial several. No /p2p/ part is needed, as a node takes a new peer id each start.
     #[arg(long)]
     peer: Vec<libp2p::Multiaddr>,
+    /// The name every protocol and gossip topic starts with, beside the genesis id: give chains
+    /// built from this code a name of their own so their nodes never mix, even on one network.
+    /// Peers under another name, or another genesis, are disconnected. Workers give the same.
+    #[arg(long, default_value = chainv4::net::DEFAULT_PROTOCOL, value_parser = chainv4::net::protocol_name)]
+    protocol: String,
     /// Do not look for peers on the local network with mDNS: for a server, whose network holds no
     /// nodes of yours, so peers come from --peer and Kademlia alone.
     #[arg(long)]
@@ -90,13 +101,24 @@ struct NodeArgs {
     /// Where mining rewards go. Defaults to the development key's address.
     #[arg(long, requires = "mine")]
     reward_to: Option<structs::address::Address>,
-    /// How many threads to mine on.
+    /// How many threads to mine on; 0 for none, when workers mine for the node over --mining.
     #[arg(long, default_value_t = 1, requires = "mine")]
     mine_threads: usize,
-    /// Mine on the GPU instead of threads: through wgpu, on Vulkan, Metal or WebGPU. Needs a build
-    /// with the gpu feature.
+    /// Mine on the GPUs instead of threads: through wgpu, on Vulkan, Metal or WebGPU, every GPU
+    /// there is unless --gpus picks. Needs a build with the gpu feature.
     #[arg(long, requires = "mine", conflicts_with = "mine_threads")]
     mine_gpu: bool,
+    /// The GPUs to mine on, by their number in chainv4 gpus, such as 0,2.
+    #[arg(long, requires = "mine_gpu", value_delimiter = ',')]
+    gpus: Vec<usize>,
+    /// Take workers on this address, such as 0.0.0.0:4002: machines running chainv4 worker that
+    /// mine for this node with no chain of their own. Each gets a range of nonces apart.
+    #[arg(long, requires = "mine", requires = "mining_token")]
+    mining: Option<std::net::SocketAddr>,
+    /// The file holding the token workers must know, for --mining: at least 32 characters, such as
+    /// openssl rand -hex 32 makes.
+    #[arg(long, requires = "mining")]
+    mining_token: Option<std::path::PathBuf>,
     /// Produce blocks (authority, rotating and staked chains), with the development key unless
     /// --producer-key names the authority's, or a signer's or validator's voting, key file.
     #[arg(long)]
@@ -178,6 +200,9 @@ fn main() -> std::process::ExitCode {
         Some(Command::Db(args)) => cli::db(args),
         #[cfg(feature = "client")]
         Some(Command::Light(args)) => cli::light(args),
+        Some(Command::Worker(args)) => cli::worker(args),
+        #[cfg(feature = "gpu")]
+        Some(Command::Gpus) => cli::gpus(),
         None => run(cli.node),
     };
 
@@ -198,7 +223,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         chainv4::consensus::{ConsensusConfig, DevAuthority},
         chainv4::db::{Database, RocksDb},
         chainv4::net::{self, BacklogLimits, NetConfig},
-        chainv4::node::{Mining, Node, Producing},
+        chainv4::node::{Mining, MiningPort, Node, Producing},
         std::sync::Arc,
     };
 
@@ -234,6 +259,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         mdns: !args.no_mdns,
         hash: genesis.hash,
         network,
+        protocol: args.protocol.clone(),
         backlog: BacklogLimits {
             total: args.max_gossip_backlog as usize,
             per_peer: args.max_gossip_per_peer as usize,
@@ -241,10 +267,25 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     })?;
     // What this node produces with: a miner's settings, a signing key, or both. The node builds
     // the producer for whatever consensus the chain runs, and again when governance changes it.
+    let port = match (args.mining, &args.mining_token) {
+        (Some(listen), Some(token)) => Some(MiningPort {
+            listen,
+            token: chainv4::mining::read_token(token)?,
+            protocol: args.protocol.clone(),
+        }),
+        _ => None,
+    };
+
+    if args.mine && args.mine_threads == 0 && !args.mine_gpu && port.is_none() {
+        return Err("--mine-threads 0 mines nothing without --mining for workers to mine for the node".into());
+    }
+
     let mine = args.mine.then(|| Mining {
         reward_to: args.reward_to.unwrap_or(dev.public().address()),
         threads: args.mine_threads,
         gpu: args.mine_gpu,
+        gpus: (!args.gpus.is_empty()).then_some(args.gpus),
+        port,
     });
     let sign = match args.produce {
         true => Some(cli::signer(args.producer_key.as_deref())?),

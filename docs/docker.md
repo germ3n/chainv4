@@ -53,6 +53,12 @@ chainv4_chain`. `docker/compose.sh down -v` removes the certificates' volumes to
 key, whose seed is public, and says so in its log. The node runs as uid 10001: on Linux, make the
 key files readable to it.
 
+**Workers:** with `docker/config/mining.token` (or `MINING_TOKEN` naming another file), a mining
+node takes workers on TCP 4002, `MINING_PORT` on the host. The node must be able to read it, as
+the keys; `docker/pow.sh up` makes it readable. A token someone else reads lets them mine for the
+node, which pays the node, or report made-up hashrates, and nothing more: every nonce is checked.
+`PROTOCOL` names the chain's protocols (see [Node](node.md#networking)).
+
 **More:** `PEERS` (multiaddrs to dial), `MINE_THREADS`, `REWARD_TO`, `INDEX_EVENTS` and
 `INDEX_ADDRESSES` (`genesis`, a height, `latest-N` or `off`), and `EXTRA_ARGS` for anything else
 `chainv4` takes. `docker/entrypoint.sh` has them all.
@@ -92,8 +98,13 @@ DNS name pointing at the host, and port 80 reachable from the internet.
 | `HTTPS_PORT` (443) | The API, the explorer, the wallet and `/stream`, over TLS. |
 | `HTTP_PORT` (80) | Let's Encrypt's challenges, and a redirect to HTTPS. |
 | `P2P_PORT` (4001, UDP) | Peer-to-peer, straight to the node. |
+| `MINING_PORT` (4002, TCP) | Workers, when `docker/config/mining.token` is there; nothing listens otherwise. |
 
 **The API is never published itself.** Port 8080 is only on compose's own network, for nginx.
+
+**Workers authenticate with the token.** Every message on the mining port carries an HMAC under
+it, so no one without it can mine for the node or feed it nonces; the messages are not
+encrypted, and need not be (see [Consensus](consensus.md#mining-with-workers)).
 
 **Peer-to-peer needs no proxy for its encryption.** It is libp2p over QUIC, which is always TLS
 1.3, with certificates bound to each peer's id: every connection is encrypted and authenticated
@@ -110,8 +121,10 @@ the node dials the VPS again every 15 seconds while it is cut off.
 docker/pow.sh init                # here, once: a key of your own, and a genesis that pays it
 docker/pow.sh push user@your-vps -i ~/.ssh/vps  # here: the repository, genesis and .env
 docker/pow.sh up                  # on the VPS, in that copy: build and start the stack
-docker/pow.sh join your-vps       # here: a node of the same chain that mines and dials the VPS
-docker/pow.sh status [url]        # either: the chain, height and peers
+docker/pow.sh join your-vps --gpu # here: a node of the same chain that mines and dials the VPS
+docker/pow.sh worker your-vps --gpu  # any rig: mine for the VPS with no chain of its own
+docker/pow.sh status [url]        # either: the chain, height, peers and mining
+docker/pow.sh logs                # on the VPS: follow the node's log
 ```
 
 1. **`init`** makes a key from new words, printed once: restore them in the [wallet](wallet.md)
@@ -119,19 +132,32 @@ docker/pow.sh status [url]        # either: the chain, height and peers
    repository. It writes a genesis, the development PoW chain with depth finality, so nothing
    votes, whose coins, minting and mining rewards are that key's, starting now. It copies the
    genesis to `docker/config/genesis.json` and writes `docker/.env`, both ignored by git: mining
-   rewards to the key, `--no-mdns`, and a self-signed certificate.
+   rewards to the key, `--no-mdns`, and a self-signed certificate. It makes the mining token too,
+   as `token` does.
 2. **`push`** copies the repository by rsync, logging in with `-i KEY` and `-p PORT` when given
    (or `SSH_KEY` and `SSH_PORT`), without build output, `.git`, databases or keys, to
    `chainv4/` in the VPS's home (`REMOTE_DIR`).
 3. **`up`** runs `docker/compose.sh up -d --build`, on Docker or Podman, warns when the machine has under 4 GiB of memory
    and swap for the first build, waits for the node, and says which ports to open: **UDP 4001**
    for peers, TCP 80 and 443 for the explorer and wallet, in `ufw` and in the provider's firewall.
-4. **`join`** builds the node here, keeps a copy of it in `POW_HOME`, looks the VPS's name up,
+4. **`join`** mines on the CPU, or on the GPU with `--gpu` (`GPU=1`), and asks which in a
+   terminal when neither is given; the GPU build has the `gpu` feature, in `target/gpu` of its
+   own, so switching rebuilds neither. It builds the node here, keeps a copy of it in `POW_HOME`, looks the VPS's name up,
    and runs a node with the same genesis that dials `/ip4/…/udp/4001/quic-v1`, mines with
    `MINE_THREADS`, and serves its API, and the explorer and wallet when they are built, on
    `127.0.0.1:8090` (`API`). Ctrl-C stops it; `join` again carries on where it was.
 
-Both mine, so both earn rewards, to the same key. `SYMBOL` names the coin at `init`, `P2P_PORT`
+5. **`token`** makes the token workers mine with, once: 32 random bytes in hex, in
+   `POW_HOME/mining.token` and `docker/config/mining.token` (ignored by git), which `push` takes
+   to the VPS. For a chain made before it: `token`, `push`, then `up` on the VPS, whose node then
+   takes workers on **TCP 4002** (`MINING_PORT`); open that port too.
+6. **`worker`** mines for the VPS's node on any machine with the token, keeping no chain: every
+   GPU with `--gpu`, some with `--gpus 0,2`, or `MINE_THREADS` CPU threads with `--cpu`, asked in
+   a terminal when none is given. It reads the token from `POW_HOME`, or `TOKEN`: copy it to each
+   rig. What the workers find pays the VPS's `REWARD_TO`, the same key.
+
+Both mine, so both earn rewards, to the same key. A chain with its own `PROTOCOL` in `.env`
+needs the same `PROTOCOL` set for `join` and `worker`. `SYMBOL` names the coin at `init`, `P2P_PORT`
 moves the QUIC port, and `docker/pow.sh` alone lists every setting.
 
 ## Podman
@@ -189,9 +215,14 @@ on, arm64 or amd64.
   role. Fine to try things on; for a chain of value, bring a genesis and keys of your own.
 - **A self-signed certificate is trusted only where you accept it.** Browsers ask once. The
   desktop explorer and wallet will not take it: use `provided` or `letsencrypt` for them.
-- **The CLI speaks plain HTTP only,** so `chainv4 send` and `chainv4 light` cannot reach the node
-  through nginx. Run them where they reach the API directly, inside the container:
-  `docker/compose.sh exec node chainv4 send --node http://127.0.0.1:8080 …`.
+- **The CLI reaches the node through nginx too.** `chainv4 send` and `chainv4 light` take
+  `--node https://…`. A certificate from Let's Encrypt, or a CA you trust, needs nothing more;
+  for the self-signed one, give it to them with `--ca-cert`, after fetching it once:
+  `docker/compose.sh exec nginx cat /etc/chainv4/tls/fullchain.pem > vps.pem`, then
+  `chainv4 send --node https://203.0.113.7 --ca-cert vps.pem …`. `--insecure` skips the check,
+  for trying things out only. A self-signed certificate an older `tls.sh` made was a CA, which
+  rustls refuses as a server's own; the nginx container makes it again, as one that is not, when
+  it next starts.
 - **A VPS takes the peers' word for nothing.** Its chain is the genesis it was given: a node
   dialing it with another genesis is on another chain, and neither syncs from the other.
 - **One node per compose project.** Several nodes on one host want their own project names and

@@ -235,6 +235,8 @@ fn a_lua_contract_is_put_together_from_its_files_and_checked_as_a_node_would() {
         code: dir.0.join("broken.lua"),
         from: None,
         node: String::new(),
+        #[cfg(feature = "client")]
+        tls: Default::default(),
     })
     .unwrap_err()
     .to_string();
@@ -345,6 +347,7 @@ mod send {
         fn args(&self, tx: TxArgs) -> SendArgs {
             SendArgs {
                 node: format!("http://{}", self.api),
+                tls: Default::default(),
                 key: None,
                 no_wait: false,
                 finalized: false,
@@ -570,7 +573,7 @@ mod send {
         let nothing = send(running.args(TxArgs::WithdrawChange { version: None }));
         let approved = send(running.args(TxArgs::ApproveChange { consensus: staked, version: None }));
         let decided = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let governance = crate::cli::send::ok(crate::cli::send::agent().get(format!("http://{}/governance", running.api)).call()).unwrap();
+        let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
         let node = running.stop();
 
         assert!(kept.unwrap_err().to_string().contains("keeps the chain's window"));
@@ -730,6 +733,8 @@ fn layout_checks_new_code_against_older_files() {
             code: code.clone(),
             from: Some(from.display().to_string()),
             node: String::new(),
+            #[cfg(feature = "client")]
+            tls: Default::default(),
         })
         .map_err(|err| err.to_string())
     };

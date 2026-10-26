@@ -1,9 +1,10 @@
-//! Mining on the GPU: one thread hands the current template's work to the GPU a batch of nonces
-//! at a time, through the chainv4-gpu crate, and reports the seal it finds. The GPU hashes exactly
+//! Mining on the GPU: a thread for each GPU hands the current template's work to it a batch of
+//! nonces at a time, through the chainv4-gpu crate, and reports the seal it finds. With several
+//! GPUs, each takes every so many batches, so none tries another's nonces. The GPU hashes exactly
 //! what the CPU miner hashes, so a seal it finds passes ProofOfWork::check.
 
 use {
-    super::pow::{Shared, work_prefix, work_target},
+    super::pow::{Rig, Shared, work_prefix, work_target},
     super::Producer,
     crate::registry::validators::Member,
     crate::structs::address::Address,
@@ -12,7 +13,6 @@ use {
     chainv4_gpu::{BATCH, Gpu, WorkHash},
     r#macro::document,
     std::sync::Arc,
-    std::thread::JoinHandle,
     std::time::Instant,
 };
 
@@ -20,43 +20,75 @@ use {
 const REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[document(
-    summary = "Mines on the GPU, through wgpu on Vulkan, Metal or WebGPU. seal hands the header to a thread that tries nonces on the GPU a batch at a time, and returns at once; the seal arrives through the callback. A new header replaces the old one, and dropping the miner stops the thread.",
+    summary = "Mines on the GPU, through wgpu on Vulkan, Metal or WebGPU: every GPU there is, or those picked. seal hands the header to a thread for each GPU, which tries nonces on it a batch at a time, and returns at once; the seal arrives through the callback. A new header replaces the old one, and dropping the miner stops the threads.",
     category = "Consensus",
-    see_also = "Miner, ProofOfWork, Producer",
+    see_also = "Miner, ProofOfWork, Producer, Rig",
 )]
 pub struct GpuMiner {
     address: Address,
-    shared: Arc<Shared>,
-    thread: Option<JoinHandle<()>>,
+    rig: Rig,
 }
 
 impl GpuMiner {
     #[document(
         parent = "GpuMiner",
-        summary = "Opens the GPU and starts the mining thread, idle until the first header.",
+        summary = "Opens the GPUs and starts a mining thread on each, idle until the first header.",
         params = {
             address = "Where rewards for blocks this miner finds go.",
             hash = "The chain's work hash, from genesis.",
-            found = "Called from the mining thread with the block id and its seal when a nonce is found.",
+            which = "The GPUs to mine on, by their place in chainv4_gpu::list; None for every one.",
+            found = "Called from a mining thread with the block id and its seal when a nonce is found.",
         },
-        returns = "The miner, or why the GPU could not be used: no device, a kernel that did not compile, or a work hash the GPU does not mine.",
+        returns = "The miner, or why the GPUs could not be used: none found, one that does not open, a kernel that did not compile, or a work hash the GPU does not mine.",
     )]
-    pub fn new(address: Address, hash: HashType, found: impl Fn(Hash, Seal) + Send + Sync + 'static) -> Result<GpuMiner, String> {
-        let work_hash = work_hash(hash).ok_or_else(|| format!("the GPU does not mine {}", hash.name()))?;
-        let gpu = Gpu::open().map_err(|err| err.to_string())?;
-        log::info!("[gpu] mining {} on {}", hash.name(), gpu.name());
-        let shared = Arc::new(Shared::new());
-        let worker = shared.clone();
-        let thread = std::thread::Builder::new()
-            .name("gpu-miner".to_string())
-            .spawn(move || mine(&worker, &gpu, work_hash, &found))
-            .map_err(|err| format!("the GPU mining thread did not start: {err}"))?;
-
+    pub fn new(address: Address, hash: HashType, which: Option<&[usize]>, found: impl Fn(Hash, Seal) + Send + Sync + 'static) -> Result<GpuMiner, String> {
         Ok(GpuMiner {
             address,
-            shared,
-            thread: Some(thread),
+            rig: Rig::gpu(hash, which, found)?,
         })
+    }
+}
+
+impl Rig {
+    #[document(
+        parent = "Rig",
+        summary = "Opens the GPUs and starts a mining thread on each, idle until the first work. In a build with the gpu feature.",
+        params = {
+            hash = "The chain's work hash, from genesis.",
+            which = "The GPUs to mine on, by their place in chainv4_gpu::list; None for every one.",
+            found = "Called from a mining thread with the block id and its seal when a nonce is found.",
+        },
+        returns = "The rig, or why the GPUs could not be used: none found, one that does not open, a kernel that did not compile, or a work hash the GPU does not mine.",
+    )]
+    pub fn gpu(hash: HashType, which: Option<&[usize]>, found: impl Fn(Hash, Seal) + Send + Sync + 'static) -> Result<Rig, String> {
+        let work_hash = work_hash(hash).ok_or_else(|| format!("the GPU does not mine {}", hash.name()))?;
+
+        for (index, name) in chainv4_gpu::list().iter().enumerate() {
+            log::info!("[gpu] {index}: {name}");
+        }
+
+        let gpus = Gpu::open_all(which).map_err(|err| err.to_string())?;
+        let (shared, found, count) = (Arc::new(Shared::new()), Arc::new(found), gpus.len() as u64);
+        // Built as it goes, so a thread that does not start stops those that did.
+        let mut rig = Rig {
+            shared,
+            threads: Vec::new(),
+            devices: Vec::new(),
+        };
+
+        for (index, gpu) in gpus.into_iter().enumerate() {
+            log::info!("[gpu] mining {} on {}", hash.name(), gpu.name());
+            let meter = Arc::new(crate::consensus::Meter::default());
+            rig.devices.push((gpu.name().to_string(), meter.clone()));
+            let (worker, found) = (rig.shared.clone(), found.clone());
+            let thread = std::thread::Builder::new()
+                .name(format!("gpu-miner-{index}"))
+                .spawn(move || mine(&worker, &gpu, work_hash, index as u64, count, &*found, &meter))
+                .map_err(|err| format!("the GPU mining thread did not start: {err}"))?;
+            rig.threads.push(thread);
+        }
+
+        Ok(rig)
     }
 }
 
@@ -83,38 +115,32 @@ impl Producer for GpuMiner {
     }
 
     fn seal(&mut self, header: &BlockHeader) -> Option<Seal> {
-        let mut job = self.shared.lock();
-        job.generation += 1;
-        job.work = Some((header.id(), header.difficulty));
-        self.shared.changed.notify_all();
+        self.rig.work(header.id(), header.difficulty, 0);
 
         None
     }
-}
 
-impl Drop for GpuMiner {
-    fn drop(&mut self) {
-        self.shared.lock().stopped = true;
-        self.shared.changed.notify_all();
-
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+    fn mining(&self) -> Option<crate::consensus::MiningReport> {
+        Some(crate::consensus::MiningReport {
+            devices: self.rig.devices(),
+            ..Default::default()
+        })
     }
 }
 
-/// The mining thread: for each job, batches of nonces on the GPU from 0 up, until one is found,
-/// the job changes, or the miner stops. A GPU that fails ends the thread, and the node mines no
-/// more until restarted; the log says so.
-fn mine(shared: &Shared, gpu: &Gpu, hash: WorkHash, found: &(dyn Fn(Hash, Seal) + Send + Sync)) {
+/// One GPU's mining thread: for each job, batches of nonces, the index-th of every count from the
+/// job's start up, until one is found, the job changes, or the miner stops. A GPU that fails ends its thread;
+/// the others go on, and the log says so.
+#[allow(clippy::too_many_arguments)]
+fn mine(shared: &Shared, gpu: &Gpu, hash: WorkHash, index: u64, count: u64, found: &(dyn Fn(Hash, Seal) + Send + Sync), meter: &crate::consensus::Meter) {
     let mut finished = 0;
     let mut hashed: u64 = 0;
     let mut since = Instant::now();
 
-    while let Some((generation, id, difficulty)) = shared.next_job(finished) {
+    while let Some((generation, id, difficulty, first)) = shared.next_job(finished) {
         let prefix = work_prefix(&id);
         let target = work_target(difficulty);
-        let mut start = 0u64;
+        let mut start = first.wrapping_add(index * u64::from(BATCH));
 
         loop {
             match gpu.search(hash, &prefix, &target, start, BATCH) {
@@ -125,17 +151,18 @@ fn mine(shared: &Shared, gpu: &Gpu, hash: WorkHash, found: &(dyn Fn(Hash, Seal) 
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    log::error!("[gpu] {err}; mining on the GPU stops");
+                    log::error!("[gpu] {}: {err}; mining on it stops", gpu.name());
 
                     return;
                 }
             }
 
             hashed += u64::from(BATCH);
-            start = start.wrapping_add(u64::from(BATCH));
+            meter.add(u64::from(BATCH));
+            start = start.wrapping_add(count * u64::from(BATCH));
 
             if since.elapsed() >= REPORT_EVERY {
-                log::info!("[gpu] {:.1} MH/s", hashed as f64 / since.elapsed().as_secs_f64() / 1e6);
+                log::info!("[gpu] {}: {:.1} MH/s", gpu.name(), hashed as f64 / since.elapsed().as_secs_f64() / 1e6);
                 hashed = 0;
                 since = Instant::now();
             }
@@ -180,7 +207,7 @@ mod tests {
     fn the_gpu_miner_finds_seals_the_rules_accept() {
         let (sender, found) = mpsc::channel();
         let sender = Mutex::new(sender);
-        let mut miner = match GpuMiner::new(Address::Ed25519([1; 32]), HashType::default_chain(), move |id, seal| {
+        let mut miner = match GpuMiner::new(Address::Ed25519([1; 32]), HashType::default_chain(), None, move |id, seal| {
             let _ = sender.lock().unwrap().send((id, seal));
         }) {
             Ok(miner) => miner,

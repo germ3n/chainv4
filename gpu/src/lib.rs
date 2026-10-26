@@ -6,6 +6,9 @@
 //! The node does not know wgpu: it hands [`Gpu::search`] the first 44 bytes of the work message
 //! and the target, and gets the lowest nonce of a range that meets it, as its own threads would
 //! find first.
+//!
+//! A machine may have several GPUs: [`list`] names each once, by its place in the list, and
+//! [`Gpu::open_all`] opens those asked for, or every one.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -96,6 +99,51 @@ pub struct Gpu {
 /// The job as the kernels read it: 11 prefix words, 8 target words, the first nonce, the count.
 const JOB_BYTES: u64 = (11 + 8 + 4) * 4;
 
+/// Every GPU wgpu can mine on, each once: a card reached through several backends, such as Vulkan
+/// and OpenGL, under its native one. Discrete cards first, then integrated, then any other;
+/// software renderers, which are the CPU, are left out.
+fn adapters() -> Vec<wgpu::Adapter> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let rank = |backend: wgpu::Backend| match backend {
+        wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 => 0,
+        wgpu::Backend::Gl => 1,
+        _ => 2,
+    };
+    let kind = |device: wgpu::DeviceType| match device {
+        wgpu::DeviceType::DiscreteGpu => 0,
+        wgpu::DeviceType::IntegratedGpu => 1,
+        _ => 2,
+    };
+    let mut found: Vec<wgpu::Adapter> = instance
+        .enumerate_adapters(wgpu::Backends::all())
+        .into_iter()
+        .filter(|adapter| adapter.get_info().device_type != wgpu::DeviceType::Cpu)
+        .collect();
+    found.sort_by_key(|adapter| {
+        let info = adapter.get_info();
+
+        (kind(info.device_type), info.vendor, info.device, info.name.clone(), rank(info.backend))
+    });
+    // After sorting, a card's backends sit side by side, its best first.
+    found.dedup_by_key(|adapter| {
+        let info = adapter.get_info();
+
+        (info.vendor, info.device, info.name)
+    });
+
+    found
+}
+
+/// The GPUs this machine has, by their place in the list, as [`Gpu::open_all`] takes it: each
+/// one's name and backend, such as "Apple M3 Pro (Metal)".
+pub fn list() -> Vec<String> {
+    adapters().iter().map(|adapter| describe(&adapter.get_info())).collect()
+}
+
+fn describe(info: &wgpu::AdapterInfo) -> String {
+    format!("{} ({:?})", info.name, info.backend)
+}
+
 impl Gpu {
     /// Opens the most powerful GPU wgpu finds and compiles every kernel on it.
     pub fn open() -> Result<Gpu, GpuError> {
@@ -105,8 +153,39 @@ impl Gpu {
             ..Default::default()
         }))
         .ok_or(GpuError::NoAdapter)?;
+
+        Gpu::on(adapter)
+    }
+
+    /// Opens the GPUs at these places in [`list`], or every one, compiling every kernel on each.
+    pub fn open_all(which: Option<&[usize]>) -> Result<Vec<Gpu>, GpuError> {
+        let mut found: Vec<Option<wgpu::Adapter>> = adapters().into_iter().map(Some).collect();
+
+        if found.is_empty() {
+            return Err(GpuError::NoAdapter);
+        }
+
+        let indices: Vec<usize> = match which {
+            Some(which) => which.to_vec(),
+            None => (0..found.len()).collect(),
+        };
+        let (count, mut opened) = (found.len(), Vec::new());
+
+        for index in indices {
+            let adapter = found
+                .get_mut(index)
+                .ok_or_else(|| GpuError::Device(format!("there is no GPU {index}: this machine has {count}")))?
+                .take()
+                .ok_or_else(|| GpuError::Device(format!("GPU {index} was asked for twice")))?;
+            opened.push(Gpu::on(adapter)?);
+        }
+
+        Ok(opened)
+    }
+
+    fn on(adapter: wgpu::Adapter) -> Result<Gpu, GpuError> {
         let info = adapter.get_info();
-        let name = format!("{} ({:?})", info.name, info.backend);
+        let name = describe(&info);
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("chainv4 miner"),
@@ -373,6 +452,23 @@ mod tests {
 
             assert_eq!(found, Some(expected), "{}", hash.name());
         }
+    }
+
+    #[test]
+    fn every_gpu_listed_opens_once_and_a_missing_one_is_refused() {
+        let names = list();
+
+        if names.is_empty() {
+            eprintln!("no GPU here: skipping");
+
+            return;
+        }
+
+        let opened = Gpu::open_all(None).unwrap();
+
+        assert_eq!(opened.iter().map(|gpu| gpu.name().to_string()).collect::<Vec<_>>(), names);
+        assert!(Gpu::open_all(Some(&[names.len()])).is_err(), "past the end");
+        assert!(Gpu::open_all(Some(&[0, 0])).is_err(), "twice");
     }
 
     #[test]

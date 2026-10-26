@@ -80,6 +80,24 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         ));
     }
 
+    if let Some(mining) = ctx.store.node.as_ref().and_then(|node| node.mining.as_ref()) {
+        let devices = mining.devices.len() + mining.workers.iter().map(|worker| worker.devices.len()).sum::<usize>();
+        tiles.push((
+            "Hashrate".to_string(),
+            format::hashrate(mining.rate),
+            format!("this node · {devices} device{} · {} worker{}", if devices == 1 { "" } else { "s" }, mining.workers.len(), if mining.workers.len() == 1 { "" } else { "s" }),
+        ));
+    }
+
+    // Difficulty is the hashes a block takes, so over the time blocks take it is the hashrate
+    // the whole network mines at.
+    if status.difficulty != "0"
+        && let Some(block_ms) = rates.block_ms.filter(|ms| *ms > 0.0)
+    {
+        let network = status.difficulty.parse::<f64>().unwrap_or(0.0) / (block_ms / 1_000.0);
+        tiles.push(("Network hashrate".to_string(), format::hashrate(network), "difficulty over block time".to_string()));
+    }
+
     if let Some(base) = status.base_price() {
         tiles.push(("Base price".to_string(), format::thousands(base), "units per gas".to_string()));
     }
@@ -142,6 +160,7 @@ fn charts(ui: &mut Ui, look: Look, recent: &[&Summary], gas_limit: Option<u64>) 
             color: roles.main,
             limit: None,
             unit: |seconds| format!("{seconds:.1} s"),
+            across: chart::block,
         },
         Series {
             name: "Transactions per block".to_string(),
@@ -150,6 +169,7 @@ fn charts(ui: &mut Ui, look: Look, recent: &[&Summary], gas_limit: Option<u64>) 
             color: roles.final_,
             limit: None,
             unit: |txs| format!("{txs:.0} transactions"),
+            across: chart::block,
         },
         Series {
             name: "Gas used".to_string(),
@@ -158,6 +178,7 @@ fn charts(ui: &mut Ui, look: Look, recent: &[&Summary], gas_limit: Option<u64>) 
             color: roles.justified,
             limit: gas_limit.map(|limit| (limit as f64, "limit")),
             unit: |gas| format!("{} gas", format::thousands(&format!("{gas:.0}"))),
+            across: chart::block,
         },
         match pow {
             true => Series {
@@ -167,6 +188,7 @@ fn charts(ui: &mut Ui, look: Look, recent: &[&Summary], gas_limit: Option<u64>) 
                 color: roles.side,
                 limit: None,
                 unit: |difficulty| format::thousands(&format!("{difficulty:.0}")),
+                across: chart::block,
             },
             false => Series {
                 name: "Base price, units per gas".to_string(),
@@ -175,6 +197,7 @@ fn charts(ui: &mut Ui, look: Look, recent: &[&Summary], gas_limit: Option<u64>) 
                 color: roles.side,
                 limit: None,
                 unit: |price| format!("{} units", format::thousands(&format!("{price:.0}"))),
+                across: chart::block,
             },
         },
     ];

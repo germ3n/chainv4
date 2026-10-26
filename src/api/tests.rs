@@ -110,6 +110,21 @@ fn fake_report(txs: usize) -> NodeReport {
         listening: vec!["/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap()],
         producing: true,
         validating: false,
+        mining: Some(crate::consensus::MiningReport {
+            devices: vec![crate::consensus::DeviceReport { name: "CPU, 2 threads".to_string(), rate: 1_000.0 }],
+            listening: Some("0.0.0.0:4002".to_string()),
+            workers: vec![crate::consensus::WorkerReport {
+                name: "rig".to_string(),
+                address: "10.0.0.3:50000".to_string(),
+                since: 3_000,
+                devices: vec![
+                    crate::consensus::DeviceReport { name: "GPU 0".to_string(), rate: 200e6 },
+                    crate::consensus::DeviceReport { name: "GPU 1".to_string(), rate: 100e6 },
+                ],
+                found: 4,
+                refused: 1,
+            }],
+        }),
         peers: vec![PeerReport {
             id: libp2p::PeerId::random(),
             address: "/ip4/10.0.0.2/udp/4001/quic-v1".parse().unwrap(),
@@ -945,6 +960,12 @@ fn the_node_tells_how_it_is_doing_and_what_waits() {
     assert_eq!((node["peers"][0]["dropped"].clone(), node["counters"]["gossip_dropped"].clone()), (json!(7), json!(7)));
     assert_eq!(node["backlog"], json!({ "waiting": 12, "total": 10_000, "per_peer": 1_000 }));
     assert_eq!(node["syncing"], Value::Null);
+    assert_eq!(node["mining"]["rate"], 300_001_000.0);
+    assert_eq!(node["mining"]["listening"], "0.0.0.0:4002");
+    assert_eq!(node["mining"]["devices"], json!([{ "name": "CPU, 2 threads", "rate": 1_000.0 }]));
+    assert_eq!(node["mining"]["workers"][0]["rate"], 300e6);
+    assert_eq!(node["mining"]["workers"][0]["devices"][1], json!({ "name": "GPU 1", "rate": 100e6 }));
+    assert_eq!((node["mining"]["workers"][0]["found"].clone(), node["mining"]["workers"][0]["refused"].clone()), (json!(4), json!(1)));
 
     let mempool = ok(fixture.address, "/mempool?limit=1");
 
