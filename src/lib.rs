@@ -1,6 +1,8 @@
 //! chainv4: a blockchain with Lua and WebAssembly contracts. The node binary, and clients such
 //! as the explorer, are built on this library.
 
+#[cfg(feature = "abi")]
+pub mod abi;
 #[cfg(feature = "http")]
 pub mod api;
 #[cfg(feature = "node")]

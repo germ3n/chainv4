@@ -70,10 +70,8 @@ chainv4 send --key me.key deploy --evm contracts/evm/Counter.bin --constructor "
 
 - **The file** is the init code in hex, as solc writes it, with or without `0x`, or its raw bytes.
 - **`--constructor`** lists the constructor's parameter types, and each **`--arg`** gives one
-  value, in order. They encode the static types: `uint8` to `uint256`, `int8` to `int256`,
-  `address`, `bool` and `bytes1` to `bytes32`. For a constructor taking a string, bytes or an
-  array, append the encoded arguments to the file yourself, such as with Foundry's
-  `cast abi-encode`.
+  value, in order, encoded as Solidity's ABI says (`src/abi/`): every type, `string`, `bytes`,
+  arrays and tuples too, those last two written as JSON, such as `[1, 2]` or `["0x…", 5]`.
 
 An EVM contract cannot be replaced by `Tx::Upgrade`. EVM code is fixed once deployed, as on
 Ethereum: upgradeable contracts use a proxy, which the EVM runs as usual, with DELEGATECALL.
@@ -100,7 +98,8 @@ chainv4 send --key me.key evm-call --to 0xc578…a4e9 --function "count()" --rea
 # Pays 1000 into the contract with deposit().
 chainv4 send --key me.key evm-call --to 0xc578…a4e9 --function "deposit()" --value 1000
 
-# Calldata from elsewhere, such as cast calldata, for the types --function cannot encode.
+# Dynamic types too, arrays as JSON; or calldata made elsewhere, with --data.
+chainv4 send --key me.key evm-call --to 0xc578…a4e9 --function "setNames(string[])" '["alice", "bob"]'
 chainv4 send --key me.key evm-call --to 0xc578…a4e9 --data "$(cast calldata 'setName(string)' hello)"
 ```
 
@@ -146,6 +145,18 @@ revm charges no fee itself and checks no nonce: the chain has done both already.
 
 **The chain id** is the first 6 bytes of the genesis id, as a number, so every chain has its own
 and it fits JavaScript's numbers. `GET /status` shows the genesis id.
+
+## In the apps
+
+- **The wallet's Contracts page** keeps EVM contracts with their ABIs, reads them, sends their
+  functions through the Send page's review, and deploys init code with typed constructor
+  arguments. It does the same for Lua and WebAssembly contracts. See
+  [Wallet](wallet.md#contracts).
+- **The explorer** shows an EVM contract's page, and with its ABI pasted, reads its functions with
+  `eth_call` and shows its logs and calls by name. See [Explorer](explorer.md).
+- **The ABI** they share is `src/abi/`, behind the `abi` feature: Solidity's encoding of every type,
+  dynamic ones included, a contract's JSON ABI, selectors, logs, custom errors, and EVM and CREATE
+  addresses worked out without an EVM. `chainv4 send evm-call --function` uses it too.
 
 ## Names
 

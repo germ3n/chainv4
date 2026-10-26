@@ -164,6 +164,30 @@ impl Verifiable for Address {
 impl Hashable for Address {
     const TAG_LEN: usize = 1;
 }
+#[document(
+    summary = "Where a deploy puts its contract: the chain hash of a domain tag, the deployer's address and their nonce. The same deployer and nonce always give the same address on a chain, and no key controls it.",
+    category = "Primitives",
+    params = {
+        deployer = "Who deploys.",
+        nonce = "The deploy's nonce.",
+        hash = "The chain's hash: any secure, 256-bit one.",
+    },
+    see_also = "Address::Contract",
+)]
+pub fn contract_address(deployer: &Address, nonce: u64, hash: crate::structs::hash::HashType) -> Address {
+    let mut hasher = crate::crypto::hasher::Hasher::new(hash);
+    hasher.update(b"chainv4 contract address");
+    hasher.update(&deployer.hashable_bytes_with_tag());
+    hasher.update(&nonce.to_le_bytes());
+    let bytes: [u8; 32] = hasher
+        .finalize()
+        .to_bytes()
+        .try_into()
+        .expect("genesis only allows 256-bit chain hashes");
+
+    Address::Contract(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

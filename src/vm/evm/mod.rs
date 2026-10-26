@@ -43,7 +43,7 @@ use {
     revm::context::{BlockEnv, CfgEnv, Context, TxEnv},
     revm::database_interface::DBErrorMarker,
     revm::primitives::hardfork::SpecId,
-    revm::primitives::{Address as Word, B256, Bytes, KECCAK_EMPTY, TxKind, U256, keccak256},
+    revm::primitives::{Address as Word, B256, Bytes, KECCAK_EMPTY, TxKind, U256},
     revm::state::{AccountInfo, Bytecode, EvmState},
     revm::{Database, ExecuteEvm, MainBuilder, MainContext},
     std::sync::Arc,
@@ -61,10 +61,7 @@ const ALIAS: &[u8] = b"evm alias";
     see_also = "Tx::EvmCall, Address::Evm",
 )]
 pub fn evm_alias(address: &Address) -> [u8; 20] {
-    match address {
-        Address::Secp256k1(bytes) | Address::Evm(bytes) => *bytes,
-        other => keccak256(address_key(other)).0[12..].try_into().expect("32 bytes hold 20"),
-    }
+    crate::abi::evm_address(address)
 }
 
 #[document(

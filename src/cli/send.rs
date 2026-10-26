@@ -246,7 +246,7 @@ pub enum TxArgs {
         /// The function's signature, such as "bump(uint256)", for the arguments after it.
         #[arg(long, conflicts_with = "data")]
         function: Option<String>,
-        /// Calldata in hex, as cast calldata writes it, for what --function cannot encode.
+        /// Calldata in hex, as cast calldata writes it, instead of --function and its arguments.
         #[arg(long)]
         data: Option<String>,
         /// What to send to the contract with the call, in the smallest unit.
@@ -255,8 +255,8 @@ pub enum TxArgs {
         /// Only run it on the node and print what it returns, as eth_call does: nothing is sent.
         #[arg(long)]
         read: bool,
-        /// The function's arguments, in its signature's order: numbers, true or false, addresses
-        /// and hex for bytesN.
+        /// The function's arguments, in its signature's order: numbers, true or false, addresses,
+        /// hex for bytes, text for strings, and JSON for arrays and tuples, such as [1, 2].
         args: Vec<String>,
     },
 }

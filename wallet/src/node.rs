@@ -42,6 +42,12 @@ pub enum Ask {
     Names,
     /// The names the node says an address owns: where the Names page looks, each one proven.
     OwnedNames(String),
+    /// A contract's record, as the node says it: its engine, and a native contract's functions.
+    Contract(String),
+    /// A native contract's function run read-only, with the body of POST /call.
+    Call(String),
+    /// An EVM contract read: a call's probe dry-run at POST /offer, for what it returns.
+    Read(String),
     /// A fee offer for a signed probe.
     Offer(String),
     /// A signed transaction.
@@ -64,6 +70,9 @@ impl Ask {
             Ask::Events(address) => format!("/events?address={address}&limit=50"),
             Ask::Names => "/names".to_string(),
             Ask::OwnedNames(address) => format!("/accounts/{address}/names?limit=100"),
+            Ask::Contract(address) => format!("/contracts/{address}"),
+            Ask::Call(_) => "/call".to_string(),
+            Ask::Read(_) => "/offer".to_string(),
             Ask::Offer(_) => "/offer".to_string(),
             Ask::Submit(_) => "/txs".to_string(),
         }
@@ -71,7 +80,7 @@ impl Ask {
 
     fn body(&self) -> Option<&str> {
         match self {
-            Ask::Offer(body) | Ask::Submit(body) => Some(body),
+            Ask::Offer(body) | Ask::Submit(body) | Ask::Call(body) | Ask::Read(body) => Some(body),
             _ => None,
         }
     }

@@ -1,13 +1,12 @@
 use {
     super::RegistryError,
     crate::crypto::hashable::Hashable,
-    crate::crypto::hasher::Hasher,
     crate::db::{Column, DbError, State, address_key},
     crate::registry::tokens::{METADATA_FUNCTIONS, Token, Tokens},
     crate::structs::address::Address,
     crate::structs::code::{Code, Engine},
     crate::structs::event::Event,
-    crate::structs::hash::{Hash, HashType},
+    crate::structs::hash::Hash,
     crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
@@ -18,7 +17,6 @@ use {
 };
 
 /// Separates contract addresses from every other hash the chain takes.
-const ADDRESS_DOMAIN: &[u8] = b"chainv4 contract address";
 
 #[document(
     summary = "A deployed contract as stored: who deployed it, which engine runs it, what the engine made of its code, the names it exports, and the storage layout it declares.",
@@ -460,34 +458,13 @@ fn load(vm: &Vm, deployer: Address, code: &Code, limits: Limits) -> Result<(Cont
     Ok((record, loading.fuel_used))
 }
 
-#[document(
-    summary = "Where a deploy puts its contract: the chain hash of a domain tag, the deployer's address and their nonce. The same deployer and nonce always give the same address on a chain, and no key controls it.",
-    category = "Registries",
-    params = {
-        deployer = "Who deploys.",
-        nonce = "The deploy's nonce.",
-        hash = "The chain's hash: any secure, 256-bit one.",
-    },
-    see_also = "Contracts::deploy, Address::Contract",
-)]
-pub fn contract_address(deployer: &Address, nonce: u64, hash: HashType) -> Address {
-    let mut hasher = Hasher::new(hash);
-    hasher.update(ADDRESS_DOMAIN);
-    hasher.update(&deployer.hashable_bytes_with_tag());
-    hasher.update(&nonce.to_le_bytes());
-    let bytes: [u8; 32] = hasher
-        .finalize()
-        .to_bytes()
-        .try_into()
-        .expect("genesis only allows 256-bit chain hashes");
-
-    Address::Contract(bytes)
-}
+pub use crate::structs::address::contract_address;
 
 #[cfg(all(test, feature = "lvm"))]
 mod tests {
     use super::*;
     use crate::db::{Database, MemoryDb};
+    use crate::structs::hash::HashType;
     use crate::structs::u256::u256;
     use crate::vm::selector;
 

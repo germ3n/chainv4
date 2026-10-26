@@ -318,6 +318,34 @@ period, and which names each address owns; what each name is, the wallet proves.
   pointing, and so on, with the name and what it sets. It cannot know what a registration burns;
   the chain charges that as it runs.
 
+## Contracts
+
+The Contracts page (`wallet/src/views/contracts.rs`) reads, calls and deploys contracts of every
+engine, from the address picked.
+
+- **Kept contracts:** add one by its address, `contract:0x…` or `evm:0x…`, with a name, and for an
+  EVM one its ABI's JSON, as `solc --abi` or Foundry writes it. They are kept on this device, and
+  a deploy from here keeps the contract it makes.
+- **A native contract,** Lua or WebAssembly, lists its functions as its record on the node says.
+  Each takes its arguments as `type:value`, one a line, such as `i64:5`, `string:hi` or
+  `address:ed25519:0x…`, as `chainv4 send call` does, and coin to send with it.
+- **An EVM contract** lists its ABI's functions, reads first, each with a field for every
+  parameter, typed: numbers, addresses (any chainv4 address goes as its EVM address), hex for
+  bytes, text for strings, and JSON for arrays and tuples, such as `[1, 2]`. A payable one takes
+  coin too.
+- **Read** runs a function on the node, sending nothing: `POST /call` for a native one, and
+  `POST /offer`'s dry run of the call for an EVM one, whose result the ABI reads, as a revert's
+  reason or custom error too. A write function's **Try it** runs it the same way, to see what it
+  would do.
+- **Send** prepares the call for the Send page, which reviews, signs and sends it as any
+  transaction, with biometrics, the offline signer or MetaMask.
+- **Deploy** takes Lua source, pasted or picked, a WebAssembly module, picked, or EVM init code in
+  hex with its ABI, whose constructor's parameters get fields. It keeps the contract under the
+  address it will land at, worked out from the sender's next nonce, and prepares the deploy for
+  the Send page.
+
+What a read answers comes from the node, as a dry run does: it is not proven.
+
 ## MetaMask and hardware wallets
 
 In the browser, MetaMask, and a Ledger or Trezor connected to it, can hold an account and sign

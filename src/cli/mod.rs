@@ -7,7 +7,6 @@ use {
     crate::structs::address::Address,
     crate::structs::amount::Amount,
     crate::structs::bundle::{Bundle, bundle},
-    crate::structs::hex::from_hex,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
     std::error::Error,
@@ -193,35 +192,7 @@ pub fn amount(value: u256) -> Amount {
 /// A call argument written as type:value, such as i64:-5, string:hi or address:ed25519:0x…, or
 /// nil for no value.
 pub fn parse_argument(text: &str) -> Result<TxCallArgumentType, String> {
-    if text == "nil" {
-        return Ok(TxCallArgumentType::Nil);
-    }
-
-    let (kind, value) = text
-        .split_once(':')
-        .ok_or_else(|| format!("{text} needs a type, such as i64:{text}"))?;
-    let bad = |_| format!("{value} is not a valid {kind}");
-    let argument = match kind {
-        "address" => TxCallArgumentType::Address(value.parse().map_err(|err: crate::structs::address::ParseAddressError| err.to_string())?),
-        "amount" => TxCallArgumentType::Amount(amount(parse_amount(value)?)),
-        "bytes" => TxCallArgumentType::Bytes(from_hex(value).ok_or_else(|| format!("{value} is not hex"))?),
-        "bool" => TxCallArgumentType::Bool(value.parse().map_err(|_| format!("{value} is not true or false"))?),
-        "string" => TxCallArgumentType::String(value.to_string()),
-        "number" => TxCallArgumentType::Number(value.parse().map_err(|_| format!("{value} is not a number"))?),
-        "i64" => TxCallArgumentType::I64(value.parse().map_err(bad)?),
-        "u64" => TxCallArgumentType::U64(value.parse().map_err(bad)?),
-        "i128" => TxCallArgumentType::I128(value.parse().map_err(bad)?),
-        "u128" => TxCallArgumentType::U128(value.parse().map_err(bad)?),
-        "u256" => TxCallArgumentType::U256(parse_amount(value)?),
-        "i256" => TxCallArgumentType::I256(crate::structs::u256::i256::from_str_radix(value, 10).map_err(bad)?),
-        other => {
-            return Err(format!(
-                "unknown type {other}; use address, amount, bytes, bool, string, number, i64, u64, i128, u128, i256, u256, or nil alone"
-            ));
-        }
-    };
-
-    Ok(argument)
+    TxCallArgumentType::parse_typed(text)
 }
 
 /// Where the next deploy from an address lands, on a chain with this hash.

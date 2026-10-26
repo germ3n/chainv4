@@ -234,8 +234,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **Old state and pending transactions over JSON-RPC.** Balances and calls at older blocks need
   state kept for them, and `eth_getTransactionByHash` could answer from the mempool too.
 - [ ] **Blob and EIP-7702 transactions.**
-- [ ] **The EVM in the wallet and explorer.** EVM calls and deploys on their send pages, EVM
-  contracts and their logs on their pages; MetaMask and Foundry guides.
+- [x] **The EVM in the wallet and explorer.** The wallet's Contracts page reads, calls and deploys
+  contracts of every engine, EVM ones by their ABI; the explorer reads EVM contracts with
+  `eth_call` and shows their logs and calls by name. MetaMask and Foundry are in
+  [Ethereum's tools](ethereum.md). The ABI they share is `src/abi/`.
+- [ ] **Proven contract reads.** The apps' reads are dry runs on the node; a light client could
+  prove the storage a read touches.
 - [ ] **Calls between the EVM and the other engines.** A precompile the EVM calls Lua and wasm
   contracts through, and a host function the other way, with values converted at the boundary.
   Until then they share balances only.

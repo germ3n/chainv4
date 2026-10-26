@@ -406,6 +406,54 @@ impl Hashable for Tx {
     const TAG_LEN: usize = 1;
 }
 
+impl TxCallArgumentType {
+    #[document(
+        parent = "TxCallArgumentType",
+        summary = "An argument as written for a person: type:value, such as i64:-5, string:hi, u256:1000, bytes:0x00ff or address:ed25519:0x…, or nil alone. What chainv4 send call and the apps take.",
+        returns = "The argument, or why the text is not one.",
+    )]
+    pub fn parse_typed(text: &str) -> Result<Self, String> {
+        let whole = |value: &str| u256::from_str_radix(value, 10).map_err(|_| format!("{value} is not a whole amount"));
+
+        if text == "nil" {
+            return Ok(Self::Nil);
+        }
+
+        let (kind, value) = text
+            .split_once(':')
+            .ok_or_else(|| format!("{text} needs a type, such as i64:{text}"))?;
+        let bad = |_| format!("{value} is not a valid {kind}");
+        let argument = match kind {
+            "address" => Self::Address(value.parse().map_err(|err: crate::structs::address::ParseAddressError| err.to_string())?),
+            "amount" => {
+                let amount = whole(value)?;
+
+                Self::Amount(match u128::try_from(amount) {
+                    Ok(narrow) => Amount::U128(narrow),
+                    Err(_) => Amount::U256(amount),
+                })
+            }
+            "bytes" => Self::Bytes(crate::structs::hex::from_hex(value).ok_or_else(|| format!("{value} is not hex"))?),
+            "bool" => Self::Bool(value.parse().map_err(|_| format!("{value} is not true or false"))?),
+            "string" => Self::String(value.to_string()),
+            "number" => Self::Number(value.parse().map_err(|_| format!("{value} is not a number"))?),
+            "i64" => Self::I64(value.parse().map_err(bad)?),
+            "u64" => Self::U64(value.parse().map_err(bad)?),
+            "i128" => Self::I128(value.parse().map_err(bad)?),
+            "u128" => Self::U128(value.parse().map_err(bad)?),
+            "u256" => Self::U256(whole(value)?),
+            "i256" => Self::I256(i256::from_str_radix(value, 10).map_err(bad)?),
+            other => {
+                return Err(format!(
+                    "unknown type {other}; use address, amount, bytes, bool, string, number, i64, u64, i128, u128, i256, u256, or nil alone"
+                ));
+            }
+        };
+
+        Ok(argument)
+    }
+}
+
 impl Hashable for TxCallArgumentType {
     const TAG_LEN: usize = 1;
 }

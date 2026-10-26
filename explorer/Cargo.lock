@@ -724,6 +724,7 @@ dependencies = [
  "getrandom 0.4.3",
  "k256",
  "macro",
+ "serde_json",
  "sha2",
  "sha3",
  "wiki",

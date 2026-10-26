@@ -11,7 +11,7 @@ members = ["macro", "wiki", "gpu"]
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -29,7 +29,10 @@ lvm = ["vm", "dep:mlua"]
 wasm = ["vm", "dep:wasmi"]
 # The Ethereum Virtual Machine, on revm in pure Rust: its precompiles take k256 and arkworks, not C.
 # EVM accounts are 20 bytes, keccak256's, so it needs keccak256.
-evm = ["vm", "keccak256", "dep:revm"]
+evm = ["vm", "keccak256", "abi", "dep:revm"]
+# Solidity's ABI: encoding calls and decoding results and logs, every type, from a contract's JSON
+# ABI, for the CLI and the apps; and EVM and CREATE addresses, worked out without an EVM.
+abi = ["keccak256", "dep:serde_json"]
 rocksdb = ["dep:rocksdb"]
 http = ["dep:axum", "dep:serde_json", "node"]
 # GET /stream: what a node does, pushed to clients as it happens. A node only streams when started

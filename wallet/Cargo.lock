@@ -776,6 +776,7 @@ dependencies = [
  "hmac",
  "k256",
  "macro",
+ "serde_json",
  "sha2",
  "sha3",
  "wiki",

@@ -167,6 +167,15 @@ fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>) {
                 (name, other) => super::json_tree(ui, ctx, name, other),
             });
         }
+
+        // An EVM call's calldata, read by the ABI kept for whom it calls.
+        if let (Some(to), Some(input)) = (tx.tx["to"].as_str(), tx.tx["input"].as_str())
+            && let Some(decoded) = evm_call(ctx, to, input)
+        {
+            facts.row("calls", |ui| {
+                ui.monospace(decoded);
+            });
+        }
     });
 }
 
@@ -227,6 +236,12 @@ pub fn events(ui: &mut Ui, ctx: &mut Ctx, events: &[EventView]) {
 /// An event's data in a row. A token's Transfer reads as who sent how much to whom, and its
 /// Approval as who let whom spend how much, in the token's units.
 pub fn event_data(ui: &mut Ui, ctx: &mut Ctx, contract: &str, name: &str, data: &[Argument]) {
+    if let Some(decoded) = evm_log(ctx, contract, name, data) {
+        ui.label(RichText::new(decoded).monospace());
+
+        return;
+    }
+
     ui.horizontal_wrapped(|ui| match token_movement(ctx, contract, name, data) {
         Some((from, link, to, amount)) => {
             super::address(ui, ctx, &from);
@@ -240,6 +255,31 @@ pub fn event_data(ui: &mut Ui, ctx: &mut Ctx, contract: &str, name: &str, data: 
             }
         }
     });
+}
+
+/// An EVM log read by its contract's ABI, kept here: Bumped(by = 0x…, count = 8).
+fn evm_log(ctx: &Ctx, contract: &str, name: &str, data: &[Argument]) -> Option<String> {
+    if name != "log" || !contract.starts_with("evm:") {
+        return None;
+    }
+
+    let abi = ctx.abi(contract)?;
+    let bytes: Vec<Vec<u8>> = data.iter().map(|value| chainv4::structs::hex::from_hex(value.value.as_str()?)).collect::<Option<_>>()?;
+    let (log_data, topics) = bytes.split_last()?;
+    let topics: Vec<[u8; 32]> = topics.iter().map(|topic| topic.as_slice().try_into().ok()).collect::<Option<_>>()?;
+    let event = abi.event_for(&topics)?;
+
+    Some(event.show(&event.decode_log(&topics, log_data).ok()?))
+}
+
+/// An EVM call's calldata, read by the ABI kept for whom it calls: bump(by = 3).
+pub fn evm_call(ctx: &Ctx, to: &str, input: &str) -> Option<String> {
+    let abi = ctx.abi(to)?;
+    let input = chainv4::structs::hex::from_hex(input)?;
+    let function = abi.function_for(&input)?;
+    let values = function.decode_input(&input).ok()?;
+
+    Some(format!("{}({})", function.name, function.show_inputs(&values)))
 }
 
 /// A token standard Transfer or Approval: who, how they relate, whom, and the amount in the

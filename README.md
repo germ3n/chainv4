@@ -406,8 +406,8 @@ MetaMask, Foundry and ethers work with it as they do with Ethereum: the node ans
 JSON-RPC at `POST /rpc` and takes the transactions they sign. See
 [Ethereum's tools](docs/ethereum.md).
 
-`--function` encodes the static types: `uint`, `int`, `address`, `bool` and `bytes1` to
-`bytes32`. Give `--data` with calldata from `cast calldata` for the rest. `--value N` sends coin
+`--function` encodes every Solidity type, arrays and tuples written as JSON such as `[1, 2]`, or
+give `--data` with calldata made elsewhere. `--value N` sends coin
 with the call, and `--read` only runs it on the node and prints what it returns.
 
 ## Contract lifecycle

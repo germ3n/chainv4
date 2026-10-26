@@ -19,7 +19,7 @@ fn every_account_has_20_bytes_in_the_evm() {
     assert_eq!(evm_alias(&ethereum), [7; 20], "secp256k1 accounts are themselves");
     assert_eq!(evm_alias(&contract), [8; 20]);
     assert_ne!(evm_alias(&ed25519), evm_alias(&edblake), "the kind is part of what is hashed");
-    assert_eq!(evm_alias(&ed25519), keccak256(address_key(&ed25519)).0[12..]);
+    assert_eq!(evm_alias(&ed25519), revm::primitives::keccak256(address_key(&ed25519)).0[12..]);
 }
 
 #[test]

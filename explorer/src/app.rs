@@ -240,6 +240,9 @@ impl Explorer {
                     store.accounts.insert(address, account);
                 }
             }
+            Ask::Rpc(_) => {
+                store.calls.insert(ask.clone(), value);
+            }
             Ask::Name(name) => {
                 if let Some(found) = parse::<crate::model::NameView>(value) {
                     store.names.insert(name, found);
@@ -396,7 +399,7 @@ impl Explorer {
         }
 
         if due(&mut self.asked.failures, RETRY_AFTER) {
-            self.store.failures.retain(|ask, _| matches!(ask, Ask::Offer(_) | Ask::Submit(_) | Ask::Call { .. }));
+            self.store.failures.retain(|ask, _| matches!(ask, Ask::Offer(_) | Ask::Submit(_) | Ask::Call { .. } | Ask::Rpc(_)));
         }
 
         if matches!(self.view, View::Map | View::Overview) && due(&mut self.asked.forks, FORKS_EVERY) {

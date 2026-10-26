@@ -3,6 +3,7 @@
 
 mod accounts;
 mod activity;
+mod contracts;
 mod names;
 mod overview;
 mod pair;
@@ -33,6 +34,7 @@ pub enum Page {
     Receive,
     Activity,
     Names,
+    Contracts,
     Accounts,
     Settings,
     /// An offline signer's: a request to sign, read off the sender's screen.
@@ -51,6 +53,7 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             (Page::Receive, "Receive"),
             (Page::Activity, "Activity"),
             (Page::Names, "Names"),
+            (Page::Contracts, "Contracts"),
             (Page::Accounts, "Accounts"),
             (Page::Settings, "Settings"),
         ],
@@ -149,6 +152,7 @@ impl Ctx<'_> {
 pub struct States {
     pub send: send::SendState,
     names: names::NamesState,
+    contracts: contracts::ContractsState,
     receive: receive::ReceiveState,
     accounts: accounts::AccountsState,
     settings: settings::SettingsState,
@@ -156,6 +160,11 @@ pub struct States {
 }
 
 impl States {
+    /// Takes the node's answer to something the Contracts page asked.
+    pub fn answered(&mut self, ask: &crate::node::Ask, result: &Result<serde_json::Value, crate::node::Failure>, kept: &[crate::app::SavedContract]) {
+        self.contracts.answered(ask, result, kept);
+    }
+
     /// The names the pages want proven: one typed to send to, and one searched for.
     pub fn wanted_names(&self) -> Vec<String> {
         self.send.wanted_name().into_iter().chain(self.names.wanted()).collect()
@@ -188,6 +197,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Receive => receive::show(ui, ctx, &mut states.receive),
         Page::Activity => activity::show(ui, ctx),
         Page::Names => names::show(ui, ctx, &mut states.names, &mut states.send),
+        Page::Contracts => contracts::show(ui, ctx, &mut states.contracts, &mut states.send),
         Page::Accounts => accounts::show(ui, ctx, &mut states.accounts),
         Page::Settings => settings::show(ui, ctx, &mut states.settings),
         Page::Sign => sign::show(ui, ctx, &mut states.sign),

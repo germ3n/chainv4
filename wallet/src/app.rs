@@ -81,12 +81,26 @@ pub struct Settings {
     pub lock_after: u32,
     /// The light palette rather than the dark one.
     pub light_theme: bool,
+    /// The contracts the Contracts page keeps, with an EVM one's ABI.
+    pub contracts: Vec<SavedContract>,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
     vault: Option<Sealed>,
     #[serde(skip_serializing)]
     current: String,
+}
+
+/// A contract kept on the Contracts page.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedContract {
+    /// Its address, as the chain writes it: contract:0x… or evm:0x….
+    pub address: String,
+    /// What to call it here.
+    pub name: String,
+    /// An EVM contract's ABI, as pasted; empty for a native one, whose functions the node lists.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub abi: String,
 }
 
 /// A wallet on this device.
@@ -121,6 +135,7 @@ impl Default for Settings {
             checked: HashMap::new(),
             lock_after: 15,
             light_theme: false,
+            contracts: Vec::new(),
             vault: None,
             current: String::new(),
         }
@@ -329,6 +344,7 @@ impl Wallet {
                         };
                     }
                 }
+                (Ask::Contract(_) | Ask::Call(_) | Ask::Read(_), _) => self.views.answered(&ask, &result, &self.settings.contracts),
                 (Ask::Offer(_) | Ask::Submit(_), _) => {
                     if let Some(sent) = self.views.send.answered(&ask, &result, now) {
                         self.settings.sent.push(sent);

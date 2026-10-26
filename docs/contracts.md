@@ -5,6 +5,9 @@ Contracts are Luau scripts or WebAssembly modules (`src/vm/`), each run by an en
 built with those engines. EVM contracts, Solidity's and Vyper's, run on revm and have
 [a page of their own](evm.md).
 
+The wallet's [Contracts page](wallet.md#contracts) reads, calls and deploys them, as it does EVM
+contracts.
+
 ## Deploying
 
 `Tx::Deploy` carries the code itself, and every node checks and loads it the same way:

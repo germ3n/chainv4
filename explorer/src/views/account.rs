@@ -28,6 +28,11 @@ pub struct AccountState {
     args: Vec<(String, String)>,
     /// The call last made.
     asked: Option<Ask>,
+    /// An EVM contract's ABI as it is being pasted.
+    abi_typing: String,
+    /// An EVM read function's fields, and the read last asked of it, by its signature.
+    evm_fields: std::collections::HashMap<String, Vec<String>>,
+    evm_asked: std::collections::HashMap<String, Ask>,
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState) {
@@ -45,7 +50,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
         ctx.api.ask(Ask::Account(address.to_string()));
     }
 
-    if address.starts_with("contract:") && !store.contracts.contains_key(address) {
+    if (address.starts_with("contract:") || address.starts_with("evm:")) && !store.contracts.contains_key(address) {
         ctx.api.ask(Ask::Contract(address.to_string()));
     }
 
@@ -53,6 +58,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
     let kind = address.split(':').next().unwrap_or_default();
     let title = match &contract {
         Some(contract) if contract.token.is_some() => "Token contract",
+        Some(contract) if contract.engine == "evm" => "EVM contract",
         Some(_) => "Contract",
         None => "Account",
     };
@@ -197,7 +203,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
             token(ui, ctx, address);
         }
 
-        super::section(ui, look, "Call a function read-only", |ui| read(ui, ctx, address, &contract.functions, state));
+        match contract.engine.as_str() {
+            "evm" => evm(ui, ctx, address, state),
+            _ => super::section(ui, look, "Call a function read-only", |ui| read(ui, ctx, address, &contract.functions, state)),
+        }
         let named = state.named.clone();
         super::section_with(
             ui,
@@ -217,6 +226,116 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
     holdings(ui, ctx, address);
     super::section(ui, look, "Transactions", |ui| transactions(ui, ctx, address));
     super::section(ui, look, "Events that mention it", |ui| events::list(ui, ctx, &EventQuery::mentioning(address)));
+}
+
+/// An EVM contract's ABI, kept here once pasted, and its read functions, run with eth_call: what
+/// they return, read by the ABI.
+fn evm(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState) {
+    let look = ctx.look;
+    let abi = ctx.abi(address);
+
+    super::section(ui, look, "ABI", |ui| match &abi {
+        Some(abi) => {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("{} functions and {} events, kept on this device; its logs and calls read by them.", abi.functions.len(), abi.events.len()));
+
+                if widgets::quiet(ui, &look.palette, "Forget it").clicked() {
+                    state.abi_typing = ctx.abi_text(address).unwrap_or_default();
+                    ctx.set_abi(address, None);
+                }
+            });
+        }
+        None => {
+            super::note(ui, look, "Paste its ABI, as solc --abi or Foundry writes it, to read its functions and logs.");
+            ui.add(egui::TextEdit::multiline(&mut state.abi_typing).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+
+            match chainv4::abi::Abi::parse(&state.abi_typing) {
+                Ok(_) if widgets::primary(ui, &look.palette, "Keep it", true).clicked() => {
+                    ctx.set_abi(address, Some(state.abi_typing.trim().to_string()));
+                }
+                Err(why) if !state.abi_typing.trim().is_empty() => {
+                    ui.colored_label(look.palette.bad, why);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let Some(abi) = abi else {
+        return;
+    };
+    let reads: Vec<_> = abi.functions.iter().filter(|function| function.reads).collect();
+
+    if reads.is_empty() {
+        return;
+    }
+
+    super::section(ui, look, "Read its functions", |ui| {
+        super::note(ui, look, "Run with eth_call on the node's latest state: nothing is sent.");
+
+        for function in reads {
+            let signature = function.signature();
+            ui.add_space(4.0);
+            ui.label(RichText::new(&signature).monospace());
+            let fields = state.evm_fields.entry(signature.clone()).or_insert_with(|| vec![String::new(); function.inputs.len()]);
+
+            for (param, field) in function.inputs.iter().zip(fields.iter_mut()) {
+                ui.add(egui::TextEdit::singleline(field).hint_text(format!("{} {}", param.ty, param.name)).desired_width(f32::INFINITY));
+            }
+
+            let input = function
+                .inputs
+                .iter()
+                .zip(fields.iter())
+                .map(|(param, field)| chainv4::abi::parse_value(&param.ty, field))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|values| function.encode_call(&values));
+
+            if widgets::quiet(ui, &look.palette, "Read").clicked() {
+                match &input {
+                    Ok(input) => {
+                        let to = address.strip_prefix("evm:").unwrap_or(address);
+                        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": [{ "to": to, "data": chainv4::structs::hex::to_hex(input) }, "latest"] });
+                        let ask = Ask::Rpc(body.to_string());
+                        ctx.api.ask(ask.clone());
+                        state.evm_asked.insert(signature.clone(), ask);
+                    }
+                    Err(why) => {
+                        ui.colored_label(look.palette.bad, why);
+                    }
+                }
+            }
+
+            let Some(ask) = state.evm_asked.get(&signature) else {
+                continue;
+            };
+
+            match (ctx.store.failures.get(ask), ctx.store.calls.get(ask)) {
+                (Some(failure), _) => {
+                    ui.colored_label(look.palette.bad, &failure.message);
+                }
+                (None, Some(answer)) => match (answer["result"].as_str().and_then(chainv4::structs::hex::from_hex), answer["error"]["message"].as_str()) {
+                    (Some(output), _) => {
+                        let shown = function.decode_output(&output).map(|values| function.show_outputs(&values)).unwrap_or_else(|_| chainv4::structs::hex::to_hex(&output));
+                        ui.horizontal_wrapped(|ui| {
+                            widgets::pill(ui, "returned", look.palette.good);
+                            ui.monospace(shown);
+                        });
+                    }
+                    (None, Some(message)) => {
+                        ui.colored_label(look.palette.bad, message);
+                    }
+                    (None, None) => {
+                        ui.colored_label(look.palette.bad, "the node does not answer JSON-RPC: it needs the ethereum feature");
+                    }
+                },
+                (None, None) if ctx.api.asking(ask) => {
+                    ui.spinner();
+                }
+                _ => {}
+            }
+        }
+    });
 }
 
 /// How long the newest page of transactions stands before it is asked for again, in milliseconds.

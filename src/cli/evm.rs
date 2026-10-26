@@ -1,13 +1,13 @@
-//! EVM calldata for the CLI: Solidity's ABI for the static types, enough to deploy and call a
-//! contract from the command line. Dynamic types (string, bytes, arrays) take --data, from a tool
-//! such as Foundry's cast calldata.
+//! EVM calldata for the CLI: Solidity's ABI, through crate::abi, for every type, to deploy and call
+//! a contract from the command line. Arrays and tuples are written as JSON, such as [1, 2].
 
 use {
+    crate::abi::{AbiType, encode_values, parse_value},
     crate::crypto::hasher::Hasher,
     crate::structs::address::Address,
     crate::structs::hash::HashType,
     crate::structs::hex::from_hex,
-    crate::structs::u256::{i256, u256},
+    crate::structs::u256::u256,
 };
 
 /// An address as the EVM takes it: 0x and 40 hex digits, for an EVM contract, or any chainv4
@@ -24,11 +24,18 @@ pub fn evm_address(text: &str) -> Result<Address, String> {
     text.parse().map_err(|err| format!("{text}: {err}"))
 }
 
-/// The types in a parameter list, such as "uint256,address" or "(uint256, address)".
-fn types(list: &str) -> Vec<String> {
-    let inner = list.trim().trim_start_matches('(').trim_end_matches(')');
+/// The types in a parameter list, such as "(uint256,address)" or "uint256, string[]".
+fn types(list: &str) -> Result<Vec<AbiType>, String> {
+    let list = list.trim();
+    let list = match list.starts_with('(') && list.ends_with(')') {
+        true => list.to_string(),
+        false => format!("({list})"),
+    };
 
-    inner.split(',').map(|kind| kind.trim().to_string()).filter(|kind| !kind.is_empty()).collect()
+    match AbiType::parse(&list)? {
+        AbiType::Tuple(types) => Ok(types),
+        _ => Err(format!("{list} is not a parameter list")),
+    }
 }
 
 /// A function's selector: the first four bytes of its signature's keccak256, such as bump(uint256)'s.
@@ -41,86 +48,23 @@ pub fn selector(signature: &str) -> Vec<u8> {
 /// Calldata for a function: its selector and its arguments, encoded.
 pub fn call(signature: &str, args: &[String]) -> Result<Vec<u8>, String> {
     let open = signature.find('(').ok_or_else(|| format!("{signature} is not a signature such as bump(uint256)"))?;
+    let canonical = format!("{}{}", signature[..open].trim(), AbiType::Tuple(types(&signature[open..])?));
 
-    Ok([selector(signature), encode(&signature[open..], args)?].concat())
+    Ok([selector(&canonical), encode(&signature[open..], args)?].concat())
 }
 
-/// Arguments encoded for a parameter list, as a constructor's follow its code.
+/// Arguments encoded for a parameter list, as a constructor's follow its code: every Solidity type,
+/// arrays and tuples written as JSON, such as [1, 2].
 pub fn encode(list: &str, args: &[String]) -> Result<Vec<u8>, String> {
-    let kinds = types(list);
+    let kinds = types(list)?;
 
     if kinds.len() != args.len() {
         return Err(format!("{} takes {} arguments, not {}", list.trim(), kinds.len(), args.len()));
     }
 
-    let mut out = Vec::new();
+    let values = kinds.iter().zip(args).map(|(kind, arg)| parse_value(kind, arg).map_err(|why| format!("{arg} as {kind}: {why}"))).collect::<Result<Vec<_>, _>>()?;
 
-    for (kind, arg) in kinds.iter().zip(args) {
-        out.extend(word(kind, arg).map_err(|why| format!("{arg} as {kind}: {why}"))?);
-    }
-
-    Ok(out)
-}
-
-/// One static value as its 32-byte word.
-fn word(kind: &str, arg: &str) -> Result<[u8; 32], String> {
-    let number = |text: &str| -> Result<u256, String> {
-        match text.strip_prefix("0x") {
-            Some(hex) => u256::from_str_radix(hex, 16).map_err(|_| "not a hex number".to_string()),
-            None => text.parse().map_err(|_| "not a number".to_string()),
-        }
-    };
-
-    if let Some(bits) = kind.strip_prefix("uint") {
-        let bits: u32 = if bits.is_empty() { 256 } else { bits.parse().map_err(|_| "no such type".to_string())? };
-        let value = number(arg)?;
-
-        if bits < 256 && value >> bits != u256::ZERO {
-            return Err(format!("more than {bits} bits"));
-        }
-
-        return Ok(value.to_be_bytes());
-    }
-
-    if let Some(bits) = kind.strip_prefix("int") {
-        let bits: u32 = if bits.is_empty() { 256 } else { bits.parse().map_err(|_| "no such type".to_string())? };
-        let value: i256 = arg.parse().map_err(|_| "not a whole number".to_string())?;
-        let half = i256::ONE << (bits - 1);
-
-        if bits < 256 && (value >= half || value < -half) {
-            return Err(format!("does not fit in {bits} bits"));
-        }
-
-        return Ok(value.to_be_bytes());
-    }
-
-    match kind {
-        "address" => {
-            let mut out = [0; 32];
-            out[12..].copy_from_slice(&crate::vm::evm::evm_alias(&evm_address(arg)?));
-
-            Ok(out)
-        }
-        "bool" => match arg {
-            "true" => Ok(u256::ONE.to_be_bytes()),
-            "false" => Ok([0; 32]),
-            _ => Err("true or false".to_string()),
-        },
-        bytes if bytes.starts_with("bytes") && bytes.len() > 5 => {
-            let size: usize = bytes[5..].parse().map_err(|_| "no such type".to_string())?;
-            let data = from_hex(arg).ok_or("not hex")?;
-
-            if size == 0 || size > 32 || data.len() != size {
-                return Err(format!("{size} bytes of hex"));
-            }
-
-            let mut out = [0; 32];
-            out[..size].copy_from_slice(&data);
-
-            Ok(out)
-        }
-        _ => Err("only static types here: uint, int, address, bool and bytes1 to bytes32; give --data for the rest, such as cast calldata writes".to_string()),
-    }
+    encode_values(&kinds, &values)
 }
 
 /// What a call returned, for a person: its words in hex, and a single word as a number too.
@@ -156,7 +100,8 @@ mod tests {
         assert!(encode("(uint8)", &["256".into()]).is_err());
         assert!(encode("(int8)", &["128".into()]).is_err());
         assert!(encode("(uint256)", &[]).is_err(), "too few");
-        assert!(encode("(string)", &["hi".into()]).is_err(), "dynamic types take --data");
+        assert_eq!(encode("(string)", &["hi".into()]).unwrap().len(), 96, "a string: its offset, its length and its bytes");
+        assert_eq!(selector("set(uint256[])"), call("set(uint256[])", &["[1, 2]".into()]).unwrap()[..4].to_vec(), "arrays as JSON");
         assert_eq!(evm_address("0x00000000000000000000000000000000000000ff"), Ok(Address::Evm({
             let mut bytes = [0; 20];
             bytes[19] = 0xff;

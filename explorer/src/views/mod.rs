@@ -101,6 +101,9 @@ pub struct Settings {
     pub proxy: String,
     /// Decimals set by hand per token contract, by chain (its genesis id), then contract.
     pub decimals: HashMap<String, HashMap<String, u8>>,
+    /// EVM contracts' ABIs, as pasted, by chain (its genesis id), then contract.
+    #[serde(default)]
+    pub abis: HashMap<String, HashMap<String, String>>,
     /// The genesis id the light client first saw at each node, which it trusts there from then on.
     pub pinned: HashMap<String, String>,
     /// A finalized checkpoint's block id to start the light client from at each node, pasted,
@@ -161,6 +164,33 @@ impl Ctx<'_> {
         let genesis = &self.store.status.as_ref()?.genesis;
 
         self.settings.decimals.get(genesis)?.get(contract).copied()
+    }
+
+    /// The ABI kept for an EVM contract on this chain, read.
+    pub fn abi(&self, contract: &str) -> Option<chainv4::abi::Abi> {
+        let genesis = &self.store.status.as_ref()?.genesis;
+
+        chainv4::abi::Abi::parse(self.settings.abis.get(genesis)?.get(contract)?).ok()
+    }
+
+    /// The ABI kept for an EVM contract, as pasted.
+    pub fn abi_text(&self, contract: &str) -> Option<String> {
+        let genesis = &self.store.status.as_ref()?.genesis;
+
+        self.settings.abis.get(genesis)?.get(contract).cloned()
+    }
+
+    /// Keeps, or with None forgets, an EVM contract's ABI on this chain.
+    pub fn set_abi(&mut self, contract: &str, abi: Option<String>) {
+        let Some(genesis) = self.store.status.as_ref().map(|status| status.genesis.clone()) else {
+            return;
+        };
+        let chain = self.settings.abis.entry(genesis).or_default();
+
+        match abi {
+            Some(abi) => chain.insert(contract.to_string(), abi),
+            None => chain.remove(contract),
+        };
     }
 
     /// Sets, or with None clears, the decimals for a token on this chain.

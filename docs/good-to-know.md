@@ -484,6 +484,11 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **An Ethereum transaction's gas is chainv4's.** Its limit covers its bytes' intrinsic cost and
   the EVM's gas as fuel, so it differs from what the same transaction takes on Ethereum; wallets
   ask `eth_estimateGas`, which knows.
+- **ABIs are kept per device.** The wallet keeps a contract's ABI with it on its Contracts page,
+  and the explorer per chain and contract in its settings. Neither is on chain: a new device needs
+  the ABI pasted again.
+- **The apps' reads are not proven.** The wallet's and explorer's contract reads are dry runs on
+  the node, as `POST /call`, `/offer` and `eth_call` are, unlike the balances the wallet proves.
 - **revm brings older crypto crates.** It pins k256 0.13 and sha3 0.11 beside the newer ones
   chainv4 uses, so both are built. It has no KZG precompile, since that needs C.
 
