@@ -628,6 +628,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **The signer for other kinds of Bitcoin input and other chains.** Taproot (BIP341) and
   wrapped or legacy inputs, PSBT version 2, PSBTs as files, and Keystone's types for Solana,
   Cosmos and the rest, would each need their own paths and signing.
+- [ ] **Atomic swaps with Bitcoin.** The same words already hold a `bc1q…` key on both chains; a
+  trustless BTC ↔ DEV swap needs a hash-time-lock contract on chainv4 (claim with the preimage
+  before a deadline, refund after) and its twin on Bitcoin, a P2WSH script the offline signer can
+  sign the claim and the refund of (today it signs P2WPKH alone), with the wallet walking both
+  sides. Later steps toward trust-minimized cross-chain: a Bitcoin SPV light client as a contract,
+  checking headers and merkle proofs with `sha256d` exposed to contracts, and an Ethereum bridge
+  through the EVM's `ecrecover`.
 - [x] **This wallet's own codes as URs.** `ur:chainv4-pairing`, `-sign-request` and `-signed`,
   carrying the chain's own encoding; CV4 and base45 are gone.
 - [x] **Sites through the offline signer.** An account watched from the signer is offered to sites
