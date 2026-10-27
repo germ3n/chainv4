@@ -134,6 +134,8 @@ The explorer does not have to take the node's word for balances. It runs the lib
 | Network | The node's roles, uptime, listening addresses and sync state, its gossip backlog, and what it counted since it started. The chain's bootnodes. When it mines: its hashrate over the last ten minutes, its own GPUs or threads, and a table of its workers, each with its address, when it connected, its hashrate, its devices and the seals it found. A graph of its peers, and a table of them with what each gossiped, how much of that was dropped, and how far its chain got. |
 | Mempool | What waits for a block, by sender and nonce. |
 | Tokens | The token registry by symbol, with a search by how a symbol starts: each token's symbol, decimals, contract and name, and what makes a token on this chain. |
+| DEX | The [DEXes](dex.md)' pools: what each holds, its price and share supply, and what traded through it over about a day and a week, in its first asset, with the fees it kept. A pool opens its price chart, from its `Sync` events, and its latest trades, adds and removals, each linked to its transaction. **Native pools** come from `dex.lua`, by read-only calls and its events; **EVM pools** from the router the node names, through `POST /rpc` and the pairs' logs. |
+| Swaps | Every [atomic swap](swaps.md) in the swap contract, newest first, from its events: what was locked, for whom, until when, and whether it was claimed or refunded, each lock with whether it is final yet. A swap is found by its hash, as the contract holds it, or by its code, `ur:chainv4-swap`, which lays out both legs, the other chain's too. |
 | Finality | The kind, the epoch, and the justified and finalized checkpoints. Who votes and with what weight, the bonded validators, the signers under authority finality, and any conflicting votes the node caught. |
 | Send | Signs and sends transfers, contract calls, deploys and burns. |
 | Settings | The node, whether it answers and how updates arrive, the chain it is on, the proxy every request goes through, dark or light, and the genesis the light client pinned there, which it can forget. |
@@ -144,16 +146,17 @@ Ethereum `0x…` or a name, its proof of work worked out a slice a frame.
 
 ## Getting around
 
-**On a wide screen,** a sidebar lists the pages in three groups: Chain (Overview, Block map,
-Mempool, Tokens), Network (Network, Finality) and Tools (Send, Settings). Under them sit the
-node's address, whether it answers and how, how old its tip is, and the light client's state.
+**On a wide screen,** a sidebar lists the pages in four groups: Chain (Overview, Block map,
+Mempool, Tokens), Markets (DEX, Swaps), Network (Network, Finality) and Tools (Send,
+Settings). Under them sit the node's address, whether it answers and how, how old its tip is,
+and the light client's state.
 Over the page are back and forward, the search box and the chain's height.
 
 **On a phone,** below 640 points wide, the sidebar gives way to:
 - **a bar on top:** back, once there is somewhere to go back to, the node's state as a dot, and
   the search box;
 - **tabs along the bottom:** Home, Blocks (the map), Mempool, Tokens and More, which lists the
-  rest;
+  rest, DEX and Swaps among them;
 - **pages that stack:** tables become rows of a few lines each, facts sit under their names, and
   charts one above another.
 

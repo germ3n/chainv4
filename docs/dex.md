@@ -146,6 +146,13 @@ names both:
 
 Every one of these is a call the Send page reviews and signs, on the offline signer too.
 
+## In the explorer
+
+The **DEX** page lists both DEXes' pools with what each holds, its price, and its volume and fees
+over about a day and a week; a pool opens its price chart and its latest trades, adds and
+removals. Volumes come from the last 500 trades at most, by the event index: a node without
+`--index-events` shows pools and prices alone. See [Explorer](explorer.md).
+
 ## Gas estimates for nested calls
 
 A router call runs calls inside calls, and each inner call gets only 63/64 of the gas left. So a

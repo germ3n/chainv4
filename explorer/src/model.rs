@@ -32,6 +32,12 @@ pub struct Status {
     /// work a request carries.
     #[serde(default)]
     pub faucet: Option<Value>,
+    /// The swap contract the node names: { contract }, or none.
+    #[serde(default)]
+    pub swap: Option<Value>,
+    /// The DEX and the EVM DEX's router the node names: { contract, router }, or none.
+    #[serde(default)]
+    pub dex: Option<Value>,
 }
 
 impl Status {

@@ -153,6 +153,8 @@ pub struct EventQuery {
     pub contract: Option<String>,
     pub name: Option<String>,
     pub address: Option<String>,
+    /// How many to a page: the node's default unless set.
+    pub limit: Option<u32>,
 }
 
 impl EventQuery {
@@ -161,7 +163,13 @@ impl EventQuery {
             contract: Some(contract.to_string()),
             name: name.filter(|name| !name.is_empty()).map(str::to_string),
             address: None,
+            limit: None,
         }
+    }
+
+    /// The same, so many to a page.
+    pub fn limited(self, limit: u32) -> EventQuery {
+        EventQuery { limit: Some(limit), ..self }
     }
 
     pub fn mentioning(address: &str) -> EventQuery {
@@ -169,11 +177,14 @@ impl EventQuery {
             contract: None,
             name: None,
             address: Some(address.to_string()),
+            limit: None,
         }
     }
 
     fn params(&self) -> String {
-        [("contract", &self.contract), ("name", &self.name), ("address", &self.address)]
+        let limit = self.limit.map(|limit| limit.to_string());
+
+        [("contract", &self.contract), ("name", &self.name), ("address", &self.address), ("limit", &limit)]
             .iter()
             .filter_map(|(key, value)| value.as_ref().map(|value| format!("{key}={}", encode(value))))
             .collect::<Vec<_>>()

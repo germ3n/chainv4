@@ -310,6 +310,10 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   coin, tokens and ERC-20s on the EVM, each pool's shares a clone of `contracts/lua/lp_token.lua`,
   and `contracts/evm/Dex.sol`'s WDEV, factory, pairs and router; `contracts.clone` for contracts
   that make contracts; `chainv4 dex`; the wallet's Trade page. See [DEX](dex.md).
+- [x] **The DEX and swaps in the explorer.** A DEX page, both DEXes' pools with prices, volume and
+  fees over a day and a week, a pool's price chart and latest activity; a Swaps page, the swap
+  contract's locks, claims and refunds with each lock's finality, and a swap found by hash or by
+  its code. See [Explorer](explorer.md).
 - [ ] **The DEX: next.** Price oracles (time-weighted prices, as V2's cumulative ones), flash
   swaps, a fee switch for the protocol, concentrated liquidity (V3's ranges), and routing across
   both DEXes at once.

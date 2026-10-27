@@ -18,6 +18,7 @@ use {
 pub mod account;
 pub mod block;
 pub mod chart;
+pub mod dex;
 pub mod events;
 pub mod faucet;
 pub mod finality;
@@ -30,6 +31,7 @@ pub mod overview;
 pub mod send;
 pub mod name;
 pub mod settings;
+pub mod swaps;
 pub mod tokens;
 pub mod tx;
 
@@ -47,6 +49,10 @@ pub enum View {
     Network,
     Mempool,
     Tokens,
+    /// The DEXes: their pools, prices, trades and volume.
+    Dex,
+    /// Atomic swaps through the swap contract: locks, claims and refunds, and their finality.
+    Swaps,
     Finality,
     Send,
     /// The node's faucet, on a dev or test chain.
@@ -58,8 +64,9 @@ pub enum View {
 
 impl View {
     /// The sidebar's pages, in groups under a heading.
-    pub const GROUPS: [(&'static str, &'static [(View, &'static str)]); 3] = [
+    pub const GROUPS: [(&'static str, &'static [(View, &'static str)]); 4] = [
         ("Chain", &[(View::Overview, "Overview"), (View::Map, "Block map"), (View::Mempool, "Mempool"), (View::Tokens, "Tokens")]),
+        ("Markets", &[(View::Dex, "DEX"), (View::Swaps, "Swaps")]),
         ("Network", &[(View::Network, "Network"), (View::Finality, "Finality")]),
         ("Tools", &[(View::Send, "Send"), (View::Faucet, "Faucet"), (View::Settings, "Settings")]),
     ];
@@ -74,7 +81,9 @@ impl View {
     ];
 
     /// The pages More lists, with what each is for.
-    pub const MORE: [(View, &'static str, &'static str); 5] = [
+    pub const MORE: [(View, &'static str, &'static str); 7] = [
+        (View::Dex, "DEX", "Pools, prices, trades and volume"),
+        (View::Swaps, "Swaps", "Atomic swaps and their finality"),
         (View::Network, "Network", "The node, its peers, and what it heard"),
         (View::Finality, "Finality", "Checkpoints, voters and caught cheats"),
         (View::Send, "Send", "Sign and send a transaction"),
@@ -89,7 +98,7 @@ impl View {
             View::Map => View::Map,
             View::Mempool => View::Mempool,
             View::Tokens => View::Tokens,
-            View::Network | View::Finality | View::Send | View::Faucet | View::Settings | View::More => View::More,
+            View::Dex | View::Swaps | View::Network | View::Finality | View::Send | View::Faucet | View::Settings | View::More => View::More,
         }
     }
 }

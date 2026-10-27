@@ -272,6 +272,12 @@ An open swap lays out each leg, where it stands, and what to do next:
 
 Both sides must follow the same test network, testnet4 or signet, for a testnet swap.
 
+## In the explorer
+
+The **Swaps** page lists the swap contract's swaps from its events, newest first, each lock with
+whether it is final yet, and finds one by its hash, or by its code, which lays out both legs. See
+[Explorer](explorer.md).
+
 ## Waiting for finality
 
 A lock in a chain's state is not yet a lock for good: a reorganization can take its block away.

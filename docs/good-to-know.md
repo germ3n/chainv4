@@ -621,6 +621,17 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
   `--dex-contract`, `--dex-router`, or the name `dex`.
 
+## The explorer's DEX and Swaps pages
+
+- **Under Markets in the sidebar,** and under More on a phone. They find the DEX and the swap
+  contract as the wallet does: by the names `dex` and `swap`, else the node's `/status`.
+- **Volumes and charts need the event index:** without `--index-events` the DEX page shows pools
+  and prices, and the Swaps page finds a swap by its hash alone.
+- **Volumes are estimates of a day and a week:** from the last 500 trades at most, by block
+  heights at the block time the explorer measures from what it loaded.
+- **A swap's code lays out both legs,** the other chain's too, but the explorer reads only this
+  chain: an EVM or Bitcoin leg's lock is for its own explorer.
+
 ## A node cut off rejoins the validators' chain
 
 - **A node that mined on its own while cut off,** as the laptop did while the VPS rebuilt, now
