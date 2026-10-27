@@ -93,6 +93,9 @@ pub enum Message {
     /// The signer's answer to one: what the browser extension reads back for a site.
     EthSignature(Box<crate::hardware::Signature>),
     Bitcoin(Box<crate::bitcoin::Request>),
+    /// A swap's terms: an offer, or its answer.
+    #[cfg(feature = "swap")]
+    Swap(Box<chainv4::swap::Terms>),
 }
 
 impl Message {
@@ -105,6 +108,8 @@ impl Message {
             Message::MetaMask(_) => crate::hardware::REQUEST_TYPE,
             Message::EthSignature(_) => crate::hardware::SIGNATURE_TYPE,
             Message::Bitcoin(request) => request.kind,
+            #[cfg(feature = "swap")]
+            Message::Swap(_) => chainv4::swap::UR_TYPE,
         }
     }
 
@@ -117,6 +122,8 @@ impl Message {
             Message::MetaMask(request) => return request.to_cbor().expect("a request read always writes back"),
             Message::EthSignature(signature) => return signature.to_cbor().expect("a signature always writes"),
             Message::Bitcoin(request) => return request.to_cbor(),
+            #[cfg(feature = "swap")]
+            Message::Swap(terms) => wincode::serialize(terms.as_ref()),
         }
         .expect("messages always encode")
     }
@@ -134,6 +141,8 @@ impl Message {
             SIGNED_TYPE => whole::<SignedTx>(bytes).map(Message::Signed),
             crate::hardware::REQUEST_TYPE => crate::hardware::SignRequest::from_cbor(bytes).map(|request| Message::MetaMask(Box::new(request))),
             crate::hardware::SIGNATURE_TYPE => crate::hardware::Signature::from_cbor(bytes).map(|signature| Message::EthSignature(Box::new(signature))),
+            #[cfg(feature = "swap")]
+            chainv4::swap::UR_TYPE => chainv4::swap::Terms::from_bytes(bytes).map(|terms| Message::Swap(Box::new(terms))),
             crate::bitcoin::PSBT_TYPE => crate::bitcoin::Request::from_cbor(crate::bitcoin::PSBT_TYPE, bytes).map(|request| Message::Bitcoin(Box::new(request))),
             crate::bitcoin::NEW_PSBT_TYPE => crate::bitcoin::Request::from_cbor(crate::bitcoin::NEW_PSBT_TYPE, bytes).map(|request| Message::Bitcoin(Box::new(request))),
             other => Err(format!("a {other} code, which this wallet does not read")),
@@ -167,6 +176,8 @@ impl Message {
             Message::MetaMask(_) => "a request from MetaMask",
             Message::EthSignature(_) => "an Ethereum signature from the signer",
             Message::Bitcoin(_) => "a Bitcoin wallet's PSBT",
+            #[cfg(feature = "swap")]
+            Message::Swap(_) => "a swap's terms",
         }
     }
 }

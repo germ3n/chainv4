@@ -1851,3 +1851,94 @@ fn webassembly_contracts_resolve_names_and_subnames_through_the_sdk() {
 
     assert!(matches!(nameless.call(book, "lookup", &[string("alice")]).result, Err(err) if err.to_string().contains("this chain has no names")));
 }
+
+#[cfg(feature = "sha256")]
+impl World {
+    /// A call that sends value, which the contract then holds, in a block at a time.
+    fn call_at(&self, sender: Address, contract: Address, function: &str, args: &[TxCallArgumentType], value: u64, time: u64) -> Outcome {
+        self.fund(contract, value);
+        let context = CallContext {
+            sender,
+            contract,
+            value: u256::from(value),
+            block: crate::vm::BlockAt { height: 1, ..crate::vm::BlockAt::at(time) },
+        };
+
+        Contracts::new(&self.state)
+            .call(&self.vm, &context, &Hash::Xxh3_64(selector(function)), args, LIMITS)
+            .unwrap()
+    }
+}
+
+#[cfg(feature = "sha256")]
+#[test]
+fn the_swap_contract_pays_the_recipient_with_the_secret_or_the_locker_after_the_deadline() {
+    let mut world = World::new();
+    let swap = world.lua_code(include_str!("../../contracts/lua/swap.lua"));
+    let (alice, bob, anyone) = (Address::Ed25519([0xa; 32]), Address::Ed25519([0xb; 32]), Address::Ed25519([0xc; 32]));
+    let text = |value: String| TxCallArgumentType::String(value);
+    let hex = |bytes: &[u8]| to_hex(bytes);
+    let secret = [0x5e; 32];
+    let hash = hex(&crate::crypto::bitcoin::sha256(&secret));
+    let (now, deadline) = (1_793_000_000_000u64, 1_793_043_200_000u64);
+    let lock = |hash: &str, value: u64, deadline: u64| world.call_at(bob, swap, "lock", &[text(hash.to_string()), address(alice), TxCallArgumentType::I64(deadline as i64)], value, now);
+
+    // Bob locks 500 for Alice; anyone sends the claim with the secret, and Alice is paid.
+    let locked = lock(&hash, 500, deadline);
+    assert!(locked.result.is_ok(), "{:?}", locked.result);
+    assert_eq!(locked.events[0].name, "Locked");
+    assert_eq!(locked.events[0].data, [text(hash.clone()), address(bob), address(alice), address(Address::Ed25519([0; 32])), wide(500), wide(deadline)]);
+    assert!(lock(&hash, 500, deadline).result.unwrap_err().to_string().contains("already exists"));
+
+    let claimed = world.call_at(anyone, swap, "claim", &[text(hex(&secret))], 0, now + 1);
+    assert!(claimed.result.is_ok(), "{:?}", claimed.result);
+    assert_eq!(claimed.events[0].data, [text(hash.clone()), text(hex(&secret))], "the secret, for the other side to read");
+    assert_eq!(world.balance(alice), u256::new(500));
+    assert!(world.call_at(alice, swap, "claim", &[text(hex(&secret))], 0, now + 2).result.unwrap_err().to_string().contains("no swap waits"));
+    let got = world.call(swap, "get", &[text(hash.clone())]).result.unwrap();
+    assert_eq!((got[0].clone(), got[6].clone()), (text("claimed".to_string()), text(hex(&secret))));
+
+    // A second swap nobody claims: too early to refund before the deadline, too late to claim at
+    // it, and then Bob gets it back.
+    let other = [0x6f; 32];
+    let other_hash = hex(&crate::crypto::bitcoin::sha256(&other));
+    lock(&other_hash, 300, deadline).result.unwrap();
+    assert!(world.call_at(anyone, swap, "refund", &[text(other_hash.clone())], 0, deadline - 1).result.unwrap_err().to_string().contains("too early"));
+    assert!(world.call_at(alice, swap, "claim", &[text(hex(&other))], 0, deadline).result.unwrap_err().to_string().contains("too late"));
+    world.call_at(anyone, swap, "refund", &[text(other_hash.clone())], 0, deadline).result.unwrap();
+    assert_eq!(world.balance(bob), u256::new(300));
+    assert_eq!(world.call(swap, "get", &[text(other_hash)]).result.unwrap()[0], text("refunded".to_string()));
+
+    // What does not hold is refused, and locks nothing.
+    let third = hex(&crate::crypto::bitcoin::sha256(&[1; 32]));
+    assert!(lock("0x1234", 1, deadline).result.unwrap_err().to_string().contains("64 hex digits"));
+    assert!(lock(&third, 1, now).result.unwrap_err().to_string().contains("after this block's time"));
+    assert!(lock(&third, 0, deadline).result.unwrap_err().to_string().contains("lock something"));
+    assert!(world.call_at(anyone, swap, "claim", &[text("0x5e".to_string())], 0, now).result.unwrap_err().to_string().contains("32 bytes"));
+    assert_eq!(world.call(swap, "get", &[text(third)]).result.unwrap(), [text("none".to_string())]);
+}
+
+#[cfg(feature = "sha256")]
+#[test]
+fn the_swap_contract_locks_and_pays_a_token() {
+    let mut world = World::new();
+    let swap = world.lua_code(include_str!("../../contracts/lua/swap.lua"));
+    let token = world.lua_code(include_str!("../../contracts/lua/token.lua"));
+    let alice = Address::Ed25519([0xa; 32]);
+    let text = |value: String| TxCallArgumentType::String(value);
+    let secret = [0x7a; 32];
+    let hash = to_hex(&crate::crypto::bitcoin::sha256(&secret));
+    let now = 1_793_000_000_000u64;
+    let args = [text(hash.clone()), address(alice), TxCallArgumentType::I64((now + 3_600_000) as i64), address(token), wide(1_000)];
+
+    // Without an allowance the token refuses to move; with one, it is locked.
+    assert!(world.call_at(DEPLOYER, swap, "lock_token", &args, 0, now).result.unwrap_err().to_string().contains("allowance"));
+    world.call_as(DEPLOYER, token, "approve", &[address(swap), wide(1_000)]).result.unwrap();
+    assert!(world.call_at(DEPLOYER, swap, "lock_token", &args, 5, now).result.unwrap_err().to_string().contains("send none"));
+    world.call_at(DEPLOYER, swap, "lock_token", &args, 0, now).result.unwrap();
+    assert_eq!(world.call(token, "balance_of", &[address(swap)]).result.unwrap(), [wide(1_000)]);
+
+    world.call_at(alice, swap, "claim", &[text(to_hex(&secret))], 0, now + 1).result.unwrap();
+    assert_eq!(world.call(token, "balance_of", &[address(alice)]).result.unwrap(), [wide(1_000)]);
+    assert_eq!(world.call(token, "balance_of", &[address(swap)]).result.unwrap(), [wide(0)]);
+}

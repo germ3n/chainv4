@@ -26,5 +26,7 @@ pub mod net;
 pub mod node;
 pub mod registry;
 pub mod structs;
+#[cfg(feature = "swap")]
+pub mod swap;
 #[cfg(feature = "vm")]
 pub mod vm;

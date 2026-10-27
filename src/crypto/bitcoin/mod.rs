@@ -11,6 +11,13 @@ use {
     sha2::{Digest, Sha256},
 };
 
+pub mod tx;
+
+/// SHA-256 once: what a P2WSH output commits its script by, and a swap's hash lock its secret.
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
 /// SHA-256 twice, as Bitcoin hashes what it signs.
 pub fn sha256d(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(Sha256::digest(bytes)).into()

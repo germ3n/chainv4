@@ -30,6 +30,8 @@ const IMPORTS: &str = r#"
   (import "chain" "sender" (func $sender (param i32)))
   (import "chain" "contract" (func $contract (param i32)))
   (import "chain" "value" (func $value (param i32)))
+  (import "chain" "block_time" (func $block_time (result i64)))
+  (import "chain" "block_height" (func $block_height (result i64)))
   (import "chain" "hash" (func $hash (param i32 i32 i32 i32) (result i32)))
   (import "chain" "balance" (func $balance (param i32 i32)))
   (import "chain" "transfer" (func $transfer (param i32 i32) (result i32)))
@@ -56,7 +58,7 @@ fn context() -> CallContext {
         sender: Address::Ed25519([1; 32]),
         contract: Address::Contract([2; 32]),
         value: u256::new(500),
-        block: crate::vm::BlockAt::at(0),
+        block: crate::vm::BlockAt { height: 42, ..crate::vm::BlockAt::at(1_793_000_000_123) },
     }
 }
 
@@ -199,6 +201,22 @@ fn the_context_is_readable() {
             TxCallArgumentType::Bytes(value),
         ]
     );
+}
+
+#[test]
+fn the_block_is_readable() {
+    // Returns the block's time and height as two I64s.
+    let body = r#"
+      (func (export "when")
+        (i64.store (i32.const 0) (i64.const 2))
+        (i32.store8 (i32.const 8) (i32.const 6))
+        (i64.store (i32.const 9) (call $block_time))
+        (i32.store8 (i32.const 17) (i32.const 6))
+        (i64.store (i32.const 18) (call $block_height))
+        (call $output (i32.const 0) (i32.const 26)))
+    "#;
+
+    assert_eq!(run(body, "when", &[]).result.unwrap(), [TxCallArgumentType::I64(1_793_000_000_123), TxCallArgumentType::I64(42)], "the block's own");
 }
 
 #[test]

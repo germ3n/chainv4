@@ -87,6 +87,11 @@ pub struct Settings {
     /// requests for it are named by, and what any other is warned of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signer_chain: Option<u64>,
+    /// An Esplora API, such as https://mempool.space/api, that the Swaps page looks Bitcoin up
+    /// at and broadcasts through: empty for none, so nothing about a swap leaves the wallet.
+    pub esplora: String,
+    /// The swap contract to use in place of the one the node names: empty to take the node's.
+    pub swap_contract: String,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -141,6 +146,8 @@ impl Default for Settings {
             light_theme: false,
             contracts: Vec::new(),
             signer_chain: None,
+            esplora: String::new(),
+            swap_contract: String::new(),
             vault: None,
             current: String::new(),
         }
@@ -223,6 +230,8 @@ pub struct Wallet {
     coin: Coin,
     /// The node's faucet, as its status describes it, on a node that runs one.
     faucet: Option<serde_json::Value>,
+    /// The swap contract the node names in GET /status, if it names one.
+    swap_contract: Option<String>,
     wake: egui::Context,
     asked_status: Option<f64>,
     asked_history: f64,
@@ -268,6 +277,7 @@ impl Wallet {
                 decimals: 18,
             },
             faucet: None,
+            swap_contract: None,
             wake: creation.egui_ctx.clone(),
             asked_status: None,
             asked_history: 0.0,
@@ -346,6 +356,7 @@ impl Wallet {
             match (&ask, &result) {
                 (Ask::Status, Ok(value)) => {
                     self.faucet = value.get("faucet").filter(|faucet| !faucet.is_null()).cloned();
+                    self.swap_contract = value["swap"]["contract"].as_str().map(str::to_string);
 
                     if let (Some(symbol), Some(decimals)) = (value["coin"]["symbol"].as_str(), value["coin"]["decimals"].as_u64()) {
                         self.coin = Coin {
@@ -747,6 +758,7 @@ impl eframe::App for Wallet {
                             lock: &mut lock,
                             wake: &self.wake,
                             faucet: self.faucet.as_ref(),
+                            swap_contract: self.swap_contract.as_deref(),
                         };
                         views::show(ui, &mut ctx, &mut self.views);
                     });
@@ -799,7 +811,7 @@ impl eframe::App for Wallet {
 /// What the wallet's requests go out through: the proxy set, or straight to the node. The browser
 /// makes its own requests, through its own proxy. An offline signer has nothing to send them by,
 /// so nothing it might ask can go out.
-fn client(settings: &Settings) -> Result<chainv4_ui::net::Client, String> {
+pub(crate) fn client(settings: &Settings) -> Result<chainv4_ui::net::Client, String> {
     match (settings.role, cfg!(target_arch = "wasm32")) {
         (Some(Role::Signer), _) => Err("an offline signer makes no requests".to_string()),
         (_, true) => Ok(chainv4_ui::net::Client::direct()),

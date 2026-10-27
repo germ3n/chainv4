@@ -68,6 +68,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         online(ui, ctx, state, node);
         ui.add_space(14.0);
         super::dapp::settings(ui, ctx);
+        #[cfg(feature = "swap")]
+        swaps(ui, ctx);
     }
 
     ui.add_space(14.0);
@@ -647,4 +649,32 @@ fn your_chain(ui: &mut Ui, ctx: &mut Ctx) {
     }
 
     ui.data_mut(|data| data.insert_temp(id, typed));
+}
+
+/// The Swaps page's settings: the swap contract, when not the node's, and an Esplora API to look
+/// Bitcoin up at.
+#[cfg(feature = "swap")]
+fn swaps(ui: &mut Ui, ctx: &mut Ctx) {
+    let palette = *ctx.palette;
+    ui.add_space(14.0);
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Swaps");
+        ui.label(RichText::new("The swap contract, empty for the one the node names, and an Esplora API, such as https://mempool.space/api or https://mempool.space/testnet4/api, for the Swaps page to look Bitcoin up at and broadcast through. Empty sends nothing anywhere: you paste what it needs and broadcast yourself.").small().color(palette.muted));
+        ui.add_space(6.0);
+        super::row(ui, &palette, "Contract", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut ctx.settings.swap_contract).hint_text(ctx.swap_contract.unwrap_or("contract:0x…")).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+        });
+
+        if !ctx.settings.swap_contract.trim().is_empty() && ctx.settings.swap_contract.trim().parse::<chainv4::structs::address::Address>().is_err() {
+            ui.colored_label(palette.bad, "That is not an address.");
+        }
+
+        super::row(ui, &palette, "Esplora", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut ctx.settings.esplora).hint_text("empty: nothing leaves the wallet").desired_width(f32::INFINITY));
+        });
+
+        if ctx.settings.esplora.trim().starts_with("http://") {
+            ui.colored_label(palette.warn, "Plain http: anyone on the way sees your swap's addresses.");
+        }
+    });
 }

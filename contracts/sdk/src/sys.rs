@@ -21,6 +21,9 @@ unsafe extern "C" {
     pub fn contract(ptr: *mut u8);
     /// Writes 32 bytes, little-endian.
     pub fn value(ptr: *mut u8);
+    /// The block's time, in milliseconds since the Unix epoch.
+    pub fn block_time() -> u64;
+    pub fn block_height() -> u64;
     /// Writes the digest and returns its length: 32, or 8 for XXH3.
     pub fn hash(algorithm: u32, data: *const u8, len: u32, out: *mut u8) -> u32;
     /// Writes 32 bytes, little-endian.

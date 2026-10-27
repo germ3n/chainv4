@@ -186,6 +186,7 @@ mod tests {
                 },
             ],
             watch: false,
+            swaps: Vec::new(),
         };
         let holders = open(&book);
         let kinds = |holder: &Holder| holder.addresses().iter().map(|address| address.kind()).collect::<Vec<_>>();
@@ -215,6 +216,7 @@ mod tests {
                 source: Source::Phrase { account: 0 },
             }],
             watch: false,
+            swaps: Vec::new(),
         });
         let origin = Origin { account: 0, fingerprint: [1, 2, 3, 4] };
         let watched = Holder::watched("Main".to_string(), signer[0].publics.clone(), Some(origin));
@@ -225,6 +227,7 @@ mod tests {
                 source: watched.source.clone(),
             }],
             watch: true,
+            swaps: Vec::new(),
         };
         let reopened = open(&serde_json::from_value(serde_json::to_value(&book).unwrap()).unwrap());
         let ethereum = signer[0].addresses()[2];
@@ -248,6 +251,7 @@ mod tests {
                 source: Source::Watch { keys: vec!["not a key".to_string()], origin: None },
             }],
             watch: true,
+            swaps: Vec::new(),
         };
 
         assert!(open(&broken).is_empty(), "one whose keys do not read is left out");

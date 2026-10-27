@@ -30,6 +30,8 @@ pub(super) const NAMES: &[&str] = &[
     "sender",
     "contract",
     "value",
+    "block_time",
+    "block_height",
     "hash",
     "balance",
     "transfer",
@@ -227,6 +229,24 @@ fn chain_contract() {}
     params = { ptr = { ty = "i32", desc = "Where to write the amount: 32 bytes, a little-endian u256." } },
 )]
 fn chain_value() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "block_time",
+    summary = "The time of the block the call runs in, in milliseconds since the Unix epoch: the same on every node, so a contract can keep deadlines by it.",
+    returns = { ty = "i64", desc = "The block's timestamp." },
+)]
+fn chain_block_time() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "block_height",
+    summary = "The height of the block the call runs in.",
+    returns = { ty = "i64", desc = "The block's height." },
+)]
+fn chain_block_height() {}
 
 #[document(
     wasm,
@@ -439,6 +459,8 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "sender", sender).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "contract", contract).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "value", value).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "block_time", block_time).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "block_height", block_height).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "hash", hash).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "balance", balance).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "transfer", transfer).expect(defined);
@@ -579,6 +601,14 @@ fn contract(mut caller: Caller<'_, Run>, ptr: u32) -> Result<()> {
     let contract = host(&mut caller)?.context().contract;
 
     write(&mut caller, ptr, &contract.to_abi())
+}
+
+fn block_time(mut caller: Caller<'_, Run>) -> Result<u64> {
+    Ok(host(&mut caller)?.context().block.time)
+}
+
+fn block_height(mut caller: Caller<'_, Run>) -> Result<u64> {
+    Ok(host(&mut caller)?.context().block.height)
 }
 
 fn value(mut caller: Caller<'_, Run>, ptr: u32) -> Result<()> {

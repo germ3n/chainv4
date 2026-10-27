@@ -480,6 +480,19 @@ fn bitcoin_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                 ui.label(format!("{} from {} input{}{others}", coins(spent), review.inputs.len(), if review.inputs.len() == 1 { "" } else { "s" }));
             });
 
+            // A swap's HTLC, claimed with its secret or taken back after its lock time.
+            for spent in &review.inputs {
+                match spent.swap {
+                    Some(bitcoin::Swapped::Claim) => {
+                        ui.label(RichText::new("It claims a swap's bitcoin for this wallet's key, with the swap's secret.").color(palette.soft));
+                    }
+                    Some(bitcoin::Swapped::Refund { locktime }) => {
+                        ui.label(RichText::new(format!("It takes back a swap's bitcoin, which Bitcoin mines once its time is past {locktime}, in seconds since 1970.")).color(palette.soft));
+                    }
+                    None => {}
+                }
+            }
+
             if review.lock_time != 0 {
                 super::row(ui, &palette, "Not before", |ui| {
                     ui.label(match review.lock_time < 500_000_000 {

@@ -1,6 +1,8 @@
 use {
     super::*,
     crate::airgap::Message,
+    chainv4::crypto::bitcoin::sha256d,
+    chainv4::crypto::bitcoin::tx::base58check,
     chainv4::crypto::mnemonic::Phrase,
     chainv4::structs::hex::from_hex,
     serde_json::Value,
@@ -162,7 +164,7 @@ fn the_review_lays_out_what_leaves_and_spots_the_change() {
         let coin = network.coin();
 
         assert_eq!(review.network, network);
-        assert_eq!(review.inputs, vec![Spent { value: 50_000, yours: Some(format!("m/84'/{coin}'/0'/0/0")) }, Spent { value: 30_000, yours: Some(format!("m/84'/{coin}'/0'/0/1")) }]);
+        assert_eq!(review.inputs, vec![Spent { value: 50_000, yours: Some(format!("m/84'/{coin}'/0'/0/0")), swap: None }, Spent { value: 30_000, yours: Some(format!("m/84'/{coin}'/0'/0/1")), swap: None }]);
         assert_eq!(review.outputs.len(), 6);
         assert_eq!(review.outputs[5], Paid { value: 38_000, to: made["change"].as_str().unwrap().to_string(), yours: Some(format!("m/84'/{coin}'/0'/1/0")) });
         assert!(review.outputs[..5].iter().all(|paid| paid.yours.is_none()), "others' outputs are no change");
@@ -335,4 +337,41 @@ fn bitcoin_wallets_own() {
     }
 
     std::fs::write(out, serde_json::to_string_pretty(&written).unwrap()).unwrap();
+}
+
+#[cfg(feature = "swap")]
+#[test]
+fn the_signer_signs_a_swaps_htlc_spend_as_the_swap_tools_do() {
+    use chainv4::swap::htlc::{Coins, Htlc, Spend};
+
+    let seed = seed();
+    // This wallet's first testnet key claims; someone else's refunds.
+    let keypair = seed.bitcoin_key(1, 0, 0);
+    let PrivateKey::Bitcoin(secret_key) = keypair.private() else { unreachable!() };
+    let ours = public(&keypair.public());
+    let theirs = chainv4::crypto::secp256k1::public_key(&[0x22; 32]).unwrap();
+    let secret = [0x5e; 32];
+    let htlc = Htlc { hash: chainv4::crypto::bitcoin::sha256(&secret), claim: ours, refund: theirs, locktime: 1_793_000_000 };
+    let to = p2wpkh(&hash160(&ours));
+    let unsigned = htlc.unsigned(Coins { txid: [7; 32], vout: 0, value: 80_000 }, to.clone(), 2, Spend::Claim { secret }).unwrap();
+    let path = [84 | HARDENED, 1 | HARDENED, HARDENED, 0, 0];
+    let asked = Psbt::for_htlc(&unsigned, 80_000, &htlc, ours, seed.bitcoin_account(0).master_fingerprint, &path);
+
+    // The signer shows it as a claim of a swap's coins, and signs it.
+    let review = Psbt::read(&asked.to_bytes()).unwrap().review(&seed).unwrap();
+    assert_eq!(review.network, Network::Test);
+    assert_eq!(review.inputs[0].swap, Some(Swapped::Claim));
+    let signed = asked.sign(&seed).unwrap();
+
+    // Finished with the secret, it is the very spend the swap tools sign with the key itself.
+    let finished = signed.finish_htlc(&htlc, 80_000, Spend::Claim { secret }).unwrap();
+    let direct = htlc.spend(Coins { txid: [7; 32], vout: 0, value: 80_000 }, to, 2, Spend::Claim { secret }, secret_key).unwrap();
+    assert_eq!(finished.encode(), direct.encode());
+
+    // A signature for other coins does not finish it, and a key the HTLC does not name is refused.
+    assert!(signed.finish_htlc(&htlc, 80_001, Spend::Claim { secret }).unwrap_err().contains("does not hold"));
+    assert!(asked.finish_htlc(&htlc, 80_000, Spend::Claim { secret }).unwrap_err().contains("no signature"));
+    let stranger = Htlc { claim: theirs, refund: chainv4::crypto::secp256k1::public_key(&[0x33; 32]).unwrap(), ..htlc };
+    let wrong = Psbt::for_htlc(&stranger.unsigned(Coins { txid: [7; 32], vout: 0, value: 80_000 }, p2wpkh(&hash160(&ours)), 2, Spend::Refund).unwrap(), 80_000, &stranger, ours, seed.bitcoin_account(0).master_fingerprint, &path);
+    assert!(wrong.review(&seed).unwrap_err().contains("neither of its swap's keys"));
 }

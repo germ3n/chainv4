@@ -126,6 +126,9 @@ struct Api {
     /// The faucet, on a node that runs one.
     #[cfg(feature = "faucet")]
     faucet: Option<Arc<faucet::Faucet>>,
+    /// The swap contract the node tells clients of.
+    #[cfg(feature = "swap")]
+    swap_contract: Option<Address>,
 }
 
 impl Api {
@@ -151,6 +154,9 @@ pub struct ApiOptions {
     #[document(summary = "A faucet to run at POST /faucet, for a dev or test chain; None for none.")]
     #[cfg(feature = "faucet")]
     pub faucet: Option<FaucetConfig>,
+    #[document(summary = "The atomic swap contract on this chain, contracts/lua/swap.lua as deployed here, which GET /status names for the wallet and the CLI; None for none.")]
+    #[cfg(feature = "swap")]
+    pub swap_contract: Option<Address>,
 }
 
 #[document(
@@ -223,6 +229,8 @@ pub fn start(
                     genesis_bootnodes,
                     #[cfg(feature = "faucet")]
                     faucet: options.faucet.map(|config| Arc::new(faucet::Faucet::new(config))),
+                    #[cfg(feature = "swap")]
+                    swap_contract: options.swap_contract,
                 })
                 // Who connects, for the faucet's limits by IP.
                 .into_make_service_with_connect_info::<SocketAddr>())
@@ -476,7 +484,20 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "max_block_bytes": api.max_block_bytes,
         "bootnodes": api.bootnodes(&State::new(db.clone()))?,
         "faucet": faucet_json(&api),
+        "swap": swap_json(&api),
     })))
+}
+
+/// The swap contract clients use: { contract }, or null on a node that names none.
+fn swap_json(api: &Api) -> Value {
+    #[cfg(feature = "swap")]
+    if let Some(contract) = api.swap_contract {
+        return json!({ "contract": contract.to_string() });
+    }
+
+    let _ = api;
+
+    Value::Null
 }
 
 /// The faucet's settings, for clients to show it by; null on a node that runs none.

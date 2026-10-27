@@ -42,6 +42,11 @@ rqrr = { version = "0.11.0", default-features = false }
 ur = "0.5.2"
 minicbor = { version = "2", default-features = false, features = ["alloc"] }
 
+[features]
+default = ["swap"]
+# Atomic swaps with Bitcoin: the Swaps page, and the offline signer signing a swap's Bitcoin side.
+swap = ["chainv4/swap"]
+
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "links", "wayland", "x11"] }
 env_logger = "0.11.11"

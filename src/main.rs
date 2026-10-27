@@ -27,6 +27,10 @@ enum Command {
     /// Asks a node's faucet for a drip, for a dev or test chain, doing the proof of work it wants.
     #[cfg(all(feature = "client", feature = "sha256"))]
     Faucet(cli::FaucetArgs),
+    /// Atomic swaps with Bitcoin: makes and answers a swap's terms, locks, claims and refunds on
+    /// chainv4, and signs Bitcoin's claim or refund of its HTLC.
+    #[cfg(all(feature = "client", feature = "swap"))]
+    Swap(cli::SwapArgs),
     /// Writes a genesis file with the development defaults, to edit and run with --genesis.
     Genesis(cli::genesis::GenesisArgs),
     /// Shows the storage layout contract code declares, and with --from, checks it keeps an
@@ -194,6 +198,11 @@ struct NodeArgs {
     #[cfg(feature = "faucet")]
     #[arg(long, requires = "faucet_key", default_value_t = 20, value_parser = clap::value_parser!(u32).range(0..=40))]
     faucet_work: u32,
+    /// The atomic swap contract on this chain, contracts/lua/swap.lua as deployed here: GET /status
+    /// names it, for the wallet's Swaps page and chainv4 swap to use unless told another.
+    #[cfg(feature = "swap")]
+    #[arg(long, requires = "http")]
+    swap_contract: Option<structs::address::Address>,
     /// Tell clients what the node does as it happens, on the API's GET /stream.
     #[cfg(feature = "stream")]
     #[arg(long, requires = "http")]
@@ -242,6 +251,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Send(args)) => cli::send(*args),
         #[cfg(all(feature = "client", feature = "sha256"))]
         Some(Command::Faucet(args)) => cli::faucet(args),
+        #[cfg(all(feature = "client", feature = "swap"))]
+        Some(Command::Swap(args)) => cli::swap(args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
         Some(Command::Layout(args)) => cli::layout(args),
         Some(Command::Db(args)) => cli::db(args),
@@ -435,6 +446,8 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             wallet: args.wallet,
             #[cfg(feature = "faucet")]
             faucet,
+            #[cfg(feature = "swap")]
+            swap_contract: args.swap_contract,
         };
         let address = api::start(db, Some(node.handle()), &genesis, address, options)?;
         log::info!("[http] listening on {address}");

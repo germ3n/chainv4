@@ -397,7 +397,7 @@ and `debug` are not there at all.
 
 | Library | What it has |
 | --- | --- |
-| `ctx` | `ctx.sender`, `ctx.contract`, `ctx.value`, and `ctx.args`, the call's arguments as a values list. |
+| `ctx` | `ctx.sender`, `ctx.contract`, `ctx.value`, `ctx.args`, the call's arguments as a values list, and `ctx.time` and `ctx.height`, the block's time in milliseconds since 1970 and its height: the header's, the same on every node, for deadlines. |
 | `storage` | `storage.get(key)`, `storage.set(key, value)`; `nil` deletes. Keys and values are strings. `storage.namespace(name)` and `storage.own` have the same `get` and `set`, as methods, on keys of their own. |
 | `accounts` | `accounts.balance(address)`, `accounts.transfer(to, amount)` from the contract's balance. |
 | `contracts` | `contracts.call(address, name, ...)`, `contracts.call_value(address, value, name, ...)`, `contracts.delegate(address, name_or_selector, ...)`, `contracts.check_layout(from, to)`, `contracts.selector(name)`. |
@@ -577,6 +577,7 @@ into its exported memory.
 | `storage_get`, `storage_set`, `storage_delete` | The contract's own storage. |
 | `namespace_get`, `namespace_set`, `namespace_delete` | A namespace, by its name first, or for an empty name the contract's own space. |
 | `sender`, `contract`, `value` | The call's context. |
+| `block_time`, `block_height` | The block's time, in milliseconds since 1970, and its height, as `i64`s: the SDK's `block_time()` and `block_height()`. |
 | `hash` | Hashes bytes with a chosen algorithm. |
 | `balance`, `transfer` | Funds, from the contract's own balance. |
 | `call`, `delegate` | Other contracts: `call(address, value, name, name_len, args, args_len)`. |
@@ -675,6 +676,7 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 | `contracts/examples/proxy` | Calling other contracts for a caller, and a reentrant callback. |
 | `contracts/examples/upgradable`, `contracts/lua/proxy.lua` | A proxy built on `fallback` and `delegate`, with its owner and implementation in its own space, that checks a new implementation's layout. |
 | `contracts/examples/token`, `contracts/lua/token.lua` | The [token standard](token-standard.md), held to it by one shared test. |
+| `contracts/lua/swap.lua` | An [atomic swap](swaps.md)'s chainv4 side: the coin or a token locked under a SHA-256 hash for a recipient until a deadline by `ctx.time`, claimed with the secret or refunded after, with `transfer_from` for tokens. |
 | `contracts/lua/guestbook.lua` | Events with addresses in them, for the event index and the explorer; value passed on with `accounts.transfer`; and a storage layout of a map and a record. |
 | `contracts/lua/names/` | A contract split across files with `--@include`, its storage layout declared in an included file. |
 | `contracts/examples/integers`, `contracts/lua/integers.lua` | The integer types in both engines, with one layout: operators, the `checked_`, `saturating_` and `wrapping_` methods, comparisons with plain numbers, and the `i128`, `u128`, `i256` and `u256` kinds. One test runs both and upgrades each into the other's storage. |

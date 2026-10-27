@@ -14,6 +14,8 @@ pub mod scan;
 pub mod send;
 mod settings;
 mod sign;
+#[cfg(feature = "swap")]
+mod swaps;
 
 use {
     crate::app::{Coin, Role, Settings},
@@ -37,6 +39,9 @@ pub enum Page {
     Activity,
     Names,
     Contracts,
+    /// Atomic swaps with Bitcoin.
+    #[cfg(feature = "swap")]
+    Swaps,
     Accounts,
     Settings,
     /// An offline signer's: a request to sign, read off the sender's screen.
@@ -56,6 +61,8 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             (Page::Activity, "Activity"),
             (Page::Names, "Names"),
             (Page::Contracts, "Contracts"),
+            #[cfg(feature = "swap")]
+            (Page::Swaps, "Swaps"),
             (Page::Accounts, "Accounts"),
             (Page::Settings, "Settings"),
         ],
@@ -104,6 +111,9 @@ pub struct Ctx<'a> {
     pub wake: &'a egui::Context,
     /// The node's faucet, as GET /status describes it, on a node that runs one.
     pub faucet: Option<&'a serde_json::Value>,
+    /// The swap contract the node names, if it names one.
+    #[cfg_attr(not(feature = "swap"), allow(dead_code))]
+    pub swap_contract: Option<&'a str>,
 }
 
 impl Ctx<'_> {
@@ -163,11 +173,18 @@ pub struct States {
     sign: sign::SignState,
     pub dapp: dapp::DappState,
     pub faucet: faucet::FaucetState,
+    #[cfg(feature = "swap")]
+    swaps: swaps::SwapsState,
 }
 
 impl States {
     /// Takes the node's answer to something the Contracts page asked.
     pub fn answered(&mut self, ask: &crate::node::Ask, result: &Result<serde_json::Value, crate::node::Failure>, kept: &[crate::app::SavedContract]) {
+        #[cfg(feature = "swap")]
+        if self.swaps.answered(ask, result) {
+            return;
+        }
+
         self.contracts.answered(ask, result, kept);
     }
 
@@ -212,6 +229,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Activity => activity::show(ui, ctx),
         Page::Names => names::show(ui, ctx, &mut states.names, &mut states.send),
         Page::Contracts => contracts::show(ui, ctx, &mut states.contracts, &mut states.send),
+        #[cfg(feature = "swap")]
+        Page::Swaps => swaps::show(ui, ctx, &mut states.swaps, &mut states.send),
         Page::Accounts => accounts::show(ui, ctx, &mut states.accounts),
         Page::Settings => settings::show(ui, ctx, &mut states.settings),
         Page::Sign => sign::show(ui, ctx, &mut states.sign),

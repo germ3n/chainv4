@@ -479,6 +479,15 @@ Keystone's `@keystonehq/bc-ur-registry-eth` and ethereumjs, as MetaMask's QR key
 signatures back with them: the accounts the extended key derives, and each signature rebuilt into
 its transaction or recovered from its hash, under its request's id.
 
+### Swaps
+
+The **Swaps** page trades coins or a token here for bitcoin, with no one in between: an offer
+and its answer as codes, the swap's secret sealed in the vault, locks and claims on this chain as
+calls the Send page signs, and the HTLC on Bitcoin paid from any Bitcoin wallet and claimed or
+refunded here, by the account's key or, for one watched from the offline signer, as a PSBT the
+signer signs. Settings, **Swaps** names the swap contract when the node does not, and an
+optional Esplora API to look Bitcoin up at. See [Atomic swaps](swaps.md).
+
 ### Bitcoin wallets
 
 The offline signer is also a QR hardware wallet for Bitcoin wallets, as a Keystone or a Passport
@@ -504,7 +513,8 @@ it off the screen, lays out what leaves, signs, and shows the PSBT back for the 
    wallet, which finishes the transaction and sends it.
 
 It signs the inputs of its own seed's keys at m/84'/0'/0'/{0,1}/n or m/84'/1'/0'/{0,1}/n that
-spend native segwit (P2WPKH) coins, with BIP143's hash of all of the transaction, SIGHASH_ALL,
+spend native segwit (P2WPKH) coins, or a [swap](swaps.md)'s HTLC whose script the PSBT gives
+(claim or refund, named on the review), with BIP143's hash of all of the transaction, SIGHASH_ALL,
 and gives back every pair the PSBT held. It refuses:
 
 - a PSBT with nothing of this seed's to sign, as from a wallet paired with another;

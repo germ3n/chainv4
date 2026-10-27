@@ -11,7 +11,7 @@ members = ["macro", "wiki", "gpu"]
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -25,6 +25,9 @@ secp256k1 = ["dep:k256", "dep:sha3"]
 # Bitcoin's keys: ECDSA on secp256k1 over double SHA-256, and addresses of the key's HASH160,
 # written bc1q… as Bitcoin's native segwit (P2WPKH) ones are.
 bitcoin = ["secp256k1", "dep:sha2", "dep:ripemd"]
+# Atomic swaps with Bitcoin: the HTLC script and its spends, and the terms both sides agree, as
+# ur:chainv4-swap codes. The chain side is a contract, contracts/lua/swap.lua.
+swap = ["bitcoin", "dep:ur"]
 # Seed phrases: BIP39 words, SLIP-0010 for the Edwards schemes and BIP32 for secp256k1.
 mnemonic = ["dep:bip39", "dep:hmac", "dep:sha2", "dep:ripemd"]
 vm = ["xxh3"]
@@ -91,6 +94,7 @@ ed25519-dalek = "3.0.0"
 curve25519-dalek = { version = "5.0.0", optional = true }
 digest = { version = "0.11.3", optional = true }
 getrandom = "0.4.3"
+ur = { version = "0.5.2", optional = true }
 zeroize = "1.9.1"
 ethnum = "1.5.3"
 rayon = { version = "1.12.0", optional = true }

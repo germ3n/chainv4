@@ -37,6 +37,7 @@ services:
       FAUCET_AMOUNT: ${FAUCET_AMOUNT:-10}
       FAUCET_EVERY: ${FAUCET_EVERY:-24h}
       FAUCET_WORK: ${FAUCET_WORK:-20}
+      SWAP_CONTRACT: ${SWAP_CONTRACT:-}
       EXTRA_ARGS: ${EXTRA_ARGS:-}
     volumes:
       - chain:/data

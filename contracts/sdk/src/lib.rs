@@ -81,6 +81,17 @@ pub fn value() -> [u8; 32] {
     bytes
 }
 
+/// The time of the block the call runs in, in milliseconds since the Unix epoch: the same on every
+/// node, so deadlines can be kept by it.
+pub fn block_time() -> u64 {
+    unsafe { sys::block_time() }
+}
+
+/// The height of the block the call runs in.
+pub fn block_height() -> u64 {
+    unsafe { sys::block_height() }
+}
+
 /// A hash algorithm the node computes for contracts. Each exists only when the node was built
 /// with it; all are by default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

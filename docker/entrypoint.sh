@@ -28,6 +28,8 @@
 #   FAUCET_AMOUNT    each drip, in whole coins: 10 unless set
 #   FAUCET_EVERY     how long an address, and an IP, wait between drips: 24h unless set
 #   FAUCET_WORK      the zero bits a request's proof of work starts with: 20 unless set
+#   SWAP_CONTRACT    the atomic swap contract deployed on this chain, contracts/lua/swap.lua,
+#                    for GET /status to name to the wallet and chainv4 swap
 #   EXTRA_ARGS       anything else, passed on to chainv4
 set -eu
 
@@ -157,6 +159,12 @@ if [ -n "$FAUCET_KEY" ] && [ ! -r "$FAUCET_KEY" ]; then
 elif [ -n "$FAUCET_KEY" ]; then
     set -- "$@" --faucet-key "$FAUCET_KEY" --faucet-amount "${FAUCET_AMOUNT:-10}" --faucet-every "${FAUCET_EVERY:-24h}" --faucet-work "${FAUCET_WORK:-20}"
     echo "[docker] running a faucet: ${FAUCET_AMOUNT:-10} a drip, every ${FAUCET_EVERY:-24h}"
+fi
+
+# The swap contract, when this chain has one deployed.
+if [ -n "${SWAP_CONTRACT:-}" ]; then
+    set -- "$@" --swap-contract "$SWAP_CONTRACT"
+    echo "[docker] naming the swap contract $SWAP_CONTRACT"
 fi
 
 # Word-split on purpose: EXTRA_ARGS holds several arguments.

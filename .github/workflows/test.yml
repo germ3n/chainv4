@@ -110,6 +110,8 @@ jobs:
         run: cargo clippy --manifest-path wallet/Cargo.toml --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --manifest-path wallet/Cargo.toml --locked
+      - name: clippy (no swaps)
+        run: cargo clippy --manifest-path wallet/Cargo.toml --all-targets --locked --no-default-features -- -D warnings
       - name: clippy (web)
         run: cargo clippy --manifest-path wallet/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
 
@@ -132,6 +134,8 @@ jobs:
           # Bitcoin's scheme with only Ethereum's beside it, and with seed phrases.
           - blake3,bitcoin
           - sha256,ed25519,bitcoin,mnemonic
+          - blake3,swap
+          - lvm,sha256,ed25519,swap
           # Contracts and nodes need a secure hash; these run on ones other than BLAKE3.
           - lvm,sha256,ed25519
           - wasm,keccak256,ed25519

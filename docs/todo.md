@@ -648,13 +648,39 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **The signer for other kinds of Bitcoin input and other chains.** Taproot (BIP341) and
   wrapped or legacy inputs, PSBT version 2, PSBTs as files, and Keystone's types for Solana,
   Cosmos and the rest, would each need their own paths and signing.
-- [ ] **Atomic swaps with Bitcoin.** The same words already hold a `bc1q…` key on both chains; a
-  trustless BTC ↔ DEV swap needs a hash-time-lock contract on chainv4 (claim with the preimage
-  before a deadline, refund after) and its twin on Bitcoin, a P2WSH script the offline signer can
-  sign the claim and the refund of (today it signs P2WPKH alone), with the wallet walking both
-  sides. Later steps toward trust-minimized cross-chain: a Bitcoin SPV light client as a contract,
-  checking headers and merkle proofs with `sha256d` exposed to contracts, and an Ethereum bridge
-  through the EVM's `ecrecover`.
+- [x] **Atomic swaps with Bitcoin.** The swap contract (`contracts/lua/swap.lua`) for the coin and
+  tokens, Bitcoin's HTLC (`src/swap/htlc.rs`), offers and answers as `ur:chainv4-swap`,
+  `chainv4 swap`, the wallet's Swaps page and the offline signer signing HTLC spends, deadlines by
+  time on both chains, behind the `swap` feature. See [Atomic swaps](swaps.md).
+- [ ] **A Bitcoin light client in the wallet,** BIP157/158 compact block filters (Kyoto), on the
+  desktop and Android apps, for swaps to see Bitcoin themselves rather than by pasting or Esplora.
+- [ ] **A Bitcoin SPV light client as a contract,** checking headers and merkle proofs with
+  `sha256d` exposed to contracts, for proving Bitcoin deposits on chainv4.
+- [ ] **Swaps with more chains.** The swap contract knows a hash and a deadline alone, so any chain
+  that locks coins under a SHA-256 hash and a deadline can be the other side: a new
+  `swap::Counterparty` with its own lock and spend. Litecoin takes Bitcoin's script as it is, with
+  its own addresses and coin type; Dogecoin and Bitcoin Cash, without segwit, the same script in
+  P2SH; Ethereum and other EVM chains a small Solidity HTLC on the `sha256` precompile; Solana and
+  Cosmos their own hash-lock programs. Monero, with no scripts, needs adaptor signatures instead.
+- [ ] **Wrapped assets: bridges.** A swap trades what exists; a wrapped coin, such as BTC as a
+  token here, needs a bridge that mints it one for one against coins locked on the other chain
+  and releases them when it is burned. Minting can be trust-minimized with the Bitcoin SPV light
+  client contract proving each deposit; releasing BTC cannot, as Bitcoin reads nothing of
+  chainv4: a federation or a threshold of staked signers signs each release (as Liquid, WBTC or
+  tBTC do) until BitVM-style proofs mature. With Ethereum, which runs contracts too, each chain
+  can check the other's headers, and both directions can be trust-minimized. Swaps of the wrapped
+  token against the real coin then keep its price honest.
+  - **Fully trustless with Ethereum** takes a light client of each chain in a contract on the
+    other, permissionless relayers, and no admin keys (immutable, or upgradable only behind a long
+    timelock). Following Ethereum here needs BLS12-381 checks and Merkle-Patricia proofs as host
+    functions; following chainv4 there needs its finality voted with secp256k1 keys, cheap
+    through `ecrecover`, or a zero-knowledge proof of it, as the EVM has no Ed25519 or BLAKE3.
+  - **With Bitcoin, only the way in can be trustless** today: releasing BTC needs a script that
+    checks chainv4's state, which Bitcoin lacks. Short of a soft fork (covenants, or a ZK
+    verifier), the best is 1-of-n honest operators (BitVM2) or signers slashed on chainv4 for
+    stealing, safe while their stake exceeds what they could take.
+  - **Either way** each chain's own consensus is trusted: a light client is only as good as the
+    finality or depth it waits for.
 - [x] **This wallet's own codes as URs.** `ur:chainv4-pairing`, `-sign-request` and `-signed`,
   carrying the chain's own encoding; CV4 and base45 are gone.
 - [x] **Sites through the offline signer.** An account watched from the signer is offered to sites

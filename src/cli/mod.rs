@@ -26,6 +26,8 @@ mod layout;
 mod light;
 #[cfg(feature = "client")]
 mod send;
+#[cfg(all(feature = "client", feature = "swap"))]
+mod swap;
 mod worker;
 
 pub use db::{DbArgs, db};
@@ -39,6 +41,8 @@ pub use worker::gpus;
 pub use light::{LightArgs, light};
 #[cfg(feature = "client")]
 pub use send::{SendArgs, TlsArgs, TxArgs, send};
+#[cfg(all(feature = "client", feature = "swap"))]
+pub use swap::{SwapArgs, swap};
 #[cfg(all(feature = "client", feature = "sha256"))]
 pub use faucet::{FaucetArgs, faucet};
 

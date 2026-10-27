@@ -37,6 +37,9 @@ impl UserData for LuaCtx {
         fields.add_field_function_get("sender", |lua, _| Ok(LuaAddress(current(lua)?.sender)));
         fields.add_field_function_get("contract", |lua, _| Ok(LuaAddress(current(lua)?.contract)));
         fields.add_field_function_get("value", |lua, _| Ok(LuaInt(current(lua)?.value)));
+        // Whole numbers well inside the 2^53 a Lua number keeps exactly.
+        fields.add_field_function_get("time", |lua, _| Ok(current(lua)?.block.time as f64));
+        fields.add_field_function_get("height", |lua, _| Ok(current(lua)?.block.height as f64));
         fields.add_field_function_get("args", |lua, _| {
             let mut call = lua
                 .app_data_mut::<CallArgs>()
@@ -108,6 +111,26 @@ fn ctx_value() {}
 )]
 fn ctx_args() {}
 
+#[document(
+    lua,
+    parent = "ctx",
+    name = "time",
+    kind = "field",
+    summary = "The time of the block the call runs in, in milliseconds since the Unix epoch: the same on every node, so a contract keeps deadlines by it.",
+    returns = { ty = "number", desc = "The block's timestamp." },
+)]
+fn ctx_time() {}
+
+#[document(
+    lua,
+    parent = "ctx",
+    name = "height",
+    kind = "field",
+    summary = "The height of the block the call runs in.",
+    returns = { ty = "number", desc = "The block's height." },
+)]
+fn ctx_height() {}
+
 pub fn register_ctx_lib(lua: &Lua) {
     lua.globals()
         .set("ctx", LuaCtx)
@@ -140,16 +163,17 @@ mod tests {
             sender: Address::Ed25519([1; 32]),
             contract: Address::Ed25519([2; 32]),
             value: u256::new(7),
-            block: crate::vm::BlockAt::at(0),
+            block: crate::vm::BlockAt { height: 42, ..crate::vm::BlockAt::at(1_793_000_000_123) },
         };
         let state = Arc::new(State::new(Arc::new(MemoryDb::default())));
         lua.set_app_data(Host::root(state, context, 1 << 20, Arc::new(Vm::new(&[], HashType::default_chain()).unwrap())));
-        let code = "return ctx.sender == address.from_bytes(string.rep('\\1', 32)), ctx.contract:hex(), tostring(ctx.value)";
-        let (sender, contract, value): (bool, String, String) = lua.load(code).eval().unwrap();
+        let code = "return ctx.sender == address.from_bytes(string.rep('\\1', 32)), ctx.contract:hex(), tostring(ctx.value), ctx.time, ctx.height";
+        let (sender, contract, value, time, height): (bool, String, String, i64, i64) = lua.load(code).eval().unwrap();
 
         assert!(sender);
         assert_eq!(contract, format!("0x{}", "02".repeat(32)));
         assert_eq!(value, "7");
+        assert_eq!((time, height), (1_793_000_000_123, 42), "the block's, exactly");
     }
 
     #[test]

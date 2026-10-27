@@ -539,6 +539,25 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Signatures are RFC 6979's,** with no extra entropy, so the same PSBT signs the same twice, as
   bitcoinjs-lib signs it; not ground for a low R, so some are a byte longer than Bitcoin Core's.
 
+## Atomic swaps
+
+- **Whoever starts holds the secret, and locks first.** Their lock has the longer deadline, so
+  once they claim the second lock, showing the secret, the other side still has hours to claim
+  the first. The secret leaking early lets the other side take the starter's lock unpaid: the
+  wallet keeps it sealed in the vault.
+- **Lock second only once the first is confirmed** with the amount, recipient and deadline the
+  terms say: the Swaps page reads chainv4's from the contract; Bitcoin's you check, or look up
+  with Esplora.
+- **Deadlines are times on both chains,** chainv4's by block time and Bitcoin's by its median time
+  past, an hour or so behind the clock: a Bitcoin refund confirms about an hour after its
+  deadline. Leave hours of margin, and claim early.
+- **A secret is exactly 32 bytes** on both sides, so neither chain takes one the other refuses.
+- **Anyone may send a claim or a refund** on chainv4: the coins only go to the recipient or the
+  locker.
+- **Contracts can read the block's time and height** now, `ctx.time` and `ctx.height` in Lua,
+  `block_time()` and `block_height()` in the SDK: the header's, the same on every node. A node
+  without them refuses such contracts, so every node updates together.
+
 ## The camera
 
 - **The live camera is the wallet's alone.** `chainv4-ui`'s `camera` feature brings it, and nokhwa

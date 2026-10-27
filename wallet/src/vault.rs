@@ -36,6 +36,36 @@ pub struct Book {
     /// A watch-only wallet's: its accounts are an offline signer's, each watched, and it holds no
     /// key and no words.
     pub watch: bool,
+    /// Its atomic swaps, with the secrets of those it started: sealed with the rest, as whoever
+    /// learns a secret early can take the other side's coins.
+    pub swaps: Vec<SwapRecord>,
+}
+
+/// An atomic swap as the wallet keeps it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwapRecord {
+    /// Its terms, as their code: the offer until answered, then the agreed terms.
+    pub terms: String,
+    /// The secret, 0x and 64 hex digits, when this wallet started the swap.
+    pub secret: Option<String>,
+    /// Which account's keys it uses, by its first address.
+    pub account: String,
+    /// When it was made, in milliseconds since 1970.
+    pub made: u64,
+    /// Whether this wallet started it, and so made its secret and locks first.
+    #[serde(default)]
+    pub started: bool,
+    /// The HTLC's coins on Bitcoin, once known: txid:vout:sats.
+    #[serde(default)]
+    pub funding: Option<String>,
+}
+
+impl Drop for SwapRecord {
+    fn drop(&mut self) {
+        if let Some(secret) = &mut self.secret {
+            secret.zeroize();
+        }
+    }
 }
 
 /// A seed phrase, and the BIP39 passphrase it is used with, empty for none. Wiped as it drops.
@@ -216,6 +246,7 @@ mod tests {
                 },
             ],
             watch: false,
+            swaps: Vec::new(),
         };
         let vault = Vault::create("correct horse").unwrap();
         let sealed = vault.seal(&book).unwrap();

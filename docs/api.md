@@ -43,6 +43,7 @@ Where the chain stands:
 | `vote_rewards` | Where vote rewards come from: `source` `mint`, or `fees` with the `pool` address and its `balance`. |
 | `max_block_bytes` | The most bytes a block's transactions may take, encoded, or `null` when genesis sets none. |
 | `bootnodes` | The chain's bootnodes at the tip: the ones governance decided last, or genesis's. |
+| `swap` | `null`, or `{"contract": …}`: the [swap contract](swaps.md) a node started with `--swap-contract` names, for the wallet and `chainv4 swap`. |
 
 ### `GET /blocks?before=H&limit=N`
 

@@ -18,16 +18,24 @@
 //! are told two ways that disagree, or whose previous transaction is not the one spent from, is
 //! refused.
 
+pub use chainv4::crypto::bitcoin::tx::Network;
+
 use {
     crate::hardware::{HdKey, KeyPath, Step},
-    chainv4::crypto::bitcoin::{hash160, sha256d},
+    chainv4::crypto::bitcoin::hash160,
+    chainv4::crypto::bitcoin::tx::{Reader, SIGHASH_ALL, Transaction, TxOut, address, compact, der, p2wpkh},
     chainv4::crypto::keypair::{PrivateKey, PublicKey},
-    chainv4::crypto::mnemonic::{BITCOIN_TESTNET_COIN_TYPE, Seed},
+    chainv4::crypto::mnemonic::Seed,
     chainv4::structs::bech32,
-    chainv4::structs::hex::to_hex,
     minicbor::data::Tag,
     minicbor::{Decoder, Encoder},
     std::collections::HashSet,
+};
+
+#[cfg(feature = "swap")]
+use {
+    chainv4::crypto::bitcoin::tx::TxIn,
+    chainv4::swap::htlc::{Htlc, Spend},
 };
 
 /// The UR types this module reads and writes: the pairing, and a PSBT, by the registry's name
@@ -47,6 +55,8 @@ const IN_NON_WITNESS_UTXO: u8 = 0x00;
 const IN_WITNESS_UTXO: u8 = 0x01;
 const IN_PARTIAL_SIG: u8 = 0x02;
 const IN_SIGHASH_TYPE: u8 = 0x03;
+#[cfg(feature = "swap")]
+const IN_WITNESS_SCRIPT: u8 = 0x05;
 const IN_BIP32_DERIVATION: u8 = 0x06;
 const IN_FINAL_SCRIPTSIG: u8 = 0x07;
 const IN_FINAL_SCRIPTWITNESS: u8 = 0x08;
@@ -55,8 +65,6 @@ const OUT_BIP32_DERIVATION: u8 = 0x02;
 /// What every PSBT starts with.
 const MAGIC: &[u8] = b"psbt\xff";
 
-/// Signing all of the transaction, its inputs and outputs: the one way this signer signs.
-const SIGHASH_ALL: u32 = 1;
 
 /// An index at or above this is hardened.
 const HARDENED: u32 = 1 << 31;
@@ -64,81 +72,11 @@ const HARDENED: u32 = 1 << 31;
 /// The most there are of bitcoin, in satoshis: no amount is more.
 const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
 
-/// Which Bitcoin: its own network, or its test networks, testnet, signet and regtest, whose
-/// coins are worth nothing. Their keys are others, so the one never spends the other's coins.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Network {
-    #[default]
-    Main,
-    Test,
-}
-
-impl Network {
-    pub const ALL: [Network; 2] = [Network::Main, Network::Test];
-
-    /// Its coin type in the keys' path, as SLIP-44 has it.
-    pub fn coin(self) -> u32 {
-        match self {
-            Network::Main => 0,
-            Network::Test => BITCOIN_TESTNET_COIN_TYPE,
-        }
-    }
-
-    fn from_coin(coin: u32) -> Option<Network> {
-        Network::ALL.into_iter().find(|network| network.coin() == coin)
-    }
-
-    /// What the pairing and the review call it, large.
-    pub fn name(self) -> &'static str {
-        match self {
-            Network::Main => "Bitcoin",
-            Network::Test => "Bitcoin testnet",
-        }
-    }
-
-    /// What the switch between them calls it.
-    pub fn short(self) -> &'static str {
-        match self {
-            Network::Main => "Mainnet",
-            Network::Test => "Testnet",
-        }
-    }
-
-    pub fn symbol(self) -> &'static str {
-        match self {
-            Network::Main => "BTC",
-            Network::Test => "tBTC",
-        }
-    }
-
-    /// The account's path: m/84'/0'/0', or m/84'/1'/0'.
-    pub fn path(self) -> String {
-        format!("m/84'/{}'/0'", self.coin())
-    }
-
-    /// Its segwit addresses' human-readable part: bc1…, or tb1… on testnet and signet.
-    fn hrp(self) -> &'static str {
-        match self {
-            Network::Main => "bc",
-            Network::Test => "tb",
-        }
-    }
-
-    /// Its legacy addresses' version bytes: paying a key's hash, 1…, or m… and n…, and a script's,
-    /// 3…, or 2….
-    fn versions(self) -> (u8, u8) {
-        match self {
-            Network::Main => (0x00, 0x05),
-            Network::Test => (0x6f, 0xc4),
-        }
-    }
-
-    /// The registry's number for it in a coin-info: 0, or 1 for testnet.
-    fn registry(self) -> u64 {
-        match self {
-            Network::Main => 0,
-            Network::Test => 1,
-        }
+/// The registry's number for a network in a coin-info: 0, or 1 for testnet.
+fn registry(network: Network) -> u64 {
+    match network {
+        Network::Main => 0,
+        Network::Test => 1,
     }
 }
 
@@ -149,7 +87,7 @@ pub fn account(seed: &Seed, network: Network) -> Result<Vec<u8>, String> {
     let key = HdKey {
         key: account.public,
         chain_code: Some(account.chain_code),
-        coin: Some((Some(0), Some(network.registry()))),
+        coin: Some((Some(0), Some(registry(network)))),
         origin: Some(KeyPath {
             steps: vec![Step::Index(84, true), Step::Index(network.coin(), true), Step::Index(0, true)],
             fingerprint: Some(account.master_fingerprint),
@@ -184,157 +122,6 @@ pub fn pairing(seed: &Seed, network: Network) -> Result<String, String> {
 /// 0, to check the pairing by.
 pub fn receiving(seed: &Seed, network: Network, index: u32) -> String {
     bech32::encode_segwit(network.hrp(), &hash160(&public(&seed.bitcoin_key(network.coin(), 0, index).public())))
-}
-
-/// A Bitcoin transaction, as the network encodes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Transaction {
-    pub version: u32,
-    pub inputs: Vec<TxIn>,
-    pub outputs: Vec<TxOut>,
-    pub lock_time: u32,
-}
-
-/// An input: the output it spends, by its transaction's id, as hashed, and its index there.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TxIn {
-    pub txid: [u8; 32],
-    pub vout: u32,
-    pub script_sig: Vec<u8>,
-    pub sequence: u32,
-}
-
-/// An output: an amount, in satoshis, and the script that spends it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TxOut {
-    pub value: u64,
-    pub script: Vec<u8>,
-}
-
-impl Transaction {
-    /// Reads one from all of these bytes, with its witnesses, as BIP144 writes them, or without;
-    /// says which.
-    pub fn read(bytes: &[u8]) -> Result<(Transaction, bool), String> {
-        let mut r = Reader::new(bytes);
-        let version = r.u32()?;
-        // The marker and flag, 0 and 1, where a transaction with witnesses counts its inputs.
-        let witnessed = matches!(bytes.get(4..6), Some([0, 1]));
-
-        if witnessed {
-            r.take(2)?;
-        }
-
-        let mut inputs = Vec::new();
-
-        for _ in 0..r.compact()? {
-            inputs.push(TxIn {
-                txid: r.take(32)?.try_into().expect("32 bytes"),
-                vout: r.u32()?,
-                script_sig: r.sized()?.to_vec(),
-                sequence: r.u32()?,
-            });
-        }
-
-        let mut outputs = Vec::new();
-
-        for _ in 0..r.compact()? {
-            outputs.push(TxOut::read(&mut r)?);
-        }
-
-        if witnessed {
-            for _ in 0..inputs.len() {
-                for _ in 0..r.compact()? {
-                    r.sized()?;
-                }
-            }
-        }
-
-        let lock_time = r.u32()?;
-
-        match r.done() {
-            true => Ok((Transaction { version, inputs, outputs, lock_time }, witnessed)),
-            false => Err("a transaction with more after it than it holds".to_string()),
-        }
-    }
-
-    /// Its encoding without witnesses: what its id hashes, and a PSBT holds unsigned.
-    pub fn base(&self) -> Vec<u8> {
-        let mut out = self.version.to_le_bytes().to_vec();
-        compact(&mut out, self.inputs.len());
-
-        for input in &self.inputs {
-            out.extend(input.txid);
-            out.extend(input.vout.to_le_bytes());
-            compact(&mut out, input.script_sig.len());
-            out.extend(&input.script_sig);
-            out.extend(input.sequence.to_le_bytes());
-        }
-
-        compact(&mut out, self.outputs.len());
-
-        for output in &self.outputs {
-            output.write(&mut out);
-        }
-
-        out.extend(self.lock_time.to_le_bytes());
-
-        out
-    }
-
-    /// Its id, as an input names it: the double SHA-256 of it without witnesses, as hashed, the
-    /// reverse of how explorers write it.
-    pub fn txid(&self) -> [u8; 32] {
-        sha256d(&self.base())
-    }
-
-    /// What BIP143 signs for an input that spends a native segwit output of a key's hash: all of
-    /// the transaction, as SIGHASH_ALL has it, the input's place in it, and the amount it spends.
-    pub fn preimage(&self, index: usize, key_hash: &[u8; 20], value: u64) -> Vec<u8> {
-        let (mut prevouts, mut sequences, mut outputs) = (Vec::new(), Vec::new(), Vec::new());
-
-        for input in &self.inputs {
-            prevouts.extend(input.txid);
-            prevouts.extend(input.vout.to_le_bytes());
-            sequences.extend(input.sequence.to_le_bytes());
-        }
-
-        for output in &self.outputs {
-            output.write(&mut outputs);
-        }
-
-        let input = &self.inputs[index];
-        let mut out = self.version.to_le_bytes().to_vec();
-        out.extend(sha256d(&prevouts));
-        out.extend(sha256d(&sequences));
-        out.extend(input.txid);
-        out.extend(input.vout.to_le_bytes());
-        // The script code: the key hash's pay-to-key-hash script, as BIP143 has it for P2WPKH.
-        out.extend([0x19, 0x76, 0xa9, 0x14]);
-        out.extend(key_hash);
-        out.extend([0x88, 0xac]);
-        out.extend(value.to_le_bytes());
-        out.extend(input.sequence.to_le_bytes());
-        out.extend(sha256d(&outputs));
-        out.extend(self.lock_time.to_le_bytes());
-        out.extend(SIGHASH_ALL.to_le_bytes());
-
-        out
-    }
-}
-
-impl TxOut {
-    fn read(r: &mut Reader) -> Result<TxOut, String> {
-        Ok(TxOut {
-            value: r.u64()?,
-            script: r.sized()?.to_vec(),
-        })
-    }
-
-    fn write(&self, out: &mut Vec<u8>) {
-        out.extend(self.value.to_le_bytes());
-        compact(out, self.script.len());
-        out.extend(&self.script);
-    }
 }
 
 /// One of a PSBT's pairs, kept as it came.
@@ -489,7 +276,7 @@ impl Psbt {
 
             let (key, path) = match (finished, ours.as_slice()) {
                 (true, _) | (_, []) => {
-                    inputs.push(Spent { value: output.value, yours: None });
+                    inputs.push(Spent { value: output.value, yours: None, swap: None });
 
                     continue;
                 }
@@ -503,7 +290,9 @@ impl Psbt {
                 return Err(format!("input {n} asks for a key at {shown} that is not this wallet's: a PSBT for another seed"));
             }
 
-            if output.script != p2wpkh(&hash160(&key)) {
+            let swap = htlc_input(pairs, &output.script, &key, n)?;
+
+            if swap.is_none() && output.script != p2wpkh(&hash160(&key)) {
                 return Err(match kind(&output.script) {
                     Some("native segwit") => format!("input {n} spends coins of another key than the one at {shown}"),
                     Some(kind) => format!("input {n} spends a {kind} output, which this signer does not sign: it signs native segwit, bc1q, alone"),
@@ -516,8 +305,9 @@ impl Psbt {
             }
 
             networks.push(network);
-            signing.push(Signing { index, network, chain, number, key, value: output.value });
-            inputs.push(Spent { value: output.value, yours: Some(shown) });
+            let (code, swapped) = swap.map_or((None, None), |(code, swapped)| (Some(code), Some(swapped)));
+            signing.push(Signing { index, network, chain, number, key, value: output.value, code });
+            inputs.push(Spent { value: output.value, yours: Some(shown), swap: swapped });
         }
 
         let Some(network) = networks.first().copied() else {
@@ -587,7 +377,10 @@ impl Psbt {
             let PrivateKey::Bitcoin(secret) = keypair.private() else {
                 unreachable!("a bitcoin key");
             };
-            let preimage = self.tx.preimage(input.index, &hash160(&input.key), input.value);
+            let preimage = match &input.code {
+                Some(code) => self.tx.script_preimage(input.index, code, input.value),
+                None => self.tx.preimage(input.index, &hash160(&input.key), input.value),
+            };
             let mut signature = der(&chainv4::crypto::bitcoin::sign(secret, &preimage));
             signature.push(SIGHASH_ALL as u8);
 
@@ -609,6 +402,8 @@ struct Signing {
     number: u32,
     key: [u8; 33],
     value: u64,
+    /// The script a swap's HTLC is spent with, its BIP143 script code; None for a key's coins.
+    code: Option<Vec<u8>>,
 }
 
 /// A PSBT laid out to check before signing.
@@ -631,6 +426,17 @@ pub struct Review {
 pub struct Spent {
     pub value: u64,
     pub yours: Option<String>,
+    /// When it spends a swap's HTLC, which way this wallet's key takes it.
+    pub swap: Option<Swapped>,
+}
+
+/// Which way a key takes a swap's HTLC: with the secret, or back after its lock time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "swap"), allow(dead_code))]
+pub enum Swapped {
+    Claim,
+    /// Mined only once Bitcoin's median time is past the lock time, Unix seconds.
+    Refund { locktime: u32 },
 }
 
 /// What an output pays, in satoshis, and to whom: its address, or what its script is when it has
@@ -684,22 +490,6 @@ impl Request {
     }
 }
 
-/// A script as its address, on a network: a key's or a script's hash in base58, 1… or 3…, a
-/// witness program in bech32, bc1q…, or bech32m, bc1p…. Data, and scripts with no address, are
-/// told as what they are.
-pub fn address(script: &[u8], network: Network) -> String {
-    let (key_hash, script_hash) = network.versions();
-
-    match script {
-        [0x76, 0xa9, 0x14, hash @ .., 0x88, 0xac] if hash.len() == 20 => base58check(key_hash, hash),
-        [0xa9, 0x14, hash @ .., 0x87] if hash.len() == 20 => base58check(script_hash, hash),
-        [0x00, size @ (0x14 | 0x20), program @ ..] if program.len() == usize::from(*size) => bech32::encode_segwit(network.hrp(), program),
-        [version @ 0x51..=0x60, size @ 2..=40, program @ ..] if program.len() == usize::from(*size) => bech32::encode_witness(network.hrp(), version - 0x50, program),
-        [0x6a, ..] => format!("data, burned: {}", to_hex(&script[1..])),
-        _ => format!("a script with no address: {}", to_hex(script)),
-    }
-}
-
 /// What kind of output a script makes, as the refusal to sign one says.
 fn kind(script: &[u8]) -> Option<&'static str> {
     match script {
@@ -712,14 +502,85 @@ fn kind(script: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// A swap's HTLC an input spends, when its PSBT gives the witness script: the script, and which
+/// way this key takes it. Refused: a script that is no HTLC of a swap's, one the coins are not
+/// locked to, and a key that is neither of its keys.
+#[cfg(feature = "swap")]
+fn htlc_input(pairs: &[Pair], spent: &[u8], key: &[u8; 33], n: usize) -> Result<Option<(Vec<u8>, Swapped)>, String> {
+    let Some(script) = find(pairs, &[IN_WITNESS_SCRIPT]) else {
+        return Ok(None);
+    };
+    let htlc = Htlc::parse(script).ok_or_else(|| format!("input {n} spends a script this signer does not sign: it signs native segwit keys and swaps' HTLCs alone"))?;
+
+    if spent != htlc.output() {
+        return Err(format!("input {n}'s script is not the one its coins are locked to"));
+    }
+
+    let swapped = match *key {
+        key if key == htlc.claim => Swapped::Claim,
+        key if key == htlc.refund => Swapped::Refund { locktime: htlc.locktime },
+        _ => return Err(format!("input {n}'s key is neither of its swap's keys")),
+    };
+
+    Ok(Some((script.to_vec(), swapped)))
+}
+
+#[cfg(not(feature = "swap"))]
+fn htlc_input(_: &[Pair], _: &[u8], _: &[u8; 33], _: usize) -> Result<Option<(Vec<u8>, Swapped)>, String> {
+    Ok(None)
+}
+
+#[cfg(feature = "swap")]
+impl Psbt {
+    /// A PSBT asking the offline signer to sign a swap's HTLC spend: the spend unsigned, the
+    /// coins it spends, the HTLC's script, and where the signer's words derive the key, at
+    /// fingerprint and path. Its outputs say nothing, so the review shows where the coins go.
+    pub fn for_htlc(tx: &Transaction, value: u64, htlc: &Htlc, key: [u8; 33], fingerprint: [u8; 4], path: &[u32]) -> Psbt {
+        let mut coins = Vec::new();
+        TxOut { value, script: htlc.output() }.write(&mut coins);
+        let derivation = fingerprint.iter().copied().chain(path.iter().flat_map(|step| step.to_le_bytes())).collect();
+
+        Psbt {
+            global: vec![Pair { key: vec![GLOBAL_UNSIGNED_TX], value: tx.base() }],
+            inputs: vec![vec![
+                Pair { key: vec![IN_WITNESS_UTXO], value: coins },
+                Pair { key: vec![IN_WITNESS_SCRIPT], value: htlc.script() },
+                Pair { key: [&[IN_BIP32_DERIVATION][..], &key].concat(), value: derivation },
+            ]],
+            outputs: vec![Vec::new(); tx.outputs.len()],
+            tx: Transaction { inputs: tx.inputs.iter().map(|input| TxIn { witness: Vec::new(), ..input.clone() }).collect(), ..tx.clone() },
+        }
+    }
+
+    /// The spend, finished with the signer's signature, worth value: the transaction to
+    /// broadcast. Refused: no signature by the key the spend needs, or one that does not hold.
+    pub fn finish_htlc(&self, htlc: &Htlc, value: u64, spend: Spend) -> Result<Transaction, String> {
+        let key = match spend {
+            Spend::Claim { .. } => htlc.claim,
+            Spend::Refund => htlc.refund,
+        };
+        let signature = find(&self.inputs[0], &[&[IN_PARTIAL_SIG][..], &key].concat()).ok_or("the signed PSBT holds no signature by the swap's key")?;
+        let preimage = self.tx.script_preimage(0, &htlc.script(), value);
+        let holds = signature
+            .split_last()
+            .filter(|(kind, _)| u32::from(**kind) == SIGHASH_ALL)
+            .and_then(|(_, der)| chainv4::crypto::bitcoin::tx::from_der(der))
+            .is_some_and(|signature| chainv4::crypto::bitcoin::verify(&key, &preimage, &signature));
+
+        if !holds {
+            return Err("the signer's signature does not hold for this spend".to_string());
+        }
+
+        let mut tx = self.tx.clone();
+        tx.inputs[0].witness = htlc.witness(signature, spend);
+
+        Ok(tx)
+    }
+}
+
 /// Amounts added up, None past all the bitcoin there are.
 fn total(values: impl Iterator<Item = u64>) -> Option<u64> {
     values.into_iter().try_fold(0u64, |sum, value| sum.checked_add(value).filter(|sum| *sum <= MAX_MONEY))
-}
-
-/// The native segwit script paying a key's hash: 0, and the 20 bytes.
-fn p2wpkh(hash: &[u8; 20]) -> Vec<u8> {
-    [&[0x00, 0x14][..], hash].concat()
 }
 
 /// A bitcoin key's 33 bytes.
@@ -797,131 +658,6 @@ fn map(r: &mut Reader) -> Result<Vec<Pair>, String> {
         }
 
         pairs.push(Pair { key: key.to_vec(), value: r.sized()?.to_vec() });
-    }
-}
-
-/// A signature, r then s, as DER writes it, as Bitcoin's scripts take it: each a whole number in
-/// its fewest bytes, a 0 before one whose top bit is set.
-pub fn der(signature: &[u8; 64]) -> Vec<u8> {
-    let integer = |bytes: &[u8]| {
-        let trimmed = &bytes[bytes.iter().position(|byte| *byte != 0).unwrap_or(bytes.len() - 1)..];
-
-        match trimmed[0] & 0x80 {
-            0 => trimmed.to_vec(),
-            _ => [&[0][..], trimmed].concat(),
-        }
-    };
-    let (r, s) = (integer(&signature[..32]), integer(&signature[32..]));
-    let mut out = vec![0x30, (4 + r.len() + s.len()) as u8, 0x02, r.len() as u8];
-    out.extend(r);
-    out.extend([0x02, s.len() as u8]);
-    out.extend(s);
-
-    out
-}
-
-/// Bytes behind a version byte, with a checksum, in base58: Bitcoin's legacy addresses.
-fn base58check(version: u8, payload: &[u8]) -> String {
-    const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    let mut bytes = vec![version];
-    bytes.extend(payload);
-    let check = sha256d(&bytes);
-    bytes.extend(&check[..4]);
-
-    // The digits, least first: each byte multiplies them by 256 and adds itself.
-    let mut digits: Vec<u8> = Vec::new();
-
-    for byte in &bytes {
-        let mut carry = u32::from(*byte);
-
-        for digit in &mut digits {
-            carry += u32::from(*digit) << 8;
-            *digit = (carry % 58) as u8;
-            carry /= 58;
-        }
-
-        while carry > 0 {
-            digits.push((carry % 58) as u8);
-            carry /= 58;
-        }
-    }
-
-    // Leading zero bytes are 1s, as they are no digits.
-    let zeros = bytes.iter().take_while(|byte| **byte == 0).count();
-
-    "1".repeat(zeros) + &digits.iter().rev().map(|digit| char::from(ALPHABET[usize::from(*digit)])).collect::<String>()
-}
-
-/// Bitcoin's compact size, in its fewest bytes.
-fn compact(out: &mut Vec<u8>, size: usize) {
-    match size {
-        0..0xfd => out.push(size as u8),
-        0xfd..=0xffff => {
-            out.push(0xfd);
-            out.extend((size as u16).to_le_bytes());
-        }
-        0x1_0000..=0xffff_ffff => {
-            out.push(0xfe);
-            out.extend((size as u32).to_le_bytes());
-        }
-        _ => {
-            out.push(0xff);
-            out.extend((size as u64).to_le_bytes());
-        }
-    }
-}
-
-/// Reading bytes in order, refusing to read past their end.
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Reader<'a> {
-        Reader { bytes, at: 0 }
-    }
-
-    fn take(&mut self, count: usize) -> Result<&'a [u8], String> {
-        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len()).ok_or("cut short: it ends before what it holds")?;
-        let taken = &self.bytes[self.at..end];
-        self.at = end;
-
-        Ok(taken)
-    }
-
-    fn u32(&mut self) -> Result<u32, String> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes")))
-    }
-
-    fn u64(&mut self) -> Result<u64, String> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
-    }
-
-    /// A compact size, as it must be written: in its fewest bytes, as Bitcoin reads it.
-    fn compact(&mut self) -> Result<u64, String> {
-        let (size, least) = match self.take(1)?[0] {
-            0xfd => (u64::from(u16::from_le_bytes(self.take(2)?.try_into().expect("2 bytes"))), 0xfd),
-            0xfe => (u64::from(u32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes"))), 0x1_0000),
-            0xff => (u64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")), 0x1_0000_0000),
-            small => return Ok(u64::from(small)),
-        };
-
-        match size >= least {
-            true => Ok(size),
-            false => Err("a size not written in its fewest bytes".to_string()),
-        }
-    }
-
-    /// A compact size, then that many bytes.
-    fn sized(&mut self) -> Result<&'a [u8], String> {
-        let size = self.compact()?;
-
-        self.take(usize::try_from(size).map_err(|_| "a size past what this device holds")?)
-    }
-
-    fn done(&self) -> bool {
-        self.at == self.bytes.len()
     }
 }
 

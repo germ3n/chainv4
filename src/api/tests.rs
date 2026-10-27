@@ -2028,3 +2028,18 @@ fn a_faucet_drips_to_each_address_and_ip_once_a_period_for_a_moments_work() {
     assert_eq!(get(plain.address, "/faucet").0, 404);
     assert_eq!(ok(plain.address, "/status")["faucet"], Value::Null);
 }
+
+#[cfg(feature = "swap")]
+#[test]
+fn status_names_the_swap_contract_when_the_node_was_given_one() {
+    let contract = Address::Contract([0x5a; 32]);
+
+    for (given, expected) in [(None, Value::Null), (Some(contract), json!({ "contract": contract.to_string() }))] {
+        let db = Arc::new(MemoryDb::default());
+        Chain::open(db.clone(), &free()).unwrap();
+        let options = ApiOptions { swap_contract: given, ..ApiOptions::default() };
+        let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+
+        assert_eq!(ok(address, "/status")["swap"], expected);
+    }
+}

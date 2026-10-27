@@ -868,6 +868,78 @@ mod send {
         assert!(again.to_string().contains("again in"), "{again}");
         running.stop();
     }
+
+    #[cfg(all(feature = "swap", feature = "sha256"))]
+    #[test]
+    fn a_swap_locks_and_claims_on_chainv4_and_signs_bitcoins_side() {
+        use crate::cli::swap::{BitcoinSpend, ChainAction, SwapAction, SwapArgs, bitcoin, swap};
+        use crate::crypto::bitcoin::tx::Transaction;
+        use crate::crypto::keypair::{Keypair, PrivateKey, PublicKey};
+        use crate::structs::hex::{from_hex, to_hex};
+        use crate::swap::htlc::{Spend, revealed};
+        use crate::swap::{Counterparty, Pays, Terms};
+
+        let dir = TempDir::new("swap");
+        let source = dir.0.join("swap.lua");
+        fs::write(&source, include_str!("../../contracts/lua/swap.lua")).unwrap();
+        let deployer = DevAuthority::dev_keypair().public().address();
+        let contract = deployed_at(&deployer, 0, crate::structs::hash::HashType::default_chain());
+        let options = crate::api::ApiOptions { swap_contract: Some(contract), ..Default::default() };
+        let running = Running::launch_serving(true, false, FinalityConfig::dev(DevAuthority::dev_keypair().public()), None, |node| node, options);
+        send(running.args(TxArgs::Deploy { lua: Some(source), wasm: None, evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
+
+        // Alice pays bitcoin and starts, with the secret; Bob, the dev key, pays 5,000 on chainv4.
+        let (secret, hash) = crate::swap::secret().unwrap();
+        let [alice_bitcoin, bob_bitcoin] = [0x11u8, 0x22].map(|byte| Keypair::from_private(PrivateKey::Bitcoin([byte; 32])));
+        let bitcoin_key = |key: &Keypair| match key.public() {
+            PublicKey::Bitcoin(bytes) => bytes,
+            _ => unreachable!(),
+        };
+        let alice = crate::structs::address::Address::Ed25519([0xa; 32]);
+        let now = now_ms();
+        let terms = Terms {
+            chain: Counterparty::BitcoinTestnet,
+            hash,
+            sats: 100_000,
+            token: None,
+            amount: u256::new(5_000),
+            starter: Pays::Bitcoin,
+            bitcoin_payer: Some(bitcoin_key(&alice_bitcoin)),
+            bitcoin_receiver: Some(bitcoin_key(&bob_bitcoin)),
+            chain_payer: Some(deployer),
+            chain_receiver: Some(alice),
+            first_deadline: now + crate::swap::FIRST_DEADLINE_MS,
+            second_deadline: now + crate::swap::SECOND_DEADLINE_MS,
+        };
+        let node = format!("http://{}", running.api);
+        // The contract comes from the node's GET /status.
+        let action = || ChainAction { terms: terms.to_text(), contract: None, node: node.clone(), tls: Default::default(), key: None };
+
+        swap(SwapArgs { action: SwapAction::Lock(action()) }).unwrap();
+        // Anyone may send the claim: the coins go to Alice whoever sends it.
+        swap(SwapArgs { action: SwapAction::Claim { action: action(), secret: to_hex(&secret) } }).unwrap();
+        let account: serde_json::Value = serde_json::from_str(&ureq::get(format!("{node}/accounts/{alice}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
+        assert_eq!(account["balance"], "5000");
+        let wrong = swap(SwapArgs { action: SwapAction::Claim { action: action(), secret: to_hex(&[0; 32]) } });
+        assert!(wrong.unwrap_err().to_string().contains("not the swap's hash"));
+
+        // Bob claims Alice's bitcoin with the secret chainv4 showed, offline, with his key file.
+        let key = dir.0.join("bob.key");
+        fs::write(&key, bob_bitcoin.to_key_file()).unwrap();
+        let to = crate::structs::bech32::encode_segwit("tb", &crate::crypto::bitcoin::hash160(&bitcoin_key(&bob_bitcoin)));
+        let spend = BitcoinSpend { terms: terms.to_text(), funding: format!("{}:1", "ab".repeat(32)), sats: 100_000, key, to, fee_rate: 2 };
+        let signed = bitcoin(&spend, Spend::Claim { secret }).unwrap();
+        let (tx, witnessed) = Transaction::read(&from_hex(&format!("0x{signed}")).unwrap()).unwrap();
+
+        assert!(witnessed);
+        assert_eq!((tx.inputs[0].txid, tx.inputs[0].vout), ([0xab; 32], 1));
+        assert_eq!(tx.inputs[0].witness.last(), Some(&terms.htlc().unwrap().script()));
+        assert_eq!(revealed(&tx, &hash), Some(secret), "what Alice would read, had Bob claimed first");
+
+        // His key cannot take the refund, nor hers the claim.
+        assert!(bitcoin(&spend, Spend::Refund).unwrap_err().to_string().contains("refund key"));
+        running.stop();
+    }
 }
 
 #[test]
