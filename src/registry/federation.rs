@@ -11,6 +11,13 @@ use {
 };
 
 #[document(
+    summary = "Where the federation in force is kept, in the Validators column, with its version: genesis's, written as the chain starts, or the one governance decided last, so a light client proves it.",
+    category = "Bridges",
+    see_also = "DecidedFederation, Changes::federation",
+)]
+pub const FEDERATION_KEY: &[u8] = b"change:federation";
+
+#[document(
     summary = "The most signers a federation may have: what one Bitcoin multisig script holds.",
     category = "Bridges",
     see_also = "Federation",

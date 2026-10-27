@@ -21,9 +21,11 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   VPS's chain and start a new one from a new genesis with everything enabled, so all of it can be
   tried end to end:
   - every engine, finality with governance, names, the collection registry, fees;
-  - the DEXes deployed, native and EVM, with pools opened (`dex.dev` registered);
-  - the swap contract and Swap.sol, `swap.dev` registered;
-  - the NFT factory (`nfts.dev`) with sample collections of both kinds, minted;
+  - the DEXes deployed, native and EVM, with pools opened;
+  - the swap contract and Swap.sol;
+  - the NFT factory with sample collections of both kinds, minted;
+  - the bridges' gateways, the relay started on Bitcoin's test network, and a federation;
+  - each of these named in the genesis's directory (or by governance after);
   - sample tokens, the faucet, and the example contracts deployed and named;
   - the laptop rejoining with `--cpu`, the apps pointed at it, and new wallet and explorer
     builds.
@@ -805,13 +807,27 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   paying withdrawals through releases it checks and the federation signs input by input (BIP143);
   sweeps to a new federation; `chainv4 bridge btc` from an Esplora API. See
   [Bridges](bridges.md#bitcoin).
+- [x] **The chain's directory.** The contracts the apps and tools use, the bridges' gateways,
+  the swap contract, the DEX and its router and the NFT factory, named by genesis or
+  `Change::Directory` rather than by names anyone could register first; genesis's directory and
+  federation written into the state, so the wallet proves both. See
+  [Directory](governance.md#directory).
+- [x] **The Bridge pages.** The wallet's: sending to and from EVM chains (its Ethereum key
+  signing there, through the EVM link it shares with Swaps), the account's transfers out with the
+  board's count and delivering one itself, the deposit address computed from the proven
+  federation, deposits minted from the light client's proofs or Esplora's, withdrawals. The
+  explorer's: the federation and directory, transfers with their signatures, wrapped assets, and
+  the Bitcoin gateway's relay, holdings, deposits, withdrawals and releases. See
+  [Wallet](wallet.md#bridge) and [Explorer](explorer.md#pages).
 - [ ] **Bitcoin's bridge: next.** Replacing a release stuck at a low fee (its inputs freed, a new
   one proposed at a higher one); taproot deposit addresses, smaller and cheaper to spend; the
   relay pruning headers far below its tip; `chainv4 bridge btc watch`, syncing, signing and
   finishing on a timer.
-- [ ] **Bridges: next.** The gateway's peers set by governance rather than its owner; carrying a
-  federation change to each Gateway.sol, its signers signing `setSigners` through the board; a
-  per-transfer and per-day cap; the wallet's and the explorer's Bridge pages (batch 9c).
+- [ ] **Bridges: next.** The gateway's peers taken from the directory rather than set by its
+  owner (signers already check them against it); carrying a federation change to each
+  Gateway.sol, its signers signing `setSigners` through the board; a per-transfer and per-day
+  cap; the wallet listing transfers from an EVM chain by Gateway.sol's logs, and asking a token
+  there its decimals.
 - [ ] **The federation as the validators.** Point the bridges' signer set at finality's validators,
   weighted by stake and slashable, once they sign with keys Bitcoin and the EVM check, and a
   threshold scheme lets a changing set hold one Bitcoin address.

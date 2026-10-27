@@ -17,6 +17,7 @@ use {
 
 pub mod account;
 pub mod block;
+pub mod bridge;
 pub mod chart;
 pub mod collections;
 pub mod dex;
@@ -58,6 +59,12 @@ pub enum View {
     Dex,
     /// Atomic swaps through the swap contract: locks, claims and refunds, and their finality.
     Swaps,
+    /// The bridges: the federation, transfers with EVM chains, wrapped assets, and Bitcoin's.
+    Bridges,
+    /// One transfer through the gateway, by its digest.
+    Transfer(String),
+    /// One release of the Bitcoin gateway, by its number.
+    Release(u64),
     Finality,
     Send,
     /// The node's faucet, on a dev or test chain.
@@ -71,7 +78,7 @@ impl View {
     /// The sidebar's pages, in groups under a heading.
     pub const GROUPS: [(&'static str, &'static [(View, &'static str)]); 4] = [
         ("Chain", &[(View::Overview, "Overview"), (View::Map, "Block map"), (View::Mempool, "Mempool"), (View::Tokens, "Tokens"), (View::Collections, "NFTs")]),
-        ("Markets", &[(View::Dex, "DEX"), (View::Swaps, "Swaps")]),
+        ("Markets", &[(View::Dex, "DEX"), (View::Swaps, "Swaps"), (View::Bridges, "Bridges")]),
         ("Network", &[(View::Network, "Network"), (View::Finality, "Finality")]),
         ("Tools", &[(View::Send, "Send"), (View::Faucet, "Faucet"), (View::Settings, "Settings")]),
     ];
@@ -86,10 +93,11 @@ impl View {
     ];
 
     /// The pages More lists, with what each is for.
-    pub const MORE: [(View, &'static str, &'static str); 8] = [
+    pub const MORE: [(View, &'static str, &'static str); 9] = [
         (View::Collections, "NFTs", "Collections, their tokens and holders"),
         (View::Dex, "DEX", "Pools, prices, trades and volume"),
         (View::Swaps, "Swaps", "Atomic swaps and their finality"),
+        (View::Bridges, "Bridges", "What crossed to other chains, and wrapped assets"),
         (View::Network, "Network", "The node, its peers, and what it heard"),
         (View::Finality, "Finality", "Checkpoints, voters and caught cheats"),
         (View::Send, "Send", "Sign and send a transaction"),
@@ -104,7 +112,7 @@ impl View {
             View::Map => View::Map,
             View::Mempool => View::Mempool,
             View::Tokens => View::Tokens,
-            View::Collections | View::Collection(_) | View::Dex | View::Swaps | View::Network | View::Finality | View::Send | View::Faucet | View::Settings | View::More => View::More,
+            View::Collections | View::Collection(_) | View::Dex | View::Swaps | View::Bridges | View::Transfer(_) | View::Release(_) | View::Network | View::Finality | View::Send | View::Faucet | View::Settings | View::More => View::More,
         }
     }
 }

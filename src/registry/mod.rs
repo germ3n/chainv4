@@ -13,6 +13,7 @@ use {
 use crate::vm::VmError;
 
 pub mod accounts;
+pub mod directory;
 pub mod changes;
 pub mod collections;
 pub mod federation;

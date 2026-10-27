@@ -3,9 +3,13 @@
 
 mod accounts;
 mod activity;
+#[cfg(feature = "bridge")]
+pub mod bridge;
 mod contracts;
 mod faucet;
 pub mod dapp;
+#[cfg(feature = "swap")]
+pub mod evm;
 mod names;
 #[cfg(feature = "nft")]
 mod nfts;
@@ -18,12 +22,8 @@ mod settings;
 mod sign;
 #[cfg(feature = "swap")]
 mod swaps;
-#[cfg(feature = "swap")]
-pub use swaps::swap_name;
 #[cfg(feature = "dex")]
 mod trade;
-#[cfg(feature = "dex")]
-pub use trade::dex_name;
 
 use {
     crate::app::{Coin, Role, Settings},
@@ -56,6 +56,9 @@ pub enum Page {
     /// What the accounts hold of the chain's NFT and multi-token collections.
     #[cfg(feature = "nft")]
     Nfts,
+    /// The bridges: to and from EVM chains, and bitcoin in and out as wBTC.
+    #[cfg(feature = "bridge")]
+    Bridge,
     Accounts,
     Settings,
     /// An offline signer's: a request to sign, read off the sender's screen.
@@ -81,6 +84,8 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             (Page::Swaps, "Swaps"),
             #[cfg(feature = "dex")]
             (Page::Trade, "Trade"),
+            #[cfg(feature = "bridge")]
+            (Page::Bridge, "Bridge"),
             (Page::Accounts, "Accounts"),
             (Page::Settings, "Settings"),
         ],
@@ -203,6 +208,8 @@ pub struct States {
     pub trade: trade::TradeState,
     #[cfg(feature = "nft")]
     pub nfts: nfts::NftsState,
+    #[cfg(feature = "bridge")]
+    bridge: bridge::BridgeState,
 }
 
 impl States {
@@ -220,6 +227,11 @@ impl States {
 
         #[cfg(feature = "nft")]
         if self.nfts.answered(ask, result) {
+            return;
+        }
+
+        #[cfg(feature = "bridge")]
+        if self.bridge.answered(ask, result) {
             return;
         }
 
@@ -273,6 +285,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Trade => trade::show(ui, ctx, &mut states.trade, &mut states.send),
         #[cfg(feature = "nft")]
         Page::Nfts => nfts::show(ui, ctx, &mut states.nfts, &mut states.send),
+        #[cfg(feature = "bridge")]
+        Page::Bridge => bridge::show(ui, ctx, &mut states.bridge, &mut states.send),
         Page::Accounts => accounts::show(ui, ctx, &mut states.accounts),
         Page::Settings => settings::show(ui, ctx, &mut states.settings),
         Page::Sign => sign::show(ui, ctx, &mut states.sign),

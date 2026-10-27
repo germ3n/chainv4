@@ -43,7 +43,7 @@ ur = "0.5.2"
 minicbor = { version = "2", default-features = false, features = ["alloc"] }
 
 [features]
-default = ["swap", "dex", "nft", "bitcoin-light"]
+default = ["swap", "dex", "nft", "bridge", "bitcoin-light"]
 # Atomic swaps between this chain, Bitcoin and EVM chains: the Swaps page, and the offline signer
 # signing a swap's Bitcoin side.
 swap = ["chainv4/swap"]
@@ -52,6 +52,9 @@ dex = ["chainv4/dex"]
 # The NFTs page: what the accounts hold of the chain's collections, proven, with their pictures
 # once Settings lets the wallet fetch them, and sending them.
 nft = ["chainv4/nft"]
+# The Bridge page: the coin, tokens and NFTs to and from EVM chains through the gateways, and BTC
+# in and out as wBTC, deposits shown by the light client's proofs.
+bridge = ["swap", "chainv4/bridge"]
 # A Bitcoin light client on the desktop and Android: BIP157/158 compact block filters from Bitcoin's
 # own peers, through Kyoto (the bip157 crate), for swaps' HTLCs and the accounts' Bitcoin
 # addresses. The browser, which opens no raw connections, goes without.

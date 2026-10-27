@@ -598,6 +598,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "coin": crate::cli::genesis::coin_json(&api.coin),
         "token_functions": &*api.token_functions,
         "federation": federation_json(&api, &State::new(db.clone()))?,
+        "directory": crate::registry::changes::Changes::new(&State::new(db.clone())).directory()?.as_ref().map(crate::cli::genesis::directory_json),
         "collections": api.rules.standards_in(&State::new(db.clone()))?.collections.as_ref().map(crate::cli::genesis::collections_json),
         "finality": finality,
         "fees": fees,

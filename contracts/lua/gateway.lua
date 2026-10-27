@@ -19,7 +19,7 @@
 -- bytes. kind is 0 the coin, 1 a fungible token, 2 an NFT, 3 an amount of a multi-token id; origin
 -- is the chain the asset is native to, and asset its address there.
 --
--- Events: Sent(nonce, target, digest), Attested(digest, signer), Received(source, nonce, digest),
+-- Events: Sent(nonce, target, digest, sender), Attested(digest, signer), Received(source, nonce, digest),
 -- Wrapped(origin, kind, asset, here).
 
 local M = {}
@@ -312,11 +312,11 @@ function M.send(target, recipient, kind, asset, id, amount)
     local t = transfer(here(), target, nonce, kind, origin, asset_bytes, id, amount, recipient, name, symbol, decimals, uri)
     local d = digest(t)
 
-    for field, value in pairs({ target = t.target, kind = kind, origin = origin, asset = asset_bytes, id = tostring(id), amount = tostring(amount), recipient = recipient, name = name, symbol = symbol, decimals = decimals, uri = uri, digest = d }) do
+    for field, value in pairs({ target = t.target, kind = kind, origin = origin, asset = asset_bytes, id = tostring(id), amount = tostring(amount), recipient = recipient, name = name, symbol = symbol, decimals = decimals, uri = uri, digest = d, from = ctx.sender:text() }) do
         out:set(nonce .. ":" .. field, tostring(value))
     end
 
-    events.emit("Sent", nonce, t.target, d)
+    events.emit("Sent", nonce, t.target, d, ctx.sender)
     return nonce
 end
 
@@ -326,7 +326,7 @@ function M.sent_count()
 end
 
 -- A transfer that left: its target, kind, origin, asset, id, amount, recipient, name, symbol,
--- decimals, URI and digest, for signers and relayers.
+-- decimals, URI and digest, for signers and relayers; and who sent it, for wallets.
 function M.sent(nonce)
     local at = whole(nonce, "the nonce") .. ":"
 
@@ -339,7 +339,7 @@ function M.sent(nonce)
     end
 
     return tonumber(field("target")), tonumber(field("kind")), tonumber(field("origin")), field("asset"), u256(field("id")), u256(field("amount")),
-        field("recipient"), field("name"), field("symbol"), tonumber(field("decimals")), field("uri"), field("digest")
+        field("recipient"), field("name"), field("symbol"), tonumber(field("decimals")), field("uri"), field("digest"), address.parse(field("from"))
 end
 
 -- A signer of the federation in force posts its signature over a transfer: one coming here, which

@@ -12,11 +12,43 @@ use {
     r#macro::document,
 };
 
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "A Bitcoin multisig script, as the Bitcoin gateway writes it: the threshold, each key, their count and OP_CHECKMULTISIG. Bare, it is a federation's change; under a recipient, its deposit script.",
+    category = "Bridges",
+    see_also = "btc_deposit_script",
+)]
+pub fn btc_multisig(threshold: u32, keys: &[[u8; 33]]) -> Vec<u8> {
+    // Numbers to 16 as their own opcodes, past it as a one-byte push, as the gateway does.
+    let small = |number: usize| match number {
+        0..=16 => vec![0x50 + number as u8],
+        _ => vec![1, number as u8],
+    };
+    let mut script = small(threshold as usize);
+
+    for key in keys {
+        script.push(33);
+        script.extend_from_slice(key);
+    }
+
+    script.extend(small(keys.len()));
+    script.push(0xae);
+
+    script
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "An address's deposit script under a federation, as the Bitcoin gateway writes it: its 33 bytes, dropped, then the multisig. Paid as its P2WSH, the gateway mints wBTC to the address for it; computed here, so a wallet never takes the address to pay from a node.",
+    category = "Bridges",
+    see_also = "btc_multisig",
+)]
+pub fn btc_deposit_script(recipient: &Address, threshold: u32, keys: &[[u8; 33]]) -> Vec<u8> {
+    [&[33][..], &recipient.to_abi(), &[0x75], &btc_multisig(threshold, keys)].concat()
+}
+
 #[document(summary = "What both gateways hash a transfer's digest under.", category = "Bridges")]
 pub const DOMAIN: &str = "chainv4-gateway";
-
-#[document(summary = "The name, under the chain's suffix, the gateway here is found by, such as gateway.dev.", category = "Bridges")]
-pub const GATEWAY_NAME: &str = "gateway";
 
 #[document(summary = "Gateway.sol's gateway, as solc wrote it for Paris: what chainv4's tools deploy on an EVM chain, its constructor's arguments after it.", category = "Bridges")]
 pub const GATEWAY_CODE: &str = include_str!("../contracts/evm/Gateway.bin");

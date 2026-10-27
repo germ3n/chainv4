@@ -129,7 +129,7 @@ fn an_evm_call_is_priced_from_one_batch_of_answers() {
     let call = sepolia_lock();
     let reply = |id: u64, result: &str| json!({ "jsonrpc": "2.0", "id": id, "result": result });
     let batch = json!([reply(2, "0x5"), reply(1, "0xaa36a7"), reply(3, "0x3b9aca00"), reply(4, "0x2"), reply(5, "0xc350")]);
-    let tx = evm::price(&call, 11155111, &batch).unwrap();
+    let tx = crate::views::evm::price(&call, 11155111, &batch).unwrap();
 
     assert_eq!((tx.chain_id, tx.nonce, tx.to, tx.value), (11155111, 5, Some([0xc0; 20]), u256::new(7)), "answers in any order, by id");
     assert_eq!((tx.max_price, tx.tip), (u256::new(2_000_000_000), u256::new(2)), "twice the price, the tip suggested");
@@ -137,12 +137,12 @@ fn an_evm_call_is_priced_from_one_batch_of_answers() {
 
     // No tip suggested: one at the whole price.
     let untipped = json!([reply(1, "0xaa36a7"), reply(2, "0x5"), reply(3, "0x64"), { "id": 4, "error": { "message": "no such method" } }, reply(5, "0x5208")]);
-    assert_eq!(evm::price(&call, 11155111, &untipped).unwrap().tip, u256::new(100));
+    assert_eq!(crate::views::evm::price(&call, 11155111, &untipped).unwrap().tip, u256::new(100));
 
     // Another chain's RPC, or a call that would fail, is refused.
-    assert!(evm::price(&call, 1, &batch).unwrap_err().contains("another chain"));
+    assert!(crate::views::evm::price(&call, 1, &batch).unwrap_err().contains("another chain"));
     let failing = json!([reply(1, "0xaa36a7"), reply(2, "0x5"), reply(3, "0x64"), reply(4, "0x1"), { "id": 5, "error": { "message": "execution reverted: lock something" } }]);
-    assert!(evm::price(&call, 11155111, &failing).unwrap_err().contains("lock something"));
+    assert!(crate::views::evm::price(&call, 11155111, &failing).unwrap_err().contains("lock something"));
 }
 
 #[test]
@@ -155,10 +155,10 @@ fn the_signers_signature_completes_the_transaction_only_for_its_address() {
     let (rs, parity) = secp256k1::sign_recoverable(&key, &tx.signing_hash());
     let signature = crate::hardware::Signature { id: request.id.clone(), signature: [&rs[..], &[parity]].concat(), origin: None };
 
-    assert_eq!(evm::finish(&tx, &request, &signature, from).unwrap().encode(), tx.clone().signed(&key).encode());
-    assert!(evm::finish(&tx, &request, &signature, [0xee; 20]).unwrap_err().contains("another key"));
+    assert_eq!(crate::views::evm::finish(&tx, &request, &signature, from).unwrap().encode(), tx.clone().signed(&key).encode());
+    assert!(crate::views::evm::finish(&tx, &request, &signature, [0xee; 20]).unwrap_err().contains("another key"));
     let other = crate::hardware::Signature { id: Some(vec![9; 16]), ..signature };
-    assert!(evm::finish(&tx, &request, &other, from).unwrap_err().contains("another request"));
+    assert!(crate::views::evm::finish(&tx, &request, &other, from).unwrap_err().contains("another request"));
 }
 
 #[test]

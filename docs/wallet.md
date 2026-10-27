@@ -532,6 +532,26 @@ The **NFTs** page shows what the account holds of the chain's [collections](nft-
   Send page reviews and signs: `safe_transfer` to a contract, which must say it takes it,
   `transfer` to a key.
 
+### Bridge
+
+The **Bridge** page moves value through the chain's [bridges](bridges.md), the ones its
+[directory](governance.md#directory) names, under the federation in force, both proven by the
+light client:
+- **To an EVM chain:** the coin, a token, an NFT or a multi-token amount, to an address there:
+  letting the gateway take it, then sending, calls the Send page signs. The account's transfers
+  out, among the latest 20, show the board's count of signatures and whether Gateway.sol took
+  them; one signed and not taken is delivered from here, with the account's Ethereum key, priced
+  and signed as the Swaps page signs there.
+- **From an EVM chain:** letting Gateway.sol take it, then sending, signed there with the
+  account's Ethereum key, or by the offline signer. It arrives as the federation signs it.
+- **Bitcoin:** the account's deposit address, with its QR code, computed here from the federation.
+  A payment to it, found by the wallet's own [Bitcoin light client](#bitcoin-followed-by-the-wallet-itself)
+  and deep enough, is minted as wBTC by its proof from the block it came in; without the light
+  client, by Esplora's proof of a transaction typed in. wBTC is withdrawn to a `bc1q…` address or
+  any output script, and the account's withdrawals show queued or paid.
+
+Settings gives the EVM chains' JSON-RPC URLs and the Esplora API, as for Swaps.
+
 ### Swaps
 
 The **Swaps** page trades coins, a token or an NFT between any two of this chain, Bitcoin and EVM chains
@@ -545,7 +565,7 @@ such as Ethereum, Sepolia or Base, with no one in between. Each swap is two legs
 - **the HTLC on Bitcoin** is paid from any Bitcoin wallet, and claimed or refunded here, by the
   account's key or, for one watched from the offline signer, as a PSBT the signer signs.
 
-Settings, **Swaps** names the swap contract when the node does not, an optional Esplora API to
+Settings, **Swaps** names the swap contract when the chain's directory and the node do not, an optional Esplora API to
 look Bitcoin up at, and EVM chains' JSON-RPC URLs, one a line. See [Atomic swaps](swaps.md).
 
 ### Bitcoin, followed by the wallet itself

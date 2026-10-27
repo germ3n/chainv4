@@ -1707,6 +1707,27 @@ fn status_names_the_federation_in_force() {
 }
 
 #[test]
+fn status_names_the_directory() {
+    use crate::registry::directory::{Directory, EvmGateway};
+
+    let empty = Arc::new(MemoryDb::default());
+    Chain::open(empty.clone(), &free()).unwrap();
+    let bare = start(empty, None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let db = Arc::new(MemoryDb::default());
+    let directory = Directory { gateway: Some(Address::Contract([1; 32])), evm_gateways: vec![EvmGateway { chain_id: 8453, gateway: [4; 20] }], nft_factory: Some(Address::Contract([2; 32])), ..Directory::default() };
+    let genesis = Genesis { directory: Some(directory), ..free() };
+    Chain::open(db.clone(), &genesis).unwrap();
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let status = ok(address, "/status");
+
+    assert_eq!(ok(bare, "/status")["directory"], Value::Null);
+    assert_eq!(status["directory"]["gateway"], Address::Contract([1; 32]).to_string());
+    assert_eq!(status["directory"]["nft_factory"], Address::Contract([2; 32]).to_string());
+    assert_eq!(status["directory"]["swap"], Value::Null);
+    assert_eq!((status["directory"]["evm_gateways"][0]["chain_id"].as_u64(), status["directory"]["evm_gateways"][0]["gateway"].as_str()), (Some(8453), Some(format!("0x{}", "04".repeat(20)).as_str())));
+}
+
+#[test]
 fn collections_are_listed_from_the_registry() {
     let authority = DevAuthority::dev_keypair();
     let db = Arc::new(MemoryDb::default());

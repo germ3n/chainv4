@@ -522,6 +522,7 @@ pub fn change(change: &Change) -> Value {
         Change::NamePrices(prices) => json!({ "name_prices": prices.iter().map(u256::to_string).collect::<Vec<_>>() }),
         Change::Collections(functions) => json!({ "collections": { "nft": functions.nft, "multi": functions.multi } }),
         Change::Federation(federation) => json!({ "federation": crate::cli::genesis::federation_json(federation) }),
+        Change::Directory(directory) => json!({ "directory": crate::cli::genesis::directory_json(directory) }),
     }
 }
 

@@ -17,6 +17,8 @@ What can change today:
   [Name prices](#name-prices)).
 - **The bridges' federation:** who vouches and signs for the [bridges](bridges.md) (see
   [Federation](#federation)).
+- **The directory:** the contracts the chain names for the apps and tools, the bridges'
+  gateways, the swap contract, the DEX and the NFT factory (see [Directory](#directory)).
 - **What makes a collection:** the functions NFT and multi-token collections export, which turns
   the collection registry on for a chain whose genesis kept none (see
   [Collections](#collections)).
@@ -115,10 +117,44 @@ chainv4 send --key member.key approve-change --federation '{"signers":["0x02…"
 
 - **The same ballot and version** as the other kinds.
 - **It takes effect at once,** from the block that decides it: contracts read it as they run.
+- **One state entry,** `change:federation`, holds the one in force, genesis's written there as
+  the chain starts, so a light client proves it: the wallet computes Bitcoin deposit addresses
+  from it.
 - **Its own version counts up** with each one decided, after genesis's 0, so what was signed for
   one federation is told from what was signed for the next.
 - **It is checked as genesis's is:** 1 to 20 secp256k1 keys, each once, a threshold of 1 to as
   many, and depths of at least 1.
+
+## Directory
+
+The directory names the contracts the apps and tools use, so none is taken from a name someone
+else could register first:
+
+| Field | What it names |
+| --- | --- |
+| `gateway` | The [bridges'](bridges.md) gateway here, `gateway.lua`. |
+| `btc_gateway` | The [Bitcoin gateway](bridges.md#bitcoin), `btc_gateway.lua`, which names its relay and wBTC. |
+| `evm_gateways` | `Gateway.sol` on each EVM chain: `{"chain_id": 1, "gateway": "0x…"}`, in the order of their ids, each chain once, 32 at most. |
+| `swap` | The [swap contract](swaps.md#chainv4s-side-the-swap-contract) new offers use. |
+| `dex`, `dex_router` | The native [DEX](dex.md), and the EVM DEX's router on this chain's EVM, `0x…`. |
+| `nft_factory` | The [NFT factory](nft-standard.md) new collections are made with. |
+
+Each is `null` while there is none. Genesis may name it (`directory`, see [Genesis](genesis.md)),
+and a change replaces all of it:
+
+```sh
+chainv4 send --key member.key approve-change --directory '{"gateway":"contract:0x…","btc_gateway":"contract:0x…","evm_gateways":[{"chain_id":11155111,"gateway":"0x…"}],"swap":"contract:0x…","dex":"contract:0x…","dex_router":"0x…","nft_factory":"contract:0x…"}'
+```
+
+- **One state entry,** `change:directory` in the validators column, holds the one in force,
+  genesis's from the first block or the last decided, so the wallet's light client proves it as
+  it proves a balance. `GET /status` shows it as `directory`.
+- **What clients take,** in order: what they are given (a flag, or Settings), the directory, then
+  what the node's operator names (`--swap-contract`, `--dex-contract`, `--dex-router`).
+- **It never moves the federation's version,** and nothing on chain reads it: it is for the apps,
+  the CLI and the federation's signers, who refuse to vouch for a gateway peer the directory does
+  not name.
+- **It is checked as genesis's is:** contracts here are contract addresses, EVM ones not zero.
 
 ## Collections
 

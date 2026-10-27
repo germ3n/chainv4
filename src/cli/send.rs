@@ -192,7 +192,7 @@ pub enum TxArgs {
     /// Approves a change under the chain's governance: a new consensus, as a genesis file's
     /// consensus object, or new bootnodes. Sign with an account governance lets approve: a
     /// validator's or signer's account under the electorate, a member's under a council.
-    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation"]))]
+    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation", "directory"]))]
     ApproveChange {
         /// The new consensus as JSON, such as '{"type":"staked","slot_ms":2000,"schedule":"draw"}'
         /// or '{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1000","min_difficulty":"1000"}'.
@@ -215,6 +215,11 @@ pub enum TxArgs {
         /// "chain_depth":20,"evm_depth":12,"bitcoin_depth":6}'.
         #[arg(long)]
         federation: Option<String>,
+        /// A new directory, the contracts the chain announces, as JSON: '{"gateway":"contract:0x…",
+        /// "btc_gateway":null,"evm_gateways":[{"chain_id":1,"gateway":"0x…"}],"swap":"contract:0x…",
+        /// "dex":null,"dex_router":null,"nft_factory":null}', EVM chains in the order of their ids.
+        #[arg(long)]
+        directory: Option<String>,
         /// The version of the decision this changes. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
@@ -856,10 +861,11 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
             name_prices,
             collections,
             federation,
+            directory,
             version,
         } => {
-            let change = match (consensus, bootnodes, name_prices, collections, federation) {
-                (Some(consensus), _, _, _, _) => {
+            let change = match (consensus, bootnodes, name_prices, collections, federation, directory) {
+                (Some(consensus), _, _, _, _, _) => {
                     let value: Value = serde_json::from_str(&consensus).map_err(|err| format!("--consensus is not JSON: {err}"))?;
                     let (consensus, window) = super::genesis::consensus_from_json(&value, "consensus")?;
 
@@ -869,7 +875,7 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
                     crate::governance::Change::Consensus(consensus)
                 }
-                (None, Some(bootnodes), _, _, _) => {
+                (None, Some(bootnodes), _, _, _, _) => {
                     let bootnodes: Vec<String> = match bootnodes.as_slice() {
                         [none] if none == "none" => Vec::new(),
                         _ => bootnodes.into_iter().map(|address| address.trim().to_string()).collect(),
@@ -881,22 +887,25 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
                     crate::governance::Change::Bootnodes(bootnodes)
                 }
-                (None, None, Some(prices), _, _) => {
+                (None, None, Some(prices), _, _, _) => {
                     if let Some(problem) = prices_problem(&prices) {
                         return Err(format!("--name-prices: {problem}").into());
                     }
 
                     crate::governance::Change::NamePrices(prices)
                 }
-                (None, None, None, Some(collections), _) => {
+                (None, None, None, Some(collections), _, _) => {
                     let functions = super::genesis::collections_from_text(&collections).map_err(|why| format!("--collections: {why}"))?;
 
                     crate::governance::Change::Collections(functions)
                 }
-                (None, None, None, None, Some(federation)) => {
+                (None, None, None, None, Some(federation), _) => {
                     crate::governance::Change::Federation(super::genesis::federation_from_text(&federation).map_err(|why| format!("--federation: {why}"))?)
                 }
-                (None, None, None, None, None) => unreachable!("clap requires one"),
+                (None, None, None, None, None, Some(directory)) => {
+                    crate::governance::Change::Directory(super::genesis::directory_from_text(&directory).map_err(|why| format!("--directory: {why}"))?)
+                }
+                (None, None, None, None, None, None) => unreachable!("clap requires one"),
             };
 
             let version = match version {
@@ -919,6 +928,14 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
                     federation.threshold,
                     federation.signers.len()
                 ),
+                crate::governance::Change::Directory(directory) => {
+                    let named = [("gateway", directory.gateway), ("Bitcoin gateway", directory.btc_gateway), ("swap", directory.swap), ("DEX", directory.dex), ("NFT factory", directory.nft_factory)];
+                    let mut listed: Vec<String> = named.iter().filter_map(|(what, address)| address.map(|address| format!("the {what} {address}"))).collect();
+                    listed.extend(directory.dex_router.map(|router| format!("the DEX router {}", crate::structs::hex::to_hex(&router))));
+                    listed.extend(directory.evm_gateways.iter().map(|evm| format!("Gateway.sol {} on chain {}", crate::structs::hex::to_hex(&evm.gateway), evm.chain_id)));
+                    let listed = if listed.is_empty() { "nothing".to_string() } else { listed.join(", ") };
+                    println!("approving a directory of {listed}, from version {version}");
+                }
             }
 
             Tx::ApproveChange { version, change }
@@ -1040,6 +1057,15 @@ pub(super) fn pooled(tls: &TlsArgs, connections: usize) -> CliResult<Agent> {
 }
 
 /// The JSON a request came back with, or the node's error.
+/// A contract the chain announces in its directory, by its key in GET /status's directory, such as
+/// swap or gateway: what the tools use when none is given, never a name someone could register.
+pub(super) fn announced(agent: &Agent, node: &str, key: &str) -> CliResult<Option<Address>> {
+    match ok(agent.get(format!("{node}/status")).call())?["directory"][key].as_str() {
+        Some(text) => Ok(Some(text.parse().map_err(|_| format!("the chain announces a {key} that does not read: {text}"))?)),
+        None => Ok(None),
+    }
+}
+
 pub(super) fn ok(response: Response) -> CliResult<Value> {
     match fetch(response)? {
         (200..=299, json) => Ok(json),

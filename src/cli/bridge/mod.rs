@@ -45,7 +45,7 @@ pub struct BridgeArgs {
     /// The key file to sign with here: the development key when none is given.
     #[arg(long, global = true)]
     pub key: Option<PathBuf>,
-    /// The gateway here, rather than the one the name gateway resolves to.
+    /// The gateway here, rather than the one the chain's directory names.
     #[arg(long, global = true)]
     pub gateway: Option<Address>,
     /// EVM chains' JSON-RPC URLs, each asked its chain id; separated by commas or given again.
@@ -227,22 +227,17 @@ impl Bridge {
         Ok(at)
     }
 
-    /// The gateway here: given, or the one the name gateway resolves to.
+    /// A gateway the chain announces in its directory: gateway or btc_gateway.
+    pub(super) fn announced(&self, key: &str) -> CliResult<Option<Address>> {
+        super::send::announced(&self.agent, &self.node, key)
+    }
+
+    /// The gateway here: given, or the one the chain announces.
     fn gateway(&self) -> CliResult<Address> {
-        if let Some(gateway) = self.args.gateway {
-            return Ok(gateway);
+        match self.args.gateway {
+            Some(gateway) => Ok(gateway),
+            None => self.announced("gateway")?.ok_or_else(|| "no gateway: the chain's directory names none. Give --gateway, or deploy one with chainv4 bridge deploy and have governance add it".into()),
         }
-
-        #[cfg(feature = "names")]
-        {
-            let suffix = ok(self.agent.get(format!("{}/names", self.node)).call()).ok().and_then(|names| names["suffix"].as_str().map(str::to_string));
-
-            if let Some(found) = suffix.and_then(|suffix| super::send::resolve(&self.agent, &self.node, &format!("{}.{suffix}", crate::bridge::GATEWAY_NAME)).ok()) {
-                return Ok(found);
-            }
-        }
-
-        Err("no gateway: the name gateway resolves to none. Give --gateway, or deploy one with chainv4 bridge deploy".into())
     }
 
     /// This chain's id, as the gateways name it: what its EVM answers CHAINID with.
@@ -328,15 +323,27 @@ impl Bridge {
         Ok(())
     }
 
-    /// The gateway on an EVM chain, as the one here knows it.
+    /// The gateway on an EVM chain, as the one here knows it: refused when the chain announces
+    /// another there, so no signer vouches for a peer its owner repointed.
     fn evm_gateway(&self, gateway: &Address, chain: u64) -> CliResult<[u8; 20]> {
         let peer = self.read(gateway, "peer", json!([{ "type": "u64", "value": chain.to_string() }]))?;
-
-        peer.first()
+        let peer: [u8; 20] = peer
+            .first()
             .and_then(|value| value["value"].as_str())
             .and_then(from_hex)
             .and_then(|bytes| bytes.try_into().ok())
-            .ok_or_else(|| format!("the gateway here has no peer on chain {chain}: join them with chainv4 bridge peer").into())
+            .ok_or_else(|| format!("the gateway here has no peer on chain {chain}: join them with chainv4 bridge peer"))?;
+        let announced = self.status()?["directory"]["evm_gateways"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|evm| evm["chain_id"].as_u64() == Some(chain))
+            .and_then(|evm| evm["gateway"].as_str().and_then(from_hex));
+
+        match announced {
+            Some(announced) if announced != peer => Err(format!("the gateway here names {} its peer on chain {chain}, but the chain announces {}", to_hex(&peer), to_hex(&announced)).into()),
+            _ => Ok(peer),
+        }
     }
 
     fn send_one(&self, kind: AssetKind, recipient: &str, amount: u256, asset: Option<&str>, id: u256, from_evm: bool) -> CliResult<()> {

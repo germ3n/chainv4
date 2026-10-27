@@ -5,9 +5,9 @@ ERC-20s and NFTs here as tokens and collections, and chainv4's own coin, tokens 
 ERC-20s, ERC-721s and ERC-1155s. An [atomic swap](swaps.md) trades what exists on each chain; a
 bridge mints a claim on what it holds locked on the other.
 
-This page grows with the bridge batches: the federation, the contracts' crypto, the gateways
-between chainv4 and EVM chains, for coins, tokens and NFTs, and Bitcoin, through a light client
-contract, are in; the wallet's and the explorer's Bridge pages come next.
+The federation, the contracts' crypto, the gateways between chainv4 and EVM chains, for coins,
+tokens and NFTs, and Bitcoin, through a light client contract, are in; so are the wallet's and the
+explorer's Bridge pages ([Wallet](wallet.md#bridge), [Explorer](explorer.md#pages)).
 
 ## The federation
 
@@ -23,7 +23,8 @@ Who vouches for a deposit made on another chain, and signs what leaves for one, 
 | `bitcoin_depth` | How many confirmations a Bitcoin deposit needs. |
 
 **Where it comes from:**
-- **Genesis** may name one, `federation` (see [Genesis](genesis.md)): version 0.
+- **Genesis** may name one, `federation` (see [Genesis](genesis.md)): version 0, written into the
+  state as the chain starts, so a light client proves it as it proves the one governance decides.
 - **Governance** replaces it with `Change::Federation` (see [Governance](governance.md#federation)),
   each decided one a version more than the last.
 - **Contracts read** the one in force, with its version: `federation.get()` in Lua,
@@ -88,13 +89,16 @@ transaction each, with `attest`:
 
 ```sh
 chainv4 bridge deploy                                     # the gateway here, with its templates
-chainv4 send name register gateway                        # found by the name gateway.<suffix>
-chainv4 bridge deploy-evm --eth-rpc URL --evm-key k.key    # Gateway.sol under the federation in force
-chainv4 bridge peer 0x<Gateway.sol> --eth-rpc URL --evm-key k.key
+chainv4 bridge deploy-evm --gateway contract:0x… --eth-rpc URL --evm-key k.key    # Gateway.sol under the federation in force
+chainv4 bridge peer 0x<Gateway.sol> --gateway contract:0x… --eth-rpc URL --evm-key k.key
+chainv4 send --key member.key approve-change --directory '{"gateway":"contract:0x…","evm_gateways":[{"chain_id":11155111,"gateway":"0x…"}],…}'
 ```
 
 `deploy-evm` reads the federation from `GET /status`, so governance names one first. `peer` makes
-each gateway the other's peer: signed here by the gateway's owner, there by Gateway.sol's.
+each gateway the other's peer: signed here by the gateway's owner, there by Gateway.sol's. Then
+governance names both in the chain's [directory](governance.md#directory): the tools, the apps
+and the signers take the gateways from it, and a name never finds one, as anyone could register
+it first. Until then, `--gateway` names it.
 
 ## Sending
 
@@ -193,7 +197,8 @@ the federation's version), `utxo(n)` and `utxo_count()`, `withdrawal(id)` and
 ### The commands
 
 `chainv4 bridge btc` drives both from an Esplora API (`--esplora`, such as
-`https://mempool.space/api`), the gateway given as `--btc-gateway`:
+`https://mempool.space/api`), the gateway the one the [directory](governance.md#directory) names
+as `btc_gateway`, or `--btc-gateway` before it does:
 
 ```sh
 chainv4 send deploy --wasm btc_relay.wasm                      # the relay
@@ -229,8 +234,9 @@ chainv4 bridge btc sweep --fee 1000 --btc-gateway 0x… --esplora URL
   shown released, so one stuck at too low a fee is bumped by a child that pays for it, spending
   one of its outputs; replacing a release is in the todo.
 - **The gateway's owner sets its peers.** A signer vouches for what the peer gateway says left it,
-  so an owner who repointed a peer could have fake deposits signed. Signers should check each peer
-  is the Gateway.sol they expect; moving peers to governance is in the todo.
+  so an owner who repointed a peer could have fake deposits signed. `chainv4 bridge` refuses to
+  sign or relay through a peer other than the Gateway.sol the directory names on that chain;
+  the gateway taking its peers from the directory itself is in the todo.
 - **Gateway.sol's signer set follows chainv4's** only when the federation in force signs the next
   one over (`setSigners`); the tooling for that is in the todo.
 - **Names are the asset's own,** cut to what the registries take: a wrapped token says what it

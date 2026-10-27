@@ -366,6 +366,12 @@ fn tip() -> Result<(Vec<u8>, u64), &'static str> {
     Ok((hash.to_vec(), kept(&hash).ok_or("the relay lost its tip")?.height))
 }
 
+/// The network it follows, as it was started: main, regtest or test; none before it starts.
+#[export]
+fn network_name() -> Option<String> {
+    storage::own().get(b"network").and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
 /// The main chain's block at a height, if it holds one.
 #[export]
 fn block_at(height: u64) -> Option<Vec<u8>> {

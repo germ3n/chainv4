@@ -10,12 +10,6 @@ use {
 };
 
 #[document(
-    summary = "The name, under the chain's suffix, the DEX contract is found by, such as dex.dev: registered by whoever runs one, and looked up before the node's advertisement.",
-    category = "DEX",
-)]
-pub const DEX_NAME: &str = "dex";
-
-#[document(
     summary = "The chain's coin as a side of a pool: the zero contract address, contract:0x00…00, where no contract lives, and which a transaction may name, as it may not the zero key.",
     category = "DEX",
 )]

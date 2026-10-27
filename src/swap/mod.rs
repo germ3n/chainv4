@@ -30,12 +30,6 @@ use {
 pub const UR_TYPE: &str = "chainv4-swap";
 
 #[document(
-    summary = "The name, under the chain's suffix, that the swap contract a new offer uses by default is found by, such as swap.dev: registered by whoever runs one, and looked up before the node's advertisement. Any contract that follows contracts/lua/swap.lua's functions will do; the terms name the one a swap uses.",
-    category = "Swaps",
-)]
-pub const SWAP_NAME: &str = "swap";
-
-#[document(
     summary = "How long before the first lock's deadline the second's must end, at least: time for the starter, once the second lock stands, to claim it and so show the secret, and for the other to claim the first with it before its refund opens.",
     category = "Swaps",
 )]

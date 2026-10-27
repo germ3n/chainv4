@@ -237,6 +237,9 @@ pub struct Genesis {
     #[document(summary = "The bridges' federation from the start, version 0, or None for a chain that has none until governance decides a Change::Federation. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
     #[wincode(with = "crate::structs::unset::UnsetOption<crate::registry::federation::Federation>")]
     pub federation: Option<crate::registry::federation::Federation>,
+    #[document(summary = "The contracts the chain announces from the start, its directory: the bridges' gateways, the swap contract, the DEX and the NFT factory; or None for a chain that announces none until governance decides a Change::Directory. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<crate::registry::directory::Directory>")]
+    pub directory: Option<crate::registry::directory::Directory>,
 }
 
 impl Hashable for Genesis {}
@@ -540,6 +543,7 @@ impl Genesis {
             names: dev_names(),
             collections: Some(crate::registry::collections::CollectionFunctions::standard()),
             federation: None,
+            directory: None,
         }
     }
 
@@ -582,6 +586,7 @@ impl Genesis {
             names: dev_names(),
             collections: Some(crate::registry::collections::CollectionFunctions::standard()),
             federation: None,
+            directory: None,
         }
     }
 
@@ -701,6 +706,16 @@ impl Genesis {
             crate::registry::changes::Changes::new(state).write_genesis(&self.consensus, self.fixed_ahead())?;
         }
 
+        // In the state, so a light client proves the federation and the directory in force from
+        // either source.
+        if let Some(federation) = &self.federation {
+            crate::registry::changes::Changes::new(state).write_genesis_federation(federation);
+        }
+
+        if let Some(directory) = &self.directory {
+            crate::registry::changes::Changes::new(state).write_directory(directory);
+        }
+
         Ok(())
     }
 
@@ -755,6 +770,10 @@ impl Genesis {
         }
 
         if let Some(problem) = self.federation.as_ref().and_then(crate::registry::federation::Federation::problem) {
+            return Some(problem);
+        }
+
+        if let Some(problem) = self.directory.as_ref().and_then(crate::registry::directory::Directory::problem) {
             return Some(problem);
         }
 

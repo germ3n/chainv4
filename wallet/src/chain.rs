@@ -12,6 +12,8 @@ use {
         nft_owner, nft_owner_key, token_balance, token_balance_key,
     },
     chainv4::registry::names::{FoundName, NameRecord, NameStatus, NamesConfig, PrimaryName, lineage, name_problem, primary_key, record_key, standing},
+    chainv4::registry::directory::{DIRECTORY_KEY, Directory},
+    chainv4::registry::federation::{DecidedFederation, FEDERATION_KEY},
     chainv4::registry::tokens::{Token, token_key},
     chainv4::structs::account::Account,
     chainv4::structs::address::Address,
@@ -52,6 +54,10 @@ enum Target {
     NftOwner { collection: String, id: String },
     /// How much of a multi-token id a holder holds.
     MultiBalance { collection: String, id: String, holder: String },
+    /// The contracts the chain announces.
+    Directory,
+    /// The bridges' federation in force.
+    Federation,
 }
 
 /// An NFT a page shows, for its ownership to be proven: a token of an NFT collection, or a
@@ -170,12 +176,30 @@ pub struct Chain {
     targets: HashMap<String, Target>,
     /// Why a proof did not check, by what it was for.
     pub refused: HashMap<String, String>,
+    /// The contracts the chain announces, proven at the tip: None where it announces none. What
+    /// the pages use where Settings gives none, before what the node names.
+    pub directory: Option<Proven<Option<Directory>>>,
+    /// The bridges' federation in force, proven at the tip: None on a chain without one. What
+    /// deposit addresses to Bitcoin are computed from, never taken from a node.
+    pub federation: Option<Proven<Option<DecidedFederation>>>,
     /// The lowest height a receipt landed at below every header the client holds: what it takes
     /// ancestors down to, a stretch at a time.
     wanted_below: Option<u64>,
 }
 
 impl Chain {
+    /// The federation in force, proven, if the chain has one.
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    pub fn federation_in_force(&self) -> Option<&DecidedFederation> {
+        self.federation.as_ref().and_then(|proven| proven.value.as_ref())
+    }
+
+    /// The directory proven, if the chain announces one.
+    #[cfg_attr(not(any(feature = "swap", feature = "dex")), allow(dead_code))]
+    pub fn announced(&self) -> Option<&Directory> {
+        self.directory.as_ref().and_then(|proven| proven.value.as_ref())
+    }
+
     /// Starts the client waiting to start at a checkpoint from genesis instead.
     fn start_from_genesis(&mut self) {
         if let Some(starting) = self.starting.take() {
@@ -292,6 +316,9 @@ impl Chain {
                 targets.push((Column::Tokens, token_key(&parsed), Target::Token(token.clone()), vec![tip]));
             }
         }
+
+        targets.push((Column::Validators, DIRECTORY_KEY.to_vec(), Target::Directory, vec![tip]));
+        targets.push((Column::Validators, FEDERATION_KEY.to_vec(), Target::Federation, vec![tip]));
 
         for (column, key, target, blocks) in targets {
             let key = to_hex(&key);
@@ -645,7 +672,7 @@ impl Chain {
                 let target = self.targets.get(key).cloned().ok_or("a proof nobody asked for")?;
                 let client = self.client.as_ref().ok_or("the light client has not started")?;
                 let block = id(client, value["block"].as_str().unwrap_or_default()).ok_or("a proof at a block id that does not read")?;
-                let column = [Column::Accounts, Column::Tokens, Column::Namespaces, Column::Names]
+                let column = [Column::Accounts, Column::Tokens, Column::Namespaces, Column::Names, Column::Validators]
                     .into_iter()
                     .find(|known| known.name() == *column)
                     .ok_or("a proof of a column it never asks for")?;
@@ -706,6 +733,18 @@ impl Chain {
                             None => u256::ZERO,
                         };
                         self.multi_balances.insert((collection, id, holder), Proven { value: amount, assurance });
+                    }
+                    Target::Directory => {
+                        let directory: Option<Directory> = held
+                            .map(|bytes| wincode::deserialize(&bytes).map_err(|_| "a directory that does not decode"))
+                            .transpose()?;
+                        self.directory = Some(Proven { value: directory, assurance });
+                    }
+                    Target::Federation => {
+                        let federation: Option<DecidedFederation> = held
+                            .map(|bytes| wincode::deserialize(&bytes).map_err(|_| "a federation that does not decode"))
+                            .transpose()?;
+                        self.federation = Some(Proven { value: federation, assurance });
                     }
                 }
 

@@ -43,11 +43,11 @@ pub struct DexState {
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState) {
     let look = ctx.look;
     super::heading(ui, look, "DEX", "Constant-product pools: each trades its two assets at the price that keeps the product of what it holds, less 0.3% for who provided.", |_| {});
-    let (native, router) = (native(ctx, state), router(ctx));
+    let (native, router) = (native(ctx), router(ctx));
 
     match (&native, router) {
         (None, None) => {
-            super::note(ui, look, "This chain names no DEX: the name dex resolves to nothing, and the node names none.");
+            super::note(ui, look, "This chain names no DEX: its directory names none, and neither does the node.");
 
             return;
         }
@@ -125,21 +125,17 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState) {
     }
 }
 
-/// The native DEX: the one the name dex resolves to, or the one the node names.
-fn native(ctx: &mut Ctx, state: &mut DexState) -> Option<String> {
-    let named = Ask::Name(chainv4::dex::DEX_NAME.to_string());
-    ask(ctx, state, named.clone());
+/// The native DEX: the one the chain's directory names, or the one the node names.
+fn native(ctx: &Ctx) -> Option<String> {
+    let status = ctx.store.status.as_ref()?;
 
-    ctx.store
-        .names
-        .get(chainv4::dex::DEX_NAME)
-        .and_then(|name| name.resolves_to.clone())
-        .or_else(|| ctx.store.status.as_ref()?.dex.as_ref()?.get("contract")?.as_str().map(str::to_string))
+    status.announced("dex").or_else(|| status.dex.as_ref()?.get("contract")?.as_str().map(str::to_string))
 }
 
-/// The EVM DEX's router, as the node names it.
+/// The EVM DEX's router: the directory's, or the one the node names.
 fn router(ctx: &Ctx) -> Option<[u8; 20]> {
-    let text = ctx.store.status.as_ref()?.dex.as_ref()?.get("router")?.as_str()?.to_string();
+    let status = ctx.store.status.as_ref()?;
+    let text = status.announced("dex_router").or_else(|| status.dex.as_ref()?.get("router")?.as_str().map(str::to_string))?;
 
     from_hex(&text)?.try_into().ok()
 }

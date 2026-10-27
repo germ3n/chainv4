@@ -319,28 +319,34 @@ impl Dex {
         ok(self.agent.get(format!("{}/status", self.node)).call())
     }
 
-    /// The native DEX: given, or the one the name dex resolves to, or the one the node names.
+    /// The native DEX: given, or the one the chain's directory names, or the one the node names.
     fn native(&self) -> CliResult<Address> {
         if let Some(dex) = self.args.dex {
             return Ok(dex);
         }
 
-        #[cfg(feature = "names")]
-        {
-            let suffix = ok(self.agent.get(format!("{}/names", self.node)).call()).ok().and_then(|names| names["suffix"].as_str().map(str::to_string));
+        let status = self.status()?;
 
-            if let Some(found) = suffix.and_then(|suffix| super::send::resolve(&self.agent, &self.node, &format!("{}.{suffix}", crate::dex::DEX_NAME)).ok()) {
-                return Ok(found);
-            }
-        }
-
-        self.status()?["dex"]["contract"].as_str().ok_or("no DEX: the name dex resolves to none, nor does the node name one. Give --dex")?.parse().map_err(|_| "the node named a DEX that is not an address".into())
+        status["directory"]["dex"]
+            .as_str()
+            .or_else(|| status["dex"]["contract"].as_str())
+            .ok_or("no DEX: the chain's directory names none, nor does the node. Give --dex")?
+            .parse()
+            .map_err(|_| "the node named a DEX that is not an address".into())
     }
 
     fn router_bytes(&self) -> CliResult<[u8; 20]> {
         let text = match &self.args.router {
             Some(router) => router.clone(),
-            None => self.status()?["dex"]["router"].as_str().ok_or("no EVM DEX: the node names no router. Give --router")?.to_string(),
+            None => {
+                let status = self.status()?;
+
+                status["directory"]["dex_router"]
+                    .as_str()
+                    .or_else(|| status["dex"]["router"].as_str())
+                    .ok_or("no EVM DEX: the chain's directory names no router, nor does the node. Give --router")?
+                    .to_string()
+            }
         };
 
         evm(&super::evm::evm_address(&text)?)

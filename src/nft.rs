@@ -8,12 +8,6 @@ use {
     serde_json::Value,
 };
 
-#[document(
-    summary = "The name, under the chain's suffix, the collection factory is found by, such as nfts.dev: registered by whoever runs one.",
-    category = "NFTs",
-)]
-pub const FACTORY_NAME: &str = "nfts";
-
 #[document(summary = "The IPFS gateway the apps offer until the user picks another: ipfs://CID/path is fetched as this, then CID/path.", category = "NFTs")]
 pub const DEFAULT_GATEWAY: &str = "https://ipfs.io/ipfs/";
 

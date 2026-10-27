@@ -133,8 +133,12 @@ impl Bridge {
         Ok(answer.body_mut().read_to_string()?)
     }
 
+    /// The Bitcoin gateway here: given, or the one the chain announces.
     fn btc_gateway(&self) -> CliResult<Address> {
-        self.args.btc_gateway.ok_or_else(|| "give --btc-gateway: the Bitcoin gateway here".into())
+        match self.args.btc_gateway {
+            Some(gateway) => Ok(gateway),
+            None => self.announced("btc_gateway")?.ok_or_else(|| "no Bitcoin gateway: the chain's directory names none. Give --btc-gateway".into()),
+        }
     }
 
     /// A transaction as the gateway takes it, without its witness, with its block, place and

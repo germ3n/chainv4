@@ -16,7 +16,7 @@
 -- spent and its change held. A sweep is a release that pays everything an old federation holds
 -- to the one in force.
 --
--- Events: DepositedBtc(txid, vout, sats, recipient), WithdrawRequested(id, script, sats),
+-- Events: DepositedBtc(txid, vout, sats, recipient), WithdrawRequested(id, script, sats, sender),
 -- Proposed(proposal, txid), SignedBtc(proposal, input, signer), Released(proposal, txid).
 
 local M = {}
@@ -306,6 +306,11 @@ function M.wbtc()
     return wbtc()
 end
 
+-- The Bitcoin light client contract deposits and releases are proven to.
+function M.relay()
+    return relay()
+end
+
 -- An address's deposit script under the federation in force, and the P2WSH output that pays it:
 -- what a wallet shows as its bc1q… deposit address.
 function M.deposit_script(recipient)
@@ -366,7 +371,8 @@ function M.withdraw(script, sats)
     withdrawals:set(id .. ":script", script)
     withdrawals:set(id .. ":sats", tostring(sats))
     withdrawals:set(id .. ":state", "queued")
-    events.emit("WithdrawRequested", id, script, u256(sats))
+    withdrawals:set(id .. ":by", ctx.sender:text())
+    events.emit("WithdrawRequested", id, script, u256(sats), ctx.sender)
     return id
 end
 
@@ -616,7 +622,9 @@ end
 function M.withdrawal(id)
     id = whole(id, "the withdrawal")
 
-    return withdrawals:get(id .. ":script"), tonumber(withdrawals:get(id .. ":sats")), withdrawals:get(id .. ":state")
+    local by = withdrawals:get(id .. ":by")
+
+    return withdrawals:get(id .. ":script"), tonumber(withdrawals:get(id .. ":sats")), withdrawals:get(id .. ":state"), by and address.parse(by)
 end
 
 function M.withdrawal_count()

@@ -113,9 +113,8 @@ both sides lock and look in the same one, whatever their wallets would pick.
 
 A new offer's leg on chainv4 takes, in this order:
 1. the one given: the CLI's `--contract`, or the wallet's Settings, **Swaps**;
-2. else the one the name `swap` resolves to under the chain's suffix, such as `swap.dev`.
-   Whoever runs a swap contract registers it, and the wallet's light client proves it, as any
-   name;
+2. else the one the chain's [directory](governance.md#directory) names, which the wallet's
+   light client proves. A name is never used: anyone could register `swap` first;
 3. else the one the node advertises, started with `--swap-contract` (in Docker, `SWAP_CONTRACT`
    in `.env`), which `GET /status` shows as `swap.contract`.
 

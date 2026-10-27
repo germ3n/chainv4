@@ -197,8 +197,8 @@ one request asks again for both registries.
   The clone goes in the registry once the transaction succeeds.
 - **List:** `count()` and `at(n)` give what it made; `Created(collection, kind, creator)` says so
   as it happens.
-- **Found by name:** the CLI looks for the factory at the name `nfts` under the chain's suffix,
-  such as `nfts.dev`, unless given `--factory`.
+- **Found by the directory:** the CLI takes the factory the chain's
+  [directory](governance.md#directory) names, `nft_factory`, unless given `--factory`.
 
 ## From the command line
 

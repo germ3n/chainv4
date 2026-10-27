@@ -784,6 +784,7 @@ fn run(
                 Change::NamePrices(prices) => crate::registry::names::prices_problem(prices),
                 Change::Collections(functions) => functions.problem(),
                 Change::Federation(federation) => federation.problem(),
+                Change::Directory(directory) => directory.problem(),
             };
 
             if let Some(problem) = problem {

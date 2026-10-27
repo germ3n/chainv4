@@ -109,12 +109,20 @@ fn pays(script: &[u8], sats: u64) -> Vec<u8> {
 fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     let mut btc = Btc::new();
     let alice = Address::Ed25519([0xa; 32]);
+    assert_eq!(btc.call("relay", &[]).unwrap(), [address(btc.relay)]);
     let scripts = btc.call("deposit_script", &[address(alice)]).unwrap();
     let [TxCallArgumentType::Bytes(witness), TxCallArgumentType::Bytes(output), TxCallArgumentType::I64(0)] = &scripts[..] else { panic!("{scripts:?}") };
 
-    // The deposit script: Alice's 33 bytes, dropped, then two of three.
+    // The deposit script: Alice's 33 bytes, dropped, then two of three; as wallets compute it
+    // without asking a node.
     assert_eq!((witness[0], &witness[1..34], witness[34], witness[35]), (33, alice.to_abi().as_slice(), 0x75, 0x52));
     assert_eq!(output[..2], [0, 32]);
+    #[cfg(feature = "bridge")]
+    {
+        let fed = federation(&[21, 22, 23], 2);
+        assert_eq!(witness, &crate::bridge::btc_deposit_script(&alice, fed.threshold, &fed.signers));
+    }
+    assert_eq!(output, &crate::crypto::bitcoin::tx::p2wsh(witness));
 
     // Paid on Bitcoin, mined, but one block deep: not yet.
     let deposit = pays(output, 50_000);
@@ -136,6 +144,7 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     let bob = crate::crypto::bitcoin::tx::p2wpkh(&[0xb0; 20]);
     assert!(btc.call_as(alice, "withdraw", &[bytes(&bob), number(500)]).unwrap_err().contains("at least"));
     assert_eq!(btc.call_as(alice, "withdraw", &[bytes(&bob), number(20_000)]).unwrap(), [TxCallArgumentType::I64(1)]);
+    assert_eq!(btc.call("withdrawal", &[number(1)]).unwrap(), [bytes(&bob), TxCallArgumentType::I64(20_000), TxCallArgumentType::String("queued".into()), address(alice)], "and who asked, for wallets");
     assert_eq!(btc.wbtc_of(alice), u256::from(30_000u64));
 
     // A release spends the deposit: Bob's 20,000, change to the federation, 1,000 in fees.

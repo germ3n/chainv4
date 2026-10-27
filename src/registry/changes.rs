@@ -21,7 +21,8 @@ const BALLOT: &[u8] = b"change:ballot";
 const BOOTNODES: &[u8] = b"change:bootnodes";
 const NAME_PRICES: &[u8] = b"change:name-prices";
 const COLLECTIONS: &[u8] = b"change:collections";
-const FEDERATION: &[u8] = b"change:federation";
+const FEDERATION: &[u8] = crate::registry::federation::FEDERATION_KEY;
+const DIRECTORY: &[u8] = crate::registry::directory::DIRECTORY_KEY;
 
 #[document(
     summary = "The consensus decided last, and how many changes of any kind came before it.",
@@ -227,10 +228,28 @@ impl<'a> Changes<'a> {
 
     #[document(
         parent = "Changes",
-        summary = "The bridges' federation as decided last, with its version, or None while governance never decided one, when genesis's stands as version 0.",
+        summary = "The bridges' federation in force, with its version: genesis's as 0, written as the chain starts, or the one governance decided last; None on a chain with neither.",
     )]
     pub fn federation(&self) -> Result<Option<crate::registry::federation::DecidedFederation>, DbError> {
         self.state.get_value(Column::Validators, FEDERATION)
+    }
+
+    #[document(
+        parent = "Changes",
+        summary = "The directory in force: genesis's, written as the chain starts, or the one governance decided last; None while there is none. One state entry either way, so a light client proves it.",
+    )]
+    pub fn directory(&self) -> Result<Option<crate::registry::directory::Directory>, DbError> {
+        self.state.get_value(Column::Validators, DIRECTORY)
+    }
+
+    #[document(parent = "Changes", summary = "Writes genesis's federation as the one in force, version 0, as the chain starts.")]
+    pub fn write_genesis_federation(&self, federation: &crate::registry::federation::Federation) {
+        self.state.put_value(Column::Validators, FEDERATION.to_vec(), &crate::registry::federation::DecidedFederation { version: 0, federation: federation.clone() });
+    }
+
+    #[document(parent = "Changes", summary = "Writes a directory as the one in force: genesis's as the chain starts, or one governance decided.")]
+    pub fn write_directory(&self, directory: &crate::registry::directory::Directory) {
+        self.state.put_value(Column::Validators, DIRECTORY.to_vec(), directory);
     }
 
     #[document(parent = "Changes", summary = "The consensus decided last, and its version: the count of every change decided, of any kind.")]
@@ -285,7 +304,7 @@ impl<'a> Changes<'a> {
             approval_epochs = "How many epochs an approval counts for.",
             governance = "Who may approve, and what it takes.",
         },
-        returns = "Whether that decided it. NotGoverning for a sender that may not approve, StaleChange for an older version, SameChange for the consensus, bootnodes, name prices, collection standards or federation already decided.",
+        returns = "Whether that decided it. NotGoverning for a sender that may not approve, StaleChange for an older version, SameChange for the consensus, bootnodes, name prices, collection standards, federation or directory already decided.",
     )]
     pub fn approve(&self, sender: &Address, version: u64, change: Change, epoch: u64, approval_epochs: u64, governance: &dyn Governance) -> Result<ChangeApproved, RegistryError> {
         let decided = self.standing(sender, version, epoch, governance)?;
@@ -295,6 +314,7 @@ impl<'a> Changes<'a> {
             Change::NamePrices(prices) => self.name_prices()?.as_ref() == Some(prices),
             Change::Collections(functions) => self.collections()?.as_ref() == Some(functions),
             Change::Federation(federation) => self.federation()?.map(|decided| decided.federation).as_ref() == Some(federation),
+            Change::Directory(directory) => self.directory()?.as_ref() == Some(directory),
         };
 
         if same {
@@ -343,6 +363,12 @@ impl<'a> Changes<'a> {
             Change::Federation(federation) => {
                 let version = self.federation()?.map_or(1, |decided| decided.version + 1);
                 self.state.put_value(Column::Validators, FEDERATION.to_vec(), &crate::registry::federation::DecidedFederation { version, federation });
+
+                decided.consensus
+            }
+            // And the directory: only the apps and tools read it.
+            Change::Directory(directory) => {
+                self.write_directory(&directory);
 
                 decided.consensus
             }

@@ -26,6 +26,7 @@ use {
     crate::structs::code::Engine,
     crate::structs::u256::u256,
     crate::registry::collections::CollectionFunctions,
+    crate::registry::directory::{Directory, EvmGateway},
     crate::registry::federation::Federation,
     crate::registry::names::NamesConfig,
     crate::vm::Limits,
@@ -297,6 +298,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "names": genesis.names.as_ref().map(names_json),
         "collections": genesis.collections.as_ref().map(collections_json),
         "federation": genesis.federation.as_ref().map(federation_json),
+        "directory": genesis.directory.as_ref().map(directory_json),
     })
 }
 
@@ -332,6 +334,66 @@ fn federation_from_json(mut fields: Fields) -> Result<Federation, String> {
     fields.done()?;
 
     Ok(federation)
+}
+
+/// The directory as JSON: the shape genesis files, GET /status and approve-change use. Contracts
+/// here as addresses, EVM ones as 0x and 40 hex digits, each null while there is none.
+pub fn directory_json(directory: &Directory) -> Value {
+    let here = |address: Option<Address>| address.map(|address| address.to_string());
+
+    json!({
+        "gateway": here(directory.gateway),
+        "btc_gateway": here(directory.btc_gateway),
+        "evm_gateways": directory.evm_gateways.iter().map(|evm| json!({ "chain_id": evm.chain_id, "gateway": crate::structs::hex::to_hex(&evm.gateway) })).collect::<Vec<_>>(),
+        "swap": here(directory.swap),
+        "dex": here(directory.dex),
+        "dex_router": directory.dex_router.map(|router| crate::structs::hex::to_hex(&router)),
+        "nft_factory": here(directory.nft_factory),
+    })
+}
+
+fn evm_address(text: &str, what: &str) -> Result<[u8; 20], String> {
+    crate::structs::hex::from_hex(text)
+        .and_then(|bytes| <[u8; 20]>::try_from(bytes).ok())
+        .ok_or_else(|| format!("{what}: {text} is not an EVM address, 0x and 40 hex digits"))
+}
+
+fn directory_from_json(mut fields: Fields) -> Result<Directory, String> {
+    let gateway = fields.optional_parse("gateway")?;
+    let btc_gateway = fields.optional_parse("btc_gateway")?;
+    let evm_gateways = fields
+        .list("evm_gateways")?
+        .into_iter()
+        .map(|mut item| {
+            let chain_id = item.whole("chain_id")?;
+            let gateway = evm_address(&item.text("gateway")?, "directory.evm_gateways")?;
+            item.done()?;
+
+            Ok(EvmGateway { chain_id, gateway })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let swap = fields.optional_parse("swap")?;
+    let dex = fields.optional_parse("dex")?;
+    let dex_router = match fields.get("dex_router")? {
+        Value::Null => None,
+        _ => Some(evm_address(&fields.text("dex_router")?, "directory.dex_router")?),
+    };
+    let nft_factory = fields.optional_parse("nft_factory")?;
+    let directory = Directory { gateway, btc_gateway, evm_gateways, swap, dex, dex_router, nft_factory };
+    fields.done()?;
+
+    Ok(directory)
+}
+
+/// A directory from approve-change's --directory: the same JSON as a genesis file's.
+pub fn directory_from_text(text: &str) -> Result<Directory, String> {
+    let value: Value = serde_json::from_str(text).map_err(|err| format!("not JSON: {err}"))?;
+    let directory = directory_from_json(Fields::of(&value, "directory")?)?;
+
+    match directory.problem() {
+        Some(problem) => Err(problem.to_string()),
+        None => Ok(directory),
+    }
 }
 
 /// A federation from approve-change's --federation: the same JSON as a genesis file's.
@@ -840,6 +902,11 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.optional_object("federation")?.map(federation_from_json).transpose()?,
         false => None,
     };
+    // Absent from files written before it: those chains keep their id, announcing no directory.
+    let directory = match root.map.contains_key("directory") {
+        true => root.optional_object("directory")?.map(directory_from_json).transpose()?,
+        false => None,
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -862,6 +929,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         names,
         collections,
         federation,
+        directory,
     };
     root.done()?;
 
@@ -1179,6 +1247,7 @@ mod tests {
         genesis.names = None;
         genesis.collections = None;
         genesis.federation = None;
+        genesis.directory = None;
         let mut value = to_json(&genesis);
         value.as_object_mut().unwrap().remove("max_block_bytes");
         let read = from_json(&value).unwrap();
@@ -1306,6 +1375,44 @@ mod tests {
         short["signers"] = json!(["0x1234"]);
 
         assert!(federation_from_text(&short.to_string()).unwrap_err().contains("compressed key"));
+    }
+
+    #[test]
+    fn a_directory_round_trips_changes_the_chain_and_a_file_without_one_announces_nothing() {
+        let directory = Directory {
+            gateway: Some(Address::Contract([1; 32])),
+            evm_gateways: vec![EvmGateway { chain_id: 1, gateway: [3; 20] }, EvmGateway { chain_id: 8453, gateway: [4; 20] }],
+            swap: Some(Address::Contract([5; 32])),
+            dex_router: Some([7; 20]),
+            ..Directory::default()
+        };
+        let genesis = Genesis { directory: Some(directory.clone()), ..dev(DevChain::Pow) };
+        let value = to_json(&genesis);
+
+        assert_eq!(value["directory"]["evm_gateways"][1]["chain_id"], 8453);
+        assert_eq!((&value["directory"]["btc_gateway"], &value["directory"]["dex_router"]), (&Value::Null, &json!(format!("0x{}", "07".repeat(20)))));
+        assert_eq!(from_json(&value).unwrap(), genesis);
+        assert_ne!(genesis.block().id(), Genesis { directory: None, ..genesis.clone() }.block().id());
+
+        let mut without = value.clone();
+        without.as_object_mut().unwrap().remove("directory");
+
+        assert_eq!(from_json(&without).unwrap().block().id(), Genesis { directory: None, ..genesis.clone() }.block().id());
+
+        // approve-change's flag reads the same JSON, and checks it as genesis would.
+        assert_eq!(directory_from_text(&value["directory"].to_string()).unwrap(), directory);
+
+        let mut wrong = value["directory"].clone();
+        wrong["evm_gateways"] = json!([{ "chain_id": 5, "gateway": "0x1234" }]);
+
+        assert!(directory_from_text(&wrong.to_string()).unwrap_err().contains("EVM address"));
+        wrong["evm_gateways"] = json!([{ "chain_id": 5, "gateway": format!("0x{}", "11".repeat(20)) }, { "chain_id": 1, "gateway": format!("0x{}", "22".repeat(20)) }]);
+
+        assert!(directory_from_text(&wrong.to_string()).unwrap_err().contains("order"));
+        wrong["evm_gateways"] = json!([]);
+        wrong["swap"] = json!(Address::Ed25519([1; 32]).to_string());
+
+        assert!(directory_from_text(&wrong.to_string()).unwrap_err().contains("contracts"));
     }
 
     #[test]

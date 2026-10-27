@@ -619,7 +619,7 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **A pool's chart** comes from the node's event index: a node without `--index-events` shows
   none.
 - **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
-  `--dex-contract`, `--dex-router`, or the name `dex`.
+  the directory's `dex` and `dex_router`, or `--dex-contract` and `--dex-router`.
 
 ## Bridges
 
@@ -647,6 +647,32 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Withdrawals start at 1,000 satoshis,** and a release pays at most 50.
 - **Releases are given without their witnesses:** the gateway reads and checks the base
   transaction, as its txid hashes it; the witnesses are assembled after, from the board.
+
+## The directory
+
+- **Names no longer find contracts:** `swap`, `dex`, `nfts` and `gateway` under the suffix were
+  anyone's to register first, and a wallet would have paid whoever did. The chain's directory
+  names them now, decided by governance; a name registered for one finds nothing.
+- **Genesis writes its directory and federation into the state,** so their state roots, and so
+  their genesis ids, differ from a chain with none: one entry each, proven like a balance.
+- **The node's own word comes last:** `--swap-contract`, `--dex-contract` and `--dex-router`
+  still answer when the directory names none.
+- **A signer checks the directory first:** `chainv4 bridge sign` and `relay` refuse a gateway
+  peer on an EVM chain other than the one the directory names there.
+
+## Bridges in the apps
+
+- **Deposit addresses are computed, not asked:** the wallet builds the account's deposit address
+  from the proven federation, so a node cannot hand it one of its own; the gateway's
+  `deposit_script` says the same, for the CLI.
+- **The light client keeps a deposit's proof as it finds it:** its block, the transaction
+  without its witness, its place and Merkle path, for Mint wBTC. Coins found before an update
+  have none: show them through Esplora.
+- **The wallet lists your transfers out and withdrawals among the latest 20** each, by who sent
+  them, which `gateway.lua` and `btc_gateway.lua` record now (`sent`'s 13th value,
+  `withdrawal`'s 4th).
+- **From an EVM chain, a token's amount is in its smallest units,** as the wallet does not ask
+  the token there its decimals.
 
 ## Crypto and the federation
 
@@ -687,8 +713,8 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Pictures leak what you look at:** the wallet fetches metadata and pictures only once Settings
   lets it, through the proxy, and the gateway sees each one.
 - **NFT swaps need the current contracts:** swap.lua and Swap.sol from before NFTs have no `item`,
-  and Swap.sol's CREATE2 address changed with its code: deploy both again and point `swap.dev` at
-  the new swap.lua.
+  and Swap.sol's CREATE2 address changed with its code: deploy both again and name the new swap.lua
+  in the directory.
 - **Terms that lock an NFT encode with a 3,** which apps from before cannot read; terms that lock
   none keep the 2 they had.
 
@@ -725,7 +751,7 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   and **I checked it myself** act sooner.
 - **The swap contracts now say the block a swap was locked in.** One deployed before (the VPS's
   first `swap.lua`) leaves finality unknown, so everything through it is held until overridden:
-  deploy the current `swap.lua` and point `swap.dev` at it. `Swap.sol`'s `get` returns one more
+  deploy the current `swap.lua` and name it in the directory. `Swap.sol`'s `get` returns one more
   value, and its address through the deployment proxy changed with its code.
 - **chainv4's JSON-RPC tags mean what Ethereum's do now:** `finalized` is the finalized
   checkpoint's block and `safe` the justified one's. On a chain without finality there is no such

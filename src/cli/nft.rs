@@ -307,21 +307,12 @@ impl Nft {
         }
     }
 
-    /// The factory: given, or the one the name nfts resolves to.
+    /// The factory: given, or the one the chain's directory names.
     fn factory(&self) -> CliResult<Address> {
-        if let Some(factory) = self.args.factory {
-            return Ok(factory);
+        match self.args.factory {
+            Some(factory) => Ok(factory),
+            None => super::send::announced(&self.agent, &self.node, "nft_factory")?
+                .ok_or_else(|| "no factory: the chain's directory names none. Give --factory, or deploy one with chainv4 nft factory".into()),
         }
-
-        #[cfg(feature = "names")]
-        {
-            let suffix = ok(self.agent.get(format!("{}/names", self.node)).call()).ok().and_then(|names| names["suffix"].as_str().map(str::to_string));
-
-            if let Some(found) = suffix.and_then(|suffix| super::send::resolve(&self.agent, &self.node, &format!("{}.{suffix}", crate::nft::FACTORY_NAME)).ok()) {
-                return Ok(found);
-            }
-        }
-
-        Err("no factory: the name nfts resolves to none. Give --factory, or deploy one with chainv4 nft factory".into())
     }
 }

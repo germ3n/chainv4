@@ -408,6 +408,10 @@ as it answered at its deploy or last upgrade, each `null` when it exports none.
 
 `GET /status` also names the [bridges' federation](bridges.md#the-federation) in force, in
 `federation`: its `signers`, `threshold`, depths and `version`, or `null` on a chain with none.
+And the chain's [directory](governance.md#directory), in `directory`: its `gateway`,
+`btc_gateway`, `evm_gateways`, `swap`, `dex`, `dex_router` and `nft_factory`, each `null` while
+there is none, or `null` on a chain without one. Both are state entries,
+`/proofs/validators/{key}` proves them: `change:federation` and `change:directory`, as hex.
 
 `GET /contracts/{address}` says the same of one contract in `collection`, `null` when it is none;
 `GET /status` says what makes one in `collections`, `{"nft": [...], "multi": [...]}`, as genesis

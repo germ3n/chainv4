@@ -630,22 +630,15 @@ fn agreed(text: &str) -> CliResult<Terms> {
     }
 }
 
-/// The swap contract a new offer uses: the one the name swap under the chain's suffix resolves
-/// to, or else the one the node advertises.
+/// The swap contract a new offer uses: the one the chain's directory names, or else the one the
+/// node advertises.
 pub(super) fn default_contract(agent: &ureq::Agent, node: &str) -> CliResult<Address> {
-    // A build without names finds it by the node's word alone.
-    #[cfg(feature = "names")]
-    {
-        let suffix = ok(agent.get(format!("{node}/names")).call()).ok().and_then(|names| names["suffix"].as_str().map(str::to_string));
+    let status = ok(agent.get(format!("{node}/status")).call())?;
 
-        if let Some(contract) = suffix.and_then(|suffix| super::send::resolve(agent, node, &format!("{}.{suffix}", crate::swap::SWAP_NAME)).ok()) {
-            return Ok(contract);
-        }
-    }
-
-    ok(agent.get(format!("{node}/status")).call())?["swap"]["contract"]
+    status["directory"]["swap"]
         .as_str()
-        .ok_or("no swap contract: none resolves by name, nor does the node name one. Give --contract")?
+        .or_else(|| status["swap"]["contract"].as_str())
+        .ok_or("no swap contract: the chain's directory names none, nor does the node. Give --contract")?
         .parse()
         .map_err(|_| "the node named a swap contract that is not an address".into())
 }

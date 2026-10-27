@@ -125,7 +125,9 @@ fn retargets_follow_bitcoin_core_s_own_vectors() {
 fn regtest_headers_follow_the_most_work_and_the_time_rules() {
     let relay = Relay::new();
     let start = mined(&[0; 32], &[0; 32], 1_700_000_000, REGTEST);
+    assert_eq!(relay.call("network_name", &[]).unwrap(), [TxCallArgumentType::Nil]);
     relay.call("start", &[bytes(&start), number(0), TxCallArgumentType::String("regtest".into())]).unwrap();
+    assert_eq!(relay.call("network_name", &[]).unwrap(), [TxCallArgumentType::String("regtest".into())]);
 
     // Chain a: three headers on the start, a minute apart.
     let mut a = vec![sha256d(&start)];

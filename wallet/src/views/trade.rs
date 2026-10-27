@@ -131,21 +131,18 @@ impl Default for TradeState {
     }
 }
 
-/// The name the DEX is found by on this chain, such as dex.dev.
-pub fn dex_name(chain: &crate::chain::Chain) -> Option<String> {
-    chain.names.as_ref().map(|names| format!("{}.{}", chainv4::dex::DEX_NAME, names.suffix))
-}
-
-/// The native DEX: the one its name resolves to, proven, or else the one the node names.
+/// The native DEX: the one the chain's directory names, proven, or else the one the node names.
 fn dex(ctx: &Ctx) -> Option<Address> {
-    let named = dex_name(ctx.chain).and_then(|name| ctx.chain.resolve(&name)).and_then(|resolved| resolved.target());
+    let announced = ctx.chain.announced().and_then(|directory| directory.dex);
 
-    named.or_else(|| ctx.dex.0.and_then(|text| text.parse().ok()))
+    announced.or_else(|| ctx.dex.0.and_then(|text| text.parse().ok()))
 }
 
-/// The EVM DEX's router, as the node names it.
+/// The EVM DEX's router: the directory's, proven, or else the one the node names.
 fn router(ctx: &Ctx) -> Option<[u8; 20]> {
-    ctx.dex.1.and_then(from_hex).and_then(|bytes| bytes.try_into().ok())
+    let announced = ctx.chain.announced().and_then(|directory| directory.dex_router);
+
+    announced.or_else(|| ctx.dex.1.and_then(from_hex).and_then(|bytes| bytes.try_into().ok()))
 }
 
 fn values(result: &Result<Value, crate::node::Failure>) -> Option<Vec<String>> {

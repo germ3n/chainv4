@@ -104,6 +104,20 @@ pub struct Coin {
     /// The block it was mined in.
     pub height: u32,
     pub spent: Option<Spent>,
+    /// What shows it to a contract that follows Bitcoin's headers, as the bridge's Bitcoin
+    /// gateway does: kept from the block it came in. None for coins found before it was kept.
+    #[serde(default)]
+    pub proof: Option<CoinProof>,
+}
+
+/// A coin's transaction in its block: the block's hash and the transaction without its witness,
+/// in hex, its place there, and its Merkle path, each sibling in Bitcoin's own byte order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoinProof {
+    pub block: String,
+    pub raw: String,
+    pub index: u32,
+    pub path: String,
 }
 
 /// What spent a coin: the transaction, its block, and the input's witness, each item in hex.
@@ -425,9 +439,13 @@ fn peer(text: &str, net: Net) -> Option<TrustedPeer> {
 /// Takes a block's transactions in: outputs paying a watched script become coins, and inputs
 /// spending a coin mark it spent, with their witness.
 pub fn scan(seen: &mut Seen, block: &Block, height: u32, watched: &BTreeSet<Vec<u8>>) -> bool {
-    let mut found = false;
+    use bitcoin::hashes::Hash;
 
-    for tx in &block.txdata {
+    let mut found = false;
+    // The block's transaction ids, in Bitcoin's own byte order, once a coin needs its path.
+    let mut ids: Option<Vec<[u8; 32]>> = None;
+
+    for (index, tx) in block.txdata.iter().enumerate() {
         let txid = tx.compute_txid().to_string();
 
         for input in &tx.input {
@@ -443,7 +461,16 @@ pub fn scan(seen: &mut Seen, block: &Block, height: u32, watched: &BTreeSet<Vec<
             let script = output.script_pubkey.as_bytes();
 
             if watched.contains(script) && !seen.coins.iter().any(|coin| coin.txid == txid && coin.vout == vout as u32) {
-                seen.coins.push(Coin { txid: txid.clone(), vout: vout as u32, value: output.value.to_sat(), script: hex(script), height, spent: None });
+                let ids = ids.get_or_insert_with(|| block.txdata.iter().map(|tx| tx.compute_txid().to_byte_array()).collect());
+                let mut base = tx.clone();
+                base.input.iter_mut().for_each(|input| input.witness.clear());
+                let proof = CoinProof {
+                    block: hex(&block.block_hash().to_byte_array()),
+                    raw: hex(&bitcoin::consensus::serialize(&base)),
+                    index: index as u32,
+                    path: chainv4::crypto::bitcoin::merkle_path(ids, index).iter().map(|sibling| hex(sibling)).collect(),
+                };
+                seen.coins.push(Coin { txid: txid.clone(), vout: vout as u32, value: output.value.to_sat(), script: hex(script), height, spent: None, proof: Some(proof) });
                 found = true;
             }
         }

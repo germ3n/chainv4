@@ -465,7 +465,16 @@ impl Wallet {
 
         let wanted = [(Net::Main, self.settings.bitcoin_main), (Net::test(&self.settings.bitcoin_test_network), self.settings.bitcoin_test)];
         let (holders, book) = (&self.holders, &self.book);
-        let scripts = |net: Net| crate::light::scripts(holders, book, net.testnet());
+        // And each account's deposit address to the Bitcoin gateway, for the Bridge page to prove.
+        #[cfg(feature = "bridge")]
+        let deposits = crate::views::bridge::deposit_outputs(&self.chain, holders);
+        #[cfg(not(feature = "bridge"))]
+        let deposits: Vec<Vec<u8>> = Vec::new();
+        let scripts = |net: Net| {
+            let mut scripts = crate::light::scripts(holders, book, net.testnet());
+            scripts.extend(deposits.iter().cloned());
+            scripts
+        };
         self.lights.keep(wanted, &self.settings.proxy, &self.settings.bitcoin_peer, scripts, &self.wake);
     }
 
@@ -491,20 +500,7 @@ impl Wallet {
             self.node.ask(ask);
         }
 
-        #[cfg_attr(not(any(feature = "swap", feature = "dex")), allow(unused_mut))]
-        let mut wanted = self.views.wanted_names();
-
-        // The swap name, proven, for new offers to find the default swap contract by.
-        #[cfg(feature = "swap")]
-        if self.page == views::Page::Swaps {
-            wanted.extend(views::swap_name(&self.chain));
-        }
-
-        // The DEX's name, proven, for the Trade page to find it by.
-        #[cfg(feature = "dex")]
-        if self.page == views::Page::Trade {
-            wanted.extend(views::dex_name(&self.chain));
-        }
+        let wanted = self.views.wanted_names();
 
         for ask in self.chain.names_due(&wanted, time) {
             self.node.ask(ask);

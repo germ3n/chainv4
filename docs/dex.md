@@ -10,7 +10,7 @@ provided it.
 | Code | `contracts/lua/dex.lua`, with `contracts/lua/lp_token.lua` | `contracts/evm/Dex.sol`: `WDEV`, `DexFactory`, `DexPair`, `DexRouter` |
 | Its pools hold | the coin, token-standard tokens, and ERC-20s on chainv4's EVM, in any mix | ERC-20s, the coin wrapped as WDEV |
 | A pool's shares | a token-standard token, cloned for each pool | the pair itself, an ERC-20 |
-| Found by | the name `dex` under the chain's suffix, such as `dex.dev`, else `--dex-contract` | `--dex-router` |
+| Found by | the chain's [directory](governance.md#directory), `dex`, else `--dex-contract` | the directory's `dex_router`, else `--dex-router` |
 | Deadlines | Unix milliseconds | Unix seconds |
 
 The `dex` cargo feature (default on) holds what the apps quote with, `src/dex.rs`. The wallet's
@@ -112,7 +112,8 @@ Then tell clients:
 - start the node with `--dex-contract contract:0x…` and `--dex-router 0x…` (in Docker,
   `DEX_CONTRACT` and `DEX_ROUTER` in `.env`), which `GET /status` names as `dex.contract` and
   `dex.router`;
-- or register the name `dex` (`dex.dev`) for the native DEX, which the apps look up first.
+- or, better, have governance name them in the chain's [directory](governance.md#directory),
+  `dex` and `dex_router`, which the apps take first and the wallet proves.
 
 ## From the command line
 

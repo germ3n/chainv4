@@ -1747,6 +1747,37 @@ mod voting {
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 2, change: Change::Federation(federation(3, &[1, 2, 3, 4])) }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council", feature = "secp256k1"))]
+    #[test]
+    fn a_council_decides_the_directory_without_touching_the_federation() {
+        use crate::governance::{Change, GovernanceConfig};
+        use crate::registry::directory::{Directory, EvmGateway};
+        use crate::registry::changes::Changes;
+
+        let council = GovernanceConfig::Council {
+            members: vec![dev().public().address(), key(70).public().address()],
+            threshold: 2,
+            approval_epochs: 8,
+        };
+        let mut chain = governed(council);
+        let directory = Directory { gateway: Some(Address::Contract([1; 32])), swap: Some(Address::Contract([2; 32])), evm_gateways: vec![EvmGateway { chain_id: 1, gateway: [3; 20] }], ..Directory::default() };
+
+        assert_eq!(Changes::new(&chain.state()).directory().unwrap(), None);
+
+        // A gateway that is no contract is refused; two members decide it.
+        let broken = Change::Directory(Directory { gateway: Some(dev().public().address()), ..directory.clone() });
+
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: broken }).result, Err(failure) if failure.to_string().contains("contracts")));
+
+        for member in [dev(), key(70)] {
+            assert_eq!(send_as(&mut chain, &member, Tx::ApproveChange { version: 0, change: Change::Directory(directory.clone()) }).result, Ok(Effect::Done));
+        }
+
+        assert_eq!(Changes::new(&chain.state()).directory().unwrap(), Some(directory.clone()));
+        assert_eq!(Changes::new(&chain.state()).federation().unwrap(), None, "the federation's version never moves");
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: Change::Directory(directory) }).result, Err(failure) if failure.to_string().contains("decided already")));
+    }
+
     #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
     #[test]
     fn a_council_turns_the_collection_registry_on_for_a_chain_that_kept_none() {

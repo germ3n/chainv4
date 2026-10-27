@@ -66,13 +66,11 @@ pub struct SwapsState {
     evm_heads: HashMap<u64, (u64, Option<u64>)>,
     /// Acting on the open swap before a lock is final, asked for after a warning.
     anyway: bool,
-    /// The chain each EVM JSON-RPC URL serves, once it said.
-    chain_ids: HashMap<String, Result<u64, String>>,
-    /// An EVM transaction on its way.
-    evm: Option<evm::Pending>,
+    /// EVM chains: which URL serves which, the transaction on its way, and what they answered.
+    evm: crate::views::evm::Link<evm::Read>,
     bitcoin: BitcoinForm,
     trouble: Option<String>,
-    /// What came back from Esplora or an EVM chain, for the next frame to take.
+    /// What came back from Esplora, for the next frame to take.
     looked: Arc<Mutex<Vec<Looked>>>,
     /// A Bitcoin spend asked of the offline signer.
     signer: Option<Box<Awaiting>>,
@@ -97,8 +95,7 @@ impl Default for SwapsState {
             evm_asked: HashMap::new(),
             evm_heads: HashMap::new(),
             anyway: false,
-            chain_ids: HashMap::new(),
-            evm: None,
+            evm: Default::default(),
             bitcoin: BitcoinForm { fee_rate: "2".to_string(), ..BitcoinForm::default() },
             trouble: None,
             looked: Arc::default(),
@@ -233,7 +230,6 @@ enum Looked {
     Secret { hash: String, secret: [u8; 32] },
     Broadcast(Result<String, String>),
     Failed(String),
-    Evm(Box<evm::Answer>),
 }
 
 impl SwapsState {
@@ -273,7 +269,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
     theme::title(ui, &palette, "Swaps", "Coins or a token on one chain for coins or a token on another, with no one in between: each side locks under one secret's hash.");
 
     take_looked(ctx, state);
-    evm::learn_chains(ctx, state);
+    evm::take(ctx, state);
+    state.evm.learn_chains(ctx);
     list(ui, ctx, state);
 
     if let Some(index) = state.open.filter(|index| *index < ctx.book.swaps.len()) {
@@ -284,9 +281,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
             *ctx.page = Page::Send;
         }
 
-        if state.evm.is_some() {
+        if state.evm.pending.is_some() {
             ui.add_space(10.0);
-            evm::show(ui, ctx, state);
+            state.evm.show(ui, ctx, "a swap's transaction", "chainv4 · swap");
         }
     }
 
@@ -296,21 +293,17 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
     read(ui, ctx, state);
 }
 
-/// The name the default swap contract is found by on this chain, such as swap.dev.
-pub fn swap_name(chain: &crate::chain::Chain) -> Option<String> {
-    chain.names.as_ref().map(|names| format!("{}.{}", chainv4::swap::SWAP_NAME, names.suffix))
-}
-
-/// The swap contract a new offer's leg on this chain uses: Settings', or the one the swap name
-/// resolves to, proven, or else the one the node names. A swap made uses the one its terms name.
+/// The swap contract a new offer's leg on this chain uses: Settings', or the one the chain's
+/// directory names, proven, or else the one the node names. A swap made uses the one its terms
+/// name.
 fn contract(ctx: &Ctx) -> Option<Address> {
     if let Ok(given) = ctx.settings.swap_contract.trim().parse() {
         return Some(given);
     }
 
-    let named = swap_name(ctx.chain).and_then(|name| ctx.chain.resolve(&name)).and_then(|resolved| resolved.target());
+    let announced = ctx.chain.announced().and_then(|directory| directory.swap);
 
-    named.or_else(|| ctx.swap_contract.and_then(|text| text.parse().ok()))
+    announced.or_else(|| ctx.swap_contract.and_then(|text| text.parse().ok()))
 }
 
 /// A swap's hash, as text, from what the wallet keeps of it.
@@ -345,7 +338,7 @@ fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
                 state.bitcoin = BitcoinForm { fee_rate: "2".to_string(), ..BitcoinForm::default() };
                 state.trouble = None;
                 state.forgetting = false;
-                state.evm = None;
+                state.evm.pending = None;
                 state.anyway = false;
             }
         }
@@ -720,7 +713,7 @@ fn ask_leg(ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, leg: &Leg, now:
             }
         }
         Leg::Evm(leg) if stale(state.evm_asked.get(&hash)) => {
-            if let Some(url) = evm::url_for(ctx, state, leg.chain_id) {
+            if let Some(url) = state.evm.url_for(ctx, leg.chain_id) {
                 state.evm_asked.insert(hash, now);
                 evm::ask_lock(ctx, state, &url, leg, &terms.hash);
                 evm::ask_heads(ctx, state, &url, leg.chain_id);
@@ -743,7 +736,7 @@ fn lock_of(ctx: &Ctx, state: &SwapsState, terms: &Terms, leg: &Leg) -> Option<Re
                 item.clone().and_then(|values| lock.with_chain_item(&values.iter().map(text).collect::<Vec<_>>()))
             }),
         }),
-        Leg::Evm(leg) => Some(match evm::url_for(ctx, state, leg.chain_id) {
+        Leg::Evm(leg) => Some(match state.evm.url_for(ctx, leg.chain_id) {
             None => Err(format!("no JSON-RPC URL for {} under Settings, Swaps", chain_name(leg.chain_id))),
             Some(_) => state.evm_locks.get(&(hash, leg.chain_id)).cloned().unwrap_or_else(|| Err("asking".to_string())),
         }),
@@ -1002,7 +995,7 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                                         _ => format!("{}. {}", step + 1, call.what),
                                     };
                                     // A token's approval may go first; the lock waits for the first leg.
-                                    let ready = state.evm.is_none() && (step + 1 < steps || waiting.is_none());
+                                    let ready = state.evm.pending.is_none() && (step + 1 < steps || waiting.is_none());
 
                                     if theme::primary(ui, &palette, &label, ready).clicked() {
                                         send_evm(ctx, state, &terms, on, call, me.evm);
@@ -1027,7 +1020,7 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                         }
                     }
                     Leg::Evm(on) => {
-                        if theme::quiet(ui, &palette, &format!("Take back your lock on {}", chain_name(on.chain_id))).clicked() && state.evm.is_none() {
+                        if theme::quiet(ui, &palette, &format!("Take back your lock on {}", chain_name(on.chain_id))).clicked() && state.evm.pending.is_none() {
                             send_evm(ctx, state, &terms, on, on.refund_call(&terms.hash), me.evm);
                         }
                     }
@@ -1069,7 +1062,7 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                             }
                         }
                         Leg::Evm(on) => {
-                            if theme::primary(ui, &palette, &format!("Claim on {}", chain_name(on.chain_id)), open && state.evm.is_none()).clicked() {
+                            if theme::primary(ui, &palette, &format!("Claim on {}", chain_name(on.chain_id)), open && state.evm.pending.is_none()).clicked() {
                                 send_evm(ctx, state, &terms, on, on.claim_call(&secret), me.evm);
                             }
                         }
@@ -1122,7 +1115,7 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                     *ctx.changed = true;
                     state.open = None;
                     state.forgetting = false;
-                    state.evm = None;
+                    state.evm.pending = None;
                 }
                 false => state.forgetting = true,
             }
@@ -1135,8 +1128,8 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
 /// Starts a call on an EVM leg on its way, through the chain's RPC, from this account's address
 /// there.
 fn send_evm(ctx: &Ctx, state: &mut SwapsState, terms: &Terms, leg: &EvmLeg, call: chainv4::swap::evm::Call, from: Option<[u8; 20]>) {
-    match (evm::url_for(ctx, state, leg.chain_id), from) {
-        (Some(url), Some(from)) => evm::start(ctx, state, &terms.hash, call, leg.chain_id, url, from),
+    match (state.evm.url_for(ctx, leg.chain_id), from) {
+        (Some(url), Some(from)) => state.evm.start(ctx, to_hex(&terms.hash), call, leg.chain_id, url, from),
         (None, _) => state.trouble = Some(format!("Give a JSON-RPC URL for {} under Settings, Swaps, to send there.", chain_name(leg.chain_id))),
         (_, None) => state.trouble = Some("This account has no Ethereum key to send with.".to_string()),
     }
@@ -1537,7 +1530,6 @@ fn take_looked(ctx: &mut Ctx, state: &mut SwapsState) {
             }
             Looked::Broadcast(Ok(txid)) => state.trouble = Some(format!("Broadcast: {txid}")),
             Looked::Broadcast(Err(why)) | Looked::Failed(why) => state.trouble = Some(why),
-            Looked::Evm(answer) => evm::take(ctx, state, *answer),
         }
     }
 }

@@ -173,8 +173,8 @@ fn a_deposit_there_mints_its_wrapped_token_here_once_enough_signed() {
     let left = bridge.left(1);
 
     assert_eq!((left.kind, left.origin, left.asset.as_slice(), left.name.as_str(), left.decimals), (AssetKind::Token, THERE, usdt.as_slice(), "Tether", 6));
-    assert_eq!(bridge.read(bridge.gateway, "sent", &[number(1)])[11], bytes(&left.digest()));
-    assert_eq!(back.events.last().map(|event| event.data.clone()), Some(vec![TxCallArgumentType::I64(1), TxCallArgumentType::I64(THERE as i64), bytes(&left.digest())]));
+    assert_eq!(bridge.read(bridge.gateway, "sent", &[number(1)])[11..], [bytes(&left.digest()), address(alice)], "and who sent it, for wallets");
+    assert_eq!(back.events.last().map(|event| event.data.clone()), Some(vec![TxCallArgumentType::I64(1), TxCallArgumentType::I64(THERE as i64), bytes(&left.digest()), address(alice)]));
 
     // Signatures over it are kept for a relayer, in the signers' order; one over a transfer that
     // never left is refused.

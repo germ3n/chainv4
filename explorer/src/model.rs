@@ -42,9 +42,24 @@ pub struct Status {
     /// chain that keeps no collection registry.
     #[serde(default)]
     pub collections: Option<Value>,
+    /// The contracts the chain announces: the bridges' gateways, the swap contract, the DEX and
+    /// its router, and the NFT factory, each null while there is none; or none at all.
+    #[serde(default)]
+    pub directory: Option<Value>,
+    /// The bridges' federation in force, with its version, or none.
+    #[serde(default)]
+    pub federation: Option<Value>,
+    /// The chain's id as the bridges name it: what its EVM answers CHAINID with.
+    #[serde(default)]
+    pub chain_id: Option<u64>,
 }
 
 impl Status {
+    /// A contract the chain's directory names, by its key there, such as swap or gateway.
+    pub fn announced(&self, key: &str) -> Option<String> {
+        self.directory.as_ref()?.get(key)?.as_str().map(str::to_string)
+    }
+
     /// What a transaction sent now pays per gas at least, on a chain with fees.
     pub fn base_price(&self) -> Option<&str> {
         self.fees.as_ref()?.get("base_price")?.as_str()

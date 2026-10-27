@@ -341,7 +341,7 @@ impl Verifiable for Tx {
             },
             // Whether the list is one a chain takes is decided when the transaction runs, and so are
             // name prices and collection standards.
-            Tx::ApproveChange { change: Change::Bootnodes(_) | Change::NamePrices(_) | Change::Collections(_) | Change::Federation(_), .. } => Ok(()),
+            Tx::ApproveChange { change: Change::Bootnodes(_) | Change::NamePrices(_) | Change::Collections(_) | Change::Federation(_) | Change::Directory(_), .. } => Ok(()),
             // The signatures are checked when it runs, against the chain's genesis id.
             Tx::Slash { first, second } => {
                 if !first.vote.conflicts(&second.vote) {

@@ -592,12 +592,12 @@ mod send {
         // A window stays genesis's; nothing to withdraw before approving; the council of one
         // decides at once, so there is nothing to withdraw after either.
         let bootnode = "/ip4/203.0.113.7/udp/4001/quic-v1".to_string();
-        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, federation: None, version: None }));
+        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, version: None }));
         let nothing = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, federation: None, version: None }));
+        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, version: None }));
         let decided = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, federation: None, version: None }));
-        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, federation: None, version: None }));
+        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, federation: None, directory: None, version: None }));
+        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, federation: None, directory: None, version: None }));
         let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
         let node = running.stop();
 
@@ -1222,12 +1222,16 @@ mod send {
             evm_depth: 12,
             bitcoin_depth: 2,
         };
-        let running = Running::launch_genesis(true, false, |genesis| Genesis { federation: Some(federation.clone()), ..genesis }, |node| node, Default::default());
+        let me = DevAuthority::dev_keypair().public().address();
+        let hash = crate::structs::hash::HashType::default_chain();
+        // The chain announces the gateway the dev key's fourth transaction deploys: after the
+        // relay, its start, and wBTC's template.
+        let announced = deployed_at(&me, 3, hash);
+        let directory = crate::registry::directory::Directory { btc_gateway: Some(announced), ..Default::default() };
+        let running = Running::launch_genesis(true, false, |genesis| Genesis { federation: Some(federation.clone()), directory: Some(directory.clone()), ..genesis }, |node| node, Default::default());
         let node = format!("http://{}", running.api);
         let mut bitcoin = FakeBitcoin::start();
         let dir = TempDir::new("btc-bridge");
-        let me = DevAuthority::dev_keypair().public().address();
-        let hash = crate::structs::hash::HashType::default_chain();
         let nonce = |node: &str| -> u64 { serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap() };
         let read = |contract: &Address, function: &str, args: serde_json::Value| -> serde_json::Value {
             let body = serde_json::json!({ "contract": contract.to_string(), "function": function, "args": args });
@@ -1237,7 +1241,8 @@ mod send {
         // The relay, from contracts/examples/btc_relay, started at the fake chain's first block.
         let wasm = dir.0.join("btc_relay.wasm");
         fs::write(&wasm, crate::vm::tests::example("btc_relay")).unwrap();
-        let relay = deployed_at(&me, nonce(&node), hash);
+        assert_eq!(nonce(&node), 0);
+        let relay = deployed_at(&me, 0, hash);
         send(running.args(TxArgs::Deploy { lua: None, wasm: Some(wasm), evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
         let start = nonce(&node);
         let esplora = bitcoin.esplora.url.clone();
@@ -1259,7 +1264,8 @@ mod send {
         // The gateway, after its wBTC template, on that relay.
         run(BtcAction::Deploy { relay, fee_cap: 10_000, grace_hours: 1 }, None, None).unwrap();
         let gateway = deployed_at(&me, start + 2, hash);
-        run(BtcAction::Address { recipient: me, network: "main".into() }, Some(gateway), None).unwrap();
+        assert_eq!(gateway, announced);
+        run(BtcAction::Address { recipient: me, network: "main".into() }, None, None).unwrap();
 
         // 50,000 satoshis to the dev key's deposit address, buried two deep, shown, minted.
         let output = read(&gateway, "deposit_script", serde_json::json!([{ "type": "address", "value": me.to_string() }]))[1]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
@@ -1274,7 +1280,7 @@ mod send {
         bitcoin.block(&[], false);
         run(BtcAction::RelaySync { relay, batch: 10 }, None, None).unwrap();
         let txid = FakeBitcoin::display(&crate::crypto::bitcoin::sha256d(&deposit));
-        run(BtcAction::Deposit { txid, vout: 0, recipient: me }, Some(gateway), None).unwrap();
+        run(BtcAction::Deposit { txid, vout: 0, recipient: me }, None, None).unwrap();
         let wbtc: Address = read(&gateway, "wbtc", serde_json::json!([]))[0]["value"].as_str().unwrap().parse().unwrap();
         let wbtc_of = |holder: &Address| read(&wbtc, "balance_of", serde_json::json!([{ "type": "address", "value": holder.to_string() }]))[0]["value"].as_str().unwrap().to_string();
 
@@ -1282,19 +1288,19 @@ mod send {
 
         // 20,000 withdrawn to a bc1q… address, proposed with a 1,000 fee, signed by two signers.
         let to = crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]);
-        run(BtcAction::Withdraw { address: to, sats: 20_000 }, Some(gateway), None).unwrap();
+        run(BtcAction::Withdraw { address: to, sats: 20_000 }, None, None).unwrap();
         assert_eq!(wbtc_of(&me), "30000");
-        run(BtcAction::Propose { fee: 1_000 }, Some(gateway), None).unwrap();
+        run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap();
 
         for secret in [21u8, 22] {
             let key = dir.0.join(format!("signer-{secret}.key"));
             fs::write(&key, Keypair::from_private(PrivateKey::Secp256k1([secret; 32])).to_key_file()).unwrap();
-            run(BtcAction::Sign, Some(gateway), Some(key.clone())).unwrap();
-            run(BtcAction::Sign, Some(gateway), Some(key)).unwrap();
+            run(BtcAction::Sign, None, Some(key.clone())).unwrap();
+            run(BtcAction::Sign, None, Some(key)).unwrap();
         }
 
         // Assembled and broadcast: two signatures and the script in its witness.
-        run(BtcAction::Finish { proposal: 1 }, Some(gateway), None).unwrap();
+        run(BtcAction::Finish { proposal: 1 }, None, None).unwrap();
         let posted = bitcoin.esplora.posted.lock().unwrap().pop().unwrap();
         let (signed, witnessed) = Transaction::read(&crate::structs::hex::from_hex(&format!("0x{posted}")).unwrap()).unwrap();
 
@@ -1307,11 +1313,11 @@ mod send {
         bitcoin.block(std::slice::from_ref(&release), false);
         bitcoin.block(&[], false);
         run(BtcAction::RelaySync { relay, batch: 10 }, None, None).unwrap();
-        run(BtcAction::Released { proposal: 1 }, Some(gateway), None).unwrap();
+        run(BtcAction::Released { proposal: 1 }, None, None).unwrap();
 
         assert_eq!(read(&gateway, "withdrawal", serde_json::json!([{ "type": "u64", "value": "1" }]))[2]["value"], "paid");
         assert_eq!(read(&gateway, "utxo_count", serde_json::json!([]))[0]["value"], "2");
-        assert!(run(BtcAction::Propose { fee: 1_000 }, Some(gateway), None).unwrap_err().to_string().contains("no withdrawals are queued"));
+        assert!(run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap_err().to_string().contains("no withdrawals are queued"));
         running.stop();
     }
 

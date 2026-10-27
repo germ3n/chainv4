@@ -28,6 +28,32 @@ pub fn hash160(bytes: &[u8]) -> [u8; 20] {
     <ripemd::Ripemd160 as ripemd::Digest>::digest(Sha256::digest(bytes)).into()
 }
 
+/// A block's Merkle root over its transactions' ids, in Bitcoin's own byte order: each row's
+/// pairs hashed with SHA-256 twice, the last of an odd row paired with itself.
+pub fn merkle_root(txids: &[[u8; 32]]) -> [u8; 32] {
+    let mut row = txids.to_vec();
+
+    while row.len() > 1 {
+        row = row.chunks(2).map(|pair| sha256d(&[pair[0], *pair.last().expect("a pair holds one at least")].concat())).collect();
+    }
+
+    row.first().copied().unwrap_or([0; 32])
+}
+
+/// A transaction's Merkle path in its block: its sibling in each row, from its own up, as the
+/// Bitcoin relay's includes takes them, the place's bits choosing left or right.
+pub fn merkle_path(txids: &[[u8; 32]], index: usize) -> Vec<[u8; 32]> {
+    let (mut row, mut at, mut path) = (txids.to_vec(), index, Vec::new());
+
+    while row.len() > 1 {
+        path.push(*row.get(at ^ 1).unwrap_or(&row[at]));
+        row = row.chunks(2).map(|pair| sha256d(&[pair[0], *pair.last().expect("a pair holds one at least")].concat())).collect();
+        at /= 2;
+    }
+
+    path
+}
+
 /// Signs a message: the double SHA-256 of it, 64 bytes, r then s, s always low.
 ///
 /// Panics on bytes that are not a private key, which a PrivateKey never holds.
@@ -48,6 +74,43 @@ pub fn address(key: &[u8; 33]) -> Option<[u8; 20]> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merkle_paths_lead_to_the_root_and_block_100000_s_root_is_its_own() {
+        use super::{merkle_path, merkle_root, sha256d};
+
+        // Block 100,000's four transactions, as explorers write them, and its Merkle root.
+        let shown = [
+            "8c14f0db3df150123e6f3dbbf30f8b955a8249b62ac1d1ff16284aefa3d06d87",
+            "fff2525b8931402dd09222c50775608f75787bd2b87e56995a7bdd30f79702c4",
+            "6359f0868171b1d194cbee1af2f16ea598ae8fad666d9b012c8ed2b79a236ec4",
+            "e9a66845e05d5abc0ad04ec80f774a7e585c6e8db975962d069a522137b80c1d",
+        ];
+        let internal = |text: &str| -> [u8; 32] {
+            let mut bytes: [u8; 32] = crate::structs::hex::from_hex(&format!("0x{text}")).unwrap().try_into().unwrap();
+            bytes.reverse();
+            bytes
+        };
+        let txids: Vec<[u8; 32]> = shown.iter().map(|text| internal(text)).collect();
+
+        assert_eq!(merkle_root(&txids), internal("f3e94742aca4b5ef85488dc37c06c3282295ffec960994b2c0d5ac2a25a95766"));
+
+        // Every place in rows of every size, odd ones paired with themselves, folds to the root.
+        for count in 1..=9u8 {
+            let txids: Vec<[u8; 32]> = (0..count).map(|byte| sha256d(&[byte])).collect();
+
+            for index in 0..txids.len() {
+                let (mut hash, mut at) = (txids[index], index);
+
+                for sibling in merkle_path(&txids, index) {
+                    hash = sha256d(&if at % 2 == 0 { [hash, sibling] } else { [sibling, hash] }.concat());
+                    at /= 2;
+                }
+
+                assert_eq!(hash, merkle_root(&txids), "{count} transactions, the one at {index}");
+            }
+        }
+    }
+
     use {super::*, crate::structs::bech32::encode_segwit, crate::structs::hex::from_hex};
 
     fn bytes<const N: usize>(hex: &str) -> [u8; N] {

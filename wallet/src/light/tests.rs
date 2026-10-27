@@ -63,11 +63,43 @@ fn blocks_add_the_coins_paying_watched_scripts_and_mark_what_spends_them() {
 }
 
 #[test]
+fn a_coin_keeps_what_proves_it_to_a_contract_following_bitcoin() {
+    let deposit = vec![0x00, 0x20, 4, 4];
+    let watched: BTreeSet<Vec<u8>> = [deposit.clone()].into();
+    let mut seen = Seen::default();
+    let others: Vec<Transaction> = (0..4u32).map(|n| tx(vec![(Txid::all_zeros(), n, vec![vec![n as u8]])], vec![(vec![0x51], 1)])).collect();
+    // Paid at the third place of five, with a witness the proof leaves out.
+    let paying = tx(vec![(Txid::all_zeros(), 9, vec![vec![0x30; 71], vec![2; 33]])], vec![(vec![0x51], 3), (deposit.clone(), 50_000)]);
+    let txdata = vec![others[0].clone(), others[1].clone(), paying.clone(), others[2].clone(), others[3].clone()];
+    let mut mined = block(txdata.clone());
+    mined.header.merkle_root = mined.compute_merkle_root().unwrap();
+    assert!(scan(&mut seen, &mined, 200, &watched));
+
+    let proof = seen.coins[0].proof.clone().unwrap();
+    let bytes = |text: &str| chainv4::structs::hex::from_hex(&format!("0x{text}")).unwrap();
+    let raw = bytes(&proof.raw);
+
+    // The raw transaction is the base one, hashing to the coin's id; the path leads to the
+    // block's Merkle root, as the relay's includes checks it.
+    assert_eq!(chainv4::crypto::bitcoin::sha256d(&raw), paying.compute_txid().to_byte_array());
+    assert_eq!(proof.index, 2);
+    assert_eq!(bytes(&proof.block), mined.block_hash().to_byte_array().to_vec());
+    let (mut hash, mut at) = (paying.compute_txid().to_byte_array(), proof.index);
+
+    for sibling in bytes(&proof.path).chunks(32) {
+        hash = chainv4::crypto::bitcoin::sha256d(&if at % 2 == 0 { [&hash[..], sibling] } else { [sibling, &hash[..]] }.concat());
+        at /= 2;
+    }
+
+    assert_eq!(hash, mined.header.merkle_root.to_byte_array());
+}
+
+#[test]
 fn what_is_found_is_kept_between_runs() {
     let seen = Seen {
         height: 972_500,
         hash: "00000000000000000001ba187a086ecd0029f8ac4bc7b445822216850844a9ce".into(),
-        coins: vec![Coin { txid: "ab".repeat(32), vout: 1, value: 9, script: "0014".into(), height: 972_450, spent: Some(Spent { txid: "cd".repeat(32), height: 972_460, witness: vec!["00".into()] }) }],
+        coins: vec![Coin { txid: "ab".repeat(32), vout: 1, value: 9, script: "0014".into(), height: 972_450, spent: Some(Spent { txid: "cd".repeat(32), height: 972_460, witness: vec!["00".into()] }), proof: None }],
     };
 
     assert_eq!(serde_json::from_str::<Seen>(&serde_json::to_string(&seen).unwrap()).unwrap(), seen);

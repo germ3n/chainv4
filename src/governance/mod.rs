@@ -221,6 +221,9 @@ pub enum Change {
     #[document(summary = "A new federation for the bridges, replacing genesis's or the last decided: its signers, threshold and depths. Its version is one more than the last's. Contracts read it from the block that decides it on; the gateways on other chains follow it once the old signers sign it over.")]
     #[wincode(tag = 4)]
     Federation(crate::registry::federation::Federation),
+    #[document(summary = "A new directory, replacing genesis's or the last decided: the contracts the chain announces, the bridges' gateways and Gateway.sol on each EVM chain, the swap contract, the DEX and its router, and the NFT factory. What the apps and tools trust from the block that decides it on; it never changes the federation's version.")]
+    #[wincode(tag = 5)]
+    Directory(crate::registry::directory::Directory),
 }
 
 #[document(summary = "The most bootnodes genesis or a change may name.", category = "Governance", see_also = "Change::Bootnodes, Genesis::bootnodes")]
@@ -252,7 +255,7 @@ impl Hashable for Change {
 }
 
 impl Change {
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections or federation.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections, federation or directory.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
@@ -260,6 +263,7 @@ impl Change {
             Change::NamePrices(_) => "name_prices",
             Change::Collections(_) => "collections",
             Change::Federation(_) => "federation",
+            Change::Directory(_) => "directory",
         }
     }
 }

@@ -47,8 +47,8 @@ struct Seen {
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
     let look = ctx.look;
     super::heading(ui, look, "Swaps", "Coins or tokens here for coins on another chain, with no one in between: each side locks under one secret's hash, and claiming one lock shows the secret for the other.", |_| {});
-    let Some(contract) = contract(ctx, state) else {
-        super::note(ui, look, "This chain names no swap contract: the name swap resolves to nothing, and the node names none.");
+    let Some(contract) = contract(ctx) else {
+        super::note(ui, look, "This chain names no swap contract: its directory names none, and neither does the node.");
 
         return;
     };
@@ -73,15 +73,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
     super::section(ui, look, "Recent swaps", |ui| recent(ui, ctx, &contract));
 }
 
-/// The swap contract: the one the name swap resolves to, or the one the node names.
-fn contract(ctx: &mut Ctx, state: &mut SwapsState) -> Option<String> {
-    ask(ctx, state, Ask::Name(chainv4::swap::SWAP_NAME.to_string()));
+/// The swap contract: the one the chain's directory names, or the one the node names.
+fn contract(ctx: &Ctx) -> Option<String> {
+    let status = ctx.store.status.as_ref()?;
 
-    ctx.store
-        .names
-        .get(chainv4::swap::SWAP_NAME)
-        .and_then(|name| name.resolves_to.clone())
-        .or_else(|| ctx.store.status.as_ref()?.swap.as_ref()?.get("contract")?.as_str().map(str::to_string))
+    status.announced("swap").or_else(|| status.swap.as_ref()?.get("contract")?.as_str().map(str::to_string))
 }
 
 fn ask(ctx: &mut Ctx, state: &mut SwapsState, asked: Ask) {
