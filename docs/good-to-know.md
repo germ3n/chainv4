@@ -633,6 +633,21 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **An EVM chain must have its own chain id:** two gateways on chains with the same id cannot tell
   a transfer's ends apart.
 
+## Bitcoin's bridge
+
+- **Hashes are written two ways:** explorers and Esplora write a txid or block hash reversed;
+  the relay and the gateway take and give them in Bitcoin's own byte order, and the gateway's
+  `utxo` keys them so. `chainv4 bridge btc` turns one into the other.
+- **The relay is only as current as what was submitted:** a deposit shows once its block is in the
+  relay, `bitcoin_depth` deep; run `relay-sync` before `deposit` and `released`.
+- **Start main at a retarget:** the relay needs the period's first block to check the next
+  difficulty, so `relay-start` on `main` takes a height divisible by 2016.
+- **A deposit address is per address and per federation:** a new federation makes new ones; pay
+  an old one only within the grace period, after which its deposits do not mint.
+- **Withdrawals start at 1,000 satoshis,** and a release pays at most 50.
+- **Releases are given without their witnesses:** the gateway reads and checks the base
+  transaction, as its txid hashes it; the witnesses are assembled after, from the board.
+
 ## Crypto and the federation
 
 - **New host calls and a precompile are consensus:** a contract calling `crypto` or `federation`,

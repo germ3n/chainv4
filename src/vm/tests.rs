@@ -2081,3 +2081,15 @@ mod crypto;
 
 #[cfg(feature = "bridge")]
 mod gateway;
+
+#[cfg(feature = "bitcoin")]
+mod btc_relay;
+
+#[cfg(feature = "bitcoin")]
+mod btc_gateway;
+
+/// A regtest header mined here, for the CLI's Bitcoin tests.
+#[cfg(feature = "bitcoin")]
+pub(crate) fn btc_relay_mined(prev: &[u8; 32], merkle: &[u8; 32], time: u32, bits: u32) -> Vec<u8> {
+    btc_relay::mined(prev, merkle, time, bits)
+}

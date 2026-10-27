@@ -5,9 +5,9 @@ ERC-20s and NFTs here as tokens and collections, and chainv4's own coin, tokens 
 ERC-20s, ERC-721s and ERC-1155s. An [atomic swap](swaps.md) trades what exists on each chain; a
 bridge mints a claim on what it holds locked on the other.
 
-This page grows with the bridge batches: the federation, the contracts' crypto, and the gateways
-between chainv4 and EVM chains, for coins, tokens and NFTs, are in; Bitcoin, through a light client
-contract, comes next.
+This page grows with the bridge batches: the federation, the contracts' crypto, the gateways
+between chainv4 and EVM chains, for coins, tokens and NFTs, and Bitcoin, through a light client
+contract, are in; the wallet's and the explorer's Bridge pages come next.
 
 ## The federation
 
@@ -124,10 +124,110 @@ chainv4 bridge watch --eth-rpc URL --evm-key signer.key --key payer.key
   paying the gas with `--evm-key`. Anyone may relay.
 - **watch** does both every `--every` seconds.
 
+## Bitcoin
+
+BTC comes here as wBTC, a token of 8 decimals, one for one with satoshis: deposits are proven to a
+Bitcoin light client contract rather than vouched for, and the federation signs what is paid out.
+
+### The relay
+
+`contracts/examples/btc_relay`, in Rust for WebAssembly, is Bitcoin's headers as a contract:
+- **Started once,** by its deployer, at a checkpoint: a header, its height and a network,
+  `start(header, height, network)`. On `main` the height is a difficulty period's first, divisible
+  by 2016.
+- **Anyone submits headers,** up to 2,000 a call, `submit(headers)`, each checked as Bitcoin's
+  nodes check them: its proof of work, the difficulty every 2016 blocks (clamped to four times
+  either way, never easier than the limit), a time after the median of the last 11 and at most two
+  hours past the chain's block time, and a parent it holds.
+- **The most work wins:** a branch with more total work becomes the main chain, as a reorg.
+- **Contracts ask it** `tip()`, `block_at(height)`, `confirmations(block)` (0 off the main chain)
+  and `includes(block, txid, index, path)`, a transaction's Merkle path to the block's root.
+
+| Network | Checks |
+| --- | --- |
+| `main` | Every rule above. |
+| `regtest` | Every rule but the retarget: one difficulty throughout, as Bitcoin's regtest. |
+| `test` | Only that each header meets the difficulty it names: testnet4's and signet's rules are looser than this checks, so it is for testing alone. |
+
+### The gateway
+
+`contracts/lua/btc_gateway.lua` is set up once by its owner, on a relay, with wBTC's template
+(`wrapped.lua`, cloned as Wrapped Bitcoin), the most fee a release may pay, and how long an old
+federation's deposit addresses stay open.
+
+**Depositing.** Every address here has its own deposit address on Bitcoin, under the federation in
+force, a P2WSH any wallet pays:
+
+```
+<its 33 bytes> OP_DROP <threshold> <signer keys…> <count> OP_CHECKMULTISIG
+```
+
+Once a payment to it is `bitcoin_depth` deep in the relay, anyone shows it, `deposit(block, tx,
+index, path, vout, recipient)`, and its value is minted as wBTC to that address, once. The gateway
+holds the output, by its transaction and place, for a later release.
+
+**Withdrawing** burns wBTC for a Bitcoin output script (P2WPKH, P2WSH, P2TR or any other, 80 bytes
+at most) and an amount, 1,000 satoshis or more, and queues it.
+
+**Releasing** pays queued withdrawals:
+1. **Proposed:** anyone proposes a release, an unsigned Bitcoin transaction, with the
+   withdrawals it pays, at most 50. The gateway checks its inputs are outputs it holds unspent, it
+   pays each withdrawal exactly, its one other output is change to the federation in force, and
+   its fee is above nothing and under the cap. Its inputs are then pending.
+2. **Signed:** each signer signs each input as BIP143 has it, SIGHASH_ALL, and posts the 64-byte
+   signature, `sign(proposal, input, signature)`; the gateway checks it against that input's
+   script and amount.
+3. **Broadcast:** once each input holds the threshold, anyone assembles the witnesses,
+   `input_signatures(proposal, input)` giving them in the keys' order, and broadcasts it.
+4. **Shown:** once it is `bitcoin_depth` deep, anyone shows it, `released(proposal, block, tx,
+   index, path)`: its inputs are spent, its change held, and its withdrawals paid.
+
+**A new federation** takes over the deposit addresses: new ones are made under it, and the old
+ones stay open for the grace period. A **sweep** is a release with no withdrawals, paying what
+older federations hold to the one in force.
+
+**Reading it:** `wbtc()`, `deposit_script(address)` (the witness script, the output script and
+the federation's version), `utxo(n)` and `utxo_count()`, `withdrawal(id)` and
+`withdrawal_count()`, `proposal(id)` and `proposal_count()`, `change_script()`.
+
+### The commands
+
+`chainv4 bridge btc` drives both from an Esplora API (`--esplora`, such as
+`https://mempool.space/api`), the gateway given as `--btc-gateway`:
+
+```sh
+chainv4 send deploy --wasm btc_relay.wasm                      # the relay
+chainv4 bridge btc relay-start 0x<relay> 840000 --esplora URL   # its checkpoint
+chainv4 bridge btc relay-sync 0x<relay> --esplora URL           # the headers since; run it often
+chainv4 bridge btc deploy 0x<relay> --fee-cap 50000 --grace-hours 168
+chainv4 bridge btc address ed25519:0x… --btc-gateway 0x…       # where to pay, bc1q…
+chainv4 bridge btc deposit <txid> 0 ed25519:0x… --btc-gateway 0x… --esplora URL
+chainv4 bridge btc withdraw bc1q… 20000 --btc-gateway 0x…
+chainv4 bridge btc propose --fee 1000 --btc-gateway 0x… --esplora URL
+chainv4 bridge btc sign --btc-gateway 0x… --evm-key signer.key  # each signer
+chainv4 bridge btc finish 1 --btc-gateway 0x… --esplora URL     # assembled and broadcast
+chainv4 bridge btc released 1 --btc-gateway 0x… --esplora URL
+chainv4 bridge btc sweep --fee 1000 --btc-gateway 0x… --esplora URL
+```
+
+- **withdraw** takes a `bc1q…` address, P2WPKH or P2WSH, or any other output script as `0x…`
+  (a Taproot output as its `5120…` script).
+- **propose** pays the queued withdrawals, oldest first, up to 50, from what the gateway holds
+  unspent, in the order it took it; change under dust (546 satoshis) goes to the fee.
+- **sweep** pays everything older federations hold to the one in force.
+- **sign** signs every input of every open release with the signer's key, skipping what it signed.
+
 ## Caveats
 
-- **The federation is trusted:** a threshold of its signers could mint wrapped assets for nothing.
-  Bitcoin deposits will be proven by a light client contract instead.
+- **The federation is trusted:** a threshold of its signers could mint wrapped assets for nothing
+  from EVM chains. Bitcoin deposits are proven to the relay instead, but what the gateway holds is
+  still theirs to spend: a threshold could pay it anywhere on Bitcoin, as with Liquid or WBTC.
+- **The relay follows the most work it has been shown.** Until someone submits the real chain's
+  headers, a branch mined in secret with more work than what was submitted could prove a deposit
+  that never was: keep it synced, and keep `bitcoin_depth` above what an attacker could mine.
+- **A release that never confirms holds its inputs:** once proposed, they are pending until it is
+  shown released, so one stuck at too low a fee is bumped by a child that pays for it, spending
+  one of its outputs; replacing a release is in the todo.
 - **The gateway's owner sets its peers.** A signer vouches for what the peer gateway says left it,
   so an owner who repointed a peer could have fake deposits signed. Signers should check each peer
   is the Gateway.sol they expect; moving peers to governance is in the todo.

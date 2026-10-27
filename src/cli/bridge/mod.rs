@@ -3,7 +3,9 @@
 //! EVM chain under the federation in force; peer joins the two; send moves the coin, a token or an
 //! NFT either way. sign is a federation signer's pass, signing what left either side once it is
 //! final; relay takes what the board has enough signatures for to the EVM chain; watch does both
-//! over and over.
+//! over and over. btc does Bitcoin's side ([btc]).
+
+pub(crate) mod btc;
 
 use {
     super::send::{SendArgs, TlsArgs, TxArgs, agent, ok, send},
@@ -23,10 +25,10 @@ use {
     std::path::PathBuf,
 };
 
-const GATEWAY_LUA: &str = include_str!("../../contracts/lua/gateway.lua");
-const WRAPPED_LUA: &str = include_str!("../../contracts/lua/wrapped.lua");
-const NFT_LUA: &str = include_str!("../../contracts/lua/nft.lua");
-const MULTI_LUA: &str = include_str!("../../contracts/lua/multi.lua");
+const GATEWAY_LUA: &str = include_str!("../../../contracts/lua/gateway.lua");
+const WRAPPED_LUA: &str = include_str!("../../../contracts/lua/wrapped.lua");
+const NFT_LUA: &str = include_str!("../../../contracts/lua/nft.lua");
+const MULTI_LUA: &str = include_str!("../../../contracts/lua/multi.lua");
 
 /// How many blocks of an EVM chain's logs are asked for at once, under nodes' limits.
 const LOG_WINDOW: u64 = 5_000;
@@ -52,6 +54,12 @@ pub struct BridgeArgs {
     /// A secp256k1 key file for EVM chains: what pays their gas, and a signer's federation key.
     #[arg(long, global = true)]
     pub evm_key: Option<PathBuf>,
+    /// The Bitcoin gateway here, contracts/lua/btc_gateway.lua, for btc's commands.
+    #[arg(long, global = true)]
+    pub btc_gateway: Option<Address>,
+    /// An Esplora API, such as https://mempool.space/api: where btc's commands read Bitcoin.
+    #[arg(long, global = true)]
+    pub esplora: Option<String>,
 }
 
 #[derive(clap::Subcommand)]
@@ -104,6 +112,11 @@ pub enum BridgeAction {
     /// Delivers to each EVM chain given what left here for it with enough signatures on the
     /// board, paid with --evm-key.
     Relay,
+    /// Bitcoin's side: the light client contract, deposits minting wBTC, and releases.
+    Btc {
+        #[command(subcommand)]
+        action: btc::BtcAction,
+    },
     /// sign and relay, then again after a pause, until stopped.
     Watch {
         #[arg(long, default_value_t = 0)]
@@ -151,6 +164,7 @@ pub fn bridge(args: BridgeArgs) -> CliResult<()> {
         BridgeAction::Send { kind, recipient, amount, asset, id, from_evm } => bridge.send_one(kind_of(kind)?, recipient, *amount, asset.as_deref(), *id, *from_evm),
         BridgeAction::Sign { from_block } => bridge.sign(*from_block),
         BridgeAction::Relay => bridge.relay(),
+        BridgeAction::Btc { action } => bridge.btc(action),
         BridgeAction::Watch { from_block, every } => loop {
             if let Err(err) = bridge.sign(*from_block).and_then(|()| bridge.relay()) {
                 eprintln!("{err}");

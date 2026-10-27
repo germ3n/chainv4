@@ -799,6 +799,16 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   both ways, held at their origin and wrapped elsewhere, on the federation's signatures gathered on
   the board here; `chainv4 bridge` deploys, joins, sends, signs and relays. See
   [Bridges](bridges.md).
+- [x] **Bitcoin's bridge.** A Bitcoin light client contract, `contracts/examples/btc_relay`,
+  checking headers as mainnet's nodes do from a checkpoint, with regtest's and a loose test mode;
+  `btc_gateway.lua` minting wBTC for deposits proven to it, one deposit address per address, and
+  paying withdrawals through releases it checks and the federation signs input by input (BIP143);
+  sweeps to a new federation; `chainv4 bridge btc` from an Esplora API. See
+  [Bridges](bridges.md#bitcoin).
+- [ ] **Bitcoin's bridge: next.** Replacing a release stuck at a low fee (its inputs freed, a new
+  one proposed at a higher one); taproot deposit addresses, smaller and cheaper to spend; the
+  relay pruning headers far below its tip; `chainv4 bridge btc watch`, syncing, signing and
+  finishing on a timer.
 - [ ] **Bridges: next.** The gateway's peers set by governance rather than its owner; carrying a
   federation change to each Gateway.sol, its signers signing `setSigners` through the board; a
   per-transfer and per-day cap; the wallet's and the explorer's Bridge pages (batch 9c).

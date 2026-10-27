@@ -1082,6 +1082,239 @@ mod send {
         running.stop();
     }
 
+/// An Esplora API in miniature, for the Bitcoin bridge's commands: what a test puts in it,
+    /// served at its paths, and what is posted to /tx, kept.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    struct FakeEsplora {
+        url: String,
+        routes: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+        posted: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    impl FakeEsplora {
+        fn start() -> FakeEsplora {
+            use std::io::{BufRead, BufReader, Read, Write};
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let routes: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>> = Arc::default();
+            let posted: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+            let (served, kept) = (routes.clone(), posted.clone());
+
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut first = String::new();
+                    reader.read_line(&mut first).unwrap();
+                    let mut length = 0;
+
+                    loop {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).unwrap();
+
+                        if line.trim().is_empty() {
+                            break;
+                        }
+
+                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+
+                    let mut body = vec![0; length];
+                    reader.read_exact(&mut body).unwrap();
+                    let mut parts = first.split_whitespace();
+                    let (method, path) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default().to_string());
+                    let answer = match method {
+                        "POST" => {
+                            kept.lock().unwrap().push(String::from_utf8(body).unwrap());
+                            Some("posted".to_string())
+                        }
+                        _ => served.lock().unwrap().get(&path).cloned(),
+                    };
+                    let (status, body) = match answer {
+                        Some(body) => ("200 OK", body),
+                        None => ("404 Not Found", "not found".to_string()),
+                    };
+                    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                }
+            });
+
+            FakeEsplora { url, routes, posted }
+        }
+
+        fn serve(&self, path: &str, body: String) {
+            self.routes.lock().unwrap().insert(path.to_string(), body);
+        }
+    }
+
+    /// A regtest chain for the fake Esplora: headers mined at regtest's difficulty, each block's
+    /// transactions with their Merkle proofs.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    struct FakeBitcoin {
+        esplora: FakeEsplora,
+        tip: [u8; 32],
+        height: u64,
+        time: u32,
+    }
+
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    impl FakeBitcoin {
+        fn start() -> FakeBitcoin {
+            let mut chain = FakeBitcoin { esplora: FakeEsplora::start(), tip: [0; 32], height: 0, time: 1_700_000_000 };
+            chain.block(&[], true);
+
+            chain
+        }
+
+        fn display(hash: &[u8]) -> String {
+            let mut bytes = hash.to_vec();
+            bytes.reverse();
+
+            crate::structs::hex::to_hex(&bytes).trim_start_matches("0x").to_string()
+        }
+
+        /// A block on the tip holding a coinbase and these transactions, served as Esplora would.
+        fn block(&mut self, txs: &[Vec<u8>], first: bool) {
+            use crate::crypto::bitcoin::sha256d;
+
+            let coinbase = sha256d(&self.time.to_le_bytes());
+            let ids: Vec<[u8; 32]> = std::iter::once(coinbase).chain(txs.iter().map(|tx| sha256d(tx))).collect();
+            // Two leaves at most here: the root, and each one's sibling as its path.
+            let root = match ids.as_slice() {
+                [one] => *one,
+                [a, b] => sha256d(&[*a, *b].concat()),
+                _ => panic!("one transaction a block here"),
+            };
+            let header = crate::vm::tests::btc_relay_mined(&self.tip, &root, self.time, 0x207f_ffff);
+            let hash = sha256d(&header);
+            let height = if first { 0 } else { self.height + 1 };
+            let esplora = &self.esplora;
+            esplora.serve(&format!("/block-height/{height}"), FakeBitcoin::display(&hash));
+            esplora.serve(&format!("/block/{}/header", FakeBitcoin::display(&hash)), crate::structs::hex::to_hex(&header).trim_start_matches("0x").to_string());
+            esplora.serve("/blocks/tip/height", height.to_string());
+
+            for (tx, id) in txs.iter().zip(&ids[1..]) {
+                let txid = FakeBitcoin::display(id);
+                esplora.serve(&format!("/tx/{txid}/hex"), crate::structs::hex::to_hex(tx).trim_start_matches("0x").to_string());
+                esplora.serve(&format!("/tx/{txid}/merkle-proof"), serde_json::json!({ "block_height": height, "merkle": [FakeBitcoin::display(&coinbase)], "pos": 1 }).to_string());
+            }
+
+            (self.tip, self.height, self.time) = (hash, height, self.time + 600);
+        }
+    }
+
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn bitcoin_is_deposited_as_wbtc_and_withdrawn_through_a_release_the_federation_signs() {
+        use crate::cli::bridge::{BridgeAction, BridgeArgs, bridge};
+        use crate::cli::bridge::btc::BtcAction;
+        use crate::crypto::bitcoin::tx::{Transaction, TxIn, TxOut};
+        use crate::crypto::keypair::{Keypair, PrivateKey};
+        use crate::registry::federation::Federation;
+
+        let federation = Federation {
+            signers: [21u8, 22, 23].iter().map(|byte| crate::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
+            threshold: 2,
+            chain_depth: 20,
+            evm_depth: 12,
+            bitcoin_depth: 2,
+        };
+        let running = Running::launch_genesis(true, false, |genesis| Genesis { federation: Some(federation.clone()), ..genesis }, |node| node, Default::default());
+        let node = format!("http://{}", running.api);
+        let mut bitcoin = FakeBitcoin::start();
+        let dir = TempDir::new("btc-bridge");
+        let me = DevAuthority::dev_keypair().public().address();
+        let hash = crate::structs::hash::HashType::default_chain();
+        let nonce = |node: &str| -> u64 { serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap() };
+        let read = |contract: &Address, function: &str, args: serde_json::Value| -> serde_json::Value {
+            let body = serde_json::json!({ "contract": contract.to_string(), "function": function, "args": args });
+            serde_json::from_str::<serde_json::Value>(&ureq::post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap()["values"].clone()
+        };
+
+        // The relay, from contracts/examples/btc_relay, started at the fake chain's first block.
+        let wasm = dir.0.join("btc_relay.wasm");
+        fs::write(&wasm, crate::vm::tests::example("btc_relay")).unwrap();
+        let relay = deployed_at(&me, nonce(&node), hash);
+        send(running.args(TxArgs::Deploy { lua: None, wasm: Some(wasm), evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
+        let start = nonce(&node);
+        let esplora = bitcoin.esplora.url.clone();
+        let run = |action: BtcAction, btc_gateway: Option<Address>, evm_key: Option<PathBuf>| {
+            bridge(BridgeArgs {
+                action: BridgeAction::Btc { action },
+                node: node.clone(),
+                tls: Default::default(),
+                key: None,
+                gateway: None,
+                eth_rpc: Vec::new(),
+                evm_key,
+                btc_gateway,
+                esplora: Some(esplora.clone()),
+            })
+        };
+        run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }, None, None).unwrap();
+
+        // The gateway, after its wBTC template, on that relay.
+        run(BtcAction::Deploy { relay, fee_cap: 10_000, grace_hours: 1 }, None, None).unwrap();
+        let gateway = deployed_at(&me, start + 2, hash);
+        run(BtcAction::Address { recipient: me, network: "main".into() }, Some(gateway), None).unwrap();
+
+        // 50,000 satoshis to the dev key's deposit address, buried two deep, shown, minted.
+        let output = read(&gateway, "deposit_script", serde_json::json!([{ "type": "address", "value": me.to_string() }]))[1]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
+        let deposit = Transaction {
+            version: 2,
+            inputs: vec![TxIn { txid: [0x5e; 32], vout: 0, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }],
+            outputs: vec![TxOut { value: 50_000, script: output }],
+            lock_time: 0,
+        }
+        .base();
+        bitcoin.block(std::slice::from_ref(&deposit), false);
+        bitcoin.block(&[], false);
+        run(BtcAction::RelaySync { relay, batch: 10 }, None, None).unwrap();
+        let txid = FakeBitcoin::display(&crate::crypto::bitcoin::sha256d(&deposit));
+        run(BtcAction::Deposit { txid, vout: 0, recipient: me }, Some(gateway), None).unwrap();
+        let wbtc: Address = read(&gateway, "wbtc", serde_json::json!([]))[0]["value"].as_str().unwrap().parse().unwrap();
+        let wbtc_of = |holder: &Address| read(&wbtc, "balance_of", serde_json::json!([{ "type": "address", "value": holder.to_string() }]))[0]["value"].as_str().unwrap().to_string();
+
+        assert_eq!(wbtc_of(&me), "50000");
+
+        // 20,000 withdrawn to a bc1q… address, proposed with a 1,000 fee, signed by two signers.
+        let to = crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]);
+        run(BtcAction::Withdraw { address: to, sats: 20_000 }, Some(gateway), None).unwrap();
+        assert_eq!(wbtc_of(&me), "30000");
+        run(BtcAction::Propose { fee: 1_000 }, Some(gateway), None).unwrap();
+
+        for secret in [21u8, 22] {
+            let key = dir.0.join(format!("signer-{secret}.key"));
+            fs::write(&key, Keypair::from_private(PrivateKey::Secp256k1([secret; 32])).to_key_file()).unwrap();
+            run(BtcAction::Sign, Some(gateway), Some(key.clone())).unwrap();
+            run(BtcAction::Sign, Some(gateway), Some(key)).unwrap();
+        }
+
+        // Assembled and broadcast: two signatures and the script in its witness.
+        run(BtcAction::Finish { proposal: 1 }, Some(gateway), None).unwrap();
+        let posted = bitcoin.esplora.posted.lock().unwrap().pop().unwrap();
+        let (signed, witnessed) = Transaction::read(&crate::structs::hex::from_hex(&format!("0x{posted}")).unwrap()).unwrap();
+
+        assert!(witnessed);
+        assert_eq!(signed.inputs[0].witness.len(), 4, "the extra pop, two signatures, the script");
+        assert_eq!((signed.outputs[0].value, signed.outputs[1].value), (20_000, 29_000));
+
+        // Mined and buried: shown released, the withdrawal paid, the change held.
+        let release = signed.base();
+        bitcoin.block(std::slice::from_ref(&release), false);
+        bitcoin.block(&[], false);
+        run(BtcAction::RelaySync { relay, batch: 10 }, None, None).unwrap();
+        run(BtcAction::Released { proposal: 1 }, Some(gateway), None).unwrap();
+
+        assert_eq!(read(&gateway, "withdrawal", serde_json::json!([{ "type": "u64", "value": "1" }]))[2]["value"], "paid");
+        assert_eq!(read(&gateway, "utxo_count", serde_json::json!([]))[0]["value"], "2");
+        assert!(run(BtcAction::Propose { fee: 1_000 }, Some(gateway), None).unwrap_err().to_string().contains("no withdrawals are queued"));
+        running.stop();
+    }
+
     #[cfg(all(feature = "bridge", feature = "swap", feature = "ethereum", feature = "finality-ffg"))]
     #[test]
     fn the_coin_crosses_to_an_evm_chain_and_back_through_the_gateways_and_the_federation() {
@@ -1117,7 +1350,7 @@ mod send {
         let relayer_address = from_key(&[0x42; 32]).unwrap();
         send(b.args(TxArgs::Transfer { to: Address::Secp256k1(relayer_address).into(), amount: u256::from(10u64).pow(20) })).unwrap();
         let run = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None })
         };
         let wait = |what: &str, done: &dyn Fn() -> bool| {
             let started = std::time::Instant::now();
@@ -1134,7 +1367,7 @@ mod send {
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
         assert!(run(BridgeAction::Deploy, None).is_ok());
         let with_gateway = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None })
         };
         with_gateway(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(relayer.clone())).unwrap();
         let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };

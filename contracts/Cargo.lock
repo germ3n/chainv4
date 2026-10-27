@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "btc_relay"
+version = "0.1.0"
+dependencies = [
+ "chainv4-sdk",
+]
+
+[[package]]
 name = "chainv4-sdk"
 version = "0.1.0"
 dependencies = [

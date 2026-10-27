@@ -18,6 +18,9 @@ fn get(lua: &Lua, (): ()) -> mlua::Result<Option<Table>> {
     let table = lua.create_table()?;
     table.set("version", decided.version)?;
     table.set("threshold", decided.federation.threshold)?;
+    table.set("chain_depth", decided.federation.chain_depth)?;
+    table.set("evm_depth", decided.federation.evm_depth)?;
+    table.set("bitcoin_depth", decided.federation.bitcoin_depth)?;
     let signers = lua.create_table()?;
 
     for key in &decided.federation.signers {
@@ -46,7 +49,7 @@ fn federation_lib() {}
     parent = "federation",
     name = "get",
     summary = "The federation in force.",
-    returns = { ty = "table | nil", desc = "version, 0 for genesis's and one more for each decided since; threshold, how many must sign; and signers, their 33-byte compressed secp256k1 keys, in order. nil on a chain with none." },
+    returns = { ty = "table | nil", desc = "version, 0 for genesis's and one more for each decided since; threshold, how many must sign; signers, their 33-byte compressed secp256k1 keys, in order; and chain_depth, evm_depth and bitcoin_depth, how deep each chain's locks must be. nil on a chain with none." },
 )]
 fn federation_get() {}
 

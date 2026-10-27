@@ -707,6 +707,7 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 | `contracts/examples/proxy` | Calling other contracts for a caller, and a reentrant callback. |
 | `contracts/examples/upgradable`, `contracts/lua/proxy.lua` | A proxy built on `fallback` and `delegate`, with its owner and implementation in its own space, that checks a new implementation's layout. |
 | `contracts/examples/token`, `contracts/lua/token.lua` | The [token standard](token-standard.md), held to it by one shared test. |
+| `contracts/examples/btc_relay`, `contracts/lua/btc_gateway.lua` | Bitcoin's headers as a contract, checked by its own rules, and the [bridge](bridges.md#bitcoin) that mints wBTC for deposits proven to it and checks BIP143 signatures over its releases. |
 | `contracts/lua/swap.lua` | An [atomic swap](swaps.md)'s chainv4 leg: the coin or a token locked under a SHA-256 hash for a recipient until a deadline by `ctx.time`, claimed with the secret or refunded after, with `transfer_from` for tokens. |
 | `contracts/lua/dex.lua`, `contracts/lua/lp_token.lua` | The [DEX](dex.md): constant-product pools of the coin, tokens and ERC-20s through `evm.call`, each pool's share token a clone of `lp_token.lua` made with `contracts.clone`. |
 | `contracts/lua/guestbook.lua` | Events with addresses in them, for the event index and the explorer; value passed on with `accounts.transfer`; and a storage layout of a map and a record. |

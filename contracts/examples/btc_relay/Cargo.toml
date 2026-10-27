@@ -1,0 +1,12 @@
+[package]
+name = "btc_relay"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+chainv4-sdk = { path = "../../sdk" }
