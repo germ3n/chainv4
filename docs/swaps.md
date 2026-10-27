@@ -1,22 +1,37 @@
 # Atomic swaps
 
-Coins or a token on chainv4 for bitcoin on Bitcoin, between two people, with no one in between
-and no way for either to take both. Each side locks what it pays under the same hash: on chainv4
-in the swap contract, on Bitcoin in a hash time-locked contract (an HTLC). Whoever claims one
-lock shows the secret behind the hash on that chain, and the other side claims the other lock
-with it. A lock nobody claims in time goes back to whoever made it.
+Coins or a token on one chain for coins or a token on another, between two people, with no one
+in between and no way for either to take both. The chains are chainv4, Bitcoin, and Ethereum or
+any other EVM chain (Sepolia, Base, Arbitrum and so on), in any pair: DEV for bitcoin, ETH for
+DEV, bitcoin for ETH, ETH on Ethereum for ETH on Base.
 
-Behind the default-on `swap` cargo feature: `src/swap/` (the terms and the HTLC),
-`contracts/lua/swap.lua` (chainv4's side), `chainv4 swap` (the CLI) and the wallet's Swaps page.
+Each side locks what it pays under the same hash:
+- on chainv4 in the swap contract;
+- on Bitcoin in a hash time-locked contract (an HTLC);
+- on an EVM chain in Swap.sol.
+
+Whoever claims one lock shows the secret behind the hash on that chain, and the other side claims
+the other lock with it. A lock nobody claims in time goes back to whoever made it.
+
+All of it is behind the default-on `swap` cargo feature:
+
+| Part | Where |
+| --- | --- |
+| The terms, the HTLC, Swap.sol's calls | `src/swap/` |
+| chainv4's side | `contracts/lua/swap.lua` |
+| An EVM chain's side | `contracts/evm/Swap.sol` |
+| The CLI | `chainv4 swap` |
+| The wallet | its Swaps page |
 
 ## How a swap goes
 
 1. **The starter** makes a secret, 32 random bytes, and its SHA-256, the hash. They write an
-   **offer**: what each side pays, the hash, the deadlines and their own keys.
+   **offer**: the two legs (what they pay and what they get, each on its chain), the hash, the
+   deadlines, and who they are on each leg.
 2. **The other side** reads the offer, checks it, and shows back an **answer**: the same terms
-   with their keys added.
-3. **The starter locks first**, with the longer deadline (24 hours by default), on the chain
-   they pay on.
+   with their parts added.
+3. **The starter locks first**, on the leg they pay, with the longer deadline (24 hours by
+   default).
 4. **The other side locks second**, with the shorter deadline (12 hours), once the first lock
    stands, confirmed, with the right amount, recipient and deadline.
 5. **The starter claims the second lock** with the secret, before its deadline. That shows the
@@ -26,42 +41,63 @@ Behind the default-on `swap` cargo feature: `src/swap/` (the terms and the HTLC)
 Either the whole swap happens or neither side loses anything:
 - if the other side never locks, the starter takes their lock back after its deadline;
 - if the starter never claims, both take their locks back, the second side first;
-- once the starter claims, the secret is public, and the other side has until the first
-  deadline, at least four hours more, to claim in turn.
+- once the starter claims, the secret is public, and the other side has until the first deadline,
+  at least four hours more, to claim in turn.
 
 **The secret is the starter's alone until they claim.** Whoever knows it early can claim the
 starter's lock without paying. The wallet keeps it sealed in the vault; the CLI prints it once.
 
 ## The terms
 
-`swap::Terms`, written as a code, `ur:chainv4-swap`, in capitals, as a QR code or copyable text:
+`swap::Terms`, written as a code, `ur:chainv4-swap`, in capitals, as a QR code or copyable text.
 
 | Field | What it is |
 | --- | --- |
-| `chain` | The other chain: `Bitcoin`, or `BitcoinTestnet` for testnet, signet and regtest. Another chain is another tag. |
-| `contract` | The swap contract on chainv4 that the lock goes into, and both sides look in. |
 | `hash` | The SHA-256 of the secret. |
-| `sats` | The bitcoin locked, in satoshis. |
-| `token`, `amount` | What is locked on chainv4: the coin, or a token's contract, and how much in its smallest units. |
-| `starter` | What the starter pays: `Bitcoin` or `Chain`. |
-| `bitcoin_payer`, `bitcoin_receiver` | The HTLC's refund and claim keys: 33-byte compressed bitcoin keys. |
-| `chain_payer`, `chain_receiver` | Who locks on chainv4, and who claims there. |
-| `first_deadline`, `second_deadline` | When the starter's lock and the other's open to a refund: Unix milliseconds. |
+| `first` | The starter's leg: what they pay, locked first. |
+| `second` | The other's leg: what they pay, locked second. |
+| `first_deadline`, `second_deadline` | When each leg's lock opens to a refund: Unix milliseconds. |
 
-An offer leaves out the other side's two keys; an answer has all four. `Terms::check` refuses
-terms with less than 294 satoshis (Bitcoin's dust limit) or nothing on chainv4, deadlines past,
-a second deadline less than four hours (`MIN_GAP_MS`) before the first, keys that are not keys,
-and the same key or address on both sides. An answer must keep every term of the offer: the
-wallet refuses one that changes anything but the other side's keys.
+Each leg is a `swap::Leg` on one chain, with what is locked there, who locks it (its payer) and
+who claims it (its receiver):
+
+| Leg | What it holds |
+| --- | --- |
+| `Chain` | The swap contract; the token, or none for the coin; the amount in smallest units; the payer's and receiver's chainv4 addresses. |
+| `Bitcoin` | Mainnet or a test network; the satoshis; the HTLC's refund and claim keys, 33-byte compressed bitcoin keys. |
+| `Evm` | The chain id (1 Ethereum, 11155111 Sepolia, 8453 Base…); its Swap.sol; the ERC-20 token, or none for the coin; the amount (wei for the coin); the payer's and receiver's 20-byte addresses. |
+
+**Filling in the parts:**
+- An offer has the starter as the first leg's payer and the second's receiver. An answer adds
+  the other side as the first leg's receiver and the second's payer.
+- Who someone is on each kind of chain is a `swap::Parties`: a chainv4 address, a bitcoin key,
+  an EVM address. A leg takes the one its chain needs.
+
+**What `Terms::check` refuses:**
+- both legs on one chain;
+- less than 294 satoshis (Bitcoin's dust limit), or nothing on chainv4 or an EVM chain;
+- deadlines past, or a second deadline less than four hours (`MIN_GAP_MS`) before the first;
+- Bitcoin keys that are not keys, or the zero address on an EVM chain;
+- the same party paying and receiving one leg.
+
+**`Terms::answers`** holds an answer to every term of its offer. The wallet refuses an answer that
+changes anything but the other side's parts.
+
+**Codes made before legs still read.** Those were chainv4 against Bitcoin, and read as the same
+swap in two legs. Terms are written as legs from then on, a 2 first.
 
 ## Deadlines
 
-- **Times, on both chains:** chainv4's lock ends at a block time, `ctx.time`; Bitcoin's lock time
-  is the same deadline in Unix seconds, which `OP_CHECKLOCKTIMEVERIFY` checks against the median
-  time of the last eleven blocks. Nothing needs either chain's height.
+- **Times, on every chain:**
+  - chainv4's lock ends at a block time, `ctx.time`;
+  - an EVM chain's at `block.timestamp`, in whole seconds;
+  - Bitcoin's lock time is the deadline in Unix seconds, which `OP_CHECKLOCKTIMEVERIFY` checks
+    against the median time of the last eleven blocks.
+
+  Nothing needs any chain's height.
 - **Bitcoin's median time runs about an hour behind the clock,** so a Bitcoin refund confirms an
   hour or so after its deadline, not at once.
-- **A block's time may be a little off the clock** on either chain. Leave hours of margin, never
+- **A block's time may be a little off the clock** on any chain. Leave hours of margin, never
   minutes: the defaults are 24 and 12 hours.
 - **Claim early.** A claim sent just before a deadline may be mined after it, when the lock is
   refundable instead.
@@ -69,11 +105,14 @@ wallet refuses one that changes anything but the other side's keys.
 ## chainv4's side: the swap contract
 
 `contracts/lua/swap.lua`, or any contract with the same functions: nothing in the chain treats
-one as special, and any contract can call one. **The terms name the contract a swap uses,** so
-both sides lock and look in the same one, whatever their wallets would pick. A new offer takes:
+one as special, and any contract can call one. **The terms name the contract a leg uses,** so
+both sides lock and look in the same one, whatever their wallets would pick.
+
+A new offer's leg on chainv4 takes, in this order:
 1. the one given: the CLI's `--contract`, or the wallet's Settings, **Swaps**;
-2. else the one the name `swap` under the chain's suffix resolves to, such as `swap.dev`, which
-   whoever runs a swap contract registers, proven by the wallet's light client as any name;
+2. else the one the name `swap` resolves to under the chain's suffix, such as `swap.dev`.
+   Whoever runs a swap contract registers it, and the wallet's light client proves it, as any
+   name;
 3. else the one the node advertises, started with `--swap-contract` (in Docker, `SWAP_CONTRACT`
    in `.env`), which `GET /status` shows as `swap.contract`.
 
@@ -86,8 +125,34 @@ both sides lock and look in the same one, whatever their wallets would pick. A n
 | `get(hash)` | Its state, `none`, `locked`, `claimed` or `refunded`; locker, recipient, token (the zero address for the coin), amount, deadline, and the secret once claimed. |
 
 Hashes and secrets are `0x` and 64 hex digits. A secret must be 32 bytes, as Bitcoin's script
-wants it, so a secret one chain takes the other takes too. Events: `Locked(hash, locker,
+wants it, so a secret one chain takes the others take too. Events: `Locked(hash, locker,
 recipient, token, amount, deadline)`, `Claimed(hash, secret)`, `Refunded(hash)`.
+
+## An EVM chain's side: Swap.sol
+
+`contracts/evm/Swap.sol`, the same functions for the EVM, built with solc 0.8 for Paris, so it
+runs on every EVM chain, the ones without `PUSH0` too:
+
+| Function | What it does |
+| --- | --- |
+| `lock(bytes32 hash, address recipient, uint64 deadline)` | Locks the ETH sent, until `deadline`, Unix **seconds**. |
+| `lockToken(hash, recipient, deadline, address token, uint256 amount)` | Locks an ERC-20, moved with `transferFrom`: approve Swap.sol first. A token that takes a fee as it moves is refused. Tokens that return nothing, as USDT does, are taken. |
+| `claim(bytes32 secret)` | Pays the recipient, before the deadline: SHA-256 through Ethereum's own precompile. Anyone may send it. |
+| `refund(bytes32 hash)` | Pays the locker back, from the deadline on. Anyone may send it. |
+| `get(bytes32 hash)` | State (0 none, 1 locked, 2 claimed, 3 refunded), locker, recipient, token (zero for ETH), amount, deadline, and the secret once claimed. |
+
+Events: `Locked`, `Claimed(hash, secret)`, `Refunded(hash)`. The secret is kept in the
+contract's state as well, so `get` alone shows it, with no log search, which providers limit.
+
+- **One address on every chain.** Swap.sol is deployed through the deterministic deployment
+  proxy (`0x4e59b44847b379578588920ca78fbf26c0b4956c`, on most EVM chains) with no salt. CREATE2
+  then puts it at the same address everywhere (`swap::evm::deployed_address()`), which new offers
+  default to. A chain without the proxy gets a plain create, and its offers name that address.
+- **Deploying it:** `chainv4 swap evm-deploy --eth-rpc URL --key FILE`, with a secp256k1 key
+  holding that chain's coin for the gas. Run again, it says it is there already.
+- **Reaching a chain:** by its JSON-RPC: `--eth-rpc` for the CLI, Settings, **Swaps** for the
+  wallet. A provider's URL, your own node's, or chainv4's own `POST /rpc`, its EVM being an EVM
+  chain too.
 
 ## Bitcoin's side: the HTLC
 
@@ -112,66 +177,128 @@ OP_CHECKSIG
 
 ## From the command line
 
+Legs are written as `--pay` and `--get`, amounts in smallest units:
+
+| Leg | Written as |
+| --- | --- |
+| chainv4 | `chainv4:AMOUNT` or `chainv4:AMOUNT:contract:0x…` for a token |
+| Bitcoin | `bitcoin:SATS`, `bitcoin-testnet:SATS` |
+| An EVM chain | `evm:CHAIN_ID:AMOUNT[:0xTOKEN]`, or by name: `ethereum:`, `sepolia:`, `base:`, `arbitrum-one:`… |
+
+Who you are on each: `--address` (chainv4), `--bitcoin-key` (a public key or key file), and
+`--evm-address` (`0x…` or a secp256k1 key file).
+
 ```sh
-# Alice, who pays bitcoin and starts:
+# Alice pays bitcoin and starts; she gets 0.01 ETH on Sepolia:
 chainv4 swap secret                                # keep the secret; share the hash
-chainv4 swap offer --pays bitcoin --testnet --hash 0x… --sats 100000 --amount 5000000000000000000 \
-  --bitcoin-key alice-btc.key --address ed25519:0x…   # prints the offer's code
+chainv4 swap offer --hash 0x… --pay bitcoin-testnet:100000 --get sepolia:10000000000000000 \
+  --bitcoin-key alice-btc.key --evm-address 0x…    # prints the offer's code
 # Bob:
-chainv4 swap answer UR:CHAINV4-SWAP/… --bitcoin-key bob-btc.key --address ed25519:0x…
-chainv4 swap show UR:CHAINV4-SWAP/…                 # the HTLC's address and script
-# Alice pays the HTLC from her Bitcoin wallet; Bob checks it confirmed, then locks:
-chainv4 swap lock UR:CHAINV4-SWAP/… --key bob.key --node https://…   # into the terms' contract
-# Alice claims on chainv4, showing the secret:
-chainv4 swap claim UR:CHAINV4-SWAP/… --secret 0x… --key alice.key --node https://…
-chainv4 swap status UR:CHAINV4-SWAP/… --node https://…   # claimed, with the secret
+chainv4 swap answer UR:CHAINV4-SWAP/… --bitcoin-key bob-btc.key --evm-address bob-eth.key
+chainv4 swap show UR:CHAINV4-SWAP/…                # both legs, the HTLC's address and script
+# Alice pays the HTLC from her Bitcoin wallet; Bob checks it confirmed, then locks his ETH:
+chainv4 swap lock UR:CHAINV4-SWAP/… --key bob-eth.key --eth-rpc https://… --anyway
+# Alice claims the ETH, showing the secret on Sepolia (anyone may send it):
+chainv4 swap claim UR:CHAINV4-SWAP/… --secret 0x… --key alice-eth.key --eth-rpc https://…
+chainv4 swap status UR:CHAINV4-SWAP/… --eth-rpc https://…   # claimed, with the secret
 # Bob claims the bitcoin with it, and broadcasts what it prints:
 chainv4 swap bitcoin-claim UR:CHAINV4-SWAP/… --secret 0x… --funding <txid>:<vout> --sats 100000 \
   --key bob-btc.key --to tb1q… --fee-rate 2
 ```
 
-`swap refund` and `swap bitcoin-refund` take a lock back after its deadline, and `swap revealed
---tx <hex>` reads the secret from a Bitcoin claim's transaction, for when the starter pays on
-chainv4 and claims the bitcoin first. `swap offer --contract` names a swap contract other than the default.
+**Which leg a command acts on:**
+- `lock` acts on the leg your `--key` pays.
+- `claim` acts on the one it receives, or else the only one not on Bitcoin.
+- `refund` acts on the one it pays.
+- `--leg first|second` picks one outright.
+
+**Locking second checks the first lock first:** it must stand as the terms say on chainv4 or the
+EVM chain, or the lock is refused. A first lock on Bitcoin the CLI cannot see: check it yourself,
+then lock with `--anyway`.
+
+**Other commands:**
+- `swap refund` and `swap bitcoin-refund` take a lock back after its deadline.
+- `swap revealed --tx <hex>` reads the secret from a Bitcoin claim's transaction, for when the
+  starter claims the bitcoin first.
+- `swap offer --contract` and `--evm-contract` name contracts other than the defaults.
 
 ## In the wallet
 
-The **Swaps** page, on an online install: **Start a swap** makes the offer and its secret, kept
-sealed with the rest of the vault; **Read an offer or an answer** reads the other side's code. An
-open swap lays out each side and what to do next:
-- the HTLC's address and amount, as a QR code to pay it from a Bitcoin wallet;
-- **Lock**, and for a token **Let the contract move the token** first, as calls the Send page
-  reviews and signs, on the offline signer too;
-- where chainv4's side stands, asked of the contract every ten seconds; once it is claimed, the
-  secret, which it keeps;
-- claiming and refunding the HTLC: the coins it holds (txid:vout and amount), where they go and
-  the fee; signed with the account's key, or for an account watched from the offline signer, as a
-  PSBT the signer signs, showing that it claims or refunds a swap's coins.
+The **Swaps** page, on an online install:
+- **Start a swap** picks each leg's chain: this chain, Bitcoin, Bitcoin testnet, or an EVM chain
+  from a list, or by id. Then what is locked there, the coin or a token, and for an EVM leg its
+  Swap.sol, filled in as the one on every chain. It makes the offer and its secret, kept sealed
+  with the rest of the vault.
+- **Read an offer or an answer** reads the other side's code.
 
-The wallet does not follow Bitcoin: by default you paste what it needs, a funding outpoint or a
-claim's transaction, and broadcast the signed spend yourself. With an **Esplora** API set in
-Settings, **Swaps** (such as `https://mempool.space/api` or `https://mempool.space/testnet4/api`),
-it looks the HTLC up, finds a claim's secret and broadcasts there, which tells that server your
-swap's addresses. A Bitcoin light client, for the desktop and Android apps, is in the todo.
+An open swap lays out each leg, where it stands, and what to do next:
+- **Where each leg stands,** asked every ten seconds: this chain's from its contract, an EVM
+  chain's from Swap.sol through its JSON-RPC. "Locked as the terms say", or "locked, but not as
+  the terms say" and why. Once a leg is claimed, the secret, which it keeps.
+- **The second lock waits for the first:** its button stays off until the first lock stands as
+  the terms say, wherever the wallet can see it.
+- **The starter claims only a lock that stands:** a second lock short of the terms is flagged,
+  as claiming it would show the secret for less; so are an HTLC's coins below its amount.
+- **This chain's locks, claims and refunds** are calls the Send page reviews and signs, on the
+  offline signer too; for a token, **Let the contract move the token** first.
+- **An EVM chain's** are priced through its JSON-RPC in one batch (nonce, gas price, tip, an
+  estimate), shown with the most they may cost, signed with the account's Ethereum key after
+  biometrics when they are on, sent, and waited for until mined. For an account watched from
+  the offline signer, the wallet shows `ur:eth-sign-request` and reads back its
+  `ur:eth-signature`, as MetaMask asks a hardware wallet.
+- **Bitcoin's HTLC:** its address and amount, as a QR code to pay it from a Bitcoin wallet;
+  claiming and refunding it, with the coins it holds (txid:vout and amount), where they go and
+  the fee. It is signed with the account's key, or, for an account watched from the offline
+  signer, as a PSBT the signer signs, showing that it claims or refunds a swap's coins.
+
+**Settings, Swaps:**
+- **the swap contract here,** when not the node's;
+- **an Esplora API** (such as `https://mempool.space/api` or
+  `https://mempool.space/testnet4/api`), to look the HTLC up, find a claim's secret and
+  broadcast there, which tells that server your swap's addresses;
+- **EVM chains' JSON-RPC,** one URL a line. Each is asked its chain id, and serves that chain's
+  legs; with none, EVM legs cannot be followed.
+
+The wallet does not follow Bitcoin: without Esplora, you paste what it needs, a funding outpoint
+or a claim's transaction, and broadcast the signed spend yourself. A Bitcoin light client, for the
+desktop and Android apps, is in the todo.
 
 ## What to keep in mind
 
 - **Lock second only once the first lock is confirmed,** with the amount, recipient and deadline
-  the terms say. On chainv4 the Swaps page reads it from the contract; on Bitcoin check the HTLC's
-  address on an explorer, or with Esplora.
+  the terms say. The CLI and the wallet check a contract's lock for you; on Bitcoin, check the
+  HTLC's address on an explorer, or with Esplora.
 - **The starter must claim before the second deadline,** and the other side before the first:
   a claim that misses its deadline cannot be mined, and the lock goes back.
-- **A swap pays what it says, not more:** the HTLC is spent whole, to one output, less the fee.
-  Pay it exactly, in one output.
-- **Testnet keys are other keys,** so a testnet swap needs an account of the wallet's words;
-  accounts watched from the signer swap on mainnet, by their paired bitcoin key.
+- **A Bitcoin leg pays what it says, not more:** the HTLC is spent whole, to one output, less the
+  fee. Pay it exactly, in one output.
+- **An EVM leg needs that chain's coin for gas,** on both sides: the claim is a transaction there.
+- **Testnet keys are other keys,** so a testnet Bitcoin leg needs an account of the wallet's
+  words; accounts watched from the signer swap on mainnet, by their paired bitcoin key.
+- **Not yet finality-aware:** a lock in the state may still be reorged away. See the todo.
 
 ## Tested
 
-The HTLC runs on Bitcoin Core itself, on a private regtest chain
-(`cargo test --lib -- --ignored bitcoin_core`, with `bitcoind` on the path): a claim with the
-secret is mined, a refund before its lock time is refused as not final, a claim with the wrong
-secret fails the script, and a refund after its lock time is taken. The contract is tested with
-the coin and a token, its deadlines and refusals; the CLI against a running node, the contract
-found from `GET /status`; and the offline signer's signature over a swap's spend matches the
-swap tools' own, byte for byte.
+- **The HTLC runs on Bitcoin Core itself,** on a private regtest chain
+  (`cargo test --lib -- --ignored bitcoin_core`, with `bitcoind` on the path):
+  - a claim with the secret is mined;
+  - a refund before its lock time is refused as not final;
+  - a claim with the wrong secret fails the script;
+  - a refund after its lock time is taken.
+- **Swap.sol runs on chainv4's EVM,** through whole blocks, with `contracts/evm/Token.sol` for an
+  ERC-20:
+  - the token is locked once approved, and claimed with the secret;
+  - the coin is refused a refund before its deadline and a claim at it, and is refunded after;
+  - the wrong secret, a second lock under one hash, a deadline past and nothing locked are all
+    refused.
+- **The calls are Swap.sol's:** selectors as solc names them, and CREATE2's address checked
+  against EIP-1014's example.
+- **The CLI swaps end to end against a running node:**
+  - chainv4 against Bitcoin;
+  - chainv4 against the node's own EVM, through its JSON-RPC: Swap.sol deployed with
+    `evm-deploy`, the second lock refused until the first stands, both claimed.
+- **The wallet's pieces:**
+  - the EVM pricing from a batch's answers;
+  - the offline signer's signature checked against its request and address;
+  - its signature over a Bitcoin swap spend matching the swap tools' own, byte for byte.
+- **Terms written before legs** read as the same swap.

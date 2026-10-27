@@ -175,7 +175,7 @@ pub fn offered(holders: &[crate::keys::Holder]) -> Vec<(String, [u8; 20])> {
 }
 
 /// Where the offline signer derives one of them, for an account watched from it.
-fn offline(ctx: &Ctx, account: &[u8; 20]) -> Option<Origin> {
+pub(super) fn offline(ctx: &Ctx, account: &[u8; 20]) -> Option<Origin> {
     ctx.holders
         .iter()
         .filter(|holder| holder.keys.is_empty())
@@ -184,7 +184,7 @@ fn offline(ctx: &Ctx, account: &[u8; 20]) -> Option<Origin> {
 }
 
 /// The key to one of them.
-fn secret(ctx: &Ctx, account: &[u8; 20]) -> Option<[u8; 32]> {
+pub(super) fn secret(ctx: &Ctx, account: &[u8; 20]) -> Option<[u8; 32]> {
     ctx.holders.iter().flat_map(|holder| &holder.keys).find_map(|key| match (key.public().address(), key.private()) {
         (Address::Secp256k1(bytes), PrivateKey::Secp256k1(secret)) if bytes == *account => Some(*secret),
         _ => None,

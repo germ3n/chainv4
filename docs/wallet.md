@@ -505,12 +505,19 @@ its transaction or recovered from its hash, under its request's id.
 
 ### Swaps
 
-The **Swaps** page trades coins or a token here for bitcoin, with no one in between: an offer
-and its answer as codes, the swap's secret sealed in the vault, locks and claims on this chain as
-calls the Send page signs, and the HTLC on Bitcoin paid from any Bitcoin wallet and claimed or
-refunded here, by the account's key or, for one watched from the offline signer, as a PSBT the
-signer signs. Settings, **Swaps** names the swap contract when the node does not, and an
-optional Esplora API to look Bitcoin up at. See [Atomic swaps](swaps.md).
+The **Swaps** page trades coins or a token between any two of this chain, Bitcoin and EVM chains
+such as Ethereum, Sepolia or Base, with no one in between. Each swap is two legs:
+- **an offer and its answer** travel as codes, and the swap's secret is sealed in the vault;
+- **where each leg stands** is shown, and the second lock waits until the first stands as the
+  terms say;
+- **this chain's locks and claims** are calls the Send page signs;
+- **an EVM chain's** go through its JSON-RPC: priced, signed with the account's Ethereum key, or
+  by the offline signer through `ur:eth-sign-request`, and waited for until mined;
+- **the HTLC on Bitcoin** is paid from any Bitcoin wallet, and claimed or refunded here, by the
+  account's key or, for one watched from the offline signer, as a PSBT the signer signs.
+
+Settings, **Swaps** names the swap contract when the node does not, an optional Esplora API to
+look Bitcoin up at, and EVM chains' JSON-RPC URLs, one a line. See [Atomic swaps](swaps.md).
 
 ### Bitcoin wallets
 

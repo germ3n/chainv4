@@ -123,7 +123,7 @@ impl Message {
             Message::EthSignature(signature) => return signature.to_cbor().expect("a signature always writes"),
             Message::Bitcoin(request) => return request.to_cbor(),
             #[cfg(feature = "swap")]
-            Message::Swap(terms) => wincode::serialize(terms.as_ref()),
+            Message::Swap(terms) => return terms.to_bytes(),
         }
         .expect("messages always encode")
     }

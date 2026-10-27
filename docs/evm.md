@@ -277,6 +277,13 @@ It has:
 `src/chain/tests/evm.rs` drives every one of them through blocks, and `src/cli/tests.rs` deploys
 and calls it with `chainv4 send`.
 
+Two more, built for Paris so they run on any EVM chain:
+- **`contracts/evm/Swap.sol`** is an [atomic swap](swaps.md)'s leg on an EVM chain: ETH or an
+  ERC-20 locked under a SHA-256 hash until a deadline, claimed with the secret or refunded. Its
+  tests run it here, and `chainv4 swap` reaches it on this chain's `POST /rpc` as on Ethereum's.
+- **`contracts/evm/Token.sol`** is a small ERC-20, its supply to whoever deploys it, which the
+  swap tests lock.
+
 ## Not yet
 
 - **Native calls in traces.** An EVM transaction's receipt has no trace, so the native calls it

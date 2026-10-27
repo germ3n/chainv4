@@ -41,7 +41,7 @@ pub enum Page {
     Activity,
     Names,
     Contracts,
-    /// Atomic swaps with Bitcoin.
+    /// Atomic swaps between this chain, Bitcoin and EVM chains.
     #[cfg(feature = "swap")]
     Swaps,
     Accounts,

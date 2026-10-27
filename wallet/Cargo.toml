@@ -44,7 +44,8 @@ minicbor = { version = "2", default-features = false, features = ["alloc"] }
 
 [features]
 default = ["swap"]
-# Atomic swaps with Bitcoin: the Swaps page, and the offline signer signing a swap's Bitcoin side.
+# Atomic swaps between this chain, Bitcoin and EVM chains: the Swaps page, and the offline signer
+# signing a swap's Bitcoin side.
 swap = ["chainv4/swap"]
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]

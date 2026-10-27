@@ -1,6 +1,8 @@
 use {
     super::*,
     chainv4::crypto::mnemonic::Phrase,
+    chainv4::crypto::secp256k1,
+    chainv4::swap::evm::Call,
 };
 
 fn seed() -> chainv4::crypto::mnemonic::Seed {
@@ -14,61 +16,59 @@ fn bitcoin_key(seed: &chainv4::crypto::mnemonic::Seed, network: Network, index: 
     (secret, public)
 }
 
-/// An offer by Alice, paying bitcoin, and Bob's answer.
+const NOW: u64 = 1_793_000_000_000;
+
+/// An offer by Alice, paying bitcoin for this chain's coin, and Bob's answer.
 fn offered() -> (Terms, Terms, [u8; 32]) {
     let seed = seed();
     let (secret, hash) = secret().unwrap();
-    let now = 1_793_000_000_000;
-    let offer = Terms {
-        chain: Counterparty::BitcoinTestnet,
-        contract: Address::Contract([0x5a; 32]),
-        hash,
-        sats: 80_000,
-        token: None,
-        amount: u256::new(5_000),
-        starter: Pays::Bitcoin,
-        bitcoin_payer: Some(bitcoin_key(&seed, Network::Test, 1).1),
-        bitcoin_receiver: None,
-        chain_payer: None,
-        chain_receiver: Some(Address::Ed25519([0xa; 32])),
-        first_deadline: now + FIRST_DEADLINE_MS,
-        second_deadline: now + SECOND_DEADLINE_MS,
-    };
-    let answer = Terms {
-        bitcoin_receiver: Some(bitcoin_key(&seed, Network::Test, 0).1),
-        chain_payer: Some(Address::Ed25519([0xb; 32])),
-        ..offer.clone()
-    };
+    let alice = Parties { chain: Some(Address::Ed25519([0xa; 32])), bitcoin: Some(bitcoin_key(&seed, Network::Test, 1).1), evm: None };
+    let bob = Parties { chain: Some(Address::Ed25519([0xb; 32])), bitcoin: Some(bitcoin_key(&seed, Network::Test, 0).1), evm: None };
+    let pays = Leg::Bitcoin(BitcoinLeg { testnet: true, sats: 80_000, payer: None, receiver: None });
+    let gets = Leg::Chain(ChainLeg { contract: Address::Contract([0x5a; 32]), token: None, amount: u256::new(5_000), payer: None, receiver: None });
+    let offer = Terms::offer(hash, pays, gets, NOW + FIRST_DEADLINE_MS, NOW + SECOND_DEADLINE_MS, &alice).unwrap();
+    let answer = offer.answer(&bob).unwrap();
 
     (offer, answer, secret)
 }
 
 #[test]
-fn an_answer_keeps_every_term_of_the_offer() {
+fn terms_travel_as_a_code_the_scanner_reads() {
     let (offer, answer, _) = offered();
 
-    assert!(answers(&offer, &answer));
-    assert!(!answers(&offer, &offer), "an offer answers nothing");
-    assert!(!answers(&offer, &Terms { sats: 79_999, ..answer.clone() }), "less bitcoin");
-    assert!(!answers(&offer, &Terms { chain_receiver: Some(Address::Ed25519([0xc; 32])), ..answer.clone() }), "paying someone else");
-    assert!(!answers(&offer, &Terms { first_deadline: answer.first_deadline + 1, ..answer.clone() }));
-    assert!(!answers(&offer, &Terms { contract: Address::Contract([0x66; 32]), ..answer.clone() }), "another contract");
+    assert!(answer.answers(&offer));
 
-    // Terms travel as a code the scanner reads.
-    let shown = Message::Swap(Box::new(answer.clone()));
-    assert_eq!(Message::from_ur(shown.ur_type(), &shown.bytes()).unwrap(), shown);
+    for terms in [offer, answer] {
+        let shown = Message::Swap(Box::new(terms.clone()));
+        assert_eq!(Message::from_ur(shown.ur_type(), &shown.bytes()).unwrap(), shown);
+        assert_eq!(shown.bytes(), terms.to_bytes(), "as the CLI writes them");
+    }
 }
 
 #[test]
-fn the_contracts_answer_reads_as_where_the_swap_stands() {
+fn a_legs_lock_reads_as_where_it_stands() {
+    let (_, terms, _) = offered();
     let value = |text: &str| json!({ "type": "string", "value": text });
+    let leg = &terms.second;
+    let deadline = terms.second_deadline.to_string();
+    let (zero, alice) = (Address::Ed25519([0; 32]).to_string(), Address::Ed25519([0xa; 32]).to_string());
+    let locked = |amount: &str| -> Vec<Value> { ["locked", &alice, &alice, &zero, amount, &deadline, ""].iter().map(|text| value(text)).collect() };
+    let mut state = SwapsState::default();
+    let hash = to_hex(&terms.hash);
 
-    assert!(matches!(chain_state(None), ChainState::Unknown(_)));
-    assert!(matches!(chain_state(Some(&Ok(vec![value("none")]))), ChainState::None));
-    assert!(matches!(chain_state(Some(&Ok(vec![value("locked")]))), ChainState::Locked));
-    let claimed = vec![value("claimed"), value(""), value(""), value(""), value(""), value(""), value("0x5e")];
-    assert!(matches!(chain_state(Some(&Ok(claimed))), ChainState::Claimed { secret } if secret == "0x5e"));
-    assert!(matches!(chain_state(Some(&Err("down".to_string()))), ChainState::Unknown(why) if why == "down"));
+    let read = |state: &SwapsState| {
+        let text = |value: &Value| value["value"].as_str().unwrap().to_string();
+        state.status.get(&hash).cloned().map(|answer| answer.and_then(|values| Lock::from_chain(&values.iter().map(text).collect::<Vec<_>>())))
+    };
+
+    assert_eq!(describe(leg, Some(&Err("asking".to_string())), terms.second_deadline), "not known yet: asking");
+    state.status.insert(hash.clone(), Ok(vec![value("none")]));
+    assert_eq!(describe(leg, read(&state).as_ref(), terms.second_deadline), "nothing locked yet");
+    state.status.insert(hash.clone(), Ok(locked("5000")));
+    assert_eq!(describe(leg, read(&state).as_ref(), terms.second_deadline), "locked as the terms say, waiting for its claim");
+    state.status.insert(hash.clone(), Ok(locked("4000")));
+    assert!(describe(leg, read(&state).as_ref(), terms.second_deadline).starts_with("locked, but not as the terms say"), "less than agreed");
+    assert!(describe(&terms.first, None, terms.first_deadline).contains("HTLC"));
 
     assert_eq!(when(1_000 + 90 * 60_000, 1_000), "in 1 h 30 min");
     assert_eq!(when(1_000, 1_000 + 5 * 60_000), "5 min ago");
@@ -116,4 +116,47 @@ fn a_claim_signed_here_is_the_one_the_offline_signer_signs() {
     // Nowhere to sign, and coins that do not read.
     assert!(sign(None, None, &terms, spend, &form).is_err_and(|why| why.contains("pair it again")));
     assert!(sign(Some(claimer), None, &terms, spend, &BitcoinForm { funding: "nope".to_string(), ..form }).is_err());
+}
+
+fn sepolia_lock() -> Call {
+    let leg = EvmLeg { chain_id: 11155111, contract: [0xc0; 20], token: None, amount: u256::new(7), payer: Some([0xa1; 20]), receiver: Some([0xb2; 20]) };
+
+    leg.lock_calls(&[0x11; 32], NOW).unwrap().remove(0)
+}
+
+#[test]
+fn an_evm_call_is_priced_from_one_batch_of_answers() {
+    let call = sepolia_lock();
+    let reply = |id: u64, result: &str| json!({ "jsonrpc": "2.0", "id": id, "result": result });
+    let batch = json!([reply(2, "0x5"), reply(1, "0xaa36a7"), reply(3, "0x3b9aca00"), reply(4, "0x2"), reply(5, "0xc350")]);
+    let tx = evm::price(&call, 11155111, &batch).unwrap();
+
+    assert_eq!((tx.chain_id, tx.nonce, tx.to, tx.value), (11155111, 5, Some([0xc0; 20]), u256::new(7)), "answers in any order, by id");
+    assert_eq!((tx.max_price, tx.tip), (u256::new(2_000_000_000), u256::new(2)), "twice the price, the tip suggested");
+    assert_eq!(tx.gas_limit, 50_000 + 12_500 + 10_000, "room above the estimate");
+
+    // No tip suggested: one at the whole price.
+    let untipped = json!([reply(1, "0xaa36a7"), reply(2, "0x5"), reply(3, "0x64"), { "id": 4, "error": { "message": "no such method" } }, reply(5, "0x5208")]);
+    assert_eq!(evm::price(&call, 11155111, &untipped).unwrap().tip, u256::new(100));
+
+    // Another chain's RPC, or a call that would fail, is refused.
+    assert!(evm::price(&call, 1, &batch).unwrap_err().contains("another chain"));
+    let failing = json!([reply(1, "0xaa36a7"), reply(2, "0x5"), reply(3, "0x64"), reply(4, "0x1"), { "id": 5, "error": { "message": "execution reverted: lock something" } }]);
+    assert!(evm::price(&call, 11155111, &failing).unwrap_err().contains("lock something"));
+}
+
+#[test]
+fn the_signers_signature_completes_the_transaction_only_for_its_address() {
+    let tx = sepolia_lock().transaction(11155111, 5, 80_000, u256::new(200), u256::new(2));
+    let key = [0x42; 32];
+    let from = secp256k1::address(&secp256k1::public_key(&key).unwrap()).unwrap();
+    let origin = crate::airgap::Origin { account: 0, fingerprint: [1, 2, 3, 4] };
+    let request = crate::hardware::SignRequest::asking(tx.signing_data(), crate::hardware::DataKind::TypedTransaction, Some(tx.chain_id), origin, from, "chainv4 · swap");
+    let (rs, parity) = secp256k1::sign_recoverable(&key, &tx.signing_hash());
+    let signature = crate::hardware::Signature { id: request.id.clone(), signature: [&rs[..], &[parity]].concat(), origin: None };
+
+    assert_eq!(evm::finish(&tx, &request, &signature, from).unwrap().encode(), tx.clone().signed(&key).encode());
+    assert!(evm::finish(&tx, &request, &signature, [0xee; 20]).unwrap_err().contains("another key"));
+    let other = crate::hardware::Signature { id: Some(vec![9; 16]), ..signature };
+    assert!(evm::finish(&tx, &request, &other, from).unwrap_err().contains("another request"));
 }

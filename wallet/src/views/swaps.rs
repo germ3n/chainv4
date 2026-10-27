@@ -1,14 +1,18 @@
-//! Atomic swaps with Bitcoin: coins or a token here for bitcoin there, with no one in between.
-//! Whoever starts makes an offer, a code holding the terms, the secret's hash and their keys, and
-//! keeps the secret in the vault; the other reads it and shows back an answer with their keys.
-//! Then the starter locks first, the other second, each under the same hash, and claims go the
+//! Atomic swaps between any two chains: coins or a token on this chain, Bitcoin, Ethereum or any
+//! EVM chain, for coins or a token on another, with no one in between. Whoever starts makes an
+//! offer, a code holding the two legs, the secret's hash and their parts, and keeps the secret in
+//! the vault; the other reads it and shows back an answer with theirs. Then the starter locks
+//! first, the other second, once the first stands, each under the same hash, and claims go the
 //! other way: the starter's claim shows the secret, which the other claims with in turn.
 //!
-//! chainv4's side goes through the swap contract the node names, as calls the Send page reviews
-//! and signs, on the offline signer too. Bitcoin's side is an HTLC: paid from any Bitcoin wallet,
-//! and claimed or refunded here, signed with this account's bitcoin key, or by the offline signer
-//! as a PSBT. The wallet does not follow Bitcoin: what it needs of it is pasted, or, with an
-//! Esplora API set in Settings, looked up and broadcast there.
+//! This chain's legs go through the swap contract the terms name, as calls the Send page reviews
+//! and signs, on the offline signer too. An EVM chain's go through Swap.sol there, by a JSON-RPC
+//! URL Settings gives ([evm]). Bitcoin's is an HTLC: paid from any Bitcoin wallet, and claimed or
+//! refunded here, signed with this account's bitcoin key, or by the offline signer as a PSBT. The
+//! wallet does not follow Bitcoin: what it needs of it is pasted, or, with an Esplora API set in
+//! Settings, looked up and broadcast there.
+
+mod evm;
 
 use {
     super::scan::Scan,
@@ -32,15 +36,16 @@ use {
     chainv4::structs::hex::{from_hex, to_hex},
     chainv4::structs::tx::{Tx, TxCallArgumentType},
     chainv4::structs::u256::u256,
+    chainv4::swap::evm::{CHAINS, chain_name, deployed_address, parse_address, show_address, symbol},
     chainv4::swap::htlc::{Coins, Spend, revealed},
-    chainv4::swap::{Counterparty, FIRST_DEADLINE_MS, Pays, SECOND_DEADLINE_MS, Terms, secret},
+    chainv4::swap::{BitcoinLeg, ChainLeg, EvmLeg, FIRST_DEADLINE_MS, Leg, Lock, LockState, Parties, SECOND_DEADLINE_MS, Side, Terms, secret},
     egui::{RichText, Ui},
     serde_json::{Value, json},
     std::collections::HashMap,
     std::sync::{Arc, Mutex},
 };
 
-/// How often an open swap asks the contract where it stands.
+/// How often an open swap asks the contracts where its legs stand.
 const ASK_EVERY: f64 = 10.0;
 
 pub struct SwapsState {
@@ -49,12 +54,19 @@ pub struct SwapsState {
     scan: Scan,
     /// An offer read, to answer.
     offered: Option<Box<Terms>>,
-    /// What the contract said of each swap, by its hash, and when it was last asked.
+    /// What this chain's swap contract said of each swap, by its hash, and when it was last asked.
     status: HashMap<String, Result<Vec<Value>, String>>,
     asked: HashMap<String, f64>,
+    /// What Swap.sol said of each swap's EVM leg, by its hash and chain, and when it was asked.
+    evm_locks: HashMap<(String, u64), Result<Lock, String>>,
+    evm_asked: HashMap<String, f64>,
+    /// The chain each EVM JSON-RPC URL serves, once it said.
+    chain_ids: HashMap<String, Result<u64, String>>,
+    /// An EVM transaction on its way.
+    evm: Option<evm::Pending>,
     bitcoin: BitcoinForm,
     trouble: Option<String>,
-    /// What came back from Esplora, for the next frame to take.
+    /// What came back from Esplora or an EVM chain, for the next frame to take.
     looked: Arc<Mutex<Vec<Looked>>>,
     /// A Bitcoin spend asked of the offline signer.
     signer: Option<Box<Awaiting>>,
@@ -71,6 +83,10 @@ impl Default for SwapsState {
             offered: None,
             status: HashMap::new(),
             asked: HashMap::new(),
+            evm_locks: HashMap::new(),
+            evm_asked: HashMap::new(),
+            chain_ids: HashMap::new(),
+            evm: None,
             bitcoin: BitcoinForm { fee_rate: "2".to_string(), ..BitcoinForm::default() },
             trouble: None,
             looked: Arc::default(),
@@ -80,12 +96,34 @@ impl Default for SwapsState {
     }
 }
 
-struct Form {
-    pay_bitcoin: bool,
-    testnet: bool,
-    btc: String,
+/// Which chain a leg of a new offer is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Chain,
+    Bitcoin,
+    BitcoinTestnet,
+    Evm,
+}
+
+/// A leg of a new offer, as typed.
+struct LegForm {
+    kind: Kind,
     amount: String,
     token: String,
+    chain_id: String,
+    contract: String,
+}
+
+impl LegForm {
+    fn new(kind: Kind) -> LegForm {
+        LegForm { kind, amount: String::new(), token: String::new(), chain_id: "11155111".to_string(), contract: show_address(&deployed_address()) }
+    }
+}
+
+struct Form {
+    /// What the starter pays, locked first, and what they get.
+    pay: LegForm,
+    get: LegForm,
     first: String,
     second: String,
 }
@@ -93,11 +131,8 @@ struct Form {
 impl Default for Form {
     fn default() -> Form {
         Form {
-            pay_bitcoin: true,
-            testnet: true,
-            btc: String::new(),
-            amount: String::new(),
-            token: String::new(),
+            pay: LegForm::new(Kind::BitcoinTestnet),
+            get: LegForm::new(Kind::Chain),
             first: (FIRST_DEADLINE_MS / 3_600_000).to_string(),
             second: (SECOND_DEADLINE_MS / 3_600_000).to_string(),
         }
@@ -128,6 +163,7 @@ enum Looked {
     Secret { hash: String, secret: [u8; 32] },
     Broadcast(Result<String, String>),
     Failed(String),
+    Evm(evm::Answer),
 }
 
 impl SwapsState {
@@ -158,18 +194,10 @@ impl SwapsState {
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendState) {
     let palette = *ctx.palette;
-    theme::title(ui, &palette, "Swaps", "Coins or a token here for bitcoin there, with no one in between: each side locks under one secret's hash.");
+    theme::title(ui, &palette, "Swaps", "Coins or a token on one chain for coins or a token on another, with no one in between: each side locks under one secret's hash.");
 
     take_looked(ctx, state);
-    let contract = contract(ctx);
-
-    if contract.is_none() {
-        theme::card(ui, &palette, |ui| {
-            ui.colored_label(palette.warn, "No swap contract found: no name resolves to one, and the node names none. Set one under Settings, Swaps, to make offers; swaps you have use the one their terms name.");
-        });
-        ui.add_space(14.0);
-    }
-
+    evm::learn_chains(ctx, state);
     list(ui, ctx, state);
 
     if let Some(index) = state.open.filter(|index| *index < ctx.book.swaps.len()) {
@@ -178,6 +206,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
         if let Some(prepared) = detail(ui, ctx, state, index) {
             send.prepare(prepared);
             *ctx.page = Page::Send;
+        }
+
+        if state.evm.is_some() {
+            ui.add_space(10.0);
+            evm::show(ui, ctx, state);
         }
     }
 
@@ -192,8 +225,8 @@ pub fn swap_name(chain: &crate::chain::Chain) -> Option<String> {
     chain.names.as_ref().map(|names| format!("{}.{}", chainv4::swap::SWAP_NAME, names.suffix))
 }
 
-/// The swap contract a new offer uses: Settings', or the one the swap name resolves to, proven,
-/// or else the one the node names. A swap made uses the one its terms name.
+/// The swap contract a new offer's leg on this chain uses: Settings', or the one the swap name
+/// resolves to, proven, or else the one the node names. A swap made uses the one its terms name.
 fn contract(ctx: &Ctx) -> Option<Address> {
     if let Ok(given) = ctx.settings.swap_contract.trim().parse() {
         return Some(given);
@@ -202,6 +235,11 @@ fn contract(ctx: &Ctx) -> Option<Address> {
     let named = swap_name(ctx.chain).and_then(|name| ctx.chain.resolve(&name)).and_then(|resolved| resolved.target());
 
     named.or_else(|| ctx.swap_contract.and_then(|text| text.parse().ok()))
+}
+
+/// A swap's hash, as text, from what the wallet keeps of it.
+fn hash_of(record: &SwapRecord) -> Option<String> {
+    Terms::from_text(&record.terms).ok().map(|terms| to_hex(&terms.hash))
 }
 
 fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
@@ -217,11 +255,10 @@ fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
         for (index, record) in ctx.book.swaps.iter().enumerate() {
             let line = match Terms::from_text(&record.terms) {
                 Ok(terms) => format!(
-                    "{} · {} {} for {} · {}",
+                    "{} · {} for {} · {}",
                     if record.started { "started" } else { "answered" },
-                    format::units(&terms.sats.to_string(), 8),
-                    terms.network().symbol(),
-                    terms.amount,
+                    shown(ctx, &terms.first),
+                    shown(ctx, &terms.second),
                     if terms.agreed() { "agreed" } else { "waiting for an answer" }
                 ),
                 Err(why) => why,
@@ -232,14 +269,29 @@ fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
                 state.bitcoin = BitcoinForm { fee_rate: "2".to_string(), ..BitcoinForm::default() };
                 state.trouble = None;
                 state.forgetting = false;
+                state.evm = None;
             }
         }
     });
 }
 
-/// The account in use's keys for a swap: its bitcoin key on the network, and its chainv4 address.
-fn keys(ctx: &Ctx, holder: &Holder, network: Network) -> Result<([u8; 33], Address), String> {
-    let address = *holder.addresses().first().ok_or("an account with no address")?;
+/// What a leg locks, as people read it: 0.001 tBTC, 50 DEV, 0.01 ETH on Sepolia.
+fn shown(ctx: &Ctx, leg: &Leg) -> String {
+    match leg {
+        Leg::Chain(leg) => match leg.token {
+            None => format::amount(&leg.amount.to_string(), ctx.coin.decimals, &ctx.coin.symbol),
+            Some(token) => format!("{} units of {}", leg.amount, format::short(&token.to_string())),
+        },
+        Leg::Bitcoin(leg) => format!("{} {}", format::units(&leg.sats.to_string(), 8), leg.network().symbol()),
+        Leg::Evm(leg) => match leg.token {
+            None => format!("{} on {}", format::amount(&leg.amount.to_string(), 18, symbol(leg.chain_id)), chain_name(leg.chain_id)),
+            Some(token) => format!("{} units of {} on {}", leg.amount, format::short(&show_address(&token)), chain_name(leg.chain_id)),
+        },
+    }
+}
+
+/// The account in use's bitcoin key on a network.
+fn bitcoin_key(ctx: &Ctx, holder: &Holder, network: Network) -> Result<[u8; 33], String> {
     let key = match network {
         Network::Main => holder.publics.iter().find_map(|public| match public {
             PublicKey::Bitcoin(bytes) => Some(*bytes),
@@ -255,10 +307,30 @@ fn keys(ctx: &Ctx, holder: &Holder, network: Network) -> Result<([u8; 33], Addre
     };
 
     match key {
-        Some(key) => Ok((key, address)),
+        Some(key) => Ok(key),
         None if network == Network::Test => Err("Testnet swaps take an account of this wallet's words: its testnet key is theirs alone.".to_string()),
         None => Err("This account has no bitcoin key: pair it again from the signer, or pick another.".to_string()),
     }
+}
+
+/// Who an account is on a swap's chains: its first address here, its first Ethereum key's
+/// address on EVM chains, and, when a leg is on Bitcoin, its bitcoin key on that network.
+fn parties(ctx: &Ctx, holder: &Holder, testnet: Option<bool>) -> Result<Parties, String> {
+    let network = |testnet: bool| if testnet { Network::Test } else { Network::Main };
+
+    Ok(Parties {
+        chain: holder.addresses().first().copied(),
+        bitcoin: testnet.map(|testnet| bitcoin_key(ctx, holder, network(testnet))).transpose()?,
+        evm: holder.publics.iter().find_map(|public| match public.address() {
+            Address::Secp256k1(bytes) => Some(bytes),
+            _ => None,
+        }),
+    })
+}
+
+/// Whether a swap's Bitcoin leg, if it has one, is on a test network.
+fn testnet(terms: &Terms) -> Option<bool> {
+    terms.bitcoin().map(|(_, leg)| leg.testnet)
 }
 
 /// The account's bitcoin key's secret on the network, when this wallet holds it.
@@ -282,32 +354,18 @@ fn secret_key(ctx: &Ctx, holder: &Holder, network: Network) -> Option<[u8; 32]> 
 
 fn start(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
     let palette = *ctx.palette;
-    let coin = ctx.coin.clone();
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Start a swap");
         ui.label(RichText::new("You make the secret and lock first, with the longer deadline. Send the offer's code to the other side, and read their answer below.").color(palette.soft));
         ui.add_space(8.0);
-        let form = &mut state.form;
 
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut form.pay_bitcoin, true, "I pay bitcoin");
-            ui.selectable_value(&mut form.pay_bitcoin, false, "I pay on this chain");
-        });
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut form.testnet, false, "Mainnet");
-            ui.selectable_value(&mut form.testnet, true, "Testnet");
-        });
-        let network = if form.testnet { Network::Test } else { Network::Main };
-        super::row(ui, &palette, network.symbol(), |ui| {
-            ui.add(egui::TextEdit::singleline(&mut form.btc).hint_text("0.001").desired_width(160.0));
-        });
-        super::row(ui, &palette, if form.token.trim().is_empty() { &coin.symbol } else { "Token units" }, |ui| {
-            ui.add(egui::TextEdit::singleline(&mut form.amount).hint_text("50").desired_width(160.0));
-        });
-        super::row(ui, &palette, "Token", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut form.token).hint_text("empty for the coin, or its contract:0x…").desired_width(f32::INFINITY));
-        });
+        leg_form(ui, ctx, &mut state.form.pay, "You pay", "pay");
+        ui.add_space(6.0);
+        leg_form(ui, ctx, &mut state.form.get, "You get", "get");
+        ui.add_space(6.0);
+
+        let form = &mut state.form;
         super::row(ui, &palette, "Deadlines", |ui| {
             ui.add(egui::TextEdit::singleline(&mut form.first).desired_width(40.0));
             ui.label("h for yours,");
@@ -336,38 +394,108 @@ fn start(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
     });
 }
 
+/// One leg of a new offer: its chain, and what is locked there.
+fn leg_form(ui: &mut Ui, ctx: &Ctx, form: &mut LegForm, label: &str, salt: &str) {
+    let palette = *ctx.palette;
+    theme::caps(ui, &palette, label);
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(&mut form.kind, Kind::Chain, "This chain");
+        ui.selectable_value(&mut form.kind, Kind::Bitcoin, "Bitcoin");
+        ui.selectable_value(&mut form.kind, Kind::BitcoinTestnet, "Bitcoin testnet");
+        ui.selectable_value(&mut form.kind, Kind::Evm, "An EVM chain");
+    });
+
+    match form.kind {
+        Kind::Chain => {
+            super::row(ui, &palette, if form.token.trim().is_empty() { &ctx.coin.symbol } else { "Token units" }, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut form.amount).hint_text("50").desired_width(160.0));
+            });
+            super::row(ui, &palette, "Token", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut form.token).hint_text("empty for the coin, or its contract:0x…").desired_width(f32::INFINITY));
+            });
+
+            if contract(ctx).is_none() {
+                ui.colored_label(palette.warn, "No swap contract found here: no name resolves to one, and the node names none. Set one under Settings, Swaps.");
+            }
+        }
+        Kind::Bitcoin | Kind::BitcoinTestnet => {
+            let network = if form.kind == Kind::BitcoinTestnet { Network::Test } else { Network::Main };
+            super::row(ui, &palette, network.symbol(), |ui| {
+                ui.add(egui::TextEdit::singleline(&mut form.amount).hint_text("0.001").desired_width(160.0));
+            });
+        }
+        Kind::Evm => {
+            let chain_id = form.chain_id.trim().parse::<u64>().ok();
+            super::row(ui, &palette, "Chain", |ui| {
+                egui::ComboBox::from_id_salt(("swap-chain", salt)).selected_text(chain_id.map_or("Pick one".to_string(), chain_name)).show_ui(ui, |ui| {
+                    for (id, name, _) in CHAINS {
+                        if ui.selectable_label(chain_id == Some(*id), *name).clicked() {
+                            form.chain_id = id.to_string();
+                        }
+                    }
+                });
+                ui.add(egui::TextEdit::singleline(&mut form.chain_id).hint_text("its id").desired_width(90.0));
+            });
+            let coin = chain_id.map_or("ETH", symbol);
+            super::row(ui, &palette, if form.token.trim().is_empty() { coin } else { "Token units" }, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut form.amount).hint_text("0.01").desired_width(160.0));
+            });
+            super::row(ui, &palette, "Token", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut form.token).hint_text("empty for the coin, or an ERC-20's 0x…").desired_width(f32::INFINITY));
+            });
+            super::row(ui, &palette, "Swap.sol", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut form.contract).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+            });
+        }
+    }
+}
+
+/// A leg from the form.
+fn leg(ctx: &Ctx, form: &LegForm) -> Result<Leg, String> {
+    let units = |text: &str, decimals: u8, what: &str| format::parse_units(text, decimals).and_then(|digits| u256::from_str_radix(&digits, 10).ok()).filter(|amount| *amount != u256::ZERO).ok_or_else(|| format!("an amount {what}"));
+
+    match form.kind {
+        Kind::Chain => {
+            let token = match form.token.trim() {
+                "" => None,
+                text => Some(text.parse::<Address>().map_err(|_| "the token is a contract's address".to_string())?),
+            };
+            let amount = units(&form.amount, if token.is_some() { 0 } else { ctx.coin.decimals }, "to lock on this chain")?;
+            let contract = contract(ctx).ok_or("no swap contract on this chain: set one under Settings, Swaps, or register the swap name for it")?;
+
+            Ok(Leg::Chain(ChainLeg { contract, token, amount, payer: None, receiver: None }))
+        }
+        Kind::Bitcoin | Kind::BitcoinTestnet => {
+            let sats = units(&form.amount, 8, "of bitcoin, such as 0.001")?;
+
+            Ok(Leg::Bitcoin(BitcoinLeg { testnet: form.kind == Kind::BitcoinTestnet, sats: u64::try_from(sats).map_err(|_| "more bitcoin than there is")?, payer: None, receiver: None }))
+        }
+        Kind::Evm => {
+            let chain_id = form.chain_id.trim().parse::<u64>().map_err(|_| "an EVM chain, by its id")?;
+            let token = match form.token.trim() {
+                "" => None,
+                text => Some(parse_address(text)?),
+            };
+            let amount = units(&form.amount, if token.is_some() { 0 } else { 18 }, &format!("to lock on {}", chain_name(chain_id)))?;
+
+            Ok(Leg::Evm(EvmLeg { chain_id, contract: parse_address(&form.contract)?, token, amount, payer: None, receiver: None }))
+        }
+    }
+}
+
 /// An offer from the form, with a new secret kept beside it.
 fn offer(ctx: &Ctx, form: &Form) -> Result<SwapRecord, String> {
     let holder = ctx.holder().ok_or("pick an account first")?;
-    let network = if form.testnet { Network::Test } else { Network::Main };
-    let (key, address) = keys(ctx, holder, network)?;
-    let sats: u64 = format::parse_units(&form.btc, 8).and_then(|digits| digits.parse().ok()).ok_or("an amount of bitcoin, such as 0.001")?;
-    let token = match form.token.trim() {
-        "" => None,
-        text => Some(text.parse::<Address>().map_err(|_| "the token is a contract's address".to_string())?),
-    };
-    let decimals = if token.is_some() { 0 } else { ctx.coin.decimals };
-    let amount = format::parse_units(&form.amount, decimals).and_then(|digits| u256::from_str_radix(&digits, 10).ok()).ok_or("an amount to lock on this chain")?;
+    let (first, second) = (leg(ctx, &form.pay)?, leg(ctx, &form.get)?);
     let hours = |text: &str| text.trim().parse::<u64>().map(|hours| hours * 3_600_000).map_err(|_| "deadlines are whole hours".to_string());
-    let (first, second) = (hours(&form.first)?, hours(&form.second)?);
-    let contract = contract(ctx).ok_or("no swap contract: set one under Settings, Swaps, or register the swap name for it")?;
+    let (first_deadline, second_deadline) = (hours(&form.first)?, hours(&form.second)?);
+    let bitcoin = [&first, &second].into_iter().find_map(|leg| match leg {
+        Leg::Bitcoin(leg) => Some(leg.testnet),
+        _ => None,
+    });
+    let me = parties(ctx, holder, bitcoin)?;
     let (secret, hash) = secret()?;
-    let starter = if form.pay_bitcoin { Pays::Bitcoin } else { Pays::Chain };
-    let terms = Terms {
-        chain: if form.testnet { Counterparty::BitcoinTestnet } else { Counterparty::Bitcoin },
-        contract,
-        hash,
-        sats,
-        token,
-        amount,
-        starter,
-        bitcoin_payer: (starter == Pays::Bitcoin).then_some(key),
-        bitcoin_receiver: (starter == Pays::Chain).then_some(key),
-        chain_payer: (starter == Pays::Chain).then_some(address),
-        chain_receiver: (starter == Pays::Bitcoin).then_some(address),
-        first_deadline: ctx.now + first,
-        second_deadline: ctx.now + second,
-    };
+    let terms = Terms::offer(hash, first, second, ctx.now + first_deadline, ctx.now + second_deadline, &me)?;
     terms.check(ctx.now)?;
 
     Ok(SwapRecord { terms: terms.to_text(), secret: Some(to_hex(&secret)), account: holder.id(), made: ctx.now, started: true, funding: None })
@@ -382,12 +510,12 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
         ui.add_space(8.0);
 
         match state.scan.show(ui, &palette) {
-            Some(Message::Swap(terms)) => match ctx.book.swaps.iter().position(|record| Terms::from_text(&record.terms).is_ok_and(|kept| kept.hash == terms.hash)) {
-                // The answer to one of ours: the same terms, with their keys in.
+            Some(Message::Swap(terms)) => match ctx.book.swaps.iter().position(|record| hash_of(record) == Some(to_hex(&terms.hash))) {
+                // The answer to one of ours: the same terms, with their parts in.
                 Some(index) if terms.agreed() => {
                     let kept = Terms::from_text(&ctx.book.swaps[index].terms).expect("kept terms read");
 
-                    match answers(&kept, &terms) {
+                    match terms.answers(&kept) {
                         true => {
                             ctx.book.swaps[index].terms = terms.to_text();
                             *ctx.changed = true;
@@ -430,32 +558,10 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
     });
 }
 
-/// Whether terms answer an offer: everything the offer said, as it said it, the other side's keys
-/// added and nothing else.
-fn answers(offer: &Terms, answer: &Terms) -> bool {
-    let kept = |given: Option<[u8; 33]>, now: Option<[u8; 33]>| given.is_none() || given == now;
-    let kept_address = |given: Option<Address>, now: Option<Address>| given.is_none() || given == now;
-    let same = (offer.chain, offer.contract, offer.hash, offer.sats, offer.token, offer.amount, offer.starter, offer.first_deadline, offer.second_deadline)
-        == (answer.chain, answer.contract, answer.hash, answer.sats, answer.token, answer.amount, answer.starter, answer.first_deadline, answer.second_deadline);
-
-    same && answer.agreed()
-        && kept(offer.bitcoin_payer, answer.bitcoin_payer)
-        && kept(offer.bitcoin_receiver, answer.bitcoin_receiver)
-        && kept_address(offer.chain_payer, answer.chain_payer)
-        && kept_address(offer.chain_receiver, answer.chain_receiver)
-}
-
-/// The answer to an offer: its terms with this account's keys in.
+/// The answer to an offer: its terms with this account's parts in.
 fn answer(ctx: &Ctx, offered: &Terms) -> Result<SwapRecord, String> {
     let holder = ctx.holder().ok_or("pick an account first")?;
-    let (key, address) = keys(ctx, holder, offered.network())?;
-    let mut terms = offered.clone();
-
-    match terms.starter {
-        Pays::Bitcoin => (terms.bitcoin_receiver, terms.chain_payer) = (Some(key), Some(address)),
-        Pays::Chain => (terms.bitcoin_payer, terms.chain_receiver) = (Some(key), Some(address)),
-    }
-
+    let terms = offered.answer(&parties(ctx, holder, testnet(offered))?)?;
     terms.check(ctx.now)?;
 
     Ok(SwapRecord { terms: terms.to_text(), secret: None, account: holder.id(), made: ctx.now, started: false, funding: None })
@@ -464,28 +570,28 @@ fn answer(ctx: &Ctx, offered: &Terms) -> Result<SwapRecord, String> {
 /// The terms, laid out.
 fn summary(ui: &mut Ui, ctx: &Ctx, terms: &Terms) {
     let palette = *ctx.palette;
-    let network = terms.network();
-    let asset = match terms.token {
-        None => format::amount(&terms.amount.to_string(), ctx.coin.decimals, &ctx.coin.symbol),
-        Some(token) => format!("{} units of {}", terms.amount, format::short(&token.to_string())),
-    };
-    theme::fitted(ui, &format!("{} {} ⇄ {asset}", format::units(&terms.sats.to_string(), 8), network.symbol()), 26.0, 14.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
+    theme::fitted(ui, &format!("{} ⇄ {}", shown(ctx, &terms.first), shown(ctx, &terms.second)), 26.0, 14.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
     super::row(ui, &palette, "Starter pays", |ui| {
-        ui.label(match terms.starter {
-            Pays::Bitcoin => format!("{}, locked first", network.name()),
-            Pays::Chain => "on this chain, locked first".to_string(),
+        ui.label(format!("on {}, locked first", terms.first.chain_name()));
+    });
+
+    for (side, leg) in terms.legs() {
+        super::row(ui, &palette, &format!("{} lock", leg.chain_name()), |ui| {
+            ui.label(format!("ends {}", when(terms.deadline(side), ctx.now)));
         });
-    });
-    super::row(ui, &palette, "Bitcoin lock", |ui| {
-        ui.label(format!("ends {}", when(terms.bitcoin_deadline(), ctx.now)));
-    });
-    super::row(ui, &palette, "This chain's", |ui| {
-        ui.label(format!("ends {}", when(terms.chain_deadline(), ctx.now)));
-    });
+    }
+
     super::row(ui, &palette, "Hash", |ui| {
         ui.label(theme::mono(format::short(&to_hex(&terms.hash))));
     });
-    super::row(ui, &palette, "Contract", |ui| super::address(ui, &palette, &terms.contract.to_string()));
+
+    for (_, leg) in terms.legs() {
+        match leg {
+            Leg::Chain(leg) => super::row(ui, &palette, "Contract", |ui| super::address(ui, &palette, &leg.contract.to_string())),
+            Leg::Evm(leg) => super::row(ui, &palette, "Swap.sol", |ui| super::address(ui, &palette, &show_address(&leg.contract))),
+            Leg::Bitcoin(_) => {}
+        }
+    }
 }
 
 /// A time, from now: in 11 h 58 min, or 2 h ago.
@@ -502,13 +608,66 @@ fn when(time: u64, now: u64) -> String {
     }
 }
 
-/// The open swap: what to share, where each side stands, and what to do next.
+/// Asks a leg's contract where it stands, when it was not asked lately.
+fn ask_leg(ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, leg: &Leg, now: f64) {
+    let hash = to_hex(&terms.hash);
+    let stale = |asked: Option<&f64>| asked.is_none_or(|asked| now - asked > ASK_EVERY);
+
+    match leg {
+        Leg::Chain(leg) if stale(state.asked.get(&hash)) => {
+            state.asked.insert(hash.clone(), now);
+            ctx.node.ask(Ask::Call(json!({ "contract": leg.contract.to_string(), "function": "get", "args": [{ "type": "string", "value": hash }] }).to_string()));
+        }
+        Leg::Evm(leg) if stale(state.evm_asked.get(&hash)) => {
+            if let Some(url) = evm::url_for(ctx, state, leg.chain_id) {
+                state.evm_asked.insert(hash, now);
+                evm::ask_lock(ctx, state, &url, leg, &terms.hash);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A leg's lock, as its contract last said; None for Bitcoin's, which is no contract's.
+fn lock_of(ctx: &Ctx, state: &SwapsState, terms: &Terms, leg: &Leg) -> Option<Result<Lock, String>> {
+    let hash = to_hex(&terms.hash);
+    let text = |value: &Value| value["value"].as_str().map_or_else(|| value["value"].to_string(), str::to_string);
+
+    match leg {
+        Leg::Chain(_) => Some(match state.status.get(&hash) {
+            None => Err("asking".to_string()),
+            Some(answer) => answer.clone().and_then(|values| Lock::from_chain(&values.iter().map(text).collect::<Vec<_>>())),
+        }),
+        Leg::Evm(leg) => Some(match evm::url_for(ctx, state, leg.chain_id) {
+            None => Err(format!("no JSON-RPC URL for {} under Settings, Swaps", chain_name(leg.chain_id))),
+            Some(_) => state.evm_locks.get(&(hash, leg.chain_id)).cloned().unwrap_or_else(|| Err("asking".to_string())),
+        }),
+        Leg::Bitcoin(_) => None,
+    }
+}
+
+/// Where a leg stands, in words.
+fn describe(leg: &Leg, lock: Option<&Result<Lock, String>>, deadline: u64) -> String {
+    match lock {
+        None => "an HTLC: look its address up on a Bitcoin explorer, or with Esplora".to_string(),
+        Some(Err(why)) => format!("not known yet: {why}"),
+        Some(Ok(lock)) => match lock.state {
+            LockState::None => "nothing locked yet".to_string(),
+            LockState::Locked => match leg.stands(lock, deadline) {
+                Ok(()) => "locked as the terms say, waiting for its claim".to_string(),
+                Err(why) => format!("locked, but not as the terms say: {why}"),
+            },
+            LockState::Claimed => "claimed: the secret is out".to_string(),
+            LockState::Refunded => "refunded".to_string(),
+        },
+    }
+}
+
+/// The open swap: what to share, where each leg stands, and what to do next.
 fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> Option<Prepared> {
     let palette = *ctx.palette;
     let record = ctx.book.swaps[index].clone();
     let terms = Terms::from_text(&record.terms).ok()?;
-    // The one the terms name, whatever this wallet would pick for a new offer.
-    let contract = Some(terms.contract);
     let hash = to_hex(&terms.hash);
     let mut prepared = None;
 
@@ -536,135 +695,231 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
 
             return;
         };
-        let Ok((my_bitcoin, my_address)) = keys(ctx, &ctx.holders[holder], terms.network()) else {
+        let me = match parties(ctx, &ctx.holders[holder], testnet(&terms)) {
+            Ok(me) => me,
+            Err(why) => {
+                ui.colored_label(palette.bad, why);
+
+                return;
+            }
+        };
+        let (pays, gets) = terms.mine(&me);
+
+        if pays.is_none() && gets.is_none() {
             ui.colored_label(palette.bad, "This account's keys are not this swap's.");
 
             return;
-        };
-        let (pays_bitcoin, gets_bitcoin) = (terms.bitcoin_payer == Some(my_bitcoin), terms.bitcoin_receiver == Some(my_bitcoin));
-        let (pays_chain, gets_chain) = (terms.chain_payer == Some(my_address), terms.chain_receiver == Some(my_address));
-        let first = record.started;
-
-        // Where chainv4's side stands, asked now and then.
-        if let Some(contract) = contract
-            && state.asked.get(&hash).is_none_or(|asked| ui.input(|input| input.time) - asked > ASK_EVERY)
-        {
-            state.asked.insert(hash.clone(), ui.input(|input| input.time));
-            ctx.node.ask(Ask::Call(json!({ "contract": contract.to_string(), "function": "get", "args": [{ "type": "string", "value": hash }] }).to_string()));
         }
 
-        let chain = chain_state(state.status.get(&hash));
-        super::row(ui, &palette, "This chain", |ui| {
-            ui.label(chain.describe());
-        });
+        // Where each leg stands, asked now and then.
+        let time = ui.input(|input| input.time);
+        for (_, leg) in terms.legs() {
+            ask_leg(ctx, state, &terms, leg, time);
+        }
 
-        // A secret the other side showed: on chainv4 by its claim.
+        let locks = terms.legs().map(|(_, leg)| lock_of(ctx, state, &terms, leg));
+        let lock = |side: Side| locks[match side { Side::First => 0, Side::Second => 1 }].as_ref();
+
+        for (side, leg) in terms.legs() {
+            super::row(ui, &palette, &leg.chain_name(), |ui| {
+                ui.label(describe(leg, lock(side), terms.deadline(side)));
+            });
+        }
+
+        // A secret the other side showed, by their claim on a contract.
         if record.secret.is_none()
-            && let ChainState::Claimed { secret } = &chain
-            && let Some(secret) = from_hex(secret).filter(|bytes| sha256(bytes) == terms.hash)
+            && let Some(secret) = locks.iter().flatten().find_map(|lock| lock.as_ref().ok().and_then(|lock| lock.secret)).filter(|secret| sha256(secret) == terms.hash)
         {
             ctx.book.swaps[index].secret = Some(to_hex(&secret));
             *ctx.changed = true;
         }
 
-        let secret = record.secret.as_deref().and_then(from_hex).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
-        let htlc = terms.htlc().expect("agreed terms have their HTLC");
-        let address = htlc.address(terms.network());
-        super::row(ui, &palette, "Bitcoin HTLC", |ui| {
-            ui.vertical(|ui| {
-                super::address(ui, &palette, &address);
-                ui.label(RichText::new(format!("{} {}", format::units(&terms.sats.to_string(), 8), terms.network().symbol())).small().color(palette.muted));
+        let secret = ctx.book.swaps[index].secret.as_deref().and_then(from_hex).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
+
+        if let (Some(htlc), Some((_, leg))) = (terms.htlc(), terms.bitcoin()) {
+            super::row(ui, &palette, "Bitcoin HTLC", |ui| {
+                ui.vertical(|ui| {
+                    super::address(ui, &palette, &htlc.address(leg.network()));
+                    ui.label(RichText::new(format!("{} {}", format::units(&leg.sats.to_string(), 8), leg.network().symbol())).small().color(palette.muted));
+                });
             });
-        });
+        }
         ui.add_space(6.0);
 
-        // Locking: the starter first; the other only once the first lock stands.
-        if pays_bitcoin {
-            ui.label(RichText::new(match first {
-                true => "Pay the HTLC exactly this from your Bitcoin wallet: you lock first.",
-                false => "Once this chain shows their lock, for you, with this amount and deadline, pay the HTLC this from your Bitcoin wallet.",
-            }).color(palette.ink));
-            let uri = format!("bitcoin:{address}?amount={}", format::units(&terms.sats.to_string(), 8));
-            let side = ui.available_width().clamp(180.0, 300.0);
-            ui.vertical_centered(|ui| super::receive::qr(ui, &uri, side));
-        }
-
-        if pays_chain
-            && matches!(chain, ChainState::None)
-            && let Some(contract) = contract
-        {
-            {
-                ui.label(RichText::new(match first {
-                    true => "Lock what you pay on this chain: you lock first.",
-                    false => "Lock on this chain only once the HTLC above holds the bitcoin, confirmed: check it on a Bitcoin explorer, or look it up below.",
-                }).color(palette.ink));
-                ui.horizontal(|ui| {
-                    let recipient = TxCallArgumentType::Address(terms.chain_receiver.expect("agreed"));
-                    let deadline = TxCallArgumentType::I64(terms.chain_deadline() as i64);
-                    let text = TxCallArgumentType::String(hash.clone());
-
-                    match terms.token {
-                        None => {
-                            if theme::primary(ui, &palette, "Lock", true).clicked() {
-                                prepared = Some(call(my_address, contract, "lock", vec![text, recipient, deadline], terms.amount, "Lock a swap".to_string()));
-                            }
-                        }
-                        Some(token) => {
-                            if theme::quiet(ui, &palette, "1. Let the contract move the token").clicked() {
-                                prepared = Some(call(my_address, token, "approve", vec![TxCallArgumentType::Address(contract), TxCallArgumentType::U256(terms.amount)], u256::ZERO, "Approve the swap contract".to_string()));
-                            }
-
-                            if theme::primary(ui, &palette, "2. Lock", true).clicked() {
-                                prepared = Some(call(my_address, contract, "lock_token", vec![text, recipient, deadline, TxCallArgumentType::Address(token), TxCallArgumentType::U256(terms.amount)], u256::ZERO, "Lock a swap's token".to_string()));
-                            }
-                        }
-                    }
-                });
-            }
-        }
-
-        // Claiming on this chain, with the secret.
-        if gets_chain && matches!(chain, ChainState::Locked) {
-            match (secret, contract) {
-                (Some(secret), Some(contract)) => {
-                    ui.label(RichText::new(match first {
-                        true => "Their lock stands: claim it. That shows the secret, which they claim your bitcoin with.",
-                        false => "Claim what they locked for you, with the secret they showed.",
-                    }).color(palette.ink));
-
-                    if theme::primary(ui, &palette, "Claim on this chain", ctx.now < terms.chain_deadline()).clicked() {
-                        prepared = Some(call(my_address, contract, "claim", vec![TxCallArgumentType::String(to_hex(&secret))], u256::ZERO, "Claim a swap".to_string()));
-                    }
-                }
-                (None, _) => learn_secret(ui, ctx, state, index, &terms),
-                (_, None) => {}
-            }
-        }
-
-        // Taking back what was locked on this chain, after its deadline.
-        if pays_chain
-            && matches!(chain, ChainState::Locked)
-            && ctx.now >= terms.chain_deadline()
-            && let Some(contract) = contract
-            && theme::quiet(ui, &palette, "Take back your lock on this chain").clicked()
-        {
-            prepared = Some(call(my_address, contract, "refund", vec![TxCallArgumentType::String(hash.clone())], u256::ZERO, "Refund a swap".to_string()));
-        }
-
-        // Bitcoin's side: a claim with the secret, or a refund after the lock time.
-        let spend = match (gets_bitcoin, pays_bitcoin, secret) {
-            (true, _, Some(secret)) => Some(Spend::Claim { secret }),
-            (_, true, _) if ctx.now / 1_000 >= u64::from(htlc.locktime) => Some(Spend::Refund),
-            _ => None,
+        // The first lock, which must stand before the second goes in: a contract's is checked
+        // here; Bitcoin's is the second side's to check.
+        let first_stands = match (&terms.first, lock(Side::First)) {
+            (_, None) => Ok(()),
+            (leg, Some(Ok(lock))) => leg.stands(lock, terms.first_deadline),
+            (_, Some(Err(why))) => Err(why.clone()),
         };
 
-        if gets_bitcoin && secret.is_none() {
-            ui.label(RichText::new("You claim the bitcoin once they show the secret, by claiming on this chain: it shows here then.").small().color(palette.muted));
+        // Paying: the starter first; the other only once the first lock stands.
+        if let Some(side) = pays {
+            let (leg, deadline, first) = (terms.leg(side), terms.deadline(side), side == Side::First);
+            let waiting = (!first).then(|| first_stands.clone().err()).flatten();
+            let nothing_yet = matches!(lock(side), Some(Ok(Lock { state: LockState::None, .. })));
+            let locked = matches!(lock(side), Some(Ok(Lock { state: LockState::Locked, .. })));
+
+            if let Some(why) = &waiting
+                && (nothing_yet || matches!(leg, Leg::Bitcoin(_)))
+            {
+                ui.colored_label(palette.warn, format!("Lock yours once theirs stands, on {}: {why}.", terms.first.chain_name()));
+            }
+
+            match leg {
+                Leg::Bitcoin(bitcoin) if waiting.is_none() => {
+                    let address = terms.htlc().expect("agreed terms have their HTLC").address(bitcoin.network());
+                    ui.label(RichText::new(match (first, &terms.first) {
+                        (true, _) => "Pay the HTLC exactly this from your Bitcoin wallet: you lock first.".to_string(),
+                        (false, other) => format!("Their lock on {} stands: pay the HTLC exactly this from your Bitcoin wallet.", other.chain_name()),
+                    }).color(palette.ink));
+                    let uri = format!("bitcoin:{address}?amount={}", format::units(&bitcoin.sats.to_string(), 8));
+                    let side = ui.available_width().clamp(180.0, 300.0);
+                    ui.vertical_centered(|ui| super::receive::qr(ui, &uri, side));
+                }
+                Leg::Chain(chain) if nothing_yet => {
+                    ui.label(RichText::new(match (first, &terms.first) {
+                        (true, _) => "Lock what you pay on this chain: you lock first.".to_string(),
+                        (false, Leg::Bitcoin(_)) => "Lock on this chain only once the HTLC above holds the bitcoin, confirmed: check it on a Bitcoin explorer, or look it up below.".to_string(),
+                        (false, other) => format!("Their lock on {} stands: lock yours.", other.chain_name()),
+                    }).color(palette.ink));
+                    let ready = waiting.is_none();
+                    ui.horizontal(|ui| {
+                        let recipient = TxCallArgumentType::Address(chain.receiver.expect("agreed"));
+                        let deadline = TxCallArgumentType::I64(deadline as i64);
+                        let text = TxCallArgumentType::String(hash.clone());
+                        let from = me.chain.expect("a payer here has an address here");
+
+                        match chain.token {
+                            None => {
+                                if theme::primary(ui, &palette, "Lock", ready).clicked() {
+                                    prepared = Some(call(from, chain.contract, "lock", vec![text, recipient, deadline], chain.amount, "Lock a swap".to_string()));
+                                }
+                            }
+                            Some(token) => {
+                                if theme::quiet(ui, &palette, "1. Let the contract move the token").clicked() {
+                                    prepared = Some(call(from, token, "approve", vec![TxCallArgumentType::Address(chain.contract), TxCallArgumentType::U256(chain.amount)], u256::ZERO, "Approve the swap contract".to_string()));
+                                }
+
+                                if theme::primary(ui, &palette, "2. Lock", ready).clicked() {
+                                    prepared = Some(call(from, chain.contract, "lock_token", vec![text, recipient, deadline, TxCallArgumentType::Address(token), TxCallArgumentType::U256(chain.amount)], u256::ZERO, "Lock a swap's token".to_string()));
+                                }
+                            }
+                        }
+                    });
+                }
+                Leg::Evm(on) if nothing_yet => {
+                    ui.label(RichText::new(match (first, &terms.first) {
+                        (true, _) => format!("Lock what you pay on {}: you lock first.", chain_name(on.chain_id)),
+                        (false, Leg::Bitcoin(_)) => format!("Lock on {} only once the HTLC above holds the bitcoin, confirmed: check it on a Bitcoin explorer, or look it up below.", chain_name(on.chain_id)),
+                        (false, other) => format!("Their lock on {} stands: lock yours on {}.", other.chain_name(), chain_name(on.chain_id)),
+                    }).color(palette.ink));
+
+                    match on.lock_calls(&terms.hash, deadline) {
+                        Ok(calls) => {
+                            let steps = calls.len();
+                            ui.horizontal(|ui| {
+                                for (step, call) in calls.into_iter().enumerate() {
+                                    let label = match steps {
+                                        1 => format!("Lock on {}", chain_name(on.chain_id)),
+                                        _ => format!("{}. {}", step + 1, call.what),
+                                    };
+                                    // A token's approval may go first; the lock waits for the first leg.
+                                    let ready = state.evm.is_none() && (step + 1 < steps || waiting.is_none());
+
+                                    if theme::primary(ui, &palette, &label, ready).clicked() {
+                                        send_evm(ctx, state, &terms, on, call, me.evm);
+                                    }
+                                }
+                            });
+                        }
+                        Err(why) => {
+                            ui.colored_label(palette.bad, why);
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            // Taking back what was locked, after its deadline.
+            if locked && ctx.now >= deadline {
+                match leg {
+                    Leg::Chain(chain) => {
+                        if theme::quiet(ui, &palette, "Take back your lock on this chain").clicked() {
+                            prepared = Some(call(me.chain.expect("a payer here"), chain.contract, "refund", vec![TxCallArgumentType::String(hash.clone())], u256::ZERO, "Refund a swap".to_string()));
+                        }
+                    }
+                    Leg::Evm(on) => {
+                        if theme::quiet(ui, &palette, &format!("Take back your lock on {}", chain_name(on.chain_id))).clicked() && state.evm.is_none() {
+                            send_evm(ctx, state, &terms, on, on.refund_call(&terms.hash), me.evm);
+                        }
+                    }
+                    Leg::Bitcoin(_) => {}
+                }
+            }
         }
 
-        if let Some(spend) = spend {
-            ui.add_space(8.0);
-            bitcoin_spend(ui, ctx, state, &terms, holder, spend, index);
+        // Receiving: claimed with the secret, once it is locked as the terms say.
+        if let Some(side) = gets {
+            let (leg, deadline) = (terms.leg(side), terms.deadline(side));
+            let stands = lock(side).and_then(|lock| lock.as_ref().ok()).filter(|lock| lock.state == LockState::Locked).map(|lock| leg.stands(lock, deadline));
+
+            match (leg, secret, stands) {
+                (Leg::Bitcoin(_), _, _) => {}
+                (_, _, Some(Err(why))) => {
+                    ui.colored_label(palette.bad, format!("Their lock is not as the terms say, {why}: do not claim it, which would show the secret. Take yours back after its deadline."));
+                }
+                (_, Some(secret), Some(Ok(()))) => {
+                    ui.label(RichText::new(match record.started {
+                        true => format!("Their lock on {} stands: claim it. That shows the secret, which they claim yours with.", leg.chain_name()),
+                        false => format!("Claim what they locked for you on {}, with the secret they showed.", leg.chain_name()),
+                    }).color(palette.ink));
+                    let open = ctx.now < deadline;
+
+                    match leg {
+                        Leg::Chain(chain) => {
+                            if theme::primary(ui, &palette, "Claim on this chain", open).clicked() {
+                                // Anyone may send the claim; this account sends it from here.
+                                prepared = Some(call(me.chain.expect("an address here"), chain.contract, "claim", vec![TxCallArgumentType::String(to_hex(&secret))], u256::ZERO, "Claim a swap".to_string()));
+                            }
+                        }
+                        Leg::Evm(on) => {
+                            if theme::primary(ui, &palette, &format!("Claim on {}", chain_name(on.chain_id)), open && state.evm.is_none()).clicked() {
+                                send_evm(ctx, state, &terms, on, on.claim_call(&secret), me.evm);
+                            }
+                        }
+                        Leg::Bitcoin(_) => {}
+                    }
+                }
+                (_, None, Some(Ok(()))) => match pays.map(|side| terms.leg(side)) {
+                    Some(Leg::Bitcoin(_)) => learn_secret(ui, ctx, state, index, &terms),
+                    Some(other) => {
+                        ui.label(RichText::new(format!("They claim yours on {} first, which shows the secret: it shows here then.", other.chain_name())).small().color(palette.muted));
+                    }
+                    None => {}
+                },
+                _ => {}
+            }
+        }
+
+        // Bitcoin's leg: a claim with the secret, or a refund after the lock time.
+        if let (Some(htlc), Some((side, _))) = (terms.htlc(), terms.bitcoin()) {
+            let (pays_bitcoin, gets_bitcoin) = (pays == Some(side), gets == Some(side));
+            let spend = match (gets_bitcoin, pays_bitcoin, secret) {
+                (true, _, Some(secret)) => Some(Spend::Claim { secret }),
+                (_, true, _) if ctx.now / 1_000 >= u64::from(htlc.locktime) => Some(Spend::Refund),
+                _ => None,
+            };
+
+            if gets_bitcoin && secret.is_none() {
+                ui.label(RichText::new("You claim the bitcoin once they show the secret, by claiming theirs: it shows here then.").small().color(palette.muted));
+            }
+
+            if let Some(spend) = spend {
+                ui.add_space(8.0);
+                bitcoin_spend(ui, ctx, state, &terms, holder, spend, index);
+            }
         }
 
         if let Some(trouble) = &state.trouble {
@@ -681,6 +936,7 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                     *ctx.changed = true;
                     state.open = None;
                     state.forgetting = false;
+                    state.evm = None;
                 }
                 false => state.forgetting = true,
             }
@@ -690,40 +946,13 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
     prepared
 }
 
-/// What the contract said of a swap.
-enum ChainState {
-    Unknown(String),
-    None,
-    Locked,
-    Claimed { secret: String },
-    Refunded,
-}
-
-impl ChainState {
-    fn describe(&self) -> String {
-        match self {
-            ChainState::Unknown(why) => format!("not known yet: {why}"),
-            ChainState::None => "nothing locked yet".to_string(),
-            ChainState::Locked => "locked, waiting for its claim".to_string(),
-            ChainState::Claimed { .. } => "claimed: the secret is out".to_string(),
-            ChainState::Refunded => "refunded".to_string(),
-        }
-    }
-}
-
-fn chain_state(answer: Option<&Result<Vec<Value>, String>>) -> ChainState {
-    let text = |value: &Value| value["value"].as_str().map_or_else(|| value["value"].to_string(), str::to_string);
-
-    match answer {
-        None => ChainState::Unknown("asking".to_string()),
-        Some(Err(why)) => ChainState::Unknown(why.clone()),
-        Some(Ok(values)) => match values.first().map(text).as_deref() {
-            Some("none") => ChainState::None,
-            Some("locked") => ChainState::Locked,
-            Some("claimed") => ChainState::Claimed { secret: values.get(6).map(text).unwrap_or_default() },
-            Some("refunded") => ChainState::Refunded,
-            _ => ChainState::Unknown("an answer this wallet does not read".to_string()),
-        },
+/// Starts a call on an EVM leg on its way, through the chain's RPC, from this account's address
+/// there.
+fn send_evm(ctx: &Ctx, state: &mut SwapsState, terms: &Terms, leg: &EvmLeg, call: chainv4::swap::evm::Call, from: Option<[u8; 20]>) {
+    match (evm::url_for(ctx, state, leg.chain_id), from) {
+        (Some(url), Some(from)) => evm::start(ctx, state, &terms.hash, call, leg.chain_id, url, from),
+        (None, _) => state.trouble = Some(format!("Give a JSON-RPC URL for {} under Settings, Swaps, to send there.", chain_name(leg.chain_id))),
+        (_, None) => state.trouble = Some("This account has no Ethereum key to send with.".to_string()),
     }
 }
 
@@ -759,8 +988,10 @@ fn learn_secret(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize
 /// or by the offline signer.
 fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, holder: usize, spend: Spend, index: usize) {
     let palette = *ctx.palette;
-    let network = terms.network();
-    let htlc = terms.htlc().expect("agreed terms have their HTLC");
+    let (Some(htlc), Some((_, leg))) = (terms.htlc(), terms.bitcoin()) else {
+        return;
+    };
+    let network = leg.network();
     let hash = to_hex(&terms.hash);
     theme::caps(ui, &palette, match spend {
         Spend::Claim { .. } => "Claim the bitcoin",
@@ -776,7 +1007,7 @@ fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Ter
     }
 
     if state.bitcoin.to.is_empty()
-        && let Ok((key, _)) = keys(ctx, &ctx.holders[holder], network)
+        && let Ok(key) = bitcoin_key(ctx, &ctx.holders[holder], network)
     {
         state.bitcoin.to = bech32::encode_segwit(network.hrp(), &hash160(&key));
     }
@@ -817,7 +1048,15 @@ fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Ter
         return;
     }
 
-    if theme::primary(ui, &palette, "Sign it", true).clicked() {
+    // The starter's claim shows the secret, which takes their whole lock: never for less than
+    // the terms say.
+    let short = matches!(spend, Spend::Claim { .. }) && ctx.book.swaps[index].started && state.bitcoin.sats.trim().parse::<u64>().is_ok_and(|sats| sats < leg.sats);
+
+    if short {
+        ui.colored_label(palette.bad, "Those coins are less than the terms say: claiming them would show the secret for less. Do not; take yours back after its deadline.");
+    }
+
+    if theme::primary(ui, &palette, "Sign it", !short).clicked() {
         let account = &ctx.holders[holder];
 
         match sign(secret_key(ctx, account, network), account.origin(), terms, spend, &state.bitcoin) {
@@ -863,8 +1102,10 @@ enum Signed {
 /// Signs a spend: with the account's key, when this wallet holds it, or else as a PSBT for the
 /// offline signer, which the pairing said where it derives the key.
 fn sign(secret: Option<[u8; 32]>, origin: Option<crate::airgap::Origin>, terms: &Terms, spend: Spend, form: &BitcoinForm) -> Result<Signed, String> {
-    let network = terms.network();
-    let htlc = terms.htlc().ok_or("no HTLC yet")?;
+    let (htlc, network) = match (terms.htlc(), terms.bitcoin()) {
+        (Some(htlc), Some((_, leg))) => (htlc, leg.network()),
+        _ => return Err("no HTLC yet".to_string()),
+    };
     let (txid, vout) = form.funding.trim().split_once(':').ok_or("its coins are txid:vout")?;
     let mut txid: [u8; 32] = from_hex(&format!("0x{txid}")).and_then(|bytes| bytes.try_into().ok()).ok_or("a txid is 64 hex digits")?;
     // Explorers write a txid backwards from how a transaction names it.
@@ -945,11 +1186,12 @@ fn look_for_secret(ctx: &Ctx, state: &SwapsState, terms: &Terms) {
     let Ok(client) = crate::app::client(ctx.settings) else {
         return;
     };
-    let Some(htlc) = terms.htlc() else {
+    let (Some(htlc), Some((_, leg))) = (terms.htlc(), terms.bitcoin()) else {
         return;
     };
+    let network = leg.network();
     let (looked, wake, hash, wanted) = (state.looked.clone(), ctx.wake.clone(), to_hex(&terms.hash), terms.hash);
-    let url = format!("{}/address/{}/txs", ctx.settings.esplora.trim().trim_end_matches('/'), htlc.address(terms.network()));
+    let url = format!("{}/address/{}/txs", ctx.settings.esplora.trim().trim_end_matches('/'), htlc.address(network));
 
     client.fetch(url, None, move |answer| {
         let secret = answer.ok().and_then(|answer| serde_json::from_slice::<Value>(&answer.bytes).ok()).and_then(|txs| {
@@ -993,20 +1235,21 @@ fn take_looked(ctx: &mut Ctx, state: &mut SwapsState) {
     for looked in looked {
         match looked {
             Looked::Funding { hash, outpoint, sats } => {
-                if let Some(record) = ctx.book.swaps.iter_mut().find(|record| Terms::from_text(&record.terms).is_ok_and(|terms| to_hex(&terms.hash) == hash)) {
+                if let Some(record) = ctx.book.swaps.iter_mut().find(|record| hash_of(record).as_deref() == Some(hash.as_str())) {
                     record.funding = Some(format!("{outpoint}:{sats}"));
                     *ctx.changed = true;
                 }
                 (state.bitcoin.funding, state.bitcoin.sats) = (outpoint, sats.to_string());
             }
             Looked::Secret { hash, secret } => {
-                if let Some(record) = ctx.book.swaps.iter_mut().find(|record| Terms::from_text(&record.terms).is_ok_and(|terms| to_hex(&terms.hash) == hash)) {
+                if let Some(record) = ctx.book.swaps.iter_mut().find(|record| hash_of(record).as_deref() == Some(hash.as_str())) {
                     record.secret = Some(to_hex(&secret));
                     *ctx.changed = true;
                 }
             }
             Looked::Broadcast(Ok(txid)) => state.trouble = Some(format!("Broadcast: {txid}")),
             Looked::Broadcast(Err(why)) | Looked::Failed(why) => state.trouble = Some(why),
+            Looked::Evm(answer) => evm::take(ctx, state, answer),
         }
     }
 }

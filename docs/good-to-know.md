@@ -581,6 +581,23 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **A secret is exactly 32 bytes** on both sides, so neither chain takes one the other refuses.
 - **Anyone may send a claim or a refund** on chainv4: the coins only go to the recipient or the
   locker.
+- **Swaps are between any two chains now:** the terms are two legs, the starter's and the
+  other's, each on chainv4, Bitcoin or an EVM chain by its chain id. Codes made before, chainv4
+  against Bitcoin, still read; `chainv4 swap offer` takes `--pay` and `--get` legs in place of
+  `--pays`, `--sats`, `--amount`, `--token` and `--testnet`.
+- **Swap.sol sits at one address on every EVM chain** it was deployed to through the
+  deterministic deployment proxy. The terms still name it, so a chain without the proxy works
+  with a plain create's address. `chainv4 swap evm-deploy` deploys it.
+- **Locking second checks the first lock,** where a contract holds it: the CLI refuses, and the
+  wallet's button waits, until it stands as the terms say. A first lock on Bitcoin is yours to
+  check (`--anyway` in the CLI).
+- **The starter is warned off a short second lock:** claiming it would show the secret, and with
+  it the whole first lock, for less.
+- **An EVM leg costs gas on that chain** to lock and to claim: both sides need some of its coin.
+  The wallet signs EVM legs with the account's first Ethereum key.
+- **An EVM leg is only as true as its JSON-RPC:** whether the first lock stands is what that URL
+  says. Use your own node, or a provider you trust; a secret it reports is kept only if its
+  SHA-256 is the swap's hash.
 - **Contracts can read the block's time and height** now, `ctx.time` and `ctx.height` in Lua,
   `block_time()` and `block_height()` in the SDK: the header's, the same on every node. A node
   without them refuses such contracts, so every node updates together.

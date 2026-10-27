@@ -892,3 +892,111 @@ fn lua_speaks_solidity_s_abi() {
     );
     assert!(matches!(&receipts[2].result, Err(failure) if failure.to_string().contains("uint8")), "{:?}", receipts[2].result);
 }
+
+#[cfg(feature = "swap")]
+mod swap {
+    //! Swap.sol, the EVM chains' side of a swap, run here on chainv4's EVM as it runs on Ethereum,
+    //! with contracts/evm/Token.sol for an ERC-20.
+
+    use {
+        super::*,
+        crate::abi::{AbiType, AbiValue, encode_values},
+        crate::swap::evm::{get_input, init_code, read_lock},
+        crate::swap::{EvmLeg, Leg, LockState},
+    };
+
+    const TOKEN_BIN: &str = include_str!("../../../contracts/evm/Token.bin");
+
+    fn create(chain: &mut Chain, init: Vec<u8>) -> [u8; 20] {
+        let deployer = authority();
+        let at = evm::create_address(&deployer.public().address(), nonce(chain, &deployer));
+        let receipts = advance(chain, vec![sign(chain, &deployer, Tx::Deploy { code: Code::Evm(init) })]);
+        assert_eq!(receipts[0].result, Ok(Effect::Deployed(at)));
+
+        match at {
+            Address::Evm(bytes) => bytes,
+            other => panic!("an EVM contract at {other}"),
+        }
+    }
+
+    fn run(chain: &mut Chain, to: [u8; 20], value: u128, input: Vec<u8>) -> Receipt {
+        let tx = call(chain, &authority(), Address::Evm(to), value, input);
+
+        advance(chain, vec![tx]).remove(0)
+    }
+
+    fn refused(receipt: &Receipt, why: &str) {
+        assert!(format!("{:?}", receipt.result).contains(why), "{:?}", receipt.result);
+    }
+
+    fn token_balance(chain: &mut Chain, token: [u8; 20], owner: [u8; 20]) -> u256 {
+        let input = calldata("balanceOf(address)", &[[vec![0; 12], owner.to_vec()].concat()]);
+
+        u256::from_be_bytes(returned(&run(chain, token, 0, input)).try_into().unwrap())
+    }
+
+    #[test]
+    fn swap_sol_pays_a_token_with_the_secret_and_the_coin_back_after_the_deadline() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let me = authority().public().address();
+        let swap = create(&mut chain, init_code());
+        let supply = encode_values(&[AbiType::String, AbiType::String, AbiType::Uint(256)], &[AbiValue::String("Test".into()), AbiValue::String("TST".into()), AbiValue::Uint(u256::new(1_000_000))]).unwrap();
+        let token = create(&mut chain, [crate::structs::hex::from_hex(TOKEN_BIN.trim()).unwrap(), supply].concat());
+        let receiver = [0xb2; 20];
+        let leg = EvmLeg { chain_id: 1, contract: swap, token: Some(token), amount: u256::new(1_000), payer: Some(evm::evm_alias(&me)), receiver: Some(receiver) };
+        let secret = [0x5e; 32];
+        let hash = crate::crypto::bitcoin::sha256(&secret);
+        let deadline = chain.tip().timestamp + 30 * SLOT;
+        let [approve, lock] = <[_; 2]>::try_from(leg.lock_calls(&hash, deadline).unwrap()).unwrap();
+
+        // The token moves only once approved; then it is locked, all of it.
+        refused(&run(&mut chain, swap, 0, lock.input.clone()), "the token would not move");
+        assert!(run(&mut chain, token, 0, approve.input).result.is_ok());
+        assert!(run(&mut chain, swap, 0, lock.input.clone()).result.is_ok());
+        assert_eq!(token_balance(&mut chain, token, swap), u256::new(1_000));
+        refused(&run(&mut chain, swap, 0, lock.input), "already exists");
+
+        let locked = read_lock(&returned(&run(&mut chain, swap, 0, get_input(&hash)))).unwrap();
+        assert_eq!(locked.state, LockState::Locked);
+        assert_eq!(Leg::Evm(leg.clone()).stands(&locked, deadline), Ok(()));
+
+        // The wrong secret claims nothing; the right one pays the receiver and keeps the secret.
+        refused(&run(&mut chain, swap, 0, leg.claim_call(&[0; 32]).input), "no swap waits");
+        assert!(run(&mut chain, swap, 0, leg.claim_call(&secret).input).result.is_ok());
+        assert_eq!(token_balance(&mut chain, token, receiver), u256::new(1_000));
+        let claimed = read_lock(&returned(&run(&mut chain, swap, 0, get_input(&hash)))).unwrap();
+        assert_eq!((claimed.state, claimed.secret), (LockState::Claimed, Some(secret)));
+        refused(&run(&mut chain, swap, 0, leg.claim_call(&secret).input), "no swap waits");
+        refused(&run(&mut chain, swap, 0, leg.refund_call(&hash).input), "no swap is locked");
+
+        // The coin, locked until a few blocks on: too early to refund, then too late to claim,
+        // and back to who locked it.
+        let coin = EvmLeg { token: None, amount: u256::new(500), ..leg.clone() };
+        let other = [0x6f; 32];
+        let other_hash = crate::crypto::bitcoin::sha256(&other);
+        let soon = chain.tip().timestamp + 4 * SLOT;
+        let before = balance(&chain, &me);
+        let lock = coin.lock_calls(&other_hash, soon).unwrap().remove(0);
+        assert!(run(&mut chain, swap, 500, lock.input).result.is_ok());
+        assert_eq!(balance(&chain, &me), before - u256::new(500));
+        refused(&run(&mut chain, swap, 0, coin.refund_call(&other_hash).input), "too early");
+
+        while chain.tip().timestamp / 1_000 < soon / 1_000 {
+            advance(&mut chain, Vec::new());
+        }
+
+        refused(&run(&mut chain, swap, 0, coin.claim_call(&other).input), "too late");
+        assert!(run(&mut chain, swap, 0, coin.refund_call(&other_hash).input).result.is_ok());
+        assert_eq!(balance(&chain, &me), before);
+        assert_eq!(read_lock(&returned(&run(&mut chain, swap, 0, get_input(&other_hash)))).unwrap().state, LockState::Refunded);
+
+        // What does not hold locks nothing.
+        let third = crate::crypto::bitcoin::sha256(&[1; 32]);
+        let past = coin.lock_calls(&third, chain.tip().timestamp).unwrap().remove(0);
+        refused(&run(&mut chain, swap, 1, past.input), "after this block's time");
+        let nothing = coin.lock_calls(&third, deadline + 60 * SLOT).unwrap().remove(0);
+        refused(&run(&mut chain, swap, 0, nothing.input), "lock something");
+        assert_eq!(read_lock(&returned(&run(&mut chain, swap, 0, get_input(&third)))).unwrap().state, LockState::None);
+    }
+}

@@ -92,6 +92,9 @@ pub struct Settings {
     pub esplora: String,
     /// The swap contract to use in place of the one the node names: empty to take the node's.
     pub swap_contract: String,
+    /// EVM chains' JSON-RPC URLs, one a line, that the Swaps page reads and sends an EVM leg's
+    /// locks and claims through: each is asked its chain id, and serves that chain's legs.
+    pub eth_rpc: String,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -148,6 +151,7 @@ impl Default for Settings {
             signer_chain: None,
             esplora: String::new(),
             swap_contract: String::new(),
+            eth_rpc: String::new(),
             vault: None,
             current: String::new(),
         }

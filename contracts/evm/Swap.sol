@@ -1,0 +1,117 @@
+// SPDX-License-Identifier: MIT
+// Atomic swaps on any EVM chain: Ethereum's side of a swap, as contracts/lua/swap.lua is
+// chainv4's. Whoever pays locks the coin or an ERC-20 token under the SHA-256 of a secret, for a
+// recipient, until a deadline. Anyone may send the claim with the secret before the deadline,
+// which pays the recipient and shows the secret to the other chain; from the deadline on, anyone
+// may send the refund, which pays the locker back. Built with solc 0.8 for Paris, so it runs on
+// every EVM chain, the ones without PUSH0 too:
+//
+//   solc --evm-version paris --optimize --bin --abi Swap.sol -o build
+//
+// Swap.bin beside it is what that writes for Swap: chainv4's apps deploy it, through the
+// deterministic deployment proxy where a chain has one, so it sits at one address on every chain
+// it was deployed to. docs/swaps.md walks through it.
+pragma solidity ^0.8.24;
+
+interface ERC20 {
+    function balanceOf(address owner) external view returns (uint256);
+}
+
+contract Swap {
+    enum State {
+        None,
+        Locked,
+        Claimed,
+        Refunded
+    }
+
+    struct Lock {
+        State state;
+        uint64 deadline;
+        address locker;
+        address recipient;
+        address token;
+        uint256 amount;
+        bytes32 secret;
+    }
+
+    mapping(bytes32 => Lock) private locks;
+
+    event Locked(bytes32 indexed hash, address indexed locker, address indexed recipient, address token, uint256 amount, uint64 deadline);
+    event Claimed(bytes32 indexed hash, bytes32 secret);
+    event Refunded(bytes32 indexed hash);
+
+    /// Locks the coin this call sends, for recipient to claim with the secret before deadline, in
+    /// Unix seconds.
+    function lock(bytes32 hash, address recipient, uint64 deadline) external payable {
+        open(hash, recipient, deadline, address(0), msg.value);
+    }
+
+    /// Locks amount of an ERC-20 token, moved with transferFrom: approve this contract for it
+    /// first. A token that takes a fee as it moves is refused, as the lock would hold less than it
+    /// says.
+    function lockToken(bytes32 hash, address recipient, uint64 deadline, address token, uint256 amount) external {
+        require(token.code.length > 0, "the token is not a contract");
+        uint256 before = ERC20(token).balanceOf(address(this));
+        open(hash, recipient, deadline, token, amount);
+        move(token, abi.encodeWithSelector(0x23b872dd, msg.sender, address(this), amount));
+        require(ERC20(token).balanceOf(address(this)) - before == amount, "the token moved less than the amount");
+    }
+
+    /// Pays the swap whose hash is the secret's SHA-256 to its recipient, before its deadline.
+    function claim(bytes32 secret) external {
+        bytes32 hash = sha256(abi.encodePacked(secret));
+        Lock storage held = locks[hash];
+        require(held.state == State.Locked, "no swap waits on that secret");
+        require(block.timestamp < held.deadline, "too late to claim: its deadline passed");
+        held.state = State.Claimed;
+        held.secret = secret;
+        emit Claimed(hash, secret);
+        pay(held.token, held.recipient, held.amount);
+    }
+
+    /// Pays a swap nobody claimed back to its locker, from its deadline on.
+    function refund(bytes32 hash) external {
+        Lock storage held = locks[hash];
+        require(held.state == State.Locked, "no swap is locked under that hash");
+        require(block.timestamp >= held.deadline, "too early to refund: its deadline is ahead");
+        held.state = State.Refunded;
+        emit Refunded(hash);
+        pay(held.token, held.locker, held.amount);
+    }
+
+    /// A swap's state, 0 none, 1 locked, 2 claimed, 3 refunded; who locked it and for whom; its
+    /// token, the zero address for the coin; how much; its deadline; and its secret once claimed.
+    function get(bytes32 hash)
+        external
+        view
+        returns (uint8 state, address locker, address recipient, address token, uint256 amount, uint64 deadline, bytes32 secret)
+    {
+        Lock storage held = locks[hash];
+        return (uint8(held.state), held.locker, held.recipient, held.token, held.amount, held.deadline, held.secret);
+    }
+
+    function open(bytes32 hash, address recipient, uint64 deadline, address token, uint256 amount) private {
+        require(locks[hash].state == State.None, "a swap under that hash already exists");
+        require(amount > 0, "lock something");
+        require(recipient != address(0), "a swap pays someone");
+        require(deadline > block.timestamp, "its deadline must be after this block's time");
+        locks[hash] = Lock(State.Locked, deadline, msg.sender, recipient, token, amount, bytes32(0));
+        emit Locked(hash, msg.sender, recipient, token, amount, deadline);
+    }
+
+    function pay(address token, address to, uint256 amount) private {
+        if (token == address(0)) {
+            (bool sent, ) = to.call{value: amount}("");
+            require(sent, "the coin would not go");
+        } else {
+            move(token, abi.encodeWithSelector(0xa9059cbb, to, amount));
+        }
+    }
+
+    /// Calls a token, taking no answer as yes, as tokens that predate ERC-20's return value give.
+    function move(address token, bytes memory call) private {
+        (bool done, bytes memory answer) = token.call(call);
+        require(done && (answer.length == 0 || abi.decode(answer, (bool))), "the token would not move");
+    }
+}

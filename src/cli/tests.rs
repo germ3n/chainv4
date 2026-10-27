@@ -872,12 +872,12 @@ mod send {
     #[cfg(all(feature = "swap", feature = "sha256"))]
     #[test]
     fn a_swap_locks_and_claims_on_chainv4_and_signs_bitcoins_side() {
-        use crate::cli::swap::{BitcoinSpend, ChainAction, SwapAction, SwapArgs, bitcoin, swap};
+        use crate::cli::swap::{BitcoinSpend, LegAction, SwapAction, SwapArgs, bitcoin, swap};
         use crate::crypto::bitcoin::tx::Transaction;
         use crate::crypto::keypair::{Keypair, PrivateKey, PublicKey};
         use crate::structs::hex::{from_hex, to_hex};
         use crate::swap::htlc::{Spend, revealed};
-        use crate::swap::{Counterparty, Pays, Terms};
+        use crate::swap::{BitcoinLeg, ChainLeg, Leg, Parties, Terms};
 
         let dir = TempDir::new("swap");
         let source = dir.0.join("swap.lua");
@@ -895,37 +895,31 @@ mod send {
             PublicKey::Bitcoin(bytes) => bytes,
             _ => unreachable!(),
         };
-        let alice = crate::structs::address::Address::Ed25519([0xa; 32]);
+        let alice = Parties { chain: Some(Address::Ed25519([0xa; 32])), bitcoin: Some(bitcoin_key(&alice_bitcoin)), evm: None };
+        let bob = Parties { chain: Some(deployer), bitcoin: Some(bitcoin_key(&bob_bitcoin)), evm: None };
         let now = now_ms();
         // A new offer's contract is the one the node names, there being no swap name.
         let agent = crate::cli::send::agent(&Default::default()).unwrap();
         assert_eq!(crate::cli::swap::default_contract(&agent, &format!("http://{}", running.api)).unwrap(), contract);
-        let terms = Terms {
-            chain: Counterparty::BitcoinTestnet,
-            contract,
-            hash,
-            sats: 100_000,
-            token: None,
-            amount: u256::new(5_000),
-            starter: Pays::Bitcoin,
-            bitcoin_payer: Some(bitcoin_key(&alice_bitcoin)),
-            bitcoin_receiver: Some(bitcoin_key(&bob_bitcoin)),
-            chain_payer: Some(deployer),
-            chain_receiver: Some(alice),
-            first_deadline: now + crate::swap::FIRST_DEADLINE_MS,
-            second_deadline: now + crate::swap::SECOND_DEADLINE_MS,
-        };
+        let pays = Leg::Bitcoin(BitcoinLeg { testnet: true, sats: 100_000, payer: None, receiver: None });
+        let gets = Leg::Chain(ChainLeg { contract, token: None, amount: u256::new(5_000), payer: None, receiver: None });
+        let terms = Terms::offer(hash, pays, gets, now + crate::swap::FIRST_DEADLINE_MS, now + crate::swap::SECOND_DEADLINE_MS, &alice).unwrap().answer(&bob).unwrap();
         let node = format!("http://{}", running.api);
-        // The terms name the contract the lock goes into.
-        let action = || ChainAction { terms: terms.to_text(), node: node.clone(), tls: Default::default(), key: None };
+        // The terms name the contract the lock goes into. Bob locks second; the first lock is
+        // Bitcoin's, which the CLI cannot see, so he checks it himself.
+        let action = || LegAction { terms: terms.to_text(), leg: None, node: node.clone(), eth_rpc: Vec::new(), tls: Default::default(), key: None, anyway: false };
 
-        swap(SwapArgs { action: SwapAction::Lock(action()) }).unwrap();
+        let unchecked = swap(SwapArgs { action: SwapAction::Lock(action()) }).unwrap_err();
+        assert!(unchecked.to_string().contains("--anyway"), "{unchecked}");
+        swap(SwapArgs { action: SwapAction::Lock(LegAction { anyway: true, ..action() }) }).unwrap();
         // Anyone may send the claim: the coins go to Alice whoever sends it.
         swap(SwapArgs { action: SwapAction::Claim { action: action(), secret: to_hex(&secret) } }).unwrap();
-        let account: serde_json::Value = serde_json::from_str(&ureq::get(format!("{node}/accounts/{alice}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
+        let account: serde_json::Value = serde_json::from_str(&ureq::get(format!("{node}/accounts/{}", alice.chain.unwrap())).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
         assert_eq!(account["balance"], "5000");
         let wrong = swap(SwapArgs { action: SwapAction::Claim { action: action(), secret: to_hex(&[0; 32]) } });
         assert!(wrong.unwrap_err().to_string().contains("not the swap's hash"));
+        let bitcoin_leg = swap(SwapArgs { action: SwapAction::Refund(LegAction { leg: Some(crate::cli::swap::LegArg::First), ..action() }) });
+        assert!(bitcoin_leg.unwrap_err().to_string().contains("Bitcoin's"));
 
         // Bob claims Alice's bitcoin with the secret chainv4 showed, offline, with his key file.
         let key = dir.0.join("bob.key");
@@ -942,6 +936,84 @@ mod send {
 
         // His key cannot take the refund, nor hers the claim.
         assert!(bitcoin(&spend, Spend::Refund).unwrap_err().to_string().contains("refund key"));
+        running.stop();
+    }
+
+    #[cfg(all(feature = "swap", feature = "sha256", feature = "ethereum"))]
+    #[test]
+    fn a_swap_between_chainv4_and_an_evm_chain_locks_checks_and_claims_both_legs() {
+        use crate::cli::swap::rpc::{Rpc, from_key};
+        use crate::cli::swap::{LegAction, LegArg, SwapAction, SwapArgs, swap};
+        use crate::crypto::keypair::{Keypair, PrivateKey};
+        use crate::structs::hex::to_hex;
+        use crate::swap::{ChainLeg, EvmLeg, Leg, LockState, Parties, Terms, evm};
+
+        let dir = TempDir::new("evm-swap");
+        let source = dir.0.join("swap.lua");
+        fs::write(&source, include_str!("../../contracts/lua/swap.lua")).unwrap();
+        let deployer = DevAuthority::dev_keypair().public().address();
+        let contract = deployed_at(&deployer, 0, crate::structs::hash::HashType::default_chain());
+        let running = Running::start(true);
+        let node = format!("http://{}", running.api);
+        send(running.args(TxArgs::Deploy { lua: Some(source), wasm: None, evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
+
+        // Bob's Ethereum key, funded, deploys Swap.sol on the node's own EVM through its JSON-RPC:
+        // the EVM chain this swap's second leg is on. The chain has no deployment proxy, so it is
+        // a plain create.
+        let bob_key = Keypair::from_private(PrivateKey::Secp256k1([0x42; 32]));
+        let bob_file = dir.0.join("bob.key");
+        fs::write(&bob_file, bob_key.to_key_file()).unwrap();
+        send(running.args(TxArgs::Transfer { to: bob_key.public().address().into(), amount: u256::from(10u64).pow(20) })).unwrap();
+        let rpc = Rpc::new(crate::cli::send::agent(&Default::default()).unwrap(), &format!("{node}/rpc"));
+        let swap_sol = rpc.deploy(&evm::init_code(), &[0x42; 32]).unwrap();
+        assert_ne!(swap_sol, evm::deployed_address(), "no proxy here");
+        assert!(rpc.has_code(&swap_sol).unwrap());
+
+        // Alice, the dev key, pays 5,000 on chainv4 and starts; Bob pays 7,000 wei on the EVM.
+        let alice_evm = [0xa1; 20];
+        let alice = Parties { chain: Some(deployer), bitcoin: None, evm: Some(alice_evm) };
+        let bob = Parties { chain: Some(Address::Ed25519([0xb; 32])), bitcoin: None, evm: Some(from_key(&[0x42; 32]).unwrap()) };
+        let (secret, hash) = crate::swap::secret().unwrap();
+        let now = now_ms();
+        let pays = Leg::Chain(ChainLeg { contract, token: None, amount: u256::new(5_000), payer: None, receiver: None });
+        let gets = Leg::Evm(EvmLeg { chain_id: rpc.chain_id().unwrap(), contract: swap_sol, token: None, amount: u256::new(7_000), payer: None, receiver: None });
+        let terms = Terms::offer(hash, pays, gets, now + crate::swap::FIRST_DEADLINE_MS, now + crate::swap::SECOND_DEADLINE_MS, &alice).unwrap().answer(&bob).unwrap();
+        terms.check(now).unwrap();
+        let action = |key: Option<PathBuf>, leg: Option<LegArg>| LegAction { terms: terms.to_text(), leg, node: node.clone(), eth_rpc: vec![format!("{node}/rpc")], tls: Default::default(), key, anyway: false };
+
+        // Bob cannot lock before Alice: her lock does not stand yet.
+        let early = swap(SwapArgs { action: SwapAction::Lock(action(Some(bob_file.clone()), None)) }).unwrap_err();
+        assert!(early.to_string().contains("nothing is locked yet"), "{early}");
+
+        swap(SwapArgs { action: SwapAction::Lock(action(None, None)) }).unwrap();
+        swap(SwapArgs { action: SwapAction::Lock(action(Some(bob_file.clone()), None)) }).unwrap();
+        let locked = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&hash)).unwrap()).unwrap();
+        assert_eq!(terms.second.stands(&locked, terms.second_deadline), Ok(()));
+
+        // Alice claims Bob's lock on the EVM, sent by anyone, which shows the secret there.
+        swap(SwapArgs { action: SwapAction::Claim { action: action(Some(bob_file.clone()), Some(LegArg::Second)), secret: to_hex(&secret) } }).unwrap();
+        let claimed = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&hash)).unwrap()).unwrap();
+        assert_eq!((claimed.state, claimed.secret), (LockState::Claimed, Some(secret)));
+        let paid: serde_json::Value = serde_json::from_str(
+            &ureq::post(format!("{node}/rpc"))
+                .header("content-type", "application/json")
+                .send(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [to_hex(&alice_evm), "latest"] }).to_string())
+                .unwrap()
+                .body_mut()
+                .read_to_string()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(paid["result"], "0x1b58", "7,000 wei to Alice's address there");
+
+        // Bob claims Alice's lock on chainv4 with the secret it showed.
+        swap(SwapArgs { action: SwapAction::Claim { action: action(None, Some(LegArg::First)), secret: to_hex(&secret) } }).unwrap();
+        let account: serde_json::Value = serde_json::from_str(&ureq::get(format!("{node}/accounts/{}", bob.chain.unwrap())).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
+        assert_eq!(account["balance"], "5000");
+
+        // Neither refunds now: both are claimed.
+        let refund = swap(SwapArgs { action: SwapAction::Refund(action(Some(bob_file), None)) }).unwrap_err();
+        assert!(refund.to_string().contains("no swap is locked"), "{refund}");
         running.stop();
     }
 }

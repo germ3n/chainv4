@@ -657,6 +657,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   tokens, Bitcoin's HTLC (`src/swap/htlc.rs`), offers and answers as `ur:chainv4-swap`,
   `chainv4 swap`, the wallet's Swaps page and the offline signer signing HTLC spends, deadlines by
   time on both chains, behind the `swap` feature. See [Atomic swaps](swaps.md).
+- [x] **Swaps between any two chains, Ethereum's and ERC-20s included.** Terms as two legs, each on
+  chainv4, Bitcoin or an EVM chain by its chain id, older codes still read; `contracts/evm/Swap.sol`
+  for ETH and ERC-20 tokens on any EVM chain, at one address through the deterministic
+  deployment proxy (`chainv4 swap evm-deploy`); `chainv4 swap` with `--pay`/`--get` legs and
+  `--eth-rpc`; the wallet's Swaps page reading and sending EVM legs through JSON-RPC URLs in
+  Settings, signed here or by the offline signer; the second lock held until the first stands.
 - [ ] **Swaps wait for finality.** The starter claims as soon as the other's lock on chainv4 is in
   the state; with reorgs cheap, a counterparty could lock, see the secret in the claim, take the
   bitcoin, and reorg the lock away. Claim only once the lock is final on chainv4 (and the HTLC
@@ -676,12 +682,26 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   desktop and Android apps, for swaps to see Bitcoin themselves rather than by pasting or Esplora.
 - [ ] **A Bitcoin SPV light client as a contract,** checking headers and merkle proofs with
   `sha256d` exposed to contracts, for proving Bitcoin deposits on chainv4.
-- [ ] **Swaps with more chains.** The swap contract knows a hash and a deadline alone, so any chain
-  that locks coins under a SHA-256 hash and a deadline can be the other side: a new
-  `swap::Counterparty` with its own lock and spend. Litecoin takes Bitcoin's script as it is, with
-  its own addresses and coin type; Dogecoin and Bitcoin Cash, without segwit, the same script in
-  P2SH; Ethereum and other EVM chains a small Solidity HTLC on the `sha256` precompile; Solana and
-  Cosmos their own hash-lock programs. Monero, with no scripts, needs adaptor signatures instead.
+- [ ] **Swaps with more chains.** The swap contracts know a hash and a deadline alone, so any chain
+  that locks coins under a SHA-256 hash and a deadline can be a leg: a new `swap::Leg` with its
+  own lock and spend. Litecoin takes Bitcoin's script as it is, with its own addresses and coin
+  type; Dogecoin and Bitcoin Cash, without segwit, the same script in P2SH; Solana and Cosmos
+  their own hash-lock programs. Monero, with no scripts, needs adaptor signatures instead: see
+  below.
+- [ ] **Swaps with Monero.** Monero has no scripts, so no HTLC: its side is a shared key, as in the
+  COMIT protocol behind BTC↔XMR swaps (UnstoppableSwap) and Farcaster. The XMR goes to an address
+  whose spend key is the sum of two halves, one from each side. chainv4's side is a contract that
+  pays not for a SHA-256 secret but for a key half: Bob locks the coin, claimable with the scalar
+  `s` where `s·G = S`, `S` Alice's half on Ed25519. Alice's claim shows `s`, which Bob adds to his
+  own half to sweep the XMR. Monero cannot time out, so refunds live on chainv4's side: a cancel
+  path after the deadline and a punish path, so neither side can stall the other.
+  - **Simpler than BTC↔XMR:** Monero's curve is Ed25519, which chainv4 has natively, so the
+    contract checks `s·G = S` itself and no cross-curve proof (secp256k1 against Ed25519, the
+    hardest part of those protocols) is needed.
+  - **Takes:** an Ed25519 scalar-to-point host function for Lua and WebAssembly (a consensus
+    change); a swap contract for key halves, with cancel and punish; a `Monero` leg in the terms;
+    and the wallet following the shared address by its view key and sweeping it, through a
+    `monero-wallet-rpc` URL in Settings, as Esplora and EVM RPCs are, or a Monero library.
 - [ ] **Wrapped assets: bridges.** A swap trades what exists; a wrapped coin, such as BTC as a
   token here, needs a bridge that mints it one for one against coins locked on the other chain
   and releases them when it is burned. Minting can be trust-minimized with the Bitcoin SPV light

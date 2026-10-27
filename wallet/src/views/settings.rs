@@ -651,8 +651,8 @@ fn your_chain(ui: &mut Ui, ctx: &mut Ctx) {
     ui.data_mut(|data| data.insert_temp(id, typed));
 }
 
-/// The Swaps page's settings: the swap contract, when not the node's, and an Esplora API to look
-/// Bitcoin up at.
+/// The Swaps page's settings: the swap contract, when not the node's, an Esplora API to look
+/// Bitcoin up at, and EVM chains' JSON-RPC.
 #[cfg(feature = "swap")]
 fn swaps(ui: &mut Ui, ctx: &mut Ctx) {
     let palette = *ctx.palette;
@@ -675,6 +675,16 @@ fn swaps(ui: &mut Ui, ctx: &mut Ctx) {
 
         if ctx.settings.esplora.trim().starts_with("http://") {
             ui.colored_label(palette.warn, "Plain http: anyone on the way sees your swap's addresses.");
+        }
+
+        ui.add_space(8.0);
+        ui.label(RichText::new("EVM chains' JSON-RPC, one URL a line, such as https://ethereum-sepolia-rpc.publicnode.com: a swap's leg on Ethereum, Sepolia or any EVM chain is read and sent through the one whose chain it is. Empty: such legs cannot be followed here.").small().color(palette.muted));
+        super::row(ui, &palette, "EVM RPC", |ui| {
+            ui.add(egui::TextEdit::multiline(&mut ctx.settings.eth_rpc).hint_text("https://…").desired_rows(2).desired_width(f32::INFINITY));
+        });
+
+        if ctx.settings.eth_rpc.lines().any(|url| url.trim().starts_with("http://") && !url.contains("127.0.0.1") && !url.contains("localhost")) {
+            ui.colored_label(palette.warn, "Plain http: anyone on the way sees and could change what goes through it.");
         }
     });
 }

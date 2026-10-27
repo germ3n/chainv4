@@ -27,8 +27,9 @@ enum Command {
     /// Asks a node's faucet for a drip, for a dev or test chain, doing the proof of work it wants.
     #[cfg(all(feature = "client", feature = "sha256"))]
     Faucet(cli::FaucetArgs),
-    /// Atomic swaps with Bitcoin: makes and answers a swap's terms, locks, claims and refunds on
-    /// chainv4, and signs Bitcoin's claim or refund of its HTLC.
+    /// Atomic swaps between chainv4, Bitcoin and EVM chains: makes and answers a swap's terms,
+    /// locks, claims and refunds on chainv4 and EVM chains, signs Bitcoin's claim or refund of its
+    /// HTLC, and deploys Swap.sol.
     #[cfg(all(feature = "client", feature = "swap"))]
     Swap(cli::SwapArgs),
     /// How many transactions a second the chain takes: blocks built and imported in-process

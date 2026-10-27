@@ -25,8 +25,9 @@ secp256k1 = ["dep:k256", "dep:sha3"]
 # Bitcoin's keys: ECDSA on secp256k1 over double SHA-256, and addresses of the key's HASH160,
 # written bc1q… as Bitcoin's native segwit (P2WPKH) ones are.
 bitcoin = ["secp256k1", "dep:sha2", "dep:ripemd"]
-# Atomic swaps with Bitcoin: the HTLC script and its spends, and the terms both sides agree, as
-# ur:chainv4-swap codes. The chain side is a contract, contracts/lua/swap.lua.
+# Atomic swaps between any two of chainv4, Bitcoin and EVM chains: the terms both sides agree, as
+# ur:chainv4-swap codes, Bitcoin's HTLC script and its spends, and Swap.sol's calls. chainv4's side
+# is a contract, contracts/lua/swap.lua; an EVM chain's, contracts/evm/Swap.sol.
 swap = ["bitcoin", "dep:ur"]
 # Seed phrases: BIP39 words, SLIP-0010 for the Edwards schemes and BIP32 for secp256k1.
 mnemonic = ["dep:bip39", "dep:hmac", "dep:sha2", "dep:ripemd"]
