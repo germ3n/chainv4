@@ -1,0 +1,13 @@
+{
+  "name": "chainv4-wallet-metamask-check",
+  "private": true,
+  "description": "MetaMask's QR keyring libraries, to make the wallet's test requests and check its codes back.",
+  "dependencies": {
+    "@keystonehq/bc-ur-registry-eth": "0.22.1",
+    "@ethereumjs/common": "4",
+    "@ethereumjs/rlp": "5",
+    "@ethereumjs/tx": "5",
+    "ethers": "6",
+    "uuid": "9"
+  }
+}

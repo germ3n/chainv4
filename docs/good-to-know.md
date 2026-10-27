@@ -455,6 +455,20 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   level again, since each runs it fresh, before the call is attached: a top level sees no `ctx`
   or `storage`.
 
+## MetaMask's QR hardware wallet
+
+- **The pairing code shows every Ethereum address the words make.** It is the extended public key
+  at m/44'/60'/0', so whoever sees it can list every account below it, as MetaMask does. No key.
+- **The signer signs for any chain.** It is offline and cannot tell which chain is real: set
+  **Your chain** in its Settings, and any other is named and warned of on the review.
+- **v is what MetaMask's keyring expects for each kind:** a typed transaction's parity alone, a
+  legacy one's EIP-155 v, as many bytes as it takes for a large chain id, and 27 or 28 for messages
+  and typed data.
+- **Only words pair.** MetaMask derives accounts from the extended key, which a key brought in
+  alone has none of.
+- **The codes are written in capitals.** A UR's bytewords are letters alone, which QR's
+  alphanumeric mode packs densest in capitals; readers take either case.
+
 ## The camera
 
 - **The live camera is the wallet's alone.** `chainv4-ui`'s `camera` feature brings it, and nokhwa

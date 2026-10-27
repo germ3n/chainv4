@@ -92,6 +92,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
 
         biometric(ui, ctx, state);
 
+        if role == Role::Signer {
+            your_chain(ui, ctx);
+        }
+
         ui.add_space(10.0);
         theme::caps(ui, &palette, "Password");
 
@@ -614,4 +618,33 @@ fn biometric(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         }
         None => {}
     }
+}
+
+/// An offline signer's word for which chain is its: MetaMask's requests for it are named so, and
+/// any other's are warned of.
+fn your_chain(ui: &mut Ui, ctx: &mut Ctx) {
+    let palette = *ctx.palette;
+    let id = egui::Id::unique("your chain typed");
+    let mut typed = ui.data(|data| data.get_temp::<String>(id)).unwrap_or_else(|| ctx.settings.signer_chain.map(|chain| chain.to_string()).unwrap_or_default());
+
+    ui.add_space(10.0);
+    theme::caps(ui, &palette, "Your chain");
+    ui.label(
+        RichText::new("Its Ethereum chain id, as GET /status shows chain_id: MetaMask's requests for it read as your chain, and any other's are warned of. Empty for none.")
+            .small()
+            .color(palette.muted),
+    );
+    ui.add(egui::TextEdit::singleline(&mut typed).hint_text("38262171930895").font(egui::TextStyle::Monospace).desired_width(220.0));
+
+    match typed.trim() {
+        "" => ctx.settings.signer_chain = None,
+        text => match text.parse::<u64>() {
+            Ok(chain) => ctx.settings.signer_chain = Some(chain),
+            Err(_) => {
+                ui.colored_label(palette.bad, "A chain id is a whole number.");
+            }
+        },
+    }
+
+    ui.data_mut(|data| data.insert_temp(id, typed));
 }

@@ -144,6 +144,28 @@ impl Seed {
 
         Keypair::from_private(private)
     }
+
+    #[document(
+        parent = "Seed",
+        summary = "The extended public key at m/44'/60'/0', Ethereum's account level: every secp256k1 account key derives below it, account n at 0/n. What MetaMask takes to pair with a QR hardware wallet, and lists the accounts of.",
+        see_also = "ExtendedPublic, Seed::key",
+    )]
+    #[cfg(feature = "secp256k1")]
+    pub fn ethereum_account(&self) -> ExtendedPublic {
+        let public = |node: &Node| crate::crypto::secp256k1::public_key(&node.secret).expect("a BIP32 key is a valid secret");
+        let path = [(44, true), (ETHEREUM_COIN_TYPE, true), (0, true)];
+        let master = bip32_node(&self.0, &[]).expect("a master key for every seed but one in 2^127");
+        let parent = bip32_node(&self.0, &path[..2]).expect("a key at every index but one in 2^127");
+        let account = bip32_node(&self.0, &path).expect("a key at every index but one in 2^127");
+
+        ExtendedPublic {
+            public: public(&account),
+            chain_code: account.chain,
+            depth: 3,
+            parent_fingerprint: fingerprint(&public(&parent)),
+            master_fingerprint: fingerprint(&public(&master)),
+        }
+    }
 }
 
 impl Drop for Seed {
@@ -211,6 +233,26 @@ fn slip10(seed: &[u8], path: &[u32]) -> [u8; 32] {
 /// None at the rare index BIP32 skips, where the child would be zero or past the order.
 #[cfg(feature = "secp256k1")]
 fn bip32(seed: &[u8], path: &[(u32, bool)]) -> Option<[u8; 32]> {
+    bip32_node(seed, path).map(|node| node.secret)
+}
+
+/// A BIP32 node: its key, and the chain code its children derive with.
+#[cfg(feature = "secp256k1")]
+struct Node {
+    secret: [u8; 32],
+    chain: [u8; 32],
+}
+
+#[cfg(feature = "secp256k1")]
+impl Drop for Node {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+        self.chain.zeroize();
+    }
+}
+
+#[cfg(feature = "secp256k1")]
+fn bip32_node(seed: &[u8], path: &[(u32, bool)]) -> Option<Node> {
     use k256::elliptic_curve::ff::PrimeField;
     use k256::{FieldBytes, Scalar};
 
@@ -238,9 +280,44 @@ fn bip32(seed: &[u8], path: &[(u32, bool)]) -> Option<[u8; 32]> {
         node = next;
     }
 
+    let found = Node {
+        secret: key.to_bytes().into(),
+        chain: node[32..].try_into().expect("64 bytes"),
+    };
     node.zeroize();
 
-    Some(key.to_bytes().into())
+    Some(found)
+}
+
+/// A key's BIP32 fingerprint: the first 4 bytes of the HASH160 of its public key, RIPEMD-160 of
+/// SHA-256.
+#[cfg(feature = "secp256k1")]
+fn fingerprint(public: &[u8; 33]) -> [u8; 4] {
+    use ripemd::Digest;
+
+    let hashed = <ripemd::Ripemd160 as Digest>::digest(<sha2::Sha256 as Digest>::digest(public));
+
+    hashed[..4].try_into().expect("20 bytes")
+}
+
+#[document(
+    summary = "An extended public key, as BIP32 has one: a public key and the chain code its children derive with, and where it sits. What a wallet hands a watch-only one, such as MetaMask pairing with a QR hardware wallet, to derive the accounts below it without their keys.",
+    category = "Keys",
+    see_also = "Seed::ethereum_account",
+)]
+#[cfg(feature = "secp256k1")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtendedPublic {
+    #[document(summary = "The public key, compressed: 33 bytes.")]
+    pub public: [u8; 33],
+    #[document(summary = "The chain code.")]
+    pub chain_code: [u8; 32],
+    #[document(summary = "How many steps down from the master key.")]
+    pub depth: u8,
+    #[document(summary = "The fingerprint of the key one step up.")]
+    pub parent_fingerprint: [u8; 4],
+    #[document(summary = "The fingerprint of the master key: what names the seed, and so the wallet, to one that pairs with it.")]
+    pub master_fingerprint: [u8; 4],
 }
 
 #[cfg(test)]
@@ -306,6 +383,43 @@ mod tests {
 
         assert_eq!(address(0), "secp256k1:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
         assert_eq!(address(1), "secp256k1:0x70997970c51812dc3a010c7d01b50e0d17dc79c8");
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn the_account_level_extended_key_derives_the_same_addresses_without_the_keys() {
+        use k256::ecdsa::VerifyingKey;
+        use k256::{ProjectivePoint, Scalar};
+
+        // BIP32's first test vector: m's identifier begins 3442193e, m/0H's 5c1bd648.
+        let seed = hex::<16>("0x000102030405060708090a0b0c0d0e0f");
+        let public = |path: &[(u32, bool)]| crate::crypto::secp256k1::public_key(&bip32_node(&seed, path).unwrap().secret).unwrap();
+
+        assert_eq!(fingerprint(&public(&[])), hex("0x3442193e"));
+        assert_eq!(fingerprint(&public(&[(0, true)])), hex("0x5c1bd648"));
+
+        // Down from the account's extended key by public steps alone, as MetaMask does: 0/n.
+        let seed = Phrase::parse("test test test test test test test test test test test junk").unwrap().seed("");
+        let account = seed.ethereum_account();
+        let step = |(public, chain): ([u8; 33], [u8; 32]), index: u32| -> ([u8; 33], [u8; 32]) {
+            let out = hmac(&chain, &[&public, &index.to_be_bytes()]);
+            let tweak: Scalar = Option::from(<Scalar as k256::elliptic_curve::ff::PrimeField>::from_repr(k256::FieldBytes::from(<[u8; 32]>::try_from(&out[..32]).unwrap()))).unwrap();
+            let parent = ProjectivePoint::from(*VerifyingKey::from_sec1_bytes(&public).unwrap().as_affine());
+            let child = VerifyingKey::from_affine((ProjectivePoint::GENERATOR * tweak + parent).to_affine()).unwrap();
+
+            (child.to_sec1_point(true).as_bytes().try_into().unwrap(), out[32..].try_into().unwrap())
+        };
+        let external = step((account.public, account.chain_code), 0);
+
+        for (n, expected) in [(0, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"), (1, "0x70997970c51812dc3a010c7d01b50e0d17dc79c8")] {
+            let (public, _) = step(external, n);
+
+            assert_eq!(crate::structs::hex::to_hex(&crate::crypto::secp256k1::address(&public).unwrap()), expected);
+        }
+
+        assert_eq!(account.depth, 3);
+        assert_ne!(account.master_fingerprint, account.parent_fingerprint);
+        assert_eq!(account.master_fingerprint, fingerprint(&crate::crypto::secp256k1::public_key(&bip32_node(&seed.0, &[]).unwrap().secret).unwrap()));
     }
 
     #[test]

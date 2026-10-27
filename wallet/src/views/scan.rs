@@ -2,12 +2,15 @@
 //! them; or a photo of its code, picked as an image, a file holding the code or its text, or the
 //! text pasted. A message shown as parts is read a part at a time, in any order, until every one
 //! is in: the other device cycles through them, and the camera picks each up as it comes round.
+//! MetaMask's codes, Uniform Resources, read the same ways: its animated ones are fountain-coded,
+//! so any parts enough to cover the request will do.
 //!
 //! The camera's frames are searched off the UI thread, where there are threads, the newest at a
 //! time; in the browser, between frames.
 
 use {
     crate::airgap::{self, Assembly, Code, Message},
+    crate::hardware,
     crate::theme::{self, Palette},
     chainv4_ui::camera::{Camera, Frame, State},
     chainv4_ui::files::{self, Pick},
@@ -20,7 +23,8 @@ const VIEW_WIDTH: f32 = 420.0;
 
 /// What a photo or file came to.
 enum Read {
-    Got(Code),
+    /// The code's text.
+    Got(String),
     Failed(String),
     /// Nothing was taken or picked.
     Nothing,
@@ -31,6 +35,8 @@ pub struct Scan {
     inbox: Arc<Mutex<Option<Read>>>,
     /// The parts of a message read so far.
     assembly: Assembly,
+    /// The parts of a MetaMask request read so far.
+    metamask: hardware::Assembly,
     pasted: String,
     reading: bool,
     error: Option<String>,
@@ -126,8 +132,8 @@ impl Scan {
             self.reading = false;
 
             match read {
-                Read::Got(code) => {
-                    if let Some(message) = self.took(code) {
+                Read::Got(text) => {
+                    if let Some(message) = self.read_text(&text) {
                         return Some(message);
                     }
                 }
@@ -164,20 +170,20 @@ impl Scan {
             ui,
             |ui| theme::quiet(ui, palette, "Read").clicked(),
             |ui, width| {
-                ui.add(egui::TextEdit::singleline(&mut self.pasted).hint_text("CV4:1:…").font(egui::TextStyle::Monospace).desired_width(width));
+                ui.add(egui::TextEdit::singleline(&mut self.pasted).hint_text("CV4:1:… or ur:…").font(egui::TextStyle::Monospace).desired_width(width));
             },
         );
 
         if read {
-            match Code::from_text(&self.pasted) {
-                Ok(code) => {
-                    self.pasted.clear();
+            let pasted = std::mem::take(&mut self.pasted);
 
-                    if let Some(message) = self.took(code) {
-                        return Some(message);
-                    }
-                }
-                Err(why) => self.error = Some(why),
+            if let Some(message) = self.read_text(&pasted) {
+                return Some(message);
+            }
+
+            // Kept to fix, when it did not read.
+            if self.error.is_some() {
+                self.pasted = pasted;
             }
         }
 
@@ -239,17 +245,17 @@ impl Scan {
 
             live.last = text.clone();
 
-            match Code::from_text(&text) {
-                Ok(code) => {
-                    if let Some(read) = self.took(code) {
-                        message = Some(read);
+            // A code of something else in view: said, and the camera keeps looking.
+            if !text.starts_with(airgap::PREFIX) && !airgap::is_ur(&text) {
+                self.error = Some("That QR code is not one of this wallet's, nor MetaMask's.".to_string());
 
-                        break;
-                    }
-                }
-                // A code of something else in view: said, and the camera keeps looking.
-                Err(_) if !text.starts_with(airgap::PREFIX) => self.error = Some("That QR code is not one of this wallet's.".to_string()),
-                Err(why) => self.error = Some(why),
+                continue;
+            }
+
+            if let Some(read) = self.read_text(&text) {
+                message = Some(read);
+
+                break;
             }
         }
 
@@ -294,6 +300,14 @@ impl Scan {
 
     /// How far a message in parts got.
     fn progress(&self, ui: &mut Ui, palette: &Palette) {
+        if let Some((read, count)) = self.metamask.progress() {
+            ui.colored_label(palette.accent, format!("Reading MetaMask's code: {read} of {count} parts in. Keep it in view; any parts will do."));
+            ui.add(egui::ProgressBar::new(read as f32 / count.max(1) as f32).desired_height(6.0));
+            ui.add_space(6.0);
+
+            return;
+        }
+
         let (count, missing) = self.assembly.missing();
 
         if count == 0 {
@@ -315,6 +329,36 @@ impl Scan {
     /// Says a message of the wrong kind came.
     pub fn refuse(&mut self, got: &Message, wanted: &str) {
         self.error = Some(format!("That is {}, not {wanted}.", got.name()));
+    }
+
+    /// Takes a code's text: this wallet's, whole or a part, or MetaMask's, whole or a part. Gives
+    /// the message once it is all in.
+    fn read_text(&mut self, text: &str) -> Option<Message> {
+        if airgap::is_ur(text) {
+            self.error = None;
+            let read = self
+                .metamask
+                .add(text, hardware::REQUEST_TYPE)
+                .and_then(|cbor| cbor.map(|cbor| hardware::SignRequest::from_cbor(&cbor)).transpose());
+
+            return match read {
+                Ok(request) => request.map(|request| Message::MetaMask(Box::new(request))),
+                Err(why) => {
+                    self.error = Some(why);
+
+                    None
+                }
+            };
+        }
+
+        match Code::from_text(text) {
+            Ok(code) => self.took(code),
+            Err(why) => {
+                self.error = Some(why);
+
+                None
+            }
+        }
     }
 
     /// Takes a code read: a whole message, or a part, which gives the message once it is the last.
@@ -348,8 +392,8 @@ impl Scan {
             let read = move || {
                 let read = match picked {
                     Ok(files) => match files.into_iter().next() {
-                        Some(file) => match airgap::read(&file.bytes) {
-                            Ok(code) => Read::Got(code),
+                        Some(file) => match airgap::text_in(&file.bytes) {
+                            Ok(text) => Read::Got(text),
                             Err(why) => Read::Failed(why),
                         },
                         None => Read::Nothing,

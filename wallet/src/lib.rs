@@ -11,6 +11,7 @@ mod biometrics;
 mod chain;
 mod dapp;
 mod format;
+mod hardware;
 mod history;
 mod keys;
 mod lock;

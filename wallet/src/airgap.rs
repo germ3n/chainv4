@@ -69,21 +69,27 @@ pub struct Request {
     pub token: Option<Shown>,
 }
 
-/// One of the three messages.
+/// One of the three messages, or a request MetaMask shows for its QR hardware wallet to sign.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     Pair(Pairing),
     Sign(Request),
     Signed(SignedTx),
+    MetaMask(Box<crate::hardware::SignRequest>),
 }
 
 impl Message {
     /// Its text: what its QR code holds.
     pub fn to_text(&self) -> String {
+        if let Message::MetaMask(request) = self {
+            return crate::hardware::ur(crate::hardware::REQUEST_TYPE, &request.to_cbor().expect("a request read always writes back"));
+        }
+
         let (kind, bytes) = match self {
             Message::Pair(pairing) => ("PAIR", wincode::serialize(pairing)),
             Message::Sign(request) => ("SIGN", wincode::serialize(request)),
             Message::Signed(signed) => ("SIGNED", wincode::serialize(signed)),
+            Message::MetaMask(_) => unreachable!("written as a UR above"),
         };
 
         format!("{PREFIX}{kind}:{}", base45::encode(&bytes.expect("messages always encode")))
@@ -111,6 +117,7 @@ impl Message {
             Message::Pair(_) => "an account to pair with",
             Message::Sign(_) => "a request to sign",
             Message::Signed(_) => "a signed transaction",
+            Message::MetaMask(_) => "a request from MetaMask",
         }
     }
 }
@@ -245,10 +252,22 @@ where
 }
 
 /// Reads a code from a file: a message's text, or a photo or image of its QR code or of a part's.
+#[cfg(test)]
 pub fn read(bytes: &[u8]) -> Result<Code, String> {
+    Code::from_text(&text_in(bytes)?)
+}
+
+/// Whether a code's text is a Uniform Resource, as MetaMask's are: ur:, in either case.
+pub fn is_ur(text: &str) -> bool {
+    text.trim().get(..3).is_some_and(|scheme| scheme.eq_ignore_ascii_case("ur:"))
+}
+
+/// The text of a code in a file: the file's own, when it is a code's text, or the QR code's in a
+/// photo or image of one, this wallet's or MetaMask's.
+pub fn text_in(bytes: &[u8]) -> Result<String, String> {
     match std::str::from_utf8(bytes) {
-        Ok(text) if text.trim().starts_with(PREFIX) => Code::from_text(text),
-        _ => Code::from_text(&code_in(bytes)?),
+        Ok(text) if text.trim().starts_with(PREFIX) || is_ur(text) => Ok(text.trim().to_string()),
+        _ => code_in(bytes),
     }
 }
 
@@ -296,7 +315,7 @@ fn code_in(bytes: &[u8]) -> Result<String, String> {
 
         for grid in prepared.detect_grids() {
             match grid.decode() {
-                Ok((_, text)) if text.starts_with(PREFIX) => return Ok(text),
+                Ok((_, text)) if text.starts_with(PREFIX) || is_ur(&text) => return Ok(text),
                 Ok(_) => found_other = true,
                 Err(_) => {}
             }

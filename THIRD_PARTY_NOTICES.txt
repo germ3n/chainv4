@@ -2604,6 +2604,65 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+minicbor 2.3.1
+  BlueOak-1.0.0
+
+# Blue Oak Model License
+
+Version 1.0.0
+
+## Purpose
+
+This license gives everyone as much permission to work with
+this software as possible, while protecting contributors
+from liability.
+
+## Acceptance
+
+In order to receive this license, you must agree to its
+rules.  The rules of this license are both obligations
+under that agreement and conditions to your license.
+You must not do anything with this software that triggers
+a rule that you cannot or will not follow.
+
+## Copyright
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe that contributor's
+copyright in it.
+
+## Notices
+
+You must ensure that everyone who gets a copy of
+any part of this software from you, with or without
+changes, also gets the text of this license or a link to
+<https://blueoakcouncil.org/license/1.0.0>.
+
+## Excuse
+
+If anyone notifies you in writing that you have not
+complied with [Notices](#notices), you can keep your
+license by taking all practical steps to comply within 30
+days after the notice.  If you do not do so, your license
+ends immediately.
+
+## Patent
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe any patent claims
+they can license or become able to license.
+
+## Reliability
+
+No contributor can revoke this license.
+
+## No Liability
+
+***As far as the law allows, this software comes as is,
+without any warranty or condition, and no contributor
+will be liable to anyone for any damages related to this
+software or this license, under any kind of legal claim.***
+
 mozjpeg 0.10.13 and mozjpeg-sys 2.2.3
   IJG
 
@@ -3139,7 +3198,7 @@ choices, and otherwise the license noted for that crate. MIT-licensed crates use
 the MIT terms reproduced at the top with the copyright lines given here in place
 of chainv4's. Apache-2.0 crates use the Apache License text above.
 
-965 crates.
+970 crates.
 
 accesskit 0.25.1
   MIT OR Apache-2.0
@@ -3716,13 +3775,19 @@ bit-vec 0.9.1
 
 bitcoin-consensus-encoding 1.3.0
   CC0-1.0
-  Built into: node
+  Built into: node and wallet
   Authors: Andrew Poelstra, Nick Johnson, Tobin C. Harding. The package has no
+  separate copyright line.
+
+bitcoin-internals 0.6.0
+  CC0-1.0
+  Built into: wallet
+  Authors: Andrew Poelstra, The Rust Bitcoin developers. The package has no
   separate copyright line.
 
 bitcoin-internals 0.7.0
   CC0-1.0
-  Built into: node
+  Built into: node and wallet
   Authors: Andrew Poelstra, The Rust Bitcoin developers. The package has no
   separate copyright line.
 
@@ -3734,6 +3799,11 @@ bitcoin-io 0.1.101
 bitcoin_hashes 0.14.101
   CC0-1.0
   Built into: node and wallet
+  Authors: Andrew Poelstra. The package has no separate copyright line.
+
+bitcoin_hashes 1.2.0
+  CC0-1.0
+  Built into: wallet
   Authors: Andrew Poelstra. The package has no separate copyright line.
 
 bitflags 1.3.2
@@ -4148,12 +4218,12 @@ cpufeatures 0.3.1
 
 crc 3.4.0
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2017 crc-rs Developers
 
 crc-catalog 2.5.0
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Authors: Akhil Velagapudi. The package has no separate copyright line.
 
 crc32fast 1.5.3
@@ -5641,6 +5711,11 @@ mime 0.3.17
   Built into: node
   Copyright (c) 2014 Sean McArthur
 
+minicbor 2.3.1
+  BlueOak-1.0.0
+  Built into: wallet
+  Authors: Toralf Wittner. The package has no separate copyright line.
+
 minimal-lexical 0.2.1
   MIT OR Apache-2.0
   Built into: node and wallet
@@ -6493,6 +6568,11 @@ rand_xorshift 0.5.0
   Copyright 2018 Developers of the Rand project
   Copyright (c) 2014 The Rust Project Developers
 
+rand_xoshiro 0.8.1
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2018 Developers of the Rand project
+
 range-alloc 0.1.5
   MIT OR Apache-2.0
   Built into: node
@@ -6672,7 +6752,7 @@ ring 0.17.14
 
 ripemd 0.2.0
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2021-2026 The RustCrypto Project Developers
 
 rlp 0.5.2
@@ -7469,6 +7549,11 @@ untrusted 0.9.0
   ISC
   Built into: node, explorer and wallet
   Copyright 2015-2016 Brian Smith.
+
+ur 0.5.2
+  MIT
+  Built into: wallet
+  Copyright (c) 2020 Dominik Spicher
 
 ureq 3.5.0
   MIT OR Apache-2.0

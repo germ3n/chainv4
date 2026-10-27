@@ -305,6 +305,75 @@ pub fn decode(raw: &[u8]) -> Result<EthereumTx, String> {
     }
 }
 
+#[document(
+    summary = "Reads an Ethereum transaction before it is signed, as a wallet hands it to a hardware wallet to sign: a legacy one with EIP-155's chain id and two zeros in place of its signature, or a type 1 or 2 one without its signature. Its signing hash is the keccak256 of exactly these bytes: bytes that would encode another way are refused, so what is shown is what is signed.",
+    category = "Ethereum",
+    returns = "The transaction, its signature zero, or why its bytes are not one.",
+    see_also = "decode, EthereumTx::signing_hash",
+)]
+pub fn decode_unsigned(raw: &[u8]) -> Result<EthereumTx, String> {
+    if raw.len() > MAX_RAW {
+        return Err(format!("an Ethereum transaction takes at most {MAX_RAW} bytes"));
+    }
+
+    let (kind, body) = match raw.first() {
+        Some(1) => (EthereumKind::AccessList, &raw[1..]),
+        Some(2) => (EthereumKind::DynamicFee, &raw[1..]),
+        Some(first) if *first >= 0xc0 => (EthereumKind::Legacy, raw),
+        _ => return Err("not an Ethereum transaction: legacy, or of type 1 or 2".to_string()),
+    };
+    let (Item::List(fields), []) = item(body)? else {
+        return Err("an Ethereum transaction is one RLP list".to_string());
+    };
+    let unsigned = |chain_id, nonce, max_price, tip, gas_limit, to, value, input: &[u8], access_list| EthereumTx {
+        kind,
+        chain_id,
+        nonce,
+        max_price,
+        tip,
+        gas_limit,
+        to,
+        value,
+        input: input.to_vec(),
+        access_list,
+        signature: [0; 64],
+        parity: 0,
+    };
+    let tx = match (kind, fields.as_slice()) {
+        (EthereumKind::Legacy, [nonce, price, gas, to, value, input, chain, _, _]) => {
+            let price = number(price, "the gas price")?;
+
+            unsigned(small(chain, "the chain id")?, small(nonce, "the nonce")?, price, price, small(gas, "the gas limit")?, to_field(to)?, number(value, "the value")?, bytes(input, "the input")?, Vec::new())
+        }
+        (EthereumKind::Legacy, [_, _, _, _, _, _]) => {
+            return Err("a legacy transaction without its chain id, as EIP-155 has it: replayable on any chain".to_string());
+        }
+        (EthereumKind::AccessList, [chain, nonce, price, gas, to, value, input, list]) => {
+            let price = number(price, "the gas price")?;
+
+            unsigned(small(chain, "the chain id")?, small(nonce, "the nonce")?, price, price, small(gas, "the gas limit")?, to_field(to)?, number(value, "the value")?, bytes(input, "the input")?, access_list(list)?)
+        }
+        (EthereumKind::DynamicFee, [chain, nonce, tip, max, gas, to, value, input, list]) => unsigned(
+            small(chain, "the chain id")?,
+            small(nonce, "the nonce")?,
+            number(max, "the max fee per gas")?,
+            number(tip, "the max priority fee per gas")?,
+            small(gas, "the gas limit")?,
+            to_field(to)?,
+            number(value, "the value")?,
+            bytes(input, "the input")?,
+            access_list(list)?,
+        ),
+        _ => return Err("an unsigned Ethereum transaction with the wrong number of fields for its type".to_string()),
+    };
+
+    // A legacy one's two zeros, and every field, as RLP writes them.
+    match tx.fields(false) == raw {
+        true => Ok(tx),
+        false => Err("an Ethereum transaction that does not encode as it reads".to_string()),
+    }
+}
+
 /// RLP's encoding of bytes.
 fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     match bytes {
@@ -421,10 +490,15 @@ impl EthereumTx {
         out
     }
 
+    #[document(parent = "EthereumTx", summary = "Its bytes before it is signed: its fields, typed as its type says, with EIP-155's chain id and two zeros for a legacy one. What a wallet hands a hardware wallet to sign, and what decode_unsigned reads.")]
+    pub fn signing_data(&self) -> Vec<u8> {
+        self.fields(false)
+    }
+
     #[cfg(feature = "secp256k1")]
-    #[document(parent = "EthereumTx", summary = "What its signature signs: the keccak256 of its fields, typed as its type says, with EIP-155's chain id for a legacy one.")]
+    #[document(parent = "EthereumTx", summary = "What its signature signs: the keccak256 of its signing data.")]
     pub fn signing_hash(&self) -> [u8; 32] {
-        keccak(&self.fields(false))
+        keccak(&self.signing_data())
     }
 
     #[document(parent = "EthereumTx", summary = "Its signed bytes, as eth_sendRawTransaction takes them: what decode reads.")]

@@ -423,6 +423,44 @@ as text** always copies the whole.
 **Keep the signer offline:** airplane mode, Wi-Fi and Bluetooth off. The live camera keeps
 nothing: each frame is searched in memory and dropped.
 
+### MetaMask's QR hardware wallet
+
+The offline signer is also a QR hardware wallet for MetaMask, as a Keystone is (ERC-4527): MetaMask
+holds the public keys and builds what to send; the signer reads each request off MetaMask's
+screen, shows what it signs, and shows the signature back.
+
+1. **Pair:** on the signer, **Pair**, **Show MetaMask's code**. In MetaMask, **Add account or
+   hardware wallet**, **Add hardware wallet**, **QR-based**, and read it. The code is the extended
+   public key at m/44'/60'/0' (`ur:crypto-hdkey`), so MetaMask lists every Ethereum account the
+   words make, account n at m/44'/60'/0'/0/n, as this wallet derives them; tick the ones to add.
+   It holds every one of those addresses, but no key. A wallet brought in as keys alone, with no
+   words, has none to show.
+2. **Sign:** MetaMask shows its request as an animated code. On the signer, **Sign**, **Scan with
+   the camera**: the parts are fountain-coded, so any enough of them read in any order will do.
+3. **Check:** the review names the chain large, by name for the common ones and as **your chain**
+   for the id set under Settings, **Your chain**, warning of any other; the account and its path;
+   and what it signs: a transaction's recipient, amount at 18 decimals, data, most fee and nonce,
+   typed data's domain and message, or a message's text.
+4. **Back:** **Sign** shows the signature as a code; in MetaMask, **Get signature**, and read it.
+
+| What MetaMask asks | What the signer signs, and v |
+| --- | --- |
+| An EIP-1559 or EIP-2930 transaction | The keccak256 of its unsigned bytes; v is the parity, 0 or 1. |
+| A legacy transaction | The same, with EIP-155's chain id; v is EIP-155's, `chain_id * 2 + 35 + parity`. One without a chain id is refused. |
+| Typed data, eth_signTypedData_v4 | EIP-712's hash, as MetaMask's own; v is 27 or 28. |
+| A message, personal_sign | EIP-191's hash; v is 27 or 28. |
+
+It signs for any chain MetaMask is set to, and refuses a request for another seed's keys (its
+fingerprint), a path below another account level than m/44'/60'/0', an address that is not the
+key's, a transaction for another chain than the request names, and bytes that do not read back
+as exactly what they say.
+
+**Tested against MetaMask's own libraries:** `wallet/src/hardware/metamask/` makes requests with
+Keystone's `@keystonehq/bc-ur-registry-eth` and ethereumjs, as MetaMask's QR keyring does, into
+`metamask.json`, which the wallet's tests read and sign; and checks the wallet's pairing code and
+signatures back with them: the accounts the extended key derives, and each signature rebuilt into
+its transaction or recovered from its hash, under its request's id.
+
 ## Receiving
 
 The Receive page shows one of the account's addresses, picked by its scheme, to copy and as a QR

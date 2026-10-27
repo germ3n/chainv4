@@ -612,8 +612,15 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   them.
 - [ ] **wallet_watchAsset and several chains for sites.** The wallet follows one node's chain, and
   shows tokens as the registry lists them.
-- [ ] **The offline signer as MetaMask's QR hardware wallet,** ERC-4527: pairing by
-  `ur:crypto-hdkey`, signing `ur:eth-sign-request`s read off MetaMask's animated codes.
+- [x] **The offline signer as MetaMask's QR hardware wallet,** ERC-4527: pairing by
+  `ur:crypto-hdkey` at m/44'/60'/0', signing `ur:eth-sign-request`s read off MetaMask's animated,
+  fountain-coded codes, for any chain, and showing `ur:eth-signature` back. See
+  [Wallet](wallet.md#metamasks-qr-hardware-wallet).
+- [ ] **The signer for other chains' wallets, by UR.** Bitcoin's PSBTs (`crypto-psbt`), as Sparrow
+  and BlueWallet ask, and Keystone's types for Solana, Cosmos and the rest, would each need their
+  derivation paths and signing beside Ethereum's.
+- [ ] **This wallet's own codes as URs.** CV4's base45 packs about a third denser than UR's
+  bytewords, but URs are fountain-coded, so a camera that missed a part needs no full round.
 - [ ] **Hardware wallets reach the wallet through MetaMask alone,** and the desktop and Android apps
   reach none. WalletConnect, or USB straight to the device, would.
 - [ ] **The wallet keeps its words as plain strings while unlocked.** The vault seals them at rest,

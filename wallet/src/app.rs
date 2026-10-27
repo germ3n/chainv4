@@ -83,6 +83,10 @@ pub struct Settings {
     pub light_theme: bool,
     /// The contracts the Contracts page keeps, with an EVM one's ABI.
     pub contracts: Vec<SavedContract>,
+    /// An offline signer's word for which chain is yours, by its Ethereum chain id: what MetaMask's
+    /// requests for it are named by, and what any other is warned of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signer_chain: Option<u64>,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -136,6 +140,7 @@ impl Default for Settings {
             lock_after: 15,
             light_theme: false,
             contracts: Vec::new(),
+            signer_chain: None,
             vault: None,
             current: String::new(),
         }

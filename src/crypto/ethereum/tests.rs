@@ -114,3 +114,42 @@ fn what_ethereum_refuses_is_refused() {
     assert!(item(&[0xb8, 0x02, 0x01, 0x02]).is_err());
     assert_eq!(item(&[0x80]).unwrap().0, Item::Bytes(&[]));
 }
+
+#[test]
+#[cfg(feature = "secp256k1")]
+fn unsigned_transactions_read_as_a_wallet_hands_them_to_a_hardware_wallet() {
+    for kind in [EthereumKind::Legacy, EthereumKind::AccessList, EthereumKind::DynamicFee] {
+        let tx = unsigned(kind);
+        let bytes = tx.fields(false);
+        let read = decode_unsigned(&bytes).unwrap();
+
+        assert_eq!(read, EthereumTx { signature: [0; 64], parity: 0, ..tx.clone() }, "{kind:?}");
+        assert_eq!(read.signing_hash(), keccak(&bytes), "{kind:?}: what is shown is what is signed");
+    }
+
+    // EIP-155's own: its signing data, and what it signs.
+    let signed = decode(&from_hex(EIP155_RAW).unwrap()).unwrap();
+    let data = signed.fields(false);
+
+    assert_eq!(decode_unsigned(&data).unwrap().signing_hash(), signed.signing_hash());
+
+    // A signed one, one without a chain id, and one written another way than RLP writes it.
+    assert!(decode_unsigned(&from_hex(EIP155_RAW).unwrap()).is_err());
+
+    let mut old = Vec::new();
+    let mut body = Vec::new();
+
+    for field in [&[9u8][..], &[1], &[0x52, 0x08], &[0x35; 20], &[1], &[]] {
+        put_bytes(&mut body, field);
+    }
+
+    put_list(&mut old, &body);
+
+    assert!(decode_unsigned(&old).unwrap_err().contains("EIP-155"));
+
+    let mut padded = data.clone();
+    padded.push(0);
+
+    assert!(decode_unsigned(&padded).is_err());
+    assert!(decode_unsigned(&[]).is_err());
+}

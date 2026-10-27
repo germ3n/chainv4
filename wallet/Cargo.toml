@@ -39,6 +39,8 @@ qrcode = { version = "0.14.1", default-features = false }
 # decoded in Rust, alike on every platform, and rqrr to find and read the codes in them.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 rqrr = { version = "0.11.0", default-features = false }
+ur = "0.5.2"
+minicbor = { version = "2", default-features = false, features = ["alloc"] }
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "links", "wayland", "x11"] }
