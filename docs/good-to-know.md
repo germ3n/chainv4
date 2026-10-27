@@ -621,6 +621,20 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
   `--dex-contract`, `--dex-router`, or the name `dex`.
 
+## A node cut off rejoins the validators' chain
+
+- **A node that mined on its own while cut off,** as the laptop did while the VPS rebuilt, now
+  moves back to the branch the validators justified however far it got, down to the finalized
+  checkpoint. Before, a branch splitting off more than `max_reorg_depth` blocks below its tip was
+  never followed, and the node stayed on its own fork until its database was moved aside.
+- **Undo records and side branches are kept down to the finalized checkpoint** on a chain with
+  finality, beyond `max_reorg_depth` while finality lags: a stalled finality grows them, and they
+  go together once it moves on.
+- **A node syncs from a peer ahead of it on justification** even when it holds more work itself,
+  until it has that peer's blocks.
+- **Nodes choose forks differently now,** so the VPS and every node that follows it update
+  together.
+
 ## Swaps wait for finality
 
 - **The second lock and the starter's claim are held** until the lock they rest on is final:

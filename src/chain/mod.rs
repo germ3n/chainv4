@@ -207,7 +207,7 @@ pub struct Genesis {
     pub tx_limits: Limits,
     #[document(summary = "The functions that make a contract a token: one that exports them all is in the token registry. Usually STANDARD_TOKEN_FUNCTIONS, ERC-20's required six; empty keeps no registry.")]
     pub token_functions: Vec<String>,
-    #[document(summary = "How far back the main chain may be rolled back. A branch that splits off deeper is never followed, however much work it holds, and undo records older than this are dropped.")]
+    #[document(summary = "How far back the main chain may be rolled back by work. A branch that splits off deeper is never followed for its work alone, however much it holds; one holding a justified checkpoint is, down to the finalized one. Undo records older than this, and on a chain with finality below the finalized checkpoint, are dropped.")]
     pub max_reorg_depth: u64,
     #[document(summary = "Finality: its kind and every parameter of it, or None for a chain where only work decides.")]
     pub finality: Option<FinalityConfig>,
@@ -1933,8 +1933,15 @@ impl Chain {
     /// this node took state at. Run after the tip moves. A branch's blocks go from its leaf down
     /// to the fork; the blocks on the main chain stay.
     fn prune_side_branches(&mut self) -> Result<usize, DbError> {
+        // With finality, a justified branch may be followed down to the finalized checkpoint, so
+        // side branches are kept that far; without, work alone moves the chain, max_reorg_depth
+        // back at most.
+        let by_depth = match self.finality {
+            Some(_) => 0,
+            None => self.tip.height.saturating_sub(self.max_reorg_depth),
+        };
         let floor = [
-            self.tip.height.saturating_sub(self.max_reorg_depth),
+            by_depth,
             self.finalized_height().unwrap_or(0),
             self.snapshot.unwrap_or(0),
         ]
@@ -2005,15 +2012,22 @@ impl Chain {
 
     /// Makes new_tip the tip: rolls the main chain back to where its branch splits off, then runs
     /// the branch, in one commit. A branch that outweighs the main chain is only followed when it
-    /// holds the latest justified checkpoint; a justified one (justified set) only needs to hold
-    /// the finalized one. Neither may split off deeper than max_reorg_depth.
+    /// holds the latest justified checkpoint, and splits off no deeper than max_reorg_depth. A
+    /// justified one (justified set) only needs to hold the finalized one, however deep it splits
+    /// off: the voters chose it, and a node that mined on its own while cut off from them follows
+    /// it back, as far as it went.
     fn reorganize(&mut self, new_tip: &Block, work: u256, justified: bool) -> Result<Imported, ImportError> {
         let mut branch = vec![new_tip.clone()];
         let mut fork = new_tip.header.parent;
-        // How deep a reorg may go is measured from this node's tip, not along the branch, which may
-        // be far longer: a node that mined a few blocks of its own follows a peer's chain that
-        // grew from below them, however long it is.
-        let floor = self.tip.height.saturating_sub(self.max_reorg_depth);
+        // How deep a reorg by work may go is measured from this node's tip, not along the branch,
+        // which may be far longer: a node that mined a few blocks of its own follows a peer's chain
+        // that grew from below them, however long it is. One to a justified branch goes down to the
+        // finalized checkpoint.
+        let finalized = self.finalized_height().unwrap_or(0);
+        let floor = match justified {
+            true => finalized,
+            false => self.tip.height.saturating_sub(self.max_reorg_depth),
+        };
 
         while !self.on_main_chain(&fork)? {
             let block = self.block(&fork)?.ok_or_else(|| missing(&fork))?;
@@ -2038,7 +2052,7 @@ impl Chain {
             return Ok(Imported::Side);
         }
 
-        if !self.on_main_chain(&fork)? || self.tip.height - fork_height > self.max_reorg_depth {
+        if !self.on_main_chain(&fork)? || (!justified && self.tip.height - fork_height > self.max_reorg_depth) {
             log::warn!(
                 "[chain] not following a branch to {} that splits off more than {} blocks back",
                 new_tip.id(),
@@ -2221,11 +2235,22 @@ impl Chain {
         below.merge(changes);
         below.put_value(Column::Undo, id_key(&id), &Undo { entries });
 
-        // Nothing rolls back further than max_reorg_depth, so older undo records go.
-        if let Some(old) = height.checked_sub(self.max_reorg_depth + 1)
-            && let Some(old_id) = read_value::<Hash>(&**below, Column::Heights, &old.to_be_bytes())?
-        {
-            below.delete(Column::Undo, id_key(&old_id));
+        // Nothing rolls back further than max_reorg_depth by work, nor, on a chain with finality,
+        // below the finalized checkpoint, down to which a justified branch may reach: older undo
+        // records go. While finality stalls they are kept, and go together once it moves on.
+        if let Some(old) = height.checked_sub(self.max_reorg_depth + 1) {
+            let mut gone = match self.finality.as_ref().map(|_| self.finalized_height().unwrap_or(0)) {
+                Some(finalized) => old.min(finalized),
+                None => old,
+            };
+
+            while gone > 0
+                && let Some(old_id) = read_value::<Hash>(&**below, Column::Heights, &gone.to_be_bytes())?
+                && read_value::<Undo>(&**below, Column::Undo, &id_key(&old_id))?.is_some()
+            {
+                below.delete(Column::Undo, id_key(&old_id));
+                gone -= 1;
+            }
         }
 
         Ok(receipts)

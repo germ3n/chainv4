@@ -214,7 +214,20 @@ impl Node {
             .filter(|(_, peer)| peer.work > ours && peer.height > 0)
             .max_by_key(|(id, peer)| (peer.work, **id));
 
-        let Some((peer, chain)) = heaviest else {
+        // Or, with nobody heavier, the peer furthest ahead on justification, until this node has
+        // its blocks: a node that mined a heavier branch on its own, cut off from the validators,
+        // fetches the branch they justified, which its justification then moves the chain to.
+        let justified = self.chain.justified().map_or(0, |justified| justified.epoch);
+        let ahead = || {
+            self.sync
+                .peers
+                .iter()
+                .filter(|(_, peer)| self.chain.takes_votes() && peer.justified > justified && peer.height > 0)
+                .filter(|(_, peer)| peer.next.is_none_or(|next| next <= peer.height))
+                .max_by_key(|(id, peer)| (peer.justified, **id))
+        };
+
+        let Some((peer, chain)) = heaviest.or_else(ahead) else {
             self.sync_proofs();
 
             return Ok(());

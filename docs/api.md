@@ -215,7 +215,8 @@ as [Storage](storage.md#keys-and-encoding) describes. An account's key, for exam
 address's tag and bytes: 32, or 20 for a secp256k1 address.
 
 `?block=ID` proves at a recent main-chain block rather than the tip, one within the last
-`max_reorg_depth` blocks, whose undo records the node keeps: 404 for any other.
+`max_reorg_depth` blocks, or above the finalized checkpoint, whose undo records the node keeps:
+404 for any other.
 
 It answers:
 - `block`, `height` and `state_root`: the block it proves against;
@@ -517,7 +518,8 @@ the explorer.
   the node loop, which answers between blocks.
 - **Reads are not snapshot-consistent.** A request that reads several keys can see two tips.
   Proofs are the exception: each is checked against its root before it is sent.
-- **Proofs reach back `max_reorg_depth` blocks.** The node keeps one state tree, and rolls it back
+- **Proofs reach back `max_reorg_depth` blocks,** and on a chain with finality to the finalized
+  checkpoint when it lags further. The node keeps one state tree, and rolls it back
   by undo records to prove at an older block, so it can only go as far back as it keeps those.
 - **A snapshot node's history is headers only** before its pivot: `GET /blocks` and
   `GET /blocks/{block}` show those blocks marked `"pruned": true`, without transactions.

@@ -257,25 +257,15 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   JSON-RPC from an index of them by their keccak hash. See [Ethereum's tools](ethereum.md).
 - [x] **Pending transactions over JSON-RPC.** `eth_getTransactionByHash` finds one waiting in the
   mempool, with no block yet.
-- [ ] **Old state over JSON-RPC.** Balances and calls at older blocks need state kept for them.
-- [ ] **Blob and EIP-7702 transactions.**
 - [x] **The EVM in the wallet and explorer.** The wallet's Contracts page reads, calls and deploys
   contracts of every engine, EVM ones by their ABI; the explorer reads EVM contracts with
   `eth_call` and shows their logs and calls by name. MetaMask and Foundry are in
   [Ethereum's tools](ethereum.md). The ABI they share is `src/abi/`.
-- [ ] **Proven contract reads.** The apps' reads are dry runs on the node; a light client could
-  prove the storage a read touches.
 - [x] **Calls between the EVM and the other engines.** The native precompile at `0x…4e43`
   calls Lua and wasm contracts with ABI-encoded arguments mapped to native types, and Lua's
   `evm.call` and the SDK's `evm_call` call the EVM, with `evm.encode` and `evm.decode` for the ABI.
   Calls nest across engines to `MAX_CALL_DEPTH`, and a revert on either side unwinds both. See
   [EVM](evm.md#calls-with-lua-and-webassembly-contracts).
-- [ ] **Native calls in EVM traces.** EVM transactions have no trace, so the native calls they
-  make are in none either; revm's inspector could build one with the native hops under it.
-- [ ] **Token refreshes from native calls the EVM makes.** A native contract that asks for
-  `tokens.refresh()` while the EVM calls it is not asked again.
-- [ ] **The wallet's Contracts page calling across engines.** Nothing to do for calls, but a
-  native contract's page could offer the `callNative` calldata for it, for EVM tools.
 - [x] **An alias registered without an EVM transaction.** On a chain with the EVM, any transaction
   writes its sender's alias down, so coin the EVM pays it reaches the account. An account that has
   only received still has none.
@@ -323,6 +313,16 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **The DEX: next.** Price oracles (time-weighted prices, as V2's cumulative ones), flash
   swaps, a fee switch for the protocol, concentrated liquidity (V3's ranges), and routing across
   both DEXes at once.
+- [ ] **Native calls in EVM traces.** EVM transactions have no trace, so the native calls they
+  make are in none either; revm's inspector could build one with the native hops under it.
+- [ ] **Token refreshes from native calls the EVM makes.** A native contract that asks for
+  `tokens.refresh()` while the EVM calls it is not asked again.
+- [ ] **The wallet's Contracts page calling across engines.** Nothing to do for calls, but a
+  native contract's page could offer the `callNative` calldata for it, for EVM tools.
+- [ ] **Proven contract reads.** The apps' reads are dry runs on the node; a light client could
+  prove the storage a read touches.
+- [ ] **Old state over JSON-RPC.** Balances and calls at older blocks need state kept for them.
+- [ ] **Blob and EIP-7702 transactions.**
 - [ ] **NFTs.** A non-fungible token standard beside the fungible one, ERC-721-like: `owner_of`,
   `transfer`, per-token and operator approvals, `token_uri` metadata, `Transfer` and `Approval`
   events, owners kept provably in a namespace as balances are; reference contracts in Lua and
@@ -584,6 +584,33 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Transactions gossip in batches,** up to 256 or 50 ms' worth a message, each still judged
   alone and none sent twice. See [Node](node.md#throughput).
 - [x] **`chainv4 bench`:** blocks built and imported in-process, and load against running nodes.
+- [ ] **End-to-end tests.** Today's tests run a node in-process, or the CLI against one, and the
+  regtest ones run Bitcoin Core; nothing runs the whole system as people use it. Tests that start
+  real processes and drive them through what users touch:
+  - **several nodes** over real networking: producing, gossip, sync, finality, restarts, a node
+    cut off and rejoining (as the laptop did, mining alone while the VPS rebuilt), snapshots,
+    upgrades across a flag day;
+  - **the wallet and the explorer,** driven through their interfaces (egui's kittest, or the web
+    builds in a headless browser): accounts from words, sending, the offline signer's codes, the
+    Swaps and Trade pages, the light client's proofs;
+  - **swaps across real test chains:** chainv4 nodes, Bitcoin Core on regtest and an EVM node
+    such as anvil, both parties' wallets, every pair of legs, claims and refunds past deadlines,
+    and reorganizations under each lock;
+  - **the DEXes** through the wallet: pools opened, trades, liquidity in and out, charts;
+  - **the browser extension and MetaMask,** against a page that asks for accounts, sends and signs;
+  - **Docker:** `pow.sh init`, `up`, `push` and `join` on throwaway machines.
+- [ ] **Fuzzing,** with cargo-fuzz, run in CI for a while on every change and for longer
+  overnight: everything a peer or a user can hand the node or the apps.
+  - **Decoding:** blocks, transactions, votes and justifications, gossip and sync messages, light
+    updates and proofs, from their wincode bytes; Ethereum's RLP transactions; JSON-RPC and the
+    HTTP API's bodies.
+  - **Running:** block import and reorganizations against a fuzzed sequence of blocks; the
+    mempool; transactions with fuzzed arguments through each engine (Lua, WebAssembly, the EVM),
+    held to their fuel and memory limits; the ABI encoder and decoder.
+  - **The apps' inputs:** codes the scanner reads (ur: parts, PSBTs, swap terms, sign requests),
+    BIP39 phrases, key files, the vault's sealed JSON.
+  - **Differential:** the Lua and WebAssembly token examples against each other, and the EVM
+    against revm's own test vectors.
 - [ ] **Benchmarks across machines,** on the testnet: the same load spread over several nodes on
   separate links, and a long run for disk growth, which nothing prunes yet.
 - [x] **An explorer.** `explorer/`, built with egui, for the desktop and, built to WebAssembly,

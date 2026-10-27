@@ -264,23 +264,24 @@ impl<'a> View<'a> {
 
     #[document(
         parent = "View",
-        summary = "The height where a stored block's branch meets the main chain, if it does within max_reorg_depth.",
+        summary = "The height where a stored block's branch meets the main chain, however far back; None for a branch whose blocks are not all stored.",
     )]
     pub fn fork_height(&self, header: &BlockHeader) -> Result<Option<u64>, DbError> {
         let mut current = header.clone();
 
-        for _ in 0..=self.max_reorg_depth {
+        // Down the branch, however long: a node that mined on its own while cut off follows a
+        // justified branch back past max_reorg_depth. It ends, as heights fall and genesis is on
+        // every chain, and side branches are pruned below the finalized checkpoint.
+        loop {
             if self.on_main_chain(&current.id())? {
                 return Ok(Some(current.height));
             }
 
             match self.header(&current.parent)? {
-                Some(parent) => current = parent,
-                None => return Ok(None),
+                Some(parent) if current.height > 0 => current = parent,
+                _ => return Ok(None),
             }
         }
-
-        Ok(None)
     }
 }
 

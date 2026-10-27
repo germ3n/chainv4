@@ -257,8 +257,10 @@ The main chain is the branch with the most total work. Under the authority every
   checkpoint.
 - **Newer justified branch:** the chain moves to it even when it holds less work, as long as it
   keeps the finalized checkpoint.
-- **Depth:** no reorg reaches back more than `max_reorg_depth` blocks, however much work the
-  other branch holds.
+- **Depth:** no reorg by work reaches back more than `max_reorg_depth` blocks, however much work
+  the other branch holds. One to a justified branch reaches down to the finalized checkpoint,
+  however deep: a node that mined on its own while cut off from the validators follows the branch
+  they justified back, as far as it went.
 
 ## Reorganizing
 
@@ -272,8 +274,9 @@ It all happens in one commit, so a crash never leaves state from a block the mai
 have. If a block of the branch fails to run, the reorg is dropped, and that block and everything
 after it on the branch are remembered as bad.
 
-Undo records are kept for the last `max_reorg_depth` blocks; older ones are deleted, since
-nothing can roll back that far.
+Undo records are kept for the last `max_reorg_depth` blocks, and on a chain with finality for
+every block above the finalized checkpoint too: a justified branch may roll back that far. Older
+ones are deleted; while finality stalls they are kept, and go together once it moves on.
 
 **Leaves:** the chain also keeps every leaf block it stores (`tips`), so a justification for a
 side branch can move the chain to the best block on it. The leaves go into the database with
@@ -281,8 +284,8 @@ each block (`Meta`), so they outlast a restart, and the API's `/forks` finds sid
 them.
 
 **Pruning side branches:** whenever the tip moves, the chain deletes every side branch it can
-never follow: one that splits off more than `max_reorg_depth` blocks below the tip, below the
-finalized checkpoint, or below the snapshot the node took state at. Its blocks, headers and work
+never follow: one that splits off below the finalized checkpoint or the snapshot the node took
+state at, and, on a chain without finality, more than `max_reorg_depth` blocks below the tip. Its blocks, headers and work
 go, from the leaf down to the fork, and the leaf leaves `tips`. So what side blocks a node stores
 is bounded by the reorg window, and each of them cost its producer a seal at the main chain's
 difficulty: filling a disk with side blocks costs as much as mining the main chain.

@@ -779,7 +779,9 @@ fn bad_blocks_are_remembered_across_restarts() {
 #[test]
 fn side_branches_the_chain_can_never_follow_are_pruned() {
     let db = Arc::new(MemoryDb::default());
-    let mut chain = Chain::open(db.clone(), &pow_genesis()).unwrap();
+    // Without finality, the reorganization depth decides what can be followed; with it, side
+    // branches are kept down to the finalized checkpoint, as finality's tests show.
+    let mut chain = Chain::open(db.clone(), &Genesis { finality: None, ..pow_genesis() }).unwrap();
     let genesis = chain.block_at(0).unwrap().unwrap();
     let mut main = genesis.clone();
 
@@ -820,7 +822,8 @@ fn side_branches_the_chain_can_never_follow_are_pruned() {
 #[test]
 fn branches_that_split_off_too_deep_are_never_followed() {
     let db = Arc::new(MemoryDb::default());
-    let mut chain = Chain::open(db.clone(), &pow_genesis()).unwrap();
+    // Without finality, depth alone decides how far back the chain can go.
+    let mut chain = Chain::open(db.clone(), &Genesis { finality: None, ..pow_genesis() }).unwrap();
     let genesis = chain.block_at(0).unwrap().unwrap();
     let mut main = genesis.clone();
 
@@ -835,6 +838,19 @@ fn branches_that_split_off_too_deep_are_never_followed() {
     // Undo records only reach back DEV_MAX_REORG_DEPTH blocks.
     assert_eq!(db.read(Column::Undo, &id_key(&first.id())).unwrap(), None);
     assert!(db.read(Column::Undo, &id_key(&second.id())).unwrap().is_some());
+
+    // With finality and nothing finalized, they all stay: a justified branch may need them.
+    let finality_db = Arc::new(MemoryDb::default());
+    let mut voting = Chain::open(finality_db.clone(), &pow_genesis()).unwrap();
+    let mut tip = voting.block_at(0).unwrap().unwrap();
+
+    for _ in 0..DEV_MAX_REORG_DEPTH + 2 {
+        tip = mine_on(&voting, &tip, Vec::new(), Address::Ed25519([1; 32]));
+        extended(voting.import(&tip, LATER));
+    }
+
+    let unfinalized = voting.block_at(1).unwrap().unwrap();
+    assert!(finality_db.read(Column::Undo, &id_key(&unfinalized.id())).unwrap().is_some());
 
     let mut side = genesis;
     let tip = chain.tip().id();

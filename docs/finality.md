@@ -26,7 +26,12 @@ The chain only talks to finality through the `Finality` trait (`src/chain/finali
 
 Whatever the kind:
 - the chain never adds a block at or below the finalized checkpoint, nor reorganizes past it;
-- work alone only moves the chain to a branch that holds the justified checkpoint.
+- work alone only moves the chain to a branch that holds the justified checkpoint;
+- a justified branch moves it however deep the branch splits off, down to the finalized
+  checkpoint, past `max_reorg_depth`. A node cut off from the validators that mined on its own,
+  as a home miner does while the VPS it follows is down, comes back to the chain they chose once
+  it hears from them. Its undo records and side branches are kept down to the finalized
+  checkpoint for that.
 
 A new kind is a new implementation of the trait.
 

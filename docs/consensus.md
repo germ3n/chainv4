@@ -265,7 +265,8 @@ Network page shows it with a hashrate chart, and the Overview a tile.
   `--consensus pow` database from before starts over; a genesis file without `window` keeps its
   id and the parent-only rule, since the field encodes as nothing while unset.
 - **Forks are normal under proof of work.** A node reorganizes to a heavier branch, up to
-  `max_reorg_depth` blocks back. Finality stops it going further (see [Chain](chain.md)).
+  `max_reorg_depth` blocks back. With finality it never goes past the finalized checkpoint, and a
+  justified branch moves it however deep, down to that checkpoint (see [Chain](chain.md)).
 - **The authority is a development key.** Its seed is in the source. A chain with several
   producers runs a rotating authority or production by stake.
 - **A rotating or staked chain lags for light clients.** Its blocks are checked against voters in

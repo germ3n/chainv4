@@ -307,7 +307,10 @@ A node catches up from its peers on its own (`src/node/sync.rs`).
    - its latest justified epoch.
 
    A peer on another chain is never asked for anything again.
-2. **Blocks.** While some peer holds more work, the node asks the heaviest for the next blocks:
+2. **Blocks.** While some peer holds more work, the node asks the heaviest for the next blocks.
+   With nobody heavier, it asks a peer ahead of it on justification for its blocks, until it has
+   them all: a node that mined a heavier branch on its own while cut off from the validators
+   fetches the branch they justified, as side blocks, for the justifications to move it to.
    - it asks for at most 128, from just past what both chains share;
    - it imports them in order, side blocks and reorgs included;
    - when a batch does not connect, the chains split earlier, so it asks again a batch further

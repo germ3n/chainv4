@@ -821,6 +821,44 @@ mod voting {
         }
     }
 
+    #[test]
+    fn a_justified_branch_wins_however_far_back_this_node_mined_alone() {
+        for finality in kinds() {
+            // Reorganizations by work alone go at most six blocks deep here.
+            let genesis = Genesis { max_reorg_depth: 6, ..pow_genesis(finality) };
+            let mut voters_chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+            let mut follower = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+            let first = voters_chain.block_at(0).unwrap().unwrap();
+            let voted = mine_branch(&mut voters_chain, &first, INTERVAL + 1, 1);
+
+            for keypair in &voters()[..2] {
+                let vote = signed(&voters_chain, keypair, start(&voters_chain), checkpoint(&voters_chain, 1));
+                voters_chain.add_vote(vote).unwrap();
+            }
+
+            // The follower, cut off, mined far past the reorganization depth on its own.
+            let alone = mine_branch(&mut follower, &first, INTERVAL + 20, 2);
+
+            for height in 1..=voted.header.height {
+                let _ = follower.import(&voters_chain.block_at(height).unwrap().unwrap(), LATER).unwrap();
+            }
+
+            assert_eq!(follower.tip().id(), alone.id(), "work alone does not move it that far");
+
+            // It mines on, its tip moving: the voters' branch is kept all the same.
+            let alone = mine_branch(&mut follower, &alone, 3, 2);
+            assert_eq!(follower.tip().id(), alone.id());
+
+            // The voters' justification does: what they chose is the chain, however deep.
+            let proof = voters_chain.justifications_from(1, 1).unwrap().remove(0);
+            let update = follower.add_justification(proof).unwrap();
+            let (undone, _) = update.reorganized.expect("the justification moves the chain");
+
+            assert_eq!(follower.tip().id(), voted.id());
+            assert_eq!(undone.len() as u64, INTERVAL + 23);
+        }
+    }
+
     #[cfg(feature = "finality-ffg")]
     #[test]
     fn quiet_validators_leak_until_the_rest_can_finalize_again() {

@@ -815,6 +815,59 @@ fn forked_nodes_settle_on_the_heavier_chain() {
     assert_eq!(Accounts::new(&light.chain().state()).get(&Address::Ed25519([2; 32])).unwrap().balance, u256::ZERO);
 }
 
+/// A node that mined a heavier branch alone, cut off from the validators for longer than any reorg
+/// by work may reach, fetches the branch they justified once it hears from them, and moves to it.
+#[cfg(feature = "finality-ffg")]
+#[test]
+fn a_node_that_mined_alone_moves_to_the_branch_its_validators_justified() {
+    let genesis = Genesis { max_reorg_depth: 6, ..easy_pow() };
+    let open = |validate: bool| {
+        let (link, fake) = NetLink::pair();
+        let mut node = Node::new(Arc::new(MemoryDb::default()), &genesis, None, link).unwrap();
+
+        if validate {
+            node = node.validate(DevAuthority::dev_keypair());
+        }
+
+        (node, fake)
+    };
+    let (mut voter, mut voter_net) = open(true);
+    let (mut alone, mut alone_net) = open(false);
+    let start = voter.chain().tip().clone();
+    let mine = |node: &mut Node, net: &FakeNet, count: u64, miner: u8| {
+        let mut parent = node.chain().tip().clone();
+
+        for _ in 0..count {
+            let block = mine_on(node, &parent, miner);
+            parent = block.header.clone();
+            net.events.send(NetEvent::Block { from: PeerId::random(), block, gossip: None }).unwrap();
+            node.step(LATER).unwrap();
+        }
+    };
+
+    // The validator's branch, which it justifies as it goes; the other node's, heavier, alone.
+    mine(&mut voter, &voter_net, 30, 1);
+    mine(&mut alone, &alone_net, 45, 2);
+    sent(&mut voter_net);
+    sent(&mut alone_net);
+
+    assert!(voter.chain().justified().is_some_and(|justified| justified.epoch >= 2), "{:?}", voter.chain().justified());
+    assert!(alone.chain().tip_work() > voter.chain().tip_work());
+    assert_eq!(alone.chain().tip().height - start.height, 45, "far past the reorganization depth");
+
+    let (voter_peer, alone_peer) = (PeerId::random(), PeerId::random());
+    alone_net.events.send(NetEvent::PeerUp { peer: voter_peer, address: Multiaddr::empty() }).unwrap();
+    alone.step(LATER).unwrap();
+    relay(
+        Side { node: &mut alone, net: &mut alone_net, peer: alone_peer },
+        Side { node: &mut voter, net: &mut voter_net, peer: voter_peer },
+        LATER,
+    );
+
+    assert_eq!(alone.chain().justified(), voter.chain().justified());
+    assert!(alone.chain().on_main_chain(&voter.chain().justified().unwrap().block).unwrap(), "the justified branch is the chain now");
+}
+
 // Finality. The dev chains run FFG with the dev key as their one validator, epochs of 8 blocks, and
 // votes two blocks behind the tip; the authority dev settings time votes the same way.
 #[cfg(any(feature = "finality-ffg", feature = "finality-authority", feature = "finality-depth"))]
@@ -1342,9 +1395,11 @@ fn a_node_switches_its_producer_when_governance_changes_the_consensus() {
 #[test]
 fn a_snapshot_whose_pivot_grows_too_old_moves_it_up_and_fetches_only_what_changed() {
     let authority = DevAuthority::dev_keypair();
-    // Undo records for 20 blocks only, so peers serve state 20 blocks back at most.
+    // Undo records for 20 blocks only, so peers serve state 20 blocks back at most: without
+    // finality, whose unfinalized blocks keep theirs.
     let genesis = Genesis {
         fees: None,
+        finality: None,
         max_reorg_depth: 20,
         ..Genesis::dev_authority(authority.public())
     };
