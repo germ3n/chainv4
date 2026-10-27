@@ -572,8 +572,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   the process rather than closing their connections first.
 - [x] **The HTTP API has transaction lookup and receipts.** `GET /txs/{id}`, and each transaction
   in a block carries its receipt.
-- [ ] **The HTTP API serves one request at a time.** A slow read-only call holds up every other
-  request; a multi-threaded runtime, or calls on a pool of their own, would keep the API answering.
+- [x] **The HTTP API answers side by side,** a thread a core (`--http-threads`), with each client
+  held to 64 requests in flight (`--http-per-ip`), 429 past it.
+- [x] **Transactions gossip in batches,** up to 256 or 50 ms' worth a message, each still judged
+  alone and none sent twice. See [Node](node.md#throughput).
+- [x] **`chainv4 bench`:** blocks built and imported in-process, and load against running nodes.
+- [ ] **Benchmarks across machines,** on the testnet: the same load spread over several nodes on
+  separate links, and a long run for disk growth, which nothing prunes yet.
 - [x] **An explorer.** `explorer/`, built with egui, for the desktop and, built to WebAssembly,
   the browser. It shows blocks on a map with side branches, transactions with their hops as a
   call tree and a graph, accounts, contracts and tokens, the network, the mempool and finality,

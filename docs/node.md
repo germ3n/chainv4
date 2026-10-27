@@ -141,7 +141,7 @@ The node never sees libp2p itself.
 | Piece | What it does |
 | --- | --- |
 | QUIC | The transport. `--listen` picks addresses, `/ip4/0.0.0.0/udp/0/quic-v1` by default; port 0 picks one, and the log shows which. |
-| gossipsub | Blocks, transactions and votes, on topics `/{protocol}/{network}/blocks`, `/txs` and `/votes`. |
+| gossipsub | Blocks, transactions and votes, on topics `/{protocol}/{network}/blocks`, `/txs-batch` and `/votes`. |
 | Kademlia | Finding peers, as `/{protocol}/{network}/kad/1`. |
 | mDNS | Finding peers on the local network; `--no-mdns` turns it off, as on a server. |
 | identify | Learning peers' addresses, and which chain they are on, as `/{protocol}/{network}/1`. |
@@ -163,6 +163,16 @@ when they find each other.
 
 **Message ids:** a gossip message's id is the chain hash of its bytes, so the same block or
 transaction is one message however many peers send it.
+
+**Transactions go in batches:** a node gathers what it gossips for up to `TX_BATCH_WAIT`, 50 ms,
+or `TX_BATCH`, 256 transactions, and sends them as one message on `/txs-batch`, so a busy network
+sends a message every 50 ms rather than one a transaction, which overflowed libp2p's queues past a
+few thousand a second. A batch is never passed on whole: each transaction in it is counted into
+the backlog, checked, admitted and judged on its own, a bad signature counting against the peer,
+and those the node takes go out again in its own next batch. Each node remembers, for two minutes,
+the transactions it sent and heard of, by id: one is sent once, and one a peer passes back is
+dropped before it costs a slot of the backlog. A node from before batches gossips on `/txs`,
+which no node reads now: every node updates together.
 
 **Checked before it is passed on:** gossipsub runs with `validate_messages`, so a block,
 transaction or vote goes on to this node's peers only once the node has checked it and said so,
@@ -395,6 +405,34 @@ no state of its own.
   another node;
 - one that started at a checkpoint holds no headers below the checkpoint start either, so it
   cannot serve a checkpoint start, or a light client's older headers, from there down.
+
+## Throughput
+
+`chainv4 bench` measures it:
+- **`bench chain`** fills blocks with transfers on an in-process chain, from `--senders` funded
+  keys, builds each as its producer and imports it as any other node does, and times signing,
+  building and importing: what one machine can execute, without a network. `--db DIR` keeps it in
+  RocksDB, synced as a node keeps it.
+- **`bench load --node URL…`** funds `--senders` new keys from `--key` (the development key
+  unless given), then submits transfers among them at each of `--rates` per second for `--step`
+  seconds, from `--threads` connections it keeps open, spread over every node given. Each step
+  reports what the nodes took, refused (an HTTP status) and failed, what landed in blocks per
+  second, and the median and 99th-percentile time of a submission; it stops at the first rate the
+  nodes take less than nine in ten of. `--json FILE` writes the steps.
+
+Measured on an Apple M3 Pro, 12 cores, on the development chain (2-second blocks, 50 million gas,
+an Ed25519 transfer 3,620 gas, so 13,812 to a full block and about 6,900 a second at most):
+
+| What | Result |
+| --- | --- |
+| A full block, built | about 230 ms |
+| A full block, imported, in memory | about 265 ms: some 50,000 transfers a second |
+| The same, RocksDB, synced | about 380 ms: some 37,000 a second, a fifth of its slot |
+| One node, submitted to directly | 6,550 a second land at 9,600 offered, the most blocks hold; past it the excess is refused, never lost |
+| Two nodes, submitted to the one that does not produce | 5,940 a second land at 9,600 offered, every transaction gossiped; before batches, 3,660, with a tenth of them lost on the way |
+
+So the protocol's own limit, not the node, bounds a well-connected network; a machine with fewer
+cores runs blocks slower, and links slower than a laptop's loopback carry fewer batches.
 
 ## What to keep in mind
 

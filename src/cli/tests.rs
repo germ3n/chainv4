@@ -987,3 +987,13 @@ fn coins_and_spans_read_as_people_write_them() {
     assert_eq!((parse_duration("90s").unwrap(), parse_duration("2d").unwrap()), (90_000, 172_800_000));
     assert!(parse_duration("24").is_err() && parse_duration("h").is_err() && parse_duration("5w").is_err());
 }
+
+#[cfg(feature = "client")]
+#[test]
+fn bench_chain_fills_blocks_and_times_each_part() {
+    let times = super::bench::chain(2, 50, None).unwrap();
+
+    assert_eq!(times.len(), 2);
+    assert!(times.iter().all(|block| block.txs == 50), "every sender's transfer in each block");
+    assert!(times.iter().all(|block| block.import > 0.0 && block.import_tps() > 0.0));
+}

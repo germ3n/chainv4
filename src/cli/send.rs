@@ -968,6 +968,13 @@ pub struct TlsArgs {
 
 /// A client for a node's API: errors come back as answers, so their message can be shown.
 pub(super) fn agent(tls: &TlsArgs) -> CliResult<Agent> {
+    pooled(tls, 3)
+}
+
+/// A client keeping up to this many connections to a node open between requests, as many as
+/// requests go at once, so none is closed and opened again: what a client sending many at once,
+/// such as bench load, needs, or its machine runs out of ports.
+pub(super) fn pooled(tls: &TlsArgs, connections: usize) -> CliResult<Agent> {
     let mut config = ureq::tls::TlsConfig::builder();
 
     if let Some(path) = &tls.ca_cert {
@@ -996,6 +1003,8 @@ pub(super) fn agent(tls: &TlsArgs) -> CliResult<Agent> {
     Ok(Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(30)))
+        .max_idle_connections(connections.max(3))
+        .max_idle_connections_per_host(connections.max(3))
         .tls_config(config.build())
         .build()
         .into())

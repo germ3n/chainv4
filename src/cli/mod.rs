@@ -25,6 +25,8 @@ mod layout;
 #[cfg(feature = "client")]
 mod light;
 #[cfg(feature = "client")]
+#[cfg(feature = "client")]
+pub(crate) mod bench;
 mod send;
 #[cfg(all(feature = "client", feature = "swap"))]
 mod swap;
@@ -41,6 +43,8 @@ pub use worker::gpus;
 pub use light::{LightArgs, light};
 #[cfg(feature = "client")]
 pub use send::{SendArgs, TlsArgs, TxArgs, send};
+#[cfg(feature = "client")]
+pub use bench::{BenchArgs, bench};
 #[cfg(all(feature = "client", feature = "swap"))]
 pub use swap::{SwapArgs, swap};
 #[cfg(all(feature = "client", feature = "sha256"))]

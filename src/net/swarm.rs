@@ -52,6 +52,56 @@ impl Names {
         })
     }
 }
+/// The most transactions one gossiped batch holds.
+pub const TX_BATCH: usize = 256;
+/// The longest a transaction waits for others to share its batch.
+pub const TX_BATCH_WAIT: Duration = Duration::from_millis(50);
+
+/// How long a transaction is remembered as sent or heard of: past it, one heard again is news.
+const SEEN_FOR: Duration = Duration::from_secs(120);
+
+/// Transactions sent and heard of lately, by id, in two generations of SEEN_FOR each, so
+/// remembering costs no sweep: the older generation goes whole as the newer one ages.
+#[derive(Default)]
+struct Seen {
+    new: HashMap<crate::structs::hash::Hash, bool>,
+    old: HashMap<crate::structs::hash::Hash, bool>,
+    since: Option<Instant>,
+}
+
+impl Seen {
+    fn age(&mut self) {
+        let now = Instant::now();
+
+        if self.since.is_none_or(|since| now.duration_since(since) > SEEN_FOR) {
+            self.old = std::mem::take(&mut self.new);
+            self.since = Some(now);
+        }
+    }
+
+    /// Notes a transaction heard of; false when it was heard of or sent already.
+    fn insert(&mut self, id: crate::structs::hash::Hash) -> bool {
+        self.age();
+
+        match self.new.contains_key(&id) || self.old.contains_key(&id) {
+            true => false,
+            false => {
+                self.new.insert(id, false);
+                true
+            }
+        }
+    }
+
+    /// Notes a transaction about to be sent; true when it was sent already.
+    fn sent(&mut self, id: crate::structs::hash::Hash) -> bool {
+        self.age();
+        let before = self.new.get(&id).or_else(|| self.old.get(&id)).copied();
+        self.new.insert(id, true);
+
+        before == Some(true)
+    }
+}
+
 /// The largest gossip message: a block with plenty of transactions.
 const MAX_GOSSIP: usize = 8 * 1024 * 1024;
 /// How often a peer given with --peer is dialed again while no connection to it stands: after it
@@ -201,6 +251,13 @@ struct Net {
     tried: HashMap<PeerId, Instant>,
     /// Peers' faults and bans.
     bans: Bans,
+    /// Transactions waiting to be gossiped in the next batch.
+    outgoing: Vec<SignedTx>,
+    /// The transactions sent and heard of lately, by id: one is never sent twice, and one heard
+    /// again, as a peer passes on what this node sent it, goes no further than here.
+    seen: Seen,
+    /// The chain's hash, which transactions are named by.
+    hash: crate::structs::hash::HashType,
     /// The IP each connected peer connects from, for bans that cover IPs.
     ips: HashMap<PeerId, IpAddr>,
 }
@@ -280,7 +337,7 @@ impl Net {
             .with_swarm_config(|swarm| swarm.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
         let blocks = gossipsub::IdentTopic::new(format!("{}/blocks", names.topic));
-        let txs = gossipsub::IdentTopic::new(format!("{}/txs", names.topic));
+        let txs = gossipsub::IdentTopic::new(format!("{}/txs-batch", names.topic));
         let votes = gossipsub::IdentTopic::new(format!("{}/votes", names.topic));
         log::info!("[net] protocols {}/…", names.topic);
         swarm.behaviour_mut().gossipsub.subscribe(&blocks).map_err(net_error)?;
@@ -323,6 +380,9 @@ impl Net {
             target_peers: config.target_peers,
             tried: HashMap::new(),
             bans: Bans::new(config.bans),
+            outgoing: Vec::new(),
+            seen: Seen::default(),
+            hash: config.hash,
             ips: HashMap::new(),
         })
     }
@@ -414,10 +474,13 @@ impl Net {
     ) {
         let mut redial = tokio::time::interval(REDIAL_EVERY);
         redial.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut batch = tokio::time::interval(TX_BATCH_WAIT);
+        batch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
                 _ = redial.tick() => self.redial(),
+                _ = batch.tick() => self.flush(),
                 event = self.swarm.select_next_some() => {
                     if !self.on_swarm(event, &events) {
                         return;
@@ -452,25 +515,20 @@ impl Net {
                             return true;
                         }
                     }
-                } else if message.topic == self.txs.hash() || message.topic == self.votes.hash() {
-                    let tx = message.topic == self.txs.hash();
-
+                } else if message.topic == self.txs.hash() {
+                    return self.batch(from, message_id, &message.data, events);
+                } else if message.topic == self.votes.hash() {
                     if !self.admit(from, events) {
                         self.judge(from, gossip, Verdict::Ignore, events);
 
                         return true;
                     }
 
-                    let event = match tx {
-                        true => wincode::deserialize::<SignedTx>(&message.data).map(|tx| NetEvent::Tx { from, tx, gossip }),
-                        false => wincode::deserialize::<SignedVote>(&message.data).map(|vote| NetEvent::Vote { from, vote, gossip }),
-                    };
-
-                    match event {
-                        Ok(event) => event,
+                    match wincode::deserialize::<SignedVote>(&message.data) {
+                        Ok(vote) => NetEvent::Vote { from, vote, gossip },
                         Err(err) => {
                             self.backlog.release(Origin::Peer(from));
-                            log::debug!("[net] undecodable {} from {from}: {err}", if tx { "transaction" } else { "vote" });
+                            log::debug!("[net] undecodable vote from {from}: {err}");
                             self.judge(from, Some(Gossip(message_id)), Verdict::Reject(Fault::Garbage), events);
 
                             return true;
@@ -688,7 +746,22 @@ impl Net {
         match command {
             NetCommand::Judge { peer, gossip, verdict } => self.judge(peer, gossip, verdict, events),
             NetCommand::PublishBlock(block) => self.publish(&self.blocks.clone(), &block),
-            NetCommand::PublishTx(tx) => self.publish(&self.txs.clone(), &tx),
+            NetCommand::PublishTx(tx) => {
+                // Sent once, with the others that come within TX_BATCH_WAIT, or at once when
+                // TX_BATCH. One heard from a peer is marked seen as it came, so taken, it goes on
+                // to the others; sent already, it does not go again.
+                let id = tx.id(self.hash);
+
+                if self.seen.sent(id) {
+                    return;
+                }
+
+                self.outgoing.push(tx);
+
+                if self.outgoing.len() >= TX_BATCH {
+                    self.flush();
+                }
+            }
             NetCommand::PublishVote(vote) => self.publish(&self.votes.clone(), &vote),
             NetCommand::Request { peer, request } => {
                 log::debug!("[net] asking {peer} for {request:?}");
@@ -702,6 +775,46 @@ impl Net {
             }
             NetCommand::Bootnodes(bootnodes) => self.bootnodes(bootnodes),
         }
+    }
+
+    /// A batch of transactions gossiped by a peer: each counted into the backlog and handed on as
+    /// its own event, to be checked, admitted and judged alone. The batch itself is not passed on:
+    /// the transactions this node takes go out again in its own batches, so one that breaks the
+    /// rules goes no further than here.
+    fn batch(&mut self, from: PeerId, id: gossipsub::MessageId, data: &[u8], events: &mpsc::Sender<NetEvent>) -> bool {
+        let txs = match wincode::deserialize::<Vec<SignedTx>>(data) {
+            Ok(txs) if !txs.is_empty() && txs.len() <= TX_BATCH => txs,
+            Ok(_) | Err(_) => {
+                log::debug!("[net] a batch of transactions from {from} that does not read");
+                self.judge(from, Some(Gossip(id)), Verdict::Reject(Fault::Garbage), events);
+
+                return true;
+            }
+        };
+        self.judge(from, Some(Gossip(id)), Verdict::Ignore, events);
+
+        for tx in txs {
+            // One this node sent or heard already: nothing new, and not a slot of the backlog.
+            if !self.seen.insert(tx.id(self.hash)) {
+                continue;
+            }
+
+            if self.admit(from, events) && events.send(NetEvent::Tx { from, tx, gossip: None }).is_err() {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Gossips the transactions waiting to go, as one batch.
+    fn flush(&mut self) {
+        if self.outgoing.is_empty() {
+            return;
+        }
+
+        let batch = std::mem::take(&mut self.outgoing);
+        self.publish(&self.txs.clone(), &batch);
     }
 
     fn publish<M>(&mut self, topic: &gossipsub::IdentTopic, message: &M)
@@ -996,5 +1109,67 @@ mod tests {
         }
 
         drop(theirs);
+    }
+
+    #[test]
+    fn a_transaction_goes_out_once_and_one_heard_again_goes_no_further() {
+        let mut seen = Seen::default();
+        let (mine, theirs) = (crate::structs::hash::Hash::Sha256([1; 32]), crate::structs::hash::Hash::Sha256([2; 32]));
+
+        assert!(!seen.sent(mine), "sent the first time");
+        assert!(seen.sent(mine), "and never again");
+        assert!(!seen.insert(mine), "heard back from a peer: no news");
+        assert!(seen.insert(theirs), "heard first from a peer");
+        assert!(!seen.sent(theirs), "taken, it goes on to the others");
+        assert!(seen.sent(theirs));
+
+        // Two generations later it is forgotten.
+        seen.since = Some(Instant::now() - SEEN_FOR * 2);
+        seen.age();
+        seen.since = Some(Instant::now() - SEEN_FOR * 2);
+        assert!(seen.insert(mine));
+    }
+
+    #[test]
+    #[ignore = "opens real sockets on 127.0.0.1"]
+    fn transactions_go_out_in_batches_and_every_one_arrives() {
+        let network = format!("batches-{}", PeerId::random());
+        let alone = |peers: Vec<Multiaddr>| NetConfig { mdns: false, ..config(&network, BacklogLimits::default(), peers) };
+        let receiver = spawn(alone(Vec::new())).unwrap();
+        let address = wait_for(&receiver, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+        let sender = spawn(alone(vec![address])).unwrap();
+        wait_for(&receiver, |event| match event {
+            NetEvent::PeerUp { .. } => Some(()),
+            _ => None,
+        });
+        // Gossip reaches a peer once it has said what it subscribes to.
+        std::thread::sleep(Duration::from_secs(2));
+
+        // More than one batch's worth, sent faster than a batch waits.
+        let authority = DevAuthority::dev_keypair();
+        let count = TX_BATCH + 44;
+
+        for nonce in 0..count as u64 {
+            sender.send(NetCommand::PublishTx(SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority)));
+        }
+
+        let mut nonces = std::collections::BTreeSet::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+
+        while nonces.len() < count {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "only {} of {count} arrived", nonces.len());
+
+            if let Ok(NetEvent::Tx { tx, gossip, .. }) = receiver.events.recv_timeout(left) {
+                assert_eq!(gossip, None, "each judged alone, the batch never forwarded whole");
+                receiver.backlog.release(Origin::Peer(PeerId::random()));
+                nonces.insert(tx.nonce);
+            }
+        }
+
+        assert_eq!(nonces, (0..count as u64).collect());
     }
 }

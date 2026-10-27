@@ -31,6 +31,10 @@ enum Command {
     /// chainv4, and signs Bitcoin's claim or refund of its HTLC.
     #[cfg(all(feature = "client", feature = "swap"))]
     Swap(cli::SwapArgs),
+    /// How many transactions a second the chain takes: blocks built and imported in-process
+    /// (bench chain), or transfers submitted to running nodes at a rising rate (bench load).
+    #[cfg(feature = "client")]
+    Bench(cli::BenchArgs),
     /// Writes a genesis file with the development defaults, to edit and run with --genesis.
     Genesis(cli::genesis::GenesisArgs),
     /// Shows the storage layout contract code declares, and with --from, checks it keeps an
@@ -167,6 +171,15 @@ struct NodeArgs {
     #[cfg(feature = "http")]
     #[arg(long)]
     http: Option<std::net::SocketAddr>,
+    /// How many threads the API answers on, side by side: one a core unless given.
+    #[cfg(feature = "http")]
+    #[arg(long, requires = "http", default_value_t = 0)]
+    http_threads: usize,
+    /// How many requests one client, by IP or the one a local proxy forwards for, may have in
+    /// flight at once: more get 429.
+    #[cfg(feature = "http")]
+    #[arg(long, requires = "http", default_value_t = chainv4::api::DEFAULT_PER_IP)]
+    http_per_ip: usize,
     /// Let web pages from this origin call the API, such as http://localhost:8081, or * for any.
     /// Repeat to allow several.
     #[cfg(feature = "http")]
@@ -253,6 +266,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Faucet(args)) => cli::faucet(args),
         #[cfg(all(feature = "client", feature = "swap"))]
         Some(Command::Swap(args)) => cli::swap(args),
+        #[cfg(feature = "client")]
+        Some(Command::Bench(args)) => cli::bench(args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
         Some(Command::Layout(args)) => cli::layout(args),
         Some(Command::Db(args)) => cli::db(args),
@@ -448,6 +463,8 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             faucet,
             #[cfg(feature = "swap")]
             swap_contract: args.swap_contract,
+            threads: args.http_threads,
+            per_ip: args.http_per_ip,
         };
         let address = api::start(db, Some(node.handle()), &genesis, address, options)?;
         log::info!("[http] listening on {address}");

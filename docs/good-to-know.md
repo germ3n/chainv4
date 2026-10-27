@@ -203,6 +203,15 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 
 ## The node on the network
 
+- **Single-transaction gossip is gone.** Transactions travel in batches on `/txs-batch`; a node
+  from before speaks `/txs`, which no node reads now. Update every node together.
+- **A batch is never forwarded whole,** so a transaction a node refuses goes no further than it,
+  and one heard twice costs nothing the second time.
+- **The API's limits are per client, behind a proxy too:** 64 requests in flight, then 429. Raise
+  `--http-per-ip` for a load generator on one machine.
+- **Bench from another machine for real numbers:** a laptop's loopback is far faster than the
+  internet, and `bench load` itself takes cores the node would have.
+
 - **A node keeps its peer id.** Its network key is `net.key`, beside the database's directory
   (`/data/net.key` in Docker, in the chain's volume), made at the first start. Delete it and the
   node takes a new id, which peers that pinned `/p2p/<id>` no longer reach. A file that does not

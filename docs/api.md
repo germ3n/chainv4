@@ -22,6 +22,7 @@ Start a node with `--http ADDR`, such as `127.0.0.1:8080`, to serve the API (`sr
 | 400 | A malformed request, or a transaction the mempool refuses for what it is: invalid, or an offer that cannot pay. |
 | 404 | Nothing there, such as a transaction not on the main chain yet. |
 | 409 | A nonce already used, or the same sender and nonce already waiting. |
+| 429 | A faucet asked again too soon, or a client with too many requests in flight already. |
 | 500 | The database failed. |
 | 503 | No node behind the API, a full mempool, or a node that stopped. |
 
@@ -503,8 +504,11 @@ the explorer.
 ## What to keep in mind
 
 - **Plain HTTP only.** The CLI is built without TLS, so keep the API on a trusted network.
-- **One request at a time.** A read-only call runs on the API's thread under the chain's fuel
-  cap, and holds up every other request while it runs.
+- **Requests are answered side by side,** on a thread a core (`--http-threads` for another
+  count), dry runs and contract calls on the blocking pool, so a slow one holds up no other.
+- **Each client may have 64 requests in flight at once** (`--http-per-ip`); more get 429. A client
+  is its IP, or behind a proxy on the node's own machine or network, such as Docker's nginx, the
+  last address `X-Forwarded-For` names. `GET /stream` is not counted.
 - **`/node`, `/mempool` and `/stream` ask the node.** The rest read the database; these go to
   the node loop, which answers between blocks.
 - **Reads are not snapshot-consistent.** A request that reads several keys can see two tips.

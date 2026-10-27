@@ -31,7 +31,7 @@ use {
     crate::structs::u256::u256,
     axum::body::Bytes,
     axum::extract::{DefaultBodyLimit, Path, Query, Request, State as Shared},
-    axum::http::{HeaderValue, Method, StatusCode, Uri, header},
+    axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     axum::middleware::{self, Next},
     axum::response::{IntoResponse, Response},
     axum::routing::{get, post},
@@ -39,7 +39,7 @@ use {
     r#macro::document,
     serde_json::{Value, json},
     std::collections::{HashMap, HashSet},
-    std::net::SocketAddr,
+    std::net::{IpAddr, SocketAddr},
     std::path::PathBuf,
     std::sync::Arc,
 };
@@ -82,6 +82,13 @@ const DEFAULT_MEMPOOL: u64 = 100;
 const MAX_MEMPOOL: u64 = 1_000;
 /// The largest request body: room for the largest deploy, hex-encoded.
 const MAX_BODY: usize = 2 * 1024 * 1024;
+
+#[document(
+    summary = "How many requests one client may have in flight at once unless --http-per-ip says otherwise: past it, 429. A client is its IP, or behind a proxy on the node's own network, the one the proxy says it forwards for.",
+    category = "Node",
+    see_also = "ApiOptions::per_ip",
+)]
+pub const DEFAULT_PER_IP: usize = 64;
 
 /// What every handler reads from.
 #[derive(Clone)]
@@ -129,6 +136,82 @@ struct Api {
     /// The swap contract the node tells clients of.
     #[cfg(feature = "swap")]
     swap_contract: Option<Address>,
+    /// Requests in flight, by client.
+    in_flight: Arc<InFlight>,
+}
+
+/// Requests in flight, by client, and how many each may have.
+struct InFlight {
+    per_ip: usize,
+    counts: std::sync::Mutex<HashMap<IpAddr, usize>>,
+}
+
+/// One request counted in: counted out as it drops, answered or not.
+struct Counted {
+    in_flight: Arc<InFlight>,
+    ip: IpAddr,
+}
+
+impl InFlight {
+    /// Counts a request in, unless its client already has as many as it may.
+    fn enter(in_flight: &Arc<InFlight>, ip: IpAddr) -> Option<Counted> {
+        let mut counts = in_flight.counts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = counts.entry(ip).or_insert(0);
+
+        if *count >= in_flight.per_ip {
+            return None;
+        }
+
+        *count += 1;
+
+        Some(Counted { in_flight: in_flight.clone(), ip })
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        let mut counts = self.in_flight.counts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if let Some(count) = counts.get_mut(&self.ip) {
+            *count -= 1;
+
+            if *count == 0 {
+                counts.remove(&self.ip);
+            }
+        }
+    }
+}
+
+/// Who asks: the connection's IP, or behind a proxy on this machine or its private network, the
+/// last one X-Forwarded-For names, which the proxy added itself.
+fn asker(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
+    let local = match peer.ip() {
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
+    };
+    let forwarded = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit(',').next())
+        .and_then(|last| last.trim().parse().ok());
+
+    match (local, forwarded) {
+        (true, Some(ip)) => ip,
+        _ => peer.ip(),
+    }
+}
+
+/// Turns away a client with too many requests in flight already, 429, so one cannot keep the rest
+/// waiting. A stream, open for as long as the client listens, is not counted.
+async fn per_client(Shared(api): Shared<Api>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>, request: Request, next: Next) -> Response {
+    if request.uri().path() == "/stream" {
+        return next.run(request).await;
+    }
+
+    match InFlight::enter(&api.in_flight, asker(peer, request.headers())) {
+        Some(_counted) => next.run(request).await,
+        None => (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": "too many requests at once from you: wait for some to answer" }))).into_response(),
+    }
 }
 
 impl Api {
@@ -157,6 +240,10 @@ pub struct ApiOptions {
     #[document(summary = "The atomic swap contract on this chain, contracts/lua/swap.lua as deployed here, which GET /status names for the wallet and the CLI; None for none.")]
     #[cfg(feature = "swap")]
     pub swap_contract: Option<Address>,
+    #[document(summary = "The threads the API answers on: as many as the machine has cores when 0.")]
+    pub threads: usize,
+    #[document(summary = "How many requests one client may have in flight at once; DEFAULT_PER_IP when 0.")]
+    pub per_ip: usize,
 }
 
 #[document(
@@ -196,7 +283,16 @@ pub fn start(
     let listener = std::net::TcpListener::bind(address)?;
     listener.set_nonblocking(true)?;
     let local = listener.local_addr()?;
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    // Requests answered side by side, a thread a core unless told: a slow one holds up no other.
+    let threads = match options.threads {
+        0 => std::thread::available_parallelism().map_or(2, usize::from),
+        threads => threads,
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(threads).thread_name("http").enable_all().build()?;
+    let per_ip = match options.per_ip {
+        0 => DEFAULT_PER_IP,
+        per_ip => per_ip,
+    };
 
     std::thread::Builder::new()
         .name("http".to_string())
@@ -231,6 +327,7 @@ pub fn start(
                     faucet: options.faucet.map(|config| Arc::new(faucet::Faucet::new(config))),
                     #[cfg(feature = "swap")]
                     swap_contract: options.swap_contract,
+                    in_flight: Arc::new(InFlight { per_ip, counts: Default::default() }),
                 })
                 // Who connects, for the faucet's limits by IP.
                 .into_make_service_with_connect_info::<SocketAddr>())
@@ -286,7 +383,7 @@ fn router(api: Api) -> Router {
     let router = router.route("/names", get(names)).route("/names/{name}", get(name)).route("/accounts/{address}/names", get(account_names));
     #[cfg(feature = "stream")]
     let router = router.route("/stream", get(stream));
-    let router = router.fallback(apps).layer(DefaultBodyLimit::max(MAX_BODY));
+    let router = router.fallback(apps).layer(DefaultBodyLimit::max(MAX_BODY)).layer(middleware::from_fn_with_state(api.clone(), per_client));
 
     match cors {
         true => router.layer(middleware::from_fn_with_state(api.clone(), allow_origins)).with_state(api),

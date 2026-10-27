@@ -7,7 +7,7 @@
 //! the last one X-Forwarded-For names: the one the proxy added itself, which a caller cannot forge.
 
 use {
-    super::{Answer, Api, ApiError, at_height, json_body, parse_address, tip},
+    super::{Answer, Api, ApiError, asker, at_height, json_body, parse_address, tip},
     crate::crypto::keypair::Keypair,
     crate::faucet::{FAUCET_WINDOW_MS, enough_work, faucet_hash, faucet_window},
     crate::mempool::MempoolError,
@@ -22,7 +22,7 @@ use {
     r#macro::document,
     serde_json::{Value, json},
     std::collections::HashMap,
-    std::net::{IpAddr, SocketAddr},
+    std::net::SocketAddr,
     std::sync::{Arc, Mutex},
 };
 
@@ -214,24 +214,6 @@ async fn send(api: &Api, faucet: &Arc<Faucet>, node: crate::node::NodeHandle, to
     Err(ApiError::Unavailable("the faucet's nonce kept being taken: ask again".to_string()))
 }
 
-/// Who asks: the connection's IP, or behind a proxy on this machine or its private network, the
-/// last one X-Forwarded-For names, which the proxy added itself.
-fn asker(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
-    let local = match peer.ip() {
-        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
-        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
-    };
-    let forwarded = headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.rsplit(',').next())
-        .and_then(|last| last.trim().parse().ok());
-
-    match (local, forwarded) {
-        (true, Some(ip)) => ip,
-        _ => peer.ip(),
-    }
-}
 
 /// A wait as people say it: 23h 59m, 5m, 30s.
 fn span(ms: u64) -> String {
@@ -259,7 +241,7 @@ mod tests {
         let proxy: SocketAddr = "172.18.0.3:40000".parse().unwrap();
         let outside: SocketAddr = "198.51.100.7:40000".parse().unwrap();
 
-        assert_eq!(asker(proxy, &headers), "203.0.113.9".parse::<IpAddr>().unwrap(), "the one the proxy added, not the one the caller wrote");
+        assert_eq!(asker(proxy, &headers), "203.0.113.9".parse::<std::net::IpAddr>().unwrap(), "the one the proxy added, not the one the caller wrote");
         assert_eq!(asker(outside, &headers), outside.ip(), "a caller from outside cannot name another IP");
         assert_eq!(asker(proxy, &HeaderMap::new()), proxy.ip());
         assert_eq!((span(86_340_000), span(300_000), span(400)), ("23h 59m".to_string(), "5m".to_string(), "1s".to_string()));

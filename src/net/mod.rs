@@ -29,7 +29,7 @@ pub use backlog::{Admission, Backlog, BacklogLimits, MAX_STRIKES, Origin, STRIKE
 pub use bans::{BAN_SCORE, BanLimits, Bans, DEFAULT_BAN, Fault, SCORE_WINDOW, Verdict};
 pub use key::{NET_KEY_FILE, net_key};
 
-pub use swarm::{NetError, spawn};
+pub use swarm::{NetError, TX_BATCH, TX_BATCH_WAIT, spawn};
 
 /// The most blocks one sync response carries.
 pub const MAX_SYNC_BLOCKS: u32 = 128;

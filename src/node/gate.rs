@@ -131,6 +131,9 @@ impl Gate {
                 let (refused, verdict) = match self.admit(tx.clone(), checked) {
                     Ok(()) => {
                         log::debug!("[node] queued transaction {id} from {from}");
+                        // Passed on in this node's own next batch: batches are never forwarded
+                        // whole, so what spreads is what each node took.
+                        let _ = self.commands.send(NetCommand::PublishTx(tx.clone()));
                         self.publish(|| NodeEvent::Queued(Arc::new(tx)));
 
                         (0, Verdict::Accept)

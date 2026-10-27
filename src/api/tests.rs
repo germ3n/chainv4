@@ -2043,3 +2043,39 @@ fn status_names_the_swap_contract_when_the_node_was_given_one() {
         assert_eq!(ok(address, "/status")["swap"], expected);
     }
 }
+
+#[test]
+fn a_client_may_have_only_so_many_requests_in_flight() {
+    let in_flight = Arc::new(super::InFlight { per_ip: 2, counts: Default::default() });
+    let (one, other): (std::net::IpAddr, std::net::IpAddr) = ("203.0.113.1".parse().unwrap(), "203.0.113.2".parse().unwrap());
+
+    let first = super::InFlight::enter(&in_flight, one).unwrap();
+    let second = super::InFlight::enter(&in_flight, one).unwrap();
+    assert!(super::InFlight::enter(&in_flight, one).is_none(), "a third waits its turn");
+    assert!(super::InFlight::enter(&in_flight, other).is_some(), "another client is not held up");
+
+    // Answered, a request makes room again, and a client with none in flight is forgotten.
+    drop(first);
+    assert!(super::InFlight::enter(&in_flight, one).is_some());
+    drop(second);
+    assert!(!in_flight.counts.lock().unwrap().contains_key(&other));
+}
+
+#[test]
+fn many_requests_are_answered_side_by_side_and_one_client_is_turned_away_past_its_share() {
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let options = ApiOptions { threads: 4, per_ip: 4, ..ApiOptions::default() };
+    let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+
+    // Sixteen at once from one client: some are answered, the rest turned away with 429, none fail.
+    let statuses: Vec<u16> = std::thread::scope(|scope| {
+        let asks: Vec<_> = (0..16).map(|_| scope.spawn(move || get(address, "/status").0)).collect();
+
+        asks.into_iter().map(|ask| ask.join().unwrap()).collect()
+    });
+
+    assert!(statuses.iter().all(|status| matches!(status, 200 | 429)), "{statuses:?}");
+    assert!(statuses.contains(&200));
+    assert_eq!(get(address, "/status").0, 200, "and served again once they are answered");
+}
