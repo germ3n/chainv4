@@ -496,6 +496,27 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **The codes are written in capitals.** A UR's bytewords are letters alone, which QR's
   alphanumeric mode packs densest in capitals; readers take either case.
 
+## Bitcoin wallets
+
+- **The pairing code shows every Bitcoin address the words make on its network.** It is the
+  extended public key at m/84'/0'/0' (or m/84'/1'/0'), so whoever sees it can list every
+  receiving and change address below it, as the Bitcoin wallet does. No key.
+- **Testnet keys are other keys.** Testnet, signet and regtest share coin type 1, so their coins
+  live at m/84'/1'/0' and never share a key with real ones; their addresses show as `tb1…`, regtest
+  included. A PSBT on both networks at once is refused.
+- **Only native segwit, only SIGHASH_ALL.** Inputs of this seed's that are legacy, wrapped segwit
+  or Taproot, or that ask to leave some of the transaction open to change, are refused, not
+  skipped. Inputs of other keys are left alone, and counted on the review.
+- **Change is checked, not taken on the wallet's word.** An output is marked as coming back only
+  when the key at its path is this seed's and its script pays that key's hash.
+- **Amounts are proven by the previous transaction when it is there.** Its id is what the input
+  spends from, so its amounts cannot lie; without it, a wallet that lies about the amounts across
+  two signatures of the same coins could make the fee larger than shown.
+- **The answer goes back in the name the request came in:** `ur:crypto-psbt`, or `ur:psbt`, the
+  registry's newer name, which some wallets use.
+- **Signatures are RFC 6979's,** with no extra entropy, so the same PSBT signs the same twice, as
+  bitcoinjs-lib signs it; not ground for a low R, so some are a byte longer than Bitcoin Core's.
+
 ## The camera
 
 - **The live camera is the wallet's alone.** `chainv4-ui`'s `camera` feature brings it, and nokhwa

@@ -147,7 +147,8 @@ impl KeyPath {
 pub struct HdKey {
     pub key: [u8; 33],
     pub chain_code: Option<[u8; 32]>,
-    /// The coin and network it is for: Ethereum's coin type, 60, for this wallet's.
+    /// The coin and network it is for: Ethereum's coin type, 60, or Bitcoin's, 0, with its
+    /// network, 0 or 1 for testnet.
     pub coin: Option<(Option<u64>, Option<u64>)>,
     pub origin: Option<KeyPath>,
     pub children: Option<KeyPath>,

@@ -1,7 +1,7 @@
 //! Bech32, as BIP173 writes Bitcoin's native segwit addresses: a human-readable part, such as bc,
 //! a 1, then the witness version and program in a 32-letter alphabet with a six-letter checksum
-//! that catches any four mistyped letters. Only version 0 is read and written, whose checksum is
-//! plain bech32 (BIP350's bech32m is for version 1 and up, Taproot's).
+//! that catches any four mistyped letters. Only version 0 is read, whose checksum is plain bech32;
+//! any version is written, version 1 and up, Taproot's bc1p… among them, with BIP350's bech32m.
 
 const ALPHABET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
@@ -62,9 +62,20 @@ fn regroup(data: &[u8], from: u32, to: u32, pad: bool) -> Option<Vec<u8>> {
 /// A version 0 witness program under a human-readable part, such as bc and a key's 20-byte
 /// HASH160: bc1q…, in lowercase.
 pub fn encode_segwit(hrp: &str, program: &[u8]) -> String {
-    let mut data = vec![0];
+    encode_witness(hrp, 0, program)
+}
+
+/// A witness program of any version, as BIP173 and BIP350 write them: version 0's in bech32,
+/// bc1q…, and version 1's and up in bech32m, such as Taproot's bc1p…, in lowercase.
+pub fn encode_witness(hrp: &str, version: u8, program: &[u8]) -> String {
+    // What the checksum comes to: 1 for bech32, BIP350's constant for bech32m.
+    let constant = match version {
+        0 => 1,
+        _ => 0x2bc8_30a3,
+    };
+    let mut data = vec![version];
     data.extend(regroup(program, 8, 5, true).expect("padding always fits"));
-    let check = polymod(expand(hrp).into_iter().chain(data.iter().copied()).chain([0; 6])) ^ 1;
+    let check = polymod(expand(hrp).into_iter().chain(data.iter().copied()).chain([0; 6])) ^ constant;
     let mut out = format!("{hrp}1");
 
     out.extend(data.iter().map(|value| ALPHABET[usize::from(*value)] as char));
@@ -119,6 +130,25 @@ mod tests {
             assert_eq!(encode_segwit(&hrp, &read), text);
             assert_eq!(decode_segwit(&text.to_ascii_uppercase()).unwrap().1, read, "uppercase is the same address");
         }
+    }
+
+    #[test]
+    fn later_versions_are_written_in_bech32m() {
+        // BIP350's examples: Taproot's version 1, on mainnet and testnet, and version 16.
+        let cases = [
+            ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0", 1, "0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
+            ("tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c", 1, "0x000000c4a5cad46221b2a187905e5266362b99d5e91c6ce24d165dab93e86433"),
+            ("bc1sw50qgdz25j", 16, "0x751e"),
+        ];
+
+        for (text, version, program) in cases {
+            let hrp = &text[..2];
+
+            assert_eq!(encode_witness(hrp, version, &from_hex(program).unwrap()), text);
+            assert_eq!(decode_segwit(text), None, "{text}: read as version 0 alone");
+        }
+
+        assert_eq!(encode_witness("bc", 0, &from_hex("0x751e76e8199196d454941c45d1b3a323f1433bd6").unwrap()), "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
     }
 
     #[test]

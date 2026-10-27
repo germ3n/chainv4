@@ -8,6 +8,7 @@
 mod airgap;
 mod app;
 mod biometrics;
+mod bitcoin;
 mod chain;
 mod dapp;
 mod format;

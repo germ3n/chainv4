@@ -621,9 +621,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   `ur:crypto-hdkey` at m/44'/60'/0', signing `ur:eth-sign-request`s read off MetaMask's animated,
   fountain-coded codes, for any chain, and showing `ur:eth-signature` back. See
   [Wallet](wallet.md#metamasks-qr-hardware-wallet).
-- [ ] **The signer for other chains' wallets, by UR.** Bitcoin's PSBTs (`crypto-psbt`), as Sparrow
-  and BlueWallet ask, and Keystone's types for Solana, Cosmos and the rest, would each need their
-  derivation paths and signing beside Ethereum's.
+- [x] **The offline signer as Bitcoin wallets' QR hardware wallet,** pairing by
+  `ur:crypto-account` at m/84'/0'/0' or testnet's m/84'/1'/0', signing the native segwit inputs of
+  `ur:crypto-psbt`s (BIP174 version 0, BIP143) and showing the PSBT back. See
+  [Wallet](wallet.md#bitcoin-wallets).
+- [ ] **The signer for other kinds of Bitcoin input and other chains.** Taproot (BIP341) and
+  wrapped or legacy inputs, PSBT version 2, PSBTs as files, and Keystone's types for Solana,
+  Cosmos and the rest, would each need their own paths and signing.
 - [x] **This wallet's own codes as URs.** `ur:chainv4-pairing`, `-sign-request` and `-signed`,
   carrying the chain's own encoding; CV4 and base45 are gone.
 - [ ] **Hardware wallets reach the wallet through MetaMask alone,** and the desktop and Android apps

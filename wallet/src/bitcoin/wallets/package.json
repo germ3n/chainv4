@@ -1,0 +1,12 @@
+{
+  "name": "chainv4-wallet-bitcoin-check",
+  "private": true,
+  "description": "The libraries Bitcoin's QR wallets build on, bitcoinjs-lib as BlueWallet does and Keystone's UR registry, to make the wallet's test PSBTs and check its codes back.",
+  "dependencies": {
+    "@bitcoinerlab/secp256k1": "1",
+    "@keystonehq/bc-ur-registry": "0.7",
+    "bip32": "4",
+    "bip39": "3",
+    "bitcoinjs-lib": "6"
+  }
+}

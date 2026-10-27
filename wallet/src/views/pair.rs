@@ -1,11 +1,14 @@
 //! An offline signer's page: the account in use, as a code for the watch-only sender to read, so it
 //! can prove what the account holds and ask for what to sign; and the wallet's Ethereum accounts,
 //! as a code MetaMask pairs with, as it would a Keystone, to use the signer as its QR hardware
-//! wallet. The codes hold public keys alone: nothing in them can spend.
+//! wallet; and the wallet's Bitcoin account, as a code a Bitcoin wallet such as Sparrow or
+//! BlueWallet pairs with the same way, on Bitcoin or its testnet. The codes hold public keys
+//! alone: nothing in them can spend.
 
 use {
     super::Ctx,
     crate::airgap::{Message, Pairing},
+    crate::bitcoin::Network,
     crate::theme,
     egui::{RichText, Ui},
 };
@@ -47,6 +50,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
 
     ui.add_space(14.0);
     metamask(ui, ctx);
+    ui.add_space(14.0);
+    bitcoin(ui, ctx);
 }
 
 /// The wallet's Ethereum accounts, for MetaMask: the extended key at m/44'/60'/0', which every
@@ -103,6 +108,80 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx) {
 
         if theme::quiet(ui, &palette, "Hide").clicked() {
             ui.data_mut(|data| data.insert_temp(id, false));
+        }
+    });
+}
+
+/// The wallet's Bitcoin account, for a Bitcoin wallet: the extended key at m/84'/0'/0', below
+/// which every account's bc1q address derives, or at m/84'/1'/0' for Bitcoin's test networks.
+fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
+    let palette = *ctx.palette;
+    let (shown_id, network_id) = (egui::Id::unique("bitcoin pairing shown"), egui::Id::unique("bitcoin pairing network"));
+    let shown = ui.data(|data| data.get_temp::<bool>(shown_id)).unwrap_or(false);
+    let mut network = ui.data(|data| data.get_temp::<Network>(network_id)).unwrap_or_default();
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Bitcoin");
+        ui.label(
+            RichText::new("Use this signer as a Bitcoin wallet's QR hardware wallet: Sparrow, BlueWallet, Nunchuk or another that pairs with an airgapped one by its account. In it, add a QR or airgapped hardware wallet and read this code; each transaction it asks to sign, read here on Sign.")
+                .color(palette.soft),
+        );
+        ui.add_space(8.0);
+
+        let Some(seed) = crate::keys::seed(ctx.book) else {
+            ui.label(RichText::new("This wallet holds no words, only keys brought in: a Bitcoin wallet pairs with the account words make.").small().color(palette.muted));
+
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            for each in Network::ALL {
+                ui.selectable_value(&mut network, each, each.short());
+            }
+        });
+        ui.data_mut(|data| data.insert_temp(network_id, network));
+        ui.add_space(6.0);
+
+        if !shown {
+            ui.label(RichText::new("The code shows every Bitcoin address these words make on the network, but no key.").small().color(palette.muted));
+
+            if theme::primary(ui, &palette, "Show the Bitcoin code", true).clicked() {
+                ui.data_mut(|data| data.insert_temp(shown_id, true));
+            }
+
+            return;
+        }
+
+        theme::fitted(ui, network.name(), 30.0, 16.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
+
+        if network == Network::Test {
+            ui.colored_label(palette.warn, "For testnet, signet and regtest: pair a wallet set to a test network, as their keys are others.");
+        }
+
+        match crate::bitcoin::pairing(&seed, network) {
+            Ok(code) => {
+                let side = ui.available_width().clamp(200.0, 420.0);
+                ui.vertical_centered(|ui| super::receive::qr(ui, &code, side));
+            }
+            Err(why) => {
+                ui.colored_label(palette.bad, why);
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(format!(
+                "{}, fingerprint {}: native segwit. Its first address should read {}.",
+                network.path(),
+                chainv4::structs::hex::to_hex(&seed.bitcoin_account(network.coin()).master_fingerprint).trim_start_matches("0x"),
+                crate::bitcoin::receiving(&seed, network, 0),
+            ))
+            .small()
+            .color(palette.muted),
+        );
+
+        if theme::quiet(ui, &palette, "Hide").clicked() {
+            ui.data_mut(|data| data.insert_temp(shown_id, false));
         }
     });
 }

@@ -5,13 +5,16 @@
 //!
 //! MetaMask's requests read here too, once it paired with the signer as its QR hardware wallet:
 //! a transaction, typed data or a message, for any chain, the chain named large, and the signature
-//! back as a code for MetaMask to read.
+//! back as a code for MetaMask to read. So do a Bitcoin wallet's PSBTs, once it paired on Pair:
+//! the network named large, each output and whether it comes back as change, and the fee; the PSBT
+//! back signed, for the wallet to send.
 
 use {
     super::Ctx,
     super::scan::Scan,
     crate::airgap::{self, Message, Request},
     crate::format,
+    crate::bitcoin::{self, Review},
     crate::hardware::{self, Asked, SignRequest},
     crate::biometrics::{self, Check},
     crate::theme,
@@ -39,6 +42,10 @@ enum Step {
     MetaMask { request: Box<SignRequest>, trouble: Option<String> },
     /// Signed for MetaMask: the code it reads back.
     MetaMaskSigned { text: String },
+    /// A Bitcoin wallet's PSBT, read, laid out to check; why it cannot be signed, if it cannot.
+    Bitcoin { request: Box<bitcoin::Request>, review: Option<Box<Review>>, trouble: Option<String> },
+    /// Signed for the Bitcoin wallet: the PSBT it reads back.
+    BitcoinSigned { message: Box<Message> },
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
@@ -49,6 +56,21 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         Step::Reading => reading(ui, ctx, state),
         Step::Review { .. } => review(ui, ctx, state),
         Step::MetaMask { .. } => metamask(ui, ctx, state),
+        Step::Bitcoin { .. } => bitcoin_review(ui, ctx, state),
+        Step::BitcoinSigned { message } => {
+            let message = message.clone();
+            theme::card(ui, &palette, |ui| {
+                theme::caps(ui, &palette, "Signed for the Bitcoin wallet");
+                ui.label(RichText::new("In the Bitcoin wallet, read this code back: it holds the transaction with this signer's signatures, for the wallet to finish and send.").color(palette.soft));
+                ui.add_space(10.0);
+                super::code(ui, &palette, &message);
+                ui.add_space(12.0);
+
+                if theme::primary(ui, &palette, "Sign another", true).clicked() {
+                    state.step = Step::Reading;
+                }
+            });
+        }
         Step::MetaMaskSigned { text } => {
             let text = text.clone();
             theme::card(ui, &palette, |ui| {
@@ -108,7 +130,17 @@ fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                 };
                 state.step = Step::Review { request: Box::new(request), trouble };
             }
-            Some(other) => state.scan.refuse(&other, "a request to sign, this wallet's or MetaMask's"),
+            Some(Message::Bitcoin(request)) => {
+                let read = match crate::keys::seed(ctx.book) {
+                    None => Err("This wallet holds no words, only keys brought in: a Bitcoin wallet signs with the account words make.".to_string()),
+                    Some(seed) => request.psbt.review(&seed),
+                };
+                state.step = match read {
+                    Ok(review) => Step::Bitcoin { request, review: Some(Box::new(review)), trouble: None },
+                    Err(why) => Step::Bitcoin { request, review: None, trouble: Some(why) },
+                };
+            }
+            Some(other) => state.scan.refuse(&other, "a request to sign, this wallet's, MetaMask's or a Bitcoin wallet's"),
             None => {}
         }
     });
@@ -361,6 +393,136 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 
                 match signed {
                     Ok(cbor) => next = Some(Step::MetaMaskSigned { text: hardware::ur(hardware::SIGNATURE_TYPE, &cbor) }),
+                    Err(why) => *trouble = Some(why),
+                }
+            }
+
+            if theme::quiet(ui, &palette, "Cancel").clicked() {
+                next = Some(Step::Reading);
+                state.confirming = None;
+            }
+        });
+    });
+
+    if let Some(next) = next {
+        state.step = next;
+    }
+}
+
+/// A Bitcoin wallet's PSBT laid out: the network, large; each output, its amount and address, and
+/// whether it pays this wallet back; and the fee.
+fn bitcoin_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
+    let palette = *ctx.palette;
+    let Step::Bitcoin { request, review, trouble } = &mut state.step else {
+        return;
+    };
+    let mut next = None;
+    let mut confirmed = false;
+
+    if let Some(came) = state.confirming.as_ref().and_then(Check::take) {
+        state.confirming = None;
+
+        match came {
+            Ok(_) => confirmed = true,
+            Err(Failure::Canceled) => {}
+            Err(Failure::Invalidated) => {
+                biometrics::turn_off(ctx.wake, ctx.settings);
+                *ctx.lock = Some(biometrics::CHANGED.to_string());
+            }
+            Err(Failure::Failed(why)) => *trouble = Some(why),
+        }
+    }
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "A Bitcoin wallet asks");
+        ui.add_space(4.0);
+
+        if let Some(review) = review.as_deref() {
+            let network = review.network;
+            let coins = |value: u64| format::amount(&value.to_string(), 8, network.symbol());
+            theme::fitted(ui, network.name(), 34.0, 16.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
+
+            match network {
+                bitcoin::Network::Main => ui.label(RichText::new("Real bitcoin: what this signs spends it.").small().color(palette.muted)),
+                bitcoin::Network::Test => ui.colored_label(palette.warn, "A test network's coins, worth nothing: testnet, signet or regtest."),
+            };
+            ui.add_space(8.0);
+
+            for paid in &review.outputs {
+                let label = match paid.yours {
+                    Some(_) => "Change",
+                    None => "Sends",
+                };
+                super::row(ui, &palette, label, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(coins(paid.value)).strong()).on_hover_text(format!("{} satoshis", paid.value));
+                        super::address(ui, &palette, &paid.to);
+
+                        if let Some(path) = &paid.yours {
+                            ui.label(RichText::new(format!("back to this wallet, {path}")).small().color(palette.muted));
+                        }
+                    });
+                });
+            }
+
+            super::row(ui, &palette, "Fee", |ui| {
+                let rate = review.vsize.map(|vsize| format!(" · about {} sat/vB", review.fee.div_ceil(vsize))).unwrap_or_default();
+                ui.label(format!("{}{rate}", coins(review.fee))).on_hover_text(format!("{} satoshis", review.fee));
+            });
+
+            let yours = review.inputs.iter().filter(|spent| spent.yours.is_some()).count();
+            super::row(ui, &palette, "Spends", |ui| {
+                let spent: u64 = review.inputs.iter().map(|spent| spent.value).sum();
+                let others = match review.inputs.len() - yours {
+                    0 => String::new(),
+                    others => format!(", {others} not this wallet's to sign"),
+                };
+                ui.label(format!("{} from {} input{}{others}", coins(spent), review.inputs.len(), if review.inputs.len() == 1 { "" } else { "s" }));
+            });
+
+            if review.lock_time != 0 {
+                super::row(ui, &palette, "Not before", |ui| {
+                    ui.label(match review.lock_time < 500_000_000 {
+                        true => format!("block {}", review.lock_time),
+                        false => format!("time {}, in seconds since 1970", review.lock_time),
+                    });
+                });
+            }
+
+            if review.costly() {
+                ui.add_space(4.0);
+                ui.colored_label(palette.bad, format!("The fee is more than a tenth of what it spends, while it sends {} to others: check it.", coins(review.sent())));
+            }
+
+            if review.unproven {
+                ui.add_space(4.0);
+                ui.colored_label(
+                    palette.warn,
+                    "The wallet left out the transactions these coins came in, which prove their amounts: the fee shown is its word. Sign the same coins once only, or a wallet that lies could make the fee more.",
+                );
+            }
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("Check each address against what you meant to pay: Bitcoin runs what is signed here, and none of it comes back.").small().color(palette.warn));
+        }
+
+        if let Some(trouble) = trouble.as_ref() {
+            ui.add_space(6.0);
+            ui.colored_label(palette.bad, trouble.as_str());
+        }
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            let tapped = theme::primary(ui, &palette, "Sign", review.is_some() && trouble.is_none() && state.confirming.is_none()).clicked();
+            let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
+
+            if tapped && !confirmed && let Some((enrolled, _)) = biometric {
+                state.confirming = Some(Check::start(ctx.wake, &enrolled, "Sign what the Bitcoin wallet asks"));
+            } else if tapped || confirmed {
+                let signed = crate::keys::seed(ctx.book).ok_or_else(|| "the words are gone from this wallet".to_string()).and_then(|seed| request.psbt.sign(&seed));
+
+                match signed {
+                    Ok(psbt) => next = Some(Step::BitcoinSigned { message: Box::new(Message::Bitcoin(Box::new(bitcoin::Request { psbt, kind: request.kind }))) }),
                     Err(why) => *trouble = Some(why),
                 }
             }

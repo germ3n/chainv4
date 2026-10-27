@@ -71,13 +71,15 @@ pub struct Request {
     pub token: Option<Shown>,
 }
 
-/// One of the three messages, or a request MetaMask shows for its QR hardware wallet to sign.
+/// One of the three messages, a request MetaMask shows for its QR hardware wallet to sign, or a
+/// PSBT a Bitcoin wallet shows, asking or signed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     Pair(Pairing),
     Sign(Request),
     Signed(SignedTx),
     MetaMask(Box<crate::hardware::SignRequest>),
+    Bitcoin(Box<crate::bitcoin::Request>),
 }
 
 impl Message {
@@ -88,16 +90,18 @@ impl Message {
             Message::Sign(_) => SIGN_TYPE,
             Message::Signed(_) => SIGNED_TYPE,
             Message::MetaMask(_) => crate::hardware::REQUEST_TYPE,
+            Message::Bitcoin(request) => request.kind,
         }
     }
 
-    /// Its encoding: the chain's own, or for MetaMask's request, its CBOR.
+    /// Its encoding: the chain's own, or for MetaMask's request and a PSBT, their CBOR.
     pub fn bytes(&self) -> Vec<u8> {
         match self {
             Message::Pair(pairing) => wincode::serialize(pairing),
             Message::Sign(request) => wincode::serialize(request),
             Message::Signed(signed) => wincode::serialize(signed),
             Message::MetaMask(request) => return request.to_cbor().expect("a request read always writes back"),
+            Message::Bitcoin(request) => return request.to_cbor(),
         }
         .expect("messages always encode")
     }
@@ -114,6 +118,8 @@ impl Message {
             SIGN_TYPE => whole::<Request>(bytes).map(Message::Sign),
             SIGNED_TYPE => whole::<SignedTx>(bytes).map(Message::Signed),
             crate::hardware::REQUEST_TYPE => crate::hardware::SignRequest::from_cbor(bytes).map(|request| Message::MetaMask(Box::new(request))),
+            crate::bitcoin::PSBT_TYPE => crate::bitcoin::Request::from_cbor(crate::bitcoin::PSBT_TYPE, bytes).map(|request| Message::Bitcoin(Box::new(request))),
+            crate::bitcoin::NEW_PSBT_TYPE => crate::bitcoin::Request::from_cbor(crate::bitcoin::NEW_PSBT_TYPE, bytes).map(|request| Message::Bitcoin(Box::new(request))),
             other => Err(format!("a {other} code, which this wallet does not read")),
         }
     }
@@ -125,7 +131,7 @@ impl Message {
         let text = text.trim();
 
         if !is_ur(text) {
-            return Err("not a code of this wallet's, nor MetaMask's: those start ur:".to_string());
+            return Err("not a code of this wallet's, MetaMask's or a Bitcoin wallet's: those start ur:".to_string());
         }
 
         let kind = text[3..].split('/').next().unwrap_or_default().to_ascii_lowercase();
@@ -143,6 +149,7 @@ impl Message {
             Message::Sign(_) => "a request to sign",
             Message::Signed(_) => "a signed transaction",
             Message::MetaMask(_) => "a request from MetaMask",
+            Message::Bitcoin(_) => "a Bitcoin wallet's PSBT",
         }
     }
 }

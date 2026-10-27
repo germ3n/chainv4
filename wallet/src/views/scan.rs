@@ -1,8 +1,8 @@
 //! Reading what the other device shows: its QR codes live, with the camera, as fast as it shows
 //! them; or a photo of its code, picked as an image, a file holding the code or its text, or the
-//! text pasted. Every code is a Uniform Resource, this wallet's and MetaMask's alike; one too long
-//! for a code animates through fountain-coded parts, and any enough of them, in any order, make
-//! the message.
+//! text pasted. Every code is a Uniform Resource, this wallet's, MetaMask's and Bitcoin wallets'
+//! alike; one too long for a code animates through fountain-coded parts, and any enough of them,
+//! in any order, make the message.
 //!
 //! The camera's frames are searched off the UI thread, where there are threads, the newest at a
 //! time; in the browser, between frames.
@@ -244,7 +244,7 @@ impl Scan {
 
             // A code of something else in view: said, and the camera keeps looking.
             if !airgap::is_ur(&text) {
-                self.error = Some("That QR code is not one of this wallet's, nor MetaMask's.".to_string());
+                self.error = Some("That QR code is not one of this wallet's, MetaMask's or a Bitcoin wallet's.".to_string());
 
                 continue;
             }
@@ -314,13 +314,13 @@ impl Scan {
         self.error = Some(format!("That is {}, not {wanted}.", got.name()));
     }
 
-    /// Takes a code's text, whole or a part of an animated one: this wallet's or MetaMask's. Gives
-    /// the message once it is all in.
+    /// Takes a code's text, whole or a part of an animated one: this wallet's, MetaMask's or a
+    /// Bitcoin wallet's. Gives the message once it is all in.
     fn read_text(&mut self, text: &str) -> Option<Message> {
         self.error = None;
         let read = match airgap::is_ur(text) {
             true => self.assembly.add(text).and_then(|done| done.map(|(kind, bytes)| Message::from_ur(&kind, &bytes)).transpose()),
-            false => Err("not a code of this wallet's, nor MetaMask's: those start ur:".to_string()),
+            false => Err("not a code of this wallet's, MetaMask's or a Bitcoin wallet's: those start ur:".to_string()),
         };
 
         match read {

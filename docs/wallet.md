@@ -475,6 +475,52 @@ Keystone's `@keystonehq/bc-ur-registry-eth` and ethereumjs, as MetaMask's QR key
 signatures back with them: the accounts the extended key derives, and each signature rebuilt into
 its transaction or recovered from its hash, under its request's id.
 
+### Bitcoin wallets
+
+The offline signer is also a QR hardware wallet for Bitcoin wallets, as a Keystone or a Passport
+is: Sparrow, BlueWallet, Nunchuk or another that pairs with an airgapped signer by its account.
+The Bitcoin wallet watches the addresses and builds each transaction as a PSBT; the signer reads
+it off the screen, lays out what leaves, signs, and shows the PSBT back for the wallet to send.
+
+1. **Pair:** on the signer, **Pair**, the **Bitcoin** card: pick **Mainnet** or **Testnet**, then
+   **Show the Bitcoin code**. In the Bitcoin wallet, add a QR or airgapped hardware wallet (in
+   Sparrow, a new wallet's **Airgapped Hardware Wallet**; in BlueWallet, **Import wallet**, **Scan
+   or import a file**) and read it. The code is `ur:crypto-account`: the seed's fingerprint and
+   `wpkh()` of the extended public key at BIP84's m/84'/0'/0', or m/84'/1'/0' on the test
+   networks, so the wallet is native segwit, receiving at 0/n and changing at 1/n. On mainnet its
+   receiving addresses are the `bc1q…` ones this wallet's accounts have, account n the nth. The
+   card names the first address: the Bitcoin wallet's should read the same.
+2. **Sign:** the Bitcoin wallet shows the PSBT as an animated `ur:crypto-psbt`. On the signer,
+   **Sign**, **Scan with the camera**.
+3. **Check:** the review names the network large, **Bitcoin** or **Bitcoin testnet**; each output,
+   its amount and address (`bc1q…`, `bc1p…`, `1…`, `3…`, or data), marked **Change** with its path
+   when it pays one of this seed's keys back; the fee, with its rate when the signer signs every
+   input; what it spends; and a lock time, if any.
+4. **Back:** **Sign** shows the PSBT with the signatures added, animated; read it in the Bitcoin
+   wallet, which finishes the transaction and sends it.
+
+It signs the inputs of its own seed's keys at m/84'/0'/0'/{0,1}/n or m/84'/1'/0'/{0,1}/n that
+spend native segwit (P2WPKH) coins, with BIP143's hash of all of the transaction, SIGHASH_ALL,
+and gives back every pair the PSBT held. It refuses:
+
+- a PSBT with nothing of this seed's to sign, as from a wallet paired with another;
+- an input of this seed's at another path, of another kind (legacy, wrapped or Taproot), whose
+  key is not the one at its path, or asking for another sighash than ALL;
+- an input whose coins it is not told, as the fee could not be known;
+- a previous transaction that is not the one spent from, or coins told two ways that disagree;
+- inputs or change on Bitcoin and its testnet both;
+- outputs worth more than the inputs, and PSBTs that are not BIP174's version 0 or do not read
+  whole.
+
+When the wallet leaves out the transactions an input's coins came in, their amounts are its word:
+the review says so, and a fee more than a tenth of what is spent is shown in red.
+
+**Tested against Bitcoin wallets' libraries:** `wallet/src/bitcoin/wallets/` makes PSBTs with
+bitcoinjs-lib, as BlueWallet does, and Keystone's `@keystonehq/bc-ur-registry`, into
+`wallets.json`, which the wallet's tests read, review and sign, matching bitcoinjs-lib's own
+signatures byte for byte; and checks the wallet's pairing code and signed PSBTs back with them:
+the addresses the account derives, and each PSBT finished and its transaction extracted.
+
 ## Receiving
 
 The Receive page shows one of the account's addresses, picked by its scheme, to copy and as a QR

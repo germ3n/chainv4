@@ -139,13 +139,18 @@ of them with 128 bits of randomness, or 24 with 256, the last word carrying a ch
   | EdBlake | SLIP-0010 | `m/44'/7744'/n'/1'/0'` |
   | secp256k1 | BIP32 | `m/44'/60'/0'/0/n` |
   | bitcoin | BIP32 (BIP84) | `m/84'/0'/0'/0/n` |
+  | Bitcoin's test networks, for the offline signer's PSBTs | BIP32 (BIP84) | `m/84'/1'/0'/{0,1}/n` |
 
 - **Ethereum's accounts.** The secp256k1 path is Ethereum's, so the same words give the same
   `0x…` addresses here as in MetaMask and other Ethereum wallets, account for account.
 - **Bitcoin's addresses.** The bitcoin path is BIP84's, native segwit's, so the same words give
   the same `bc1q…` addresses here as Sparrow, BlueWallet and other Bitcoin wallets show: account
   *n* is the wallet's *n*th receiving address. What chainv4 sends to one stays on chainv4; bitcoin
-  sent to it on Bitcoin is the same key's, but on Bitcoin.
+  sent to it on Bitcoin is the same key's, but on Bitcoin. The offline signer signs Bitcoin's own
+  transactions with these keys too, and their change at `m/84'/0'/0'/1/n`, for a Bitcoin wallet
+  paired with it (see [Wallet](wallet.md#bitcoin-wallets)); on Bitcoin's test networks, with
+  others, at coin type 1. `bech32::encode_witness` writes any witness version, Taproot's `bc1p…`
+  in BIP350's bech32m, for showing what a PSBT pays.
 - **The Edwards paths** are hardened at every step, as SLIP-0010 requires for Ed25519. 7744 is
   chainv4's coin type, not registered in SLIP-44. Ed25519 and EdBlake take a branch each, so one
   seed never makes the same secret for both.
