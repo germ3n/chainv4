@@ -89,6 +89,7 @@ fn every_message_reads_back_from_its_ur_and_a_short_one_fits_one_code() {
     let pairing = Pairing {
         name: "Main".to_string(),
         keys: KeyType::ALL.iter().map(|scheme| Keypair::from_seed([*scheme as u8 + 1; 32]).public()).collect(),
+        origin: Some(crate::airgap::Origin { account: 3, fingerprint: [0x73, 0xc5, 0xda, 0x0a] }),
     };
     let signed = sign(&transfer(&key), &key).unwrap();
 

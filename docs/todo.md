@@ -630,6 +630,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   Cosmos and the rest, would each need their own paths and signing.
 - [x] **This wallet's own codes as URs.** `ur:chainv4-pairing`, `-sign-request` and `-signed`,
   carrying the chain's own encoding; CV4 and base45 are gone.
+- [x] **Sites through the offline signer.** An account watched from the signer is offered to sites
+  by the extension, and each send and signature goes to the signer as `ur:eth-sign-request`, its
+  `ur:eth-signature` read back. See [Wallet](wallet.md#sites).
 - [ ] **Hardware wallets reach the wallet through MetaMask alone,** and the desktop and Android apps
   reach none. WalletConnect, or USB straight to the device, would.
 - [ ] **The wallet keeps its words as plain strings while unlocked.** The vault seals them at rest,

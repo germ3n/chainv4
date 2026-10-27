@@ -274,7 +274,7 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
     let seed = crate::keys::seed(ctx.book);
 
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, &format!("MetaMask asks{}", request.origin.as_deref().map(|origin| format!(" · {origin}")).unwrap_or_default()));
+        theme::caps(ui, &palette, &request.asker());
         ui.add_space(4.0);
 
         match chain {

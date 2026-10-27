@@ -43,11 +43,22 @@ pub const FRAGMENT: usize = 300;
 /// thousands of pixels across, more than a code needs and slow to search, so smaller first.
 const SEARCH_WIDTHS: [u32; 3] = [1_200, 2_000, 800];
 
-/// An account's public keys, one per scheme it has an address in, as the signer shows them.
+/// An account's public keys, one per scheme it has an address in, as the signer shows them, and
+/// where its words derive it, when they do.
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct Pairing {
     pub name: String,
     pub keys: Vec<PublicKey>,
+    pub origin: Option<Origin>,
+}
+
+/// Where the signer's words derive an account: its number, and the fingerprint of the seed. What
+/// a request in Ethereum's own codes names the key by, m/44'/60'/0'/0/number under the
+/// fingerprint, for a site's send or signature through the browser extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead, serde::Serialize, serde::Deserialize)]
+pub struct Origin {
+    pub account: u32,
+    pub fingerprint: [u8; 4],
 }
 
 /// How the sender's node names an asset: what the signer shows amounts in. The signer cannot
@@ -79,6 +90,8 @@ pub enum Message {
     Sign(Request),
     Signed(SignedTx),
     MetaMask(Box<crate::hardware::SignRequest>),
+    /// The signer's answer to one: what the browser extension reads back for a site.
+    EthSignature(Box<crate::hardware::Signature>),
     Bitcoin(Box<crate::bitcoin::Request>),
 }
 
@@ -90,6 +103,7 @@ impl Message {
             Message::Sign(_) => SIGN_TYPE,
             Message::Signed(_) => SIGNED_TYPE,
             Message::MetaMask(_) => crate::hardware::REQUEST_TYPE,
+            Message::EthSignature(_) => crate::hardware::SIGNATURE_TYPE,
             Message::Bitcoin(request) => request.kind,
         }
     }
@@ -101,6 +115,7 @@ impl Message {
             Message::Sign(request) => wincode::serialize(request),
             Message::Signed(signed) => wincode::serialize(signed),
             Message::MetaMask(request) => return request.to_cbor().expect("a request read always writes back"),
+            Message::EthSignature(signature) => return signature.to_cbor().expect("a signature always writes"),
             Message::Bitcoin(request) => return request.to_cbor(),
         }
         .expect("messages always encode")
@@ -118,6 +133,7 @@ impl Message {
             SIGN_TYPE => whole::<Request>(bytes).map(Message::Sign),
             SIGNED_TYPE => whole::<SignedTx>(bytes).map(Message::Signed),
             crate::hardware::REQUEST_TYPE => crate::hardware::SignRequest::from_cbor(bytes).map(|request| Message::MetaMask(Box::new(request))),
+            crate::hardware::SIGNATURE_TYPE => crate::hardware::Signature::from_cbor(bytes).map(|signature| Message::EthSignature(Box::new(signature))),
             crate::bitcoin::PSBT_TYPE => crate::bitcoin::Request::from_cbor(crate::bitcoin::PSBT_TYPE, bytes).map(|request| Message::Bitcoin(Box::new(request))),
             crate::bitcoin::NEW_PSBT_TYPE => crate::bitcoin::Request::from_cbor(crate::bitcoin::NEW_PSBT_TYPE, bytes).map(|request| Message::Bitcoin(Box::new(request))),
             other => Err(format!("a {other} code, which this wallet does not read")),
@@ -149,6 +165,7 @@ impl Message {
             Message::Sign(_) => "a request to sign",
             Message::Signed(_) => "a signed transaction",
             Message::MetaMask(_) => "a request from MetaMask",
+            Message::EthSignature(_) => "an Ethereum signature from the signer",
             Message::Bitcoin(_) => "a Bitcoin wallet's PSBT",
         }
     }

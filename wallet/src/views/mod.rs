@@ -454,7 +454,7 @@ mod tests {
     fn pairing(keys: usize) -> Message {
         let key = chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public();
 
-        Message::Pair(Pairing { name: "Main".to_string(), keys: vec![key; keys] })
+        Message::Pair(Pairing { name: "Main".to_string(), keys: vec![key; keys], origin: None })
     }
 
     #[test]

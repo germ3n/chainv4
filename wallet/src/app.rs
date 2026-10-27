@@ -455,15 +455,7 @@ impl Wallet {
         }
 
         let unlocked = matches!(self.lock, Lock::Open);
-        let accounts: Vec<[u8; 20]> = self
-            .holders
-            .iter()
-            .flat_map(|holder| &holder.keys)
-            .filter_map(|key| match key.public().address() {
-                Address::Secp256k1(bytes) => Some(bytes),
-                _ => None,
-            })
-            .collect();
+        let accounts: Vec<[u8; 20]> = crate::views::dapp::offered(&self.holders).into_iter().map(|(_, account)| account).collect();
         let chain = self.chain.genesis.map(|genesis| chainv4::crypto::ethereum::chain_id(&genesis));
         crate::dapp::report(&crate::dapp::state(&self.settings.node, chain, &accounts, unlocked));
 

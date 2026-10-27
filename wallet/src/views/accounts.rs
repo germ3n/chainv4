@@ -476,7 +476,7 @@ fn from_signer(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
                     state.name = pairing.name.clone();
                 }
 
-                add(ctx, state, Ok(Holder::watched(String::new(), pairing.keys)));
+                add(ctx, state, Ok(Holder::watched(String::new(), pairing.keys, pairing.origin)));
             }
             Some(other) => state.scan.refuse(&other, "an account to pair with"),
             None => {}

@@ -3,6 +3,7 @@
 //! in as a key has that one. An account watched from an offline signer has its public keys alone.
 
 use {
+    crate::airgap::Origin,
     crate::vault::{Book, Source},
     chainv4::crypto::keypair::{KeyType, Keypair, PublicKey},
     chainv4::crypto::mnemonic::{Phrase, Seed},
@@ -30,11 +31,12 @@ impl Holder {
         }
     }
 
-    /// An account an offline signer signs for, from the public keys it paired.
-    pub fn watched(name: String, publics: Vec<PublicKey>) -> Holder {
+    /// An account an offline signer signs for, from the public keys it paired, and where its words
+    /// derive it.
+    pub fn watched(name: String, publics: Vec<PublicKey>, origin: Option<Origin>) -> Holder {
         Holder {
             name,
-            source: Source::Watch { keys: publics.iter().map(PublicKey::to_string).collect() },
+            source: Source::Watch { keys: publics.iter().map(PublicKey::to_string).collect(), origin },
             publics,
             keys: Vec::new(),
         }
@@ -73,6 +75,14 @@ impl Holder {
     /// The public key of one of its addresses.
     pub fn public(&self, address: &Address) -> Option<PublicKey> {
         self.publics.iter().copied().find(|public| public.address() == *address)
+    }
+
+    /// Where an offline signer's words derive it, for an account watched from one that said.
+    pub fn origin(&self) -> Option<Origin> {
+        match self.source {
+            Source::Watch { origin, .. } => origin,
+            _ => None,
+        }
     }
 
     /// The phrase's number for it, if it comes from the phrase.
@@ -134,10 +144,10 @@ pub fn open(book: &Book) -> Vec<Holder> {
             let keys = match &stored.source {
                 Source::Phrase { account } => derive(seed.as_ref()?, *account),
                 Source::Key { key } => vec![Keypair::from_key_file(key).ok()?],
-                Source::Watch { keys } => {
+                Source::Watch { keys, origin } => {
                     let publics = keys.iter().map(|key| key.parse().ok()).collect::<Option<Vec<PublicKey>>>()?;
 
-                    return Some(Holder::watched(stored.name.clone(), publics));
+                    return Some(Holder::watched(stored.name.clone(), publics, *origin));
                 }
                 Source::MetaMask { key } => return Some(Holder::metamask(stored.name.clone(), key.parse().ok()?)),
             };
@@ -206,7 +216,8 @@ mod tests {
             }],
             watch: false,
         });
-        let watched = Holder::watched("Main".to_string(), signer[0].publics.clone());
+        let origin = Origin { account: 0, fingerprint: [1, 2, 3, 4] };
+        let watched = Holder::watched("Main".to_string(), signer[0].publics.clone(), Some(origin));
         let book = Book {
             phrase: None,
             accounts: vec![StoredAccount {
@@ -224,12 +235,17 @@ mod tests {
         assert!(reopened[0].keys.is_empty() && reopened[0].key(&ethereum).is_none(), "nothing to sign with");
         assert_eq!(reopened[0].public(&ethereum), Some(signer[0].keys[2].public()));
         assert_eq!(reopened[0].number(), None);
+        assert_eq!(reopened[0].origin(), Some(origin), "where the signer derives it");
+
+        // One kept before pairings said where.
+        let older: Book = serde_json::from_value(serde_json::json!({ "phrase": null, "watch": true, "accounts": [{ "name": "Old", "source": { "watch": { "keys": [watched.publics[0].to_string()] } } }] })).unwrap();
+        assert_eq!(open(&older)[0].origin(), None);
 
         let broken = Book {
             phrase: None,
             accounts: vec![StoredAccount {
                 name: "Broken".to_string(),
-                source: Source::Watch { keys: vec!["not a key".to_string()] },
+                source: Source::Watch { keys: vec!["not a key".to_string()], origin: None },
             }],
             watch: true,
         };

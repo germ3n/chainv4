@@ -384,7 +384,8 @@ wallets, after which the lock screen asks again.
 | **Offline signer** | Holds its keys and makes no network requests at all: it has no client to make them with, so none can go out, whatever its settings say. It follows no chain, so its pages are Sign, Pair, Receive, Accounts and Settings. |
 
 **Pairing:** on the signer, **Pair** shows the account in use as a QR code holding its public
-keys, one per scheme. On an online install, the lock screen's **Add a wallet** → **Pair with a
+keys, one per scheme, and, for an account its words make, its number and the seed's fingerprint,
+which a site's request through the browser extension names its Ethereum key by. On an online install, the lock screen's **Add a wallet** → **Pair with a
 signer** makes a watch-only wallet from it, beside any others; in that wallet, Accounts → **Add
 from the signer** watches more of the signer's accounts. Read the code, then name and seal the
 wallet with a password, as any other.
@@ -619,7 +620,8 @@ artifacts, and attaches them to a `v*` tag's release.
 
 The extension gives sites `window.ethereum`, so a dApp that speaks to MetaMask speaks to the
 wallet: it connects, sends Ethereum transactions, and signs messages and typed data, from the
-wallet's Ethereum accounts, the secp256k1 ones it holds keys for.
+wallet's Ethereum accounts: the secp256k1 ones it holds keys for, and those watched from the
+offline signer.
 
 - **Off until you turn it on.** Settings, **Sites**, **Let sites ask to connect** shows a bar above
   the wallet whose **Allow** asks the browser for every site, once; then `inpage.js` and
@@ -643,6 +645,16 @@ wallet's Ethereum accounts, the secp256k1 ones it holds keys for.
     data** is `eth_signTypedData_v4`, its domain and message laid out, with a warning when it
     names another chain.
   - With biometrics on, each send and signature waits for them too.
+  - **An account watched from the offline signer** signs there: **Ask the signer** shows the
+    request as `ur:eth-sign-request`, as MetaMask's are, naming the key at m/44'/60'/0'/0/n under
+    the signer's fingerprint, the site and, for a send, the EIP-1559 transaction, priced. On the
+    signer, **Sign** reads it and lays it out as it does MetaMask's, headed **A site asks, through
+    the wallet**; its `ur:eth-signature` is read back here with the camera, and the send goes to
+    the node, or the signature to the site. A signature for another request, or not the account's
+    key's over what was asked, is refused. Only accounts paired by a code that says where the
+    signer derives them are offered: an account paired before pairs again. The camera needs the
+    extension's leave: give it once by scanning in a tab, as the side panel cannot ask for it.
+    Pasting the signer's code as text, or opening a photo of it, works too.
 - **Connected sites** are listed under Settings, **Sites**, each with **Disconnect**. A site may
   disconnect itself with `wallet_revokePermissions`.
 - **Never:** `eth_sign`, `eth_signTransaction` and the older typed data versions, which sign what

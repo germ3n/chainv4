@@ -3,16 +3,23 @@
 //! and reviewed as any send is; to sign a message or typed data, laid out to read. Nothing is
 //! signed but from a tap here, after biometrics when they are on. Settings has the switch that
 //! lets sites ask at all, and the sites connected.
+//!
+//! An account watched from the offline signer is offered too, once paired by a code that says
+//! where the signer's words derive it: approving shows the request as the signer reads MetaMask's,
+//! ur:eth-sign-request, and the signer's ur:eth-signature, read back off its screen, signs it.
 
 use {
     super::Ctx,
     crate::biometrics::{self, Check},
+    crate::airgap::{Message, Origin},
     crate::dapp::{self, Asked, Request, Wanted},
+    crate::hardware::{self, DataKind, SignRequest},
     crate::format,
     crate::node::Ask,
     crate::theme,
     chainv4::crypto::ethereum::{EthereumKind, EthereumTx, chain_id},
-    chainv4::crypto::keypair::PrivateKey,
+    chainv4::crypto::keypair::{PrivateKey, PublicKey},
+    chainv4::crypto::secp256k1,
     chainv4::structs::address::Address,
     chainv4::structs::hex::to_hex,
     chainv4::structs::u256::u256,
@@ -51,6 +58,18 @@ struct Shown {
     asked: bool,
     sending: bool,
     trouble: Option<String>,
+    /// Asked of the offline signer, once approved, until its signature is read back.
+    offline: Option<Box<Offline>>,
+}
+
+/// A request shown to the offline signer: what it signs, and the scanner its answer comes in by.
+struct Offline {
+    request: SignRequest,
+    /// For a send, the transaction the signature completes.
+    tx: Option<EthereumTx>,
+    /// What is signed: the transaction's hash, or the message's or typed data's.
+    digest: [u8; 32],
+    scan: super::scan::Scan,
 }
 
 impl DappState {
@@ -77,6 +96,7 @@ impl DappState {
                     asked: false,
                     sending: false,
                     trouble: None,
+                    offline: None,
                 }),
                 Err((id, why)) => {
                     self.answered.insert(id);
@@ -124,17 +144,35 @@ impl DappState {
     }
 }
 
-/// The Ethereum accounts this wallet signs for: each its name and 20 bytes.
+/// The Ethereum accounts this wallet signs for, itself or by the offline signer: each its name and
+/// 20 bytes.
 pub fn accounts(ctx: &Ctx) -> Vec<(String, [u8; 20])> {
-    ctx.holders
+    offered(ctx.holders)
+}
+
+/// The same, of these accounts: those this wallet holds keys for, and those watched from an offline
+/// signer that said where it derives them. MetaMask's are MetaMask's to offer.
+pub fn offered(holders: &[crate::keys::Holder]) -> Vec<(String, [u8; 20])> {
+    holders
         .iter()
         .flat_map(|holder| {
-            holder.keys.iter().filter_map(move |key| match key.public().address() {
+            let signs = !holder.keys.is_empty() || holder.origin().is_some();
+
+            holder.publics.iter().filter(move |_| signs && !holder.by_metamask()).filter_map(move |public| match public.address() {
                 Address::Secp256k1(bytes) => Some((holder.name.clone(), bytes)),
                 _ => None,
             })
         })
         .collect()
+}
+
+/// Where the offline signer derives one of them, for an account watched from it.
+fn offline(ctx: &Ctx, account: &[u8; 20]) -> Option<Origin> {
+    ctx.holders
+        .iter()
+        .filter(|holder| holder.keys.is_empty())
+        .find(|holder| holder.publics.iter().any(|public| matches!(public.address(), Address::Secp256k1(bytes) if bytes == *account)))
+        .and_then(|holder| holder.origin())
 }
 
 /// The key to one of them.
@@ -248,6 +286,28 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
         }
     });
 
+    // An account whose key is on the offline signer, where the signer derives it.
+    let signer = shown.request.signer();
+    let away = signer.and_then(|signer| secret(ctx, &signer).is_none().then(|| offline(ctx, &signer)).flatten());
+    let mut signed = None;
+
+    if let Some(offline) = shown.offline.as_mut() {
+        theme::card(ui, &palette, |ui| {
+            theme::caps(ui, &palette, "On the offline signer");
+            ui.label(RichText::new("On the signer, Sign, and read this code: it shows what it signs. Then read the signature it shows back, here.").color(palette.soft));
+            ui.add_space(8.0);
+            super::code(ui, &palette, &Message::MetaMask(Box::new(offline.request.clone())));
+            ui.add_space(10.0);
+            theme::caps(ui, &palette, "Read the signature");
+
+            match offline.scan.show(ui, &palette) {
+                Some(Message::EthSignature(signature)) => signed = Some(finish(offline, &signature, shown.request.signer())),
+                Some(other) => offline.scan.refuse(&other, "the signer's signature"),
+                None => {}
+            }
+        });
+    }
+
     theme::card(ui, &palette, |ui| {
         if let Some(trouble) = &shown.trouble {
             ui.colored_label(palette.bad, trouble.as_str());
@@ -255,13 +315,15 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
         }
 
         ui.horizontal(|ui| {
-            let ready = match &asked {
+            let ready = shown.offline.is_none()
+                && match &asked {
                 Asked::Connect => !shown.chosen.is_empty(),
                 Asked::Send(_) => shown.trouble.is_none() && !shown.sending && prepared(shown).is_some(),
                 _ => shown.trouble.is_none(),
             };
             let label = match &asked {
                 Asked::Connect => "Connect",
+                _ if away.is_some() && shown.offline.is_none() => "Ask the signer",
                 Asked::Send(_) if shown.sending => "Sending…",
                 Asked::Send(_) => "Send",
                 _ => "Sign",
@@ -271,8 +333,28 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
         });
     });
 
-    // A connect gives addresses alone; anything signed waits for biometrics, when they are on.
-    let signs = !matches!(asked, Asked::Connect);
+    // A connect gives addresses alone; anything signed here waits for biometrics, when they are
+    // on. The offline signer checks its own.
+    let signs = !matches!(asked, Asked::Connect) && away.is_none();
+
+    if approve && let (Some(origin), Some(from)) = (away, signer) {
+        match ask_offline(&asked, shown, origin, from, chain) {
+            Ok(offline) => shown.offline = Some(Box::new(offline)),
+            Err(why) => shown.trouble = Some(why),
+        }
+
+        approve = false;
+    }
+
+    match signed {
+        Some(Ok(Finished::Send(tx))) => {
+            shown.sending = true;
+            ask.push(rpc(id, SEND, "eth_sendRawTransaction", json!([to_hex(&tx.encode())])));
+        }
+        Some(Ok(Finished::Signature(signature))) => done = Some((id, Ok(json!(signature)))),
+        Some(Err(why)) => shown.trouble = Some(why),
+        None => {}
+    }
 
     if approve && signs && !confirmed && state.confirming.is_none() && let Some((enrolled, _)) = biometrics::enrolled(ctx.wake, ctx.settings) {
         state.confirming = Some((id, Check::start(ctx.wake, &enrolled, "Approve what the site asks")));
@@ -282,23 +364,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
                 let chosen = accounts.iter().filter(|(_, account)| shown.chosen.contains(account)).map(|(_, account)| json!(to_hex(account))).collect();
                 done = Some((id, Ok(Value::Array(chosen))));
             }
-            Asked::Send(wanted) => match (prepared(shown), chain, secret(ctx, &wanted.from)) {
-                (Some((nonce, gas, price)), Some(chain), Some(secret)) => {
-                    let tx = EthereumTx {
-                        kind: EthereumKind::DynamicFee,
-                        chain_id: chain,
-                        nonce,
-                        max_price: price,
-                        tip: wanted.tip.unwrap_or(u256::ZERO).min(price),
-                        gas_limit: gas,
-                        to: wanted.to,
-                        value: wanted.value,
-                        input: wanted.input.clone(),
-                        access_list: Vec::new(),
-                        signature: [0; 64],
-                        parity: 0,
-                    }
-                    .signed(&secret);
+            Asked::Send(wanted) => match (transaction(wanted, shown, chain), secret(ctx, &wanted.from)) {
+                (Some(tx), Some(secret)) => {
+                    let tx = tx.signed(&secret);
                     shown.sending = true;
                     ask.push(rpc(id, SEND, "eth_sendRawTransaction", json!([to_hex(&tx.encode())])));
                 }
@@ -362,6 +430,87 @@ fn take_check(ctx: &mut Ctx, state: &mut DappState) -> bool {
             false
         }
     }
+}
+
+/// The transaction a send asks for, unsigned, once the node said what the site left out and the
+/// light client met the chain.
+fn transaction(wanted: &Wanted, shown: &Shown, chain: Option<u64>) -> Option<EthereumTx> {
+    let (nonce, gas, price) = prepared(shown)?;
+
+    Some(EthereumTx {
+        kind: EthereumKind::DynamicFee,
+        chain_id: chain?,
+        nonce,
+        max_price: price,
+        tip: wanted.tip.unwrap_or(u256::ZERO).min(price),
+        gas_limit: gas,
+        to: wanted.to,
+        value: wanted.value,
+        input: wanted.input.clone(),
+        access_list: Vec::new(),
+        signature: [0; 64],
+        parity: 0,
+    })
+}
+
+/// What to ask the offline signer for an approved request: the request it reads, as MetaMask's
+/// would be, by the account's place under the signer's seed.
+fn ask_offline(asked: &Asked, shown: &Shown, origin: Origin, from: [u8; 20], chain: Option<u64>) -> Result<Offline, String> {
+    let site = shown.request.origin.as_str();
+    let (request, tx, digest) = match asked {
+        Asked::Send(wanted) => {
+            let tx = transaction(wanted, shown, chain).ok_or("It is not priced yet.")?;
+            let request = SignRequest::asking(tx.signing_data(), DataKind::TypedTransaction, Some(tx.chain_id), origin, from, site);
+            let digest = tx.signing_hash();
+
+            (request, Some(tx), digest)
+        }
+        Asked::Message { message, .. } => (SignRequest::asking(message.clone(), DataKind::Message, chain, origin, from, site), None, dapp::personal_digest(message)),
+        Asked::Typed { data, json, .. } => {
+            let digest = data.digest()?;
+
+            (SignRequest::asking(json.to_string().into_bytes(), DataKind::TypedData, chain, origin, from, site), None, digest)
+        }
+        Asked::Connect => return Err("nothing to sign".to_string()),
+    };
+
+    Ok(Offline { request, tx, digest, scan: super::scan::Scan::default() })
+}
+
+/// What the signer's signature completes.
+enum Finished {
+    /// A send's transaction, signed, for the node.
+    Send(Box<EthereumTx>),
+    /// A message's or typed data's signature, as the site takes it: r, s and v, 27 or 28.
+    Signature(String),
+}
+
+/// Takes the signer's answer: refused if it answers another request, or is not the account's key's
+/// over what was asked.
+fn finish(offline: &Offline, signature: &hardware::Signature, from: Option<[u8; 20]>) -> Result<Finished, String> {
+    if signature.id.is_some() && signature.id != offline.request.id {
+        return Err("That signature answers another request: read the one the signer shows for this.".to_string());
+    }
+
+    let (rs, parity) = signature.parts().ok_or("A signature that does not read.")?;
+    let key = secp256k1::recover_strict(&offline.digest, &rs, parity).ok_or("A signature that recovers no key.")?;
+
+    if secp256k1::address(&key) != from {
+        let by = PublicKey::Secp256k1(key).address();
+
+        return Err(format!("That signature is {by}'s, not this account's: was the signer paired with these words?"));
+    }
+
+    Ok(match &offline.tx {
+        Some(tx) => {
+            let mut tx = tx.clone();
+            tx.signature = rs;
+            tx.parity = parity;
+
+            Finished::Send(Box::new(tx))
+        }
+        None => Finished::Signature(to_hex(&[rs.as_slice(), &[27 + parity]].concat())),
+    })
 }
 
 /// A send's nonce, gas and price, once the node said what the site left out.
@@ -513,3 +662,6 @@ pub fn settings(ui: &mut Ui, ctx: &Ctx) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests;

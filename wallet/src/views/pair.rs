@@ -7,7 +7,7 @@
 
 use {
     super::Ctx,
-    crate::airgap::{Message, Pairing},
+    crate::airgap::{Message, Origin, Pairing},
     crate::bitcoin::Network,
     crate::theme,
     egui::{RichText, Ui},
@@ -20,9 +20,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     let Some(holder) = ctx.holder() else {
         return;
     };
+    // Where the words derive it, for a site's requests to name its Ethereum key by.
+    let origin = holder.number().zip(crate::keys::seed(ctx.book)).map(|(account, seed)| Origin { account, fingerprint: seed.ethereum_account().master_fingerprint });
     let pairing = Pairing {
         name: holder.name.clone(),
         keys: holder.publics.clone(),
+        origin,
     };
     let addresses = holder.addresses();
     let message = Message::Pair(pairing);

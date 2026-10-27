@@ -116,6 +116,10 @@ fn codes_are_byte_for_byte_keystones() {
         "0xa301d825509b1deb4d3b7d4bad9bdd2b0d7b3dcb6d025841d4f0a7bcd95bba1fbb1051885054730e3f47064288575aacc102fbbf6a9a14daa066991e360d3e3406c20c00a40973eff37c7d641e5b351ec4a99bfe86f335f71303686b657973746f6e65"
     );
 
+    // Read back, as the wallet reads a signer's answer for a site.
+    assert_eq!(Signature::from_cbor(&signature.to_cbor().unwrap()).unwrap(), signature);
+    assert!(Signature::from_cbor(&[signature.to_cbor().unwrap(), vec![0]].concat()).is_err(), "bytes after it");
+
     // Anything past the request's map is refused.
     let mut longer = hex("a2020103d82550");
     longer.push(0);
@@ -318,4 +322,33 @@ fn metamasks_own_requests_read_and_sign_for_the_account_it_asked() {
         let out = serde_json::json!({ "pairing": pairing(&seed).unwrap(), "signatures": written });
         std::fs::write(path, out.to_string()).unwrap();
     }
+}
+
+#[test]
+fn the_wallets_own_requests_name_the_signers_key_and_the_site() {
+    let seed = seed();
+    let origin = crate::airgap::Origin { account: 1, fingerprint: seed.ethereum_account().master_fingerprint };
+    let address = secp256k1::address(&secp256k1::public_key(&match seed.key(KeyType::Secp256k1, 1).private() {
+        PrivateKey::Secp256k1(secret) => *secret,
+        _ => unreachable!(),
+    }).unwrap()).unwrap();
+    let asked = SignRequest::asking(b"hello".to_vec(), DataKind::Message, Some(1), origin, address, "https://app.example");
+    let read = SignRequest::from_cbor(&asked.to_cbor().unwrap()).unwrap();
+    let id = asked.id.clone().unwrap();
+
+    assert_eq!(read, asked);
+    assert_eq!((read.account(), read.path.fingerprint), (Ok(1), Some(origin.fingerprint)));
+    assert_eq!((id.len(), id[6] >> 4, id[8] >> 6), (16, 4, 2), "a version 4 UUID");
+    assert_ne!(SignRequest::asking(Vec::new(), DataKind::Message, None, origin, address, "x").id, asked.id, "each its own");
+    assert_eq!(read.asker(), "A site asks, through the wallet · https://app.example");
+    assert_eq!(request(DataKind::Message, Vec::new(), 0).asker(), "MetaMask asks · metamask");
+
+    // The signer signs it as MetaMask's, for the account it names; the parts come back out.
+    let signature = Signature::from_cbor(&read.sign(&seed).unwrap().to_cbor().unwrap()).unwrap();
+    let (rs, parity) = signature.parts().unwrap();
+
+    assert_eq!(signature.id, asked.id);
+    assert_eq!(signer(&crate::metamask::personal_digest(b"hello"), &[rs.as_slice(), &[parity]].concat()), to_hex(&address));
+    assert_eq!(Signature { signature: vec![0; 64], ..signature.clone() }.parts(), None, "no v");
+    assert_eq!(Signature { signature: [vec![0; 64], vec![0x01, 0x23]].concat(), ..signature }.parts().map(|(_, parity)| parity), Some(0), "EIP-155's v, 291: 291 - 35 is even");
 }

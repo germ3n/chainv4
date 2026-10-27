@@ -312,6 +312,42 @@ impl SignRequest {
 }
 
 impl SignRequest {
+    /// A request to the offline signer for its Ethereum key at m/44'/60'/0'/0/account, under its
+    /// seed's fingerprint, as MetaMask's would be: what the browser extension shows for a site's
+    /// send or signature from an account watched from the signer. Its id is new and random.
+    pub fn asking(data: Vec<u8>, kind: DataKind, chain_id: Option<u64>, origin: crate::airgap::Origin, address: [u8; 20], site: &str) -> SignRequest {
+        let mut id = [0u8; 16];
+        let _ = getrandom::fill(&mut id);
+        // A version 4 UUID, as MetaMask's are.
+        id[6] = (id[6] & 0x0f) | 0x40;
+        id[8] = (id[8] & 0x3f) | 0x80;
+
+        SignRequest {
+            id: Some(id.to_vec()),
+            data,
+            kind,
+            chain_id,
+            path: KeyPath {
+                steps: vec![Step::Index(44, true), Step::Index(60, true), Step::Index(0, true), Step::Index(0, false), Step::Index(origin.account, false)],
+                fingerprint: Some(origin.fingerprint),
+                depth: None,
+            },
+            address: Some(address),
+            origin: Some(format!("{NAME} · {site}")),
+        }
+    }
+
+    /// Who asks, as the signer's review names them: MetaMask, or a site through this wallet.
+    pub fn asker(&self) -> String {
+        let site = self.origin.as_deref().and_then(|origin| origin.strip_prefix(NAME)?.strip_prefix(" · "));
+
+        match (site, self.origin.as_deref()) {
+            (Some(site), _) => format!("A site asks, through the wallet · {site}"),
+            (None, Some(origin)) => format!("MetaMask asks · {origin}"),
+            (None, None) => "MetaMask asks".to_string(),
+        }
+    }
+
     /// Its CBOR, as MetaMask writes it: what from_cbor reads.
     pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
         let entries = 3 + [self.id.is_some(), self.chain_id.is_some(), self.address.is_some(), self.origin.is_some()].iter().filter(|there| **there).count() as u64;
@@ -359,6 +395,49 @@ pub struct Signature {
 }
 
 impl Signature {
+    /// Reads one from its CBOR, as a signer shows it back: this one's or a Keystone's.
+    pub fn from_cbor(bytes: &[u8]) -> Result<Signature, String> {
+        let mut d = Decoder::new(bytes);
+        let (mut id, mut signature, mut origin) = (None, None, None);
+
+        for _ in 0..d.map().map_err(text)?.ok_or("a signature of unknown length")? {
+            match d.u8().map_err(text)? {
+                1 => {
+                    expect_tag(&mut d, UUID)?;
+                    id = Some(d.bytes().map_err(text)?.to_vec());
+                }
+                2 => signature = Some(d.bytes().map_err(text)?.to_vec()),
+                3 => origin = Some(d.str().map_err(text)?.to_string()),
+                _ => d.skip().map_err(text)?,
+            }
+        }
+
+        if d.position() != bytes.len() {
+            return Err("a signature with more in it than it should hold".to_string());
+        }
+
+        Ok(Signature {
+            id,
+            signature: signature.ok_or("a signature code with no signature")?,
+            origin,
+        })
+    }
+
+    /// r, s and the parity, 0 or 1, from its last byte: v as each kind has it, 0 or 1, 27 or 28,
+    /// or EIP-155's for a chain.
+    pub fn parts(&self) -> Option<([u8; 64], u8)> {
+        let (rs, v) = (self.signature.get(..64)?, self.signature.get(64..).filter(|v| (1..=8).contains(&v.len()))?);
+        let v = v.iter().try_fold(0u64, |v, byte| v.checked_mul(256).map(|v| v + u64::from(*byte)))?;
+        let parity = match v {
+            0 | 1 => v,
+            27 | 28 => v - 27,
+            v if v >= 35 => (v - 35) % 2,
+            _ => return None,
+        };
+
+        Some((rs.try_into().ok()?, parity as u8))
+    }
+
     pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
         let entries = 1 + u64::from(self.id.is_some()) + u64::from(self.origin.is_some());
         let mut e = Encoder::new(Vec::new());

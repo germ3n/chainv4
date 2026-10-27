@@ -474,6 +474,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 
 ## The signer's codes
 
+- **The pairing says where the account is.** `ur:chainv4-pairing` carries the account's number and
+  the seed's fingerprint beside its public keys, for an account words make; one brought in as a
+  key says nothing. Older pairing codes no longer read: pair again, as both devices update
+  together.
 - **The codes are URs now, and only URs.** `CV4:1:` and its parts are gone: a signer or sender
   from before cannot read today's codes, nor today's theirs. Update both devices together.
 - **A third longer, but never a full round to wait.** UR's bytewords take two characters a byte,
@@ -532,8 +536,14 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 
 ## The extension's window.ethereum
 
-- **Sites see Ethereum accounts alone.** Only secp256k1 accounts the wallet holds keys for are
-  offered: Ethereum's tools know no Ed25519 address. Watched and MetaMask accounts are not offered.
+- **Sites see Ethereum accounts alone.** Only secp256k1 accounts are offered: Ethereum's tools know
+  no Ed25519 address. Those the wallet holds keys for sign here; those watched from the offline
+  signer sign there, by `ur:eth-sign-request` and `ur:eth-signature`, and only when their pairing
+  said where the signer derives them, which pairings from before this did not: pair again.
+  MetaMask's accounts are MetaMask's to offer.
+- **The signer's answer is checked before it is used.** Its id must be the request's, and it must
+  recover to the account over the very hash asked; a send's transaction is then the one priced,
+  with that signature, as signing in the wallet would have made it, byte for byte.
 - **The provider is off by default.** It needs the browser's leave for every site, asked from a
   click in the wallet's Settings; until then no page gets `window.ethereum`.
 - **A site's reads are not proven.** They are the node's word at `POST /rpc`, as any dApp's are;

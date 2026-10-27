@@ -539,7 +539,7 @@ fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &P
         phrase: None,
         accounts: vec![StoredAccount {
             name: pairing.name.clone(),
-            source: Source::Watch { keys: pairing.keys.iter().map(ToString::to_string).collect() },
+            source: Source::Watch { keys: pairing.keys.iter().map(ToString::to_string).collect(), origin: pairing.origin },
         }],
         watch: true,
     };
@@ -667,6 +667,7 @@ mod tests {
         let pairing = Pairing {
             name: "Cold".to_string(),
             keys: signer.iter().map(|key| key.public()).collect(),
+            origin: None,
         };
         let watched = keep_watched(&mut settings, "Cold storage".to_string(), Vault::create("battery staple").unwrap(), &pairing);
 

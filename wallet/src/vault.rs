@@ -68,8 +68,12 @@ pub enum Source {
     /// One key brought in, as a key file holds it.
     Key { key: String },
     /// An account an offline signer holds the keys of, watched: its public keys, as the signer
-    /// paired it, and nothing to sign with.
-    Watch { keys: Vec<String> },
+    /// paired it, and nothing to sign with; and where the signer's words derive it, when it said.
+    Watch {
+        keys: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<crate::airgap::Origin>,
+    },
     /// An Ethereum account MetaMask holds, or a hardware wallet through it: its public key, and
     /// nothing to sign with here. MetaMask signs what it sends, in the browser.
     #[serde(rename = "metamask")]
