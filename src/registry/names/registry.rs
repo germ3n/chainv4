@@ -2,7 +2,7 @@
 
 use {
     super::*,
-    crate::db::{Column, Database, DbError, State},
+    crate::db::{Column, Committed, DbError, State},
     crate::registry::{Accounts, RegistryError},
 };
 
@@ -254,7 +254,7 @@ impl<'a> Names<'a> {
     category = "Names",
     see_also = "owned_prefix",
 )]
-pub fn stored_owned_names(db: &dyn Database, owner: &Address, start: &str, limit: usize) -> Result<(Vec<String>, Option<String>), DbError> {
+pub fn stored_owned_names(db: &dyn Committed, owner: &Address, start: &str, limit: usize) -> Result<(Vec<String>, Option<String>), DbError> {
     let prefix = owned_prefix(owner);
     let from = [prefix.clone(), start.as_bytes().to_vec()].concat();
     let mut names = Vec::new();

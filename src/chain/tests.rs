@@ -1,7 +1,7 @@
 use super::*;
 use crate::consensus::{AuthorityProducer, DevAuthority, Producer, meets, work_hash};
 use crate::crypto::keypair::Keypair;
-use crate::db::MemoryDb;
+use crate::db::{Committed, MemoryDb};
 use crate::registry::contracts::contract_address;
 use crate::registry::RegistryError;
 use crate::structs::amount::Amount;

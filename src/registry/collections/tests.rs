@@ -1,6 +1,6 @@
 use {
     super::*,
-    crate::db::MemoryDb,
+    crate::db::{Database, MemoryDb},
     crate::registry::tokens::{Token, Tokens, stored_tokens},
     std::sync::Arc,
 };

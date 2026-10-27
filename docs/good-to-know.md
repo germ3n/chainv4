@@ -227,6 +227,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Remembered peers are dialed like bootnodes,** while the node is short of peers, at most once a
   minute each; a peer that changed its address is found again through the others.
 - **Every commit is synced.** It costs a few milliseconds a block; `--no-fsync` for benchmarks.
+- **The API answers from a snapshot per request,** so a reply never mixes two tips; a slow request
+  keeps the files it reads on disk until it ends.
+- **`--db-cache` sizes the database's block cache,** 256 MiB by default, shared by every column:
+  give it more on a node whose state outgrows memory.
 
 ## How the chain behaves
 

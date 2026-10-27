@@ -12,7 +12,7 @@
 
 use {
     crate::crypto::hashable::Hashable,
-    crate::db::{Column, Database, DbError, State, address_key},
+    crate::db::{Column, Committed, DbError, State, address_key},
     crate::registry::tokens::{MAX_NAME, MAX_SYMBOL},
     crate::structs::address::Address,
     crate::structs::tx::TxCallArgumentType,
@@ -292,7 +292,7 @@ fn listing(symbol: Option<&str>, address: &Address) -> Vec<u8> {
     see_also = "Collections",
 )]
 pub fn stored_collections(
-    db: &dyn Database,
+    db: &dyn Committed,
     symbol: Option<&str>,
     cursor: Option<&[u8]>,
     limit: usize,

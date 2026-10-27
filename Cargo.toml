@@ -50,7 +50,7 @@ evm = ["vm", "keccak256", "abi", "dep:revm"]
 # Solidity's ABI: encoding calls and decoding results and logs, every type, from a contract's JSON
 # ABI, for the CLI and the apps; and EVM and CREATE addresses, worked out without an EVM.
 abi = ["keccak256", "dep:serde_json"]
-rocksdb = ["dep:rocksdb"]
+rocksdb = ["dep:rocksdb", "dep:self_cell"]
 http = ["dep:axum", "dep:serde_json", "node"]
 # A faucet for dev and test chains: the node's --faucet-key pays POST /faucet, a drip per address
 # and per IP each window, each asked with a moment's proof of work (src/faucet.rs).
@@ -88,6 +88,8 @@ node = ["dep:rayon", "dep:signal-hook", "dep:libp2p", "dep:tokio", "dep:clap", "
 
 [dependencies]
 rocksdb = { version = "0.25.0", optional = true }
+# A RocksDB snapshot owned with the database it reads, for the API's point-in-time reads.
+self_cell = { version = "1.2.0", optional = true }
 blake3 = { version = "1.8.7", optional = true }
 blake2 = { version = "0.11.0", optional = true }
 sha2 = { version = "0.11.1", optional = true }

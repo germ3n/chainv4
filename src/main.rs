@@ -122,6 +122,10 @@ struct NodeArgs {
     /// blocks, which peers give back. For benchmarks and tests.
     #[arg(long)]
     no_fsync: bool,
+    /// The database's block cache, in MiB, which every column shares: more keeps more of the
+    /// state in memory between blocks.
+    #[arg(long, default_value_t = chainv4::db::DEFAULT_CACHE_MB)]
+    db_cache: usize,
     /// The most transactions a block this node produces may hold. Without it, blocks fill to the
     /// chain's max_block_bytes and gas limit, which every node checks; this only caps this node's
     /// own blocks.
@@ -335,8 +339,8 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         None => cli::genesis::dev(args.consensus),
     };
     let rocks = match args.no_fsync {
-        true => RocksDb::open(&args.db)?.unsynced(),
-        false => RocksDb::open(&args.db)?,
+        true => RocksDb::open_with(&args.db, args.db_cache)?.unsynced(),
+        false => RocksDb::open_with(&args.db, args.db_cache)?,
     };
     // An older database is moved up to this node's format, after a backup, before anything reads it.
     cli::db::on_start(&rocks, &args.db)?;

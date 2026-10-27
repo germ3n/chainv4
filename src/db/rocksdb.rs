@@ -1,9 +1,54 @@
 use {
-    super::{Changes, Column, Database, DbError, Read, scan_from},
+    super::{Changes, Column, Database, DbError, Read, Committed, scan_from},
     r#macro::document,
-    rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options, WriteBatch},
+    rocksdb::{BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DB, DBCompressionType, Direction, IteratorMode, Options, SnapshotWithThreadMode, WriteBatch},
     std::path::Path,
+    std::sync::Arc,
 };
+
+type Snapshot<'a> = SnapshotWithThreadMode<'a, DB>;
+
+self_cell::self_cell!(
+    /// A RocksDB snapshot together with the database it reads, so it lives as long as anyone holds
+    /// it: what Database::snapshot hands out.
+    struct Owned {
+        owner: Arc<DB>,
+        #[covariant]
+        dependent: Snapshot,
+    }
+);
+
+struct RocksSnapshot(Owned);
+
+#[document(
+    summary = "The block cache RocksDb::open gives every column to share, in MiB: what --db-cache sets.",
+    category = "Storage",
+    see_also = "RocksDb::open_with",
+)]
+pub const DEFAULT_CACHE_MB: usize = 256;
+
+/// How each column is kept: blocks cached in the one cache all share, a Bloom filter so a key that
+/// is not there is mostly found so without reading its block, and the filters and indexes cached
+/// beside the blocks, those of the newest files pinned. What is written in bulk and read rarely,
+/// blocks, receipts, undo records and events, is compressed with ZSTD; the rest with LZ4, quick to
+/// read; and every column's oldest level with ZSTD.
+fn column_options(column: Column, cache: &Cache) -> Options {
+    let mut table = BlockBasedOptions::default();
+    table.set_block_cache(cache);
+    table.set_bloom_filter(10.0, false);
+    table.set_cache_index_and_filter_blocks(true);
+    table.set_pin_l0_filter_and_index_blocks_in_cache(true);
+    let mut options = Options::default();
+    options.set_block_based_table_factory(&table);
+    options.set_level_compaction_dynamic_level_bytes(true);
+    options.set_compression_type(match column {
+        Column::Blocks | Column::Receipts | Column::Undo | Column::Events => DBCompressionType::Zstd,
+        _ => DBCompressionType::Lz4,
+    });
+    options.set_bottommost_compression_type(DBCompressionType::Zstd);
+
+    options
+}
 
 #[document(
     summary = "The RocksDB backend. Each Column is a column family, and a commit is one WriteBatch, synced to disk before it returns unless opened unsynced: a power cut loses no commit the node was told stood.",
@@ -11,7 +56,7 @@ use {
     see_also = "Database, MemoryDb",
 )]
 pub struct RocksDb {
-    rocks: DB,
+    rocks: Arc<DB>,
     /// Whether each commit waits for the disk.
     sync: bool,
 }
@@ -23,15 +68,28 @@ impl RocksDb {
         params = { path = "The database directory." },
     )]
     pub fn open(path: impl AsRef<Path>) -> Result<RocksDb, DbError> {
+        RocksDb::open_with(path, DEFAULT_CACHE_MB)
+    }
+
+    #[document(
+        parent = "RocksDb",
+        summary = "Opens the database with a block cache of its own size: what the node's --db-cache gives. Compactions and flushes run on as many threads as the machine has cores, up to 8.",
+        params = { path = "The database directory.", cache_mb = "The block cache every column shares, in MiB." },
+    )]
+    pub fn open_with(path: impl AsRef<Path>, cache_mb: usize) -> Result<RocksDb, DbError> {
+        let cores = std::thread::available_parallelism().map_or(2, usize::from) as i32;
+        let cache = Cache::new_lru_cache(cache_mb.saturating_mul(1 << 20));
         let mut options = Options::default();
         options.create_if_missing(true);
         options.create_missing_column_families(true);
+        options.increase_parallelism(cores);
+        options.set_max_background_jobs(cores.clamp(2, 8));
         let columns = Column::ALL
             .iter()
-            .map(|column| ColumnFamilyDescriptor::new(column.name(), Options::default()));
+            .map(|column| ColumnFamilyDescriptor::new(column.name(), column_options(*column, &cache)));
         let rocks = DB::open_cf_descriptors(&options, path, columns).map_err(backend)?;
 
-        Ok(RocksDb { rocks, sync: true })
+        Ok(RocksDb { rocks: Arc::new(rocks), sync: true })
     }
 
     #[document(
@@ -64,10 +122,25 @@ impl RocksDb {
     }
 
     fn column(&self, column: Column) -> &ColumnFamily {
-        self.rocks
-            .cf_handle(column.name())
-            .expect("every column family is created on open")
+        handle(&self.rocks, column)
     }
+}
+
+fn handle(rocks: &DB, column: Column) -> &ColumnFamily {
+    rocks.cf_handle(column.name()).expect("every column family is created on open")
+}
+
+/// Visits what an iterator from a scan's start gives, while its keys keep the prefix.
+fn visit_while(records: impl Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>, prefix: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError> {
+    for record in records {
+        let (key, value) = record.map_err(backend)?;
+
+        if !key.starts_with(prefix) || !visit(&key, &value) {
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 fn backend(err: rocksdb::Error) -> DbError {
@@ -117,18 +190,32 @@ impl Database for RocksDb {
         self.rocks.write_opt(batch, &self.options()).map_err(backend)
     }
 
+    fn snapshot(&self) -> Arc<dyn Committed> {
+        Arc::new(RocksSnapshot(Owned::new(self.rocks.clone(), |rocks| rocks.snapshot())))
+    }
+}
+
+impl Committed for RocksDb {
     fn scan(&self, column: Column, prefix: &[u8], start: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError> {
         let mode = IteratorMode::From(scan_from(prefix, start), Direction::Forward);
 
-        for record in self.rocks.iterator_cf(self.column(column), mode) {
-            let (key, value) = record.map_err(backend)?;
+        visit_while(self.rocks.iterator_cf(self.column(column), mode), prefix, visit)
+    }
+}
 
-            if !key.starts_with(prefix) || !visit(&key, &value) {
-                break;
-            }
-        }
+impl Read for RocksSnapshot {
+    fn read(&self, column: Column, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
+        let rocks = self.0.borrow_owner();
 
-        Ok(())
+        self.0.borrow_dependent().get_cf(handle(rocks, column), key).map_err(backend)
+    }
+}
+
+impl Committed for RocksSnapshot {
+    fn scan(&self, column: Column, prefix: &[u8], start: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError> {
+        let mode = IteratorMode::From(scan_from(prefix, start), Direction::Forward);
+
+        visit_while(self.0.borrow_dependent().iterator_cf(handle(self.0.borrow_owner(), column), mode), prefix, visit)
     }
 }
 

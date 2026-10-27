@@ -17,7 +17,8 @@ Nothing writes to a database directly. Changes collect in `State` layers:
 - the block's sits on the database.
 
 **Reads and merges:** a read sees its own layer's changes first, then falls through to the one
-below. When a layer is done, it merges into the one below it, or is dropped to throw its changes
+below. A layer keeps its changes by column, then key, so a read looks its key up as it is given,
+copying nothing. When a layer is done, it merges into the one below it, or is dropped to throw its changes
 away. That is how a failed transaction or call leaves nothing behind.
 
 **Commits:** a block commits its layer's changes in one atomic batch, so after a crash either all
@@ -250,6 +251,37 @@ deleted, since nothing can roll back that far.
 **What they hold:** a block's state tree nodes too, so undoing a block puts its tree back. That
 adds about ten nodes to the record for every entry the block changed.
 
+## Snapshots: reading one commit
+
+`Database::snapshot()` gives a read-only view of the database as it is now, a `Committed`: it
+reads and scans as the database does, and later commits never change it.
+- **RocksDB:** its own snapshot, held together with the database, so the files it reads stay
+  until it is dropped.
+- **MemoryDb:** a copy of its records, for tests.
+
+**The API reads one per request:** each handler gets the database as its request arrived, so
+every key it reads, the tip included, is from one commit, and a block committed meanwhile never
+mixes in. A state or receipt proof is read once, never again for a block that landed halfway. The
+`/stream` and the middleware read the database as it is.
+
+**Cost:** a RocksDB snapshot is a sequence number; files compacted away while one is held stay on
+disk until it is dropped, so a request held open for long keeps them.
+
+## Tuning
+
+`RocksDb::open` tunes each column:
+- **One block cache** all columns share, `--db-cache` MiB (256 by default), holding their index
+  and filter blocks too, those of the newest files pinned.
+- **Bloom filters,** 10 bits a key, so a key that is not there is mostly found so without reading
+  a block: most reads of state are of accounts and storage that may not exist.
+- **Compression:** LZ4, quick to read, for state; ZSTD for what is written in bulk and read
+  rarely, blocks, receipts, undo records and events, and for every column's oldest level.
+- **Background work** on as many threads as the machine has cores, up to 8.
+
+On the bench (`chainv4 bench chain --db`, 6 full blocks, 16,000 accounts) it imports as fast as
+before, about 36,000 transfers a second on an M3 Pro: that state fits in memory either way. The
+cache and filters matter once the state outgrows memory.
+
 ## Scans
 
 `Database::scan(column, prefix, start, visit)` visits a column's committed records whose keys
@@ -281,11 +313,9 @@ Records are stored in the chain's encoding (see [Crypto and encoding](crypto.md)
 - **Formats are migrated from 8 on.** A node moves an older database up as it starts, after a
   backup; one in a format no migration reaches is refused, and must be deleted. A genesis change
   refuses it as well (`WrongGenesis`).
-- **Commits are not fsynced.** A power cut can lose the last few blocks, though never half of
-  one.
 - **The main chain is never pruned.** Every main-chain block and all history are kept. Side
   branches go once the chain can no longer follow them: when they split off more than
   `max_reorg_depth` blocks below the tip, or below the finalized checkpoint (see
   [Chain](chain.md#reorganizing)).
-- **API reads are not snapshot-consistent.** The API reads the database while the node writes it,
-  so a request that reads several keys can see two different tips.
+- **A snapshot is read only by the API.** The node's own work, building, importing and syncing,
+  reads the database as it is, as only it writes.

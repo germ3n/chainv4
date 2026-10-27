@@ -21,7 +21,7 @@ mod tree;
 
 pub use self::memory::MemoryDb;
 #[cfg(feature = "rocksdb")]
-pub use self::rocksdb::RocksDb;
+pub use self::rocksdb::{DEFAULT_CACHE_MB, RocksDb};
 pub use self::snapshot::{SnapshotWalk, WalkError};
 pub use self::tree::{PartContents, Path, STATE_COLUMNS, StateEntry, StatePart, StateProof, StateTree, root_of, state_path, stored_root};
 
@@ -195,6 +195,10 @@ pub type Changes = BTreeMap<Key, Option<Vec<u8>>>;
 /// Keys, as a recording State lists what it read.
 pub type Keys = BTreeSet<Key>;
 
+/// Records by column, then key: what a State layer holds and MemoryDb keeps, so a read looks its
+/// key up as it is given, without copying it into a (Column, Vec<u8>) first.
+pub(crate) type ByColumn<V> = BTreeMap<Column, BTreeMap<Vec<u8>, V>>;
+
 #[document(
     summary = "Anything state can be read from: a database, or a State layered on one.",
     category = "Storage",
@@ -209,20 +213,13 @@ pub trait Read: Send + Sync {
 }
 
 #[document(
-    summary = "A storage backend. Reads come through Read; writes only ever arrive as a whole set of changes, which the backend must apply atomically: after a crash, either all of them are there or none are.",
+    summary = "Committed records to read and scan: a database, or a snapshot of one, which later commits never change.",
     category = "Storage",
-    see_also = "RocksDb, MemoryDb, State",
+    see_also = "Database::snapshot",
 )]
-pub trait Database: Read {
+pub trait Committed: Read {
     #[document(
-        parent = "Database",
-        summary = "Writes a set of changes atomically.",
-        params = { changes = "Usually a block's State, from take_changes. None values delete." },
-    )]
-    fn commit(&self, changes: Changes) -> Result<(), DbError>;
-
-    #[document(
-        parent = "Database",
+        parent = "Committed",
         summary = "Visits a column's committed records whose keys start with prefix, in key order, from the first at or after start. Backends keep keys sorted, so this seeks once and reads only what it visits. It sees committed data only, never a State's changes.",
         params = {
             column = "The column to scan.",
@@ -232,6 +229,26 @@ pub trait Database: Read {
         },
     )]
     fn scan(&self, column: Column, prefix: &[u8], start: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError>;
+}
+
+#[document(
+    summary = "A storage backend. Reads come through Read and Committed; writes only ever arrive as a whole set of changes, which the backend must apply atomically: after a crash, either all of them are there or none are.",
+    category = "Storage",
+    see_also = "RocksDb, MemoryDb, State",
+)]
+pub trait Database: Committed {
+    #[document(
+        parent = "Database",
+        summary = "Writes a set of changes atomically.",
+        params = { changes = "Usually a block's State, from take_changes. None values delete." },
+    )]
+    fn commit(&self, changes: Changes) -> Result<(), DbError>;
+
+    #[document(
+        parent = "Database",
+        summary = "The database as it is now, to read and scan while commits go on: everything read from it is from one commit, so a request that reads the tip and then the state never mixes two. RocksDB keeps the files it reads alive until it is dropped; MemoryDb copies its records.",
+    )]
+    fn snapshot(&self) -> Arc<dyn Committed>;
 
     #[document(
         parent = "Database",
@@ -257,7 +274,7 @@ fn scan_from<'a>(prefix: &'a [u8], start: &'a [u8]) -> &'a [u8] {
 )]
 pub struct State {
     base: Arc<dyn Read>,
-    changes: Mutex<Changes>,
+    changes: Mutex<ByColumn<Option<Vec<u8>>>>,
     /// What this layer read from below it, when it records reads.
     reads: Option<Mutex<Keys>>,
 }
@@ -271,7 +288,7 @@ impl State {
     pub fn new(base: Arc<dyn Read>) -> State {
         State {
             base,
-            changes: Mutex::new(Changes::new()),
+            changes: Mutex::default(),
             reads: None,
         }
     }
@@ -313,7 +330,7 @@ impl State {
         summary = "Sets a value in this layer.",
     )]
     pub fn put(&self, column: Column, key: Vec<u8>, value: Vec<u8>) {
-        self.lock().insert((column, key), Some(value));
+        self.lock().entry(column).or_default().insert(key, Some(value));
     }
 
     #[document(
@@ -321,7 +338,7 @@ impl State {
         summary = "Deletes a value in this layer.",
     )]
     pub fn delete(&self, column: Column, key: Vec<u8>) {
-        self.lock().insert((column, key), None);
+        self.lock().entry(column).or_default().insert(key, None);
     }
 
     #[document(
@@ -354,10 +371,12 @@ impl State {
         summary = "What this layer changed in these columns, without taking it: each key, and its new value or None for a delete.",
     )]
     pub fn changed(&self, columns: &[Column]) -> Vec<(Column, Vec<u8>, Option<Vec<u8>>)> {
-        self.lock()
+        let changes = self.lock();
+
+        columns
             .iter()
-            .filter(|((column, _), _)| columns.contains(column))
-            .map(|((column, key), value)| (*column, key.clone(), value.clone()))
+            .filter_map(|column| Some((*column, changes.get(column)?)))
+            .flat_map(|(column, keys)| keys.iter().map(move |(key, value)| (column, key.clone(), value.clone())))
             .collect()
     }
 
@@ -367,7 +386,10 @@ impl State {
         returns = "The changes, for merge on the layer below or Database::commit.",
     )]
     pub fn take_changes(&self) -> Changes {
-        std::mem::take(&mut *self.lock())
+        let changes = std::mem::take(&mut *self.lock());
+
+        // In order already, column by column: the map builds from it in one pass.
+        changes.into_iter().flat_map(|(column, keys)| keys.into_iter().map(move |(key, value)| ((column, key), value))).collect()
     }
 
     #[document(
@@ -375,17 +397,21 @@ impl State {
         summary = "Applies a finished layer's changes on top of this one's.",
     )]
     pub fn merge(&self, changes: Changes) {
-        self.lock().extend(changes);
+        let mut layer = self.lock();
+
+        for ((column, key), value) in changes {
+            layer.entry(column).or_default().insert(key, value);
+        }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Changes> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ByColumn<Option<Vec<u8>>>> {
         self.changes.lock().expect("a state layer is never poisoned")
     }
 }
 
 impl Read for State {
     fn read(&self, column: Column, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
-        if let Some(value) = self.lock().get(&(column, key.to_vec())) {
+        if let Some(value) = self.lock().get(&column).and_then(|keys| keys.get(key)) {
             return Ok(value.clone());
         }
 
@@ -513,6 +539,68 @@ pub(crate) mod tests {
             assert_eq!(scan(b"b", b"b", 2), ["b", "b1"], "stopped early");
             assert!(scan(b"d", b"d", 10).is_empty());
         }
+    }
+
+    #[test]
+    fn a_snapshot_reads_and_scans_one_commit_whatever_comes_after() {
+        for backend in backends("snapshot") {
+            let db = &backend.db;
+            let state = State::new(backend.base());
+            state.put(Column::Meta, b"tip".to_vec(), b"1".to_vec());
+            state.put(Column::Accounts, b"a".to_vec(), b"at 1".to_vec());
+            db.commit(state.take_changes()).unwrap();
+            let snapshot = db.snapshot();
+
+            // The next commit moves the tip, rewrites a, deletes nothing it held and adds b.
+            let state = State::new(backend.base());
+            state.put(Column::Meta, b"tip".to_vec(), b"2".to_vec());
+            state.put(Column::Accounts, b"a".to_vec(), b"at 2".to_vec());
+            state.put(Column::Accounts, b"b".to_vec(), b"at 2".to_vec());
+            db.commit(state.take_changes()).unwrap();
+            let state = State::new(backend.base());
+            state.delete(Column::Accounts, b"a".to_vec());
+            db.commit(state.take_changes()).unwrap();
+
+            assert_eq!(snapshot.read(Column::Meta, b"tip").unwrap(), Some(b"1".to_vec()));
+            assert_eq!(snapshot.read(Column::Accounts, b"a").unwrap(), Some(b"at 1".to_vec()));
+            assert_eq!(snapshot.read(Column::Accounts, b"b").unwrap(), None);
+            let mut seen = Vec::new();
+            snapshot.scan(Column::Accounts, b"", b"", &mut |key, value| {
+                seen.push((key.to_vec(), value.to_vec()));
+                true
+            })
+            .unwrap();
+            assert_eq!(seen, [(b"a".to_vec(), b"at 1".to_vec())]);
+
+            // A State over it reads the snapshot too, while the database has moved on.
+            assert_eq!(State::new(snapshot.clone()).get(Column::Meta, b"tip").unwrap(), Some(b"1".to_vec()));
+            assert_eq!(db.read(Column::Meta, b"tip").unwrap(), Some(b"2".to_vec()));
+            assert_eq!(db.read(Column::Accounts, b"a").unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn a_layer_keeps_its_changes_by_column_and_hands_them_back_in_order() {
+        let db: Arc<dyn Database> = Arc::new(MemoryDb::default());
+        let state = State::new(db.clone());
+        state.put(Column::Names, b"b".to_vec(), b"1".to_vec());
+        state.put(Column::Accounts, b"z".to_vec(), b"2".to_vec());
+        state.delete(Column::Accounts, b"a".to_vec());
+        state.merge([((Column::Names, b"a".to_vec()), Some(b"3".to_vec())), ((Column::Accounts, b"z".to_vec()), Some(b"4".to_vec()))].into());
+
+        assert_eq!(state.get(Column::Accounts, b"z").unwrap(), Some(b"4".to_vec()), "the merged layer's value wins");
+        assert_eq!(state.get(Column::Names, b"z").unwrap(), None, "another column's key is another key");
+        assert_eq!(state.changed(&[Column::Names]), [(Column::Names, b"a".to_vec(), Some(b"3".to_vec())), (Column::Names, b"b".to_vec(), Some(b"1".to_vec()))]);
+        assert_eq!(
+            state.take_changes().into_iter().collect::<Vec<_>>(),
+            [
+                ((Column::Accounts, b"a".to_vec()), None),
+                ((Column::Accounts, b"z".to_vec()), Some(b"4".to_vec())),
+                ((Column::Names, b"a".to_vec()), Some(b"3".to_vec())),
+                ((Column::Names, b"b".to_vec()), Some(b"1".to_vec())),
+            ]
+        );
+        assert!(state.take_changes().is_empty());
     }
 
     #[test]

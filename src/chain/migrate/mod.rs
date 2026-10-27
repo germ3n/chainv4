@@ -372,7 +372,7 @@ pub(crate) fn set_format(db: &dyn Database, format: u32) {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, crate::db::MemoryDb, std::sync::atomic::{AtomicUsize, Ordering}};
+    use {super::*, crate::db::{Committed, MemoryDb}, std::sync::atomic::{AtomicUsize, Ordering}};
 
     /// Moves every Storage record whose key starts with `old` to the same key starting with `new`,
     /// at most limit at a time: its format keeps them under `a`, the next one under `b`.

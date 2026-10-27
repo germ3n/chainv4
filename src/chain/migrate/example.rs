@@ -125,7 +125,7 @@ mod tests {
         crate::chain::migrate::{format_of, migrate, plan},
         crate::chain::{Chain, Genesis},
         crate::consensus::{AuthorityProducer, DevAuthority, Producer},
-        crate::db::{Database, MemoryDb, Read},
+        crate::db::{Committed, MemoryDb, Read},
         std::sync::Arc,
     };
 

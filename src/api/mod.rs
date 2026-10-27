@@ -17,7 +17,7 @@ use {
     crate::registry::changes::Changes,
     crate::registry::validators::Validators,
     crate::structs::vote::Checkpoint,
-    crate::db::{Database, DbError, Read, STATE_COLUMNS, State, StateTree},
+    crate::db::{Committed, Database, DbError, Read, STATE_COLUMNS, State, StateTree},
     crate::vm::{BlockAt, CallContext, Limits, Vm, VmError, selector},
     crate::mempool::MempoolError,
     crate::node::{NodeHandle, NodeReport, SubmitError},
@@ -31,7 +31,7 @@ use {
     crate::structs::tx::{FeeOffer, SignedTx, Tx},
     crate::structs::u256::u256,
     axum::body::Bytes,
-    axum::extract::{DefaultBodyLimit, Path, Query, Request, State as Shared},
+    axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State as Live},
     axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     axum::middleware::{self, Next},
     axum::response::{IntoResponse, Response},
@@ -94,8 +94,12 @@ pub const DEFAULT_PER_IP: usize = 64;
 /// What every handler reads from.
 #[derive(Clone)]
 struct Api {
-    /// Only ever read: a Database rather than a Read so listings can scan it.
-    db: Arc<dyn Database>,
+    /// What a handler reads: a snapshot of the database taken as its request arrived, so every
+    /// key it reads, the tip included, is from one commit. Committed rather than Read, so listings
+    /// can scan it.
+    db: Arc<dyn Committed>,
+    /// The database itself, which snapshots are taken of. Never written here.
+    live: Arc<dyn Database>,
     /// None when no node runs behind the API, so nothing can be submitted.
     node: Option<NodeHandle>,
     /// The chain's finality settings, to tell which epoch a height is in.
@@ -211,7 +215,7 @@ fn asker(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
 
 /// Turns away a client with too many requests in flight already, 429, so one cannot keep the rest
 /// waiting. A stream, open for as long as the client listens, is not counted.
-async fn per_client(Shared(api): Shared<Api>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>, request: Request, next: Next) -> Response {
+async fn per_client(Live(api): Live<Api>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>, request: Request, next: Next) -> Response {
     if request.uri().path() == "/stream" {
         return next.run(request).await;
     }
@@ -219,6 +223,19 @@ async fn per_client(Shared(api): Shared<Api>, axum::extract::ConnectInfo(peer): 
     match InFlight::enter(&api.in_flight, asker(peer, request.headers())) {
         Some(_counted) => next.run(request).await,
         None => (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": "too many requests at once from you: wait for some to answer" }))).into_response(),
+    }
+}
+
+/// The API as a handler sees it: its database a snapshot taken as the request arrived, never
+/// moving under it however many keys it reads. Middleware, which reads nothing, takes the API as
+/// it is (Live).
+struct Shared<T>(T);
+
+impl FromRequestParts<Api> for Shared<Api> {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(_: &mut axum::http::request::Parts, api: &Api) -> Result<Shared<Api>, std::convert::Infallible> {
+        Ok(Shared(Api { db: api.live.snapshot(), ..api.clone() }))
     }
 }
 
@@ -320,7 +337,8 @@ pub fn start(
                 };
 
                 if let Err(err) = axum::serve(listener, router(Api {
-                    db,
+                    db: db.clone(),
+                    live: db,
                     node,
                     finality,
                     hash,
@@ -415,7 +433,7 @@ fn router(api: Api) -> Router {
 
 /// Lets pages from the allowed origins read the API's answers, and answers their browsers'
 /// preflight questions.
-async fn allow_origins(Shared(api): Shared<Api>, request: Request, next: Next) -> Response {
+async fn allow_origins(Live(api): Live<Api>, request: Request, next: Next) -> Response {
     let origin = request
         .headers()
         .get(header::ORIGIN)
@@ -444,7 +462,7 @@ async fn allow_origins(Shared(api): Shared<Api>, request: Request, next: Next) -
 
 /// Serves the web apps' files for anything that is not a route: the wallet's under /wallet/, and
 /// the explorer's for the rest, / being its index.html.
-async fn apps(Shared(api): Shared<Api>, uri: Uri) -> Result<Response, ApiError> {
+async fn apps(Live(api): Live<Api>, uri: Uri) -> Result<Response, ApiError> {
     let path = uri.path();
 
     if let Some(root) = &api.wallet {
@@ -1174,9 +1192,6 @@ async fn contract(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
     Ok(Json(json::contract(&address, &record, token.as_ref(), collection.as_ref())))
 }
 
-/// How many times a proof is read again when the node committed a block while it was being read.
-const PROOF_TRIES: usize = 3;
-
 /// What a light client starts from: the chain's light parameters and its genesis header, encoded,
 /// for it to check against the genesis id it trusts.
 async fn light(Shared(api): Shared<Api>) -> Answer {
@@ -1313,77 +1328,59 @@ async fn state_proof(
     let key = from_hex(&key).ok_or_else(|| ApiError::BadRequest(format!("the key is not hex: {key}")))?;
 
     let at = query.get("block").map(|block| block_id(block, api.hash)).transpose()?;
+    // One snapshot: the tip, its tree and the value are all from one commit.
+    let (state, sealed) = match at {
+        None => {
+            let tip = tip(&*api.db)?;
 
-    for _ in 0..PROOF_TRIES {
-        let (state, sealed) = match at {
-            None => {
-                let tip = tip(&*api.db)?;
-
-                (Arc::new(State::new(api.db.clone())), tip.sealed_header())
-            }
-            Some(block) => {
-                let state = stored_state_at(api.db.clone(), &block)?.ok_or_else(|| {
-                    ApiError::NotFound(format!("block {block} is not on the main chain, or older than this node can prove at"))
-                })?;
-                let sealed = stored_header(&*api.db, &block)?.ok_or_else(|| ApiError::NotFound(format!("no block {block}")))?;
-
-                (state, sealed)
-            }
-        };
-        let value = state.get(column, &key)?;
-        let proof = StateTree::new(&state, api.hash).prove(column, &key)?;
-
-        // A block committed while this was read mixes two trees, so the proof fails to check:
-        // read it again.
-        if proof.verify(&sealed.header.state_root, column, &key, value.as_deref()) {
-            return Ok(Json(json::state_proof(&sealed, column, &key, value.as_deref(), &proof)));
+            (Arc::new(State::new(api.db.clone())), tip.sealed_header())
         }
-    }
+        Some(block) => {
+            let state = stored_state_at(api.db.clone(), &block)?.ok_or_else(|| {
+                ApiError::NotFound(format!("block {block} is not on the main chain, or older than this node can prove at"))
+            })?;
+            let sealed = stored_header(&*api.db, &block)?.ok_or_else(|| ApiError::NotFound(format!("no block {block}")))?;
 
-    Err(ApiError::Unavailable("the state kept moving while the proof was read; ask again".to_string()))
+            (state, sealed)
+        }
+    };
+    let value = state.get(column, &key)?;
+    let proof = StateTree::new(&state, api.hash).prove(column, &key)?;
+
+    Ok(Json(json::state_proof(&sealed, column, &key, value.as_deref(), &proof)))
 }
 
 /// A proof that a transaction's receipt is in its block's receipts root.
 async fn receipt_proof(Shared(api): Shared<Api>, Path(id): Path<String>) -> Answer {
     let db = api.db.clone();
     let id = block_id(&id, api.hash)?;
+    // One snapshot: the receipt and its block's others are from one commit, so a reorg never
+    // lands between them.
+    let receipt = stored_receipt(&*db, &id)?.ok_or_else(|| ApiError::NotFound(format!("transaction {id} is not on the main chain, or not yet")))?;
+    let block = stored_block(&*db, &receipt.block)?.ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("block {} is not stored", receipt.block))))?;
+    let mut committed: Vec<CommittedReceipt> = Vec::with_capacity(block.txs.len());
 
-    for _ in 0..PROOF_TRIES {
-        let receipt = stored_receipt(&*db, &id)?
-            .ok_or_else(|| ApiError::NotFound(format!("transaction {id} is not on the main chain, or not yet")))?;
-        let block = stored_block(&*db, &receipt.block)?
-            .ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("block {} is not stored", receipt.block))))?;
-        let mut committed: Vec<CommittedReceipt> = Vec::with_capacity(block.txs.len());
-
-        for tx in &block.txs {
-            let tx = tx.id(api.hash);
-
-            // A reorg between the reads leaves a receipt elsewhere, or gone: read it all again.
-            match stored_receipt(&*db, &tx)? {
-                Some(stored) if stored.block == receipt.block => committed.push(stored.committed(tx)),
-                _ => break,
-            }
-        }
-
-        let leaves: Vec<Hash> = committed.iter().map(|receipt| receipt.leaf(api.hash)).collect();
-        let index = receipt.index as usize;
-
-        if leaves.len() != block.txs.len() || index >= leaves.len() {
-            continue;
-        }
-
-        let path = merkle::audit_path(api.hash, &leaves, index);
-
-        if merkle::verify(&block.header.receipts_root, &leaves[index], index, leaves.len(), &path) {
-            // The transaction too, against tx_root: who sent what, which the receipt does not say.
-            let txs: Vec<Hash> = block.txs.iter().map(|tx| tx.leaf(api.hash)).collect();
-            let tx_path = merkle::audit_path(api.hash, &txs, index);
-
-            return Ok(Json(json::receipt_proof(&block, &committed[index], index, leaves.len(), &path, &tx_path)));
-        }
+    for tx in &block.txs {
+        let tx = tx.id(api.hash);
+        let stored = stored_receipt(&*db, &tx)?
+            .filter(|stored| stored.block == receipt.block)
+            .ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("transaction {tx} of block {} has no receipt there", receipt.block))))?;
+        committed.push(stored.committed(tx));
     }
 
-    Err(ApiError::Unavailable("the chain kept moving while the proof was read; ask again".to_string()))
+    let leaves: Vec<Hash> = committed.iter().map(|receipt| receipt.leaf(api.hash)).collect();
+    let index = receipt.index as usize;
+
+    if index >= leaves.len() {
+        return Err(ApiError::Db(DbError::Corrupt(format!("transaction {id} is past the end of its block"))));
+    }
+
+    let path = merkle::audit_path(api.hash, &leaves, index);
+    // The transaction too, against tx_root: who sent what, which the receipt does not say.
+    let txs: Vec<Hash> = block.txs.iter().map(|tx| tx.leaf(api.hash)).collect();
+    let tx_path = merkle::audit_path(api.hash, &txs, index);
+
+    Ok(Json(json::receipt_proof(&block, &committed[index], index, leaves.len(), &path, &tx_path)))
 }
 
 /// The token registry by symbol, a page at a time: every token, or those whose symbol starts with
@@ -1579,7 +1576,7 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
 /// chain again.
 #[cfg(feature = "stream")]
 async fn stream(
-    Shared(api): Shared<Api>,
+    Live(api): Live<Api>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
     use tokio_stream::{StreamExt, wrappers::BroadcastStream, wrappers::errors::BroadcastStreamRecvError};
 

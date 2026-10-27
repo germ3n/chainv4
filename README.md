@@ -63,6 +63,7 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | Option | Default | What it does |
 | --- | --- | --- |
 | `--db PATH` | `chain.db` | Where the chain is stored. |
+| `--db-cache MIB` | `256` | The database's block cache, shared by every column (see [Storage](docs/storage.md#tuning)). |
 | `--listen ADDR` | `/ip4/0.0.0.0/udp/0/quic-v1` | A libp2p address to listen on; repeat for several. Port 0 picks one; the log shows which. |
 | `--peer ADDR` | | A peer to dial at startup; repeat for several. Nodes on the same network also find each other through mDNS. |
 | `--bootnode ADDR` | | A bootnode of this node's own, beside the chain's [`bootnodes`](docs/genesis.md); repeat for several. Through them and Kademlia the node meets the peers they know. |

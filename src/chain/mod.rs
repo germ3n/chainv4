@@ -461,7 +461,7 @@ pub struct DryRun {
     returns = "What it did, or the database failure that kept it from running.",
     see_also = "DryRun, Fees::estimated",
 )]
-pub fn dry_run(db: Arc<dyn Database>, rules: &Rules, vm: &Arc<Vm>, probe: &SignedTx, gas_limit: u64, base_price: u256) -> Result<DryRun, DbError> {
+pub fn dry_run(db: Arc<dyn Read>, rules: &Rules, vm: &Arc<Vm>, probe: &SignedTx, gas_limit: u64, base_price: u256) -> Result<DryRun, DbError> {
     let layer = Arc::new(State::new(db.clone()));
     let mut tx = probe.clone();
     tx.nonce = Accounts::new(&layer).get(&tx.sender())?.nonce;

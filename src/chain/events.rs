@@ -9,7 +9,7 @@
 
 use {
     crate::crypto::hashable::Hashable,
-    crate::db::{Column, Database, DbError, State, address_key},
+    crate::db::{Column, Committed, DbError, State, address_key},
     crate::structs::address::Address,
     crate::structs::event::Event,
     crate::structs::hash::Hash,
@@ -152,7 +152,7 @@ pub(super) fn unindex(layer: &State, height: u64, index: u32, events: &[Event]) 
     see_also = "stored_index, IndexedEvent",
 )]
 pub fn stored_events(
-    db: &dyn Database,
+    db: &dyn Committed,
     filter: &EventFilter,
     cursor: Option<&[u8]>,
     limit: usize,

@@ -366,9 +366,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   time. The proofs a block carries are picked among same-epoch links in one order, and the chain's
   tips are kept and listed by `GET /forks` in one too. Held votes are found by voter, not by
   scanning them all. The explorer's block map lays its lanes out once a change, not every frame.
-- [ ] **Every state read copies its key.** `State::read` looks a key up as `(Column, Vec<u8>)`,
-  so each read in each layer allocates it; nest the map by column, or key it by one byte string.
-  With the storage work (batch 10).
+- [x] **State reads copy no key.** A layer, and MemoryDb, keep their records by column then key,
+  so a read borrows its key. Imports a full block of transfers about 6% faster in memory.
 - [ ] **Native multisig, across chains.** Accounts that need M of N keys to move anything,
   built into the chain rather than a contract: the keys may be any kind the chain takes
   (Ed25519, secp256k1, Bitcoin), and the same signers hold matching multisig on the other
@@ -528,13 +527,16 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **No migrations.** A database in an old format has to be deleted; nothing upgrades it.
 - [x] **Leaves are stored.** The chain's leaf blocks go into `Meta` with each block, so side
   branches outlast a restart and the API can list them (`/forks`).
-- [ ] **Leaves are never pruned.** Every side branch's leaf stays, even far below the finalized
-  checkpoint, where no branch can matter again.
+- [x] **Leaves are pruned.** A side branch, its blocks and its leaf go once the chain can never
+  follow it: split off below the finalized checkpoint, or past `max_reorg_depth` without
+  finality, after every move of the tip (`prune_side_branches`).
 - [x] **Commits are fsynced.** Each commit waits for the disk, so a power cut loses no block the
   node stored; `--no-fsync` turns it off for benchmarks and tests.
-- [ ] **RocksDB runs on default options.** No tuning of caches, compression or compaction.
-- [ ] **API reads are not snapshot-consistent.** A request that reads several keys can see state
-  from two different tips.
+- [x] **RocksDB is tuned.** One block cache for every column (`--db-cache`), Bloom filters,
+  LZ4 for state and ZSTD for blocks, receipts, undo and events. See
+  [Storage](storage.md#tuning).
+- [x] **API reads are snapshot-consistent.** Each request reads one database snapshot, so the
+  tip and every key it reads are from one commit. See [Storage](storage.md#snapshots-reading-one-commit).
 
 ### Network
 

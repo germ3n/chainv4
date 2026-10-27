@@ -16,7 +16,7 @@ use {
     super::index::Landed,
     crate::chain::receipt::{TxReceipt, TxStatus},
     crate::crypto::hashable::Hashable,
-    crate::db::{Column, Database, DbError, State, address_key},
+    crate::db::{Column, Committed, DbError, State, address_key},
     crate::structs::address::Address,
     crate::structs::hash::Hash,
     crate::registry::names::NameAction,
@@ -143,7 +143,7 @@ pub(super) fn unindex(layer: &State, height: u64, index: u32, signed: &SignedTx,
     returns = "The transactions, and the cursor for the next page, or None after the last.",
     see_also = "stored_index, IndexedTx",
 )]
-pub fn stored_address_txs(db: &dyn Database, address: &Address, cursor: Option<&[u8]>, limit: usize) -> Result<(Vec<IndexedTx>, Option<Vec<u8>>), DbError> {
+pub fn stored_address_txs(db: &dyn Committed, address: &Address, cursor: Option<&[u8]>, limit: usize) -> Result<(Vec<IndexedTx>, Option<Vec<u8>>), DbError> {
     let prefix = address_key(address);
     let mut found: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     db.scan(Column::Addresses, &prefix, cursor.unwrap_or(&prefix), &mut |key, value| {

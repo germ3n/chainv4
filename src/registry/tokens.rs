@@ -13,7 +13,7 @@
 
 use {
     crate::crypto::hashable::Hashable,
-    crate::db::{Column, Database, DbError, State, address_key},
+    crate::db::{Column, Committed, DbError, State, address_key},
     crate::structs::address::Address,
     crate::structs::tx::TxCallArgumentType,
     r#macro::document,
@@ -208,7 +208,7 @@ fn listing(symbol: Option<&str>, address: &Address) -> Vec<u8> {
     see_also = "Tokens",
 )]
 pub fn stored_tokens(
-    db: &dyn Database,
+    db: &dyn Committed,
     symbol: Option<&str>,
     cursor: Option<&[u8]>,
     limit: usize,
@@ -241,7 +241,7 @@ pub fn stored_tokens(
 mod tests {
     use {
         super::*,
-        crate::db::MemoryDb,
+        crate::db::{Database, MemoryDb},
         std::sync::Arc,
     };
 
