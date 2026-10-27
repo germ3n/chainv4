@@ -231,6 +231,9 @@ pub struct Genesis {
     #[document(summary = "The name registry: names such as alice.dev, their suffix, their price a year by length, their grace period and the most years ahead they are held; or None for a chain without names, where name transactions fail. Under governance, Change::NamePrices replaces the prices. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
     #[wincode(with = "crate::structs::unset::UnsetOption<crate::registry::names::NamesConfig>")]
     pub names: Option<crate::registry::names::NamesConfig>,
+    #[document(summary = "What makes a contract a collection: the NFT and multi-token standards' functions, usually CollectionFunctions::standard; or None for a chain that keeps no collection registry until governance decides a Change::Collections. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<crate::registry::collections::CollectionFunctions>")]
+    pub collections: Option<crate::registry::collections::CollectionFunctions>,
 }
 
 impl Hashable for Genesis {}
@@ -532,6 +535,7 @@ impl Genesis {
             governance: None,
             bootnodes: Vec::new(),
             names: dev_names(),
+            collections: Some(crate::registry::collections::CollectionFunctions::standard()),
         }
     }
 
@@ -572,6 +576,7 @@ impl Genesis {
             governance: None,
             bootnodes: Vec::new(),
             names: dev_names(),
+            collections: Some(crate::registry::collections::CollectionFunctions::standard()),
         }
     }
 
@@ -740,6 +745,10 @@ impl Genesis {
             return Some("token_functions must name each function once");
         }
 
+        if let Some(problem) = self.collections.as_ref().and_then(crate::registry::collections::CollectionFunctions::problem) {
+            return Some(problem);
+        }
+
         if self.max_block_bytes.is_some_and(|bytes| bytes < MIN_BLOCK_BYTES) {
             return Some("max_block_bytes must be at least 1 MiB, 1048576, so a block holds the largest deploy");
         }
@@ -791,7 +800,10 @@ impl Genesis {
             hash: self.hash,
             minter: self.minter,
             limits: self.tx_limits,
-            token_functions: self.token_functions.clone().into(),
+            standards: crate::registry::Standards {
+                tokens: self.token_functions.clone().into(),
+                collections: self.collections.clone(),
+            },
             staking: self.finality.as_ref().and_then(|config| config.staking(self.block().id())),
             signers: self.finality.as_ref().and_then(|config| config.signer_rules(self.block().id())),
             governance: self.governance.as_ref().zip(self.finality.as_ref()).map(|(governance, finality)| GovernanceRules {

@@ -43,7 +43,7 @@ const GLOBALS: &[&str] = &[
     "rawget", "rawlen", "rawset", "select", "setmetatable", "tonumber", "tostring", "type",
     "typeof", "unpack", "xpcall", "string", "table", "utf8", "bit32", "address", "hash", "u64",
     "u128", "u256", "i64", "i128", "i256", "ctx", "storage", "contracts", "accounts", "events",
-    "tokens", "names", "evm",
+    "tokens", "collections", "names", "evm",
 ];
 
 /// What scripts keep of math: what rounds to and works on whole numbers. Contracts deal in whole

@@ -29,3 +29,16 @@ fn a_swaps_events_read_as_its_lock_and_what_came_of_it() {
     assert_eq!((swaps[1].1.state, swaps[1].1.deadline, swaps[1].1.token.as_str()), ("locked", 1_793_043_200_000, "contract:0x07"));
     assert_eq!(swaps[1].1.locked_in, format!("0x{:064x}", 11));
 }
+
+#[test]
+fn an_nft_lock_says_which_nft_it_holds() {
+    let hash = format!("0x{}", "33".repeat(32));
+    let events = [
+        event("LockedItem", &[&hash, "nft", "7"], 20),
+        event("Locked", &[&hash, "ed25519:0x0b", "ed25519:0x0a", "contract:0xc1", "1", "1793043200000"], 20),
+    ];
+    let swaps = swaps(&events);
+
+    assert_eq!(swaps[0].1.item, Some(("nft".to_string(), "7".to_string())));
+    assert_eq!(swaps[0].1.token, "contract:0xc1", "the collection");
+}

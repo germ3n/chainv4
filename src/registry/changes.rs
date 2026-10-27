@@ -20,6 +20,7 @@ const DECIDED: &[u8] = b"change:decided";
 const BALLOT: &[u8] = b"change:ballot";
 const BOOTNODES: &[u8] = b"change:bootnodes";
 const NAME_PRICES: &[u8] = b"change:name-prices";
+const COLLECTIONS: &[u8] = b"change:collections";
 
 #[document(
     summary = "The consensus decided last, and how many changes of any kind came before it.",
@@ -215,6 +216,14 @@ impl<'a> Changes<'a> {
         Ok(self.state.get_value::<DecidedNamePrices>(Column::Validators, NAME_PRICES)?.map(|decided| decided.prices))
     }
 
+    #[document(
+        parent = "Changes",
+        summary = "What makes a collection, as decided last, or None while governance never decided it, when genesis's stands.",
+    )]
+    pub fn collections(&self) -> Result<Option<crate::registry::collections::CollectionFunctions>, DbError> {
+        self.state.get_value(Column::Validators, COLLECTIONS)
+    }
+
     #[document(parent = "Changes", summary = "The consensus decided last, and its version: the count of every change decided, of any kind.")]
     pub fn decided(&self) -> Result<DecidedChange, DbError> {
         self.state
@@ -267,7 +276,7 @@ impl<'a> Changes<'a> {
             approval_epochs = "How many epochs an approval counts for.",
             governance = "Who may approve, and what it takes.",
         },
-        returns = "Whether that decided it. NotGoverning for a sender that may not approve, StaleChange for an older version, SameChange for the consensus, bootnodes or name prices already decided.",
+        returns = "Whether that decided it. NotGoverning for a sender that may not approve, StaleChange for an older version, SameChange for the consensus, bootnodes, name prices or collection standards already decided.",
     )]
     pub fn approve(&self, sender: &Address, version: u64, change: Change, epoch: u64, approval_epochs: u64, governance: &dyn Governance) -> Result<ChangeApproved, RegistryError> {
         let decided = self.standing(sender, version, epoch, governance)?;
@@ -275,6 +284,7 @@ impl<'a> Changes<'a> {
             Change::Consensus(consensus) => *consensus == decided.consensus,
             Change::Bootnodes(bootnodes) => self.bootnodes()?.as_ref() == Some(bootnodes),
             Change::NamePrices(prices) => self.name_prices()?.as_ref() == Some(prices),
+            Change::Collections(functions) => self.collections()?.as_ref() == Some(functions),
         };
 
         if same {
@@ -309,6 +319,12 @@ impl<'a> Changes<'a> {
             // So do name prices: what a name costs is read when one is registered or renewed.
             Change::NamePrices(prices) => {
                 self.state.put_value(Column::Validators, NAME_PRICES.to_vec(), &DecidedNamePrices { prices });
+
+                decided.consensus
+            }
+            // And what makes a collection: deploys read it as they run.
+            Change::Collections(functions) => {
+                self.state.put_value(Column::Validators, COLLECTIONS.to_vec(), &functions);
 
                 decided.consensus
             }

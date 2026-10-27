@@ -108,6 +108,11 @@ pub struct Settings {
     pub bitcoin_peer: String,
     /// How many confirmations a swap's lock on Bitcoin needs before the other side acts on it.
     pub bitcoin_depth: u32,
+    /// Whether the NFTs page fetches what a token's URI names, its metadata and picture: off by
+    /// default, as each fetch tells whoever serves it that this wallet looks at that token.
+    pub nft_media: bool,
+    /// The IPFS gateway ipfs:// URIs are fetched through, ending in a slash.
+    pub ipfs_gateway: String,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -170,6 +175,9 @@ impl Default for Settings {
             bitcoin_test_network: "testnet4".to_string(),
             bitcoin_peer: String::new(),
             bitcoin_depth: 3,
+            nft_media: false,
+            // chainv4::nft::DEFAULT_GATEWAY, which a build without NFTs has no copy of.
+            ipfs_gateway: "https://ipfs.io/ipfs/".to_string(),
             vault: None,
             current: String::new(),
         }
@@ -406,6 +414,8 @@ impl Wallet {
                 #[cfg(feature = "dex")]
                 (Ask::Named { .. }, _) => self.views.trade.events(&result),
                 (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
+                #[cfg(feature = "nft")]
+                (Ask::Collections, _) => self.views.nfts.collections(&result),
                 (Ask::Offer(_) | Ask::Submit(_), _) => {
                     if let Some(sent) = self.views.send.answered(&ask, &result, now) {
                         self.settings.sent.push(sent);
@@ -413,6 +423,11 @@ impl Wallet {
                 }
                 _ => {}
             }
+        }
+
+        #[cfg(feature = "nft")]
+        for (url, result) in self.node.fetched() {
+            self.views.nfts.fetched(&url, result, self.settings.ipfs_gateway.trim());
         }
 
         // What was proven is kept, so it shows without proving it again.
@@ -493,6 +508,14 @@ impl Wallet {
 
         for ask in self.chain.names_due(&wanted, time) {
             self.node.ask(ask);
+        }
+
+        // The NFTs the account holds, proven while their page shows.
+        #[cfg(feature = "nft")]
+        if self.page == views::Page::Nfts {
+            for ask in self.chain.nfts_due(&self.views.nfts.wanted(), time) {
+                self.node.ask(ask);
+            }
         }
 
         let Some(current) = self.current().map(|holder| holder.addresses().iter().map(Address::to_string).collect::<Vec<_>>()) else {

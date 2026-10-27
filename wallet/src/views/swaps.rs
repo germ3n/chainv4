@@ -38,7 +38,7 @@ use {
     chainv4::structs::u256::u256,
     chainv4::swap::evm::{CHAINS, chain_name, deployed_address, parse_address, show_address, symbol},
     chainv4::swap::htlc::{Coins, Spend, revealed},
-    chainv4::swap::{BitcoinLeg, ChainLeg, EvmLeg, FIRST_DEADLINE_MS, Leg, Lock, LockState, Parties, SECOND_DEADLINE_MS, Settled, Side, Terms, bitcoin_settled, chain_settled, evm_settled, secret},
+    chainv4::swap::{BitcoinLeg, ChainLeg, EvmLeg, FIRST_DEADLINE_MS, Item, Leg, Lock, LockState, Parties, SECOND_DEADLINE_MS, Settled, Side, Terms, bitcoin_settled, chain_settled, evm_settled, secret},
     egui::{RichText, Ui},
     serde_json::{Value, json},
     std::collections::HashMap,
@@ -56,6 +56,8 @@ pub struct SwapsState {
     offered: Option<Box<Terms>>,
     /// What this chain's swap contract said of each swap, by its hash, and when it was last asked.
     status: HashMap<String, Result<Vec<Value>, String>>,
+    /// What the contract's item said each NFT swap holds, by its hash.
+    items: HashMap<String, Result<Vec<Value>, String>>,
     asked: HashMap<String, f64>,
     /// What Swap.sol said of each swap's EVM leg, by its hash and chain, and when it was asked.
     evm_locks: HashMap<(String, u64), Result<Lock, String>>,
@@ -89,6 +91,7 @@ impl Default for SwapsState {
             scan: Scan::default(),
             offered: None,
             status: HashMap::new(),
+            items: HashMap::new(),
             asked: HashMap::new(),
             evm_locks: HashMap::new(),
             evm_asked: HashMap::new(),
@@ -115,18 +118,75 @@ enum Kind {
     Evm,
 }
 
+/// What a leg on this chain or an EVM chain locks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asset {
+    /// The coin, or a fungible token.
+    Fungible,
+    /// One NFT of a collection.
+    Nft,
+    /// An amount of one id of a multi-token collection.
+    Multi,
+}
+
 /// A leg of a new offer, as typed.
 struct LegForm {
     kind: Kind,
+    asset: Asset,
     amount: String,
+    /// The token, or an NFT's collection.
     token: String,
+    /// An NFT's id.
+    id: String,
     chain_id: String,
     contract: String,
 }
 
 impl LegForm {
     fn new(kind: Kind) -> LegForm {
-        LegForm { kind, amount: String::new(), token: String::new(), chain_id: "11155111".to_string(), contract: show_address(&deployed_address()) }
+        LegForm { kind, asset: Asset::Fungible, amount: String::new(), token: String::new(), id: String::new(), chain_id: "11155111".to_string(), contract: show_address(&deployed_address()) }
+    }
+
+    /// The NFT it locks, from its id, for a leg that locks one.
+    fn item(&self) -> Result<Option<Item>, String> {
+        let id = || u256::from_str_radix(self.id.trim(), 10).map_err(|_| "an NFT's id, a whole number".to_string());
+
+        match self.asset {
+            Asset::Fungible => Ok(None),
+            Asset::Nft => Ok(Some(Item { id: id()?, multi: false })),
+            Asset::Multi => Ok(Some(Item { id: id()?, multi: true })),
+        }
+    }
+}
+
+/// The asset picker and an NFT's collection and id, for a leg on this chain or an EVM chain.
+fn asset_form(ui: &mut Ui, palette: &theme::Palette, form: &mut LegForm, coin: &str, collection_hint: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(&mut form.asset, Asset::Fungible, "Coin or token");
+        ui.selectable_value(&mut form.asset, Asset::Nft, "An NFT");
+        ui.selectable_value(&mut form.asset, Asset::Multi, "Multi-token");
+    });
+
+    match form.asset {
+        Asset::Fungible => {
+            super::row(ui, palette, if form.token.trim().is_empty() { coin } else { "Token units" }, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut form.amount).hint_text("50").desired_width(160.0));
+            });
+        }
+        Asset::Nft | Asset::Multi => {
+            super::row(ui, palette, "Collection", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut form.token).hint_text(collection_hint).desired_width(f32::INFINITY));
+            });
+            super::row(ui, palette, "Id", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut form.id).hint_text("7").desired_width(160.0));
+            });
+
+            if form.asset == Asset::Multi {
+                super::row(ui, palette, "How many", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut form.amount).hint_text("1").desired_width(160.0));
+                });
+            }
+        }
     }
 }
 
@@ -173,7 +233,7 @@ enum Looked {
     Secret { hash: String, secret: [u8; 32] },
     Broadcast(Result<String, String>),
     Failed(String),
-    Evm(evm::Answer),
+    Evm(Box<evm::Answer>),
 }
 
 impl SwapsState {
@@ -187,7 +247,9 @@ impl SwapsState {
         };
         let hash = body["args"][0]["value"].as_str().unwrap_or_default().to_string();
 
-        if body["function"] != "get" || !self.asked.contains_key(&hash) {
+        let function = body["function"].as_str().unwrap_or_default();
+
+        if !matches!(function, "get" | "item") || !self.asked.contains_key(&hash) {
             return false;
         }
 
@@ -196,7 +258,11 @@ impl SwapsState {
             Ok(value) => Err(value["error"].as_str().unwrap_or("the contract would not say").to_string()),
             Err(failure) => Err(failure.message.clone()),
         };
-        self.status.insert(hash, answer);
+
+        match function {
+            "get" => self.status.insert(hash, answer),
+            _ => self.items.insert(hash, answer),
+        };
 
         true
     }
@@ -418,12 +484,13 @@ fn leg_form(ui: &mut Ui, ctx: &Ctx, form: &mut LegForm, label: &str, salt: &str)
 
     match form.kind {
         Kind::Chain => {
-            super::row(ui, &palette, if form.token.trim().is_empty() { &ctx.coin.symbol } else { "Token units" }, |ui| {
-                ui.add(egui::TextEdit::singleline(&mut form.amount).hint_text("50").desired_width(160.0));
-            });
-            super::row(ui, &palette, "Token", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut form.token).hint_text("empty for the coin, or its contract:0x…").desired_width(f32::INFINITY));
-            });
+            asset_form(ui, &palette, form, &ctx.coin.symbol, "contract:0x…");
+
+            if form.asset == Asset::Fungible {
+                super::row(ui, &palette, "Token", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut form.token).hint_text("empty for the coin, or its contract:0x…").desired_width(f32::INFINITY));
+                });
+            }
 
             if contract(ctx).is_none() {
                 ui.colored_label(palette.warn, "No swap contract found here: no name resolves to one, and the node names none. Set one under Settings, Swaps.");
@@ -448,12 +515,13 @@ fn leg_form(ui: &mut Ui, ctx: &Ctx, form: &mut LegForm, label: &str, salt: &str)
                 ui.add(egui::TextEdit::singleline(&mut form.chain_id).hint_text("its id").desired_width(90.0));
             });
             let coin = chain_id.map_or("ETH", symbol);
-            super::row(ui, &palette, if form.token.trim().is_empty() { coin } else { "Token units" }, |ui| {
-                ui.add(egui::TextEdit::singleline(&mut form.amount).hint_text("0.01").desired_width(160.0));
-            });
-            super::row(ui, &palette, "Token", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut form.token).hint_text("empty for the coin, or an ERC-20's 0x…").desired_width(f32::INFINITY));
-            });
+            asset_form(ui, &palette, form, coin, "an ERC-721's or ERC-1155's 0x…");
+
+            if form.asset == Asset::Fungible {
+                super::row(ui, &palette, "Token", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut form.token).hint_text("empty for the coin, or an ERC-20's 0x…").desired_width(f32::INFINITY));
+                });
+            }
             super::row(ui, &palette, "Swap.sol", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut form.contract).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
             });
@@ -465,16 +533,27 @@ fn leg_form(ui: &mut Ui, ctx: &Ctx, form: &mut LegForm, label: &str, salt: &str)
 fn leg(ctx: &Ctx, form: &LegForm) -> Result<Leg, String> {
     let units = |text: &str, decimals: u8, what: &str| format::parse_units(text, decimals).and_then(|digits| u256::from_str_radix(&digits, 10).ok()).filter(|amount| *amount != u256::ZERO).ok_or_else(|| format!("an amount {what}"));
 
+    let item = form.item()?;
+    // One NFT is one; a multi-token amount, whole units.
+    let count = |what: &str| match item {
+        Some(Item { multi: false, .. }) => Ok(u256::from(1u64)),
+        _ => units(&form.amount, 0, what),
+    };
+
     match form.kind {
         Kind::Chain => {
             let token = match form.token.trim() {
+                "" if item.is_some() => return Err("an NFT's collection, its contract:0x…".to_string()),
                 "" => None,
                 text => Some(text.parse::<Address>().map_err(|_| "the token is a contract's address".to_string())?),
             };
-            let amount = units(&form.amount, if token.is_some() { 0 } else { ctx.coin.decimals }, "to lock on this chain")?;
+            let amount = match item {
+                Some(_) => count("to lock on this chain")?,
+                None => units(&form.amount, if token.is_some() { 0 } else { ctx.coin.decimals }, "to lock on this chain")?,
+            };
             let contract = contract(ctx).ok_or("no swap contract on this chain: set one under Settings, Swaps, or register the swap name for it")?;
 
-            Ok(Leg::Chain(ChainLeg { contract, token, amount, payer: None, receiver: None }))
+            Ok(Leg::Chain(ChainLeg { item, contract, token, amount, payer: None, receiver: None }))
         }
         Kind::Bitcoin | Kind::BitcoinTestnet => {
             let sats = units(&form.amount, 8, "of bitcoin, such as 0.001")?;
@@ -484,12 +563,17 @@ fn leg(ctx: &Ctx, form: &LegForm) -> Result<Leg, String> {
         Kind::Evm => {
             let chain_id = form.chain_id.trim().parse::<u64>().map_err(|_| "an EVM chain, by its id")?;
             let token = match form.token.trim() {
+                "" if item.is_some() => return Err("an NFT's collection, its 0x…".to_string()),
                 "" => None,
                 text => Some(parse_address(text)?),
             };
-            let amount = units(&form.amount, if token.is_some() { 0 } else { 18 }, &format!("to lock on {}", chain_name(chain_id)))?;
+            let what = format!("to lock on {}", chain_name(chain_id));
+            let amount = match item {
+                Some(_) => count(&what)?,
+                None => units(&form.amount, if token.is_some() { 0 } else { 18 }, &what)?,
+            };
 
-            Ok(Leg::Evm(EvmLeg { chain_id, contract: parse_address(&form.contract)?, token, amount, payer: None, receiver: None }))
+            Ok(Leg::Evm(EvmLeg { item, chain_id, contract: parse_address(&form.contract)?, token, amount, payer: None, receiver: None }))
         }
     }
 }
@@ -628,6 +712,12 @@ fn ask_leg(ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, leg: &Leg, now:
         Leg::Chain(leg) if stale(state.asked.get(&hash)) => {
             state.asked.insert(hash.clone(), now);
             ctx.node.ask(Ask::Call(json!({ "contract": leg.contract.to_string(), "function": "get", "args": [{ "type": "string", "value": hash }] }).to_string()));
+
+            // Which NFT it holds, asked only of legs that lock one: contracts from before NFTs have
+            // no item.
+            if leg.item.is_some() {
+                ctx.node.ask(Ask::Call(json!({ "contract": leg.contract.to_string(), "function": "item", "args": [{ "type": "string", "value": hash }] }).to_string()));
+            }
         }
         Leg::Evm(leg) if stale(state.evm_asked.get(&hash)) => {
             if let Some(url) = evm::url_for(ctx, state, leg.chain_id) {
@@ -646,9 +736,12 @@ fn lock_of(ctx: &Ctx, state: &SwapsState, terms: &Terms, leg: &Leg) -> Option<Re
     let text = |value: &Value| value["value"].as_str().map_or_else(|| value["value"].to_string(), str::to_string);
 
     match leg {
-        Leg::Chain(_) => Some(match state.status.get(&hash) {
-            None => Err("asking".to_string()),
-            Some(answer) => answer.clone().and_then(|values| Lock::from_chain(&values.iter().map(text).collect::<Vec<_>>())),
+        Leg::Chain(chain) => Some(match (state.status.get(&hash), chain.item, state.items.get(&hash)) {
+            (None, _, _) | (_, Some(_), None) => Err("asking".to_string()),
+            (Some(answer), None, _) => answer.clone().and_then(|values| Lock::from_chain(&values.iter().map(text).collect::<Vec<_>>())),
+            (Some(answer), Some(_), Some(item)) => answer.clone().and_then(|values| Lock::from_chain(&values.iter().map(text).collect::<Vec<_>>())).and_then(|lock| {
+                item.clone().and_then(|values| lock.with_chain_item(&values.iter().map(text).collect::<Vec<_>>()))
+            }),
         }),
         Leg::Evm(leg) => Some(match evm::url_for(ctx, state, leg.chain_id) {
             None => Err(format!("no JSON-RPC URL for {} under Settings, Swaps", chain_name(leg.chain_id))),
@@ -848,13 +941,39 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                         let text = TxCallArgumentType::String(hash.clone());
                         let from = me.chain.expect("a payer here has an address here");
 
-                        match chain.token {
-                            None => {
+                        match (chain.token, chain.item) {
+                            (None, _) => {
                                 if theme::primary(ui, &palette, "Lock", ready).clicked() {
                                     prepared = Some(call(from, chain.contract, "lock", vec![text, recipient, deadline], chain.amount, "Lock a swap".to_string()));
                                 }
                             }
-                            Some(token) => {
+                            // An NFT moves as a token does: the contract let to, then the lock.
+                            (Some(collection), Some(item)) => {
+                                let let_move = match item.multi {
+                                    false => call(from, collection, "approve", vec![TxCallArgumentType::Address(chain.contract), TxCallArgumentType::U256(item.id)], u256::ZERO, "Let the swap contract move the NFT".to_string()),
+                                    true => call(from, collection, "set_approval_for_all", vec![TxCallArgumentType::Address(chain.contract), TxCallArgumentType::Bool(true)], u256::ZERO, "Make the swap contract an operator".to_string()),
+                                };
+                                let lock = match item.multi {
+                                    false => call(from, chain.contract, "lock_nft", vec![text, recipient, deadline, TxCallArgumentType::Address(collection), TxCallArgumentType::U256(item.id)], u256::ZERO, "Lock a swap's NFT".to_string()),
+                                    true => call(
+                                        from,
+                                        chain.contract,
+                                        "lock_multi",
+                                        vec![text, recipient, deadline, TxCallArgumentType::Address(collection), TxCallArgumentType::U256(item.id), TxCallArgumentType::U256(chain.amount)],
+                                        u256::ZERO,
+                                        "Lock a swap's tokens".to_string(),
+                                    ),
+                                };
+
+                                if theme::quiet(ui, &palette, "1. Let the contract move it").clicked() {
+                                    prepared = Some(let_move);
+                                }
+
+                                if theme::primary(ui, &palette, "2. Lock", ready).clicked() {
+                                    prepared = Some(lock);
+                                }
+                            }
+                            (Some(token), None) => {
                                 if theme::quiet(ui, &palette, "1. Let the contract move the token").clicked() {
                                     prepared = Some(call(from, token, "approve", vec![TxCallArgumentType::Address(chain.contract), TxCallArgumentType::U256(chain.amount)], u256::ZERO, "Approve the swap contract".to_string()));
                                 }
@@ -1418,7 +1537,7 @@ fn take_looked(ctx: &mut Ctx, state: &mut SwapsState) {
             }
             Looked::Broadcast(Ok(txid)) => state.trouble = Some(format!("Broadcast: {txid}")),
             Looked::Broadcast(Err(why)) | Looked::Failed(why) => state.trouble = Some(why),
-            Looked::Evm(answer) => evm::take(ctx, state, answer),
+            Looked::Evm(answer) => evm::take(ctx, state, *answer),
         }
     }
 }

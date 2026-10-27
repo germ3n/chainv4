@@ -43,6 +43,8 @@ pub enum Ask {
     AccountTxs { address: String, cursor: Option<String> },
     /// A page of the token registry: tokens whose symbol starts with this, or every one for "".
     Tokens { symbol: String, cursor: Option<String> },
+    /// The collection registry, every NFT and multi-token collection, up to the node's most.
+    Collections,
     /// A read-only call, with its arguments already written as JSON.
     Call { contract: String, function: String, args: String },
     /// A fee offer for a signed probe, with the sender's own choices, as POST /offer's body.
@@ -121,6 +123,7 @@ impl Ask {
 
                 path
             }
+            Ask::Collections => "/collections?limit=500".to_string(),
             Ask::Light => "/light".to_string(),
             Ask::Headers { from, count } => format!("/headers?from={from}&count={count}"),
             Ask::Finality(from) => format!("/light/finality?from={from}"),
@@ -453,6 +456,7 @@ mod tests {
     #[test]
     fn token_searches_become_paths() {
         assert_eq!(Ask::Tokens { symbol: String::new(), cursor: None }.path(), "/tokens?limit=100");
+        assert_eq!(Ask::Collections.path(), "/collections?limit=500");
         assert_eq!(
             Ask::Tokens { symbol: "a b".to_string(), cursor: Some("0x01".to_string()) }.path(),
             "/tokens?limit=100&symbol=a%20b&cursor=0x01"

@@ -58,6 +58,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
     let kind = address.split(':').next().unwrap_or_default();
     let title = match &contract {
         Some(contract) if contract.token.is_some() => "Token contract",
+        Some(contract) if contract.collection.is_some() => "Collection contract",
         Some(contract) if contract.engine == "evm" => "EVM contract",
         Some(_) => "Contract",
         None => "Account",
@@ -203,6 +204,18 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
             token(ui, ctx, address);
         }
 
+        if let Some(collection) = &contract.collection {
+            super::section(ui, look, "Collection", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(match collection.multi() {
+                        true => "A multi-token collection:",
+                        false => "An NFT collection:",
+                    }).color(look.palette.soft));
+                    super::collections::open_link(ui, ctx, collection);
+                });
+            });
+        }
+
         match contract.engine.as_str() {
             "evm" => evm(ui, ctx, address, state),
             _ => super::section(ui, look, "Call a function read-only", |ui| read(ui, ctx, address, &contract.functions, state)),
@@ -224,6 +237,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
     }
 
     holdings(ui, ctx, address);
+    nfts(ui, ctx, address);
     super::section(ui, look, "Transactions", |ui| transactions(ui, ctx, address));
     super::section(ui, look, "Events that mention it", |ui| events::list(ui, ctx, &EventQuery::mentioning(address)));
 }
@@ -489,6 +503,33 @@ fn holdings(ui: &mut Ui, ctx: &mut Ctx, holder: &str) {
                 };
                 ui.label(RichText::new(amount).monospace().color(look.palette.ink));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| super::address(ui, ctx, &token));
+            });
+            widgets::rule(ui, &look.palette);
+        }
+    });
+}
+
+/// What it holds of the chain's collections: each collection's ids, as tokens_of says, the first
+/// page of each. Shown only once something is held.
+fn nfts(ui: &mut Ui, ctx: &mut Ctx, address: &str) {
+    let look = ctx.look;
+    let Some(collections) = super::collections::registry(ctx) else {
+        return;
+    };
+    let held: Vec<_> = collections.iter().filter_map(|collection| Some((collection, super::collections::held(ctx, &collection.address, address)?))).filter(|(_, ids)| !ids.is_empty()).collect();
+
+    if held.is_empty() {
+        return;
+    }
+
+    super::section(ui, look, "NFTs", |ui| {
+        for (collection, ids) in held {
+            ui.horizontal_wrapped(|ui| {
+                super::collections::open_link(ui, ctx, collection);
+                ui.label(RichText::new(match collection.multi() {
+                    true => format!("ids {}", ids.join(", ")),
+                    false => ids.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(" "),
+                }).monospace().color(look.palette.ink));
             });
             widgets::rule(ui, &look.palette);
         }

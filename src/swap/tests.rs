@@ -15,7 +15,7 @@ fn bob() -> Parties {
 }
 
 fn chain_leg() -> Leg {
-    Leg::Chain(ChainLeg { contract: Address::Contract([0x5a; 32]), token: None, amount: u256::new(5_000), payer: None, receiver: None })
+    Leg::Chain(ChainLeg { item: None, contract: Address::Contract([0x5a; 32]), token: None, amount: u256::new(5_000), payer: None, receiver: None })
 }
 
 fn bitcoin_leg() -> Leg {
@@ -23,7 +23,7 @@ fn bitcoin_leg() -> Leg {
 }
 
 fn evm_leg(chain_id: u64) -> Leg {
-    Leg::Evm(EvmLeg { chain_id, contract: evm::deployed_address(), token: None, amount: u256::new(10u128.pow(16)), payer: None, receiver: None })
+    Leg::Evm(EvmLeg { item: None, chain_id, contract: evm::deployed_address(), token: None, amount: u256::new(10u128.pow(16)), payer: None, receiver: None })
 }
 
 /// Alice's offer of bitcoin for chainv4's coin, and Bob's answer.
@@ -128,12 +128,12 @@ fn terms_that_do_not_hold_together_are_refused() {
     };
 
     refused(with_first(&|leg| leg.sats = 100), "at least");
-    refused(Terms { second: Leg::Chain(ChainLeg { amount: u256::ZERO, ..chain(&answered().second) }), ..answered() }, "more than nothing");
+    refused(Terms { second: Leg::Chain(ChainLeg { item: None, amount: u256::ZERO, ..chain(&answered().second) }), ..answered() }, "more than nothing");
     refused(Terms { second_deadline: NOW - 1, ..answered() }, "passed");
     refused(Terms { second_deadline: NOW + FIRST_DEADLINE_MS - 3_600_000, ..answered() }, "at least 4 hours");
     refused(with_first(&|leg| leg.receiver = Some([0; 33])), "not a key");
     refused(with_first(&|leg| leg.receiver = Some(bitcoin_key(1))), "same party");
-    refused(Terms { second: Leg::Chain(ChainLeg { payer: Some(Address::Ed25519([0xa; 32])), ..chain(&answered().second) }), ..answered() }, "same party");
+    refused(Terms { second: Leg::Chain(ChainLeg { item: None, payer: Some(Address::Ed25519([0xa; 32])), ..chain(&answered().second) }), ..answered() }, "same party");
 
     let mut zero = Terms::offer(offer().hash, evm_leg(1), bitcoin_leg(), offer().first_deadline, offer().second_deadline, &alice()).unwrap();
     if let Leg::Evm(leg) = &mut zero.first {
@@ -153,7 +153,7 @@ fn chain(leg: &Leg) -> ChainLeg {
 fn a_lock_stands_only_as_the_terms_say() {
     let terms = answered();
     let leg = &terms.second;
-    let lock = Lock { state: LockState::Locked, recipient: Some(Party::Chain(Address::Ed25519([0xa; 32]))), token: None, amount: u256::new(5_000), deadline: terms.second_deadline, secret: None, height: Some(100) };
+    let lock = Lock { state: LockState::Locked, recipient: Some(Party::Chain(Address::Ed25519([0xa; 32]))), token: None, amount: u256::new(5_000), deadline: terms.second_deadline, secret: None, height: Some(100), item: None };
 
     assert_eq!(leg.stands(&lock, terms.second_deadline), Ok(()));
     assert_eq!(leg.stands(&Lock { state: LockState::Claimed, ..lock.clone() }, terms.second_deadline), Ok(()));
@@ -179,7 +179,7 @@ fn a_lock_stands_only_as_the_terms_say() {
 
 #[test]
 fn a_lock_is_final_once_its_block_is_or_once_deep_enough() {
-    let at = |height: u64| Lock { state: LockState::Locked, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: Some(height) };
+    let at = |height: u64| Lock { state: LockState::Locked, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: Some(height), item: None };
 
     // A chain with finality: final once finality reaches its block, whatever the depth.
     assert_eq!(chain_settled(&at(100), 500, Some(100)), Settled::Final);
@@ -206,4 +206,62 @@ fn a_secret_is_new_each_time_and_its_hash_is_sha256() {
 
     assert_eq!(hash, sha256(&secret));
     assert_ne!(super::secret().unwrap().0, secret);
+}
+
+#[test]
+fn legs_lock_nfts_and_terms_without_any_keep_their_old_encoding() {
+    let collection = Address::Contract([0xc1; 32]);
+    let plain = answered();
+    let nft = Item { id: u256::new(7), multi: false };
+    let with_nft = Terms {
+        second: Leg::Chain(ChainLeg { token: Some(collection), item: Some(nft), amount: u256::new(1), ..chain(&plain.second) }),
+        ..plain.clone()
+    };
+
+    // Terms without NFTs are written as before, a 2 first, so older apps read them; with one, a 3.
+    assert_eq!(plain.to_bytes()[0], 2);
+    assert_eq!(with_nft.to_bytes()[0], 3);
+    assert_eq!(Terms::from_text(&with_nft.to_text()).unwrap(), with_nft);
+    assert_eq!(Terms::from_text(&plain.to_text()).unwrap(), plain);
+    let padded = [vec![3], wincode::serialize(&plain).unwrap()].concat();
+
+    assert!(Terms::from_bytes(&padded).unwrap_err().contains("more in them"), "one encoding a swap");
+    assert!(with_nft.has_items() && !plain.has_items());
+    assert_eq!(with_nft.second.what(), format!("NFT 7 of collection {collection}"));
+
+    // One NFT is one, and names its collection; a multi-token amount may be any.
+    with_nft.check(0).unwrap();
+    let two = Terms { second: Leg::Chain(ChainLeg { amount: u256::new(2), ..chain(&with_nft.second) }), ..with_nft.clone() };
+    let bare = Terms { second: Leg::Chain(ChainLeg { token: None, ..chain(&with_nft.second) }), ..with_nft.clone() };
+    let many = Terms { second: Leg::Chain(ChainLeg { amount: u256::new(2), item: Some(Item { multi: true, ..nft }), ..chain(&with_nft.second) }), ..with_nft.clone() };
+
+    assert!(two.check(0).unwrap_err().contains("its amount is 1"));
+    assert!(bare.check(0).unwrap_err().contains("names its collection"));
+    many.check(0).unwrap();
+    assert_eq!(many.second.what(), format!("2 of id 7 of collection {collection}"));
+
+    // A lock stands only holding that NFT, as the contract's item says.
+    let leg = &with_nft.second;
+    let lock = Lock {
+        state: LockState::Locked,
+        recipient: leg.party(Role::Receiver),
+        token: Some(Party::Chain(collection)),
+        amount: u256::new(1),
+        deadline: with_nft.second_deadline,
+        secret: None,
+        height: Some(10),
+        item: Some(nft),
+    };
+
+    assert_eq!(leg.stands(&lock, with_nft.second_deadline), Ok(()));
+    assert!(leg.stands(&Lock { item: Some(Item { id: u256::new(8), ..nft }), ..lock.clone() }, with_nft.second_deadline).unwrap_err().contains("nft 8"));
+    assert!(leg.stands(&Lock { item: None, ..lock.clone() }, with_nft.second_deadline).unwrap_err().contains("no NFT"));
+
+    let text = |values: &[&str]| values.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+    let unread = Lock { item: None, ..lock.clone() };
+
+    assert_eq!(unread.clone().with_chain_item(&text(&["nft", "7"])).unwrap(), lock);
+    assert_eq!(unread.clone().with_chain_item(&text(&["multi", "7"])).unwrap().item, Some(Item { multi: true, ..nft }));
+    assert_eq!(unread.clone().with_chain_item(&text(&["coin", "0"])).unwrap().item, None);
+    assert!(unread.with_chain_item(&text(&["nft"])).is_err());
 }

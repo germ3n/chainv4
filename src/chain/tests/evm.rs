@@ -901,11 +901,13 @@ mod swap {
     use {
         super::*,
         crate::abi::{AbiType, AbiValue, encode_values},
-        crate::swap::evm::{get_input, init_code, read_lock},
-        crate::swap::{EvmLeg, Leg, LockState},
+        crate::swap::evm::{get_input, init_code, item_input, read_item, read_lock},
+        crate::swap::{EvmLeg, Item, Leg, LockState},
     };
 
     const TOKEN_BIN: &str = include_str!("../../../contracts/evm/Token.bin");
+    const COLLECTIBLE_BIN: &str = include_str!("../../../contracts/evm/Collectible.bin");
+    const ITEMS_BIN: &str = include_str!("../../../contracts/evm/Items.bin");
 
     fn create(chain: &mut Chain, init: Vec<u8>) -> [u8; 20] {
         let deployer = authority();
@@ -944,7 +946,7 @@ mod swap {
         let supply = encode_values(&[AbiType::String, AbiType::String, AbiType::Uint(256)], &[AbiValue::String("Test".into()), AbiValue::String("TST".into()), AbiValue::Uint(u256::new(1_000_000))]).unwrap();
         let token = create(&mut chain, [crate::structs::hex::from_hex(TOKEN_BIN.trim()).unwrap(), supply].concat());
         let receiver = [0xb2; 20];
-        let leg = EvmLeg { chain_id: 1, contract: swap, token: Some(token), amount: u256::new(1_000), payer: Some(evm::evm_alias(&me)), receiver: Some(receiver) };
+        let leg = EvmLeg { item: None, chain_id: 1, contract: swap, token: Some(token), amount: u256::new(1_000), payer: Some(evm::evm_alias(&me)), receiver: Some(receiver) };
         let secret = [0x5e; 32];
         let hash = crate::crypto::bitcoin::sha256(&secret);
         let deadline = chain.tip().timestamp + 30 * SLOT;
@@ -972,7 +974,7 @@ mod swap {
 
         // The coin, locked until a few blocks on: too early to refund, then too late to claim,
         // and back to who locked it.
-        let coin = EvmLeg { token: None, amount: u256::new(500), ..leg.clone() };
+        let coin = EvmLeg { item: None, token: None, amount: u256::new(500), ..leg.clone() };
         let other = [0x6f; 32];
         let other_hash = crate::crypto::bitcoin::sha256(&other);
         let soon = chain.tip().timestamp + 4 * SLOT;
@@ -998,5 +1000,73 @@ mod swap {
         let nothing = coin.lock_calls(&third, deadline + 60 * SLOT).unwrap().remove(0);
         refused(&run(&mut chain, swap, 0, nothing.input), "lock something");
         assert_eq!(read_lock(&returned(&run(&mut chain, swap, 0, get_input(&third)))).unwrap().state, LockState::None);
+    }
+
+    fn word(address: [u8; 20]) -> Vec<u8> {
+        [vec![0; 12], address.to_vec()].concat()
+    }
+
+    fn number(value: u64) -> Vec<u8> {
+        u256::from(value).to_be_bytes().to_vec()
+    }
+
+    #[test]
+    fn swap_sol_locks_an_erc721_token_and_an_erc1155_amount() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let me = evm::evm_alias(&authority().public().address());
+        let swap = create(&mut chain, init_code());
+        let names = encode_values(&[AbiType::String, AbiType::String], &[AbiValue::String("Art".into()), AbiValue::String("ART".into())]).unwrap();
+        let art = create(&mut chain, [crate::structs::hex::from_hex(COLLECTIBLE_BIN.trim()).unwrap(), names].concat());
+        let items = create(&mut chain, crate::structs::hex::from_hex(ITEMS_BIN.trim()).unwrap());
+        let receiver = [0xb2; 20];
+        let owner_of = |chain: &mut Chain, id: u64| -> [u8; 20] { returned(&run(chain, art, 0, calldata("ownerOf(uint256)", &[number(id)])))[12..].try_into().unwrap() };
+        let held = |chain: &mut Chain, owner: [u8; 20], id: u64| u256::from_be_bytes(returned(&run(chain, items, 0, calldata("balanceOf(address,uint256)", &[word(owner), number(id)]))).try_into().unwrap());
+
+        assert!(run(&mut chain, art, 0, calldata("mint(address)", &[word(me)])).result.is_ok());
+        assert!(run(&mut chain, items, 0, calldata("mint(address,uint256,uint256)", &[word(me), number(9), number(50)])).result.is_ok());
+
+        // ERC-721: approved, then pulled in; the secret pays it to the receiver.
+        let nft = EvmLeg { item: Some(Item { id: u256::new(1), multi: false }), chain_id: 1, contract: swap, token: Some(art), amount: u256::new(1), payer: Some(me), receiver: Some(receiver) };
+        let secret = [0x5e; 32];
+        let hash = crate::crypto::bitcoin::sha256(&secret);
+        let deadline = chain.tip().timestamp + 30 * SLOT;
+        let [approve, lock] = <[_; 2]>::try_from(nft.lock_calls(&hash, deadline).unwrap()).unwrap();
+
+        refused(&run(&mut chain, swap, 0, lock.input.clone()), "not the owner, approved or an operator");
+        assert!(run(&mut chain, art, 0, approve.input).result.is_ok());
+        assert!(run(&mut chain, swap, 0, lock.input).result.is_ok());
+        assert_eq!(owner_of(&mut chain, 1), swap);
+        let mut locked = read_lock(&returned(&run(&mut chain, swap, 0, get_input(&hash)))).unwrap();
+        locked.item = read_item(&returned(&run(&mut chain, swap, 0, item_input(&hash)))).unwrap();
+
+        assert_eq!(locked.item, nft.item);
+        assert_eq!(Leg::Evm(nft.clone()).stands(&locked, deadline), Ok(()));
+        assert!(run(&mut chain, swap, 0, nft.claim_call(&secret).input).result.is_ok());
+        assert_eq!(owner_of(&mut chain, 1), receiver);
+
+        // ERC-1155: an operator, then an amount pulled in; the deadline passes and it goes back.
+        let multi = EvmLeg { item: Some(Item { id: u256::new(9), multi: true }), token: Some(items), amount: u256::new(20), ..nft.clone() };
+        let other = [0x6f; 32];
+        let other_hash = crate::crypto::bitcoin::sha256(&other);
+        let soon = chain.tip().timestamp + 4 * SLOT;
+        let [operator, lock] = <[_; 2]>::try_from(multi.lock_calls(&other_hash, soon).unwrap()).unwrap();
+
+        assert!(run(&mut chain, items, 0, operator.input).result.is_ok());
+        assert!(run(&mut chain, swap, 0, lock.input).result.is_ok());
+        assert_eq!((held(&mut chain, swap, 9), held(&mut chain, me, 9)), (u256::new(20), u256::new(30)));
+        assert_eq!(read_item(&returned(&run(&mut chain, swap, 0, item_input(&other_hash)))).unwrap(), multi.item);
+
+        // Tokens sent to it any other way are refused.
+        let stray = calldata("safeTransferFrom(address,address,uint256,uint256,bytes)", &[word(me), word(swap), number(9), number(1), number(160), number(0)]);
+        refused(&run(&mut chain, items, 0, stray), "send tokens with lockMulti");
+
+        while chain.tip().timestamp / 1_000 < soon / 1_000 {
+            advance(&mut chain, Vec::new());
+        }
+
+        assert!(run(&mut chain, swap, 0, multi.refund_call(&other_hash).input).result.is_ok());
+        assert_eq!((held(&mut chain, swap, 9), held(&mut chain, me, 9)), (u256::ZERO, u256::new(50)));
+        assert_eq!(read_item(&returned(&run(&mut chain, swap, 0, item_input(&crate::crypto::bitcoin::sha256(&[1; 32]))))).unwrap(), None);
     }
 }

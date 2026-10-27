@@ -327,11 +327,27 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   prove the storage a read touches.
 - [ ] **Old state over JSON-RPC.** Balances and calls at older blocks need state kept for them.
 - [ ] **Blob and EIP-7702 transactions.**
-- [ ] **NFTs.** A non-fungible token standard beside the fungible one, ERC-721-like: `owner_of`,
-  `transfer`, per-token and operator approvals, `token_uri` metadata, `Transfer` and `Approval`
-  events, owners kept provably in a namespace as balances are; reference contracts in Lua and
-  Rust held to it by one shared test; the registry listing collections; the wallet showing and
-  sending them, the explorer listing them; and later, NFTs in atomic swaps.
+- [x] **NFTs.** Two standards beside the fungible one: NFTs, ERC-721-like, and multi-token
+  collections, ERC-1155-like, with safe transfers a receiving contract agrees to, owners and
+  amounts kept provably, and `token_uri` metadata. Reference collections in Lua and Rust held to
+  them by one shared test each, and a factory that clones them; the collection registry, set by
+  genesis or turned on by governance; the wallet's NFTs page, proving what the account holds and
+  showing pictures once Settings lets it fetch them; the explorer's NFTs pages; `chainv4 nft`; and
+  NFTs in atomic swaps, on chainv4 and EVM chains. See [NFT standards](nft-standard.md).
+- [ ] **NFTs: next.** SVG and GIF pictures in the wallet; batch transfers (`safeBatchTransferFrom`);
+  royalties (ERC-2981); a marketplace contract; EVM collections listed by the apps, as native
+  ones are.
+- [ ] **Containers where they matter.** `eth_getLogs` checks its address and topic filters by
+  scanning lists of any length, per log: sets, and caps on the lists. Proofs a block carries are
+  picked among same-epoch links in hash-map order, and `GET /forks` lists tips in it: sort both.
+  The explorer's block map rebuilds its lanes every frame; held votes are found by scanning.
+  Later, with the storage work: every state read copies its key.
+- [ ] **Native multisig, across chains.** Accounts that need M of N keys to move anything,
+  built into the chain rather than a contract: the keys may be any kind the chain takes
+  (Ed25519, secp256k1, Bitcoin), and the same signers hold matching multisig on the other
+  chains swaps reach, a Bitcoin P2WSH M-of-N and an EVM Safe-style contract, so one quorum
+  controls funds on all of them; the wallet and the offline signer collect signatures, and
+  swaps can be made from a multisig.
 - [x] **Delegate calls and fallback.** `contracts.delegate` / `delegate` run another contract's code
   on the caller's storage, like `delegatecall`; `fallback` answers functions a contract does not
   export. Together they make proxies, upgradable without the built-in upgrade, with examples in

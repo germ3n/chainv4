@@ -63,9 +63,9 @@ who claims it (its receiver):
 
 | Leg | What it holds |
 | --- | --- |
-| `Chain` | The swap contract; the token, or none for the coin; the amount in smallest units; the payer's and receiver's chainv4 addresses. |
+| `Chain` | The swap contract; the token, or none for the coin; the NFT, if it locks one; the amount in smallest units; the payer's and receiver's chainv4 addresses. |
 | `Bitcoin` | Mainnet or a test network; the satoshis; the HTLC's refund and claim keys, 33-byte compressed bitcoin keys. |
-| `Evm` | The chain id (1 Ethereum, 11155111 Sepolia, 8453 Base…); its Swap.sol; the ERC-20 token, or none for the coin; the amount (wei for the coin); the payer's and receiver's 20-byte addresses. |
+| `Evm` | The chain id (1 Ethereum, 11155111 Sepolia, 8453 Base…); its Swap.sol; the ERC-20 token, or none for the coin; the NFT, if it locks one; the amount (wei for the coin); the payer's and receiver's 20-byte addresses. |
 
 **Filling in the parts:**
 - An offer has the starter as the first leg's payer and the second's receiver. An answer adds
@@ -85,6 +85,9 @@ changes anything but the other side's parts.
 
 **Codes made before legs still read.** Those were chainv4 against Bitcoin, and read as the same
 swap in two legs. Terms are written as legs from then on, a 2 first.
+
+**Terms that lock an NFT are written with a 3 first,** their legs holding it; terms that lock none
+are still written with a 2, as before NFTs, so apps from before read every code they could.
 
 ## Deadlines
 
@@ -122,11 +125,15 @@ A new offer's leg on chainv4 takes, in this order:
 | `lock_token(hash, recipient, deadline, token, amount)` | Locks `amount` of a token, moved with `transfer_from`: approve the swap contract for it first. Sends no coin. |
 | `claim(secret)` | Pays the swap whose hash is the secret's SHA-256 to its recipient, before its deadline. Anyone may send it. |
 | `refund(hash)` | Pays a swap nobody claimed back to its locker, from its deadline on. Anyone may send it. |
-| `get(hash)` | Its state, `none`, `locked`, `claimed` or `refunded`; locker, recipient, token (the zero address for the coin), amount, deadline, the secret once claimed, and the block it was locked in. |
+| `lock_nft(hash, recipient, deadline, collection, id)` | Locks one [NFT](nft-standard.md), moved with `transfer_from`: approve the swap contract for it first. |
+| `lock_multi(hash, recipient, deadline, collection, id, amount)` | Locks `amount` of a multi-token id, moved with `transfer_from`: make the swap contract an operator first. |
+| `get(hash)` | Its state, `none`, `locked`, `claimed` or `refunded`; locker, recipient, token (the zero address for the coin, the collection for NFTs), amount, deadline, the secret once claimed, and the block it was locked in. |
+| `item(hash)` | What it holds, `coin`, `token`, `nft` or `multi`, and the NFT's id, or 0; `none` for no swap. |
 
 Hashes and secrets are `0x` and 64 hex digits. A secret must be 32 bytes, as Bitcoin's script
 wants it, so a secret one chain takes the others take too. Events: `Locked(hash, locker,
-recipient, token, amount, deadline)`, `Claimed(hash, secret)`, `Refunded(hash)`.
+recipient, token, amount, deadline)`, then `LockedItem(hash, kind, id)` for NFTs,
+`Claimed(hash, secret)`, `Refunded(hash)`.
 
 ## An EVM chain's side: Swap.sol
 
@@ -139,9 +146,13 @@ runs on every EVM chain, the ones without `PUSH0` too:
 | `lockToken(hash, recipient, deadline, address token, uint256 amount)` | Locks an ERC-20, moved with `transferFrom`: approve Swap.sol first. A token that takes a fee as it moves is refused. Tokens that return nothing, as USDT does, are taken. |
 | `claim(bytes32 secret)` | Pays the recipient, before the deadline: SHA-256 through Ethereum's own precompile. Anyone may send it. |
 | `refund(bytes32 hash)` | Pays the locker back, from the deadline on. Anyone may send it. |
-| `get(bytes32 hash)` | State (0 none, 1 locked, 2 claimed, 3 refunded), locker, recipient, token (zero for ETH), amount, deadline, the secret once claimed, and the block it was locked in. |
+| `lockNft(hash, recipient, deadline, address collection, uint256 id)` | Locks an ERC-721 token, moved with `transferFrom`: approve Swap.sol for it first. |
+| `lockMulti(hash, recipient, deadline, address collection, uint256 id, uint256 amount)` | Locks an amount of an ERC-1155 id, moved with `safeTransferFrom`: `setApprovalForAll` for Swap.sol first. Swap.sol takes ERC-1155 tokens only as this moves them in. |
+| `get(bytes32 hash)` | State (0 none, 1 locked, 2 claimed, 3 refunded), locker, recipient, token (zero for ETH, the collection for NFTs), amount, deadline, the secret once claimed, and the block it was locked in. |
+| `item(bytes32 hash)` | What it holds: 0 the coin or an ERC-20, 1 an ERC-721 token, 2 an ERC-1155 amount; and the NFT's id. |
 
-Events: `Locked`, `Claimed(hash, secret)`, `Refunded(hash)`. The secret is kept in the
+Events: `Locked`, then `LockedItem(hash, kind, id)` for NFTs, `Claimed(hash, secret)`,
+`Refunded(hash)`. The secret is kept in the
 contract's state as well, so `get` alone shows it, with no log search, which providers limit.
 
 - **One address on every chain.** Swap.sol is deployed through the deterministic deployment
@@ -182,8 +193,10 @@ Legs are written as `--pay` and `--get`, amounts in smallest units:
 | Leg | Written as |
 | --- | --- |
 | chainv4 | `chainv4:AMOUNT` or `chainv4:AMOUNT:contract:0x…` for a token |
+| An NFT on chainv4 | `chainv4:nft:contract:0x…:ID`, or `chainv4:multi:contract:0x…:ID:AMOUNT` for a multi-token id |
 | Bitcoin | `bitcoin:SATS`, `bitcoin-testnet:SATS` |
 | An EVM chain | `evm:CHAIN_ID:AMOUNT[:0xTOKEN]`, or by name: `ethereum:`, `sepolia:`, `base:`, `arbitrum-one:`… |
+| An NFT there | `evm:CHAIN_ID:nft:0xCOLLECTION:ID` for ERC-721, `evm:CHAIN_ID:multi:0xCOLLECTION:ID:AMOUNT` for ERC-1155, or by name: `sepolia:nft:…` |
 
 Who you are on each: `--address` (chainv4), `--bitcoin-key` (a public key or key file), and
 `--evm-address` (`0x…` or a secp256k1 key file).
@@ -226,8 +239,8 @@ then lock with `--anyway`.
 
 The **Swaps** page, on an online install:
 - **Start a swap** picks each leg's chain: this chain, Bitcoin, Bitcoin testnet, or an EVM chain
-  from a list, or by id. Then what is locked there, the coin or a token, and for an EVM leg its
-  Swap.sol, filled in as the one on every chain. It makes the offer and its secret, kept sealed
+  from a list, or by id. Then what is locked there, the coin or a token, an NFT or an amount of a
+  multi-token id, and for an EVM leg its Swap.sol, filled in as the one on every chain. It makes the offer and its secret, kept sealed
   with the rest of the vault.
 - **Read an offer or an answer** reads the other side's code.
 
@@ -271,6 +284,22 @@ An open swap lays out each leg, where it stands, and what to do next:
   yourself. The browser has this and Esplora alone: it opens no raw connections.
 
 Both sides must follow the same test network, testnet4 or signet, for a testnet swap.
+
+## NFTs
+
+Either leg on chainv4 or an EVM chain may lock an [NFT](nft-standard.md), or an amount of a
+multi-token id (ERC-721 and ERC-1155 on the EVM), rather than coins or a fungible token: the leg's
+`item` says which id, its token is the collection, and its amount how many, 1 for an NFT.
+- **Locking:** the CLI and the wallet let the contract move it first, `approve` for an NFT or
+  `set_approval_for_all` for a multi-token collection, then call `lock_nft` or `lock_multi`
+  (`lockNft` and `lockMulti` on Swap.sol).
+- **Checking a lock:** `Leg::stands` holds the lock to the terms' NFT, as `item` says it; the CLI
+  and the apps ask `item` beside `get` for legs that lock one.
+- **Claiming and refunding** are as for coins: the secret, or the deadline, sends the NFT on.
+- **Older contracts:** a swap contract or Swap.sol from before NFTs has no `item`, so a leg locking
+  an NFT never stands there: offers take the current default contracts.
+- **Swap.sol's address changed with it:** CREATE2 puts the new code at a new address, which new
+  offers default to; terms naming the old one still go to it.
 
 ## In the explorer
 

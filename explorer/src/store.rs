@@ -6,7 +6,7 @@ use {
     crate::api::{Ask, EventQuery, Failure},
     crate::model::{
         Account, BlockDetail, Checkpoint, Contract, Forks, FoundEvent, FoundTx, IndexPage, Mempool, NodeView, Page, Peer,
-        PeerChange, Placed, Receipt, RegisteredToken, Reorganized, Status, Summary, TokensPage, TxView,
+        PeerChange, Placed, Receipt, RegisteredCollection, RegisteredToken, Reorganized, Status, Summary, TokensPage, TxView,
     },
     serde_json::Value,
     std::collections::{BTreeMap, HashMap, VecDeque},
@@ -152,6 +152,8 @@ pub struct Store {
     pub tokens: HashMap<String, RegisteredToken>,
     /// Pages of the token registry, by the symbol searched for.
     pub token_lists: HashMap<String, TokenList>,
+    /// The collection registry, and when it came, in milliseconds since the Unix epoch.
+    pub collections: Option<(Vec<RegisteredCollection>, u64)>,
     /// Token balances by token and holder, in whole units.
     pub holdings: HashMap<(String, String), String>,
     pub validators: Option<Value>,

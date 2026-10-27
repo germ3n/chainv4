@@ -1,7 +1,7 @@
 use {super::*, crate::swap::Leg};
 
 fn leg(token: Option<[u8; 20]>) -> EvmLeg {
-    EvmLeg { chain_id: 11155111, contract: [0xc0; 20], token, amount: u256::new(7), payer: Some([0xa1; 20]), receiver: Some([0xb2; 20]) }
+    EvmLeg { item: None, chain_id: 11155111, contract: [0xc0; 20], token, amount: u256::new(7), payer: Some([0xa1; 20]), receiver: Some([0xb2; 20]) }
 }
 
 #[test]
@@ -27,7 +27,7 @@ fn calls_are_swap_sols_as_solc_names_them() {
         ([0xc0; 20], u256::ZERO, vec![0x6b, 0xb3, 0xe8, 0x57]),
     ]);
     assert_eq!(calls[0].input[4..], [address_word(&[0xc0; 20]), number_word(u256::new(7))].concat(), "the contract, for the amount");
-    assert!(EvmLeg { receiver: None, ..leg(None) }.lock_calls(&hash, 0).is_err());
+    assert!(EvmLeg { item: None, receiver: None, ..leg(None) }.lock_calls(&hash, 0).is_err());
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn get_answers_read_as_locks() {
     };
 
     let locked = read_lock(&words(1, [0; 20], [0; 32])).unwrap();
-    assert_eq!(locked, Lock { state: LockState::Locked, recipient: Some(Party::Evm([0xb2; 20])), token: None, amount: u256::new(7), deadline: 1_793_043_200_000, secret: None, height: Some(4_242) });
+    assert_eq!(locked, Lock { state: LockState::Locked, recipient: Some(Party::Evm([0xb2; 20])), token: None, amount: u256::new(7), deadline: 1_793_043_200_000, secret: None, height: Some(4_242), item: None });
     assert_eq!(Leg::Evm(leg(None)).stands(&locked, 1_793_043_200_999), Ok(()), "seconds, as Swap.sol keeps them");
 
     let claimed = read_lock(&words(2, [0x70; 20], [0x22; 32])).unwrap();

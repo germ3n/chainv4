@@ -71,6 +71,46 @@ pub fn token_balance(value: &[u8]) -> Option<u256> {
 const TOKEN_BALANCES: &[u8] = b"balances";
 
 #[document(
+    summary = "Where an NFT collection keeps a token's owner, by the NFT standard: in Column::Namespaces, the collection's owners namespace, by the token id in decimal. What a light client proves who owns an NFT by.",
+    params = {
+        collection = "The collection contract.",
+        id = "The token.",
+    },
+    category = "Light client",
+    see_also = "nft_owner",
+)]
+pub fn nft_owner_key(collection: &Address, id: u256) -> Vec<u8> {
+    namespace_key(collection, NFT_OWNERS, id.to_string().as_bytes())
+}
+
+#[document(
+    summary = "An NFT's owner as a collection keeps it: the owner's address text, as Lua and the SDK both write it.",
+    returns = "The owner, or None for a value that is not an address.",
+    category = "Light client",
+    see_also = "nft_owner_key",
+)]
+pub fn nft_owner(value: &[u8]) -> Option<Address> {
+    std::str::from_utf8(value).ok()?.parse().ok()
+}
+
+#[document(
+    summary = "Where a multi-token collection keeps a holder's amount of an id, by the multi-token standard: in Column::Namespaces, the collection's balances namespace, by the id in decimal, a colon and the holder's address text. The amount reads as a token balance does, with token_balance.",
+    params = {
+        collection = "The collection contract.",
+        id = "The id.",
+        holder = "Whose amount.",
+    },
+    category = "Light client",
+    see_also = "token_balance",
+)]
+pub fn multi_balance_key(collection: &Address, id: u256, holder: &Address) -> Vec<u8> {
+    namespace_key(collection, TOKEN_BALANCES, format!("{id}:{holder}").as_bytes())
+}
+
+/// The namespace the NFT standard keeps owners in.
+const NFT_OWNERS: &[u8] = b"owners";
+
+#[document(
     summary = "What a light client needs to know about a chain to follow it: its hash, its consensus, how its finality works, and whether governance may change the consensus. Genesis's proof_root is the hash of these, so a client that trusts a genesis id can check what a node tells it they are.",
     category = "Light client",
     see_also = "LightClient, Genesis::light_params",

@@ -199,7 +199,7 @@ impl GovernanceConfig {
 }
 
 #[document(
-    summary = "What a change proposes: a new consensus, which takes effect at an epoch, as a checkpoint fixes it, so blocks either side of the boundary are checked by different rules; new bootnodes, which nodes dial from the block that decides them on; or new prices for names, which hold from that block on too. Every kind shares one ballot and one version.",
+    summary = "What a change proposes: a new consensus, which takes effect at an epoch, as a checkpoint fixes it, so blocks either side of the boundary are checked by different rules; new bootnodes, which nodes dial from the block that decides them on; new prices for names, which hold from that block on too; or what makes a collection, which does as well. Every kind shares one ballot and one version.",
     category = "Governance",
     see_also = "Tx::ApproveChange, Changes",
 )]
@@ -215,6 +215,9 @@ pub enum Change {
     #[document(summary = "New prices for names, replacing genesis's or the last decided: what a year costs by a name's length, as NamesConfig::prices lists them. Registrations and renewals pay them from the block that decides them on; names already held keep the years they paid for.")]
     #[wincode(tag = 2)]
     NamePrices(#[wincode(with = "crate::structs::u256::U256LeList")] Vec<crate::structs::u256::u256>),
+    #[document(summary = "What makes a contract a collection, replacing genesis's or the last decided: the NFT and multi-token standards' functions. A chain whose genesis kept no collection registry turns it on this way. Deploys, upgrades and refreshes register by it from the block that decides it on; contracts already deployed join at their next upgrade or refresh.")]
+    #[wincode(tag = 3)]
+    Collections(crate::registry::collections::CollectionFunctions),
 }
 
 #[document(summary = "The most bootnodes genesis or a change may name.", category = "Governance", see_also = "Change::Bootnodes, Genesis::bootnodes")]
@@ -246,12 +249,13 @@ impl Hashable for Change {
 }
 
 impl Change {
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes or name_prices.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices or collections.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
             Change::Bootnodes(_) => "bootnodes",
             Change::NamePrices(_) => "name_prices",
+            Change::Collections(_) => "collections",
         }
     }
 }

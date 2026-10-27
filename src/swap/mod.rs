@@ -55,6 +55,33 @@ pub const SECOND_DEADLINE_MS: u64 = 12 * 3_600_000;
 /// The first byte of terms written as two legs. Terms from before, chainv4 against Bitcoin, began
 /// with their chain's tag, 0 or 1, and still read.
 const LEGS: u8 = 2;
+/// The first byte of terms whose legs may lock NFTs. Terms that lock none are written as LEGS, so
+/// apps from before NFTs read every code they could.
+const ITEMS: u8 = 3;
+
+#[document(
+    summary = "The NFT a leg locks, when it locks one rather than coins or a fungible token: one token of an NFT collection (ERC-721 on an EVM chain), or an amount of one id of a multi-token collection (ERC-1155). The leg's token is the collection, and its amount how many: 1 for an NFT.",
+    category = "Swaps",
+    see_also = "ChainLeg, EvmLeg",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct Item {
+    #[document(summary = "The token's id in its collection.")]
+    #[wincode(with = "crate::structs::u256::U256Le")]
+    pub id: u256,
+    #[document(summary = "An id of a multi-token collection, held in amounts, rather than one NFT.")]
+    pub multi: bool,
+}
+
+impl Item {
+    #[document(parent = "Item", summary = "\"nft\" or \"multi\", as the swap contracts' item() names it.")]
+    pub fn kind(&self) -> &'static str {
+        match self.multi {
+            true => "multi",
+            false => "nft",
+        }
+    }
+}
 
 #[document(
     summary = "One side of a swap: the chain it is on, what is locked there, who locks it and who claims it with the secret. An offer leaves out the answerer's part of each.",
@@ -80,9 +107,11 @@ pub enum Leg {
 pub struct ChainLeg {
     #[document(summary = "The swap contract the lock goes into, and both sides look in.")]
     pub contract: Address,
-    #[document(summary = "The token locked, or None for the coin.")]
+    #[document(summary = "The token locked, or None for the coin: an NFT's collection, when item says which.")]
     pub token: Option<Address>,
-    #[document(summary = "How much, in its smallest units.")]
+    #[document(summary = "The NFT locked, or None for coins or a fungible token.")]
+    pub item: Option<Item>,
+    #[document(summary = "How much, in its smallest units: how many, for NFTs.")]
     #[wincode(with = "crate::structs::u256::U256Le")]
     pub amount: u256,
     #[document(summary = "Who locks it, and gets it back after the deadline.")]
@@ -111,9 +140,11 @@ pub struct EvmLeg {
     pub chain_id: u64,
     #[document(summary = "The Swap.sol the lock goes into there.")]
     pub contract: [u8; 20],
-    #[document(summary = "The ERC-20 token locked, or None for the chain's coin.")]
+    #[document(summary = "The ERC-20 token locked, or None for the chain's coin: an NFT's collection, ERC-721 or ERC-1155, when item says which.")]
     pub token: Option<[u8; 20]>,
-    #[document(summary = "How much, in its smallest units: wei for the coin.")]
+    #[document(summary = "The NFT locked, or None for the coin or an ERC-20.")]
+    pub item: Option<Item>,
+    #[document(summary = "How much, in its smallest units: wei for the coin; how many, for NFTs.")]
     #[wincode(with = "crate::structs::u256::U256Le")]
     pub amount: u256,
     #[document(summary = "Who locks it: an address there.")]
@@ -194,6 +225,8 @@ pub struct Lock {
     pub secret: Option<[u8; 32]>,
     #[document(summary = "The block it was locked in, on contracts that say: what its finality is reckoned from.")]
     pub height: Option<u64>,
+    #[document(summary = "The NFT it holds, as the contract's item() says; None for coins, a fungible token, or a contract from before NFTs.")]
+    pub item: Option<Item>,
 }
 
 #[document(
@@ -393,18 +426,34 @@ impl Leg {
         }
     }
 
-    #[document(parent = "Leg", summary = "What it locks, in smallest units: 100000 sats, 5000 of the coin, or 5000 of a token.")]
+    #[document(parent = "Leg", summary = "What it locks, in smallest units: 100000 sats, 5000 of the coin, 5000 of a token, NFT 7 of a collection, or 3 of id 7 of one.")]
     pub fn what(&self) -> String {
+        let item = |item: &Item, amount: u256, collection: String| match item.multi {
+            true => format!("{amount} of id {} of collection {collection}", item.id),
+            false => format!("NFT {} of collection {collection}", item.id),
+        };
+
         match self {
-            Leg::Chain(leg) => match leg.token {
-                None => format!("{} of the coin", leg.amount),
-                Some(token) => format!("{} of token {token}", leg.amount),
+            Leg::Chain(leg) => match (leg.token, &leg.item) {
+                (Some(token), Some(found)) => item(found, leg.amount, token.to_string()),
+                (None, _) => format!("{} of the coin", leg.amount),
+                (Some(token), None) => format!("{} of token {token}", leg.amount),
             },
             Leg::Bitcoin(leg) => format!("{} sats", leg.sats),
-            Leg::Evm(leg) => match leg.token {
-                None => format!("{} wei", leg.amount),
-                Some(token) => format!("{} of token {}", leg.amount, to_hex(&token)),
+            Leg::Evm(leg) => match (leg.token, &leg.item) {
+                (Some(token), Some(found)) => item(found, leg.amount, to_hex(&token)),
+                (None, _) => format!("{} wei", leg.amount),
+                (Some(token), None) => format!("{} of token {}", leg.amount, to_hex(&token)),
             },
+        }
+    }
+
+    #[document(parent = "Leg", summary = "The NFT it locks, if it locks one.")]
+    pub fn item(&self) -> Option<Item> {
+        match self {
+            Leg::Chain(leg) => leg.item,
+            Leg::Evm(leg) => leg.item,
+            Leg::Bitcoin(_) => None,
         }
     }
 
@@ -413,10 +462,10 @@ impl Leg {
         summary = "Checks a lock its chain's contract shows against it: locked, or since claimed, for its receiver, with its token, amount and deadline, at the precision its chain keeps. Lock second only once the first stands.",
     )]
     pub fn stands(&self, lock: &Lock, deadline: u64) -> Result<(), String> {
-        let (receiver, token, amount, deadline) = match self {
-            Leg::Chain(leg) => (leg.receiver.map(Party::Chain), leg.token.map(Party::Chain), leg.amount, deadline),
+        let (receiver, token, amount, deadline, item) = match self {
+            Leg::Chain(leg) => (leg.receiver.map(Party::Chain), leg.token.map(Party::Chain), leg.amount, deadline, leg.item),
             // Swap.sol keeps whole seconds.
-            Leg::Evm(leg) => (leg.receiver.map(Party::Evm), leg.token.map(Party::Evm), leg.amount, deadline / 1_000 * 1_000),
+            Leg::Evm(leg) => (leg.receiver.map(Party::Evm), leg.token.map(Party::Evm), leg.amount, deadline / 1_000 * 1_000, leg.item),
             Leg::Bitcoin(_) => return Err("Bitcoin's lock is an HTLC, not a contract's: look its address up".to_string()),
         };
 
@@ -434,6 +483,13 @@ impl Leg {
             return Err(format!("it locks {} of {}, not what the terms say", lock.amount, lock.token.map_or("the coin".to_string(), |token| format!("{token:?}"))));
         }
 
+        if lock.item != item {
+            return Err(match (lock.item, item) {
+                (Some(locked), _) => format!("it locks {} {}, not what the terms say", locked.kind(), locked.id),
+                (None, _) => "it locks no NFT, or its contract does not say which".to_string(),
+            });
+        }
+
         if lock.deadline != deadline {
             return Err("its deadline is not the terms'".to_string());
         }
@@ -448,9 +504,15 @@ impl Leg {
         };
         distinct(self.party(Role::Payer), self.party(Role::Receiver))?;
 
+        let one_nft = |item: &Option<Item>, amount: u256, collection: bool| match item {
+            Some(_) if !collection => Err(format!("an NFT on {} names its collection", self.chain_name())),
+            Some(Item { multi: false, .. }) if amount != u256::from(1u64) => Err("one NFT is one: its amount is 1".to_string()),
+            _ => Ok(()),
+        };
+
         match self {
             Leg::Chain(leg) if leg.amount == u256::ZERO => Err("a swap locks more than nothing on chainv4".to_string()),
-            Leg::Chain(_) => Ok(()),
+            Leg::Chain(leg) => one_nft(&leg.item, leg.amount, leg.token.is_some()),
             Leg::Bitcoin(leg) => {
                 if leg.sats < htlc::DUST {
                     return Err(format!("a swap locks at least {} satoshis on Bitcoin", htlc::DUST));
@@ -473,7 +535,7 @@ impl Leg {
                 let zero = [0; 20];
                 match leg.contract == zero || leg.token == Some(zero) || leg.payer == Some(zero) || leg.receiver == Some(zero) {
                     true => Err(format!("the zero address, on {}", self.chain_name())),
-                    false => Ok(()),
+                    false => one_nft(&leg.item, leg.amount, leg.token.is_some()),
                 }
             }
         }
@@ -624,9 +686,12 @@ impl Terms {
         ur::encode(&self.to_bytes(), &ur::Type::Custom(UR_TYPE)).to_ascii_uppercase()
     }
 
-    #[document(parent = "Terms", summary = "Its encoding: a 2, then its fields.")]
+    #[document(parent = "Terms", summary = "Its encoding: a 3, then its fields, for terms that lock an NFT; a 2, then its fields as written before NFTs, for every other.")]
     pub fn to_bytes(&self) -> Vec<u8> {
-        [vec![LEGS], wincode::serialize(self).expect("terms always encode")].concat()
+        match legacy::write_legs(self) {
+            Some(bytes) => [vec![LEGS], bytes].concat(),
+            None => [vec![ITEMS], wincode::serialize(self).expect("terms always encode")].concat(),
+        }
     }
 
     #[document(
@@ -648,21 +713,26 @@ impl Terms {
 
     #[document(
         parent = "Terms",
-        summary = "Reads terms from their encoding, all of these bytes: two legs, or the chainv4-against-Bitcoin terms written before legs.",
+        summary = "Reads terms from their encoding, all of these bytes: two legs that may lock NFTs, two legs as written before NFTs, or the chainv4-against-Bitcoin terms written before legs.",
     )]
     pub fn from_bytes(bytes: &[u8]) -> Result<Terms, String> {
-        match bytes.first() {
-            Some(&LEGS) => {
-                let terms: Terms = wincode::deserialize(&bytes[1..]).map_err(|_| "terms that do not decode".to_string())?;
+        let terms = match bytes.first() {
+            Some(&ITEMS) => wincode::deserialize::<Terms>(&bytes[1..]).map_err(|_| "terms that do not decode".to_string())?,
+            Some(&LEGS) => legacy::read_legs(&bytes[1..])?,
+            Some(0 | 1) => return legacy::read(bytes),
+            _ => return Err("terms of a kind this build does not read".to_string()),
+        };
 
-                match terms.to_bytes() == bytes {
-                    true => Ok(terms),
-                    false => Err("terms with more in them than they hold".to_string()),
-                }
-            }
-            Some(0 | 1) => legacy::read(bytes),
-            _ => Err("terms of a kind this build does not read".to_string()),
+        // One encoding a swap: terms without NFTs are never written as 3.
+        match terms.to_bytes() == bytes {
+            true => Ok(terms),
+            false => Err("terms with more in them than they hold".to_string()),
         }
+    }
+
+    #[document(parent = "Terms", summary = "Whether either leg locks an NFT.")]
+    pub fn has_items(&self) -> bool {
+        self.first.item().is_some() || self.second.item().is_some()
     }
 }
 
@@ -681,7 +751,7 @@ impl Lock {
         };
 
         if state == LockState::None {
-            return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: None });
+            return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: None, item: None });
         }
 
         // Contracts from before they said the block a swap was locked in give seven values.
@@ -707,7 +777,24 @@ impl Lock {
             deadline: u64::try_from(number(deadline)?).map_err(|_| "a deadline past any time".to_string())?,
             secret,
             height: height.map(|height| number(height).and_then(|height| u64::try_from(height).map_err(|_| "a height past any chain".to_string()))).transpose()?.filter(|height| *height > 0),
+            item: None,
         })
+    }
+
+    #[document(
+        parent = "Lock",
+        summary = "The lock with the NFT chainv4's swap contract says it holds, from item's values as text: its kind, coin, token, nft or multi, and the id.",
+    )]
+    pub fn with_chain_item(mut self, values: &[String]) -> Result<Lock, String> {
+        self.item = match values {
+            [kind, _] if kind == "coin" || kind == "token" || kind == "none" => None,
+            [kind, id] if kind == "nft" || kind == "multi" => {
+                Some(Item { id: u256::from_str_radix(id, 10).map_err(|_| format!("{id} is not an id"))?, multi: kind == "multi" })
+            }
+            _ => return Err("an answer the swap contract's item does not give".to_string()),
+        };
+
+        Ok(self)
     }
 }
 

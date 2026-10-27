@@ -30,5 +30,7 @@ pub mod structs;
 pub mod swap;
 #[cfg(feature = "dex")]
 pub mod dex;
+#[cfg(feature = "nft")]
+pub mod nft;
 #[cfg(feature = "vm")]
 pub mod vm;

@@ -8,8 +8,8 @@ use {
     crate::node::{Ask, Failure},
     chainv4::db::{Column, StateProof, address_key},
     chainv4::light::{
-        Assurance, CheckpointStart, FinalityStep, LightClient, LightError, LightParams, LightRequest, LightState, MAX_LIGHT_HEADERS, token_balance,
-        token_balance_key,
+        Assurance, CheckpointStart, FinalityStep, LightClient, LightError, LightParams, LightRequest, LightState, MAX_LIGHT_HEADERS, multi_balance_key,
+        nft_owner, nft_owner_key, token_balance, token_balance_key,
     },
     chainv4::registry::names::{FoundName, NameRecord, NameStatus, NamesConfig, PrimaryName, lineage, name_problem, primary_key, record_key, standing},
     chainv4::registry::tokens::{Token, token_key},
@@ -48,6 +48,22 @@ enum Target {
     Name(String),
     /// An address's primary name.
     Primary(String),
+    /// Who owns an NFT, by collection and id.
+    NftOwner { collection: String, id: String },
+    /// How much of a multi-token id a holder holds.
+    MultiBalance { collection: String, id: String, holder: String },
+}
+
+/// An NFT a page shows, for its ownership to be proven: a token of an NFT collection, or a
+/// holder's amount of a multi-token id.
+#[cfg_attr(not(feature = "nft"), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Held {
+    pub collection: String,
+    /// The id, in decimal.
+    pub id: String,
+    pub multi: bool,
+    pub holder: String,
 }
 
 /// A name looked up from proven records: where it stands at the tip, and how far that is trusted.
@@ -141,6 +157,12 @@ pub struct Chain {
     pub primaries: HashMap<String, Proven<Option<String>>>,
     /// When each name's records were last asked for.
     named: HashMap<String, f64>,
+    /// NFT owners proven, by collection and id: None where nobody owns it.
+    pub nft_owners: HashMap<(String, String), Proven<Option<Address>>>,
+    /// Multi-token amounts proven, by collection, id and holder.
+    pub multi_balances: HashMap<(String, String, String), Proven<u256>>,
+    /// When each NFT's proof was last asked for, by its key.
+    nfts_asked: HashMap<String, f64>,
     /// Whether the node keeps an address index, or else an event index, to list them from.
     pub indexes_addresses: Option<bool>,
     pub indexes_events: Option<bool>,
@@ -322,6 +344,45 @@ impl Chain {
                     block: tip.clone(),
                 });
             }
+        }
+
+        asks
+    }
+
+    /// The proofs of NFTs a page shows, at the tip: each NFT's owner, or each holder's amount of a
+    /// multi-token id, asked again once PROVE_EVERY old.
+    #[cfg_attr(not(feature = "nft"), allow(dead_code))]
+    pub fn nfts_due(&mut self, wanted: &[Held], time: f64) -> Vec<Ask> {
+        let Some(client) = self.client.as_ref().filter(|_| self.caught_up()) else {
+            return Vec::new();
+        };
+        let tip = client.tip().id().to_string();
+        let mut asks = Vec::new();
+
+        for held in wanted {
+            let (Ok(collection), Ok(id)) = (held.collection.parse::<Address>(), u256::from_str_radix(&held.id, 10)) else {
+                continue;
+            };
+            let (key, target) = match held.multi {
+                false => (nft_owner_key(&collection, id), Target::NftOwner { collection: held.collection.clone(), id: held.id.clone() }),
+                true => {
+                    let Ok(holder) = held.holder.parse::<Address>() else {
+                        continue;
+                    };
+                    let target = Target::MultiBalance { collection: held.collection.clone(), id: held.id.clone(), holder: held.holder.clone() };
+
+                    (multi_balance_key(&collection, id, &holder), target)
+                }
+            };
+            let key = to_hex(&key);
+
+            if self.nfts_asked.get(&key).is_some_and(|asked| time - asked < PROVE_EVERY) {
+                continue;
+            }
+
+            self.nfts_asked.insert(key.clone(), time);
+            self.targets.insert(key.clone(), target);
+            asks.push(Ask::Proof { column: Column::Namespaces.name(), key, block: tip.clone() });
         }
 
         asks
@@ -634,6 +695,17 @@ impl Chain {
                             .map(|bytes| wincode::deserialize(&bytes).map_err(|_| "a primary name that does not decode"))
                             .transpose()?;
                         self.primaries.insert(address, Proven { value: chosen.map(|chosen| chosen.name), assurance });
+                    }
+                    Target::NftOwner { collection, id } => {
+                        let owner = held.map(|bytes| nft_owner(&bytes).ok_or("an NFT owner that does not read")).transpose()?;
+                        self.nft_owners.insert((collection, id), Proven { value: owner, assurance });
+                    }
+                    Target::MultiBalance { collection, id, holder } => {
+                        let amount = match held {
+                            Some(bytes) => token_balance(&bytes).ok_or("an amount that does not read")?,
+                            None => u256::ZERO,
+                        };
+                        self.multi_balances.insert((collection, id, holder), Proven { value: amount, assurance });
                     }
                 }
 

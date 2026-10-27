@@ -13,6 +13,7 @@ use {
     crate::structs::vote::{Checkpoint, Justification, SignedVote},
     crate::registry::contracts::ContractRecord,
     crate::registry::tokens::Token,
+    crate::registry::collections::Collection,
     crate::registry::names::NameAction,
     crate::structs::account::Account,
     crate::structs::address::Address,
@@ -519,6 +520,7 @@ pub fn change(change: &Change) -> Value {
         Change::Consensus(consensus) => json!({ "consensus": crate::cli::genesis::consensus_json(consensus, None) }),
         Change::Bootnodes(bootnodes) => json!({ "bootnodes": bootnodes }),
         Change::NamePrices(prices) => json!({ "name_prices": prices.iter().map(u256::to_string).collect::<Vec<_>>() }),
+        Change::Collections(functions) => json!({ "collections": { "nft": functions.nft, "multi": functions.multi } }),
     }
 }
 
@@ -641,7 +643,7 @@ pub fn account(address: &Address, account: &Account) -> Value {
 }
 
 /// A contract, with what the token registry holds for it: null when it is not a token.
-pub fn contract(address: &Address, record: &ContractRecord, token: Option<&Token>) -> Value {
+pub fn contract(address: &Address, record: &ContractRecord, token: Option<&Token>, collection: Option<&Collection>) -> Value {
     json!({
         "address": address.to_string(),
         "deployer": record.deployer.to_string(),
@@ -652,6 +654,7 @@ pub fn contract(address: &Address, record: &ContractRecord, token: Option<&Token
         "layout": record.layout.namespaces.iter().map(declared).collect::<Vec<_>>(),
         "code_size": record.code.len(),
         "token": token.map(self::token),
+        "collection": collection.map(self::collection),
     })
 }
 
@@ -685,6 +688,16 @@ fn declared(declared: &Declared) -> Value {
 
 /// A registered token: its address, and its name, symbol and decimals, each null when it exports
 /// none.
+/// A registered collection: its address, its kind, nft or multi, its name and its symbol.
+pub fn collection(collection: &Collection) -> Value {
+    json!({
+        "address": collection.address.to_string(),
+        "kind": collection.kind.as_str(),
+        "name": collection.name,
+        "symbol": collection.symbol,
+    })
+}
+
 pub fn token(token: &Token) -> Value {
     json!({
         "address": token.address.to_string(),

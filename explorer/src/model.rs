@@ -38,6 +38,10 @@ pub struct Status {
     /// The DEX and the EVM DEX's router the node names: { contract, router }, or none.
     #[serde(default)]
     pub dex: Option<Value>,
+    /// What makes a collection on this chain: { nft, multi } lists of functions, or none for a
+    /// chain that keeps no collection registry.
+    #[serde(default)]
+    pub collections: Option<Value>,
 }
 
 impl Status {
@@ -296,6 +300,9 @@ pub struct Contract {
     /// What the chain's token registry holds for it, when it is a token.
     #[serde(default)]
     pub token: Option<RegisteredToken>,
+    /// What the chain's collection registry holds for it, when it is a collection.
+    #[serde(default)]
+    pub collection: Option<RegisteredCollection>,
 }
 
 /// One namespace a contract's storage layout declares: a map of one kind, keyed by any key or by
@@ -347,6 +354,33 @@ pub struct RegisteredToken {
     pub name: Option<String>,
     pub symbol: Option<String>,
     pub decimals: Option<u8>,
+}
+
+/// A collection as the registry holds it: an NFT one, one owner a token, or a multi-token one.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct RegisteredCollection {
+    pub address: String,
+    /// nft or multi.
+    pub kind: String,
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+}
+
+impl RegisteredCollection {
+    pub fn multi(&self) -> bool {
+        self.kind == "multi"
+    }
+
+    /// Its name, else its symbol, else nothing.
+    pub fn title(&self) -> Option<String> {
+        self.name.clone().or_else(|| self.symbol.clone())
+    }
+}
+
+/// GET /collections.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CollectionsPage {
+    pub collections: Vec<RegisteredCollection>,
 }
 
 /// GET /tokens.

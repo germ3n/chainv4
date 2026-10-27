@@ -285,6 +285,9 @@ Two more, built for Paris so they run on any EVM chain:
   pairs, the pair, and a router, in the manner of Uniswap V2, written afresh.
 - **`contracts/evm/Token.sol`** is a small ERC-20, its supply to whoever deploys it, which the
   swap tests lock.
+- **`contracts/evm/Collectibles.sol`** is a small ERC-721, `Collectible`, and a small ERC-1155,
+  `Items`, each minting only for its deployer, which the swap tests lock as
+  [NFTs](nft-standard.md).
 
 ## Not yet
 

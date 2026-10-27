@@ -14,6 +14,7 @@ use crate::vm::VmError;
 
 pub mod accounts;
 pub mod changes;
+pub mod collections;
 pub mod names;
 pub mod signers;
 pub mod tokens;
@@ -27,6 +28,20 @@ pub use names::Names;
 #[cfg(feature = "vm")]
 pub use contracts::Contracts;
 pub use tokens::Tokens;
+pub use collections::Collections;
+
+#[document(
+    summary = "What makes a contract a token or a collection on a chain: genesis's token functions, and the collection standards genesis names or governance decided last.",
+    category = "Registries",
+    see_also = "Tokens, Collections, Contracts::refresh",
+)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Standards {
+    #[document(summary = "The functions that make a token; empty keeps no token registry.")]
+    pub tokens: std::sync::Arc<[String]>,
+    #[document(summary = "The functions that make a collection, or None for a chain without the collection registry.")]
+    pub collections: Option<collections::CollectionFunctions>,
+}
 
 #[document(
     summary = "Why a registry operation failed.",
@@ -83,10 +98,12 @@ pub enum RegistryError {
     StaleChange(u64),
     #[document(summary = "A change that does not fit the chain, and why: a consensus that needs another finality, or settings no chain could run.")]
     BadChange(&'static str),
-    #[document(summary = "A change to what was decided already: the same consensus, bootnodes or name prices.")]
+    #[document(summary = "A change to what was decided already: the same consensus, bootnodes, name prices or collection standards.")]
     SameChange,
     #[document(summary = "The contract exports what makes a token on this chain, but its name(), symbol() or decimals() did not answer as the registry needs, and why.")]
     BadToken(String),
+    #[document(summary = "The contract exports what makes a collection on this chain, but its name() or symbol() did not answer as the registry needs, and why.")]
+    BadCollection(String),
     #[document(summary = "The contract would not load, or this node lacks its engine.")]
     #[cfg(feature = "vm")]
     Vm(VmError),
@@ -128,6 +145,7 @@ impl fmt::Display for RegistryError {
             RegistryError::BadChange(why) => write!(f, "{why}"),
             RegistryError::SameChange => write!(f, "that change was decided already"),
             RegistryError::BadToken(why) => write!(f, "it is a token, but {why}"),
+            RegistryError::BadCollection(why) => write!(f, "it is a collection, but {why}"),
             #[cfg(feature = "vm")]
             RegistryError::Vm(err) => write!(f, "{err}"),
             RegistryError::Layout(why) => write!(f, "the new code does not keep the storage layout: {why}"),

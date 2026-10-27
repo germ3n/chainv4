@@ -19,7 +19,7 @@ use {
     crate::structs::u256::u256,
     crate::swap::evm::{self, parse_address, show_address},
     crate::swap::htlc::{Coins, Spend, revealed},
-    crate::swap::{BitcoinLeg, ChainLeg, EvmLeg, Leg, Lock, LockState, Parties, Role, Settled, Side, Terms, secret},
+    crate::swap::{BitcoinLeg, ChainLeg, EvmLeg, Item, Leg, Lock, LockState, Parties, Role, Settled, Side, Terms, secret},
     rpc::Rpc,
     serde_json::json,
     std::path::PathBuf,
@@ -263,9 +263,24 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
                 Leg::Chain(leg) => {
                     let (hash, recipient, deadline) = (text(to_hex(&terms.hash)), TxCallArgumentType::Address(leg.receiver.ok_or("no receiver")?), TxCallArgumentType::I64(terms.deadline(side) as i64));
 
-                    match leg.token {
-                        None => call(&action, leg.contract, "lock", leg.amount, vec![hash, recipient, deadline])?,
-                        Some(token) => {
+                    match (leg.token, leg.item) {
+                        (None, _) => call(&action, leg.contract, "lock", leg.amount, vec![hash, recipient, deadline])?,
+                        // An NFT moves as a token does: approved for the contract, then pulled in.
+                        (Some(collection), Some(item)) if !item.multi => {
+                            call(&action, collection, "approve", u256::ZERO, vec![TxCallArgumentType::Address(leg.contract), TxCallArgumentType::U256(item.id)])?;
+                            call(&action, leg.contract, "lock_nft", u256::ZERO, vec![hash, recipient, deadline, TxCallArgumentType::Address(collection), TxCallArgumentType::U256(item.id)])?;
+                        }
+                        (Some(collection), Some(item)) => {
+                            call(&action, collection, "set_approval_for_all", u256::ZERO, vec![TxCallArgumentType::Address(leg.contract), TxCallArgumentType::Bool(true)])?;
+                            call(
+                                &action,
+                                leg.contract,
+                                "lock_multi",
+                                u256::ZERO,
+                                vec![hash, recipient, deadline, TxCallArgumentType::Address(collection), TxCallArgumentType::U256(item.id), TxCallArgumentType::U256(leg.amount)],
+                            )?;
+                        }
+                        (Some(token), None) => {
                             // The contract moves the token itself, so it may first: the approval
                             // lands before the lock is tried.
                             call(&action, token, "approve", u256::ZERO, vec![TxCallArgumentType::Address(leg.contract), TxCallArgumentType::U256(leg.amount)])?;
@@ -385,28 +400,57 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
 /// A leg from how --pay and --get write one.
 fn parse_leg(text: &str, chain_contract: &mut dyn FnMut() -> CliResult<Address>, evm_contract: [u8; 20]) -> CliResult<Leg> {
     let parts: Vec<&str> = text.trim().split(':').collect();
-    let bad = || format!("{text} is not a leg: chainv4:AMOUNT[:TOKEN], bitcoin:SATS, bitcoin-testnet:SATS, evm:CHAIN_ID:AMOUNT[:TOKEN] or a chain's name, such as sepolia:AMOUNT");
+    let bad = || {
+        format!(
+            "{text} is not a leg: chainv4:AMOUNT[:TOKEN], chainv4:nft:COLLECTION:ID, chainv4:multi:COLLECTION:ID:AMOUNT, bitcoin:SATS, bitcoin-testnet:SATS, \
+             evm:CHAIN_ID:AMOUNT[:TOKEN], evm:CHAIN_ID:nft:COLLECTION:ID, evm:CHAIN_ID:multi:COLLECTION:ID:AMOUNT, or a chain's name for evm:CHAIN_ID, such as sepolia:AMOUNT"
+        )
+    };
+    // An NFT's collection, id and, for a multi-token one, amount; a chainv4 collection holds a
+    // colon of its own, contract:0x….
+    let item = |multi: bool, rest: &[&str]| -> CliResult<(String, Item, u256)> {
+        let (collection, numbers) = match (multi, rest) {
+            (false, [collection @ .., id]) => (collection.join(":"), (*id, "1")),
+            (true, [collection @ .., id, amount]) => (collection.join(":"), (*id, *amount)),
+            _ => return Err(bad().into()),
+        };
+
+        Ok((collection, Item { id: parse_amount(numbers.0)?, multi }, parse_amount(numbers.1)?))
+    };
     let sats = |text: &str| text.parse::<u64>().map_err(|_| format!("{text} is not a whole number of satoshis"));
     let evm = |chain_id: u64, rest: &[&str]| -> CliResult<Leg> {
+        if let [kind @ ("nft" | "multi"), rest @ ..] = rest {
+            let (collection, found, amount) = item(*kind == "multi", rest)?;
+
+            return Ok(Leg::Evm(EvmLeg { chain_id, contract: evm_contract, token: Some(parse_address(&collection)?), item: Some(found), amount, payer: None, receiver: None }));
+        }
+
         let (amount, token) = match rest {
             [amount] => (parse_amount(amount)?, None),
             [amount, token] => (parse_amount(amount)?, Some(parse_address(token)?)),
             _ => return Err(bad().into()),
         };
 
-        Ok(Leg::Evm(EvmLeg { chain_id, contract: evm_contract, token, amount, payer: None, receiver: None }))
+        Ok(Leg::Evm(EvmLeg { chain_id, contract: evm_contract, token, item: None, amount, payer: None, receiver: None }))
     };
 
     match parts.as_slice() {
-        ["chainv4", amount] => Ok(Leg::Chain(ChainLeg { contract: chain_contract()?, token: None, amount: parse_amount(amount)?, payer: None, receiver: None })),
+        ["chainv4", kind @ ("nft" | "multi"), rest @ ..] => {
+            let (collection, found, amount) = item(*kind == "multi", rest)?;
+            let collection: Address = collection.parse().or_else(|_| format!("contract:{collection}").parse()).map_err(|_| format!("{collection} is not a collection's address"))?;
+
+            Ok(Leg::Chain(ChainLeg { contract: chain_contract()?, token: Some(collection), item: Some(found), amount, payer: None, receiver: None }))
+        }
+        ["chainv4", amount] => Ok(Leg::Chain(ChainLeg { contract: chain_contract()?, token: None, item: None, amount: parse_amount(amount)?, payer: None, receiver: None })),
         ["chainv4", amount, token] => {
             // A chainv4 address holds a colon of its own, contract:0x….
             let token: Address = token.parse().or_else(|_| format!("contract:{token}").parse()).map_err(|_| format!("{token} is not a token's address"))?;
 
-            Ok(Leg::Chain(ChainLeg { contract: chain_contract()?, token: Some(token), amount: parse_amount(amount)?, payer: None, receiver: None }))
+            Ok(Leg::Chain(ChainLeg { contract: chain_contract()?, token: Some(token), item: None, amount: parse_amount(amount)?, payer: None, receiver: None }))
         }
         ["chainv4", amount, "contract", token] => Ok(Leg::Chain(ChainLeg {
             contract: chain_contract()?,
+            item: None,
             token: Some(format!("contract:{token}").parse().map_err(|_| format!("{token} is not a token's address"))?),
             amount: parse_amount(amount)?,
             payer: None,
@@ -503,17 +547,35 @@ fn look(terms: &Terms, side: Side, action: &LegAction) -> CliResult<Lock> {
     match terms.leg(side) {
         Leg::Chain(leg) => {
             let (agent, node) = (agent(&action.tls)?, action.node.trim_end_matches('/'));
-            let body = json!({ "contract": leg.contract.to_string(), "function": "get", "args": [{ "type": "string", "value": to_hex(&terms.hash) }] });
-            let answer = ok(agent.post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()))?;
-            let values: Vec<String> = answer["values"].as_array().into_iter().flatten().map(|value| value["value"].as_str().map_or_else(|| value["value"].to_string(), str::to_string)).collect();
+            let ask = |function: &str| -> CliResult<Vec<String>> {
+                let body = json!({ "contract": leg.contract.to_string(), "function": function, "args": [{ "type": "string", "value": to_hex(&terms.hash) }] });
+                let answer = ok(agent.post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()))?;
+                let values: Vec<String> = answer["values"].as_array().into_iter().flatten().map(|value| value["value"].as_str().map_or_else(|| value["value"].to_string(), str::to_string)).collect();
 
-            if values.is_empty() {
-                return Err(format!("the contract did not answer: {}", answer["error"]).into());
+                match values.is_empty() {
+                    true => Err(format!("the contract did not answer {function}: {}", answer["error"]).into()),
+                    false => Ok(values),
+                }
+            };
+            let lock = Lock::from_chain(&ask("get")?)?;
+
+            // Which NFT it holds, asked only of legs that lock one: contracts from before NFTs
+            // have no item.
+            match leg.item {
+                Some(_) => Ok(lock.with_chain_item(&ask("item")?)?),
+                None => Ok(lock),
+            }
+        }
+        Leg::Evm(leg) => {
+            let rpc = evm_rpc(action, leg)?;
+            let mut lock = evm::read_lock(&rpc.call(&leg.contract, &evm::get_input(&terms.hash))?)?;
+
+            if leg.item.is_some() {
+                lock.item = evm::read_item(&rpc.call(&leg.contract, &evm::item_input(&terms.hash))?)?;
             }
 
-            Ok(Lock::from_chain(&values)?)
+            Ok(lock)
         }
-        Leg::Evm(leg) => Ok(evm::read_lock(&evm_rpc(action, leg)?.call(&leg.contract, &evm::get_input(&terms.hash))?)?),
         Leg::Bitcoin(_) => Err("Bitcoin's lock is an HTLC: look its address up on an explorer".into()),
     }
 }
@@ -654,4 +716,46 @@ fn bytes32(text: &str, what: &str) -> CliResult<[u8; 32]> {
 
 fn text(value: String) -> TxCallArgumentType {
     TxCallArgumentType::String(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legs_are_read_as_the_flags_write_them_nfts_included() {
+        let contract = Address::Contract([0x5a; 32]);
+        let collection = Address::Contract([0xc1; 32]);
+        let evm_contract = [0xe0; 20];
+        let read = |text: &str| parse_leg(text, &mut || Ok(contract), evm_contract);
+        let chain = |leg: Leg| match leg {
+            Leg::Chain(leg) => leg,
+            other => panic!("{other:?}"),
+        };
+        let on_evm = |leg: Leg| match leg {
+            Leg::Evm(leg) => leg,
+            other => panic!("{other:?}"),
+        };
+
+        let coin = chain(read("chainv4:5000").unwrap());
+
+        assert_eq!((coin.token, coin.item, coin.amount), (None, None, u256::new(5000)));
+        let nft = chain(read(&format!("chainv4:nft:{collection}:7")).unwrap());
+
+        assert_eq!((nft.token, nft.item, nft.amount), (Some(collection), Some(Item { id: u256::new(7), multi: false }), u256::new(1)));
+        let bare = chain(read(&format!("chainv4:multi:{}:7:20", collection.to_string().trim_start_matches("contract:"))).unwrap());
+
+        assert_eq!((bare.token, bare.item, bare.amount), (Some(collection), Some(Item { id: u256::new(7), multi: true }), u256::new(20)), "a collection's hex alone");
+
+        let erc721 = on_evm(read("sepolia:nft:0x00000000000000000000000000000000000000c1:3").unwrap());
+
+        assert_eq!((erc721.chain_id, erc721.token, erc721.item), (11155111, Some({ let mut a = [0; 20]; a[19] = 0xc1; a }), Some(Item { id: u256::new(3), multi: false })));
+        let erc1155 = on_evm(read("evm:1:multi:0x00000000000000000000000000000000000000c1:3:40").unwrap());
+
+        assert_eq!((erc1155.amount, erc1155.item.map(|item| item.multi)), (u256::new(40), Some(true)));
+
+        for bad in ["chainv4:nft:contract:0xc1", "chainv4:multi:x:1", "evm:1:nft:3", "dogecoin:5"] {
+            assert!(read(bad).is_err(), "{bad}");
+        }
+    }
 }

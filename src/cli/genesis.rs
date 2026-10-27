@@ -25,6 +25,7 @@ use {
     crate::structs::hash::HashType,
     crate::structs::code::Engine,
     crate::structs::u256::u256,
+    crate::registry::collections::CollectionFunctions,
     crate::registry::names::NamesConfig,
     crate::vm::Limits,
     serde_json::{Map, Value, json},
@@ -293,7 +294,41 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "governance": genesis.governance.as_ref().map(governance_json),
         "bootnodes": genesis.bootnodes,
         "names": genesis.names.as_ref().map(names_json),
+        "collections": genesis.collections.as_ref().map(collections_json),
     })
+}
+
+/// What makes a collection as JSON: the shape genesis files, GET /status and approve-change use.
+pub fn collections_json(functions: &CollectionFunctions) -> Value {
+    json!({ "nft": functions.nft, "multi": functions.multi })
+}
+
+fn collections_from_json(mut fields: Fields) -> Result<CollectionFunctions, String> {
+    let functions = CollectionFunctions {
+        nft: fields.strings("nft")?,
+        multi: fields.strings("multi")?,
+    };
+    fields.done()?;
+
+    Ok(functions)
+}
+
+/// What makes a collection, from approve-change's --collections: standard, for the standards' own
+/// functions, or JSON with nft and multi lists.
+pub fn collections_from_text(text: &str) -> Result<CollectionFunctions, String> {
+    let functions = match text.trim() {
+        "standard" => CollectionFunctions::standard(),
+        text => {
+            let value: Value = serde_json::from_str(text).map_err(|err| format!("not standard, nor JSON: {err}"))?;
+
+            collections_from_json(Fields::of(&value, "collections")?)?
+        }
+    };
+
+    match functions.problem() {
+        Some(problem) => Err(problem.to_string()),
+        None => Ok(functions),
+    }
 }
 
 /// A chain's names as JSON: the shape genesis files and GET /names use, prices as decimal strings.
@@ -748,6 +783,11 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.optional_object("names")?.map(names_from_json).transpose()?,
         false => None,
     };
+    // Absent from files written before it: those chains keep their id, with no collections.
+    let collections = match root.map.contains_key("collections") {
+        true => root.optional_object("collections")?.map(collections_from_json).transpose()?,
+        false => None,
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -768,6 +808,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         vote_reward_source,
         bootnodes,
         names,
+        collections,
     };
     root.done()?;
 
@@ -1080,9 +1121,10 @@ mod tests {
     fn a_genesis_from_before_max_block_bytes_keeps_its_id() {
         let mut genesis = dev(DevChain::Authority);
         genesis.max_block_bytes = None;
-        // The EVM and names came later, and joined the dev chains then.
+        // The EVM, names and collections came later, and joined the dev chains then.
         genesis.engines.retain(|engine| *engine != Engine::Evm);
         genesis.names = None;
+        genesis.collections = None;
         let mut value = to_json(&genesis);
         value.as_object_mut().unwrap().remove("max_block_bytes");
         let read = from_json(&value).unwrap();
@@ -1176,6 +1218,38 @@ mod tests {
             assert_eq!(read.hash, algorithm);
             assert_eq!(read.block().id().algorithm(), algorithm);
         }
+    }
+
+    #[test]
+    fn collections_round_trip_change_the_chain_and_a_file_without_them_has_none() {
+        let genesis = dev(DevChain::Pow);
+        let value = to_json(&genesis);
+
+        assert_eq!(value["collections"]["nft"][4], "owner_of");
+        assert_eq!(from_json(&value).unwrap(), genesis);
+
+        // Without the field, as files from before it: no registry, and the id of a genesis without.
+        let mut without = value.clone();
+        without.as_object_mut().unwrap().remove("collections");
+        let read = from_json(&without).unwrap();
+
+        assert_eq!(read.collections, None);
+        assert_eq!(read.block().id(), Genesis { collections: None, ..genesis.clone() }.block().id());
+        assert_ne!(read.block().id(), genesis.block().id());
+
+        // Its shape is read here; a function named twice is the chain's to refuse, as for tokens.
+        for bad in [json!({ "nft": [] }), json!({ "nft": [], "multi": [], "more": [] }), json!({ "nft": "owner_of", "multi": [] }), json!(["owner_of"])] {
+            let mut broken = value.clone();
+            broken["collections"] = bad.clone();
+
+            assert!(from_json(&broken).is_err(), "{bad}");
+        }
+
+        // approve-change's flag: standard, or the same JSON.
+        assert_eq!(collections_from_text("standard").unwrap(), CollectionFunctions::standard());
+        assert_eq!(collections_from_text(r#"{"nft":["owner_of"],"multi":[]}"#).unwrap().nft, ["owner_of"]);
+        assert!(collections_from_text("nonsense").is_err());
+        assert!(collections_from_text(r#"{"nft":["",""],"multi":[]}"#).is_err());
     }
 
     #[cfg(feature = "names")]

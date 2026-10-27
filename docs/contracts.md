@@ -352,7 +352,7 @@ what its storage or calls cost (`vm::cost`).
   loading included. One that runs out of fuel, while loading or in a hook, pays for all of it.
 - **Every call pays for the top level too.** Each call runs the script's top level again in its
   fresh state, so the same work is charged again. It runs before the call is attached, so it
-  sees nothing of the call: `ctx`, `storage`, `contracts`, `accounts`, `events` and `tokens` are
+  sees nothing of the call: `ctx`, `storage`, `contracts`, `accounts`, `events`, `tokens` and `collections` are
   not there yet. It is the same code doing the same work every time.
 
 A call that runs out of fuel fails with `OutOfFuel`. On a chain with fees, fuel costs gas, and the
@@ -403,6 +403,7 @@ and `debug` are not there at all.
 | `contracts` | `contracts.call(address, name, ...)`, `contracts.call_value(address, value, name, ...)`, `contracts.delegate(address, name_or_selector, ...)`, `contracts.check_layout(from, to)`, `contracts.selector(name)`, `contracts.clone(template, salt, ...)`, `contracts.cloned_at(salt)`. |
 | `events` | `events.emit(name, ...)`. |
 | `tokens` | `tokens.refresh()`: asks the token registry to ask this token's name, symbol and decimals again once the transaction succeeds. |
+| `collections` | `collections.refresh()`: the same request, for a [collection](nft-standard.md) renamed; one asks again for both registries. |
 | `names` | `names.resolve(name)`, the address a name such as `alice.dev` resolves to, or `nil`; `names.name_of(address)`, the name an address goes by. At the block's time. See [Names](names.md#names-in-contracts). |
 | `evm` | `evm.call(address, calldata, value)` calls an [EVM](evm.md) contract and returns what it returned, as bytes; `evm.encode("transfer(address,uint256)", to, 5)` writes calldata, `evm.encode("(uint256,string)", …)` arguments alone; `evm.decode("(uint256,bool)", bytes)` reads them back. Tables for arrays and tuples. See [EVM](evm.md#calls-with-lua-and-webassembly-contracts). |
 | `address` | `address.parse("ed25519:0x…")`, `address.from_hex`, `address.from_bytes`; methods `hex`, `bytes`, `text`, `kind`, `is_contract`, `is_valid`. |

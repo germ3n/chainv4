@@ -9,14 +9,14 @@ use {
     crate::format,
     crate::light::Light,
     crate::model::{
-        BlockDetail, Called, Checkpoint, Contract, EventsPage, Forks, TxsPage, Mempool, NodeView, Page, PeerChange, Receipt, Reorganized,
+        BlockDetail, Called, Checkpoint, CollectionsPage, Contract, EventsPage, Forks, TxsPage, Mempool, NodeView, Page, PeerChange, Receipt, Reorganized,
         Status, Summary, TokensPage, TxView,
     },
     crate::store::{PAGE, Store},
     crate::theme::{self, DARK, LIGHT, Roles},
     crate::views::{
         self, Ctx, Look, Settings, View, account::AccountState, hops::HopState, map::MapState, network::Streaming, send::SendState,
-        settings::SettingsState, tokens::TokensState, dex::DexState, swaps::SwapsState,
+        settings::SettingsState, tokens::TokensState, dex::DexState, swaps::SwapsState, collections::CollectionsState,
     },
     chainv4_ui::{Palette, layout, widgets},
     egui::{RichText, Ui},
@@ -67,6 +67,7 @@ pub struct Explorer {
     hops: HopState,
     account: AccountState,
     tokens: TokensState,
+    collections: CollectionsState,
     dex: DexState,
     swaps: SwapsState,
     send: SendState,
@@ -112,6 +113,7 @@ impl Explorer {
             hops: HopState::default(),
             account: AccountState::default(),
             tokens: TokensState::default(),
+            collections: CollectionsState::default(),
             dex: DexState::default(),
             swaps: SwapsState::default(),
             send: SendState::default(),
@@ -270,6 +272,11 @@ impl Explorer {
                 };
                 store.contracts.insert(address, contract);
             }
+            Ask::Collections => {
+                if let Some(page) = parse::<CollectionsPage>(value) {
+                    store.collections = Some((page.collections, now));
+                }
+            }
             Ask::Tokens { symbol, cursor } => {
                 if let Some(page) = parse::<TokensPage>(value) {
                     for token in &page.tokens {
@@ -283,7 +290,11 @@ impl Explorer {
             Ask::Signers => store.signers = Some(value),
             Ask::Evidence => store.evidence = Some(value),
             Ask::Call { ref contract, ref function, ref args } => {
+                // A token's balance_of takes a holder alone; a multi-token collection's takes an id too.
+                let one_argument = serde_json::from_str::<Value>(args).ok().and_then(|args| args.as_array().map(Vec::len)) == Some(1);
+
                 if function == "balance_of"
+                    && one_argument
                     && let Some(called) = parse::<Called>(value.clone())
                     && called.status == "returned"
                     && let Some(first) = called.values.first()
@@ -732,6 +743,8 @@ impl Explorer {
                         View::Network => views::network::show(ui, &mut ctx, &self.streaming),
                         View::Mempool => views::mempool::show(ui, &mut ctx),
                         View::Tokens => views::tokens::show(ui, &mut ctx, &mut self.tokens),
+                        View::Collections => views::collections::list(ui, &mut ctx),
+                        View::Collection(address) => views::collections::show(ui, &mut ctx, &mut self.collections, address),
                         View::Dex => views::dex::show(ui, &mut ctx, &mut self.dex),
                         View::Swaps => views::swaps::show(ui, &mut ctx, &mut self.swaps),
                         View::Finality => views::finality::show(ui, &mut ctx),

@@ -70,6 +70,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         super::dapp::settings(ui, ctx);
         #[cfg(feature = "swap")]
         swaps(ui, ctx);
+        #[cfg(feature = "nft")]
+        nfts(ui, ctx);
         #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
         bitcoin(ui, ctx);
     }
@@ -692,6 +694,27 @@ fn swaps(ui: &mut Ui, ctx: &mut Ctx) {
 
         if ctx.settings.eth_rpc.lines().any(|url| url.trim().starts_with("http://") && !url.contains("127.0.0.1") && !url.contains("localhost")) {
             ui.colored_label(palette.warn, "Plain http: anyone on the way sees and could change what goes through it.");
+        }
+    });
+}
+
+/// The NFTs page's settings: whether it fetches tokens' metadata and pictures, and the IPFS
+/// gateway it fetches ipfs:// through.
+#[cfg(feature = "nft")]
+fn nfts(ui: &mut Ui, ctx: &mut Ctx) {
+    let palette = *ctx.palette;
+    ui.add_space(14.0);
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "NFTs");
+        ui.label(RichText::new("What an NFT is called and looks like lives where its token URI points: a web server or IPFS, which learn your IP address and which tokens you look at when the wallet fetches from them. Off, the NFTs page shows ids and owners alone, all of it proven; data: URIs, carried on the chain itself, show either way.").small().color(palette.muted));
+        ui.add_space(6.0);
+        ui.checkbox(&mut ctx.settings.nft_media, "Fetch NFTs' metadata and pictures");
+        super::row(ui, &palette, "IPFS gateway", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut ctx.settings.ipfs_gateway).hint_text("https://ipfs.io/ipfs/").desired_width(f32::INFINITY));
+        });
+
+        if !ctx.settings.ipfs_gateway.trim().is_empty() && !ctx.settings.ipfs_gateway.trim().ends_with('/') {
+            ui.colored_label(palette.warn, "A gateway ends in a slash: ipfs://CID is fetched as the gateway, then CID.");
         }
     });
 }

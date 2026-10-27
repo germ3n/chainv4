@@ -210,6 +210,23 @@ fn a_different_genesis_is_refused() {
 }
 
 #[test]
+fn collection_functions_named_twice_or_blank_are_refused() {
+    use crate::registry::collections::CollectionFunctions;
+
+    for collections in [
+        CollectionFunctions { nft: vec!["owner_of".to_string(), "owner_of".to_string()], multi: Vec::new() },
+        CollectionFunctions { nft: Vec::new(), multi: vec![String::new()] },
+    ] {
+        let genesis = Genesis { collections: Some(collections), ..genesis() };
+
+        assert!(matches!(
+            Chain::open(Arc::new(MemoryDb::default()), &genesis),
+            Err(ChainError::BadGenesis(why)) if why.contains("collections must name each function once")
+        ));
+    }
+}
+
+#[test]
 fn token_functions_named_twice_or_blank_are_refused() {
     for token_functions in [vec!["transfer".to_string(), "transfer".to_string()], vec![String::new()]] {
         let genesis = Genesis { token_functions, ..genesis() };

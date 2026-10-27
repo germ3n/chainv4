@@ -40,7 +40,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "multi"
+version = "0.1.0"
+dependencies = [
+ "chainv4-sdk",
+]
+
+[[package]]
 name = "names"
+version = "0.1.0"
+dependencies = [
+ "chainv4-sdk",
+]
+
+[[package]]
+name = "nft"
 version = "0.1.0"
 dependencies = [
  "chainv4-sdk",

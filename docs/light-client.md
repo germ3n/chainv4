@@ -153,6 +153,10 @@ justification is refused as before.
   balance is in the token's `balances` namespace under the holder's address text.
   `token_balance_key(token, holder)` is its key in `Column::Namespaces`, for `check_state`, and
   `token_balance(value)` reads what it holds, whichever engine wrote it.
+- **NFTs:** by the [NFT standards](nft-standard.md#provable-ownership), an NFT's owner is in its
+  collection's `owners` namespace, `nft_owner_key(collection, id)`, read with `nft_owner`; a
+  multi-token amount in its `balances` namespace, `multi_balance_key(collection, id, holder)`,
+  read with `token_balance`.
 - **What it says:** each check gives an `Assurance`: the block, its height, and whether it is
   final. A proof that does not check is `BadProof`, and a block the client never followed is
   `NotOnChain`.

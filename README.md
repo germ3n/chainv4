@@ -754,6 +754,7 @@ Start a node with `--http ADDR`. Every answer is JSON; errors are `{"error": "�
 | `GET /stream` | Server-sent events, from a node started with `--stream`: blocks, reorgs, finality, queued transactions and peers. |
 | `GET /events` | Indexed events, newest first and paged: a contract's, a contract's of one name, or those that mention an address. On nodes started with `--index-events`. |
 | `GET /tokens` | The token registry by symbol, paged, with a search by how a symbol starts. |
+| `GET /collections` | The NFT and multi-token collections, by symbol, as `GET /tokens` lists tokens. |
 
 Amounts and large integers are decimal strings, hashes and bytes are `0x` hex, and addresses
 are their kind and hex, such as `ed25519:0x…`, `secp256k1:0x…` or `contract:0x…`.

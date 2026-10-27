@@ -25,7 +25,7 @@ fn offered() -> (Terms, Terms, [u8; 32]) {
     let alice = Parties { chain: Some(Address::Ed25519([0xa; 32])), bitcoin: Some(bitcoin_key(&seed, Network::Test, 1).1), evm: None };
     let bob = Parties { chain: Some(Address::Ed25519([0xb; 32])), bitcoin: Some(bitcoin_key(&seed, Network::Test, 0).1), evm: None };
     let pays = Leg::Bitcoin(BitcoinLeg { testnet: true, sats: 80_000, payer: None, receiver: None });
-    let gets = Leg::Chain(ChainLeg { contract: Address::Contract([0x5a; 32]), token: None, amount: u256::new(5_000), payer: None, receiver: None });
+    let gets = Leg::Chain(ChainLeg { item: None, contract: Address::Contract([0x5a; 32]), token: None, amount: u256::new(5_000), payer: None, receiver: None });
     let offer = Terms::offer(hash, pays, gets, NOW + FIRST_DEADLINE_MS, NOW + SECOND_DEADLINE_MS, &alice).unwrap();
     let answer = offer.answer(&bob).unwrap();
 
@@ -119,7 +119,7 @@ fn a_claim_signed_here_is_the_one_the_offline_signer_signs() {
 }
 
 fn sepolia_lock() -> Call {
-    let leg = EvmLeg { chain_id: 11155111, contract: [0xc0; 20], token: None, amount: u256::new(7), payer: Some([0xa1; 20]), receiver: Some([0xb2; 20]) };
+    let leg = EvmLeg { item: None, chain_id: 11155111, contract: [0xc0; 20], token: None, amount: u256::new(7), payer: Some([0xa1; 20]), receiver: Some([0xb2; 20]) };
 
     leg.lock_calls(&[0x11; 32], NOW).unwrap().remove(0)
 }
@@ -169,4 +169,26 @@ fn an_evm_chains_heads_read_with_or_without_a_finalized_block() {
     // A chain without finality names no finalized block: depth is counted instead.
     assert_eq!(evm::heads(&json!([reply(1, json!("0x70")), reply(2, Value::Null)])), Ok((0x70, None)));
     assert!(evm::heads(&json!([])).is_err());
+}
+
+#[test]
+fn a_leg_locking_an_nft_names_it_and_its_contract_is_asked_which() {
+    let form = |asset: Asset, id: &str| LegForm { asset, id: id.to_string(), ..LegForm::new(Kind::Chain) };
+
+    assert_eq!(form(Asset::Fungible, "").item(), Ok(None));
+    assert_eq!(form(Asset::Nft, " 7 ").item(), Ok(Some(Item { id: u256::new(7), multi: false })));
+    assert_eq!(form(Asset::Multi, "9").item(), Ok(Some(Item { id: u256::new(9), multi: true })));
+    assert!(form(Asset::Nft, "seven").item().is_err());
+
+    // The contract's item answer is kept beside get's, by the swap's hash.
+    let (_, terms, _) = offered();
+    let hash = to_hex(&terms.hash);
+    let mut state = SwapsState::default();
+    state.asked.insert(hash.clone(), 0.0);
+    let asked = |function: &str| Ask::Call(json!({ "contract": "contract:0x5a", "function": function, "args": [{ "type": "string", "value": hash }] }).to_string());
+    let returned = Ok(json!({ "status": "returned", "values": [{ "type": "string", "value": "nft" }, { "type": "u256", "value": "7" }] }));
+
+    assert!(state.answered(&asked("item"), &returned));
+    assert!(state.items.contains_key(&hash) && !state.status.contains_key(&hash));
+    assert!(!state.answered(&asked("lock"), &returned), "not a read");
 }

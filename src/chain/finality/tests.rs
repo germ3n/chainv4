@@ -1706,6 +1706,54 @@ mod voting {
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: prices }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+    #[test]
+    fn a_council_turns_the_collection_registry_on_for_a_chain_that_kept_none() {
+        use crate::governance::{Change, GovernanceConfig};
+        use crate::registry::changes::Changes;
+        use crate::registry::collections::{CollectionFunctions, CollectionKind, Collections};
+        use crate::structs::code::Code;
+
+        let council = GovernanceConfig::Council {
+            members: vec![dev().public().address(), key(70).public().address()],
+            threshold: 2,
+            approval_epochs: 8,
+        };
+        let genesis = Genesis {
+            governance: Some(council),
+            collections: None,
+            ..genesis_with(Some(ffg()))
+        };
+        let mut chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+        let deploy = |chain: &mut Chain| {
+            let deployed = send_as(chain, &dev(), Tx::Deploy { code: Code::Lua(include_str!("../../../contracts/lua/nft.lua").to_string()) });
+            let Ok(Effect::Deployed(address)) = deployed.result else {
+                panic!("{:?}", deployed.result);
+            };
+
+            address
+        };
+        let standard = Change::Collections(CollectionFunctions::standard());
+        let before = deploy(&mut chain);
+
+        assert_eq!(Collections::new(&chain.state()).get(&before).unwrap(), None, "genesis kept no registry");
+
+        // Lists no chain could have are refused; one member is not enough; two decide.
+        let twice = Change::Collections(CollectionFunctions { nft: vec!["a".into(), "a".into()], multi: Vec::new() });
+
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: twice }).result, Err(failure) if failure.to_string().contains("each function once")));
+        assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: standard.clone() }).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: standard.clone() }).result, Ok(Effect::Done));
+        assert_eq!(Changes::new(&chain.state()).collections().unwrap(), Some(CollectionFunctions::standard()));
+
+        // Deploys register from then on; what came before waits for its next upgrade or refresh.
+        let after = deploy(&mut chain);
+
+        assert_eq!(Collections::new(&chain.state()).get(&after).unwrap().map(|found| found.kind), Some(CollectionKind::Nft));
+        assert_eq!(Collections::new(&chain.state()).get(&before).unwrap(), None);
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: standard }).result, Err(failure) if failure.to_string().contains("decided already")));
+    }
+
     #[cfg(feature = "finality-authority")]
     #[test]
     fn signers_cannot_stake_but_a_double_voter_is_thrown_out() {

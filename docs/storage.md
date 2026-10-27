@@ -55,7 +55,7 @@ holds addresses that matter.
 | `Epochs` | Each epoch's validators or signers, and which checkpoints' voters were paid. | Yes |
 | `Finality` | What this node learned about finality: justifications, the justified and finalized checkpoints, the votes it counted or holds, its own votes, and evidence. | No |
 | `Events` | The event index, on a node started with `--index-events`: each event under its contract, and pointers to it by contract and name and by every address in its data, newest first. | Node's |
-| `Tokens` | The token registry: each token by address, with its name, symbol and decimals, and a listing key by symbol, in ASCII lower case, then a zero byte, then its address. | Yes |
+| `Tokens` | The token registry: each token by address, with its name, symbol and decimals, and a listing key by symbol, in ASCII lower case, then a zero byte, then its address. The [collection registry](nft-standard.md#the-collection-registry) too, under keys of its own: each collection by address, with its kind, name and symbol, and a listing by symbol. | Yes |
 | `Headers` | Every stored block's header and seal, by id: a node that synced from a snapshot keeps these alone for the blocks before its pivot. | Node's |
 | `Light` | For genesis and each checkpoint, the light update: proofs of the voters it fixed, against its state root (see [Light client](light-client.md)). | Node's |
 | `StateTree` | The state tree's nodes, by depth and the path bits above them, kept in step with the chain-state columns block by block (see [Chain](chain.md#the-state-root)). Its root is each header's `state_root`. | Node's |

@@ -36,6 +36,10 @@ enum Command {
     /// best route, and trades, adds and takes out, on the native DEX or with --evm the router.
     #[cfg(all(feature = "client", feature = "dex", feature = "evm"))]
     Dex(cli::DexArgs),
+    /// The chain's NFT and multi-token collections: lists the registry, deploys a factory and
+    /// creates collections through it, and mints, sends, shows and lists what is held.
+    #[cfg(all(feature = "client", feature = "nft"))]
+    Nft(cli::NftArgs),
     /// How many transactions a second the chain takes: blocks built and imported in-process
     /// (bench chain), or transfers submitted to running nodes at a rising rate (bench load).
     #[cfg(feature = "client")]
@@ -283,6 +287,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Swap(args)) => cli::swap(args),
         #[cfg(all(feature = "client", feature = "dex", feature = "evm"))]
         Some(Command::Dex(args)) => cli::dex(args),
+        #[cfg(all(feature = "client", feature = "nft"))]
+        Some(Command::Nft(args)) => cli::nft(args),
         #[cfg(feature = "client")]
         Some(Command::Bench(args)) => cli::bench(args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),

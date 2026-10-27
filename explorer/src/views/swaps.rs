@@ -35,6 +35,8 @@ struct Seen {
     recipient: String,
     token: String,
     amount: String,
+    /// The NFT it holds, from its LockedItem event: nft or multi, and the id.
+    item: Option<(String, String)>,
     deadline: u64,
     /// Where it was locked, and the transaction that locked it.
     height: u64,
@@ -97,9 +99,19 @@ fn get(ctx: &mut Ctx, state: &mut SwapsState, contract: &str, hash: &str) -> Opt
     ask(ctx, state, asked.clone());
     let called: Called = serde_json::from_value(ctx.store.calls.get(&asked)?.clone()).ok()?;
 
-    Some(match called.status.as_str() {
+    let lock = match called.status.as_str() {
         "returned" => Lock::from_chain(&called.values.iter().map(|value| value.text()).collect::<Vec<_>>()),
         _ => Err(called.error.unwrap_or_else(|| "the contract would not say".to_string())),
+    };
+
+    // Which NFT it holds, from contracts that say: those from before NFTs have no item.
+    let item = Ask::Call { contract: contract.to_string(), function: "item".to_string(), args: json!([{ "type": "string", "value": hash }]).to_string() };
+    ask(ctx, state, item.clone());
+    let item = ctx.store.calls.get(&item).and_then(|value| serde_json::from_value::<Called>(value.clone()).ok()).filter(|called| called.status == "returned");
+
+    Some(match (lock, item) {
+        (Ok(lock), Some(item)) => lock.clone().with_chain_item(&item.values.iter().map(|value| value.text()).collect::<Vec<_>>()).or(Ok(lock)),
+        (lock, _) => lock,
     })
 }
 
@@ -109,7 +121,7 @@ fn finality(ctx: &Ctx, height: u64) -> Settled {
         return Settled::Unknown("the node's status is not in yet".to_string());
     };
     let finalized = status.finality.as_ref().map(|finality| finality.finalized.height.unwrap_or(0));
-    let lock = Lock { state: LockState::Locked, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: Some(height) };
+    let lock = Lock { state: LockState::Locked, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: Some(height), item: None };
 
     chain_settled(&lock, status.height, finalized)
 }
@@ -122,6 +134,22 @@ fn settled_text(ui: &mut Ui, ctx: &Ctx, settled: &Settled) {
         Settled::Unknown(_) => palette.muted,
     };
     ui.colored_label(color, settled.describe());
+}
+
+/// What is locked: an NFT of a collection, or an amount of an id of one, when it says which.
+fn locked_item(ctx: &Ctx, token: &str, amount: &str, item: Option<(&str, &str)>) -> String {
+    let collection = ctx
+        .store
+        .collections
+        .as_ref()
+        .and_then(|(collections, _)| collections.iter().find(|collection| collection.address == token).and_then(|collection| collection.title()))
+        .unwrap_or_else(|| format::short(token));
+
+    match item {
+        Some(("nft", id)) => format!("NFT #{id} of {collection}"),
+        Some((_, id)) => format!("{amount} of #{id} of {collection}"),
+        None => locked(ctx, token, amount),
+    }
 }
 
 /// What is locked, in the coin or a token: the zero key's address is the coin.
@@ -158,7 +186,8 @@ fn lock_facts(ui: &mut Ui, ctx: &mut Ctx, lock: &Lock, id: &str) {
         chainv4::swap::Party::Chain(address) => address.to_string(),
         other => format!("{other:?}"),
     });
-    let what = locked(ctx, token.as_deref().unwrap_or_default(), &lock.amount.to_string());
+    let item = lock.item.map(|item| (item.kind(), item.id.to_string()));
+    let what = locked_item(ctx, token.as_deref().unwrap_or_default(), &lock.amount.to_string(), item.as_ref().map(|(kind, id)| (*kind, id.as_str())));
     let recipient = match lock.recipient {
         Some(chainv4::swap::Party::Chain(address)) => address.to_string(),
         _ => "—".to_string(),
@@ -288,7 +317,7 @@ fn recent(ui: &mut Ui, ctx: &mut Ctx, contract: &str) {
         for (hash, seen) in swaps.iter().rev().take(50) {
             ui.monospace(format::short(hash));
             ui.label(widgets::strong(seen.state, 13.0));
-            ui.label(locked(ctx, &seen.token, &seen.amount));
+            ui.label(locked_item(ctx, &seen.token, &seen.amount, seen.item.as_ref().map(|(kind, id)| (kind.as_str(), id.as_str()))));
             super::address(ui, ctx, &seen.recipient);
             ui.label(format::ago(seen.deadline, ctx.now));
             ui.horizontal(|ui| {
@@ -325,11 +354,17 @@ fn swaps(events: &[FoundEvent]) -> Vec<(String, Seen)> {
                     recipient: text(event, 2),
                     token: text(event, 3),
                     amount: text(event, 4),
+                    item: None,
                     deadline: text(event, 5).parse().unwrap_or(0),
                     height: event.height,
                     block: event.block.clone(),
                     locked_in: event.tx.clone(),
                 });
+            }
+            "LockedItem" => {
+                if let Some(seen) = by_hash.get_mut(&hash) {
+                    seen.item = Some((text(event, 1), text(event, 2)));
+                }
             }
             "Claimed" => {
                 if let Some(seen) = by_hash.get_mut(&hash) {

@@ -515,9 +515,26 @@ its router, the EVM's:
 
 Approving a token, trading, adding and taking out are calls the Send page reviews and signs.
 
+### NFTs
+
+The **NFTs** page shows what the account holds of the chain's [collections](nft-standard.md):
+- **Where to look:** the node's collection registry, `GET /collections`, and each collection's
+  `tokens_of` for each of the account's addresses, the first 100 of each.
+- **What it proves:** each NFT's owner, or each multi-token amount, against the tip, by the
+  standards' [provable ownership](nft-standard.md#provable-ownership). An NFT shows only once its
+  proof says it is the account's, with how far that is trusted.
+- **Names and pictures:** a token's metadata and picture, where its `token_uri` points. `data:`
+  URIs, on the chain, show always. `https://` and `ipfs://` ones only once Settings, **NFTs**,
+  lets the wallet fetch them: each fetch tells whoever serves it, the IPFS gateway set there
+  included, which tokens you look at, and from where. PNG, JPEG and WebP pictures show; SVG and GIF
+  ones do not yet. At most 8 MB is fetched.
+- **Sending:** an NFT, or an amount of a multi-token id, to an address or a name, as a call the
+  Send page reviews and signs: `safe_transfer` to a contract, which must say it takes it,
+  `transfer` to a key.
+
 ### Swaps
 
-The **Swaps** page trades coins or a token between any two of this chain, Bitcoin and EVM chains
+The **Swaps** page trades coins, a token or an NFT between any two of this chain, Bitcoin and EVM chains
 such as Ethereum, Sepolia or Base, with no one in between. Each swap is two legs:
 - **an offer and its answer** travel as codes, and the swap's secret is sealed in the vault;
 - **where each leg stands** is shown, and the second lock waits until the first stands as the

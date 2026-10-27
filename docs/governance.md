@@ -15,6 +15,9 @@ What can change today:
   with the chain's id (see [Bootnodes](#bootnodes)).
 - **What names cost:** the price of a year of a name by its length (see
   [Name prices](#name-prices)).
+- **What makes a collection:** the functions NFT and multi-token collections export, which turns
+  the collection registry on for a chain whose genesis kept none (see
+  [Collections](#collections)).
  The finality kind, and the parameters that define
 its epochs, stay what genesis says: the electorate that approves is finality's own, and every
 light client's epoch arithmetic rests on them.
@@ -98,6 +101,23 @@ chainv4 send --key member.key approve-change --name-prices 100000000000000000000
 - **The list is checked as genesis's is:** 1 to 61 prices, in the smallest unit, the first for
   names of 3 characters and the last for every length from its own on. A chain without names
   refuses the change.
+
+## Collections
+
+A change says what makes a contract a [collection](nft-standard.md#the-collection-registry),
+replacing genesis's `collections` or the last decided: how a chain launched without the registry
+turns it on.
+
+```sh
+chainv4 send --key member.key approve-change --collections standard
+chainv4 send --key member.key approve-change --collections '{"nft":["owner_of",…],"multi":["balance_of",…]}'
+```
+
+- **The same ballot and version** as the other kinds.
+- **It takes effect at once,** from the block that decides it: deploys, upgrades and refreshes
+  register by it. Contracts deployed before join at their next upgrade or refresh.
+- **The lists are checked as genesis's are:** each function named once in each list.
+  `GET /status` shows what is in force, in `collections`.
 - **Names already held keep the years they paid for.** `GET /names` shows the prices in force
   and genesis's.
 

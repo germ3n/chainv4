@@ -621,6 +621,27 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
   `--dex-contract`, `--dex-router`, or the name `dex`.
 
+## NFTs
+
+- **Two standards, one registry:** NFT collections (one owner a token) and multi-token ones
+  (amounts of each id), listed by `GET /collections`. A contract exporting both lists is an NFT
+  collection: the NFT list holds the multi-token one. See [NFT standards](nft-standard.md).
+- **The running chain needs governance to list them:** a genesis without `collections` keeps no
+  registry until a council or electorate decides `Change::Collections`; contracts deployed before
+  join at their next upgrade or refresh. New dev chains have it from genesis, which changes their
+  genesis id.
+- **Safe transfers call the receiver;** plain ones do not. Send to a contract with `safe_transfer`,
+  and pull a token into a contract with `transfer_from`, as the swap contract does.
+- **The wallet proves ownership, not completeness:** each NFT shows once its owner is proven, but
+  which ids to look at is `tokens_of`'s word.
+- **Pictures leak what you look at:** the wallet fetches metadata and pictures only once Settings
+  lets it, through the proxy, and the gateway sees each one.
+- **NFT swaps need the current contracts:** swap.lua and Swap.sol from before NFTs have no `item`,
+  and Swap.sol's CREATE2 address changed with its code: deploy both again and point `swap.dev` at
+  the new swap.lua.
+- **Terms that lock an NFT encode with a 3,** which apps from before cannot read; terms that lock
+  none keep the 2 they had.
+
 ## The explorer's DEX and Swaps pages
 
 - **Under Markets in the sidebar,** and under More on a phone. They find the DEX and the swap

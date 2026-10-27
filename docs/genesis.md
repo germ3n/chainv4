@@ -35,6 +35,7 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `engines` | Which engines contracts may be deployed for: `lua`, `wasm`, `evm`. A node built without one refuses the chain. |
 | `tx_limits` | `fuel` and `memory` one deploy, upgrade or call may use. |
 | `token_functions` | The functions that make a contract a token: one that exports them all is in the [token registry](token-standard.md#the-token-registry). The dev chains name ERC-20's six: `allowance`, `approve`, `balance_of`, `total_supply`, `transfer` and `transfer_from`. `[]` keeps no registry. Each is named once. |
+| `collections` | What makes a contract a collection: `{"nft": [...], "multi": [...]}`, the functions an NFT collection exports and those a multi-token one does (see the [collection registry](nft-standard.md#the-collection-registry)). The dev chains name the standards' own. `null`, or left out, keeps no registry until governance decides one (`Change::Collections`); left out, a chain from before it keeps its id. Each list names each function once; an empty one keeps no collections of its kind. |
 | `max_reorg_depth` | How far back the main chain may be rolled. |
 | `finality` | `null`, or the kind and its settings, by `type`: `ffg`, `authority` or `depth`. |
 | `fees` | `null` for free transactions, or the fee settings. |

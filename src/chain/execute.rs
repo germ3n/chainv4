@@ -42,8 +42,8 @@ pub struct Rules {
     pub minter: Option<Address>,
     #[document(summary = "What one deploy or contract call may use.")]
     pub limits: Limits,
-    #[document(summary = "The functions that make a contract a token, as genesis says; empty keeps no registry.")]
-    pub token_functions: Arc<[String]>,
+    #[document(summary = "What makes a contract a token or a collection, as genesis says. Governance may have decided other collection standards since: Rules::standards_in reads them.")]
+    pub standards: crate::registry::Standards,
     #[document(summary = "What transactions pay, or None on a chain where they are free.")]
     pub fees: Option<Arc<Fees>>,
     #[document(summary = "What staking transactions run under, or None on a chain without staking, where they fail.")]
@@ -56,6 +56,28 @@ pub struct Rules {
     pub pooled_fees: bool,
     #[document(summary = "The chain's names, or None on a chain without them, where name transactions fail.")]
     pub names: Option<Arc<NamesConfig>>,
+}
+
+impl Rules {
+    #[document(
+        parent = "Rules",
+        summary = "What makes a contract a token or a collection in a state: genesis's, with the collection standards governance decided last, once it decided any.",
+    )]
+    pub fn standards_in(&self, state: &State) -> Result<crate::registry::Standards, crate::db::DbError> {
+        #[cfg(feature = "governance")]
+        if self.governance.is_some()
+            && let Some(collections) = Changes::new(state).collections()?
+        {
+            return Ok(crate::registry::Standards {
+                tokens: self.standards.tokens.clone(),
+                collections: Some(collections),
+            });
+        }
+        #[cfg(not(feature = "governance"))]
+        let _ = state;
+
+        Ok(self.standards.clone())
+    }
 }
 
 #[document(
@@ -506,7 +528,7 @@ fn failed_hooks(failed: Failed) -> (Result<Effect, Failure>, Contracted) {
     (Err(Failure::Registry(failed.error)), contracted)
 }
 
-/// A call's result, once the tokens it asked to be asked again with tokens.refresh are: what
+/// A call's result, once the contracts it asked to be asked again with tokens.refresh are: what
 /// their questions burn and where they go join the call's, and an answer that does not fit fails
 /// the transaction.
 fn refreshed(
@@ -514,7 +536,7 @@ fn refreshed(
     vm: &Arc<Vm>,
     call: &CallContext,
     limits: Limits,
-    token_functions: &[String],
+    rules: &Rules,
     outcome: Outcome,
 ) -> (Result<Effect, Failure>, Contracted) {
     let mut contracted = Contracted {
@@ -528,13 +550,22 @@ fn refreshed(
     };
     let contracts = Contracts::new(layer);
 
+    if outcome.refresh_tokens.is_empty() {
+        return (Ok(Effect::Returned(returned)), contracted);
+    }
+
+    let standards = match rules.standards_in(layer) {
+        Ok(standards) => standards,
+        Err(err) => return (Err(Failure::Registry(RegistryError::Db(err))), contracted),
+    };
+
     for token in &outcome.refresh_tokens {
         let left = Limits {
             fuel: limits.fuel.saturating_sub(contracted.fuel_used),
             ..limits
         };
 
-        match contracts.refresh(vm, token, call.sender, left, token_functions, call.block) {
+        match contracts.refresh(vm, token, call.sender, left, &standards, call.block) {
             Ok((fuel_used, trace)) => {
                 contracted.fuel_used += fuel_used;
                 contracted.trace.append(trace);
@@ -606,7 +637,7 @@ fn run(
             };
 
             match Contracts::new(layer).call(vm, &call, func, data, limits) {
-                Ok(outcome) => refreshed(layer, vm, &call, limits, &rules.token_functions, outcome),
+                Ok(outcome) => refreshed(layer, vm, &call, limits, rules, outcome),
                 Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
             }
         }
@@ -653,7 +684,12 @@ fn run(
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
-            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits, &rules.token_functions, block_at(rules, context)) {
+            let standards = match rules.standards_in(layer) {
+                Ok(standards) => standards,
+                Err(err) => return (Err(Failure::Registry(RegistryError::Db(err))), Contracted::default()),
+            };
+
+            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits, &standards, block_at(rules, context)) {
                 Ok((address, hooked)) => (Ok(Effect::Deployed(address)), hooked.into()),
                 Err(failed) => failed_hooks(failed),
             }
@@ -663,7 +699,12 @@ fn run(
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
-            match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits, &rules.token_functions, block_at(rules, context)) {
+            let standards = match rules.standards_in(layer) {
+                Ok(standards) => standards,
+                Err(err) => return (Err(Failure::Registry(RegistryError::Db(err))), Contracted::default()),
+            };
+
+            match Contracts::new(layer).upgrade(vm, &sender, contract, code, limits, &standards, block_at(rules, context)) {
                 Ok(hooked) => (Ok(Effect::Upgraded(*contract)), hooked.into()),
                 Err(failed) => failed_hooks(failed),
             }
@@ -741,6 +782,7 @@ fn run(
                 Change::Bootnodes(bootnodes) => crate::governance::bootnodes_problem(bootnodes),
                 Change::NamePrices(_) if rules.names.is_none() => return (Err(Failure::NoNames), Contracted::default()),
                 Change::NamePrices(prices) => crate::registry::names::prices_problem(prices),
+                Change::Collections(functions) => functions.problem(),
             };
 
             if let Some(problem) = problem {

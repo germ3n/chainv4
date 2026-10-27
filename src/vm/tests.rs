@@ -221,9 +221,13 @@ impl World {
     }
 }
 
-/// What makes a contract a token on the chains these tests stand for: ERC-20's six.
-fn standard() -> Vec<String> {
-    crate::registry::tokens::STANDARD_TOKEN_FUNCTIONS.map(str::to_string).to_vec()
+/// What makes a contract a token or a collection on the chains these tests stand for: ERC-20's
+/// six, and the collection standards' own.
+fn standard() -> crate::registry::Standards {
+    crate::registry::Standards {
+        tokens: crate::registry::tokens::STANDARD_TOKEN_FUNCTIONS.map(str::to_string).to_vec().into(),
+        collections: Some(crate::registry::collections::CollectionFunctions::standard()),
+    }
 }
 
 fn address(address: Address) -> TxCallArgumentType {
@@ -957,11 +961,11 @@ function M.decimals() return 6 end"#,
     // Genesis says what makes a token: other functions, or none, which keeps no registry.
     world.nonce += 1;
     let (minimal, _) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", Some("approve")), LIMITS, &["transfer".to_string()], crate::vm::BlockAt::at(0))
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", Some("approve")), LIMITS, &crate::registry::Standards { tokens: ["transfer".to_string()].into(), collections: None }, crate::vm::BlockAt::at(0))
         .unwrap();
     world.nonce += 1;
     let (unlisted, _) = Contracts::new(&world.state)
-        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", None), LIMITS, &[], crate::vm::BlockAt::at(0))
+        .deploy(&world.vm, &DEPLOYER, world.nonce, &token_with("", None), LIMITS, &crate::registry::Standards::default(), crate::vm::BlockAt::at(0))
         .unwrap();
 
     assert!(tokens(&world, minimal).is_some());
@@ -2070,3 +2074,5 @@ fn a_webassembly_contract_clones_through_the_host() {
     let again = world.call(factory, "make", &[address(template)]).result.unwrap_err();
     assert!(again.to_string().contains("lives at"), "{again}");
 }
+
+mod collections;

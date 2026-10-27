@@ -589,12 +589,12 @@ mod send {
         // A window stays genesis's; nothing to withdraw before approving; the council of one
         // decides at once, so there is nothing to withdraw after either.
         let bootnode = "/ip4/203.0.113.7/udp/4001/quic-v1".to_string();
-        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, name_prices: None, version: None }));
+        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, version: None }));
         let nothing = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, name_prices: None, version: None }));
+        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, version: None }));
         let decided = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, version: None }));
-        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, version: None }));
+        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, version: None }));
+        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, version: None }));
         let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
         let node = running.stop();
 
@@ -903,7 +903,7 @@ mod send {
         let agent = crate::cli::send::agent(&Default::default()).unwrap();
         assert_eq!(crate::cli::swap::default_contract(&agent, &format!("http://{}", running.api)).unwrap(), contract);
         let pays = Leg::Bitcoin(BitcoinLeg { testnet: true, sats: 100_000, payer: None, receiver: None });
-        let gets = Leg::Chain(ChainLeg { contract, token: None, amount: u256::new(5_000), payer: None, receiver: None });
+        let gets = Leg::Chain(ChainLeg { item: None, contract, token: None, amount: u256::new(5_000), payer: None, receiver: None });
         let terms = Terms::offer(hash, pays, gets, now + crate::swap::FIRST_DEADLINE_MS, now + crate::swap::SECOND_DEADLINE_MS, &alice).unwrap().answer(&bob).unwrap();
         let node = format!("http://{}", running.api);
         // The terms name the contract the lock goes into. Bob locks second; the first lock is
@@ -1018,6 +1018,67 @@ mod send {
         running.stop();
     }
 
+    #[cfg(feature = "nft")]
+    #[test]
+    fn collections_are_made_minted_sent_and_read_from_the_cli() {
+        use crate::cli::nft::{NftAction, NftArgs, nft};
+
+        let running = Running::start(true);
+        let node = format!("http://{}", running.api);
+        let me = DevAuthority::dev_keypair().public().address();
+        let hash = crate::structs::hash::HashType::default_chain();
+        let nonce = |node: &str| -> u64 { serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap() };
+        let run = |action: NftAction, factory: Option<Address>| nft(NftArgs { action, node: node.clone(), tls: Default::default(), key: None, factory });
+        let read = |contract: &Address, function: &str, args: serde_json::Value| -> serde_json::Value {
+            let body = serde_json::json!({ "contract": contract.to_string(), "function": function, "args": args });
+            serde_json::from_str(&ureq::post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap()
+        };
+        let get = |path: &str| -> serde_json::Value { serde_json::from_str(&ureq::get(format!("{node}{path}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap() };
+        let bob = Address::Ed25519([0xb; 32]);
+        let id = |value: u64| serde_json::json!({ "type": "u256", "value": value.to_string() });
+
+        // The factory and its two templates, which are collections themselves.
+        let start = nonce(&node);
+        run(NftAction::Factory, None).unwrap();
+        let factory = deployed_at(&me, start + 2, hash);
+
+        assert!(run(NftAction::Create { kind: "nft".into(), name: "Art".into(), symbol: "ART".into(), base_uri: String::new() }, None).unwrap_err().to_string().contains("no factory"));
+        assert!(run(NftAction::Create { kind: "coin".into(), name: "X".into(), symbol: "X".into(), base_uri: String::new() }, Some(factory)).is_err());
+
+        // A collection of each kind, through it.
+        run(NftAction::Create { kind: "nft".into(), name: "Art".into(), symbol: "ART".into(), base_uri: "ipfs://bafy/".into() }, Some(factory)).unwrap();
+        run(NftAction::Create { kind: "multi".into(), name: "Items".into(), symbol: "ITM".into(), base_uri: String::new() }, Some(factory)).unwrap();
+        let made = |n: u64| -> Address { read(&factory, "at", serde_json::json!([id(n)]))["values"][0]["value"].as_str().unwrap().parse().unwrap() };
+        let (art, items) = (made(0), made(1));
+        let kinds: Vec<_> = get("/collections?symbol=")["collections"].as_array().unwrap().iter().map(|found| (found["symbol"].as_str().unwrap().to_string(), found["kind"].as_str().unwrap().to_string())).collect();
+
+        assert!(kinds.contains(&("ART".to_string(), "nft".to_string())) && kinds.contains(&("ITM".to_string(), "multi".to_string())), "{kinds:?}");
+        run(NftAction::Collections { symbol: Some("ar".into()) }, None).unwrap();
+
+        // Minted, shown, sent, and listed.
+        run(NftAction::Mint { collection: art, to: me, id: None, amount: u256::new(1), uri: None }, None).unwrap();
+        run(NftAction::Mint { collection: art, to: me, id: None, amount: u256::new(1), uri: Some("https://example.com/2.json".into()) }, None).unwrap();
+        assert!(run(NftAction::Mint { collection: art, to: me, id: Some(u256::new(5)), amount: u256::new(1), uri: None }, None).is_err(), "an NFT picks its own id");
+        run(NftAction::Mint { collection: items, to: me, id: Some(u256::new(7)), amount: u256::new(10), uri: None }, None).unwrap();
+        assert!(run(NftAction::Mint { collection: items, to: me, id: None, amount: u256::new(1), uri: None }, None).is_err(), "a multi-token mint names its id");
+        assert_eq!(read(&art, "token_uri", serde_json::json!([id(1)]))["values"][0]["value"], "ipfs://bafy/1");
+        run(NftAction::Show { collection: art, id: None }, None).unwrap();
+        run(NftAction::Show { collection: art, id: Some(u256::new(2)) }, None).unwrap();
+        run(NftAction::Show { collection: items, id: Some(u256::new(7)) }, None).unwrap();
+
+        run(NftAction::Send { collection: art, to: bob, id: u256::new(1), amount: u256::new(1), safe: false }, None).unwrap();
+        run(NftAction::Send { collection: items, to: bob, id: u256::new(7), amount: u256::new(3), safe: true }, None).unwrap();
+        assert_eq!(read(&art, "owner_of", serde_json::json!([id(1)]))["values"][0]["value"], bob.to_string());
+        assert_eq!(read(&items, "balance_of", serde_json::json!([{ "type": "address", "value": bob.to_string() }, id(7)]))["values"][0]["value"], "3");
+        run(NftAction::Held { collection: art, owner: me }, None).unwrap();
+        run(NftAction::Held { collection: items, owner: bob }, None).unwrap();
+
+        run(NftAction::Operator { collection: art, operator: bob, revoke: false }, None).unwrap();
+        assert_eq!(read(&art, "is_approved_for_all", serde_json::json!([{ "type": "address", "value": me.to_string() }, { "type": "address", "value": bob.to_string() }]))["values"][0]["value"], true);
+        assert!(run(NftAction::Show { collection: factory, id: None }, None).unwrap_err().to_string().contains("not in the collection registry"));
+        running.stop();
+    }
+
     #[cfg(all(feature = "swap", feature = "sha256", feature = "ethereum"))]
     #[test]
     fn a_swap_between_chainv4_and_an_evm_chain_locks_checks_and_claims_both_legs() {
@@ -1054,8 +1115,8 @@ mod send {
         let bob = Parties { chain: Some(Address::Ed25519([0xb; 32])), bitcoin: None, evm: Some(from_key(&[0x42; 32]).unwrap()) };
         let (secret, hash) = crate::swap::secret().unwrap();
         let now = now_ms();
-        let pays = Leg::Chain(ChainLeg { contract, token: None, amount: u256::new(5_000), payer: None, receiver: None });
-        let gets = Leg::Evm(EvmLeg { chain_id: rpc.chain_id().unwrap(), contract: swap_sol, token: None, amount: u256::new(7_000), payer: None, receiver: None });
+        let pays = Leg::Chain(ChainLeg { item: None, contract, token: None, amount: u256::new(5_000), payer: None, receiver: None });
+        let gets = Leg::Evm(EvmLeg { item: None, chain_id: rpc.chain_id().unwrap(), contract: swap_sol, token: None, amount: u256::new(7_000), payer: None, receiver: None });
         let terms = Terms::offer(hash, pays, gets, now + crate::swap::FIRST_DEADLINE_MS, now + crate::swap::SECOND_DEADLINE_MS, &alice).unwrap().answer(&bob).unwrap();
         terms.check(now).unwrap();
         let action = |key: Option<PathBuf>, leg: Option<LegArg>| LegAction { terms: terms.to_text(), leg, node: node.clone(), eth_rpc: vec![format!("{node}/rpc")], tls: Default::default(), key, anyway: false };

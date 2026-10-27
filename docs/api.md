@@ -397,6 +397,19 @@ or `null` after the last.
 **Each token** has its `address`, `name`, `symbol` and `decimals`, as it answered at its deploy
 or last upgrade, each `null` when it exports none.
 
+### `GET /collections`
+
+The [collection registry](nft-standard.md#the-collection-registry): every contract that exports
+what makes an NFT or a multi-token collection on this chain. Ordered, searched with `symbol=…`
+and paged with `limit` and `cursor` as `GET /tokens` is.
+
+**Each collection** has its `address`, its `kind`, `nft` or `multi`, and its `name` and `symbol`,
+as it answered at its deploy or last upgrade, each `null` when it exports none.
+
+`GET /contracts/{address}` says the same of one contract in `collection`, `null` when it is none;
+`GET /status` says what makes one in `collections`, `{"nft": [...], "multi": [...]}`, as genesis
+or governance decided last, or `null` on a chain without the registry.
+
 ### `GET /node`
 
 How the node behind the API is doing. 503 when no node runs behind it.

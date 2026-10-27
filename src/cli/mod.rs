@@ -20,6 +20,8 @@ pub mod db;
 pub(super) mod dex;
 #[cfg(all(feature = "client", feature = "evm"))]
 mod evm;
+#[cfg(all(feature = "client", feature = "nft"))]
+pub(super) mod nft;
 #[cfg(all(feature = "client", feature = "sha256"))]
 mod faucet;
 pub mod genesis;
@@ -51,6 +53,8 @@ pub use bench::{BenchArgs, bench};
 pub use swap::{SwapArgs, swap};
 #[cfg(all(feature = "client", feature = "dex", feature = "evm"))]
 pub use dex::{DexArgs, dex};
+#[cfg(all(feature = "client", feature = "nft"))]
+pub use nft::{NftArgs, nft};
 #[cfg(all(feature = "client", feature = "sha256"))]
 pub use faucet::{FaucetArgs, faucet};
 

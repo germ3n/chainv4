@@ -34,7 +34,10 @@ fn rules() -> Rules {
             fuel: 1_000_000,
             memory: 16 * 1024 * 1024,
         },
-        token_functions: crate::chain::standard_token_functions().into(),
+        standards: crate::registry::Standards {
+            tokens: crate::chain::standard_token_functions().into(),
+            collections: None,
+        },
         staking: None,
         signers: None,
         governance: None,

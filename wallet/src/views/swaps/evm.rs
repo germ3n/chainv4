@@ -17,7 +17,7 @@ use {
     chainv4::crypto::secp256k1,
     chainv4::structs::hex::{from_hex, to_hex},
     chainv4::structs::u256::u256,
-    chainv4::swap::evm::{Call, chain_name, get_input, read_lock, symbol},
+    chainv4::swap::evm::{Call, chain_name, get_input, item_input, read_item, read_lock, symbol},
     chainv4::swap::{EvmLeg, Lock},
     chainv4_ui::biometric::Failure,
     egui::{RichText, Ui},
@@ -90,15 +90,36 @@ pub fn learn_chains(ctx: &Ctx, state: &mut SwapsState) {
     }
 }
 
-/// Asks Swap.sol where a leg's lock stands.
+/// Asks Swap.sol where a leg's lock stands, and for a leg locking an NFT, which one it holds, in
+/// one batch.
 pub fn ask_lock(ctx: &Ctx, state: &SwapsState, url: &str, leg: &EvmLeg, hash: &[u8; 32]) {
     let (chain_id, key) = (leg.chain_id, to_hex(hash));
-    let call = request(1, "eth_call", json!([{ "to": to_hex(&leg.contract), "data": to_hex(&get_input(hash)) }, "latest"]));
+    let call = |id: u64, input: Vec<u8>| request(id, "eth_call", json!([{ "to": to_hex(&leg.contract), "data": to_hex(&input) }, "latest"]));
+    let output = |value: &Value| value.as_str().and_then(from_hex).ok_or_else(|| format!("eth_call answered {value}"));
 
-    ask(ctx, state, url, call, move |answer| Answer::Lock {
+    if leg.item.is_none() {
+        return ask(ctx, state, url, call(1, get_input(hash)), move |answer| Answer::Lock { hash: key, chain_id, lock: answer.and_then(|value| output(&value)).and_then(|output| read_lock(&output)) });
+    }
+
+    let batch = json!([call(1, get_input(hash)), call(2, item_input(hash))]);
+
+    ask_raw(ctx, state, url, batch, move |answer| Answer::Lock {
         hash: key,
         chain_id,
-        lock: answer.and_then(|value| value.as_str().and_then(from_hex).ok_or_else(|| format!("eth_call answered {value}"))).and_then(|output| read_lock(&output)),
+        lock: answer.and_then(|replies| {
+            let reply = |id: u64| -> Result<Vec<u8>, String> {
+                let found = replies.as_array().and_then(|replies| replies.iter().find(|reply| reply["id"] == id)).ok_or("a batch without its answer")?;
+
+                match found.get("error").filter(|error| !error.is_null()) {
+                    Some(error) => Err(error["message"].as_str().map_or_else(|| error.to_string(), str::to_string)),
+                    None => output(&found["result"]),
+                }
+            };
+            let mut lock = read_lock(&reply(1)?)?;
+            lock.item = read_item(&reply(2)?)?;
+
+            Ok(lock)
+        }),
     });
 }
 
@@ -436,7 +457,7 @@ fn ask_raw(ctx: &Ctx, state: &SwapsState, url: &str, body: Value, answer: impl F
     let client = match crate::app::client(ctx.settings) {
         Ok(client) => client,
         Err(why) => {
-            state.looked.lock().expect("never poisoned").push(Looked::Evm(answer(Err(why))));
+            state.looked.lock().expect("never poisoned").push(Looked::Evm(Box::new(answer(Err(why)))));
             return;
         }
     };
@@ -444,7 +465,7 @@ fn ask_raw(ctx: &Ctx, state: &SwapsState, url: &str, body: Value, answer: impl F
 
     client.fetch(url.to_string(), Some(body.to_string().into_bytes()), move |reply| {
         let reply = reply.and_then(|reply| serde_json::from_slice::<Value>(&reply.bytes).map_err(|_| format!("not JSON-RPC: {}", String::from_utf8_lossy(&reply.bytes).chars().take(120).collect::<String>())));
-        looked.lock().expect("never poisoned").push(Looked::Evm(answer(reply)));
+        looked.lock().expect("never poisoned").push(Looked::Evm(Box::new(answer(reply))));
         wake.request_repaint();
     });
 }

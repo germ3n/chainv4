@@ -1666,6 +1666,44 @@ fn tokens_are_listed_from_the_registry() {
 }
 
 #[test]
+fn collections_are_listed_from_the_registry() {
+    let authority = DevAuthority::dev_keypair();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let deployed = |nonce: u64| contract_address(&authority.public().address(), nonce, HashType::default_chain());
+    let (nft, multi, greeter) = (deployed(0), deployed(1), deployed(2));
+    let deploy = |code: &str, nonce: u64| SignedTx::sign(Tx::Deploy { code: Code::Lua(code.to_string()) }, nonce, FeeOffer::NONE, &authority);
+    produce(
+        &mut chain,
+        vec![
+            deploy(include_str!("../../contracts/lua/nft.lua"), 0),
+            deploy(include_str!("../../contracts/lua/multi.lua"), 1),
+            deploy(GREETER, 2),
+        ],
+    );
+
+    assert_eq!(ok(address, "/status")["collections"]["nft"].as_array().unwrap().len(), 12);
+    assert_eq!(ok(address, "/status")["collections"]["multi"][0], "balance_of");
+    assert_eq!(
+        ok(address, "/collections"),
+        json!({
+            "collections": [
+                { "address": nft.to_string(), "kind": "nft", "name": "Example Collection", "symbol": "EXC" },
+                { "address": multi.to_string(), "kind": "multi", "name": "Example Items", "symbol": "EXI" },
+            ],
+            "next": null,
+        })
+    );
+    assert_eq!(ok(address, "/collections?symbol=exi")["collections"][0]["kind"], "multi");
+    assert_eq!(ok(address, "/collections?limit=1")["collections"].as_array().unwrap().len(), 1);
+    assert!(ok(address, "/tokens")["tokens"].as_array().unwrap().is_empty(), "collections are not tokens");
+    assert_eq!(ok(address, &format!("/contracts/{nft}"))["collection"]["kind"], "nft");
+    assert_eq!(ok(address, &format!("/contracts/{greeter}"))["collection"], Value::Null);
+    assert_eq!(get(address, "/collections?cursor=zz").0, 400);
+}
+
+#[test]
 fn events_are_listed_from_the_index() {
     let authority = DevAuthority::dev_keypair();
     let db = Arc::new(MemoryDb::default());

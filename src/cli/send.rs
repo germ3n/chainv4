@@ -192,7 +192,7 @@ pub enum TxArgs {
     /// Approves a change under the chain's governance: a new consensus, as a genesis file's
     /// consensus object, or new bootnodes. Sign with an account governance lets approve: a
     /// validator's or signer's account under the electorate, a member's under a council.
-    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices"]))]
+    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections"]))]
     ApproveChange {
         /// The new consensus as JSON, such as '{"type":"staked","slot_ms":2000,"schedule":"draw"}'
         /// or '{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1000","min_difficulty":"1000"}'.
@@ -206,6 +206,11 @@ pub enum TxArgs {
         /// for names of 3 characters, the next for 4, and the last for every length from its own.
         #[arg(long, value_delimiter = ',', value_parser = parse_amount)]
         name_prices: Option<Vec<u256>>,
+        /// What makes a collection: standard, for the NFT and multi-token standards' own
+        /// functions, or JSON such as '{"nft":["owner_of",…],"multi":["balance_of",…]}'. Turns the
+        /// collection registry on for a chain whose genesis kept none.
+        #[arg(long)]
+        collections: Option<String>,
         /// The version of the decision this changes. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
@@ -845,10 +850,11 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
             consensus,
             bootnodes,
             name_prices,
+            collections,
             version,
         } => {
-            let change = match (consensus, bootnodes, name_prices) {
-                (Some(consensus), _, _) => {
+            let change = match (consensus, bootnodes, name_prices, collections) {
+                (Some(consensus), _, _, _) => {
                     let value: Value = serde_json::from_str(&consensus).map_err(|err| format!("--consensus is not JSON: {err}"))?;
                     let (consensus, window) = super::genesis::consensus_from_json(&value, "consensus")?;
 
@@ -858,7 +864,7 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
                     crate::governance::Change::Consensus(consensus)
                 }
-                (None, Some(bootnodes), _) => {
+                (None, Some(bootnodes), _, _) => {
                     let bootnodes: Vec<String> = match bootnodes.as_slice() {
                         [none] if none == "none" => Vec::new(),
                         _ => bootnodes.into_iter().map(|address| address.trim().to_string()).collect(),
@@ -870,14 +876,19 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
                     crate::governance::Change::Bootnodes(bootnodes)
                 }
-                (None, None, Some(prices)) => {
+                (None, None, Some(prices), _) => {
                     if let Some(problem) = prices_problem(&prices) {
                         return Err(format!("--name-prices: {problem}").into());
                     }
 
                     crate::governance::Change::NamePrices(prices)
                 }
-                (None, None, None) => unreachable!("clap requires one"),
+                (None, None, None, Some(collections)) => {
+                    let functions = super::genesis::collections_from_text(&collections).map_err(|why| format!("--collections: {why}"))?;
+
+                    crate::governance::Change::Collections(functions)
+                }
+                (None, None, None, None) => unreachable!("clap requires one"),
             };
 
             let version = match version {
@@ -890,6 +901,11 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
                 crate::governance::Change::Consensus(consensus) => println!("approving a change to {} consensus, from version {version}", consensus.name()),
                 crate::governance::Change::Bootnodes(bootnodes) => println!("approving {} bootnode{}, from version {version}", bootnodes.len(), if bootnodes.len() == 1 { "" } else { "s" }),
                 crate::governance::Change::NamePrices(prices) => println!("approving {} name price{}, from version {version}", prices.len(), if prices.len() == 1 { "" } else { "s" }),
+                crate::governance::Change::Collections(functions) => println!(
+                    "approving what makes a collection: {} NFT and {} multi-token functions, from version {version}",
+                    functions.nft.len(),
+                    functions.multi.len()
+                ),
             }
 
             Tx::ApproveChange { version, change }

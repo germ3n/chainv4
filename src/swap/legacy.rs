@@ -1,8 +1,10 @@
 //! Terms as they were written before legs: chainv4 against Bitcoin, the chain tag first. Codes made
-//! then still read, as the same swap in two legs; they are written as legs from then on.
+//! then still read, as the same swap in two legs; they are written as legs from then on. And legs
+//! as they were written before NFTs, which terms that lock none are still written as, so apps from
+//! before NFTs read them.
 
 use {
-    super::{BitcoinLeg, ChainLeg, Leg, Terms},
+    super::{BitcoinLeg, ChainLeg, EvmLeg, Leg, Terms},
     crate::structs::address::Address,
     crate::structs::u256::u256,
     wincode::{SchemaRead, SchemaWrite},
@@ -52,7 +54,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<Terms, String> {
         return Err("terms with more in them than they hold".to_string());
     }
 
-    let chain = Leg::Chain(ChainLeg { contract: old.contract, token: old.token, amount: old.amount, payer: old.chain_payer, receiver: old.chain_receiver });
+    let chain = Leg::Chain(ChainLeg { contract: old.contract, token: old.token, item: None, amount: old.amount, payer: old.chain_payer, receiver: old.chain_receiver });
     let bitcoin = Leg::Bitcoin(BitcoinLeg { testnet: old.chain == Counterparty::BitcoinTestnet, sats: old.sats, payer: old.bitcoin_payer, receiver: old.bitcoin_receiver });
     let (first, second) = match old.starter {
         Pays::Bitcoin => (bitcoin, chain),
@@ -60,6 +62,87 @@ pub(super) fn read(bytes: &[u8]) -> Result<Terms, String> {
     };
 
     Ok(Terms { hash: old.hash, first, second, first_deadline: old.first_deadline, second_deadline: old.second_deadline })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+struct TermsV2 {
+    hash: [u8; 32],
+    first: LegV2,
+    second: LegV2,
+    first_deadline: u64,
+    second_deadline: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+enum LegV2 {
+    #[wincode(tag = 0)]
+    Chain(ChainLegV2),
+    #[wincode(tag = 1)]
+    Bitcoin(BitcoinLeg),
+    #[wincode(tag = 2)]
+    Evm(EvmLegV2),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+struct ChainLegV2 {
+    contract: Address,
+    token: Option<Address>,
+    #[wincode(with = "crate::structs::u256::U256Le")]
+    amount: u256,
+    payer: Option<Address>,
+    receiver: Option<Address>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+struct EvmLegV2 {
+    chain_id: u64,
+    contract: [u8; 20],
+    token: Option<[u8; 20]>,
+    #[wincode(with = "crate::structs::u256::U256Le")]
+    amount: u256,
+    payer: Option<[u8; 20]>,
+    receiver: Option<[u8; 20]>,
+}
+
+impl LegV2 {
+    fn from_leg(leg: &Leg) -> Option<LegV2> {
+        Some(match leg {
+            Leg::Chain(leg) if leg.item.is_none() => LegV2::Chain(ChainLegV2 { contract: leg.contract, token: leg.token, amount: leg.amount, payer: leg.payer, receiver: leg.receiver }),
+            Leg::Evm(leg) if leg.item.is_none() => LegV2::Evm(EvmLegV2 { chain_id: leg.chain_id, contract: leg.contract, token: leg.token, amount: leg.amount, payer: leg.payer, receiver: leg.receiver }),
+            Leg::Bitcoin(leg) => LegV2::Bitcoin(leg.clone()),
+            _ => return None,
+        })
+    }
+
+    fn leg(self) -> Leg {
+        match self {
+            LegV2::Chain(leg) => Leg::Chain(ChainLeg { contract: leg.contract, token: leg.token, item: None, amount: leg.amount, payer: leg.payer, receiver: leg.receiver }),
+            LegV2::Bitcoin(leg) => Leg::Bitcoin(leg),
+            LegV2::Evm(leg) => Leg::Evm(EvmLeg { chain_id: leg.chain_id, contract: leg.contract, token: leg.token, item: None, amount: leg.amount, payer: leg.payer, receiver: leg.receiver }),
+        }
+    }
+}
+
+/// Terms written as legs before NFTs, after their first byte.
+pub(super) fn read_legs(bytes: &[u8]) -> Result<Terms, String> {
+    let old: TermsV2 = wincode::deserialize(bytes).map_err(|_| "terms that do not decode".to_string())?;
+
+    Ok(Terms { hash: old.hash, first: old.first.leg(), second: old.second.leg(), first_deadline: old.first_deadline, second_deadline: old.second_deadline })
+}
+
+/// Terms as legs were written before NFTs, after their first byte; None for terms locking an NFT,
+/// which those legs cannot hold.
+pub(super) fn write_legs(terms: &Terms) -> Option<Vec<u8>> {
+    let old = TermsV2 {
+        hash: terms.hash,
+        first: LegV2::from_leg(&terms.first)?,
+        second: LegV2::from_leg(&terms.second)?,
+        first_deadline: terms.first_deadline,
+        second_deadline: terms.second_deadline,
+    };
+
+    Some(wincode::serialize(&old).expect("terms always encode"))
 }
 
 /// Old terms' bytes, for the tests to read back.

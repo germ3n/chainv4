@@ -72,7 +72,7 @@ pub enum Column {
     #[document(summary = "The event index, for a node that keeps one: each event by its contract, and pointers to it by contract and name and by every address in its data, newest first.")]
     #[wincode(tag = 12)]
     Events,
-    #[document(summary = "The token registry: every contract that exports the token standard, with its name, symbol and decimals, by address and by symbol.")]
+    #[document(summary = "The token and collection registries: every contract that exports the token standard, with its name, symbol and decimals, and every one that exports a collection standard, with its kind, name and symbol, each by address and by symbol.")]
     #[wincode(tag = 13)]
     Tokens,
     #[document(summary = "Contract storage in namespaces, the contract's own space among them: keyed by the contract's address, the namespace's name with its length in front, and the script's own key.")]

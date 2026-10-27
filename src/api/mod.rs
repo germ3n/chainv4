@@ -22,6 +22,7 @@ use {
     crate::mempool::MempoolError,
     crate::node::{NodeHandle, NodeReport, SubmitError},
     crate::registry::tokens::stored_tokens,
+    crate::registry::collections::{Collections, stored_collections},
     crate::registry::{Accounts, Contracts, Tokens},
     crate::structs::address::Address,
     crate::structs::block::Block,
@@ -268,7 +269,7 @@ pub struct ApiOptions {
         options = "Who else it answers, and what it serves besides the chain.",
     },
     returns = "The address it listens on, which tells you the port when address asked for port 0.",
-    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream; GET /faucet and POST /faucet, on a node run with --faucet-key. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 429 for a faucet asked again too soon, 500, or 503 when the node cannot take transactions.",
+    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /collections, the NFT and multi-token collections by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream; GET /faucet and POST /faucet, on a node run with --faucet-key. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 429 for a faucet asked again too soon, 500, or 503 when the node cannot take transactions.",
     see_also = "Node, Address, NodeHandle",
 )]
 pub fn start(
@@ -383,6 +384,7 @@ fn router(api: Api) -> Router {
         .route("/forks", get(forks))
         .route("/events", get(events))
         .route("/tokens", get(tokens))
+        .route("/collections", get(collections))
 
         .route("/node", get(node))
         .route("/mempool", get(mempool))
@@ -590,6 +592,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "hash": api.hash.name(),
         "coin": crate::cli::genesis::coin_json(&api.coin),
         "token_functions": &*api.token_functions,
+        "collections": api.rules.standards_in(&State::new(db.clone()))?.collections.as_ref().map(crate::cli::genesis::collections_json),
         "finality": finality,
         "fees": fees,
         "vote_rewards": vote_rewards,
@@ -1159,8 +1162,9 @@ async fn contract(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
         .get(&address)?
         .ok_or_else(|| ApiError::NotFound(format!("no contract at {address}")))?;
     let token = Tokens::new(&state).get(&address)?;
+    let collection = Collections::new(&state).get(&address)?;
 
-    Ok(Json(json::contract(&address, &record, token.as_ref())))
+    Ok(Json(json::contract(&address, &record, token.as_ref(), collection.as_ref())))
 }
 
 /// How many times a proof is read again when the node committed a block while it was being read.
@@ -1387,6 +1391,21 @@ async fn tokens(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
 
     Ok(Json(json!({
         "tokens": found.iter().map(json::token).collect::<Vec<_>>(),
+        "next": next.map(|next| to_hex(&next)),
+    })))
+}
+
+/// The collection registry by symbol, a page at a time, as /tokens lists tokens.
+async fn collections(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_TOKENS).clamp(1, MAX_TOKENS) as usize;
+    let cursor = query
+        .get("cursor")
+        .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
+        .transpose()?;
+    let (found, next) = stored_collections(&*api.db, query.get("symbol").map(String::as_str), cursor.as_deref(), limit)?;
+
+    Ok(Json(json!({
+        "collections": found.iter().map(json::collection).collect::<Vec<_>>(),
         "next": next.map(|next| to_hex(&next)),
     })))
 }

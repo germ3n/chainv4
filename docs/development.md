@@ -119,6 +119,9 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `abi` | Solidity's ABI (`src/abi/`): encoding calls and decoding results, logs and errors, every type, from a contract's JSON ABI; and EVM and CREATE addresses. What the CLI, the wallet and the explorer speak to EVM contracts with. Brings `keccak256`. `evm` brings it. |
 | `ethereum` | [Ethereum's tools](ethereum.md): `POST /rpc`, and the index of Ethereum-signed transactions by their keccak256 it answers from. Brings `evm`, `secp256k1` and `http`. Checking and running those transactions is every build's with `secp256k1` and `evm`, so a node without this feature agrees on every block. |
 | `names` | The [name registry](names.md): running name transactions, `GET /names`, `chainv4 send name` and names in `transfer --to`, and the EVM's names precompile. A build without it refuses a chain whose genesis has names. |
+| `swap` | [Atomic swaps](swaps.md): the terms, Bitcoin's HTLC, Swap.sol's calls, `--swap-contract` and, with `client`, `chainv4 swap`. Brings `bitcoin`. |
+| `dex` | The [DEX](dex.md)'s arithmetic, `--dex-contract` and `--dex-router`, and, with `client` and `evm`, `chainv4 dex`. |
+| `nft` | [NFTs](nft-standard.md) for the apps: where a token URI leads and the metadata it names, and, with `client`, `chainv4 nft`. The collection registry itself is every build's, as it is consensus. |
 
 **What a build must have:** at least one key scheme, and for contracts and nodes, at least one
 secure hash, or they fail to build.

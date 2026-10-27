@@ -81,7 +81,8 @@ works, but no light client can prove what it holds. Both reference implementatio
 ## The token registry
 
 The chain keeps a registry of tokens (`registry::tokens`), so wallets can list them and tell a
-token from any other contract.
+token from any other contract. NFTs have a [registry of their own](nft-standard.md#the-collection-registry),
+beside this one.
 
 **What makes a token:** exporting every function genesis names in `token_functions` (see
 [Genesis](genesis.md)). The dev chains name the six required above, ERC-20's; a chain may name

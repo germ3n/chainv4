@@ -61,6 +61,9 @@ pub enum Ask {
     /// A JSON-RPC request to POST /rpc, as its body: what a site's transaction is priced and sent
     /// by, as Ethereum's tools do.
     Rpc(String),
+    /// The collection registry's first page, for the NFTs page to look through.
+    #[cfg_attr(not(feature = "nft"), allow(dead_code))]
+    Collections,
 }
 
 impl Ask {
@@ -75,6 +78,7 @@ impl Ask {
             Ask::Proof { column, key, block } => format!("/proofs/{column}/{key}?block={block}"),
             Ask::Receipt(id) => format!("/proofs/receipts/{id}"),
             Ask::Tokens => "/tokens?limit=100".to_string(),
+            Ask::Collections => "/collections?limit=500".to_string(),
             Ask::History(address) => format!("/accounts/{address}/txs?limit=50"),
             Ask::Events(address) => format!("/events?address={address}&limit=50"),
             Ask::Named { contract, name } => format!("/events?contract={contract}&name={name}&limit=200"),
@@ -109,6 +113,9 @@ pub struct Failure {
 /// Where answers wait for the app, each with what it answers.
 type Inbox = Arc<Mutex<Vec<(Ask, Result<Value, Failure>)>>>;
 
+/// What was fetched from elsewhere than the node, by URL: its bytes, or why there are none.
+type Fetched = Arc<Mutex<Vec<(String, Result<Vec<u8>, String>)>>>;
+
 pub struct Node {
     base: String,
     /// What every request goes out through, or why none can: a proxy set that does not build
@@ -117,6 +124,8 @@ pub struct Node {
     inbox: Inbox,
     asking: HashSet<Ask>,
     wake: egui::Context,
+    fetched: Fetched,
+    fetching: HashSet<String>,
 }
 
 impl Node {
@@ -127,7 +136,48 @@ impl Node {
             inbox: Arc::default(),
             asking: HashSet::new(),
             wake,
+            fetched: Arc::default(),
+            fetching: HashSet::new(),
         }
+    }
+
+    /// Fetches a URL that is not the node's, as an NFT's metadata or picture, through the same
+    /// proxy, unless it is out already. At most `most` bytes are kept: more fails.
+    #[cfg_attr(not(feature = "nft"), allow(dead_code))]
+    pub fn fetch(&mut self, url: &str, most: usize) {
+        if !self.fetching.insert(url.to_string()) {
+            return;
+        }
+
+        let (fetched, wake, key) = (self.fetched.clone(), self.wake.clone(), url.to_string());
+        let done = move |answer: Result<Answer, String>| {
+            let result = match answer {
+                Ok(answer) if !answer.ok => Err(format!("{} {}", answer.status, answer.status_text)),
+                Ok(answer) if answer.bytes.len() > most => Err(format!("more than {} MB", most / (1024 * 1024))),
+                Ok(answer) => Ok(answer.bytes),
+                Err(message) => Err(message),
+            };
+
+            fetched.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((key, result));
+            wake.request_repaint();
+        };
+
+        match &self.client {
+            Ok(client) => client.fetch(url.to_string(), None, done),
+            Err(why) => done(Err(format!("the proxy set does not work: {why}"))),
+        }
+    }
+
+    /// Everything fetched from elsewhere since last time.
+    #[cfg_attr(not(feature = "nft"), allow(dead_code))]
+    pub fn fetched(&mut self) -> Vec<(String, Result<Vec<u8>, String>)> {
+        let fetched = std::mem::take(&mut *self.fetched.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+
+        for (url, _) in &fetched {
+            self.fetching.remove(url);
+        }
+
+        fetched
     }
 
     /// Asks, unless the same question is out already.

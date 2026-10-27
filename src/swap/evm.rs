@@ -8,7 +8,7 @@
 //! chain without the proxy works with one deployed anywhere.
 
 use {
-    super::{EvmLeg, Lock, LockState, Party},
+    super::{EvmLeg, Item, Lock, LockState, Party},
     crate::crypto::ethereum::{EthereumKind, EthereumTx},
     crate::crypto::secp256k1::keccak,
     crate::structs::hex::{from_hex, to_hex},
@@ -151,11 +151,32 @@ fn calldata(signature: &str, words: &[[u8; 32]]) -> Vec<u8> {
 impl EvmLeg {
     #[document(
         parent = "EvmLeg",
-        summary = "What locking it takes, from its payer: the coin sent with lock, or for a token, approve for Swap.sol to move it, then lockToken. The deadline is in milliseconds, Swap.sol's in seconds.",
+        summary = "What locking it takes, from its payer: the coin sent with lock; for a token, approve for Swap.sol to move it, then lockToken; for an ERC-721 token, approve it, then lockNft; for an ERC-1155 amount, setApprovalForAll, then lockMulti. The deadline is in milliseconds, Swap.sol's in seconds.",
     )]
     pub fn lock_calls(&self, hash: &[u8; 32], deadline: u64) -> Result<Vec<Call>, String> {
         let receiver = self.receiver.ok_or("its receiver is not in yet")?;
         let deadline = number_word(u256::from(deadline / 1_000));
+
+        if let (Some(collection), Some(item)) = (self.token, self.item) {
+            let (approve, lock) = match item.multi {
+                false => (
+                    calldata("approve(address,uint256)", &[address_word(&self.contract), number_word(item.id)]),
+                    calldata("lockNft(bytes32,address,uint64,address,uint256)", &[*hash, address_word(&receiver), deadline, address_word(&collection), number_word(item.id)]),
+                ),
+                true => (
+                    calldata("setApprovalForAll(address,bool)", &[address_word(&self.contract), number_word(u256::from(1u64))]),
+                    calldata(
+                        "lockMulti(bytes32,address,uint64,address,uint256,uint256)",
+                        &[*hash, address_word(&receiver), deadline, address_word(&collection), number_word(item.id), number_word(self.amount)],
+                    ),
+                ),
+            };
+
+            return Ok(vec![
+                Call { to: collection, value: u256::ZERO, input: approve, what: "Let the swap contract move the NFT" },
+                Call { to: self.contract, value: u256::ZERO, input: lock, what: "Lock a swap's NFT" },
+            ]);
+        }
 
         Ok(match self.token {
             None => vec![Call {
@@ -197,6 +218,31 @@ pub fn get_input(hash: &[u8; 32]) -> Vec<u8> {
     calldata("get(bytes32)", &[*hash])
 }
 
+#[document(summary = "Calldata asking Swap.sol which NFT the swap under a hash holds, for eth_call.", category = "Swaps", see_also = "read_item")]
+pub fn item_input(hash: &[u8; 32]) -> Vec<u8> {
+    calldata("item(bytes32)", &[*hash])
+}
+
+#[document(
+    summary = "What Swap.sol's item answered: the NFT a lock holds, or None for the coin or an ERC-20.",
+    category = "Swaps",
+    see_also = "item_input",
+)]
+pub fn read_item(output: &[u8]) -> Result<Option<Item>, String> {
+    if output.len() != 2 * 32 || output[..31].iter().any(|byte| *byte != 0) {
+        return Err("an answer Swap.sol's item does not give: is the contract one from before NFTs?".to_string());
+    }
+
+    let id = u256::from_be_bytes(output[32..].try_into().expect("32 bytes"));
+
+    match output[31] {
+        0 => Ok(None),
+        1 => Ok(Some(Item { id, multi: false })),
+        2 => Ok(Some(Item { id, multi: true })),
+        _ => Err("a kind Swap.sol's item does not give".to_string()),
+    }
+}
+
 #[document(summary = "What Swap.sol's get answered, as a lock.", category = "Swaps", see_also = "get_input")]
 pub fn read_lock(output: &[u8]) -> Result<Lock, String> {
     if output.len() != 8 * 32 {
@@ -222,7 +268,7 @@ pub fn read_lock(output: &[u8]) -> Result<Lock, String> {
     let secret: [u8; 32] = word(6).try_into().expect("32 bytes");
 
     if state == LockState::None {
-        return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: None });
+        return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: None, item: None });
     }
 
     Ok(Lock {
@@ -233,6 +279,7 @@ pub fn read_lock(output: &[u8]) -> Result<Lock, String> {
         deadline: small(5)?.saturating_mul(1_000),
         secret: (state == LockState::Claimed).then_some(secret),
         height: Some(small(7)?).filter(|height| *height > 0),
+        item: None,
     })
 }
 

@@ -181,6 +181,13 @@ pub fn refresh_token() {
     unsafe { sys::refresh_token() }
 }
 
+/// Asks the chain's collection registry to ask this contract's name() and symbol() again, once
+/// the transaction succeeds; for a collection whose answers just changed. The same request as
+/// refresh_token: one asks again for both registries.
+pub fn refresh_collection() {
+    refresh_token()
+}
+
 /// Runs another contract's function as this contract's own: on this contract's storage and
 /// balance, under this call's sender and value, with events in this contract's name. The EVM's
 /// delegatecall, for proxies. Only functions the target exports; never its fallback or a hook.

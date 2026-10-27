@@ -1,4 +1,4 @@
--- Atomic swaps with Bitcoin, chainv4's side: coins or a token locked under the SHA-256 of a
+-- Atomic swaps with Bitcoin, chainv4's side: coins, a token or NFTs locked under the SHA-256 of a
 -- secret, for a recipient who claims them with the secret before a deadline, or back to whoever
 -- locked them after it. Bitcoin's side is an HTLC under the same hash (src/swap/htlc.rs): whoever
 -- claims on one chain shows the secret there, and the other side claims with it on the other.
@@ -10,8 +10,13 @@
 -- may be a little off the clock.
 --
 -- Events: Locked(hash, locker, recipient, token, amount, deadline), the token being the zero
--- address for the chain's coin; Claimed(hash, secret), which the other side reads the secret
--- from; Refunded(hash).
+-- address for the chain's coin, or an NFT collection; LockedItem(hash, kind, id) after it for
+-- NFTs, kind nft or multi; Claimed(hash, secret), which the other side reads the secret from;
+-- Refunded(hash).
+--
+-- NFTs follow docs/nft-standard.md: one token of an NFT collection, or an amount of one id of a
+-- multi-token collection, moved in with transfer_from, so approve this contract for the token, or
+-- make it an operator, first.
 
 --@namespace swaps bytes -> bytes
 
@@ -92,16 +97,28 @@ local function record(hash, recipient, deadline, token, amount)
     events.emit("Locked", hash, ctx.sender, recipient, token, amount, u256(deadline))
 end
 
--- Pays a swap's coins or token to whoever it goes to.
+-- Pays a swap's coins, token or NFTs to whoever it goes to.
 local function pay(hash, to)
     local token = address.parse(field(hash, "token"))
     local amount = u256(field(hash, "amount"))
+    local kind = field(hash, "kind")
 
-    if token == COIN then
+    if kind == "nft" then
+        contracts.call(token, "transfer", to, u256(field(hash, "id")))
+    elseif kind == "multi" then
+        contracts.call(token, "transfer", to, u256(field(hash, "id")), amount)
+    elseif token == COIN then
         accounts.transfer(to, amount)
     else
         contracts.call(token, "transfer", to, amount)
     end
+end
+
+-- Records which NFT a swap holds, once record has the rest.
+local function item(hash, kind, id)
+    set(hash, "kind", kind)
+    set(hash, "id", tostring(id))
+    events.emit("LockedItem", hash, kind, id)
 end
 
 -- Locks the chain's coin the call sends, for recipient to claim with the secret behind hash
@@ -122,6 +139,34 @@ function M.lock_token(hash, recipient, deadline, token, amount)
     amount = u256(amount)
     contracts.call(token, "transfer_from", ctx.sender, ctx.contract, amount)
     record(hash, recipient, deadline, token, amount)
+end
+
+-- Locks one NFT of a collection, which the caller first approved this contract to move, as
+-- lock_token does a token.
+function M.lock_nft(hash, recipient, deadline, collection, id)
+    if ctx.value ~= u256(0) then
+        error("lock_nft takes an NFT, not coins: send none")
+    end
+
+    hash, deadline = fresh(hash, deadline)
+    id = u256(id)
+    contracts.call(collection, "transfer_from", ctx.sender, ctx.contract, id)
+    record(hash, recipient, deadline, collection, u256(1))
+    item(hash, "nft", id)
+end
+
+-- Locks an amount of one id of a multi-token collection, which the caller first made this
+-- contract an operator of.
+function M.lock_multi(hash, recipient, deadline, collection, id, amount)
+    if ctx.value ~= u256(0) then
+        error("lock_multi takes tokens, not coins: send none")
+    end
+
+    hash, deadline = fresh(hash, deadline)
+    id, amount = u256(id), u256(amount)
+    contracts.call(collection, "transfer_from", ctx.sender, ctx.contract, id, amount)
+    record(hash, recipient, deadline, collection, amount)
+    item(hash, "multi", id)
 end
 
 -- Pays a swap to its recipient with its secret, 0x and 64 hex digits, before its deadline, and
@@ -181,6 +226,25 @@ function M.get(hash)
         u256(field(hash, "deadline")),
         field(hash, "secret") or "",
         u256(field(hash, "height") or "0")
+end
+
+-- What kind of thing a swap holds, coin, token, nft or multi, and the NFT's id, or 0; none for
+-- no swap. get's token is the collection, and its amount how many.
+function M.item(hash)
+    bytes32(hash, "the hash")
+    hash = string.lower(hash)
+
+    if field(hash, "state") == nil then
+        return "none", u256(0)
+    end
+
+    local kind = field(hash, "kind")
+
+    if kind == nil then
+        kind = field(hash, "token") == COIN:text() and "coin" or "token"
+    end
+
+    return kind, u256(field(hash, "id") or "0")
 end
 
 return M

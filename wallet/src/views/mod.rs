@@ -7,6 +7,8 @@ mod contracts;
 mod faucet;
 pub mod dapp;
 mod names;
+#[cfg(feature = "nft")]
+mod nfts;
 mod overview;
 mod pair;
 mod receive;
@@ -51,6 +53,9 @@ pub enum Page {
     /// Trading on the DEXes: swaps of tokens, and pools to add to.
     #[cfg(feature = "dex")]
     Trade,
+    /// What the accounts hold of the chain's NFT and multi-token collections.
+    #[cfg(feature = "nft")]
+    Nfts,
     Accounts,
     Settings,
     /// An offline signer's: a request to sign, read off the sender's screen.
@@ -68,6 +73,8 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             (Page::Send, "Send"),
             (Page::Receive, "Receive"),
             (Page::Activity, "Activity"),
+            #[cfg(feature = "nft")]
+            (Page::Nfts, "NFTs"),
             (Page::Names, "Names"),
             (Page::Contracts, "Contracts"),
             #[cfg(feature = "swap")]
@@ -194,6 +201,8 @@ pub struct States {
     swaps: swaps::SwapsState,
     #[cfg(feature = "dex")]
     pub trade: trade::TradeState,
+    #[cfg(feature = "nft")]
+    pub nfts: nfts::NftsState,
 }
 
 impl States {
@@ -206,6 +215,11 @@ impl States {
 
         #[cfg(feature = "dex")]
         if self.trade.answered(ask, result) {
+            return;
+        }
+
+        #[cfg(feature = "nft")]
+        if self.nfts.answered(ask, result) {
             return;
         }
 
@@ -257,6 +271,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Swaps => swaps::show(ui, ctx, &mut states.swaps, &mut states.send),
         #[cfg(feature = "dex")]
         Page::Trade => trade::show(ui, ctx, &mut states.trade, &mut states.send),
+        #[cfg(feature = "nft")]
+        Page::Nfts => nfts::show(ui, ctx, &mut states.nfts, &mut states.send),
         Page::Accounts => accounts::show(ui, ctx, &mut states.accounts),
         Page::Settings => settings::show(ui, ctx, &mut states.settings),
         Page::Sign => sign::show(ui, ctx, &mut states.sign),
