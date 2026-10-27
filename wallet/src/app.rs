@@ -23,6 +23,9 @@ const STATUS_EVERY: f64 = 10.0;
 const HISTORY_EVERY: f64 = 6.0;
 /// The key the wallet keeps everything it remembers under.
 const STORAGE_KEY: &str = "chainv4-wallet";
+/// Where the Bitcoin light client's findings are kept, apart from the settings.
+#[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+const BITCOIN_KEY: &str = "chainv4-bitcoin";
 /// The most proven transactions kept, the newest; older ones are proven again if asked.
 const MAX_CHECKED: usize = 2_000;
 /// Below this width, in points, as on a phone, the sidebar gives way to a bar on top and tabs at
@@ -95,6 +98,14 @@ pub struct Settings {
     /// EVM chains' JSON-RPC URLs, one a line, that the Swaps page reads and sends an EVM leg's
     /// locks and claims through: each is asked its chain id, and serves that chain's legs.
     pub eth_rpc: String,
+    /// Whether the light client follows Bitcoin, and its test network, for swaps and the accounts'
+    /// Bitcoin addresses: off by default, as a first sync takes a while and some data.
+    pub bitcoin_main: bool,
+    pub bitcoin_test: bool,
+    /// Which test network: testnet4, or signet.
+    pub bitcoin_test_network: String,
+    /// A Bitcoin node to try first, such as your own: host:port, or empty for the DNS seeds'.
+    pub bitcoin_peer: String,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -152,6 +163,10 @@ impl Default for Settings {
             esplora: String::new(),
             swap_contract: String::new(),
             eth_rpc: String::new(),
+            bitcoin_main: false,
+            bitcoin_test: false,
+            bitcoin_test_network: "testnet4".to_string(),
+            bitcoin_peer: String::new(),
             vault: None,
             current: String::new(),
         }
@@ -238,6 +253,9 @@ pub struct Wallet {
     swap_contract: Option<String>,
     /// The DEX, and the EVM DEX's router, the node names in GET /status.
     dex: (Option<String>, Option<String>),
+    /// The Bitcoin light clients the settings ask for.
+    #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+    lights: crate::light::Lights,
     wake: egui::Context,
     asked_status: Option<f64>,
     asked_history: f64,
@@ -285,6 +303,11 @@ impl Wallet {
             faucet: None,
             swap_contract: None,
             dex: (None, None),
+            #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+            lights: crate::light::Lights {
+                kept: creation.storage.and_then(|storage| eframe::get_value(storage, BITCOIN_KEY)).unwrap_or_default(),
+                ..Default::default()
+            },
             wake: creation.egui_ctx.clone(),
             asked_status: None,
             asked_history: 0.0,
@@ -408,6 +431,24 @@ impl Wallet {
         if let Some((genesis, state)) = self.chain.saved() {
             self.settings.light.insert(genesis, state);
         }
+    }
+
+    /// Keeps the Bitcoin light clients as the settings say, watching the accounts' addresses and
+    /// the swaps' HTLCs: only while the wallet is open, and never on an offline signer.
+    #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+    fn follow_bitcoin(&mut self) {
+        use crate::light::Net;
+
+        if !matches!(self.lock, Lock::Open) || self.settings.role != Some(Role::Online) {
+            self.lights.stop_all();
+
+            return;
+        }
+
+        let wanted = [(Net::Main, self.settings.bitcoin_main), (Net::test(&self.settings.bitcoin_test_network), self.settings.bitcoin_test)];
+        let (holders, book) = (&self.holders, &self.book);
+        let scripts = |net: Net| crate::light::scripts(holders, book, net.testnet());
+        self.lights.keep(wanted, &self.settings.proxy, &self.settings.bitcoin_peer, scripts, &self.wake);
     }
 
     /// Asks for what is due. An offline signer asks for nothing, nor an install before it says
@@ -711,6 +752,8 @@ impl eframe::App for Wallet {
         let now = now_ms();
         self.take(now, time);
         self.poll(time);
+        #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+        self.follow_bitcoin();
         self.sites();
         chainv4_ui::layout::suit_touch(ui.ctx());
         let palette = self.palette;
@@ -787,6 +830,8 @@ impl eframe::App for Wallet {
                             faucet: self.faucet.as_ref(),
                             swap_contract: self.swap_contract.as_deref(),
                             dex: (self.dex.0.as_deref(), self.dex.1.as_deref()),
+                            #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+                            lights: &mut self.lights,
                         };
                         views::show(ui, &mut ctx, &mut self.views);
                     });
@@ -828,6 +873,12 @@ impl eframe::App for Wallet {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, STORAGE_KEY, &self.settings);
+
+        #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+        {
+            self.lights.sync();
+            eframe::set_value(storage, BITCOIN_KEY, &self.lights.kept);
+        }
     }
 
     /// The paper's color, behind everything: what shows under a phone's status bar.

@@ -259,9 +259,18 @@ An open swap lays out each leg, where it stands, and what to do next:
 - **EVM chains' JSON-RPC,** one URL a line. Each is asked its chain id, and serves that chain's
   legs; with none, EVM legs cannot be followed.
 
-The wallet does not follow Bitcoin: without Esplora, you paste what it needs, a funding outpoint
-or a claim's transaction, and broadcast the signed spend yourself. A Bitcoin light client, for the
-desktop and Android apps, is in the todo.
+**Following Bitcoin**, the wallet has three ways, best first:
+- **its own light client,** on the desktop and Android apps, when Settings, **Bitcoin** follows the
+  swap's network. It asks Bitcoin's peers for compact block filters, so no server learns the
+  HTLC's address. It finds the coins paying the HTLC, with their confirmations, and fills them in
+  to claim or refund. It reads the secret from a claim, and broadcasts the signed spend to its
+  peers. With it, a first lock on Bitcoin counts as standing only once the HTLC is paid in full,
+  in a block.
+- **an Esplora API,** as above;
+- **pasting,** a funding outpoint or a claim's transaction, and broadcasting the signed spend
+  yourself. The browser has this and Esplora alone: it opens no raw connections.
+
+Both sides must follow the same test network, testnet4 or signet, for a testnet swap.
 
 ## What to keep in mind
 

@@ -531,6 +531,38 @@ such as Ethereum, Sepolia or Base, with no one in between. Each swap is two legs
 Settings, **Swaps** names the swap contract when the node does not, an optional Esplora API to
 look Bitcoin up at, and EVM chains' JSON-RPC URLs, one a line. See [Atomic swaps](swaps.md).
 
+### Bitcoin, followed by the wallet itself
+
+On the desktop and Android apps, Settings, **Bitcoin** turns on a light client for Bitcoin, its
+test network (testnet4 or signet), or both. It runs Kyoto (the `bip157` crate):
+- **what it asks:** each block's compact filter (BIP157/158), from Bitcoin's own peers;
+- **what it fetches:** only the blocks whose filters match the scripts it watches, so no server
+  learns which addresses are yours;
+- **what it watches:**
+  - each account's own Bitcoin addresses, its further ones included; on the test networks, its
+    words' first testnet key;
+  - every swap's HTLC on that network.
+
+What it finds shows on **Overview**, a Bitcoin card with the account's balance, confirmed in
+blocks, and its latest coins. On **Swaps**, an HTLC's funding is found with its confirmations, a
+claim's secret is read, and spends go out to Bitcoin's peers.
+
+**Syncing:**
+- a first sync starts from a checkpoint built into the app, a block a week or so before its
+  build, and takes some minutes and a few tens of megabytes;
+- later syncs pick up from where the last one got to, which the wallet keeps between runs, apart
+  from the settings;
+- **Scan again** forgets what it found and starts from the checkpoint, for an account added with
+  history since then.
+
+**Connections:**
+- Bitcoin's DNS seeds give its peers, or name your own node under **Peer** to try first;
+- with a proxy set, every connection and seed lookup goes through it. It must be SOCKS5, as Tor's
+  is: an HTTP proxy is refused rather than gone around.
+
+It runs while the wallet is open, and not on an offline signer, nor in the browser, which opens no
+raw connections.
+
 ### Bitcoin wallets
 
 The offline signer is also a QR hardware wallet for Bitcoin wallets, as a Keystone or a Passport

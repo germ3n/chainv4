@@ -43,12 +43,20 @@ ur = "0.5.2"
 minicbor = { version = "2", default-features = false, features = ["alloc"] }
 
 [features]
-default = ["swap", "dex"]
+default = ["swap", "dex", "bitcoin-light"]
 # Atomic swaps between this chain, Bitcoin and EVM chains: the Swaps page, and the offline signer
 # signing a swap's Bitcoin side.
 swap = ["chainv4/swap"]
 # The Trade page: swaps of tokens on the DEXes, and their pools.
 dex = ["chainv4/dex"]
+# A Bitcoin light client on the desktop and Android: BIP157/158 compact block filters from Bitcoin's
+# own peers, through Kyoto (the bip157 crate), for swaps' HTLCs and the accounts' Bitcoin
+# addresses. The browser, which opens no raw connections, goes without.
+bitcoin-light = ["dep:bip157", "dep:bitcoin"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bip157 = { version = "0.8.0", optional = true }
+bitcoin = { version = "0.32.8", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "links", "wayland", "x11"] }

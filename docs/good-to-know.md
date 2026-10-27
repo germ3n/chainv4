@@ -621,6 +621,22 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
   `--dex-contract`, `--dex-router`, or the name `dex`.
 
+## The Bitcoin light client
+
+- **Off until switched on:** Settings, **Bitcoin**, for Bitcoin, its test network, or both. A
+  first sync downloads a few tens of megabytes of filters from the checkpoint built in.
+- **It sees blocks, not the mempool:** a payment shows once it is mined, with its confirmations.
+- **Coins paid before the checkpoint are not seen,** nor those to an address only added after the
+  client passed their block: **Scan again** starts over from the checkpoint.
+- **Testnet swaps need both sides on one test network:** testnet4 and signet are different chains
+  with the same tb1q addresses.
+- **A proxy must be SOCKS5;** an HTTP proxy stops the light client rather than letting it connect
+  directly.
+- **On the test networks it watches each account's first address alone,** its words' testnet key;
+  on Bitcoin, all of an account's Bitcoin addresses.
+- **What it found is kept apart from the settings** (the `chainv4-bitcoin` entry), so a new
+  install starts from the checkpoint again.
+
 ## The camera
 
 - **The live camera is the wallet's alone.** `chainv4-ui`'s `camera` feature brings it, and nokhwa

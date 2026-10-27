@@ -15,6 +15,8 @@ mod format;
 mod hardware;
 mod history;
 mod keys;
+#[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+mod light;
 mod lock;
 mod metamask;
 mod node;

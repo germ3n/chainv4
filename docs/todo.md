@@ -685,8 +685,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   - **an outside audit** of the node, the swap contract, the HTLC flow and the wallet;
   - **a long run on Bitcoin's testnet** with swaps between people who are not the developers;
   - **legal advice** on exchanging assets where it would run.
-- [ ] **A Bitcoin light client in the wallet,** BIP157/158 compact block filters (Kyoto), on the
-  desktop and Android apps, for swaps to see Bitcoin themselves rather than by pasting or Esplora.
+- [x] **A Bitcoin light client in the wallet,** BIP157/158 compact block filters through Kyoto (the
+  `bip157` crate), on the desktop and Android apps: swaps' HTLCs (funding, confirmations, the
+  claim's secret, broadcasting to peers) and the accounts' Bitcoin balances, from a checkpoint
+  built in, through the SOCKS5 proxy. See [Wallet](wallet.md).
+- [ ] **The Bitcoin light client: next.** Unconfirmed payments from the peers' mempools (Kyoto's
+  gossip monitor), further keys' testnet addresses, checkpoints refreshed each release, and Send
+  paying from the accounts' Bitcoin coins.
 - [ ] **A Bitcoin SPV light client as a contract,** checking headers and merkle proofs with
   `sha256d` exposed to contracts, for proving Bitcoin deposits on chainv4.
 - [ ] **Swaps with more chains.** The swap contracts know a hash and a deadline alone, so any chain

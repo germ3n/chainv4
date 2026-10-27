@@ -61,6 +61,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         held_at(ui, ctx, address);
     }
 
+    #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+    bitcoin(ui, ctx);
+
     ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         ui.horizontal(|ui| {
@@ -166,3 +169,54 @@ fn held(ui: &mut Ui, ctx: &Ctx, symbol: &str, under: &str, token: Option<&str>, 
         });
     });
 }
+
+/// What this account holds on Bitcoin, as the light client found it, on each network it follows:
+/// its balance, confirmed in blocks, and its latest coins.
+#[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+fn bitcoin(ui: &mut Ui, ctx: &Ctx) {
+    let palette = *ctx.palette;
+    let Some(holder) = ctx.holder() else {
+        return;
+    };
+
+    for testnet in [false, true] {
+        let Some(light) = ctx.lights.on(testnet) else {
+            continue;
+        };
+        let scripts = crate::light::account_scripts(std::slice::from_ref(holder), ctx.book, testnet);
+
+        if scripts.is_empty() {
+            continue;
+        }
+
+        let mut coins: Vec<crate::light::Coin> = scripts.iter().flat_map(|script| light.coins(script)).collect();
+        coins.sort_by_key(|coin| std::cmp::Reverse(coin.height));
+        let held: u64 = coins.iter().filter(|coin| coin.spent.is_none()).map(|coin| coin.value).sum();
+        let symbol = if testnet { "tBTC" } else { "BTC" };
+        let status = light.status();
+
+        ui.add_space(14.0);
+        theme::card(ui, &palette, |ui| {
+            theme::caps(ui, &palette, &format!("Bitcoin{}", if testnet { format!(" · {}", light.net.name()) } else { String::new() }));
+            ui.add_space(4.0);
+            theme::fitted(ui, &format!("{} {symbol}", format::units(&held.to_string(), 8)), 32.0, 16.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
+            ui.label(RichText::new(match status.synced {
+                true => format!("confirmed, to block {}", light.tip()),
+                false => format!("so far: syncing, at block {} of {}", light.seen().height, status.headers),
+            }).small().color(palette.muted));
+
+            for coin in coins.iter().take(5) {
+                let depth = light.confirmations(coin.height);
+                let line = format!(
+                    "+{} {symbol} · {} confirmation{}{}",
+                    format::units(&coin.value.to_string(), 8),
+                    depth,
+                    if depth == 1 { "" } else { "s" },
+                    if coin.spent.is_some() { " · spent" } else { "" }
+                );
+                ui.label(RichText::new(line).color(if coin.spent.is_some() { palette.muted } else { palette.ink }));
+            }
+        });
+    }
+}
+

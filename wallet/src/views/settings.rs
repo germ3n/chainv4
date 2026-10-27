@@ -70,6 +70,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         super::dapp::settings(ui, ctx);
         #[cfg(feature = "swap")]
         swaps(ui, ctx);
+        #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+        bitcoin(ui, ctx);
     }
 
     ui.add_space(14.0);
@@ -688,3 +690,60 @@ fn swaps(ui: &mut Ui, ctx: &mut Ctx) {
         }
     });
 }
+
+/// The Bitcoin light client's settings: which networks it follows, a peer to try first, and how
+/// each is doing.
+#[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
+    use crate::light::Net;
+
+    let palette = *ctx.palette;
+    ui.add_space(14.0);
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Bitcoin");
+        ui.label(RichText::new("A light client that asks Bitcoin's own peers for each block's compact filter, and fetches only the blocks that pay or spend your addresses and your swaps' HTLCs: no server learns which are yours. A first sync takes some minutes and a few tens of megabytes; later ones, the blocks since. Through the proxy above when one is set, SOCKS5 alone.").small().color(palette.muted));
+        ui.add_space(6.0);
+        ui.checkbox(&mut ctx.settings.bitcoin_main, "Follow Bitcoin");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut ctx.settings.bitcoin_test, "Follow its test network:");
+            ui.selectable_value(&mut ctx.settings.bitcoin_test_network, "testnet4".to_string(), "testnet4");
+            ui.selectable_value(&mut ctx.settings.bitcoin_test_network, "signet".to_string(), "signet");
+        });
+        super::row(ui, &palette, "Peer", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut ctx.settings.bitcoin_peer).hint_text("empty: Bitcoin's DNS seeds; or host:port, such as your own node").desired_width(f32::INFINITY));
+        });
+
+        if let Some(trouble) = &ctx.lights.trouble {
+            ui.colored_label(palette.bad, trouble);
+        }
+
+        for testnet in [false, true] {
+            let Some(light) = ctx.lights.on(testnet) else {
+                continue;
+            };
+            let (status, seen, net) = (light.status(), light.seen(), light.net);
+            let line = match (&status.stopped, status.synced, status.connected) {
+                (Some(why), ..) => format!("stopped: {why}"),
+                (None, true, _) => format!("synced to block {}", status.headers.max(seen.height)),
+                (None, false, true) => format!("syncing: filters to {} of {}", status.filters.max(seen.height), status.headers),
+                (None, false, false) => "finding peers…".to_string(),
+            };
+            super::row(ui, &palette, net.name(), |ui| {
+                ui.label(RichText::new(line).color(palette.ink));
+
+                if ui.small_button("Scan again").on_hover_text("Forget what it found, and sync again from the checkpoint built in.").clicked() {
+                    ctx.lights.rescan(testnet);
+                }
+            });
+
+            if let Some(warning) = status.warning.filter(|_| !status.synced) {
+                ui.label(RichText::new(warning).small().color(palette.warn));
+            }
+
+            if net == Net::Main && ctx.settings.proxy.trim().is_empty() {
+                ui.label(RichText::new("Without a proxy, Bitcoin's peers see your IP address, though not which addresses are yours.").small().color(palette.muted));
+            }
+        }
+    });
+}
+

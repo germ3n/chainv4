@@ -72,6 +72,9 @@ pub struct SwapsState {
     signer: Option<Box<Awaiting>>,
     /// Forgetting the open swap, asked once and waiting for the second tap.
     forgetting: bool,
+    /// A spend sent to Bitcoin's peers by the light client, by the number it was sent under.
+    #[cfg_attr(not(all(feature = "bitcoin-light", not(target_arch = "wasm32"))), allow(dead_code))]
+    relayed: Option<u64>,
 }
 
 impl Default for SwapsState {
@@ -92,6 +95,7 @@ impl Default for SwapsState {
             looked: Arc::default(),
             signer: None,
             forgetting: false,
+            relayed: None,
         }
     }
 }
@@ -734,13 +738,36 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
             *ctx.changed = true;
         }
 
+        // Or by their claim of the HTLC, as Bitcoin's peers show it to the light client.
+        if ctx.book.swaps[index].secret.is_none()
+            && let Some(secret) = htlc_secret(ctx, &terms)
+        {
+            ctx.book.swaps[index].secret = Some(to_hex(&secret));
+            *ctx.changed = true;
+        }
+
         let secret = ctx.book.swaps[index].secret.as_deref().and_then(from_hex).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
+        let paid = htlc_seen(ctx, &terms);
 
         if let (Some(htlc), Some((_, leg))) = (terms.htlc(), terms.bitcoin()) {
             super::row(ui, &palette, "Bitcoin HTLC", |ui| {
                 ui.vertical(|ui| {
                     super::address(ui, &palette, &htlc.address(leg.network()));
                     ui.label(RichText::new(format!("{} {}", format::units(&leg.sats.to_string(), 8), leg.network().symbol())).small().color(palette.muted));
+
+                    if let Some(paid) = &paid {
+                        let line = match paid.iter().max_by_key(|coin| coin.sats) {
+                            None => "nothing paid to it yet, as Bitcoin's peers show it".to_string(),
+                            Some(coin) => format!(
+                                "paid {} sats, {} confirmation{}{}",
+                                coin.sats,
+                                coin.depth,
+                                if coin.depth == 1 { "" } else { "s" },
+                                if coin.spent { ", and spent" } else { "" }
+                            ),
+                        };
+                        ui.label(RichText::new(line).small().color(palette.soft));
+                    }
                 });
             });
         }
@@ -748,10 +775,15 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
 
         // The first lock, which must stand before the second goes in: a contract's is checked
         // here; Bitcoin's is the second side's to check.
-        let first_stands = match (&terms.first, lock(Side::First)) {
-            (_, None) => Ok(()),
-            (leg, Some(Ok(lock))) => leg.stands(lock, terms.first_deadline),
-            (_, Some(Err(why))) => Err(why.clone()),
+        let first_stands = match (&terms.first, lock(Side::First), &paid) {
+            // Bitcoin's, when the light client follows it: paid in full, in a block.
+            (Leg::Bitcoin(leg), None, Some(paid)) => match paid.iter().any(|coin| coin.sats >= leg.sats && coin.depth >= 1) {
+                true => Ok(()),
+                false => Err("the HTLC holds nothing yet, as Bitcoin's peers show it".to_string()),
+            },
+            (_, None, _) => Ok(()),
+            (leg, Some(Ok(lock)), _) => leg.stands(lock, terms.first_deadline),
+            (_, Some(Err(why)), _) => Err(why.clone()),
         };
 
         // Paying: the starter first; the other only once the first lock stands.
@@ -1006,6 +1038,13 @@ fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Ter
         (state.bitcoin.funding, state.bitcoin.sats) = (outpoint.to_string(), sats.to_string());
     }
 
+    // The coins the light client saw pay it, still unspent.
+    if state.bitcoin.funding.is_empty()
+        && let Some(coin) = htlc_seen(ctx, terms).and_then(|paid| paid.into_iter().find(|coin| !coin.spent))
+    {
+        (state.bitcoin.funding, state.bitcoin.sats) = (coin.outpoint, coin.sats.to_string());
+    }
+
     if state.bitcoin.to.is_empty()
         && let Ok(key) = bitcoin_key(ctx, &ctx.holders[holder], network)
     {
@@ -1090,8 +1129,72 @@ fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Ter
             if !ctx.settings.esplora.trim().is_empty() && theme::quiet(ui, &palette, "Broadcast on Esplora").clicked() {
                 broadcast(ctx, state, signed.clone());
             }
+
+            #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+            if let Some(light) = ctx.lights.on_mut(network == Network::Test)
+                && theme::quiet(ui, &palette, "Broadcast to Bitcoin's peers").clicked()
+                && let Some(raw) = from_hex(&format!("0x{signed}"))
+            {
+                state.relayed = Some(light.broadcast(raw));
+            }
         });
+
+        // What came of a broadcast through the light client.
+        #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+        if let Some(id) = state.relayed
+            && let Some(result) = ctx.lights.on(network == Network::Test).and_then(|light| light.broadcasted(id))
+        {
+            state.trouble = Some(match result {
+                Ok(txid) => format!("Sent to Bitcoin's peers: {txid}"),
+                Err(why) => format!("Not sent: {why}"),
+            });
+            state.relayed = None;
+        }
     }
+}
+
+/// A coin paying a swap's HTLC, as the light client saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Paid {
+    /// txid:vout, as explorers write it.
+    outpoint: String,
+    sats: u64,
+    depth: u32,
+    spent: bool,
+}
+
+/// The coins paying a swap's HTLC, when a light client follows its Bitcoin network: none for a
+/// swap with no Bitcoin leg, or a network not followed.
+#[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+fn htlc_seen(ctx: &Ctx, terms: &Terms) -> Option<Vec<Paid>> {
+    let (htlc, (_, leg)) = (terms.htlc()?, terms.bitcoin()?);
+    let light = ctx.lights.on(leg.testnet)?;
+
+    Some(
+        light
+            .coins(&htlc.output())
+            .into_iter()
+            .map(|coin| Paid { outpoint: format!("{}:{}", coin.txid, coin.vout), sats: coin.value, depth: light.confirmations(coin.height), spent: coin.spent.is_some() })
+            .collect(),
+    )
+}
+
+#[cfg(not(all(feature = "bitcoin-light", not(target_arch = "wasm32"))))]
+fn htlc_seen(_: &Ctx, _: &Terms) -> Option<Vec<Paid>> {
+    None
+}
+
+/// The secret a claim of the HTLC showed, as the light client saw it.
+#[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+fn htlc_secret(ctx: &Ctx, terms: &Terms) -> Option<[u8; 32]> {
+    let (htlc, (_, leg)) = (terms.htlc()?, terms.bitcoin()?);
+
+    ctx.lights.on(leg.testnet)?.secret(&htlc.output(), &terms.hash)
+}
+
+#[cfg(not(all(feature = "bitcoin-light", not(target_arch = "wasm32"))))]
+fn htlc_secret(_: &Ctx, _: &Terms) -> Option<[u8; 32]> {
+    None
 }
 
 enum Signed {
