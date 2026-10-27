@@ -212,6 +212,14 @@ docker/pow.sh join 203.0.113.7 --gpu
 - **Everyone else** on the old chain needs the new genesis, and the wallet's pinned genesis for
   the node changes: it follows the new chain once you forget the old one in its Settings.
 
+### A faucet
+
+`docker/pow.sh faucet https://your-vps --fund 1000`, here, makes a key for a
+[faucet](faucet.md), funds it from your key through the VPS's node, copies it to
+`docker/config/faucet.key`, and adds `FAUCET_AMOUNT`, `FAUCET_EVERY` and `FAUCET_WORK` to
+`docker/.env`. `push` takes the key along, as it does the voting key, and `up` hands it to the
+node's user; the node then serves `POST /faucet`, and the wallet and explorer it serves show it.
+
 ## Podman
 
 `CONTAINER_ENGINE=podman`, in the environment or `docker/.env`, has `docker/compose.sh` and

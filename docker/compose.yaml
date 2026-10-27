@@ -33,11 +33,15 @@ services:
       BOOTNODES: ${BOOTNODES:-}
       INDEX_EVENTS: ${INDEX_EVENTS:-genesis}
       INDEX_ADDRESSES: ${INDEX_ADDRESSES:-genesis}
+      FAUCET_KEY: ${FAUCET_KEY:-}
+      FAUCET_AMOUNT: ${FAUCET_AMOUNT:-10}
+      FAUCET_EVERY: ${FAUCET_EVERY:-24h}
+      FAUCET_WORK: ${FAUCET_WORK:-20}
       EXTRA_ARGS: ${EXTRA_ARGS:-}
     volumes:
       - chain:/data
-      # A genesis.json to start from, producer.key and validator.key to sign with, and
-      # mining.token for workers to mine with.
+      # A genesis.json to start from, producer.key and validator.key to sign with,
+      # mining.token for workers to mine with, and faucet.key for a faucet to pay from.
       - ./config:/config:ro,z
     # Peer-to-peer goes straight to the node: QUIC is TLS 1.3 already, with keys bound to peer ids.
     ports:

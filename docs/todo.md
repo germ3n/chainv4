@@ -511,6 +511,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ### Node, API and tooling
 
+- [x] **A faucet for dev chains.** `--faucet-key` serves `POST /faucet`: a drip per address and
+  per IP each period, each request with a moment's proof of work; the wallet, the explorer and
+  `chainv4 faucet` ask it, and `docker/pow.sh faucet` sets one up on the VPS. See
+  [Faucet](faucet.md).
+- [ ] **The faucet's limits survive a restart.** They live in memory; a column of their own would
+  keep them.
 - [ ] **Engine pools sized on the node.** Each engine's per-node resources are constants in the
   code: Lua keeps `POOL_SIZE` (16) pristine Luau states built ahead by `BUILDERS` (2) threads,
   WebAssembly a module cache of `MODULE_CACHE_BYTES` (32 MiB) and `MODULE_CACHE_ENTRIES` (1024),

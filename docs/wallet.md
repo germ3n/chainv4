@@ -318,6 +318,12 @@ period, and which names each address owns; what each name is, the wallet proves.
   pointing, and so on, with the name and what it sets. It cannot know what a registration burns;
   the chain charges that as it runs.
 
+## Faucet
+
+On a node that runs a [faucet](faucet.md), as a dev or test chain's may, the Overview has a
+**Faucet** card: pick one of the account's addresses and **Get**. The wallet works out the
+faucet's proof of work a slice a frame, so the page keeps moving, then asks.
+
 ## Contracts
 
 The Contracts page (`wallet/src/views/contracts.rs`) reads, calls and deploys contracts of every

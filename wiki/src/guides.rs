@@ -17,7 +17,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
     ("Start here", &["readme", "good-to-know", "architecture", "development"]),
     ("The chain", &["chain", "genesis", "consensus", "finality", "fees", "crypto", "storage"]),
     ("Contracts", &["contracts", "contract-storage", "token-standard"]),
-    ("Running a node", &["node", "api", "light-client", "docker"]),
+    ("Running a node", &["node", "api", "light-client", "docker", "faucet"]),
     ("Apps", &["explorer", "wallet"]),
     ("Project", &["todo"]),
 ];

@@ -137,6 +137,9 @@ The explorer does not have to take the node's word for balances. It runs the lib
 | Settings | The node, whether it answers and how updates arrive, the chain it is on, the proxy every request goes through, dark or light, and the genesis the light client pinned there, which it can forget. |
 | More | On a phone, the pages the tabs have no room for. |
 
+**Faucet,** under Tools, on a node that runs a [faucet](faucet.md): coins for an address, an
+Ethereum `0x…` or a name, its proof of work worked out a slice a frame.
+
 ## Getting around
 
 **On a wide screen,** a sidebar lists the pages in three groups: Chain (Overview, Block map,

@@ -4,6 +4,7 @@
 mod accounts;
 mod activity;
 mod contracts;
+mod faucet;
 pub mod dapp;
 mod names;
 mod overview;
@@ -101,6 +102,8 @@ pub struct Ctx<'a> {
     /// What wakes the app when something arrives later, as a key file picked.
     #[cfg_attr(target_os = "android", allow(dead_code))]
     pub wake: &'a egui::Context,
+    /// The node's faucet, as GET /status describes it, on a node that runs one.
+    pub faucet: Option<&'a serde_json::Value>,
 }
 
 impl Ctx<'_> {
@@ -159,6 +162,7 @@ pub struct States {
     settings: settings::SettingsState,
     sign: sign::SignState,
     pub dapp: dapp::DappState,
+    pub faucet: faucet::FaucetState,
 }
 
 impl States {
@@ -199,7 +203,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
     }
 
     match *ctx.page {
-        Page::Overview => overview::show(ui, ctx),
+        Page::Overview => {
+            overview::show(ui, ctx);
+            faucet::card(ui, ctx, &mut states.faucet);
+        }
         Page::Send => send::show(ui, ctx, &mut states.send),
         Page::Receive => receive::show(ui, ctx, &mut states.receive),
         Page::Activity => activity::show(ui, ctx),

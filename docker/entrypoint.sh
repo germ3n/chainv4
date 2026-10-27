@@ -23,6 +23,11 @@
 #   BOOTNODES        this node's own bootnodes, beside the chain's, separated by spaces
 #   INDEX_EVENTS     which blocks the event index keeps: genesis (the default), a height,
 #   INDEX_ADDRESSES  latest-N, or off; the same for the address index
+#   FAUCET_KEY       a faucet's key file, for a dev or test chain: /config/faucet.key when
+#                    there is one. With one, the API serves POST /faucet, paying from it
+#   FAUCET_AMOUNT    each drip, in whole coins: 10 unless set
+#   FAUCET_EVERY     how long an address, and an IP, wait between drips: 24h unless set
+#   FAUCET_WORK      the zero bits a request's proof of work starts with: 20 unless set
 #   EXTRA_ARGS       anything else, passed on to chainv4
 set -eu
 
@@ -142,6 +147,17 @@ for key in "${PRODUCER_KEY:-}" "${VALIDATOR_KEY:-}"; do
         exit 1
     fi
 done
+
+# A faucet, when there is a key for one.
+FAUCET_KEY=${FAUCET_KEY:-}
+if [ -z "$FAUCET_KEY" ] && [ -s "$config/faucet.key" ]; then FAUCET_KEY=$config/faucet.key; fi
+
+if [ -n "$FAUCET_KEY" ] && [ ! -r "$FAUCET_KEY" ]; then
+    echo "[docker] cannot read $FAUCET_KEY as uid $(id -u): running no faucet. Make it readable (docker/pow.sh up does)" >&2
+elif [ -n "$FAUCET_KEY" ]; then
+    set -- "$@" --faucet-key "$FAUCET_KEY" --faucet-amount "${FAUCET_AMOUNT:-10}" --faucet-every "${FAUCET_EVERY:-24h}" --faucet-work "${FAUCET_WORK:-20}"
+    echo "[docker] running a faucet: ${FAUCET_AMOUNT:-10} a drip, every ${FAUCET_EVERY:-24h}"
+fi
 
 # Word-split on purpose: EXTRA_ARGS holds several arguments.
 # shellcheck disable=SC2086

@@ -336,6 +336,21 @@ code and storage, `eth_call` and `eth_estimateGas`, fees, `eth_sendRawTransactio
 and receipts by their keccak hash, blocks, and `eth_getLogs`. Only the latest state is kept. See
 [Ethereum's tools](ethereum.md#json-rpc).
 
+### `GET /faucet` and `POST /faucet`
+
+On a node that runs a [faucet](faucet.md). `GET /faucet` answers its settings, as `GET /status`
+shows them under `faucet`, and how much it holds:
+
+```json
+{ "address": "ed25519:0x…", "amount": "10000000000000000000", "every_ms": 86400000, "work_bits": 20, "window_ms": 600000, "balance": "…" }
+```
+
+`POST /faucet` with `{"to": "ed25519:0x…", "window": W, "nonce": N}`, the proof of work for that
+address and window, sends a drip and answers `{"id", "to", "amount"}`. It answers 400 for work
+that falls short or is for another window, or an address the chain takes no transfer to; 429 with
+how long to wait when the address or the connection had a drip this period; 503 when the faucet is
+dry; and 404 on a node with none.
+
 ### `GET /names`
 
 The chain's [names](names.md): their `suffix`, the `prices` a year costs now by length, as decimal

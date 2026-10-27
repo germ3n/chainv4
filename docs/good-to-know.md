@@ -455,6 +455,17 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   level again, since each runs it fresh, before the call is attached: a top level sees no `ctx`
   or `storage`.
 
+## The faucet
+
+- **Its limits forget on restart.** Who had a drip when lives in the node's memory alone.
+- **Behind a proxy, the IP is the last X-Forwarded-For names,** and only when the connection comes
+  from this machine or a private network: the Docker stack's nginx appends the real one. A node
+  reached straight from the internet goes by the connection.
+- **The faucet's key is hot:** it sits on the node. Fund it with what you would give away, and top
+  it up as it drains; `GET /faucet` says what it holds.
+- **Work is bound to the window it names,** ten minutes, and the faucet takes the last one too: a
+  clock far off fails the work.
+
 ## MetaMask's QR hardware wallet
 
 - **The pairing code shows every Ethereum address the words make.** It is the extended public key

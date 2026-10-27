@@ -18,6 +18,8 @@ use {
 pub mod db;
 #[cfg(all(feature = "client", feature = "evm"))]
 mod evm;
+#[cfg(all(feature = "client", feature = "sha256"))]
+mod faucet;
 pub mod genesis;
 mod layout;
 #[cfg(feature = "client")]
@@ -37,6 +39,8 @@ pub use worker::gpus;
 pub use light::{LightArgs, light};
 #[cfg(feature = "client")]
 pub use send::{SendArgs, TlsArgs, TxArgs, send};
+#[cfg(all(feature = "client", feature = "sha256"))]
+pub use faucet::{FaucetArgs, faucet};
 
 type CliResult<T> = Result<T, Box<dyn Error>>;
 
@@ -179,6 +183,43 @@ fn parse_words(text: &str) -> Result<usize, String> {
 /// A whole, non-negative amount in decimal.
 pub fn parse_amount(text: &str) -> Result<u256, String> {
     u256::from_str_radix(text, 10).map_err(|_| format!("{text} is not a whole amount"))
+}
+
+/// An amount in whole coins, as people write one, such as 10 or 0.5: in the coin's smallest units,
+/// at its decimals. More decimal places than the coin has are refused rather than rounded.
+pub fn parse_coins(text: &str, decimals: u8) -> Result<u256, String> {
+    let bad = || format!("{text} is not an amount of coins, such as 10 or 0.5");
+    let (whole, fraction) = text.trim().split_once('.').unwrap_or((text.trim(), ""));
+
+    if whole.is_empty() && fraction.is_empty() || !whole.chars().chain(fraction.chars()).all(|c| c.is_ascii_digit()) {
+        return Err(bad());
+    }
+
+    if fraction.len() > usize::from(decimals) {
+        return Err(format!("{text} has more decimal places than the coin's {decimals}"));
+    }
+
+    let digits = format!("{whole}{fraction:0<width$}", width = usize::from(decimals));
+
+    u256::from_str_radix(&digits, 10).map_err(|_| bad())
+}
+
+/// A span of time as people write one, such as 24h, 30m, 90s or 2d: in milliseconds.
+pub fn parse_duration(text: &str) -> Result<u64, String> {
+    let bad = || format!("{text} is not a span of time, such as 24h, 30m or 90s");
+    let text = text.trim();
+    let split = text.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?;
+    let (count, unit) = text.split_at(split);
+    let count: u64 = count.parse().map_err(|_| bad())?;
+    let unit = match unit {
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => return Err(bad()),
+    };
+
+    count.checked_mul(unit).ok_or_else(bad)
 }
 
 /// The narrowest Amount that holds a value.

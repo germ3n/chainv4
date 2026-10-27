@@ -24,6 +24,9 @@ enum Command {
     /// Signs a transaction and submits it to a node's HTTP API.
     #[cfg(feature = "client")]
     Send(Box<cli::SendArgs>),
+    /// Asks a node's faucet for a drip, for a dev or test chain, doing the proof of work it wants.
+    #[cfg(all(feature = "client", feature = "sha256"))]
+    Faucet(cli::FaucetArgs),
     /// Writes a genesis file with the development defaults, to edit and run with --genesis.
     Genesis(cli::genesis::GenesisArgs),
     /// Shows the storage layout contract code declares, and with --from, checks it keeps an
@@ -157,6 +160,24 @@ struct NodeArgs {
     #[cfg(feature = "http")]
     #[arg(long, requires = "http")]
     wallet: Option<std::path::PathBuf>,
+    /// Run a faucet at the API's POST /faucet, for a dev or test chain, paying from this key file's
+    /// account: fund it first. Each address, and each IP, gets a drip once every --faucet-every.
+    #[cfg(feature = "faucet")]
+    #[arg(long, requires = "http")]
+    faucet_key: Option<std::path::PathBuf>,
+    /// Each drip, in whole coins, such as 10 or 0.5.
+    #[cfg(feature = "faucet")]
+    #[arg(long, requires = "faucet_key", default_value = "10")]
+    faucet_amount: String,
+    /// How long an address, and an IP, wait between drips: 24h, 30m, 90s or 2d.
+    #[cfg(feature = "faucet")]
+    #[arg(long, requires = "faucet_key", default_value = "24h", value_parser = cli::parse_duration)]
+    faucet_every: u64,
+    /// How many zero bits the proof of work each request carries starts with: each one doubles the
+    /// asker's hashing. 20 is about a second in a browser.
+    #[cfg(feature = "faucet")]
+    #[arg(long, requires = "faucet_key", default_value_t = 20, value_parser = clap::value_parser!(u32).range(0..=40))]
+    faucet_work: u32,
     /// Tell clients what the node does as it happens, on the API's GET /stream.
     #[cfg(feature = "stream")]
     #[arg(long, requires = "http")]
@@ -203,6 +224,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Keygen(args)) => cli::keygen(args),
         #[cfg(feature = "client")]
         Some(Command::Send(args)) => cli::send(*args),
+        #[cfg(all(feature = "client", feature = "sha256"))]
+        Some(Command::Faucet(args)) => cli::faucet(args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
         Some(Command::Layout(args)) => cli::layout(args),
         Some(Command::Db(args)) => cli::db(args),
@@ -363,10 +386,24 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "http")]
     if let Some(address) = args.http {
+        #[cfg(feature = "faucet")]
+        let faucet = match &args.faucet_key {
+            Some(path) => {
+                let text = std::fs::read_to_string(path).map_err(|err| format!("could not read the faucet's key {}: {err}", path.display()))?;
+                let key = chainv4::crypto::keypair::Keypair::from_key_file(&text).map_err(|err| format!("the faucet's key {}: {err}", path.display()))?;
+                let amount = cli::parse_coins(&args.faucet_amount, genesis.coin.decimals)?;
+                log::info!("[faucet] {} {} a drip, from {}, every {} ms", args.faucet_amount, genesis.coin.symbol, key.public().address(), args.faucet_every);
+
+                Some(api::FaucetConfig { key, amount, every_ms: args.faucet_every, work_bits: args.faucet_work })
+            }
+            None => None,
+        };
         let options = api::ApiOptions {
             cors: args.cors,
             explorer: args.explorer,
             wallet: args.wallet,
+            #[cfg(feature = "faucet")]
+            faucet,
         };
         let address = api::start(db, Some(node.handle()), &genesis, address, options)?;
         log::info!("[http] listening on {address}");

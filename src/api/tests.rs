@@ -1440,9 +1440,9 @@ fn the_explorer_and_the_wallet_are_served_beside_the_routes() {
     let db = Arc::new(MemoryDb::default());
     Chain::open(db.clone(), &free()).unwrap();
     let options = ApiOptions {
-        cors: Vec::new(),
         explorer: Some(dir.clone()),
         wallet: Some(wallet.clone()),
+        ..ApiOptions::default()
     };
     let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
     let (status, head, body) = raw(address, "GET", "/", "");
@@ -1953,4 +1953,78 @@ fn blocks_say_what_they_minted() {
     assert_eq!(ok(address, "/blocks/1")["reward"], initial.to_string());
     assert_eq!(ok(address, "/blocks/0")["reward"], "0");
     assert_eq!(ok(serve().address, "/blocks/1")["reward"], "0", "a chain without a reward");
+}
+
+/// Asks a faucet, from an IP a proxy on this machine names: a request with a proof of work worked
+/// out for that address and window.
+#[cfg(feature = "faucet")]
+fn drip(address: SocketAddr, to: &Address, window: u64, nonce: u64, ip: &str) -> (u16, Value) {
+    let body = json!({ "to": to.to_string(), "window": window, "nonce": nonce }).to_string();
+    let headers = format!("Content-Type: application/json\r\nContent-Length: {}\r\nX-Forwarded-For: {ip}\r\n", body.len());
+    let mut stream = TcpStream::connect(address).unwrap();
+    write!(stream, "POST /faucet HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{headers}\r\n{body}").unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+
+    (head.split(' ').nth(1).unwrap().parse().unwrap(), serde_json::from_str(body).unwrap())
+}
+
+#[cfg(feature = "faucet")]
+#[test]
+fn a_faucet_drips_to_each_address_and_ip_once_a_period_for_a_moments_work() {
+    use crate::faucet::{faucet_window, solve_faucet};
+
+    let genesis = free();
+    let db = Arc::new(MemoryDb::default());
+    let chain = Chain::open(db.clone(), &genesis).unwrap();
+    let id = chain.genesis();
+    let faucet = crate::api::FaucetConfig { key: DevAuthority::dev_keypair(), amount: u256::from(5_000u64), every_ms: 3_600_000, work_bits: 8 };
+    let options = ApiOptions { faucet: Some(faucet), ..ApiOptions::default() };
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), options).unwrap();
+    let window = faucet_window(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64);
+    let work = |to: &Address, window: u64| solve_faucet(&id, to, window, 8, 0, 1 << 20).unwrap();
+    let [alice, bob, carol] = [1u8, 2, 3].map(|byte| Address::Ed25519([byte; 32]));
+
+    // What clients read before they ask.
+    let about = ok(address, "/faucet");
+
+    assert_eq!((about["amount"].as_str(), about["work_bits"].as_u64(), about["every_ms"].as_u64()), (Some("5000"), Some(8), Some(3_600_000)));
+    assert_eq!(about["address"], DevAuthority::dev_keypair().public().address().to_string());
+    assert!(about["balance"].as_str().unwrap().parse::<u128>().unwrap() > 0);
+    assert_eq!(ok(address, "/status")["faucet"]["amount"], "5000");
+
+    // Work for this address and window: a drip.
+    let (status, answer) = drip(address, &alice, window, work(&alice, window), "203.0.113.1");
+
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!((answer["to"].as_str(), answer["amount"].as_str()), (Some(alice.to_string().as_str()), Some("5000")));
+
+    // Again for the same address, from anywhere: too soon. Another address from the same IP: too.
+    let (status, answer) = drip(address, &alice, window, work(&alice, window), "203.0.113.2");
+
+    assert_eq!(status, 429, "{answer}");
+    assert!(answer["error"].as_str().unwrap().contains("again in 59m") || answer["error"].as_str().unwrap().contains("again in 1h"), "{answer}");
+    assert_eq!(drip(address, &bob, window, work(&bob, window), "203.0.113.1").0, 429);
+
+    // Another address from another IP, with the last window's work: a drip, at the next nonce.
+    let (status, second) = drip(address, &bob, window - 1, work(&bob, window - 1), "203.0.113.2");
+
+    assert_eq!(status, 200, "{second}");
+    assert_ne!(second["id"], answer["id"]);
+
+    // Work that falls short, is for another address, or for a window gone by, is refused, and
+    // leaves the address free to ask properly.
+    let short = (0..).find(|nonce| !crate::faucet::enough_work(&crate::faucet::faucet_hash(&id, &carol, window, *nonce), 8)).unwrap();
+
+    assert_eq!(drip(address, &carol, window, short, "203.0.113.3").0, 400);
+    assert_eq!(drip(address, &carol, window, work(&alice, window), "203.0.113.3").0, 400);
+    assert_eq!(drip(address, &carol, window - 2, work(&carol, window - 2), "203.0.113.3").0, 400);
+    assert_eq!(drip(address, &carol, window, work(&carol, window), "203.0.113.3").0, 200);
+
+    // A node without a faucet has none to show.
+    let plain = serve();
+
+    assert_eq!(get(plain.address, "/faucet").0, 404);
+    assert_eq!(ok(plain.address, "/status")["faucet"], Value::Null);
 }

@@ -28,6 +28,10 @@ pub struct Status {
     /// nodes.
     #[serde(default)]
     pub bootnodes: Vec<String>,
+    /// The node's faucet, on a node that runs one: who pays, how much, how often and how much
+    /// work a request carries.
+    #[serde(default)]
+    pub faucet: Option<Value>,
 }
 
 impl Status {

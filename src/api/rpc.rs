@@ -50,7 +50,7 @@ impl RpcError {
 impl From<ApiError> for RpcError {
     fn from(err: ApiError) -> RpcError {
         let message = match err {
-            ApiError::BadRequest(message) | ApiError::NotFound(message) | ApiError::Conflict(message) | ApiError::Unavailable(message) => message,
+            ApiError::BadRequest(message) | ApiError::NotFound(message) | ApiError::Conflict(message) | ApiError::Unavailable(message) | ApiError::TooMany(message) => message,
             ApiError::Db(err) => err.to_string(),
         };
 

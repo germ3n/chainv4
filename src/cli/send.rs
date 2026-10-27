@@ -368,7 +368,7 @@ fn name_of(names: &NamesConfig, text: &str) -> CliResult<String> {
 
 /// What a name resolves to now, from the node.
 #[cfg(feature = "names")]
-fn resolve(agent: &Agent, node: &str, name: &str) -> CliResult<Address> {
+pub(super) fn resolve(agent: &Agent, node: &str, name: &str) -> CliResult<Address> {
     let answer = ok(agent.get(format!("{node}/names/{name}")).call())?;
     let status = answer["status"].as_str().unwrap_or("unknown");
     let target = answer["resolves_to"].as_str().ok_or_else(|| format!("{name} resolves to nothing: it is {status}"))?;

@@ -47,9 +47,14 @@ use {
 #[cfg(feature = "stream")]
 use axum::response::sse::{Event, KeepAlive, Sse};
 
+#[cfg(feature = "faucet")]
+mod faucet;
 mod json;
 #[cfg(feature = "ethereum")]
 mod rpc;
+
+#[cfg(feature = "faucet")]
+pub use faucet::FaucetConfig;
 
 /// How many blocks a listing returns when the client does not say.
 const DEFAULT_PAGE: u64 = 20;
@@ -118,6 +123,9 @@ struct Api {
     vote_rewards: VoteRewardSource,
     /// Genesis's bootnodes, which stand until governance decides others.
     genesis_bootnodes: Arc<Vec<String>>,
+    /// The faucet, on a node that runs one.
+    #[cfg(feature = "faucet")]
+    faucet: Option<Arc<faucet::Faucet>>,
 }
 
 impl Api {
@@ -140,6 +148,9 @@ pub struct ApiOptions {
     pub explorer: Option<PathBuf>,
     #[document(summary = "A built wallet web app, trunk's dist directory, to serve from /wallet/ on the API's own origin, so it talks to the node that served it.")]
     pub wallet: Option<PathBuf>,
+    #[document(summary = "A faucet to run at POST /faucet, for a dev or test chain; None for none.")]
+    #[cfg(feature = "faucet")]
+    pub faucet: Option<FaucetConfig>,
 }
 
 #[document(
@@ -153,7 +164,7 @@ pub struct ApiOptions {
         options = "Who else it answers, and what it serves besides the chain.",
     },
     returns = "The address it listens on, which tells you the port when address asked for port 0.",
-    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 500, or 503 when the node cannot take transactions.",
+    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream; GET /faucet and POST /faucet, on a node run with --faucet-key. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 429 for a faucet asked again too soon, 500, or 503 when the node cannot take transactions.",
     see_also = "Node, Address, NodeHandle",
 )]
 pub fn start(
@@ -210,7 +221,13 @@ pub fn start(
                     reward,
                     vote_rewards,
                     genesis_bootnodes,
-                })).await {
+                    #[cfg(feature = "faucet")]
+                    faucet: options.faucet.map(|config| Arc::new(faucet::Faucet::new(config))),
+                })
+                // Who connects, for the faucet's limits by IP.
+                .into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                {
                     log::error!("[http] {err}");
                 }
             })
@@ -255,6 +272,8 @@ fn router(api: Api) -> Router {
     let router = router.route("/governance", get(governance));
     #[cfg(feature = "ethereum")]
     let router = router.route("/rpc", post(ethereum_rpc));
+    #[cfg(feature = "faucet")]
+    let router = router.route("/faucet", get(faucet::about).post(faucet::give));
     #[cfg(feature = "names")]
     let router = router.route("/names", get(names)).route("/names/{name}", get(name)).route("/accounts/{address}/names", get(account_names));
     #[cfg(feature = "stream")]
@@ -353,6 +372,9 @@ fn app_file(root: &std::path::Path, wanted: &str) -> Result<Response, ApiError> 
 enum ApiError {
     BadRequest(String),
     NotFound(String),
+    /// Asked again too soon.
+    #[cfg_attr(not(feature = "faucet"), allow(dead_code))]
+    TooMany(String),
     /// The transaction's nonce is used or already waiting.
     Conflict(String),
     /// The node cannot take transactions right now.
@@ -371,6 +393,7 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             ApiError::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            ApiError::TooMany(message) => (StatusCode::TOO_MANY_REQUESTS, message),
             ApiError::Conflict(message) => (StatusCode::CONFLICT, message),
             ApiError::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
             ApiError::Db(err) => {
@@ -452,7 +475,20 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "vote_rewards": vote_rewards,
         "max_block_bytes": api.max_block_bytes,
         "bootnodes": api.bootnodes(&State::new(db.clone()))?,
+        "faucet": faucet_json(&api),
     })))
+}
+
+/// The faucet's settings, for clients to show it by; null on a node that runs none.
+fn faucet_json(api: &Api) -> Value {
+    #[cfg(feature = "faucet")]
+    if let Some(faucet) = &api.faucet {
+        return faucet.json();
+    }
+
+    let _ = api;
+
+    Value::Null
 }
 
 /// A checkpoint with its block's height.

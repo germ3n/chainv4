@@ -109,6 +109,7 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `node` | The node, the chain and the CLI, which stops cleanly on SIGTERM and SIGINT through `signal-hook`. |
 | `http` | The HTTP API. |
 | `stream` | `GET /stream`, and the node's `--stream`. Needs `http`. |
+| `faucet` | A [faucet](faucet.md) for dev and test chains: `--faucet-key` and `POST /faucet`. Brings `http` and `sha256`; `chainv4 faucet` comes with `client`. |
 | `client` | `chainv4 send`, `light` and `layout --from`: HTTP, and HTTPS through rustls, with `--ca-cert` and `--insecure`. |
 | `gpu` | Off by default: mining on the GPU, through the `chainv4-gpu` crate and wgpu, for `--mine-gpu`, `chainv4 worker --gpu` and `chainv4 gpus`. |
 | `finality-ffg`, `finality-authority`, `finality-depth` | Kinds of finality. `finality-ffg` brings `staking`. |

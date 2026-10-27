@@ -66,6 +66,8 @@ pub enum Ask {
     AccountNames(String),
     /// A JSON-RPC request to POST /rpc, as its body: what EVM reads go through.
     Rpc(String),
+    /// A request to the node's faucet, with its proof of work: the body of POST /faucet.
+    Faucet(String),
 }
 
 impl Ask {
@@ -83,6 +85,7 @@ impl Ask {
             Ask::Name(name) => format!("/names/{}", encode(name)),
             Ask::AccountNames(address) => format!("/accounts/{address}/names?limit=100"),
             Ask::Rpc(_) => "/rpc".to_string(),
+            Ask::Faucet(_) => "/faucet".to_string(),
             Ask::Contract(address) => format!("/contracts/{address}"),
             Ask::Validators => "/validators".to_string(),
             Ask::Signers => "/signers".to_string(),
@@ -138,7 +141,7 @@ impl Ask {
                 json!(contract),
                 json!(function)
             )),
-            Ask::Offer(body) | Ask::Submit(body) | Ask::Rpc(body) => Some(body.clone()),
+            Ask::Offer(body) | Ask::Submit(body) | Ask::Rpc(body) | Ask::Faucet(body) => Some(body.clone()),
             _ => None,
         }
     }

@@ -11,7 +11,7 @@ members = ["macro", "wiki", "gpu"]
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -35,6 +35,9 @@ evm = ["vm", "keccak256", "abi", "dep:revm"]
 abi = ["keccak256", "dep:serde_json"]
 rocksdb = ["dep:rocksdb"]
 http = ["dep:axum", "dep:serde_json", "node"]
+# A faucet for dev and test chains: the node's --faucet-key pays POST /faucet, a drip per address
+# and per IP each window, each asked with a moment's proof of work (src/faucet.rs).
+faucet = ["http", "sha256"]
 # GET /stream: what a node does, pushed to clients as it happens. A node only streams when started
 # with --stream.
 stream = ["http", "dep:tokio-stream"]

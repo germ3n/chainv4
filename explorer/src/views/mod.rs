@@ -19,6 +19,7 @@ pub mod account;
 pub mod block;
 pub mod chart;
 pub mod events;
+pub mod faucet;
 pub mod finality;
 pub mod hops;
 pub mod map;
@@ -48,6 +49,8 @@ pub enum View {
     Tokens,
     Finality,
     Send,
+    /// The node's faucet, on a dev or test chain.
+    Faucet,
     Settings,
     /// On a phone, the pages the tabs have no room for.
     More,
@@ -58,7 +61,7 @@ impl View {
     pub const GROUPS: [(&'static str, &'static [(View, &'static str)]); 3] = [
         ("Chain", &[(View::Overview, "Overview"), (View::Map, "Block map"), (View::Mempool, "Mempool"), (View::Tokens, "Tokens")]),
         ("Network", &[(View::Network, "Network"), (View::Finality, "Finality")]),
-        ("Tools", &[(View::Send, "Send"), (View::Settings, "Settings")]),
+        ("Tools", &[(View::Send, "Send"), (View::Faucet, "Faucet"), (View::Settings, "Settings")]),
     ];
 
     /// A phone's tabs, along the bottom.
@@ -71,10 +74,11 @@ impl View {
     ];
 
     /// The pages More lists, with what each is for.
-    pub const MORE: [(View, &'static str, &'static str); 4] = [
+    pub const MORE: [(View, &'static str, &'static str); 5] = [
         (View::Network, "Network", "The node, its peers, and what it heard"),
         (View::Finality, "Finality", "Checkpoints, voters and caught cheats"),
         (View::Send, "Send", "Sign and send a transaction"),
+        (View::Faucet, "Faucet", "Coins for a dev or test chain"),
         (View::Settings, "Settings", "The node, the theme, the light client"),
     ];
 
@@ -85,7 +89,7 @@ impl View {
             View::Map => View::Map,
             View::Mempool => View::Mempool,
             View::Tokens => View::Tokens,
-            View::Network | View::Finality | View::Send | View::Settings | View::More => View::More,
+            View::Network | View::Finality | View::Send | View::Faucet | View::Settings | View::More => View::More,
         }
     }
 }

@@ -12,6 +12,8 @@ pub mod cli;
 pub mod consensus;
 pub mod crypto;
 pub mod db;
+#[cfg(feature = "sha256")]
+pub mod faucet;
 pub mod governance;
 pub mod light;
 #[cfg(feature = "node")]

@@ -20,6 +20,9 @@
 #                  [--gpu | --cpu]     on the GPU or the CPU; asked when neither is given
 #   docker/pow.sh token               here, once: the token workers mine for the VPS with; push
 #                                     takes it there, and up starts taking workers
+#   docker/pow.sh faucet url          here: a faucet for the VPS's chain: a key of its own, funded
+#                  [--fund COINS]      from your key through the node at url (1000 coins unless
+#                                     said), for push to take there and up to run
 #   docker/pow.sh worker host         any rig: mine for the VPS's node over its mining port, with
 #      [--gpu [--gpus 0,2] | --cpu]    no chain of its own: every GPU, those picked, or threads
 #   docker/pow.sh status [url]        either: the node's chain, height, peers and mining
@@ -313,6 +316,60 @@ token() {
     fi
 }
 
+# A faucet for the VPS's chain: a key of its own, which only ever holds what it is funded with,
+# funded from the owner's key through a node of the chain, and the settings .env passes on.
+faucet() {
+    url=
+    fund=1000
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --fund) [ $# -ge 2 ] || fail "--fund takes a number of whole coins"; fund=$2; shift 2 ;;
+            -*) fail "faucet takes a node's url and --fund COINS, not $1" ;;
+            *) url=$1; shift ;;
+        esac
+    done
+
+    [ -n "$url" ] || fail "fund it through which node? docker/pow.sh faucet https://your-vps [--fund COINS]"
+    [ -s "$home/owner.key" ] || fail "no key yet: run docker/pow.sh init first"
+    chainv4=$(binary)
+
+    if [ ! -s "$home/faucet.key" ]; then
+        (umask 077 && "$chainv4" keygen --out "$home/faucet.key" > "$home/faucet.address.out")
+        sed -n 's/^address //p' "$home/faucet.address.out" > "$home/faucet.address"
+        rm -f "$home/faucet.address.out"
+        say "made the faucet's key, $home/faucet.key: it pays from its own account alone"
+    fi
+
+    (umask 077 && cp "$home/faucet.key" "$root/docker/config/faucet.key")
+    address=$(cat "$home/faucet.address" 2> /dev/null)
+    [ -n "$address" ] || fail "no address for the faucet's key in $home/faucet.address"
+
+    # Whole coins, in the coin's smallest units, at the decimals the node says.
+    units=$(curl -fsk "$url/status" | python3 -I -c '
+import json, sys
+from decimal import Decimal
+decimals = json.load(sys.stdin)["coin"]["decimals"]
+print(int(Decimal(sys.argv[1]) * 10 ** decimals))
+' "$fund") || fail "could not read $url/status"
+
+    say "funding the faucet, $address, with $fund coins from your key"
+    "$chainv4" send --node "$url" --key "$home/owner.key" transfer --to "$address" --amount "$units"
+
+    if ! grep -q '^FAUCET_AMOUNT=' "$root/docker/.env" 2>/dev/null; then
+        {
+            echo
+            echo "# The faucet, docker/config/faucet.key, which docker/pow.sh faucet made and funded: each drip in"
+            echo "# whole coins, how long an address and an IP wait between drips, and the proof of work's bits."
+            echo "FAUCET_AMOUNT=10"
+            echo "FAUCET_EVERY=24h"
+            echo "FAUCET_WORK=20"
+        } >> "$root/docker/.env"
+    fi
+
+    say "next: docker/pow.sh push to the VPS, then up there; top it up with docker/pow.sh faucet $url --fund COINS"
+}
+
 push() {
     target=
     key=${SSH_KEY:-}
@@ -348,7 +405,7 @@ push() {
     say "copying the repository to $target:$dir"
     # The voting key goes, for the VPS to vote with; your own key never does.
     rsync -az -e "$ssh" \
-        --include '/docker/config/validator.key' \
+        --include '/docker/config/validator.key' --include '/docker/config/faucet.key' \
         --exclude 'target/' --exclude 'dist/' --exclude '.git/' --exclude '*.db/' \
         --exclude '*.key' --exclude '/docker/certs/*.pem' \
         "$root/" "$target:$dir/"
@@ -382,7 +439,7 @@ up() {
     [ -s "$root/docker/.env" ] || fail "no docker/.env: run docker/pow.sh init on your machine, then push"
 
     # The node runs as uid 10001 in its container: the voting key and the token become its.
-    for secret in "$root/docker/config/validator.key" "$root/docker/config/mining.token"; do
+    for secret in "$root/docker/config/validator.key" "$root/docker/config/mining.token" "$root/docker/config/faucet.key"; do
         if [ -s "$secret" ]; then node_owns "$secret"; fi
     done
 
@@ -596,6 +653,7 @@ case "$command" in
     reset) reset "$@" ;;
     join) join "$@" ;;
     token) token ;;
+    faucet) faucet "$@" ;;
     worker) worker "$@" ;;
     status) status "$@" ;;
     logs) logs ;;

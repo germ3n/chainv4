@@ -298,6 +298,18 @@ mod send {
             governance: Option<crate::governance::GovernanceConfig>,
             set_up: impl FnOnce(Node) -> Node,
         ) -> Running {
+            Running::launch_serving(produce, validate, finality, governance, set_up, Default::default())
+        }
+
+        /// As launch_governed, with the API serving more than the chain, such as a faucet.
+        fn launch_serving(
+            produce: bool,
+            validate: bool,
+            finality: Option<FinalityConfig>,
+            governance: Option<crate::governance::GovernanceConfig>,
+            set_up: impl FnOnce(Node) -> Node,
+            options: crate::api::ApiOptions,
+        ) -> Running {
             const SLOT: u64 = 50;
             let authority = DevAuthority::dev_keypair();
             let genesis = Genesis {
@@ -320,7 +332,7 @@ mod send {
             }
 
             node = set_up(node);
-            let api = crate::api::start(db, Some(node.handle()), &genesis, "127.0.0.1:0".parse().unwrap(), Default::default()).unwrap();
+            let api = crate::api::start(db, Some(node.handle()), &genesis, "127.0.0.1:0".parse().unwrap(), options).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
             let thread = std::thread::spawn({
                 let stop = stop.clone();
@@ -814,6 +826,41 @@ mod send {
         assert!(record.active_until.is_some());
         assert!(early.unwrap_err().to_string().contains("the transaction failed"));
     }
+
+    #[cfg(feature = "faucet")]
+    #[test]
+    fn the_faucet_command_works_out_the_proof_and_the_coins_land() {
+        let faucet = crate::api::FaucetConfig { key: DevAuthority::dev_keypair(), amount: u256::new(777), every_ms: 60_000, work_bits: 6 };
+        let options = crate::api::ApiOptions { faucet: Some(faucet), ..Default::default() };
+        let running = Running::launch_serving(true, false, None, None, |node| node, options);
+        let node = format!("http://{}", running.api);
+        let to = crate::crypto::keypair::Keypair::generate(crate::crypto::keypair::KeyType::Ed25519).unwrap().public().address();
+        let args = |to: String| crate::cli::FaucetArgs { node: node.clone(), tls: Default::default(), to };
+
+        // Bytes that are no key take no transfer: refused, and the address stays free to ask.
+        let nobody = crate::cli::faucet(args(Address::Ed25519([0x0f; 32]).to_string())).unwrap_err();
+
+        assert!(nobody.to_string().contains("(400)"), "{nobody}");
+
+        crate::cli::faucet(args(to.to_string())).unwrap();
+
+        let balance = || -> String {
+            let answer: serde_json::Value = serde_json::from_str(&ureq::get(format!("{node}/accounts/{to}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
+            answer["balance"].as_str().unwrap_or("0").to_string()
+        };
+        let started = std::time::Instant::now();
+
+        while balance() != "777" {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "the drip lands within a few blocks");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // Once a period.
+        let again = crate::cli::faucet(args(to.to_string())).unwrap_err();
+
+        assert!(again.to_string().contains("again in"), "{again}");
+        running.stop();
+    }
 }
 
 #[test]
@@ -843,4 +890,21 @@ fn layout_checks_new_code_against_older_files() {
     assert!(check(&retyped, &v2).unwrap_err().contains("held number, and now holds text"));
     assert!(check(&v1, &v2).unwrap_err().contains("stays retired"));
     assert!(check(&v1, &dir.0.join("v1.txt")).unwrap_err().contains(".lua, .luau or .wasm"));
+}
+
+#[test]
+fn coins_and_spans_read_as_people_write_them() {
+    use crate::cli::{parse_coins, parse_duration};
+
+    assert_eq!(parse_coins("10", 18).unwrap(), u256::from(10u64) * u256::from(10u64).pow(18));
+    assert_eq!(parse_coins("0.5", 2).unwrap(), u256::from(50u64));
+    assert_eq!(parse_coins(".25", 2).unwrap(), u256::from(25u64));
+    assert_eq!(parse_coins("7", 0).unwrap(), u256::from(7u64));
+    assert!(parse_coins("0.001", 2).unwrap_err().contains("decimal places"));
+    assert!(parse_coins("-1", 18).is_err() && parse_coins("ten", 18).is_err() && parse_coins(".", 18).is_err());
+
+    assert_eq!(parse_duration("24h").unwrap(), 86_400_000);
+    assert_eq!(parse_duration("30m").unwrap(), 1_800_000);
+    assert_eq!((parse_duration("90s").unwrap(), parse_duration("2d").unwrap()), (90_000, 172_800_000));
+    assert!(parse_duration("24").is_err() && parse_duration("h").is_err() && parse_duration("5w").is_err());
 }

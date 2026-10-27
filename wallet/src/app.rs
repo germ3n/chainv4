@@ -221,6 +221,8 @@ pub struct Wallet {
     holders: Vec<Holder>,
     page: Page,
     coin: Coin,
+    /// The node's faucet, as its status describes it, on a node that runs one.
+    faucet: Option<serde_json::Value>,
     wake: egui::Context,
     asked_status: Option<f64>,
     asked_history: f64,
@@ -265,6 +267,7 @@ impl Wallet {
                 symbol: "DEV".to_string(),
                 decimals: 18,
             },
+            faucet: None,
             wake: creation.egui_ctx.clone(),
             asked_status: None,
             asked_history: 0.0,
@@ -342,6 +345,8 @@ impl Wallet {
 
             match (&ask, &result) {
                 (Ask::Status, Ok(value)) => {
+                    self.faucet = value.get("faucet").filter(|faucet| !faucet.is_null()).cloned();
+
                     if let (Some(symbol), Some(decimals)) = (value["coin"]["symbol"].as_str(), value["coin"]["decimals"].as_u64()) {
                         self.coin = Coin {
                             symbol: symbol.to_string(),
@@ -351,6 +356,7 @@ impl Wallet {
                 }
                 (Ask::Contract(_) | Ask::Call(_) | Ask::Read(_), _) => self.views.answered(&ask, &result, &self.settings.contracts),
                 (Ask::Rpc(body), _) => self.views.dapp.answered(body, &result),
+                (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
                 (Ask::Offer(_) | Ask::Submit(_), _) => {
                     if let Some(sent) = self.views.send.answered(&ask, &result, now) {
                         self.settings.sent.push(sent);
@@ -748,6 +754,7 @@ impl eframe::App for Wallet {
                             leave: &mut leave,
                             lock: &mut lock,
                             wake: &self.wake,
+                            faucet: self.faucet.as_ref(),
                         };
                         views::show(ui, &mut ctx, &mut self.views);
                     });
