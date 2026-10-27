@@ -16,6 +16,9 @@ android:
       # Unlocking with a fingerprint or face, and confirming sends with one: a normal permission,
       # granted as the app is installed.
       - name: android.permission.USE_BIOMETRIC
+      # Reading the other device's codes live, with the back camera: a dangerous permission, asked
+      # for the first time the scanner opens.
+      - name: android.permission.CAMERA
     application:
       label: chainv4 wallet
       # No action bar: the app never draws one, but Android would keep room for it all the same.

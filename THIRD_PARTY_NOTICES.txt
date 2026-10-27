@@ -1872,7 +1872,7 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-bindgen 0.72.1
+bindgen 0.65.1 and bindgen 0.72.1
   BSD-3-Clause
 
 BSD 3-Clause License
@@ -2604,6 +2604,79 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+mozjpeg 0.10.13 and mozjpeg-sys 2.2.3
+  IJG
+
+The Independent JPEG Group's JPEG software
+==========================================
+
+This distribution contains a release of the Independent JPEG Group's free JPEG
+software.  You are welcome to redistribute this software and to use it for any
+purpose, subject to the conditions under LEGAL ISSUES, below.
+
+This software is the work of Tom Lane, Guido Vollbeding, Philip Gladstone,
+Bill Allombert, Jim Boucher, Lee Crocker, Bob Friesenhahn, Ben Jackson,
+Julian Minguillon, Luis Ortiz, George Phillips, Davide Rossi, Ge' Weijers,
+and other members of the Independent JPEG Group.
+
+IJG is not affiliated with the ISO/IEC JTC1/SC29/WG1 standards committee
+(also known as JPEG, together with ITU-T SG16).
+
+----
+
+Copyright (C)2009-2023 D. R. Commander.  All Rights Reserved.<br>
+Copyright (C)2015 Viktor Szathmáry.  All Rights Reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice,
+  this list of conditions and the following disclaimer.
+- Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+- Neither the name of the libjpeg-turbo Project nor the names of its
+  contributors may be used to endorse or promote products derived from this
+  software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS",
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+nanorand 0.7.0
+  Zlib
+
+The zlib/libpng License
+=======================
+
+Copyright (c) 2021 lucy
+
+This software is provided 'as-is', without any express or implied warranty. In
+no event will the authors be held liable for any damages arising from the use of
+this software.
+
+Permission is granted to anyone to use this software for any purpose, including
+commercial applications, and to alter it and redistribute it freely, subject to
+the following restrictions:
+
+1.  The origin of this software must not be misrepresented; you must not claim
+    that you wrote the original software. If you use this software in a product,
+    an acknowledgment in the product documentation would be appreciated but is
+    not required.
+
+2.  Altered source versions must be plainly marked as such, and must not be
+    misrepresented as being the original software.
+
+3.  This notice may not be removed or altered from any source distribution.
+
 ring 0.17.14
   Apache-2.0 AND ISC
 
@@ -3066,7 +3139,7 @@ choices, and otherwise the license noted for that crate. MIT-licensed crates use
 the MIT terms reproduced at the top with the copyright lines given here in place
 of chainv4's. Apache-2.0 crates use the Apache License text above.
 
-933 crates.
+965 crates.
 
 accesskit 0.25.1
   MIT OR Apache-2.0
@@ -3606,6 +3679,11 @@ base64ct 1.8.3
   Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
   Copyright (c) 2021-2025 The RustCrypto Project Developers
 
+bindgen 0.65.1
+  BSD-3-Clause
+  Built into: wallet
+  Copyright (c) 2013, Jyun-Yan You
+
 bindgen 0.72.1
   BSD-3-Clause
   Built into: node
@@ -3693,7 +3771,7 @@ blake3 1.8.7
 
 block 0.1.6
   MIT
-  Built into: node
+  Built into: node and wallet
   Authors: Steven Sheldon. The package has no separate copyright line.
 
 block-buffer 0.10.4
@@ -3820,8 +3898,13 @@ cc 1.10.0
 
 cexpr 0.6.0
   Apache-2.0 OR MIT
-  Built into: node
+  Built into: node and wallet
   Authors: Jethro Beekman. The package has no separate copyright line.
+
+cfg-if 0.1.10
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2014 Alex Crichton
 
 cfg-if 1.0.5
   MIT OR Apache-2.0
@@ -3865,7 +3948,7 @@ cipher 0.4.4
 
 clang-sys 1.9.1
   Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Authors: Kyle Mayes. The package has no separate copyright line.
 
 clap 4.6.7
@@ -3906,6 +3989,16 @@ cmov 0.5.4
   Apache-2.0 OR MIT
   Built into: node, explorer and wallet
   Copyright (c) 2022-2026 The RustCrypto Project Developers
+
+cocoa 0.20.2
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2012-2013 Mozilla Foundation
+
+cocoa-foundation 0.2.1
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2012-2013 Mozilla Foundation
 
 codespan-reporting 0.11.1
   Apache-2.0
@@ -3978,6 +4071,11 @@ convert_case 0.10.0
   Built into: node
   Copyright (c) 2025 rutrum
 
+core-foundation 0.7.0
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2012-2013 Mozilla Foundation
+
 core-foundation 0.9.4
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
@@ -3988,9 +4086,19 @@ core-foundation 0.10.1
   Built into: explorer and wallet
   Copyright (c) 2012-2013 Mozilla Foundation
 
+core-foundation-sys 0.7.0
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2012-2013 Mozilla Foundation
+
 core-foundation-sys 0.8.7
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
+  Copyright (c) 2012-2013 Mozilla Foundation
+
+core-graphics 0.19.2
+  MIT OR Apache-2.0
+  Built into: wallet
   Copyright (c) 2012-2013 Mozilla Foundation
 
 core-graphics 0.23.2
@@ -4002,6 +4110,21 @@ core-graphics-types 0.1.3
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
   Copyright (c) 2012-2013 Mozilla Foundation
+
+core-graphics-types 0.2.0
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2012-2013 Mozilla Foundation
+
+core-media-sys 0.1.2
+  MIT
+  Built into: wallet
+  Copyright (c) 2018 寧靜
+
+core-video-sys 0.1.4
+  MIT
+  Built into: wallet
+  Copyright (c) 2018 寧靜
 
 core_detect 1.0.0
   MIT OR Apache-2.0
@@ -4287,7 +4410,7 @@ dtoa 1.0.11
 
 dunce 1.0.5
   CC0-1.0 OR MIT-0 OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Authors: Kornel. The package has no separate copyright line.
 
 dyn-clone 1.0.20
@@ -4552,6 +4675,11 @@ flate2 1.1.10
   Built into: explorer and wallet
   Copyright (c) 2014-2026 Alex Crichton
 
+flume 0.11.1
+  Apache-2.0 OR MIT
+  Built into: wallet
+  Authors: Joshua Barretto. The package has no separate copyright line.
+
 fnv 1.0.7
   Apache-2.0 OR MIT
   Built into: node
@@ -4573,6 +4701,11 @@ font-types 0.12.7
   Copyright (c) 2019 Fontations Developers
   Copyright 2019 Fontations Developers
 
+foreign-types 0.3.2
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2017 The foreign-types Developers
+
 foreign-types 0.5.0
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
@@ -4581,6 +4714,11 @@ foreign-types 0.5.0
 foreign-types-macros 0.2.4
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
+  Copyright (c) 2017 The foreign-types Developers
+
+foreign-types-shared 0.1.1
+  MIT OR Apache-2.0
+  Built into: wallet
   Copyright (c) 2017 The foreign-types Developers
 
 foreign-types-shared 0.3.1
@@ -4743,7 +4881,7 @@ glifo 0.3.0
 
 glob 0.3.4
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2014 The Rust Project Developers
 
 gloo-timers 0.2.6
@@ -4938,6 +5076,11 @@ hmac 0.13.0
   MIT OR Apache-2.0
   Built into: node, explorer and wallet
   Copyright (c) 2017 Artyom Pavlov
+
+home 0.5.12
+  MIT OR Apache-2.0
+  Built into: wallet
+  Authors: Brian Anderson. The package has no separate copyright line.
 
 http 1.5.0
   MIT OR Apache-2.0
@@ -5244,8 +5387,14 @@ kurbo 0.13.1
 
 lazy_static 1.5.1
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Authors: Marvin Löbel. The package has no separate copyright line.
+
+lazycell 1.3.0
+  MIT OR Apache-2.0
+  Built into: wallet
+  Authors: Alex Crichton, Nikita Pekin. The package has no separate copyright
+  line.
 
 leb128fmt 0.1.0
   MIT OR Apache-2.0
@@ -5446,7 +5595,7 @@ lz4-sys 1.11.1+lz4-1.10.0
 
 malloc_buf 0.0.6
   MIT
-  Built into: node
+  Built into: node and wallet
   Authors: Steven Sheldon. The package has no separate copyright line.
 
 match-lookup 0.1.3
@@ -5477,6 +5626,11 @@ memoffset 0.9.1
   Built into: explorer and wallet
   Copyright (c) 2017 Gilad Naaman
 
+metal 0.18.0
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2010 The Rust Project Developers
+
 metal 0.31.0
   MIT OR Apache-2.0
   Built into: node
@@ -5489,7 +5643,7 @@ mime 0.3.17
 
 minimal-lexical 0.2.1
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2009 The Go Authors. All rights reserved.
 
 miniz_oxide 0.8.9
@@ -5539,6 +5693,18 @@ moxcms 0.8.1
   Copyright (c) Radzivon Bartoshyk. All rights reserved.
   Copyright 2024 Radzivon Bartoshyk
 
+mozjpeg 0.10.13
+  IJG
+  Built into: wallet
+  Copyright (C)2009-2023 D. R. Commander. All Rights Reserved.<br>
+  Copyright (C)2015 Viktor Szathmáry. All Rights Reserved.
+
+mozjpeg-sys 2.2.3
+  IJG AND Zlib AND BSD-3-Clause
+  Built into: wallet
+  Copyright (C)2009-2023 D. R. Commander. All Rights Reserved.<br>
+  Copyright (C)2015 Viktor Szathmáry. All Rights Reserved.
+
 multiaddr 0.19.1
   MIT
   Built into: node
@@ -5573,6 +5739,16 @@ naga-types 30.0.1
   MIT OR Apache-2.0
   Built into: explorer and wallet
   Copyright (c) 2025 The gfx-rs developers
+
+nanorand 0.7.0
+  Zlib
+  Built into: wallet
+  Copyright (c) 2021 lucy
+
+nasm-rs 0.3.2
+  MIT OR Apache-2.0
+  Built into: wallet
+  Copyright (c) 2016 The Rust Project Developers
 
 ndk 0.9.0
   MIT OR Apache-2.0
@@ -5628,9 +5804,34 @@ nohash-hasher 0.2.0
   Built into: explorer and wallet
   Copyright 2018 Parity Technologies (UK) Ltd.
 
+nokhwa 0.10.11
+  Apache-2.0
+  Built into: wallet
+  Authors: l1npengtul. The package has no separate copyright line.
+
+nokhwa-bindings-linux 0.1.4
+  Apache-2.0
+  Built into: wallet
+  nokhwa-bindings-linux contributors. The package has no separate copyright line.
+
+nokhwa-bindings-macos 0.2.4
+  Apache-2.0
+  Built into: wallet
+  Authors: l1npengtul. The package has no separate copyright line.
+
+nokhwa-bindings-windows 0.4.6
+  Apache-2.0
+  Built into: wallet
+  Authors: l1npengtul. The package has no separate copyright line.
+
+nokhwa-core 0.1.9
+  Apache-2.0
+  Built into: wallet
+  Authors: l1npengtul. The package has no separate copyright line.
+
 nom 7.1.3
   MIT
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2014-2019 Geoffroy Couprie
 
 nom 8.0.0
@@ -5706,7 +5907,7 @@ num_enum_derive 0.7.6
 
 objc 0.2.7
   MIT
-  Built into: node
+  Built into: node and wallet
   Copyright (c) Steven Sheldon
 
 objc-sys 0.3.5
@@ -5835,6 +6036,11 @@ objc2-user-notifications 0.2.2
   Built into: explorer and wallet
   objc2-user-notifications contributors. The package has no separate copyright line.
 
+objc_exception 0.1.2
+  MIT
+  Built into: wallet
+  Authors: Steven Sheldon. The package has no separate copyright line.
+
 oid-registry 0.8.1
   MIT OR Apache-2.0
   Built into: node
@@ -5913,7 +6119,7 @@ password-hash 0.5.0
 
 paste 1.0.15
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Authors: David Tolnay. The package has no separate copyright line.
 
 pastey 0.2.3
@@ -5921,6 +6127,11 @@ pastey 0.2.3
   Built into: node, explorer and wallet
   Authors: Aditya Kumar, David Tolnay. The package has no separate copyright
   line.
+
+peeking_take_while 0.1.2
+  Apache-2.0 OR MIT
+  Built into: wallet
+  Copyright (c) 2015 The Rust Project Developers
 
 pem 3.0.6
   MIT
@@ -6076,6 +6287,11 @@ presser 0.3.1
   MIT OR Apache-2.0
   Built into: node
   Copyright (c) 2019 Embark Studios
+
+prettyplease 0.2.37
+  MIT OR Apache-2.0
+  Built into: wallet
+  Authors: David Tolnay. The package has no separate copyright line.
 
 primefield 0.14.0
   Apache-2.0 OR MIT
@@ -6442,6 +6658,11 @@ rfd 0.17.2
   Built into: explorer and wallet
   Copyright (c) 2022 Bartłomiej Maryńczak
 
+rgb 0.8.53
+  MIT
+  Built into: wallet
+  Copyright (c) 2019 Kornel
+
 ring 0.17.14
   Apache-2.0 AND ISC
   Built into: node, explorer and wallet
@@ -6756,7 +6977,7 @@ sharded-slab 0.1.7
 
 shlex 1.3.0
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2015 Nicholas Allegra (comex).
   Copyright 2015 Nicholas Allegra (comex).
 
@@ -6860,7 +7081,7 @@ socket2 0.6.5
 
 spin 0.9.9
   MIT
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2014 Mathijs van de Nes
 
 spirv 0.3.0+sdk-1.3.268.0
@@ -7286,6 +7507,16 @@ uuid 1.29.0
   Copyright (c) 2014 The Rust Project Developers
   Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
 
+v4l 0.14.0
+  MIT
+  Built into: wallet
+  Copyright (c) 2020 Christopher N. Hesse.
+
+v4l2-sys-mit 0.3.0
+  MIT
+  Built into: wallet
+  Authors: Christopher N. Hesse. The package has no separate copyright line.
+
 valuable 0.1.1
   MIT
   Built into: node
@@ -7567,6 +7798,11 @@ wgpu-types 30.0.1
   MIT OR Apache-2.0
   Built into: explorer and wallet
   Copyright (c) 2025 The gfx-rs developers
+
+which 4.4.2
+  MIT
+  Built into: wallet
+  Copyright (c) 2015 fangyuanziti
 
 widestring 1.2.1
   MIT OR Apache-2.0

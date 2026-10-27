@@ -414,8 +414,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Signing offline.** The wallet installs as an online wallet or an offline signer that makes
   no requests; an online one holds watch-only wallets beside ones with keys. Pairing, requests and
   signed transactions travel as QR codes read off photos, or as text.
-- [x] **Messages too long for one code go as parts,** each photographed in turn and put back
-  together in any order. Animated codes, read by a live camera, would take them in one go.
+- [x] **Messages too long for one code go as parts,** put back together in any order. The screen
+  cycles through them, about three a second, and the other device's live camera reads each as it
+  comes round: getUserMedia in the browser, Camera2 on Android, nokhwa on the desktop.
+- [ ] **Fountain-coded parts.** Parts cycle as they are; Uniform Resources' fountain codes, as
+  Keystone and MetaMask show, would let a camera that missed one part read any later ones
+  instead.
 - [ ] **The explorer pins genesis on first use.** It should also take a genesis id to trust from
   the person, before it meets a node.
 - [ ] **Proofs are against the tip only.** The node keeps one state tree, so it cannot prove what

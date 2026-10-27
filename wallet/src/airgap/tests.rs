@@ -341,3 +341,38 @@ fn a_part_reads_off_a_photo_like_a_whole_code() {
 
     assert!(matches!(read(&photo), Ok(Code::Part(Part { index: 2, .. }))));
 }
+
+#[test]
+fn a_message_in_parts_reads_off_a_camera_as_the_display_cycles_through_them() {
+    let message = long(&key());
+    let codes = codes(&message.to_text());
+    let mut assembly = Assembly::default();
+    let mut read = None;
+
+    assert!(codes.len() > 2, "long enough to go as parts");
+
+    // As a camera sees a screen cycling: frames of 1280 by 720, the code in the middle at about
+    // the size a phone held up to it shows, each part twice, starting midway round.
+    for text in codes.iter().cycle().skip(1).take(codes.len() * 2) {
+        let frame = photo(text, 4, 720);
+        let mut wide = image::GrayImage::from_pixel(1_280, 720, image::Luma([150]));
+        image::imageops::overlay(&mut wide, &frame, 280, 0);
+        let found = code_in_frame(1_280, 720, wide.as_raw()).expect("a code in every frame");
+
+        assert_eq!(&found, text);
+
+        if let Code::Part(part) = Code::from_text(&found).unwrap()
+            && let Some(message) = assembly.add(part).unwrap()
+        {
+            read = Some(message);
+
+            break;
+        }
+    }
+
+    assert_eq!(read, Some(message), "every part in, in the order they came round");
+
+    // A frame with no code in it, or a part cut off, reads as nothing.
+    assert_eq!(code_in_frame(640, 480, &vec![150; 640 * 480]), None);
+    assert_eq!(code_in_frame(640, 480, &[0; 10]), None, "a frame shorter than it says");
+}

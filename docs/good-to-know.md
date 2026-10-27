@@ -455,6 +455,19 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   level again, since each runs it fresh, before the call is attached: a top level sees no `ctx`
   or `storage`.
 
+## The camera
+
+- **The live camera is the wallet's alone.** `chainv4-ui`'s `camera` feature brings it, and nokhwa
+  with it on the desktop; the explorer reads no codes and leaves it off.
+- **Android asks for CAMERA now.** The wallet declares the permission, and asks the first time the
+  scanner opens. A photo from the system's camera app would want it too, so on Android the live
+  scanner takes the place of **Take a photo**; **Open a file** still reads a photo taken elsewhere.
+- **The extension's side panel cannot ask for the camera.** Chrome shows no permission prompt
+  there: open the wallet's page in a tab once and allow it, and the panel has it from then on.
+- **Frames are searched the newest at a time.** A search slower than the camera drops the frames
+  between, so a code read is never stale; in the browser, where the page has one thread, a frame
+  is searched about five times a second.
+
 ## The extension's window.ethereum
 
 - **Sites see Ethereum accounts alone.** Only secp256k1 accounts the wallet holds keys for are

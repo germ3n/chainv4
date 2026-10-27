@@ -252,6 +252,29 @@ pub fn read(bytes: &[u8]) -> Result<Code, String> {
     }
 }
 
+/// The longest side a camera's frame is searched at: frames come many a second, so one size, and a
+/// small one, as a code held up to the camera fills much of it.
+const FRAME_WIDTH: u32 = 800;
+
+/// The text of a QR code in a camera's frame, in grey: the first that reads, of any kind; None
+/// when none does. Whose code it is, the reader says.
+pub fn code_in_frame(width: usize, height: usize, luma: &[u8]) -> Option<String> {
+    let image = image::GrayImage::from_raw(u32::try_from(width).ok()?, u32::try_from(height).ok()?, luma.to_vec())?;
+    let longest = image.width().max(image.height());
+    let image = match longest > FRAME_WIDTH {
+        true => {
+            let scale = FRAME_WIDTH as f32 / longest as f32;
+            let (w, h) = ((image.width() as f32 * scale) as u32, (image.height() as f32 * scale) as u32);
+
+            image::imageops::resize(&image, w.max(1), h.max(1), image::imageops::FilterType::Triangle)
+        }
+        false => image,
+    };
+    let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(image.width() as usize, image.height() as usize, |x, y| image.get_pixel(x as u32, y as u32).0[0]);
+
+    prepared.detect_grids().into_iter().find_map(|grid| grid.decode().ok().map(|(_, text)| text))
+}
+
 /// The text of the wallet's QR code in an image.
 fn code_in(bytes: &[u8]) -> Result<String, String> {
     let image = image::load_from_memory(bytes).map_err(|_| "not an image this wallet reads: a PNG or a JPEG".to_string())?.into_luma8();

@@ -7,6 +7,8 @@
 //! a face, Touch ID or a passkey.
 
 pub mod biometric;
+#[cfg(feature = "camera")]
+pub mod camera;
 pub mod files;
 pub mod layout;
 pub mod net;

@@ -61,11 +61,11 @@ jobs:
       - name: clippy
         run: cargo clippy --manifest-path ui/Cargo.toml --all-targets --locked -- -D warnings
       - name: test
-        run: cargo test --manifest-path ui/Cargo.toml --locked
+        run: cargo test --manifest-path ui/Cargo.toml --features camera --locked
       - name: clippy (web)
         run: cargo clippy --manifest-path ui/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
       - name: clippy (android)
-        run: cargo clippy --manifest-path ui/Cargo.toml --target aarch64-linux-android --no-default-features --locked -- -D warnings
+        run: cargo clippy --manifest-path ui/Cargo.toml --target aarch64-linux-android --no-default-features --features camera --locked -- -D warnings
 
   # The explorer is a workspace of its own, for the desktop and the browser.
   explorer:

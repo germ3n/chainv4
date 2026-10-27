@@ -3,8 +3,9 @@
 //! safe area, and the app is drawn inside it. The soft keyboard shows while a text field wants it,
 //! and goes once none does. egui reaches no clipboard on Android, so what the app copies is put on
 //! Android's here, and pasting is offered by [`crate::edit`]. Files are picked through the Java
-//! activity the APK carries when it was built with one (see [`crate::files`]), and biometric
-//! checks made through its Java class for them (see [`crate::biometric`]).
+//! activity the APK carries when it was built with one (see [`crate::files`]), biometric
+//! checks made through its Java class for them (see [`crate::biometric`]), and the camera run
+//! through its Camera2 class (see [`crate::camera`]).
 
 use {
     crate::{
@@ -43,6 +44,8 @@ pub fn run(app: AndroidApp, title: &str, log_tag: &str, storage_file: &str, make
             let picker = class(&app, "org.chainv4.ui.Picker");
             files::android::set_can_pick(&creation.egui_ctx, picker.is_some());
             let biometric = class(&app, "org.chainv4.ui.Biometric");
+            #[cfg(feature = "camera")]
+            let camera = class(&app, "org.chainv4.ui.Camera");
             // Known before the first frame, so the lock screen can show its prompt at once.
             let level = biometric.as_ref().map_or(Ok(-1), |class| biometric_level(&app, class));
             biometric::android::set_level(&creation.egui_ctx, level.unwrap_or(-1));
@@ -58,6 +61,12 @@ pub fn run(app: AndroidApp, title: &str, log_tag: &str, storage_file: &str, make
                 biometric,
                 checking: None,
                 level_at: 0.0,
+                #[cfg(feature = "camera")]
+                camera,
+                #[cfg(feature = "camera")]
+                filming: None,
+                #[cfg(feature = "camera")]
+                asked_camera: false,
             }))
         }),
     );
@@ -87,6 +96,15 @@ struct OnAndroid {
     /// When the app last asked whether biometrics can be used: someone may enroll a finger while
     /// it runs.
     level_at: f64,
+    /// The camera's Java class, when the APK carries it.
+    #[cfg(feature = "camera")]
+    camera: Option<Global<JClass<'static>>>,
+    /// Where the camera running hands its frames.
+    #[cfg(feature = "camera")]
+    filming: Option<crate::camera::Slot>,
+    /// Whether Android's prompt for the camera was shown, for the camera wanted now.
+    #[cfg(feature = "camera")]
+    asked_camera: bool,
 }
 
 impl OnAndroid {
@@ -226,6 +244,132 @@ impl OnAndroid {
                 }
             }
         }
+    }
+
+    /// Runs the camera while the app wants it: asks Android for leave first, the once, starts it,
+    /// and hands each frame over; stops it once the app is done.
+    #[cfg(feature = "camera")]
+    fn film(&mut self, ctx: &egui::Context) {
+        use crate::camera::android;
+
+        let wanted = android::wanted_slot(ctx);
+
+        let Some(slot) = wanted else {
+            if self.filming.take().is_some() {
+                let _ = self.camera_call("stop");
+            }
+
+            self.asked_camera = false;
+
+            return;
+        };
+
+        if self.camera.is_none() {
+            android::failed(&slot, ctx, "this APK carries no camera: build it with a JDK and Android's build-tools".to_string());
+
+            return;
+        }
+
+        // Another camera asked for since: Android may be asked again.
+        if !self.filming.as_ref().is_some_and(|filming| std::sync::Arc::ptr_eq(filming, &slot)) {
+            if self.filming.is_none() {
+                match self.camera_permitted() {
+                    Ok(true) => {
+                        if let Err(err) = self.camera_call("start") {
+                            android::failed(&slot, ctx, format!("could not start the camera: {err}"));
+
+                            return;
+                        }
+                    }
+                    Ok(false) => {
+                        if !self.asked_camera {
+                            self.asked_camera = true;
+                            let _ = self.camera_call("ask");
+                        }
+
+                        android::asking(&slot, ctx);
+
+                        return;
+                    }
+                    Err(err) => {
+                        android::failed(&slot, ctx, format!("could not ask for the camera: {err}"));
+
+                        return;
+                    }
+                }
+            }
+
+            self.filming = Some(slot.clone());
+        }
+
+        match self.camera_frame() {
+            Ok(Some(Ok((luma, width, height, rotation)))) => android::frame(&slot, ctx, luma, width, height, rotation),
+            Ok(Some(Err(why))) => {
+                self.filming = None;
+                android::failed(&slot, ctx, why);
+            }
+            Ok(None) => ctx.request_repaint_after(std::time::Duration::from_millis(30)),
+            Err(err) => android::failed(&slot, ctx, format!("could not read the camera: {err}")),
+        }
+    }
+
+    /// `Camera.permitted(activity)`.
+    #[cfg(feature = "camera")]
+    fn camera_permitted(&self) -> jni::errors::Result<bool> {
+        let class = self.camera.as_ref().ok_or(jni::errors::Error::NullPtr("this APK carries no camera"))?;
+
+        java(&self.app, |env, activity| {
+            env.call_static_method(&**class, jni_str!("permitted"), jni_sig!("(Landroid/app/Activity;)Z"), &[JValue::Object(activity)])?.z()
+        })
+    }
+
+    /// `Camera.ask(activity)`, `Camera.start(activity)` or `Camera.stop()`.
+    #[cfg(feature = "camera")]
+    fn camera_call(&self, method: &'static str) -> jni::errors::Result<()> {
+        let class = self.camera.as_ref().ok_or(jni::errors::Error::NullPtr("this APK carries no camera"))?;
+
+        java(&self.app, |env, activity| {
+            match method {
+                "stop" => env.call_static_method(&**class, jni_str!("stop"), jni_sig!("()V"), &[])?,
+                "ask" => env.call_static_method(&**class, jni_str!("ask"), jni_sig!("(Landroid/app/Activity;)V"), &[JValue::Object(activity)])?,
+                _ => env.call_static_method(&**class, jni_str!("start"), jni_sig!("(Landroid/app/Activity;)V"), &[JValue::Object(activity)])?,
+            };
+
+            Ok(())
+        })
+    }
+
+    /// `Camera.frame()`: the newest frame's luma, width, height and rotation, or why the camera
+    /// stopped; None when nothing new came.
+    #[cfg(feature = "camera")]
+    #[allow(clippy::type_complexity)]
+    fn camera_frame(&self) -> jni::errors::Result<Option<Result<(Vec<u8>, usize, usize, i32), String>>> {
+        let class = self.camera.as_ref().ok_or(jni::errors::Error::NullPtr("this APK carries no camera"))?;
+
+        java(&self.app, |env, _| {
+            let taken = env.call_static_method(&**class, jni_str!("frame"), jni_sig!("()[Ljava/lang/Object;"), &[])?.l()?;
+
+            if taken.is_null() {
+                return Ok(None);
+            }
+
+            let taken = env.cast_local::<JObjectArray<JObject>>(taken)?;
+            let failure = taken.get_element(env, 2)?;
+
+            if !failure.is_null() {
+                return Ok(Some(Err(env.cast_local::<JString>(failure)?.try_to_string(env)?)));
+            }
+
+            let luma = taken.get_element(env, 0)?;
+            let luma = env.cast_local::<JByteArray>(luma)?;
+            let luma = env.convert_byte_array(&luma)?;
+            let sizes = taken.get_element(env, 1)?;
+            let sizes = env.cast_local::<jni::objects::JIntArray>(sizes)?;
+            let mut read = [0; 3];
+            sizes.get_region(env, 0, &mut read)?;
+
+            Ok(Some(Ok((luma, read[0].max(0) as usize, read[1].max(0) as usize, read[2]))))
+        })
     }
 
     fn biometric_class(&self) -> jni::errors::Result<&Global<JClass<'static>>> {
@@ -513,6 +657,8 @@ impl eframe::App for OnAndroid {
         self.copy(&ctx);
         self.pick(&ctx, self.inner.clear_color(&ctx.global_style().visuals));
         self.check_biometrics(&ctx);
+        #[cfg(feature = "camera")]
+        self.film(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

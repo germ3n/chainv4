@@ -306,35 +306,73 @@ pub fn waiting(ui: &mut Ui, palette: &Palette, text: &str) {
     });
 }
 
+/// How long each part of a message shows, as the display cycles through them: about three a
+/// second, so a phone's camera catches every one within a few rounds.
+const PART_SECONDS: f64 = 0.33;
+
+/// Which part shows, cycling, and whether it is paused there.
+#[derive(Clone, Copy, Debug, Default)]
+struct Cycling {
+    shown: usize,
+    paused: bool,
+    /// When the part showing came up.
+    since: f64,
+}
+
 /// A message for the other device: its QR code, as wide as there is room for up to what a camera
-/// reads comfortably off a screen, or its parts, one at a time, for one too long for a code; and
-/// its whole text to copy, for a file or where there is no camera.
+/// reads comfortably off a screen, or for one too long for a code, its parts, one after another
+/// over and over, for the other device's camera to read as they come round; and its whole text to
+/// copy, for a file or where there is no camera.
 pub fn code(ui: &mut Ui, palette: &Palette, text: &str) {
     let codes = crate::airgap::codes(text);
     let id = egui::Id::unique(("airgap part shown", text));
-    let shown = ui.data(|data| data.get_temp::<usize>(id)).unwrap_or(0).min(codes.len() - 1);
+    let now = ui.input(|input| input.time);
+    let mut cycling = ui.data(|data| data.get_temp::<Cycling>(id)).unwrap_or(Cycling { since: now, ..Cycling::default() });
     let side = ui.available_width().clamp(200.0, 420.0);
 
+    if codes.len() > 1 && !cycling.paused && now - cycling.since >= PART_SECONDS {
+        cycling.shown = (cycling.shown + 1) % codes.len();
+        cycling.since = now;
+    }
+
+    cycling.shown = cycling.shown.min(codes.len() - 1);
+
     if codes.len() > 1 {
-        theme::caps(ui, palette, &format!("Part {} of {}", shown + 1, codes.len()));
-        ui.label(RichText::new("Too long for one code: read each part, in any order. The other device says which it still needs.").small().color(palette.muted));
+        theme::caps(ui, palette, &format!("Part {} of {}", cycling.shown + 1, codes.len()));
+        ui.label(
+            RichText::new("Too long for one code: it shows each part in turn, over and over. Hold the other device's camera on it; it says which parts it still needs.")
+                .small()
+                .color(palette.muted),
+        );
         ui.add_space(6.0);
     }
 
-    ui.vertical_centered(|ui| receive::qr(ui, &codes[shown], side));
+    ui.vertical_centered(|ui| receive::qr(ui, &codes[cycling.shown], side));
 
     if codes.len() > 1 {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.add_enabled(shown > 0, egui::Button::new("Back")).clicked() {
-                ui.data_mut(|data| data.insert_temp(id, shown - 1));
+            if ui.button(if cycling.paused { "Play" } else { "Pause" }).clicked() {
+                cycling.paused = !cycling.paused;
+                cycling.since = now;
             }
 
-            if ui.add_enabled(shown + 1 < codes.len(), egui::Button::new("Next part")).clicked() {
-                ui.data_mut(|data| data.insert_temp(id, shown + 1));
+            // Stepping by hand pauses it there.
+            if ui.button("Back").clicked() {
+                cycling = Cycling { shown: (cycling.shown + codes.len() - 1) % codes.len(), paused: true, since: now };
+            }
+
+            if ui.button("Next part").clicked() {
+                cycling = Cycling { shown: (cycling.shown + 1) % codes.len(), paused: true, since: now };
             }
         });
+
+        if !cycling.paused {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((PART_SECONDS - (now - cycling.since)).max(0.02)));
+        }
     }
+
+    ui.data_mut(|data| data.insert_temp(id, cycling));
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {
@@ -344,4 +382,45 @@ pub fn code(ui: &mut Ui, palette: &Palette, text: &str) {
 
         ui.label(RichText::new(format!("{} characters", text.len())).small().color(palette.muted));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Draws the code at each of these times, and says which part showed.
+    fn shown(ctx: &egui::Context, text: &str, times: &[f64]) -> Vec<usize> {
+        times
+            .iter()
+            .map(|time| {
+                let mut drawn = ctx.run_ui(egui::RawInput { time: Some(*time), ..Default::default() }, |ui| code(ui, &crate::theme::DARK, text));
+                drawn.textures_delta.clear();
+
+                ctx.data(|data| data.get_temp::<Cycling>(egui::Id::unique(("airgap part shown", text)))).unwrap().shown
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_message_in_parts_cycles_through_them_about_three_a_second_until_paused() {
+        let ctx = egui::Context::default();
+        let text = format!("{}{}", crate::airgap::PREFIX, "A".repeat(crate::airgap::PART_SIZE * 3));
+        let parts = crate::airgap::codes(&text).len();
+
+        assert_eq!(parts, 4);
+
+        // A part each third of a second, round and round.
+        let times: Vec<f64> = (0..9).map(|step| f64::from(step) * 0.34).collect();
+
+        assert_eq!(shown(&ctx, &text, &times), [0, 1, 2, 3, 0, 1, 2, 3, 0]);
+
+        // Paused, it stays; a message that fits one code never moves.
+        ctx.data_mut(|data| data.insert_temp(egui::Id::unique(("airgap part shown", text.as_str())), Cycling { shown: 2, paused: true, since: 3.0 }));
+
+        assert_eq!(shown(&ctx, &text, &[3.4, 4.0, 9.0]), [2, 2, 2]);
+
+        let short = format!("{}{}", crate::airgap::PREFIX, "B".repeat(10));
+
+        assert_eq!(shown(&ctx, &short, &[10.0, 11.0, 12.0]), [0, 0, 0]);
+    }
 }

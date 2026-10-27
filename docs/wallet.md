@@ -391,10 +391,21 @@ wallet with a password, as any other.
 4. The watch-only wallet reads it back, and sends it only if it is the very transaction it asked for, signed
    by that key, and the signature holds.
 
-**Reading a code:** **Take a photo** opens the camera on Android; on the desktop and in the
-browser, pick a photo or screenshot of the code, and a phone's browser offers its camera. Hold the
-camera close enough that the code fills most of the photo. **Open a file** reads an image or a
-text file, and every code's text can be copied and pasted instead: **Copy as text** under each.
+**Reading a code:** **Scan with the camera** opens the camera live and shows what it sees, reading
+each code as soon as it is in view, and a message in parts as the other screen cycles through
+them, with how many are in. It is the back camera in a phone's browser and on Android, and the
+first webcam on the desktop:
+
+| Where | The camera |
+| --- | --- |
+| The browser | `getUserMedia`, which wants https or localhost and asks for leave the first time. A browser extension's side panel cannot ask: open the wallet in a tab once, and allow it there. |
+| Android | Camera2, through `ui/android/Camera.java`, which the APK carries when it was built with a JDK, as the picker is; the app asks for the CAMERA permission the first time. |
+| The desktop | [nokhwa](https://github.com/l1npengtul/nokhwa): AVFoundation on macOS, which asks for leave the first time, V4L2 on Linux, Media Foundation on Windows. |
+
+Or read a still: **Open a photo** (**A photo** in the browser, where a phone offers its camera)
+reads a photo or screenshot of the code, held close enough that the code fills most of it, and
+**Open a file** an image or a text file. Every code's text can be copied and pasted instead:
+**Copy as text** under each.
 
 **What the codes hold:** `CV4:1:`, then `PAIR`, `SIGN` or `SIGNED`, then the message's encoding in
 base45, the 45 characters a QR code packs densest. An account's pairing is about 190 characters,
@@ -402,14 +413,15 @@ a transfer's request about 330, a token transfer's about 420, and a signed trans
 Text that is not exactly one message, or has anything past its encoding, is refused.
 
 **Too long for one code:** a message over 600 characters goes as parts, each a code about that
-long: `CV4:1:PART:2/5:`, a hash of the whole text, and a stretch of it. The screen shows one part at
-a time, with **Back** and **Next part**; the other device reads them in any order, says which it
-still needs, starts over on a part of another message, and checks the whole against its hash
-before reading it. Up to 64 parts, so 38,400 characters; **Copy as text** always copies the whole.
+long: `CV4:1:PART:2/5:`, a hash of the whole text, and a stretch of it. The screen cycles through the
+parts, about three a second, round and round, with the part showing counted; **Pause** holds one,
+and **Back** and **Next part** step by hand. The other device's camera picks each up as it comes
+round, in any order, says which it still needs, starts over on a part of another message, and
+checks the whole against its hash before reading it. Up to 64 parts, so 38,400 characters; **Copy
+as text** always copies the whole.
 
-**Keep the signer offline:** airplane mode, Wi-Fi and Bluetooth off. On Android 10 and up, a photo
-taken for a code is written to the device's pictures, read, and deleted at once; older ones hand
-back only the camera's small preview, which reads codes held close.
+**Keep the signer offline:** airplane mode, Wi-Fi and Bluetooth off. The live camera keeps
+nothing: each frame is searched in memory and dropped.
 
 ## Receiving
 
