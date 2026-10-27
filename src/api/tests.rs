@@ -1373,6 +1373,23 @@ fn ethereum_json_rpc_answers_as_ethereums_tools_ask() {
     assert_eq!(logs.as_array().unwrap().len(), 1);
     assert_eq!(rpc("eth_getLogs", json!([{ "fromBlock": "0x0", "topics": [hex(&[0; 32])] }]))["result"], json!([]));
 
+    // Many addresses and topics match as one does, the log found among them, up to the caps.
+    let others: Vec<String> = (0..999u16).map(|n| hex(&[[0u8; 18].as_slice(), &n.to_be_bytes()].concat())).collect();
+    let mut many = others.clone();
+    many.push(hex(&counter_bytes));
+    let topic = logs[0]["topics"][0].clone();
+
+    assert_eq!(rpc("eth_getLogs", json!([{ "fromBlock": "0x0", "address": many, "topics": [[topic, hex(&[1; 32])]] }]))["result"], logs);
+    let mut past = others.clone();
+    past.extend([hex(&[9; 20]), hex(&[8; 20])]);
+
+    assert!(rpc("eth_getLogs", json!([{ "fromBlock": "0x0", "address": past }]))["error"]["message"].as_str().unwrap().contains("at most 1000 addresses"));
+    let topics: Vec<String> = (0..1_001u16).map(|n| hex(&[[0u8; 30].as_slice(), &n.to_be_bytes()].concat())).collect();
+
+    assert!(rpc("eth_getLogs", json!([{ "fromBlock": "0x0", "topics": [topics] }]))["error"]["message"].as_str().unwrap().contains("at most 1000 topics"));
+    assert!(rpc("eth_getLogs", json!([{ "fromBlock": "0x0", "topics": [null, null, null, null, null] }]))["error"]["message"].as_str().unwrap().contains("4 places"));
+    assert_eq!(rpc("eth_getLogs", json!([{ "blockHash": block["hash"], "address": hex(&counter_bytes) }]))["result"], logs, "one block, by its hash");
+
     // Calls: what count() returns, and a revert with its reason and bytes.
     let call = |input: Vec<u8>| json!([{ "from": hex(&from), "to": hex(&counter_bytes), "data": hex(&input) }, "latest"]);
 

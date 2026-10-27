@@ -27,7 +27,7 @@ use {
     crate::structs::vote::Justification,
     crate::vm::{Limits, Vm},
     r#macro::document,
-    std::collections::{HashSet, VecDeque},
+    std::collections::{BTreeSet, HashSet, VecDeque},
     std::fmt,
     std::sync::{Arc, Mutex},
     std::time::Instant,
@@ -967,7 +967,8 @@ pub struct Chain {
     bad: HashSet<Hash>,
     bad_order: VecDeque<Hash>,
     /// Stored blocks no stored block builds on yet, which a justification may move the chain to.
-    tips: HashSet<Hash>,
+    /// Ordered, so they are kept, and GET /forks lists them, the same way every time.
+    tips: BTreeSet<Hash>,
     finality_config: Option<FinalityConfig>,
     finality: Option<Box<dyn Finality>>,
     /// How finality works, as light clients see it, for the light updates blocks keep.
@@ -1597,7 +1598,7 @@ impl Chain {
 
         self.tip = pivot.header.clone();
         self.tip_work = work;
-        self.tips = HashSet::from([id]);
+        self.tips = BTreeSet::from([id]);
         self.snapshot = Some(pivot.header.height);
         self.finality = match &self.finality_config {
             Some(config) => Some(config.build(&self.view(), self.vote_rewards)?),

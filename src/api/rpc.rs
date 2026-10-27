@@ -22,11 +22,18 @@ use {
     crate::structs::u256::u256,
     crate::vm::evm::{self, EvmAction, EvmBlock, EvmRan, LOG, account_of},
     serde_json::{Value, json},
+    std::collections::HashSet,
     std::sync::Arc,
 };
 
 /// The most blocks one eth_getLogs scans.
 const MAX_LOG_BLOCKS: u64 = 10_000;
+/// The most addresses an eth_getLogs filter may name, and the most topics it may name at one
+/// place: past these it is refused, as public providers refuse them.
+const MAX_LOG_ADDRESSES: usize = 1_000;
+const MAX_LOG_TOPICS: usize = 1_000;
+/// The most places a log has topics at: a filter asking past them never matches.
+const LOG_TOPIC_PLACES: usize = 4;
 /// The most fee history one eth_feeHistory gives.
 const MAX_FEE_HISTORY: u64 = 1_024;
 
@@ -760,8 +767,35 @@ fn logs(api: &Api, filter: &Value) -> Answer {
             Some(value) => Ok(u64::try_from(number(value, name)?).unwrap_or(u64::MAX).min(tip)),
         }
     };
-    let blocks: Vec<Block> = match filter.get("blockHash") {
-        Some(hash) => block_by_hash(api, hash)?.into_iter().collect(),
+    // The filter first, so a bad one costs no block read: sets, so each log is matched at once.
+    let addresses: HashSet<[u8; 20]> = match filter.get("address") {
+        None | Some(Value::Null) => HashSet::new(),
+        Some(Value::Array(list)) if list.len() > MAX_LOG_ADDRESSES => {
+            return Err(RpcError::invalid(format!("a filter names at most {MAX_LOG_ADDRESSES} addresses")));
+        }
+        Some(Value::Array(list)) => list.iter().map(address).collect::<Result<_, _>>()?,
+        Some(one) => HashSet::from([address(one)?]),
+    };
+    // At each place, the topics that match it; None matches any.
+    let topics: Vec<Option<HashSet<Vec<u8>>>> = match filter.get("topics") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(places)) if places.len() > LOG_TOPIC_PLACES => {
+            return Err(RpcError::invalid(format!("a log has topics at {LOG_TOPIC_PLACES} places at most")));
+        }
+        Some(Value::Array(places)) => places
+            .iter()
+            .map(|place| match place {
+                Value::Null => Ok(None),
+                Value::Array(any) if any.len() > MAX_LOG_TOPICS => Err(RpcError::invalid(format!("a filter names at most {MAX_LOG_TOPICS} topics at a place"))),
+                Value::Array(any) => any.iter().map(|topic| bytes(topic, "a topic")).collect::<Result<_, _>>().map(Some),
+                one => bytes(one, "a topic").map(|topic| Some(HashSet::from([topic]))),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(RpcError::invalid("topics is a list")),
+    };
+    // The blocks to look through, read one at a time as they are: a hash, or a range of heights.
+    let (by_hash, range) = match filter.get("blockHash") {
+        Some(hash) => (block_by_hash(api, hash)?, None),
         None => {
             let (from, to) = (height("fromBlock", tip)?, height("toBlock", tip)?);
 
@@ -773,30 +807,23 @@ fn logs(api: &Api, filter: &Value) -> Answer {
                 return Err(RpcError::server(format!("ask for at most {MAX_LOG_BLOCKS} blocks of logs at once")));
             }
 
-            (from..=to).map(|at| stored_block_at(&*api.db, at)).collect::<Result<Option<Vec<_>>, _>>()?.unwrap_or_default()
+            (None, Some(from..=to))
         }
     };
-    let addresses: Vec<[u8; 20]> = match filter.get("address") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(list)) => list.iter().map(address).collect::<Result<_, _>>()?,
-        Some(one) => vec![address(one)?],
-    };
-    // At each place, the topics that match it; None matches any.
-    let topics: Vec<Option<Vec<Vec<u8>>>> = match filter.get("topics") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(places)) => places
-            .iter()
-            .map(|place| match place {
-                Value::Null => Ok(None),
-                Value::Array(any) => any.iter().map(|topic| bytes(topic, "a topic")).collect::<Result<_, _>>().map(Some),
-                one => bytes(one, "a topic").map(|topic| Some(vec![topic])),
-            })
-            .collect::<Result<_, _>>()?,
-        Some(_) => return Err(RpcError::invalid("topics is a list")),
-    };
+    let mut heights = range.into_iter().flatten();
+    let mut by_hash = by_hash.into_iter();
     let mut found = Vec::new();
 
-    for block in &blocks {
+    loop {
+        let block = match (by_hash.next(), heights.next()) {
+            (Some(block), _) => block,
+            (None, Some(at)) => match stored_block_at(&*api.db, at)? {
+                Some(block) => block,
+                // A block missing from the range, as the tip moved back under a reorg: nothing.
+                None => return Ok(json!([])),
+            },
+            (None, None) => break,
+        };
         let header = &block.header;
         let mut log_index = 0usize;
         let mut ethereum_index = 0usize;

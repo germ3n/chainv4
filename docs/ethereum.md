@@ -67,7 +67,7 @@ JSON-RPC does: an error is in the answer.
 | `eth_sendRawTransaction` | Takes a signed transaction to the node's mempool, and answers its hash. |
 | `eth_getTransactionByHash`, `eth_getTransactionReceipt` | A transaction on the main chain, by its hash, and what it did: status, gas used, the price paid, a created contract's address, and its logs. `eth_getTransactionByHash` finds one waiting in the mempool too, its block fields null; its receipt is null until a block holds it. |
 | `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getBlockTransactionCountBy…` | A main-chain block: its header's fields and its Ethereum-signed transactions, as hashes or in full. `finalized` names the finalized checkpoint's block and `safe` the justified one's; on a chain without finality there is none, `null`, as on proof of work. |
-| `eth_getLogs` | EVM logs by block range or block hash, address and topics: up to 10,000 blocks at once. |
+| `eth_getLogs` | EVM logs by block range or block hash, address and topics: up to 10,000 blocks at once, 1,000 addresses, and 1,000 topics at each of a log's 4 places. A filter past those is refused, as public providers refuse them. |
 | `eth_accounts`, `eth_syncing`, `net_listening`, `web3_clientVersion` | None, false, true, and `chainv4/` and the version. |
 
 **What differs from an Ethereum node:**

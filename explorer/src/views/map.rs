@@ -9,7 +9,7 @@ use {
     crate::store::Store,
     chainv4_ui::widgets,
     egui::{Align2, Color32, FontId, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2},
-    std::collections::{HashMap, HashSet},
+    std::collections::{BTreeMap, HashMap, HashSet},
 };
 
 /// The distance between heights.
@@ -27,6 +27,8 @@ pub struct MapState {
     pub follow: bool,
     /// The tip the view last moved to.
     followed: Option<u64>,
+    /// The lanes, laid out once for what the store held: done again only when that changes.
+    layout: Option<Layout>,
 }
 
 impl Default for MapState {
@@ -36,37 +38,75 @@ impl Default for MapState {
             selected: None,
             follow: true,
             followed: None,
+            layout: None,
         }
     }
 }
 
-/// Which lane each block sits in: 0 for the main chain, and for a side block its parent's lane,
-/// or for one that starts a branch, or whose lane is taken, the nearest free one, alternating
-/// above and below.
-pub fn lanes(store: &Store) -> HashMap<String, i32> {
-    let mut lanes: HashMap<String, i32> = store.main.values().map(|id| (id.clone(), 0)).collect();
-    let mut taken: HashSet<(i32, u64)> = store.main.keys().map(|&height| (0, height)).collect();
-    let mut side: Vec<&Summary> = store.blocks.values().filter(|block| !store.on_main(block)).collect();
-    // At each height, branches going on take their lanes before new ones look for one.
-    let starts = |block: &Summary| store.blocks.get(&block.parent).is_none_or(|parent| store.on_main(parent));
-    side.sort_by(|a, b| (a.height, starts(a), &a.id).cmp(&(b.height, starts(b), &b.id)));
+/// What the layout was made from: the blocks held, the main chain's length and both its ends.
+/// A reorganization moves the tip, so it changes too.
+type Made = (usize, usize, Option<String>, Option<String>);
 
-    for block in side {
-        let parent = lanes.get(&block.parent).copied().filter(|&lane| lane != 0);
-        let lane = parent
-            .filter(|&lane| !taken.contains(&(lane, block.height)))
-            .unwrap_or_else(|| {
+fn made(store: &Store) -> Made {
+    let end = |entry: Option<(&u64, &String)>| entry.map(|(_, id)| id.clone());
+
+    (store.blocks.len(), store.main.len(), end(store.main.first_key_value()), end(store.main.last_key_value()))
+}
+
+/// The side blocks' lanes, and the side blocks by height, to find those in view without looking
+/// through every block.
+pub struct Layout {
+    made: Made,
+    side: HashMap<String, i32>,
+    by_height: BTreeMap<u64, Vec<String>>,
+}
+
+impl Layout {
+    /// Which lane each side block sits in: its parent's, or for one that starts a branch, or whose
+    /// lane is taken, the nearest free one, alternating above and below. The main chain is lane 0.
+    pub fn of(store: &Store) -> Layout {
+        let mut side_lanes: HashMap<String, i32> = HashMap::new();
+        let mut by_height: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+        let mut taken: HashSet<(i32, u64)> = HashSet::new();
+        let mut side: Vec<&Summary> = store.blocks.values().filter(|block| !store.on_main(block)).collect();
+        // At each height, branches going on take their lanes before new ones look for one.
+        let starts = |block: &Summary| store.blocks.get(&block.parent).is_none_or(|parent| store.on_main(parent));
+        side.sort_by(|a, b| (a.height, starts(a), &a.id).cmp(&(b.height, starts(b), &b.id)));
+
+        for block in side {
+            let parent = side_lanes.get(&block.parent).copied();
+            let lane = parent.filter(|&lane| !taken.contains(&(lane, block.height))).unwrap_or_else(|| {
                 (1..)
                     .flat_map(|distance| [distance, -distance])
                     .find(|&lane| !taken.contains(&(lane, block.height)))
                     .expect("some lane is always free")
             });
 
-        taken.insert((lane, block.height));
-        lanes.insert(block.id.clone(), lane);
+            taken.insert((lane, block.height));
+            side_lanes.insert(block.id.clone(), lane);
+            by_height.entry(block.height).or_default().push(block.id.clone());
+        }
+
+        Layout { made: made(store), side: side_lanes, by_height }
     }
 
-    lanes
+    /// A block's lane: 0 on the main chain; None for one the store does not hold.
+    pub fn lane(&self, store: &Store, id: &str) -> Option<i32> {
+        let block = store.blocks.get(id)?;
+
+        match store.on_main(block) {
+            true => Some(0),
+            false => self.side.get(id).copied(),
+        }
+    }
+
+    /// The blocks at these heights, main and side.
+    fn at<'a>(&self, store: &'a Store, heights: std::ops::RangeInclusive<u64>) -> Vec<&'a Summary> {
+        let main = store.main.range(heights.clone()).map(|(_, id)| id);
+        let side = self.by_height.range(heights).flat_map(|(_, ids)| ids);
+
+        main.chain(side).filter_map(|id| store.blocks.get(id)).collect()
+    }
 }
 
 fn place(height: u64, lane: i32) -> Rect {
@@ -141,7 +181,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
 
     let ink = if look.palette.dark { Color32::WHITE } else { look.palette.ink };
 
-    let lanes = lanes(store);
+    if state.layout.as_ref().is_none_or(|layout| layout.made != made(store)) {
+        state.layout = Some(Layout::of(store));
+    }
+
+    let layout = state.layout.as_ref().expect("laid out above");
     let (finalized, _) = store.finality_heights();
     let justified = store.status.as_ref().and_then(|status| status.finality.as_ref()).map(|finality| finality.justified.block.clone());
     let zoom = ui.available_width() / state.rect.width().max(1.0);
@@ -153,16 +197,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
         let visible = ui.clip_rect().expand(STEP * 2.0);
         let painter = ui.painter().clone();
         let heights = (visible.min.x / STEP).floor().max(0.0) as u64..=(visible.max.x / STEP).ceil().max(0.0) as u64;
-        let shown: Vec<&Summary> = store
-            .blocks
-            .values()
-            .filter(|block| heights.contains(&block.height))
-            .collect();
+        let shown = layout.at(store, heights);
 
         for block in &shown {
-            let Some(&lane) = lanes.get(&block.id) else { continue };
+            let Some(lane) = layout.lane(store, &block.id) else { continue };
             let Some(parent) = store.blocks.get(&block.parent) else { continue };
-            let Some(&parent_lane) = lanes.get(&parent.id) else { continue };
+            let Some(parent_lane) = layout.lane(store, &parent.id) else { continue };
             let (from, to) = (place(block.height, lane), place(parent.height, parent_lane));
             let color = if lane == 0 && parent_lane == 0 { roles.main } else { roles.side };
 
@@ -170,7 +210,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
         }
 
         for block in shown {
-            let Some(&lane) = lanes.get(&block.id) else { continue };
+            let Some(lane) = layout.lane(store, &block.id) else { continue };
             let rect = place(block.height, lane);
             let main = lane == 0;
             let base = match (main, block.height <= finalized && finalized > 0) {
@@ -284,14 +324,27 @@ mod tests {
             store.side_block(block(height, id, parent));
         }
 
-        let lanes = lanes(&store);
+        let layout = Layout::of(&store);
+        let lane = |id: &str| layout.lane(&store, id).unwrap();
 
-        assert_eq!(["a", "b", "c", "d"].map(|id| lanes[id]), [0; 4]);
-        assert_eq!(lanes["x"], lanes["y"], "a branch stays in its lane");
-        assert_ne!(lanes["x"], 0);
+        assert_eq!(["a", "b", "c", "d"].map(lane), [0; 4]);
+        assert_eq!(lane("x"), lane("y"), "a branch stays in its lane");
+        assert_ne!(lane("x"), 0);
 
-        let at_three: HashSet<i32> = ["c", "y", "s", "t"].iter().map(|id| lanes[*id]).collect();
+        let at_three: HashSet<i32> = ["c", "y", "s", "t"].into_iter().map(lane).collect();
 
         assert_eq!(at_three.len(), 4, "blocks at one height never share a lane");
+        assert_eq!(layout.lane(&store, "nowhere"), None);
+
+        // Those in view, by height, main and side alike; and laid out again only once the store
+        // changed.
+        let mut seen: Vec<&str> = layout.at(&store, 3..=3).iter().map(|block| block.id.as_str()).collect();
+        seen.sort();
+
+        assert_eq!(seen, ["c", "s", "t", "y"]);
+        assert_eq!(made(&store), layout.made);
+        store.side_block(block(4, "z", "y"));
+
+        assert_ne!(made(&store), layout.made);
     }
 }

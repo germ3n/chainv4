@@ -621,6 +621,17 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
   `--dex-contract`, `--dex-router`, or the name `dex`.
 
+## Maps and sets in the code
+
+- **Consensus never iterates a hash map.** Execution, state, receipts and roots keep `BTreeMap`s
+  where order could show; a `HashMap` there is only looked up. Keep it so: a node iterating one
+  could build, or reject, what another does not.
+- **Grindable keys keep SipHash.** Transaction and block ids, peer ids and anything a peer or a
+  request sends are keys an attacker can pick; std's randomly keyed hasher stands against
+  flooding, where FNV, Fx or an identity hasher would not.
+- **Order shows where nodes or users see it:** the proofs a block carries and `GET /forks` come
+  from ordered maps, so the same node answers the same way.
+
 ## NFTs
 
 - **Two standards, one registry:** NFT collections (one owner a token) and multi-token ones

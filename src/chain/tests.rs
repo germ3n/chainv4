@@ -737,9 +737,9 @@ fn side_branches_can_be_found_in_the_database() {
     extended(chain.import(&a1, LATER));
     assert!(matches!(chain.import(&b1, LATER), Ok(Imported::Side)));
 
-    let leaves = HashSet::from([a1.id(), b1.id()]);
+    let leaves = std::collections::BTreeSet::from([a1.id(), b1.id()]);
 
-    assert_eq!(stored_tips(&*db).unwrap().into_iter().collect::<HashSet<_>>(), leaves);
+    assert_eq!(stored_tips(&*db).unwrap(), leaves.iter().copied().collect::<Vec<_>>(), "kept in order");
     assert!(stored_on_main_chain(&*db, &a1).unwrap());
     assert!(!stored_on_main_chain(&*db, &b1).unwrap());
     assert_eq!(Chain::open(db.clone(), &pow_genesis()).unwrap().tips, leaves);
@@ -829,7 +829,7 @@ fn side_branches_the_chain_can_never_follow_are_pruned() {
     assert_eq!(stored_work(&*db, &old_child.id()).unwrap(), None);
     assert!(chain.block(&fresh.id()).unwrap().is_some());
     assert_eq!(stored_tips(&*db).unwrap().into_iter().collect::<HashSet<_>>(), HashSet::from([main.id(), fresh.id()]));
-    assert_eq!(chain.tips, HashSet::from([main.id(), fresh.id()]));
+    assert_eq!(chain.tips, std::collections::BTreeSet::from([main.id(), fresh.id()]));
 
     // The main chain keeps every block, and a block on the pruned branch is just unknown now.
     assert!(chain.block_at(0).unwrap().is_some());

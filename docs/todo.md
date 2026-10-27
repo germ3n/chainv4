@@ -6,6 +6,19 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ## Todo
 
+### Once every queued batch is done
+
+- [ ] **A fresh test chain on the VPS.** Once all queued changes and batches are in, delete the
+  VPS's chain and start a new one from a new genesis with everything enabled, so all of it can be
+  tried end to end:
+  - every engine, finality with governance, names, the collection registry, fees;
+  - the DEXes deployed, native and EVM, with pools opened (`dex.dev` registered);
+  - the swap contract and Swap.sol, `swap.dev` registered;
+  - the NFT factory (`nfts.dev`) with sample collections of both kinds, minted;
+  - sample tokens, the faucet, and the example contracts deployed and named;
+  - the laptop rejoining with `--cpu`, the apps pointed at it, and new wallet and explorer
+    builds.
+
 ### Consensus
 
 - [x] **Proof of work.** Genesis names the scheme. Under proof of work anyone mines: a nonce
@@ -337,11 +350,14 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **NFTs: next.** SVG and GIF pictures in the wallet; batch transfers (`safeBatchTransferFrom`);
   royalties (ERC-2981); a marketplace contract; EVM collections listed by the apps, as native
   ones are.
-- [ ] **Containers where they matter.** `eth_getLogs` checks its address and topic filters by
-  scanning lists of any length, per log: sets, and caps on the lists. Proofs a block carries are
-  picked among same-epoch links in hash-map order, and `GET /forks` lists tips in it: sort both.
-  The explorer's block map rebuilds its lanes every frame; held votes are found by scanning.
-  Later, with the storage work: every state read copies its key.
+- [x] **Containers where they matter.** `eth_getLogs` matches its address and topic filters as
+  sets, refuses ones past 1,000 addresses or topics at a place, and reads its blocks one at a
+  time. The proofs a block carries are picked among same-epoch links in one order, and the chain's
+  tips are kept and listed by `GET /forks` in one too. Held votes are found by voter, not by
+  scanning them all. The explorer's block map lays its lanes out once a change, not every frame.
+- [ ] **Every state read copies its key.** `State::read` looks a key up as `(Column, Vec<u8>)`,
+  so each read in each layer allocates it; nest the map by column, or key it by one byte string.
+  With the storage work (batch 10).
 - [ ] **Native multisig, across chains.** Accounts that need M of N keys to move anything,
   built into the chain rather than a contract: the keys may be any kind the chain takes
   (Ed25519, secp256k1, Bitcoin), and the same signers hold matching multisig on the other

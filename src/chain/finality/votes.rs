@@ -174,10 +174,63 @@ pub(super) struct Votes<E> {
     workers: Arc<Workers>,
     justified: Checkpoint,
     finalized: Checkpoint,
-    links: HashMap<(Checkpoint, Checkpoint), Tally>,
-    pending: VecDeque<SignedVote>,
+    /// Ordered, so the proofs a block carries are picked the same way every time.
+    links: BTreeMap<(Checkpoint, Checkpoint), Tally>,
+    pending: Held,
     seen: HashMap<(PublicKey, u64), SignedVote>,
     history: HashMap<PublicKey, VecDeque<SignedVote>>,
+}
+
+/// Votes held back until they can be counted, oldest first, and by voter: what is held, and what
+/// conflicts with a vote, is found among one voter's votes, not by scanning them all.
+#[derive(Default)]
+struct Held {
+    order: VecDeque<SignedVote>,
+    by_voter: HashMap<PublicKey, Vec<SignedVote>>,
+}
+
+impl Held {
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn contains(&self, vote: &SignedVote) -> bool {
+        self.by(&vote.vote.voter).any(|held| held == vote)
+    }
+
+    /// One voter's held votes.
+    fn by(&self, voter: &PublicKey) -> impl Iterator<Item = &SignedVote> {
+        self.by_voter.get(voter).into_iter().flatten()
+    }
+
+    fn push_back(&mut self, vote: SignedVote) {
+        self.order.push_back(vote);
+        self.by_voter.entry(vote.vote.voter).or_default().push(vote);
+    }
+
+    fn pop_front(&mut self) -> Option<SignedVote> {
+        let oldest = self.order.pop_front()?;
+        self.forget(&oldest);
+
+        Some(oldest)
+    }
+
+    fn forget(&mut self, vote: &SignedVote) {
+        if let Some(theirs) = self.by_voter.get_mut(&vote.vote.voter) {
+            theirs.retain(|held| held != vote);
+
+            if theirs.is_empty() {
+                self.by_voter.remove(&vote.vote.voter);
+            }
+        }
+    }
+
+    /// Every vote held, oldest first, leaving none.
+    fn drain(&mut self) -> Vec<SignedVote> {
+        self.by_voter.clear();
+
+        self.order.drain(..).collect()
+    }
 }
 
 impl<E: Electorate> Votes<E> {
@@ -198,8 +251,8 @@ impl<E: Electorate> Votes<E> {
             workers: chain.workers().clone(),
             justified: read_value(db, Column::Finality, JUSTIFIED_KEY)?.unwrap_or(start),
             finalized: read_value(db, Column::Finality, FINALIZED_KEY)?.unwrap_or(start),
-            links: HashMap::new(),
-            pending: VecDeque::new(),
+            links: BTreeMap::new(),
+            pending: Held::default(),
             seen: HashMap::new(),
             history: HashMap::new(),
         };
@@ -213,7 +266,9 @@ impl<E: Electorate> Votes<E> {
             votes.remember(vote);
         }
 
-        votes.pending.extend(stored_votes(db, HELD, 0)?);
+        for vote in stored_votes(db, HELD, 0)? {
+            votes.pending.push_back(vote);
+        }
 
         for vote in open {
             match votes.count(chain, vote) {
@@ -329,7 +384,7 @@ impl<E: Electorate> Votes<E> {
     /// ones, which nobody could tell were a voter's until now.
     fn held_conflict(&self, vote: &SignedVote) -> Option<Evidence> {
         self.pending
-            .iter()
+            .by(&vote.vote.voter)
             .find(|held| held.vote.conflicts(&vote.vote))
             .map(|first| Evidence {
                 first: *first,
@@ -599,7 +654,7 @@ impl<E: Electorate> Finality for Votes<E> {
     }
 
     fn retry_votes(&mut self, chain: &View) -> Result<FinalityUpdate, FinalityError> {
-        let held: Vec<SignedVote> = self.pending.drain(..).collect();
+        let held: Vec<SignedVote> = self.pending.drain();
         let mut update = FinalityUpdate::default();
 
         for vote in held {
@@ -840,5 +895,41 @@ impl<E: Electorate> Finality for Votes<E> {
         }
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, crate::crypto::keypair::Keypair};
+
+    fn vote(key: u8, source: u64, target: u64) -> SignedVote {
+        let keypair = Keypair::from_private(crate::crypto::keypair::PrivateKey::Ed25519([key; 32]));
+        let at = |epoch: u64| Checkpoint { epoch, block: Hash::Xxh3_64(epoch) };
+
+        SignedVote::sign(Vote { source: at(source), target: at(target), voter: keypair.public() }, &keypair, &Hash::Xxh3_64(0))
+    }
+
+    #[test]
+    fn held_votes_are_found_by_voter_and_leave_oldest_first() {
+        let mut held = Held::default();
+        let (a1, a2, b1) = (vote(1, 0, 1), vote(1, 1, 2), vote(2, 0, 1));
+
+        for vote in [a1, b1, a2] {
+            held.push_back(vote);
+        }
+
+        assert_eq!(held.len(), 3);
+        assert!(held.contains(&a2) && held.contains(&b1));
+        assert!(!held.contains(&vote(1, 0, 3)));
+        assert_eq!(held.by(&a1.vote.voter).count(), 2);
+
+        // A conflict is looked for among the voter's own: a surrounding vote, by a, is found.
+        let surrounding = vote(1, 0, 3);
+
+        assert!(held.by(&surrounding.vote.voter).any(|vote| vote.vote.conflicts(&surrounding.vote)));
+        assert_eq!(held.pop_front(), Some(a1));
+        assert!(!held.contains(&a1));
+        assert_eq!(held.drain(), [b1, a2]);
+        assert_eq!((held.len(), held.by(&a1.vote.voter).count()), (0, 0));
     }
 }
