@@ -560,6 +560,22 @@ impl Node {
 
     #[document(
         parent = "Node",
+        summary = "How many blocks back the node keeps state to read and prove at, or None for every height: what --state-history and --archive set.",
+        see_also = "Chain::keep_state_history",
+    )]
+    pub fn keep_state_history(mut self, window: Option<u64>) -> Node {
+        self.chain.keep_state_history(window);
+
+        match window {
+            Some(window) => log::info!("[node] keeping state {window} blocks back"),
+            None => log::info!("[node] keeping the state of every height, as an archive"),
+        }
+
+        self
+    }
+
+    #[document(
+        parent = "Node",
         summary = "Makes the node keep one of the indexes. Its loop then catches the index up a step at a time, in between everything else. Once on, the database keeps it on.",
         params = {
             kind = "Which index.",

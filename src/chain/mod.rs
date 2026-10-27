@@ -12,7 +12,7 @@ use {
     crate::registry::changes::Changes,
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::{Keypair, PublicKey},
-    crate::db::{Column, Database, DbError, MemoryDb, Path, Read, SnapshotWalk, State, StatePart, StateTree, WalkError},
+    crate::db::{Column, Database, DbError, MemoryDb, Path, Read, SnapshotWalk, State, StatePart, StateTree, WalkError, history_key, history_list_key, kept_in_history, replaced},
     crate::light::{CheckpointStart, FinalityStep, LightFinality, LightParams, LightUpdate},
     crate::registry::tokens::STANDARD_TOKEN_FUNCTIONS,
     crate::registry::validators::Member,
@@ -116,6 +116,15 @@ const FORMAT_KEY: &[u8] = b"format";
 const SNAPSHOT_KEY: &[u8] = b"snapshot";
 /// Where the chain keeps the blocks that failed to run, so a restart refuses them again.
 const BAD_KEY: &[u8] = b"bad";
+/// Where the chain keeps the lowest height whose state its history still holds.
+const HISTORY_FROM_KEY: &[u8] = b"history-from";
+
+#[document(
+    summary = "How many blocks back a node keeps state it can read and prove at, unless told otherwise: about 5.5 hours of 2-second blocks. What --state-history sets; --archive keeps every height.",
+    category = "Storage",
+    see_also = "Chain::keep_state_history",
+)]
+pub const DEFAULT_STATE_HISTORY: u64 = 10_000;
 
 #[document(
     summary = "How many blocks that failed to run a node remembers across restarts, newest kept: 1,024. A branch past that is run again before it is refused, as every one was before the memory outlived a restart.",
@@ -1013,6 +1022,31 @@ pub struct Chain {
     /// The height this node took state at, when it synced from a snapshot: it has headers only
     /// below it, and never rolls back past it.
     snapshot: Option<u64>,
+    /// How many blocks back state is kept to read at, or None to keep every height.
+    state_history: Option<u64>,
+}
+
+/// The lowest height whose state history holds.
+#[derive(Clone, Copy, Debug, SchemaWrite, SchemaRead)]
+struct HistoryFrom {
+    height: u64,
+}
+
+impl Hashable for HistoryFrom {}
+
+/// The keys a block changed in the state columns and the tree: what pruning its history deletes.
+#[derive(Clone, Debug, Default, SchemaWrite, SchemaRead)]
+struct HistoryList {
+    #[wincode(with = "wincode::containers::Vec<HistoryKey, wincode::len::BincodeLen<{ crate::structs::block::MAX_LIST_MEMORY }>>")]
+    keys: Vec<HistoryKey>,
+}
+
+impl Hashable for HistoryList {}
+
+#[derive(Clone, Debug, SchemaWrite, SchemaRead)]
+struct HistoryKey {
+    column: Column,
+    key: Vec<u8>,
 }
 
 impl Chain {
@@ -1073,6 +1107,7 @@ impl Chain {
                 state.put_value(Column::Meta, TIP_KEY.to_vec(), &id);
                 state.put_value(Column::Meta, TIPS_KEY.to_vec(), &Leaves { blocks: vec![id] });
                 state.put_value(Column::Meta, FORMAT_KEY.to_vec(), &FormatRecord { format: STORAGE_FORMAT });
+                state.put_value(Column::Meta, HISTORY_FROM_KEY.to_vec(), &HistoryFrom { height: 0 });
                 db.commit(state.take_changes())?;
                 log::info!(
                     "[chain] wrote genesis {id} with {} allocations",
@@ -1094,6 +1129,13 @@ impl Chain {
         let addresses = index::stored_index(&*db, IndexKind::Addresses)?;
         let snapshot = read_value::<SnapshotRecord>(&*db, Column::Meta, SNAPSHOT_KEY)?.map(|record| record.height);
         let bad_order: VecDeque<Hash> = read_value::<BadBlocks>(&*db, Column::Meta, BAD_KEY)?.unwrap_or_default().blocks.into();
+        // A database from before history begins it at its tip.
+        if read_value::<HistoryFrom>(&*db, Column::Meta, HISTORY_FROM_KEY)?.is_none() {
+            let state = State::new(db.clone());
+            state.put_value(Column::Meta, HISTORY_FROM_KEY.to_vec(), &HistoryFrom { height: tip.header.height });
+            db.commit(state.take_changes())?;
+        }
+
         let mut chain = Chain {
             db,
             rules: genesis.rules(),
@@ -1123,11 +1165,26 @@ impl Chain {
             events,
             addresses,
             snapshot,
+            state_history: Some(DEFAULT_STATE_HISTORY),
         };
         // In case the node stopped between committing a block and catching finality up with it.
         chain.tip_moved()?;
 
         Ok(chain)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "How many blocks back to keep state to read and prove at, or None to keep every height from now on: what --state-history and --archive set. History older than the window goes as the next block comes; a wider window, or an archive, keeps from what is held now.",
+        params = { window = "Blocks back from the tip, at least 1; None for every height." },
+    )]
+    pub fn keep_state_history(&mut self, window: Option<u64>) {
+        self.state_history = window.map(|window| window.max(1));
+    }
+
+    #[document(parent = "Chain", summary = "The lowest height whose state this node can read and prove at: genesis's for one that ran every block and keeps every height, else where history began or the window starts.")]
+    pub fn history_from(&self) -> Result<u64, DbError> {
+        Ok(read_value::<HistoryFrom>(&*self.db, Column::Meta, HISTORY_FROM_KEY)?.map_or(0, |from| from.height))
     }
 
     #[document(parent = "Chain", summary = "How far back the main chain may be rolled back, from genesis.")]
@@ -1634,6 +1691,8 @@ impl Chain {
             height: pivot.header.height,
             block: id,
         });
+        // History begins at the pivot: nothing below it was run here.
+        state.put_value(Column::Meta, HISTORY_FROM_KEY.to_vec(), &HistoryFrom { height: pivot.header.height });
         self.db.commit(state.take_changes())?;
         log::info!("[chain] installed a snapshot at height {} {id}", pivot.header.height);
 
@@ -2280,6 +2339,22 @@ impl Chain {
             });
         }
 
+        // History: what each key of state and of the tree held before this block, by key and
+        // height, and the list of them, for pruning together. Undoing the block takes them back.
+        let mut listed = HistoryList::default();
+
+        for entry in entries.iter().filter(|entry| kept_in_history(entry.column)) {
+            below.put(Column::History, history_key(entry.column, &entry.key, height), replaced(&entry.value));
+            listed.keys.push(HistoryKey { column: entry.column, key: entry.key.clone() });
+        }
+
+        for HistoryKey { column, key } in &listed.keys {
+            entries.push(UndoEntry { column: Column::History, key: history_key(*column, key, height), value: None });
+        }
+
+        below.put_value(Column::History, history_list_key(height), &listed);
+        entries.push(UndoEntry { column: Column::History, key: history_list_key(height), value: None });
+
         // Undoing the block also forgets how to undo it.
         entries.push(UndoEntry {
             column: Column::Undo,
@@ -2288,6 +2363,7 @@ impl Chain {
         });
         below.merge(changes);
         below.put_value(Column::Undo, id_key(&id), &Undo { entries });
+        self.prune_history(below, height)?;
 
         // Nothing rolls back further than max_reorg_depth by work, nor, on a chain with finality,
         // below the finalized checkpoint, down to which a justified branch may reach: older undo
@@ -2308,6 +2384,36 @@ impl Chain {
         }
 
         Ok(receipts)
+    }
+
+    /// Lets go of history past the window, as the tip reaches a height: the entries of the block
+    /// after the lowest height kept, which only reads below it need, one height at a time.
+    fn prune_history(&self, below: &Arc<State>, height: u64) -> Result<(), DbError> {
+        let Some(window) = self.state_history else {
+            return Ok(());
+        };
+        let mut from = read_value::<HistoryFrom>(&**below, Column::Meta, HISTORY_FROM_KEY)?.map_or(0, |from| from.height);
+
+        if from + window >= height {
+            return Ok(());
+        }
+
+        while from + window < height {
+            let gone = from + 1;
+
+            if let Some(list) = read_value::<HistoryList>(&**below, Column::History, &history_list_key(gone))? {
+                for HistoryKey { column, key } in list.keys {
+                    below.delete(Column::History, history_key(column, &key, gone));
+                }
+            }
+
+            below.delete(Column::History, history_list_key(gone));
+            from = gone;
+        }
+
+        below.put_value(Column::Meta, HISTORY_FROM_KEY.to_vec(), &HistoryFrom { height: from });
+
+        Ok(())
     }
 
     pub(super) fn on_main_chain(&self, id: &Hash) -> Result<bool, DbError> {
@@ -2487,9 +2593,10 @@ pub fn stored_header(db: &dyn Read, id: &Hash) -> Result<Option<SealedHeader>, D
 }
 
 #[document(
-    summary = "The state at the end of a recent main-chain block, read straight from a database into a layer that is thrown away: every block above it rolled back by its undo record. For proofs against an older block's state root.",
+    summary = "The state at the end of a main-chain block, read straight from a database: the tip's as it is, an older one's through history, as a layer to read and prove from and throw away. For values, calls and proofs at a past block.",
     category = "Chain",
-    returns = "The layer; None for a block not on the main chain, or older than the undo records, which reach back max_reorg_depth blocks.",
+    returns = "The layer; None for a block not on the main chain, or below the lowest height history holds: the node's --state-history window, or where its history began.",
+    see_also = "Historic, Chain::history_from",
 )]
 pub fn stored_state_at(db: Arc<dyn crate::db::Committed>, id: &Hash) -> Result<Option<Arc<State>>, DbError> {
     let Some(sealed) = stored_header(&*db, id)? else {
@@ -2501,27 +2608,19 @@ pub fn stored_state_at(db: Arc<dyn crate::db::Committed>, id: &Hash) -> Result<O
         return Ok(None);
     }
 
-    let Some(tip) = read_value::<Hash>(&*db, Column::Meta, TIP_KEY)? else {
+    let Some(top) = read_value::<Hash>(&*db, Column::Meta, TIP_KEY)?.map(|tip| stored_header(&*db, &tip)).transpose()?.flatten().map(|sealed| sealed.header.height) else {
         return Ok(None);
     };
-    let Some(top) = stored_header(&*db, &tip)?.map(|sealed| sealed.header.height) else {
-        return Ok(None);
-    };
-    let state = Arc::new(State::new(db));
 
-    for above in (height + 1..=top).rev() {
-        let Some(undone) = read_value::<Hash>(&*state, Column::Heights, &above.to_be_bytes())? else {
-            return Ok(None);
-        };
-
-        if read_value::<Undo>(&*state, Column::Undo, &id_key(&undone))?.is_none() {
-            return Ok(None);
-        }
-
-        revert(&state, &undone)?;
+    if height == top {
+        return Ok(Some(Arc::new(State::new(db))));
     }
 
-    Ok(Some(state))
+    if read_value::<HistoryFrom>(&*db, Column::Meta, HISTORY_FROM_KEY)?.is_none_or(|from| height < from.height) {
+        return Ok(None);
+    }
+
+    Ok(Some(Arc::new(State::new(Arc::new(crate::db::Historic::new(db, height))))))
 }
 
 #[document(

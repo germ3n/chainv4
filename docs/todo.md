@@ -349,7 +349,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   native contract's page could offer the `callNative` calldata for it, for EVM tools.
 - [ ] **Proven contract reads.** The apps' reads are dry runs on the node; a light client could
   prove the storage a read touches.
-- [ ] **Old state over JSON-RPC.** Balances and calls at older blocks need state kept for them.
+- [x] **Old state over JSON-RPC.** Balances, nonces, code, storage and calls at an older block,
+  by number, tag or hash, from the node's history. See [Ethereum's tools](ethereum.md).
 - [ ] **Blob and EIP-7702 transactions.**
 - [x] **NFTs.** Two standards beside the fungible one: NFTs, ERC-721-like, and multi-token
   collections, ERC-1155-like, with safe transfers a receiving contract agrees to, owners and
@@ -496,8 +497,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   fountain-coded parts, of which a camera needs any enough.
 - [ ] **The explorer pins genesis on first use.** It should also take a genesis id to trust from
   the person, before it meets a node.
-- [ ] **Proofs are against the tip only.** The node keeps one state tree, so it cannot prove what
-  an older block's state held; keeping nodes by version, as Jellyfish trees do, would.
+- [x] **Proofs at older blocks.** History keeps what each block replaced, state and tree nodes,
+  by key and height, so reads, calls and proofs at any kept height cost what they do at the tip:
+  `--state-history N` blocks, or `--archive`. See [Storage](storage.md#history).
 - [x] **A Merkle `tx_root`.** It is the root over each signed transaction's leaf, as the receipts
   root is over receipts, and `GET /proofs/receipts/{id}` proves the transaction with its receipt:
   `check_tx` gives who sent what.

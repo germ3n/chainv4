@@ -251,6 +251,29 @@ deleted, since nothing can roll back that far.
 **What they hold:** a block's state tree nodes too, so undoing a block puts its tree back. That
 adds about ten nodes to the record for every entry the block changed.
 
+## History
+
+The `history` column keeps recent state as it was, to read and prove at a past block
+(`src/db/history.rs`):
+- **What a block writes:** for each key it changed in the state columns or the state tree, the
+  value the key held just before, under the key and then the block's height; and the list of
+  those keys, by height. They go in the commit that runs the block, and its undo record takes
+  them back on a reorg.
+- **Reading at height h:** the first change after h replaced the value the key had at h; with
+  none since, the current value stands. One seek a key, so a read, a call or a proof at a past
+  block costs what it does at the tip (`Historic`, `stored_state_at`). Scans merge the keys there
+  now with those changed since, so contracts iterate at a past block too.
+- **Keys sort as the keys do:** each is escaped, a 0 byte as 0 then 255, and ended with two 0s,
+  so no key's entries fall among another's, and a prefix's scan finds every longer key's.
+- **How long:** `--state-history N` blocks back from the tip, 10,000 by default, pruned a height
+  at a time as the tip moves; `--archive` keeps every height from then on. A node keeps history
+  from when it first ran this format, a snapshot node from its pivot, a new chain from genesis.
+- **What it costs:** about what the undo records hold, for every block of the window: the values
+  a block replaced and its state tree nodes, ZSTD-compressed once on disk. On the bench (6 full
+  blocks of 13,812 transfers, M3 Pro) importing a block took 12% longer in memory and 16% longer
+  on RocksDB, and the bytes written per block doubled, about 19 MB more for a full one, most of it
+  tree nodes. A window of full blocks is that times its length; most blocks are far from full.
+
 ## Snapshots: reading one commit
 
 `Database::snapshot()` gives a read-only view of the database as it is now, a `Committed`: it

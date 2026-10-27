@@ -61,7 +61,7 @@ JSON-RPC does: an error is in the answer.
 | `eth_blockNumber` | The tip's height. |
 | `eth_getBalance`, `eth_getTransactionCount` | An account's balance and nonce at its EVM address: a secp256k1 account's own, an EVM contract's, or an alias. `pending` counts what the sender has waiting in the mempool. |
 | `eth_getCode`, `eth_getStorageAt` | An EVM contract's code, and a slot of its storage. |
-| `eth_call` | What a call returns, run on a copy of the latest state as the next block would run it. A revert answers code 3, `execution reverted: ` and its reason, with the bytes it returned as `data`, which ethers decodes custom errors from. |
+| `eth_call` | What a call returns, run on a copy of the state at the block asked, the latest unless asked, as the block after it would run it. A revert answers code 3, `execution reverted: ` and its reason, with the bytes it returned as `data`, which ethers decodes custom errors from. |
 | `eth_estimateGas` | The gas a transaction of the call needs on this chain: its bytes' intrinsic cost and the EVM's gas, with a quarter more of what ran. The gas is tried, and raised until a run succeeds, as nested calls need more than they use. |
 | `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory` | Twice the next block's base price; a tip of 0; and each block's base price and how full it was. |
 | `eth_sendRawTransaction` | Takes a signed transaction to the node's mempool, and answers its hash. |
@@ -71,8 +71,10 @@ JSON-RPC does: an error is in the answer.
 | `eth_accounts`, `eth_syncing`, `net_listening`, `web3_clientVersion` | None, false, true, and `chainv4/` and the version. |
 
 **What differs from an Ethereum node:**
-- **The latest state alone.** A node keeps no old state, so a balance, nonce, code, storage or call
-  asked at an older block is refused; ask at `latest`.
+- **Recent state, not all of it.** A balance, nonce, code, storage or call at an older block, by
+  number, tag or `{"blockHash": …}` (EIP-1898), answers while the node keeps that block's state,
+  `--state-history` blocks back; past that it is refused. An archive node (`--archive`) keeps
+  every height from when it started keeping them.
 - **Blocks list Ethereum-signed transactions alone.** chainv4's own, a Lua call or a bond, change
   balances and nonces but are not listed, so a tool never meets one it cannot read. Logs from EVM
   calls sent the chainv4 way are in `eth_getLogs`, under their chainv4 id.

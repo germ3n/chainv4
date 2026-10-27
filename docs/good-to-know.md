@@ -862,8 +862,9 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   signed bytes; the sender is the secp256k1 account their signature recovers, at its own nonce.
   Legacy ones must carry EIP-155's chain id, and blob and EIP-7702 transactions are refused. See
   [Ethereum's tools](ethereum.md).
-- **JSON-RPC answers from the latest state alone.** A balance, nonce or call at an older block is
-  refused. Blocks list only Ethereum-signed transactions, and a transaction is found by hash only
+- **Old state is kept 10,000 blocks back by default.** Balances, calls and proofs at older blocks
+  answer over the API and JSON-RPC within `--state-history`; `--archive` keeps every height, from
+  when the node first ran a version that keeps history. Blocks list only Ethereum-signed transactions, and a transaction is found by hash only
   once a block holds it.
 - **An Ethereum transaction's gas is chainv4's.** Its limit covers its bytes' intrinsic cost and
   the EVM's gas as fuel, so it differs from what the same transaction takes on Ethereum; wallets

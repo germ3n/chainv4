@@ -126,6 +126,13 @@ struct NodeArgs {
     /// state in memory between blocks.
     #[arg(long, default_value_t = chainv4::db::DEFAULT_CACHE_MB)]
     db_cache: usize,
+    /// How many blocks back to keep state to read and prove at: balances, calls and proofs at a
+    /// past block, over the API and JSON-RPC.
+    #[arg(long, default_value_t = chainv4::chain::DEFAULT_STATE_HISTORY, value_parser = clap::value_parser!(u64).range(1..))]
+    state_history: u64,
+    /// Keep the state of every height from now on, never pruning it: an archive node.
+    #[arg(long, conflicts_with = "state_history")]
+    archive: bool,
     /// The most transactions a block this node produces may hold. Without it, blocks fill to the
     /// chain's max_block_bytes and gas limit, which every node checks; this only caps this node's
     /// own blocks.
@@ -464,6 +471,8 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     if args.stream {
         node = node.stream(STREAM_BACKLOG);
     }
+
+    node = node.keep_state_history((!args.archive).then_some(args.state_history));
 
     for (kind, asked) in [(IndexKind::Events, args.index_events), (IndexKind::Addresses, args.index_addresses)] {
         match asked {

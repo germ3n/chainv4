@@ -6,7 +6,7 @@
 
 use {
     super::{Api, ApiError, tip},
-    crate::chain::{stored_block, stored_block_at, stored_ethereum_tx, stored_header_at, stored_receipt},
+    crate::chain::{stored_block, stored_block_at, stored_ethereum_tx, stored_header_at, stored_receipt, stored_state_at},
     crate::chain::{TxReceipt, TxStatus},
     crate::crypto::ethereum::{EthereumKind, EthereumTx, chain_id, decode, tx_hash},
     crate::db::State,
@@ -15,7 +15,7 @@ use {
     crate::registry::Accounts,
     crate::registry::contracts::ContractRecord,
     crate::structs::address::Address,
-    crate::structs::block::Block,
+    crate::structs::block::{Block, BlockHeader},
     crate::structs::hash::Hash,
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
@@ -135,16 +135,14 @@ async fn answer(api: &Arc<Api>, method: &str, params: &[Value]) -> Answer {
         "eth_maxPriorityFeePerGas" => Ok(quantity(u256::ZERO)),
         "eth_feeHistory" => fee_history(api, param(0), param(1), param(2)),
         "eth_getBalance" => {
-            latest(api, param(1))?;
-            let state = State::new(db);
+            let (state, _) = state_at(api, param(1))?;
             let account = account_of(&state, address(param(0))?)?;
 
             Ok(quantity(Accounts::new(&state).get(&account)?.balance))
         }
         "eth_getTransactionCount" => {
             let pending = param(1).as_str() == Some("pending");
-            latest(api, param(1))?;
-            let state = State::new(db);
+            let (state, _) = state_at(api, param(1))?;
             let bytes = address(param(0))?;
             let account = account_of(&state, bytes)?;
             let mut nonce = Accounts::new(&state).get(&account)?.nonce;
@@ -158,22 +156,21 @@ async fn answer(api: &Arc<Api>, method: &str, params: &[Value]) -> Answer {
             Ok(quantity(u256::from(nonce)))
         }
         "eth_getCode" => {
-            latest(api, param(1))?;
-            let state = State::new(db);
+            let (state, _) = state_at(api, param(1))?;
             let record: Option<ContractRecord> = state.get_value(crate::db::Column::Contracts, &crate::db::address_key(&Address::Evm(address(param(0))?)))?;
 
             Ok(to_hex(&record.filter(|record| record.engine == crate::structs::code::Engine::Evm).map(|record| record.code).unwrap_or_default()).into())
         }
         "eth_getStorageAt" => {
-            latest(api, param(2))?;
+            let (state, _) = state_at(api, param(2))?;
             let slot = word(param(1))?;
 
-            Ok(to_hex(&evm::storage_word(&State::new(db), address(param(0))?, slot)?).into())
+            Ok(to_hex(&evm::storage_word(&state, address(param(0))?, slot)?).into())
         }
         "eth_call" => {
-            latest(api, param(1))?;
+            let at = state_at(api, param(1))?;
             let call = Call::read(param(0))?;
-            let ran = simulate(api, call).await?;
+            let ran = simulate(api, call, at).await?;
 
             match ran.result {
                 Ok(evm::EvmReturned::Output(output)) => Ok(to_hex(&output).into()),
@@ -183,7 +180,7 @@ async fn answer(api: &Arc<Api>, method: &str, params: &[Value]) -> Answer {
         }
         "eth_estimateGas" => {
             let call = Call::read(param(0))?;
-            let ran = simulate(api, call.clone()).await?;
+            let ran = simulate(api, call.clone(), state_at(api, &Value::Null)?).await?;
 
             if let Err(err) = &ran.result {
                 return Err(failed(&err.to_string(), &ran.reverted));
@@ -194,7 +191,7 @@ async fn answer(api: &Arc<Api>, method: &str, params: &[Value]) -> Answer {
             let mut needed = ran.gas_used;
 
             for _ in 0..16 {
-                let tried = simulate(api, Call { gas: Some(needed), ..call.clone() }).await?;
+                let tried = simulate(api, Call { gas: Some(needed), ..call.clone() }, state_at(api, &Value::Null)?).await?;
 
                 if tried.result.is_ok() {
                     break;
@@ -290,14 +287,41 @@ fn word(value: &Value) -> Result<[u8; 32], RpcError> {
     Ok(number(value, "a slot")?.to_be_bytes())
 }
 
-/// Refuses a block other than the latest for a question about state, which only the latest has.
-fn latest(api: &Api, block: &Value) -> Result<(), RpcError> {
-    match block {
-        Value::Null => Ok(()),
-        Value::String(tag) if matches!(tag.as_str(), "latest" | "pending" | "safe" | "finalized") => Ok(()),
-        Value::String(_) if number(block, "a block number")? >= u256::from(tip(&*api.db)?.header.height) => Ok(()),
-        Value::Object(_) => Ok(()),
-        _ => Err(RpcError::server("this node keeps the latest state alone: ask at latest")),
+/// The state at the block a question about state names, and its header: latest's and pending's
+/// as it is; a tag's, a number's, or an object's blockHash or blockNumber (EIP-1898), on the main
+/// chain, through history, as far back as this node keeps it.
+fn state_at(api: &Api, block: &Value) -> Result<(Arc<State>, BlockHeader), RpcError> {
+    let height = match block {
+        Value::Null => None,
+        Value::String(tag) => match tag.as_str() {
+            "latest" | "pending" => None,
+            "earliest" => Some(0),
+            named @ ("safe" | "finalized") => Some(tagged(api, named)?.ok_or_else(|| RpcError::server(format!("this chain has no {named} block")))?),
+            _ => Some(u64::try_from(number(block, "a block number")?).map_err(|_| RpcError::invalid("a block number past 64 bits"))?),
+        },
+        Value::Object(fields) => match (fields.get("blockHash"), fields.get("blockNumber")) {
+            (Some(hash), _) => {
+                let block = block_by_hash(api, hash)?.ok_or_else(|| RpcError::server("no block on the main chain by that hash"))?;
+
+                Some(block.header.height)
+            }
+            (None, Some(number)) => return state_at(api, number),
+            (None, None) => None,
+        },
+        _ => return Err(RpcError::invalid("a block is a tag, a number, or an object naming one")),
+    };
+    let tip = tip(&*api.db)?.header;
+
+    match height {
+        None => Ok((Arc::new(State::new(api.db.clone())), tip)),
+        Some(height) if height > tip.height => Err(RpcError::server(format!("block {height} is past the tip, {}", tip.height))),
+        Some(height) => {
+            let sealed = stored_header_at(&*api.db, height)?.ok_or_else(|| RpcError::server(format!("no block at {height}")))?;
+            let state = stored_state_at(api.db.clone(), &sealed.id())?
+                .ok_or_else(|| RpcError::server(format!("this node no longer keeps the state at block {height}: ask an archive node")))?;
+
+            Ok((state, sealed.header))
+        }
     }
 }
 
@@ -329,17 +353,16 @@ impl Call {
     }
 }
 
-/// Runs a call on a throwaway copy of the latest state, as the next block would run it, as its
+/// Runs a call on a throwaway copy of a block's state, as the block after it would run it, as its
 /// sender at its next nonce. Nothing it writes is kept.
-async fn simulate(api: &Arc<Api>, call: Call) -> Result<EvmRan, RpcError> {
+async fn simulate(api: &Arc<Api>, call: Call, (at, header): (Arc<State>, BlockHeader)) -> Result<EvmRan, RpcError> {
     let api = api.clone();
     let chain = chain(&api)?;
 
     tokio::task::spawn_blocking(move || -> Result<EvmRan, RpcError> {
-        let state = Arc::new(State::new(Arc::new(State::new(api.db.clone()))));
+        let state = Arc::new(State::new(at));
         let sender = account_of(&state, call.from)?;
         let nonce = Accounts::new(&state).get(&sender)?.nonce;
-        let header = tip(&*api.db)?.header;
         let fuel_per_gas = api.rules.fees.as_ref().map_or(1, |fees| fees.schedule().fuel_for(1).max(1));
         let cap = api.rules.limits.fuel / fuel_per_gas;
         let action = match call.to {

@@ -143,7 +143,7 @@ justification is refused as before.
 - **State:** `check_state` checks a chain-state entry, and its proof from
   `GET /proofs/{column}/{key}`, against a block it followed. `?block=` proves at a recent block
   rather than the tip, and the client asks at the finalized checkpoint: a value proven there is
-  final. A node can prove at blocks within its last `max_reorg_depth`, whose undo records it keeps.
+  final. A node can prove at any block whose state it keeps, `--state-history` blocks back.
 - **Receipts:** `check_receipt` checks a receipt, and its Merkle path from
   `GET /proofs/receipts/{id}`, against the block's receipts root: what a transaction did.
 - **Transactions:** `check_tx` checks the signed transaction the same answer carries, and its path,

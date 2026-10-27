@@ -13,12 +13,14 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
+mod history;
 mod memory;
 #[cfg(feature = "rocksdb")]
 mod rocksdb;
 mod snapshot;
 mod tree;
 
+pub use self::history::{Historic, history_key, history_list_key, kept_in_history, replaced};
 pub use self::memory::MemoryDb;
 #[cfg(feature = "rocksdb")]
 pub use self::rocksdb::{DEFAULT_CACHE_MB, RocksDb};
@@ -99,6 +101,9 @@ pub enum Column {
     #[document(summary = "Peers this node met, by peer id: the addresses each said it listens on and when it was last seen, at most node::MAX_REMEMBERED of them, dialed at the next start. Not chain state.")]
     #[wincode(tag = 21)]
     Peers,
+    #[document(summary = "Recent state as it was: for each key a main-chain block changed in the state columns or the state tree, the value it held just before, by key and height; and each height's list of the keys, for pruning. Kept for the node's --state-history window, or every height with --archive. Not chain state: what a node can answer about past heights.")]
+    #[wincode(tag = 22)]
+    History,
 }
 
 impl Hashable for Column {
@@ -106,7 +111,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 22] = [
+    pub const ALL: [Column; 23] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -129,6 +134,7 @@ impl Column {
         Column::Names,
         Column::Ethereum,
         Column::Peers,
+        Column::History,
     ];
 
     #[document(
@@ -159,6 +165,7 @@ impl Column {
             Column::Names => "names",
             Column::Ethereum => "ethereum",
             Column::Peers => "peers",
+            Column::History => "history",
         }
     }
 }

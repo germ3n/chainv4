@@ -1416,8 +1416,7 @@ fn a_node_switches_its_producer_when_governance_changes_the_consensus() {
 #[test]
 fn a_snapshot_whose_pivot_grows_too_old_moves_it_up_and_fetches_only_what_changed() {
     let authority = DevAuthority::dev_keypair();
-    // Undo records for 20 blocks only, so peers serve state 20 blocks back at most: without
-    // finality, whose unfinalized blocks keep theirs.
+    // State history for 20 blocks only, so peers serve state 20 blocks back at most.
     let genesis = Genesis {
         fees: None,
         finality: None,
@@ -1428,7 +1427,7 @@ fn a_snapshot_whose_pivot_grows_too_old_moves_it_up_and_fetches_only_what_change
         let producer = produce.then(|| Box::new(AuthorityProducer::new(authority.clone(), SLOT)) as Box<dyn Producer>);
         let (link, fake) = NetLink::pair();
 
-        (Node::new(Arc::new(MemoryDb::default()), &genesis, producer, link).unwrap(), fake)
+        (Node::new(Arc::new(MemoryDb::default()), &genesis, producer, link).unwrap().keep_state_history(Some(20)), fake)
     };
     let (mut producer, mut producer_net) = start(true);
     let (mut late, mut late_net) = start(false);

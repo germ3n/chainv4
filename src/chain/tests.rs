@@ -1741,3 +1741,131 @@ mod dex;
 mod evm;
 #[cfg(feature = "names")]
 mod names;
+
+/// The state at a main-chain height, through history.
+fn state_at(db: &Arc<MemoryDb>, chain: &Chain, height: u64) -> Option<Arc<State>> {
+    let id = chain.block_at(height).unwrap().unwrap().id();
+
+    stored_state_at(db.clone(), &id).unwrap()
+}
+
+#[test]
+fn state_reads_and_proves_at_every_kept_height() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let to = stranger().public().address();
+
+    // Each block pays 10 more; the third deploys a contract, the fifth calls it.
+    for amount in 1..=6u128 {
+        let mut txs = vec![transfer(&chain, &authority(), &to, amount * 10)];
+
+        if amount == 3 {
+            let deploy = Tx::Deploy { code: Code::Lua(COUNTER.to_string()) };
+            txs.push(SignedTx::sign(deploy, nonce(&chain, &authority()) + 1, FeeOffer::NONE, &authority()));
+        }
+
+        advance(&mut chain, txs);
+    }
+
+    let counted: u128 = (1..=6).map(|amount| amount * 10).sum();
+    assert_eq!(balance(&chain, &to), u256::from(counted));
+
+    for height in 0..=6u64 {
+        let state = state_at(&db, &chain, height).unwrap();
+        let header = chain.block_at(height).unwrap().unwrap().header;
+        let paid: u128 = (1..=u128::from(height)).map(|amount| amount * 10).sum();
+
+        // What it held then, and a tree whose root is the one that block committed to.
+        assert_eq!(Accounts::new(&state).get(&to).unwrap().balance, u256::from(paid), "at {height}");
+        assert_eq!(StateTree::new(&state, chain.hash()).root().unwrap(), header.state_root, "the root at {height}");
+
+        let key = crate::db::address_key(&to);
+        let proof = StateTree::new(&state, chain.hash()).prove(Column::Accounts, &key).unwrap();
+        let value = state.get(Column::Accounts, &key).unwrap();
+
+        assert!(proof.verify(&header.state_root, Column::Accounts, &key, value.as_deref()), "a proof at {height}");
+    }
+
+    // The contract is there from the block that deployed it, its code read as it was.
+    let contract = contract_address(&authority().public().address(), 3, chain.hash());
+    assert!(crate::registry::Contracts::new(&state_at(&db, &chain, 2).unwrap()).get(&contract).unwrap().is_none());
+    assert!(crate::registry::Contracts::new(&state_at(&db, &chain, 3).unwrap()).get(&contract).unwrap().is_some());
+
+    // Reopened, the node still reads its history.
+    let reopened = open(&db);
+    assert_eq!(reopened.history_from().unwrap(), 0);
+    assert_eq!(Accounts::new(&state_at(&db, &reopened, 2).unwrap()).get(&to).unwrap().balance, u256::from(30u64));
+}
+
+#[test]
+fn history_past_the_window_goes_and_reads_below_it_are_refused() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    chain.keep_state_history(Some(3));
+    let to = stranger().public().address();
+
+    for amount in 1..=8u128 {
+        let tx = transfer(&chain, &authority(), &to, amount);
+        advance(&mut chain, vec![tx]);
+    }
+
+    assert_eq!(chain.history_from().unwrap(), 5, "three blocks back from 8");
+    assert!(state_at(&db, &chain, 4).is_none());
+    assert_eq!(Accounts::new(&state_at(&db, &chain, 5).unwrap()).get(&to).unwrap().balance, u256::from(15u64));
+
+    // Nothing of the heights pruned is left in the column: only 6 to 8's entries and lists.
+    let mut heights = std::collections::BTreeSet::new();
+    db.scan(Column::History, &[0xff], &[0xff], &mut |key, _| {
+        heights.insert(u64::from_be_bytes(key[1..9].try_into().unwrap()));
+        true
+    })
+    .unwrap();
+    assert_eq!(heights, std::collections::BTreeSet::from([6, 7, 8]));
+
+    // An archive keeps every height from now on.
+    chain.keep_state_history(None);
+
+    for amount in 9..=12u128 {
+        let tx = transfer(&chain, &authority(), &to, amount);
+        advance(&mut chain, vec![tx]);
+    }
+
+    assert_eq!(chain.history_from().unwrap(), 5);
+    assert!(state_at(&db, &chain, 5).is_some());
+}
+
+#[test]
+fn a_reorg_takes_the_history_of_the_blocks_it_undoes() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &Genesis { finality: None, ..pow_genesis() }).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let (a, b) = (Address::Ed25519([1; 32]), Address::Ed25519([2; 32]));
+    // The main chain: two blocks, each paying a its reward.
+    let mut main = genesis.clone();
+
+    for _ in 0..2 {
+        main = mine_on(&chain, &main, Vec::new(), a);
+        extended(chain.import(&main, LATER));
+    }
+
+    let rewarded = |state: &State, miner: &Address| Accounts::new(state).get(miner).unwrap().balance;
+    assert!(rewarded(&state_at(&db, &chain, 1).unwrap(), &a) > u256::ZERO);
+
+    // A branch of three off genesis, paying b, outweighs it.
+    let mut branch = genesis;
+
+    for _ in 0..3 {
+        branch = mine_on(&chain, &branch, Vec::new(), b);
+        let _ = chain.import(&branch, LATER).unwrap();
+    }
+
+    assert_eq!(chain.tip().id(), branch.id());
+
+    for height in 1..=3u64 {
+        let state = state_at(&db, &chain, height).unwrap();
+
+        assert_eq!(rewarded(&state, &a), u256::ZERO, "the undone blocks' rewards are gone at {height}");
+        assert!(rewarded(&state, &b) > u256::ZERO);
+        assert_eq!(StateTree::new(&state, chain.hash()).root().unwrap(), chain.block_at(height).unwrap().unwrap().header.state_root);
+    }
+}

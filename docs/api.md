@@ -115,7 +115,9 @@ too.
 
 ### `GET /accounts/{address}`
 
-`address`, `nonce` and `balance`. An address never written to reads as nonce 0 and balance 0.
+`address`, `nonce` and `balance`, and the `height` read at. An address never written to reads as
+nonce 0 and balance 0. `?block=` reads at an older main-chain block, by its height or id, while the
+node keeps its state; 404 past that.
 On a chain with [names](names.md), `name` too: the account's primary name with its suffix, such as
 `alice.dev`, while that name resolves to it, or `null`.
 
@@ -214,9 +216,9 @@ A proof of one chain-state entry against the tip's state root (see
 as [Storage](storage.md#keys-and-encoding) describes. An account's key, for example, is its
 address's tag and bytes: 32, or 20 for a secp256k1 address.
 
-`?block=ID` proves at a recent main-chain block rather than the tip, one within the last
-`max_reorg_depth` blocks, or above the finalized checkpoint, whose undo records the node keeps:
-404 for any other.
+`?block=ID` proves at a main-chain block rather than the tip, one whose state the node still keeps
+(`--state-history`, 10,000 blocks by default, or every one with `--archive`; see
+[Storage](storage.md#history)): 404 for any other.
 
 It answers:
 - `block`, `height` and `state_root`: the block it proves against;
@@ -287,7 +289,8 @@ the values a call returned, and `deployed`, the address a deploy made, each `nul
 ### `POST /call`
 
 **The body:** `contract`, `function` by name, `args` as a list of `{"type": …, "value": …}` the
-way `values` are written, and optionally the `sender` it runs as (the zero address otherwise).
+way `values` are written, and optionally the `sender` it runs as (the zero address otherwise),
+and the `block` to run at, a height or a 0x id, rather than the tip.
 
 **What it does:** runs the function as a transaction would call it, on a throwaway copy of the
 committed state, under the chain's fuel cap. Whatever it writes, sends or emits is dropped.
@@ -538,8 +541,7 @@ the explorer.
   the node loop, which answers between blocks.
 - **Reads are not snapshot-consistent.** A request that reads several keys can see two tips.
   Proofs are the exception: each is checked against its root before it is sent.
-- **Proofs reach back `max_reorg_depth` blocks,** and on a chain with finality to the finalized
-  checkpoint when it lags further. The node keeps one state tree, and rolls it back
-  by undo records to prove at an older block, so it can only go as far back as it keeps those.
+- **Past state reaches back `--state-history` blocks,** 10,000 by default, or every height on an
+  archive node: reads, calls and proofs at an older block answer 404.
 - **A snapshot node's history is headers only** before its pivot: `GET /blocks` and
   `GET /blocks/{block}` show those blocks marked `"pruned": true`, without transactions.

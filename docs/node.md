@@ -351,8 +351,8 @@ the tip. Then it syncs the rest as usual.
    what finality has justified, as any light client does.
 2. **The pivot.** Once a peer has no more, the pivot is the block `PIVOT_DEPTH` (16) below the
    last header, or half `max_reorg_depth` below when that is less. Deep enough not to come off in
-   a reorg, and recent enough for peers to serve: they rebuild state at any of their last
-   `max_reorg_depth` blocks from undo records. A chain shorter than `MIN_SNAPSHOT_HEIGHT` (32) is
+   a reorg, and recent enough for peers to serve: they read state at any height their history
+   keeps, `--state-history` blocks back. A chain shorter than `MIN_SNAPSHOT_HEIGHT` (32) is
    synced by running its blocks instead.
 3. **State.** It walks the pivot's state tree down from the root (`SnapshotWalk`), a position at a
    time:
@@ -362,8 +362,8 @@ the tip. Then it syncs the rest as usual.
      Its entries must sit under the position and hash, with the siblings, up to the root. A peer
      that sends one that does not is never asked again.
    - **Skipping:** any subtree whose hash matches what the node holds already is skipped.
-4. **Moving the pivot.** If a peer can no longer serve the pivot, because the chain moved more than
-   `max_reorg_depth` past it, the node fetches the headers since, picks a newer pivot and walks
+4. **Moving the pivot.** If a peer can no longer serve the pivot, because the chain moved past
+   the state it keeps, the node fetches the headers since, picks a newer pivot and walks
    again. The walk skips every subtree that did not change, so it only fetches what did. After 8
    moves it gives up on the snapshot and syncs by running blocks.
 5. **Installing.** Once the tree is the pivot's, it fetches the pivot block itself, checks its

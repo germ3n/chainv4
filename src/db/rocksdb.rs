@@ -42,7 +42,7 @@ fn column_options(column: Column, cache: &Cache) -> Options {
     options.set_block_based_table_factory(&table);
     options.set_level_compaction_dynamic_level_bytes(true);
     options.set_compression_type(match column {
-        Column::Blocks | Column::Receipts | Column::Undo | Column::Events => DBCompressionType::Zstd,
+        Column::Blocks | Column::Receipts | Column::Undo | Column::Events | Column::History => DBCompressionType::Zstd,
         _ => DBCompressionType::Lz4,
     });
     options.set_bottommost_compression_type(DBCompressionType::Zstd);

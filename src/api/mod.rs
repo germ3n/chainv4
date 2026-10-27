@@ -1014,21 +1014,20 @@ async fn report(api: &Api, txs: usize) -> Result<NodeReport, ApiError> {
     node.report(txs).await.map_err(|err| ApiError::Unavailable(err.to_string()))
 }
 
-async fn account(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
-    let db = api.db;
+async fn account(Shared(api): Shared<Api>, Path(address): Path<String>, Query(query): Query<HashMap<String, String>>) -> Answer {
     let address = parse_address(&address)?;
-    let state = State::new(db.clone());
+    let (state, header) = state_at(&api, query.get("block").map(String::as_str))?;
     let account = Accounts::new(&state).get(&address)?;
     #[cfg_attr(not(feature = "names"), allow(unused_mut))]
     let mut answer = json::account(&address, &account);
+    answer["height"] = header.height.into();
 
     // Its primary name, for a reverse lookup, while that name still resolves to it.
     #[cfg(feature = "names")]
     if let Some(names) = &api.rules.names {
         use crate::registry::names::Names;
 
-        let now = tip(&*db)?.header.timestamp;
-        answer["name"] = Names::new(&state).primary(&address, now, names.grace_ms)?.map(|name| names.display(&name)).into();
+        answer["name"] = Names::new(&state).primary(&address, header.timestamp, names.grace_ms)?.map(|name| names.display(&name)).into();
     }
 
     Ok(Json(answer))
@@ -1538,8 +1537,14 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
             .collect::<Result<_, _>>()?,
         Some(_) => return Err(ApiError::BadRequest("args must be a list".to_string())),
     };
-    let (db, vm, limits, function) = (api.db.clone(), api.vm.clone(), api.limits, Hash::Xxh3_64(selector(function)));
-    let header = tip(&*db)?.header;
+    let at = match body.get("block") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(height)) => Some(height.to_string()),
+        Some(Value::String(block)) => Some(block.clone()),
+        Some(_) => return Err(ApiError::BadRequest("block is a height or a 0x block id".to_string())),
+    };
+    let (vm, limits, function) = (api.vm.clone(), api.limits, Hash::Xxh3_64(selector(function)));
+    let (at, header) = state_at(&api, at.as_deref())?;
     let block = BlockAt {
         height: header.height,
         time: header.timestamp,
@@ -1548,7 +1553,7 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     };
     // On a blocking thread, since the API answers everything on one.
     let outcome = tokio::task::spawn_blocking(move || {
-        let state = Arc::new(State::new(db));
+        let state = Arc::new(State::new(at));
         let record = Contracts::new(&state)
             .get(&contract)?
             .ok_or_else(|| ApiError::NotFound(format!("no contract at {contract}")))?;
@@ -1641,6 +1646,24 @@ fn number(query: &HashMap<String, String>, name: &str) -> Result<Option<u64>, Ap
 }
 
 /// A block or transaction id, in the chain's hash.
+/// The state at the block a request names, and that block's header: the tip's as it is, for none
+/// or latest; an older main-chain block's, by its height or 0x id, through history.
+fn state_at(api: &Api, block: Option<&str>) -> Result<(Arc<State>, crate::structs::block::BlockHeader), ApiError> {
+    let id = match block {
+        None | Some("latest") => return Ok((Arc::new(State::new(api.db.clone())), tip(&*api.db)?.header)),
+        Some(text) => match text.parse::<u64>() {
+            Ok(height) => stored_header_at(&*api.db, height)?.ok_or_else(|| ApiError::NotFound(format!("no block at height {height}")))?.id(),
+            Err(_) => block_id(text, api.hash)?,
+        },
+    };
+    let state = stored_state_at(api.db.clone(), &id)?.ok_or_else(|| {
+        ApiError::NotFound(format!("block {id} is not on the main chain, or older than the state this node keeps (--state-history)"))
+    })?;
+    let header = stored_header(&*api.db, &id)?.ok_or_else(|| ApiError::NotFound(format!("no block {id}")))?.header;
+
+    Ok((state, header))
+}
+
 fn block_id(text: &str, hash: HashType) -> Result<Hash, ApiError> {
     from_hex(text)
         .and_then(|bytes| Hash::from_bytes(hash, &bytes))

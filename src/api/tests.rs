@@ -1412,7 +1412,14 @@ fn ethereum_json_rpc_answers_as_ethereums_tools_ask() {
     assert_eq!(rpc("eth_getTransactionReceipt", json!([hex(&tx_hash(&waiting))]))["result"], Value::Null);
     assert_eq!(rpc("eth_getTransactionByHash", json!([hex(&[8; 32])]))["result"], Value::Null, "nothing by that hash, waiting or landed");
 
-    assert!(rpc("eth_getBalance", json!([hex(&from), "0x1"]))["error"]["message"].as_str().unwrap().contains("latest"), "no state of old blocks");
+    // State at older blocks, through history: by number, tag or hash (EIP-1898), all alike.
+    let at = |block: Value| rpc("eth_getBalance", json!([hex(&from), block]))["result"].clone();
+    let genesis_hash = rpc("eth_getBlockByNumber", json!(["0x0", false]))["result"]["hash"].clone();
+
+    assert_eq!(at(json!("0x0")), at(json!("earliest")));
+    assert_eq!(at(json!("0x0")), at(json!({ "blockHash": genesis_hash })));
+    assert_ne!(at(json!("0x0")), at(json!("latest")), "it has sent since genesis");
+    assert!(rpc("eth_getBalance", json!([hex(&from), "0xffff"]))["error"]["message"].as_str().unwrap().contains("past the tip"));
 
     // Sending: one for this chain goes to the node; one for another is refused.
     let next = ethereum(2, Some([5; 20]), Vec::new());
@@ -2214,4 +2221,32 @@ fn many_requests_are_answered_side_by_side_and_one_client_is_turned_away_past_it
     assert!(statuses.iter().all(|status| matches!(status, 200 | 429)), "{statuses:?}");
     assert!(statuses.contains(&200));
     assert_eq!(get(address, "/status").0, 200, "and served again once they are answered");
+}
+
+#[test]
+fn accounts_and_calls_read_at_an_older_block() {
+    let fixture = serve();
+    let authority = DevAuthority::dev_keypair().public().address();
+    let block1 = fixture.chain.block_at(1).unwrap().unwrap().id();
+    let held = |at: &str| ok(fixture.address, &format!("/accounts/{}{at}", fixture.bob))["balance"].clone();
+
+    // Bob was paid in block 1: nothing before, 100 from then on, by height or by id.
+    assert_eq!(held("?block=0"), "0");
+    assert_eq!(held("?block=1"), "100");
+    assert_eq!(held(&format!("?block={block1}")), "100");
+    assert_eq!(ok(fixture.address, &format!("/accounts/{}?block=1", fixture.bob))["height"], 1);
+    assert_eq!(ok(fixture.address, &format!("/accounts/{}", fixture.bob))["height"], 2, "the tip, unless asked");
+    assert_eq!(get(fixture.address, &format!("/accounts/{}?block=9", fixture.bob)).0, 404);
+
+    // The counter was deployed in block 2: no contract at block 1.
+    let counter = contract_address(&authority, 1, HashType::default_chain());
+    let call = |block: Value| {
+        let body = json!({ "contract": counter.to_string(), "function": "increment", "args": [{ "type": "number", "value": 3 }], "block": block });
+
+        request(fixture.address, "POST", "/call", &body.to_string())
+    };
+
+    assert_eq!(call(json!(1)).0, 404);
+    assert_eq!(call(json!(2)).2["values"], json!([{ "type": "i64", "value": "3" }]));
+    assert_eq!(call(Value::Null).2["values"], json!([{ "type": "i64", "value": "3" }]));
 }

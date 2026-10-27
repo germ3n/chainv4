@@ -24,8 +24,9 @@ use {
 };
 
 /// How far below the best tip the pivot sits, so the block whose state it takes is unlikely to
-/// come off in a reorg, yet recent enough for peers to serve: they keep undo records for the last
-/// max_reorg_depth blocks at least, so it is at most half that.
+/// come off in a reorg, yet recent enough for peers to serve: they read state as far back as their
+/// history keeps it, --state-history blocks, and at most half max_reorg_depth, which every node
+/// keeps undo records for.
 pub(super) const PIVOT_DEPTH: u64 = 16;
 /// How many times the pivot may move up before the node gives up on the snapshot and syncs by
 /// running blocks: peers that cannot serve any pivot would have it move forever.
