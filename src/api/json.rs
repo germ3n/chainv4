@@ -174,6 +174,8 @@ pub fn node(report: &NodeReport) -> Value {
             "connections": counters.connections,
             "gossip_dropped": counters.gossip_dropped,
             "flooders_disconnected": counters.flooders_disconnected,
+            "gossip_rejected": counters.gossip_rejected,
+            "peers_banned": counters.peers_banned,
         },
         "backlog": {
             "waiting": report.backlog.0,

@@ -12,7 +12,7 @@ use {
     crate::crypto::verifiable::VerifyError,
     crate::db::{Database, State},
     crate::mempool::{Mempool, MempoolError},
-    crate::net::{Backlog, NetCommand, NetEvent, Origin},
+    crate::net::{Backlog, Fault, NetCommand, NetEvent, Origin, Verdict},
     crate::structs::hash::{Hash, HashType},
     crate::structs::tx::SignedTx,
     libp2p::PeerId,
@@ -45,12 +45,15 @@ pub(super) struct Tally {
     pub(super) refused: u64,
     /// Gossiped, by the peer that passed each on.
     pub(super) heard: Vec<PeerId>,
+    /// Gossiped with a signature that does not hold, counted against its sender.
+    pub(super) rejected: u64,
 }
 
 impl Tally {
     pub(super) fn add(&mut self, other: Tally) {
         self.submitted += other.submitted;
         self.refused += other.refused;
+        self.rejected += other.rejected;
         self.heard.extend(other.heard);
     }
 
@@ -122,24 +125,30 @@ impl Gate {
 
                 Ok(tally)
             }
-            NetEvent::Tx { from, tx } => {
+            NetEvent::Tx { from, tx, gossip } => {
                 self.backlog.release(Origin::Peer(from));
                 let id = tx.id(self.hash);
-                let refused = match self.admit(tx.clone(), checked) {
+                let (refused, verdict) = match self.admit(tx.clone(), checked) {
                     Ok(()) => {
                         log::debug!("[node] queued transaction {id} from {from}");
                         self.publish(|| NodeEvent::Queued(Arc::new(tx)));
 
-                        0
+                        (0, Verdict::Accept)
                     }
                     Err(err) => {
                         log::debug!("[node] refused transaction {id} from {from}: {err}");
 
-                        1
+                        // A signature that does not hold is the sender's fault; the rest, such as
+                        // a nonce used or a fee too low, is not anyone's.
+                        (1, match err {
+                            MempoolError::Invalid(_) => Verdict::Reject(Fault::Tx),
+                            _ => Verdict::Ignore,
+                        })
                     }
                 };
+                let _ = self.commands.send(NetCommand::Judge { peer: from, gossip, verdict });
 
-                Ok(Tally { submitted: 0, refused, heard: vec![from] })
+                Ok(Tally { submitted: 0, refused, heard: vec![from], rejected: u64::from(matches!(verdict, Verdict::Reject(_))) })
             }
             event => Err(Arrival::Event { event: Box::new(event), checked }),
         }

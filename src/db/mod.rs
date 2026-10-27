@@ -96,6 +96,9 @@ pub enum Column {
     #[document(summary = "The Ethereum index, for a node with the ethereum feature: each Ethereum-signed transaction's chainv4 id, by the keccak256 of its signed bytes, which Ethereum's tools name it by. Not chain state: written as blocks run, and never wrong, as the same bytes are always the same transaction.")]
     #[wincode(tag = 20)]
     Ethereum,
+    #[document(summary = "Peers this node met, by peer id: the addresses each said it listens on and when it was last seen, at most node::MAX_REMEMBERED of them, dialed at the next start. Not chain state.")]
+    #[wincode(tag = 21)]
+    Peers,
 }
 
 impl Hashable for Column {
@@ -103,7 +106,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 21] = [
+    pub const ALL: [Column; 22] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -125,6 +128,7 @@ impl Column {
         Column::Addresses,
         Column::Names,
         Column::Ethereum,
+        Column::Peers,
     ];
 
     #[document(
@@ -154,6 +158,7 @@ impl Column {
             Column::Addresses => "addresses",
             Column::Names => "names",
             Column::Ethereum => "ethereum",
+            Column::Peers => "peers",
         }
     }
 }

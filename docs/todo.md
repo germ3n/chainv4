@@ -454,8 +454,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   branches outlast a restart and the API can list them (`/forks`).
 - [ ] **Leaves are never pruned.** Every side branch's leaf stays, even far below the finalized
   checkpoint, where no branch can matter again.
-- [ ] **Commits are not fsynced.** A power cut can lose the last few blocks, though never half of
-  one. Decide whether to sync each block.
+- [x] **Commits are fsynced.** Each commit waits for the disk, so a power cut loses no block the
+  node stored; `--no-fsync` turns it off for benchmarks and tests.
 - [ ] **RocksDB runs on default options.** No tuning of caches, compression or compaction.
 - [ ] **API reads are not snapshot-consistent.** A request that reads several keys can see state
   from two different tips.
@@ -470,22 +470,23 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   downloading from several peers at once would be faster for long catch-ups.
 - [ ] **Blocks gossiped ahead of the tip are dropped.** They only tell the node a peer is ahead;
   sync fetches them again. Keeping a few would save the round trip.
-- [ ] **Gossip is forwarded before it is checked.** gossipsub relays blocks and transactions
-  before the node validates them. Turn on `validate_messages` and report each result, so only
-  valid messages spread.
-- [ ] **No peer scoring or banning.** Peers that send invalid blocks, transactions or floods of
-  sync requests pay no price. A peer whose sync batch does not fit is only forgotten, and one the
-  backlog disconnects for flooding can connect again at once.
+- [x] **Gossip is checked before it is passed on.** gossipsub's `validate_messages`, each message
+  reported back as the node judged it: accepted, ignored, or rejected as its sender's fault. See
+  [Node](node.md#networking).
+- [x] **Faults are scored and peers banned.** Invalid blocks, bad signatures, undecodable gossip
+  and floods add up per peer; past `BAN_SCORE` within `SCORE_WINDOW` the peer is banned for
+  `--ban-for`, by id, and with `--ban-ips` by IP. See [Node](node.md#bans).
+- [ ] **Sync requests and bad sync batches pay no price.** A peer whose sync batch does not fit is
+  only forgotten; floods of sync requests are not scored. Bans live in memory, so a restart lifts
+  them.
 - [ ] **Backlog shares are per peer id.** One host with many ids gets many shares; limits per IP
   address would close that.
-- [ ] **Invalid gossip is not struck.** The backlog strikes a peer for volume only, not for
-  transactions that fail their signature check or blocks that do not import.
 - [ ] **Blocks and sync requests are not counted in the backlog.** Gossiped blocks and requests
   from syncing peers still queue without bound.
 - [ ] **The strike rules are fixed.** `MAX_STRIKES` and `STRIKE_WINDOW` are constants, and a small
   share can cut off an honest peer relaying a burst.
-- [ ] **The node's identity changes on every start.** The libp2p key is generated fresh each run;
-  keep it in the data directory so the peer id is stable.
+- [x] **The node keeps its identity.** Its libp2p key is `net.key`, beside the database or where
+  `--net-key` says, so its peer id is the same each start and `--peer` can pin `/p2p/<id>`.
 - [x] **Bootnodes, and discovery past the peers given.** Genesis's `bootnodes`, replaced on a live
   chain by `Change::Bootnodes`, and `--bootnode`, are dialed while a node has fewer than
   `--target-peers`; Kademlia bootstraps every 2 minutes, and the node dials a few of the peers it
@@ -494,17 +495,14 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   macOS; a Windows desktop keeps the password.
 - [ ] **Touch ID guards a check, not the key.** A signed macOS build could tie the Keychain item to
   biometry with an access control, as Android's Keystore does.
-- [ ] **Peers are not remembered.** A restarted node starts from its `--peer`s and bootnodes;
-  keeping the peers it met with the database would let it reconnect with none.
+- [x] **Peers are remembered.** The 64 seen last, with the addresses identify gave, in the
+  database's `peers` column, dialed at the next start as bootnodes are.
 - [x] **Chains keep apart by protocol name and genesis.** Every protocol and topic is
   `/{protocol}/{network}/…`, `--protocol` naming the first; identify tells a node a peer of
   another chain, which it disconnects and forgets.
 - [x] **Peers given are dialed again.** A `--peer` with no connection is dialed every 15 seconds,
   so a node behind NAT finds a restarted server again, and `--no-mdns` keeps a server off its
   network's multicast. `docker/pow.sh` runs a chain across a VPS and a machine at home.
-- [ ] **Peer ids change every start.** A node makes a new libp2p identity each time, so `--peer`
-  takes addresses alone and nothing can pin a peer by id. A key kept with the database would let
-  a node keep its id.
 - [ ] **No connection or request limits.**
 - [ ] **No NAT traversal** (relay, hole punching, AutoNAT).
 

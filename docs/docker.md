@@ -248,7 +248,7 @@ Podman's restart service runs: `systemctl --user enable podman-restart.service`,
 
 | Volume | What it holds |
 | --- | --- |
-| `chain` | The database and the genesis. |
+| `chain` | The database, the genesis, and the node's network key, `net.key`, so its peer id survives a rebuild. |
 | `tls` | The certificate nginx serves. |
 | `letsencrypt` | certbot's account and certificates. |
 | `acme` | The webroot for challenges. |

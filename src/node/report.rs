@@ -123,6 +123,10 @@ pub struct Counters {
     pub gossip_dropped: u64,
     #[document(summary = "Peers disconnected for going over their share of the backlog too often.")]
     pub flooders_disconnected: u64,
+    #[document(summary = "Gossip refused as breaking the rules, which counted against its sender.")]
+    pub gossip_rejected: u64,
+    #[document(summary = "Peers banned for their faults.")]
+    pub peers_banned: u64,
 }
 
 /// A connected peer, as the node keeps it.

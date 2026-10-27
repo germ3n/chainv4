@@ -164,6 +164,38 @@ when they find each other.
 **Message ids:** a gossip message's id is the chain hash of its bytes, so the same block or
 transaction is one message however many peers send it.
 
+**Checked before it is passed on:** gossipsub runs with `validate_messages`, so a block,
+transaction or vote goes on to this node's peers only once the node has checked it and said so,
+with `NetCommand::Judge` and its `Verdict`:
+
+| What came | Verdict |
+| --- | --- |
+| A block that ran, a transaction the mempool took, a vote counted | **Accept**: passed on. |
+| A block this node has, or whose parent it lacks, from the future, past finality, or it cannot check yet; a transaction it cannot take now (nonce, fee, full, syncing); a vote stale or not a validator's; anything while syncing from a snapshot | **Ignore**: dropped, no one's fault. |
+| A block that breaks the rules (work, seal, transactions, roots); a transaction or vote whose signature does not hold; bytes that do not decode; a flood past the backlog | **Reject**: dropped, and counted against the peer that sent it. |
+
+So a flood, or an invalid block, stops at the first honest node rather than passing through it.
+
+**The node's identity** is its network key, kept in `net.key` beside the database's directory
+(`--net-key FILE` for another), made at the first start, readable by its owner alone: its peer id
+is the same each start, so a peer can be named by it in `--peer` as `/p2p/<id>`, and is checked
+when it is. A file that does not read stops the node rather than giving it a new id; move it aside
+for a new one. It signs gossip and connections, nothing on the chain.
+
+## Bans
+
+Faults add up per peer within `SCORE_WINDOW`, 10 minutes, by weight: an invalid block or
+undecodable gossip 50, a flood 25, a bad signature on a transaction or vote 10. At `BAN_SCORE`,
+100 (two invalid blocks, or ten bad signatures), the peer is banned:
+- **Cut off:** disconnected, forgotten in Kademlia and in the remembered peers, and never dialed.
+- **Refused:** a connection from it, whoever dialed, is closed as soon as it stands.
+- **For `--ban-for`,** an hour unless given (`30m`, `2d`); bans live in memory, so a restart lifts
+  them.
+- **By peer id,** and with `--ban-ips` by its IP too, which also refuses a new id from the same
+  machine, but also any honest node behind the same NAT or VPN.
+
+`GET /node`'s counters show `gossip_rejected` and `peers_banned`.
+
 **Size limits:** a gossip message is at most 8 MiB, which a full block at genesis's largest
 `max_block_bytes`, 6 MiB, fits with its header and proofs; a sync request 1 KiB, a sync response
 64 MiB.
@@ -194,13 +226,16 @@ holds the chain's nodes alone, and a peer of another chain is dropped once ident
 | `--target-peers N` | 15 | How many peers to look for. |
 | `--no-mdns` | off | Do not look on the local network, as on a server. |
 
-**Peers remembered:** none yet. A restarted node starts from its `--peer`s and bootnodes again;
-the DHT refills from them within a minute.
+**Peers remembered:** each peer's listen addresses, as identify gives them, are kept in the
+database's `peers` column by peer id with when it was last seen, the 64 most recent
+(`MAX_REMEMBERED`). A restarted node dials them as it does bootnodes, while short of peers, each
+at most once a minute, so it finds its old peers even when its `--peer`s are gone. A banned peer
+is forgotten.
 
 **About addresses:**
-- **`--peer` takes an address alone,** such as `/ip4/203.0.113.7/udp/4001/quic-v1`: a node takes
-  a new peer id each time it starts, so an address with `/p2p/` and an old id would never connect.
-  QUIC learns the id in its handshake.
+- **`--peer` takes an address,** such as `/ip4/203.0.113.7/udp/4001/quic-v1`, with or without
+  `/p2p/<id>`: peers keep their ids now, so one given is checked, and without it QUIC learns the id
+  in its handshake.
 - **It is dialed again** every 15 seconds while no connection to it stands: after the peer
   restarts, after this machine's network drops or it wakes from sleep, and before the peer is up
   at all. The log says each time it could not be reached.
@@ -237,18 +272,12 @@ counts them, so a flood is turned away at the door instead of queueing without e
 `GET /node` shows what waits (`backlog`), what was dropped in all and from each peer, and how many
 peers were disconnected for it. The explorer's Network page shows them too.
 
-**Hardening still to do.** The backlog bounds memory and the loop's work, but a determined peer
-still has ways around it:
-- **No bans.** A disconnected flooder can connect again at once, through its own dial, mDNS or
-  Kademlia, and starts with a clean slate. A ban list, with an expiry, would keep it out.
+**Hardening still to do.** The backlog bounds memory and the loop's work, and bans keep out a
+peer that floods or sends what breaks the rules, but a determined peer still has ways around it:
 - **Shares are per peer id.** Ids are free, so one host with many ids gets many shares. Limits per
   IP address, or on connections, would close that.
-- **Invalid gossip costs nothing.** A peer whose transactions fail their signature check, or whose
-  blocks are invalid, is not struck; only volume is. Striking, or scoring, on what the verifier
-  and the chain find would.
-- **Gossip is forwarded before it is checked.** gossipsub relays messages on before the node has
-  looked at them, so a flood passes through this node to its peers. Its `validate_messages` mode,
-  reporting each verdict back, would stop that, and gossipsub's own peer scoring could build on it.
+- **gossipsub's own peer scoring is off.** The node's verdicts feed the bans above; gossipsub's
+  mesh scoring, which could build on the same verdicts, is not configured.
 - **Blocks and sync requests are not counted.** Only transactions and votes are; gossiped blocks
   and requests from syncing peers still queue without bound.
 - **The strike rules are fixed.** `MAX_STRIKES` and `STRIKE_WINDOW` are constants; a share small

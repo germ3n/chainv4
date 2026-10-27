@@ -6,12 +6,14 @@ use {
 };
 
 #[document(
-    summary = "The RocksDB backend. Each Column is a column family, and a commit is one WriteBatch.",
+    summary = "The RocksDB backend. Each Column is a column family, and a commit is one WriteBatch, synced to disk before it returns unless opened unsynced: a power cut loses no commit the node was told stood.",
     category = "Storage",
     see_also = "Database, MemoryDb",
 )]
 pub struct RocksDb {
     rocks: DB,
+    /// Whether each commit waits for the disk.
+    sync: bool,
 }
 
 impl RocksDb {
@@ -29,7 +31,25 @@ impl RocksDb {
             .map(|column| ColumnFamilyDescriptor::new(column.name(), Options::default()));
         let rocks = DB::open_cf_descriptors(&options, path, columns).map_err(backend)?;
 
-        Ok(RocksDb { rocks })
+        Ok(RocksDb { rocks, sync: true })
+    }
+
+    #[document(
+        parent = "RocksDb",
+        summary = "The same database, its commits no longer waiting for the disk: faster, but a power cut can lose the last few. What --no-fsync gives, for benchmarks and tests.",
+    )]
+    pub fn unsynced(mut self) -> RocksDb {
+        self.sync = false;
+
+        self
+    }
+
+    /// How a commit is written: synced, unless opened unsynced.
+    fn options(&self) -> rocksdb::WriteOptions {
+        let mut options = rocksdb::WriteOptions::default();
+        options.set_sync(self.sync);
+
+        options
     }
 
     #[document(
@@ -77,7 +97,7 @@ impl Database for RocksDb {
         let mut batch = WriteBatch::default();
         self.add(&mut batch, changes);
 
-        self.rocks.write(batch).map_err(backend)
+        self.rocks.write_opt(batch, &self.options()).map_err(backend)
     }
 
     fn clear(&self, column: Column, changes: Changes) -> Result<(), DbError> {
@@ -94,7 +114,7 @@ impl Database for RocksDb {
 
         self.add(&mut batch, changes);
 
-        self.rocks.write(batch).map_err(backend)
+        self.rocks.write_opt(batch, &self.options()).map_err(backend)
     }
 
     fn scan(&self, column: Column, prefix: &[u8], start: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError> {

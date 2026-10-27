@@ -201,6 +201,24 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   every `tx_root`. A new chain-state column must join `STATE_COLUMNS` on purpose, and so becomes a
   new chain. The address index's column does not: it is a node's own.
 
+## The node on the network
+
+- **A node keeps its peer id.** Its network key is `net.key`, beside the database's directory
+  (`/data/net.key` in Docker, in the chain's volume), made at the first start. Delete it and the
+  node takes a new id, which peers that pinned `/p2p/<id>` no longer reach. A file that does not
+  read stops the node instead.
+- **Gossip waits for the node's verdict.** Nothing is passed on before it is checked, so an
+  invalid block stops at the first honest node. A node that is still syncing from a snapshot
+  ignores gossip, and so passes none on until it is done.
+- **Bans are by peer id unless `--ban-ips`.** Ids are free to make, so a determined peer comes back
+  under another one; `--ban-ips` stops that, and also refuses honest nodes behind the same NAT or
+  VPN. Bans end after `--ban-for` and with a restart.
+- **Being honest costs nothing.** A block whose parent is missing, one already had, one a little
+  from the future, a nonce used or a fee too low: dropped, never scored.
+- **Remembered peers are dialed like bootnodes,** while the node is short of peers, at most once a
+  minute each; a peer that changed its address is found again through the others.
+- **Every commit is synced.** It costs a few milliseconds a block; `--no-fsync` for benchmarks.
+
 ## How the chain behaves
 
 - **Failed transactions stay in their block.** They use up their nonce and pay their fee. Only a

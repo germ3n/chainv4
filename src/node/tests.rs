@@ -261,7 +261,7 @@ fn gossip_leaves_the_backlog_once_the_loop_handled_it() {
 
         // As the network does: counted in, then handed on.
         assert_eq!(backlog.admit(crate::net::Origin::Peer(peer), std::time::Instant::now()), crate::net::Admission::Admitted);
-        follower_net.events.send(NetEvent::Tx { from: peer, tx }).unwrap();
+        follower_net.events.send(NetEvent::Tx { from: peer, tx, gossip: None }).unwrap();
     }
 
     assert_eq!(backlog.waiting(), 2);
@@ -283,12 +283,15 @@ fn followers_import_gossiped_blocks_and_never_produce() {
         .send(NetEvent::Block {
             from: PeerId::random(),
             block,
+            gossip: None,
         })
         .unwrap();
     follower.step(SLOT * 10).unwrap();
 
     assert_eq!(follower.chain().tip().id(), producer.chain().tip().id());
-    assert!(sent(&mut follower_net).is_empty());
+    // It produced nothing, and told the network the block holds, to pass on.
+    let sent = sent(&mut follower_net);
+    assert!(matches!(sent.as_slice(), [NetCommand::Judge { verdict: Verdict::Accept, .. }]), "{sent:?}");
 }
 
 #[cfg(feature = "secp256k1")]
@@ -332,7 +335,7 @@ fn a_transfer_signed_as_typed_data_goes_into_a_block_as_any_other() {
 
     assert_eq!(block.txs, [signed]);
 
-    follower_net.events.send(NetEvent::Block { from: PeerId::random(), block }).unwrap();
+    follower_net.events.send(NetEvent::Block { from: PeerId::random(), block, gossip: None }).unwrap();
     follower.step(SLOT).unwrap();
 
     assert_eq!(Accounts::new(&follower.chain().state()).get(&bob).unwrap().balance, u256::new(42));
@@ -371,6 +374,7 @@ fn transactions_travel_to_the_producer_and_into_a_block() {
         .send(NetEvent::Tx {
             from: PeerId::random(),
             tx: gossiped,
+            gossip: None,
         })
         .unwrap();
     producer.step(SLOT).unwrap();
@@ -383,6 +387,7 @@ fn transactions_travel_to_the_producer_and_into_a_block() {
         .send(NetEvent::Block {
             from: PeerId::random(),
             block,
+            gossip: None,
         })
         .unwrap();
     follower.step(SLOT).unwrap();
@@ -405,6 +410,7 @@ fn blocks_ahead_of_the_tip_wait_for_sync() {
         .send(NetEvent::Block {
             from: PeerId::random(),
             block: second,
+            gossip: None,
         })
         .unwrap();
     follower.step(SLOT * 2).unwrap();
@@ -543,7 +549,7 @@ fn a_block_from_the_future_makes_the_node_ask_its_sender() {
         })
         .unwrap();
     let (producer_peer, follower_peer) = (PeerId::random(), PeerId::random());
-    follower_net.events.send(NetEvent::Block { from: producer_peer, block: third }).unwrap();
+    follower_net.events.send(NetEvent::Block { from: producer_peer, block: third, gossip: None }).unwrap();
     follower.step(SLOT * 3).unwrap();
     relay(
         Side { node: &mut follower, net: &mut follower_net, peer: follower_peer },
@@ -778,7 +784,7 @@ fn forked_nodes_settle_on_the_heavier_chain() {
     let (mut light, mut light_net) = pow_node();
     let genesis = heavy.chain().tip().clone();
     let feed = |node: &mut Node, net: &FakeNet, block: Block| {
-        net.events.send(NetEvent::Block { from: PeerId::random(), block }).unwrap();
+        net.events.send(NetEvent::Block { from: PeerId::random(), block, gossip: None }).unwrap();
         node.step(LATER).unwrap();
     };
     let mut parent = genesis.clone();
@@ -910,8 +916,8 @@ mod finality {
 
             for command in sent(&mut producer_net) {
                 let event = match command {
-                    NetCommand::PublishBlock(block) => NetEvent::Block { from: peer, block },
-                    NetCommand::PublishVote(vote) => NetEvent::Vote { from: peer, vote },
+                    NetCommand::PublishBlock(block) => NetEvent::Block { from: peer, block, gossip: None },
+                    NetCommand::PublishVote(vote) => NetEvent::Vote { from: peer, vote, gossip: None },
                     _ => continue,
                 };
                 follower_net.events.send(event).unwrap();
@@ -1038,8 +1044,8 @@ fn the_report_counts_what_peers_sent_and_shows_what_waits() {
     );
     net.events.send(NetEvent::Listening("/ip4/127.0.0.1/udp/9/quic-v1".parse().unwrap())).unwrap();
     net.events.send(NetEvent::PeerUp { peer, address: address.clone() }).unwrap();
-    net.events.send(NetEvent::Tx { from: peer, tx: tx.clone() }).unwrap();
-    net.events.send(NetEvent::Tx { from: peer, tx: tx.clone() }).unwrap();
+    net.events.send(NetEvent::Tx { from: peer, tx: tx.clone(), gossip: None }).unwrap();
+    net.events.send(NetEvent::Tx { from: peer, tx: tx.clone(), gossip: None }).unwrap();
     node.step(SLOT).unwrap();
     sent(&mut net);
     let report = node.report(SLOT * 2, 10);
@@ -1239,7 +1245,7 @@ fn snapshot_of_a_chain_with_producers_from_finality(genesis: Genesis, producer: 
     for slot in blocks + 1..=blocks + 3 {
         producer.step(SLOT * slot).unwrap();
         let block = published_block(&mut producer_net);
-        late_net.events.send(NetEvent::Block { from: producer_peer, block }).unwrap();
+        late_net.events.send(NetEvent::Block { from: producer_peer, block, gossip: None }).unwrap();
         late.step(SLOT * slot).unwrap();
     }
 
@@ -1304,7 +1310,7 @@ fn a_node_switches_its_producer_when_governance_changes_the_consensus() {
             NetCommand::PublishBlock(block) => Some(block),
             _ => None,
         }) {
-            follower_net.events.send(NetEvent::Block { from: peer, block }).unwrap();
+            follower_net.events.send(NetEvent::Block { from: peer, block, gossip: None }).unwrap();
             follower.step(now).unwrap();
         }
     };
@@ -1420,4 +1426,69 @@ fn a_running_node_returns_once_told_to_stop() {
     }
 
     assert!(running.join().unwrap().is_ok());
+}
+
+/// The verdicts the node sent the network since the last call.
+fn verdicts(fake: &mut FakeNet) -> Vec<(PeerId, Verdict)> {
+    sent(fake)
+        .into_iter()
+        .filter_map(|command| match command {
+            NetCommand::Judge { peer, verdict, .. } => Some((peer, verdict)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn gossiped_blocks_are_passed_on_only_once_they_hold_and_their_faults_are_their_senders() {
+    let (mut producer, mut producer_net) = node(true);
+    let (mut follower, mut follower_net) = node(false);
+    producer.step(SLOT).unwrap();
+    let good = published_block(&mut producer_net);
+    producer.step(SLOT * 2).unwrap();
+    let orphan = published_block(&mut producer_net);
+    let (honest, liar) = (PeerId::random(), PeerId::random());
+    let gossip = |from, block| NetEvent::Block { from, block, gossip: None };
+
+    // A block whose parent the node lacks: not passed on, and no one's fault.
+    follower_net.events.send(gossip(honest, orphan)).unwrap();
+    follower.step(SLOT * 10).unwrap();
+    assert_eq!(verdicts(&mut follower_net), [(honest, Verdict::Ignore)]);
+
+    // One that holds is passed on; the same again is known, and dropped quietly.
+    follower_net.events.send(gossip(honest, good.clone())).unwrap();
+    follower_net.events.send(gossip(honest, good.clone())).unwrap();
+    follower.step(SLOT * 10).unwrap();
+    assert_eq!(verdicts(&mut follower_net), [(honest, Verdict::Accept), (honest, Verdict::Ignore)]);
+
+    // One that breaks the rules counts against whoever sent it.
+    let mut forged = good;
+    forged.header.gas_used += 1;
+    follower_net.events.send(gossip(liar, forged)).unwrap();
+    follower.step(SLOT * 10).unwrap();
+    assert_eq!(verdicts(&mut follower_net), [(liar, Verdict::Reject(crate::net::Fault::Block))]);
+    assert_eq!(follower.report(1, 0).counters.gossip_rejected, 1);
+}
+
+#[test]
+fn peers_are_remembered_for_the_next_start_and_a_banned_one_is_forgotten() {
+    let db: Arc<dyn Database> = Arc::new(MemoryDb::default());
+    let genesis = Genesis {
+        fees: None,
+        ..Genesis::dev_authority(DevAuthority::dev_keypair().public())
+    };
+    let (link, fake) = NetLink::pair();
+    let mut node = Node::new(db.clone(), &genesis, None, link).unwrap();
+    let (kept, banned) = (PeerId::random(), PeerId::random());
+    let at = |peer: &PeerId| -> Multiaddr { format!("/ip4/203.0.113.9/udp/4001/quic-v1/p2p/{peer}").parse().unwrap() };
+
+    fake.events.send(NetEvent::Addresses { peer: kept, addresses: vec![at(&kept)] }).unwrap();
+    fake.events.send(NetEvent::Addresses { peer: banned, addresses: vec![at(&banned)] }).unwrap();
+    node.step(1).unwrap();
+    assert_eq!(remembered(db.as_ref()).unwrap().len(), 2);
+
+    fake.events.send(NetEvent::Banned(banned)).unwrap();
+    node.step(2).unwrap();
+    assert_eq!(remembered(db.as_ref()).unwrap(), [at(&kept)], "what the next start dials");
+    assert_eq!(node.report(1, 0).counters.peers_banned, 1);
 }

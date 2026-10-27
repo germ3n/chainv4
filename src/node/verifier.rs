@@ -102,7 +102,7 @@ mod tests {
         crate::consensus::DevAuthority,
         crate::db::MemoryDb,
         crate::mempool::Mempool,
-        crate::net::{Backlog, BacklogLimits, NetCommand},
+        crate::net::{Backlog, BacklogLimits, NetCommand, Verdict},
         crate::structs::hash::HashType,
         tokio::sync::{mpsc as async_mpsc, oneshot},
         crate::crypto::keypair::Keypair,
@@ -129,7 +129,7 @@ mod tests {
         // Its signature was over another nonce.
         forged.nonce = 7;
         let peer = PeerId::random();
-        let batch = vec![NetEvent::Tx { from: peer, tx: transfer(0) }, NetEvent::PeerDown(peer), NetEvent::Tx { from: peer, tx: forged }];
+        let batch = vec![NetEvent::Tx { from: peer, tx: transfer(0), gossip: None }, NetEvent::PeerDown(peer), NetEvent::Tx { from: peer, tx: forged, gossip: None }];
         let checked = check(batch, &Workers::new(), &Hash::zero(HashType::default_chain()));
 
         assert!(matches!(&checked[0], Arrival::Event { event, checked: Some(Ok(())) } if matches!(**event, NetEvent::Tx { .. })));
@@ -156,9 +156,9 @@ mod tests {
         let peer = PeerId::random();
         let (reply, verdict) = oneshot::channel();
 
-        network.send(NetEvent::Tx { from: peer, tx: transfer(0) }).unwrap();
+        network.send(NetEvent::Tx { from: peer, tx: transfer(0), gossip: None }).unwrap();
         network.send(NetEvent::PeerDown(peer)).unwrap();
-        network.send(NetEvent::Tx { from: peer, tx: forged }).unwrap();
+        network.send(NetEvent::Tx { from: peer, tx: forged, gossip: None }).unwrap();
         network.send(NetEvent::Submitted { tx: transfer(1), reply }).unwrap();
 
         // The loop sees the other event, and only tallies of the transactions.
@@ -176,7 +176,15 @@ mod tests {
         assert_eq!((tally.heard, tally.submitted, tally.refused), (vec![peer, peer], 1, 1));
         assert!(verdict.blocking_recv().unwrap().is_ok(), "the client heard back from the gate");
         assert_eq!(gate.mempool().len(), 2);
-        assert!(matches!(published.try_recv(), Ok(NetCommand::PublishTx(_))), "and its transaction went out");
+        // Each gossiped one judged, the forged one's fault its sender's; the submitted one went out.
+        let commands: Vec<NetCommand> = std::iter::from_fn(|| published.try_recv().ok()).collect();
+        let verdicts: Vec<Verdict> = commands.iter().filter_map(|command| match command {
+            NetCommand::Judge { verdict, .. } => Some(*verdict),
+            _ => None,
+        }).collect();
+
+        assert_eq!(verdicts, [Verdict::Accept, Verdict::Reject(crate::net::Fault::Tx)]);
+        assert!(commands.iter().any(|command| matches!(command, NetCommand::PublishTx(_))), "and its transaction went out");
 
         // It stops once the network is gone.
         drop(network);

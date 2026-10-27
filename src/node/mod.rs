@@ -6,12 +6,12 @@
 //! counts the votes it hears. Catching up with peers lives in sync.rs.
 
 use {
-    crate::chain::{Chain, ChainError, FinalityError, FinalityUpdate, Genesis, ImportError, Imported, IndexKind, KeepFrom},
+    crate::chain::{BlockError, Chain, ChainError, FinalityError, FinalityUpdate, Genesis, ImportError, Imported, IndexKind, KeepFrom},
     crate::consensus::{ConsensusConfig, Producer},
     crate::crypto::keypair::Keypair,
     crate::db::{Database, DbError},
     crate::mempool::{Budget, Mempool, MempoolError},
-    crate::net::{Admission, Backlog, MAX_SYNC_BLOCKS, MAX_SYNC_ENTRIES, MAX_SYNC_FINALITY, MAX_SYNC_HEADERS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, Origin, SyncRequest, SyncResponse},
+    crate::net::{Admission, Backlog, Fault, Gossip, MAX_SYNC_BLOCKS, MAX_SYNC_ENTRIES, MAX_SYNC_FINALITY, MAX_SYNC_HEADERS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, Origin, SyncRequest, SyncResponse, Verdict},
     crate::structs::address::Address,
     crate::structs::block::Block,
     crate::structs::hash::Hash,
@@ -33,6 +33,7 @@ use {
 };
 
 mod gate;
+mod peers;
 mod report;
 mod snapshot;
 mod stream;
@@ -40,6 +41,7 @@ mod sync;
 mod verifier;
 
 pub use crate::mining::pool::MiningPort;
+pub use peers::{MAX_REMEMBERED, remembered};
 pub use report::{Counters, Heard, NodeReport, PeerReport};
 pub use stream::NodeEvent;
 
@@ -716,6 +718,7 @@ impl Node {
     fn count(&mut self, tally: Tally) {
         self.counters.txs_submitted += tally.submitted;
         self.counters.txs_refused += tally.refused;
+        self.counters.gossip_rejected += tally.rejected;
 
         for peer in tally.heard {
             self.counters.txs_heard += 1;
@@ -744,15 +747,18 @@ impl Node {
 
         match event {
             // While it takes a snapshot its state is half the pivot's: nothing can be run on it.
-            NetEvent::Block { from, .. } | NetEvent::Vote { from, .. } if self.snapshotting() => {
+            NetEvent::Block { from, gossip, .. } | NetEvent::Vote { from, gossip, .. } if self.snapshotting() => {
                 log::debug!("[node] ignored gossip from {from} while syncing from a snapshot");
+                self.judge(from, gossip, Verdict::Ignore);
             }
-            NetEvent::Block { from, block } => {
+            NetEvent::Block { from, block, gossip } => {
                 let height = block.header.height;
                 self.counters.blocks_heard += 1;
                 self.heard(&from, |heard| heard.blocks += 1);
+                let imported = self.chain.import(&block, now);
+                self.judge(from, gossip, block_verdict(&imported));
 
-                match self.chain.import(&block, now) {
+                match imported {
                     Ok(imported) => self.imported(&block, imported, &format!("from {from}"))?,
                     Err(ImportError::Db(err)) => return Err(NodeError::Db(err)),
                     Err(ImportError::Known) => {}
@@ -770,12 +776,27 @@ impl Node {
                     }
                 }
             }
+            NetEvent::Addresses { peer, addresses } => peers::remember(self.chain.db().as_ref(), &peer, &addresses, now_ms()).map_err(NodeError::Db)?,
+            NetEvent::Banned(peer) => {
+                self.counters.peers_banned += 1;
+                peers::forget(self.chain.db().as_ref(), &peer).map_err(NodeError::Db)?;
+            }
             NetEvent::Sealed { block, seal } => self.sealed(block, seal, now)?,
-            NetEvent::Vote { from, vote } => {
+            NetEvent::Vote { from, vote, gossip } => {
                 self.counters.votes_heard += 1;
                 self.heard(&from, |heard| heard.votes += 1);
+                let added = self.chain.add_vote(vote);
+                self.judge(
+                    from,
+                    gossip,
+                    match &added {
+                        Ok(_) => Verdict::Accept,
+                        Err(FinalityError::Invalid(_)) => Verdict::Reject(Fault::Vote),
+                        Err(_) => Verdict::Ignore,
+                    },
+                );
 
-                match self.chain.add_vote(vote) {
+                match added {
                     Ok(update) => self.finality_changed(update, &format!("from {from}"))?,
                     Err(FinalityError::Db(err)) => return Err(NodeError::Db(err)),
                     Err(err) => log::debug!("[node] ignored a vote from {from}: {err}"),
@@ -1196,6 +1217,15 @@ impl Node {
         Ok(())
     }
 
+    /// Tells the network what came of a peer's gossip: passed on, dropped, or counted against it.
+    fn judge(&mut self, peer: PeerId, gossip: Option<Gossip>, verdict: Verdict) {
+        if matches!(verdict, Verdict::Reject(_)) {
+            self.counters.gossip_rejected += 1;
+        }
+
+        self.send(NetCommand::Judge { peer, gossip, verdict });
+    }
+
     fn send(&mut self, command: NetCommand) {
         if matches!(command, NetCommand::Request { .. }) {
             self.counters.requests_sent += 1;
@@ -1238,6 +1268,21 @@ fn reorganized(undone: &[Block], applied: &[Block]) -> NodeEvent {
     NodeEvent::Reorganized {
         undone: undone.iter().map(Block::id).collect(),
         applied: applied.iter().cloned().map(Arc::new).collect(),
+    }
+}
+
+/// What a gossiped block comes to, for the network: passed on once it ran, dropped quietly when it
+/// is known, early, or this node cannot judge it yet, and counted against its sender when it
+/// breaks the rules.
+fn block_verdict(imported: &Result<Imported, ImportError>) -> Verdict {
+    use crate::consensus::ConsensusError;
+
+    match imported {
+        Ok(_) => Verdict::Accept,
+        Err(ImportError::Invalid(BlockError::Consensus(ConsensusError::FromTheFuture | ConsensusError::NoAncestors | ConsensusError::NoProducers)))
+        | Err(ImportError::Invalid(BlockError::ConflictsWithFinality))
+        | Err(ImportError::Known | ImportError::UnknownParent(_) | ImportError::Db(_)) => Verdict::Ignore,
+        Err(ImportError::Invalid(_)) => Verdict::Reject(Fault::Block),
     }
 }
 

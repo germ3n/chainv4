@@ -57,7 +57,7 @@ struct NodeArgs {
     #[arg(long, default_value = "/ip4/0.0.0.0/udp/0/quic-v1")]
     listen: Vec<libp2p::Multiaddr>,
     /// A peer to dial at startup, and again every 15 seconds while no connection to it stands.
-    /// Repeat to dial several. No /p2p/ part is needed, as a node takes a new peer id each start.
+    /// Repeat to dial several. A /p2p/ part, the peer's id, is checked when given; none is needed.
     #[arg(long)]
     peer: Vec<libp2p::Multiaddr>,
     /// The name every protocol and gossip topic starts with, beside the genesis id: give chains
@@ -85,6 +85,22 @@ struct NodeArgs {
     /// 10 times in a minute is disconnected.
     #[arg(long, default_value_t = 1_000, value_parser = clap::value_parser!(u32).range(1..))]
     max_gossip_per_peer: u32,
+    /// The node's network key file, which its peer id is of, so the id is the same each start:
+    /// made at the first start, readable by its owner alone. net.key beside --db unless given.
+    #[arg(long)]
+    net_key: Option<std::path::PathBuf>,
+    /// How long a peer is banned once what it sent that breaks the rules adds up, such as two
+    /// invalid blocks or ten bad signatures within ten minutes: 1h, 30m, 90s or 2d.
+    #[arg(long, default_value = "1h", value_parser = cli::parse_duration)]
+    ban_for: u64,
+    /// Ban a peer's IP as well as its peer id, so a new id from the same machine is refused too.
+    /// It can catch honest nodes behind the same NAT or VPN.
+    #[arg(long)]
+    ban_ips: bool,
+    /// Do not wait for the disk on each commit: faster, but a power cut can lose the last few
+    /// blocks, which peers give back. For benchmarks and tests.
+    #[arg(long)]
+    no_fsync: bool,
     /// The most transactions a block this node produces may hold. Without it, blocks fill to the
     /// chain's max_block_bytes and gas limit, which every node checks; this only caps this node's
     /// own blocks.
@@ -263,7 +279,10 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         Some(path) => cli::genesis::read(path)?,
         None => cli::genesis::dev(args.consensus),
     };
-    let rocks = RocksDb::open(&args.db)?;
+    let rocks = match args.no_fsync {
+        true => RocksDb::open(&args.db)?.unsynced(),
+        false => RocksDb::open(&args.db)?,
+    };
     // An older database is moved up to this node's format, after a backup, before anything reads it.
     cli::db::on_start(&rocks, &args.db)?;
     let db: Arc<dyn Database> = Arc::new(rocks);
@@ -284,6 +303,12 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         genesis.engines.iter().map(|engine| engine.name()).collect::<Vec<_>>().join(" and ")
     );
 
+    // The network key, beside the database's directory unless --net-key names its file.
+    let net_key = args.net_key.clone().unwrap_or_else(|| {
+        let parent = args.db.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+
+        parent.join(net::NET_KEY_FILE)
+    });
     let net = net::spawn(NetConfig {
         listen: args.listen,
         peers: args.peer,
@@ -296,6 +321,12 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         backlog: BacklogLimits {
             total: args.max_gossip_backlog as usize,
             per_peer: args.max_gossip_per_peer as usize,
+        },
+        key: Some(net::net_key(&net_key)?),
+        remembered: chainv4::node::remembered(db.as_ref())?,
+        bans: net::BanLimits {
+            ban_for: std::time::Duration::from_millis(args.ban_for),
+            ips: args.ban_ips,
         },
     })?;
     // What this node produces with: a miner's settings, a signing key, or both. The node builds

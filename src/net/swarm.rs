@@ -1,6 +1,6 @@
 use {
     super::codec::SyncCodec,
-    super::{Admission, Backlog, NetCommand, NetConfig, NetEvent, NetLink, Origin, SyncResponse},
+    super::{Admission, Backlog, Bans, Fault, Gossip, NetCommand, NetConfig, NetEvent, NetLink, Origin, SyncResponse, Verdict},
     crate::crypto::hasher::Hasher,
     crate::structs::block::Block,
     crate::structs::tx::SignedTx,
@@ -13,6 +13,7 @@ use {
     r#macro::document,
     std::collections::HashMap,
     std::fmt,
+    std::net::IpAddr,
     std::sync::{Arc, mpsc},
     std::time::{Duration, Instant},
     tokio::sync::mpsc as async_mpsc,
@@ -74,6 +75,8 @@ enum Given {
     /// A bootnode, from --bootnode or, for chain, from genesis or governance: dialed while the
     /// node has fewer peers than it wants.
     Bootnode { chain: bool },
+    /// A peer the node met before it last stopped, from its database: dialed as a bootnode is.
+    Remembered,
 }
 
 /// An address to dial: its kind, and the dial under way to it or the peer it reached. Its peer id
@@ -196,6 +199,29 @@ struct Net {
     target_peers: usize,
     /// The peers Kademlia knows that discovery dialed, and when, so it moves on to others.
     tried: HashMap<PeerId, Instant>,
+    /// Peers' faults and bans.
+    bans: Bans,
+    /// The IP each connected peer connects from, for bans that cover IPs.
+    ips: HashMap<PeerId, IpAddr>,
+}
+
+/// The IP an address starts with, if it does.
+fn ip_of(address: &Multiaddr) -> Option<IpAddr> {
+    use libp2p::multiaddr::Protocol;
+
+    match address.iter().next() {
+        Some(Protocol::Ip4(ip)) => Some(IpAddr::V4(ip)),
+        Some(Protocol::Ip6(ip)) => Some(IpAddr::V6(ip)),
+        _ => None,
+    }
+}
+
+/// The peer id an address ends in, /p2p/<id>, if it does.
+fn peer_of(address: &Multiaddr) -> Option<PeerId> {
+    match address.iter().last() {
+        Some(libp2p::multiaddr::Protocol::P2p(peer)) => Some(peer),
+        _ => None,
+    }
 }
 
 impl Net {
@@ -203,13 +229,18 @@ impl Net {
         let (hash, local) = (config.hash, config.mdns);
         let names = Names::new(&config.protocol, &config.network)?;
         let (sync_protocol, kad_protocol, identify_protocol) = (names.sync.clone(), names.kad.clone(), names.identify.clone());
-        let mut swarm = SwarmBuilder::with_new_identity()
+        // The node's own key, the same each start; a new one when none is given, as in tests.
+        let identity = config.key.clone().unwrap_or_else(libp2p::identity::Keypair::generate_ed25519);
+        let mut swarm = SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
             .with_quic()
             .with_behaviour(|key| {
                 let peer_id = key.public().to_peer_id();
                 let gossip_config = gossipsub::ConfigBuilder::default()
                     .max_transmit_size(MAX_GOSSIP)
+                    // Nothing is passed on until the node has checked it: its verdict comes back
+                    // as NetCommand::Judge.
+                    .validate_messages()
                     // Ids by content, so the same block from two peers is one message.
                     .message_id_fn(move |message| {
                         gossipsub::MessageId::from(Hasher::digest(hash, &message.data).to_bytes())
@@ -277,6 +308,7 @@ impl Net {
 
         // Dialed on the first tick, as the node has no peers yet.
         wanted.extend(config.bootnodes.iter().map(|address| Wanted::new(address.clone(), Given::Bootnode { chain: false })));
+        wanted.extend(config.remembered.iter().map(|address| Wanted::new(address.clone(), Given::Remembered)));
 
         Ok(Net {
             swarm,
@@ -290,6 +322,8 @@ impl Net {
             wanted,
             target_peers: config.target_peers,
             tried: HashMap::new(),
+            bans: Bans::new(config.bans),
+            ips: HashMap::new(),
         })
     }
 
@@ -298,15 +332,18 @@ impl Net {
     /// and a few of the peers Kademlia knows.
     fn redial(&mut self) {
         let short = self.swarm.connected_peers().count() < self.target_peers;
+        let now = Instant::now();
+        self.bans.sweep(now);
 
         for wanted in &mut self.wanted {
             let connected = wanted.reached.is_some_and(|peer| self.swarm.is_connected(&peer));
+            let banned = wanted.reached.or_else(|| peer_of(&wanted.address)).is_some_and(|peer| self.bans.banned(&peer, ip_of(&wanted.address), now));
 
-            if connected || wanted.dialing.is_some() {
+            if connected || wanted.dialing.is_some() || banned {
                 continue;
             }
 
-            if matches!(wanted.given, Given::Bootnode { .. }) && (!short || wanted.tried.is_some_and(|tried| tried.elapsed() < BOOTNODE_EVERY)) {
+            if matches!(wanted.given, Given::Bootnode { .. } | Given::Remembered) && (!short || wanted.tried.is_some_and(|tried| tried.elapsed() < BOOTNODE_EVERY)) {
                 continue;
             }
 
@@ -342,6 +379,7 @@ impl Net {
         let fresh: Vec<_> = known
             .into_iter()
             .filter(|(peer, addresses)| *peer != local && !addresses.is_empty() && !self.swarm.is_connected(peer) && !self.tried.contains_key(peer))
+            .filter(|(peer, addresses)| !self.bans.banned(peer, addresses.first().and_then(ip_of), Instant::now()))
             .take(missing.min(DIALS_AT_ONCE))
             .collect();
 
@@ -386,7 +424,7 @@ impl Net {
                     }
                 }
                 command = commands.recv() => match command {
-                    Some(command) => self.on_command(command),
+                    Some(command) => self.on_command(command, &events),
                     // The node is gone.
                     None => return,
                 },
@@ -399,42 +437,41 @@ impl Net {
         let event = match event {
             SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
                 propagation_source: from,
+                message_id,
                 message,
-                ..
             })) => {
+                let gossip = Some(Gossip(message_id.clone()));
+
                 if message.topic == self.blocks.hash() {
                     match wincode::deserialize::<Block>(&message.data) {
-                        Ok(block) => NetEvent::Block { from, block },
+                        Ok(block) => NetEvent::Block { from, block, gossip },
                         Err(err) => {
                             log::debug!("[net] undecodable block from {from}: {err}");
+                            self.judge(from, Some(Gossip(message_id)), Verdict::Reject(Fault::Garbage), events);
 
                             return true;
                         }
                     }
-                } else if message.topic == self.txs.hash() {
-                    if !self.admit(from) {
+                } else if message.topic == self.txs.hash() || message.topic == self.votes.hash() {
+                    let tx = message.topic == self.txs.hash();
+
+                    if !self.admit(from, events) {
+                        self.judge(from, gossip, Verdict::Ignore, events);
+
                         return true;
                     }
 
-                    match wincode::deserialize::<SignedTx>(&message.data) {
-                        Ok(tx) => NetEvent::Tx { from, tx },
+                    let event = match tx {
+                        true => wincode::deserialize::<SignedTx>(&message.data).map(|tx| NetEvent::Tx { from, tx, gossip }),
+                        false => wincode::deserialize::<SignedVote>(&message.data).map(|vote| NetEvent::Vote { from, vote, gossip }),
+                    };
+
+                    match event {
+                        Ok(event) => event,
                         Err(err) => {
                             self.backlog.release(Origin::Peer(from));
-                            log::debug!("[net] undecodable transaction from {from}: {err}");
-
-                            return true;
-                        }
-                    }
-                } else if message.topic == self.votes.hash() {
-                    if !self.admit(from) {
-                        return true;
-                    }
-
-                    match wincode::deserialize::<SignedVote>(&message.data) {
-                        Ok(vote) => NetEvent::Vote { from, vote },
-                        Err(err) => {
-                            self.backlog.release(Origin::Peer(from));
-                            log::debug!("[net] undecodable vote from {from}: {err}");
+                            log::debug!("[net] undecodable {} from {from}: {err}", if tx { "transaction" } else { "vote" });
+                            self.judge(from, Some(Gossip(message_id)), Verdict::Reject(Fault::Garbage), events);
 
                             return true;
                         }
@@ -477,12 +514,16 @@ impl Net {
                 // peer sees this node on loopback too, so nodes on one machine still find each
                 // other, and left out otherwise, so the DHT never hands them to anyone else.
                 let local = loopback(&info.observed_addr);
+                let addresses: Vec<Multiaddr> = info.listen_addrs.into_iter().filter(|address| local || !loopback(address)).collect();
 
-                for address in info.listen_addrs.into_iter().filter(|address| local || !loopback(address)) {
-                    self.swarm.behaviour_mut().kad.add_address(&peer_id, address);
+                for address in &addresses {
+                    self.swarm.behaviour_mut().kad.add_address(&peer_id, address.clone());
                 }
 
-                return true;
+                // What the node remembers it by, with its id, for its next start.
+                let addresses = addresses.into_iter().map(|address| address.with_p2p(peer_id).unwrap_or_else(|address| address)).collect();
+
+                NetEvent::Addresses { peer: peer_id, addresses }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::Message {
                 peer,
@@ -518,6 +559,16 @@ impl Net {
                 num_established,
                 ..
             } => {
+                let ip = ip_of(endpoint.get_remote_address());
+
+                // A banned peer, or with --ban-ips any peer from a banned IP, is let in no further.
+                if self.bans.banned(&peer_id, ip, Instant::now()) {
+                    log::debug!("[net] refused {peer_id} at {}: banned", endpoint.get_remote_address());
+                    let _ = self.swarm.disconnect_peer_id(peer_id);
+
+                    return true;
+                }
+
                 for wanted in self.wanted.iter_mut().filter(|wanted| wanted.dialing == Some(connection_id)) {
                     log::info!("[net] connected to {peer_id} at {}", wanted.address);
                     (wanted.dialing, wanted.reached) = (None, Some(peer_id));
@@ -525,6 +576,10 @@ impl Net {
 
                 if num_established.get() != 1 {
                     return true;
+                }
+
+                if let Some(ip) = ip {
+                    self.ips.insert(peer_id, ip);
                 }
 
                 let address = endpoint.get_remote_address().clone();
@@ -536,7 +591,11 @@ impl Net {
                 peer_id,
                 num_established: 0,
                 ..
-            } => NetEvent::PeerDown(peer_id),
+            } => {
+                self.ips.remove(&peer_id);
+
+                NetEvent::PeerDown(peer_id)
+            }
             SwarmEvent::NewListenAddr { address, .. } => {
                 let address = address.with_p2p(*self.swarm.local_peer_id()).unwrap_or_else(|address| address);
                 log::info!("[net] listening on {address}");
@@ -580,7 +639,7 @@ impl Net {
 
     /// Whether the backlog has room for one more transaction or vote from a peer, disconnecting a
     /// peer that keeps going over its share.
-    fn admit(&mut self, from: PeerId) -> bool {
+    fn admit(&mut self, from: PeerId, events: &mpsc::Sender<NetEvent>) -> bool {
         match self.backlog.admit(Origin::Peer(from), Instant::now()) {
             Admission::Admitted => true,
             Admission::Dropped => {
@@ -591,14 +650,43 @@ impl Net {
             Admission::Disconnect => {
                 log::warn!("[net] disconnecting {from}: it kept sending more gossip than its share of the backlog");
                 let _ = self.swarm.disconnect_peer_id(from);
+                self.judge(from, None, Verdict::Reject(Fault::Flood), events);
 
                 false
             }
         }
     }
 
-    fn on_command(&mut self, command: NetCommand) {
+    /// Tells gossipsub what came of a message, which it passes on only once accepted, and counts
+    /// a fault against the peer that sent it, banning it once they add up.
+    fn judge(&mut self, peer: PeerId, gossip: Option<Gossip>, verdict: Verdict, events: &mpsc::Sender<NetEvent>) {
+        if let Some(Gossip(id)) = gossip {
+            let acceptance = match verdict {
+                Verdict::Accept => gossipsub::MessageAcceptance::Accept,
+                Verdict::Ignore => gossipsub::MessageAcceptance::Ignore,
+                Verdict::Reject(_) => gossipsub::MessageAcceptance::Reject,
+            };
+            self.swarm.behaviour_mut().gossipsub.report_message_validation_result(&id, &peer, acceptance);
+        }
+
+        if let Verdict::Reject(fault) = verdict
+            && self.bans.fault(peer, self.ips.get(&peer).copied(), fault, Instant::now())
+        {
+            log::warn!("[net] banning {peer}: it kept sending what breaks the rules");
+            self.drop_banned(peer, events);
+        }
+    }
+
+    /// Cuts a banned peer off: its connections, its place in Kademlia, and the node's memory of it.
+    fn drop_banned(&mut self, peer: PeerId, events: &mpsc::Sender<NetEvent>) {
+        let _ = self.swarm.disconnect_peer_id(peer);
+        self.swarm.behaviour_mut().kad.remove_peer(&peer);
+        let _ = events.send(NetEvent::Banned(peer));
+    }
+
+    fn on_command(&mut self, command: NetCommand, events: &mpsc::Sender<NetEvent>) {
         match command {
+            NetCommand::Judge { peer, gossip, verdict } => self.judge(peer, gossip, verdict, events),
             NetCommand::PublishBlock(block) => self.publish(&self.blocks.clone(), &block),
             NetCommand::PublishTx(tx) => self.publish(&self.txs.clone(), &tx),
             NetCommand::PublishVote(vote) => self.publish(&self.votes.clone(), &vote),
@@ -652,6 +740,9 @@ mod tests {
             bootnodes: Vec::new(),
             target_peers: crate::net::DEFAULT_TARGET_PEERS,
             backlog,
+            key: None,
+            remembered: Vec::new(),
+            bans: crate::net::BanLimits::default(),
         }
     }
 
@@ -855,5 +946,55 @@ mod tests {
             }),
             flooder_id
         );
+    }
+
+    #[test]
+    #[ignore = "opens real sockets on 127.0.0.1"]
+    fn a_node_keeps_its_peer_id_and_a_banned_peer_is_refused_when_it_dials_again() {
+        use crate::net::{Fault, Verdict};
+
+        let network = format!("bans-{}", PeerId::random());
+        let key = libp2p::identity::Keypair::generate_ed25519();
+        let ours = spawn(NetConfig {
+            mdns: false,
+            key: Some(key.clone()),
+            ..config(&network, BacklogLimits::default(), Vec::new())
+        })
+        .unwrap();
+        let address = wait_for(&ours, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+
+        // Its address names it by the key it was given, as it will after every start.
+        assert_eq!(peer_of(&address), Some(key.public().to_peer_id()));
+
+        // Theirs dials ours by it, and again every 15 seconds while cut off.
+        let theirs = spawn(NetConfig { mdns: false, ..config(&network, BacklogLimits::default(), vec![address]) }).unwrap();
+        let peer = wait_for(&ours, |event| match event {
+            NetEvent::PeerUp { peer, .. } => Some(peer),
+            _ => None,
+        });
+
+        for _ in 0..2 {
+            ours.send(NetCommand::Judge { peer, gossip: None, verdict: Verdict::Reject(Fault::Block) });
+        }
+
+        assert_eq!(
+            wait_for(&ours, |event| match event {
+                NetEvent::Banned(banned) => Some(banned),
+                _ => None,
+            }),
+            peer
+        );
+
+        // Its redials reach ours, and are refused: it never comes up again.
+        let deadline = Instant::now() + REDIAL_EVERY * 3;
+
+        while let Ok(event) = ours.events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            assert!(!matches!(event, NetEvent::PeerUp { peer: up, .. } if up == peer), "a banned peer came back");
+        }
+
+        drop(theirs);
     }
 }

@@ -21,7 +21,13 @@ below. When a layer is done, it merges into the one below it, or is dropped to t
 away. That is how a failed transaction or call leaves nothing behind.
 
 **Commits:** a block commits its layer's changes in one atomic batch, so after a crash either all
-of a block is there or none of it is. A reorg's whole rollback and replay is one batch too.
+of a block is there or none of it is. A reorg's whole rollback and replay is one batch too. Each
+batch is synced to disk before the commit returns, so a power cut loses no block the node stored;
+`--no-fsync` (`RocksDb::unsynced`) skips that, for benchmarks and tests, at the cost of the last
+few blocks, which peers give back.
+
+**Not chain state:** the `peers` column keeps the peers a node met, for its next start; like the
+indexes, it is the node's own and in no state root.
 
 **Recorded state:** the registries read and write whichever layer they are given:
 - `Accounts`: balances and nonces;
