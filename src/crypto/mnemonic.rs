@@ -175,6 +175,31 @@ impl Seed {
 
     #[document(
         parent = "Seed",
+        summary = "One of an account's keys in a scheme, beside the first that key gives: for Ed25519 and EdBlake the account's index-th, at m/44'/7744'/n'/0'/index' and m/44'/7744'/n'/1'/index'; for secp256k1 and bitcoin the key at address index on the shared path every account takes its first from, m/44'/60'/0'/0/index and m/84'/0'/0'/0/index, as Ethereum's and Bitcoin's own wallets list them, the account not counting. At index 0 for the Edwards schemes, and at the account's own number for the others, it is the key key gives.",
+        params = {
+            scheme = "Which scheme.",
+            account = "The account's number: the Edwards schemes' keys sit below it.",
+            index = "The key's number: below the account for the Edwards schemes, on the shared path for the others. Below 2^31.",
+        },
+        see_also = "Seed::key",
+    )]
+    pub fn key_at(&self, scheme: KeyType, account: u32, index: u32) -> Keypair {
+        let private = match scheme {
+            #[cfg(feature = "ed25519")]
+            KeyType::Ed25519 => PrivateKey::Ed25519(slip10(&self.0, &[44, COIN_TYPE, account, 0, index])),
+            #[cfg(feature = "edblake")]
+            KeyType::EdBlake => PrivateKey::EdBlake(slip10(&self.0, &[44, COIN_TYPE, account, 1, index])),
+            #[cfg(feature = "secp256k1")]
+            KeyType::Secp256k1 => return self.key(scheme, index),
+            #[cfg(feature = "bitcoin")]
+            KeyType::Bitcoin => return self.key(scheme, index),
+        };
+
+        Keypair::from_private(private)
+    }
+
+    #[document(
+        parent = "Seed",
         summary = "The extended public key at m/44'/60'/0', Ethereum's account level: every secp256k1 account key derives below it, account n at 0/n. What MetaMask takes to pair with a QR hardware wallet, and lists the accounts of.",
         see_also = "ExtendedPublic, Seed::key",
     )]
@@ -520,6 +545,25 @@ mod tests {
         assert_eq!(testnet.public, crate::crypto::secp256k1::public_key(&bip32(&seed.0, &[(84, true), (1, true), (0, true)]).unwrap()).unwrap());
         assert_eq!(testnet.master_fingerprint, account.master_fingerprint);
         assert_ne!(seed.bitcoin_key(1, 0, 0).public(), seed.bitcoin_key(0, 0, 0).public());
+    }
+
+    #[test]
+    fn an_accounts_further_keys_sit_below_it_or_on_the_shared_path() {
+        let seed = Phrase::parse("test test test test test test test test test test test junk").unwrap().seed("");
+
+        for scheme in KeyType::ALL {
+            let (first, second) = match scheme.on_secp256k1() {
+                true => (seed.key_at(*scheme, 5, 5), seed.key_at(*scheme, 5, 9)),
+                false => (seed.key_at(*scheme, 5, 0), seed.key_at(*scheme, 5, 1)),
+            };
+
+            assert_eq!(first.public(), seed.key(*scheme, 5).public(), "{scheme:?}: the first is the one key gives");
+            assert_ne!(second.public(), first.public());
+        }
+
+        // Ethereum's are MetaMask's: the third of Hardhat's development accounts.
+        #[cfg(feature = "secp256k1")]
+        assert_eq!(seed.key_at(KeyType::Secp256k1, 0, 2).public().address().to_string(), "secp256k1:0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc");
     }
 
     #[test]

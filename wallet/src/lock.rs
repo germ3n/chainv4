@@ -508,7 +508,7 @@ fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, pa
         }),
         accounts: vec![StoredAccount {
             name: "Account 1".to_string(),
-            source: Source::Phrase { account: 0 },
+            source: Source::Phrase { account: 0, extra: Vec::new() },
         }],
         watch: false,
         swaps: Vec::new(),
@@ -630,7 +630,7 @@ mod tests {
         let opened = keep(&mut settings, "Mine".to_string(), Vault::create("correct horse").unwrap(), &phrase, String::new());
 
         assert_eq!((settings.wallets.len(), settings.wallet, settings.wallets[0].name.as_str()), (1, 0, "Mine"));
-        assert_eq!(opened.book.accounts[0].source, Source::Phrase { account: 0 });
+        assert_eq!(opened.book.accounts[0].source, Source::Phrase { account: 0, extra: Vec::new() });
         assert_eq!(Vault::open(&settings.wallets[0].vault, "correct horse").unwrap().1, opened.book);
 
         assert!(!settings.wallets[0].unprotected);

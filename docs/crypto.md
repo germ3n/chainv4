@@ -135,8 +135,8 @@ of them with 128 bits of randomness, or 24 with 256, the last word carrying a ch
 
   | Scheme | Standard | Path |
   | --- | --- | --- |
-  | Ed25519 | SLIP-0010 | `m/44'/7744'/n'/0'/0'` |
-  | EdBlake | SLIP-0010 | `m/44'/7744'/n'/1'/0'` |
+  | Ed25519 | SLIP-0010 | `m/44'/7744'/n'/0'/0'`, further keys `…/0'/k'` |
+  | EdBlake | SLIP-0010 | `m/44'/7744'/n'/1'/0'`, further keys `…/1'/k'` |
   | secp256k1 | BIP32 | `m/44'/60'/0'/0/n` |
   | bitcoin | BIP32 (BIP84) | `m/84'/0'/0'/0/n` |
   | Bitcoin's test networks, for the offline signer's PSBTs | BIP32 (BIP84) | `m/84'/1'/0'/{0,1}/n` |

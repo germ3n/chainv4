@@ -82,6 +82,14 @@ impl Drop for Words {
     }
 }
 
+/// A further key of a words account's: its scheme, by name, and its index, which Seed::key_at
+/// derives it at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Extra {
+    pub scheme: String,
+    pub index: u32,
+}
+
 /// One account, as the vault holds it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredAccount {
@@ -93,8 +101,13 @@ pub struct StoredAccount {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
-    /// The phrase's account of this number: an address in every scheme.
-    Phrase { account: u32 },
+    /// The phrase's account of this number: an address in every scheme, and the further keys it
+    /// was given, each by its scheme and index.
+    Phrase {
+        account: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extra: Vec<Extra>,
+    },
     /// One key brought in, as a key file holds it.
     Key { key: String },
     /// An account an offline signer holds the keys of, watched: its public keys, as the signer
@@ -278,7 +291,7 @@ mod tests {
             accounts: vec![
                 StoredAccount {
                     name: "Spending".to_string(),
-                    source: Source::Phrase { account: 0 },
+                    source: Source::Phrase { account: 0, extra: Vec::new() },
                 },
                 StoredAccount {
                     name: "Development".to_string(),

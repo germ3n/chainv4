@@ -112,6 +112,21 @@ the same keys. A wallet from before the bitcoin scheme gains the Bitcoin address
 unlock, from the same words; an account watched from an offline signer gains it when paired
 again.
 
+**More addresses per account.** Accounts, **Another address**, then a scheme, gives an account
+from the words a further key in it (`Seed::key_at`):
+- **Ed25519 and EdBlake:** below the account, its *k*th key at `m/44'/7744'/n'/0'/k'` and
+  `m/44'/7744'/n'/1'/k'`, counting from 1.
+- **Ethereum and Bitcoin:** the lowest index on the shared path, `m/44'/60'/0'/0/i` or
+  `m/84'/0'/0'/0/i`, that no account's number and no further key takes, so MetaMask and Bitcoin's
+  wallets, paired with the same words, list it too; a new account then skips it.
+- **Bitcoin's habit of a new address for each payer:** on Receive, with a Bitcoin address shown,
+  **New address** adds the next one and shows it.
+
+The vault keeps which keys an account has, so the words bring all of them back; Send pays from any
+of them, and Receive numbers a scheme's: Bitcoin, Bitcoin 2. Only accounts from the words have
+them: a key brought in has no words to derive more from, and an account watched from the signer
+gains them when paired again, though sites reach its first Ethereum key alone.
+
 **Settings** shows the words, once the wallet's password is typed again, renames the wallet, and
 removes it, also after the password. A wallet from before seed phrases has none: Settings makes
 new words for it or takes words you have, and from then on new accounts come from them.

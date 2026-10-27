@@ -157,11 +157,19 @@ pub fn offered(holders: &[crate::keys::Holder]) -> Vec<(String, [u8; 20])> {
         .iter()
         .flat_map(|holder| {
             let signs = !holder.keys.is_empty() || holder.origin().is_some();
+            // A watched account's first Ethereum key alone: a request names it by the account's
+            // place under the signer's words, which a further one is not at.
+            let first_only = holder.keys.is_empty();
 
-            holder.publics.iter().filter(move |_| signs && !holder.by_metamask()).filter_map(move |public| match public.address() {
-                Address::Secp256k1(bytes) => Some((holder.name.clone(), bytes)),
-                _ => None,
-            })
+            holder
+                .publics
+                .iter()
+                .filter(move |_| signs && !holder.by_metamask())
+                .filter_map(move |public| match public.address() {
+                    Address::Secp256k1(bytes) => Some((holder.name.clone(), bytes)),
+                    _ => None,
+                })
+                .take(if first_only { 1 } else { usize::MAX })
         })
         .collect()
 }

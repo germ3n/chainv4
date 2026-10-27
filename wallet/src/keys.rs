@@ -77,6 +77,34 @@ impl Holder {
         self.publics.iter().copied().find(|public| public.address() == *address)
     }
 
+    /// Its further keys, each by scheme and index, for an account from the words.
+    pub fn extras(&self) -> Vec<(KeyType, u32)> {
+        match &self.source {
+            Source::Phrase { extra, .. } => extra.iter().filter_map(|extra| Some((extra.scheme.parse().ok()?, extra.index))).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The indices its further Ethereum and Bitcoin keys take on the paths every account shares.
+    fn shared_indices(&self) -> Vec<u32> {
+        self.extras().into_iter().filter(|(scheme, _)| scheme.on_secp256k1()).map(|(_, index)| index).collect()
+    }
+
+    /// Gives an account from the words a further key in a scheme, at the index next_index gives:
+    /// its key, and the record that brings it back from the words. Its address.
+    pub fn add_key(&mut self, seed: &Seed, scheme: KeyType, index: u32) -> Option<Address> {
+        let Source::Phrase { account, extra } = &mut self.source else {
+            return None;
+        };
+        let key = seed.key_at(scheme, *account, index);
+        extra.push(crate::vault::Extra { scheme: scheme.name().to_string(), index });
+        let address = key.public().address();
+        self.publics.push(key.public());
+        self.keys.push(key);
+
+        Some(address)
+    }
+
     /// Where an offline signer's words derive it, for an account watched from one that said.
     pub fn origin(&self) -> Option<Origin> {
         match self.source {
@@ -88,7 +116,7 @@ impl Holder {
     /// The phrase's number for it, if it comes from the phrase.
     pub fn number(&self) -> Option<u32> {
         match self.source {
-            Source::Phrase { account } => Some(account),
+            Source::Phrase { account, .. } => Some(account),
             Source::Key { .. } | Source::Watch { .. } | Source::MetaMask { .. } => None,
         }
     }
@@ -128,10 +156,23 @@ pub fn seed(book: &Book) -> Option<Seed> {
     Phrase::parse(&words.words).ok().map(|phrase| phrase.seed(&words.passphrase))
 }
 
-/// The number a new account takes from the phrase: the lowest none of these has, so one removed
-/// comes back first.
+/// The number a new account takes from the phrase: the lowest none of these has, nor any further
+/// Ethereum or Bitcoin key on the path its first keys of those take, so one removed comes back
+/// first and no key is two accounts'.
 pub fn unused(holders: &[Holder]) -> u32 {
-    (0..).find(|number| !holders.iter().any(|holder| holder.number() == Some(*number))).unwrap_or(0)
+    (0..).find(|number| !holders.iter().any(|holder| holder.number() == Some(*number) || holder.shared_indices().contains(number))).unwrap_or(0)
+}
+
+/// The index a further key in a scheme takes for an account: below it, the next after its own for
+/// the Edwards schemes; on the shared path, the lowest no account's number and no further key
+/// takes, for secp256k1 and bitcoin.
+pub fn next_index(holders: &[Holder], account: u32, scheme: KeyType) -> u32 {
+    let extras = |holder: &Holder| holder.extras().into_iter().filter(move |(kind, _)| *kind == scheme).map(|(_, index)| index);
+
+    match scheme.on_secp256k1() {
+        true => (0..).find(|index| !holders.iter().any(|holder| holder.number() == Some(*index) || extras(holder).any(|taken| taken == *index))).unwrap_or(0),
+        false => 1 + holders.iter().filter(|holder| holder.number() == Some(account)).flat_map(extras).max().unwrap_or(0),
+    }
 }
 
 /// Every account in a book, unlocked. One whose key does not read is left out.
@@ -142,7 +183,13 @@ pub fn open(book: &Book) -> Vec<Holder> {
         .iter()
         .filter_map(|stored| {
             let keys = match &stored.source {
-                Source::Phrase { account } => derive(seed.as_ref()?, *account),
+                Source::Phrase { account, extra } => {
+                    let seed = seed.as_ref()?;
+                    let mut keys = derive(seed, *account);
+                    keys.extend(extra.iter().filter_map(|extra| Some(seed.key_at(extra.scheme.parse().ok()?, *account, extra.index))));
+
+                    keys
+                }
                 Source::Key { key } => vec![Keypair::from_key_file(key).ok()?],
                 Source::Watch { keys, origin } => {
                     let publics = keys.iter().map(|key| key.parse().ok()).collect::<Option<Vec<PublicKey>>>()?;
@@ -174,11 +221,11 @@ mod tests {
             accounts: vec![
                 StoredAccount {
                     name: "Main".to_string(),
-                    source: Source::Phrase { account: 0 },
+                    source: Source::Phrase { account: 0, extra: Vec::new() },
                 },
                 StoredAccount {
                     name: "Second".to_string(),
-                    source: Source::Phrase { account: 1 },
+                    source: Source::Phrase { account: 1, extra: Vec::new() },
                 },
                 StoredAccount {
                     name: "Brought in".to_string(),
@@ -213,7 +260,7 @@ mod tests {
             }),
             accounts: vec![StoredAccount {
                 name: "Main".to_string(),
-                source: Source::Phrase { account: 0 },
+                source: Source::Phrase { account: 0, extra: Vec::new() },
             }],
             watch: false,
             swaps: Vec::new(),
@@ -255,5 +302,47 @@ mod tests {
         };
 
         assert!(open(&broken).is_empty(), "one whose keys do not read is left out");
+    }
+
+    #[test]
+    fn further_keys_take_free_indices_and_come_back_from_the_words() {
+        let words = crate::vault::Words { words: "test test test test test test test test test test test junk".to_string(), passphrase: String::new() };
+        let book = Book {
+            phrase: Some(words),
+            accounts: vec![
+                StoredAccount { name: "Main".to_string(), source: Source::Phrase { account: 0, extra: Vec::new() } },
+                StoredAccount { name: "Second".to_string(), source: Source::Phrase { account: 1, extra: Vec::new() } },
+            ],
+            ..Book::default()
+        };
+        let seed = seed(&book).unwrap();
+        let mut holders = open(&book);
+
+        // Ethereum's next free index is past both accounts' own; the Edwards schemes' are below each.
+        assert_eq!(next_index(&holders, 0, KeyType::Secp256k1), 2);
+        assert_eq!(next_index(&holders, 0, KeyType::Ed25519), 1);
+        let ethereum = holders[0].add_key(&seed, KeyType::Secp256k1, 2).unwrap();
+        assert_eq!(ethereum.to_string(), "secp256k1:0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc", "MetaMask's third account");
+        holders[0].add_key(&seed, KeyType::Ed25519, 1).unwrap();
+        assert_eq!(next_index(&holders, 1, KeyType::Secp256k1), 3, "index 2 is taken now, by an account's further key");
+        assert_eq!(next_index(&holders, 0, KeyType::Ed25519), 2);
+        assert_eq!(next_index(&holders, 1, KeyType::Ed25519), 1, "each account counts its own");
+
+        // A new account never takes an index a further key holds.
+        assert_eq!(unused(&holders), 3);
+
+        // Sealed and opened again, the words bring every key back, in order.
+        let kept = Book {
+            accounts: holders.iter().map(|holder| StoredAccount { name: holder.name.clone(), source: holder.source.clone() }).collect(),
+            ..book.clone()
+        };
+        let reopened = open(&serde_json::from_value(serde_json::to_value(&kept).unwrap()).unwrap());
+        assert_eq!(reopened[0].addresses(), holders[0].addresses());
+        assert_eq!(reopened[0].addresses().len(), 6);
+        assert!(reopened[0].key(&ethereum).is_some(), "and signs with it");
+
+        // A vault from before further keys reads as before.
+        let older: Book = serde_json::from_value(serde_json::json!({ "phrase": null, "accounts": [{ "name": "Old", "source": { "phrase": { "account": 4 } } }], "watch": false })).unwrap();
+        assert_eq!(older.accounts[0].source, Source::Phrase { account: 4, extra: Vec::new() });
     }
 }

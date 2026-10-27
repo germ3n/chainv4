@@ -32,6 +32,8 @@ pub struct AccountsState {
     picked: Picked,
     error: Option<String>,
     renaming: Option<(usize, String)>,
+    /// The account a further address is being chosen for.
+    adding: Option<usize>,
     /// The account whose key it asks about showing, the one whose key shows, and the one asked to
     /// be removed.
     asking_reveal: Option<usize>,
@@ -286,6 +288,19 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
             });
         }
 
+        if state.adding == Some(index) {
+            ui.add_space(4.0);
+            ui.label(RichText::new("Another address from the words, in:").small().color(palette.soft));
+            ui.horizontal_wrapped(|ui| {
+                for scheme in KeyType::ALL {
+                    if theme::quiet(ui, &palette, keys::label(*scheme)).clicked() {
+                        add_address(ctx, index, *scheme);
+                        state.adding = None;
+                    }
+                }
+            });
+        }
+
         ui.add_space(8.0);
         // On a narrow screen the buttons go on to a second line rather than past the edge.
         ui.horizontal_wrapped(|ui| {
@@ -295,6 +310,11 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
 
             if theme::quiet(ui, &palette, "Rename").clicked() {
                 state.renaming = Some((index, ctx.holders[index].name.clone()));
+            }
+
+            // A further address from the words, in a scheme picked next.
+            if number.is_some() && !watched && theme::quiet(ui, &palette, "Another address").clicked() {
+                state.adding = (state.adding != Some(index)).then_some(index);
             }
 
             let revealed = state.revealing == Some(index);
@@ -405,6 +425,18 @@ fn reveal_question(ui: &mut Ui, ctx: &Ctx, state: &mut AccountsState) {
     }
 }
 
+/// Gives a words account a further address in a scheme, the index next_index picks, and seals
+/// it with the rest: what the words bring back.
+pub fn add_address(ctx: &mut Ctx, index: usize, scheme: KeyType) -> Option<chainv4::structs::address::Address> {
+    let seed = keys::seed(ctx.book)?;
+    let account = ctx.holders[index].number()?;
+    let at = keys::next_index(ctx.holders, account, scheme);
+    let address = ctx.holders[index].add_key(&seed, scheme, at)?;
+    *ctx.changed = true;
+
+    Some(address)
+}
+
 /// Takes an account out, and moves the one in use to the first left when it was that one.
 fn remove(holders: &mut Vec<Holder>, current: &mut String, index: usize) {
     let removed = holders.remove(index);
@@ -421,7 +453,7 @@ fn new_account(book: &Book, holders: &[Holder], scheme: KeyType) -> Result<Holde
         Some(seed) => {
             let account = keys::unused(holders);
 
-            Ok(Holder::signing(String::new(), Source::Phrase { account }, keys::derive(&seed, account)))
+            Ok(Holder::signing(String::new(), Source::Phrase { account, extra: Vec::new() }, keys::derive(&seed, account)))
         }
         None => Keypair::generate(scheme).map(brought_in).map_err(|err| format!("no randomness for a key: {err}")),
     }

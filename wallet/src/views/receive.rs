@@ -9,6 +9,17 @@ use {
     qrcode::{Color, EcLevel, QrCode},
 };
 
+/// An address's scheme, numbered when the account has more than one in it: Bitcoin, Bitcoin 2.
+fn numbered(addresses: &[Address], index: usize) -> String {
+    let scheme = super::scheme(&addresses[index]);
+    let nth = addresses[..=index].iter().filter(|address| super::scheme(address) == scheme).count();
+
+    match nth {
+        1 => scheme.to_string(),
+        nth => format!("{scheme} {nth}"),
+    }
+}
+
 /// The quiet border around the code, in modules, as scanners want it.
 const QUIET: usize = 3;
 
@@ -26,6 +37,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
         return;
     };
     let (name, addresses) = (holder.name.clone(), holder.addresses());
+    let holder_words = holder.number().is_some() && !holder.keys.is_empty();
+    let mut new_bitcoin = false;
     state.shown = state.shown.min(addresses.len().saturating_sub(1));
     let Some(shown) = addresses.get(state.shown).map(Address::to_string) else {
         return;
@@ -40,8 +53,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
             if addresses.len() > 1 {
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
-                    for (index, address) in addresses.iter().enumerate() {
-                        ui.selectable_value(&mut state.shown, index, super::scheme(address));
+                    for index in 0..addresses.len() {
+                        ui.selectable_value(&mut state.shown, index, numbered(&addresses, index));
                     }
                 });
             }
@@ -63,8 +76,26 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
             if copied {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
             }
+
+            // Bitcoin's habit: a new address to each payer, from the words, one tap at a time.
+            let bitcoin = matches!(addresses.get(state.shown), Some(Address::Bitcoin(_)));
+
+            if bitcoin && holder_words {
+                ui.add_space(6.0);
+
+                if theme::quiet(ui, &palette, "New address").on_hover_text("The next Bitcoin address from the words, kept with this account").clicked() {
+                    new_bitcoin = true;
+                }
+            }
         });
     });
+
+    if new_bitcoin
+        && let Some(address) = super::accounts::add_address(ctx, ctx.current, chainv4::crypto::keypair::KeyType::Bitcoin)
+        && let Some(holder) = ctx.holder()
+    {
+        state.shown = holder.addresses().iter().position(|shown| *shown == address).unwrap_or(state.shown);
+    }
 
     if addresses.len() > 1 {
         ui.add_space(14.0);
@@ -72,8 +103,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
             theme::caps(ui, &palette, "All its addresses");
             ui.add_space(4.0);
 
-            for address in &addresses {
-                super::row(ui, &palette, super::scheme(address), |ui| super::address(ui, &palette, &address.to_string()));
+            for (index, address) in addresses.iter().enumerate() {
+                super::row(ui, &palette, &numbered(&addresses, index), |ui| super::address(ui, &palette, &address.to_string()));
             }
         });
     }

@@ -554,6 +554,18 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Signatures are RFC 6979's,** with no extra entropy, so the same PSBT signs the same twice, as
   bitcoinjs-lib signs it; not ground for a low R, so some are a byte longer than Bitcoin Core's.
 
+## More addresses per account
+
+- **Ethereum's and Bitcoin's further keys share one path with every account's first,** so an
+  account's second Ethereum address is the next index no account and no further key takes: what
+  MetaMask lists as another account, and Sparrow as another receiving address. A new account
+  skips the indices further keys hold, or two accounts would hold one key.
+- **The Edwards schemes' sit below their account,** at `…/s'/k'`, which no other wallet uses.
+- **The vault keeps them,** by scheme and index, so restoring words in a new install brings back
+  the accounts but not their further keys: add them again, and they come back the same.
+- **Sites reach a watched account's first Ethereum key alone:** the request names the key by the
+  account's place under the signer's words, which a further key is not at.
+
 ## Atomic swaps
 
 - **Whoever starts holds the secret, and locks first.** Their lock has the longer deadline, so
