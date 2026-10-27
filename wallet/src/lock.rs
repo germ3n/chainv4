@@ -15,11 +15,9 @@ use {
     crate::views::scan::Scan,
     chainv4::crypto::mnemonic::Phrase,
     egui::{RichText, Ui},
-    zeroize::Zeroizing,
 };
 
-/// What is typed into a password or words field: wiped from memory as it drops.
-pub type Typed = Zeroizing<String>;
+pub use chainv4_ui::secret::{Typed, secret};
 
 /// Where the lock screen is.
 pub enum Lock {
@@ -190,7 +188,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                     false
                 }
                 false => {
-                    let field = ui.add(egui::TextEdit::singleline(&mut **password).password(true).hint_text("password").desired_width(f32::INFINITY));
+                    let field = secret(ui, egui::TextEdit::singleline(&mut **password).password(true).hint_text("password").desired_width(f32::INFINITY));
 
                     field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
                 }
@@ -350,7 +348,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             for (position, answer) in asked.iter().zip(answers.iter_mut()) {
                 ui.horizontal(|ui| {
                     ui.add_sized([72.0, 24.0], egui::Label::new(RichText::new(format!("Word {}", position + 1)).color(palette.muted)));
-                    ui.add(egui::TextEdit::singleline(&mut **answer).desired_width(f32::INFINITY));
+                    secret(ui, egui::TextEdit::singleline(&mut **answer).desired_width(f32::INFINITY));
                 });
             }
 
@@ -375,7 +373,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
         Lock::Restore { making, words } => {
             theme::caps(ui, palette, "Restore from words");
             ui.label(RichText::new("The 12 or 24 words, in order, with spaces between.").small().color(palette.muted));
-            ui.add(egui::TextEdit::multiline(&mut **words).desired_rows(3).desired_width(f32::INFINITY).hint_text("word word word …"));
+            secret(ui, egui::TextEdit::multiline(&mut **words).desired_rows(3).desired_width(f32::INFINITY).hint_text("word word word …"));
             ui.add_space(6.0);
             making_fields(ui, palette, making, settings.wallets.len(), true);
             ui.add_space(6.0);
@@ -430,8 +428,8 @@ fn making_fields(ui: &mut Ui, palette: &Palette, making: &mut Making, wallets: u
     ui.add(egui::TextEdit::singleline(&mut making.name).hint_text(format!("name, such as Wallet {}", wallets + 1)).desired_width(f32::INFINITY));
     ui.add_space(4.0);
     ui.label(RichText::new("A password seals the wallet on this device. Nothing opens it without it.").small().color(palette.muted));
-    ui.add(egui::TextEdit::singleline(&mut *making.first).password(true).hint_text("password, or none").desired_width(f32::INFINITY));
-    ui.add(egui::TextEdit::singleline(&mut *making.second).password(true).hint_text("the same again").desired_width(f32::INFINITY));
+    secret(ui, egui::TextEdit::singleline(&mut *making.first).password(true).hint_text("password, or none").desired_width(f32::INFINITY));
+    secret(ui, egui::TextEdit::singleline(&mut *making.second).password(true).hint_text("the same again").desired_width(f32::INFINITY));
 
     if making.first.is_empty() && making.second.is_empty() {
         ui.label(
@@ -456,7 +454,7 @@ fn making_fields(ui: &mut Ui, palette: &Palette, making: &mut Making, wallets: u
                 .small()
                 .color(palette.warn),
         );
-        ui.add(egui::TextEdit::singleline(&mut *making.passphrase).password(true).hint_text("passphrase, or none").desired_width(f32::INFINITY));
+        secret(ui, egui::TextEdit::singleline(&mut *making.passphrase).password(true).hint_text("passphrase, or none").desired_width(f32::INFINITY));
     });
 
     if let Some(error) = &making.error {
@@ -619,6 +617,8 @@ mod tests {
             assert!(asked[0] < asked[1] && asked[1] < asked[2] && asked[2] < 12, "{asked:?}");
         }
 
+        assert!(Typed::default().capacity() >= chainv4_ui::secret::ROOM, "room for 24 words, never moved");
+        assert_eq!(*Typed::new("abc".to_string()).clone(), "abc");
         assert!(right(&phrase, &[0, 5, 11], &[Typed::new("test".to_string()), Typed::new(" TEST ".to_string()), Typed::new("junk".to_string())]));
         assert!(!right(&phrase, &[0, 5, 11], &[Typed::new("test".to_string()), Typed::new("test".to_string()), Typed::new("test".to_string())]));
     }

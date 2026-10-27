@@ -18,7 +18,7 @@ use {
     r#macro::document,
     sha2::Sha512,
     std::fmt,
-    zeroize::Zeroize,
+    zeroize::{Zeroize, Zeroizing},
 };
 
 #[document(
@@ -87,12 +87,22 @@ impl Phrase {
         returns = "The phrase, or what is wrong with it.",
     )]
     pub fn parse(text: &str) -> Result<Phrase, MnemonicError> {
-        let words: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+        // Every copy of the words made here is wiped as it goes, as the phrase itself is.
+        let words: Vec<Zeroizing<String>> = text.split_whitespace().map(|word| Zeroizing::new(word.to_lowercase())).collect();
+        let mut joined = Zeroizing::new(String::with_capacity(text.len()));
 
-        match bip39::Mnemonic::parse_in_normalized(bip39::Language::English, &words.join(" ")) {
+        for (index, word) in words.iter().enumerate() {
+            if index > 0 {
+                joined.push(' ');
+            }
+
+            joined.push_str(word);
+        }
+
+        match bip39::Mnemonic::parse_in_normalized(bip39::Language::English, &joined) {
             Ok(phrase) => Ok(Phrase(phrase)),
             Err(bip39::Error::BadWordCount(count)) => Err(MnemonicError::WordCount(count)),
-            Err(bip39::Error::UnknownWord(at)) => Err(MnemonicError::UnknownWord(words[at].clone())),
+            Err(bip39::Error::UnknownWord(at)) => Err(MnemonicError::UnknownWord(words[at].to_string())),
             Err(_) => Err(MnemonicError::Checksum),
         }
     }

@@ -688,8 +688,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   `ur:eth-signature` read back. See [Wallet](wallet.md#sites).
 - [ ] **Hardware wallets reach the wallet through MetaMask alone,** and the desktop and Android apps
   reach none. WalletConnect, or USB straight to the device, would.
-- [ ] **The wallet keeps its words as plain strings while unlocked.** The vault seals them at rest,
-  but in memory they are ordinary `String`s, not zeroized when the wallet locks.
+- [x] **Secrets are wiped from memory, and their copies.** The words, passphrase and keys as they
+  drop, locking included; BIP39's own and `Phrase::parse`'s copies; typed fields with room made up
+  front and no undo history; the vault's JSON written into room of its size; the explorer's pasted
+  key and key file. See [Wallet](wallet.md#keys).
+- [ ] **What egui lays out to show the words,** its text layout cache, and memory the system swaps
+  out are not wiped; a locked page of shown words keeps the glyph runs until egui drops them.
 - [ ] **The wallet proves only the registry's first page of tokens,** 100 by symbol, as the
   explorer's holdings do.
 - [ ] **CI does not build the web bundles.** It lints the explorer's and the wallet's wasm32 builds

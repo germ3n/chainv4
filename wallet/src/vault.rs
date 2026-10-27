@@ -200,7 +200,7 @@ impl Vault {
         let mut nonce = [0; 12];
         getrandom::fill(&mut nonce).map_err(|err| format!("no randomness for a nonce: {err}"))?;
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&*self.key));
-        let plain = Zeroizing::new(serde_json::to_vec(book).map_err(|err| err.to_string())?);
+        let plain = plain(book)?;
         let sealed = cipher.encrypt(Nonce::from_slice(&nonce), plain.as_slice()).map_err(|_| "sealing failed".to_string())?;
 
         Ok(Sealed {
@@ -209,6 +209,34 @@ impl Vault {
             sealed: to_hex(&sealed),
         })
     }
+}
+
+/// A book as the JSON sealed: written into room made to its size first, so it never grows and
+/// leaves an unwiped copy of the words behind, and wiped as it drops.
+fn plain(book: &Book) -> Result<Zeroizing<Vec<u8>>, String> {
+    /// Counts what would be written, keeping none of it.
+    struct Count(usize);
+
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, book).map_err(|err| err.to_string())?;
+    let mut plain = Zeroizing::new(Vec::with_capacity(count.0));
+    serde_json::to_writer(&mut *plain, book).map_err(|err| err.to_string())?;
+
+    debug_assert_eq!(plain.capacity(), count.0, "never grown");
+
+    Ok(plain)
 }
 
 fn stretch(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
@@ -227,6 +255,18 @@ fn bytes<const N: usize>(text: &str) -> Result<[u8; N], String> {
 #[cfg(test)]
 mod tests {
     use {super::*, chainv4::crypto::keypair::Keypair};
+
+    #[test]
+    fn what_is_sealed_is_written_into_room_made_for_it() {
+        let book = Book {
+            phrase: Some(Words { words: "test test test test test test test test test test test junk".to_string(), passphrase: "and a passphrase".to_string() }),
+            ..Book::default()
+        };
+        let plain = plain(&book).unwrap();
+
+        assert_eq!(plain.len(), plain.capacity(), "never grown, so never copied");
+        assert_eq!(serde_json::from_slice::<Book>(&plain).unwrap(), book);
+    }
 
     #[test]
     fn accounts_open_with_their_password_alone() {

@@ -142,8 +142,17 @@ password later, and also takes one away.
 
 **Wiped from memory.** The stretched key, the accounts as they open and seal, the words, and what is
 typed into a password, words or key field are overwritten as they drop (`zeroize`), and so is every
-copy of a key biometrics keep, Java's on Android included. What the browser or the OS hold of what
-was typed, such as a keyboard's own buffer, is out of reach.
+copy of a key biometrics keep, Java's on Android included. So are the copies made along the way:
+- **the phrase, as read:** BIP39's own (its `zeroize` feature) and the lowercase words
+  `Phrase::parse` makes;
+- **a field as it is typed into:** it has room for 1,024 characters from the start, so typing
+  never moves it and leaves the old text behind, and egui's undo history of it is dropped each
+  frame;
+- **the vault as it seals:** its JSON is written into room made to its size, never grown;
+- **a swap's secret,** kept in the vault, wiped as its record drops.
+
+What egui lays out to draw words that are shown, what the browser or the OS hold of what was typed,
+such as a keyboard's own buffer, and memory the system swaps to disk, are out of reach.
 
 **Locking:** the Lock button, or 15 minutes without input. Settings changes the time, or turns it
 off.

@@ -12,6 +12,7 @@ pub mod camera;
 pub mod files;
 pub mod layout;
 pub mod net;
+pub mod secret;
 pub mod theme;
 pub mod widgets;
 

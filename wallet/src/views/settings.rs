@@ -102,7 +102,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         theme::caps(ui, &palette, "Password");
 
         for (field, hint) in [(&mut state.current, "current password"), (&mut state.new, "new password"), (&mut state.again, "the new one again")] {
-            ui.add(egui::TextEdit::singleline(&mut **field).password(true).hint_text(hint).desired_width(f32::INFINITY));
+            crate::lock::secret(ui, egui::TextEdit::singleline(&mut **field).password(true).hint_text(hint).desired_width(f32::INFINITY));
         }
 
         if theme::quiet(ui, &palette, "Change password").clicked() {
@@ -407,7 +407,7 @@ fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
                     RichText::new("Its words and keys leave this device. Without the words written down, or copies of its keys, what its accounts hold is out of reach for good.")
                         .color(palette.bad),
                 );
-                ui.add(egui::TextEdit::singleline(&mut **password).password(true).hint_text("its password, to be sure").desired_width(f32::INFINITY));
+                crate::lock::secret(ui, egui::TextEdit::singleline(&mut **password).password(true).hint_text("its password, to be sure").desired_width(f32::INFINITY));
 
                 if let Some(error) = error {
                     ui.colored_label(palette.bad, error.as_str());
@@ -455,7 +455,7 @@ fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
             ui.label(RichText::new("Anyone who sees them can take everything every account holds, now and later.").color(palette.ink));
             ui.label(RichText::new("Show them only to write them down, with no one watching your screen and nothing recording it.").small().color(palette.muted));
             ui.add_space(8.0);
-            let field = ui.add(egui::TextEdit::singleline(&mut **password).password(true).hint_text("the wallet's password").desired_width(f32::INFINITY));
+            let field = crate::lock::secret(ui, egui::TextEdit::singleline(&mut **password).password(true).hint_text("the wallet's password").desired_width(f32::INFINITY));
             let enter = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
 
             if let Some(error) = error {

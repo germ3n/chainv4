@@ -751,6 +751,7 @@ dependencies = [
  "web-sys",
  "web-time",
  "wincode",
+ "zeroize",
 ]
 
 [[package]]

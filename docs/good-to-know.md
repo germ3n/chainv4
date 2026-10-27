@@ -323,9 +323,15 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **A wallet may have no password.** It is sealed with an empty one and says so on its lock
   screen; `WalletEntry::unprotected` marks it. Settings adds or removes one.
 - **Wallet secrets are zeroized.** `Vault`'s key, the opened vault's JSON, `Words`, typed
-  passwords and words (`lock::Typed`, a `Zeroizing<String>`), and biometric secrets
+  passwords, words and keys (`chainv4_ui::secret::Typed`), and biometric secrets
   (`chainv4_ui::biometric::Secret`) are wiped as they drop; the Android glue overwrites Java's copy
   of a secret once it has read it.
+- **And the copies along the way.** BIP39 is built with its `zeroize` feature and
+  `Phrase::parse` wipes its lowercase copies; a `Typed` field starts with room for 1,024
+  characters, so a `String` growing never leaves the old text in freed memory, and
+  `chainv4_ui::secret::secret` drops egui's undo history of the field each frame; the vault's JSON
+  is counted first and written into room of exactly its size. Use both for any new secret field,
+  in the wallet or the explorer, whose pasted key and key file are wiped the same way.
 - **`GET /node` has `mining`,** null for a node that does not mine: the total `rate`, the node's
   `devices`, `listening` for workers, and `workers`, each with its devices, `found` and `refused`.
 - **A rotating authority's producers are its finality signers, and a staked chain's its FFG

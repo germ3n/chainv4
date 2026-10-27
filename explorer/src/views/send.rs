@@ -75,8 +75,8 @@ enum Step {
 pub struct SendState {
     key: Option<Keypair>,
     key_name: String,
-    /// A key's text, pasted, as chainv4 keygen writes it.
-    pasted: String,
+    /// A key's text, pasted, as chainv4 keygen writes it: wiped as it goes.
+    pasted: chainv4_ui::secret::Typed,
     picked: Arc<Mutex<Option<Picked>>>,
     kind: Kind,
     to: String,
@@ -102,7 +102,7 @@ impl Default for SendState {
         SendState {
             key: None,
             key_name: String::new(),
-            pasted: String::new(),
+            pasted: chainv4_ui::secret::Typed::default(),
             picked: Arc::default(),
             kind: Kind::Transfer,
             to: String::new(),
@@ -426,7 +426,7 @@ fn key(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
                 ui,
                 |ui| widgets::quiet(ui, &palette, "Use it").clicked(),
                 |ui, width| {
-                    ui.add(egui::TextEdit::singleline(&mut state.pasted).password(true).hint_text("ed25519:0x…").desired_width(width));
+                    chainv4_ui::secret::secret(ui, egui::TextEdit::singleline(&mut *state.pasted).password(true).hint_text("ed25519:0x…").desired_width(width));
                 },
             );
 
@@ -701,7 +701,8 @@ fn take_picked(state: &mut SendState) {
     let picked = state.picked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
 
     match picked {
-        Some(Picked::Key { name, bytes }) => match String::from_utf8(bytes).map_err(|err| err.to_string()).and_then(|text| Keypair::from_key_file(&text)) {
+        // The file's bytes, and its text, are wiped once read.
+        Some(Picked::Key { name, bytes }) => match String::from_utf8(bytes).map(zeroize::Zeroizing::new).map_err(|err| err.to_string()).and_then(|text| Keypair::from_key_file(&text)) {
             Ok(key) => {
                 state.key = Some(key);
                 state.key_name = name;
