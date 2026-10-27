@@ -27,6 +27,7 @@ extern crate alloc;
 use alloc::{string::String, vec, vec::Vec};
 
 pub mod args;
+mod bech32;
 pub mod i256;
 pub mod storage;
 pub mod sys;

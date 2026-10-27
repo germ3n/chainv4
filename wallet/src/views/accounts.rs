@@ -176,7 +176,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
             ui,
             |ui| theme::quiet(ui, &palette, "Import").clicked(),
             |ui, width| {
-                ui.add(egui::TextEdit::singleline(&mut *state.pasted).password(true).hint_text("ed25519:0x…, secp256k1:0x…").desired_width(width));
+                ui.add(egui::TextEdit::singleline(&mut *state.pasted).password(true).hint_text("ed25519:0x…, secp256k1:0x…, bitcoin:0x…").desired_width(width));
             },
         );
 
@@ -577,7 +577,7 @@ mod tests {
         let second = new_account(&words, std::slice::from_ref(&first), KeyType::Ed25519).unwrap();
 
         assert_eq!((first.number(), second.number()), (Some(0), Some(1)));
-        assert_eq!(first.addresses().len(), 3, "an address in every scheme");
+        assert_eq!(first.addresses().len(), 4, "an address in every scheme");
         assert_eq!(first.addresses()[2].to_string(), "secp256k1:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
 
         let without = new_account(&Book::default(), &[], KeyType::Secp256k1).unwrap();

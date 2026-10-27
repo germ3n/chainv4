@@ -38,15 +38,20 @@ Key schemes sit behind features too:
 | `Ed25519` | `ed25519` | Standard Ed25519 (RFC 8032), hashing with SHA-512. |
 | `EdBlake` | `edblake` | Ed25519 hashing with BLAKE3 read out to 64 bytes instead of SHA-512, matching chainv3's keys and signatures. |
 | `Secp256k1` | `secp256k1` | Ethereum's: ECDSA on secp256k1 over the keccak256 of what is signed, deterministic (RFC 6979). |
+| `Bitcoin` | `bitcoin` | Bitcoin's: ECDSA on secp256k1 over the double SHA-256 of what is signed, deterministic (RFC 6979). Needs `secp256k1`'s code, so it turns that feature on. |
 
 - **Addresses:** an Edwards key's address is its scheme and its 32 bytes, such as `ed25519:0x…`.
   A secp256k1 key's is Ethereum's: the last 20 bytes of the keccak256 of its uncompressed point,
   as `secp256k1:0x` and 40 hex digits. The same key has the same `0x…` address here as on
-  Ethereum. A contract's address is `contract:0x…`, derived from its deployer and nonce, so no key
+  Ethereum. A bitcoin key's is Bitcoin's native segwit (P2WPKH) one: the HASH160 of its
+  compressed key, RIPEMD-160 over SHA-256, written alone in bech32 as `bc1q…`, which carries its
+  own kind and checksum. Every chain, dev or main, writes it with mainnet's `bc`, so the same key
+  has the same `bc1q…` address here as in Bitcoin's wallets. A contract's address is `contract:0x…`, derived from its deployer and nonce, so no key
   controls it.
 - **Validity:** an Edwards address must be a valid point on its curve; an arbitrary 32 bytes
-  usually is not. A secp256k1 address is a hash, so there is nothing to check until its key signs.
-- **One signature per transaction.** secp256k1 signatures always have a low `s` and verifying
+  usually is not. A secp256k1 or bitcoin address is a hash, so there is nothing to check until its key signs;
+  a bitcoin one's bech32 checksum does catch a mistyped letter.
+- **One signature per transaction.** secp256k1 signatures, Ethereum's and Bitcoin's, always have a low `s` and verifying
   refuses a high one, so no one can reshape a signature into a second valid one. Its public key
   travels compressed, in 33 bytes, and its signature in 64.
 - **Three ways to sign.** A secp256k1 key signs chainv4's transactions under chainv4's domain, or
@@ -54,9 +59,12 @@ Key schemes sit behind features too:
   [Typed data (EIP-712)](#typed-data-eip-712)), or signs Ethereum's own transactions, RLP and
   all, which the chain takes as `Tx::Ethereum` and runs in the EVM (see
   [Ethereum's tools](ethereum.md)).
-- **In contracts,** every address takes 33 bytes: its kind's tag, then its bytes, a secp256k1
-  address's 20 padded with zeros. Lua's `address(hex)` reads 40 hex digits as a secp256k1 address
-  and 64 as an Ed25519 one.
+- **In contracts,** every address takes 33 bytes: its kind's tag, then its bytes, a secp256k1 or
+  bitcoin address's 20 padded with zeros. Lua's `address(hex)` reads 40 hex digits as a secp256k1
+  address and 64 as an Ed25519 one; `address.parse("bc1q…")` reads a bitcoin one, and its
+  `text()` writes it back so. The SDK's `Address::parse` and `text` do the same.
+- **In the EVM,** a bitcoin account goes by an alias, as Ed25519 accounts do: its 20 bytes are a
+  HASH160, not Ethereum's keccak256, so they are not its EVM address. See [EVM](evm.md).
 
 ### Signing domains
 
@@ -105,8 +113,9 @@ does; its signatures recover to the signer's key.
 
 ## Key files
 
-`chainv4 keygen [--scheme ed25519|edblake|secp256k1] [--out PATH]` writes one line: the scheme, a
-colon, and the 32-byte secret in hex: an Edwards key's seed, or a secp256k1 key's scalar.
+`chainv4 keygen [--scheme ed25519|edblake|secp256k1|bitcoin] [--out PATH]` writes one line: the
+scheme, a colon, and the 32-byte secret in hex: an Edwards key's seed, or a secp256k1 or bitcoin
+key's scalar.
 - It is created readable by its owner only, and never overwritten.
 - It is not encrypted, so guard it.
 - `--key`, `--producer-key` and `--validator-key` read this format.
@@ -129,9 +138,14 @@ of them with 128 bits of randomness, or 24 with 256, the last word carrying a ch
   | Ed25519 | SLIP-0010 | `m/44'/7744'/n'/0'/0'` |
   | EdBlake | SLIP-0010 | `m/44'/7744'/n'/1'/0'` |
   | secp256k1 | BIP32 | `m/44'/60'/0'/0/n` |
+  | bitcoin | BIP32 (BIP84) | `m/84'/0'/0'/0/n` |
 
 - **Ethereum's accounts.** The secp256k1 path is Ethereum's, so the same words give the same
   `0x…` addresses here as in MetaMask and other Ethereum wallets, account for account.
+- **Bitcoin's addresses.** The bitcoin path is BIP84's, native segwit's, so the same words give
+  the same `bc1q…` addresses here as Sparrow, BlueWallet and other Bitcoin wallets show: account
+  *n* is the wallet's *n*th receiving address. What chainv4 sends to one stays on chainv4; bitcoin
+  sent to it on Bitcoin is the same key's, but on Bitcoin.
 - **The Edwards paths** are hardened at every step, as SLIP-0010 requires for Ed25519. 7744 is
   chainv4's coin type, not registered in SLIP-44. Ed25519 and EdBlake take a branch each, so one
   seed never makes the same secret for both.
@@ -142,6 +156,7 @@ of them with 128 bits of randomness, or 24 with 256, the last word carrying a ch
 chainv4 keygen --phrase                          # new words, printed once, and account 0's key
 chainv4 keygen --phrase --words 24
 chainv4 keygen --from-phrase --account 2 --scheme secp256k1 < words.txt
+chainv4 keygen --from-phrase --scheme bitcoin < words.txt   # bc1q…, as Bitcoin's wallets show
 chainv4 keygen --from-phrase --passphrase        # the words, then the passphrase, on stdin
 ```
 

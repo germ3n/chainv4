@@ -46,7 +46,7 @@ type CliResult<T> = Result<T, Box<dyn Error>>;
 
 #[derive(clap::Args)]
 pub struct KeygenArgs {
-    /// The signature scheme: ed25519, edblake or secp256k1.
+    /// The signature scheme: ed25519, edblake, secp256k1 or bitcoin.
     #[arg(long, default_value = "ed25519", value_parser = parse_scheme)]
     scheme: KeyType,
     /// Where to write the key. An existing file is never overwritten.

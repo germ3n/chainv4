@@ -42,7 +42,7 @@ written `evm:0x…`. Each account takes part in the EVM at one 20-byte address:
 | --- | --- |
 | An EVM contract, `evm:0x…` | Its own 20 bytes. |
 | A secp256k1 account, `secp256k1:0x…` | Its own 20 bytes, which are Ethereum's address for the key. |
-| Anything else: Ed25519, EdBlake, a Lua or wasm contract | Its **alias**: the last 20 bytes of the keccak256 of its key. |
+| Anything else: Ed25519, EdBlake, bitcoin, a Lua or wasm contract | Its **alias**: the last 20 bytes of the keccak256 of its key. A bitcoin account's 20 bytes are a HASH160, not its EVM address. |
 
 `msg.sender`, `tx.origin`, `address(this)`, `block.coinbase` and every address the EVM is given
 or returns are these 20 bytes.

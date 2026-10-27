@@ -273,6 +273,7 @@ pub fn probe(tx: Tx, nonce: u64, signer: PublicKey) -> SignedTx {
         PublicKey::Ed25519(_) => Signature::Ed25519([0; 64]),
         PublicKey::EdBlake(_) => Signature::EdBlake([0; 64]),
         PublicKey::Secp256k1(_) => Signature::Secp256k1([0; 64]),
+        PublicKey::Bitcoin(_) => Signature::Bitcoin([0; 64]),
     };
 
     SignedTx {

@@ -100,10 +100,14 @@ screen (`wallet/src/lock.rs`) makes the first, and holds them all:
 - **Several wallets:** "Add a wallet" makes another. With more than one, the lock screen asks
   which to unlock; each has its own password. The one last opened comes first.
 
-**An account, three addresses.** Account *n* of the words has a key in every scheme, derived as
-[Crypto](crypto.md#seed-phrases) says: Ed25519 and EdBlake by SLIP-0010, and secp256k1 at
-Ethereum's `m/44'/60'/0'/0/n`. So its Ethereum address is the one MetaMask shows for the same
-words and account. `chainv4 keygen --from-phrase --account n` gives the same keys.
+**An account, four addresses.** Account *n* of the words has a key in every scheme, derived as
+[Crypto](crypto.md#seed-phrases) says: Ed25519 and EdBlake by SLIP-0010, secp256k1 at
+Ethereum's `m/44'/60'/0'/0/n`, and bitcoin at BIP84's `m/84'/0'/0'/0/n`. So its Ethereum
+address is the one MetaMask shows for the same words and account, and its Bitcoin `bc1q…` the
+*n*th receiving address Bitcoin's wallets show. `chainv4 keygen --from-phrase --account n` gives
+the same keys. A wallet from before the bitcoin scheme gains the Bitcoin address on its next
+unlock, from the same words; an account watched from an offline signer gains it when paired
+again.
 
 **Settings** shows the words, once the wallet's password is typed again, renames the wallet, and
 removes it, also after the password. A wallet from before seed phrases has none: Settings makes
@@ -143,9 +147,9 @@ off.
 
 **Accounts** (`wallet/src/views/accounts.rs`, `wallet/src/keys.rs`):
 - **New account:** the words' next account, the lowest number the wallet does not hold, with its
-  three addresses. A wallet without words makes one random key instead, in the scheme picked.
+  four addresses. A wallet without words makes one random key instead, in the scheme picked.
 - **Open key file / paste a key:** a key file as `chainv4 keygen` writes it, `ed25519:0x…`,
-  `edblake:0x…` or `secp256k1:0x…`, picked or pasted. An account brought in has that one key, and
+  `edblake:0x…`, `secp256k1:0x…` or `bitcoin:0x…`, picked or pasted. An account brought in has that one key, and
   one address, named after the file when no name is typed.
 - **Development key:** the dev chains' well-known key, which holds their genesis coin. Anyone can
   spend from it.

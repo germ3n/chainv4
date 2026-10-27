@@ -1,5 +1,5 @@
 //! Accounts, unlocked. An account from the seed phrase has a key in every scheme, and so an address
-//! in each: Ed25519, EdBlake and Ethereum's secp256k1, all from the same words. An account brought
+//! in each: Ed25519, EdBlake, Ethereum's secp256k1 and Bitcoin's, all from the same words. An account brought
 //! in as a key has that one. An account watched from an offline signer has its public keys alone.
 
 use {
@@ -13,7 +13,7 @@ use {
 pub struct Holder {
     pub name: String,
     pub source: Source,
-    /// Its public keys, in the order schemes are listed: Ed25519, EdBlake, secp256k1.
+    /// Its public keys, in the order schemes are listed: Ed25519, EdBlake, secp256k1, bitcoin.
     pub publics: Vec<PublicKey>,
     /// The keys to them, in the same order; none for an account watched from an offline signer.
     pub keys: Vec<Keypair>,
@@ -84,12 +84,14 @@ impl Holder {
     }
 }
 
-/// What a scheme is called on a page: Ethereum, for secp256k1, as people know its addresses.
+/// What a scheme is called on a page: Ethereum, for secp256k1, and Bitcoin, as people know their
+/// addresses.
 pub fn label(scheme: KeyType) -> &'static str {
     match scheme {
         KeyType::Ed25519 => "Ed25519",
         KeyType::EdBlake => "EdBlake",
         KeyType::Secp256k1 => "Ethereum",
+        KeyType::Bitcoin => "Bitcoin",
     }
 }
 
@@ -99,6 +101,7 @@ pub fn scheme_of(address: &Address) -> Option<KeyType> {
         Address::Ed25519(_) => Some(KeyType::Ed25519),
         Address::EdBlake(_) => Some(KeyType::EdBlake),
         Address::Secp256k1(_) => Some(KeyType::Secp256k1),
+        Address::Bitcoin(_) => Some(KeyType::Bitcoin),
         Address::Contract(_) | Address::Evm(_) => None,
     }
 }
@@ -177,7 +180,8 @@ mod tests {
         let holders = open(&book);
         let kinds = |holder: &Holder| holder.addresses().iter().map(|address| address.kind()).collect::<Vec<_>>();
 
-        assert_eq!(kinds(&holders[0]), ["ed25519", "edblake", "secp256k1"]);
+        assert_eq!(kinds(&holders[0]), ["ed25519", "edblake", "secp256k1", "bitcoin"]);
+        assert!(holders[0].addresses()[3].to_string().starts_with("bc1q"), "Bitcoin's, as BIP84 derives it");
         assert_eq!(holders[0].addresses()[2].to_string(), "secp256k1:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "Ethereum's, for these words");
         assert_eq!(holders[1].addresses()[2].to_string(), "secp256k1:0x70997970c51812dc3a010c7d01b50e0d17dc79c8");
         assert_eq!((holders[0].number(), holders[2].number()), (Some(0), None));

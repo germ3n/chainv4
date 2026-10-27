@@ -102,13 +102,19 @@ other pages explain each part in full; this one is the short list to keep in min
   device: write them down. In the browser they live in the page origin's storage, which clearing
   the site's data deletes. It trusts the genesis a node first shows it, and proves everything
   else. `--wallet wallet/dist` serves it from the node's `/wallet/`. See [Wallet](wallet.md).
-- **One account, three addresses.** A seed-phrase account has an Ed25519, an EdBlake and an
-  Ethereum (secp256k1) address, each with its own balance and nonce. Coins at one are not at the
+- **One account, four addresses.** A seed-phrase account has an Ed25519, an EdBlake, an
+  Ethereum (secp256k1) and a Bitcoin address, each with its own balance and nonce. Coins at one are not at the
   others: the wallet adds them up on Home, but a transaction is sent from one address.
 - **secp256k1 addresses are Ethereum's.** `secp256k1:0x` and 20 bytes, the same as Ethereum's for
   the same key, and the same words give MetaMask's accounts. But chainv4 signs its own
   transactions, so an Ethereum wallet can hold the key yet not sign for chainv4, and a
   secp256k1 address cannot be checked as a curve point: a mistyped one takes coins for good.
+  See [Crypto](crypto.md#keys-and-signatures).
+- **bitcoin addresses are Bitcoin's.** `bc1q…`, alone, with no `kind:` before it: the HASH160 of a
+  key at BIP84's `m/84'/0'/0'/0/n`, the address Bitcoin's wallets show for the same words. Every
+  chain writes it with mainnet's `bc`. The key signs chainv4's transactions over double SHA-256,
+  so it is a scheme of its own, `bitcoin`, a consensus change: nodes without it refuse those
+  transactions. Text that tells addresses from names now parses, since a `bc1q…` has no colon.
   See [Crypto](crypto.md#keys-and-signatures).
 - **The Android apps are built with xbuild, not Gradle.** `wallet/build-android.sh` and
   `explorer/build-android.sh`, both through `ui/build-android.sh`, need clang, lld and llvm-ar, and

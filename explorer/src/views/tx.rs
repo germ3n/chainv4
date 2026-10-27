@@ -162,7 +162,7 @@ fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>) {
                         ui.add(egui::TextEdit::multiline(&mut source).code_editor().desired_width(f32::INFINITY));
                     });
                 }
-                (_, Value::String(text)) if text.contains(':') && text.contains("0x") => super::address(ui, ctx, text),
+                (_, Value::String(text)) if super::is_address(text) => super::address(ui, ctx, text),
                 (_, Value::String(text)) => super::copyable(ui, text),
                 (name, other) => super::json_tree(ui, ctx, name, other),
             });

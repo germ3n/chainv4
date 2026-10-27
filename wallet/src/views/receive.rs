@@ -84,9 +84,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
         ui.add_space(4.0);
 
         let ethereum = addresses.iter().any(|address| matches!(address, Address::Secp256k1(_)));
+        let bitcoin = addresses.iter().any(|address| matches!(address, Address::Bitcoin(_)));
         let lines = [
             Some("Each address holds its own coin and tokens. The coin and every token the chain's registry lists arrive at any of them."),
             ethereum.then_some("The Ethereum address is the one Ethereum wallets show for the same key, but what this chain sends to it lives on this chain alone."),
+            bitcoin.then_some("The Bitcoin address is the one Bitcoin wallets show for the same words, but what this chain sends to it lives on this chain alone."),
             Some("A payment counts once the light client proves it, and cannot be undone once its block is final."),
             Some("Coins a contract pays out show in the balance; the activity lists them when the node keeps an address index."),
         ];

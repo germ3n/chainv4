@@ -2,8 +2,8 @@
 
 use alloc::{string::String, vec::Vec};
 
-/// An address: its kind and its bytes, 32 of them, or 20 for secp256k1 and EVM contracts with the
-/// rest zero.
+/// An address: its kind and its bytes, 32 of them, or 20 for secp256k1, bitcoin and EVM contracts
+/// with the rest zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address {
     pub kind: AddressKind,
@@ -20,6 +20,8 @@ pub enum AddressKind {
     Secp256k1 = 3,
     /// An EVM contract's: the 20 bytes Ethereum's CREATE or CREATE2 gives it.
     Evm = 4,
+    /// Bitcoin's: the HASH160 of a secp256k1 key, written bc1q….
+    Bitcoin = 5,
 }
 
 impl AddressKind {
@@ -30,14 +32,15 @@ impl AddressKind {
             2 => Some(AddressKind::EdBlake),
             3 => Some(AddressKind::Secp256k1),
             4 => Some(AddressKind::Evm),
+            5 => Some(AddressKind::Bitcoin),
             _ => None,
         }
     }
 
-    /// How many bytes an address of this kind has: 32, or 20 for secp256k1 and the EVM.
+    /// How many bytes an address of this kind has: 32, or 20 for secp256k1, bitcoin and the EVM.
     pub fn width(self) -> usize {
         match self {
-            AddressKind::Secp256k1 | AddressKind::Evm => 20,
+            AddressKind::Secp256k1 | AddressKind::Evm | AddressKind::Bitcoin => 20,
             _ => 32,
         }
     }
@@ -52,7 +55,7 @@ impl Address {
         Some(Address { kind, bytes: out })
     }
 
-    /// Its bytes: 32, or 20 for secp256k1.
+    /// Its bytes: 32, or 20 for secp256k1, bitcoin and the EVM.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.kind.width()]
     }
@@ -79,9 +82,10 @@ impl Address {
     }
 
     /// The address in its text form, as the node writes it: its kind, a colon and 0x hex, such
-    /// as `ed25519:0x3b6a…`. What the `address-text` kind holds.
+    /// as `ed25519:0x3b6a…`, or a bitcoin one's bc1q…. What the `address-text` kind holds.
     pub fn text(&self) -> String {
         let kind = match self.kind {
+            AddressKind::Bitcoin => return crate::bech32::encode_segwit("bc", self.as_bytes()),
             AddressKind::Ed25519 => "ed25519",
             AddressKind::Contract => "contract",
             AddressKind::EdBlake => "edblake",
@@ -99,7 +103,11 @@ impl Address {
     /// Reads the text form, as text writes it and Lua's address.parse reads it. None for anything
     /// else.
     pub fn parse(text: &str) -> Option<Address> {
-        let (kind, hex) = text.split_once(':')?;
+        let Some((kind, hex)) = text.split_once(':') else {
+            let (hrp, program) = crate::bech32::decode_segwit(text)?;
+
+            return Address::new(AddressKind::Bitcoin, &program).filter(|_| hrp == "bc");
+        };
         let kind = match kind {
             "ed25519" => AddressKind::Ed25519,
             "contract" => AddressKind::Contract,
@@ -486,7 +494,15 @@ mod tests {
         assert_eq!(Address::from_hex(&ethereum.hex()), Some(ethereum));
         assert_eq!(Address::from_hex(&edblake.hex()).map(|address| address.kind), Some(AddressKind::Ed25519), "hex keeps no kind");
 
-        for bad in ["edblake:ab", "ed25519:0x12", "nokind:0x00", "ed25519:0xzz", "0x"] {
+        // BIP173's P2WPKH example, as the node writes a bitcoin address.
+        let bitcoin = Address::parse("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap();
+
+        assert_eq!(bitcoin.kind, AddressKind::Bitcoin);
+        assert_eq!(bitcoin.hex(), "0x751e76e8199196d454941c45d1b3a323f1433bd6");
+        assert_eq!(bitcoin.text(), "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+        assert_eq!(Address::decode(&bitcoin.encode()), Some(bitcoin));
+
+        for bad in ["edblake:ab", "ed25519:0x12", "nokind:0x00", "ed25519:0xzz", "0x", "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5"] {
             assert_eq!(Address::parse(bad), None, "{bad}");
         }
 

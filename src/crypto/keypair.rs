@@ -21,6 +21,9 @@ use crate::crypto::edblake;
 #[cfg(feature = "secp256k1")]
 use crate::crypto::secp256k1;
 
+#[cfg(feature = "bitcoin")]
+use crate::crypto::bitcoin;
+
 #[cfg(not(any(feature = "ed25519", feature = "edblake", feature = "secp256k1")))]
 compile_error!("enable at least one key feature: ed25519, edblake or secp256k1");
 
@@ -45,6 +48,10 @@ pub enum KeyType {
     #[cfg(feature = "secp256k1")]
     #[wincode(tag = 2)]
     Secp256k1,
+    #[document(summary = "Bitcoin's: ECDSA on secp256k1 over double SHA-256, with a low s, and addresses of the key's HASH160, written bc1q… as Bitcoin's native segwit ones are.")]
+    #[cfg(feature = "bitcoin")]
+    #[wincode(tag = 3)]
+    Bitcoin,
 }
 
 impl KeyType {
@@ -56,9 +63,11 @@ impl KeyType {
         KeyType::EdBlake,
         #[cfg(feature = "secp256k1")]
         KeyType::Secp256k1,
+        #[cfg(feature = "bitcoin")]
+        KeyType::Bitcoin,
     ];
 
-    #[document(parent = "KeyType", summary = "Its name, as key files and addresses begin: ed25519, edblake or secp256k1.")]
+    #[document(parent = "KeyType", summary = "Its name, as key files and addresses begin: ed25519, edblake, secp256k1 or bitcoin.")]
     pub fn name(self) -> &'static str {
         match self {
             #[cfg(feature = "ed25519")]
@@ -67,6 +76,22 @@ impl KeyType {
             KeyType::EdBlake => "edblake",
             #[cfg(feature = "secp256k1")]
             KeyType::Secp256k1 => "secp256k1",
+            #[cfg(feature = "bitcoin")]
+            KeyType::Bitcoin => "bitcoin",
+        }
+    }
+}
+
+impl KeyType {
+    #[document(parent = "KeyType", summary = "Whether its keys are secp256k1 scalars, as Ethereum's and Bitcoin's are, which a random draw must land below the group's order to be.")]
+    pub fn on_secp256k1(self) -> bool {
+        match self {
+            #[cfg(feature = "secp256k1")]
+            KeyType::Secp256k1 => true,
+            #[cfg(feature = "bitcoin")]
+            KeyType::Bitcoin => true,
+            #[allow(unreachable_patterns)]
+            _ => false,
         }
     }
 }
@@ -104,12 +129,16 @@ pub enum PublicKey {
     #[cfg(feature = "secp256k1")]
     #[wincode(tag = 2)]
     Secp256k1([u8; 33]),
+    #[document(summary = "A Bitcoin key: a secp256k1 one, compressed.")]
+    #[cfg(feature = "bitcoin")]
+    #[wincode(tag = 3)]
+    Bitcoin([u8; 33]),
 }
 
 impl PublicKey {
     #[document(
         parent = "PublicKey",
-        summary = "The account this key controls: under Ed25519 and EdBlake the key itself, under secp256k1 the last 20 bytes of the keccak256 of its point, as Ethereum's; each tagged with its scheme.",
+        summary = "The account this key controls: under Ed25519 and EdBlake the key itself, under secp256k1 the last 20 bytes of the keccak256 of its point, as Ethereum's, under bitcoin the HASH160 of the key, as Bitcoin's; each tagged with its scheme.",
     )]
     pub fn address(&self) -> Address {
         match self {
@@ -120,6 +149,8 @@ impl PublicKey {
             // A key that is no point has no account; it never verifies anything either.
             #[cfg(feature = "secp256k1")]
             PublicKey::Secp256k1(key) => Address::Secp256k1(secp256k1::address(key).unwrap_or_default()),
+            #[cfg(feature = "bitcoin")]
+            PublicKey::Bitcoin(key) => Address::Bitcoin(bitcoin::address(key).unwrap_or_default()),
         }
     }
 
@@ -135,6 +166,8 @@ impl PublicKey {
             PublicKey::EdBlake(_) => KeyType::EdBlake,
             #[cfg(feature = "secp256k1")]
             PublicKey::Secp256k1(_) => KeyType::Secp256k1,
+            #[cfg(feature = "bitcoin")]
+            PublicKey::Bitcoin(_) => KeyType::Bitcoin,
         }
     }
 
@@ -166,6 +199,10 @@ impl PublicKey {
             (PublicKey::Secp256k1(key), Signature::Secp256k1(signature)) => {
                 secp256k1::verify(key, message, signature)
             }
+            #[cfg(feature = "bitcoin")]
+            (PublicKey::Bitcoin(key), Signature::Bitcoin(signature)) => {
+                bitcoin::verify(key, message, signature)
+            }
             #[allow(unreachable_patterns)]
             _ => false,
         };
@@ -195,6 +232,11 @@ impl Verifiable for PublicKey {
                 true => Ok(()),
                 false => Err(VerifyError::InvalidPublicKey),
             },
+            #[cfg(feature = "bitcoin")]
+            PublicKey::Bitcoin(key) => match secp256k1::valid_key(key) {
+                true => Ok(()),
+                false => Err(VerifyError::InvalidPublicKey),
+            },
         }
     }
 }
@@ -204,20 +246,23 @@ impl Hashable for PublicKey {
 }
 
 /// The scheme, a colon and the key in hex: the same text as the key's address under the Edwards
-/// schemes, such as ed25519:0x3b6a…, and the compressed point under secp256k1, which is 33 bytes
-/// where its address is 20.
+/// schemes, such as ed25519:0x3b6a…, and the compressed point under secp256k1 and bitcoin, which
+/// is 33 bytes where its address is 20.
 impl fmt::Display for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             #[cfg(feature = "secp256k1")]
             PublicKey::Secp256k1(key) => write!(f, "secp256k1:{}", to_hex(key)),
+            #[cfg(feature = "bitcoin")]
+            PublicKey::Bitcoin(key) => write!(f, "bitcoin:{}", to_hex(key)),
             #[allow(unreachable_patterns)]
             _ => self.address().fmt(f),
         }
     }
 }
 
-/// Reads the text Display writes. A contract address, or a secp256k1 address, is not a key.
+/// Reads the text Display writes. A contract address, or a secp256k1 or bitcoin address, is not a
+/// key.
 impl std::str::FromStr for PublicKey {
     type Err = crate::structs::address::ParseAddressError;
 
@@ -227,6 +272,13 @@ impl std::str::FromStr for PublicKey {
             && let Some(key) = from_hex(hex).and_then(|bytes| <[u8; 33]>::try_from(bytes).ok())
         {
             return Ok(PublicKey::Secp256k1(key));
+        }
+
+        #[cfg(feature = "bitcoin")]
+        if let Some(hex) = text.strip_prefix("bitcoin:")
+            && let Some(key) = from_hex(hex).and_then(|bytes| <[u8; 33]>::try_from(bytes).ok())
+        {
+            return Ok(PublicKey::Bitcoin(key));
         }
 
         match text.parse::<Address>()? {
@@ -267,6 +319,10 @@ pub enum PrivateKey {
     #[cfg(feature = "secp256k1")]
     #[wincode(tag = 2)]
     Secp256k1([u8; 32]),
+    #[document(summary = "A Bitcoin key: a secp256k1 scalar, above zero and below the group's order.")]
+    #[cfg(feature = "bitcoin")]
+    #[wincode(tag = 3)]
+    Bitcoin([u8; 32]),
 }
 
 impl PrivateKey {
@@ -282,6 +338,8 @@ impl PrivateKey {
             PrivateKey::EdBlake(_) => KeyType::EdBlake,
             #[cfg(feature = "secp256k1")]
             PrivateKey::Secp256k1(_) => KeyType::Secp256k1,
+            #[cfg(feature = "bitcoin")]
+            PrivateKey::Bitcoin(_) => KeyType::Bitcoin,
         }
     }
 
@@ -300,6 +358,10 @@ impl PrivateKey {
             #[cfg(feature = "secp256k1")]
             PrivateKey::Secp256k1(secret) => {
                 PublicKey::Secp256k1(secp256k1::public_key(secret).expect("a secp256k1 private key is a valid scalar"))
+            }
+            #[cfg(feature = "bitcoin")]
+            PrivateKey::Bitcoin(secret) => {
+                PublicKey::Bitcoin(secp256k1::public_key(secret).expect("a bitcoin private key is a valid scalar"))
             }
         }
     }
@@ -320,6 +382,8 @@ impl PrivateKey {
             PrivateKey::EdBlake(seed) => Signature::EdBlake(edblake::sign(seed, message)),
             #[cfg(feature = "secp256k1")]
             PrivateKey::Secp256k1(secret) => Signature::Secp256k1(secp256k1::sign(secret, message)),
+            #[cfg(feature = "bitcoin")]
+            PrivateKey::Bitcoin(secret) => Signature::Bitcoin(bitcoin::sign(secret, message)),
         }
     }
 }
@@ -333,6 +397,8 @@ impl Drop for PrivateKey {
             PrivateKey::EdBlake(seed) => seed.zeroize(),
             #[cfg(feature = "secp256k1")]
             PrivateKey::Secp256k1(secret) => secret.zeroize(),
+            #[cfg(feature = "bitcoin")]
+            PrivateKey::Bitcoin(secret) => secret.zeroize(),
         }
     }
 }
@@ -365,6 +431,10 @@ pub enum Signature {
     #[cfg(feature = "secp256k1")]
     #[wincode(tag = 4)]
     Ethereum,
+    #[document(summary = "A Bitcoin key's ECDSA signature, over the double SHA-256 of what it signs: r, then s, which is always low.")]
+    #[cfg(feature = "bitcoin")]
+    #[wincode(tag = 5)]
+    Bitcoin([u8; 64]),
 }
 
 impl Hashable for Signature {
@@ -383,6 +453,8 @@ impl fmt::Display for Signature {
             Signature::Secp256k1(bytes) | Signature::Secp256k1Eip712(bytes) => f.write_str(&to_hex(bytes)),
             #[cfg(feature = "secp256k1")]
             Signature::Ethereum => f.write_str("ethereum"),
+            #[cfg(feature = "bitcoin")]
+            Signature::Bitcoin(bytes) => f.write_str(&to_hex(bytes)),
         }
     }
 }
@@ -412,7 +484,7 @@ pub const DEV_SEED: [u8; 32] = *b"chainv4 dev authority, not safe!";
 impl Keypair {
     #[document(
         parent = "Keypair",
-        summary = "The well-known development key: Ed25519 when built in, else EdBlake, else secp256k1. Never use it for anything of value: its seed is in the source.",
+        summary = "The well-known development key: Ed25519 when built in, else EdBlake, else secp256k1, else bitcoin. Never use it for anything of value: its seed is in the source.",
         see_also = "DEV_SEED, DevAuthority::dev_keypair, Keypair::from_seed",
     )]
     pub fn development() -> Keypair {
@@ -421,8 +493,8 @@ impl Keypair {
 
     #[document(
         parent = "Keypair",
-        summary = "A key from a fixed 32-byte seed, in the first scheme this build has: Ed25519, else EdBlake, else secp256k1. For the development key and tests, never for keys of value: a seed is a key only when it is secret and random.",
-        params = { seed = "The seed. For secp256k1 it must be a valid secret: not zero, and below the group's order, as every seed of 32 equal bytes but 0x00 and 0xff is." },
+        summary = "A key from a fixed 32-byte seed, in the first scheme this build has: Ed25519, else EdBlake, else secp256k1, else bitcoin. For the development key and tests, never for keys of value: a seed is a key only when it is secret and random.",
+        params = { seed = "The seed. For secp256k1 and bitcoin it must be a valid secret: not zero, and below the group's order, as every seed of 32 equal bytes but 0x00 and 0xff is." },
         see_also = "Keypair::development, Keypair::generate",
     )]
     pub fn from_seed(seed: [u8; 32]) -> Keypair {
@@ -433,6 +505,8 @@ impl Keypair {
             KeyType::EdBlake => PrivateKey::EdBlake(seed),
             #[cfg(feature = "secp256k1")]
             KeyType::Secp256k1 => PrivateKey::Secp256k1(seed),
+            #[cfg(feature = "bitcoin")]
+            KeyType::Bitcoin => PrivateKey::Bitcoin(seed),
         };
 
         Keypair::from_private(private)
@@ -448,9 +522,10 @@ impl Keypair {
         let mut seed = [0; 32];
         getrandom::fill(&mut seed)?;
 
-        // A secp256k1 key must be below the group's order: all but one in 2^128 draws are.
+        // A secp256k1 key, Ethereum's or Bitcoin's, must be below the group's order: all but one in
+        // 2^128 draws are.
         #[cfg(feature = "secp256k1")]
-        while key_type == KeyType::Secp256k1 && !secp256k1::valid_secret(&seed) {
+        while key_type.on_secp256k1() && !secp256k1::valid_secret(&seed) {
             getrandom::fill(&mut seed)?;
         }
 
@@ -461,6 +536,8 @@ impl Keypair {
             KeyType::EdBlake => PrivateKey::EdBlake(seed),
             #[cfg(feature = "secp256k1")]
             KeyType::Secp256k1 => PrivateKey::Secp256k1(seed),
+            #[cfg(feature = "bitcoin")]
+            KeyType::Bitcoin => PrivateKey::Bitcoin(seed),
         };
         seed.zeroize();
 
@@ -498,6 +575,10 @@ impl Keypair {
             "secp256k1" if secp256k1::valid_secret(&seed) => Ok(PrivateKey::Secp256k1(seed)),
             #[cfg(feature = "secp256k1")]
             "secp256k1" => Err("it is not a secp256k1 key: zero, or past the group's order".to_string()),
+            #[cfg(feature = "bitcoin")]
+            "bitcoin" if secp256k1::valid_secret(&seed) => Ok(PrivateKey::Bitcoin(seed)),
+            #[cfg(feature = "bitcoin")]
+            "bitcoin" => Err("it is not a bitcoin key: zero, or past the group's order".to_string()),
             other => Err(format!("unknown scheme {other}")),
         };
         seed.zeroize();
@@ -518,6 +599,8 @@ impl Keypair {
             PrivateKey::EdBlake(seed) => ("edblake", seed),
             #[cfg(feature = "secp256k1")]
             PrivateKey::Secp256k1(secret) => ("secp256k1", secret),
+            #[cfg(feature = "bitcoin")]
+            PrivateKey::Bitcoin(secret) => ("bitcoin", secret),
         };
 
         format!("{scheme}:{}", to_hex(seed))
@@ -604,6 +687,11 @@ mod tests {
             }
             #[cfg(feature = "secp256k1")]
             Signature::Ethereum => Signature::Ethereum,
+            #[cfg(feature = "bitcoin")]
+            Signature::Bitcoin(mut bytes) => {
+                bytes[40] ^= 1;
+                Signature::Bitcoin(bytes)
+            }
         }
     }
 

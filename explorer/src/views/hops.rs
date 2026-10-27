@@ -305,7 +305,7 @@ fn graph(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], state: &mut HopState) {
                 let fill = if first { look.roles.main.gamma_multiply(0.5) } else { ui.visuals().widgets.inactive.bg_fill };
                 let response = ui.put(rect, egui::Button::new(RichText::new(format::short(address)).monospace()).fill(fill));
 
-                if response.on_hover_text(address).clicked() && address.contains(':') {
+                if response.on_hover_text(address).clicked() && super::is_address(address) {
                     open = Some(address.clone());
                 }
             }

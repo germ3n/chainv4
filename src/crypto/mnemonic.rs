@@ -7,6 +7,8 @@
 //!   same secret for two schemes. 7744 is chainv4's coin type, unregistered in SLIP-44.
 //! - **secp256k1** by BIP32, at Ethereum's m/44'/60'/0'/0/n: the same words give the same accounts
 //!   and 0x addresses here as in Ethereum's wallets.
+//! - **bitcoin** by BIP32, at BIP84's m/84'/0'/0'/0/n: the same words give the same bc1q addresses
+//!   here as in Bitcoin's wallets, account n being the wallet's nth receiving address.
 //!
 //! Each derivation step hashes with HMAC-SHA512, as both standards do.
 
@@ -32,6 +34,13 @@ pub const COIN_TYPE: u32 = 7744;
     see_also = "Seed::key",
 )]
 pub const ETHEREUM_COIN_TYPE: u32 = 60;
+
+#[document(
+    summary = "BIP84's purpose, 84: bitcoin keys derive at m/84'/0'/0'/0/n, as Bitcoin's wallets derive native segwit (bc1q) addresses.",
+    category = "Keys",
+    see_also = "Seed::key, Seed::bitcoin_account",
+)]
+pub const BIP84_PURPOSE: u32 = 84;
 
 /// An index at or above this is hardened: its child cannot be derived from the parent's public key.
 const HARDENED: u32 = 1 << 31;
@@ -120,12 +129,12 @@ pub struct Seed([u8; 64]);
 impl Seed {
     #[document(
         parent = "Seed",
-        summary = "An account's key in one scheme: Ed25519 and EdBlake by SLIP-0010 at m/44'/7744'/n'/0'/0' and m/44'/7744'/n'/1'/0', secp256k1 by BIP32 at Ethereum's m/44'/60'/0'/0/n.",
+        summary = "An account's key in one scheme: Ed25519 and EdBlake by SLIP-0010 at m/44'/7744'/n'/0'/0' and m/44'/7744'/n'/1'/0', secp256k1 by BIP32 at Ethereum's m/44'/60'/0'/0/n, bitcoin by BIP32 at BIP84's m/84'/0'/0'/0/n.",
         params = {
             scheme = "Which scheme.",
             account = "The account's number, from 0. Below 2^31.",
         },
-        see_also = "COIN_TYPE, ETHEREUM_COIN_TYPE",
+        see_also = "COIN_TYPE, ETHEREUM_COIN_TYPE, BIP84_PURPOSE",
     )]
     pub fn key(&self, scheme: KeyType, account: u32) -> Keypair {
         let private = match scheme {
@@ -140,6 +149,12 @@ impl Seed {
 
                 PrivateKey::Secp256k1(bip32(&self.0, &path).expect("a key at every index but one in 2^127"))
             }
+            #[cfg(feature = "bitcoin")]
+            KeyType::Bitcoin => {
+                let path = [(BIP84_PURPOSE, true), (0, true), (0, true), (0, false), (account, false)];
+
+                PrivateKey::Bitcoin(bip32(&self.0, &path).expect("a key at every index but one in 2^127"))
+            }
         };
 
         Keypair::from_private(private)
@@ -152,8 +167,23 @@ impl Seed {
     )]
     #[cfg(feature = "secp256k1")]
     pub fn ethereum_account(&self) -> ExtendedPublic {
+        self.account_level([(44, true), (ETHEREUM_COIN_TYPE, true), (0, true)])
+    }
+
+    #[document(
+        parent = "Seed",
+        summary = "The extended public key at m/84'/0'/0', BIP84's account level: every bitcoin account key derives below it, account n at 0/n. What a Bitcoin wallet takes to watch the addresses an offline signer holds the keys of.",
+        see_also = "ExtendedPublic, Seed::key, BIP84_PURPOSE",
+    )]
+    #[cfg(feature = "bitcoin")]
+    pub fn bitcoin_account(&self) -> ExtendedPublic {
+        self.account_level([(BIP84_PURPOSE, true), (0, true), (0, true)])
+    }
+
+    /// The extended public key three hardened steps down, where BIP44 and BIP84 put an account.
+    #[cfg(feature = "secp256k1")]
+    fn account_level(&self, path: [(u32, bool); 3]) -> ExtendedPublic {
         let public = |node: &Node| crate::crypto::secp256k1::public_key(&node.secret).expect("a BIP32 key is a valid secret");
-        let path = [(44, true), (ETHEREUM_COIN_TYPE, true), (0, true)];
         let master = bip32_node(&self.0, &[]).expect("a master key for every seed but one in 2^127");
         let parent = bip32_node(&self.0, &path[..2]).expect("a key at every index but one in 2^127");
         let account = bip32_node(&self.0, &path).expect("a key at every index but one in 2^127");
@@ -420,6 +450,25 @@ mod tests {
         assert_eq!(account.depth, 3);
         assert_ne!(account.master_fingerprint, account.parent_fingerprint);
         assert_eq!(account.master_fingerprint, fingerprint(&crate::crypto::secp256k1::public_key(&bip32_node(&seed.0, &[]).unwrap().secret).unwrap()));
+    }
+
+    #[cfg(feature = "bitcoin")]
+    #[test]
+    fn bitcoin_keys_follow_bip84_and_match_bitcoins_wallets() {
+        // BIP84's test vector: the receiving addresses of its phrase's first account.
+        let seed = Phrase::parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap().seed("");
+        let key = seed.key(KeyType::Bitcoin, 0);
+
+        assert_eq!(key.public().to_string(), "bitcoin:0x0330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c");
+        assert_eq!(key.public().address().to_string(), "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu");
+        assert_eq!(seed.key(KeyType::Bitcoin, 1).public().address().to_string(), "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g");
+
+        let account = seed.bitcoin_account();
+
+        // The phrase's master fingerprint, as every wallet that reads it shows it.
+        assert_eq!(account.master_fingerprint, hex("0x73c5da0a"));
+        assert_eq!(account.public, crate::crypto::secp256k1::public_key(&bip32(&seed.0, &[(84, true), (0, true), (0, true)]).unwrap()).unwrap());
+        assert_eq!(account.depth, 3);
     }
 
     #[test]

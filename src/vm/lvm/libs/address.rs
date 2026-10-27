@@ -92,10 +92,10 @@ fn address_from_hex() {}
     name = "parse",
     summary = "Reads an address of any kind from its full text form, as Address:text writes it and the CLI and API show it. The way to store a contract's address and get it back.",
     params = {
-        text = { ty = "string", desc = "Such as ed25519:0x…, secp256k1:0x… or contract:0x…." },
+        text = { ty = "string", desc = "Such as ed25519:0x…, secp256k1:0x…, contract:0x… or a bitcoin address's bc1q…." },
     },
     returns = { ty = "Address", desc = "The address." },
-    panics = "Errors when the kind is unknown or the hex is the wrong length for it: 32 bytes, or 20 for secp256k1.",
+    panics = "Errors when the kind is unknown or the hex is the wrong length for it: 32 bytes, or 20 for secp256k1; or a bc1q… address's checksum does not hold.",
     see_also = "Address:text",
 )]
 fn address_parse() {}
@@ -129,7 +129,7 @@ fn address_class() {}
     parent = "Address",
     name = "hex",
     kind = "method",
-    summary = "The address as 0x followed by lowercase hex digits: 64, or 40 for secp256k1.",
+    summary = "The address as 0x followed by lowercase hex digits: 64, or 40 for secp256k1 and bitcoin.",
     returns = { ty = "string", desc = "The hex form." },
 )]
 fn address_hex() {}
@@ -139,7 +139,7 @@ fn address_hex() {}
     parent = "Address",
     name = "bytes",
     kind = "method",
-    summary = "The address's raw bytes: 32, or 20 for secp256k1.",
+    summary = "The address's raw bytes: 32, or 20 for secp256k1 and bitcoin.",
     returns = { ty = "string", desc = "The bytes." },
 )]
 fn address_bytes() {}
@@ -160,7 +160,7 @@ fn address_is_contract() {}
     parent = "Address",
     name = "kind",
     kind = "method",
-    summary = "What kind of address it is: ed25519, edblake, secp256k1 or contract.",
+    summary = "What kind of address it is: ed25519, edblake, secp256k1, bitcoin, contract or evm.",
     returns = { ty = "string", desc = "The kind." },
 )]
 fn address_kind() {}
@@ -170,7 +170,7 @@ fn address_kind() {}
     parent = "Address",
     name = "text",
     kind = "method",
-    summary = "The full text form: the kind, a colon and the hex, such as contract:0x…. Unlike hex, it keeps the kind, so address.parse gets the same address back.",
+    summary = "The full text form: the kind, a colon and the hex, such as contract:0x…, or for a bitcoin address bc1q…, as Bitcoin writes it. Unlike hex, it keeps the kind, so address.parse gets the same address back.",
     returns = { ty = "string", desc = "The text form." },
     see_also = "address.parse",
 )]
@@ -181,7 +181,7 @@ fn address_text() {}
     parent = "Address",
     name = "is_valid",
     kind = "method",
-    summary = "Whether the address is a usable public key: a point on the curve that is not a weak small-order point. Funds sent to an invalid address can never be spent. A secp256k1 address is a hash of its key, so nothing can be checked, and it is always valid; so is a contract's.",
+    summary = "Whether the address is a usable public key: a point on the curve that is not a weak small-order point. Funds sent to an invalid address can never be spent. A secp256k1 or bitcoin address is a hash of its key, so nothing can be checked, and it is always valid; so is a contract's.",
     returns = { ty = "boolean", desc = "True when the key is valid." },
 )]
 fn address_is_valid() {}
@@ -343,5 +343,16 @@ mod tests {
 
         assert_eq!((text, kind.as_str(), round.as_str(), len), (format!("secp256k1:{hex}"), "secp256k1", hex, 20));
         assert!(bytes && parsed && valid);
+    }
+    #[test]
+    fn a_bitcoin_address_reads_and_writes_as_bitcoin_does() {
+        let lua = setup();
+        let text = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+        let code = format!("local a = address.parse('{text}') return a:text(), a:kind(), a:hex(), a == address.decode(a:encode()), a:is_valid()");
+        let (round, kind, hex, decoded, valid): (String, String, String, bool, bool) = lua.load(code).eval().unwrap();
+
+        assert_eq!((round.as_str(), kind.as_str(), hex.as_str()), (text, "bitcoin", "0x751e76e8199196d454941c45d1b3a323f1433bd6"));
+        assert!(decoded && valid);
+        assert!(lua.load("address.parse('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5')").exec().is_err(), "a typo fails the checksum");
     }
 }

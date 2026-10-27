@@ -56,7 +56,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, page: &mut FaucetPage) {
             ui,
             |ui| widgets::primary(ui, &palette, &format!("Get {amount}"), !busy && typed).clicked(),
             |ui, width| {
-                ui.add(egui::TextEdit::singleline(&mut page.to).hint_text("ed25519:0x…, an Ethereum 0x…, or a name such as alice.dev").desired_width(width));
+                ui.add(egui::TextEdit::singleline(&mut page.to).hint_text("ed25519:0x…, an Ethereum 0x…, a bc1q…, or a name such as alice.dev").desired_width(width));
             },
         );
 
@@ -136,6 +136,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, page: &mut FaucetPage) {
 /// Whom the field names: an address, an Ethereum one as Ethereum writes it, or a name the node
 /// resolves; None while the name's lookup is out.
 fn recipient(ctx: &mut Ctx, text: &str) -> Result<Option<Address>, String> {
+    if let Ok(address) = text.parse() {
+        return Ok(Some(address));
+    }
+
     if text.contains(':') {
         return text.parse().map(Some).map_err(|err| format!("{text}: {err}"));
     }

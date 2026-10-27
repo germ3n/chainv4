@@ -45,6 +45,13 @@ fn keygen_writes_the_keys_a_seed_phrase_gives() {
     assert_eq!(made("a.key", &["--from-phrase", "--scheme", "secp256k1"], words), "secp256k1:0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
     assert_eq!(made("b.key", &["--from-phrase", "--scheme", "secp256k1", "--account", "1"], words), "secp256k1:0x70997970c51812dc3a010c7d01b50e0d17dc79c8");
 
+    // And the address Bitcoin's wallets show for BIP84's words.
+    #[cfg(feature = "bitcoin")]
+    assert_eq!(
+        made("f.key", &["--from-phrase", "--scheme", "bitcoin"], "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about\n"),
+        "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+    );
+
     // The library's keys for the same account, and another passphrase makes another wallet.
     let seed = crate::crypto::mnemonic::Phrase::parse(words).unwrap().seed("");
 

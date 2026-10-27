@@ -78,7 +78,7 @@ pub struct SendArgs {
 pub enum TxArgs {
     /// Sends funds to an address, or to whatever a name resolves to.
     Transfer {
-        /// Who receives them, such as ed25519:0x…, or a name, such as alice.dev.
+        /// Who receives them, such as ed25519:0x… or bc1q…, or a name, such as alice.dev.
         #[arg(long)]
         to: Recipient,
         /// A whole amount, in the smallest unit.

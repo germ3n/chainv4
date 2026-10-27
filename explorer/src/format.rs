@@ -2,8 +2,10 @@
 
 /// An id or address cut to its ends, keeping any kind in front: `ed25519:0x3b6a91…f2c0`.
 pub fn short(text: &str) -> String {
+    // The kind and 0x, or a bitcoin address's bc1q, stay whole.
     let (kind, hex) = match text.find("0x") {
         Some(at) => text.split_at(at + 2),
+        None if text.starts_with("bc1q") => text.split_at(4),
         None => ("", text),
     };
 

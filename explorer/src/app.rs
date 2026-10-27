@@ -674,7 +674,7 @@ impl Explorer {
 
         if wanted.chars().all(|digit| digit.is_ascii_digit() || digit == ',') {
             self.go(View::Block(wanted.replace(',', "")));
-        } else if wanted.contains(':') {
+        } else if views::is_address(&wanted) || wanted.contains(':') {
             self.go(View::Account(wanted));
         } else if wanted.starts_with("0x") {
             self.api.ask(Ask::Lookup(wanted));

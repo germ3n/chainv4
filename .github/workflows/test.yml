@@ -129,6 +129,9 @@ jobs:
           - sha256,secp256k1
           - blake3,ed25519,mnemonic
           - keccak256,edblake,secp256k1,mnemonic
+          # Bitcoin's scheme with only Ethereum's beside it, and with seed phrases.
+          - blake3,bitcoin
+          - sha256,ed25519,bitcoin,mnemonic
           # Contracts and nodes need a secure hash; these run on ones other than BLAKE3.
           - lvm,sha256,ed25519
           - wasm,keccak256,ed25519

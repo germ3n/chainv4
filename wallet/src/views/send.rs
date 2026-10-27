@@ -264,7 +264,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
         ui.add_space(10.0);
         theme::caps(ui, &palette, "To");
-        ui.add(egui::TextEdit::singleline(&mut state.to).hint_text("ed25519:0x…, an Ethereum 0x…, or a name such as alice.dev").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+        ui.add(egui::TextEdit::singleline(&mut state.to).hint_text("ed25519:0x…, an Ethereum 0x…, a bc1q…, or a name such as alice.dev").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
 
         match destination(ctx, &state.to) {
             Destination::Blank | Destination::Address(_) => {}

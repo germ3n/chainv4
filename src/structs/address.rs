@@ -3,6 +3,7 @@ use {
     crate::crypto::keypair::curve_point,
     crate::crypto::verifiable::Verifiable,
     crate::crypto::verifiable::VerifyError,
+    crate::structs::bech32,
     crate::structs::hex::{from_hex, to_hex},
     r#macro::document,
     std::fmt,
@@ -43,17 +44,23 @@ pub enum Address {
     )]
     #[wincode(tag = 4)]
     Evm([u8; 20]),
+    #[document(
+        summary = "An address of a Bitcoin key, as Bitcoin's native segwit (P2WPKH) addresses are made: the HASH160 of its compressed key, written bc1q…. The same key has the same bc1q address here as in Bitcoin's wallets.",
+        see_also = "KeyType::Bitcoin",
+    )]
+    #[wincode(tag = 5)]
+    Bitcoin([u8; 20]),
 }
 
 impl Address {
     #[document(
         parent = "Address",
-        summary = "The bytes behind the address, without saying which kind it is: 32, or 20 for secp256k1 and EVM contracts.",
+        summary = "The bytes behind the address, without saying which kind it is: 32, or 20 for secp256k1, bitcoin and EVM contracts.",
     )]
     pub fn bytes(&self) -> &[u8] {
         match self {
             Address::Ed25519(bytes) | Address::Contract(bytes) | Address::EdBlake(bytes) => bytes,
-            Address::Secp256k1(bytes) | Address::Evm(bytes) => bytes,
+            Address::Secp256k1(bytes) | Address::Evm(bytes) | Address::Bitcoin(bytes) => bytes,
         }
     }
 
@@ -86,13 +93,14 @@ impl Address {
             2 => wide().map(Address::EdBlake),
             3 if bytes[21..].iter().all(|byte| *byte == 0) => bytes[1..21].try_into().ok().map(Address::Secp256k1),
             4 if bytes[21..].iter().all(|byte| *byte == 0) => bytes[1..21].try_into().ok().map(Address::Evm),
+            5 if bytes[21..].iter().all(|byte| *byte == 0) => bytes[1..21].try_into().ok().map(Address::Bitcoin),
             _ => None,
         }
     }
 
     #[document(
         parent = "Address",
-        summary = "The name of the address's kind, as its text form begins: ed25519, edblake, secp256k1, contract or evm.",
+        summary = "The name of the address's kind, as its text form begins: ed25519, edblake, secp256k1, contract or evm; or bitcoin, whose text is bc1q… alone.",
     )]
     pub fn kind(&self) -> &'static str {
         match self {
@@ -101,22 +109,35 @@ impl Address {
             Address::EdBlake(_) => "edblake",
             Address::Secp256k1(_) => "secp256k1",
             Address::Evm(_) => "evm",
+            Address::Bitcoin(_) => "bitcoin",
         }
     }
 }
 
-/// The kind, a colon and the bytes in hex, such as ed25519:0x3b6a…. FromStr reads it back.
+/// The kind, a colon and the bytes in hex, such as ed25519:0x3b6a…; a bitcoin address as Bitcoin
+/// writes it, bc1q… in bech32, which says its own kind. FromStr reads it back.
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.kind(), to_hex(self.bytes()))
+        match self {
+            Address::Bitcoin(bytes) => f.write_str(&bech32::encode_segwit(BITCOIN_HRP, bytes)),
+            _ => write!(f, "{}:{}", self.kind(), to_hex(self.bytes())),
+        }
     }
 }
+
+/// The human-readable part of a bitcoin address: mainnet's, bc, on every chain.
+const BITCOIN_HRP: &str = "bc";
 
 impl FromStr for Address {
     type Err = ParseAddressError;
 
     fn from_str(text: &str) -> Result<Address, ParseAddressError> {
-        let (kind, hex) = text.split_once(':').ok_or(ParseAddressError)?;
+        let Some((kind, hex)) = text.split_once(':') else {
+            return match bech32::decode_segwit(text) {
+                Some((hrp, program)) if hrp == BITCOIN_HRP => program.try_into().map(Address::Bitcoin).map_err(|_| ParseAddressError),
+                _ => Err(ParseAddressError),
+            };
+        };
         let bytes = from_hex(hex).ok_or(ParseAddressError)?;
         let wide = || <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| ParseAddressError);
 
@@ -132,7 +153,7 @@ impl FromStr for Address {
 }
 
 #[document(
-    summary = "Text that is not an address: it must be a kind, a colon and 64 hex digits, such as ed25519:0x3b6a…, or 40 for secp256k1 and evm.",
+    summary = "Text that is not an address: it must be a kind, a colon and 64 hex digits, such as ed25519:0x3b6a…, or 40 for secp256k1 and evm; or a bitcoin address, bc1q… and 38 more letters.",
     category = "Primitives",
     see_also = "Address::kind",
 )]
@@ -141,7 +162,7 @@ pub struct ParseAddressError;
 
 impl fmt::Display for ParseAddressError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "an address is ed25519:, edblake: or contract: and 64 hex digits, or secp256k1: or evm: and 40")
+        write!(f, "an address is ed25519:, edblake: or contract: and 64 hex digits, secp256k1: or evm: and 40, or a bc1q… bitcoin address")
     }
 }
 
@@ -150,13 +171,13 @@ impl std::error::Error for ParseAddressError {}
 impl Verifiable for Address {
     #[document(
         parent = "Address",
-        summary = "Checks that an Ed25519 or EdBlake key is a point on the curve and not a weak small-order point, which would accept one signature for almost any message. A contract address, and a secp256k1 one, a hash, is always valid.",
+        summary = "Checks that an Ed25519 or EdBlake key is a point on the curve and not a weak small-order point, which would accept one signature for almost any message. A contract address, and a secp256k1 or bitcoin one, a hash, is always valid.",
         see_also = "VerifyError::InvalidPublicKey",
     )]
     fn verify(&self) -> Result<(), VerifyError> {
         match self {
             Address::Ed25519(key) | Address::EdBlake(key) => curve_point(key),
-            Address::Contract(_) | Address::Secp256k1(_) | Address::Evm(_) => Ok(()),
+            Address::Contract(_) | Address::Secp256k1(_) | Address::Evm(_) | Address::Bitcoin(_) => Ok(()),
         }
     }
 }
@@ -204,7 +225,7 @@ mod tests {
 
     #[test]
     fn contracts_memory_holds_every_kind_in_33_bytes() {
-        for address in [Address::Ed25519([1; 32]), Address::Contract([2; 32]), Address::EdBlake([3; 32]), Address::Secp256k1([4; 20]), Address::Evm([5; 20])] {
+        for address in [Address::Ed25519([1; 32]), Address::Contract([2; 32]), Address::EdBlake([3; 32]), Address::Secp256k1([4; 20]), Address::Evm([5; 20]), Address::Bitcoin([6; 20])] {
             let abi = address.to_abi();
 
             assert_eq!(abi[0], wincode::serialize(&address).unwrap()[0], "the same tag as the encoding");
@@ -235,5 +256,26 @@ mod tests {
         assert_eq!(format!("secp256k1:0x{short}").parse(), Ok(Address::Secp256k1([0xcd; 20])));
         assert_eq!(format!("secp256k1:{hex}").parse::<Address>(), Err(ParseAddressError));
         assert_eq!(format!("ed25519:0x{short}").parse::<Address>(), Err(ParseAddressError));
+    }
+
+    #[test]
+    fn bitcoin_addresses_are_written_as_bitcoin_writes_them() {
+        // BIP173's P2WPKH example.
+        let text = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+        let address: Address = text.parse().unwrap();
+
+        assert_eq!(address, Address::Bitcoin(from_hex("0x751e76e8199196d454941c45d1b3a323f1433bd6").unwrap().try_into().unwrap()));
+        assert_eq!(address.to_string(), text);
+        assert_eq!(address.kind(), "bitcoin");
+        assert_eq!(text.to_ascii_uppercase().parse(), Ok(address), "as a QR code writes it");
+
+        for other in [
+            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",                       // testnet's
+            "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3", // a script's 32 bytes
+            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5",                       // a typo
+            "bitcoin:0x751e76e8199196d454941c45d1b3a323f1433bd6",                // one text only
+        ] {
+            assert_eq!(other.parse::<Address>(), Err(ParseAddressError), "{other}");
+        }
     }
 }

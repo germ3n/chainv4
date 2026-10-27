@@ -18,7 +18,7 @@ pub struct FaucetArgs {
     pub node: String,
     #[command(flatten)]
     pub tls: TlsArgs,
-    /// Whom to pay: an address, such as ed25519:0x…, an Ethereum 0x…, or a name, such as alice.dev.
+    /// Whom to pay: an address, such as ed25519:0x…, an Ethereum 0x… or a bc1q…, or a name, such as alice.dev.
     #[arg(long)]
     pub to: String,
 }
@@ -62,7 +62,7 @@ pub fn faucet(args: FaucetArgs) -> CliResult<()> {
 fn recipient(agent: &ureq::Agent, node: &str, text: &str) -> CliResult<Address> {
     let text = text.trim();
 
-    if text.contains(':') {
+    if text.contains(':') || text.to_ascii_lowercase().starts_with("bc1") {
         return Ok(text.parse()?);
     }
 

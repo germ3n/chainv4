@@ -474,9 +474,14 @@ fn link_text(ctx: &Ctx, text: impl Into<String>) -> RichText {
     RichText::new(text.into()).monospace().color(ctx.look.palette.accent)
 }
 
+/// Whether text is an address of any kind, as the node writes them: kind:0x… or bc1q….
+pub fn is_address(text: &str) -> bool {
+    text.parse::<chainv4::structs::address::Address>().is_ok()
+}
+
 /// An address that opens its account page. Text that is not an address shows as it is.
 pub fn address(ui: &mut Ui, ctx: &mut Ctx, address: &str) {
-    if !address.contains(':') {
+    if !is_address(address) {
         ui.label(address);
 
         return;
@@ -711,7 +716,7 @@ pub fn json_tree(ui: &mut Ui, ctx: &mut Ctx, name: &str, value: &Value) {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(format!("{name}:")).color(muted));
 
-                match text.contains(':') && text.contains("0x") {
+                match is_address(text) {
                     true => address(ui, ctx, text),
                     false => copyable(ui, text),
                 }

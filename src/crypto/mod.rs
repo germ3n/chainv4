@@ -1,3 +1,5 @@
+#[cfg(feature = "bitcoin")]
+pub mod bitcoin;
 #[cfg(feature = "edblake")]
 pub mod edblake;
 pub mod hashable;

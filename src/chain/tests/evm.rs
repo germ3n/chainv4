@@ -200,6 +200,48 @@ fn any_transaction_writes_its_senders_alias_down_so_the_evm_can_pay_it() {
     assert_eq!(balance(&chain, &Address::Secp256k1(evm::evm_alias(&carol.public().address()))), u256::new(200));
 }
 
+#[cfg(feature = "bitcoin")]
+#[test]
+fn a_bitcoin_account_sends_and_the_evm_pays_it_under_its_alias() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let counter = deploy(&mut chain, 0);
+    let deposit = call(&chain, &authority(), counter, 1_000, calldata("deposit()", &[]));
+    let dave = Keypair::generate(KeyType::Bitcoin).unwrap();
+    let address = dave.public().address();
+
+    assert!(matches!(address, Address::Bitcoin(_)) && address.to_string().starts_with("bc1q"));
+
+    let fund = SignedTx::sign(
+        Tx::Transfer { from: authority().public().address(), to: address, amount: Amount::U128(10u128.pow(21)) },
+        nonce(&chain, &authority()) + 1,
+        FeeOffer::NONE,
+        &authority(),
+    );
+    advance(&mut chain, vec![deposit, fund]);
+
+    // Dave signs with his bitcoin key, over double SHA-256; the chain checks it and writes his
+    // alias down, as for any account that is not its own 20 EVM bytes.
+    let back = SignedTx::sign(
+        Tx::Transfer { from: address, to: authority().public().address(), amount: Amount::U128(5) },
+        nonce(&chain, &dave),
+        FeeOffer::NONE,
+        &dave,
+    );
+
+    assert!(crate::crypto::verifiable::Verifiable::verify(&back).is_ok());
+    assert!(advance(&mut chain, vec![back])[0].result.is_ok());
+    assert_eq!(nonce(&chain, &dave), 1);
+    assert_eq!(evm::account_of(&chain.state(), evm::evm_alias(&address)).unwrap(), address);
+    assert_ne!(evm::evm_alias(&address), *<&[u8; 20]>::try_from(address.bytes()).unwrap(), "an alias, not its HASH160");
+
+    let before = balance(&chain, &address);
+    let pay = call(&chain, &authority(), counter, 0, calldata("pay(address,uint256)", &[address_word(&address), word(300)]));
+
+    assert!(advance(&mut chain, vec![pay])[0].result.is_ok());
+    assert_eq!(balance(&chain, &address), before + u256::new(300));
+}
+
 #[test]
 fn an_evm_contract_creates_contracts_and_reads_the_block() {
     let db = Arc::new(MemoryDb::default());
