@@ -234,6 +234,9 @@ pub struct Genesis {
     #[document(summary = "What makes a contract a collection: the NFT and multi-token standards' functions, usually CollectionFunctions::standard; or None for a chain that keeps no collection registry until governance decides a Change::Collections. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
     #[wincode(with = "crate::structs::unset::UnsetOption<crate::registry::collections::CollectionFunctions>")]
     pub collections: Option<crate::registry::collections::CollectionFunctions>,
+    #[document(summary = "The bridges' federation from the start, version 0, or None for a chain that has none until governance decides a Change::Federation. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<crate::registry::federation::Federation>")]
+    pub federation: Option<crate::registry::federation::Federation>,
 }
 
 impl Hashable for Genesis {}
@@ -536,6 +539,7 @@ impl Genesis {
             bootnodes: Vec::new(),
             names: dev_names(),
             collections: Some(crate::registry::collections::CollectionFunctions::standard()),
+            federation: None,
         }
     }
 
@@ -577,6 +581,7 @@ impl Genesis {
             bootnodes: Vec::new(),
             names: dev_names(),
             collections: Some(crate::registry::collections::CollectionFunctions::standard()),
+            federation: None,
         }
     }
 
@@ -746,6 +751,10 @@ impl Genesis {
         }
 
         if let Some(problem) = self.collections.as_ref().and_then(crate::registry::collections::CollectionFunctions::problem) {
+            return Some(problem);
+        }
+
+        if let Some(problem) = self.federation.as_ref().and_then(crate::registry::federation::Federation::problem) {
             return Some(problem);
         }
 
@@ -1004,6 +1013,7 @@ impl Chain {
             Vm::new(&genesis.engines, genesis.hash)
                 .map_err(ChainError::MissingEngine)?
                 .with_names(genesis.names.clone())
+                .with_federation(genesis.federation.clone())
                 .with_chain_id(crate::crypto::ethereum::chain_id(&id)),
         );
         let stored: Option<Hash> = read_value(&*db, Column::Heights, &0u64.to_be_bytes())?;

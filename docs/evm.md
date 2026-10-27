@@ -168,6 +168,36 @@ On a chain with [names](names.md), a precompile at `0x00000000000000000000000000
 resolves them: `resolve(string) returns (address)` and `name(address) returns (string)`.
 `contracts/evm/NamePayer.sol` pays a name with it. See [Names in contracts](names.md#names-in-contracts).
 
+## Crypto
+
+The crypto precompile, at `0x…4e56` on every chain that runs the EVM, gives Solidity what
+Ethereum's own precompiles lack: chainv4's signatures, hashes and proofs, as Lua and WebAssembly
+contracts have them (see [Contracts](contracts.md#crypto)).
+
+```solidity
+interface Crypto {
+    function verify(string calldata scheme, bytes calldata key, bytes calldata message, bytes calldata signature) external view returns (bool);
+    function keyAddress(string calldata scheme, bytes calldata key) external view returns (bytes memory);
+    function blake3(bytes calldata data) external view returns (bytes32);
+    function blake2s(bytes calldata data) external view returns (bytes32);
+    function blake2b(bytes calldata data) external view returns (bytes32);
+    function xxh3(bytes calldata data) external view returns (bytes8);
+    function hash160(bytes calldata data) external view returns (bytes20);
+    function sha256d(bytes calldata data) external view returns (bytes32);
+    function checkState(bytes32 root, string calldata column, bytes calldata key, bytes calldata value, bool present, bytes calldata proof) external view returns (bool);
+    function checkMerkle(bytes32 root, bytes calldata data, uint256 index, uint256 count, bytes calldata path) external view returns (bool);
+}
+
+Crypto constant CRYPTO = Crypto(address(0x4e56));
+```
+
+- **Gas** is the fuel the native engines charge for the same work: 3,000 to check a signature,
+  20 and 1 per 64 bytes to hash, 200 and 60 per 32 bytes of proof.
+- **Bad input reverts:** an unknown function, arguments that do not decode, or a scheme the chain
+  lacks. A signature that does not hold is `false`, not a revert.
+- **`keyAddress`** returns the chainv4 address as its 33 bytes: the kind's tag, then its bytes.
+- **Ethereum's own** `ecrecover`, SHA-256, RIPEMD-160 and the rest stay where they are.
+
 ## Calls with Lua and WebAssembly contracts
 
 EVM contracts and native ones, Lua and WebAssembly, call each other within one transaction, as

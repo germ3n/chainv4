@@ -783,6 +783,7 @@ fn run(
                 Change::NamePrices(_) if rules.names.is_none() => return (Err(Failure::NoNames), Contracted::default()),
                 Change::NamePrices(prices) => crate::registry::names::prices_problem(prices),
                 Change::Collections(functions) => functions.problem(),
+                Change::Federation(federation) => federation.problem(),
             };
 
             if let Some(problem) = problem {
@@ -859,6 +860,7 @@ fn evm(
         producer: context.producer,
         chain_id: evm::chain_id(&context.genesis),
         names: rules.names.as_deref().cloned(),
+        hash: rules.hash,
     };
 
     let bridge = evm::Bridge {

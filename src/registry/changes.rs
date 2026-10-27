@@ -21,6 +21,7 @@ const BALLOT: &[u8] = b"change:ballot";
 const BOOTNODES: &[u8] = b"change:bootnodes";
 const NAME_PRICES: &[u8] = b"change:name-prices";
 const COLLECTIONS: &[u8] = b"change:collections";
+const FEDERATION: &[u8] = b"change:federation";
 
 #[document(
     summary = "The consensus decided last, and how many changes of any kind came before it.",
@@ -224,6 +225,14 @@ impl<'a> Changes<'a> {
         self.state.get_value(Column::Validators, COLLECTIONS)
     }
 
+    #[document(
+        parent = "Changes",
+        summary = "The bridges' federation as decided last, with its version, or None while governance never decided one, when genesis's stands as version 0.",
+    )]
+    pub fn federation(&self) -> Result<Option<crate::registry::federation::DecidedFederation>, DbError> {
+        self.state.get_value(Column::Validators, FEDERATION)
+    }
+
     #[document(parent = "Changes", summary = "The consensus decided last, and its version: the count of every change decided, of any kind.")]
     pub fn decided(&self) -> Result<DecidedChange, DbError> {
         self.state
@@ -276,7 +285,7 @@ impl<'a> Changes<'a> {
             approval_epochs = "How many epochs an approval counts for.",
             governance = "Who may approve, and what it takes.",
         },
-        returns = "Whether that decided it. NotGoverning for a sender that may not approve, StaleChange for an older version, SameChange for the consensus, bootnodes, name prices or collection standards already decided.",
+        returns = "Whether that decided it. NotGoverning for a sender that may not approve, StaleChange for an older version, SameChange for the consensus, bootnodes, name prices, collection standards or federation already decided.",
     )]
     pub fn approve(&self, sender: &Address, version: u64, change: Change, epoch: u64, approval_epochs: u64, governance: &dyn Governance) -> Result<ChangeApproved, RegistryError> {
         let decided = self.standing(sender, version, epoch, governance)?;
@@ -285,6 +294,7 @@ impl<'a> Changes<'a> {
             Change::Bootnodes(bootnodes) => self.bootnodes()?.as_ref() == Some(bootnodes),
             Change::NamePrices(prices) => self.name_prices()?.as_ref() == Some(prices),
             Change::Collections(functions) => self.collections()?.as_ref() == Some(functions),
+            Change::Federation(federation) => self.federation()?.map(|decided| decided.federation).as_ref() == Some(federation),
         };
 
         if same {
@@ -325,6 +335,14 @@ impl<'a> Changes<'a> {
             // And what makes a collection: deploys read it as they run.
             Change::Collections(functions) => {
                 self.state.put_value(Column::Validators, COLLECTIONS.to_vec(), &functions);
+
+                decided.consensus
+            }
+            // And the federation: contracts read it as they run, and its version counts the ones
+            // decided, after genesis's 0.
+            Change::Federation(federation) => {
+                let version = self.federation()?.map_or(1, |decided| decided.version + 1);
+                self.state.put_value(Column::Validators, FEDERATION.to_vec(), &crate::registry::federation::DecidedFederation { version, federation });
 
                 decided.consensus
             }

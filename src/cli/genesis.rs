@@ -26,6 +26,7 @@ use {
     crate::structs::code::Engine,
     crate::structs::u256::u256,
     crate::registry::collections::CollectionFunctions,
+    crate::registry::federation::Federation,
     crate::registry::names::NamesConfig,
     crate::vm::Limits,
     serde_json::{Map, Value, json},
@@ -295,7 +296,53 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "bootnodes": genesis.bootnodes,
         "names": genesis.names.as_ref().map(names_json),
         "collections": genesis.collections.as_ref().map(collections_json),
+        "federation": genesis.federation.as_ref().map(federation_json),
     })
+}
+
+/// A federation as JSON: the shape genesis files, GET /status and approve-change use, keys as 0x
+/// and 66 hex digits.
+pub fn federation_json(federation: &Federation) -> Value {
+    json!({
+        "signers": federation.signers.iter().map(|key| crate::structs::hex::to_hex(key)).collect::<Vec<_>>(),
+        "threshold": federation.threshold,
+        "chain_depth": federation.chain_depth,
+        "evm_depth": federation.evm_depth,
+        "bitcoin_depth": federation.bitcoin_depth,
+    })
+}
+
+fn federation_from_json(mut fields: Fields) -> Result<Federation, String> {
+    let signers = fields
+        .strings("signers")?
+        .iter()
+        .map(|text| {
+            crate::structs::hex::from_hex(text)
+                .and_then(|bytes| <[u8; 33]>::try_from(bytes).ok())
+                .ok_or_else(|| format!("federation.signers: {text} is not a compressed key, 0x and 66 hex digits"))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let federation = Federation {
+        signers,
+        threshold: u32::try_from(fields.whole("threshold")?).map_err(|_| "federation.threshold is too large".to_string())?,
+        chain_depth: fields.whole("chain_depth")?,
+        evm_depth: fields.whole("evm_depth")?,
+        bitcoin_depth: u32::try_from(fields.whole("bitcoin_depth")?).map_err(|_| "federation.bitcoin_depth is too large".to_string())?,
+    };
+    fields.done()?;
+
+    Ok(federation)
+}
+
+/// A federation from approve-change's --federation: the same JSON as a genesis file's.
+pub fn federation_from_text(text: &str) -> Result<Federation, String> {
+    let value: Value = serde_json::from_str(text).map_err(|err| format!("not JSON: {err}"))?;
+    let federation = federation_from_json(Fields::of(&value, "federation")?)?;
+
+    match federation.problem() {
+        Some(problem) => Err(problem.to_string()),
+        None => Ok(federation),
+    }
 }
 
 /// What makes a collection as JSON: the shape genesis files, GET /status and approve-change use.
@@ -788,6 +835,11 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.optional_object("collections")?.map(collections_from_json).transpose()?,
         false => None,
     };
+    // Absent from files written before it: those chains keep their id, with no federation.
+    let federation = match root.map.contains_key("federation") {
+        true => root.optional_object("federation")?.map(federation_from_json).transpose()?,
+        false => None,
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -809,6 +861,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         bootnodes,
         names,
         collections,
+        federation,
     };
     root.done()?;
 
@@ -1125,6 +1178,7 @@ mod tests {
         genesis.engines.retain(|engine| *engine != Engine::Evm);
         genesis.names = None;
         genesis.collections = None;
+        genesis.federation = None;
         let mut value = to_json(&genesis);
         value.as_object_mut().unwrap().remove("max_block_bytes");
         let read = from_json(&value).unwrap();
@@ -1218,6 +1272,40 @@ mod tests {
             assert_eq!(read.hash, algorithm);
             assert_eq!(read.block().id().algorithm(), algorithm);
         }
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn a_federation_round_trips_and_a_file_without_one_keeps_its_id() {
+        let federation = Federation {
+            signers: (1..=3u8).map(|byte| crate::crypto::secp256k1::public_key(&[byte; 32]).unwrap()).collect(),
+            threshold: 2,
+            chain_depth: 20,
+            evm_depth: 12,
+            bitcoin_depth: 6,
+        };
+        let genesis = Genesis { federation: Some(federation.clone()), ..dev(DevChain::Pow) };
+        let value = to_json(&genesis);
+
+        assert_eq!(value["federation"]["threshold"], 2);
+        assert_eq!(from_json(&value).unwrap(), genesis);
+        assert_ne!(genesis.block().id(), Genesis { federation: None, ..genesis.clone() }.block().id());
+
+        let mut without = value.clone();
+        without.as_object_mut().unwrap().remove("federation");
+
+        assert_eq!(from_json(&without).unwrap().block().id(), Genesis { federation: None, ..genesis.clone() }.block().id());
+
+        // approve-change's flag reads the same JSON, and checks it as genesis would.
+        assert_eq!(federation_from_text(&value["federation"].to_string()).unwrap(), federation);
+
+        let mut short = value["federation"].clone();
+        short["threshold"] = json!(4);
+
+        assert!(federation_from_text(&short.to_string()).unwrap_err().contains("threshold"));
+        short["signers"] = json!(["0x1234"]);
+
+        assert!(federation_from_text(&short.to_string()).unwrap_err().contains("compressed key"));
     }
 
     #[test]

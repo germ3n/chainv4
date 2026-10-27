@@ -108,6 +108,8 @@ struct Api {
     tx_fuel: u64,
     /// The chain's coin, for clients to show balances by.
     coin: Arc<Coin>,
+    /// Genesis's federation, which stands until governance decides another.
+    federation: Option<Arc<crate::registry::federation::Federation>>,
     /// The functions that make a contract a token on this chain.
     token_functions: Arc<[String]>,
     /// The chain's engines, for read-only calls.
@@ -284,12 +286,14 @@ pub fn start(
     let fees = genesis.fees.as_ref().map(|config| Arc::new(config.build()));
     let (hash, tx_fuel, coin, limits) = (genesis.hash, genesis.tx_limits.fuel, genesis.coin.clone(), genesis.tx_limits);
     let token_functions = genesis.token_functions.clone().into();
+    let federation = genesis.federation.clone().map(Arc::new);
     let (rules, max_block_bytes, reward, vote_rewards) = (Arc::new(genesis.rules()), genesis.max_block_bytes, genesis.reward, genesis.vote_rewards());
     let genesis_bootnodes = Arc::new(genesis.bootnodes.clone());
     let vm = Arc::new(
         Vm::new(&genesis.engines, genesis.hash)
             .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?
             .with_names(genesis.names.clone())
+            .with_federation(genesis.federation.clone())
             .with_chain_id(crate::crypto::ethereum::chain_id(&genesis.block().id())),
     );
     let listener = std::net::TcpListener::bind(address)?;
@@ -324,6 +328,7 @@ pub fn start(
                     tx_fuel,
                     coin: Arc::new(coin),
                     token_functions,
+                    federation,
                     vm,
                     limits,
                     cors: Arc::new(options.cors),
@@ -592,6 +597,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "hash": api.hash.name(),
         "coin": crate::cli::genesis::coin_json(&api.coin),
         "token_functions": &*api.token_functions,
+        "federation": federation_json(&api, &State::new(db.clone()))?,
         "collections": api.rules.standards_in(&State::new(db.clone()))?.collections.as_ref().map(crate::cli::genesis::collections_json),
         "finality": finality,
         "fees": fees,
@@ -1393,6 +1399,22 @@ async fn tokens(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
         "tokens": found.iter().map(json::token).collect::<Vec<_>>(),
         "next": next.map(|next| to_hex(&next)),
     })))
+}
+
+/// The bridges' federation in force, with its version: governance's last, else genesis's as 0.
+fn federation_json(api: &Api, state: &State) -> Result<Value, ApiError> {
+    let decided = crate::registry::changes::Changes::new(state).federation()?;
+    let in_force = decided.map(|decided| (decided.version, decided.federation)).or_else(|| api.federation.as_deref().map(|federation| (0, federation.clone())));
+
+    Ok(match in_force {
+        Some((version, federation)) => {
+            let mut value = crate::cli::genesis::federation_json(&federation);
+            value["version"] = version.into();
+
+            value
+        }
+        None => Value::Null,
+    })
 }
 
 /// The collection registry by symbol, a page at a time, as /tokens lists tokens.

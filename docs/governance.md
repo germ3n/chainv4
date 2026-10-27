@@ -15,6 +15,8 @@ What can change today:
   with the chain's id (see [Bootnodes](#bootnodes)).
 - **What names cost:** the price of a year of a name by its length (see
   [Name prices](#name-prices)).
+- **The bridges' federation:** who vouches and signs for the [bridges](bridges.md) (see
+  [Federation](#federation)).
 - **What makes a collection:** the functions NFT and multi-token collections export, which turns
   the collection registry on for a chain whose genesis kept none (see
   [Collections](#collections)).
@@ -101,6 +103,22 @@ chainv4 send --key member.key approve-change --name-prices 100000000000000000000
 - **The list is checked as genesis's is:** 1 to 61 prices, in the smallest unit, the first for
   names of 3 characters and the last for every length from its own on. A chain without names
   refuses the change.
+
+## Federation
+
+A change names the [bridges' federation](bridges.md#the-federation), replacing genesis's or the
+last decided:
+
+```sh
+chainv4 send --key member.key approve-change --federation '{"signers":["0x02…","0x03…","0x02…"],"threshold":2,"chain_depth":20,"evm_depth":12,"bitcoin_depth":6}'
+```
+
+- **The same ballot and version** as the other kinds.
+- **It takes effect at once,** from the block that decides it: contracts read it as they run.
+- **Its own version counts up** with each one decided, after genesis's 0, so what was signed for
+  one federation is told from what was signed for the next.
+- **It is checked as genesis's is:** 1 to 20 secp256k1 keys, each once, a threshold of 1 to as
+  many, and depths of at least 1.
 
 ## Collections
 

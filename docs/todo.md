@@ -777,6 +777,17 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
     change); a swap contract for key halves, with cancel and punish; a `Monero` leg in the terms;
     and the wallet following the shared address by its view key and sweeping it, through a
     `monero-wallet-rpc` URL in Settings, as Esplora and EVM RPCs are, or a Monero library.
+- [x] **Crypto for every engine.** Lua and WebAssembly contracts check signatures of every scheme
+  the chain has, recover secp256k1 keys as `ecrecover` does, take a key's address, hash with
+  RIPEMD-160, HASH160 and double SHA-256, and check state proofs and Merkle paths against a root;
+  the EVM gets the same, and BLAKE3, BLAKE2 and XXH3, through the crypto precompile at `0x…4e56`.
+  See [Contracts](contracts.md#crypto).
+- [x] **The bridges' federation.** Its signers, threshold and depths, from genesis or
+  `Change::Federation`, versioned, read by contracts and shown by `GET /status`. See
+  [Bridges](bridges.md#the-federation).
+- [ ] **The federation as the validators.** Point the bridges' signer set at finality's validators,
+  weighted by stake and slashable, once they sign with keys Bitcoin and the EVM check, and a
+  threshold scheme lets a changing set hold one Bitcoin address.
 - [ ] **Wrapped assets: bridges.** A swap trades what exists; a wrapped coin, such as BTC as a
   token here, needs a bridge that mints it one for one against coins locked on the other chain
   and releases them when it is burned. Minting can be trust-minimized with the Bitcoin SPV light

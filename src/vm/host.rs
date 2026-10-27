@@ -278,6 +278,21 @@ impl Host {
 
     #[document(
         parent = "Host",
+        summary = "The bridges' federation in force, with its version: the one governance decided last, else genesis's as version 0. None on a chain with neither. Engines charge cost::FEDERATION.",
+    )]
+    pub fn federation(&self) -> Result<Option<crate::registry::federation::DecidedFederation>, VmError> {
+        let decided = crate::registry::changes::Changes::new(&self.state).federation().map_err(|err| self.fail(err))?;
+
+        Ok(decided.or_else(|| self.vm.federation().map(|federation| crate::registry::federation::DecidedFederation { version: 0, federation: federation.clone() })))
+    }
+
+    #[document(parent = "Host", summary = "The chain's hash: what its roots, and so the proofs contracts check, are made with.")]
+    pub fn chain_hash(&self) -> crate::structs::hash::HashType {
+        self.vm.hash()
+    }
+
+    #[document(
+        parent = "Host",
         summary = "The address a name resolves to at the call's block time, the name with or without the chain's suffix, in any case. None for a name nobody holds, one past its expiry, or text that is no name. Engines charge cost::NAME.",
         panics = "Runtime on a chain without names.",
     )]
@@ -496,6 +511,7 @@ impl Host {
             producer: block.producer,
             chain_id: self.vm.chain_id(),
             names: self.vm.names().cloned(),
+            hash: self.vm.hash(),
         };
         let bridge = Bridge {
             vm: self.vm.clone(),

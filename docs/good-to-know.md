@@ -621,6 +621,18 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
   `--dex-contract`, `--dex-router`, or the name `dex`.
 
+## Crypto and the federation
+
+- **New host calls and a precompile are consensus:** a contract calling `crypto` or `federation`,
+  or an EVM call to `0x…4e56`, runs differently on a node without them. Nodes update together.
+- **Each scheme signs its own way:** `secp256k1` verifies over the message's keccak256, as
+  Ethereum keys sign, `bitcoin` over its double SHA-256; `recover` takes a 32-byte digest, as
+  `ecrecover` does. Hash the message the way it was signed.
+- **Proofs are checked by this chain's hash:** another chainv4 chain's state or receipts check
+  only if it hashes the same.
+- **The federation is versioned:** genesis's is 0, and each decided by governance one more, so a
+  signature can name the federation it was made for.
+
 ## Maps and sets in the code
 
 - **Consensus never iterates a hash map.** Execution, state, receipts and roots keep `BTreeMap`s

@@ -1706,6 +1706,47 @@ mod voting {
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: prices }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council", feature = "secp256k1"))]
+    #[test]
+    fn a_council_names_the_federation_and_each_one_counts_up_a_version() {
+        use crate::governance::{Change, GovernanceConfig};
+        use crate::registry::changes::Changes;
+        use crate::registry::federation::Federation;
+
+        let council = GovernanceConfig::Council {
+            members: vec![dev().public().address(), key(70).public().address()],
+            threshold: 2,
+            approval_epochs: 8,
+        };
+        let mut chain = governed(council);
+        let federation = |threshold: u32, keys: &[u8]| Federation {
+            signers: keys.iter().map(|byte| crate::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
+            threshold,
+            chain_depth: 20,
+            evm_depth: 12,
+            bitcoin_depth: 6,
+        };
+        let decide = |chain: &mut Chain, version: u64, change: Change| {
+            for member in [dev(), key(70)] {
+                assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(Effect::Done));
+            }
+        };
+
+        assert_eq!(Changes::new(&chain.state()).federation().unwrap(), None);
+
+        // One that could not sign is refused; two members decide one, then another.
+        let broken = Change::Federation(federation(3, &[1, 2]));
+
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: broken }).result, Err(failure) if failure.to_string().contains("threshold")));
+        decide(&mut chain, 0, Change::Federation(federation(2, &[1, 2, 3])));
+        let first = Changes::new(&chain.state()).federation().unwrap().unwrap();
+
+        assert_eq!((first.version, first.federation.threshold), (1, 2));
+        decide(&mut chain, 1, Change::Federation(federation(3, &[1, 2, 3, 4])));
+        assert_eq!(Changes::new(&chain.state()).federation().unwrap().map(|decided| decided.version), Some(2));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 2, change: Change::Federation(federation(3, &[1, 2, 3, 4])) }).result, Err(failure) if failure.to_string().contains("decided already")));
+    }
+
     #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
     #[test]
     fn a_council_turns_the_collection_registry_on_for_a_chain_that_kept_none() {

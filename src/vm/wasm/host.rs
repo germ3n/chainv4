@@ -47,6 +47,13 @@ pub(super) const NAMES: &[&str] = &[
     "evm_call",
     "abi_encode",
     "abi_decode",
+    "verify",
+    "recover",
+    "key_address",
+    "crypto_hash",
+    "check_state",
+    "check_merkle",
+    "federation",
     "abort",
 ];
 
@@ -358,6 +365,128 @@ fn chain_cloned_at() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "verify",
+    summary = "Whether a signature over a message is a key's, by its scheme's rules, as chainv4's keys sign. Costs 3,000 fuel, plus 1 per 64 bytes of message. Traps for a scheme the chain lacks or a key of the wrong length.",
+    params = {
+        scheme = { ty = "i32", desc = "The scheme's name, UTF-8: ed25519, edblake, secp256k1 or bitcoin." },
+        scheme_len = { ty = "i32", desc = "Its length." },
+        key = { ty = "i32", desc = "The key: 32 bytes, or 33 compressed for secp256k1 and Bitcoin." },
+        key_len = { ty = "i32", desc = "Its length." },
+        message = { ty = "i32", desc = "The bytes signed." },
+        message_len = { ty = "i32", desc = "Their length." },
+        signature = { ty = "i32", desc = "The signature, 64 bytes." },
+        signature_len = { ty = "i32", desc = "Its length." },
+    },
+    returns = { ty = "i32", desc = "1 when it holds, 0 when it does not." },
+    see_also = "rust/check_signature",
+)]
+fn chain_verify() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "recover",
+    summary = "The secp256k1 key that signed a 32-byte digest, as Ethereum's ecrecover finds it. Costs 3,000 fuel.",
+    params = {
+        digest = { ty = "i32", desc = "The digest, 32 bytes." },
+        signature = { ty = "i32", desc = "r, s and v, 65 bytes, v 0, 1, 27 or 28." },
+        signature_len = { ty = "i32", desc = "Its length." },
+        out = { ty = "i32", desc = "Where the key goes: 33 bytes, compressed." },
+    },
+    returns = { ty = "i32", desc = "1 with the key at out, 0 for a signature that recovers none." },
+    see_also = "rust/recover_key",
+)]
+fn chain_recover() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "key_address",
+    summary = "The account a key controls. Costs 100 fuel. Traps as verify does.",
+    params = {
+        scheme = { ty = "i32", desc = "The scheme's name, UTF-8." },
+        scheme_len = { ty = "i32", desc = "Its length." },
+        key = { ty = "i32", desc = "The key." },
+        key_len = { ty = "i32", desc = "Its length." },
+        out = { ty = "i32", desc = "Where the address goes: 33 bytes, as sender writes them." },
+    },
+    see_also = "rust/key_address",
+)]
+fn chain_key_address() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "crypto_hash",
+    summary = "ripemd160, hash160 or sha256d of some bytes. Costs what hash does. Traps for another name.",
+    params = {
+        name = { ty = "i32", desc = "The hash's name, UTF-8." },
+        name_len = { ty = "i32", desc = "Its length." },
+        data = { ty = "i32", desc = "The bytes." },
+        len = { ty = "i32", desc = "Their length." },
+        out = { ty = "i32", desc = "Where the digest goes: 32 bytes of room." },
+    },
+    returns = { ty = "i32", desc = "The digest's length: 20, or 32 for sha256d." },
+    see_also = "rust/digest",
+)]
+fn chain_crypto_hash() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "check_state",
+    summary = "Whether a state proof shows a chain-state entry holds a value, or nothing, under a state root. Costs 200 fuel, plus 60 per 32 bytes of proof.",
+    params = {
+        root = { ty = "i32", desc = "The state root." },
+        root_len = { ty = "i32", desc = "Its length, 32." },
+        column = { ty = "i32", desc = "The column's name, UTF-8, such as accounts." },
+        column_len = { ty = "i32", desc = "Its length." },
+        key = { ty = "i32", desc = "The entry's key." },
+        key_len = { ty = "i32", desc = "Its length." },
+        value = { ty = "i32", desc = "What it holds." },
+        value_len = { ty = "i32", desc = "Its length." },
+        present = { ty = "i32", desc = "0 to check it holds nothing, value ignored; else 1." },
+        proof = { ty = "i32", desc = "The proof, as GET /proofs encodes it." },
+        proof_len = { ty = "i32", desc = "Its length." },
+    },
+    returns = { ty = "i32", desc = "1 when it shows that, else 0." },
+    see_also = "rust/check_state",
+)]
+fn chain_check_state() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "check_merkle",
+    summary = "Whether some bytes are the index-th of count leaves under a Merkle root, by an audit path. Costs 200 fuel, plus 60 per 32 bytes of path.",
+    params = {
+        root = { ty = "i32", desc = "The root." },
+        root_len = { ty = "i32", desc = "Its length, 32." },
+        data = { ty = "i32", desc = "The leaf's bytes." },
+        data_len = { ty = "i32", desc = "Their length." },
+        index = { ty = "i64", desc = "Its place, from 0." },
+        count = { ty = "i64", desc = "How many leaves." },
+        path = { ty = "i32", desc = "The siblings, 32 bytes each, from the leaf up." },
+        path_len = { ty = "i32", desc = "Its length." },
+    },
+    returns = { ty = "i32", desc = "1 when it is so, else 0." },
+    see_also = "rust/check_merkle",
+)]
+fn chain_check_merkle() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "federation",
+    summary = "The bridges' federation in force, into the result buffer: its version as a u64, its threshold and how many signers as u32s, little-endian, then each signer's 33-byte compressed secp256k1 key. Costs 200 fuel.",
+    returns = { ty = "i32", desc = "The length in the result buffer, or -1 on a chain with no federation." },
+    see_also = "chain.result_read, rust/Host::federation",
+)]
+fn chain_federation() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "resolve_name",
     summary = "The address a name resolves to at the block's time, such as alice.dev, with or without the chain's suffix, in any case. Costs 500 fuel, plus 1 per 64 bytes of name. Traps on a chain without names.",
     params = {
@@ -510,6 +639,13 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "evm_call", evm_call).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abi_encode", abi_encode).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abi_decode", abi_decode).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "verify", verify).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "recover", recover).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "key_address", key_address).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "crypto_hash", crypto_hash).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "check_state", check_state).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "check_merkle", check_merkle).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "federation", federation).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
 
     linker
@@ -691,6 +827,120 @@ fn transfer(mut caller: Caller<'_, Run>, address: u32, amount: u32) -> Result<u3
 
             Ok(1)
         }
+    }
+}
+
+/// Text a contract hands over: what is not UTF-8 stops it.
+fn text_at(caller: &mut Caller<'_, Run>, ptr: u32, len: u32, what: &str) -> Result<String> {
+    let bytes = read(caller, ptr, len)?;
+
+    String::from_utf8(bytes).map_err(|_| stop(caller, VmError::BadArgument(format!("{what} is not UTF-8"))))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify(mut caller: Caller<'_, Run>, scheme: u32, scheme_len: u32, key: u32, key_len: u32, message: u32, message_len: u32, signature: u32, signature_len: u32) -> Result<u32> {
+    charge(&mut caller, cost::VERIFY + u64::from(message_len) / cost::HASH_BYTES_PER_FUEL)?;
+    let scheme = text_at(&mut caller, scheme, scheme_len, "the scheme")?;
+    let (key, message, signature) = (read(&mut caller, key, key_len)?, read(&mut caller, message, message_len)?, read(&mut caller, signature, signature_len)?);
+
+    match crate::vm::crypto::check_signature(&scheme, &key, &message, &signature) {
+        Ok(holds) => Ok(u32::from(holds)),
+        Err(why) => Err(stop(&mut caller, VmError::BadArgument(why))),
+    }
+}
+
+fn recover(mut caller: Caller<'_, Run>, digest: u32, signature: u32, signature_len: u32, out: u32) -> Result<u32> {
+    charge(&mut caller, cost::RECOVER)?;
+    let digest: [u8; 32] = read(&mut caller, digest, 32)?.try_into().expect("32 bytes read");
+    let signature = read(&mut caller, signature, signature_len)?;
+
+    #[cfg(feature = "secp256k1")]
+    if let Some(key) = crate::vm::crypto::recover_key(&digest, &signature) {
+        write(&mut caller, out, &key)?;
+
+        return Ok(1);
+    }
+
+    #[cfg(not(feature = "secp256k1"))]
+    let _ = (digest, signature, out);
+
+    Ok(0)
+}
+
+fn key_address(mut caller: Caller<'_, Run>, scheme: u32, scheme_len: u32, key: u32, key_len: u32, out: u32) -> Result<()> {
+    charge(&mut caller, cost::KEY_ADDRESS)?;
+    let scheme = text_at(&mut caller, scheme, scheme_len, "the scheme")?;
+    let key = read(&mut caller, key, key_len)?;
+
+    match crate::vm::crypto::key_address(&scheme, &key) {
+        Ok(address) => write(&mut caller, out, &address.to_abi()),
+        Err(why) => Err(stop(&mut caller, VmError::BadArgument(why))),
+    }
+}
+
+fn crypto_hash(mut caller: Caller<'_, Run>, name: u32, name_len: u32, data: u32, len: u32, out: u32) -> Result<u32> {
+    charge(&mut caller, cost::HASH + u64::from(len) / cost::HASH_BYTES_PER_FUEL)?;
+    let name = text_at(&mut caller, name, name_len, "the hash's name")?;
+    let data = read(&mut caller, data, len)?;
+    let Some(digest) = crate::vm::crypto::digest(&name, &data) else {
+        return Err(stop(&mut caller, VmError::BadArgument(format!("{name} is not in this build"))));
+    };
+    write(&mut caller, out, &digest)?;
+
+    Ok(digest.len() as u32)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_state(
+    mut caller: Caller<'_, Run>,
+    root: u32,
+    root_len: u32,
+    column: u32,
+    column_len: u32,
+    key: u32,
+    key_len: u32,
+    value: u32,
+    value_len: u32,
+    present: u32,
+    proof: u32,
+    proof_len: u32,
+) -> Result<u32> {
+    charge(&mut caller, cost::CHECK_PROOF + cost::PROOF_SIBLING * (u64::from(proof_len) / 32))?;
+    let hash = host(&mut caller)?.chain_hash();
+    let column = text_at(&mut caller, column, column_len, "the column")?;
+    let (root, key, value, proof) = (read(&mut caller, root, root_len)?, read(&mut caller, key, key_len)?, read(&mut caller, value, value_len)?, read(&mut caller, proof, proof_len)?);
+
+    Ok(u32::from(crate::vm::crypto::check_state(hash, &root, &column, &key, (present != 0).then_some(value.as_slice()), &proof)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_merkle(mut caller: Caller<'_, Run>, root: u32, root_len: u32, data: u32, data_len: u32, index: u64, count: u64, path: u32, path_len: u32) -> Result<u32> {
+    charge(&mut caller, cost::CHECK_PROOF + cost::PROOF_SIBLING * (u64::from(path_len) / 32))?;
+    let hash = host(&mut caller)?.chain_hash();
+    let (root, data, path) = (read(&mut caller, root, root_len)?, read(&mut caller, data, data_len)?, read(&mut caller, path, path_len)?);
+
+    Ok(u32::from(crate::vm::crypto::check_merkle(hash, &root, &data, index, count, &path)))
+}
+
+/// The federation in force into the result buffer: its version, u64, its threshold, u32, how many
+/// signers, u32, all little-endian, then their 33-byte keys. Its length, or -1 for none.
+fn federation(mut caller: Caller<'_, Run>) -> Result<i32> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::FEDERATION)?;
+
+    match host.federation() {
+        Ok(Some(decided)) => {
+            let mut bytes = decided.version.to_le_bytes().to_vec();
+            bytes.extend(decided.federation.threshold.to_le_bytes());
+            bytes.extend((decided.federation.signers.len() as u32).to_le_bytes());
+            bytes.extend(decided.federation.signers.iter().flatten());
+            let len = bytes.len() as i32;
+            caller.data_mut().result = bytes;
+
+            Ok(len)
+        }
+        Ok(None) => Ok(-1),
+        Err(err) => Err(stop(&mut caller, err)),
     }
 }
 

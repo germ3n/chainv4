@@ -14,7 +14,7 @@ use {
     crate::structs::tx::TxCallArgumentType,
     libs::{
         ctx::CallArgs, register_accounts_lib, register_address_lib, register_contracts_lib, register_ctx_lib,
-        register_events_lib, register_hash_lib, register_storage_lib, register_tokens_lib, register_integer_libs, register_names_lib, register_evm_lib, values::Given,
+        register_events_lib, register_hash_lib, register_storage_lib, register_tokens_lib, register_crypto_lib, register_federation_lib, register_integer_libs, register_names_lib, register_evm_lib, values::Given,
     },
     mlua::{ChunkMode, Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value},
     r#macro::document,
@@ -43,7 +43,7 @@ const GLOBALS: &[&str] = &[
     "rawget", "rawlen", "rawset", "select", "setmetatable", "tonumber", "tostring", "type",
     "typeof", "unpack", "xpcall", "string", "table", "utf8", "bit32", "address", "hash", "u64",
     "u128", "u256", "i64", "i128", "i256", "ctx", "storage", "contracts", "accounts", "events",
-    "tokens", "collections", "names", "evm",
+    "tokens", "collections", "names", "evm", "crypto", "federation",
 ];
 
 /// What scripts keep of math: what rounds to and works on whole numbers. Contracts deal in whole
@@ -292,6 +292,8 @@ impl Pristine {
         register_accounts_lib(&lua);
         register_events_lib(&lua);
         register_tokens_lib(&lua);
+        register_crypto_lib(&lua);
+        register_federation_lib(&lua);
         register_names_lib(&lua);
         register_evm_lib(&lua);
         replace_tostring(&lua)?;

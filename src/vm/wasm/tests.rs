@@ -47,6 +47,13 @@ const IMPORTS: &str = r#"
   (import "chain" "evm_call" (func $evm_call (param i32 i32 i32 i32) (result i32)))
   (import "chain" "abi_encode" (func $abi_encode (param i32 i32 i32 i32) (result i32)))
   (import "chain" "abi_decode" (func $abi_decode (param i32 i32 i32 i32) (result i32)))
+  (import "chain" "verify" (func $verify (param i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "chain" "recover" (func $recover (param i32 i32 i32 i32) (result i32)))
+  (import "chain" "key_address" (func $key_address (param i32 i32 i32 i32 i32)))
+  (import "chain" "crypto_hash" (func $crypto_hash (param i32 i32 i32 i32 i32) (result i32)))
+  (import "chain" "check_state" (func $check_state (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "chain" "check_merkle" (func $check_merkle (param i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (import "chain" "federation" (func $federation (result i32)))
   (import "chain" "abort" (func $abort (param i32 i32)))
 "#;
 

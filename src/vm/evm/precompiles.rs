@@ -1,9 +1,11 @@
 //! Ethereum's precompiles, and chainv4's beside them: the native precompile on every chain that
-//! runs the EVM with native contracts to call, and the names precompile on a chain with names.
+//! runs the EVM with native contracts to call, the names precompile on a chain with names, and the
+//! crypto precompile on every chain.
 
 #[cfg(feature = "names")]
 use super::names::{NAMES_PRECOMPILE, NamesAt};
 use {
+    super::crypto::{CRYPTO_PRECOMPILE, CryptoAt},
     super::native::{NATIVE_PRECOMPILE, NativeAt},
     crate::db::DbError,
     revm::context_interface::{Cfg, ContextTr, JournalTr},
@@ -18,16 +20,18 @@ pub(super) struct ChainPrecompiles<'a> {
     #[cfg(feature = "names")]
     names: Option<NamesAt<'a>>,
     native: Option<NativeAt<'a>>,
+    crypto: CryptoAt,
     warm: AddressSet,
 }
 
 impl<'a> ChainPrecompiles<'a> {
-    pub fn new(eth: EthPrecompiles, #[cfg(feature = "names")] names: Option<NamesAt<'a>>, native: Option<NativeAt<'a>>) -> ChainPrecompiles<'a> {
+    pub fn new(eth: EthPrecompiles, #[cfg(feature = "names")] names: Option<NamesAt<'a>>, native: Option<NativeAt<'a>>, crypto: CryptoAt) -> ChainPrecompiles<'a> {
         let mut precompiles = ChainPrecompiles {
             eth,
             #[cfg(feature = "names")]
             names,
             native,
+            crypto,
             warm: AddressSet::default(),
         };
         precompiles.warm = precompiles.ours();
@@ -47,6 +51,8 @@ impl<'a> ChainPrecompiles<'a> {
         if self.native.is_some() {
             warm.insert(Word::from(NATIVE_PRECOMPILE));
         }
+
+        warm.insert(Word::from(CRYPTO_PRECOMPILE));
 
         warm
     }
@@ -98,6 +104,13 @@ where
             && inputs.bytecode_address == Word::from(NATIVE_PRECOMPILE)
         {
             let output = native.answer(context, inputs);
+
+            return Ok(Some(precompile_output_to_interpreter_result(output, inputs.gas_limit)));
+        }
+
+        if inputs.bytecode_address == Word::from(CRYPTO_PRECOMPILE) {
+            let input = inputs.input.as_bytes(context);
+            let output = self.crypto.answer(&input, inputs.gas_limit, inputs.reservoir);
 
             return Ok(Some(precompile_output_to_interpreter_result(output, inputs.gas_limit)));
         }

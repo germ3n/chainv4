@@ -1682,6 +1682,30 @@ fn tokens_are_listed_from_the_registry() {
     assert_eq!(get(address, "/tokens?cursor=zz").0, 400);
 }
 
+#[cfg(feature = "secp256k1")]
+#[test]
+fn status_names_the_federation_in_force() {
+    let empty = Arc::new(MemoryDb::default());
+    Chain::open(empty.clone(), &free()).unwrap();
+    let bare = start(empty, None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let db = Arc::new(MemoryDb::default());
+    let federation = crate::registry::federation::Federation {
+        signers: vec![crate::crypto::secp256k1::public_key(&[1; 32]).unwrap()],
+        threshold: 1,
+        chain_depth: 20,
+        evm_depth: 12,
+        bitcoin_depth: 6,
+    };
+    let genesis = Genesis { federation: Some(federation.clone()), ..free() };
+    Chain::open(db.clone(), &genesis).unwrap();
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let status = ok(address, "/status");
+
+    assert_eq!(ok(bare, "/status")["federation"], Value::Null);
+    assert_eq!((status["federation"]["version"].as_u64(), status["federation"]["threshold"].as_u64()), (Some(0), Some(1)));
+    assert_eq!(status["federation"]["signers"][0], crate::structs::hex::to_hex(&federation.signers[0]));
+}
+
 #[test]
 fn collections_are_listed_from_the_registry() {
     let authority = DevAuthority::dev_keypair();

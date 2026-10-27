@@ -19,6 +19,7 @@ use {
     std::sync::Arc,
 };
 
+pub mod crypto;
 mod host;
 mod layout;
 #[cfg(feature = "lvm")]
@@ -163,6 +164,19 @@ pub mod cost {
     /// Encoding or decoding values in Solidity's ABI, plus 1 for every COPY_BYTES_PER_FUEL bytes
     /// of signature and data.
     pub const ABI: u64 = 50;
+    /// Checking a signature, of any scheme, as the EVM's ecrecover costs, plus 1 for every
+    /// HASH_BYTES_PER_FUEL bytes of message.
+    pub const VERIFY: u64 = 3_000;
+    /// Recovering a secp256k1 key from a signature, as the EVM's ecrecover costs.
+    pub const RECOVER: u64 = 3_000;
+    /// The address a key controls: a hash of the key, at most.
+    pub const KEY_ADDRESS: u64 = 100;
+    /// Checking a state proof or a Merkle path: the proof decoded, plus a hash for each of its
+    /// siblings.
+    pub const CHECK_PROOF: u64 = 200;
+    pub const PROOF_SIBLING: u64 = 60;
+    /// Reading the federation in force: one record.
+    pub const FEDERATION: u64 = 200;
 }
 
 #[document(
@@ -348,6 +362,8 @@ pub struct Vm {
     hash: HashType,
     /// The chain's names, which contracts resolve, or None on a chain without them.
     names: Option<crate::registry::names::NamesConfig>,
+    /// Genesis's federation, version 0, until governance decides another.
+    federation: Option<crate::registry::federation::Federation>,
     /// The chain's id, as the EVM's CHAINID reads it.
     chain_id: u64,
 }
@@ -381,13 +397,24 @@ impl Vm {
             engines.push((*kind, engine));
         }
 
-        Ok(Vm { engines, evm, hash, names: None, chain_id: 0 })
+        Ok(Vm { engines, evm, hash, names: None, federation: None, chain_id: 0 })
     }
 
     #[document(parent = "Vm", summary = "The engines, with the chain's names for contracts to resolve: genesis's names, or None for a chain without them.")]
     pub fn with_names(mut self, names: Option<crate::registry::names::NamesConfig>) -> Vm {
         self.names = names;
         self
+    }
+
+    #[document(parent = "Vm", summary = "The engines, with genesis's federation for contracts to read until governance decides another: None for a chain that starts without one.")]
+    pub fn with_federation(mut self, federation: Option<crate::registry::federation::Federation>) -> Vm {
+        self.federation = federation;
+        self
+    }
+
+    #[document(parent = "Vm", summary = "Genesis's federation, if any.")]
+    pub fn federation(&self) -> Option<&crate::registry::federation::Federation> {
+        self.federation.as_ref()
     }
 
     #[document(parent = "Vm", summary = "The engines, with the chain's id for EVM calls contracts make: chain_id of the genesis block's id.")]

@@ -76,6 +76,18 @@ fn count(chain: &mut Chain, counter: Address) -> Vec<u8> {
     returned(&advance(chain, vec![read])[0])
 }
 
+#[cfg(feature = "bitcoin")]
+#[test]
+fn a_transaction_reaches_the_crypto_precompile() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let input = [&keccak256(b"sha256d(bytes)")[..4], &word(32), &word(3), &[b"abc".as_slice(), &[0; 29]].concat()].concat();
+    let asked = call(&chain, &authority(), Address::Evm(evm::CRYPTO_PRECOMPILE), 0, input);
+    let receipt = advance(&mut chain, vec![asked]).remove(0);
+
+    assert_eq!(returned(&receipt), crate::crypto::bitcoin::sha256d(b"abc"));
+}
+
 #[test]
 fn an_evm_contract_deploys_counts_emits_and_reverts_with_its_reason() {
     let db = Arc::new(MemoryDb::default());

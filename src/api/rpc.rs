@@ -352,6 +352,7 @@ async fn simulate(api: &Arc<Api>, call: Call) -> Result<EvmRan, RpcError> {
             producer: header.producer,
             chain_id: chain,
             names: api.rules.names.as_deref().cloned(),
+            hash: api.rules.hash,
         };
 
         let bridge = evm::Bridge {

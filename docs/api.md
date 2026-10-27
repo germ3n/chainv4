@@ -406,6 +406,9 @@ and paged with `limit` and `cursor` as `GET /tokens` is.
 **Each collection** has its `address`, its `kind`, `nft` or `multi`, and its `name` and `symbol`,
 as it answered at its deploy or last upgrade, each `null` when it exports none.
 
+`GET /status` also names the [bridges' federation](bridges.md#the-federation) in force, in
+`federation`: its `signers`, `threshold`, depths and `version`, or `null` on a chain with none.
+
 `GET /contracts/{address}` says the same of one contract in `collection`, `null` when it is none;
 `GET /status` says what makes one in `collections`, `{"nft": [...], "multi": [...]}`, as genesis
 or governance decided last, or `null` on a chain without the registry.

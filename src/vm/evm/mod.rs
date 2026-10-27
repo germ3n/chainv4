@@ -24,10 +24,12 @@
 //! **Not yet:** blob transactions, and the KZG point evaluation precompile, which needs blobs.
 
 #[cfg(feature = "names")]
+mod crypto;
 mod names;
 mod native;
 mod precompiles;
 #[cfg(feature = "names")]
+pub use crypto::CRYPTO_PRECOMPILE;
 pub use names::NAMES_PRECOMPILE;
 pub use native::{Bridge, NATIVE_PRECOMPILE, abi_value, native_from_abi, native_type};
 
@@ -251,6 +253,8 @@ pub struct EvmBlock {
     pub chain_id: u64,
     #[document(summary = "The chain's names, which the names precompile resolves, or None on a chain without them, where there is none.")]
     pub names: Option<crate::registry::names::NamesConfig>,
+    #[document(summary = "The chain's hash, which the crypto precompile checks proofs by.")]
+    pub hash: crate::structs::hash::HashType,
 }
 
 #[document(
@@ -390,6 +394,7 @@ pub fn run(
         #[cfg(feature = "names")]
         names,
         native,
+        crypto::CryptoAt { hash: block.hash },
     ));
 
     let transacted = evm.transact(tx);

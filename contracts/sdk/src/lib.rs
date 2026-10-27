@@ -188,6 +188,95 @@ pub fn refresh_collection() {
     refresh_token()
 }
 
+/// Whether a signature over message is key's, by its scheme's own rules, as chainv4's keys sign:
+/// strict Ed25519 and EdBlake, low-s ECDSA over the keccak256 for secp256k1 and over the double
+/// SHA-256 for Bitcoin. scheme is ed25519, edblake, secp256k1 or bitcoin; one the chain lacks, or
+/// a key of the wrong length, aborts the call.
+pub fn verify(scheme: &str, key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    unsafe { sys::verify(scheme.as_ptr(), scheme.len() as u32, key.as_ptr(), key.len() as u32, message.as_ptr(), message.len() as u32, signature.as_ptr(), signature.len() as u32) == 1 }
+}
+
+/// The secp256k1 key that signed a 32-byte digest, compressed, as Ethereum's ecrecover finds it:
+/// signature is r, s and v, 65 bytes, v 0, 1, 27 or 28. None for one that recovers none.
+pub fn recover(digest: &[u8; 32], signature: &[u8]) -> Option<[u8; 33]> {
+    let mut key = [0; 33];
+
+    (unsafe { sys::recover(digest.as_ptr(), signature.as_ptr(), signature.len() as u32, key.as_mut_ptr()) } == 1).then_some(key)
+}
+
+/// The account a key of a scheme controls.
+pub fn key_address(scheme: &str, key: &[u8]) -> Address {
+    let mut out = [0; 33];
+    unsafe { sys::key_address(scheme.as_ptr(), scheme.len() as u32, key.as_ptr(), key.len() as u32, out.as_mut_ptr()) };
+
+    Address::decode(&out).unwrap_or_else(|| abort("the host gave an address that does not read"))
+}
+
+/// RIPEMD-160.
+pub fn ripemd160(data: &[u8]) -> [u8; 20] {
+    crypto_hash("ripemd160", data)[..20].try_into().expect("20 bytes")
+}
+
+/// Bitcoin's HASH160: RIPEMD-160 of SHA-256.
+pub fn hash160(data: &[u8]) -> [u8; 20] {
+    crypto_hash("hash160", data)[..20].try_into().expect("20 bytes")
+}
+
+/// SHA-256 twice, as Bitcoin makes block and transaction ids, in its byte order.
+pub fn sha256d(data: &[u8]) -> [u8; 32] {
+    crypto_hash("sha256d", data)
+}
+
+fn crypto_hash(name: &str, data: &[u8]) -> [u8; 32] {
+    let mut out = [0; 32];
+    unsafe { sys::crypto_hash(name.as_ptr(), name.len() as u32, data.as_ptr(), data.len() as u32, out.as_mut_ptr()) };
+
+    out
+}
+
+/// Whether a state proof shows a chain-state entry, in column (such as accounts), holds value, or
+/// with None, nothing, under a state root: what a light client checks values by.
+pub fn check_state(root: &[u8], column: &str, key: &[u8], value: Option<&[u8]>, proof: &[u8]) -> bool {
+    let (held, present) = match value {
+        Some(value) => (value, 1),
+        None => (&[][..], 0),
+    };
+
+    unsafe {
+        sys::check_state(root.as_ptr(), root.len() as u32, column.as_ptr(), column.len() as u32, key.as_ptr(), key.len() as u32, held.as_ptr(), held.len() as u32, present, proof.as_ptr(), proof.len() as u32) == 1
+    }
+}
+
+/// Whether data is the index-th of count leaves under a Merkle root, by its audit path: the
+/// siblings, 32 bytes each, from the leaf up.
+pub fn check_merkle(root: &[u8], data: &[u8], index: u64, count: u64, path: &[u8]) -> bool {
+    unsafe { sys::check_merkle(root.as_ptr(), root.len() as u32, data.as_ptr(), data.len() as u32, index, count, path.as_ptr(), path.len() as u32) == 1 }
+}
+
+/// The bridges' federation in force: who vouches for what crosses chains, and how many must.
+pub struct Federation {
+    /// 0 for genesis's, one more for each governance decided since.
+    pub version: u64,
+    pub threshold: u32,
+    /// The signers' compressed secp256k1 keys, in order.
+    pub signers: Vec<[u8; 33]>,
+}
+
+/// The federation in force, as genesis named it or governance decided last; None on a chain with
+/// none.
+pub fn federation() -> Option<Federation> {
+    if unsafe { sys::federation() } < 0 {
+        return None;
+    }
+
+    let bytes = result();
+    let version = u64::from_le_bytes(bytes.get(..8)?.try_into().ok()?);
+    let threshold = u32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?);
+    let signers = bytes.get(16..)?.as_chunks::<33>().0.to_vec();
+
+    Some(Federation { version, threshold, signers })
+}
+
 /// Runs another contract's function as this contract's own: on this contract's storage and
 /// balance, under this call's sender and value, with events in this contract's name. The EVM's
 /// delegatecall, for proxies. Only functions the target exports; never its fallback or a hook.

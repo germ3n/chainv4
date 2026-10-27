@@ -340,6 +340,12 @@ what its storage or calls cost (`vm::cost`).
 | Asking a token's name, symbol and decimals at deploy or upgrade | What those functions burn |
 | Asking for that again, with `tokens.refresh` or `refresh_token` | 100, and what the questions burn once the call succeeds |
 | Resolving a name, or an address's primary name | 500, plus 1 per 64 bytes of name from WebAssembly |
+| Checking a signature, of any scheme | 3,000, as the EVM's ecrecover, plus 1 per 64 bytes of message |
+| Recovering a secp256k1 key | 3,000 |
+| The address a key controls | 100 |
+| RIPEMD-160, HASH160 or double SHA-256 | As a hash: 20, plus 1 per 64 bytes |
+| Checking a state proof or a Merkle path | 200, plus 60 per 32 bytes of it |
+| Reading the federation | 200 |
 
 **Loading code** is paid for by the deploy or upgrade, and shows in its receipt's `fuel_used`:
 - **Compiling:** every byte costs 1 fuel (`cost::LOAD_BYTE`), as compiling and checking the code
@@ -409,6 +415,26 @@ and `debug` are not there at all.
 | `address` | `address.parse("ed25519:0x…")`, `address.from_hex`, `address.from_bytes`; methods `hex`, `bytes`, `text`, `kind`, `is_contract`, `is_valid`. |
 | `u64`, `u128`, `u256`, `i64`, `i128`, `i256` | The integer types: `u256(value)` or `u256.new`, and `zero`, `min`, `max`, for each. See [Integers](#integers). |
 | `hash` | `hash.sha256`, `blake3`, `blake2s`, `blake2b`, `xxh3`, `keccak256`, whichever the node has; the result has `hex`, `bytes`, `algorithm`. |
+| `crypto` | See [Crypto](#crypto). |
+| `federation` | `federation.get()`: the bridges' federation in force, `{ version, threshold, signers }`, or `nil`. See [Bridges](bridges.md). |
+
+### Crypto
+
+What a contract checks of another chain, a signer or a header, the same in Lua, WebAssembly and,
+through the [crypto precompile](evm.md#crypto), the EVM (`vm::crypto`):
+
+| Lua | SDK | Does |
+| --- | --- | --- |
+| `crypto.verify(scheme, key, message, signature)` | `verify` | Whether a signature over a message is the key's, by its scheme's rules, as chainv4's keys sign: strict Ed25519 and EdBlake, low-s ECDSA over the keccak256 for `secp256k1`, over the double SHA-256 for `bitcoin`. A scheme the chain lacks, or a key of the wrong length, is an error. |
+| `crypto.recover(digest, signature)` | `recover` | The secp256k1 key that signed a 32-byte digest, compressed, as Ethereum's ecrecover finds it: `r`, `s` and `v`, 65 bytes, `v` 0, 1, 27 or 28. `nil` for none, high-s signatures included. |
+| `crypto.address(scheme, key)` | `key_address` | The account a key controls. |
+| `crypto.ripemd160`, `hash160`, `sha256d` | `ripemd160`, `hash160`, `sha256d` | Bitcoin's hashes, as bytes: what its addresses, blocks and transactions are made of. |
+| `crypto.check_state(root, column, key, value, proof)` | `check_state` | Whether a [state proof](light-client.md), as `GET /proofs` encodes it, shows an entry holds a value, or with `nil`, nothing, under a state root. |
+| `crypto.check_merkle(root, data, index, count, path)` | `check_merkle` | Whether data is the index-th of `count` leaves under a Merkle root, by its audit path: how a header holds its transactions and receipts. |
+
+Proofs are checked by the chain's own hash, so they take this chain's headers, or another chainv4
+chain's made with the same hash. What a header the contract trusts says is the contract's to
+decide: a root it was given by its owner, by a federation, or proven some other way.
 
 ### Integers
 
@@ -588,6 +614,8 @@ into its exported memory.
 | `resolve_name`, `name_of` | Names: `resolve_name(name, len, out)` writes the address a name resolves to, returning 1, or returns 0; `name_of(address)` puts an address's primary name in the result buffer and returns its length, or -1. |
 | `evm_call` | Calls an [EVM](evm.md) contract: `evm_call(address, value, input, input_len)`, with what it returned in the result buffer and 0, or why it reverted and 1. |
 | `abi_encode`, `abi_decode` | Solidity's ABI, on the node: `abi_encode(signature, len, values, values_len)` writes calldata or arguments from a list of values, `abi_decode(types, len, data, data_len)` reads them back into one. |
+| `verify`, `recover`, `key_address`, `crypto_hash`, `check_state`, `check_merkle` | [Crypto](#crypto): a signature checked, 1 or 0; the key a secp256k1 signature recovers, 33 bytes at `out`, 1 or 0; a key's address at `out`; `ripemd160`, `hash160` or `sha256d` at `out`, returning its length; a state proof or a Merkle path checked, 1 or 0. |
+| `federation` | The federation in force into the result buffer, its length, or -1 for none: its version (u64), threshold and signer count (u32s), then 33-byte keys. |
 | `abort` | Stops the call with an error. Only the first 1,024 bytes of the message are kept. |
 
 **The encoding:** arguments and return values travel as the chain's encoding of a list of
@@ -631,7 +659,9 @@ order, and what it returns becomes the call's return values (`chainv4_sdk::args`
 - `#[export(reentrant)]` also marks a function reentrant;
 - `sender`, `this`, `value`, `balance`, `transfer`;
 - `call` and `call_with_value`, `delegate`, `check_layout`, `emit`, `hash`, `abort`,
-  `refresh_token`, `resolve_name` and `name_of`, `evm_call`, `abi_encode` and `abi_decode`, and
+  `refresh_token`, `resolve_name` and `name_of`, `evm_call`, `abi_encode` and `abi_decode`,
+  `verify`, `recover`, `key_address`, `ripemd160`, `hash160`, `sha256d`, `check_state`,
+  `check_merkle` and `federation`, and
   `storage`, with `storage::namespace(name)`
   and `storage::own()`;
 - `namespace!` and `retired!`, which declare the storage layout, and typed methods on a

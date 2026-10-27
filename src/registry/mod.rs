@@ -15,6 +15,7 @@ use crate::vm::VmError;
 pub mod accounts;
 pub mod changes;
 pub mod collections;
+pub mod federation;
 pub mod names;
 pub mod signers;
 pub mod tokens;
