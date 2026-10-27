@@ -26,6 +26,7 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Names](names.md) | Names such as alice.dev: registering for years at a price by length, burned, records, subnames, primary names, expiry and grace, and prices changed by governance. |
 | [Token standard](token-standard.md) | The interface every token contract follows, and the registry that lists them. |
 | [Atomic swaps](swaps.md) | Coins or tokens between any two of chainv4, Bitcoin and EVM chains, with no one in between: the two-leg terms, the swap contract, Swap.sol, Bitcoin's HTLC, the CLI and the wallet's Swaps page. |
+| [DEX](dex.md) | Constant-product pools, as Uniswap V2 keeps them: the native DEX for the coin, tokens and ERC-20s, the EVM's factory, pairs and router, contract cloning for share tokens, the CLI and the wallet's Trade page. |
 | [Storage](storage.md) | The database, its columns, state layers, undo records and scans. |
 | [Node and network](node.md) | The node loop, the mempool, peer-to-peer networking, sync, and syncing from a snapshot. |
 | [Light client](light-client.md) | Following a chain from its genesis id alone: headers by consensus, finality by proven voters, and values by proofs. |

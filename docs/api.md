@@ -45,6 +45,7 @@ Where the chain stands:
 | `max_block_bytes` | The most bytes a block's transactions may take, encoded, or `null` when genesis sets none. |
 | `bootnodes` | The chain's bootnodes at the tip: the ones governance decided last, or genesis's. |
 | `swap` | `null`, or `{"contract": …}`: the [swap contract](swaps.md) a node started with `--swap-contract` names, for the wallet and `chainv4 swap`. |
+| `dex` | `null`, or `{"contract": …, "router": …}`, either `null`: the [DEX](dex.md) and the EVM DEX's router a node started with `--dex-contract` and `--dex-router` names. |
 
 ### `GET /blocks?before=H&limit=N`
 
@@ -102,7 +103,7 @@ Each summary has:
 **The trace** is `hops`, depth first, and `dropped`, how many hops past the 256 a receipt keeps
 were only counted. Each hop has:
 - `depth`: 0 for what the transaction ran itself;
-- `kind`: `call`, `delegate` or `transfer`;
+- `kind`: `call`, `delegate`, `transfer` or `clone`, a contract created by another;
 - `from`, `to`, `function` and `value`;
 - `fuel_used`, including the hops under it;
 - `error`: why it failed, or `null`;
@@ -270,7 +271,10 @@ field of an offer has a fixed size, so it weighs what the real one will. `gas_li
 **A dry run** of a call, EVM call, deploy, upgrade or name transaction comes first: it runs on a throwaway copy of the
 committed state, as its sender at their next nonce, on a thread apart from the rest of the API.
 Unless the sender chose a gas limit, the offer's is what the run used plus a quarter of what it
-ran past its intrinsic cost, at most the fuel cap's worth; a run that fails gets the cap.
+ran past its intrinsic cost, at most the fuel cap's worth; a run that fails gets the cap. That
+limit is tried with a second dry run, and raised until a run succeeds at it: a call inside
+another gets 63/64 of the gas left, so nested calls, such as a DEX router's, need more than they
+use.
 
 It answers `gas_limit`, `max_price` and `tip`, all zero on a chain without fees, and `estimate`:
 the dry run's `gas_used` and `fuel_used`, `status`, `ok` or `failed` with `error`, `returned`,

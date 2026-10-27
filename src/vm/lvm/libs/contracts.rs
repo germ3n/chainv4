@@ -58,6 +58,40 @@ fn check_layout(lua: &Lua, (from, to): (AnyUserData, AnyUserData)) -> mlua::Resu
     host.check_layout(&from.0, &to.0).map_err(refused)
 }
 
+fn clone_contract(lua: &Lua, (template, salt, args): (AnyUserData, mlua::String, MultiValue)) -> mlua::Result<LuaAddress> {
+    let template = *template.borrow::<LuaAddress>()?;
+    let host = lua
+        .app_data_ref::<Host>()
+        .map(|host| host.clone())
+        .ok_or_else(|| Error::runtime("contracts.clone is only available inside a call"))?;
+    let salt = salt.as_bytes().to_vec();
+    let args = Given::read(args).map_err(|err| Error::runtime(format!("contracts.clone: {err}")))?.into_values();
+    charge(lua, cost::CLONE + cost::HASH + salt.len() as u64 / cost::HASH_BYTES_PER_FUEL)?;
+    let fuel = lua.get_fuel()?;
+    let outcome = host.clone_contract(&template.0, &salt, &args, fuel);
+    lua.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;
+
+    match outcome.result {
+        Ok(values) => match values.as_slice() {
+            [crate::structs::tx::TxCallArgumentType::Address(address)] => Ok(LuaAddress(*address)),
+            _ => Err(Error::runtime("contracts.clone: no address came back")),
+        },
+        Err(err @ VmError::Storage(_)) => Err(refused(err)),
+        Err(err) => Err(Error::runtime(format!("clone of {} failed: {err}", template.0))),
+    }
+}
+
+fn cloned_at(lua: &Lua, salt: mlua::String) -> mlua::Result<LuaAddress> {
+    let host = lua
+        .app_data_ref::<Host>()
+        .map(|host| host.clone())
+        .ok_or_else(|| Error::runtime("contracts.cloned_at is only available inside a call"))?;
+    let salt = salt.as_bytes().to_vec();
+    charge(lua, cost::HASH + salt.len() as u64 / cost::HASH_BYTES_PER_FUEL)?;
+
+    Ok(LuaAddress(host.cloned_at(&salt)))
+}
+
 fn selector_of(_: &Lua, name: String) -> mlua::Result<LuaInt<u64>> {
     Ok(LuaInt(selector(&name)))
 }
@@ -196,6 +230,36 @@ fn contracts_check_layout() {}
 )]
 fn contracts_selector() {}
 
+#[document(
+    lua,
+    parent = "contracts",
+    name = "clone",
+    summary = "Creates a contract running another's code, as a factory does: a copy of template's code, deployed by this contract at the address cloned_at(salt) gives, whose init then runs with args, this contract as ctx.sender. Nothing of the template's storage or balance comes along; a clone that is a token goes in the token registry once the transaction succeeds. Raises an error when it fails, and nothing of it is kept.",
+    params = {
+        template = { ty = "Address", desc = "The contract whose code to run: Lua or WebAssembly." },
+        salt = { ty = "string", desc = "Any bytes this contract picks, fixing the address: one salt, one clone." },
+        args = { ty = "...", desc = "What the copy's init takes.", optional = true },
+    },
+    returns = { ty = "Address", desc = "The new contract." },
+    panics = "Errors when there is no template, a contract lives at the address already, or init fails.",
+    note = "Costs 5000 fuel, 1 more for every 16 bytes of the template's compiled code, which every node keeps again, and the salt's hash, on top of what init burns.",
+    example = "local salt = a:text() .. b:text()\nlocal lp = contracts.clone(template, salt, a, b)\n-- later, without keeping it\nlocal again = contracts.cloned_at(salt)",
+    see_also = "contracts.cloned_at",
+)]
+fn contracts_clone() {}
+
+#[document(
+    lua,
+    parent = "contracts",
+    name = "cloned_at",
+    summary = "Where this contract's clone with a salt is, or would be: the chain hash of a domain tag, this contract's address and the salt's hash. A contract finds what it cloned again by its salt, without keeping it.",
+    params = { salt = { ty = "string", desc = "The salt the clone was, or will be, made with." } },
+    returns = { ty = "Address", desc = "The address, whether or not anything lives there yet." },
+    note = "Costs 20 fuel, 1 more for every 64 bytes of salt.",
+    see_also = "contracts.clone",
+)]
+fn contracts_cloned_at() {}
+
 pub fn register_contracts_lib(lua: &Lua) {
     let contracts_table = lua
         .create_table()
@@ -229,6 +293,20 @@ pub fn register_contracts_lib(lua: &Lua) {
                 .expect("[contracts] Failed to create check_layout"),
         )
         .expect("[contracts] Failed to set check_layout");
+    contracts_table
+        .set(
+            "clone",
+            lua.create_function(clone_contract)
+                .expect("[contracts] Failed to create clone"),
+        )
+        .expect("[contracts] Failed to set clone");
+    contracts_table
+        .set(
+            "cloned_at",
+            lua.create_function(cloned_at)
+                .expect("[contracts] Failed to create cloned_at"),
+        )
+        .expect("[contracts] Failed to set cloned_at");
     contracts_table
         .set(
             "selector",

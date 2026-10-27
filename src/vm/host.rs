@@ -609,6 +609,128 @@ impl Host {
 
     #[document(
         parent = "Host",
+        summary = "Creates a contract running another's code, as a factory does: a copy of the template's code at clone_address(this contract, the chain hash of salt), deployed by this contract, which then runs the copy's init with these arguments, this contract as its sender. Nothing of the template's storage or balance comes along. A clone that is a token goes in the token registry once the transaction succeeds. All of it stays only if init succeeds, and only if this call does.",
+        params = {
+            template = "The contract whose code to run: Lua or WebAssembly, not EVM.",
+            salt = "This contract's pick, any bytes, fixing the address: the same salt, the same address.",
+            args = "What init takes; none for a template without init.",
+            fuel = "What init may burn: what the caller has left after paying cost::CLONE.",
+        },
+        returns = "The new contract's address, as one Address value, or why it failed. Subtract its fuel_used from the caller's fuel.",
+        panics = "TooDeep past MAX_CALL_DEPTH, NoSuchContract when there is no template, Runtime when a contract lives at the address already, or when arguments are given to a template without init.",
+        see_also = "clone_address, Host::cloned_at, INIT, Contracts::deploy",
+    )]
+    pub fn clone_contract(&self, template: &Address, salt: &[u8], args: &[TxCallArgumentType], fuel: u64) -> Outcome {
+        let address = self.cloned_at(salt);
+        let hop = self.open(HopKind::Clone, address, super::INIT, u256::ZERO);
+        let outcome = self.create(template, address, args, fuel, hop);
+        self.close(hop, &outcome);
+
+        outcome
+    }
+
+    #[document(
+        parent = "Host",
+        summary = "Where this contract's clone with a salt is, or would be: clone_address of this contract and the chain hash of the salt. Engines charge cost::HASH and the salt's bytes.",
+    )]
+    pub fn cloned_at(&self, salt: &[u8]) -> Address {
+        let salt: [u8; 32] = crate::crypto::hasher::Hasher::digest(self.vm.hash(), salt).to_bytes().try_into().expect("256-bit chain hashes");
+
+        crate::structs::address::clone_address(&self.context.contract, &salt, self.vm.hash())
+    }
+
+    fn create(&self, template: &Address, address: Address, args: &[TxCallArgumentType], fuel: u64, hop: Option<usize>) -> Outcome {
+        if self.stack.len() >= MAX_CALL_DEPTH {
+            return Outcome::failed(VmError::TooDeep);
+        }
+
+        let contracts = Contracts::new(&self.state);
+        let template = match contracts.get(template) {
+            Ok(Some(record)) => record,
+            Ok(None) => return Outcome::failed(VmError::NoSuchContract(*template)),
+            Err(err) => return Outcome::failed(self.fail(err)),
+        };
+
+        match contracts.get(&address) {
+            Ok(None) => {}
+            Ok(Some(_)) => return Outcome::failed(VmError::Runtime(format!("a contract lives at {address} already: clone with another salt"))),
+            Err(err) => return Outcome::failed(self.fail(err)),
+        }
+
+        // Every node keeps the code again.
+        let copying = template.code.len() as u64 / super::cost::STORAGE_BYTES_PER_FUEL;
+
+        if copying > fuel {
+            return Outcome { fuel_used: fuel, ..Outcome::failed(VmError::OutOfFuel) };
+        }
+
+        let init = template.functions.iter().any(|function| function == super::INIT);
+
+        if !init && !args.is_empty() {
+            return Outcome::failed(VmError::Runtime("the template has no init to take arguments".to_string()));
+        }
+
+        // The copy goes in a layer of its own, kept only if its init succeeds.
+        let layer = Arc::new(State::new(self.state.clone()));
+        let record = ContractRecord { deployer: self.context.contract, ..template };
+        layer.put_value(Column::Contracts, crate::db::address_key(&address), &record);
+        let mut outcome = Outcome {
+            fuel_used: 0,
+            result: Ok(Vec::new()),
+            events: Vec::new(),
+            trace: Trace::default(),
+            refresh_tokens: Vec::new(),
+        };
+
+        if init {
+            let context = CallContext {
+                sender: self.context.contract,
+                contract: address,
+                value: u256::ZERO,
+                block: self.context.block,
+            };
+            let mut stack = self.stack.clone();
+            stack.push(address);
+            let callee = Host {
+                state: Arc::new(State::new(layer.clone())),
+                context,
+                stack,
+                delegated: false,
+                layout: Arc::default(),
+                memory: self.memory,
+                fault: self.fault.clone(),
+                vm: self.vm.clone(),
+                events: Arc::default(),
+                emitted: Arc::default(),
+                trace: self.trace.clone(),
+                hop,
+                offset: self.offset + lock(&self.events).len(),
+                refresh: Arc::default(),
+            };
+            let limits = Limits {
+                fuel: fuel - copying,
+                memory: self.memory,
+            };
+            outcome = run(&layer, &record, super::INIT, args, callee, limits);
+        }
+
+        outcome.fuel_used += copying;
+
+        if outcome.result.is_ok() {
+            self.state.merge(layer.take_changes());
+            lock(&self.events).append(&mut outcome.events);
+            let mut refresh = lock(&self.refresh);
+            refresh.extend(std::mem::take(&mut outcome.refresh_tokens));
+            // A token among clones is registered as a deployed one is.
+            refresh.insert(address);
+            outcome.result = Ok(vec![TxCallArgumentType::Address(address)]);
+        }
+
+        outcome
+    }
+
+    #[document(
+        parent = "Host",
         summary = "Emits an event from this contract. It reaches the receipt only if this call, and every call above it, succeeds. Engines charge cost::EVENT and the bytes it takes.",
         params = {
             name = "What happened: at most MAX_EVENT_NAME bytes.",

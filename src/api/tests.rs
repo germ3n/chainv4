@@ -2044,6 +2044,26 @@ fn status_names_the_swap_contract_when_the_node_was_given_one() {
     }
 }
 
+#[cfg(feature = "dex")]
+#[test]
+fn status_names_the_dexes_the_node_was_given() {
+    let contract = Address::Contract([0xde; 32]);
+    let cases = [
+        (None, None, Value::Null),
+        (Some(contract), None, json!({ "contract": contract.to_string(), "router": null })),
+        (Some(contract), Some([0xab; 20]), json!({ "contract": contract.to_string(), "router": format!("0x{}", "ab".repeat(20)) })),
+    ];
+
+    for (dex_contract, dex_router, expected) in cases {
+        let db = Arc::new(MemoryDb::default());
+        Chain::open(db.clone(), &free()).unwrap();
+        let options = ApiOptions { dex_contract, dex_router, ..ApiOptions::default() };
+        let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+
+        assert_eq!(ok(address, "/status")["dex"], expected);
+    }
+}
+
 #[test]
 fn a_client_may_have_only_so_many_requests_in_flight() {
     let in_flight = Arc::new(super::InFlight { per_ip: 2, counts: Default::default() });

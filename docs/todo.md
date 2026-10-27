@@ -316,6 +316,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   land in the deploy's receipt. Only the chain may run `init` and `migrate`.
 - [x] **A token standard.** ERC-20-like, by convention: [docs/token-standard.md](token-standard.md),
   with example tokens in Lua and Rust that one shared test holds to it.
+- [x] **A DEX.** Constant-product pools, as Uniswap V2 keeps them: `contracts/lua/dex.lua` for the
+  coin, tokens and ERC-20s on the EVM, each pool's shares a clone of `contracts/lua/lp_token.lua`,
+  and `contracts/evm/Dex.sol`'s WDEV, factory, pairs and router; `contracts.clone` for contracts
+  that make contracts; `chainv4 dex`; the wallet's Trade page. See [DEX](dex.md).
+- [ ] **The DEX: next.** Price oracles (time-weighted prices, as V2's cumulative ones), flash
+  swaps, a fee switch for the protocol, concentrated liquidity (V3's ranges), and routing across
+  both DEXes at once.
 - [ ] **NFTs.** A non-fungible token standard beside the fungible one, ERC-721-like: `owner_of`,
   `transfer`, per-token and operator approvals, `token_uri` metadata, `Transfer` and `Approval`
   events, owners kept provably in a namespace as balances are; reference contracts in Lua and

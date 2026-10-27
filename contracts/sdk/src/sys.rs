@@ -43,6 +43,11 @@ unsafe extern "C" {
     ) -> u32;
     /// Runs another contract's function on this contract's storage; status and result as call.
     pub fn delegate(address: *const u8, selector: u64, args: *const u8, args_len: u32) -> u32;
+    /// 0 when a clone of template was made, its address at out; 1 when not, with why in the
+    /// result buffer.
+    pub fn clone(template: *const u8, salt: *const u8, salt_len: u32, args: *const u8, args_len: u32, out: *mut u8) -> u32;
+    /// The address this contract's clone with salt is, or would be, at out.
+    pub fn cloned_at(salt: *const u8, salt_len: u32, out: *mut u8);
     /// 0 when to's code keeps from's storage layout; 1 when not, with why in the result buffer.
     pub fn check_layout(from: *const u8, to: *const u8) -> u32;
     /// Emits an event; data is an encoded list of values.

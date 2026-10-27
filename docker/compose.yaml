@@ -38,6 +38,8 @@ services:
       FAUCET_EVERY: ${FAUCET_EVERY:-24h}
       FAUCET_WORK: ${FAUCET_WORK:-20}
       SWAP_CONTRACT: ${SWAP_CONTRACT:-}
+      DEX_CONTRACT: ${DEX_CONTRACT:-}
+      DEX_ROUTER: ${DEX_ROUTER:-}
       EXTRA_ARGS: ${EXTRA_ARGS:-}
     volumes:
       - chain:/data

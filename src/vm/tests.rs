@@ -1942,3 +1942,130 @@ fn the_swap_contract_locks_and_pays_a_token() {
     assert_eq!(world.call(token, "balance_of", &[address(alice)]).result.unwrap(), [wide(1_000)]);
     assert_eq!(world.call(token, "balance_of", &[address(swap)]).result.unwrap(), [wide(0)]);
 }
+
+const CLONE_TEMPLATE: &str = r#"
+local M = {}
+
+function M.init(label)
+    if label == "fail" then error("refused") end
+    storage.set("label", label)
+    storage.set("creator", ctx.sender:text())
+end
+
+function M.get()
+    return storage.get("label"), storage.get("creator")
+end
+
+return M
+"#;
+
+const CLONE_FACTORY: &str = r#"
+local M = {}
+
+function M.make(template, salt, label)
+    return contracts.clone(template, salt, label)
+end
+
+function M.bare(template, salt)
+    return contracts.clone(template, salt)
+end
+
+function M.where(salt)
+    return contracts.cloned_at(salt)
+end
+
+function M.try(template, salt, label)
+    local ok, err = pcall(contracts.clone, template, salt, label)
+    return ok, tostring(err)
+end
+
+return M
+"#;
+
+/// Takes [Address(template)] and clones it with the salt "pool" and no arguments, returning
+/// nothing, or aborting with the error.
+const WASM_FACTORY: &str = r#"
+(module
+  (import "chain" "input_read" (func $input_read (param i32)))
+  (import "chain" "clone" (func $clone (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "chain" "result_len" (func $result_len (result i32)))
+  (import "chain" "result_read" (func $result_read (param i32)))
+  (import "chain" "output" (func $output (param i32 i32)))
+  (import "chain" "abort" (func $abort (param i32 i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 100) "pool")
+  (func (export "make")
+    (call $input_read (i32.const 0))
+    (if (call $clone (i32.const 9) (i32.const 100) (i32.const 4) (i32.const 200) (i32.const 8) (i32.const 300))
+      (then
+        (call $result_read (i32.const 1000))
+        (call $abort (i32.const 1000) (call $result_len))))
+    (call $output (i32.const 200) (i32.const 8))))
+"#;
+
+#[test]
+fn a_contract_clones_another_whose_init_runs_with_it_as_sender() {
+    let mut world = World::new();
+    let template = world.lua_code(CLONE_TEMPLATE);
+    let factory = world.lua_code(CLONE_FACTORY);
+    let text = |value: &str| TxCallArgumentType::String(value.to_string());
+    let made = world.call(factory, "make", &[address(template), text("a"), text("first")]);
+    let clone = match made.result.as_deref() {
+        Ok([TxCallArgumentType::Address(clone)]) => *clone,
+        other => panic!("{other:?}"),
+    };
+
+    // Where cloned_at says, the chain hash of the salt under the factory's address.
+    assert_eq!(world.call(factory, "where", &[text("a")]).result.unwrap(), [address(clone)]);
+    let salt: [u8; 32] = Hasher::digest(world.vm.hash(), b"a").to_bytes().try_into().unwrap();
+    assert_eq!(clone, crate::structs::address::clone_address(&factory, &salt, world.vm.hash()));
+    assert_ne!(clone, template);
+
+    // Its own storage, written by its init, the factory its sender; the template's untouched.
+    assert_eq!(world.call(clone, "get", &[]).result.unwrap(), [text("first"), text(&factory.to_string())]);
+    assert_eq!(world.call(template, "get", &[]).result.unwrap(), [TxCallArgumentType::Nil, text(&DEPLOYER.to_string())], "its own, from its deploy");
+    let record = Contracts::new(&world.state).get(&clone).unwrap().unwrap();
+    assert_eq!(record.deployer, factory);
+    assert!(made.fuel_used > crate::vm::cost::CLONE);
+    assert!(made.refresh_tokens.contains(&clone), "asked into the token registry, should it be a token");
+
+    // One salt, one clone; init failing keeps nothing; a template without init takes no
+    // arguments, and with none is cloned bare.
+    let again = world.call(factory, "try", &[address(template), text("a"), text("second")]).result.unwrap();
+    assert!(matches!(&again[1], TxCallArgumentType::String(why) if why.contains("lives at")), "{again:?}");
+    let failed = world.call(factory, "try", &[address(template), text("b"), text("fail")]).result.unwrap();
+    assert!(matches!(&failed[1], TxCallArgumentType::String(why) if why.contains("refused")), "{failed:?}");
+    let would_be = match world.call(factory, "where", &[text("b")]).result.unwrap().as_slice() {
+        [TxCallArgumentType::Address(address)] => *address,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(Contracts::new(&world.state).get(&would_be).unwrap(), None, "nothing kept");
+    let plain = world.lua_code(LUA);
+    let given = world.call(factory, "try", &[address(plain), text("c"), text("x")]).result.unwrap();
+    assert!(matches!(&given[1], TxCallArgumentType::String(why) if why.contains("no init")), "{given:?}");
+    let nobody = world.call(factory, "try", &[address(Address::Contract([9; 32])), text("d"), text("x")]).result.unwrap();
+    assert!(matches!(&nobody[1], TxCallArgumentType::String(why) if why.contains("no contract")), "{nobody:?}");
+
+    // A WebAssembly template clones too, and runs as its own contract.
+    let counter = world.wasm(WASM_COUNTER);
+    let counted = match world.call(factory, "bare", &[address(counter), text("counter")]).result.as_deref() {
+        Ok([TxCallArgumentType::Address(clone)]) => *clone,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(world.call(counted, "bump", &[]).result.unwrap(), [TxCallArgumentType::I64(1)]);
+    assert_eq!(world.call(counter, "bump", &[]).result.unwrap(), [TxCallArgumentType::I64(1)], "the template counts apart");
+}
+
+#[test]
+fn a_webassembly_contract_clones_through_the_host() {
+    let mut world = World::new();
+    let factory = world.wasm(WASM_FACTORY);
+    let template = world.lua_code(CLONE_TEMPLATE.replace("function M.init(label)", "function M.init(label)\n    label = label or \"bare\"").as_str());
+    world.call(factory, "make", &[address(template)]).result.unwrap();
+    let salt: [u8; 32] = Hasher::digest(world.vm.hash(), b"pool").to_bytes().try_into().unwrap();
+    let clone = crate::structs::address::clone_address(&factory, &salt, world.vm.hash());
+
+    assert_eq!(world.call(clone, "get", &[]).result.unwrap(), [TxCallArgumentType::String("bare".to_string()), TxCallArgumentType::String(factory.to_string())]);
+    let again = world.call(factory, "make", &[address(template)]).result.unwrap_err();
+    assert!(again.to_string().contains("lives at"), "{again}");
+}

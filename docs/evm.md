@@ -281,6 +281,8 @@ Two more, built for Paris so they run on any EVM chain:
 - **`contracts/evm/Swap.sol`** is an [atomic swap](swaps.md)'s leg on an EVM chain: ETH or an
   ERC-20 locked under a SHA-256 hash until a deadline, claimed with the secret or refunded. Its
   tests run it here, and `chainv4 swap` reaches it on this chain's `POST /rpc` as on Ethereum's.
+- **`contracts/evm/Dex.sol`** is the EVM [DEX](dex.md): WDEV, a factory of constant-product
+  pairs, the pair, and a router, in the manner of Uniswap V2, written afresh.
 - **`contracts/evm/Token.sol`** is a small ERC-20, its supply to whoever deploys it, which the
   swap tests lock.
 

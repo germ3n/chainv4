@@ -30,6 +30,8 @@
 #   FAUCET_WORK      the zero bits a request's proof of work starts with: 20 unless set
 #   SWAP_CONTRACT    the atomic swap contract deployed on this chain, contracts/lua/swap.lua,
 #                    for GET /status to name to the wallet and chainv4 swap
+#   DEX_CONTRACT     the DEX deployed on this chain, contracts/lua/dex.lua, for GET /status
+#   DEX_ROUTER       the EVM DEX's router, DexRouter from contracts/evm/Dex.sol, 0x and 40 hex
 #   EXTRA_ARGS       anything else, passed on to chainv4
 set -eu
 
@@ -165,6 +167,17 @@ fi
 if [ -n "${SWAP_CONTRACT:-}" ]; then
     set -- "$@" --swap-contract "$SWAP_CONTRACT"
     echo "[docker] naming the swap contract $SWAP_CONTRACT"
+fi
+
+# The DEXes, when this chain has them deployed.
+if [ -n "${DEX_CONTRACT:-}" ]; then
+    set -- "$@" --dex-contract "$DEX_CONTRACT"
+    echo "[docker] naming the DEX $DEX_CONTRACT"
+fi
+
+if [ -n "${DEX_ROUTER:-}" ]; then
+    set -- "$@" --dex-router "$DEX_ROUTER"
+    echo "[docker] naming the EVM DEX's router $DEX_ROUTER"
 fi
 
 # Word-split on purpose: EXTRA_ARGS holds several arguments.

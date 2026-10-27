@@ -32,6 +32,10 @@ enum Command {
     /// HTLC, and deploys Swap.sol.
     #[cfg(all(feature = "client", feature = "swap"))]
     Swap(cli::SwapArgs),
+    /// The chain's DEXes: deploys and sets one up, lists its pools, quotes a trade through the
+    /// best route, and trades, adds and takes out, on the native DEX or with --evm the router.
+    #[cfg(all(feature = "client", feature = "dex", feature = "evm"))]
+    Dex(cli::DexArgs),
     /// How many transactions a second the chain takes: blocks built and imported in-process
     /// (bench chain), or transfers submitted to running nodes at a rising rate (bench load).
     #[cfg(feature = "client")]
@@ -217,6 +221,16 @@ struct NodeArgs {
     #[cfg(feature = "swap")]
     #[arg(long, requires = "http")]
     swap_contract: Option<structs::address::Address>,
+    /// The DEX on this chain, contracts/lua/dex.lua as deployed here: GET /status names it, for
+    /// the wallet's Trade page to use when the name dex does not resolve.
+    #[cfg(feature = "dex")]
+    #[arg(long, requires = "http")]
+    dex_contract: Option<structs::address::Address>,
+    /// The EVM DEX's router on this chain, DexRouter from contracts/evm/Dex.sol, by its 20 bytes
+    /// as 0x and 40 hex digits: GET /status names it, for the Trade page's EVM pools.
+    #[cfg(feature = "dex")]
+    #[arg(long, requires = "http")]
+    dex_router: Option<String>,
     /// Tell clients what the node does as it happens, on the API's GET /stream.
     #[cfg(feature = "stream")]
     #[arg(long, requires = "http")]
@@ -267,6 +281,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Faucet(args)) => cli::faucet(args),
         #[cfg(all(feature = "client", feature = "swap"))]
         Some(Command::Swap(args)) => cli::swap(args),
+        #[cfg(all(feature = "client", feature = "dex", feature = "evm"))]
+        Some(Command::Dex(args)) => cli::dex(args),
         #[cfg(feature = "client")]
         Some(Command::Bench(args)) => cli::bench(args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
@@ -464,6 +480,13 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             faucet,
             #[cfg(feature = "swap")]
             swap_contract: args.swap_contract,
+            #[cfg(feature = "dex")]
+            dex_contract: args.dex_contract,
+            #[cfg(feature = "dex")]
+            dex_router: match args.dex_router.as_deref().map(evm_bytes).transpose() {
+                Ok(router) => router,
+                Err(why) => return Err(format!("--dex-router: {why}").into()),
+            },
             threads: args.http_threads,
             per_ip: args.http_per_ip,
         };
@@ -488,4 +511,13 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(feature = "node"))]
 fn main() {
     eprintln!("chainv4 was built without the node feature");
+}
+
+/// 20 bytes of EVM address, from 0x and 40 hex digits.
+#[cfg(all(feature = "dex", feature = "http"))]
+fn evm_bytes(text: &str) -> Result<[u8; 20], String> {
+    match text.trim().strip_prefix("0x").filter(|hex| hex.len() == 40) {
+        Some(_) => structs::hex::from_hex(text.trim()).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{text} is not hex")),
+        None => Err(format!("{text} is not 0x and 40 hex digits")),
+    }
 }

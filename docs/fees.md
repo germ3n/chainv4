@@ -179,7 +179,8 @@ receipts their gas and fee.
 - **Accounts need coins to send anything,** the development key included.
 - **Gas limits come from a dry run.** The node runs a call, deploy or upgrade on a throwaway
   copy of its state, as the sender at their next nonce, and offers what it used plus a quarter of
-  what it ran, so blocks fill with what calls really use rather than their caps. A call whose
+  what it ran, tried again at that limit and raised until it succeeds, since nested calls need
+  more than they use, so blocks fill with what calls really use rather than their caps. A call whose
   work grows past that by the time it lands runs out and fails, still charged; one the dry run
   says would fail gets the whole fuel cap, since things may change, and `send` refuses it unless
   given `--anyway`. The wallet and the explorer show why and ask first.

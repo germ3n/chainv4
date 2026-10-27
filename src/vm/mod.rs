@@ -153,6 +153,10 @@ pub mod cost {
     pub const TOKEN_REFRESH: u64 = 100;
     /// Comparing two contracts' storage layouts: two contract reads, as a call makes one.
     pub const CHECK_LAYOUT: u64 = 2_000;
+    /// Cloning a contract: the template read and the new contract written, plus 1 for every
+    /// STORAGE_BYTES_PER_FUEL bytes of its code, which every node keeps again; its init is
+    /// charged on top as it runs.
+    pub const CLONE: u64 = 5_000;
     /// Resolving a name, or an address's primary name: a few name records read, one for each
     /// label, and the primary name's.
     pub const NAME: u64 = 500;

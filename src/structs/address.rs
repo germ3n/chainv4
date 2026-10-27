@@ -209,6 +209,30 @@ pub fn contract_address(deployer: &Address, nonce: u64, hash: crate::structs::ha
     Address::Contract(bytes)
 }
 
+#[document(
+    summary = "Where contracts.clone puts a contract: the chain hash of a domain tag, the address of the contract that clones and a salt it picks. The same creator and salt always give the same address on a chain, so a contract can find what it cloned again without keeping it, and no key controls it.",
+    category = "Primitives",
+    params = {
+        creator = "The contract that clones.",
+        salt = "Its pick: 32 bytes, such as the hash of what the clone is for.",
+        hash = "The chain's hash: any secure, 256-bit one.",
+    },
+    see_also = "Address::Contract, contract_address, Host::clone_contract",
+)]
+pub fn clone_address(creator: &Address, salt: &[u8; 32], hash: crate::structs::hash::HashType) -> Address {
+    let mut hasher = crate::crypto::hasher::Hasher::new(hash);
+    hasher.update(b"chainv4 clone address");
+    hasher.update(&creator.hashable_bytes_with_tag());
+    hasher.update(salt);
+    let bytes: [u8; 32] = hasher
+        .finalize()
+        .to_bytes()
+        .try_into()
+        .expect("genesis only allows 256-bit chain hashes");
+
+    Address::Contract(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

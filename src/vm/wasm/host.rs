@@ -37,6 +37,8 @@ pub(super) const NAMES: &[&str] = &[
     "transfer",
     "call",
     "delegate",
+    "clone",
+    "cloned_at",
     "check_layout",
     "emit",
     "refresh_token",
@@ -324,6 +326,38 @@ fn chain_delegate() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "clone",
+    summary = "Creates a contract running another's code, as a factory does: a copy of the template's code, deployed by this contract at the address cloned_at gives for the salt, whose init then runs with the arguments, this contract as its sender. Nothing of the template's storage or balance comes along; a clone that is a token goes in the token registry once the transaction succeeds. Kept only if init succeeds, and only if this call does. Costs 5000 fuel, 1 more per 16 bytes of the template's compiled code, the salt's hash and 1 per 64 bytes of arguments, on top of what init burns.",
+    params = {
+        template = { ty = "i32", desc = "The contract whose code to run: 33 bytes, Lua or WebAssembly." },
+        salt = { ty = "i32", desc = "Any bytes this contract picks, fixing the address." },
+        salt_len = { ty = "i32", desc = "Their length." },
+        args = { ty = "i32", desc = "What init takes, encoded." },
+        args_len = { ty = "i32", desc = "Their length." },
+        out = { ty = "i32", desc = "Where the new contract's 33 bytes go." },
+    },
+    returns = { ty = "i32", desc = "0 when it was made; 1 when it failed, with the error text in the result buffer." },
+    see_also = "chain.cloned_at, rust/Host::clone_contract",
+)]
+fn chain_clone() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "cloned_at",
+    summary = "Where this contract's clone with a salt is, or would be. Costs 20 fuel, 1 more per 64 bytes of salt.",
+    params = {
+        salt = { ty = "i32", desc = "The salt." },
+        salt_len = { ty = "i32", desc = "Its length." },
+        out = { ty = "i32", desc = "Where the 33 bytes of the address go." },
+    },
+    see_also = "chain.clone, rust/clone_address",
+)]
+fn chain_cloned_at() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "resolve_name",
     summary = "The address a name resolves to at the block's time, such as alice.dev, with or without the chain's suffix, in any case. Costs 500 fuel, plus 1 per 64 bytes of name. Traps on a chain without names.",
     params = {
@@ -466,6 +500,8 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "transfer", transfer).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "call", call).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "delegate", delegate).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "clone", clone).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "cloned_at", cloned_at).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "check_layout", check_layout).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "emit", emit).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "refresh_token", refresh_token).expect(defined);
@@ -876,6 +912,46 @@ fn delegate(mut caller: Caller<'_, Run>, address: u32, selector: u64, args: u32,
     caller.data_mut().result = result;
 
     Ok(status)
+}
+
+fn clone(mut caller: Caller<'_, Run>, template: u32, salt: u32, salt_len: u32, args: u32, args_len: u32, out: u32) -> Result<u32> {
+    let host = host(&mut caller)?;
+    let template = address_at(&mut caller, template)?;
+    charge(&mut caller, cost::CLONE + cost::HASH + u64::from(salt_len) / cost::HASH_BYTES_PER_FUEL + u64::from(args_len) / cost::COPY_BYTES_PER_FUEL)?;
+    let salt = read(&mut caller, salt, salt_len)?;
+    let args = read(&mut caller, args, args_len)?;
+    let args = match wincode::deserialize::<Vec<TxCallArgumentType>>(&args) {
+        Ok(args) => args,
+        Err(err) => return Err(stop(&mut caller, VmError::BadArgument(err.to_string()))),
+    };
+    let fuel = caller.get_fuel()?;
+    let outcome = host.clone_contract(&template, &salt, &args, fuel);
+    caller.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;
+
+    match outcome.result {
+        Ok(values) => match values.as_slice() {
+            [TxCallArgumentType::Address(address)] => {
+                write(&mut caller, out, &address.to_abi())?;
+
+                Ok(0)
+            }
+            _ => Err(stop(&mut caller, VmError::Runtime("no address came back from a clone".to_string()))),
+        },
+        Err(VmError::Storage(err)) => Err(stop(&mut caller, VmError::Storage(err))),
+        Err(err) => {
+            caller.data_mut().result = err.to_string().into_bytes();
+
+            Ok(1)
+        }
+    }
+}
+
+fn cloned_at(mut caller: Caller<'_, Run>, salt: u32, salt_len: u32, out: u32) -> Result<()> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::HASH + u64::from(salt_len) / cost::HASH_BYTES_PER_FUEL)?;
+    let salt = read(&mut caller, salt, salt_len)?;
+
+    write(&mut caller, out, &host.cloned_at(&salt).to_abi())
 }
 
 fn emit(mut caller: Caller<'_, Run>, name: u32, name_len: u32, data: u32, data_len: u32) -> Result<()> {

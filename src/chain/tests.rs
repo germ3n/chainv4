@@ -1702,6 +1702,8 @@ fn a_full_block_past_wincodes_default_limit_builds_imports_and_reads_back() {
     assert_eq!(chain.block(&block.id()).unwrap(), Some(block), "and it reads back from the database");
 }
 
+#[cfg(all(feature = "evm", feature = "secp256k1"))]
+mod dex;
 #[cfg(feature = "evm")]
 mod evm;
 #[cfg(feature = "names")]

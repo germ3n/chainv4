@@ -43,10 +43,12 @@ ur = "0.5.2"
 minicbor = { version = "2", default-features = false, features = ["alloc"] }
 
 [features]
-default = ["swap"]
+default = ["swap", "dex"]
 # Atomic swaps between this chain, Bitcoin and EVM chains: the Swaps page, and the offline signer
 # signing a swap's Bitcoin side.
 swap = ["chainv4/swap"]
+# The Trade page: swaps of tokens on the DEXes, and their pools.
+dex = ["chainv4/dex"]
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "links", "wayland", "x11"] }

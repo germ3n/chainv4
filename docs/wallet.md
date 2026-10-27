@@ -503,6 +503,18 @@ Keystone's `@keystonehq/bc-ur-registry-eth` and ethereumjs, as MetaMask's QR key
 signatures back with them: the accounts the extended key derives, and each signature rebuilt into
 its transaction or recovered from its hash, under its request's id.
 
+### Trade
+
+The **Trade** page trades on the chain's [DEXes](dex.md), the native one and, when the node names
+its router, the EVM's:
+- **trades:** the best route, through one pool or two, its quote, price impact and the least it
+  takes at the slippage allowed;
+- **pools:** what each holds and its price, a native pool's price chart from its `Sync` events,
+  and adding to it or taking your shares out;
+- **new pools,** opened by their first deposit, at the price its two amounts set.
+
+Approving a token, trading, adding and taking out are calls the Send page reviews and signs.
+
 ### Swaps
 
 The **Swaps** page trades coins or a token between any two of this chain, Bitcoin and EVM chains

@@ -62,7 +62,7 @@ JSON-RPC does: an error is in the answer.
 | `eth_getBalance`, `eth_getTransactionCount` | An account's balance and nonce at its EVM address: a secp256k1 account's own, an EVM contract's, or an alias. `pending` counts what the sender has waiting in the mempool. |
 | `eth_getCode`, `eth_getStorageAt` | An EVM contract's code, and a slot of its storage. |
 | `eth_call` | What a call returns, run on a copy of the latest state as the next block would run it. A revert answers code 3, `execution reverted: ` and its reason, with the bytes it returned as `data`, which ethers decodes custom errors from. |
-| `eth_estimateGas` | The gas a transaction of the call needs on this chain: its bytes' intrinsic cost and the EVM's gas, with a quarter more of what ran. |
+| `eth_estimateGas` | The gas a transaction of the call needs on this chain: its bytes' intrinsic cost and the EVM's gas, with a quarter more of what ran. The gas is tried, and raised until a run succeeds, as nested calls need more than they use. |
 | `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory` | Twice the next block's base price; a tip of 0; and each block's base price and how full it was. |
 | `eth_sendRawTransaction` | Takes a signed transaction to the node's mempool, and answers its hash. |
 | `eth_getTransactionByHash`, `eth_getTransactionReceipt` | A transaction on the main chain, by its hash, and what it did: status, gas used, the price paid, a created contract's address, and its logs. `eth_getTransactionByHash` finds one waiting in the mempool too, its block fields null; its receipt is null until a block holds it. |

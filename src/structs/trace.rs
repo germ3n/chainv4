@@ -71,6 +71,9 @@ pub enum HopKind {
     #[document(summary = "Funds a contract sent from its own balance.")]
     #[wincode(tag = 2)]
     Transfer,
+    #[document(summary = "A contract created by another, running a template's code, and its init.")]
+    #[wincode(tag = 3)]
+    Clone,
 }
 
 impl Hop {

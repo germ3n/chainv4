@@ -54,6 +54,10 @@ pub enum Ask {
     Submit(String),
     /// A request to the node's faucet, with its proof of work: the body of POST /faucet.
     Faucet(String),
+    /// A contract's events of one name, newest first, from the node's event index: what the Trade
+    /// page draws a pool's price from.
+    #[cfg_attr(not(feature = "dex"), allow(dead_code))]
+    Named { contract: String, name: String },
     /// A JSON-RPC request to POST /rpc, as its body: what a site's transaction is priced and sent
     /// by, as Ethereum's tools do.
     Rpc(String),
@@ -73,6 +77,7 @@ impl Ask {
             Ask::Tokens => "/tokens?limit=100".to_string(),
             Ask::History(address) => format!("/accounts/{address}/txs?limit=50"),
             Ask::Events(address) => format!("/events?address={address}&limit=50"),
+            Ask::Named { contract, name } => format!("/events?contract={contract}&name={name}&limit=200"),
             Ask::Names => "/names".to_string(),
             Ask::OwnedNames(address) => format!("/accounts/{address}/names?limit=100"),
             Ask::Contract(address) => format!("/contracts/{address}"),

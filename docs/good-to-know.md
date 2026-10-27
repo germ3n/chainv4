@@ -602,6 +602,25 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   `block_time()` and `block_height()` in the SDK: the header's, the same on every node. A node
   without them refuses such contracts, so every node updates together.
 
+## The DEX
+
+- **Contracts can clone contracts now:** `contracts.clone(template, salt, ...)` in Lua, `clone`
+  in WebAssembly, a copy of another contract's code at an address fixed by the cloner and the
+  salt, its init run with the arguments. A consensus change: every node updates together.
+- **The native DEX names the coin by the zero contract address,** `contract:0x00…00`: the zero
+  key, which swap.lua uses inside, is no valid key, and transactions refuse it as an argument.
+- **ERC-20s in native pools** are approved to the DEX's EVM address, as the EVM sees it, not its
+  `contract:` one.
+- **The two DEXes are separate:** their pools do not share liquidity, and a trade goes through
+  one or the other. The EVM DEX trades the coin as WDEV, and Lua tokens not at all.
+- **Gas estimates are checked now:** `POST /offer` and `eth_estimateGas` try the limit they give
+  and raise it until a run succeeds. A DEX router's nested calls need more gas than they use, and
+  failed with no reason before.
+- **A pool's chart** comes from the node's event index: a node without `--index-events` shows
+  none.
+- **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
+  `--dex-contract`, `--dex-router`, or the name `dex`.
+
 ## The camera
 
 - **The live camera is the wallet's alone.** `chainv4-ui`'s `camera` feature brings it, and nokhwa

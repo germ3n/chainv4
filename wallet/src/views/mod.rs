@@ -18,6 +18,10 @@ mod sign;
 mod swaps;
 #[cfg(feature = "swap")]
 pub use swaps::swap_name;
+#[cfg(feature = "dex")]
+mod trade;
+#[cfg(feature = "dex")]
+pub use trade::dex_name;
 
 use {
     crate::app::{Coin, Role, Settings},
@@ -44,6 +48,9 @@ pub enum Page {
     /// Atomic swaps between this chain, Bitcoin and EVM chains.
     #[cfg(feature = "swap")]
     Swaps,
+    /// Trading on the DEXes: swaps of tokens, and pools to add to.
+    #[cfg(feature = "dex")]
+    Trade,
     Accounts,
     Settings,
     /// An offline signer's: a request to sign, read off the sender's screen.
@@ -65,6 +72,8 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             (Page::Contracts, "Contracts"),
             #[cfg(feature = "swap")]
             (Page::Swaps, "Swaps"),
+            #[cfg(feature = "dex")]
+            (Page::Trade, "Trade"),
             (Page::Accounts, "Accounts"),
             (Page::Settings, "Settings"),
         ],
@@ -116,6 +125,9 @@ pub struct Ctx<'a> {
     /// The swap contract the node names, if it names one.
     #[cfg_attr(not(feature = "swap"), allow(dead_code))]
     pub swap_contract: Option<&'a str>,
+    /// The DEX, and the EVM DEX's router, the node names, if it names them.
+    #[cfg_attr(not(feature = "dex"), allow(dead_code))]
+    pub dex: (Option<&'a str>, Option<&'a str>),
 }
 
 impl Ctx<'_> {
@@ -177,6 +189,8 @@ pub struct States {
     pub faucet: faucet::FaucetState,
     #[cfg(feature = "swap")]
     swaps: swaps::SwapsState,
+    #[cfg(feature = "dex")]
+    pub trade: trade::TradeState,
 }
 
 impl States {
@@ -184,6 +198,11 @@ impl States {
     pub fn answered(&mut self, ask: &crate::node::Ask, result: &Result<serde_json::Value, crate::node::Failure>, kept: &[crate::app::SavedContract]) {
         #[cfg(feature = "swap")]
         if self.swaps.answered(ask, result) {
+            return;
+        }
+
+        #[cfg(feature = "dex")]
+        if self.trade.answered(ask, result) {
             return;
         }
 
@@ -233,6 +252,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Contracts => contracts::show(ui, ctx, &mut states.contracts, &mut states.send),
         #[cfg(feature = "swap")]
         Page::Swaps => swaps::show(ui, ctx, &mut states.swaps, &mut states.send),
+        #[cfg(feature = "dex")]
+        Page::Trade => trade::show(ui, ctx, &mut states.trade, &mut states.send),
         Page::Accounts => accounts::show(ui, ctx, &mut states.accounts),
         Page::Settings => settings::show(ui, ctx, &mut states.settings),
         Page::Sign => sign::show(ui, ctx, &mut states.sign),

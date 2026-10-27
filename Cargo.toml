@@ -11,7 +11,7 @@ members = ["macro", "wiki", "gpu"]
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -29,6 +29,9 @@ bitcoin = ["secp256k1", "dep:sha2", "dep:ripemd"]
 # ur:chainv4-swap codes, Bitcoin's HTLC script and its spends, and Swap.sol's calls. chainv4's side
 # is a contract, contracts/lua/swap.lua; an EVM chain's, contracts/evm/Swap.sol.
 swap = ["bitcoin", "dep:ur"]
+# The DEX's arithmetic for the apps: the trade formula and routes through pools, quoting
+# contracts/lua/dex.lua and the EVM's contracts/evm/Dex.sol alike, and the node naming them.
+dex = []
 # Seed phrases: BIP39 words, SLIP-0010 for the Edwards schemes and BIP32 for secp256k1.
 mnemonic = ["dep:bip39", "dep:hmac", "dep:sha2", "dep:ripemd"]
 vm = ["xxh3"]

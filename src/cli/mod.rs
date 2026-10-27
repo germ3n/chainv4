@@ -16,6 +16,8 @@ use {
 };
 
 pub mod db;
+#[cfg(all(feature = "client", feature = "dex", feature = "evm"))]
+pub(super) mod dex;
 #[cfg(all(feature = "client", feature = "evm"))]
 mod evm;
 #[cfg(all(feature = "client", feature = "sha256"))]
@@ -47,6 +49,8 @@ pub use send::{SendArgs, TlsArgs, TxArgs, send};
 pub use bench::{BenchArgs, bench};
 #[cfg(all(feature = "client", feature = "swap"))]
 pub use swap::{SwapArgs, swap};
+#[cfg(all(feature = "client", feature = "dex", feature = "evm"))]
+pub use dex::{DexArgs, dex};
 #[cfg(all(feature = "client", feature = "sha256"))]
 pub use faucet::{FaucetArgs, faucet};
 

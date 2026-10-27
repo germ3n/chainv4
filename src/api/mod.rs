@@ -136,6 +136,11 @@ struct Api {
     /// The swap contract the node tells clients of.
     #[cfg(feature = "swap")]
     swap_contract: Option<Address>,
+    /// The DEX, and the EVM DEX's router, the node tells clients of.
+    #[cfg(feature = "dex")]
+    dex_contract: Option<Address>,
+    #[cfg(feature = "dex")]
+    dex_router: Option<[u8; 20]>,
     /// Requests in flight, by client.
     in_flight: Arc<InFlight>,
 }
@@ -240,6 +245,12 @@ pub struct ApiOptions {
     #[document(summary = "The atomic swap contract on this chain, contracts/lua/swap.lua as deployed here, which GET /status names for the wallet and the CLI; None for none.")]
     #[cfg(feature = "swap")]
     pub swap_contract: Option<Address>,
+    #[document(summary = "The DEX on this chain, contracts/lua/dex.lua as deployed here, which GET /status names for the wallet; None for none.")]
+    #[cfg(feature = "dex")]
+    pub dex_contract: Option<Address>,
+    #[document(summary = "The EVM DEX's router on this chain, by its 20 bytes, which GET /status names; None for none.")]
+    #[cfg(feature = "dex")]
+    pub dex_router: Option<[u8; 20]>,
     #[document(summary = "The threads the API answers on: as many as the machine has cores when 0.")]
     pub threads: usize,
     #[document(summary = "How many requests one client may have in flight at once; DEFAULT_PER_IP when 0.")]
@@ -327,6 +338,10 @@ pub fn start(
                     faucet: options.faucet.map(|config| Arc::new(faucet::Faucet::new(config))),
                     #[cfg(feature = "swap")]
                     swap_contract: options.swap_contract,
+                    #[cfg(feature = "dex")]
+                    dex_contract: options.dex_contract,
+                    #[cfg(feature = "dex")]
+                    dex_router: options.dex_router,
                     in_flight: Arc::new(InFlight { per_ip, counts: Default::default() }),
                 })
                 // Who connects, for the faucet's limits by IP.
@@ -582,7 +597,24 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "bootnodes": api.bootnodes(&State::new(db.clone()))?,
         "faucet": faucet_json(&api),
         "swap": swap_json(&api),
+        "dex": dex_json(&api),
     })))
+}
+
+/// The DEXes clients use: { contract, router }, each null when the node names none; null for a
+/// node that names neither.
+fn dex_json(api: &Api) -> Value {
+    #[cfg(feature = "dex")]
+    if api.dex_contract.is_some() || api.dex_router.is_some() {
+        return json!({
+            "contract": api.dex_contract.map(|contract| contract.to_string()),
+            "router": api.dex_router.map(|router| to_hex(&router)),
+        });
+    }
+
+    let _ = api;
+
+    Value::Null
 }
 
 /// The swap contract clients use: { contract }, or null on a node that names none.
@@ -1414,7 +1446,21 @@ async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
         None => FeeOffer::NONE,
         Some(fees) => {
             // A run that fails says nothing of what a later one needs: that gets the fuel cap.
-            let estimated = ran.as_ref().filter(|ran| ran.failure.is_none()).map(|ran| fees.estimated(api.tx_fuel, &probe, ran.gas_used));
+            let mut estimated = ran.as_ref().filter(|ran| ran.failure.is_none()).map(|ran| fees.estimated(api.tx_fuel, &probe, ran.gas_used));
+
+            // What a run used, and a quarter, may still be too little: a call inside another
+            // gets 63/64 of what is left, so nested calls need more than they use. Tried at the
+            // limit, and raised until a run succeeds at it, at most to the open one it did.
+            if gas_limit.is_none() {
+                while let Some(limit) = estimated.filter(|limit| *limit < open) {
+                    if dry_run_off_loop(&api, probe.clone(), limit, base).await?.failure.is_none() {
+                        break;
+                    }
+
+                    estimated = Some(limit.saturating_add(limit / 4).max(limit + 1).min(open));
+                }
+            }
+
             let chosen = OfferChoice { gas_limit: gas_limit.or(estimated), max_price, tip: tip_chosen };
 
             fees.offer(base, api.tx_fuel, &probe, chosen)

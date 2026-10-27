@@ -198,6 +198,34 @@ pub fn delegate(target: &Address, selector: u64, args: &[Value]) -> Result<Vec<V
     }
 }
 
+/// Creates a contract running another's code, as a factory does: a copy of template's code,
+/// deployed by this contract at the address [cloned_at] gives for salt, whose init then runs with
+/// args, this contract as its sender. Nothing of the template's storage or balance comes along; a
+/// clone that is a token goes in the token registry once the transaction succeeds.
+///
+/// Returns the new contract, or why it was not made: no template, a contract at the address
+/// already, or init failing.
+pub fn clone_contract(template: &Address, salt: &[u8], args: &[Value]) -> Result<Address, String> {
+    let template = template.encode();
+    let args = value::encode(args);
+    let mut out = [0; 33];
+    let status = unsafe { sys::clone(template.as_ptr(), salt.as_ptr(), salt.len() as u32, args.as_ptr(), args.len() as u32, out.as_mut_ptr()) };
+
+    match status {
+        0 => Ok(Address::decode(&out).unwrap_or_else(|| abort("unreadable address"))),
+        _ => Err(String::from_utf8_lossy(&result()).into_owned()),
+    }
+}
+
+/// Where this contract's clone with salt is, or would be: a contract finds what it cloned again
+/// by its salt, without keeping it.
+pub fn cloned_at(salt: &[u8]) -> Address {
+    let mut out = [0; 33];
+    unsafe { sys::cloned_at(salt.as_ptr(), salt.len() as u32, out.as_mut_ptr()) };
+
+    Address::decode(&out).unwrap_or_else(|| abort("unreadable address"))
+}
+
 /// Whether to's code keeps from's storage layout: every namespace from's code declares is
 /// declared by to's too, with the same kind, or retired, the rule an upgrade's new code is held
 /// to. What a proxy checks before it points at a new implementation.

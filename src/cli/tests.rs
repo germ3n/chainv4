@@ -939,6 +939,72 @@ mod send {
         running.stop();
     }
 
+    #[cfg(all(feature = "dex", feature = "evm"))]
+    #[test]
+    fn the_dexes_deploy_trade_add_and_take_out_from_the_cli() {
+        use crate::cli::dex::{DexAction, DexArgs, dex};
+
+        let running = Running::start(true);
+        let node = format!("http://{}", running.api);
+        let me = DevAuthority::dev_keypair().public().address();
+        let hash = crate::structs::hash::HashType::default_chain();
+        let nonce = |node: &str| -> u64 { serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap() };
+        let run = |action: DexAction, evm: bool, contract: Option<Address>, router: Option<String>| dex(DexArgs { action, node: node.clone(), tls: Default::default(), key: None, evm, dex: contract, router });
+        let read = |contract: &Address, function: &str, args: serde_json::Value| -> serde_json::Value {
+            let body = serde_json::json!({ "contract": contract.to_string(), "function": function, "args": args });
+            serde_json::from_str(&ureq::post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap()
+        };
+
+        // A token to trade, then the native DEX, deployed and set up.
+        let dir = TempDir::new("dex");
+        let source = dir.0.join("token.lua");
+        fs::write(&source, include_str!("../../contracts/lua/token.lua")).unwrap();
+        let token = deployed_at(&me, nonce(&node), hash);
+        send(running.args(TxArgs::Deploy { lua: Some(source), wasm: None, evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
+        let start = nonce(&node);
+        run(DexAction::Deploy, false, None, None).unwrap();
+        let contract = deployed_at(&me, start + 1, hash);
+        assert_eq!(read(&contract, "template", serde_json::json!([]))["values"][0]["value"], deployed_at(&me, start, hash).to_string());
+
+        // Opened by its first deposit, then traded both ways, then half taken out.
+        let (coin, token_text) = ("coin".to_string(), token.to_string());
+        run(DexAction::Add { a: coin.clone(), b: token_text.clone(), amount_a: u256::new(1_000_000), amount_b: u256::new(4_000_000), slippage: 0.5 }, false, Some(contract), None).unwrap();
+        run(DexAction::Quote { from: coin.clone(), to: token_text.clone(), amount: u256::new(10_000) }, false, Some(contract), None).unwrap();
+        let held = |owner: &Address| read(&token, "balance_of", serde_json::json!([{ "type": "address", "value": owner.to_string() }]))["values"][0]["value"].as_str().unwrap().parse::<u128>().unwrap();
+        let before = held(&me);
+        run(DexAction::Swap { from: coin.clone(), to: token_text.clone(), amount: u256::new(10_000), slippage: 1.0 }, false, Some(contract), None).unwrap();
+        assert_eq!(held(&me) - before, crate::dex::amount_out(u256::new(10_000), u256::new(1_000_000), u256::new(4_000_000)).unwrap().as_u128());
+        run(DexAction::Swap { from: token_text.clone(), to: coin.clone(), amount: u256::new(20_000), slippage: 1.0 }, false, Some(contract), None).unwrap();
+        let pool = read(&contract, "pool", serde_json::json!([{ "type": "address", "value": crate::dex::COIN.to_string() }, { "type": "address", "value": token_text }]));
+        let share: Address = pool["values"][2]["value"].as_str().unwrap().parse().unwrap();
+        let shares = read(&share, "balance_of", serde_json::json!([{ "type": "address", "value": me.to_string() }]))["values"][0]["value"].as_str().unwrap().parse::<u128>().unwrap();
+        run(DexAction::Remove { a: coin.clone(), b: token_text.clone(), shares: u256::new(shares / 2) }, false, Some(contract), None).unwrap();
+        let left = read(&share, "balance_of", serde_json::json!([{ "type": "address", "value": me.to_string() }]))["values"][0]["value"].as_str().unwrap().parse::<u128>().unwrap();
+        assert_eq!(left, shares - shares / 2);
+        let none = run(DexAction::Swap { from: coin.clone(), to: Address::Contract([9; 32]).to_string(), amount: u256::new(1), slippage: 1.0 }, false, Some(contract), None);
+        assert!(none.unwrap_err().to_string().contains("no pool"));
+
+        // The EVM DEX: WDEV, the factory and the router; an ERC-20 against the coin.
+        let start = nonce(&node);
+        run(DexAction::Deploy, true, None, None).unwrap();
+        let router = crate::vm::evm::create_address(&me, start + 2);
+        let Address::Evm(router_bytes) = router else { unreachable!() };
+        let router = crate::structs::hex::to_hex(&router_bytes);
+        let bin = dir.0.join("Token.bin");
+        let supply = super::super::evm::encode("(string,string,uint256)", &["T".into(), "T".into(), "1000000000000000000000".into()]).unwrap();
+        fs::write(&bin, crate::structs::hex::to_hex(&[crate::structs::hex::from_hex(&format!("0x{}", include_str!("../../contracts/evm/Token.bin").trim())).unwrap(), supply].concat())).unwrap();
+        let erc20 = crate::vm::evm::create_address(&me, nonce(&node));
+        send(running.args(TxArgs::Deploy { lua: None, wasm: None, evm: Some(bin), constructor: None, constructor_args: Vec::new() })).unwrap();
+        let erc20 = erc20.to_string();
+        run(DexAction::Add { a: erc20.clone(), b: coin.clone(), amount_a: u256::new(3_000_000), amount_b: u256::new(1_000_000), slippage: 0.5 }, true, None, Some(router.clone())).unwrap();
+        run(DexAction::Swap { from: coin.clone(), to: erc20.clone(), amount: u256::new(5_000), slippage: 1.0 }, true, None, Some(router.clone())).unwrap();
+        run(DexAction::Swap { from: erc20.clone(), to: coin.clone(), amount: u256::new(9_000), slippage: 1.0 }, true, None, Some(router.clone())).unwrap();
+        run(DexAction::Pools, true, None, Some(router.clone())).unwrap();
+        let refused = run(DexAction::Swap { from: token.to_string(), to: coin, amount: u256::new(1), slippage: 1.0 }, true, None, Some(router));
+        assert!(refused.is_err(), "a native token is no ERC-20 on the EVM DEX");
+        running.stop();
+    }
+
     #[cfg(all(feature = "swap", feature = "sha256", feature = "ethereum"))]
     #[test]
     fn a_swap_between_chainv4_and_an_evm_chain_locks_checks_and_claims_both_legs() {

@@ -236,6 +236,8 @@ pub struct Wallet {
     faucet: Option<serde_json::Value>,
     /// The swap contract the node names in GET /status, if it names one.
     swap_contract: Option<String>,
+    /// The DEX, and the EVM DEX's router, the node names in GET /status.
+    dex: (Option<String>, Option<String>),
     wake: egui::Context,
     asked_status: Option<f64>,
     asked_history: f64,
@@ -282,6 +284,7 @@ impl Wallet {
             },
             faucet: None,
             swap_contract: None,
+            dex: (None, None),
             wake: creation.egui_ctx.clone(),
             asked_status: None,
             asked_history: 0.0,
@@ -361,6 +364,7 @@ impl Wallet {
                 (Ask::Status, Ok(value)) => {
                     self.faucet = value.get("faucet").filter(|faucet| !faucet.is_null()).cloned();
                     self.swap_contract = value["swap"]["contract"].as_str().map(str::to_string);
+                    self.dex = (value["dex"]["contract"].as_str().map(str::to_string), value["dex"]["router"].as_str().map(str::to_string));
 
                     if let (Some(symbol), Some(decimals)) = (value["coin"]["symbol"].as_str(), value["coin"]["decimals"].as_u64()) {
                         self.coin = Coin {
@@ -370,7 +374,11 @@ impl Wallet {
                     }
                 }
                 (Ask::Contract(_) | Ask::Call(_) | Ask::Read(_), _) => self.views.answered(&ask, &result, &self.settings.contracts),
+                #[cfg(feature = "dex")]
+                (Ask::Rpc(body), _) if self.views.trade.answered_rpc(body, &result) => {}
                 (Ask::Rpc(body), _) => self.views.dapp.answered(body, &result),
+                #[cfg(feature = "dex")]
+                (Ask::Named { .. }, _) => self.views.trade.events(&result),
                 (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
                 (Ask::Offer(_) | Ask::Submit(_), _) => {
                     if let Some(sent) = self.views.send.answered(&ask, &result, now) {
@@ -424,13 +432,19 @@ impl Wallet {
             self.node.ask(ask);
         }
 
-        #[cfg_attr(not(feature = "swap"), allow(unused_mut))]
+        #[cfg_attr(not(any(feature = "swap", feature = "dex")), allow(unused_mut))]
         let mut wanted = self.views.wanted_names();
 
         // The swap name, proven, for new offers to find the default swap contract by.
         #[cfg(feature = "swap")]
         if self.page == views::Page::Swaps {
             wanted.extend(views::swap_name(&self.chain));
+        }
+
+        // The DEX's name, proven, for the Trade page to find it by.
+        #[cfg(feature = "dex")]
+        if self.page == views::Page::Trade {
+            wanted.extend(views::dex_name(&self.chain));
         }
 
         for ask in self.chain.names_due(&wanted, time) {
@@ -772,6 +786,7 @@ impl eframe::App for Wallet {
                             wake: &self.wake,
                             faucet: self.faucet.as_ref(),
                             swap_contract: self.swap_contract.as_deref(),
+                            dex: (self.dex.0.as_deref(), self.dex.1.as_deref()),
                         };
                         views::show(ui, &mut ctx, &mut self.views);
                     });

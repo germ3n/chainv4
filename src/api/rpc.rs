@@ -182,7 +182,21 @@ async fn answer(api: &Arc<Api>, method: &str, params: &[Value]) -> Answer {
                 return Err(failed(&err.to_string(), &ran.reverted));
             }
 
-            Ok(quantity(u256::from(estimate(api, &call, ran.gas_used))))
+            // What it used may be too little to succeed with, as a call inside another gets
+            // 63/64 of what is left: tried at that, and raised until a run succeeds.
+            let mut needed = ran.gas_used;
+
+            for _ in 0..16 {
+                let tried = simulate(api, Call { gas: Some(needed), ..call.clone() }).await?;
+
+                if tried.result.is_ok() {
+                    break;
+                }
+
+                needed = needed.saturating_add(needed / 4).max(needed + 1);
+            }
+
+            Ok(quantity(u256::from(estimate(api, &call, needed))))
         }
         "eth_sendRawTransaction" => {
             let raw = bytes(param(0), "the transaction")?;
