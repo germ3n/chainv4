@@ -63,6 +63,9 @@ a proxy, and only through it:
 - **HTTP:** `http://host:port`. Every request goes through a CONNECT tunnel, https or not.
 - **Orbot** fills in `socks5h://127.0.0.1:9050`: Orbot's SOCKS port on a phone, and Tor's own on a
   desktop. Start Orbot, or Tor, first. Tor Browser's Tor listens on 9150 instead.
+- **I2P** fills in `socks5h://127.0.0.1:4447`, i2pd's SOCKS port, which reaches a node at a `.i2p`
+  address. The Java I2P router has an HTTP proxy instead: type `http://127.0.0.1:4444`. A node
+  with an ordinary address is reached only through an I2P outproxy, slowly, if at all.
 - **Off** goes straight to the node again.
 
 **It fails closed.** While a proxy is set, nothing goes out any other way. With the proxy stopped,

@@ -162,7 +162,7 @@ pub fn beside(ui: &mut Ui, button: impl FnOnce(&mut Ui) -> bool, field: impl FnO
 }
 
 /// Where a proxy is set, in an app's settings: a field with Use, which takes what is typed, then
-/// Orbot, which takes Orbot's port on the device, and Off. Gives the setting to keep, empty to go
+/// Orbot, which takes Orbot's port on the device, I2P, i2pd's, and Off. Gives the setting to keep, empty to go
 /// direct, once one is chosen that reads as a proxy; why one does not waits in trouble. set is the
 /// setting in use. In the browser, which makes every request itself, it says where to set one.
 pub fn proxy(ui: &mut Ui, palette: &Palette, typed: &mut String, trouble: &mut Option<String>, set: &str) -> Option<String> {
@@ -177,7 +177,7 @@ pub fn proxy(ui: &mut Ui, palette: &Palette, typed: &mut String, trouble: &mut O
     let shown = crate::net::Proxy::parse(set).map(|proxy| proxy.shown().to_string());
     note(ui, match shown {
         Ok(shown) => format!("Every request goes through the proxy at {shown}, and only through it: while it is down, nothing is sent."),
-        Err(_) => "None: requests go straight to the node. Set one to send them all through it, such as Orbot's to reach the node over Tor.".to_string(),
+        Err(_) => "None: requests go straight to the node. Set one to send them all through it, such as Orbot's to reach the node over Tor, or I2P's for a .i2p node.".to_string(),
     });
     ui.add_space(4.0);
 
@@ -198,6 +198,13 @@ pub fn proxy(ui: &mut Ui, palette: &Palette, typed: &mut String, trouble: &mut O
     ui.horizontal(|ui| {
         if quiet(ui, palette, "Orbot").on_hover_text("Orbot's SOCKS port on this device, which is Tor's own too").clicked() {
             chosen = Some(crate::net::Proxy::ORBOT.to_string());
+        }
+
+        if quiet(ui, palette, "I2P")
+            .on_hover_text("i2pd's SOCKS port on this device, reaching .i2p nodes; for the Java I2P router, type its HTTP proxy, http://127.0.0.1:4444")
+            .clicked()
+        {
+            chosen = Some(crate::net::Proxy::I2P.to_string());
         }
 
         if !set.is_empty() && quiet(ui, palette, "Off").on_hover_text("Go straight to the node").clicked() {

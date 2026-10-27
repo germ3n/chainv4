@@ -65,7 +65,9 @@ explorer/build-android.sh --install       # an APK for arm64, put on the device 
 
 **Settings → Proxy** works as the wallet's (see [Through a proxy](wallet.md#through-a-proxy)):
 `socks5h://host:port`, with `socks5://` read as `socks5h://` so the proxy looks up names too, or
-`http://host:port`. **Orbot** fills in `socks5h://127.0.0.1:9050`, and **Off** goes direct.
+`http://host:port`. **Orbot** fills in `socks5h://127.0.0.1:9050`, **I2P** i2pd's
+`socks5h://127.0.0.1:4447` (the Java I2P router's HTTP proxy is `http://127.0.0.1:4444`), and
+**Off** goes direct.
 - **Everything goes through it:** every request and the event stream. With the proxy down,
   nothing is sent: requests fail with `through the proxy at …`, the stream reports itself closed,
   and the explorer polls in vain until the proxy is back.

@@ -13,6 +13,7 @@ fn proxies_read_as_written_and_socks5_always_resolves_through_the_proxy() {
     let read = |text: &str| Proxy::parse(text).map(|proxy| proxy.as_str().to_string());
 
     assert_eq!(read(Proxy::ORBOT), Ok("socks5h://127.0.0.1:9050".to_string()));
+    assert_eq!(read(Proxy::I2P), Ok("socks5h://127.0.0.1:4447".to_string()), "i2pd's, a preset as Orbot's is");
     assert_eq!(read(" socks5://127.0.0.1:9050/ "), Ok("socks5h://127.0.0.1:9050".to_string()), "never a lookup outside the proxy");
     assert_eq!(read("SOCKS5H://tor.lan:9150"), Ok("socks5h://tor.lan:9150".to_string()));
     assert_eq!(read("http://10.0.0.2:8118"), Ok("http://10.0.0.2:8118".to_string()));
