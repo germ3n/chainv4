@@ -218,8 +218,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
             ui.add_space(8.0);
 
             match std::str::from_utf8(message).ok().filter(|text| !text.chars().any(|c| c.is_control() && !c.is_whitespace())) {
-                Some(text) => super::code(ui, &palette, text),
-                None => super::code(ui, &palette, &to_hex(message)),
+                Some(text) => super::text_block(ui, &palette, text),
+                None => super::text_block(ui, &palette, &to_hex(message)),
             }
         }
         Asked::Typed { data, json, .. } => {
@@ -244,7 +244,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
             }
 
             ui.add_space(6.0);
-            super::code(ui, &palette, &serde_json::to_string_pretty(&json["message"]).unwrap_or_default());
+            super::text_block(ui, &palette, &serde_json::to_string_pretty(&json["message"]).unwrap_or_default());
         }
     });
 

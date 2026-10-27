@@ -140,7 +140,7 @@ other pages explain each part in full; this one is the short list to keep in min
   [Typed data (EIP-712)](crypto.md#typed-data-eip-712).
 - **An offline signer has no network client at all.** The wallet's role is picked once per
   install. A signer's requests fail before they start, and it polls nothing, nor does a new install
-  before it picks its role. Transactions travel as QR codes: `CV4:1:` and base45. See
+  before it picks its role. Transactions travel as QR codes: Uniform Resources, `ur:chainv4-…`, animated when long. See
   [Signing offline](wallet.md#signing-offline).
 - **The apps' proxy fails closed.** A proxy set under Settings in the wallet or the explorer
   carries that app's every request, on the desktop and Android, and while it is down nothing goes
@@ -465,6 +465,16 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   it up as it drains; `GET /faucet` says what it holds.
 - **Work is bound to the window it names,** ten minutes, and the faucet takes the last one too: a
   clock far off fails the work.
+
+## The signer's codes
+
+- **The codes are URs now, and only URs.** `CV4:1:` and its parts are gone: a signer or sender
+  from before cannot read today's codes, nor today's theirs. Update both devices together.
+- **A third longer, but never a full round to wait.** UR's bytewords take two characters a byte,
+  against base45's one and a half, so one code holds 300 bytes where it held about 400. Long ones
+  animate fountain-coded parts, of which any enough will do.
+- **Inside, the chain's own encoding.** Only the transport changed: what is read is checked as
+  strictly as before, and anything past a message's encoding is refused.
 
 ## MetaMask's QR hardware wallet
 

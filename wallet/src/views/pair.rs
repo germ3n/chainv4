@@ -22,7 +22,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         keys: holder.publics.clone(),
     };
     let addresses = holder.addresses();
-    let text = Message::Pair(pairing).to_text();
+    let message = Message::Pair(pairing);
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &holder.name);
@@ -31,7 +31,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
                 .color(palette.soft),
         );
         ui.add_space(10.0);
-        super::code(ui, &palette, &text);
+        super::code(ui, &palette, &message);
         ui.add_space(10.0);
 
         for address in &addresses {

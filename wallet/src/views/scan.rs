@@ -1,15 +1,14 @@
 //! Reading what the other device shows: its QR codes live, with the camera, as fast as it shows
 //! them; or a photo of its code, picked as an image, a file holding the code or its text, or the
-//! text pasted. A message shown as parts is read a part at a time, in any order, until every one
-//! is in: the other device cycles through them, and the camera picks each up as it comes round.
-//! MetaMask's codes, Uniform Resources, read the same ways: its animated ones are fountain-coded,
-//! so any parts enough to cover the request will do.
+//! text pasted. Every code is a Uniform Resource, this wallet's and MetaMask's alike; one too long
+//! for a code animates through fountain-coded parts, and any enough of them, in any order, make
+//! the message.
 //!
 //! The camera's frames are searched off the UI thread, where there are threads, the newest at a
 //! time; in the browser, between frames.
 
 use {
-    crate::airgap::{self, Assembly, Code, Message},
+    crate::airgap::{self, Message},
     crate::hardware,
     crate::theme::{self, Palette},
     chainv4_ui::camera::{Camera, Frame, State},
@@ -33,10 +32,8 @@ enum Read {
 #[derive(Default)]
 pub struct Scan {
     inbox: Arc<Mutex<Option<Read>>>,
-    /// The parts of a message read so far.
-    assembly: Assembly,
-    /// The parts of a MetaMask request read so far.
-    metamask: hardware::Assembly,
+    /// The parts of an animated code read so far.
+    assembly: hardware::Assembly,
     pasted: String,
     reading: bool,
     error: Option<String>,
@@ -170,7 +167,7 @@ impl Scan {
             ui,
             |ui| theme::quiet(ui, palette, "Read").clicked(),
             |ui, width| {
-                ui.add(egui::TextEdit::singleline(&mut self.pasted).hint_text("CV4:1:… or ur:…").font(egui::TextStyle::Monospace).desired_width(width));
+                ui.add(egui::TextEdit::singleline(&mut self.pasted).hint_text("ur:…").font(egui::TextStyle::Monospace).desired_width(width));
             },
         );
 
@@ -246,7 +243,7 @@ impl Scan {
             live.last = text.clone();
 
             // A code of something else in view: said, and the camera keeps looking.
-            if !text.starts_with(airgap::PREFIX) && !airgap::is_ur(&text) {
+            if !airgap::is_ur(&text) {
                 self.error = Some("That QR code is not one of this wallet's, nor MetaMask's.".to_string());
 
                 continue;
@@ -300,25 +297,11 @@ impl Scan {
 
     /// How far a message in parts got.
     fn progress(&self, ui: &mut Ui, palette: &Palette) {
-        if let Some((read, count)) = self.metamask.progress() {
-            ui.colored_label(palette.accent, format!("Reading MetaMask's code: {read} of {count} parts in. Keep it in view; any parts will do."));
+        if let Some((read, count)) = self.assembly.progress() {
+            ui.colored_label(palette.accent, format!("Read {read} of {count} parts. Keep it in view: any parts will do."));
             ui.add(egui::ProgressBar::new(read as f32 / count.max(1) as f32).desired_height(6.0));
             ui.add_space(6.0);
-
-            return;
         }
-
-        let (count, missing) = self.assembly.missing();
-
-        if count == 0 {
-            return;
-        }
-
-        let read = count - missing.len();
-        let next = missing.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-        ui.colored_label(palette.accent, format!("Read {read} of {count} parts. Still to read: {next}."));
-        ui.add(egui::ProgressBar::new(read as f32 / count as f32).desired_height(6.0));
-        ui.add_space(6.0);
     }
 
     /// Says why what was read will not do.
@@ -331,54 +314,22 @@ impl Scan {
         self.error = Some(format!("That is {}, not {wanted}.", got.name()));
     }
 
-    /// Takes a code's text: this wallet's, whole or a part, or MetaMask's, whole or a part. Gives
+    /// Takes a code's text, whole or a part of an animated one: this wallet's or MetaMask's. Gives
     /// the message once it is all in.
     fn read_text(&mut self, text: &str) -> Option<Message> {
-        if airgap::is_ur(text) {
-            self.error = None;
-            let read = self
-                .metamask
-                .add(text, hardware::REQUEST_TYPE)
-                .and_then(|cbor| cbor.map(|cbor| hardware::SignRequest::from_cbor(&cbor)).transpose());
+        self.error = None;
+        let read = match airgap::is_ur(text) {
+            true => self.assembly.add(text).and_then(|done| done.map(|(kind, bytes)| Message::from_ur(&kind, &bytes)).transpose()),
+            false => Err("not a code of this wallet's, nor MetaMask's: those start ur:".to_string()),
+        };
 
-            return match read {
-                Ok(request) => request.map(|request| Message::MetaMask(Box::new(request))),
-                Err(why) => {
-                    self.error = Some(why);
-
-                    None
-                }
-            };
-        }
-
-        match Code::from_text(text) {
-            Ok(code) => self.took(code),
+        match read {
+            Ok(message) => message,
             Err(why) => {
                 self.error = Some(why);
 
                 None
             }
-        }
-    }
-
-    /// Takes a code read: a whole message, or a part, which gives the message once it is the last.
-    fn took(&mut self, code: Code) -> Option<Message> {
-        self.error = None;
-
-        match code {
-            Code::Whole(message) => {
-                self.assembly = Assembly::default();
-
-                Some(*message)
-            }
-            Code::Part(part) => match self.assembly.add(part) {
-                Ok(message) => message,
-                Err(why) => {
-                    self.error = Some(why);
-
-                    None
-                }
-            },
         }
     }
 

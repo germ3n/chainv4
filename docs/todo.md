@@ -417,9 +417,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Messages too long for one code go as parts,** put back together in any order. The screen
   cycles through them, about three a second, and the other device's live camera reads each as it
   comes round: getUserMedia in the browser, Camera2 on Android, nokhwa on the desktop.
-- [ ] **Fountain-coded parts.** Parts cycle as they are; Uniform Resources' fountain codes, as
-  Keystone and MetaMask show, would let a camera that missed one part read any later ones
-  instead.
+- [x] **Fountain-coded parts.** The signer's codes are Uniform Resources, and a long one animates
+  fountain-coded parts, of which a camera needs any enough.
 - [ ] **The explorer pins genesis on first use.** It should also take a genesis id to trust from
   the person, before it meets a node.
 - [ ] **Proofs are against the tip only.** The node keeps one state tree, so it cannot prove what
@@ -625,8 +624,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **The signer for other chains' wallets, by UR.** Bitcoin's PSBTs (`crypto-psbt`), as Sparrow
   and BlueWallet ask, and Keystone's types for Solana, Cosmos and the rest, would each need their
   derivation paths and signing beside Ethereum's.
-- [ ] **This wallet's own codes as URs.** CV4's base45 packs about a third denser than UR's
-  bytewords, but URs are fountain-coded, so a camera that missed a part needs no full round.
+- [x] **This wallet's own codes as URs.** `ur:chainv4-pairing`, `-sign-request` and `-signed`,
+  carrying the chain's own encoding; CV4 and base45 are gone.
 - [ ] **Hardware wallets reach the wallet through MetaMask alone,** and the desktop and Android apps
   reach none. WalletConnect, or USB straight to the device, would.
 - [ ] **The wallet keeps its words as plain strings while unlocked.** The vault seals them at rest,

@@ -34,7 +34,7 @@ enum Step {
     /// Read, to check before signing; why it cannot be signed, if it cannot.
     Review { request: Box<Request>, trouble: Option<String> },
     /// Signed: the code for the sender.
-    Signed { text: String },
+    Signed { message: Box<Message> },
     /// MetaMask's request, read, to check before signing; why it cannot be signed, if it cannot.
     MetaMask { request: Box<SignRequest>, trouble: Option<String> },
     /// Signed for MetaMask: the code it reads back.
@@ -64,13 +64,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                 }
             });
         }
-        Step::Signed { text } => {
-            let text = text.clone();
+        Step::Signed { message } => {
+            let message = message.clone();
             theme::card(ui, &palette, |ui| {
                 theme::caps(ui, &palette, "Signed");
                 ui.label(RichText::new("Show this to the sender: it checks this is what it asked for, and sends it.").color(palette.soft));
                 ui.add_space(10.0);
-                super::code(ui, &palette, &text);
+                super::code(ui, &palette, &message);
                 ui.add_space(12.0);
 
                 if theme::primary(ui, &palette, "Sign another", true).clicked() {
@@ -197,7 +197,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     .and_then(|key| airgap::sign(request, key));
 
                 match signed {
-                    Ok(signed) => next = Some(Step::Signed { text: Message::Signed(signed).to_text() }),
+                    Ok(signed) => next = Some(Step::Signed { message: Box::new(Message::Signed(signed)) }),
                     Err(why) => *trouble = Some(why),
                 }
             }
@@ -318,7 +318,7 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     }
                 }
 
-                super::code(ui, &palette, &serde_json::to_string_pretty(&json["message"]).unwrap_or_default());
+                super::text_block(ui, &palette, &serde_json::to_string_pretty(&json["message"]).unwrap_or_default());
             }
             Ok(Asked::Message(message)) => {
                 super::row(ui, &palette, "Signs", |ui| {

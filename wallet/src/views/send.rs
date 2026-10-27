@@ -103,7 +103,7 @@ enum Step {
     /// Priced; warning is why a dry run on the node says it would fail, if it does.
     Review { draft: Draft, fee: FeeOffer, warning: Option<String> },
     /// Asked of the offline signer, as the code shown, until its signed code is read back.
-    Offline { draft: Draft, request: Box<Request>, text: String, scan: Box<Scan> },
+    Offline { draft: Draft, request: Box<Request>, message: Box<Message>, scan: Box<Scan> },
     /// Asked of MetaMask, until it signs or refuses.
     MetaMask { draft: Draft, fee: FeeOffer, genesis: Hash, signed: Signed },
     /// Submitted, signed with the fee.
@@ -658,7 +658,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
                         };
                         state.step = Step::Offline {
                             draft: draft.clone(),
-                            text: Message::Sign(request.clone()).to_text(),
+                            message: Box::new(Message::Sign(request.clone())),
                             request: Box::new(request),
                             scan: Box::default(),
                         };
@@ -686,7 +686,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
 /// is the very transaction asked for, signed by the key asked.
 fn offline(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     let palette = *ctx.palette;
-    let Step::Offline { draft, request, text, scan } = &mut state.step else {
+    let Step::Offline { draft, request, message, scan } = &mut state.step else {
         return;
     };
     let mut next = None;
@@ -695,7 +695,7 @@ fn offline(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         theme::caps(ui, &palette, "Sign it on the signer");
         ui.label(RichText::new(format!("{} to {}: on the offline signer, open Sign and read this code.", draft.what, format::short(&draft.to))).color(palette.soft));
         ui.add_space(10.0);
-        super::code(ui, &palette, text);
+        super::code(ui, &palette, message);
         ui.add_space(14.0);
         theme::caps(ui, &palette, "Then read what it signed");
 

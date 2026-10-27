@@ -249,7 +249,8 @@ fn an_animated_request_is_read_from_any_parts_enough_in_any_order() {
             continue;
         }
 
-        if let Some(cbor) = assembly.add(&part.to_ascii_uppercase(), REQUEST_TYPE).unwrap() {
+        if let Some((kind, cbor)) = assembly.add(&part.to_ascii_uppercase()).unwrap() {
+            assert_eq!(kind, REQUEST_TYPE);
             read = Some(cbor);
 
             break;
@@ -262,9 +263,9 @@ fn an_animated_request_is_read_from_any_parts_enough_in_any_order() {
     assert_eq!(read, Some(cbor.clone()));
 
     // A whole one, and one of another type.
-    assert_eq!(assembly.add(&ur(REQUEST_TYPE, &cbor), REQUEST_TYPE).unwrap(), Some(cbor));
-    assert!(assembly.add("ur:crypto-psbt/abc", REQUEST_TYPE).unwrap_err().contains("crypto-psbt"));
-    assert!(assembly.add("CV4:1:PAIR:XYZ", REQUEST_TYPE).is_err());
+    assert_eq!(assembly.add(&ur(REQUEST_TYPE, &cbor)).unwrap(), Some((REQUEST_TYPE.to_string(), cbor)));
+    assert!(assembly.add("ur:crypto-psbt/abc").is_err(), "not bytewords");
+    assert!(assembly.add("CV4:1:PAIR:XYZ").is_err());
 }
 
 /// Requests as MetaMask's QR keyring makes them, with Keystone's own library: an EIP-1559
@@ -290,7 +291,8 @@ fn metamasks_own_requests_read_and_sign_for_the_account_it_asked() {
             .iter()
             .enumerate()
             .filter(|(index, _)| parts.len() == 3 || (*index >= 4 && index % 3 != 0))
-            .find_map(|(_, part)| assembly.add(&part.to_ascii_uppercase(), REQUEST_TYPE).unwrap())
+            .find_map(|(_, part)| assembly.add(&part.to_ascii_uppercase()).unwrap())
+            .map(|(_, bytes)| bytes)
             .unwrap_or_else(|| panic!("{name}: every part read"));
         let read = SignRequest::from_cbor(&cbor).unwrap();
 

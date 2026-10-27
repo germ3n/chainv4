@@ -84,22 +84,7 @@ fn encoded(image: &image::GrayImage, format: image::ImageFormat) -> Vec<u8> {
 }
 
 #[test]
-fn base45_reads_and_writes_as_rfc_9285_does() {
-    for (bytes, text) in [(&b"AB"[..], "BB8"), (b"Hello!!", "%69 VD92EX0"), (b"base-45", "UJCLQE7W581"), (b"ietf!", "QED8WEX0"), (b"", "")] {
-        assert_eq!(base45::encode(bytes), text);
-        assert_eq!(base45::decode(text).as_deref(), Some(bytes));
-    }
-
-    let every: Vec<u8> = (0..=255).chain((0..=255).rev()).collect();
-
-    assert_eq!(base45::decode(&base45::encode(&every)), Some(every));
-    assert_eq!(base45::decode("GGW"), None, "65535 is the most three characters may hold");
-    assert_eq!(base45::decode("ab"), None, "lower case is not in the alphabet");
-    assert_eq!(base45::decode("A"), None, "one character holds nothing");
-}
-
-#[test]
-fn every_message_reads_back_from_its_text_and_fits_a_dense_code() {
+fn every_message_reads_back_from_its_ur_and_a_short_one_fits_one_code() {
     let key = key();
     let pairing = Pairing {
         name: "Main".to_string(),
@@ -107,30 +92,43 @@ fn every_message_reads_back_from_its_text_and_fits_a_dense_code() {
     };
     let signed = sign(&transfer(&key), &key).unwrap();
 
-    for message in [Message::Pair(pairing), Message::Sign(transfer(&key)), Message::Sign(token_transfer(&key)), Message::Signed(signed)] {
+    for (message, kind) in [
+        (Message::Pair(pairing), "UR:CHAINV4-PAIRING/"),
+        (Message::Sign(transfer(&key)), "UR:CHAINV4-SIGN-REQUEST/"),
+        (Message::Sign(token_transfer(&key)), "UR:CHAINV4-SIGN-REQUEST/"),
+        (Message::Signed(signed), "UR:CHAINV4-SIGNED/"),
+    ] {
         let text = message.to_text();
 
+        assert!(text.starts_with(kind), "{text}");
         assert_eq!(Message::from_text(&text), Ok(message.clone()));
-        assert_eq!(Message::from_text(&format!("  {text}\r\n")), Ok(message.clone()), "pasted, with what pasting brings");
-        assert!(!text.ends_with(' '), "base45 never ends in its space");
+        assert_eq!(Message::from_text(&format!("  {}\r\n", text.to_ascii_lowercase())), Ok(message.clone()), "pasted, in either case, with what pasting brings");
         assert!(text.bytes().all(|byte| b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:".contains(&byte)), "all in a QR code's alphanumeric mode");
-        assert!(text.len() < 700, "{} is {} characters", message.name(), text.len());
+        assert_eq!(Message::from_ur(message.ur_type(), &message.bytes()), Ok(message.clone()));
+        assert!(message.bytes().len() <= FRAGMENT, "{} fits one code: {} bytes", message.name(), message.bytes().len());
     }
 }
 
 #[test]
-fn text_that_is_not_exactly_one_message_is_refused() {
-    let text = Message::Sign(transfer(&key())).to_text();
-    // The encoding comes after the third colon; base45 has colons of its own.
-    let encoded = text.splitn(4, ':').nth(3).unwrap();
-    let mut longer = base45::decode(encoded).unwrap();
+fn bytes_that_are_not_exactly_one_message_are_refused() {
+    let message = Message::Sign(transfer(&key()));
+    let mut longer = message.bytes();
     longer.push(0);
 
-    assert!(Message::from_text(&format!("CV4:1:SIGN:{}", base45::encode(&longer))).unwrap_err().contains("more in it"));
-    assert!(Message::from_text(&format!("CV4:1:SIGN:{}", &encoded[..encoded.len() - 3])).is_err(), "cut short");
-    assert!(Message::from_text(&text.replace("CV4:1:", "CV4:2:")).unwrap_err().contains("not a chainv4"), "another version");
-    assert!(Message::from_text(&text.replace(":SIGN:", ":SEND:")).unwrap_err().contains("does not know"));
+    assert!(Message::from_ur(SIGN_TYPE, &longer).unwrap_err().contains("more in it"));
+    assert!(Message::from_ur(SIGN_TYPE, &message.bytes()[..10]).is_err(), "cut short");
+    assert!(Message::from_ur(PAIR_TYPE, &message.bytes()).is_err(), "a request read as a pairing");
+    assert!(Message::from_ur("chainv4-send", &message.bytes()).unwrap_err().contains("does not read"));
+
+    let text = message.to_text();
+
+    assert!(Message::from_text(&text[..text.len() - 4]).is_err(), "its checksum caught");
+    assert!(Message::from_text("CV4:1:SIGN:ABC").unwrap_err().contains("start ur:"), "the codes from before");
     assert!(Message::from_text("https://example.com").is_err());
+
+    let part = ur::Encoder::new(&long(&key()).bytes(), FRAGMENT, SIGN_TYPE).unwrap().next_part().unwrap();
+
+    assert!(Message::from_text(&part).unwrap_err().contains("one part"));
 }
 
 #[test]
@@ -143,9 +141,9 @@ fn codes_read_off_photos_and_files_alike() {
     let screenshot = encoded(&photo(&text, 6, 0), image::ImageFormat::Png);
     let camera = encoded(&photo(&text, 18, 3_000), image::ImageFormat::Jpeg);
 
-    assert_eq!(read(&screenshot), Ok(Code::Whole(Box::new(message.clone()))));
-    assert_eq!(read(&camera), Ok(Code::Whole(Box::new(message.clone()))));
-    assert_eq!(read(text.as_bytes()), Ok(Code::Whole(Box::new(message))));
+    assert_eq!(read(&screenshot), Ok(message.clone()));
+    assert_eq!(read(&camera), Ok(message.clone()));
+    assert_eq!(read(text.as_bytes()), Ok(message));
 
     let other = encoded(&photo("https://example.com", 6, 0), image::ImageFormat::Png);
     let blank = encoded(&image::GrayImage::from_pixel(400, 300, image::Luma([200])), image::ImageFormat::Png);
@@ -255,105 +253,24 @@ fn long(key: &Keypair) -> Message {
 }
 
 #[test]
-fn a_message_too_long_for_one_code_goes_as_parts_read_in_any_order() {
+fn a_long_message_reads_off_a_camera_from_any_parts_enough() {
     let message = long(&key());
-    let text = message.to_text();
-    assert_eq!(codes(&Message::Sign(transfer(&key())).to_text()).len(), 1, "a transfer fits one code");
-
-    let codes = codes(&text);
-    assert_eq!(codes.len(), text.len().div_ceil(PART_SIZE));
-    assert!(codes.len() > 2);
-
-    for code in &codes {
-        assert!(code.len() <= PART_SIZE + 32, "each about as long as the rest: {}", code.len());
-        assert!(code.bytes().all(|byte| b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:".contains(&byte)), "and as dense: {code}");
-    }
-
-    // Backwards, the first one read twice: only the last one in gives the message.
-    let mut assembly = Assembly::default();
-    let order = [codes.len() - 1].into_iter().chain((0..codes.len()).rev());
-    let mut seen = std::collections::BTreeSet::new();
-
-    for index in order {
-        let Ok(Code::Part(part)) = Code::from_text(&codes[index]) else {
-            panic!("not a part: {}", codes[index]);
-        };
-        seen.insert(index);
-        let got = assembly.add(part).unwrap();
-
-        match seen.len() == codes.len() {
-            true => assert_eq!(got, Some(message.clone()), "the last one in"),
-            false => {
-                assert_eq!(got, None);
-                assert_eq!(assembly.missing(), (codes.len(), (1..=codes.len()).filter(|part| !seen.contains(&(part - 1))).collect()));
-            }
-        }
-    }
-
-    assert_eq!(assembly.missing(), (0, Vec::new()), "and it starts afresh after");
-}
-
-#[test]
-fn parts_of_another_message_start_over_and_a_forged_part_is_caught() {
-    let key = key();
-    let first = codes(&long(&key).to_text());
-    let mut other = long(&key);
-
-    if let Message::Sign(request) = &mut other {
-        request.nonce = 99;
-    }
-
-    let second = codes(&other.to_text());
-    let part = |code: &String| match Code::from_text(code) {
-        Ok(Code::Part(part)) => part,
-        other => panic!("not a part: {other:?}"),
-    };
-    let mut assembly = Assembly::default();
-
-    assembly.add(part(&first[0])).unwrap();
-    assembly.add(part(&second[1])).unwrap();
-
-    assert_eq!(assembly.missing(), (second.len(), (1..=second.len()).filter(|index| *index != 2).collect()), "the other's, from scratch");
-
-    // A part whose text was changed, but which still names the whole by the same hash.
-    let mut assembly = Assembly::default();
-    let mut forged = part(&first[1]);
-    forged.text = forged.text.chars().rev().collect();
-
-    for (index, code) in first.iter().enumerate() {
-        let read = if index == 1 { forged.clone() } else { part(code) };
-        let got = assembly.add(read);
-
-        if index + 1 == first.len() {
-            assert!(got.unwrap_err().contains("do not make the message"));
-        }
-    }
-
-    for bad in ["CV4:1:PART:0/3:ABCDEF01:XYZ", "CV4:1:PART:4/3:ABCDEF01:XYZ", "CV4:1:PART:1/1:ABCDEF01:XYZ", "CV4:1:PART:1/3:ABC:XYZ", "CV4:1:PART:1/3:ABCDEF01:", "CV4:1:PART:x/3:ABCDEF01:XYZ"] {
-        assert!(Code::from_text(bad).is_err(), "{bad}");
-    }
-}
-
-#[test]
-fn a_part_reads_off_a_photo_like_a_whole_code() {
-    let codes = codes(&long(&key()).to_text());
-    let photo = encoded(&photo(&codes[1], 14, 2_400), image::ImageFormat::Jpeg);
-
-    assert!(matches!(read(&photo), Ok(Code::Part(Part { index: 2, .. }))));
-}
-
-#[test]
-fn a_message_in_parts_reads_off_a_camera_as_the_display_cycles_through_them() {
-    let message = long(&key());
-    let codes = codes(&message.to_text());
-    let mut assembly = Assembly::default();
+    let bytes = message.bytes();
+    let mut encoder = ur::Encoder::new(&bytes, FRAGMENT, message.ur_type()).unwrap();
+    let parts: Vec<String> = (0..20).map(|_| encoder.next_part().unwrap().to_ascii_uppercase()).collect();
+    let mut assembly = crate::hardware::Assembly::default();
     let mut read = None;
 
-    assert!(codes.len() > 2, "long enough to go as parts");
+    assert!(encoder.fragment_count() > 2, "long enough to animate");
+    assert!(parts.iter().all(|part| part.len() < 700), "each about as long as a code a camera reads well");
 
-    // As a camera sees a screen cycling: frames of 1280 by 720, the code in the middle at about
-    // the size a phone held up to it shows, each part twice, starting midway round.
-    for text in codes.iter().cycle().skip(1).take(codes.len() * 2) {
+    // As a camera sees a screen going through them: frames of 1280 by 720, the code in the middle
+    // at about the size a phone held up to it shows; starting late, and missing every third.
+    for (index, text) in parts.iter().enumerate().skip(1) {
+        if index % 3 == 0 {
+            continue;
+        }
+
         let frame = photo(text, 4, 720);
         let mut wide = image::GrayImage::from_pixel(1_280, 720, image::Luma([150]));
         image::imageops::overlay(&mut wide, &frame, 280, 0);
@@ -361,16 +278,14 @@ fn a_message_in_parts_reads_off_a_camera_as_the_display_cycles_through_them() {
 
         assert_eq!(&found, text);
 
-        if let Code::Part(part) = Code::from_text(&found).unwrap()
-            && let Some(message) = assembly.add(part).unwrap()
-        {
-            read = Some(message);
+        if let Some((kind, bytes)) = assembly.add(&found).unwrap() {
+            read = Some(Message::from_ur(&kind, &bytes).unwrap());
 
             break;
         }
     }
 
-    assert_eq!(read, Some(message), "every part in, in the order they came round");
+    assert_eq!(read, Some(message), "any enough parts, in the order they came");
 
     // A frame with no code in it, or a part cut off, reads as nothing.
     assert_eq!(code_in_frame(640, 480, &vec![150; 640 * 480]), None);

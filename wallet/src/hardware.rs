@@ -497,8 +497,9 @@ pub fn pairing(seed: &Seed) -> Result<String, String> {
     Ok(ur(HDKEY_TYPE, &HdKey::ethereum(&seed.ethereum_account()).to_cbor()?))
 }
 
-/// Reading a UR, whole or in parts, in any order: MetaMask's animated codes are fountain-coded, so
-/// any parts enough to cover the message will do.
+/// Reading a UR, whole or in parts, in any order, of whichever type: this wallet's own codes and
+/// MetaMask's alike. Animated codes are fountain-coded, so any parts enough to cover the message
+/// will do.
 #[derive(Default)]
 pub struct Assembly {
     decoder: ur::Decoder,
@@ -513,21 +514,17 @@ impl std::fmt::Debug for Assembly {
 }
 
 impl Assembly {
-    /// Takes a code's text: a UR of the type wanted, whole or a part. Gives its CBOR once it is
-    /// all in. A part of another message starts over with it.
-    pub fn add(&mut self, text: &str, wanted: &str) -> Result<Option<Vec<u8>>, String> {
+    /// Takes a code's text: a UR, whole or a part. Gives its type and bytes once it is all in. A
+    /// part of another message starts over with it.
+    pub fn add(&mut self, text: &str) -> Result<Option<(String, Vec<u8>)>, String> {
         let lower = text.trim().to_ascii_lowercase();
-        let kind = lower.strip_prefix("ur:").and_then(|rest| rest.split('/').next()).ok_or("not a UR code")?;
-
-        if kind != wanted {
-            return Err(format!("a {kind} code, not the {wanted} this wallet reads here"));
-        }
+        let kind = lower.strip_prefix("ur:").and_then(|rest| rest.split('/').next()).ok_or("not a UR code")?.to_string();
 
         match ur::decode(&lower).map_err(|err| format!("a UR code that does not read: {err:?}"))? {
-            (ur::ur::Kind::SinglePart, cbor) => {
+            (ur::ur::Kind::SinglePart, bytes) => {
                 *self = Assembly::default();
 
-                Ok(Some(cbor))
+                Ok(Some((kind, bytes)))
             }
             (ur::ur::Kind::MultiPart, _) => {
                 let count = lower.split('/').nth(1).and_then(|indices| indices.split_once('-')).and_then(|(_, count)| count.parse().ok());
@@ -549,7 +546,7 @@ impl Assembly {
                         let message = self.decoder.message().map_err(|err| format!("{err:?}"))?;
                         *self = Assembly::default();
 
-                        Ok(message)
+                        Ok(message.map(|bytes| (kind, bytes)))
                     }
                     false => Ok(None),
                 }

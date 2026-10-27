@@ -413,18 +413,22 @@ reads a photo or screenshot of the code, held close enough that the code fills m
 **Open a file** an image or a text file. Every code's text can be copied and pasted instead:
 **Copy as text** under each.
 
-**What the codes hold:** `CV4:1:`, then `PAIR`, `SIGN` or `SIGNED`, then the message's encoding in
-base45, the 45 characters a QR code packs densest. An account's pairing is about 190 characters,
-a transfer's request about 330, a token transfer's about 420, and a signed transfer about 410.
-Text that is not exactly one message, or has anything past its encoding, is refused.
+**What the codes hold:** a Uniform Resource, as MetaMask's and Keystone's are:
+`ur:chainv4-pairing`, `ur:chainv4-sign-request` or `ur:chainv4-signed`, then the message's
+encoding, the chain's own, in bytewords, with a checksum, in capitals, which a QR code packs
+densest. An account's pairing is about 265 characters, a transfer's request about 450, a token
+transfer's about 580, and a signed transfer about 550. Bytes that are not exactly one message, or
+have anything past its encoding, are refused.
 
-**Too long for one code:** a message over 600 characters goes as parts, each a code about that
-long: `CV4:1:PART:2/5:`, a hash of the whole text, and a stretch of it. The screen cycles through the
-parts, about three a second, round and round, with the part showing counted; **Pause** holds one,
-and **Back** and **Next part** step by hand. The other device's camera picks each up as it comes
-round, in any order, says which it still needs, starts over on a part of another message, and
-checks the whole against its hash before reading it. Up to 64 parts, so 38,400 characters; **Copy
-as text** always copies the whole.
+**Too long for one code:** a message over 300 bytes animates: fountain-coded parts, each a code of
+about 650 characters, `ur:chainv4-sign-request/7-4/…`, one after another, about three a second,
+with the part showing counted; **Pause** holds one, and **Next part** steps by hand. Past the first
+round, each part mixes several of the message's, so the other device's camera needs any enough of
+them, in any order, and never waits a full round for one it missed; it says how many are in.
+**Copy as text** always copies the whole, as one UR.
+
+**From before:** the codes used to be `CV4:1:` and base45. A wallet from before reads none of these,
+nor this one any of those: update the signer and the sender together.
 
 **Keep the signer offline:** airplane mode, Wi-Fi and Bluetooth off. The live camera keeps
 nothing: each frame is searched in memory and dropped.
