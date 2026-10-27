@@ -413,6 +413,7 @@ fn transactions_are_looked_up_by_id_once_they_land() {
     assert_eq!(receipt["index"], 0);
     assert_eq!(receipt["confirmations"], 2);
     assert_eq!(receipt["status"], "done");
+    assert_eq!(receipt["payments"], json!([]), "a plain transfer: no contract paid anything");
 
     let deploy = ok(fixture.address, "/blocks/2")["txs"][0]["id"].as_str().unwrap().to_string();
 

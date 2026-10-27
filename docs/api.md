@@ -96,6 +96,8 @@ Each summary has:
 - where it is: `block`, `height`, `index`, `confirmations`, and whether it is `final`;
 - what it cost: `fuel_used`, `gas_used`, `fee`;
 - its `events`;
+- its `payments`: the coin its contracts paid, each `from`, `to` and `amount`, as the receipts
+  root commits to them (see [Chain](chain.md#receipts));
 - its `status`: `done`, `deployed` with `contract`, `upgraded` with `contract`, `returned` with
   `values`, or `failed` with `error`;
 - its `trace`: where its contracts went (see below).

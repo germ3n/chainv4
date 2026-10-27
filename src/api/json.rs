@@ -316,9 +316,15 @@ fn outcome(receipt: &TxReceipt) -> Value {
     value["gas_used"] = receipt.gas_used.into();
     value["fee"] = receipt.fee.to_string().into();
     value["events"] = receipt.events.iter().map(event).collect();
+    value["payments"] = receipt.payments.iter().map(payment).collect();
     value["trace"] = trace(&receipt.trace);
 
     value
+}
+
+/// Coin a contract paid while a transaction ran.
+pub fn payment(payment: &crate::structs::receipt::Payment) -> Value {
+    json!({ "from": payment.from.to_string(), "to": payment.to.to_string(), "amount": payment.amount.to_string() })
 }
 
 /// Where a transaction's contracts went, hop by hop, depth first.

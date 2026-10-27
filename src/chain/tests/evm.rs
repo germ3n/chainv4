@@ -135,7 +135,9 @@ fn the_coin_moves_into_evm_contracts_and_back_out_to_any_account() {
     let before = balance(&chain, &me);
 
     let deposit = call(&chain, &authority(), counter, 1_000, calldata("deposit()", &[]));
-    advance(&mut chain, vec![deposit]);
+    let deposited = advance(&mut chain, vec![deposit]).remove(0);
+
+    assert!(deposited.payments.is_empty(), "what the sender sent is the transaction's own, not a payout");
 
     assert_eq!(balance(&chain, &counter), u256::new(1_000));
     assert_eq!(balance(&chain, &me), before - u256::new(1_000));
@@ -147,6 +149,13 @@ fn the_coin_moves_into_evm_contracts_and_back_out_to_any_account() {
     let paid = advance(&mut chain, vec![pay_me, pay_them]);
 
     assert!(paid.iter().all(|receipt| receipt.result.is_ok()), "{paid:?}");
+    // The EVM's own payouts, each told as the account it reached: the Ed25519 sender under its
+    // alias, the secp256k1 account by its own address.
+    let payment = |to: Address, amount: u128| crate::structs::receipt::Payment { from: counter, to, amount: u256::new(amount) };
+
+    assert_eq!(paid[0].payments, [payment(me, 400)]);
+    assert_eq!(paid[1].payments, [payment(ethereum, 100)]);
+    assert_eq!(crate::structs::receipt::CommittedReceipt::of(&paid[0]).payments, paid[0].payments, "committed in the receipts root");
 
     assert_eq!(balance(&chain, &me), before - u256::new(600));
     assert_eq!(balance(&chain, &ethereum), u256::new(100));
@@ -164,6 +173,7 @@ fn the_coin_moves_into_evm_contracts_and_back_out_to_any_account() {
 
     assert_eq!(receipt.result, Err(Failure::Contract(VmError::Runtime("reverted: the payment failed".to_string()))));
     assert_eq!(balance(&chain, &counter), u256::new(500));
+    assert!(receipt.payments.is_empty());
 }
 
 #[test]
@@ -684,6 +694,7 @@ fn evm_contracts_call_native_ones_and_send_them_coin() {
     assert_eq!(returned(&receipt), word(5), "{:?}", receipt.result);
     assert_eq!(total(&chain, &counter).as_deref(), Some("5"));
     assert_eq!(balance(&chain, &counter), u256::new(300), "what the EVM call carried reached the native contract");
+    assert_eq!(receipt.payments, [crate::structs::receipt::Payment { from: bridge, to: counter, amount: u256::new(300) }], "the bridge paid it on, through the native precompile");
     assert_eq!(balance(&chain, &bridge), u256::ZERO);
     assert_eq!(bridge_count(&chain, &bridge), word(1));
 
@@ -727,6 +738,7 @@ fn a_revert_on_either_side_unwinds_both() {
     assert_eq!(total(&chain, &counter).as_deref(), Some("2"));
     assert_eq!(bridge_count(&chain, &bridge), word(11));
     assert!(receipt.events.is_empty(), "{:?}", receipt.events);
+    assert!(receipt.payments.is_empty());
 
     // A native call that fails reverts the EVM's call with why.
     let nothing = Address::Contract([7; 32]);

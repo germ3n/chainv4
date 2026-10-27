@@ -227,6 +227,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Remembered peers are dialed like bootnodes,** while the node is short of peers, at most once a
   minute each; a peer that changed its address is found again through the others.
 - **Every commit is synced.** It costs a few milliseconds a block; `--no-fsync` for benchmarks.
+- **Receipts commit to payments now:** the receipts root of every block changed shape, a new
+  chain's consensus; receipts a node stored before read back with none.
+- **A payment is a contract's, never the sender's:** a transfer or a call's value is the
+  transaction's own and shows in it; payments are what contracts sent on.
 - **Iterating storage is paid a page at a time:** 100 fuel a page of up to 64 from the iterators,
   plus 40 an entry; a loop over a list anyone can grow gets dearer as it grows.
 - **A transaction that iterates may run twice** in a block whose transactions run side by side:

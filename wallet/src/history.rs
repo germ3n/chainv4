@@ -74,6 +74,8 @@ impl Checked {
                 _ => {}
             }
 
+            // What contracts paid out, proven with the receipt, then tokens by their events.
+            moves.extend(receipt.payments.iter().map(|paid| coin(Some(paid.from.to_string()), Some(paid.to.to_string()), paid.amount.to_string())));
             moves.extend(receipt.events.iter().filter_map(token_move));
         }
 
@@ -232,6 +234,7 @@ mod tests {
                     fee: u256::new(21),
                     outcome,
                     events,
+                    payments: Vec::new(),
                 },
                 signed,
                 time: 1_000,
@@ -292,6 +295,21 @@ mod tests {
         };
 
         assert_eq!(token_move(&minted).map(|moved| (moved.from, moved.amount)), Some((None, "7".to_string())));
+    }
+
+    #[test]
+    fn coin_a_contract_paid_comes_in_for_whom_it_paid() {
+        let (contract, them) = (Address::Contract([5; 32]), Address::Ed25519([3; 32]));
+        let call = Tx::ContractCall { to: contract, func: Hasher::digest(HashType::Xxh3_64, b"claim"), amount: Amount::U128(0), data: Vec::new() };
+        let mut proven = landed(call, CommittedOutcome::Returned(Vec::new()), Vec::new());
+        proven.value.receipt.payments = vec![chainv4::structs::receipt::Payment { from: contract, to: them, amount: u256::new(900) }];
+        let checked = Checked::of(&proven);
+
+        assert_eq!(checked.for_account(&[them.to_string()]).map(|(incoming, moved)| (incoming, moved.token.clone(), moved.amount.as_str())).collect::<Vec<_>>(), [(true, None, "900")]);
+        assert_eq!(checked.for_account(&[contract.to_string()]).map(|(incoming, _)| incoming).collect::<Vec<_>>(), [false]);
+
+        proven.value.receipt.outcome = CommittedOutcome::Failed;
+        assert!(Checked::of(&proven).moves.is_empty(), "a failure paid nothing");
     }
 
     #[test]

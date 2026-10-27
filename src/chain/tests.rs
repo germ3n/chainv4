@@ -575,6 +575,19 @@ function M.split(first, second)
     accounts.transfer(second, ctx.value - half)
 end
 
+function M.relay(splitter, first, second)
+    contracts.call_value(splitter, ctx.value, "split", first, second)
+end
+
+function M.split_then_fail(first)
+    accounts.transfer(first, ctx.value)
+    error("changed my mind")
+end
+
+function M.try_split(splitter, first)
+    pcall(contracts.call_value, splitter, ctx.value, "split_then_fail", first)
+end
+
 return M
 "#;
     let db = Arc::new(MemoryDb::default());
@@ -601,6 +614,32 @@ return M
     assert_eq!(balance(&chain, &first), u256::new(50));
     assert_eq!(balance(&chain, &second), u256::new(51));
     assert_eq!(balance(&chain, &splitter), u256::ZERO);
+
+    // What it paid out, line by line, in the receipt and the root it goes in.
+    let paid = |from: Address, to: Address, amount: u128| crate::structs::receipt::Payment { from, to, amount: u256::new(amount) };
+
+    assert_eq!(receipts[0].payments, [paid(splitter, first, 50), paid(splitter, second, 51)]);
+    assert_eq!(crate::structs::receipt::CommittedReceipt::of(&receipts[0]).payments, receipts[0].payments);
+
+    // Through another contract: the value it sent with its call first, then what the callee paid.
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(SPLITTER.to_string()) }, 2, FeeOffer::NONE, &deployer);
+    advance(&mut chain, vec![deploy]);
+    let relay = contract_address(&deployer.public().address(), 2, HashType::default_chain());
+    let call = |function: &str, data: Vec<TxCallArgumentType>, nonce: u64| {
+        let tx = Tx::ContractCall { to: relay, func: Hash::Xxh3_64(selector(function)), amount: Amount::U128(10), data };
+
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &deployer)
+    };
+    let (a, b) = (TxCallArgumentType::Address(first), TxCallArgumentType::Address(second));
+    let receipts = advance(&mut chain, vec![
+        call("relay", vec![TxCallArgumentType::Address(splitter), a.clone(), b.clone()], 3),
+        call("split_then_fail", vec![a.clone()], 4),
+        call("try_split", vec![TxCallArgumentType::Address(splitter), a.clone()], 5),
+    ]);
+
+    assert_eq!(receipts[0].payments, [paid(relay, splitter, 10), paid(splitter, first, 5), paid(splitter, second, 5)]);
+    assert!(receipts[1].result.is_err() && receipts[1].payments.is_empty(), "a call that failed paid nothing");
+    assert!(receipts[2].result.is_ok() && receipts[2].payments.is_empty(), "nor one whose caller caught its failure");
 }
 
 // Proof of work: forks, reorgs and rewards. Difficulty 1 lets any nonce through, and blocks a
@@ -1393,14 +1432,17 @@ fn a_transaction_touches_its_sender_its_parties_and_the_addresses_it_names() {
         data: vec![TxCallArgumentType::Address(alice), TxCallArgumentType::U256(u256::new(5)), TxCallArgumentType::Address(bob)],
     };
 
-    assert_eq!(touched(&signed(Tx::Transfer { from: me, to: alice, amount: Amount::U128(1) }), &TxStatus::Done), set(&[me, alice]));
-    assert_eq!(touched(&signed(Tx::Mint { to: bob, amount: Amount::U128(1) }), &TxStatus::Done), set(&[me, bob]));
-    assert_eq!(touched(&signed(Tx::Burn { from: me, amount: Amount::U128(1) }), &TxStatus::Done), set(&[me]));
-    assert_eq!(touched(&signed(call), &TxStatus::Returned(Vec::new())), set(&[me, contract, alice, bob]), "every address among the arguments");
-    assert_eq!(touched(&signed(Tx::Deploy { code: code() }), &TxStatus::Deployed(deployed)), set(&[me, deployed]));
-    assert_eq!(touched(&signed(Tx::Deploy { code: code() }), &TxStatus::Failed("no".to_string())), set(&[me]), "a failed deploy landed nowhere");
-    assert_eq!(touched(&signed(Tx::Upgrade { contract, code: code() }), &TxStatus::Upgraded(contract)), set(&[me, contract]));
-    assert_eq!(touched(&signed(Tx::WithdrawApproval { version: 1 }), &TxStatus::Done), set(&[me]));
+    assert_eq!(touched(&signed(Tx::Transfer { from: me, to: alice, amount: Amount::U128(1) }), &TxStatus::Done, &[]), set(&[me, alice]));
+    assert_eq!(touched(&signed(Tx::Mint { to: bob, amount: Amount::U128(1) }), &TxStatus::Done, &[]), set(&[me, bob]));
+    assert_eq!(touched(&signed(Tx::Burn { from: me, amount: Amount::U128(1) }), &TxStatus::Done, &[]), set(&[me]));
+    assert_eq!(touched(&signed(call), &TxStatus::Returned(Vec::new()), &[]), set(&[me, contract, alice, bob]), "every address among the arguments");
+    assert_eq!(touched(&signed(Tx::Deploy { code: code() }), &TxStatus::Deployed(deployed), &[]), set(&[me, deployed]));
+    assert_eq!(touched(&signed(Tx::Deploy { code: code() }), &TxStatus::Failed("no".to_string()), &[]), set(&[me]), "a failed deploy landed nowhere");
+    assert_eq!(touched(&signed(Tx::Upgrade { contract, code: code() }), &TxStatus::Upgraded(contract), &[]), set(&[me, contract]));
+    assert_eq!(touched(&signed(Tx::WithdrawApproval { version: 1 }), &TxStatus::Done, &[]), set(&[me]));
+    // Whom a contract paid, and the contract, though the transaction named neither.
+    let paid = crate::structs::receipt::Payment { from: contract, to: bob, amount: u256::new(5) };
+    assert_eq!(touched(&signed(Tx::WithdrawApproval { version: 1 }), &TxStatus::Done, &[paid]), set(&[me, contract, bob]));
 }
 
 #[test]

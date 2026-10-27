@@ -62,7 +62,7 @@ pub use finality::{
 #[cfg(feature = "finality-ffg")]
 pub use finality::{FfgConfig, GenesisValidator, Leak};
 pub use crate::structs::receipt::{CommittedOutcome, CommittedReceipt, receipts_root};
-pub use receipt::{TxReceipt, TxStatus};
+pub use receipt::{LegacyTxReceipt, TxReceipt, TxStatus};
 
 /// The development chains' transaction limits: what one deploy or contract call may use.
 pub const DEV_TX_LIMITS: Limits = Limits {
@@ -2827,7 +2827,19 @@ pub fn stored_on_main_chain(db: &dyn Read, block: &Block) -> Result<bool, DbErro
     returns = "The receipt, or None when the transaction is not on the main chain.",
 )]
 pub fn stored_receipt(db: &dyn Read, tx: &Hash) -> Result<Option<TxReceipt>, DbError> {
-    read_value(db, Column::Receipts, &id_key(tx))
+    let Some(bytes) = db.read(Column::Receipts, &id_key(tx))? else {
+        return Ok(None);
+    };
+
+    // Receipts stored before payments were kept lack the field.
+    match wincode::deserialize::<TxReceipt>(&bytes) {
+        Ok(receipt) => Ok(Some(receipt)),
+        Err(_) => Ok(Some(
+            wincode::deserialize::<receipt::LegacyTxReceipt>(&bytes)
+                .map_err(|err| DbError::Corrupt(format!("receipt {tx}: {err}")))?
+                .into(),
+        )),
+    }
 }
 
 #[document(

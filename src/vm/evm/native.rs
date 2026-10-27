@@ -30,6 +30,7 @@ use {
     crate::structs::account::Account,
     crate::structs::address::Address,
     crate::structs::event::Event,
+    crate::structs::receipt::Payment,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::{i256, u256},
     crate::vm::host::Host,
@@ -82,6 +83,9 @@ pub(super) struct Crossed {
     pub changes: Changes,
     pub events: Vec<Event>,
     pub log_at: usize,
+    /// What it paid, and how many moves the EVM had made when it returned, which places them.
+    pub payments: Vec<Payment>,
+    pub pay_at: usize,
 }
 
 /// The native calls one EVM run makes through the precompile.
@@ -98,6 +102,8 @@ pub(super) struct NativeAt<'a> {
     pub crossed: RefCell<Vec<Crossed>>,
     /// The first database failure, which stops the node rather than the transaction.
     pub fault: RefCell<Option<DbError>>,
+    /// What the run's frames paid so far, as the inspector keeps it.
+    pub paid: super::payments::Paid,
 }
 
 enum Answer {
@@ -215,6 +221,7 @@ impl NativeAt<'_> {
         };
         let changes = layer.take_changes();
         let events = host.take_events();
+        let payments = host.take_payments();
 
         if inputs.is_static && (!changes.is_empty() || !events.is_empty()) {
             return Ok(Answer::Refused(format!("{name} on {target} changed state inside a static call"), used));
@@ -243,7 +250,8 @@ impl NativeAt<'_> {
         journal.load_account(Word::from(NATIVE_PRECOMPILE)).map_err(journal_failed)?;
         journal.sstore(Word::from(NATIVE_PRECOMPILE), U256::from(index), U256::from(1)).map_err(journal_failed)?;
         let log_at = journal.logs().len();
-        self.crossed.borrow_mut().push(Crossed { changes: kept, events, log_at });
+        let pay_at = self.paid.borrow().len();
+        self.crossed.borrow_mut().push(Crossed { changes: kept, events, log_at, payments, pay_at });
 
         Ok(Answer::Returned(output, used))
     }
@@ -345,6 +353,33 @@ pub(super) fn interleave(logs: Vec<Event>, standing: &mut [Crossed]) -> Vec<Even
     events.extend(logs);
 
     events
+}
+
+/// What the run paid: the EVM's own moves, each address told as the account it is, with the
+/// payments of the native calls that stand placed where they ran.
+pub(super) fn interleave_payments(state: &State, moved: Vec<super::payments::Moved>, standing: &mut [Crossed]) -> Result<Vec<Payment>, DbError> {
+    let mut payments = Vec::with_capacity(moved.len());
+    let mut moved = moved.into_iter();
+    let mut made = 0;
+    let told = |movement: super::payments::Moved| -> Result<Payment, DbError> {
+        Ok(Payment { from: account_of(state, movement.from)?, to: account_of(state, movement.to)?, amount: from_word(movement.amount) })
+    };
+
+    for crossed in standing {
+        while made < crossed.pay_at {
+            let Some(movement) = moved.next() else { break };
+            payments.push(told(movement)?);
+            made += 1;
+        }
+
+        payments.append(&mut crossed.payments);
+    }
+
+    for movement in moved {
+        payments.push(told(movement)?);
+    }
+
+    Ok(payments)
 }
 
 /// An EVM storage slot's key, as the EVM module writes it: the contract's address key, 21 bytes,

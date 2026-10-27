@@ -379,6 +379,7 @@ fn call(state: &Pristine, bytecode: &[u8], name: &str, args: &[TxCallArgumentTyp
         events: Vec::new(),
         trace: Trace::default(),
         refresh_tokens: Vec::new(),
+        payments: Vec::new(),
     }
 }
 

@@ -145,7 +145,8 @@ justification is refused as before.
   rather than the tip, and the client asks at the finalized checkpoint: a value proven there is
   final. A node can prove at any block whose state it keeps, `--state-history` blocks back.
 - **Receipts:** `check_receipt` checks a receipt, and its Merkle path from
-  `GET /proofs/receipts/{id}`, against the block's receipts root: what a transaction did.
+  `GET /proofs/receipts/{id}`, against the block's receipts root: what a transaction did, and
+  what its contracts paid, line by line. `chainv4 light history` shows those of the address.
 - **Transactions:** `check_tx` checks the signed transaction the same answer carries, and its path,
   against the block's `tx_root`: who sent what, which the receipt does not say. So a plain coin
   transfer to an account is proven down to its sender and amount.

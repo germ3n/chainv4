@@ -106,6 +106,20 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, id: &str, state: &mut hops::HopState) {
     super::section(ui, look, "Hops", |ui| hops::show(ui, ctx, tx, outcome, state));
 
     if let Some(outcome) = outcome
+        && !outcome.payments.is_empty()
+    {
+        super::section_with(
+            ui,
+            look,
+            "Paid out",
+            |ui| {
+                ui.label(RichText::new(outcome.payments.len().to_string()).monospace().color(look.palette.muted));
+            },
+            |ui| payments(ui, ctx, &outcome.payments),
+        );
+    }
+
+    if let Some(outcome) = outcome
         && !outcome.events.is_empty()
     {
         super::section_with(
@@ -204,6 +218,21 @@ fn result(facts: &mut Facts, ctx: &mut Ctx, look: Look, outcome: &Outcome) {
 
 /// Events in a list: what each contract emitted, in order. A token's Transfer reads as who sent how
 /// much to whom, in its decimals.
+/// The coin the transaction's contracts paid, line by line, as its receipt commits to it.
+fn payments(ui: &mut Ui, ctx: &mut Ctx, payments: &[crate::model::PaymentView]) {
+    let look = ctx.look;
+
+    super::table(ui, look, "payments", &["#", "from", "to", "amount"], |ui| {
+        for (index, payment) in payments.iter().enumerate() {
+            ui.monospace(index.to_string());
+            super::address(ui, ctx, &payment.from);
+            super::address(ui, ctx, &payment.to);
+            ui.label(ctx.coins(&payment.amount));
+            ui.end_row();
+        }
+    });
+}
+
 pub fn events(ui: &mut Ui, ctx: &mut Ctx, events: &[EventView]) {
     let look = ctx.look;
 

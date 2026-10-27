@@ -23,13 +23,14 @@
 //!
 //! **Not yet:** blob transactions, and the KZG point evaluation precompile, which needs blobs.
 
-#[cfg(feature = "names")]
 mod crypto;
+#[cfg(feature = "names")]
 mod names;
 mod native;
+mod payments;
 mod precompiles;
-#[cfg(feature = "names")]
 pub use crypto::CRYPTO_PRECOMPILE;
+#[cfg(feature = "names")]
 pub use names::NAMES_PRECOMPILE;
 pub use native::{Bridge, NATIVE_PRECOMPILE, abi_value, native_from_abi, native_type};
 
@@ -43,6 +44,7 @@ use {
     crate::structs::code::Engine,
     crate::structs::event::Event,
     crate::structs::hash::Hash,
+    crate::structs::receipt::Payment,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
     crate::vm::VmError,
@@ -53,7 +55,7 @@ use {
     revm::primitives::hardfork::SpecId,
     revm::primitives::{Address as Word, B256, Bytes, KECCAK_EMPTY, TxKind, U256},
     revm::state::{AccountInfo, Bytecode, EvmState},
-    revm::{Database, ExecuteEvm, MainBuilder, MainContext},
+    revm::{Database, InspectEvm, MainBuilder, MainContext},
     std::sync::Arc,
 };
 
@@ -272,6 +274,8 @@ pub struct EvmRan {
     pub events: Vec<Event>,
     #[document(summary = "What a revert returned, as Solidity encodes its reason or a custom error, which eth_call hands back; empty for anything else.")]
     pub reverted: Vec<u8>,
+    #[document(summary = "The coin its frames below the top paid, and the native contracts it called, in the order they paid it, each address told as the account it is; empty when it failed.")]
+    pub payments: Vec<Payment>,
 }
 
 #[document(
@@ -365,7 +369,9 @@ pub fn run(
         caller,
         caller_nonce: nonce,
     };
-    let evm = Context::mainnet().with_db(db).with_block(block_env).with_cfg(cfg).build_mainnet();
+    let paying = payments::Payments::default();
+    let paid = paying.paid.clone();
+    let evm = Context::mainnet().with_db(db).with_block(block_env).with_cfg(cfg).build_mainnet_with_inspector(paying);
     #[cfg(feature = "names")]
     let names = block.names.clone().map(|config| names::NamesAt {
         state,
@@ -387,6 +393,7 @@ pub fn run(
         sender: *sender,
         crossed: Default::default(),
         fault: Default::default(),
+        paid: paid.clone(),
     });
     let eth = evm.precompiles.clone();
     let mut evm = evm.with_precompiles(precompiles::ChainPrecompiles::new(
@@ -397,7 +404,7 @@ pub fn run(
         crypto::CryptoAt { hash: block.hash },
     ));
 
-    let transacted = evm.transact(tx);
+    let transacted = evm.inspect_tx(tx);
 
     // A lookup the database failed is the node's fault, not the transaction's.
     if let Some(err) = evm.precompiles.fault() {
@@ -415,6 +422,7 @@ pub fn run(
                 gas_used: gas_limit,
                 events: Vec::new(),
                 reverted: Vec::new(),
+                payments: Vec::new(),
             });
         }
     };
@@ -445,13 +453,15 @@ pub fn run(
                 })
                 .collect();
             let events = native::interleave(logs, &mut standing);
+            let moved = paid.borrow().clone();
+            let payments = native::interleave_payments(state, moved, &mut standing)?;
             let returned = match output {
                 Output::Create(_, Some(created)) => EvmReturned::Created(Address::Evm(created.into_array())),
-                Output::Create(_, None) => return Ok(EvmRan { result: Err(VmError::Runtime("the contract was not created".to_string())), gas_used, events: Vec::new(), reverted: Vec::new() }),
+                Output::Create(_, None) => return Ok(EvmRan { result: Err(VmError::Runtime("the contract was not created".to_string())), gas_used, events: Vec::new(), reverted: Vec::new(), payments: Vec::new() }),
                 Output::Call(bytes) => EvmReturned::Output(bytes.to_vec()),
             };
 
-            return Ok(EvmRan { result: Ok(returned), gas_used, events, reverted: Vec::new() });
+            return Ok(EvmRan { result: Ok(returned), gas_used, events, reverted: Vec::new(), payments });
         }
         ExecutionResult::Revert { output, .. } => {
             return Ok(EvmRan {
@@ -459,6 +469,7 @@ pub fn run(
                 gas_used,
                 events: Vec::new(),
                 reverted: output.to_vec(),
+                payments: Vec::new(),
             });
         }
         ExecutionResult::Halt { reason, .. } => Err(match reason {
@@ -467,7 +478,7 @@ pub fn run(
         }),
     };
 
-    Ok(EvmRan { result, gas_used, events: Vec::new(), reverted: Vec::new() })
+    Ok(EvmRan { result, gas_used, events: Vec::new(), reverted: Vec::new(), payments: Vec::new() })
 }
 
 /// A revert's reason: Solidity's Error(string) read out, else its bytes in hex.

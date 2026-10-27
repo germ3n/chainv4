@@ -317,6 +317,7 @@ impl ScriptEngine for WasmEngine {
             events: Vec::new(),
             trace: Trace::default(),
             refresh_tokens: Vec::new(),
+            payments: Vec::new(),
         }
     }
 }

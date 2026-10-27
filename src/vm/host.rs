@@ -5,6 +5,7 @@ use {
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
     crate::structs::event::Event,
+    crate::structs::receipt::Payment,
     crate::structs::trace::{Hop, HopKind, Trace},
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
@@ -106,6 +107,8 @@ pub struct Host {
     events: Arc<Mutex<Vec<Event>>>,
     /// How many events this call emitted itself.
     emitted: Arc<Mutex<usize>>,
+    /// The coin this call paid, joined by what the calls it made paid once they succeed.
+    payments: Arc<Mutex<Vec<Payment>>>,
     /// Every hop in this tree of calls so far, shared by all of them.
     trace: Arc<Mutex<Trace>>,
     /// Where this call's own hop is in the trace: None for one nobody traced, or past MAX_HOPS.
@@ -139,6 +142,7 @@ impl Host {
             fault: Arc::new(Mutex::new(None)),
             vm,
             events: Arc::default(),
+            payments: Arc::default(),
             emitted: Arc::default(),
             trace: Arc::default(),
             hop: None,
@@ -167,6 +171,12 @@ impl Host {
     #[cfg(feature = "evm")]
     pub(crate) fn state(&self) -> &Arc<State> {
         &self.state
+    }
+
+    /// The coin the calls made from this host paid, once they succeeded.
+    #[cfg(feature = "evm")]
+    pub(crate) fn take_payments(&self) -> Vec<Payment> {
+        std::mem::take(&mut *lock(&self.payments))
     }
 
     /// The events the calls made from this host emitted, once they succeeded.
@@ -416,6 +426,10 @@ impl Host {
         let sent = send(&self.state, &self.context.contract, to, amount).map_err(|err| self.refused(err));
         lock(&self.trace).close(hop, 0, sent.as_ref().err().map(ToString::to_string));
 
+        if sent.is_ok() && amount > u256::ZERO {
+            lock(&self.payments).push(Payment { from: self.context.contract, to: *to, amount });
+        }
+
         sent
     }
 
@@ -500,6 +514,7 @@ impl Host {
             fault: self.fault.clone(),
             vm: self.vm.clone(),
             events: Arc::default(),
+            payments: Arc::default(),
             emitted: Arc::default(),
             trace: self.trace.clone(),
             hop,
@@ -516,6 +531,14 @@ impl Host {
         if outcome.result.is_ok() {
             lock(&self.events).append(&mut outcome.events);
             lock(&self.refresh).extend(std::mem::take(&mut outcome.refresh_tokens));
+            // The value it was sent first, then what it paid on.
+            let mut payments = lock(&self.payments);
+
+            if value > u256::ZERO {
+                payments.push(Payment { from: self.context.contract, to: *target, amount: value });
+            }
+
+            payments.extend(outcome.payments.iter().cloned());
         }
 
         outcome
@@ -587,6 +610,14 @@ impl Host {
                 let mut events = lock(&self.events);
                 lock(&self.trace).emitted(self.hop, self.offset + events.len());
                 events.extend(ran.events);
+                // What it sent the EVM first, then what the EVM paid on.
+                let mut payments = lock(&self.payments);
+
+                if value > u256::ZERO {
+                    payments.push(Payment { from: self.context.contract, to: *to, amount: value });
+                }
+
+                payments.extend(ran.payments);
 
                 Ok(vec![TxCallArgumentType::Bytes(output)])
             }
@@ -600,6 +631,7 @@ impl Host {
             events: Vec::new(),
             trace: Trace::default(),
             refresh_tokens: Vec::new(),
+            payments: Vec::new(),
         }
     }
 
@@ -660,6 +692,7 @@ impl Host {
             fault: self.fault.clone(),
             vm: self.vm.clone(),
             events: Arc::default(),
+            payments: Arc::default(),
             emitted: Arc::default(),
             trace: self.trace.clone(),
             hop,
@@ -675,6 +708,7 @@ impl Host {
         if outcome.result.is_ok() {
             lock(&self.events).append(&mut outcome.events);
             lock(&self.refresh).extend(std::mem::take(&mut outcome.refresh_tokens));
+            lock(&self.payments).extend(outcome.payments.iter().cloned());
         }
 
         outcome
@@ -753,6 +787,7 @@ impl Host {
             events: Vec::new(),
             trace: Trace::default(),
             refresh_tokens: Vec::new(),
+            payments: Vec::new(),
         };
 
         if init {
@@ -774,6 +809,7 @@ impl Host {
                 fault: self.fault.clone(),
                 vm: self.vm.clone(),
                 events: Arc::default(),
+                payments: Arc::default(),
                 emitted: Arc::default(),
                 trace: self.trace.clone(),
                 hop,
@@ -792,6 +828,7 @@ impl Host {
         if outcome.result.is_ok() {
             self.state.merge(layer.take_changes());
             lock(&self.events).append(&mut outcome.events);
+            lock(&self.payments).extend(outcome.payments.iter().cloned());
             let mut refresh = lock(&self.refresh);
             refresh.extend(std::mem::take(&mut outcome.refresh_tokens));
             // A token among clones is registered as a deployed one is.
@@ -957,6 +994,7 @@ pub(super) fn run(
     let layer = host.state.clone();
     let fault = host.fault.clone();
     let events = host.events.clone();
+    let payments = host.payments.clone();
     let refresh = host.refresh.clone();
     let mut outcome = engine.run(&record.code, function, args, host, limits);
 
@@ -967,6 +1005,7 @@ pub(super) fn run(
     if outcome.result.is_ok() {
         parent.merge(layer.take_changes());
         outcome.events = std::mem::take(&mut *lock(&events));
+        outcome.payments = std::mem::take(&mut *lock(&payments));
         outcome.refresh_tokens = std::mem::take(&mut *lock(&refresh)).into_iter().collect();
     }
 

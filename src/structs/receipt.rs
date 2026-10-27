@@ -33,9 +33,29 @@ pub struct CommittedReceipt {
     pub outcome: CommittedOutcome,
     #[document(summary = "What it emitted, in order.")]
     pub events: Vec<Event>,
+    #[document(summary = "The coin its contracts paid, in the order they paid it: what a contract sent from its own balance, with a call or a transfer, natively or in the EVM. Not what its sender sent, which the transaction says. Empty when it failed.")]
+    pub payments: Vec<Payment>,
 }
 
 impl Hashable for CommittedReceipt {}
+
+#[document(
+    summary = "Coin a contract paid while a transaction ran, as the receipts root commits to it: so a wallet proves, line by line, what a contract paid it, as it proves a receipt.",
+    category = "Chain",
+    see_also = "CommittedReceipt",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct Payment {
+    #[document(summary = "The contract it left.")]
+    pub from: Address,
+    #[document(summary = "Who got it: an account, or a contract.")]
+    pub to: Address,
+    #[document(summary = "How much, in the coin's smallest unit.")]
+    #[wincode(with = "U256Le")]
+    pub amount: u256,
+}
+
+impl Hashable for Payment {}
 
 #[document(
     summary = "What a transaction did, as the receipts root commits to it: a TxStatus without a failure's message.",
@@ -64,7 +84,7 @@ pub enum CommittedOutcome {
 
 impl CommittedReceipt {
     #[document(parent = "CommittedReceipt", summary = "A committed receipt from its parts.")]
-    pub fn new(tx: Hash, fuel_used: u64, gas_used: u64, fee: u256, outcome: CommittedOutcome, events: Vec<Event>) -> CommittedReceipt {
+    pub fn new(tx: Hash, fuel_used: u64, gas_used: u64, fee: u256, outcome: CommittedOutcome, events: Vec<Event>, payments: Vec<Payment>) -> CommittedReceipt {
         CommittedReceipt {
             tx,
             fuel_used,
@@ -72,6 +92,7 @@ impl CommittedReceipt {
             fee,
             outcome,
             events,
+            payments,
         }
     }
 

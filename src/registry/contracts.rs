@@ -350,6 +350,7 @@ impl<'a> Contracts<'a> {
             fuel_used: outcome.fuel_used,
             events: outcome.events,
             trace: outcome.trace,
+            payments: outcome.payments,
         })
     }
 
@@ -403,6 +404,8 @@ pub struct Hooked {
     pub events: Vec<Event>,
     #[document(summary = "Where init, or check_perms and then migrate, went.")]
     pub trace: Trace,
+    #[document(summary = "What init or migrate paid from contracts' balances, in order.")]
+    pub payments: Vec<crate::structs::receipt::Payment>,
 }
 
 #[document(

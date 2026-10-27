@@ -4,7 +4,7 @@ use {
     crate::structs::address::Address,
     crate::structs::event::Event,
     crate::structs::hash::Hash,
-    crate::structs::receipt::{CommittedOutcome, CommittedReceipt},
+    crate::structs::receipt::{CommittedOutcome, CommittedReceipt, Payment},
     crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::{U256Le, u256},
@@ -36,9 +36,53 @@ pub struct TxReceipt {
     pub events: Vec<Event>,
     #[document(summary = "Where its contracts went: every call, delegate and transfer, failed ones included. Empty for a transaction that runs no contract.")]
     pub trace: Trace,
+    #[document(summary = "The coin its contracts paid, in order: what the receipts root commits to. Empty when it failed, and for receipts stored before payments were kept.")]
+    pub payments: Vec<Payment>,
 }
 
 impl Hashable for TxReceipt {}
+
+#[document(
+    summary = "A receipt as nodes stored them before payments: what stored_receipt falls back to reading.",
+    category = "Chain",
+    see_also = "TxReceipt",
+)]
+#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+pub struct LegacyTxReceipt {
+    #[document(summary = "The block it landed in.")]
+    pub block: Hash,
+    #[document(summary = "Its place among the block's transactions.")]
+    pub index: u32,
+    #[document(summary = "Fuel its contracts burned.")]
+    pub fuel_used: u64,
+    #[document(summary = "Gas it used.")]
+    pub gas_used: u64,
+    #[document(summary = "What its sender paid.")]
+    #[wincode(with = "U256Le")]
+    pub fee: u256,
+    #[document(summary = "What it did.")]
+    pub status: TxStatus,
+    #[document(summary = "What it emitted.")]
+    pub events: Vec<Event>,
+    #[document(summary = "Where its contracts went.")]
+    pub trace: Trace,
+}
+
+impl From<LegacyTxReceipt> for TxReceipt {
+    fn from(old: LegacyTxReceipt) -> TxReceipt {
+        TxReceipt {
+            block: old.block,
+            index: old.index,
+            fuel_used: old.fuel_used,
+            gas_used: old.gas_used,
+            fee: old.fee,
+            status: old.status,
+            events: old.events,
+            trace: old.trace,
+            payments: Vec::new(),
+        }
+    }
+}
 
 #[document(
     summary = "What a transaction did, as stored. A failure keeps only its message.",
@@ -80,6 +124,7 @@ impl TxReceipt {
             status: TxStatus::of(receipt),
             events: receipt.events.clone(),
             trace: receipt.trace.clone(),
+            payments: receipt.payments.clone(),
         }
     }
 
@@ -88,7 +133,7 @@ impl TxReceipt {
         summary = "What the block's receipts root commits to for it, given its transaction's id.",
     )]
     pub fn committed(&self, tx: Hash) -> CommittedReceipt {
-        CommittedReceipt::new(tx, self.fuel_used, self.gas_used, self.fee, outcome(&self.status), self.events.clone())
+        CommittedReceipt::new(tx, self.fuel_used, self.gas_used, self.fee, outcome(&self.status), self.events.clone(), self.payments.clone())
     }
 }
 
@@ -111,7 +156,7 @@ impl CommittedReceipt {
         summary = "What the receipts root commits to for a receipt from running a block.",
     )]
     pub fn of(receipt: &Receipt) -> CommittedReceipt {
-        CommittedReceipt::new(receipt.id, receipt.fuel_used, receipt.gas_used, receipt.fee, outcome(&TxStatus::of(receipt)), receipt.events.clone())
+        CommittedReceipt::new(receipt.id, receipt.fuel_used, receipt.gas_used, receipt.fee, outcome(&TxStatus::of(receipt)), receipt.events.clone(), receipt.payments.clone())
     }
 }
 

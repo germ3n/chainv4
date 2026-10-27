@@ -111,6 +111,7 @@ pub fn key_address(scheme: &str, key: &[u8]) -> Result<Address, String> {
     returns = "The digest, or None for a name this build lacks.",
     category = "VM",
 )]
+#[cfg_attr(not(feature = "bitcoin"), allow(unused_variables))]
 pub fn digest(name: &str, data: &[u8]) -> Option<Vec<u8>> {
     match name {
         #[cfg(feature = "bitcoin")]

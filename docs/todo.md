@@ -509,9 +509,10 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Token balances are provable.** By the token standard, each holder's balance is in the
   token's `balances` namespace under its address text, so a light client proves it with
   `token_balance_key` and `check_state`.
-- [ ] **Contract payouts are not provable line by line.** Coin a contract pays out shows only in
-  the trace, which the receipts root leaves out, and the address index does not follow it.
-  Committing payments, as events of the chain's own, would let wallets list and prove them.
+- [x] **Contract payouts are provable line by line.** Each receipt commits to the coin its
+  contracts paid, native and EVM, in the order they paid it; the address index lists the
+  transaction under everyone paid, and the wallet, the explorer and `chainv4 light history` show
+  and prove each line. See [Chain](chain.md#receipts).
 - [x] **Commits can be undone.** Each main-chain block keeps an undo record of every value it
   replaced, for the last 100 blocks.
 - [x] **Prefix scans.** `Database::scan` visits a column's keys with a prefix, in order, from a

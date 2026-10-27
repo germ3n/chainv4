@@ -198,8 +198,19 @@ pub struct Outcome {
     pub gas_used: u64,
     pub fee: String,
     pub events: Vec<EventView>,
+    /// The coin its contracts paid, in order, as the receipts root commits to it.
+    #[serde(default)]
+    pub payments: Vec<PaymentView>,
     #[serde(default)]
     pub trace: Trace,
+}
+
+/// Coin a contract paid while a transaction ran.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PaymentView {
+    pub from: String,
+    pub to: String,
+    pub amount: String,
 }
 
 /// GET /txs/{id}: a receipt and where it landed.
@@ -617,6 +628,20 @@ pub struct PeerChange {
 #[cfg(test)]
 mod tests {
     use {super::*, serde_json::json};
+
+    #[test]
+    fn a_receipt_reads_what_its_contracts_paid_and_one_from_before_reads_none() {
+        let paid: Outcome = serde_json::from_value(json!({
+            "status": "returned", "fuel_used": 1, "gas_used": 2, "fee": "3", "events": [],
+            "payments": [{ "from": "contract:0x05", "to": "ed25519:0x03", "amount": "900" }],
+        }))
+        .unwrap();
+
+        assert_eq!((paid.payments[0].to.as_str(), paid.payments[0].amount.as_str()), ("ed25519:0x03", "900"));
+
+        let older: Outcome = serde_json::from_value(json!({ "status": "done", "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [] })).unwrap();
+        assert!(older.payments.is_empty());
+    }
 
     #[test]
     fn layouts_read_with_key_kinds_and_units_and_without() {

@@ -11,6 +11,7 @@ use {
     crate::structs::address::Address,
     crate::structs::code::Engine,
     crate::structs::event::Event,
+    crate::structs::receipt::Payment,
     crate::structs::trace::Trace,
     crate::structs::hash::Hash,
     crate::chain::fees::{Charged, Fees, Scoring},
@@ -239,6 +240,8 @@ pub struct Receipt {
     pub events: Vec<Event>,
     #[document(summary = "Where its contracts went: every call, delegate and transfer, failed ones included. Empty for a transaction that runs no contract.")]
     pub trace: Trace,
+    #[document(summary = "The coin its contracts paid, in order. Empty when it failed.")]
+    pub payments: Vec<Payment>,
 }
 
 #[document(
@@ -290,7 +293,7 @@ impl From<DbError> for ExecuteError {
 }
 
 /// What a transaction pays per gas, and what it reserved before running.
-struct Payment<'a> {
+struct Charge<'a> {
     fees: &'a Fees,
     intrinsic: u64,
     price: u256,
@@ -299,7 +302,7 @@ struct Payment<'a> {
 
 /// Checks a transaction can pay for itself: its gas limit covers its intrinsic cost, its price is
 /// enough for the block, and the sender holds its whole gas limit at that price.
-fn payment<'a>(fees: &'a Fees, tx: &SignedTx, sender: &Address, accounts: &Accounts, base: u256) -> Result<Payment<'a>, ExecuteError> {
+fn payment<'a>(fees: &'a Fees, tx: &SignedTx, sender: &Address, accounts: &Accounts, base: u256) -> Result<Charge<'a>, ExecuteError> {
     let invalid = |error| Err(ExecuteError::Invalid(error));
     let intrinsic = fees.schedule().intrinsic(tx);
     let limit = tx.fee.gas_limit;
@@ -319,7 +322,7 @@ fn payment<'a>(fees: &'a Fees, tx: &SignedTx, sender: &Address, accounts: &Accou
         return invalid(TxError::CannotPay);
     }
 
-    Ok(Payment {
+    Ok(Charge {
         fees,
         intrinsic,
         price,
@@ -404,6 +407,7 @@ pub(crate) fn execute_verified(
         fuel_used,
         mut events,
         mut trace,
+        mut payments,
     } = contracted;
 
     // A failing database is the node's fault, never the transaction's.
@@ -427,6 +431,7 @@ pub(crate) fn execute_verified(
 
     if result.is_err() {
         events.clear();
+        payments.clear();
         trace.forget_events();
     }
 
@@ -438,6 +443,7 @@ pub(crate) fn execute_verified(
         result,
         events,
         trace,
+        payments,
     };
 
     Ok(Executed {
@@ -455,7 +461,7 @@ fn settle(
     block: &Arc<State>,
     tx: &SignedTx,
     sender: Address,
-    payment: &Payment,
+    payment: &Charge,
     fuel_used: u64,
     failed: bool,
     vm: &Arc<Vm>,
@@ -504,6 +510,7 @@ struct Contracted {
     fuel_used: u64,
     events: Vec<Event>,
     trace: Trace,
+    payments: Vec<Payment>,
 }
 
 impl From<Hooked> for Contracted {
@@ -512,6 +519,7 @@ impl From<Hooked> for Contracted {
             fuel_used: hooked.fuel_used,
             events: hooked.events,
             trace: hooked.trace,
+            payments: hooked.payments,
         }
     }
 }
@@ -523,6 +531,7 @@ fn failed_hooks(failed: Failed) -> (Result<Effect, Failure>, Contracted) {
         fuel_used: failed.fuel_used,
         events: Vec::new(),
         trace: failed.trace,
+        payments: Vec::new(),
     };
 
     (Err(Failure::Registry(failed.error)), contracted)
@@ -543,6 +552,7 @@ fn refreshed(
         fuel_used: outcome.fuel_used,
         events: outcome.events,
         trace: outcome.trace,
+        payments: outcome.payments,
     };
     let returned = match outcome.result {
         Ok(returned) => returned,
@@ -876,6 +886,7 @@ fn evm(
                 fuel_used: ran.gas_used.saturating_mul(fuel_per_gas),
                 events: ran.events,
                 trace: Default::default(),
+                payments: ran.payments,
             };
             let result = match ran.result {
                 Ok(EvmReturned::Created(address)) => Ok(Effect::Deployed(address)),

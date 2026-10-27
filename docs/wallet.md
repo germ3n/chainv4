@@ -284,6 +284,8 @@ first. The wallet proves each one with
 
 From those it works out what moved for the account (`wallet/src/history.rs`):
 - the coin, from a transfer, a mint, a burn or a call's value;
+- the coin a contract paid, from the receipt's payments: a swap's claim, a bridge's release, a
+  split, each line proven with the receipt;
 - tokens, from the standard's `Transfer` events.
 
 A move between two of the account's own addresses moved nothing for it, so its line says what the

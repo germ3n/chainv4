@@ -300,6 +300,7 @@ Every transaction on the main chain has a receipt, stored by its id (`TxReceipt`
 - the gas it used, and the fee it paid;
 - its status: what it did, or why it failed;
 - the events its contracts emitted, in order;
+- its payments: the coin its contracts paid, in the order they paid it (see below);
 - its trace: every call, delegate and transfer its contracts made (see
   [Contracts](contracts.md#traces)).
 
@@ -309,7 +310,7 @@ receipts with everything else.
 **The receipts root:** each header commits to what its transactions did as a Merkle root, built the
 way RFC 6962 (Certificate Transparency) builds one (`crypto::merkle`):
 - **Leaves:** one per transaction, in order: the hash of `0` and its `CommittedReceipt`, which is
-  its id, fuel burned, gas used, fee, outcome and events.
+  its id, fuel burned, gas used, fee, outcome, events and payments.
 - **Not committed:** a failure's message and the trace. Neither is consensus, so their wording and
   depth can change without splitting the chain. The outcome only says that it failed.
 - **The tree:** a node is the hash of `1` and its two halves', and a list splits at the largest
@@ -319,6 +320,20 @@ way RFC 6962 (Certificate Transparency) builds one (`crypto::merkle`):
 transaction's leaf (`SignedTx::leaf`, its whole encoding, signature included), in order. So a
 receipt says what a transaction did, and its leaf at the same place in `tx_root` says who sent
 what, which the receipt does not.
+
+**Payments:** every coin movement a contract made while the transaction ran, that stuck, each
+from, to and amount, in the order they ran:
+- **Native:** what a contract sent with `accounts.transfer` or the SDK's `transfer`, and the value
+  it sent with a call, `evm.call` included, before what the callee paid on.
+- **EVM:** every frame below the top that sends value (`CALL`), creates a contract with value, or
+  pays its balance on with `SELFDESTRUCT`, each address told as the account it is: an alias as its
+  native account. What an EVM contract sends a native one through the native precompile is
+  recorded where the native call ran.
+- **Not payments:** the transaction's own value or transfer, which the transaction itself says,
+  and anything a failed call or a reverted frame sent, which it took back.
+
+So a wallet proves what a contract paid it as it proves a receipt, line by line, and the address
+index lists the transaction under every contract that paid and everyone paid.
 
 `GET /proofs/receipts/{id}` serves both paths: that the transaction is in its block, who sent
 what, and what it did. A light client checks them with `check_tx` and `check_receipt`.

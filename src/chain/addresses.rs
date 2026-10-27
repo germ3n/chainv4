@@ -13,6 +13,7 @@
 //! shares, in the index module.
 
 use {
+    crate::structs::receipt::Payment,
     super::index::Landed,
     crate::chain::receipt::{TxReceipt, TxStatus},
     crate::crypto::hashable::Hashable,
@@ -46,15 +47,16 @@ pub struct IndexedTx {
 impl Hashable for IndexedTx {}
 
 #[document(
-    summary = "Every address a transaction touches, as the address index keeps it under each: its sender; a transfer's, mint's or burn's parties; the contract called or upgraded and every address among the call's arguments; and the contract it deployed.",
+    summary = "Every address a transaction touches, as the address index keeps it under each: its sender; a transfer's, mint's or burn's parties; the contract called or upgraded and every address among the call's arguments; the contract it deployed; and every contract that paid coin while it ran, and whom it paid.",
     params = {
         signed = "The transaction.",
         status = "What it did, for the address a deploy landed at.",
+        payments = "What its contracts paid, from its receipt.",
     },
     category = "Chain",
     see_also = "IndexedTx",
 )]
-pub fn touched(signed: &SignedTx, status: &TxStatus) -> BTreeSet<Address> {
+pub fn touched(signed: &SignedTx, status: &TxStatus, payments: &[Payment]) -> BTreeSet<Address> {
     let mut touched = BTreeSet::from([signed.sender()]);
 
     match &signed.tx {
@@ -107,6 +109,9 @@ pub fn touched(signed: &SignedTx, status: &TxStatus) -> BTreeSet<Address> {
         touched.insert(*contract);
     }
 
+    // What a contract paid shows in the history of whom it paid, and its own.
+    touched.extend(payments.iter().flat_map(|payment| [payment.from, payment.to]));
+
     touched
 }
 
@@ -119,14 +124,14 @@ fn key(address: &Address, height: u64, index: u32) -> Vec<u8> {
 pub(super) fn index(layer: &State, landed: Landed, signed: &SignedTx, receipt: &TxReceipt) {
     let Landed { block, height, at: index, tx } = landed;
 
-    for address in touched(signed, &receipt.status) {
+    for address in touched(signed, &receipt.status, &receipt.payments) {
         layer.put_value(Column::Addresses, key(&address, height, index), &IndexedTx { tx, block, height, index });
     }
 }
 
 /// Takes one transaction back out.
 pub(super) fn unindex(layer: &State, height: u64, index: u32, signed: &SignedTx, receipt: &TxReceipt) {
-    for address in touched(signed, &receipt.status) {
+    for address in touched(signed, &receipt.status, &receipt.payments) {
         layer.delete(Column::Addresses, key(&address, height, index));
     }
 }

@@ -10,6 +10,7 @@ use {
     crate::structs::address::Address,
     crate::structs::code::Engine,
     crate::structs::event::Event,
+    crate::structs::receipt::Payment,
     crate::structs::hash::{Hash, HashType},
     crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
@@ -260,6 +261,8 @@ pub struct Outcome {
     pub trace: Trace,
     #[document(summary = "The contracts that asked, with tokens.refresh or refresh_token, for the token registry to ask their name, symbol and decimals again once the transaction succeeds, sorted. Empty when the call failed, or asked for none.")]
     pub refresh_tokens: Vec<Address>,
+    #[document(summary = "The coin the call and the calls it made paid from contracts' balances, in order: value sent with a call, transfers, and the EVM's own moves. Empty when it failed.")]
+    pub payments: Vec<Payment>,
 }
 
 impl Outcome {
@@ -271,6 +274,7 @@ impl Outcome {
             events: Vec::new(),
             trace: Trace::default(),
             refresh_tokens: Vec::new(),
+            payments: Vec::new(),
         }
     }
 }

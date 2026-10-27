@@ -165,6 +165,12 @@ pub fn light(args: LightArgs) -> CliResult<()> {
                 let (signed, receipt, assurance) = proven_tx(&agent, &node, &client, id)?;
                 let mark = if assurance.final_ { "final" } else { "not final" };
                 println!("{:>8} {id} {}: {} [{mark}]", assurance.height, summary(&signed.tx), outcome(&receipt.outcome));
+
+                // What contracts paid while it ran, proven with the receipt: the lines that are
+                // this address's.
+                for payment in receipt.payments.iter().filter(|payment| payment.to == address || payment.from == address) {
+                    println!("{:>8} {:>66}   {} paid {} to {}", "", "", payment.from, payment.amount, payment.to);
+                }
             }
 
             if listing["next"].is_string() {
