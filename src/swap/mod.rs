@@ -16,78 +16,101 @@ use {
     crate::crypto::bitcoin::sha256,
     crate::structs::address::Address,
     crate::structs::u256::u256,
+    r#macro::document,
     wincode::{SchemaRead, SchemaWrite},
 };
 
-/// The UR type the terms travel as.
+#[document(summary = "The UR type the terms travel as.", category = "Swaps")]
 pub const UR_TYPE: &str = "chainv4-swap";
 
-/// How long before the first lock's deadline the second's must end, at least: time for the
-/// starter, once the second lock stands, to claim it and so show the secret, and for the other to
-/// claim the first with it before its refund opens.
+#[document(
+    summary = "The name, under the chain's suffix, that the swap contract a new offer uses by default is found by, such as swap.dev: registered by whoever runs one, and looked up before the node's advertisement. Any contract that follows contracts/lua/swap.lua's functions will do; the terms name the one a swap uses.",
+    category = "Swaps",
+)]
+pub const SWAP_NAME: &str = "swap";
+
+#[document(
+    summary = "How long before the first lock's deadline the second's must end, at least: time for the starter, once the second lock stands, to claim it and so show the secret, and for the other to claim the first with it before its refund opens.",
+    category = "Swaps",
+)]
 pub const MIN_GAP_MS: u64 = 4 * 3_600_000;
 
-/// The deadlines a swap gets unless its starter says otherwise: the first lock's, then the
-/// second's, from when it starts.
+#[document(
+    summary = "The deadlines a swap gets unless its starter says otherwise: the first lock's, then the second's, from when it starts.",
+    category = "Swaps",
+)]
 pub const FIRST_DEADLINE_MS: u64 = 24 * 3_600_000;
+#[document(
+    summary = "The second lock's deadline unless the starter says otherwise: 12 hours from when the swap starts.",
+    category = "Swaps",
+)]
 pub const SECOND_DEADLINE_MS: u64 = 12 * 3_600_000;
 
-/// The chain on the other side of a swap. Bitcoin's networks for now; another chain that locks
-/// coins under a SHA-256 hash and a deadline is a new tag here, its own lock and spend beside
-/// htlc's, with nothing to change on chainv4's side.
+#[document(
+    summary = "The chain on the other side of a swap. Bitcoin's networks for now; another chain that locks coins under a SHA-256 hash and a deadline is a new tag here, its own lock and spend beside htlc's, with nothing to change on chainv4's side.",
+    category = "Swaps",
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
 pub enum Counterparty {
     #[wincode(tag = 0)]
     Bitcoin,
-    /// Bitcoin's test networks: testnet, signet and regtest.
+    #[document(summary = "Bitcoin's test networks: testnet, signet and regtest.")]
     #[wincode(tag = 1)]
     BitcoinTestnet,
 }
 
-/// What the starter of a swap pays.
+#[document(summary = "What the starter of a swap pays.", category = "Swaps")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 #[wincode(tag_encoding = "u8")]
 pub enum Pays {
-    /// Bitcoin, for coins or a token on chainv4.
+    #[document(summary = "Bitcoin, for coins or a token on chainv4.")]
     #[wincode(tag = 0)]
     Bitcoin,
-    /// Coins or a token on chainv4, for bitcoin.
+    #[document(summary = "Coins or a token on chainv4, for bitcoin.")]
     #[wincode(tag = 1)]
     Chain,
 }
 
-/// A swap's terms, as both sides hold them once agreed. An offer leaves out the answerer's keys.
+#[document(
+    summary = "A swap's terms, as both sides hold them once agreed. An offer leaves out the answerer's keys.",
+    category = "Swaps",
+)]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct Terms {
-    /// The chain on the other side.
+    #[document(summary = "The chain on the other side.")]
     pub chain: Counterparty,
-    /// The SHA-256 of the starter's secret.
+    #[document(summary = "The swap contract on chainv4 that the lock there goes into, and both sides look in.")]
+    pub contract: Address,
+    #[document(summary = "The SHA-256 of the starter's secret.")]
     pub hash: [u8; 32],
-    /// The bitcoin locked, in satoshis.
+    #[document(summary = "The bitcoin locked, in satoshis.")]
     pub sats: u64,
-    /// The token locked on chainv4, or None for its coin.
+    #[document(summary = "The token locked on chainv4, or None for its coin.")]
     pub token: Option<Address>,
-    /// How much of it, in its smallest units.
+    #[document(summary = "How much of it, in its smallest units.")]
     #[wincode(with = "crate::structs::u256::U256Le")]
     pub amount: u256,
-    /// What the starter pays.
+    #[document(summary = "What the starter pays.")]
     pub starter: Pays,
-    /// Whose bitcoin it is: the HTLC's refund key.
+    #[document(summary = "Whose bitcoin it is: the HTLC's refund key.")]
     pub bitcoin_payer: Option<[u8; 33]>,
-    /// Who takes the bitcoin with the secret: the HTLC's claim key.
+    #[document(summary = "Who takes the bitcoin with the secret: the HTLC's claim key.")]
     pub bitcoin_receiver: Option<[u8; 33]>,
-    /// Who locks on chainv4, and gets it back after the deadline.
+    #[document(summary = "Who locks on chainv4, and gets it back after the deadline.")]
     pub chain_payer: Option<Address>,
-    /// Who takes what is locked on chainv4 with the secret.
+    #[document(summary = "Who takes what is locked on chainv4 with the secret.")]
     pub chain_receiver: Option<Address>,
-    /// When the starter's lock, the first, opens to a refund: Unix milliseconds.
+    #[document(summary = "When the starter's lock, the first, opens to a refund: Unix milliseconds.")]
     pub first_deadline: u64,
-    /// When the other's lock, the second, does.
+    #[document(summary = "When the other's lock, the second, does.")]
     pub second_deadline: u64,
 }
 
-/// A secret for a swap's starter: 32 random bytes, and their SHA-256, which the terms carry.
+#[document(
+    summary = "A secret for a swap's starter: 32 random bytes, and their SHA-256, which the terms carry.",
+    category = "Swaps",
+)]
 pub fn secret() -> Result<([u8; 32], [u8; 32]), String> {
     let mut secret = [0u8; 32];
     getrandom::fill(&mut secret).map_err(|err| format!("no randomness for a secret: {err}"))?;
@@ -96,7 +119,7 @@ pub fn secret() -> Result<([u8; 32], [u8; 32]), String> {
 }
 
 impl Terms {
-    /// The Bitcoin network it is on.
+    #[document(parent = "Terms", summary = "The Bitcoin network it is on.")]
     pub fn network(&self) -> Network {
         match self.chain {
             Counterparty::BitcoinTestnet => Network::Test,
@@ -104,13 +127,18 @@ impl Terms {
         }
     }
 
-    /// Whether both sides' keys are in: an answer, rather than an offer.
+    #[document(
+        parent = "Terms",
+        summary = "Whether both sides' keys are in: an answer, rather than an offer.",
+    )]
     pub fn agreed(&self) -> bool {
         self.bitcoin_payer.is_some() && self.bitcoin_receiver.is_some() && self.chain_payer.is_some() && self.chain_receiver.is_some()
     }
 
-    /// When the lock on chainv4 ends: the first deadline if the starter locks there, else the
-    /// second.
+    #[document(
+        parent = "Terms",
+        summary = "When the lock on chainv4 ends: the first deadline if the starter locks there, else the second.",
+    )]
     pub fn chain_deadline(&self) -> u64 {
         match self.starter {
             Pays::Chain => self.first_deadline,
@@ -118,7 +146,7 @@ impl Terms {
         }
     }
 
-    /// When the lock on Bitcoin ends.
+    #[document(parent = "Terms", summary = "When the lock on Bitcoin ends.")]
     pub fn bitcoin_deadline(&self) -> u64 {
         match self.starter {
             Pays::Bitcoin => self.first_deadline,
@@ -126,8 +154,10 @@ impl Terms {
         }
     }
 
-    /// The HTLC on Bitcoin, once both keys are in. Its lock time is the Bitcoin deadline in
-    /// seconds.
+    #[document(
+        parent = "Terms",
+        summary = "The HTLC on Bitcoin, once both keys are in. Its lock time is the Bitcoin deadline in seconds.",
+    )]
     pub fn htlc(&self) -> Option<htlc::Htlc> {
         Some(htlc::Htlc {
             hash: self.hash,
@@ -137,8 +167,10 @@ impl Terms {
         })
     }
 
-    /// Checks the terms hold together, at a time: something on each side, deadlines ahead and
-    /// far enough apart, keys that are keys and not each other's.
+    #[document(
+        parent = "Terms",
+        summary = "Checks the terms hold together, at a time: something on each side, deadlines ahead and far enough apart, keys that are keys and not each other's.",
+    )]
     pub fn check(&self, now: u64) -> Result<(), String> {
         if self.sats < htlc::DUST || self.amount == u256::ZERO {
             return Err(format!("a swap pays something on each side: at least {} satoshis, and more than nothing on chainv4", htlc::DUST));
@@ -173,12 +205,15 @@ impl Terms {
         Ok(())
     }
 
-    /// The terms as a code: ur:chainv4-swap, in capitals.
+    #[document(parent = "Terms", summary = "The terms as a code: ur:chainv4-swap, in capitals.")]
     pub fn to_text(&self) -> String {
         ur::encode(&wincode::serialize(self).expect("terms always encode"), &ur::Type::Custom(UR_TYPE)).to_ascii_uppercase()
     }
 
-    /// Reads terms from their code, whole: anything past them is refused.
+    #[document(
+        parent = "Terms",
+        summary = "Reads terms from their code, whole: anything past them is refused.",
+    )]
     pub fn from_text(text: &str) -> Result<Terms, String> {
         let text = text.trim().to_ascii_lowercase();
 
@@ -192,7 +227,7 @@ impl Terms {
         }
     }
 
-    /// Reads terms from their encoding, all of these bytes.
+    #[document(parent = "Terms", summary = "Reads terms from their encoding, all of these bytes.")]
     pub fn from_bytes(bytes: &[u8]) -> Result<Terms, String> {
         let terms: Terms = wincode::deserialize(bytes).map_err(|_| "terms that do not decode".to_string())?;
 

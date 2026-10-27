@@ -16,6 +16,8 @@ mod settings;
 mod sign;
 #[cfg(feature = "swap")]
 mod swaps;
+#[cfg(feature = "swap")]
+pub use swaps::swap_name;
 
 use {
     crate::app::{Coin, Role, Settings},

@@ -420,7 +420,16 @@ impl Wallet {
             self.node.ask(ask);
         }
 
-        for ask in self.chain.names_due(&self.views.wanted_names(), time) {
+        #[cfg_attr(not(feature = "swap"), allow(unused_mut))]
+        let mut wanted = self.views.wanted_names();
+
+        // The swap name, proven, for new offers to find the default swap contract by.
+        #[cfg(feature = "swap")]
+        if self.page == views::Page::Swaps {
+            wanted.extend(views::swap_name(&self.chain));
+        }
+
+        for ask in self.chain.names_due(&wanted, time) {
             self.node.ask(ask);
         }
 

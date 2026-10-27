@@ -25,8 +25,8 @@ mod layout;
 #[cfg(feature = "client")]
 mod light;
 #[cfg(feature = "client")]
-#[cfg(feature = "client")]
 pub(crate) mod bench;
+#[cfg(feature = "client")]
 mod send;
 #[cfg(all(feature = "client", feature = "swap"))]
 mod swap;

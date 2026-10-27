@@ -10,6 +10,7 @@ fn bitcoin_key(byte: u8) -> [u8; 33] {
 fn offer() -> Terms {
     Terms {
         chain: Counterparty::BitcoinTestnet,
+        contract: Address::Contract([0x5a; 32]),
         hash: sha256(&[0x5e; 32]),
         sats: 100_000,
         token: None,

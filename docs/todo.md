@@ -657,6 +657,21 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   tokens, Bitcoin's HTLC (`src/swap/htlc.rs`), offers and answers as `ur:chainv4-swap`,
   `chainv4 swap`, the wallet's Swaps page and the offline signer signing HTLC spends, deadlines by
   time on both chains, behind the `swap` feature. See [Atomic swaps](swaps.md).
+- [ ] **Swaps wait for finality.** The starter claims as soon as the other's lock on chainv4 is in
+  the state; with reorgs cheap, a counterparty could lock, see the secret in the claim, take the
+  bitcoin, and reorg the lock away. Claim only once the lock is final on chainv4 (and the HTLC
+  deeply confirmed on Bitcoin): the Swaps page and `chainv4 swap status` would say when, and hold
+  the claim until then.
+- [ ] **Before real value moves through the chain.** Not one of these is done:
+  - **finality-aware swaps,** as above;
+  - **independent validators,** run by different people on different machines, so no one key
+    decides what is final, as the VPS's alone does now;
+  - **security that is costly to attack:** real hashrate, or finality by stake, so a reorg is not
+    cheap;
+  - **frozen consensus:** no flag days without a migration and a release that says so;
+  - **an outside audit** of the node, the swap contract, the HTLC flow and the wallet;
+  - **a long run on Bitcoin's testnet** with swaps between people who are not the developers;
+  - **legal advice** on exchanging assets where it would run.
 - [ ] **A Bitcoin light client in the wallet,** BIP157/158 compact block filters (Kyoto), on the
   desktop and Android apps, for swaps to see Bitcoin themselves rather than by pasting or Esplora.
 - [ ] **A Bitcoin SPV light client as a contract,** checking headers and merkle proofs with

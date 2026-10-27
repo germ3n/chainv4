@@ -52,9 +52,12 @@ impl Names {
         })
     }
 }
-/// The most transactions one gossiped batch holds.
+#[document(summary = "The most transactions one gossiped batch holds.", category = "Node")]
 pub const TX_BATCH: usize = 256;
-/// The longest a transaction waits for others to share its batch.
+#[document(
+    summary = "The longest a transaction waits for others to share its batch.",
+    category = "Node",
+)]
 pub const TX_BATCH_WAIT: Duration = Duration::from_millis(50);
 
 /// How long a transaction is remembered as sent or heard of: past it, one heard again is news.
@@ -1114,7 +1117,8 @@ mod tests {
     #[test]
     fn a_transaction_goes_out_once_and_one_heard_again_goes_no_further() {
         let mut seen = Seen::default();
-        let (mine, theirs) = (crate::structs::hash::Hash::Sha256([1; 32]), crate::structs::hash::Hash::Sha256([2; 32]));
+        let id = |text: &[u8]| Hasher::digest(crate::structs::hash::HashType::default_chain(), text);
+        let (mine, theirs) = (id(b"mine"), id(b"theirs"));
 
         assert!(!seen.sent(mine), "sent the first time");
         assert!(seen.sent(mine), "and never again");

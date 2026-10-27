@@ -19,6 +19,7 @@ use {
     crate::crypto::bitcoin::tx::{Network, SIGHASH_ALL, Transaction, TxIn, TxOut, der, p2wsh},
     crate::crypto::bitcoin::{self, sha256},
     crate::structs::bech32,
+    r#macro::document,
 };
 
 const OP_IF: u8 = 0x63;
@@ -31,27 +32,35 @@ const OP_SHA256: u8 = 0xa8;
 const OP_CHECKSIG: u8 = 0xac;
 const OP_CHECKLOCKTIMEVERIFY: u8 = 0xb1;
 
-/// The smallest lock time that is a Unix time, in seconds, rather than a block height.
+#[document(
+    summary = "The smallest lock time that is a Unix time, in seconds, rather than a block height.",
+    category = "Swaps",
+)]
 pub const LOCKTIME_THRESHOLD: u32 = 500_000_000;
 
-/// A Bitcoin output's dust limit for native segwit: one worth less is not relayed.
+#[document(
+    summary = "A Bitcoin output's dust limit for native segwit: one worth less is not relayed.",
+    category = "Swaps",
+)]
 pub const DUST: u64 = 294;
 
-/// A swap's hash time-locked contract on Bitcoin.
+#[document(summary = "A swap's hash time-locked contract on Bitcoin.", category = "Swaps")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Htlc {
-    /// The SHA-256 of the secret.
+    #[document(summary = "The SHA-256 of the secret.")]
     pub hash: [u8; 32],
-    /// Who takes the coins with the secret: a compressed key.
+    #[document(summary = "Who takes the coins with the secret: a compressed key.")]
     pub claim: [u8; 33],
-    /// Who takes them back after the lock time.
+    #[document(summary = "Who takes them back after the lock time.")]
     pub refund: [u8; 33],
-    /// When the refund opens: a Unix time, in seconds.
+    #[document(summary = "When the refund opens: a Unix time, in seconds.")]
     pub locktime: u32,
 }
 
-/// The coins an HTLC holds on Bitcoin: the output paying it, by its transaction's id as hashed
-/// and its index there, and what it holds, in satoshis.
+#[document(
+    summary = "The coins an HTLC holds on Bitcoin: the output paying it, by its transaction's id as hashed and its index there, and what it holds, in satoshis.",
+    category = "Swaps",
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Coins {
     pub txid: [u8; 32],
@@ -59,17 +68,17 @@ pub struct Coins {
     pub value: u64,
 }
 
-/// How an HTLC's coins are spent.
+#[document(summary = "How an HTLC's coins are spent.", category = "Swaps")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spend {
-    /// By the claim key, with the secret.
+    #[document(summary = "By the claim key, with the secret.")]
     Claim { secret: [u8; 32] },
-    /// By the refund key, once the lock time passed.
+    #[document(summary = "By the refund key, once the lock time passed.")]
     Refund,
 }
 
 impl Htlc {
-    /// Its witness script.
+    #[document(parent = "Htlc", summary = "Its witness script.")]
     pub fn script(&self) -> Vec<u8> {
         let mut out = vec![OP_IF, OP_SIZE, 0x01, 0x20, OP_EQUALVERIFY, OP_SHA256, 0x20];
         out.extend(self.hash);
@@ -84,7 +93,10 @@ impl Htlc {
         out
     }
 
-    /// Reads one from its witness script: exactly this template, or None.
+    #[document(
+        parent = "Htlc",
+        summary = "Reads one from its witness script: exactly this template, or None.",
+    )]
     pub fn parse(script: &[u8]) -> Option<Htlc> {
         let rest = script.strip_prefix(&[OP_IF, OP_SIZE, 0x01, 0x20, OP_EQUALVERIFY, OP_SHA256, 0x20][..])?;
         let (hash, rest) = rest.split_at_checked(32)?;
@@ -112,21 +124,23 @@ impl Htlc {
         (htlc.script() == script).then_some(htlc)
     }
 
-    /// The output that pays it: P2WSH of its script.
+    #[document(parent = "Htlc", summary = "The output that pays it: P2WSH of its script.")]
     pub fn output(&self) -> Vec<u8> {
         p2wsh(&self.script())
     }
 
-    /// Its address on a network: bc1q…, or tb1q…, longer than a key's, as a script's is.
+    #[document(
+        parent = "Htlc",
+        summary = "Its address on a network: bc1q…, or tb1q…, longer than a key's, as a script's is.",
+    )]
     pub fn address(&self, network: Network) -> String {
         bech32::encode_segwit(network.hrp(), &sha256(&self.script()))
     }
 
-    /// A transaction spending its coins to a script, less a fee
-    /// of fee_rate satoshis a virtual byte, signed with the claim's or the refund's key. A refund
-    /// carries the lock time, as CHECKLOCKTIMEVERIFY wants, and so is not mined before it.
-    /// Refused: a key that is not the one the spend needs, a secret that is not the hash's, and a
-    /// fee that leaves less than dust.
+    #[document(
+        parent = "Htlc",
+        summary = "A transaction spending its coins to a script, less a fee of fee_rate satoshis a virtual byte, signed with the claim's or the refund's key. A refund carries the lock time, as CHECKLOCKTIMEVERIFY wants, and so is not mined before it. Refused: a key that is not the one the spend needs, a secret that is not the hash's, and a fee that leaves less than dust.",
+    )]
     pub fn spend(&self, coins: Coins, to: Vec<u8>, fee_rate: u64, spend: Spend, secret: &[u8; 32]) -> Result<Transaction, String> {
         let key = crate::crypto::secp256k1::public_key(secret).ok_or("not a secp256k1 key")?;
 
@@ -143,8 +157,10 @@ impl Htlc {
         Ok(tx)
     }
 
-    /// The same spend, unsigned, its fee paid for the witness it will carry: what a PSBT asks an
-    /// offline signer to sign.
+    #[document(
+        parent = "Htlc",
+        summary = "The same spend, unsigned, its fee paid for the witness it will carry: what a PSBT asks an offline signer to sign.",
+    )]
     pub fn unsigned(&self, coins: Coins, to: Vec<u8>, fee_rate: u64, spend: Spend) -> Result<Transaction, String> {
         let Coins { txid, vout, value } = coins;
 
@@ -176,8 +192,10 @@ impl Htlc {
         Ok(tx)
     }
 
-    /// The signature a key makes over a spend of its coins, worth value: BIP143's hash with the
-    /// script as its code, DER, and SIGHASH_ALL after it.
+    #[document(
+        parent = "Htlc",
+        summary = "The signature a key makes over a spend of its coins, worth value: BIP143's hash with the script as its code, DER, and SIGHASH_ALL after it.",
+    )]
     pub fn signature(&self, tx: &Transaction, value: u64, secret: &[u8; 32]) -> Vec<u8> {
         let preimage = tx.script_preimage(0, &self.script(), value);
         let mut signature = der(&bitcoin::sign(secret, &preimage));
@@ -186,8 +204,10 @@ impl Htlc {
         signature
     }
 
-    /// The witness that spends it: the signature, the secret and 1 for the claim's branch, or
-    /// nothing for the refund's, and the script.
+    #[document(
+        parent = "Htlc",
+        summary = "The witness that spends it: the signature, the secret and 1 for the claim's branch, or nothing for the refund's, and the script.",
+    )]
     pub fn witness(&self, signature: &[u8], spend: Spend) -> Vec<Vec<u8>> {
         match spend {
             Spend::Claim { secret } => vec![signature.to_vec(), secret.to_vec(), vec![1], self.script()],
@@ -196,8 +216,10 @@ impl Htlc {
     }
 }
 
-/// The secret a claim revealed: the 32 bytes in a spend's witness that hash to the swap's hash,
-/// from the transaction that claimed it, for the other side to claim with in turn.
+#[document(
+    summary = "The secret a claim revealed: the 32 bytes in a spend's witness that hash to the swap's hash, from the transaction that claimed it, for the other side to claim with in turn.",
+    category = "Swaps",
+)]
 pub fn revealed(tx: &Transaction, hash: &[u8; 32]) -> Option<[u8; 32]> {
     tx.inputs.iter().flat_map(|input| &input.witness).filter_map(|item| <[u8; 32]>::try_from(item.as_slice()).ok()).find(|item| sha256(item) == *hash)
 }

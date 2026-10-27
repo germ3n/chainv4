@@ -897,8 +897,12 @@ mod send {
         };
         let alice = crate::structs::address::Address::Ed25519([0xa; 32]);
         let now = now_ms();
+        // A new offer's contract is the one the node names, there being no swap name.
+        let agent = crate::cli::send::agent(&Default::default()).unwrap();
+        assert_eq!(crate::cli::swap::default_contract(&agent, &format!("http://{}", running.api)).unwrap(), contract);
         let terms = Terms {
             chain: Counterparty::BitcoinTestnet,
+            contract,
             hash,
             sats: 100_000,
             token: None,
@@ -912,8 +916,8 @@ mod send {
             second_deadline: now + crate::swap::SECOND_DEADLINE_MS,
         };
         let node = format!("http://{}", running.api);
-        // The contract comes from the node's GET /status.
-        let action = || ChainAction { terms: terms.to_text(), contract: None, node: node.clone(), tls: Default::default(), key: None };
+        // The terms name the contract the lock goes into.
+        let action = || ChainAction { terms: terms.to_text(), node: node.clone(), tls: Default::default(), key: None };
 
         swap(SwapArgs { action: SwapAction::Lock(action()) }).unwrap();
         // Anyone may send the claim: the coins go to Alice whoever sends it.

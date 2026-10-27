@@ -21,6 +21,7 @@ fn offered() -> (Terms, Terms, [u8; 32]) {
     let now = 1_793_000_000_000;
     let offer = Terms {
         chain: Counterparty::BitcoinTestnet,
+        contract: Address::Contract([0x5a; 32]),
         hash,
         sats: 80_000,
         token: None,
@@ -51,6 +52,7 @@ fn an_answer_keeps_every_term_of_the_offer() {
     assert!(!answers(&offer, &Terms { sats: 79_999, ..answer.clone() }), "less bitcoin");
     assert!(!answers(&offer, &Terms { chain_receiver: Some(Address::Ed25519([0xc; 32])), ..answer.clone() }), "paying someone else");
     assert!(!answers(&offer, &Terms { first_deadline: answer.first_deadline + 1, ..answer.clone() }));
+    assert!(!answers(&offer, &Terms { contract: Address::Contract([0x66; 32]), ..answer.clone() }), "another contract");
 
     // Terms travel as a code the scanner reads.
     let shown = Message::Swap(Box::new(answer.clone()));

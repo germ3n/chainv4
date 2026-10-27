@@ -39,6 +39,7 @@ starter's lock without paying. The wallet keeps it sealed in the vault; the CLI 
 | Field | What it is |
 | --- | --- |
 | `chain` | The other chain: `Bitcoin`, or `BitcoinTestnet` for testnet, signet and regtest. Another chain is another tag. |
+| `contract` | The swap contract on chainv4 that the lock goes into, and both sides look in. |
 | `hash` | The SHA-256 of the secret. |
 | `sats` | The bitcoin locked, in satoshis. |
 | `token`, `amount` | What is locked on chainv4: the coin, or a token's contract, and how much in its smallest units. |
@@ -67,8 +68,14 @@ wallet refuses one that changes anything but the other side's keys.
 
 ## chainv4's side: the swap contract
 
-`contracts/lua/swap.lua`, deployed once per chain; nodes name it with `--swap-contract` (in
-Docker, `SWAP_CONTRACT` in `.env`), and `GET /status` shows it as `swap.contract`.
+`contracts/lua/swap.lua`, or any contract with the same functions: nothing in the chain treats
+one as special, and any contract can call one. **The terms name the contract a swap uses,** so
+both sides lock and look in the same one, whatever their wallets would pick. A new offer takes:
+1. the one given: the CLI's `--contract`, or the wallet's Settings, **Swaps**;
+2. else the one the name `swap` under the chain's suffix resolves to, such as `swap.dev`, which
+   whoever runs a swap contract registers, proven by the wallet's light client as any name;
+3. else the one the node advertises, started with `--swap-contract` (in Docker, `SWAP_CONTRACT`
+   in `.env`), which `GET /status` shows as `swap.contract`.
 
 | Function | What it does |
 | --- | --- |
@@ -114,7 +121,7 @@ chainv4 swap offer --pays bitcoin --testnet --hash 0x… --sats 100000 --amount 
 chainv4 swap answer UR:CHAINV4-SWAP/… --bitcoin-key bob-btc.key --address ed25519:0x…
 chainv4 swap show UR:CHAINV4-SWAP/…                 # the HTLC's address and script
 # Alice pays the HTLC from her Bitcoin wallet; Bob checks it confirmed, then locks:
-chainv4 swap lock UR:CHAINV4-SWAP/… --key bob.key --node https://…
+chainv4 swap lock UR:CHAINV4-SWAP/… --key bob.key --node https://…   # into the terms' contract
 # Alice claims on chainv4, showing the secret:
 chainv4 swap claim UR:CHAINV4-SWAP/… --secret 0x… --key alice.key --node https://…
 chainv4 swap status UR:CHAINV4-SWAP/… --node https://…   # claimed, with the secret
@@ -125,7 +132,7 @@ chainv4 swap bitcoin-claim UR:CHAINV4-SWAP/… --secret 0x… --funding <txid>:<
 
 `swap refund` and `swap bitcoin-refund` take a lock back after its deadline, and `swap revealed
 --tx <hex>` reads the secret from a Bitcoin claim's transaction, for when the starter pays on
-chainv4 and claims the bitcoin first. `--contract` names a swap contract the node does not.
+chainv4 and claims the bitcoin first. `swap offer --contract` names a swap contract other than the default.
 
 ## In the wallet
 

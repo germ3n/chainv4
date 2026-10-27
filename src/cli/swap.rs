@@ -15,7 +15,7 @@ use {
     crate::structs::u256::u256,
     crate::swap::htlc::{Coins, Spend, revealed},
     crate::swap::{Counterparty, Pays, Terms, secret},
-    serde_json::{Value, json},
+    serde_json::json,
     std::path::PathBuf,
 };
 
@@ -62,6 +62,15 @@ pub enum SwapAction {
         /// How long until the other's lock does: at least 4h before the first.
         #[arg(long, default_value = "12h", value_parser = parse_duration)]
         second: u64,
+        /// The swap contract the lock on chainv4 goes into: by default the one the name swap
+        /// under the chain's suffix resolves to, such as swap.dev, or else the one the node names.
+        #[arg(long)]
+        contract: Option<Address>,
+        /// The node to find the default contract at, when --contract is not given.
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        node: String,
+        #[command(flatten)]
+        tls: TlsArgs,
     },
     /// Answers an offer with your keys: the agreed terms, as a code to hand back.
     Answer {
@@ -95,8 +104,6 @@ pub enum SwapAction {
     /// Where the swap stands on chainv4: locked, claimed, with its secret, or refunded.
     Status {
         terms: String,
-        #[arg(long)]
-        contract: Option<Address>,
         #[arg(long, default_value = "http://127.0.0.1:8080")]
         node: String,
         #[command(flatten)]
@@ -131,11 +138,8 @@ pub enum PaysArg {
 /// What chainv4's side of a swap sends with.
 #[derive(clap::Args)]
 pub struct ChainAction {
-    /// The terms' code.
+    /// The terms' code: the swap contract is the one they name.
     pub terms: String,
-    /// The swap contract; the node's, from GET /status, unless given.
-    #[arg(long)]
-    pub contract: Option<Address>,
     /// The node's HTTP API.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub node: String,
@@ -178,10 +182,15 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
             println!("secret {}", to_hex(&secret));
             println!("hash   {}", to_hex(&hash));
         }
-        SwapAction::Offer { pays, hash, sats, amount, token, testnet, bitcoin_key, address, first, second } => {
+        SwapAction::Offer { pays, hash, sats, amount, token, testnet, bitcoin_key, address, first, second, contract, node, tls } => {
+            let contract = match contract {
+                Some(contract) => contract,
+                None => default_contract(&agent(&tls)?, node.trim_end_matches('/'))?,
+            };
             let (starter, key) = (match pays { PaysArg::Bitcoin => Pays::Bitcoin, PaysArg::Chain => Pays::Chain }, bitcoin_public(&bitcoin_key)?);
             let terms = Terms {
                 chain: if testnet { Counterparty::BitcoinTestnet } else { Counterparty::Bitcoin },
+                contract,
                 hash: bytes32(&hash, "--hash")?,
                 sats,
                 token,
@@ -216,7 +225,7 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
         SwapAction::Show { terms } => show(&Terms::from_text(&terms)?),
         SwapAction::Lock(action) => {
             let terms = agreed(&action.terms)?;
-            let contract = contract(&action)?;
+            let contract = terms.contract;
             let (hash, recipient, deadline) = (text(to_hex(&terms.hash)), TxCallArgumentType::Address(terms.chain_receiver.ok_or("no receiver")?), TxCallArgumentType::I64(terms.chain_deadline() as i64));
 
             match terms.token {
@@ -237,20 +246,17 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
                 return Err("that secret's SHA-256 is not the swap's hash".into());
             }
 
-            call(&action, contract(&action)?, "claim", u256::ZERO, vec![text(to_hex(&secret))])?;
+            call(&action, terms.contract, "claim", u256::ZERO, vec![text(to_hex(&secret))])?;
         }
         SwapAction::Refund(action) => {
             let terms = agreed(&action.terms)?;
-            call(&action, contract(&action)?, "refund", u256::ZERO, vec![text(to_hex(&terms.hash))])?;
+            call(&action, terms.contract, "refund", u256::ZERO, vec![text(to_hex(&terms.hash))])?;
         }
-        SwapAction::Status { terms, contract, node, tls } => {
+        SwapAction::Status { terms, node, tls } => {
             let terms = Terms::from_text(&terms)?;
             let agent = agent(&tls)?;
             let node = node.trim_end_matches('/');
-            let contract = match contract {
-                Some(contract) => contract,
-                None => advertised(&ok(agent.get(format!("{node}/status")).call())?)?,
-            };
+            let contract = terms.contract;
             let body = json!({ "contract": contract.to_string(), "function": "get", "args": [{ "type": "string", "value": to_hex(&terms.hash) }] });
             let answer = ok(agent.post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()))?;
             let values: Vec<String> = answer["values"].as_array().into_iter().flatten().map(|value| value["value"].as_str().map_or_else(|| value["value"].to_string(), str::to_string)).collect();
@@ -290,6 +296,7 @@ fn show(terms: &Terms) {
     println!("{} sats on {} for {} of {asset} on chainv4", terms.sats, terms.network().name(), terms.amount);
     println!("starter pays {}", match terms.starter { Pays::Bitcoin => "bitcoin, and locks first", Pays::Chain => "on chainv4, and locks first" });
     println!("hash {}", to_hex(&terms.hash));
+    println!("swap contract {}", terms.contract);
     println!("chainv4 lock ends {}", what(deadline));
     println!("bitcoin lock ends {}", what(terms.bitcoin_deadline()));
 
@@ -312,21 +319,18 @@ fn agreed(text: &str) -> CliResult<Terms> {
     }
 }
 
-/// The swap contract: given, or the node's.
-fn contract(action: &ChainAction) -> CliResult<Address> {
-    match action.contract {
-        Some(contract) => Ok(contract),
-        None => {
-            let agent = agent(&action.tls)?;
-            advertised(&ok(agent.get(format!("{}/status", action.node.trim_end_matches('/'))).call())?)
-        }
-    }
-}
+/// The swap contract a new offer uses: the one the name swap under the chain's suffix resolves
+/// to, or else the one the node advertises.
+pub(super) fn default_contract(agent: &ureq::Agent, node: &str) -> CliResult<Address> {
+    let suffix = ok(agent.get(format!("{node}/names")).call()).ok().and_then(|names| names["suffix"].as_str().map(str::to_string));
 
-fn advertised(status: &Value) -> CliResult<Address> {
-    status["swap"]["contract"]
+    if let Some(contract) = suffix.and_then(|suffix| super::send::resolve(agent, node, &format!("{}.{suffix}", crate::swap::SWAP_NAME)).ok()) {
+        return Ok(contract);
+    }
+
+    ok(agent.get(format!("{node}/status")).call())?["swap"]["contract"]
         .as_str()
-        .ok_or("the node names no swap contract: give --contract")?
+        .ok_or("no swap contract: none resolves by name, nor does the node name one. Give --contract")?
         .parse()
         .map_err(|_| "the node named a swap contract that is not an address".into())
 }

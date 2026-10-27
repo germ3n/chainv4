@@ -7,14 +7,19 @@ use {
     super::sha256d,
     crate::structs::bech32,
     crate::structs::hex::to_hex,
+    r#macro::document,
 };
 
-/// Signing all of the transaction, its inputs and outputs: the sighash type BIP143's hash here is
-/// for.
+#[document(
+    summary = "Signing all of the transaction, its inputs and outputs: the sighash type BIP143's hash here is for.",
+    category = "Bitcoin",
+)]
 pub const SIGHASH_ALL: u32 = 1;
 
-/// Which Bitcoin: its own network, or its test networks, testnet, signet and regtest, whose
-/// coins are worth nothing. Their keys are others, so the one never spends the other's coins.
+#[document(
+    summary = "Which Bitcoin: its own network, or its test networks, testnet, signet and regtest, whose coins are worth nothing. Their keys are others, so the one never spends the other's coins.",
+    category = "Bitcoin",
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Network {
     #[default]
@@ -25,7 +30,7 @@ pub enum Network {
 impl Network {
     pub const ALL: [Network; 2] = [Network::Main, Network::Test];
 
-    /// Its coin type in the keys' path, as SLIP-44 has it.
+    #[document(parent = "Network", summary = "Its coin type in the keys' path, as SLIP-44 has it.")]
     pub fn coin(self) -> u32 {
         match self {
             Network::Main => 0,
@@ -38,7 +43,7 @@ impl Network {
         Network::ALL.into_iter().find(|network| network.coin() == coin)
     }
 
-    /// What the pairing and the review call it, large.
+    #[document(parent = "Network", summary = "What the pairing and the review call it, large.")]
     pub fn name(self) -> &'static str {
         match self {
             Network::Main => "Bitcoin",
@@ -46,7 +51,7 @@ impl Network {
         }
     }
 
-    /// What the switch between them calls it.
+    #[document(parent = "Network", summary = "What the switch between them calls it.")]
     pub fn short(self) -> &'static str {
         match self {
             Network::Main => "Mainnet",
@@ -61,12 +66,15 @@ impl Network {
         }
     }
 
-    /// The account's path: m/84'/0'/0', or m/84'/1'/0'.
+    #[document(parent = "Network", summary = "The account's path: m/84'/0'/0', or m/84'/1'/0'.")]
     pub fn path(self) -> String {
         format!("m/84'/{}'/0'", self.coin())
     }
 
-    /// Its segwit addresses' human-readable part: bc1…, or tb1… on testnet and signet.
+    #[document(
+        parent = "Network",
+        summary = "Its segwit addresses' human-readable part: bc1…, or tb1… on testnet and signet.",
+    )]
     pub fn hrp(self) -> &'static str {
         match self {
             Network::Main => "bc",
@@ -74,8 +82,10 @@ impl Network {
         }
     }
 
-    /// Its legacy addresses' version bytes: paying a key's hash, 1…, or m… and n…, and a script's,
-    /// 3…, or 2….
+    #[document(
+        parent = "Network",
+        summary = "Its legacy addresses' version bytes: paying a key's hash, 1…, or m… and n…, and a script's, 3…, or 2….",
+    )]
     pub fn versions(self) -> (u8, u8) {
         match self {
             Network::Main => (0x00, 0x05),
@@ -85,7 +95,7 @@ impl Network {
 }
 
 
-/// A Bitcoin transaction, as the network encodes it.
+#[document(summary = "A Bitcoin transaction, as the network encodes it.", category = "Bitcoin")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transaction {
     pub version: u32,
@@ -94,18 +104,24 @@ pub struct Transaction {
     pub lock_time: u32,
 }
 
-/// An input: the output it spends, by its transaction's id, as hashed, and its index there.
+#[document(
+    summary = "An input: the output it spends, by its transaction's id, as hashed, and its index there.",
+    category = "Bitcoin",
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TxIn {
     pub txid: [u8; 32],
     pub vout: u32,
     pub script_sig: Vec<u8>,
     pub sequence: u32,
-    /// Its witness, segwit's signature and what goes with it: none until signed.
+    #[document(summary = "Its witness, segwit's signature and what goes with it: none until signed.")]
     pub witness: Vec<Vec<u8>>,
 }
 
-/// An output: an amount, in satoshis, and the script that spends it.
+#[document(
+    summary = "An output: an amount, in satoshis, and the script that spends it.",
+    category = "Bitcoin",
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TxOut {
     pub value: u64,
@@ -113,8 +129,10 @@ pub struct TxOut {
 }
 
 impl Transaction {
-    /// Reads one from all of these bytes, with its witnesses, as BIP144 writes them, or without;
-    /// says which.
+    #[document(
+        parent = "Transaction",
+        summary = "Reads one from all of these bytes, with its witnesses, as BIP144 writes them, or without; says which.",
+    )]
     pub fn read(bytes: &[u8]) -> Result<(Transaction, bool), String> {
         let mut r = Reader::new(bytes);
         let version = r.u32()?;
@@ -159,7 +177,10 @@ impl Transaction {
         }
     }
 
-    /// Its encoding without witnesses: what its id hashes, and a PSBT holds unsigned.
+    #[document(
+        parent = "Transaction",
+        summary = "Its encoding without witnesses: what its id hashes, and a PSBT holds unsigned.",
+    )]
     pub fn base(&self) -> Vec<u8> {
         let mut out = self.version.to_le_bytes().to_vec();
         compact(&mut out, self.inputs.len());
@@ -183,8 +204,10 @@ impl Transaction {
         out
     }
 
-    /// Its encoding as the network takes it: with its witnesses, as BIP144 writes them, when any
-    /// input has one, and as base otherwise. What is broadcast.
+    #[document(
+        parent = "Transaction",
+        summary = "Its encoding as the network takes it: with its witnesses, as BIP144 writes them, when any input has one, and as base otherwise. What is broadcast.",
+    )]
     pub fn encode(&self) -> Vec<u8> {
         if self.inputs.iter().all(|input| input.witness.is_empty()) {
             return self.base();
@@ -209,22 +232,28 @@ impl Transaction {
         out
     }
 
-    /// Its size in virtual bytes, as fees are paid by: a base byte is four weight, a witness
-    /// byte one.
+    #[document(
+        parent = "Transaction",
+        summary = "Its size in virtual bytes, as fees are paid by: a base byte is four weight, a witness byte one.",
+    )]
     pub fn vsize(&self) -> u64 {
         let (base, all) = (self.base().len() as u64, self.encode().len() as u64);
 
         (base * 3 + all).div_ceil(4)
     }
 
-    /// Its id, as an input names it: the double SHA-256 of it without witnesses, as hashed, the
-    /// reverse of how explorers write it.
+    #[document(
+        parent = "Transaction",
+        summary = "Its id, as an input names it: the double SHA-256 of it without witnesses, as hashed, the reverse of how explorers write it.",
+    )]
     pub fn txid(&self) -> [u8; 32] {
         sha256d(&self.base())
     }
 
-    /// What BIP143 signs for an input that spends a native segwit output of a key's hash: all of
-    /// the transaction, as SIGHASH_ALL has it, the input's place in it, and the amount it spends.
+    #[document(
+        parent = "Transaction",
+        summary = "What BIP143 signs for an input that spends a native segwit output of a key's hash: all of the transaction, as SIGHASH_ALL has it, the input's place in it, and the amount it spends.",
+    )]
     pub fn preimage(&self, index: usize, key_hash: &[u8; 20], value: u64) -> Vec<u8> {
         // The script code: the key hash's pay-to-key-hash script, as BIP143 has it for P2WPKH.
         let code = [&[0x76, 0xa9, 0x14][..], key_hash, &[0x88, 0xac]].concat();
@@ -232,8 +261,10 @@ impl Transaction {
         self.script_preimage(index, &code, value)
     }
 
-    /// The same for an input that spends a script's native segwit output, P2WSH: its script code
-    /// is the witness script itself, which the hash covers whole.
+    #[document(
+        parent = "Transaction",
+        summary = "The same for an input that spends a script's native segwit output, P2WSH: its script code is the witness script itself, which the hash covers whole.",
+    )]
     pub fn script_preimage(&self, index: usize, code: &[u8], value: u64) -> Vec<u8> {
         let (mut prevouts, mut sequences, mut outputs) = (Vec::new(), Vec::new(), Vec::new());
 
@@ -281,9 +312,10 @@ impl TxOut {
 }
 
 
-/// A script as its address, on a network: a key's or a script's hash in base58, 1… or 3…, a
-/// witness program in bech32, bc1q…, or bech32m, bc1p…. Data, and scripts with no address, are
-/// told as what they are.
+#[document(
+    summary = "A script as its address, on a network: a key's or a script's hash in base58, 1… or 3…, a witness program in bech32, bc1q…, or bech32m, bc1p…. Data, and scripts with no address, are told as what they are.",
+    category = "Bitcoin",
+)]
 pub fn address(script: &[u8], network: Network) -> String {
     let (key_hash, script_hash) = network.versions();
 
@@ -298,20 +330,27 @@ pub fn address(script: &[u8], network: Network) -> String {
 }
 
 
-/// The native segwit script paying a key's hash: 0, and the 20 bytes.
+#[document(
+    summary = "The native segwit script paying a key's hash: 0, and the 20 bytes.",
+    category = "Bitcoin",
+)]
 pub fn p2wpkh(hash: &[u8; 20]) -> Vec<u8> {
     [&[0x00, 0x14][..], hash].concat()
 }
 
-/// The native segwit script paying a script's SHA-256, P2WSH: 0, and the 32 bytes, which bc1q…
-/// writes longer than a key's.
+#[document(
+    summary = "The native segwit script paying a script's SHA-256, P2WSH: 0, and the 32 bytes, which bc1q… writes longer than a key's.",
+    category = "Bitcoin",
+)]
 pub fn p2wsh(script: &[u8]) -> Vec<u8> {
     [&[0x00, 0x20][..], &crate::crypto::bitcoin::sha256(script)].concat()
 }
 
 
-/// A signature, r then s, as DER writes it, as Bitcoin's scripts take it: each a whole number in
-/// its fewest bytes, a 0 before one whose top bit is set.
+#[document(
+    summary = "A signature, r then s, as DER writes it, as Bitcoin's scripts take it: each a whole number in its fewest bytes, a 0 before one whose top bit is set.",
+    category = "Bitcoin",
+)]
 pub fn der(signature: &[u8; 64]) -> Vec<u8> {
     let integer = |bytes: &[u8]| {
         let trimmed = &bytes[bytes.iter().position(|byte| *byte != 0).unwrap_or(bytes.len() - 1)..];
@@ -330,8 +369,10 @@ pub fn der(signature: &[u8; 64]) -> Vec<u8> {
     out
 }
 
-/// A DER signature read back into r then s, 32 bytes each: what der writes, and only that, each
-/// number in its fewest bytes. None for anything else.
+#[document(
+    summary = "A DER signature read back into r then s, 32 bytes each: what der writes, and only that, each number in its fewest bytes. None for anything else.",
+    category = "Bitcoin",
+)]
 pub fn from_der(der: &[u8]) -> Option<[u8; 64]> {
     let (&[0x30, length], rest) = der.split_first_chunk::<2>()? else {
         return None;
@@ -367,7 +408,10 @@ pub fn from_der(der: &[u8]) -> Option<[u8; 64]> {
     rest.is_empty().then_some(out)
 }
 
-/// Bytes behind a version byte, with a checksum, in base58: Bitcoin's legacy addresses.
+#[document(
+    summary = "Bytes behind a version byte, with a checksum, in base58: Bitcoin's legacy addresses.",
+    category = "Bitcoin",
+)]
 pub fn base58check(version: u8, payload: &[u8]) -> String {
     const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     let mut bytes = vec![version];
@@ -399,7 +443,7 @@ pub fn base58check(version: u8, payload: &[u8]) -> String {
     "1".repeat(zeros) + &digits.iter().rev().map(|digit| char::from(ALPHABET[usize::from(*digit)])).collect::<String>()
 }
 
-/// Bitcoin's compact size, in its fewest bytes.
+#[document(summary = "Bitcoin's compact size, in its fewest bytes.", category = "Bitcoin")]
 pub fn compact(out: &mut Vec<u8>, size: usize) {
     match size {
         0..0xfd => out.push(size as u8),
@@ -418,7 +462,10 @@ pub fn compact(out: &mut Vec<u8>, size: usize) {
     }
 }
 
-/// Reading bytes in order, refusing to read past their end.
+#[document(
+    summary = "Reading bytes in order, refusing to read past their end.",
+    category = "Bitcoin",
+)]
 pub struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
@@ -445,7 +492,10 @@ impl<'a> Reader<'a> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
     }
 
-    /// A compact size, as it must be written: in its fewest bytes, as Bitcoin reads it.
+    #[document(
+        parent = "Reader",
+        summary = "A compact size, as it must be written: in its fewest bytes, as Bitcoin reads it.",
+    )]
     pub fn compact(&mut self) -> Result<u64, String> {
         let (size, least) = match self.take(1)?[0] {
             0xfd => (u64::from(u16::from_le_bytes(self.take(2)?.try_into().expect("2 bytes"))), 0xfd),
@@ -460,7 +510,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// A compact size, then that many bytes.
+    #[document(parent = "Reader", summary = "A compact size, then that many bytes.")]
     pub fn sized(&mut self) -> Result<&'a [u8], String> {
         let size = self.compact()?;
 

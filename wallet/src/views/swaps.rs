@@ -165,7 +165,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
 
     if contract.is_none() {
         theme::card(ui, &palette, |ui| {
-            ui.colored_label(palette.warn, "This node names no swap contract. Set one under Settings, Swaps, to lock and claim on this chain.");
+            ui.colored_label(palette.warn, "No swap contract found: no name resolves to one, and the node names none. Set one under Settings, Swaps, to make offers; swaps you have use the one their terms name.");
         });
         ui.add_space(14.0);
     }
@@ -175,7 +175,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
     if let Some(index) = state.open.filter(|index| *index < ctx.book.swaps.len()) {
         ui.add_space(14.0);
 
-        if let Some(prepared) = detail(ui, ctx, state, index, contract) {
+        if let Some(prepared) = detail(ui, ctx, state, index) {
             send.prepare(prepared);
             *ctx.page = Page::Send;
         }
@@ -187,12 +187,21 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
     read(ui, ctx, state);
 }
 
-/// The swap contract: Settings', or the node's.
+/// The name the default swap contract is found by on this chain, such as swap.dev.
+pub fn swap_name(chain: &crate::chain::Chain) -> Option<String> {
+    chain.names.as_ref().map(|names| format!("{}.{}", chainv4::swap::SWAP_NAME, names.suffix))
+}
+
+/// The swap contract a new offer uses: Settings', or the one the swap name resolves to, proven,
+/// or else the one the node names. A swap made uses the one its terms name.
 fn contract(ctx: &Ctx) -> Option<Address> {
-    match ctx.settings.swap_contract.trim() {
-        "" => ctx.swap_contract.and_then(|text| text.parse().ok()),
-        text => text.parse().ok(),
+    if let Ok(given) = ctx.settings.swap_contract.trim().parse() {
+        return Some(given);
     }
+
+    let named = swap_name(ctx.chain).and_then(|name| ctx.chain.resolve(&name)).and_then(|resolved| resolved.target());
+
+    named.or_else(|| ctx.swap_contract.and_then(|text| text.parse().ok()))
 }
 
 fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
@@ -341,10 +350,12 @@ fn offer(ctx: &Ctx, form: &Form) -> Result<SwapRecord, String> {
     let amount = format::parse_units(&form.amount, decimals).and_then(|digits| u256::from_str_radix(&digits, 10).ok()).ok_or("an amount to lock on this chain")?;
     let hours = |text: &str| text.trim().parse::<u64>().map(|hours| hours * 3_600_000).map_err(|_| "deadlines are whole hours".to_string());
     let (first, second) = (hours(&form.first)?, hours(&form.second)?);
+    let contract = contract(ctx).ok_or("no swap contract: set one under Settings, Swaps, or register the swap name for it")?;
     let (secret, hash) = secret()?;
     let starter = if form.pay_bitcoin { Pays::Bitcoin } else { Pays::Chain };
     let terms = Terms {
         chain: if form.testnet { Counterparty::BitcoinTestnet } else { Counterparty::Bitcoin },
+        contract,
         hash,
         sats,
         token,
@@ -424,8 +435,8 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
 fn answers(offer: &Terms, answer: &Terms) -> bool {
     let kept = |given: Option<[u8; 33]>, now: Option<[u8; 33]>| given.is_none() || given == now;
     let kept_address = |given: Option<Address>, now: Option<Address>| given.is_none() || given == now;
-    let same = (offer.chain, offer.hash, offer.sats, offer.token, offer.amount, offer.starter, offer.first_deadline, offer.second_deadline)
-        == (answer.chain, answer.hash, answer.sats, answer.token, answer.amount, answer.starter, answer.first_deadline, answer.second_deadline);
+    let same = (offer.chain, offer.contract, offer.hash, offer.sats, offer.token, offer.amount, offer.starter, offer.first_deadline, offer.second_deadline)
+        == (answer.chain, answer.contract, answer.hash, answer.sats, answer.token, answer.amount, answer.starter, answer.first_deadline, answer.second_deadline);
 
     same && answer.agreed()
         && kept(offer.bitcoin_payer, answer.bitcoin_payer)
@@ -474,6 +485,7 @@ fn summary(ui: &mut Ui, ctx: &Ctx, terms: &Terms) {
     super::row(ui, &palette, "Hash", |ui| {
         ui.label(theme::mono(format::short(&to_hex(&terms.hash))));
     });
+    super::row(ui, &palette, "Contract", |ui| super::address(ui, &palette, &terms.contract.to_string()));
 }
 
 /// A time, from now: in 11 h 58 min, or 2 h ago.
@@ -491,10 +503,12 @@ fn when(time: u64, now: u64) -> String {
 }
 
 /// The open swap: what to share, where each side stands, and what to do next.
-fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize, contract: Option<Address>) -> Option<Prepared> {
+fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> Option<Prepared> {
     let palette = *ctx.palette;
     let record = ctx.book.swaps[index].clone();
     let terms = Terms::from_text(&record.terms).ok()?;
+    // The one the terms name, whatever this wallet would pick for a new offer.
+    let contract = Some(terms.contract);
     let hash = to_hex(&terms.hash);
     let mut prepared = None;
 
