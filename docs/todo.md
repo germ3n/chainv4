@@ -8,6 +8,15 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ### Once every queued batch is done
 
+- [ ] **A review pass, feature by feature.** Once every queued batch is in, before the fresh test
+  chain, go through each feature and category in turn (consensus, finality, governance, storage,
+  the node and network, the API, each engine, the registries, swaps, the DEX, NFTs, bridges, the
+  wallet, the explorer, the CLI) and in each find:
+  - bugs, and code or comments that make no sense or say what the code no longer does;
+  - stale docs: guides, good-to-know, the todo and `#[document]` text that drifted from the code;
+  - tests that test nothing, or the wrong thing, and places that want more;
+  - then measure coverage, run the analysis tools (clippy pedantic, cargo-audit, fuzzing where the
+    todo asks for it), and fix what turns up, a commit per feature.
 - [ ] **A fresh test chain on the VPS.** Once all queued changes and batches are in, delete the
   VPS's chain and start a new one from a new genesis with everything enabled, so all of it can be
   tried end to end:
@@ -785,6 +794,14 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **The bridges' federation.** Its signers, threshold and depths, from genesis or
   `Change::Federation`, versioned, read by contracts and shown by `GET /status`. See
   [Bridges](bridges.md#the-federation).
+- [x] **Bridges with EVM chains.** The gateway here, `gateway.lua`, and `Gateway.sol` on EVM
+  chains carry the coin, ERC-20s and tokens, ERC-721s and NFTs, ERC-1155s and multi-token amounts
+  both ways, held at their origin and wrapped elsewhere, on the federation's signatures gathered on
+  the board here; `chainv4 bridge` deploys, joins, sends, signs and relays. See
+  [Bridges](bridges.md).
+- [ ] **Bridges: next.** The gateway's peers set by governance rather than its owner; carrying a
+  federation change to each Gateway.sol, its signers signing `setSigners` through the board; a
+  per-transfer and per-day cap; the wallet's and the explorer's Bridge pages (batch 9c).
 - [ ] **The federation as the validators.** Point the bridges' signer set at finality's validators,
   weighted by stake and slashable, once they sign with keys Bitcoin and the EVM check, and a
   threshold scheme lets a changing set hold one Bitcoin address.

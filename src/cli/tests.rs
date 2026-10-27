@@ -317,18 +317,21 @@ mod send {
             set_up: impl FnOnce(Node) -> Node,
             options: crate::api::ApiOptions,
         ) -> Running {
+            Running::launch_genesis(produce, validate, |genesis| Genesis { finality, governance, ..genesis }, set_up, options)
+        }
+
+        /// A node whose dev authority genesis is changed as asked, set up as asked, behind an API.
+        fn launch_genesis(produce: bool, validate: bool, change: impl FnOnce(Genesis) -> Genesis, set_up: impl FnOnce(Node) -> Node, options: crate::api::ApiOptions) -> Running {
             const SLOT: u64 = 50;
             let authority = DevAuthority::dev_keypair();
-            let genesis = Genesis {
+            let genesis = change(Genesis {
                 consensus: ConsensusConfig::Authority {
                     key: authority.public(),
                     slot_ms: SLOT,
                 },
                 timestamp: now_ms(),
-                finality,
-                governance,
                 ..Genesis::dev_authority(authority.public())
-            };
+            });
             let producer = produce.then(|| Box::new(AuthorityProducer::new(authority, SLOT)) as Box<dyn Producer>);
             let db = Arc::new(MemoryDb::default());
             let (link, net) = NetLink::pair();
@@ -1077,6 +1080,119 @@ mod send {
         assert_eq!(read(&art, "is_approved_for_all", serde_json::json!([{ "type": "address", "value": me.to_string() }, { "type": "address", "value": bob.to_string() }]))["values"][0]["value"], true);
         assert!(run(NftAction::Show { collection: factory, id: None }, None).unwrap_err().to_string().contains("not in the collection registry"));
         running.stop();
+    }
+
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "ethereum", feature = "finality-ffg"))]
+    #[test]
+    fn the_coin_crosses_to_an_evm_chain_and_back_through_the_gateways_and_the_federation() {
+        use crate::abi::{AbiType, AbiValue, decode_values, encode_values};
+        use crate::chain::{IndexKind, KeepFrom};
+        use crate::cli::bridge::{BridgeAction, BridgeArgs, bridge};
+        use crate::cli::swap::rpc::{Rpc, from_key};
+        use crate::crypto::keypair::{Keypair, PrivateKey};
+        use crate::registry::federation::Federation;
+        use crate::structs::hex::to_hex;
+
+        // Chain A runs the gateway here and the federation; chain B's EVM is the other chain.
+        let federation = Federation {
+            signers: [11u8, 12, 13].iter().map(|byte| crate::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
+            threshold: 2,
+            chain_depth: 20,
+            evm_depth: 12,
+            bitcoin_depth: 6,
+        };
+        let finality = FinalityConfig::dev(DevAuthority::dev_keypair().public());
+        let indexed = |node: Node| node.keep_index(IndexKind::Events, Some(KeepFrom::Height(0))).unwrap();
+        let a = Running::launch_genesis(true, true, |genesis| Genesis { federation: Some(federation.clone()), finality: finality.clone(), ..genesis }, indexed, Default::default());
+        let b = Running::launch_genesis(true, true, |genesis| Genesis { finality: finality.clone(), ..genesis }, |node| node, Default::default());
+        let (node_a, rpc_b) = (format!("http://{}", a.api), format!("http://{}/rpc", b.api));
+        let dir = TempDir::new("bridge");
+        let key_file = |name: &str, secret: [u8; 32]| {
+            let path = dir.0.join(name);
+            fs::write(&path, Keypair::from_private(PrivateKey::Secp256k1(secret)).to_key_file()).unwrap();
+            path
+        };
+        let relayer = key_file("relayer.key", [0x42; 32]);
+        let (signer_one, signer_two) = (key_file("eleven.key", [11; 32]), key_file("twelve.key", [12; 32]));
+        let relayer_address = from_key(&[0x42; 32]).unwrap();
+        send(b.args(TxArgs::Transfer { to: Address::Secp256k1(relayer_address).into(), amount: u256::from(10u64).pow(20) })).unwrap();
+        let run = |action: BridgeAction, evm_key: Option<PathBuf>| {
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key })
+        };
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let started = std::time::Instant::now();
+
+            while !done() {
+                assert!(started.elapsed() < std::time::Duration::from_secs(60), "{what} never happened");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+
+        // The gateway here, Gateway.sol there under the federation, each the other's peer.
+        let me = DevAuthority::dev_keypair().public().address();
+        let nonce = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node_a}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap();
+        let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
+        assert!(run(BridgeAction::Deploy, None).is_ok());
+        let with_gateway = |action: BridgeAction, evm_key: Option<PathBuf>| {
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key })
+        };
+        with_gateway(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(relayer.clone())).unwrap();
+        let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
+        with_gateway(BridgeAction::Peer { evm_gateway: to_hex(&evm_gateway) }, Some(relayer.clone())).unwrap();
+
+        // 1,000 of the coin to the relayer's address there: held here, then signed by two, then
+        // delivered, minted there as wrapped DEV.
+        with_gateway(BridgeAction::Send { kind: "coin".into(), recipient: to_hex(&relayer_address), amount: u256::new(1_000), asset: None, id: u256::ZERO, from_evm: false }, None).unwrap();
+        let rpc = Rpc::new(crate::cli::send::agent(&Default::default()).unwrap(), &rpc_b);
+        let here = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node_a}/status")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["chain_id"].as_u64().unwrap();
+        let salt = crate::crypto::hasher::Hasher::digest(
+            crate::structs::hash::HashType::Keccak256,
+            &encode_values(&[AbiType::Uint(64), AbiType::Uint(8), AbiType::Bytes], &[AbiValue::Uint(u256::from(here)), AbiValue::Uint(u256::from(1u64)), AbiValue::Bytes(Vec::new())]).unwrap(),
+        )
+        .to_bytes();
+        let call = |to: &[u8; 20], signature: &str, values: &[AbiValue], returns: &[AbiType]| {
+            let (_, types) = crate::abi::parse_signature(signature).unwrap();
+            let input = [crate::crypto::hasher::Hasher::digest(crate::structs::hash::HashType::Keccak256, signature.as_bytes()).to_bytes()[..4].to_vec(), encode_values(&types, values).unwrap()].concat();
+            decode_values(returns, &rpc.call(to, &input).unwrap()).unwrap()
+        };
+        let wrapped = || match call(&evm_gateway, "wrappedOf(bytes32)", &[AbiValue::FixedBytes(salt.clone())], &[AbiType::Address])[..] {
+            [AbiValue::Address(address)] => address,
+            _ => unreachable!(),
+        };
+
+        wait("the federation signing what left here", &|| {
+            for key in [&signer_one, &signer_two] {
+                with_gateway(BridgeAction::Sign { from_block: 0 }, Some(key.clone())).unwrap();
+            }
+
+            with_gateway(BridgeAction::Relay, Some(relayer.clone())).unwrap();
+            wrapped() != [0; 20]
+        });
+        let held = |address: [u8; 20]| call(&wrapped(), "balanceOf(address)", &[AbiValue::Address(address)], &[AbiType::Uint(256)]);
+
+        assert_eq!(held(relayer_address), [AbiValue::Uint(u256::from(1_000u64))]);
+
+        // 400 of it back to Bob here: burned there, signed by two once final there, released here.
+        let bob = Address::Ed25519([0xb0; 32]);
+        with_gateway(BridgeAction::Send { kind: "token".into(), recipient: bob.to_string(), amount: u256::new(400), asset: Some(to_hex(&wrapped())), id: u256::ZERO, from_evm: true }, Some(relayer.clone())).unwrap();
+
+        assert_eq!(held(relayer_address), [AbiValue::Uint(u256::from(600u64))]);
+        let balance = |address: &Address| serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node_a}/accounts/{address}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["balance"].as_str().unwrap_or("0").to_string();
+
+        wait("the coin coming back", &|| {
+            for key in [&signer_one, &signer_two] {
+                with_gateway(BridgeAction::Sign { from_block: 0 }, Some(key.clone())).unwrap();
+            }
+
+            balance(&bob) == "400"
+        });
+        assert_eq!(balance(&gateway), "600");
+
+        // Someone outside the federation signs nothing.
+        let stranger = key_file("stranger.key", [0x77; 32]);
+        assert!(with_gateway(BridgeAction::Sign { from_block: 0 }, Some(stranger)).unwrap_err().to_string().contains("not a signer"));
+        a.stop();
+        b.stop();
     }
 
     #[cfg(all(feature = "swap", feature = "sha256", feature = "ethereum"))]

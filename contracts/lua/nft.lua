@@ -262,17 +262,25 @@ function M.is_approved_for_all(holder, operator)
     return is_operator(holder, operator)
 end
 
--- Beyond the standard: the owner mints the next id to whoever they like, with its own URI or
--- the base one, and returns the id.
-function M.mint(to, uri)
+-- Beyond the standard: the owner mints the next id to whoever they like, or an id of their
+-- choosing, as a bridge's wrapped collection mints the ids the other chain's tokens have, with
+-- its own URI or the base one, and returns the id.
+function M.mint(to, uri, chosen)
     only_owner()
 
     if same(to, ZERO) then
         error("mint to the zero address")
     end
 
-    local id = u256(storage.get("next") or "1")
-    storage.set("next", tostring(id + ONE))
+    local id = u256(chosen or storage.get("next") or "1")
+
+    if owners:get(key(id)) ~= nil then
+        error("that token exists already")
+    end
+
+    if id >= u256(storage.get("next") or "1") then
+        storage.set("next", tostring(id + ONE))
+    end
 
     if uri ~= nil then
         uris:set(key(id), uri)

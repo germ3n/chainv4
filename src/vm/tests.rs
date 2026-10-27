@@ -2078,3 +2078,6 @@ fn a_webassembly_contract_clones_through_the_host() {
 mod collections;
 
 mod crypto;
+
+#[cfg(feature = "bridge")]
+mod gateway;

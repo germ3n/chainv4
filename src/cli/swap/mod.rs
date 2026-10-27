@@ -633,10 +633,14 @@ fn agreed(text: &str) -> CliResult<Terms> {
 /// The swap contract a new offer uses: the one the name swap under the chain's suffix resolves
 /// to, or else the one the node advertises.
 pub(super) fn default_contract(agent: &ureq::Agent, node: &str) -> CliResult<Address> {
-    let suffix = ok(agent.get(format!("{node}/names")).call()).ok().and_then(|names| names["suffix"].as_str().map(str::to_string));
+    // A build without names finds it by the node's word alone.
+    #[cfg(feature = "names")]
+    {
+        let suffix = ok(agent.get(format!("{node}/names")).call()).ok().and_then(|names| names["suffix"].as_str().map(str::to_string));
 
-    if let Some(contract) = suffix.and_then(|suffix| super::send::resolve(agent, node, &format!("{}.{suffix}", crate::swap::SWAP_NAME)).ok()) {
-        return Ok(contract);
+        if let Some(contract) = suffix.and_then(|suffix| super::send::resolve(agent, node, &format!("{}.{suffix}", crate::swap::SWAP_NAME)).ok()) {
+            return Ok(contract);
+        }
     }
 
     ok(agent.get(format!("{node}/status")).call())?["swap"]["contract"]

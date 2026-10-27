@@ -22,6 +22,8 @@ pub(super) mod dex;
 mod evm;
 #[cfg(all(feature = "client", feature = "nft"))]
 pub(super) mod nft;
+#[cfg(all(feature = "client", feature = "bridge", feature = "swap"))]
+pub(super) mod bridge;
 #[cfg(all(feature = "client", feature = "sha256"))]
 mod faucet;
 pub mod genesis;
@@ -55,6 +57,8 @@ pub use swap::{SwapArgs, swap};
 pub use dex::{DexArgs, dex};
 #[cfg(all(feature = "client", feature = "nft"))]
 pub use nft::{NftArgs, nft};
+#[cfg(all(feature = "client", feature = "bridge", feature = "swap"))]
+pub use bridge::{BridgeArgs, bridge};
 #[cfg(all(feature = "client", feature = "sha256"))]
 pub use faucet::{FaucetArgs, faucet};
 

@@ -81,6 +81,13 @@ impl Rpc {
         Ok((tip, finalized))
     }
 
+    /// A contract's logs with a first topic, from a block to another, as eth_getLogs gives them.
+    pub fn logs(&self, address: &[u8; 20], topic: &[u8; 32], from: u64, to: u64) -> CliResult<Vec<Value>> {
+        let filter = json!({ "address": to_hex(address), "topics": [to_hex(topic)], "fromBlock": format!("{from:#x}"), "toBlock": format!("{to:#x}") });
+
+        Ok(self.ask("eth_getLogs", json!([filter]))?.as_array().cloned().unwrap_or_default())
+    }
+
     /// Whether there is code at an address.
     pub fn has_code(&self, address: &[u8; 20]) -> CliResult<bool> {
         let answer = self.ask("eth_getCode", json!([to_hex(address), "latest"]))?;

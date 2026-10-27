@@ -1082,3 +1082,179 @@ mod swap {
         assert_eq!(read_item(&returned(&run(&mut chain, swap, 0, item_input(&crate::crypto::bitcoin::sha256(&[1; 32]))))).unwrap(), None);
     }
 }
+
+#[cfg(feature = "bridge")]
+mod gateway {
+    //! Gateway.sol, the bridges' gateway on EVM chains, run on chainv4's own EVM: what arrives
+    //! with the federation's signatures is minted wrapped or released, what leaves is held or
+    //! burned, with digests as chainv4::bridge makes them, and the signer set moves only as the
+    //! one in force signs.
+
+    use {
+        super::*,
+        crate::abi::{AbiType, AbiValue, decode_values, encode_values},
+        crate::bridge::{AssetKind, Transfer, WRAPPED_CODES, gateway_constructor, send_input, set_signers_input, sign_digest, signers_digest},
+        crate::structs::hex::from_hex,
+    };
+
+    /// chainv4's own chain id, as the gateways would name a chain it bridges to, and its gateway.
+    const OTHER: u64 = 0x12_3456;
+    const PEER: [u8; 33] = [0x01; 33];
+
+    fn create(chain: &mut Chain, init: Vec<u8>) -> [u8; 20] {
+        let deployer = authority();
+        let at = evm::create_address(&deployer.public().address(), nonce(chain, &deployer));
+        let receipts = advance(chain, vec![sign(chain, &deployer, Tx::Deploy { code: Code::Evm(init) })]);
+        assert_eq!(receipts[0].result, Ok(Effect::Deployed(at)), "{:?}", receipts[0].result);
+
+        match at {
+            Address::Evm(bytes) => bytes,
+            other => panic!("an EVM contract at {other}"),
+        }
+    }
+
+    fn run(chain: &mut Chain, to: [u8; 20], value: u128, input: Vec<u8>) -> Receipt {
+        let tx = call(chain, &authority(), Address::Evm(to), value, input);
+
+        advance(chain, vec![tx]).remove(0)
+    }
+
+    fn read(chain: &mut Chain, to: [u8; 20], signature: &str, values: &[AbiValue], returns: &str) -> Vec<AbiValue> {
+        let (_, types) = crate::abi::parse_signature(signature).unwrap();
+        let input = [keccak256(signature.as_bytes())[..4].to_vec(), encode_values(&types, values).unwrap()].concat();
+        let receipt = run(chain, to, 0, input);
+        let (_, returned_types) = crate::abi::parse_signature(returns).unwrap();
+
+        decode_values(&returned_types, &returned(&receipt)).unwrap_or_else(|err| panic!("{signature}: {err} {:?}", receipt.result))
+    }
+
+    fn signer(index: u8) -> [u8; 20] {
+        crate::crypto::secp256k1::address(&crate::crypto::secp256k1::public_key(&[index; 32]).unwrap()).unwrap()
+    }
+
+    /// A gateway with its templates, under a federation of three, two to sign, peered with OTHER.
+    fn gateway(chain: &mut Chain) -> [u8; 20] {
+        let templates = WRAPPED_CODES.map(|code| create(chain, from_hex(code.trim()).unwrap()));
+        let code = from_hex(crate::bridge::GATEWAY_CODE.trim()).unwrap();
+        let gateway = create(chain, [code, gateway_constructor(&[signer(1), signer(2), signer(3)], 2, 0, ("Dev", "DEV"), templates)].concat());
+        let peer = [keccak256(b"setPeer(uint64,bytes)")[..4].to_vec(), encode_values(&[AbiType::Uint(64), AbiType::Bytes], &[AbiValue::Uint(u256::from(OTHER)), AbiValue::Bytes(PEER.to_vec())]).unwrap()].concat();
+        assert!(run(chain, gateway, 0, peer).result.is_ok());
+
+        gateway
+    }
+
+    fn sent(chain: &mut Chain, gateway: [u8; 20], nonce: u64) -> Transfer {
+        let values = read(chain, gateway, "sent(uint64)", &[AbiValue::Uint(u256::from(nonce))], &format!("({})", crate::bridge::TRANSFER_TUPLE));
+
+        Transfer::from_evm(&values[0]).unwrap()
+    }
+
+    fn refused(receipt: &Receipt, why: &str) {
+        assert!(format!("{:?}", receipt.result).contains(why), "{:?}", receipt.result);
+    }
+
+    #[test]
+    fn a_token_from_chainv4_is_minted_wrapped_here_and_goes_back_burned() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let here = evm::chain_id(&chain.genesis());
+        let gateway = gateway(&mut chain);
+        let me = evm::evm_alias(&authority().public().address());
+        let arriving = Transfer {
+            from: PEER.to_vec(),
+            to: gateway.to_vec(),
+            source: OTHER,
+            target: here,
+            nonce: 1,
+            kind: AssetKind::Token,
+            origin: OTHER,
+            asset: vec![0x07; 33],
+            id: u256::ZERO,
+            amount: u256::from(500u64),
+            recipient: me.to_vec(),
+            name: "Example Token".to_string(),
+            symbol: "EXT".to_string(),
+            decimals: 18,
+            uri: String::new(),
+        };
+        let signed = |transfer: &Transfer, signers: &[u8]| signers.iter().map(|index| transfer.sign(&[*index; 32])).collect::<Vec<_>>();
+
+        // One signature is not enough, nor two of one signer, nor a stranger's.
+        refused(&run(&mut chain, gateway, 0, arriving.deliver_input(&signed(&arriving, &[1]))), "not enough of the federation");
+        refused(&run(&mut chain, gateway, 0, arriving.deliver_input(&signed(&arriving, &[1, 1]))), "not enough of the federation");
+        refused(&run(&mut chain, gateway, 0, arriving.deliver_input(&signed(&arriving, &[1, 9]))), "not enough of the federation");
+        refused(&run(&mut chain, gateway, 0, Transfer { from: vec![2; 33], ..arriving.clone() }.deliver_input(&signed(&arriving, &[1, 2]))), "not from this gateway's peer");
+
+        // Two of three, and it is minted: wEXT, to its recipient, once.
+        assert!(run(&mut chain, gateway, 0, arriving.deliver_input(&signed(&arriving, &[1, 3]))).result.is_ok());
+        refused(&run(&mut chain, gateway, 0, arriving.deliver_input(&signed(&arriving, &[1, 3]))), "delivered already");
+        let salt = keccak256(encode_values(&[AbiType::Uint(64), AbiType::Uint(8), AbiType::Bytes], &[AbiValue::Uint(u256::from(OTHER)), AbiValue::Uint(u256::from(1u64)), AbiValue::Bytes(vec![0x07; 33])]).unwrap());
+        let [AbiValue::Address(wrapped)] = read(&mut chain, gateway, "wrappedOf(bytes32)", &[AbiValue::FixedBytes(salt.to_vec())], "(address)")[..] else { panic!("made") };
+
+        assert_eq!(read(&mut chain, wrapped, "balanceOf(address)", &[AbiValue::Address(me)], "(uint256)"), [AbiValue::Uint(u256::from(500u64))]);
+        assert_eq!(read(&mut chain, wrapped, "symbol()", &[], "(string)"), [AbiValue::String("wEXT".into())]);
+
+        // Back: burned here, and the transfer names the token on chainv4, digest as Rust makes it.
+        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &[0x05; 33], AssetKind::Token, wrapped, u256::ZERO, u256::from(200u64))).result.is_ok());
+        assert_eq!(read(&mut chain, wrapped, "balanceOf(address)", &[AbiValue::Address(me)], "(uint256)"), [AbiValue::Uint(u256::from(300u64))]);
+        let back = sent(&mut chain, gateway, 1);
+
+        assert_eq!((back.origin, back.asset.as_slice(), back.amount, back.name.as_str()), (OTHER, [0x07; 33].as_slice(), u256::from(200u64), "Example Token"));
+        assert_eq!((back.from.as_slice(), back.to.as_slice()), (gateway.as_slice(), PEER.as_slice()));
+        assert_eq!(read(&mut chain, gateway, &format!("digestOf({})", crate::bridge::TRANSFER_TUPLE), &[back.evm_tuple()], "(bytes32)"), [AbiValue::FixedBytes(back.digest().to_vec())]);
+    }
+
+    #[test]
+    fn the_coin_and_erc20s_leave_held_and_the_signers_change_only_as_they_sign() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let here = evm::chain_id(&chain.genesis());
+        let gateway = gateway(&mut chain);
+
+        // ETH, here DEV, leaves held, as the coin.
+        assert!(run(&mut chain, gateway, 1_000, send_input(OTHER, &[0x05; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(1_000u64))).result.is_ok());
+        let left = sent(&mut chain, gateway, 1);
+
+        assert_eq!((left.kind, left.origin, left.asset.len(), left.symbol.as_str()), (AssetKind::Coin, here, 0, "DEV"));
+        refused(&run(&mut chain, gateway, 5, send_input(OTHER, &[0x05; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(6u64))), "as much as amount says");
+        refused(&run(&mut chain, gateway, 0, send_input(99, &[0x05; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(1u64))), "no gateway on that chain");
+
+        // An ERC-20 leaves held, with its name, after its approval.
+        let supply = encode_values(&[AbiType::String, AbiType::String, AbiType::Uint(256)], &[AbiValue::String("Test".into()), AbiValue::String("TST".into()), AbiValue::Uint(u256::new(1_000_000))]).unwrap();
+        let token = create(&mut chain, [from_hex(include_str!("../../../contracts/evm/Token.bin").trim()).unwrap(), supply].concat());
+        let approve = [keccak256(b"approve(address,uint256)")[..4].to_vec(), encode_values(&[AbiType::Address, AbiType::Uint(256)], &[AbiValue::Address(gateway), AbiValue::Uint(u256::new(70))]).unwrap()].concat();
+        assert!(run(&mut chain, token, 0, approve).result.is_ok());
+        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &[0x05; 33], AssetKind::Token, token, u256::ZERO, u256::from(70u64))).result.is_ok());
+        let held = sent(&mut chain, gateway, 2);
+
+        assert_eq!((held.kind, held.asset.as_slice(), held.name.as_str(), held.decimals), (AssetKind::Token, token.as_slice(), "Test", 18));
+
+        // It comes back released, with the federation's word.
+        let back = Transfer {
+            from: PEER.to_vec(),
+            to: gateway.to_vec(),
+            source: OTHER,
+            target: here,
+            nonce: 1,
+            recipient: vec![0xab; 20],
+            amount: u256::from(30u64),
+            ..held.clone()
+        };
+        assert!(run(&mut chain, gateway, 0, back.deliver_input(&[back.sign(&[2; 32]), back.sign(&[3; 32])])).result.is_ok());
+
+        assert_eq!(read(&mut chain, token, "balanceOf(address)", &[AbiValue::Address([0xab; 20])], "(uint256)"), [AbiValue::Uint(u256::from(30u64))]);
+
+        // The next federation needs the one in force's signatures, and a later version.
+        let next = [signer(4), signer(5)];
+        let digest = signers_digest(gateway, here, 1, &next, 2);
+        refused(&run(&mut chain, gateway, 0, set_signers_input(&next, 2, 1, &[sign_digest(&[4; 32], &digest), sign_digest(&[5; 32], &digest)])), "not enough of the federation");
+        assert!(run(&mut chain, gateway, 0, set_signers_input(&next, 2, 1, &[sign_digest(&[1; 32], &digest), sign_digest(&[2; 32], &digest)])).result.is_ok());
+        refused(&run(&mut chain, gateway, 0, set_signers_input(&next, 2, 1, &[sign_digest(&[4; 32], &digest), sign_digest(&[5; 32], &digest)])), "an older federation");
+        assert_eq!(read(&mut chain, gateway, "version()", &[], "(uint64)"), [AbiValue::Uint(u256::from(1u64))]);
+
+        // Now only the new signers deliver.
+        let again = Transfer { nonce: 2, ..back.clone() };
+        refused(&run(&mut chain, gateway, 0, again.deliver_input(&[again.sign(&[2; 32]), again.sign(&[3; 32])])), "not enough of the federation");
+        assert!(run(&mut chain, gateway, 0, again.deliver_input(&[again.sign(&[4; 32]), again.sign(&[5; 32])])).result.is_ok());
+    }
+}

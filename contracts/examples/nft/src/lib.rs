@@ -320,18 +320,27 @@ fn is_approved_for_all(holder: Address, operator: Address) -> bool {
     is_operator(&holder, &operator)
 }
 
-/// Beyond the standard: the owner mints the next id to whoever they like, with its own URI or
-/// the base one, and returns the id.
+/// Beyond the standard: the owner mints the next id to whoever they like, or an id of their
+/// choosing, as a bridge's wrapped collection mints the ids the other chain's tokens have, with
+/// its own URI or the base one, and returns the id.
 #[export]
-fn mint(to: Address, uri: Option<String>) -> Result<U256, &'static str> {
+fn mint(to: Address, uri: Option<String>, chosen: Option<U256>) -> Result<U256, &'static str> {
     only_owner()?;
 
     if to == zero() {
         return Err("mint to the zero address");
     }
 
-    let id = storage::own().get_u256(NEXT).unwrap_or(U256::ONE);
-    storage::own().set_u256(NEXT, id + U256::ONE);
+    let next = storage::own().get_u256(NEXT).unwrap_or(U256::ONE);
+    let id = chosen.unwrap_or(next);
+
+    if owners().get(key(id).as_bytes()).is_some() {
+        return Err("that token exists already");
+    }
+
+    if id >= next {
+        storage::own().set_u256(NEXT, id + U256::ONE);
+    }
 
     if let Some(uri) = uri {
         uris().set_text(key(id).as_bytes(), &uri);

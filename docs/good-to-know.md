@@ -621,6 +621,18 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
   `--dex-contract`, `--dex-router`, or the name `dex`.
 
+## Bridges
+
+- **The gateway's setup takes the chain id:** `setup(chain_id, …)`, the id the chain's EVM answers
+  CHAINID with, as `GET /status` says it. A wrong one makes every digest a stranger's.
+- **Signers need the event index:** `chainv4 bridge sign` reads what left here from `Sent` events.
+- **Wrapped coins go back as the coin:** a wrapped ETH token sent back says kind 0, so its gateway
+  releases ETH.
+- **Deploy Gateway.sol plainly, not through a deployment proxy:** whoever creates it owns it, and
+  only the owner sets its peers.
+- **An EVM chain must have its own chain id:** two gateways on chains with the same id cannot tell
+  a transfer's ends apart.
+
 ## Crypto and the federation
 
 - **New host calls and a precompile are consensus:** a contract calling `crypto` or `federation`,

@@ -40,6 +40,10 @@ enum Command {
     /// creates collections through it, and mints, sends, shows and lists what is held.
     #[cfg(all(feature = "client", feature = "nft"))]
     Nft(cli::NftArgs),
+    /// The bridges: deploys and joins the gateways here and on EVM chains, sends the coin, tokens
+    /// and NFTs across, and runs a federation signer's signing and relaying.
+    #[cfg(all(feature = "client", feature = "bridge", feature = "swap"))]
+    Bridge(cli::BridgeArgs),
     /// How many transactions a second the chain takes: blocks built and imported in-process
     /// (bench chain), or transfers submitted to running nodes at a rising rate (bench load).
     #[cfg(feature = "client")]
@@ -289,6 +293,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Dex(args)) => cli::dex(args),
         #[cfg(all(feature = "client", feature = "nft"))]
         Some(Command::Nft(args)) => cli::nft(args),
+        #[cfg(all(feature = "client", feature = "bridge", feature = "swap"))]
+        Some(Command::Bridge(args)) => cli::bridge(args),
         #[cfg(feature = "client")]
         Some(Command::Bench(args)) => cli::bench(args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),

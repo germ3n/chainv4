@@ -153,6 +153,14 @@ fn conforms_to_the_nft_standard(code: Code) {
     assert_eq!(call(DEPLOYER, "total_supply", &[]).0, [id(2)]);
     assert!(ids(carol).is_empty());
 
+    // An id of the owner's choosing, as a wrapped collection mints; the next goes past it, and an
+    // id taken is refused.
+    assert_eq!(call(DEPLOYER, "mint", &[address(dave), TxCallArgumentType::Nil, id(9)]).0, [id(9)]);
+    assert!(no(DEPLOYER, "mint", &[address(dave), TxCallArgumentType::Nil, id(2)]).contains("exists already"));
+    assert_eq!(call(DEPLOYER, "mint", &[address(dave)]).0, [id(10)]);
+    call(dave, "burn", &[id(9)]);
+    call(dave, "burn", &[id(10)]);
+
     // Only the owner upgrades, and owners outlive it.
     assert_eq!(world.upgrade(bob, nft, code.clone()), Err(crate::registry::RegistryError::NotPermitted));
     world.upgrade(DEPLOYER, nft, code).unwrap();
