@@ -159,7 +159,9 @@ docker/pow.sh logs                # on the VPS: follow the node's log
    as genesis says.
 2. **`push`** copies the repository by rsync, logging in with `-i KEY` and `-p PORT` when given
    (or `SSH_KEY` and `SSH_PORT`), without build output, `.git`, databases or keys, to
-   `chainv4/` in the VPS's home (`REMOTE_DIR`).
+   `chainv4/` in the VPS's home (`REMOTE_DIR`). Files gone here are deleted there, so a source
+   file moved is never built twice; what it leaves out, the chain, keys, certificates and build
+   output, rsync never deletes.
 3. **`up`** runs `docker/compose.sh up -d --build --force-recreate`, on Docker or Podman, so an
    update restarts on the new image (podman-compose keeps the old one otherwise), warns when the machine has under 4 GiB of memory
    and swap for the first build, waits for the node, and says which ports to open: **UDP 4001**

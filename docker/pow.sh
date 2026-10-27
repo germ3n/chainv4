@@ -403,8 +403,10 @@ push() {
 
     # What the image builds from, and the chain's settings; no build output, no keys.
     say "copying the repository to $target:$dir"
-    # The voting key goes, for the VPS to vote with; your own key never does.
-    rsync -az -e "$ssh" \
+    # The voting key goes, for the VPS to vote with; your own key never does. Files gone here go
+    # there too, as a module moved into a folder would otherwise be built twice; what is excluded,
+    # the chain, keys, certificates and build output, rsync never deletes.
+    rsync -az --delete -e "$ssh" \
         --include '/docker/config/validator.key' --include '/docker/config/faucet.key' \
         --exclude 'target/' --exclude 'dist/' --exclude '.git/' --exclude '*.db/' \
         --exclude '*.key' --exclude '/docker/certs/*.pem' \
