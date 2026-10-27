@@ -87,6 +87,7 @@ local function record(hash, recipient, deadline, token, amount)
     set(hash, "token", token:text())
     set(hash, "amount", tostring(amount))
     set(hash, "deadline", tostring(deadline))
+    set(hash, "height", tostring(ctx.height))
     set(hash, "state", "locked")
     events.emit("Locked", hash, ctx.sender, recipient, token, amount, u256(deadline))
 end
@@ -161,7 +162,8 @@ function M.refund(hash)
 end
 
 -- A swap: its state, locked, claimed or refunded, or none; who locked it, for whom, the token
--- (the zero address for the coin), how much, its deadline, and its secret once claimed, or "".
+-- (the zero address for the coin), how much, its deadline, its secret once claimed, or "", and
+-- the block it was locked in, for the other side to wait until that block is final.
 function M.get(hash)
     bytes32(hash, "the hash")
     hash = string.lower(hash)
@@ -177,7 +179,8 @@ function M.get(hash)
         address.parse(field(hash, "token")),
         u256(field(hash, "amount")),
         u256(field(hash, "deadline")),
-        field(hash, "secret") or ""
+        field(hash, "secret") or "",
+        u256(field(hash, "height") or "0")
 end
 
 return M

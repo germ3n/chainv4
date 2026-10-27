@@ -19,7 +19,7 @@ use {
     crate::structs::u256::u256,
     crate::swap::evm::{self, parse_address, show_address},
     crate::swap::htlc::{Coins, Spend, revealed},
-    crate::swap::{BitcoinLeg, ChainLeg, EvmLeg, Leg, Lock, LockState, Parties, Role, Side, Terms, secret},
+    crate::swap::{BitcoinLeg, ChainLeg, EvmLeg, Leg, Lock, LockState, Parties, Role, Settled, Side, Terms, secret},
     rpc::Rpc,
     serde_json::json,
     std::path::PathBuf,
@@ -245,10 +245,16 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
             let (keypair, parties) = keyed(&action)?;
             let side = pick(&terms, &action, &parties, Role::Payer, "lock")?;
 
-            // The second lock goes in only once the first stands as the terms say.
+            // The second lock goes in only once the first stands as the terms say, and is final.
             if side == Side::Second && !action.anyway {
                 match look(&terms, Side::First, &action) {
-                    Ok(lock) => terms.first.stands(&lock, terms.first_deadline).map_err(|why| format!("the starter's lock does not stand: {why}. Lock only once it does"))?,
+                    Ok(lock) => {
+                        terms.first.stands(&lock, terms.first_deadline).map_err(|why| format!("the starter's lock does not stand: {why}. Lock only once it does"))?;
+
+                        if let settled @ (Settled::Waiting(_) | Settled::Unknown(_)) = settled(&terms, Side::First, &action, &lock)? {
+                            return Err(format!("the starter's lock is {}. Lock once it is, or with --anyway", settled.describe()).into());
+                        }
+                    }
                     Err(why) => return Err(format!("cannot check the starter's lock: {why}. Check it yourself, then lock with --anyway").into()),
                 }
             }
@@ -286,8 +292,19 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
             }
 
             let (keypair, parties) = keyed(&action)?;
+            let side = pick(&terms, &action, &parties, Role::Receiver, "claim")?;
 
-            match terms.leg(pick(&terms, &action, &parties, Role::Receiver, "claim")?) {
+            // The starter's claim shows the secret: only once the second lock is final, which a
+            // reorganization could otherwise take away with the secret already out.
+            if side == Side::Second && !action.anyway {
+                let lock = look(&terms, side, &action)?;
+
+                if let settled @ (Settled::Waiting(_) | Settled::Unknown(_)) = settled(&terms, side, &action, &lock)? {
+                    return Err(format!("their lock is {}. Claim once it is, or with --anyway", settled.describe()).into());
+                }
+            }
+
+            match terms.leg(side) {
                 Leg::Chain(leg) => call(&action, leg.contract, "claim", u256::ZERO, vec![text(to_hex(&secret))])?,
                 Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.claim_call(&secret), false, &evm_secret(&keypair)?)?,
                 Leg::Bitcoin(_) => unreachable!("pick leaves Bitcoin's legs out"),
@@ -330,7 +347,11 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
                             Ok(()) => "as the terms say".to_string(),
                             Err(why) => why,
                         };
-                        println!("{name} leg, on {}: {state}, {stands}", leg.chain_name());
+                        let settled = match lock.state {
+                            LockState::Locked | LockState::Claimed => format!(", {}", settled(&terms, side, &action, &lock).map_or_else(|why| format!("finality not known: {why}"), |settled| settled.describe())),
+                            _ => String::new(),
+                        };
+                        println!("{name} leg, on {}: {state}, {stands}{settled}", leg.chain_name());
 
                         if let Some(secret) = lock.secret {
                             println!("secret {}", to_hex(&secret));
@@ -454,6 +475,26 @@ fn pick(terms: &Terms, action: &LegAction, parties: &Parties, role: Role, what: 
     match terms.leg(side) {
         Leg::Bitcoin(_) => Err(format!("that leg is Bitcoin's: pay its HTLC from a Bitcoin wallet, or use swap bitcoin-claim and bitcoin-refund; there is no {what} to send").into()),
         _ => Ok(side),
+    }
+}
+
+/// Whether a leg's lock is final, as its chain says: chainv4's by its finality, or its depth on a
+/// chain without; an EVM chain's by its finalized block, or its depth.
+fn settled(terms: &Terms, side: Side, action: &LegAction, lock: &Lock) -> CliResult<Settled> {
+    match terms.leg(side) {
+        Leg::Chain(_) => {
+            let status = ok(agent(&action.tls)?.get(format!("{}/status", action.node.trim_end_matches('/'))).call())?;
+            let tip = status["height"].as_u64().unwrap_or(0);
+            let finalized = status["finality"].is_object().then(|| status["finality"]["finalized"]["height"].as_u64().unwrap_or(0));
+
+            Ok(crate::swap::chain_settled(lock, tip, finalized))
+        }
+        Leg::Evm(leg) => {
+            let (tip, finalized) = evm_rpc(action, leg)?.heads()?;
+
+            Ok(crate::swap::evm_settled(lock, tip, finalized))
+        }
+        Leg::Bitcoin(_) => Ok(Settled::Unknown("Bitcoin's depth is for you to check".to_string())),
     }
 }
 

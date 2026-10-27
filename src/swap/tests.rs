@@ -153,7 +153,7 @@ fn chain(leg: &Leg) -> ChainLeg {
 fn a_lock_stands_only_as_the_terms_say() {
     let terms = answered();
     let leg = &terms.second;
-    let lock = Lock { state: LockState::Locked, recipient: Some(Party::Chain(Address::Ed25519([0xa; 32]))), token: None, amount: u256::new(5_000), deadline: terms.second_deadline, secret: None };
+    let lock = Lock { state: LockState::Locked, recipient: Some(Party::Chain(Address::Ed25519([0xa; 32]))), token: None, amount: u256::new(5_000), deadline: terms.second_deadline, secret: None, height: Some(100) };
 
     assert_eq!(leg.stands(&lock, terms.second_deadline), Ok(()));
     assert_eq!(leg.stands(&Lock { state: LockState::Claimed, ..lock.clone() }, terms.second_deadline), Ok(()));
@@ -169,10 +169,35 @@ fn a_lock_stands_only_as_the_terms_say() {
     let zero = Address::Ed25519([0; 32]).to_string();
     let a = Address::Ed25519([0xa; 32]).to_string();
     let deadline = terms.second_deadline.to_string();
-    let read = Lock::from_chain(&text(&["locked", &a, &a, &zero, "5000", &deadline, ""])).unwrap();
+    let read = Lock::from_chain(&text(&["locked", &a, &a, &zero, "5000", &deadline, "", "100"])).unwrap();
     assert_eq!(read, Lock { recipient: Some(Party::Chain(Address::Ed25519([0xa; 32]))), ..lock.clone() });
+    let older = Lock::from_chain(&text(&["locked", &a, &a, &zero, "5000", &deadline, ""])).unwrap();
+    assert_eq!(older.height, None, "a contract from before heights");
     assert_eq!(Lock::from_chain(&text(&["none"])).unwrap().state, LockState::None);
     assert!(Lock::from_chain(&text(&["locked", &a])).is_err());
+}
+
+#[test]
+fn a_lock_is_final_once_its_block_is_or_once_deep_enough() {
+    let at = |height: u64| Lock { state: LockState::Locked, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: Some(height) };
+
+    // A chain with finality: final once finality reaches its block, whatever the depth.
+    assert_eq!(chain_settled(&at(100), 500, Some(100)), Settled::Final);
+    assert!(matches!(chain_settled(&at(101), 500, Some(100)), Settled::Waiting(why) if why.contains("until block 101 is final")));
+
+    // Without finality: CHAIN_DEPTH blocks deep, its own block counted.
+    assert_eq!(chain_settled(&at(100), 100 + CHAIN_DEPTH - 1, None), Settled::Final);
+    assert_eq!(chain_settled(&at(100), 100 + CHAIN_DEPTH - 2, None), Settled::Waiting("1 more block".to_string()));
+    assert_eq!(evm_settled(&at(10), 12, None), Settled::Waiting("9 more blocks".to_string()));
+    assert_eq!(evm_settled(&at(10), 12, Some(10)), Settled::Final, "the RPC's finalized block");
+
+    // A contract that does not say where: not known, so held.
+    assert!(matches!(chain_settled(&Lock { height: None, ..at(1) }, 500, Some(400)), Settled::Unknown(_)));
+    assert!(!chain_settled(&Lock { height: None, ..at(1) }, 500, Some(400)).is_final());
+
+    assert_eq!(bitcoin_settled(3, BITCOIN_DEPTH), Settled::Final);
+    assert_eq!(bitcoin_settled(1, BITCOIN_DEPTH).describe(), "not final yet: 2 more confirmations");
+    assert_eq!(bitcoin_settled(0, BITCOIN_DEPTH), Settled::Waiting("unconfirmed".to_string()));
 }
 
 #[test]

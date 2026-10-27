@@ -670,13 +670,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   deployment proxy (`chainv4 swap evm-deploy`); `chainv4 swap` with `--pay`/`--get` legs and
   `--eth-rpc`; the wallet's Swaps page reading and sending EVM legs through JSON-RPC URLs in
   Settings, signed here or by the offline signer; the second lock held until the first stands.
-- [ ] **Swaps wait for finality.** The starter claims as soon as the other's lock on chainv4 is in
-  the state; with reorgs cheap, a counterparty could lock, see the secret in the claim, take the
-  bitcoin, and reorg the lock away. Claim only once the lock is final on chainv4 (and the HTLC
-  deeply confirmed on Bitcoin): the Swaps page and `chainv4 swap status` would say when, and hold
-  the claim until then.
+- [x] **Swaps wait for finality.** The second lock waits until the first is final, and the
+  starter's claim until the second is: chainv4's by its finality (or 20 blocks without), an EVM
+  chain's by its finalized block (or 12), Bitcoin's by 3 confirmations, settable. The swap
+  contracts say which block a swap was locked in. The CLI and the Swaps page hold, with an
+  override. See [Atomic swaps](swaps.md#waiting-for-finality).
 - [ ] **Before real value moves through the chain.** Not one of these is done:
-  - **finality-aware swaps,** as above;
+  - ~~finality-aware swaps~~, done;
   - **independent validators,** run by different people on different machines, so no one key
     decides what is final, as the VPS's alone does now;
   - **security that is costly to attack:** real hashrate, or finality by stake, so a reorg is not

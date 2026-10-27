@@ -621,6 +621,20 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
   `--dex-contract`, `--dex-router`, or the name `dex`.
 
+## Swaps wait for finality
+
+- **The second lock and the starter's claim are held** until the lock they rest on is final:
+  chainv4's by its finality (20 blocks deep on a chain without), an EVM chain's by its finalized
+  block (12 deep where it names none), Bitcoin's by 3 confirmations (Settings, Swaps). `--anyway`
+  and **I checked it myself** act sooner.
+- **The swap contracts now say the block a swap was locked in.** One deployed before (the VPS's
+  first `swap.lua`) leaves finality unknown, so everything through it is held until overridden:
+  deploy the current `swap.lua` and point `swap.dev` at it. `Swap.sol`'s `get` returns one more
+  value, and its address through the deployment proxy changed with its code.
+- **chainv4's JSON-RPC tags mean what Ethereum's do now:** `finalized` is the finalized
+  checkpoint's block and `safe` the justified one's. On a chain without finality there is no such
+  block, as on proof of work: tools count depth. They named the tip before.
+
 ## The Bitcoin light client
 
 - **Off until switched on:** Settings, **Bitcoin**, for Bitcoin, its test network, or both. A

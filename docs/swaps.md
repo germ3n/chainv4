@@ -122,7 +122,7 @@ A new offer's leg on chainv4 takes, in this order:
 | `lock_token(hash, recipient, deadline, token, amount)` | Locks `amount` of a token, moved with `transfer_from`: approve the swap contract for it first. Sends no coin. |
 | `claim(secret)` | Pays the swap whose hash is the secret's SHA-256 to its recipient, before its deadline. Anyone may send it. |
 | `refund(hash)` | Pays a swap nobody claimed back to its locker, from its deadline on. Anyone may send it. |
-| `get(hash)` | Its state, `none`, `locked`, `claimed` or `refunded`; locker, recipient, token (the zero address for the coin), amount, deadline, and the secret once claimed. |
+| `get(hash)` | Its state, `none`, `locked`, `claimed` or `refunded`; locker, recipient, token (the zero address for the coin), amount, deadline, the secret once claimed, and the block it was locked in. |
 
 Hashes and secrets are `0x` and 64 hex digits. A secret must be 32 bytes, as Bitcoin's script
 wants it, so a secret one chain takes the others take too. Events: `Locked(hash, locker,
@@ -139,7 +139,7 @@ runs on every EVM chain, the ones without `PUSH0` too:
 | `lockToken(hash, recipient, deadline, address token, uint256 amount)` | Locks an ERC-20, moved with `transferFrom`: approve Swap.sol first. A token that takes a fee as it moves is refused. Tokens that return nothing, as USDT does, are taken. |
 | `claim(bytes32 secret)` | Pays the recipient, before the deadline: SHA-256 through Ethereum's own precompile. Anyone may send it. |
 | `refund(bytes32 hash)` | Pays the locker back, from the deadline on. Anyone may send it. |
-| `get(bytes32 hash)` | State (0 none, 1 locked, 2 claimed, 3 refunded), locker, recipient, token (zero for ETH), amount, deadline, and the secret once claimed. |
+| `get(bytes32 hash)` | State (0 none, 1 locked, 2 claimed, 3 refunded), locker, recipient, token (zero for ETH), amount, deadline, the secret once claimed, and the block it was locked in. |
 
 Events: `Locked`, `Claimed(hash, secret)`, `Refunded(hash)`. The secret is kept in the
 contract's state as well, so `get` alone shows it, with no log search, which providers limit.
@@ -272,11 +272,41 @@ An open swap lays out each leg, where it stands, and what to do next:
 
 Both sides must follow the same test network, testnet4 or signet, for a testnet swap.
 
+## Waiting for finality
+
+A lock in a chain's state is not yet a lock for good: a reorganization can take its block away.
+Two moments must not rest on one that can still go:
+- **the second lock** goes in only once the first is final. Otherwise the starter's lock could
+  vanish after the second side paid;
+- **the starter's claim** waits until the second lock is final. The claim shows the secret, and
+  if the second lock were then reorged away, the other side would hold the secret and the
+  starter's coins both.
+
+When a lock counts as final (`swap::Settled`):
+
+| Chain | Final when |
+| --- | --- |
+| chainv4 | its block is finalized, on a chain with finality: as the wallet's light client proves it, or `GET /status` says to the CLI. On a chain without, 20 blocks deep (`CHAIN_DEPTH`). |
+| An EVM chain | at or below the block its RPC tags `finalized`. Where it names none, as on chainv4's own EVM without finality, 12 blocks deep (`EVM_DEPTH`). |
+| Bitcoin | paid in full with 3 confirmations (`BITCOIN_DEPTH`; Settings, Swaps, **Bitcoin depth**), as the wallet's light client counts them. Without it, depth is yours to check. |
+
+The swap contracts say which block a swap was locked in, `get`'s last value, to reckon from.
+
+**Holding, with an override:**
+- `chainv4 swap lock` and `claim` refuse until the lock is final, saying what is left, and act
+  anyway with `--anyway`.
+- The Swaps page shows each leg's finality, keeps the buttons off until final, and offers
+  **I checked it myself** after a warning.
+- `chainv4 swap status` shows each lock's finality.
+- A swap contract deployed before contracts said their lock's block (the first `swap.lua`) leaves
+  finality unknown, and so held until overridden: deploy the current one, and point the name
+  `swap` at it.
+
 ## What to keep in mind
 
-- **Lock second only once the first lock is confirmed,** with the amount, recipient and deadline
-  the terms say. The CLI and the wallet check a contract's lock for you; on Bitcoin, check the
-  HTLC's address on an explorer, or with Esplora.
+- **Lock second only once the first lock is final,** with the amount, recipient and deadline the
+  terms say. The CLI and the wallet check a contract's lock, and its finality, for you; on
+  Bitcoin, the wallet's light client counts confirmations, or check the HTLC on an explorer.
 - **The starter must claim before the second deadline,** and the other side before the first:
   a claim that misses its deadline cannot be mined, and the lock goes back.
 - **A Bitcoin leg pays what it says, not more:** the HTLC is spent whole, to one output, less the

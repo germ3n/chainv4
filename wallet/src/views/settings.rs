@@ -679,6 +679,11 @@ fn swaps(ui: &mut Ui, ctx: &mut Ctx) {
             ui.colored_label(palette.warn, "Plain http: anyone on the way sees your swap's addresses.");
         }
 
+        super::row(ui, &palette, "Bitcoin depth", |ui| {
+            ui.add(egui::DragValue::new(&mut ctx.settings.bitcoin_depth).range(1..=100));
+            ui.label(RichText::new("confirmations before a lock on Bitcoin is acted on").small().color(palette.muted));
+        });
+
         ui.add_space(8.0);
         ui.label(RichText::new("EVM chains' JSON-RPC, one URL a line, such as https://ethereum-sepolia-rpc.publicnode.com: a swap's leg on Ethereum, Sepolia or any EVM chain is read and sent through the one whose chain it is. Empty: such legs cannot be followed here.").small().color(palette.muted));
         super::row(ui, &palette, "EVM RPC", |ui| {

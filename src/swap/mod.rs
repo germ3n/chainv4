@@ -192,6 +192,98 @@ pub struct Lock {
     pub deadline: u64,
     #[document(summary = "The secret, once claimed.")]
     pub secret: Option<[u8; 32]>,
+    #[document(summary = "The block it was locked in, on contracts that say: what its finality is reckoned from.")]
+    pub height: Option<u64>,
+}
+
+#[document(
+    summary = "How deep a lock on chainv4 must be, in blocks, on a chain without finality, before the other side acts on it.",
+    category = "Swaps",
+)]
+pub const CHAIN_DEPTH: u64 = 20;
+
+#[document(summary = "How many confirmations a lock on Bitcoin needs by default before the other side acts on it.", category = "Swaps")]
+pub const BITCOIN_DEPTH: u32 = 3;
+
+#[document(
+    summary = "How deep a lock on an EVM chain must be, in blocks, where its RPC names no finalized block.",
+    category = "Swaps",
+)]
+pub const EVM_DEPTH: u64 = 12;
+
+#[document(
+    summary = "Whether a lock is settled enough to act on: the second lock goes in only once the first is final, and the starter claims, showing the secret, only once the second is. A lock a reorganization could still take away would leave the other side's coins claimable with a secret already out.",
+    category = "Swaps",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Settled {
+    #[document(summary = "Final, or as deep as needed.")]
+    Final,
+    #[document(summary = "Not yet: what is left to wait for.")]
+    Waiting(String),
+    #[document(summary = "Not known: why.")]
+    Unknown(String),
+}
+
+impl Settled {
+    #[document(parent = "Settled", summary = "Whether it is final.")]
+    pub fn is_final(&self) -> bool {
+        *self == Settled::Final
+    }
+
+    #[document(parent = "Settled", summary = "In words: final, or what it waits for, or why it is not known.")]
+    pub fn describe(&self) -> String {
+        match self {
+            Settled::Final => "final".to_string(),
+            Settled::Waiting(what) => format!("not final yet: {what}"),
+            Settled::Unknown(why) => format!("finality not known: {why}"),
+        }
+    }
+}
+
+fn settled(lock: &Lock, tip: u64, finalized: Option<u64>, depth: u64) -> Settled {
+    let Some(height) = lock.height.filter(|height| *height > 0) else {
+        return Settled::Unknown("the contract does not say which block it was locked in".to_string());
+    };
+
+    match finalized {
+        Some(finalized) if height <= finalized => Settled::Final,
+        Some(finalized) => Settled::Waiting(format!("until block {height} is final; finality is at {finalized}")),
+        None => match (tip + 1).saturating_sub(height) {
+            deep if deep >= depth => Settled::Final,
+            deep => Settled::Waiting(format!("{} more block{}", depth - deep, if depth - deep == 1 { "" } else { "s" })),
+        },
+    }
+}
+
+#[document(
+    summary = "Whether a lock on chainv4 is final: its block finalized, on a chain with finality; or CHAIN_DEPTH blocks deep, on one without.",
+    category = "Swaps",
+    params = {
+        lock = "The lock, as the swap contract shows it.",
+        tip = "The chain's height.",
+        finalized = "The finalized height, on a chain with finality; None on one without.",
+    },
+)]
+pub fn chain_settled(lock: &Lock, tip: u64, finalized: Option<u64>) -> Settled {
+    settled(lock, tip, finalized, CHAIN_DEPTH)
+}
+
+#[document(
+    summary = "Whether a lock on an EVM chain is final: at or below the block its RPC calls finalized; or EVM_DEPTH blocks deep, where it names none.",
+    category = "Swaps",
+)]
+pub fn evm_settled(lock: &Lock, tip: u64, finalized: Option<u64>) -> Settled {
+    settled(lock, tip, finalized, EVM_DEPTH)
+}
+
+#[document(summary = "Whether a lock on Bitcoin is deep enough: its confirmations against those needed.", category = "Swaps")]
+pub fn bitcoin_settled(confirmations: u32, needed: u32) -> Settled {
+    match confirmations {
+        0 => Settled::Waiting("unconfirmed".to_string()),
+        deep if deep >= needed => Settled::Final,
+        deep => Settled::Waiting(format!("{} more confirmation{}", needed - deep, if needed - deep == 1 { "" } else { "s" })),
+    }
 }
 
 #[document(
@@ -589,11 +681,14 @@ impl Lock {
         };
 
         if state == LockState::None {
-            return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None });
+            return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: None });
         }
 
-        let [_, _, recipient, token, amount, deadline, secret] = values else {
-            return Err("an answer the swap contract does not give".to_string());
+        // Contracts from before they said the block a swap was locked in give seven values.
+        let (recipient, token, amount, deadline, secret, height) = match values {
+            [_, _, recipient, token, amount, deadline, secret] => (recipient, token, amount, deadline, secret, None),
+            [_, _, recipient, token, amount, deadline, secret, height] => (recipient, token, amount, deadline, secret, Some(height)),
+            _ => return Err("an answer the swap contract does not give".to_string()),
         };
         let address = |text: &str| text.parse::<Address>().map_err(|_| format!("{text} is not an address"));
         let number = |text: &str| match text.strip_prefix("0x") {
@@ -611,6 +706,7 @@ impl Lock {
             amount: number(amount)?,
             deadline: u64::try_from(number(deadline)?).map_err(|_| "a deadline past any time".to_string())?,
             secret,
+            height: height.map(|height| number(height).and_then(|height| u64::try_from(height).map_err(|_| "a height past any chain".to_string()))).transpose()?.filter(|height| *height > 0),
         })
     }
 }

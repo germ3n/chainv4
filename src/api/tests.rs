@@ -489,6 +489,13 @@ fn a_chain_without_finality_says_so() {
     assert_eq!(ok(address, "/status")["finality"], Value::Null);
     assert_eq!(get(address, "/validators").0, 404);
     assert_eq!(ok(address, "/evidence")["evidence"], json!([]));
+
+    // Ethereum's tools are told no block is finalized, as on proof of work: they count depth.
+    #[cfg(feature = "ethereum")]
+    for tag in ["finalized", "safe"] {
+        let (_, _, answer) = request(address, "POST", "/rpc", &json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber", "params": [tag, false] }).to_string());
+        assert_eq!(answer["result"], Value::Null, "{tag}");
+    }
 }
 
 /// Produces blocks on a chain with this finality, the transactions given for a height going into
@@ -690,6 +697,15 @@ fn depth_chains_finalize_by_depth() {
     assert_eq!(finality["type"], "depth");
     assert_eq!(finality["checkpoint_interval"], 1);
     assert_eq!(finality["finalized"]["height"], 3);
+
+    // Ethereum's finalized tag names the finalized block, not the tip.
+    #[cfg(feature = "ethereum")]
+    {
+        let (_, _, answer) = request(address, "POST", "/rpc", &json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber", "params": ["finalized", false] }).to_string());
+        assert_eq!(answer["result"]["number"], "0x3");
+        let (_, _, answer) = request(address, "POST", "/rpc", &json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber", "params": ["latest", false] }).to_string());
+        assert_eq!(answer["result"]["number"], "0x6");
+    }
     assert_eq!(ok(address, &format!("/txs/{}", id(1)))["final"], true);
     assert_eq!(ok(address, &format!("/txs/{}", id(5)))["final"], false);
     assert_eq!(get(address, "/validators").0, 404);

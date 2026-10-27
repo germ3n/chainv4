@@ -106,6 +106,8 @@ pub struct Settings {
     pub bitcoin_test_network: String,
     /// A Bitcoin node to try first, such as your own: host:port, or empty for the DNS seeds'.
     pub bitcoin_peer: String,
+    /// How many confirmations a swap's lock on Bitcoin needs before the other side acts on it.
+    pub bitcoin_depth: u32,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -167,6 +169,7 @@ impl Default for Settings {
             bitcoin_test: false,
             bitcoin_test_network: "testnet4".to_string(),
             bitcoin_peer: String::new(),
+            bitcoin_depth: 3,
             vault: None,
             current: String::new(),
         }

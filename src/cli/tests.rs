@@ -885,7 +885,8 @@ mod send {
         let deployer = DevAuthority::dev_keypair().public().address();
         let contract = deployed_at(&deployer, 0, crate::structs::hash::HashType::default_chain());
         let options = crate::api::ApiOptions { swap_contract: Some(contract), ..Default::default() };
-        let running = Running::launch_serving(true, false, FinalityConfig::dev(DevAuthority::dev_keypair().public()), None, |node| node, options);
+        // A node that votes, so blocks become final as the claim waits for.
+        let running = Running::launch_serving(true, true, FinalityConfig::dev(DevAuthority::dev_keypair().public()), None, |node| node, options);
         send(running.args(TxArgs::Deploy { lua: Some(source), wasm: None, evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
 
         // Alice pays bitcoin and starts, with the secret; Bob, the dev key, pays 5,000 on chainv4.
@@ -912,8 +913,20 @@ mod send {
         let unchecked = swap(SwapArgs { action: SwapAction::Lock(action()) }).unwrap_err();
         assert!(unchecked.to_string().contains("--anyway"), "{unchecked}");
         swap(SwapArgs { action: SwapAction::Lock(LegAction { anyway: true, ..action() }) }).unwrap();
-        // Anyone may send the claim: the coins go to Alice whoever sends it.
-        swap(SwapArgs { action: SwapAction::Claim { action: action(), secret: to_hex(&secret) } }).unwrap();
+        // Anyone may send the claim: the coins go to Alice whoever sends it. It shows the secret,
+        // so it waits until Bob's lock is final.
+        let started = std::time::Instant::now();
+
+        loop {
+            match swap(SwapArgs { action: SwapAction::Claim { action: action(), secret: to_hex(&secret) } }) {
+                Ok(()) => break,
+                Err(held) => {
+                    assert!(held.to_string().contains("not final yet"), "{held}");
+                    assert!(started.elapsed() < std::time::Duration::from_secs(20), "final within a few epochs");
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
         let account: serde_json::Value = serde_json::from_str(&ureq::get(format!("{node}/accounts/{}", alice.chain.unwrap())).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
         assert_eq!(account["balance"], "5000");
         let wrong = swap(SwapArgs { action: SwapAction::Claim { action: action(), secret: to_hex(&[0; 32]) } });
@@ -1052,12 +1065,20 @@ mod send {
         assert!(early.to_string().contains("nothing is locked yet"), "{early}");
 
         swap(SwapArgs { action: SwapAction::Lock(action(None, None)) }).unwrap();
-        swap(SwapArgs { action: SwapAction::Lock(action(Some(bob_file.clone()), None)) }).unwrap();
+
+        // Alice's lock stands, but nothing on this node is final: Bob is held, until he says so.
+        let unfinal = swap(SwapArgs { action: SwapAction::Lock(action(Some(bob_file.clone()), None)) }).unwrap_err();
+        assert!(unfinal.to_string().contains("not final yet") && unfinal.to_string().contains("--anyway"), "{unfinal}");
+        swap(SwapArgs { action: SwapAction::Lock(LegAction { anyway: true, ..action(Some(bob_file.clone()), None) }) }).unwrap();
         let locked = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&hash)).unwrap()).unwrap();
         assert_eq!(terms.second.stands(&locked, terms.second_deadline), Ok(()));
+        assert!(locked.height.is_some(), "Swap.sol says the block it was locked in");
 
-        // Alice claims Bob's lock on the EVM, sent by anyone, which shows the secret there.
-        swap(SwapArgs { action: SwapAction::Claim { action: action(Some(bob_file.clone()), Some(LegArg::Second)), secret: to_hex(&secret) } }).unwrap();
+        // Alice claims Bob's lock on the EVM, sent by anyone, which shows the secret there: held
+        // too, as its block is not final, until she says so.
+        let held = swap(SwapArgs { action: SwapAction::Claim { action: action(Some(bob_file.clone()), Some(LegArg::Second)), secret: to_hex(&secret) } }).unwrap_err();
+        assert!(held.to_string().contains("not final yet"), "{held}");
+        swap(SwapArgs { action: SwapAction::Claim { action: LegAction { anyway: true, ..action(Some(bob_file.clone()), Some(LegArg::Second)) }, secret: to_hex(&secret) } }).unwrap();
         let claimed = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&hash)).unwrap()).unwrap();
         assert_eq!((claimed.state, claimed.secret), (LockState::Claimed, Some(secret)));
         let paid: serde_json::Value = serde_json::from_str(

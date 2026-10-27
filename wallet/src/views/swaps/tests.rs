@@ -160,3 +160,13 @@ fn the_signers_signature_completes_the_transaction_only_for_its_address() {
     let other = crate::hardware::Signature { id: Some(vec![9; 16]), ..signature };
     assert!(evm::finish(&tx, &request, &other, from).unwrap_err().contains("another request"));
 }
+
+#[test]
+fn an_evm_chains_heads_read_with_or_without_a_finalized_block() {
+    let reply = |id: u64, result: Value| json!({ "jsonrpc": "2.0", "id": id, "result": result });
+
+    assert_eq!(evm::heads(&json!([reply(2, json!({ "number": "0x64" })), reply(1, json!("0x70"))])), Ok((0x70, Some(0x64))));
+    // A chain without finality names no finalized block: depth is counted instead.
+    assert_eq!(evm::heads(&json!([reply(1, json!("0x70")), reply(2, Value::Null)])), Ok((0x70, None)));
+    assert!(evm::heads(&json!([])).is_err());
+}

@@ -66,7 +66,7 @@ JSON-RPC does: an error is in the answer.
 | `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory` | Twice the next block's base price; a tip of 0; and each block's base price and how full it was. |
 | `eth_sendRawTransaction` | Takes a signed transaction to the node's mempool, and answers its hash. |
 | `eth_getTransactionByHash`, `eth_getTransactionReceipt` | A transaction on the main chain, by its hash, and what it did: status, gas used, the price paid, a created contract's address, and its logs. `eth_getTransactionByHash` finds one waiting in the mempool too, its block fields null; its receipt is null until a block holds it. |
-| `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getBlockTransactionCountBy…` | A main-chain block: its header's fields and its Ethereum-signed transactions, as hashes or in full. |
+| `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getBlockTransactionCountBy…` | A main-chain block: its header's fields and its Ethereum-signed transactions, as hashes or in full. `finalized` names the finalized checkpoint's block and `safe` the justified one's; on a chain without finality there is none, `null`, as on proof of work. |
 | `eth_getLogs` | EVM logs by block range or block hash, address and topics: up to 10,000 blocks at once. |
 | `eth_accounts`, `eth_syncing`, `net_listening`, `web3_clientVersion` | None, false, true, and `chainv4/` and the version. |
 

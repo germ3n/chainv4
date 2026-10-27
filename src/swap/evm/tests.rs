@@ -50,12 +50,13 @@ fn get_answers_read_as_locks() {
             number_word(u256::new(7)),
             number_word(u256::new(1_793_043_200)),
             secret,
+            number_word(u256::new(4_242)),
         ]
         .concat()
     };
 
     let locked = read_lock(&words(1, [0; 20], [0; 32])).unwrap();
-    assert_eq!(locked, Lock { state: LockState::Locked, recipient: Some(Party::Evm([0xb2; 20])), token: None, amount: u256::new(7), deadline: 1_793_043_200_000, secret: None });
+    assert_eq!(locked, Lock { state: LockState::Locked, recipient: Some(Party::Evm([0xb2; 20])), token: None, amount: u256::new(7), deadline: 1_793_043_200_000, secret: None, height: Some(4_242) });
     assert_eq!(Leg::Evm(leg(None)).stands(&locked, 1_793_043_200_999), Ok(()), "seconds, as Swap.sol keeps them");
 
     let claimed = read_lock(&words(2, [0x70; 20], [0x22; 32])).unwrap();

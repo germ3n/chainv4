@@ -199,7 +199,7 @@ pub fn get_input(hash: &[u8; 32]) -> Vec<u8> {
 
 #[document(summary = "What Swap.sol's get answered, as a lock.", category = "Swaps", see_also = "get_input")]
 pub fn read_lock(output: &[u8]) -> Result<Lock, String> {
-    if output.len() != 7 * 32 {
+    if output.len() != 8 * 32 {
         return Err("an answer Swap.sol does not give: is the contract Swap.sol?".to_string());
     }
 
@@ -222,7 +222,7 @@ pub fn read_lock(output: &[u8]) -> Result<Lock, String> {
     let secret: [u8; 32] = word(6).try_into().expect("32 bytes");
 
     if state == LockState::None {
-        return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None });
+        return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: None });
     }
 
     Ok(Lock {
@@ -232,6 +232,7 @@ pub fn read_lock(output: &[u8]) -> Result<Lock, String> {
         amount: u256::from_be_bytes(word(4).try_into().expect("32 bytes")),
         deadline: small(5)?.saturating_mul(1_000),
         secret: (state == LockState::Claimed).then_some(secret),
+        height: Some(small(7)?).filter(|height| *height > 0),
     })
 }
 

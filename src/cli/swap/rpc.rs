@@ -70,6 +70,17 @@ impl Rpc {
         Ok(answer.as_str().and_then(from_hex).ok_or_else(|| format!("eth_call answered {answer}"))?)
     }
 
+    /// The chain's height, and the block its RPC calls finalized, where it names one.
+    pub fn heads(&self) -> CliResult<(u64, Option<u64>)> {
+        let tip = u64::try_from(self.number("eth_blockNumber", json!([]))?).map_err(|_| "a height past 64 bits")?;
+        let finalized = self
+            .ask("eth_getBlockByNumber", json!(["finalized", false]))
+            .ok()
+            .and_then(|block| block["number"].as_str().and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()));
+
+        Ok((tip, finalized))
+    }
+
     /// Whether there is code at an address.
     pub fn has_code(&self, address: &[u8; 20]) -> CliResult<bool> {
         let answer = self.ask("eth_getCode", json!([to_hex(address), "latest"]))?;

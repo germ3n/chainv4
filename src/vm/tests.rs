@@ -1897,6 +1897,7 @@ fn the_swap_contract_pays_the_recipient_with_the_secret_or_the_locker_after_the_
     assert!(world.call_at(alice, swap, "claim", &[text(hex(&secret))], 0, now + 2).result.unwrap_err().to_string().contains("no swap waits"));
     let got = world.call(swap, "get", &[text(hash.clone())]).result.unwrap();
     assert_eq!((got[0].clone(), got[6].clone()), (text("claimed".to_string()), text(hex(&secret))));
+    assert_eq!(got[7], wide(1), "the block it was locked in, for finality to be reckoned from");
 
     // A second swap nobody claims: too early to refund before the deadline, too late to claim at
     // it, and then Bob gets it back.

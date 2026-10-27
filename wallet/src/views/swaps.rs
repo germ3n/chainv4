@@ -38,7 +38,7 @@ use {
     chainv4::structs::u256::u256,
     chainv4::swap::evm::{CHAINS, chain_name, deployed_address, parse_address, show_address, symbol},
     chainv4::swap::htlc::{Coins, Spend, revealed},
-    chainv4::swap::{BitcoinLeg, ChainLeg, EvmLeg, FIRST_DEADLINE_MS, Leg, Lock, LockState, Parties, SECOND_DEADLINE_MS, Side, Terms, secret},
+    chainv4::swap::{BitcoinLeg, ChainLeg, EvmLeg, FIRST_DEADLINE_MS, Leg, Lock, LockState, Parties, SECOND_DEADLINE_MS, Settled, Side, Terms, bitcoin_settled, chain_settled, evm_settled, secret},
     egui::{RichText, Ui},
     serde_json::{Value, json},
     std::collections::HashMap,
@@ -60,6 +60,10 @@ pub struct SwapsState {
     /// What Swap.sol said of each swap's EVM leg, by its hash and chain, and when it was asked.
     evm_locks: HashMap<(String, u64), Result<Lock, String>>,
     evm_asked: HashMap<String, f64>,
+    /// Each EVM chain's height and finalized block, by chain id, as its RPC last said.
+    evm_heads: HashMap<u64, (u64, Option<u64>)>,
+    /// Acting on the open swap before a lock is final, asked for after a warning.
+    anyway: bool,
     /// The chain each EVM JSON-RPC URL serves, once it said.
     chain_ids: HashMap<String, Result<u64, String>>,
     /// An EVM transaction on its way.
@@ -88,6 +92,8 @@ impl Default for SwapsState {
             asked: HashMap::new(),
             evm_locks: HashMap::new(),
             evm_asked: HashMap::new(),
+            evm_heads: HashMap::new(),
+            anyway: false,
             chain_ids: HashMap::new(),
             evm: None,
             bitcoin: BitcoinForm { fee_rate: "2".to_string(), ..BitcoinForm::default() },
@@ -274,6 +280,7 @@ fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
                 state.trouble = None;
                 state.forgetting = false;
                 state.evm = None;
+                state.anyway = false;
             }
         }
     });
@@ -626,6 +633,7 @@ fn ask_leg(ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, leg: &Leg, now:
             if let Some(url) = evm::url_for(ctx, state, leg.chain_id) {
                 state.evm_asked.insert(hash, now);
                 evm::ask_lock(ctx, state, &url, leg, &terms.hash);
+                evm::ask_heads(ctx, state, &url, leg.chain_id);
             }
         }
         _ => {}
@@ -723,10 +731,17 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
 
         let locks = terms.legs().map(|(_, leg)| lock_of(ctx, state, &terms, leg));
         let lock = |side: Side| locks[match side { Side::First => 0, Side::Second => 1 }].as_ref();
+        let paid = htlc_seen(ctx, &terms);
+        let settles = [Side::First, Side::Second].map(|side| settled_of(ctx, state, &terms, side, lock(side), paid.as_deref()));
+        let settled = |side: Side| &settles[match side { Side::First => 0, Side::Second => 1 }];
 
         for (side, leg) in terms.legs() {
             super::row(ui, &palette, &leg.chain_name(), |ui| {
-                ui.label(describe(leg, lock(side), terms.deadline(side)));
+                let shown = match (lock(side), leg) {
+                    (Some(Ok(Lock { state: LockState::Locked | LockState::Claimed, .. })), _) | (None, Leg::Bitcoin(_)) => format!("{} · {}", describe(leg, lock(side), terms.deadline(side)), settled(side).describe()),
+                    _ => describe(leg, lock(side), terms.deadline(side)),
+                };
+                ui.label(shown);
             });
         }
 
@@ -747,7 +762,6 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
         }
 
         let secret = ctx.book.swaps[index].secret.as_deref().and_then(from_hex).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
-        let paid = htlc_seen(ctx, &terms);
 
         if let (Some(htlc), Some((_, leg))) = (terms.htlc(), terms.bitcoin()) {
             super::row(ui, &palette, "Bitcoin HTLC", |ui| {
@@ -789,9 +803,20 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
         // Paying: the starter first; the other only once the first lock stands.
         if let Some(side) = pays {
             let (leg, deadline, first) = (terms.leg(side), terms.deadline(side), side == Side::First);
-            let waiting = (!first).then(|| first_stands.clone().err()).flatten();
             let nothing_yet = matches!(lock(side), Some(Ok(Lock { state: LockState::None, .. })));
             let locked = matches!(lock(side), Some(Ok(Lock { state: LockState::Locked, .. })));
+            // Theirs must stand as the terms say, and be final: one a reorganization could take
+            // away would leave yours to them for a secret they keep.
+            let unsettled = (!first && first_stands.is_ok() && !settled(Side::First).is_final()).then(|| settled(Side::First).describe());
+
+            if let Some(why) = &unsettled
+                && (nothing_yet || matches!(leg, Leg::Bitcoin(_)))
+            {
+                ui.colored_label(palette.warn, format!("Their lock on {} is {why}. Lock yours once it is final.", terms.first.chain_name()));
+                ui.checkbox(&mut state.anyway, "I checked it myself: lock anyway");
+            }
+
+            let waiting = (!first).then(|| first_stands.clone().err().or_else(|| unsettled.clone().filter(|_| !state.anyway))).flatten();
 
             if let Some(why) = &waiting
                 && (nothing_yet || matches!(leg, Leg::Bitcoin(_)))
@@ -903,11 +928,19 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                     ui.colored_label(palette.bad, format!("Their lock is not as the terms say, {why}: do not claim it, which would show the secret. Take yours back after its deadline."));
                 }
                 (_, Some(secret), Some(Ok(()))) => {
+                    // The starter's claim shows the secret: only once their lock is final.
+                    let held = record.started && !settled(side).is_final();
+
+                    if held {
+                        ui.colored_label(palette.warn, format!("Their lock on {} is {}. Claim once it is final: claiming shows the secret.", leg.chain_name(), settled(side).describe()));
+                        ui.checkbox(&mut state.anyway, "I checked it myself: claim anyway");
+                    }
+
                     ui.label(RichText::new(match record.started {
                         true => format!("Their lock on {} stands: claim it. That shows the secret, which they claim yours with.", leg.chain_name()),
                         false => format!("Claim what they locked for you on {}, with the secret they showed.", leg.chain_name()),
                     }).color(palette.ink));
-                    let open = ctx.now < deadline;
+                    let open = ctx.now < deadline && (!held || state.anyway);
 
                     match leg {
                         Leg::Chain(chain) => {
@@ -949,8 +982,10 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
             }
 
             if let Some(spend) = spend {
+                // The starter's claim of the bitcoin shows the secret: only once it is deep enough.
+                let held = (matches!(spend, Spend::Claim { .. }) && record.started && !settled(side).is_final()).then(|| settled(side).describe());
                 ui.add_space(8.0);
-                bitcoin_spend(ui, ctx, state, &terms, holder, spend, index);
+                bitcoin_spend(ui, ctx, state, &terms, holder, spend, index, held);
             }
         }
 
@@ -1018,7 +1053,8 @@ fn learn_secret(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize
 
 /// Claiming or refunding the HTLC: the coins it holds, where they go, and the fee; signed here,
 /// or by the offline signer.
-fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, holder: usize, spend: Spend, index: usize) {
+#[allow(clippy::too_many_arguments)]
+fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, holder: usize, spend: Spend, index: usize, held: Option<String>) {
     let palette = *ctx.palette;
     let (Some(htlc), Some((_, leg))) = (terms.htlc(), terms.bitcoin()) else {
         return;
@@ -1095,7 +1131,12 @@ fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Ter
         ui.colored_label(palette.bad, "Those coins are less than the terms say: claiming them would show the secret for less. Do not; take yours back after its deadline.");
     }
 
-    if theme::primary(ui, &palette, "Sign it", !short).clicked() {
+    if let Some(why) = &held {
+        ui.colored_label(palette.warn, format!("The HTLC's coins are {why}. Claim once they are deep enough: claiming shows the secret."));
+        ui.checkbox(&mut state.anyway, "I checked it myself: claim anyway");
+    }
+
+    if theme::primary(ui, &palette, "Sign it", !short && (held.is_none() || state.anyway)).clicked() {
         let account = &ctx.holders[holder];
 
         match sign(secret_key(ctx, account, network), account.origin(), terms, spend, &state.bitcoin) {
@@ -1150,6 +1191,31 @@ fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Ter
             });
             state.relayed = None;
         }
+    }
+}
+
+/// Whether a leg's lock is final enough to act on: chainv4's by its finality, as the light client
+/// proves it; an EVM chain's by its finalized block; Bitcoin's by its confirmations, as the light
+/// client sees them, against the depth Settings asks.
+fn settled_of(ctx: &Ctx, state: &SwapsState, terms: &Terms, side: Side, lock: Option<&Result<Lock, String>>, paid: Option<&[Paid]>) -> Settled {
+    match (terms.leg(side), lock) {
+        (Leg::Bitcoin(leg), _) => match paid {
+            Some(paid) => match paid.iter().filter(|coin| coin.sats >= leg.sats).map(|coin| coin.depth).max() {
+                Some(depth) => bitcoin_settled(depth, ctx.settings.bitcoin_depth.max(1)),
+                None => Settled::Waiting("nothing paid to it yet".to_string()),
+            },
+            None => Settled::Unknown("follow Bitcoin under Settings, Bitcoin, or check its confirmations yourself".to_string()),
+        },
+        (Leg::Chain(_), Some(Ok(lock))) => match ctx.chain.finality() {
+            Some((tip, finalized)) => chain_settled(lock, tip, finalized),
+            None => Settled::Unknown("the light client is not following the chain yet".to_string()),
+        },
+        (Leg::Evm(leg), Some(Ok(lock))) => match state.evm_heads.get(&leg.chain_id) {
+            Some((tip, finalized)) => evm_settled(lock, *tip, *finalized),
+            None => Settled::Unknown(format!("asking {}", chain_name(leg.chain_id))),
+        },
+        (_, Some(Err(why))) => Settled::Unknown(why.clone()),
+        (_, None) => Settled::Unknown("not known yet".to_string()),
     }
 }
 

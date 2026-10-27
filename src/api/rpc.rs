@@ -410,7 +410,8 @@ fn fee_history(api: &Api, count: &Value, newest: &Value, percentiles: &Value) ->
     .clamp(1, MAX_FEE_HISTORY);
     let tip = tip(&*api.db)?.header.height;
     let newest = match newest.as_str() {
-        Some("latest" | "pending" | "safe" | "finalized") | None => tip,
+        Some(named @ ("safe" | "finalized")) => tagged(api, named)?.unwrap_or(tip),
+        Some("latest" | "pending") | None => tip,
         Some(_) => u64::try_from(number(newest, "the newest block")?).unwrap_or(tip).min(tip),
     };
     let oldest = newest.saturating_sub(count - 1);
@@ -435,10 +436,37 @@ fn fee_history(api: &Api, count: &Value, newest: &Value, percentiles: &Value) ->
     Ok(answer)
 }
 
-/// The block a tag or number names on the main chain: latest and its kin are the tip.
+/// The height a tag names on the main chain: latest and pending the tip; finalized and safe the
+/// finalized and the justified checkpoints' blocks, on a chain with finality, and none on one
+/// without, as an Ethereum node on proof of work names none: a client then counts depth.
+fn tagged(api: &Api, tag: &str) -> Result<Option<u64>, RpcError> {
+    let tip = tip(&*api.db)?.header.height;
+
+    match tag {
+        "safe" | "finalized" if api.finality.is_none() => Ok(None),
+        "safe" | "finalized" => {
+            let (justified, finalized) = crate::chain::stored_finality(&*api.db)?;
+            let checkpoint = if tag == "safe" { justified } else { finalized };
+
+            match checkpoint {
+                // Before anything past genesis is.
+                None => Ok(Some(0)),
+                Some(checkpoint) => Ok(Some(super::stored_block(&*api.db, &checkpoint.block)?.map_or(0, |block| block.header.height))),
+            }
+        }
+        _ => Ok(Some(tip)),
+    }
+}
+
+/// The block a tag or number names on the main chain: latest and pending the tip, finalized and
+/// safe as tagged says.
 fn block_at(api: &Api, tag: &Value) -> Result<Option<Block>, RpcError> {
     let height = match tag.as_str() {
-        Some("latest" | "pending" | "safe" | "finalized") | None => tip(&*api.db)?.header.height,
+        Some(named @ ("safe" | "finalized")) => match tagged(api, named)? {
+            Some(height) => height,
+            None => return Ok(None),
+        },
+        Some("latest" | "pending") | None => tip(&*api.db)?.header.height,
         Some("earliest") => 0,
         Some(_) => match u64::try_from(number(tag, "a block number")?) {
             Ok(height) => height,
@@ -726,7 +754,8 @@ fn logs(api: &Api, filter: &Value) -> Answer {
     let height = |name: &str, default: u64| -> Result<u64, RpcError> {
         match filter.get(name) {
             None | Some(Value::Null) => Ok(default),
-            Some(Value::String(tag)) if matches!(tag.as_str(), "latest" | "pending" | "safe" | "finalized") => Ok(tip),
+            Some(Value::String(tag)) if matches!(tag.as_str(), "safe" | "finalized") => Ok(tagged(api, tag)?.unwrap_or(tip)),
+            Some(Value::String(tag)) if matches!(tag.as_str(), "latest" | "pending") => Ok(tip),
             Some(Value::String(tag)) if tag == "earliest" => Ok(0),
             Some(value) => Ok(u64::try_from(number(value, name)?).unwrap_or(u64::MAX).min(tip)),
         }

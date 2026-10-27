@@ -58,6 +58,8 @@ pub enum Stage {
 pub enum Answer {
     Chain { url: String, chain_id: Result<u64, String> },
     Lock { hash: String, chain_id: u64, lock: Result<Lock, String> },
+    /// The chain's height, and the block its RPC calls finalized, where it names one.
+    Heads { chain_id: u64, heads: Result<(u64, Option<u64>), String> },
     Priced(Result<EthereumTx, String>),
     Sent(Result<String, String>),
     Mined(Result<Option<bool>, String>),
@@ -98,6 +100,23 @@ pub fn ask_lock(ctx: &Ctx, state: &SwapsState, url: &str, leg: &EvmLeg, hash: &[
         chain_id,
         lock: answer.and_then(|value| value.as_str().and_then(from_hex).ok_or_else(|| format!("eth_call answered {value}"))).and_then(|output| read_lock(&output)),
     });
+}
+
+/// Asks a chain for its height and its finalized block, in one batch.
+pub fn ask_heads(ctx: &Ctx, state: &SwapsState, url: &str, chain_id: u64) {
+    let batch = json!([request(1, "eth_blockNumber", json!([])), request(2, "eth_getBlockByNumber", json!(["finalized", false]))]);
+
+    ask_raw(ctx, state, url, batch, move |answer| Answer::Heads { chain_id, heads: answer.and_then(|replies| heads(&replies)) });
+}
+
+/// A chain's height, and its finalized block's, from the batch's answers: none where the RPC
+/// names no finalized block.
+pub fn heads(replies: &Value) -> Result<(u64, Option<u64>), String> {
+    let reply = |id: u64| replies.as_array().and_then(|replies| replies.iter().find(|reply| reply["id"] == id)).cloned().unwrap_or(Value::Null);
+    let tip = number(&reply(1)["result"]).and_then(|tip| u64::try_from(tip).map_err(|_| "a height past 64 bits".to_string()))?;
+    let finalized = reply(2)["result"]["number"].as_str().and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok());
+
+    Ok((tip, finalized))
 }
 
 /// Starts a call on its way: priced first, in one batch of questions.
@@ -158,6 +177,11 @@ pub fn take(ctx: &mut Ctx, state: &mut SwapsState, answer: Answer) {
             }
 
             state.evm_locks.insert((hash, chain_id), lock);
+        }
+        Answer::Heads { chain_id, heads } => {
+            if let Ok(heads) = heads {
+                state.evm_heads.insert(chain_id, heads);
+            }
         }
         Answer::Priced(priced) => {
             if let Some(pending) = state.evm.as_mut() {

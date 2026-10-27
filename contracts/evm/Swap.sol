@@ -28,6 +28,7 @@ contract Swap {
     struct Lock {
         State state;
         uint64 deadline;
+        uint64 height;
         address locker;
         address recipient;
         address token;
@@ -81,14 +82,15 @@ contract Swap {
     }
 
     /// A swap's state, 0 none, 1 locked, 2 claimed, 3 refunded; who locked it and for whom; its
-    /// token, the zero address for the coin; how much; its deadline; and its secret once claimed.
+    /// token, the zero address for the coin; how much; its deadline; its secret once claimed; and
+    /// the block it was locked in, for the other side to wait until that block is final.
     function get(bytes32 hash)
         external
         view
-        returns (uint8 state, address locker, address recipient, address token, uint256 amount, uint64 deadline, bytes32 secret)
+        returns (uint8 state, address locker, address recipient, address token, uint256 amount, uint64 deadline, bytes32 secret, uint64 height)
     {
         Lock storage held = locks[hash];
-        return (uint8(held.state), held.locker, held.recipient, held.token, held.amount, held.deadline, held.secret);
+        return (uint8(held.state), held.locker, held.recipient, held.token, held.amount, held.deadline, held.secret, held.height);
     }
 
     function open(bytes32 hash, address recipient, uint64 deadline, address token, uint256 amount) private {
@@ -96,7 +98,7 @@ contract Swap {
         require(amount > 0, "lock something");
         require(recipient != address(0), "a swap pays someone");
         require(deadline > block.timestamp, "its deadline must be after this block's time");
-        locks[hash] = Lock(State.Locked, deadline, msg.sender, recipient, token, amount, bytes32(0));
+        locks[hash] = Lock(State.Locked, deadline, uint64(block.number), msg.sender, recipient, token, amount, bytes32(0));
         emit Locked(hash, msg.sender, recipient, token, amount, deadline);
     }
 

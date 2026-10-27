@@ -164,6 +164,15 @@ impl Chain {
         }
     }
 
+    /// The tip's height, and the finalized height on a chain with finality, None on one without:
+    /// what a swap's lock here is reckoned final by.
+    #[cfg_attr(not(feature = "swap"), allow(dead_code))]
+    pub fn finality(&self) -> Option<(u64, Option<u64>)> {
+        let client = self.client.as_ref()?;
+
+        Some((client.tip().height, client.params().finality.is_some().then(|| client.final_height())))
+    }
+
     /// How far it follows: the tip's height and the height up to which blocks are final.
     pub fn following(&self) -> Option<(u64, u64)> {
         self.client.as_ref().map(|client| (client.tip().height, client.final_height()))
