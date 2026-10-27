@@ -218,6 +218,23 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   client.
 - [ ] **No governance over fees, rewards or limits.** The same ballot could carry them; each is a
   question of what the chain's rules read from state instead of genesis.
+- [ ] **Fuel costs measured, not guessed.** `vm::cost` is a table of hand-picked constants
+  (a storage write 500, a call 1,000, a hash 20…) compiled into the node. A Rust tool, run at
+  build time or as `chainv4 calibrate`, would time each fuel-charged operation on a reference
+  machine, Lua and WebAssembly instructions, every host call, signature checks and transfers, and
+  the EVM's gas against them, and write the cost table and a fee schedule from it. Genesis would
+  carry the table, so each chain fixes its own prices, and a governance change could replace it
+  later, as the item above would let fees be.
+  - **Lua too, down to the opcode.** The Luau fork meters fuel as a script's instructions run;
+    the same tool would time each Luau opcode (arithmetic, table reads and writes, calls,
+    closures, string building, the integer userdata's methods) and each library function, so
+    Lua's prices come from what they cost, in a table genesis carries like the rest.
+  - **Every engine's opcodes, one by one.** A benchmark per WebAssembly instruction and per EVM
+    opcode as well, run under one harness, with the results printed beside the prices charged, so
+    an operation priced far below what it costs, the way to stall every node with cheap work,
+    shows up at once.
+  - **Repeatable.** Runs pinned to one machine and build, each result with its spread, kept with
+    the release, so a change to the engines that moves a cost is caught before it ships.
 - [ ] **Changing a running chain's engines.** Which engines a chain runs, Lua, WebAssembly and the
   EVM, is fixed by genesis's `engines`: adding or dropping any of them today takes a new genesis.
   A `Change::Engines` by governance naming the whole new set, several engines at once, taking
@@ -299,6 +316,11 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   land in the deploy's receipt. Only the chain may run `init` and `migrate`.
 - [x] **A token standard.** ERC-20-like, by convention: [docs/token-standard.md](token-standard.md),
   with example tokens in Lua and Rust that one shared test holds to it.
+- [ ] **NFTs.** A non-fungible token standard beside the fungible one, ERC-721-like: `owner_of`,
+  `transfer`, per-token and operator approvals, `token_uri` metadata, `Transfer` and `Approval`
+  events, owners kept provably in a namespace as balances are; reference contracts in Lua and
+  Rust held to it by one shared test; the registry listing collections; the wallet showing and
+  sending them, the explorer listing them; and later, NFTs in atomic swaps.
 - [x] **Delegate calls and fallback.** `contracts.delegate` / `delegate` run another contract's code
   on the caller's storage, like `delegatecall`; `fallback` answers functions a contract does not
   export. Together they make proxies, upgradable without the built-in upgrade, with examples in
