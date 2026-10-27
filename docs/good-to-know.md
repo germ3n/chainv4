@@ -227,6 +227,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Remembered peers are dialed like bootnodes,** while the node is short of peers, at most once a
   minute each; a peer that changed its address is found again through the others.
 - **Every commit is synced.** It costs a few milliseconds a block; `--no-fsync` for benchmarks.
+- **Iterating storage is paid a page at a time:** 100 fuel a page of up to 64 from the iterators,
+  plus 40 an entry; a loop over a list anyone can grow gets dearer as it grows.
+- **A transaction that iterates may run twice** in a block whose transactions run side by side:
+  when one before it writes anywhere in the range it went through.
 - **The API answers from a snapshot per request,** so a reply never mixes two tips; a slow request
   keeps the files it reads on disk until it ends.
 - **`--db-cache` sizes the database's block cache,** 256 MiB by default, shared by every column:

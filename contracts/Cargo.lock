@@ -47,6 +47,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "members"
+version = "0.1.0"
+dependencies = [
+ "chainv4-sdk",
+]
+
+[[package]]
 name = "multi"
 version = "0.1.0"
 dependencies = [

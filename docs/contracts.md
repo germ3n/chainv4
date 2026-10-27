@@ -153,6 +153,32 @@ two entries.
 
 They are kept in the `Namespaces` column (see [Storage](storage.md#columns)).
 
+## Iterating storage
+
+Each part's keys can be gone through in byte order, each with its value, as the call's own writes
+leave them: a key set earlier in the call is there, one deleted is not.
+
+| | Lua | Rust SDK | WebAssembly |
+| --- | --- | --- | --- |
+| Plain storage | `for key, value in storage.iter(prefix, start) do` | `storage::iter(prefix)`, `storage::scan(prefix, start, limit)` | `storage_scan` |
+| A namespace, or the own space | `ns:iter(prefix, start)` | `ns.iter(prefix)`, `ns.scan(prefix, start, limit)` | `namespace_scan` |
+
+- **Pages:** the host gives at most 256 entries at a time (`MAX_SCAN`). The iterators ask for 64
+  at a time, so a loop that stops early pays for, and depends on, only the pages it read. To go
+  on later where one stopped, start at the last key with a 0 byte after it.
+- **Cost:** 100 fuel a page, plus 40 an entry and 1 for every 16 bytes of keys and values given,
+  and of the prefix and start.
+- **Layouts:** code that declares a storage layout iterates only the namespaces it declares, and
+  plain storage, which it may read.
+- **Side by side:** a transaction that iterated is run again, when a block runs transactions side
+  by side, if one before it wrote any key in the range it saw, even one that was not there (see
+  [Chain](chain.md#running-transactions-side-by-side)).
+- **Lists grow:** iterating a list anyone can add to costs more as it grows. Keep a count, or page
+  through it with `scan`, rather than going through all of it in one call.
+
+`contracts/examples/members` keeps a club's members, counts them by iterating, and lists them a
+page at a time.
+
 ## Storage layouts
 
 Code may declare its storage layout: the namespaces it keeps its state in, and what each holds.
@@ -330,6 +356,7 @@ what its storage or calls cost (`vm::cost`).
 | --- | --- |
 | Storage read | 100, plus 1 per 16 bytes of key and value |
 | Storage write or delete | 500, plus 1 per 16 bytes of key and value |
+| Storage scan, a page | 100, plus 40 an entry and 1 per 16 bytes of keys, values, prefix and start |
 | Hash | 20, plus 1 per 64 bytes hashed |
 | Call another contract | 1,000, on top of what the callee burns, and 1,000 more when it sends value |
 | Balance | 100 |
@@ -702,6 +729,7 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 | --- | --- |
 | `contracts/examples/counter` | Storage, arguments and return values, and a storage layout. |
 | `contracts/examples/vault` | Holding and sending funds. |
+| `contracts/examples/members` | Iterating storage: a namespace's keys counted, and listed a page at a time. |
 | `contracts/examples/names`, `contracts/evm/NamePayer.sol` | Resolving [names](names.md) and paying them, from WebAssembly and the EVM. |
 | `contracts/examples/evm`, `contracts/evm/Bridge.sol` | Calls between engines: WebAssembly and Lua calling the EVM, and the EVM calling them through the native precompile. |
 | `contracts/examples/proxy` | Calling other contracts for a caller, and a reentrant callback. |

@@ -20,7 +20,7 @@ use {
     super::execute::{self, BlockContext, ExecuteError, Executed, Rules},
     super::{BlockError, ImportError, Receipt, TxError},
     crate::crypto::verifiable::VerifyError,
-    crate::db::{Changes, Column, Key, Keys, State, address_key},
+    crate::db::{Changes, Column, Key, Keys, Scanned, State, address_key},
     crate::registry::contracts::contract_address,
     crate::chain::REWARD_POOL,
     crate::registry::{Accounts, RegistryError},
@@ -122,6 +122,8 @@ struct Attempt {
     outcome: Result<Executed, ExecuteError>,
     changes: Changes,
     reads: Keys,
+    /// The ranges it scanned: a write anywhere in one changes what it saw, key or no key.
+    scans: Vec<Scanned>,
 }
 
 /// What a transaction names, and so is expected to touch: accounts and contracts by address, and
@@ -196,6 +198,8 @@ struct Schedule {
     stale: Vec<bool>,
     /// Which attempts read each key, so a transaction going in can tell which it spoiled.
     readers: BTreeMap<Key, Vec<(usize, u64)>>,
+    /// Which attempts scanned each range, for the same: few, as few transactions scan.
+    scanners: Vec<(usize, u64, Scanned)>,
     /// The transactions waiting for each one.
     waiting: Vec<Vec<usize>>,
     /// What runs next round.
@@ -224,6 +228,7 @@ impl Schedule {
             attempts: (0..count).map(|_| None).collect(),
             stale: vec![false; count],
             readers: BTreeMap::new(),
+            scanners: Vec::new(),
             waiting,
             runnable,
             ran: vec![false; count],
@@ -250,6 +255,8 @@ impl Schedule {
             self.readers.entry(key.clone()).or_default().push((index, id));
         }
 
+        self.scanners.extend(attempt.scans.iter().map(|scanned| (index, id, scanned.clone())));
+
         self.attempts[index] = Some((attempt, id));
         self.stale[index] = false;
 
@@ -267,16 +274,25 @@ impl Schedule {
     /// Notes that a transaction went in, or was left out, having written these keys: attempts
     /// after it that read one run again, and those waiting for it may run.
     fn done(&mut self, turn: usize, written: &Keys) {
-        for key in written {
-            for (reader, id) in self.readers.remove(key).unwrap_or_default() {
-                let current = self.attempts[reader].as_ref().is_some_and(|(_, current)| *current == id);
+        let mut spoiled = Vec::new();
 
-                if reader > turn && current && !self.stale[reader] {
-                    self.stale[reader] = true;
-                    self.runnable.insert(reader);
-                }
+        for key in written {
+            spoiled.extend(self.readers.remove(key).unwrap_or_default());
+            spoiled.extend(self.scanners.iter().filter(|(_, _, scanned)| scanned.covers(key.0, &key.1)).map(|(scanner, id, _)| (*scanner, *id)));
+        }
+
+        for (reader, id) in spoiled {
+            let current = self.attempts[reader].as_ref().is_some_and(|(_, current)| *current == id);
+
+            if reader > turn && current && !self.stale[reader] {
+                self.stale[reader] = true;
+                self.runnable.insert(reader);
             }
         }
+
+        // Ranges of attempts no longer current never spoil anything again.
+        let attempts = &self.attempts;
+        self.scanners.retain(|(scanner, id, _)| attempts[*scanner].as_ref().is_some_and(|(_, current)| current == id));
 
         self.runnable.extend(std::mem::take(&mut self.waiting[turn]));
     }
@@ -398,6 +414,7 @@ impl Runner<'_> {
                 outcome: Err(ExecuteError::Invalid(TxError::Invalid(err))),
                 changes: Changes::new(),
                 reads: Keys::new(),
+                scans: Vec::new(),
             };
         }
 
@@ -408,6 +425,7 @@ impl Runner<'_> {
             outcome,
             changes: own.take_changes(),
             reads: own.take_reads(),
+            scans: own.take_scans(),
         }
     }
 

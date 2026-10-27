@@ -392,6 +392,12 @@ pub(in crate::chain) fn anchor(state: &State, checkpoint: &Checkpoint) {
     state.put_value(Column::Finality, FINALIZED_KEY.to_vec(), checkpoint);
 }
 
+/// Keeps a checkpoint's justification, by its target, as finality keeps the ones it saw: for a
+/// node syncing from a snapshot, the ones its light client checked.
+pub(in crate::chain) fn keep_justification(state: &State, justification: &Justification) {
+    state.put_value(Column::Finality, justification_key(&justification.target.block), justification);
+}
+
 fn justification_key(block: &Hash) -> Vec<u8> {
     let mut key = b"j:".to_vec();
     key.extend_from_slice(&id_key(block));

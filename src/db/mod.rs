@@ -273,10 +273,36 @@ fn scan_from<'a>(prefix: &'a [u8], start: &'a [u8]) -> &'a [u8] {
     example = "let block = Arc::new(State::new(db.clone()));\nlet tx = Arc::new(State::new(block.clone()));\n// ... run the transaction against tx ...\nblock.merge(tx.take_changes());\ndb.commit(block.take_changes())?;",
 )]
 pub struct State {
-    base: Arc<dyn Read>,
+    base: Arc<dyn Committed>,
     changes: Mutex<ByColumn<Option<Vec<u8>>>>,
     /// What this layer read from below it, when it records reads.
     reads: Option<Mutex<Keys>>,
+    /// The ranges this layer scanned from below, when it records reads.
+    scans: Option<Mutex<Vec<Scanned>>>,
+}
+
+#[document(
+    summary = "A range a recording State scanned: a column's keys with a prefix, from a key on, through the last one visited when the scan stopped early or to the prefix's end when it ran out. A transaction that wrote any key in it changed what the scan saw.",
+    category = "Storage",
+    see_also = "State::take_scans",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scanned {
+    #[document(summary = "The column scanned.")]
+    pub column: Column,
+    #[document(summary = "What every key it visited starts with.")]
+    pub prefix: Vec<u8>,
+    #[document(summary = "The first key it could visit.")]
+    pub from: Vec<u8>,
+    #[document(summary = "The last key it visited, when it stopped early; None when it ran to the prefix's end.")]
+    pub to: Option<Vec<u8>>,
+}
+
+impl Scanned {
+    #[document(parent = "Scanned", summary = "Whether a key falls in the range: one written there changes what the scan saw.")]
+    pub fn covers(&self, column: Column, key: &[u8]) -> bool {
+        column == self.column && key.starts_with(&self.prefix) && key >= self.from.as_slice() && self.to.as_deref().is_none_or(|to| key <= to)
+    }
 }
 
 impl State {
@@ -285,11 +311,12 @@ impl State {
         summary = "An empty layer over base.",
         params = { base = "The database, or the State below this one." },
     )]
-    pub fn new(base: Arc<dyn Read>) -> State {
+    pub fn new(base: Arc<dyn Committed>) -> State {
         State {
             base,
             changes: Mutex::default(),
             reads: None,
+            scans: None,
         }
     }
 
@@ -299,9 +326,10 @@ impl State {
         params = { base = "The database, or the State below this one." },
         see_also = "State::take_reads",
     )]
-    pub fn recording(base: Arc<dyn Read>) -> State {
+    pub fn recording(base: Arc<dyn Committed>) -> State {
         State {
             reads: Some(Mutex::default()),
+            scans: Some(Mutex::default()),
             ..State::new(base)
         }
     }
@@ -314,6 +342,18 @@ impl State {
         match &self.reads {
             Some(reads) => std::mem::take(&mut *reads.lock().expect("a state layer is never poisoned")),
             None => Keys::new(),
+        }
+    }
+
+    #[document(
+        parent = "State",
+        summary = "Takes the ranges a recording layer scanned from below, leaving it none: what a transaction run ahead of its turn depended on, besides the keys it read. Empty for a layer that does not record.",
+        see_also = "Scanned",
+    )]
+    pub fn take_scans(&self) -> Vec<Scanned> {
+        match &self.scans {
+            Some(scans) => std::mem::take(&mut *scans.lock().expect("a state layer is never poisoned")),
+            None => Vec::new(),
         }
     }
 
@@ -423,6 +463,77 @@ impl Read for State {
     }
 }
 
+/// A scan as it goes: the visitor, the last key it was given, and whether it stopped there.
+struct Visiting<'a> {
+    visit: &'a mut dyn FnMut(&[u8], &[u8]) -> bool,
+    last: Option<Vec<u8>>,
+    stopped: bool,
+}
+
+impl Visiting<'_> {
+    /// Gives the visitor a key; false once it stops.
+    fn emit(&mut self, key: &[u8], value: &[u8]) -> bool {
+        self.last = Some(key.to_vec());
+        self.stopped = !(self.visit)(key, value);
+
+        !self.stopped
+    }
+}
+
+impl Committed for State {
+    /// Visits the keys as the layers have them together: this layer's changes over what is below,
+    /// a value set here in place of the one below, a key deleted here left out.
+    fn scan(&self, column: Column, prefix: &[u8], start: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError> {
+        let from = scan_from(prefix, start);
+        // Copied out first, so visit can read this layer without waiting on its lock.
+        let own: Vec<(Vec<u8>, Option<Vec<u8>>)> = self
+            .lock()
+            .get(&column)
+            .into_iter()
+            .flat_map(|keys| keys.range::<[u8], _>((std::ops::Bound::Included(from), std::ops::Bound::Unbounded)))
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let mut own = own.into_iter().peekable();
+        let mut visiting = Visiting { visit, last: None, stopped: false };
+
+        self.base.scan(column, prefix, start, &mut |key, value| {
+            // This layer's keys before the one below, then this one, as set or deleted here.
+            while let Some((own_key, own_value)) = own.next_if(|(own_key, _)| own_key.as_slice() < key) {
+                if let Some(own_value) = own_value
+                    && !visiting.emit(&own_key, &own_value)
+                {
+                    return false;
+                }
+            }
+
+            match own.next_if(|(own_key, _)| own_key.as_slice() == key) {
+                Some((_, Some(own_value))) => visiting.emit(key, &own_value),
+                Some((_, None)) => true,
+                None => visiting.emit(key, value),
+            }
+        })?;
+
+        // And this layer's keys past everything below.
+        if !visiting.stopped {
+            for (key, value) in own {
+                if let Some(value) = value
+                    && !visiting.emit(&key, &value)
+                {
+                    break;
+                }
+            }
+        }
+
+        if let Some(scans) = &self.scans {
+            let to = visiting.stopped.then_some(visiting.last).flatten();
+            scans.lock().expect("a state layer is never poisoned").push(Scanned { column, prefix: prefix.to_vec(), from: from.to_vec(), to });
+        }
+
+        Ok(())
+    }
+}
+
 /// The key of an address's record. The tag is part of it, so a key and a contract that share
 /// their 32 bytes are still two records.
 pub fn address_key(address: &Address) -> Vec<u8> {
@@ -482,7 +593,7 @@ pub(crate) mod tests {
     }
 
     impl Backend {
-        fn base(&self) -> Arc<dyn Read> {
+        fn base(&self) -> Arc<dyn Committed> {
             self.db.clone()
         }
     }
@@ -601,6 +712,72 @@ pub(crate) mod tests {
             ]
         );
         assert!(state.take_changes().is_empty());
+    }
+
+    #[test]
+    fn a_layer_scans_its_own_changes_over_what_is_below() {
+        for backend in backends("layered-scan") {
+            let state = State::new(backend.base());
+
+            for key in [&b"k1"[..], b"k3", b"k5", b"k7"] {
+                state.put(Column::Storage, key.to_vec(), b"below".to_vec());
+            }
+
+            state.put(Column::Storage, b"other".to_vec(), b"below".to_vec());
+            backend.db.commit(state.take_changes()).unwrap();
+            let block = Arc::new(State::new(backend.base()));
+            block.put(Column::Storage, b"k3".to_vec(), b"block".to_vec());
+            block.put(Column::Storage, b"k4".to_vec(), b"block".to_vec());
+            let tx = State::new(block.clone());
+            tx.delete(Column::Storage, b"k5".to_vec());
+            tx.put(Column::Storage, b"k0".to_vec(), b"tx".to_vec());
+            tx.put(Column::Storage, b"k9".to_vec(), b"tx".to_vec());
+            let scan = |layer: &State, start: &[u8], stop_after: usize| {
+                let mut seen = Vec::new();
+                layer
+                    .scan(Column::Storage, b"k", start, &mut |key, value| {
+                        seen.push(format!("{}={}", String::from_utf8_lossy(key), String::from_utf8_lossy(value)));
+                        seen.len() < stop_after
+                    })
+                    .unwrap();
+                seen
+            };
+
+            // Set here wins, deleted here is gone, new here is in, all in key order.
+            assert_eq!(scan(&tx, b"k", 99), ["k0=tx", "k1=below", "k3=block", "k4=block", "k7=below", "k9=tx"]);
+            assert_eq!(scan(&tx, b"k4", 99), ["k4=block", "k7=below", "k9=tx"], "from a start");
+            assert_eq!(scan(&tx, b"k", 3), ["k0=tx", "k1=below", "k3=block"], "stopped early");
+            assert_eq!(scan(&block, b"k", 99), ["k1=below", "k3=block", "k4=block", "k5=below", "k7=below"], "the layer below sees none of the one above");
+        }
+    }
+
+    #[test]
+    fn a_recording_layer_notes_the_ranges_it_scanned() {
+        let db: Arc<dyn Database> = Arc::new(MemoryDb::default());
+        let state = State::new(db.clone());
+
+        for key in [&b"a1"[..], b"a2", b"a3"] {
+            state.put(Column::Storage, key.to_vec(), b"v".to_vec());
+        }
+
+        db.commit(state.take_changes()).unwrap();
+        let recording = State::recording(db.clone());
+        recording.scan(Column::Storage, b"a", b"a", &mut |_, _| true).unwrap();
+        recording.scan(Column::Storage, b"a", b"a2", &mut |key, _| key != b"a2").unwrap();
+        let scans = recording.take_scans();
+
+        assert_eq!(scans, [
+            Scanned { column: Column::Storage, prefix: b"a".to_vec(), from: b"a".to_vec(), to: None },
+            Scanned { column: Column::Storage, prefix: b"a".to_vec(), from: b"a2".to_vec(), to: Some(b"a2".to_vec()) },
+        ]);
+        // A key written anywhere in the first, even one that was never there, spoils it.
+        assert!(scans[0].covers(Column::Storage, b"a9"));
+        assert!(!scans[0].covers(Column::Storage, b"b1") && !scans[0].covers(Column::Accounts, b"a1"));
+        // The second saw only a2: a1 is before it, a3 past where it stopped.
+        assert!(scans[1].covers(Column::Storage, b"a2"));
+        assert!(!scans[1].covers(Column::Storage, b"a1") && !scans[1].covers(Column::Storage, b"a3"));
+        assert!(recording.take_scans().is_empty());
+        assert!(State::new(db).take_scans().is_empty(), "a layer that does not record notes none");
     }
 
     #[test]

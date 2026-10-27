@@ -27,6 +27,8 @@ const IMPORTS: &str = r#"
   (import "chain" "namespace_get" (func $namespace_get (param i32 i32 i32 i32) (result i32)))
   (import "chain" "namespace_set" (func $namespace_set (param i32 i32 i32 i32 i32 i32)))
   (import "chain" "namespace_delete" (func $namespace_delete (param i32 i32 i32 i32)))
+  (import "chain" "storage_scan" (func $storage_scan (param i32 i32 i32 i32 i32) (result i32)))
+  (import "chain" "namespace_scan" (func $namespace_scan (param i32 i32 i32 i32 i32 i32 i32) (result i32)))
   (import "chain" "sender" (func $sender (param i32)))
   (import "chain" "contract" (func $contract (param i32)))
   (import "chain" "value" (func $value (param i32)))

@@ -12,13 +12,17 @@
 //! an upgrade or a proxy repointing, must keep every namespace and key with the same kinds and
 //! units, or retire it.
 //!
+//! Keys iterate in byte order, a page at a time: [iter] and [Namespace::iter] over every key with
+//! a prefix, [scan] and [Namespace::scan] for one page. A transaction that iterated is run again,
+//! when blocks run transactions side by side, if one before it wrote a key in what it saw.
+//!
 //! Lua contracts write the text kinds and Rust the binary ones, but either reads and writes
 //! both: here get_decimal, get_text, get_address_text and get_address_hex, and in Lua get_u256,
 //! get_address and the like. So a version on one engine keeps what a version on the other kept.
 
 use {
     crate::{Address, I256, U256, abort, sys},
-    alloc::{string::String, vec, vec::Vec},
+    alloc::{collections::VecDeque, string::String, vec, vec::Vec},
 };
 
 /// The longest namespace name, in bytes.
@@ -168,6 +172,64 @@ pub fn delete(key: &[u8]) {
     unsafe { sys::storage_delete(key.as_ptr(), key.len() as u32) };
 }
 
+/// The most entries one page gives.
+pub const MAX_SCAN: u32 = 256;
+
+/// How many entries an iterator asks for at a time.
+const ITER_PAGE: u32 = 64;
+
+/// A page of plain keys in byte order, with their values: those starting with prefix, from start
+/// on (the prefix itself when start is empty), at most limit, 1 to MAX_SCAN. Fewer than limit at
+/// the end. To go on, start at the last key with a 0 byte after it.
+pub fn scan(prefix: &[u8], start: &[u8], limit: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
+    entries(unsafe { sys::storage_scan(prefix.as_ptr(), prefix.len() as u32, start.as_ptr(), start.len() as u32, limit) })
+}
+
+/// Every plain key starting with prefix, in byte order, with its value: a page asked for at a
+/// time, so stopping early pays for no more than the page it stopped in.
+pub fn iter(prefix: &[u8]) -> Iter<'_> {
+    Iter::new(None, prefix)
+}
+
+/// Keys and values in byte order, from [iter] or [Namespace::iter].
+pub struct Iter<'a> {
+    /// The namespace, or None for plain keys.
+    name: Option<&'a [u8]>,
+    prefix: &'a [u8],
+    next: Vec<u8>,
+    page: VecDeque<(Vec<u8>, Vec<u8>)>,
+    ended: bool,
+}
+
+impl<'a> Iter<'a> {
+    fn new(name: Option<&'a [u8]>, prefix: &'a [u8]) -> Iter<'a> {
+        Iter { name, prefix, next: prefix.to_vec(), page: VecDeque::new(), ended: false }
+    }
+}
+
+impl Iterator for Iter<'_> {
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+        if self.page.is_empty() && !self.ended {
+            let found = match self.name {
+                Some(name) => Namespace { name }.scan(self.prefix, &self.next, ITER_PAGE),
+                None => scan(self.prefix, &self.next, ITER_PAGE),
+            };
+            self.ended = (found.len() as u32) < ITER_PAGE;
+
+            // The page after starts right after its last key.
+            if let Some((last, _)) = found.last() {
+                self.next = [&last[..], &[0]].concat();
+            }
+
+            self.page.extend(found);
+        }
+
+        self.page.pop_front()
+    }
+}
+
 /// Reads a value stored as an i64, little-endian.
 pub fn get_i64(key: &[u8]) -> Option<i64> {
     get(key)?.try_into().ok().map(i64::from_le_bytes)
@@ -223,6 +285,20 @@ impl Namespace<'_> {
     /// Deletes a key.
     pub fn delete(&self, key: &[u8]) {
         unsafe { sys::namespace_delete(self.name.as_ptr(), self.name.len() as u32, key.as_ptr(), key.len() as u32) };
+    }
+
+    /// A page of its keys in byte order, with their values, as [scan] gives plain ones.
+    pub fn scan(&self, prefix: &[u8], start: &[u8], limit: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
+        entries(unsafe { sys::namespace_scan(self.name.as_ptr(), self.name.len() as u32, prefix.as_ptr(), prefix.len() as u32, start.as_ptr(), start.len() as u32, limit) })
+    }
+
+    /// Every key of it starting with prefix, in byte order, with its value, as [iter] gives plain
+    /// ones.
+    pub fn iter<'a>(&self, prefix: &'a [u8]) -> Iter<'a>
+    where
+        Self: 'a,
+    {
+        Iter::new(Some(self.name), prefix)
     }
 
     /// Reads a value stored as an i64, little-endian: the `i64` kind.
@@ -469,6 +545,29 @@ pub const fn entry<const N: usize>(text: &str) -> [u8; N] {
 }
 
 /// The value a read left in the result buffer, given the length it returned.
+/// The entries a scan left in the result buffer: each a u32 length and a key, a u32 length and a
+/// value, little-endian.
+fn entries(count: i32) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let bytes = crate::result();
+    let mut found = Vec::with_capacity(count.max(0) as usize);
+    let mut at = 0;
+    let take = |at: &mut usize| -> Vec<u8> {
+        let len = u32::from_le_bytes(bytes[*at..*at + 4].try_into().expect("four bytes")) as usize;
+        let taken = bytes[*at + 4..*at + 4 + len].to_vec();
+        *at += 4 + len;
+
+        taken
+    };
+
+    for _ in 0..count.max(0) {
+        let key = take(&mut at);
+        let value = take(&mut at);
+        found.push((key, value));
+    }
+
+    found
+}
+
 fn taken(len: i32) -> Option<Vec<u8>> {
     if len < 0 {
         return None;

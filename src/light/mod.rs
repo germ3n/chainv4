@@ -468,7 +468,61 @@ impl LightUpdate {
 
         Ok(Some(LightUpdate { block, voters, eras }))
     }
+
+    #[document(
+        parent = "LightUpdate",
+        summary = "Checks an update a node sent for a block at a height, whose state root is trusted: it names that block, every voter and era proof holds against the root for an epoch the block fixes, and it holds the voters of every one of those epochs, each once, so none was left out.",
+        params = {
+            block = "The block it should be of.",
+            finality = "The chain's finality, which says which epochs a block fixes and where voters are kept.",
+            height = "The block's height.",
+            root = "Its state root, from a header the caller trusts.",
+        },
+        returns = "The voters of each epoch, and the consensus of each epoch it names under governance. BadProof for one that does not hold or leaves voters out, Undecodable for a value that does not decode.",
+    )]
+    pub fn check(&self, block: &Hash, finality: &LightFinality, height: u64, root: &Hash) -> Result<Learned, LightError> {
+        let fixed = finality.fixed_at(height).ok_or(LightError::BadProof)?;
+
+        if self.block != *block {
+            return Err(LightError::BadProof);
+        }
+
+        let epochs: BTreeSet<u64> = self.voters.iter().map(|voter| voter.epoch).collect();
+
+        if epochs.len() != self.voters.len() || !fixed.clone().all(|epoch| epochs.contains(&epoch)) {
+            return Err(LightError::BadProof);
+        }
+
+        let mut learned = Vec::new();
+
+        for voter in &self.voters {
+            let key = finality.voters_key(voter.epoch).ok_or(LightError::BadProof)?;
+
+            if !fixed.contains(&voter.epoch) || !voter.proof.verify(root, Column::Epochs, &key, Some(&voter.value)) {
+                return Err(LightError::BadProof);
+            }
+
+            learned.push((voter.epoch, finality.voters(&voter.value).ok_or(LightError::Undecodable)?));
+        }
+
+        let mut eras = Vec::new();
+
+        for era in &self.eras {
+            let key = Changes::consensus_key(era.epoch);
+
+            if !fixed.contains(&era.epoch) || !era.proof.verify(root, Column::Epochs, &key, Some(&era.value)) {
+                return Err(LightError::BadProof);
+            }
+
+            eras.push((era.epoch, wincode::deserialize::<ConsensusConfig>(&era.value).map_err(|_| LightError::Undecodable)?));
+        }
+
+        Ok((learned, eras))
+    }
 }
+
+/// What a checked update teaches: each epoch's voters, and each epoch's consensus it names.
+type Learned = (Vec<(u64, Voters)>, Vec<(u64, ConsensusConfig)>);
 
 #[document(
     summary = "What a light client keeps between runs, from LightClient::save, to restore it from. Only checked data: headers from the finalized block on, and what they prove.",
@@ -682,6 +736,22 @@ pub struct LightClient {
     /// The height of the first header it could not check yet, under a consensus whose producers it
     /// learns from finality: it asks again once their epoch's voters are known.
     stalled: Option<u64>,
+    /// What it checked of the chain's finality, kept for a node syncing from a snapshot to store
+    /// and serve: None for a client that keeps nothing of it, as most do.
+    kept: Option<Kept>,
+}
+
+#[document(
+    summary = "What a light client checked of a chain's finality and kept, once asked to: each justification it took and each light update it trusted, for a node syncing from a snapshot to serve light clients from genesis.",
+    category = "Light client",
+    see_also = "LightClient::keep_checked, LightClient::take_checked",
+)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Kept {
+    #[document(summary = "Justifications, in the order taken.")]
+    pub justifications: Vec<Justification>,
+    #[document(summary = "Light updates, in the order trusted.")]
+    pub updates: Vec<LightUpdate>,
 }
 
 impl LightClient {
@@ -723,6 +793,7 @@ impl LightClient {
             justifications_done: false,
             back: None,
             stalled: None,
+            kept: None,
             params,
         })
     }
@@ -1167,6 +1238,7 @@ impl LightClient {
             justifications_done: false,
             back: None,
             stalled: None,
+            kept: None,
             params: state.params,
         };
 
@@ -1283,36 +1355,8 @@ impl LightClient {
             return Ok(());
         };
         let finality = self.params.finality.ok_or(LightError::BadProof)?;
-        let fixed = finality.fixed_at(height).ok_or(LightError::BadProof)?;
-
-        if update.block != *block {
-            return Err(LightError::BadProof);
-        }
-
         let root = self.sealed(height).ok_or(LightError::NotOnChain)?.header.state_root;
-        let mut learned = Vec::new();
-
-        for voter in &update.voters {
-            let key = finality.voters_key(voter.epoch).ok_or(LightError::BadProof)?;
-
-            if !fixed.contains(&voter.epoch) || !voter.proof.verify(&root, Column::Epochs, &key, Some(&voter.value)) {
-                return Err(LightError::BadProof);
-            }
-
-            learned.push((voter.epoch, finality.voters(&voter.value).ok_or(LightError::Undecodable)?));
-        }
-
-        let mut eras = Vec::new();
-
-        for era in &update.eras {
-            let key = Changes::consensus_key(era.epoch);
-
-            if !fixed.contains(&era.epoch) || !era.proof.verify(&root, Column::Epochs, &key, Some(&era.value)) {
-                return Err(LightError::BadProof);
-            }
-
-            eras.push((era.epoch, wincode::deserialize::<ConsensusConfig>(&era.value).map_err(|_| LightError::Undecodable)?));
-        }
+        let (learned, eras) = update.check(block, &finality, height, &root)?;
 
         self.voters.extend(learned);
 
@@ -1322,7 +1366,25 @@ impl LightClient {
 
         self.updated.insert(height);
 
+        if let Some(kept) = &mut self.kept {
+            kept.updates.push(update);
+        }
+
         Ok(())
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "From now on, keeps each justification it takes and each light update it trusts, for take_checked: what a node syncing from a snapshot stores, to serve light clients from genesis.",
+        params = { already = "What it checked before keeping began, to keep with the rest: a checkpoint start's updates, which from_checkpoint took." },
+    )]
+    pub fn keep_checked(&mut self, already: Kept) {
+        self.kept = Some(already);
+    }
+
+    #[document(parent = "LightClient", summary = "Takes what it kept since keep_checked, leaving it keeping on; empty for a client that keeps nothing.")]
+    pub fn take_checked(&mut self) -> Kept {
+        self.kept.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     #[document(
@@ -1422,6 +1484,10 @@ impl LightClient {
         self.check_justification(justification)?;
         let (source, target) = (justification.source, justification.target);
         self.justified.insert(target.epoch, target.block);
+
+        if let Some(kept) = &mut self.kept {
+            kept.justifications.push(justification.clone());
+        }
 
         if target.epoch == source.epoch + 1 && source.epoch > self.finalized.epoch {
             self.finalized = source;

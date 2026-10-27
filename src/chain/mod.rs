@@ -461,7 +461,7 @@ pub struct DryRun {
     returns = "What it did, or the database failure that kept it from running.",
     see_also = "DryRun, Fees::estimated",
 )]
-pub fn dry_run(db: Arc<dyn Read>, rules: &Rules, vm: &Arc<Vm>, probe: &SignedTx, gas_limit: u64, base_price: u256) -> Result<DryRun, DbError> {
+pub fn dry_run(db: Arc<dyn crate::db::Committed>, rules: &Rules, vm: &Arc<Vm>, probe: &SignedTx, gas_limit: u64, base_price: u256) -> Result<DryRun, DbError> {
     let layer = Arc::new(State::new(db.clone()));
     let mut tx = probe.clone();
     tx.nonce = Accounts::new(&layer).get(&tx.sender())?.nonce;
@@ -1573,10 +1573,11 @@ impl Chain {
             pivot = "The block, whose state root the state in the database must have.",
             work = "Its total work.",
             checkpoint = "The checkpoint the node trusts, among the headers, or None for one that checked every header from genesis.",
+            finality = "What the light client that checked the headers checked of finality: the justifications and light updates of checkpoints among them, stored so this node serves light clients from genesis, as one that ran every block does. Those of blocks not among the headers are left out.",
         },
         returns = "BadSnapshot when the chain holds more than genesis, the headers do not end at the block or start past genesis without a checkpoint, the checkpoint is not among them, or the state is not the block's.",
     )]
-    pub fn install_snapshot(&mut self, headers: &[SealedHeader], pivot: &Block, work: u256, checkpoint: Option<Checkpoint>) -> Result<(), ChainError> {
+    pub fn install_snapshot(&mut self, headers: &[SealedHeader], pivot: &Block, work: u256, checkpoint: Option<Checkpoint>, finality: &crate::light::Kept) -> Result<(), ChainError> {
         let bad = |why: &str| Err(ChainError::BadSnapshot(why.to_string()));
         let id = pivot.id();
 
@@ -1612,6 +1613,17 @@ impl Chain {
 
         if let Some(checkpoint) = checkpoint {
             finality::anchor(&state, &checkpoint);
+        }
+
+        // The finality before the pivot, as checked: what light clients ask this node for.
+        let installed: HashSet<Hash> = headers.iter().map(SealedHeader::id).collect();
+
+        for update in finality.updates.iter().filter(|update| installed.contains(&update.block)) {
+            state.put_value(Column::Light, id_key(&update.block), update);
+        }
+
+        for justification in finality.justifications.iter().filter(|justification| installed.contains(&justification.target.block)) {
+            finality::keep_justification(&state, justification);
         }
 
         state.put_value(Column::Blocks, id_key(&id), pivot);
@@ -2479,7 +2491,7 @@ pub fn stored_header(db: &dyn Read, id: &Hash) -> Result<Option<SealedHeader>, D
     category = "Chain",
     returns = "The layer; None for a block not on the main chain, or older than the undo records, which reach back max_reorg_depth blocks.",
 )]
-pub fn stored_state_at(db: Arc<dyn Read>, id: &Hash) -> Result<Option<Arc<State>>, DbError> {
+pub fn stored_state_at(db: Arc<dyn crate::db::Committed>, id: &Hash) -> Result<Option<Arc<State>>, DbError> {
     let Some(sealed) = stored_header(&*db, id)? else {
         return Ok(None);
     };

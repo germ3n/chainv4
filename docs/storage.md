@@ -291,12 +291,18 @@ false.
 **Cost:** both backends keep keys sorted, so a scan seeks once (O(log n)) and then reads only
 what it visits: an iterator on RocksDB, a range on MemoryDb.
 
-**Limits:**
-- scans see committed data only, never a `State`'s uncommitted changes;
-- `visit` must not write to the database.
+**Limits:** `visit` must not write to the database.
 
-**Use so far:** finality uses scans to find its stored votes. Listing a contract's storage from
-inside a block would need `State` to merge its changes into a scan.
+**State layers scan too:** a `State` is a `Committed` whose scan merges its own changes over what
+is below, layer by layer: a value set in a layer in place of the one below, a key deleted there
+left out, new keys in their order. A recording layer notes each range it scanned, a `Scanned`,
+from its first key to the last one visited when the scan stopped early, or to the prefix's end;
+running transactions side by side, a write anywhere in one makes the scan's transaction run
+again.
+
+**Use:** finality finds its stored votes by scanning; contracts iterate their storage through
+`Host::storage_scan` (see [Contracts](contracts.md#iterating-storage)); the API lists tokens,
+collections, names, events and an address's transactions.
 
 ## Keys and encoding
 

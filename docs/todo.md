@@ -470,9 +470,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **A light client.** `chainv4::light` follows a chain from its genesis id alone: headers by
   consensus, finality from justifications whose voters it proved from checkpoints' state, and
   values and receipts by their proofs. `chainv4 light` and the explorer run it.
-- [ ] **Snapshot nodes cannot serve finality before their pivot.** They never ran the checkpoints
-  before it, so they have no light updates for them. Fetching those from peers along with the
-  state would let them serve light clients from genesis.
+- [x] **Snapshot nodes serve finality before their pivot.** The justifications and light updates
+  their light client checked while checking headers are stored with the snapshot; an update must
+  hold every epoch's voters its block fixes.
 - [x] **Light clients resume.** `LightClient::save` keeps what it checked from the finalized block
   on, at most 4,096 headers, and `restore` takes it back for the same genesis. The wallet saves it
   as it goes.
@@ -515,10 +515,11 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [x] **Prefix scans.** `Database::scan` visits a column's keys with a prefix, in order, from a
   start key: one seek, then only what it visits, on both backends. Finality uses it to find
   stored votes.
-- [ ] **State layers cannot scan.** Scans see committed data only, so code running inside a
-  block still reads single keys. Snapshots, pruning, listing a contract's storage and most API
-  listings could build on `Database::scan`; contract storage iteration would need State to merge
-  its changes into a scan.
+- [x] **State layers scan, and contracts iterate their storage.** A `State` merges its changes
+  into a scan; Lua's `storage.iter` and `Namespace:iter`, the SDK's `iter` and `scan`, and the
+  `storage_scan` and `namespace_scan` host calls go through a contract's keys in order, a page at
+  a time, and a transaction that scanned runs again when one before it wrote into the range. See
+  [Contracts](contracts.md#iterating-storage).
 - [ ] **No pruning.** Every block and all history are kept forever.
 - [x] **Receipts and a transaction index.** Each transaction's block, index, fuel, result and
   events are stored by transaction id, and reorgs move them along with everything else.

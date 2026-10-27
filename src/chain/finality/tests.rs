@@ -1259,6 +1259,14 @@ mod voting {
         assert_eq!(client.next(), Some(LightRequest::Finality { from: 0 }));
 
         let steps = |from: u64| stored_light_finality(&*chain.db, INTERVAL, from, 64, chain.tip().height).unwrap();
+
+        // Genesis's update with one epoch's voters left out is refused, though every proof in it
+        // holds: a node could otherwise stall a client by holding voters back.
+        let mut short = steps(0);
+        short[0].update.as_mut().unwrap().voters.pop();
+
+        assert_eq!(client.deliver_finality(0, short), Err(crate::light::LightError::BadProof));
+        client.keep_checked(crate::light::Kept::default());
         client.deliver_finality(0, steps(0)).unwrap();
 
         // Now through epoch 2, where it waits for checkpoint 1's update: epoch 1's justification
@@ -1281,6 +1289,14 @@ mod voting {
 
         assert_eq!(client.tip().id(), chain.tip().id());
         assert_eq!(client.justified().epoch, 1);
+
+        // What it checked, kept: genesis's and checkpoint 1's updates, and epoch 1's justification.
+        let kept = client.take_checked();
+        let checkpoint_1 = chain.block_at(INTERVAL).unwrap().unwrap().id();
+
+        assert_eq!(kept.updates.iter().map(|update| update.block).collect::<Vec<_>>(), [genesis.id(), checkpoint_1]);
+        assert_eq!(kept.justifications.iter().map(|justification| justification.target.block).collect::<Vec<_>>(), [checkpoint_1]);
+        assert_eq!(client.take_checked(), crate::light::Kept::default(), "taken");
     }
 
     /// A chain whose FFG validators produce by stake, every two seconds, under a schedule.

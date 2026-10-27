@@ -27,6 +27,8 @@ pub(super) const NAMES: &[&str] = &[
     "namespace_get",
     "namespace_set",
     "namespace_delete",
+    "storage_scan",
+    "namespace_scan",
     "sender",
     "contract",
     "value",
@@ -211,6 +213,42 @@ fn chain_namespace_set() {}
     },
 )]
 fn chain_namespace_delete() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "storage_scan",
+    summary = "A page of the contract's plain keys in byte order, as this call's own writes leave them, into the result buffer: for each, its key's length as a u32, the key, its value's length as a u32 and the value, lengths little-endian. To go on, start the next page at the last key with a 0 byte after it. Costs 100 fuel, plus 40 an entry and 1 per 16 bytes of what it reads and gives. A transaction that scanned runs again, when blocks run transactions side by side, if one before it wrote any key in what it saw.",
+    params = {
+        prefix = { ty = "i32", desc = "What every key given starts with." },
+        prefix_len = { ty = "i32", desc = "Its length: at most 256; 0 for every key." },
+        start = { ty = "i32", desc = "The first key it may give." },
+        start_len = { ty = "i32", desc = "Its length: at most 257; 0 to start at the prefix." },
+        limit = { ty = "i32", desc = "The most entries to give: 1 to 256." },
+    },
+    returns = { ty = "i32", desc = "How many entries it gave: fewer than limit at the end." },
+    see_also = "chain.result_read, chain.namespace_scan",
+)]
+fn chain_storage_scan() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "namespace_scan",
+    summary = "A page of one of the contract's namespaces, or its own space, as storage_scan gives plain keys. A module that declares a storage layout scans only the namespaces it declares. Costs what storage_scan does, plus 1 per 16 bytes of the name.",
+    params = {
+        name = { ty = "i32", desc = "The namespace's name." },
+        name_len = { ty = "i32", desc = "Its length: at most 64. 0 is the contract's own space." },
+        prefix = { ty = "i32", desc = "What every key given starts with." },
+        prefix_len = { ty = "i32", desc = "Its length: at most 256; 0 for every key." },
+        start = { ty = "i32", desc = "The first key it may give." },
+        start_len = { ty = "i32", desc = "Its length: at most 257; 0 to start at the prefix." },
+        limit = { ty = "i32", desc = "The most entries to give: 1 to 256." },
+    },
+    returns = { ty = "i32", desc = "How many entries it gave." },
+    see_also = "chain.result_read, chain.storage_scan",
+)]
+fn chain_namespace_scan() {}
 
 #[document(
     wasm,
@@ -619,6 +657,8 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "namespace_get", namespace_get).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "namespace_set", namespace_set).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "namespace_delete", namespace_delete).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "storage_scan", storage_scan).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "namespace_scan", namespace_scan).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "sender", sender).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "contract", contract).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "value", value).expect(defined);
@@ -717,6 +757,47 @@ fn namespace_delete(mut caller: Caller<'_, Run>, name: u32, name_len: u32, key: 
     let space = space(&mut caller, name, name_len)?;
 
     set_in(&mut caller, &space, key, key_len, None)
+}
+
+fn storage_scan(mut caller: Caller<'_, Run>, prefix: u32, prefix_len: u32, start: u32, start_len: u32, limit: u32) -> Result<i32> {
+    scan_in(&mut caller, &Space::Plain, (prefix, prefix_len), (start, start_len), limit)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn namespace_scan(mut caller: Caller<'_, Run>, name: u32, name_len: u32, prefix: u32, prefix_len: u32, start: u32, start_len: u32, limit: u32) -> Result<i32> {
+    let space = space(&mut caller, name, name_len)?;
+
+    scan_in(&mut caller, &space, (prefix, prefix_len), (start, start_len), limit)
+}
+
+/// A page of a space into the result buffer, each entry its key's and value's lengths before
+/// them; how many it gave.
+fn scan_in(caller: &mut Caller<'_, Run>, space: &Space, (prefix, prefix_len): (u32, u32), (start, start_len): (u32, u32), limit: u32) -> Result<i32> {
+    let host = host(caller)?;
+    check_len(caller, prefix_len, MAX_KEY_LEN, "scan prefixes")?;
+    check_len(caller, start_len, MAX_KEY_LEN + 1, "scan starts")?;
+    let asked = space.name().len() as u64 + u64::from(prefix_len) + u64::from(start_len);
+    charge(caller, cost::STORAGE_SCAN + asked / cost::STORAGE_BYTES_PER_FUEL)?;
+    let prefix = read(caller, prefix, prefix_len)?;
+    let start = match start_len {
+        0 => prefix.clone(),
+        _ => read(caller, start, start_len)?,
+    };
+    let found = host.storage_scan(space, &prefix, &start, limit as usize).map_err(|err| stop(caller, err))?;
+    let moved: usize = found.iter().map(|(key, value)| key.len() + value.len()).sum();
+    charge(caller, cost::STORAGE_SCAN_ENTRY * found.len() as u64 + moved as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
+    let mut result = Vec::with_capacity(moved + 8 * found.len());
+
+    for (key, value) in &found {
+        result.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        result.extend_from_slice(key);
+        result.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        result.extend_from_slice(value);
+    }
+
+    caller.data_mut().result = result;
+
+    Ok(found.len() as i32)
 }
 
 /// The space a namespace import names: an empty name is the contract's own.

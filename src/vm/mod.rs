@@ -29,7 +29,7 @@ pub mod wasm;
 #[cfg(feature = "evm")]
 pub mod evm;
 
-pub use host::{Host, MAX_CALL_DEPTH, MAX_EVENTS, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_VALUE_LEN, Space};
+pub use host::{Host, MAX_CALL_DEPTH, MAX_EVENTS, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_SCAN, MAX_VALUE_LEN, Space};
 pub use layout::{Access, Declared, Entry, Field, Kind, Layout, Shape, Typed, TypedField};
 
 #[document(
@@ -177,6 +177,11 @@ pub mod cost {
     pub const PROOF_SIBLING: u64 = 60;
     /// Reading the federation in force: one record.
     pub const FEDERATION: u64 = 200;
+    /// A storage scan's seek, plus STORAGE_SCAN_ENTRY for each entry it gives and 1 for every
+    /// STORAGE_BYTES_PER_FUEL bytes of key and value: cheaper an entry than a read, as the scan
+    /// reads them in order.
+    pub const STORAGE_SCAN: u64 = 100;
+    pub const STORAGE_SCAN_ENTRY: u64 = 40;
 }
 
 #[document(

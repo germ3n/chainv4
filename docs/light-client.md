@@ -231,10 +231,12 @@ The explorer runs the same client against the node it talks to:
 - **It fetches every header from genesis, the first time.** Headers are small, but there are as
   many as blocks. The CLI and the explorer follow the chain afresh each time; the wallet saves the
   client and resumes from the finalized block.
-- **Snapshot nodes cannot serve the finality before their pivot.** A node that synced from a
-  snapshot never ran the checkpoints before it, so it has no light updates for them. A client
-  following finality from genesis needs a node that ran them. Headers and proofs at the tip still
-  check against such a node.
+- **Snapshot nodes serve the finality before their pivot** as their own light client checked it:
+  each update proven against its block's state root and holding every epoch's voters it should.
+  A node that synced from one that lacked them lacks them too.
+- **An update must hold every epoch's voters** its block fixes, each once: one with voters left
+  out is refused, though each proof in it holds, so a node cannot stall a client by holding some
+  back.
 - **Proving at a block takes the node's undo records,** so only the last `max_reorg_depth` blocks
   can be proven at. Final values need the finalized checkpoint to be within that.
 - **Dev chains share a genesis id.** Every chain started from the built-in dev genesis has the

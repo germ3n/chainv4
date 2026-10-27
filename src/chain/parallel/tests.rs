@@ -272,6 +272,70 @@ fn a_contract_reaching_what_nobody_named_makes_only_the_reader_run_again() {
     assert_eq!(layer.take_changes(), reference.take_changes());
 }
 
+/// Keeps members in a namespace and counts them by iterating it; or adds one to another such
+/// contract, which the transaction calling it never names.
+const MEMBERS: &str = r#"
+local M = {}
+local members = storage.namespace("members")
+
+function M.join()
+    members:set(ctx.sender:text(), "1")
+end
+
+function M.count()
+    local count = 0
+    for _ in members:iter() do
+        count = count + 1
+    end
+    storage.set("count", tostring(count))
+    return count
+end
+
+function M.relay(club)
+    contracts.call(club, "join")
+end
+
+return M
+"#;
+
+#[test]
+fn a_scan_another_transaction_wrote_into_runs_again() {
+    let rules = rules();
+    let vm = Arc::new(Vm::new(&[Engine::Lua], rules.hash).unwrap());
+    let workers = Workers::new();
+    let runner = Runner {
+        rules: &rules,
+        vm: &vm,
+        workers: &workers,
+    };
+    let (club, relay) = (contract_address(&key(6).public().address(), 0, rules.hash), contract_address(&key(6).public().address(), 1, rules.hash));
+    let fee = FeeOffer {
+        gas_limit: 1_000_000,
+        max_price: u256::from(2_000_000_000u64),
+        tip: u256::ZERO,
+    };
+    let call = |to: Address, function: &str, data: Vec<TxCallArgumentType>| Tx::ContractCall { to, func: Hash::Xxh3_64(selector(function)), amount: Amount::U128(0), data };
+    let txs = vec![
+        SignedTx::sign(Tx::Deploy { code: Code::Lua(MEMBERS.to_string()) }, 0, fee, &key(6)),
+        SignedTx::sign(Tx::Deploy { code: Code::Lua(MEMBERS.to_string()) }, 1, fee, &key(6)),
+        // Names the relay, and joins the club through it: a key the club never had.
+        SignedTx::sign(call(relay, "relay", vec![TxCallArgumentType::Address(club)]), 0, fee, &key(7)),
+        // Names the club, so runs beside the relay, counting no members. It read no key the join
+        // wrote, as none was there, but its scan covered it, so it runs again and counts one.
+        SignedTx::sign(call(club, "count", Vec::new()), 0, fee, &key(8)),
+    ];
+    let db = funded();
+    let reference = Arc::new(State::new(db.clone()));
+    let expected = one_by_one(&rules, &vm, &reference, &txs, &context(), Unfit::Skip).unwrap();
+    let layer = Arc::new(State::new(db));
+    let ran = runner.run(&layer, &txs, &context(), Unfit::Skip, None).unwrap();
+
+    assert!(ran.again.contains(&3), "the count ran again: {:?}", ran.again);
+    assert_eq!(ran.receipts, expected.receipts);
+    assert_eq!(layer.take_changes(), reference.take_changes());
+    assert_eq!(reference.get(crate::db::Column::Storage, &crate::db::storage_key(&club, b"count")).unwrap(), None, "taken already");
+}
+
 #[test]
 fn workers_keep_the_order_of_what_they_map() {
     let workers = Workers::new();

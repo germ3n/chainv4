@@ -404,8 +404,9 @@ no state of its own.
 - the API shows them marked `pruned`, and the node cannot serve their bodies to peers;
 - it never rolls back past the pivot;
 - its indexes reach back to the block after it, since it has no receipts before;
-- it has no light updates before it, so light clients following finality from genesis need
-  another node;
+- it serves the finality before it all the same: the justifications and light updates its light
+  client checked as it checked the headers, from genesis or from the checkpoint start, are stored
+  with the snapshot, so light clients follow finality from genesis through it;
 - one that started at a checkpoint holds no headers below the checkpoint start either, so it
   cannot serve a checkpoint start, or a light client's older headers, from there down.
 
@@ -446,8 +447,8 @@ cores runs blocks slower, and links slower than a laptop's loopback carry fewer 
   there is no peer scoring or banning yet.
 - **Sync uses one peer at a time,** snapshots included, and blocks gossiped ahead of the tip are
   dropped and fetched again by sync.
-- **A snapshot node keeps no history before its pivot:** headers only, no bodies, receipts,
-  events or light updates (see [Syncing from a snapshot](#syncing-from-a-snapshot)).
+- **A snapshot node keeps no history before its pivot:** headers, justifications and light
+  updates only, no bodies, receipts or events (see [Syncing from a snapshot](#syncing-from-a-snapshot)).
 - **Stopping is between steps.** Ctrl-C or SIGTERM sets a flag the loop checks after each step,
   within a second, and the node returns and closes its database. Peers and API clients see their
   connections drop with the process, not a goodbye.

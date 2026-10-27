@@ -72,7 +72,10 @@ enum Asked {
 }
 
 impl SnapshotSync {
-    pub(super) fn new(light: LightClient, checkpoint: Option<Hash>) -> SnapshotSync {
+    pub(super) fn new(mut light: LightClient, checkpoint: Option<Hash>) -> SnapshotSync {
+        // What it checks of finality is kept, to store with the snapshot and serve on from.
+        light.keep_checked(crate::light::Kept::default());
+
         SnapshotSync {
             light: match checkpoint {
                 Some(_) => None,
@@ -332,8 +335,12 @@ impl Node {
         };
         let genesis = self.chain.headers_from(0, 1)?.pop().ok_or(NodeError::Db(crate::db::DbError::Corrupt("no genesis header".to_string())))?;
 
+        // The start's updates are checked as the client starts on them: kept with the rest.
+        let updates: Vec<_> = answer.start.updates.iter().flatten().cloned().collect();
+
         match LightClient::from_checkpoint(self.chain.light_params(), genesis, self.chain.genesis(), trusted, answer.start) {
-            Ok(light) => {
+            Ok(mut light) => {
+                light.keep_checked(crate::light::Kept { justifications: Vec::new(), updates });
                 let height = light.tip().height;
                 let counted = light.work_at(height).expect("the checkpoint is followed");
                 log::info!("[node] starting at checkpoint {trusted}, height {height}, with headers from {} from {peer}", light.lowest());
@@ -398,7 +405,8 @@ impl Node {
 
     /// Makes the pivot the tip, and goes back to syncing as usual from it.
     fn install(&mut self, block: Block, pivot: u64) -> Result<(), NodeError> {
-        let snapshot = self.sync.snapshot.take().expect("taking one");
+        let mut snapshot = self.sync.snapshot.take().expect("taking one");
+        let kept = snapshot.light_mut().take_checked();
         let light = snapshot.light();
         // From genesis, the headers after it; from a checkpoint, every one held, the trusted ones
         // below the checkpoint included.
@@ -418,7 +426,7 @@ impl Node {
             (Some(trusted), _) => Some(trusted),
             (None, seen) => seen,
         };
-        self.chain.install_snapshot(&headers, &block, snapshot.work_at(pivot), checkpoint).map_err(NodeError::Chain)?;
+        self.chain.install_snapshot(&headers, &block, snapshot.work_at(pivot), checkpoint, &kept).map_err(NodeError::Chain)?;
         log::info!("[node] synced from a snapshot to height {pivot} {}", block.id());
 
         // What peers said was before the pivot moved, perhaps: ask them where they are now.

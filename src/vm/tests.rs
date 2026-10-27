@@ -1027,6 +1027,78 @@ fn the_lua_token_follows_the_standard() {
 }
 
 #[test]
+fn storage_iterates_in_key_order_a_page_at_a_time() {
+    let mut world = World::new();
+    let members = world.deploy(Code::Wasm(example("members")));
+    let people: Vec<Address> = (0..150u8).map(|byte| Address::Ed25519([byte; 32])).collect();
+
+    for person in &people {
+        world.call_as(*person, members, "join", &[]).result.unwrap();
+    }
+
+    assert!(world.call_as(people[0], members, "join", &[]).result.unwrap_err().to_string().contains("a member already"));
+    let counted = world.call(members, "count", &[]);
+
+    assert_eq!(counted.result.unwrap(), [TxCallArgumentType::U64(150)], "past two pages of 64");
+
+    // Listed in the order of the addresses' bytes, a page at a time from where the last ended.
+    let list = |after: Option<Address>, limit: u64| {
+        let values = world.call(members, "list", &[after.map_or(TxCallArgumentType::Nil, address), TxCallArgumentType::U64(limit)]).result.unwrap();
+
+        values
+            .iter()
+            .map(|value| match value {
+                TxCallArgumentType::Address(member) => *member,
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = list(None, 100);
+    let rest = list(first.last().copied(), 100);
+
+    assert_eq!((first.len(), rest.len()), (100, 50));
+    assert_eq!([first, rest].concat(), people);
+
+    // One leaves: the count follows, and costs less with fewer to go through.
+    world.call_as(people[7], members, "leave", &[]).result.unwrap();
+    let after = world.call(members, "count", &[]);
+
+    assert_eq!(after.result.unwrap(), [TxCallArgumentType::U64(149)]);
+    assert!(after.fuel_used < counted.fuel_used);
+    assert!(list(Some(people[6]), 1) == [people[8]], "the one who left is gone from the list");
+}
+
+#[test]
+fn a_layout_iterates_only_what_it_declares() {
+    let mut world = World::new();
+    let code = r#"
+--@namespace members text -> text
+local M = {}
+
+function M.declared()
+    local n = 0
+    for _ in storage.namespace("members"):iter() do n = n + 1 end
+    return n
+end
+
+function M.undeclared()
+    for _ in storage.namespace("other"):iter() do end
+end
+
+function M.plain()
+    for _ in storage.iter() do end
+end
+
+return M
+"#;
+    let contract = world.lua_code(code);
+
+    assert_eq!(world.call(contract, "declared", &[]).result.unwrap(), [TxCallArgumentType::I64(0)]);
+    assert!(world.call(contract, "undeclared", &[]).result.unwrap_err().to_string().contains("not in this code's layout"));
+    world.call(contract, "plain", &[]).result.unwrap();
+}
+
+#[test]
 fn typed_exports_refuse_arguments_that_do_not_fit() {
     let mut world = World::new();
     let token = world.deploy(Code::Wasm(example("token")));

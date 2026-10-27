@@ -180,10 +180,12 @@ running them one by one gives.
    records, or the signer records.
 2. **Rounds:** each round runs every transaction whose wait is over, side by side, each on a layer
    of its own over what the block holds so far. The layer records every key the transaction reads
-   that it did not write itself. The first round also checks every signature in the block at once,
+   that it did not write itself, and every range of keys it scanned, from where to where it
+   stopped. The first round also checks every signature in the block at once,
    most of what a simple transaction costs.
 3. **In order:** results then go in in block order, for as long as they hold. A result holds if
-   no transaction that went in after it ran wrote anything it read. What it read is then what it
+   no transaction that went in after it ran wrote anything it read, nor any key in a range it
+   scanned, one that was not there before included. What it read is then what it
    would have read in its turn, so its result is the one it would have had. Each one that goes in
    ends the wait of those waiting for it, and they run in the next round.
 4. **Again:** what a transaction names is only a guess at what it touches, since a contract can

@@ -1283,6 +1283,27 @@ fn snapshot_of_a_chain_with_producers_from_finality(genesis: Genesis, producer: 
         assert_eq!(Accounts::new(&late.chain().state()).get(to).unwrap().balance, u256::new(u128::from(*amount)));
     }
 
+    // It serves the finality before its pivot as the producer does, though it never ran those
+    // checkpoints: from genesis, every one; from a checkpoint, those from the start's first on.
+    let interval = 8;
+    let first = checkpoint.map_or(1, |height| (height - 8) / interval);
+
+    for epoch in first..=pivot / interval {
+        let block = producer.chain().block_at(epoch * interval).unwrap().unwrap().id();
+        let (producer_db, late_db) = (producer.chain().db().clone(), late.chain().db().clone());
+        let update = crate::chain::stored_light_update(&*late_db, &block).unwrap();
+
+        assert!(update.is_some(), "epoch {epoch}'s update");
+        assert_eq!(update, crate::chain::stored_light_update(&*producer_db, &block).unwrap());
+
+        if epoch * interval > checkpoint.unwrap_or(0) {
+            let justification = crate::chain::stored_justification(&*late_db, &block).unwrap();
+
+            assert!(justification.is_some(), "epoch {epoch}'s justification");
+            assert_eq!(justification, crate::chain::stored_justification(&*producer_db, &block).unwrap());
+        }
+    }
+
     match checkpoint {
         // The start reaches back to the checkpoint activation_delay epochs before: from epoch 5's
         // to epoch 3's, height 32 for 40, and no further.

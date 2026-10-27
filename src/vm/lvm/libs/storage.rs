@@ -6,12 +6,17 @@ use {
     crate::structs::u256::{i256, u256},
     crate::vm::lvm::charge,
     crate::vm::{Host, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_VALUE_LEN, Space, cost},
+    std::collections::VecDeque,
     mlua::{Error, Lua, UserData, UserDataMethods, Value},
     r#macro::document,
 };
 
 /// The largest whole number a Lua number holds exactly: 2^53.
 const EXACT: i64 = 1 << 53;
+
+/// How many entries an iterator asks for at a time: a loop that breaks early pays for, and
+/// depends on, no more than the page it stopped in.
+const ITER_PAGE: usize = 64;
 
 /// One part of the contract's storage with keys of its own: a namespace, from storage.namespace,
 /// or the contract's own space, storage.own.
@@ -21,6 +26,9 @@ pub struct LuaNamespace(pub Space);
 impl UserData for LuaNamespace {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("get", |lua, this, key: mlua::String| storage_get(lua, &this.0, &key.as_bytes()));
+        methods.add_method("iter", |lua, this, (prefix, start): (Option<mlua::String>, Option<mlua::String>)| {
+            storage_iter(lua, this.0.clone(), prefix.map(|prefix| prefix.as_bytes().to_vec()), start.map(|start| start.as_bytes().to_vec()))
+        });
         methods.add_method("set", |lua, this, (key, value): (mlua::String, Option<mlua::String>)| {
             let value = value.as_ref().map(|value| value.as_bytes());
 
@@ -201,6 +209,47 @@ fn storage_set(lua: &Lua, space: &Space, key: &[u8], value: Option<&[u8]>) -> ml
     host.storage_set(space, key, value).map_err(refused)
 }
 
+/// A page of a space's keys in order, charged: the seek, then each entry and its bytes.
+fn storage_scan(lua: &Lua, space: &Space, prefix: &[u8], start: &[u8]) -> mlua::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let host = host(lua)?;
+    let asked = (space.name().len() + prefix.len() + start.len()) as u64;
+    charge(lua, cost::STORAGE_SCAN + asked / cost::STORAGE_BYTES_PER_FUEL)?;
+    let found = host.storage_scan(space, prefix, start, ITER_PAGE).map_err(refused)?;
+    let moved: usize = found.iter().map(|(key, value)| key.len() + value.len()).sum();
+    charge(lua, cost::STORAGE_SCAN_ENTRY * found.len() as u64 + moved as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
+
+    Ok(found)
+}
+
+/// An iterator over a space's keys that start with prefix, from start on, in byte order, for a
+/// generic for: each step gives a key and its value, a page asked for at a time.
+fn storage_iter(lua: &Lua, space: Space, prefix: Option<Vec<u8>>, start: Option<Vec<u8>>) -> mlua::Result<mlua::Function> {
+    host(lua)?;
+    let prefix = prefix.unwrap_or_default();
+    let mut next = start.unwrap_or_else(|| prefix.clone());
+    let mut page: VecDeque<(Vec<u8>, Vec<u8>)> = VecDeque::new();
+    let mut ended = false;
+
+    lua.create_function_mut(move |lua, _: mlua::MultiValue| {
+        if page.is_empty() && !ended {
+            let found = storage_scan(lua, &space, &prefix, &next)?;
+            ended = found.len() < ITER_PAGE;
+
+            // The page after starts right after its last key.
+            if let Some((last, _)) = found.last() {
+                next = [&last[..], &[0]].concat();
+            }
+
+            page.extend(found);
+        }
+
+        match page.pop_front() {
+            Some((key, value)) => Ok((Some(lua.create_string(&key)?), Some(lua.create_string(&value)?))),
+            None => Ok((None, None)),
+        }
+    })
+}
+
 fn namespace(name: &[u8]) -> mlua::Result<LuaNamespace> {
     if name.is_empty() || name.len() > MAX_NAMESPACE_LEN {
         return Err(Error::runtime(format!("namespace names are 1 to {MAX_NAMESPACE_LEN} bytes")));
@@ -249,6 +298,22 @@ fn storage_set_doc() {}
 #[document(
     lua,
     parent = "storage",
+    name = "iter",
+    summary = "Iterates over plain keys in byte order, for a generic for: each step gives a key and its value, as this call's own writes leave them. It asks for 64 at a time, so a loop that breaks early pays for only the pages it read.",
+    params = {
+        prefix = { ty = "string?", desc = "What every key given starts with: all of them when nil.", optional = true },
+        start = { ty = "string?", desc = "The first key it may give: the prefix when nil. To go on later where a loop stopped, the last key with \0 after it.", optional = true },
+    },
+    returns = { ty = "function", desc = "The iterator: a key and its value each step, nil after the last." },
+    note = "A page costs 100 fuel, plus 40 an entry and 1 for every 16 bytes of the keys and values it gives, and of the prefix and start. A transaction that iterated is run again, when blocks run transactions side by side, if one before it wrote any key in the range it saw.",
+    example = "for key, value in storage.iter(\"member:\") do\n    count = count + 1\nend",
+    see_also = "Namespace:iter",
+)]
+fn storage_iter_doc() {}
+
+#[document(
+    lua,
+    parent = "storage",
     name = "namespace",
     summary = "A namespace: keys of its own, apart from plain storage and from every other namespace, so two pieces of code that keep state on one contract cannot clash by picking the same key. Code that names the same namespace shares it, delegated code included.",
     params = { name = { ty = "string", desc = "Its name: 1 to 64 bytes. Something long enough not to clash, such as \"my-token.balances\"." } },
@@ -292,6 +357,22 @@ fn namespace_class() {}
     see_also = "Namespace:set",
 )]
 fn namespace_get_doc() {}
+
+#[document(
+    lua,
+    parent = "Namespace",
+    name = "iter",
+    kind = "method",
+    summary = "Iterates over the namespace's keys in byte order, for a generic for, as storage.iter does plain keys. A script that declares a storage layout iterates only the namespaces it declares.",
+    params = {
+        prefix = { ty = "string?", desc = "What every key given starts with: all of them when nil.", optional = true },
+        start = { ty = "string?", desc = "The first key it may give: the prefix when nil.", optional = true },
+    },
+    returns = { ty = "function", desc = "The iterator: a key and its value each step, nil after the last." },
+    example = "local balances = storage.namespace(\"token.balances\")\nfor holder, held in balances:iter() do\n    total = total + u256(held)\nend",
+    see_also = "storage.iter",
+)]
+fn namespace_iter_doc() {}
 
 #[document(
     lua,
@@ -540,6 +621,15 @@ pub fn register_storage_lib(lua: &Lua) {
         .expect("[storage] Failed to set set");
     storage_table
         .set(
+            "iter",
+            lua.create_function(|lua, (prefix, start): (Option<mlua::String>, Option<mlua::String>)| {
+                storage_iter(lua, Space::Plain, prefix.map(|prefix| prefix.as_bytes().to_vec()), start.map(|start| start.as_bytes().to_vec()))
+            })
+            .expect("[storage] Failed to create iter"),
+        )
+        .expect("[storage] Failed to set iter");
+    storage_table
+        .set(
             "namespace",
             lua.create_function(|_, name: mlua::String| namespace(&name.as_bytes()))
                 .expect("[storage] Failed to create namespace"),
@@ -630,6 +720,66 @@ mod tests {
         assert_eq!(read, ("plain".into(), "a".into(), "b".into(), "own".into(), None));
         assert_eq!(state.get(Column::Namespaces, &namespace_key(&contract, b"b", b"k")).unwrap(), Some(b"b".to_vec()));
         assert_eq!(state.get(Column::Namespaces, &namespace_key(&contract, b"", b"k")).unwrap(), Some(b"own".to_vec()));
+    }
+
+    #[test]
+    fn iteration_goes_in_key_order_over_what_the_call_left() {
+        let contract = Address::Contract([1; 32]);
+        let (lua, state) = setup(contract);
+
+        // Some keys committed below the call's layer, then changed by it.
+        for key in ["m:b", "m:d", "m:f", "other"] {
+            state.put(Column::Storage, storage_key(&contract, key.as_bytes()), b"below".to_vec());
+        }
+
+        let code = r#"
+            storage.set("m:a", "call")
+            storage.set("m:d", "call")
+            storage.set("m:f", nil)
+            storage.namespace("n"):set("m:z", "elsewhere")
+            local seen = {}
+            for key, value in storage.iter("m:") do
+                table.insert(seen, key .. "=" .. value)
+            end
+            local from = {}
+            for key in storage.iter("m:", "m:c") do
+                table.insert(from, key)
+            end
+            return table.concat(seen, " "), table.concat(from, " ")
+        "#;
+        let (seen, from): (String, String) = lua.load(code).eval().unwrap();
+
+        assert_eq!(seen, "m:a=call m:b=below m:d=call");
+        assert_eq!(from, "m:d");
+    }
+
+    #[test]
+    fn iteration_pages_and_stops_where_the_loop_breaks() {
+        let (lua, _) = setup(Address::Contract([1; 32]));
+        let code = r#"
+            local balances = storage.namespace("balances")
+            for i = 1, 150 do
+                balances:set(string.format("k%03d", i), tostring(i))
+            end
+            local count, last = 0, nil
+            for key, value in balances:iter() do
+                count = count + 1
+                last = value
+            end
+            local first
+            for key in balances:iter() do
+                first = key
+                break
+            end
+            local under = 0
+            for key in balances:iter("k1") do
+                under = under + 1
+            end
+            return count, last, first, under
+        "#;
+        let (count, last, first, under): (u32, String, String, u32) = lua.load(code).eval().unwrap();
+
+        assert_eq!((count, last.as_str(), first.as_str(), under), (150, "150", "k001", 51), "past two pages of 64, and k100 to k150 under k1");
     }
 
     #[test]

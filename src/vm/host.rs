@@ -1,6 +1,6 @@
 use {
     super::{Access, CallContext, FunctionId, Layout, Limits, Outcome, Vm, VmError, route},
-    crate::db::{Column, DbError, State, namespace_key, storage_key},
+    crate::db::{Column, Committed, DbError, State, namespace_key, storage_key},
     crate::registry::contracts::{ContractRecord, Contracts},
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
@@ -29,6 +29,12 @@ pub const MAX_VALUE_LEN: usize = 64 * 1024;
 
 /// The longest namespace name, in bytes.
 pub const MAX_NAMESPACE_LEN: usize = 64;
+
+/// The most entries one storage scan gives: a page, of which a contract asks as many as it needs.
+pub const MAX_SCAN: usize = 256;
+
+/// A page of storage: each key, in its space, with its value.
+pub type Page = Vec<(Vec<u8>, Vec<u8>)>;
 
 /// The longest event name, in bytes.
 pub const MAX_EVENT_NAME: usize = 64;
@@ -219,6 +225,57 @@ impl Host {
         }
 
         Ok(())
+    }
+
+    #[document(
+        parent = "Host",
+        summary = "A page of the contract's storage in key order: the keys in a space that start with a prefix, from a key on, each with its value, as the call's own writes leave them. Engines charge cost::STORAGE_SCAN, then cost::STORAGE_SCAN_ENTRY an entry and the bytes moved. Run ahead of its turn, a transaction that scanned is run again when one before it wrote anywhere in what it scanned.",
+        params = {
+            space = "Which part of it.",
+            prefix = "What every key given starts with: empty for all of them.",
+            start = "The first key it may give, the prefix itself for all of them: the key after the last one of the page before, to go on.",
+            limit = "The most entries to give: 1 to MAX_SCAN.",
+        },
+        returns = "Each key, in the space, and its value. Runtime for a prefix or start too long, a limit past MAX_SCAN, or a namespace code that declares a layout does not declare; Storage when the database failed.",
+    )]
+    pub fn storage_scan(&self, space: &Space, prefix: &[u8], start: &[u8], limit: usize) -> Result<Page, VmError> {
+        check_key(prefix)?;
+
+        // One past the longest key, as the key right after a longest one, to go on from it.
+        if start.len() > MAX_KEY_LEN + 1 {
+            return Err(VmError::Runtime(format!("a scan starts at a key of at most {MAX_KEY_LEN} bytes, or one past it")));
+        }
+
+        if limit == 0 || limit > MAX_SCAN {
+            return Err(VmError::Runtime(format!("a scan gives 1 to {MAX_SCAN} entries at a time")));
+        }
+
+        let contract = &self.context.contract;
+        let (column, base) = match space {
+            Space::Plain => (Column::Storage, storage_key(contract, &[])),
+            Space::Own => (Column::Namespaces, namespace_key(contract, &[], &[])),
+            Space::Named(name) => {
+                check_namespace(name)?;
+
+                if self.layout.is_declared() && self.layout.get(name).is_none() {
+                    return Err(VmError::Runtime(format!("namespace {} is not in this code's layout", String::from_utf8_lossy(name))));
+                }
+
+                (Column::Namespaces, namespace_key(contract, name, &[]))
+            }
+        };
+        let (full_prefix, full_start) = ([&base[..], prefix].concat(), [&base[..], start].concat());
+        let mut found = Vec::new();
+
+        self.state
+            .scan(column, &full_prefix, &full_start, &mut |key, value| {
+                found.push((key[base.len()..].to_vec(), value.to_vec()));
+
+                found.len() < limit
+            })
+            .map_err(|err| self.fail(err))?;
+
+        Ok(found)
     }
 
     /// Where a key in a space is kept, if the code running may do this with it there.

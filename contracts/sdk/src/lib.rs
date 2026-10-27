@@ -420,7 +420,7 @@ pub fn abort(message: &str) -> ! {
 }
 
 /// The result buffer: what the last storage read or call left there.
-fn result() -> Vec<u8> {
+pub(crate) fn result() -> Vec<u8> {
     let mut bytes = vec![0; unsafe { sys::result_len() } as usize];
     unsafe { sys::result_read(bytes.as_mut_ptr()) };
 
