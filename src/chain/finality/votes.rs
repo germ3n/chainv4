@@ -916,7 +916,7 @@ mod tests {
     use {super::*, crate::crypto::keypair::Keypair};
 
     fn vote(key: u8, source: u64, target: u64) -> SignedVote {
-        let keypair = Keypair::from_private(crate::crypto::keypair::PrivateKey::Ed25519([key; 32]));
+        let keypair = Keypair::from_seed([key; 32]);
         let at = |epoch: u64| Checkpoint { epoch, block: Hash::Xxh3_64(epoch) };
 
         SignedVote::sign(Vote { source: at(source), target: at(target), voter: keypair.public() }, &keypair, &Hash::Xxh3_64(0))

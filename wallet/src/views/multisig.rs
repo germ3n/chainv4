@@ -72,6 +72,7 @@ impl MultisigState {
     /// Takes a transaction another page made for a followed multisig to send, such as a swap's
     /// lock: it is priced and becomes the bundle for its members to sign, once the node says the
     /// multisig's nonce.
+    #[cfg(feature = "swap")]
     pub fn propose(&mut self, prepared: Prepared) {
         let account = prepared.from.to_string();
         self.selected = Some(account.clone());

@@ -1,10 +1,12 @@
+#[cfg(all(feature = "ed25519", feature = "edblake", feature = "secp256k1", feature = "bitcoin"))]
+use crate::crypto::keypair::{Keypair, PrivateKey};
 use {
     super::*,
-    crate::crypto::keypair::{Keypair, PrivateKey},
     crate::db::{MemoryDb, State, StateTree},
     std::sync::Arc,
 };
 
+#[cfg(all(feature = "ed25519", feature = "edblake", feature = "secp256k1", feature = "bitcoin"))]
 fn signed(private: PrivateKey, message: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let keypair = Keypair::from_private(private);
     let key = match keypair.public() {

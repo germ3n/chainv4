@@ -1115,14 +1115,14 @@ mod tests {
     fn back_returns_through_the_pages_left_each_once_and_stops_at_the_first() {
         let mut visits = Visits::new(Page::Overview);
         visits.see(Page::Overview);
-        visits.see(Page::Swaps);
+        visits.see(Page::Contracts);
         visits.see(Page::Send);
-        // Back to Swaps, then on to Send again: Swaps is left once, not twice.
-        assert_eq!(visits.back(), Some(Page::Swaps));
-        visits.see(Page::Swaps);
+        // Back to Contracts, then on to Send again: Contracts is left once, not twice.
+        assert_eq!(visits.back(), Some(Page::Contracts));
+        visits.see(Page::Contracts);
         visits.see(Page::Send);
 
-        assert_eq!(visits.back(), Some(Page::Swaps));
+        assert_eq!(visits.back(), Some(Page::Contracts));
         assert_eq!(visits.back(), Some(Page::Overview));
         assert_eq!(visits.back(), None, "the first page: left to the platform");
     }

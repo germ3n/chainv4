@@ -237,7 +237,9 @@ fn the_nodes_own_miner_mines_beside_the_workers_and_ends_their_work() {
     let parent = header(5, 10_000, 500);
     let child = child(&parent, 10_100);
     pool.seal(&child);
-    let job = next(&mut from_node, "work")["job"].as_u64().unwrap();
+    // The pool's first template is job 1. The worker may never hear of it: the node's own miner
+    // can find the seal before the pool hands the job out, and a found job is handed to no one.
+    let job = 1;
 
     let (id, seal) = seals.recv_timeout(Duration::from_secs(30)).unwrap();
     let Seal::Work { nonce } = seal else { panic!("not a work seal") };

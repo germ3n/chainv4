@@ -1,10 +1,11 @@
 //! The crypto library and host calls, from inside contracts of each native engine.
 
+#[cfg(all(feature = "ed25519", feature = "bitcoin"))]
 use {
-    super::*,
     crate::crypto::keypair::{Keypair, PrivateKey},
     crate::db::address_key,
 };
+use super::*;
 
 const LUA_CRYPTO: &str = r#"
 local M = {}

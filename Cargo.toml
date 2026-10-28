@@ -141,6 +141,8 @@ signal-hook = { version = "0.3.18", optional = true }
 
 [dev-dependencies]
 wat = "1.262.0"
+# Tests read JSON whatever features the build has.
+serde_json = "1.0.154"
 
 [build-dependencies]
 wiki = { path = "wiki" }

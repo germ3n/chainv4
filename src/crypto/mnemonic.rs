@@ -577,6 +577,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bitcoin")]
     #[test]
     fn bitcoin_keys_follow_bip84_and_match_bitcoins_wallets() {
         // BIP84's test vector: the receiving addresses of its phrase's first account.

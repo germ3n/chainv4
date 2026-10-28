@@ -898,17 +898,20 @@ fn branches_that_split_off_too_deep_are_never_followed() {
     assert!(db.read(Column::Undo, &id_key(&second.id())).unwrap().is_some());
 
     // With finality and nothing finalized, they all stay: a justified branch may need them.
-    let finality_db = Arc::new(MemoryDb::default());
-    let mut voting = Chain::open(finality_db.clone(), &pow_genesis()).unwrap();
-    let mut tip = voting.block_at(0).unwrap().unwrap();
+    #[cfg(feature = "finality-ffg")]
+    {
+        let finality_db = Arc::new(MemoryDb::default());
+        let mut voting = Chain::open(finality_db.clone(), &pow_genesis()).unwrap();
+        let mut tip = voting.block_at(0).unwrap().unwrap();
 
-    for _ in 0..DEV_MAX_REORG_DEPTH + 2 {
-        tip = mine_on(&voting, &tip, Vec::new(), Address::Ed25519([1; 32]));
-        extended(voting.import(&tip, LATER));
+        for _ in 0..DEV_MAX_REORG_DEPTH + 2 {
+            tip = mine_on(&voting, &tip, Vec::new(), Address::Ed25519([1; 32]));
+            extended(voting.import(&tip, LATER));
+        }
+
+        let unfinalized = voting.block_at(1).unwrap().unwrap();
+        assert!(finality_db.read(Column::Undo, &id_key(&unfinalized.id())).unwrap().is_some());
     }
-
-    let unfinalized = voting.block_at(1).unwrap().unwrap();
-    assert!(finality_db.read(Column::Undo, &id_key(&unfinalized.id())).unwrap().is_some());
 
     let mut side = genesis;
     let tip = chain.tip().id();
@@ -1833,7 +1836,12 @@ fn a_light_client_follows_proof_of_work_through_a_reorg() {
 
     assert_eq!(chain.tip().id(), branch.id());
     assert_eq!(client.tip().id(), branch.id());
+    #[cfg(feature = "finality-ffg")]
     assert_eq!(outcomes[..2], [Extended::Unlinked, Extended::Added(3)]);
+    // Without finality nothing is justified: the client switches to the heavier branch where it
+    // split off.
+    #[cfg(not(feature = "finality-ffg"))]
+    assert_eq!(outcomes[..2], [Extended::Unlinked, Extended::Switched(1)]);
 
     // A header consensus refuses is refused: here, one declaring a difficulty its parent does not
     // make it.

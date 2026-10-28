@@ -139,6 +139,7 @@ pub enum BitcoinAction {
     },
     /// Signs a PSBT as a member, with its seed phrase read from input: the inputs it names this
     /// seed's keys for, at m/48'/coin'/0'/2'.
+    #[cfg(feature = "mnemonic")]
     Sign {
         psbt: PathBuf,
         /// Ask for the seed's passphrase too.
@@ -428,6 +429,7 @@ fn bitcoin(agent: &Agent, node: &str, account: &Address, action: BitcoinAction) 
             println!("a spend of {amount} satoshis to {to}, from {} coin{}, in {}", psbt.tx.inputs.len(), plural(psbt.tx.inputs.len()), out.display());
             println!("next: each member signs it, chainv4 multisig bitcoin {account} sign {}, or in their own wallet", out.display());
         }
+        #[cfg(feature = "mnemonic")]
         BitcoinAction::Sign { psbt: path, passphrase } => sign_file(&path, &read_seed(passphrase)?)?,
         BitcoinAction::Combine { psbt: path, others } => {
             let mut psbt = read_psbt(&path)?;
@@ -458,7 +460,7 @@ fn bitcoin(agent: &Agent, node: &str, account: &Address, action: BitcoinAction) 
 }
 
 /// Signs a PSBT's file with a member's seed, and writes it back.
-#[cfg(feature = "bitcoin")]
+#[cfg(all(feature = "bitcoin", feature = "mnemonic"))]
 pub(super) fn sign_file(path: &Path, seed: &crate::crypto::mnemonic::Seed) -> CliResult<()> {
     let mut psbt = read_psbt(path)?;
     let fingerprint = seed.multisig_account(0).fingerprint;
@@ -491,7 +493,7 @@ fn read_psbt(path: &Path) -> CliResult<crate::crypto::bitcoin::psbt::Psbt> {
 }
 
 /// A member's seed, its phrase, and passphrase if asked, read from input.
-#[cfg(feature = "bitcoin")]
+#[cfg(all(feature = "bitcoin", feature = "mnemonic"))]
 fn read_seed(passphrase: bool) -> CliResult<crate::crypto::mnemonic::Seed> {
     use std::io::{BufRead, Write};
 

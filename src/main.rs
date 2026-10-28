@@ -711,8 +711,8 @@ fn start_again(binary: &std::path::Path) -> Result<(), Box<dyn std::error::Error
     }
 }
 
-/// A file beside the database's directory, as net.key and pool.json are.
-#[cfg(feature = "node")]
+/// A file beside the database's directory, as pool.json and release.json are.
+#[cfg(all(feature = "node", any(feature = "pool", feature = "updates")))]
 fn beside(db: &std::path::Path, name: &str) -> std::path::PathBuf {
     db.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")).join(name)
 }

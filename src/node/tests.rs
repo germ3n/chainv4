@@ -1618,7 +1618,7 @@ fn peers_are_remembered_for_the_next_start_and_a_banned_one_is_forgotten() {
     assert_eq!(node.report(1, 0).counters.peers_banned, 1);
 }
 
-#[cfg(feature = "governance-council")]
+#[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
 #[test]
 fn a_node_too_old_for_an_upgrade_governance_decided_stops_before_its_block() {
     use crate::governance::{Change, GovernanceConfig};
@@ -1655,6 +1655,7 @@ fn a_node_too_old_for_an_upgrade_governance_decided_stops_before_its_block() {
     assert_eq!(node.chain().tip().height, 5, "it never builds the block the upgrade names");
 }
 
+#[cfg(feature = "updates")]
 #[test]
 fn a_node_too_old_for_an_upgrade_its_release_announces_takes_no_block_from_it_on() {
     use crate::release::{Breaking, Release, ReleaseKeys, SignedRelease};

@@ -638,4 +638,5 @@ impl Psbt {
 }
 
 #[cfg(test)]
+#[cfg(feature = "mnemonic")]
 mod tests;

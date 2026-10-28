@@ -94,16 +94,14 @@ pub struct DecidedFederation {
 
 impl Hashable for DecidedFederation {}
 
-#[cfg(test)]
+#[cfg(all(test, feature = "secp256k1"))]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "secp256k1")]
     fn key(byte: u8) -> [u8; 33] {
         crate::crypto::secp256k1::public_key(&[byte; 32]).unwrap()
     }
 
-    #[cfg(feature = "secp256k1")]
     #[test]
     fn a_federation_holds_together_or_says_why_not() {
         let good = Federation { signers: vec![key(1), key(2), key(3)], threshold: 2, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6 };

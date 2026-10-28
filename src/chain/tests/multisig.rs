@@ -195,19 +195,22 @@ fn multisig_policies_are_checked() {
     assert!(policy(vec![member(&alice)], 0).is_some());
     assert!(policy(vec![member(&alice)], 2).is_some());
     assert!(policy(vec![member(&alice), member(&alice)], 1).is_some(), "a key twice");
-    assert!(policy((0..21).map(|seed| member(&Keypair::from_seed([seed; 32]))).collect(), 1).is_some(), "more than 20");
+    assert!(policy((1..=21).map(|seed| member(&Keypair::from_seed([seed; 32]))).collect(), 1).is_some(), "more than 20");
 
     // Every member names its other chains' keys, or none does.
-    let xpub = |seed: u8| crate::registry::multisig::BitcoinXpub {
-        fingerprint: [seed; 4],
-        parent: [0; 4],
-        public: crate::crypto::secp256k1::public_key(&[seed; 32]).unwrap(),
-        chain_code: [seed; 32],
-    };
-    let with = |keypair: &Keypair, seed: u8| MultisigMember { bitcoin: Some(xpub(seed)), evm: Some([seed; 20]), ..member(keypair) };
+    #[cfg(feature = "secp256k1")]
+    {
+        let xpub = |seed: u8| crate::registry::multisig::BitcoinXpub {
+            fingerprint: [seed; 4],
+            parent: [0; 4],
+            public: crate::crypto::secp256k1::public_key(&[seed; 32]).unwrap(),
+            chain_code: [seed; 32],
+        };
+        let with = |keypair: &Keypair, seed: u8| MultisigMember { bitcoin: Some(xpub(seed)), evm: Some([seed; 20]), ..member(keypair) };
 
-    assert!(policy(vec![with(&alice, 1), member(&bob)], 1).is_some());
-    assert!(policy(vec![with(&alice, 1), with(&bob, 1)], 1).is_some(), "the same Bitcoin key twice");
+        assert!(policy(vec![with(&alice, 1), member(&bob)], 1).is_some());
+        assert!(policy(vec![with(&alice, 1), with(&bob, 1)], 1).is_some(), "the same Bitcoin key twice");
+    }
 }
 
 #[test]
