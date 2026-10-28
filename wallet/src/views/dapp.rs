@@ -322,7 +322,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
             ui.add_space(6.0);
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let ready = shown.offline.is_none()
                 && match &asked {
                 Asked::Connect => !shown.chosen.is_empty(),
@@ -658,7 +658,7 @@ pub fn settings(ui: &mut Ui, ctx: &Ctx) {
         theme::caps(ui, &palette, "Connected");
 
         for (origin, site) in &connected {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let accounts = site["accounts"].as_array().map_or(0, Vec::len);
                 ui.label(RichText::new(origin).color(palette.ink));
                 ui.label(RichText::new(format!("{accounts} account{}", if accounts == 1 { "" } else { "s" })).small().color(palette.muted));

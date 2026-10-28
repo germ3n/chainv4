@@ -353,7 +353,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, send: &mut Send
 
     overview(ui, ctx, &directory, federation.as_ref());
     ui.add_space(12.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.selectable_value(&mut state.way, Way::Out, "To an EVM chain");
         ui.selectable_value(&mut state.way, Way::In, "From an EVM chain");
         ui.selectable_value(&mut state.way, Way::Bitcoin, "Bitcoin");
@@ -528,7 +528,7 @@ fn out(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Director
         };
 
         ui.add_space(6.0);
-        ui.horizontal(|ui| match (state.kind, asset) {
+        ui.horizontal_wrapped(|ui| match (state.kind, asset) {
             (AssetKind::Coin, _) => {
                 if theme::primary(ui, &palette, "Send", true).clicked() {
                     prepared = Some(send_call(amount));
@@ -614,7 +614,7 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
                 state.evm.call(ctx, url, &to, &input, move |answer| Read::Delivered { chain_id, digest, delivered: answer.map(|output| output.last() == Some(&1)) });
             }
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(theme::mono(format!("#{}", transfer.nonce)).color(palette.muted));
                 ui.label(format!("{} · {} to {}", transfer.symbol, format::units(&transfer.amount.to_string(), transfer.decimals), chain_name(transfer.target)));
 
@@ -692,7 +692,7 @@ fn into(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
         let busy = state.evm.pending.is_some();
 
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if let Some(input) = evm_approval(state.kind, evm_gateway, id, amount)
                 && theme::quiet(ui, &palette, "1. Let Gateway.sol take it").clicked()
                 && !busy
@@ -767,7 +767,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
 
             for coin in light.coins(&output) {
                 let depth = light.confirmations(coin.height);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(format::amount(&coin.value.to_string(), 8, "BTC"));
                     ui.label(RichText::new(format!("{depth} confirmations")).color(palette.muted));
 
@@ -866,7 +866,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
 
             any = true;
             let paid = values.get(2).map(text).unwrap_or_default();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(theme::mono(format!("#{id}")).color(palette.muted));
                 ui.label(format::amount(&values.get(1).and_then(whole).unwrap_or(0).to_string(), 8, "BTC"));
                 ui.label(theme::mono(format::short(&address(&values.first().map(raw).unwrap_or_default(), network))).color(palette.soft));

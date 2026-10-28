@@ -156,7 +156,8 @@ Over the page are back and forward, the search box and the chain's height.
 
 **On a phone,** below 640 points wide, the sidebar gives way to:
 - **a bar on top:** back, once there is somewhere to go back to, the node's state as a dot, and
-  the search box;
+  the search box. Android's back gesture goes back too, and on the first page sends the app to
+  the background, as Android apps do;
 - **tabs along the bottom:** Home, Blocks (the map), Mempool, Tokens and More, which lists the
   rest, NFTs, DEX and Swaps among them;
 - **pages that stack:** tables become rows of a few lines each, facts sit under their names, and

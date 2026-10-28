@@ -220,7 +220,7 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
     let mut remove = false;
 
     theme::card(ui, &palette, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             match &mut state.renaming {
                 Some((renamed, name)) if *renamed == index => {
                     let field = ui.add(egui::TextEdit::singleline(name).desired_width(220.0));
@@ -276,7 +276,7 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
 
         for address in &addresses {
             let text = address.to_string();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add_sized([64.0, 18.0], egui::Label::new(RichText::new(super::scheme(address)).small().color(palette.muted)));
                 super::address(ui, &palette, &text);
 
@@ -345,7 +345,7 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
             for key in &ctx.holders[index].keys {
                 let file = key.to_key_file();
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     theme::caps(ui, &palette, keys::label(key.public().key_type()));
                     super::copy(ui, &palette, &file);
                 });
@@ -360,7 +360,7 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
                 None => "Its key leaves this wallet. Without a copy of it, what the account holds is out of reach for good.",
             };
             ui.label(RichText::new(warning).color(palette.bad));
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if theme::primary(ui, &palette, "Remove it", true).clicked() {
                     remove = true;
                 }
@@ -403,7 +403,7 @@ fn reveal_question(ui: &mut Ui, ctx: &Ctx, state: &mut AccountsState) {
                     .color(palette.muted),
             );
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if theme::primary(ui, &palette, "Show them", true).clicked() {
                     answer = Some(true);
                 }

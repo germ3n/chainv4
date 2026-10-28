@@ -437,6 +437,11 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **An EVM bundle is EIP-712 typed data**, so the offline signer signs it through the MetaMask-style
   `eth-sign-request` it already reads, with no code of its own, and any other EIP-712 signer can
   too. `EvmBundle::add` takes a signature from elsewhere, checked to recover with a low s.
+- **A light client on a left branch used to stop.** A justification for a block it did not hold
+  at the checkpoint failed as `BadJustification`, and the wallet stops its light client on any
+  error, so a phone that saw the losing side of a fork, common with two machines mining, sat on a
+  block the node had dropped, and every proof waited. `LightClient` now rewinds to its justified
+  checkpoint when such a justification's votes hold (`take_justification`).
 - **The anvil test is ignored** (`a_multisig_s_contract_sits_at_one_address_on_anvil_and_chainv4_and_pays_on_anvil`):
   run it with `--ignored` where Foundry's `anvil` is installed; it takes port 18965.
 - **Light updates gained a field again.** `LightUpdate::switched` is a plain field, not an

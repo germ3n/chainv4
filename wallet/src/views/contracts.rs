@@ -212,7 +212,7 @@ fn saved(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState) {
         }
 
         for (index, contract) in ctx.settings.contracts.iter().enumerate() {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let kind = match contract.address.starts_with("evm:") {
                     true => "EVM",
                     false => "native",
@@ -355,7 +355,7 @@ fn native_functions(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from
         let args: Result<Vec<TxCallArgumentType>, String> = fields[0].lines().map(str::trim).filter(|line| !line.is_empty()).map(TxCallArgumentType::parse_typed).collect();
         let sent = coin(ctx, value);
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if theme::quiet(ui, &palette, "Read").clicked() {
                 let args_json: Vec<Value> = fields[0]
                     .lines()
@@ -417,7 +417,7 @@ fn evm_functions(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &
         let key = (contract.address.clone(), signature.clone());
         ui.add_space(6.0);
         ui.separator();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&signature).monospace().color(palette.ink));
             theme::pill(ui, if function.reads { "read" } else if function.payable { "payable" } else { "write" }, palette.soft);
         });
@@ -443,7 +443,7 @@ fn evm_functions(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &
             .and_then(|values| function.encode_call(&values));
         let sent = coin(ctx, value);
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let read = theme::quiet(ui, &palette, if function.reads { "Read" } else { "Try it" }).clicked();
             let write = !function.reads && theme::quiet(ui, &palette, "Send").clicked();
 
@@ -539,7 +539,7 @@ fn deploy(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &Address
     }
 
     egui::CollapsingHeader::new(RichText::new("Deploy a contract").color(palette.soft)).id_salt("contracts-deploy").show(ui, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut state.engine, Engine::Lua, "Lua");
             ui.selectable_value(&mut state.engine, Engine::Wasm, "WebAssembly");
             ui.selectable_value(&mut state.engine, Engine::Evm, "EVM");

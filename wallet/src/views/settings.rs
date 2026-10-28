@@ -85,12 +85,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
             _ => format!("{}.", role.name()),
         }).small().color(palette.muted));
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Theme").color(palette.soft));
             ui.selectable_value(&mut ctx.settings.light_theme, false, "Dark");
             ui.selectable_value(&mut ctx.settings.light_theme, true, "Light");
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Lock after").color(palette.soft));
             ui.add(egui::DragValue::new(&mut ctx.settings.lock_after).range(0..=240).suffix(" min"));
             ui.label(RichText::new(if ctx.settings.lock_after == 0 { "never, until you lock it" } else { "without input" }).small().color(palette.muted));
@@ -418,7 +418,7 @@ fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
                 }
 
                 let mut keep = false;
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if theme::primary(ui, &palette, "Remove it", !password.is_empty() || unprotected(ctx)).clicked() {
                         match opens(ctx, password) {
                             true => {
@@ -467,7 +467,7 @@ fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
             }
 
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if theme::primary(ui, &palette, "Show them", !password.is_empty() || unprotected(ctx)).clicked() || enter {
                     answer = Some(true);
                 }
@@ -732,7 +732,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
         ui.label(RichText::new("A light client that asks Bitcoin's own peers for each block's compact filter, and fetches only the blocks that pay or spend your addresses and your swaps' HTLCs: no server learns which are yours. A first sync takes some minutes and a few tens of megabytes; later ones, the blocks since. Through the proxy above when one is set, SOCKS5 alone.").small().color(palette.muted));
         ui.add_space(6.0);
         ui.checkbox(&mut ctx.settings.bitcoin_main, "Follow Bitcoin");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut ctx.settings.bitcoin_test, "Follow its test network:");
             ui.selectable_value(&mut ctx.settings.bitcoin_test_network, "testnet4".to_string(), "testnet4");
             ui.selectable_value(&mut ctx.settings.bitcoin_test_network, "signet".to_string(), "signet");

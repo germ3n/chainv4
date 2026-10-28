@@ -41,7 +41,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         ui.add_space(10.0);
 
         for address in &addresses {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add_sized([64.0, 18.0], egui::Label::new(RichText::new(super::scheme(address)).small().color(palette.muted)));
                 super::address(ui, &palette, &address.to_string());
             });
@@ -161,7 +161,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
             return;
         };
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for each in Network::ALL {
                 ui.selectable_value(&mut network, each, each.short());
             }

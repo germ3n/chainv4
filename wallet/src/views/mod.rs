@@ -218,6 +218,18 @@ pub struct States {
 }
 
 impl States {
+    /// Closes a view a page opened, such as a swap, for the back gesture: false when the page has
+    /// none open.
+    pub fn back(&mut self, page: Page) -> bool {
+        match page {
+            #[cfg(feature = "swap")]
+            Page::Swaps => self.swaps.back(),
+            _ => false,
+        }
+    }
+}
+
+impl States {
     /// Takes the node's answer to something the Contracts page asked.
     pub fn answered(&mut self, ask: &crate::node::Ask, result: &Result<serde_json::Value, crate::node::Failure>, kept: &[crate::app::SavedContract]) {
         #[cfg(feature = "swap")]
@@ -363,7 +375,7 @@ pub fn scheme(address: &Address) -> &'static str {
 /// An address in the mono face, cut short, with the whole one on hover. Clicking or tapping it
 /// copies it whole.
 pub fn address(ui: &mut Ui, palette: &Palette, address: &str) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let label = egui::Label::new(theme::mono(format::short(address)).color(palette.soft));
         chainv4_ui::widgets::copy_on_click(ui, palette, label, address).on_hover_text(format!("{address}\nClick to copy"));
     });
@@ -378,17 +390,29 @@ pub fn copy(ui: &mut Ui, palette: &Palette, text: &str) {
     }
 }
 
-/// A row of a card: a label on the left, what it says on the right.
+/// A row of a card: a label on the left, what it says on the right; on a narrow screen, the label
+/// above what it says, so neither is squeezed.
 pub fn row(ui: &mut Ui, palette: &Palette, label: &str, add: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
+    if ui.available_width() < ROW_STACKS_BELOW {
+        ui.label(RichText::new(label).small().color(palette.muted));
+        ui.horizontal_wrapped(add);
+        ui.add_space(2.0);
+
+        return;
+    }
+
+    ui.horizontal_top(|ui| {
         ui.add_sized([128.0, 20.0], egui::Label::new(RichText::new(label).color(palette.muted)));
-        add(ui);
+        ui.horizontal_wrapped(add);
     });
 }
 
+/// The narrowest a card's row keeps its label beside what it says.
+const ROW_STACKS_BELOW: f32 = 420.0;
+
 /// A note that something is still on its way.
 pub fn waiting(ui: &mut Ui, palette: &Palette, text: &str) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spinner();
         ui.label(RichText::new(text).color(palette.muted));
     });
@@ -440,7 +464,7 @@ pub fn code(ui: &mut Ui, palette: &Palette, message: &crate::airgap::Message) {
     }
 
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if theme::quiet(ui, palette, "Copy as text").on_hover_text("For a file, or where there is no camera").clicked() {
             ui.ctx().copy_text(text.clone());
         }
@@ -482,7 +506,7 @@ fn animated(ui: &mut Ui, palette: &Palette, kind: &'static str, bytes: &[u8], te
     ui.add_space(6.0);
     ui.vertical_centered(|ui| receive::qr(ui, &cycling.part, side));
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.button(if cycling.paused { "Play" } else { "Pause" }).clicked() {
             cycling.paused = !cycling.paused;
             cycling.since = now;

@@ -423,7 +423,7 @@ fn tile(ui: &mut Ui, ctx: &Ctx, state: &mut NftsState, card: &Card) -> egui::Res
             }
 
             ui.label(RichText::new(&name).strong().color(palette.ink));
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let held = match card.listed.kind {
                     CollectionKind::Nft => card.listed.title(),
                     CollectionKind::Multi => format!("{} × {}", card.amount, card.listed.title()),
@@ -447,7 +447,7 @@ fn opened(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, card: &Card, prepar
     let read = metadata(state, card).cloned();
 
     theme::card(ui, &palette, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             theme::caps(ui, &palette, &name);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::quiet(ui, &palette, "Close").clicked() {

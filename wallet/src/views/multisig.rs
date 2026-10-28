@@ -217,7 +217,7 @@ fn followed(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState) {
         }
 
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add(egui::TextEdit::singleline(&mut state.adding).hint_text("multisig:0x…").font(egui::TextStyle::Monospace).desired_width(ui.available_width() - 70.0));
 
             if theme::quiet(ui, &palette, "Follow").clicked() {
@@ -272,7 +272,7 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
         for member in &members {
             let key = member["key"].as_str().unwrap_or("?");
             let you = my_key.is_some_and(|mine| mine.to_string() == key);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(format::short(key)).monospace().color(palette.ink));
 
                 if you {
@@ -303,7 +303,7 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
             ui.separator();
             ui.label(RichText::new(describe(ctx, &tx)).color(palette.ink));
             ui.label(RichText::new(format!("approved by {} of the {threshold} it needs", approvals.len())).small().color(palette.soft));
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if let Some(from) = mine {
                     if !approved && theme::quiet(ui, &palette, "Approve").clicked() {
                         *prepared = Some(approval(from, account, nonce, fee, tx.clone()));
@@ -583,7 +583,7 @@ fn create(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, prepared: &mut 
                 state.members.push_str(&line);
             }
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Members needed").color(palette.soft));
                 ui.add(egui::TextEdit::singleline(&mut state.threshold).hint_text("2").desired_width(48.0));
             });

@@ -222,7 +222,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         }
 
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let tapped = theme::primary(ui, &palette, "Sign", trouble.is_none() && state.confirming.is_none()).clicked();
             let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
 
@@ -331,7 +331,7 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         }
 
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let tapped = theme::primary(ui, &palette, "Sign", trouble.is_none() && key.is_some() && state.confirming.is_none()).clicked();
             let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
 
@@ -492,7 +492,7 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         }
 
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let tapped = theme::primary(ui, &palette, "Sign", trouble.is_none() && state.confirming.is_none()).clicked();
             let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
 
@@ -639,7 +639,7 @@ fn bitcoin_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         }
 
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let tapped = theme::primary(ui, &palette, "Sign", review.is_some() && trouble.is_none() && state.confirming.is_none()).clicked();
             let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
 

@@ -49,6 +49,8 @@ use {
 const ASK_EVERY: f64 = 10.0;
 
 pub struct SwapsState {
+    /// The section shown while no swap is open.
+    section: Section,
     open: Option<usize>,
     form: Form,
     scan: Scan,
@@ -104,6 +106,7 @@ struct Shared {
 impl Default for SwapsState {
     fn default() -> SwapsState {
         SwapsState {
+            section: Section::Swaps,
             open: None,
             form: Form::default(),
             scan: Scan::default(),
@@ -128,6 +131,22 @@ impl Default for SwapsState {
             shared: None,
         }
     }
+}
+
+/// The page's sections, while no swap is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Section {
+    Swaps,
+    Offer,
+    Answer,
+}
+
+/// Where a step of a swap stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Done,
+    Now,
+    Later,
 }
 
 /// Which chain a leg of a new offer is on.
@@ -257,6 +276,11 @@ enum Looked {
 }
 
 impl SwapsState {
+    /// Closes the swap open, back to the list: false when none is.
+    pub fn back(&mut self) -> bool {
+        self.open.take().is_some()
+    }
+
     /// Keeps what the node said of a multisig.
     pub fn multisig_answered(&mut self, ask: &Ask, result: &Result<Value, crate::node::Failure>) {
         if let (Ask::Multisig(address), Ok(value)) = (ask, result) {
@@ -297,15 +321,22 @@ impl SwapsState {
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendState, multisig: &mut super::multisig::MultisigState) {
     let palette = *ctx.palette;
-    theme::title(ui, &palette, "Swaps", "Coins or a token on one chain for coins or a token on another, with no one in between: each side locks under one secret's hash.");
+    theme::title(ui, &palette, "Swaps", "Trade coins, tokens or NFTs between chains, with no one in between.");
 
     take_looked(ctx, state);
     evm::take(ctx, state);
     state.evm.learn_chains(ctx);
-    list(ui, ctx, state);
 
+    // A swap opened takes the page, with a way back.
     if let Some(index) = state.open.filter(|index| *index < ctx.book.swaps.len()) {
-        ui.add_space(14.0);
+        if theme::quiet(ui, &palette, "← All swaps").clicked() {
+            state.open = None;
+            state.section = Section::Swaps;
+
+            return;
+        }
+
+        ui.add_space(6.0);
 
         match detail(ui, ctx, state, index) {
             // A multisig's step is its own transaction: proposed for its members to sign.
@@ -330,12 +361,28 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
             multisig.propose_evm(&account, chain_id, calls);
             *ctx.page = Page::Multisig;
         }
+
+        return;
     }
 
-    ui.add_space(14.0);
-    start(ui, ctx, state);
-    ui.add_space(14.0);
-    read(ui, ctx, state);
+    ui.horizontal_wrapped(|ui| {
+        let count = ctx.book.swaps.len();
+        let yours = if count == 0 { "Your swaps".to_string() } else { format!("Your swaps ({count})") };
+
+        for (section, name) in [(Section::Swaps, yours.as_str()), (Section::Offer, "Make an offer"), (Section::Answer, "Answer an offer")] {
+            if ui.selectable_label(state.section == section, name).clicked() {
+                state.section = section;
+                state.trouble = None;
+            }
+        }
+    });
+    ui.add_space(10.0);
+
+    match state.section {
+        Section::Swaps => list(ui, ctx, state),
+        Section::Offer => start(ui, ctx, state),
+        Section::Answer => read(ui, ctx, state),
+    }
 }
 
 /// The swap contract a new offer's leg on this chain uses: Settings', or the one the chain's
@@ -359,26 +406,43 @@ fn hash_of(record: &SwapRecord) -> Option<String> {
 fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
     let palette = *ctx.palette;
 
-    if ctx.book.swaps.is_empty() {
-        return;
-    }
-
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, "Your swaps");
+        if ctx.book.swaps.is_empty() {
+            ui.label(RichText::new("No swaps yet. Make an offer and send its code to someone, or answer an offer someone sent you.").color(palette.soft));
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if theme::primary(ui, &palette, "Make an offer", true).clicked() {
+                    state.section = Section::Offer;
+                }
+
+                if theme::quiet(ui, &palette, "Answer an offer").clicked() {
+                    state.section = Section::Answer;
+                }
+            });
+
+            return;
+        }
 
         for (index, record) in ctx.book.swaps.iter().enumerate() {
-            let line = match Terms::from_text(&record.terms) {
-                Ok(terms) => format!(
-                    "{} · {} for {} · {}",
-                    if record.started { "started" } else { "answered" },
-                    shown(ctx, &terms.first),
-                    shown(ctx, &terms.second),
-                    if terms.agreed() { "agreed" } else { "waiting for an answer" }
-                ),
-                Err(why) => why,
+            let (line, status) = match Terms::from_text(&record.terms) {
+                Ok(terms) => {
+                    let (pay, get) = if record.started { (&terms.first, &terms.second) } else { (&terms.second, &terms.first) };
+                    let status = match (terms.agreed(), record.started) {
+                        (false, _) => "waiting for their answer",
+                        (true, true) => "agreed: you lock first",
+                        (true, false) => "agreed: they lock first",
+                    };
+
+                    (format!("You pay {} · you get {}", shown(ctx, pay), shown(ctx, get)), status.to_string())
+                }
+                Err(why) => (why, String::new()),
             };
 
-            if ui.selectable_label(state.open == Some(index), RichText::new(line).color(palette.ink)).clicked() {
+            let response = ui.add(egui::Button::new(RichText::new(line).color(palette.ink)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE).min_size(egui::vec2(ui.available_width(), 0.0)));
+            ui.label(RichText::new(status).small().color(palette.muted));
+            ui.separator();
+
+            if response.clicked() {
                 state.open = Some(index);
                 state.bitcoin = BitcoinForm { fee_rate: "2".to_string(), ..BitcoinForm::default() };
                 state.trouble = None;
@@ -524,8 +588,8 @@ fn start(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
     let palette = *ctx.palette;
 
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, "Start a swap");
-        ui.label(RichText::new("You make the secret and lock first, with the longer deadline. Send the offer's code to the other side, and read their answer below.").color(palette.soft));
+        theme::caps(ui, &palette, "Make an offer");
+        ui.label(RichText::new("Say what you pay and what you want. You get a code to send the other side; when they answer, read their code under Answer an offer. You lock first, and have longer to take yours back if they never lock.").color(palette.soft));
         ui.add_space(8.0);
 
         leg_form(ui, ctx, &mut state.form.pay, "You pay", "pay");
@@ -695,8 +759,8 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
     let palette = *ctx.palette;
 
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, "Read an offer or an answer");
-        ui.label(RichText::new("An offer someone sent you, to answer; or the answer to one of yours, which completes its terms.").color(palette.soft));
+        theme::caps(ui, &palette, "Answer an offer");
+        ui.label(RichText::new("Read the code of an offer someone sent you, to see it and answer it; or the code of their answer to one of your offers, which completes it.").color(palette.soft));
         ui.add_space(8.0);
 
         match state.scan.show(ui, &palette) {
@@ -729,7 +793,7 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
         ui.add_space(8.0);
         summary(ui, ctx, &terms);
         as_picker(ui, ctx, state, "answer-as");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if theme::primary(ui, &palette, "Answer it", true).clicked() {
                 match answer(ctx, state, &terms) {
                     Ok(record) => {
@@ -874,21 +938,16 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
     let mut prepared = None;
 
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, if record.started { "A swap you started" } else { "A swap you answered" });
-        summary(ui, ctx, &terms);
-        ui.add_space(8.0);
+        headline(ui, ctx, &terms, record.started);
 
-        // What the other side needs to see.
-        if !terms.agreed() || !record.started {
-            ui.label(RichText::new(match terms.agreed() {
-                false => "Send this offer to the other side. Once they answer, read their answer here.",
-                true => "Show this answer to who offered: their wallet completes the terms with it.",
-            }).color(palette.soft));
-            super::code(ui, &palette, &Message::Swap(Box::new(terms.clone())));
-            ui.add_space(8.0);
-        }
-
+        // Offered, and waiting for the answer: the code is all there is to do.
         if !terms.agreed() {
+            steps(ui, &palette, record.started, [Step::Done, Step::Now, Step::Later, Step::Later, Step::Later, Step::Later]);
+            now(ui, &palette, "Waiting for their answer. Send them this code; when they answer, read their code under Answer an offer.");
+            super::code(ui, &palette, &Message::Swap(Box::new(terms.clone())));
+            details(ui, ctx, &terms, &[], None);
+            more(ui, ctx, state, index);
+
             return;
         }
 
@@ -931,15 +990,18 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
         let settles = [Side::First, Side::Second].map(|side| settled_of(ctx, state, &terms, side, lock(side), paid.as_deref()));
         let settled = |side: Side| &settles[match side { Side::First => 0, Side::Second => 1 }];
 
-        for (side, leg) in terms.legs() {
-            super::row(ui, &palette, &leg.chain_name(), |ui| {
+        let standing: Vec<(String, String)> = terms
+            .legs()
+            .into_iter()
+            .map(|(side, leg)| {
                 let shown = match (lock(side), leg) {
                     (Some(Ok(Lock { state: LockState::Locked | LockState::Claimed, .. })), _) | (None, Leg::Bitcoin(_)) => format!("{} · {}", describe(leg, lock(side), terms.deadline(side)), settled(side).describe()),
                     _ => describe(leg, lock(side), terms.deadline(side)),
                 };
-                ui.label(shown);
-            });
-        }
+
+                (leg.chain_name(), shown)
+            })
+            .collect();
 
         // A secret the other side showed, by their claim on a contract.
         if record.secret.is_none()
@@ -959,28 +1021,53 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
 
         let secret = ctx.book.swaps[index].secret.as_deref().and_then(from_hex).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
 
-        if let (Some(htlc), Some((_, leg))) = (terms.htlc(), terms.bitcoin()) {
-            super::row(ui, &palette, "Bitcoin HTLC", |ui| {
-                ui.vertical(|ui| {
-                    super::address(ui, &palette, &htlc.address(leg.network()));
-                    ui.label(RichText::new(format!("{} {}", format::units(&leg.sats.to_string(), 8), leg.network().symbol())).small().color(palette.muted));
-
-                    if let Some(paid) = &paid {
-                        let line = match paid.iter().max_by_key(|coin| coin.sats) {
-                            None => "nothing paid to it yet, as Bitcoin's peers show it".to_string(),
-                            Some(coin) => format!(
-                                "paid {} sats, {} confirmation{}{}",
-                                coin.sats,
-                                coin.depth,
-                                if coin.depth == 1 { "" } else { "s" },
-                                if coin.spent { ", and spent" } else { "" }
-                            ),
-                        };
-                        ui.label(RichText::new(line).small().color(palette.soft));
-                    }
+        let htlc_line = match (terms.htlc(), terms.bitcoin()) {
+            (Some(htlc), Some((_, leg))) => {
+                let coins = format!("{} {}", format::units(&leg.sats.to_string(), 8), leg.network().symbol());
+                let paid_line = paid.as_ref().map(|paid| match paid.iter().max_by_key(|coin| coin.sats) {
+                    None => "nothing paid to it yet, as Bitcoin's peers show it".to_string(),
+                    Some(coin) => format!("paid {} sats, {} confirmation{}{}", coin.sats, coin.depth, if coin.depth == 1 { "" } else { "s" }, if coin.spent { ", and spent" } else { "" }),
                 });
-            });
+
+                Some((htlc.address(leg.network()), coins, paid_line))
+            }
+            _ => None,
+        };
+
+        // Where the swap stands, step by step: each side's lock, the starter's claim, which shows
+        // the secret, then the other's. A Bitcoin leg counts as locked once the light client sees
+        // the HTLC paid in full.
+        let leg_state = |side: Side| match (lock(side), terms.leg(side), &paid) {
+            (Some(Ok(lock)), _, _) => Some(lock.state),
+            (None, Leg::Bitcoin(leg), Some(paid)) => paid.iter().find(|coin| coin.sats >= leg.sats && coin.depth >= 1).map(|coin| if coin.spent { LockState::Claimed } else { LockState::Locked }),
+            _ => None,
+        };
+        let locked = |side: Side| matches!(leg_state(side), Some(LockState::Locked | LockState::Claimed));
+        let claimed = |side: Side| leg_state(side) == Some(LockState::Claimed);
+        let refunded = [Side::First, Side::Second].iter().any(|side| leg_state(*side) == Some(LockState::Refunded));
+        let done = [true, true, locked(Side::First), locked(Side::Second), claimed(Side::Second), claimed(Side::First)];
+        let current = done.iter().position(|done| !done);
+        steps(ui, &palette, record.started, marks(done));
+        let yours = |starter: bool| starter == record.started;
+        now(ui, &palette, &match (refunded, current) {
+            (true, _) => "A lock was taken back after its deadline: this swap is over.".to_string(),
+            (false, None) => "Done: both sides claimed what they get.".to_string(),
+            (false, Some(2)) if yours(true) => format!("Your turn: lock {} on {}.", shown(ctx, &terms.first), terms.first.chain_name()),
+            (false, Some(2)) => format!("Waiting for them to lock {} on {}.", shown(ctx, &terms.first), terms.first.chain_name()),
+            (false, Some(3)) if yours(false) => format!("Their lock stands. Your turn: lock {} on {}.", shown(ctx, &terms.second), terms.second.chain_name()),
+            (false, Some(3)) => format!("Waiting for them to lock {} on {}.", shown(ctx, &terms.second), terms.second.chain_name()),
+            (false, Some(4)) if yours(true) => format!("Both sides locked. Your turn: claim {} on {}.", shown(ctx, &terms.second), terms.second.chain_name()),
+            (false, Some(4)) => "Both sides locked. Waiting for them to claim theirs, which shows the secret you claim with.".to_string(),
+            (false, Some(_)) if yours(false) => format!("They claimed. Your turn: claim {} on {}.", shown(ctx, &terms.first), terms.first.chain_name()),
+            (false, Some(_)) => "Waiting for them to claim what you locked.".to_string(),
+        });
+
+        // The answerer's code, until the starter's lock shows they read it.
+        if !record.started && !locked(Side::First) {
+            ui.label(RichText::new("Show this code to who offered: their wallet completes the terms with it.").small().color(palette.soft));
+            super::code(ui, &palette, &Message::Swap(Box::new(terms.clone())));
         }
+
         ui.add_space(6.0);
 
         // The first lock, which must stand before the second goes in: a contract's is checked
@@ -1038,7 +1125,7 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                         (false, other) => format!("Their lock on {} stands: lock yours.", other.chain_name()),
                     }).color(palette.ink));
                     let ready = waiting.is_none();
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let recipient = TxCallArgumentType::Address(chain.receiver.expect("agreed"));
                         let deadline = TxCallArgumentType::I64(deadline as i64);
                         let text = TxCallArgumentType::String(hash.clone());
@@ -1104,7 +1191,7 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                         }
                         Ok(calls) => {
                             let steps = calls.len();
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 for (step, call) in calls.into_iter().enumerate() {
                                     let label = match steps {
                                         1 => format!("Lock on {}", chain_name(on.chain_id)),
@@ -1221,7 +1308,99 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
             ui.colored_label(palette.bad, trouble);
         }
 
-        ui.add_space(10.0);
+        details(ui, ctx, &terms, &standing, htlc_line);
+        more(ui, ctx, state, index);
+    });
+
+    prepared
+}
+
+/// The swap in a line or two: what you pay, what you get, and whose offer it was.
+fn headline(ui: &mut Ui, ctx: &Ctx, terms: &Terms, started: bool) {
+    let palette = *ctx.palette;
+    let (pay, get) = if started { (&terms.first, &terms.second) } else { (&terms.second, &terms.first) };
+    theme::fitted(ui, &format!("{} ⇄ {}", shown(ctx, pay), shown(ctx, get)), 24.0, 14.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
+    super::row(ui, &palette, "You pay", |ui| {
+        ui.label(format!("{} on {}", shown(ctx, pay), pay.chain_name()));
+    });
+    super::row(ui, &palette, "You get", |ui| {
+        ui.label(format!("{} on {}", shown(ctx, get), get.chain_name()));
+    });
+    ui.label(RichText::new(if started { "Your offer: you lock first." } else { "Their offer, which you answered: they lock first." }).small().color(palette.muted));
+    ui.add_space(8.0);
+}
+
+/// The steps a swap goes through, done, now and to come, from the account's side.
+fn steps(ui: &mut Ui, palette: &theme::Palette, started: bool, marks: [Step; 6]) {
+    let (me, them) = ("You", "They");
+    let (first, second) = if started { (me, them) } else { (them, me) };
+    let names = ["Offered".to_string(), "Answered".to_string(), format!("{first} lock"), format!("{second} lock"), format!("{first} claim"), format!("{second} claim")];
+
+    ui.horizontal_wrapped(|ui| {
+        for (name, mark) in names.iter().zip(marks) {
+            let (dot, color) = match mark {
+                Step::Done => ("●", palette.good),
+                Step::Now => ("◉", palette.accent),
+                Step::Later => ("○", palette.muted),
+            };
+            ui.label(RichText::new(format!("{dot} {name}")).small().color(if mark == Step::Now { palette.ink } else { color }));
+            ui.add_space(6.0);
+        }
+    });
+    ui.add_space(6.0);
+}
+
+/// Each step's mark from which are done: the first not done is now's, the rest to come.
+fn marks(done: [bool; 6]) -> [Step; 6] {
+    let current = done.iter().position(|done| !done);
+
+    std::array::from_fn(|at| match (done[at], Some(at) == current) {
+        (true, _) => Step::Done,
+        (false, true) => Step::Now,
+        (false, false) => Step::Later,
+    })
+}
+
+/// What to do now, or what the swap waits for, in a sentence.
+fn now(ui: &mut Ui, palette: &theme::Palette, text: &str) {
+    ui.label(RichText::new(text).strong().color(palette.ink));
+    ui.add_space(6.0);
+}
+
+/// The terms and where each leg stands, folded away: deadlines, the hash, the contracts, the HTLC.
+fn details(ui: &mut Ui, ctx: &Ctx, terms: &Terms, standing: &[(String, String)], htlc: Option<(String, String, Option<String>)>) {
+    let palette = *ctx.palette;
+
+    ui.add_space(6.0);
+    egui::CollapsingHeader::new(RichText::new("Details").color(palette.soft)).id_salt(("swap-details", to_hex(&terms.hash))).show(ui, |ui| {
+        for (chain, shown) in standing {
+            super::row(ui, &palette, chain, |ui| {
+                ui.label(shown);
+            });
+        }
+
+        if let Some((address, coins, paid)) = htlc {
+            super::row(ui, &palette, "Bitcoin HTLC", |ui| {
+                ui.vertical(|ui| {
+                    super::address(ui, &palette, &address);
+                    ui.label(RichText::new(coins).small().color(palette.muted));
+
+                    if let Some(paid) = paid {
+                        ui.label(RichText::new(paid).small().color(palette.soft));
+                    }
+                });
+            });
+        }
+
+        summary(ui, ctx, terms);
+    });
+}
+
+/// The rarer actions, folded away: forgetting the swap.
+fn more(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) {
+    let palette = *ctx.palette;
+
+    egui::CollapsingHeader::new(RichText::new("More").color(palette.soft)).id_salt(("swap-more", index)).show(ui, |ui| {
         let label = if state.forgetting { "Forget it: its secret goes too" } else { "Forget this swap" };
 
         if theme::quiet(ui, &palette, label).clicked() {
@@ -1237,8 +1416,6 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
             }
         }
     });
-
-    prepared
 }
 
 /// Starts a call on an EVM leg on its way, through the chain's RPC, from this account's address
@@ -1256,7 +1433,7 @@ fn learn_secret(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize
     let palette = *ctx.palette;
     ui.label(RichText::new("They claim your bitcoin first, which shows the secret on Bitcoin. Paste their claim's transaction, in hex, to read it.").color(palette.soft));
     ui.add(egui::TextEdit::multiline(&mut state.bitcoin.claim_tx).hint_text("02000000000101…").desired_rows(2).desired_width(f32::INFINITY));
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if theme::quiet(ui, &palette, "Read the secret").clicked() {
             let read = from_hex(&format!("0x{}", state.bitcoin.claim_tx.trim().trim_start_matches("0x")))
                 .ok_or("not hex".to_string())
@@ -1409,7 +1586,7 @@ fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Ter
             Spend::Refund => "Signed. Bitcoin mines it once its median time is past the lock time.",
         }).color(palette.soft));
         super::text_block(ui, &palette, &signed);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if theme::quiet(ui, &palette, "Copy").clicked() {
                 ui.ctx().copy_text(signed.clone());
             }

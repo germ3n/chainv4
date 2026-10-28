@@ -109,7 +109,7 @@ fn primary(ui: &mut Ui, ctx: &mut Ctx, from: &Address, prepared: &mut Option<Pre
 
         match ctx.chain.primary(&address) {
             Some(name) => {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(&name).color(palette.ink).size(18.0));
 
                     if theme::quiet(ui, &palette, "Clear").clicked() {
@@ -160,7 +160,7 @@ fn find(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfig,
             }
             Some(Resolved { found: Some(found), assurance }) => {
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     super::assurance(ui, &palette, &assurance);
                     ui.label(RichText::new(format!("{shown} is {}", status(found.status))).color(palette.soft));
                 });
@@ -183,12 +183,12 @@ fn find(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfig,
             }
             Some(Resolved { found: None, assurance }) if !name.contains('.') => {
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     super::assurance(ui, &palette, &assurance);
                     ui.label(RichText::new(format!("{shown} is available")).color(palette.good));
                 });
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Years").color(palette.soft));
                     ui.add(egui::TextEdit::singleline(&mut state.years).hint_text("1").desired_width(48.0));
                 });
@@ -254,7 +254,7 @@ fn owned(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfig
             ui.add_space(6.0);
             ui.separator();
             let open = state.open.as_deref() == Some(name.as_str());
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 super::assurance(ui, &palette, &resolved.assurance);
                 ui.label(RichText::new(&shown).color(palette.ink).size(16.0));
                 ui.label(RichText::new(format!("{} · expires {}", status(found.status), format::utc(found.expires))).small().color(palette.muted));
@@ -295,7 +295,7 @@ fn manage(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfi
     ui.add_space(6.0);
 
     if top {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Renew for").color(palette.soft));
             ui.add(egui::TextEdit::singleline(&mut state.renew).hint_text("1").desired_width(48.0));
             ui.label(RichText::new("years").color(palette.soft));
@@ -324,7 +324,7 @@ fn manage(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfi
         ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(220.0));
     };
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         field(ui, &mut state.target, "point at: ed25519:0x…, or empty for this address");
 
         if theme::quiet(ui, &palette, "Point").clicked() {
@@ -338,7 +338,7 @@ fn manage(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfi
         }
     });
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         field(ui, &mut state.key, "text record: url, avatar, description…");
         ui.add(egui::TextEdit::singleline(&mut state.value).hint_text("its value; empty clears it").desired_width(220.0));
 
@@ -353,7 +353,7 @@ fn manage(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfi
         }
     });
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         field(ui, &mut state.label, "subname: pay, for pay.alice…");
         ui.add(egui::TextEdit::singleline(&mut state.owner).hint_text("its owner; empty for this address").desired_width(220.0));
 
@@ -378,7 +378,7 @@ fn manage(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfi
         }
     });
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         field(ui, &mut state.give_to, "give it to: ed25519:0x…");
 
         if theme::quiet(ui, &palette, "Give").clicked() {

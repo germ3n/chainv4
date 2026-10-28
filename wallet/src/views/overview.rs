@@ -45,7 +45,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         }
 
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if theme::primary(ui, &palette, "Send", true).clicked() {
                 *ctx.page = Page::Send;
             }
@@ -66,7 +66,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
 
     ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             theme::caps(ui, &palette, "Lately");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.link("All activity").clicked() {
@@ -152,7 +152,7 @@ fn held(ui: &mut Ui, ctx: &Ctx, symbol: &str, under: &str, token: Option<&str>, 
     // The name keeps a third of the row; the amount shrinks into the rest beside its pill.
     let third = ui.available_width() / 3.0;
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.vertical(|ui| {
             ui.set_max_width(third);
             ui.add(egui::Label::new(theme::strong(symbol, 15.0).color(palette.ink)).truncate());

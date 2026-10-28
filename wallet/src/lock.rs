@@ -346,7 +346,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             ui.add_space(6.0);
 
             for (position, answer) in asked.iter().zip(answers.iter_mut()) {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.add_sized([72.0, 24.0], egui::Label::new(RichText::new(format!("Word {}", position + 1)).color(palette.muted)));
                     secret(ui, egui::TextEdit::singleline(&mut **answer).desired_width(f32::INFINITY));
                 });

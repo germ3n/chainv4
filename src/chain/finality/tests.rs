@@ -2579,6 +2579,47 @@ mod voting {
     }
 
     #[test]
+    fn a_light_client_on_a_branch_the_chain_left_goes_back_once_the_voters_justify_the_other() {
+        for finality in kinds() {
+            // Two copies of one chain, the same to its justified checkpoint at epoch 2; then one
+            // skips a slot, so their next blocks differ, and only it is justified on.
+            let (mut kept, mut left) = (open(&finality), open(&finality));
+
+            for chain in [&mut kept, &mut left] {
+                finalize_through(chain, 2);
+            }
+
+            assert_eq!(kept.tip().id(), left.tip().id());
+            let later = kept.tip().timestamp + 2 * SLOT;
+            let mut producer = AuthorityProducer::new(dev(), SLOT);
+            let mut skipped = kept.build(Vec::new(), Vec::new(), producer.address(&[]), later).unwrap();
+            skipped.seal = producer.seal(&skipped.header).unwrap();
+            kept.import(&skipped, later).unwrap();
+            finalize_through(&mut kept, 3);
+            grow_to(&mut left, kept.tip().height);
+
+            // The client followed the branch left, past epoch 3's checkpoint.
+            let params = genesis_with(Some(finality.clone())).light_params();
+            let genesis = stored_header_at(&*left.db, 0).unwrap().unwrap();
+            let mut client = crate::light::LightClient::new(params, genesis, left.genesis()).unwrap();
+            serve(&left, &mut client);
+
+            assert_eq!(client.tip().id(), left.tip().id(), "{}", finality.name());
+            assert_eq!(client.justified().epoch, 2);
+
+            // The voters justify the other's checkpoint: no error, it goes back to its own
+            // justified one, and follows the chain they chose from there.
+            assert!(client.deliver_finality(3, finality_from(&kept, 3)).is_ok(), "{}", finality.name());
+            assert_eq!(client.tip().height, 2 * INTERVAL, "back to its justified checkpoint");
+
+            serve(&kept, &mut client);
+
+            assert_eq!(client.tip().id(), kept.tip().id(), "{}", finality.name());
+            assert_eq!(Some(client.justified()), kept.justified());
+        }
+    }
+
+    #[test]
     fn a_light_client_follows_headers_and_finality_from_the_genesis_id_alone() {
         use crate::light::{LightClient, LightError};
 

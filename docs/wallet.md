@@ -582,6 +582,13 @@ such as Ethereum, Sepolia or Base, with no one in between. Each swap is two legs
 - **the HTLC on Bitcoin** is paid from any Bitcoin wallet, and claimed or refunded here, by the
   account's key or, for one watched from the offline signer, as a PSBT the signer signs.
 
+The page has three sections: **Your swaps**, **Make an offer** and **Answer an offer**, which reads
+an offer to answer or the answer to one of yours. A swap opened takes the page, with **← All
+swaps** back. It says what you pay and get, marks its six steps (offered, answered, each side's
+lock, each side's claim, in the order they happen) and says in a sentence whose turn it is; the
+button for that step follows. The terms, the hash, the contracts, each leg's state and the HTLC
+fold under **Details**, and forgetting the swap under **More**.
+
 Settings, **Swaps** names the swap contract when the chain's directory and the node do not, an optional Esplora API to
 look Bitcoin up at, and EVM chains' JSON-RPC URLs, one a line. See [Atomic swaps](swaps.md).
 
@@ -696,7 +703,13 @@ it shares with the explorer (see [The ui crate](development.md#the-ui-crate)).
   and the big numbers. The fonts and their licences are in `wallet/assets/fonts`.
 - **Layout:** each page is a column of cards beside a sidebar with the account, the pages, and
   the light client's state. Below 640 points wide, as on a phone, the sidebar gives way to a bar
-  on top with the account, the light client's dot and Lock, and tabs along the bottom.
+  on top with the account, the light client's dot and Lock, and tabs along the bottom: sharing
+  the width when they fit, otherwise each wide enough for its name in a row that scrolls
+  sideways, faded at an edge where more wait, and bringing the page opened into view. A card's
+  row puts its label above what it says on a narrow screen, and text wraps everywhere, in rows
+  too, so nothing is cut off at the screen's edge. Android's back gesture closes a view the page
+  opened, such as a swap, then returns through the pages left, each once; on the first, the app
+  goes to the background, as Android apps do.
 
 ## Building and testing
 

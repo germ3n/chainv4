@@ -97,6 +97,15 @@ sends a proof that fails.
 finds where they split. It follows the new branch only if it holds more work, and never past a
 justified checkpoint (`ConflictsWithFinality`).
 
+**A branch the voters left.** Two miners can find blocks at one height, and the two branches may
+weigh the same, so work alone keeps a client on the one it saw first. Under FFG or authority
+finality the voters decide: a justification whose votes check (from a justified source, the
+target epoch's voters, enough weight), but for a block other than the one the client holds at
+that checkpoint's height, means the client followed a branch the chain left. It drops its headers
+past its own justified checkpoint and follows the node again from there, checking every header
+as ever, and takes the justification once its headers are in. Only votes that hold move it, so a
+node cannot make it go back by saying so.
+
 **Finality,** under FFG or authority finality:
 - **Justifications** come from the node, with the light updates, many epochs to a request
   (`GET /light/finality`, see [Asking in batches](#asking-in-batches)). The client checks each

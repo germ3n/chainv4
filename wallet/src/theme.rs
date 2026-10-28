@@ -59,7 +59,9 @@ pub fn install_fonts(ctx: &egui::Context) {
     chainv4_ui::install_fonts(ctx, &TYPEFACE);
 }
 
-/// Dresses egui in a palette, roomy.
+/// Dresses egui in a palette, roomy. Text wraps everywhere, in rows too, where egui would let it
+/// run past the edge: a phone's screen is narrow, and nothing the wallet says may be cut off.
 pub fn apply(ctx: &egui::Context, palette: &Palette) {
     chainv4_ui::apply(ctx, palette, &Density::COMFORTABLE);
+    ctx.all_styles_mut(|style| style.wrap_mode = Some(egui::TextWrapMode::Wrap));
 }

@@ -1551,6 +1551,18 @@ impl LightClient {
             return Ok(Took::Waits);
         }
 
+        // A justification that holds, for a block other than the one followed at its height: the
+        // client followed a branch of a fork the chain left, which may weigh as much as the one it
+        // went on with. The voters say which: it goes back to its own justified checkpoint and
+        // follows the node again from there, checking every header as ever, and the justification
+        // is taken once the headers it is for are in.
+        if !self.on_chain(&justification.target) {
+            self.check_votes(justification)?;
+            self.rewind();
+
+            return Ok(Took::Waits);
+        }
+
         self.check_justification(justification)?;
         let (source, target) = (justification.source, justification.target);
         self.justified.insert(target.epoch, target.block);
@@ -1566,16 +1578,45 @@ impl LightClient {
         Ok(Took::Taken)
     }
 
+    /// Whether the header followed at a checkpoint's height is its block.
+    fn on_chain(&self, checkpoint: &Checkpoint) -> bool {
+        let interval = self.params.finality.and_then(|finality| finality.checkpoint_interval()).unwrap_or(1);
+
+        self.sealed(checkpoint.epoch * interval).is_some_and(|sealed| sealed.id() == checkpoint.block)
+    }
+
+    /// Drops the headers past the justified checkpoint, to follow the node again from there.
+    fn rewind(&mut self) {
+        let keep = self.justified_height().max(self.base);
+
+        for dropped in self.headers.drain((keep + 1 - self.base) as usize..) {
+            self.heights.remove(&dropped.id());
+        }
+
+        self.work.truncate((keep + 1 - self.base) as usize);
+        self.updated.retain(|height| *height <= keep);
+        self.stalled = None;
+        self.back = None;
+        self.headers_done = false;
+        self.justifications_done = false;
+    }
+
     fn check_justification(&self, justification: &Justification) -> Result<(), LightError> {
         let (source, target) = (justification.source, justification.target);
-        let interval = self
-            .params
-            .finality
-            .and_then(|finality| finality.checkpoint_interval())
-            .ok_or(LightError::BadJustification("the chain does not vote"))?;
-        let on_chain = |checkpoint: &Checkpoint| self.sealed(checkpoint.epoch * interval).is_some_and(|sealed| sealed.id() == checkpoint.block);
 
-        if source.epoch >= target.epoch || !on_chain(&target) || !on_chain(&source) {
+        if source.epoch >= target.epoch || !self.on_chain(&target) || !self.on_chain(&source) {
+            return Err(LightError::BadJustification("its link is not on the chain followed"));
+        }
+
+        self.check_votes(justification)
+    }
+
+    /// A justification's votes: from a justified source, each a voter's, sorted, signed, for its
+    /// link, and together weighing what its target's epoch needs.
+    fn check_votes(&self, justification: &Justification) -> Result<(), LightError> {
+        let (source, target) = (justification.source, justification.target);
+
+        if source.epoch >= target.epoch {
             return Err(LightError::BadJustification("its link is not on the chain followed"));
         }
 

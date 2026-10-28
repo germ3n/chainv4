@@ -270,7 +270,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
             Destination::Blank | Destination::Address(_) => {}
             Destination::Named { shown, resolved: Some(resolved) } => match resolved.target() {
                 Some(target) => {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         super::assurance(ui, &palette, &resolved.assurance);
                         ui.label(RichText::new(format!("{shown} resolves to {}", format::short(&target.to_string()))).small().color(palette.soft));
                     });
@@ -314,7 +314,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
             ui.add_space(6.0);
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if theme::primary(ui, &palette, "Review", !busy).clicked() {
                 state.step = match draft(ctx, state) {
                     Ok((draft, body)) => {
@@ -380,7 +380,7 @@ fn prepared(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, busy: bool) {
             ui.add_space(6.0);
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if theme::primary(ui, &palette, "Review", !busy).clicked() {
                 state.step = match draft(ctx, state) {
                     Ok((draft, body)) => {
@@ -606,7 +606,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
         }
 
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let key = ctx.holders.iter().find_map(|holder| holder.key(&draft.from));
             let by_metamask = ctx.holders.iter().any(|holder| holder.by_metamask() && holder.addresses().contains(&draft.from));
             let send = match (key.is_some(), by_metamask, warning.is_some()) {
@@ -767,7 +767,7 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Sign it in MetaMask");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spinner();
             ui.label(RichText::new(waiting).color(palette.soft));
         });
@@ -801,14 +801,14 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, id: &str) {
             Some(checked) => (format!("Proven in block {}, not final yet.", checked.height), palette.accent),
             None => ("The node took it. Waiting for a block to hold it…".to_string(), palette.warn),
         };
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             theme::dot(ui, color);
             ui.label(RichText::new(text).color(palette.ink));
         });
         ui.add_space(6.0);
         super::row(ui, &palette, "Transaction", |ui| super::address(ui, &palette, id));
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if theme::primary(ui, &palette, "Send another", true).clicked() {
                 state.step = Step::Edit;
             }

@@ -77,7 +77,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BitcoinState, account: &str,
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &format!("On {}, {} of {}", wallet.network.name(), wallet.threshold, wallet.xpubs.len()));
         let receiving = descriptor(wallet.threshold, &wallet.xpubs, wallet.network, 0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Its descriptor, for Sparrow, Nunchuk or Bitcoin Core to watch it").small().color(palette.soft));
 
             if theme::quiet(ui, &palette, "Copy").clicked() {
@@ -113,7 +113,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BitcoinState, account: &str,
                 false => format!("{} {}, {} coin{}, as Esplora says", format::units(&held.to_string(), 8), wallet.network.symbol(), state.utxos.len(), if state.utxos.len() == 1 { "" } else { "s" }),
             });
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if theme::quiet(ui, &palette, "Look up its coins").clicked() {
                 look(ctx, state, wallet);
             }
@@ -238,7 +238,7 @@ fn pay(ui: &mut Ui, ctx: &mut Ctx, state: &mut BitcoinState, wallet: &MultisigWa
         theme::caps(ui, &palette, "Pay from it on Bitcoin");
         ui.add(egui::TextEdit::singleline(&mut state.to).hint_text(format!("To: {}1q…", wallet.network.hrp())).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
         ui.add(egui::TextEdit::singleline(&mut state.amount).hint_text(format!("Amount in {}", wallet.network.symbol())).desired_width(f32::INFINITY));
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Fee rate, sat/vB").color(palette.soft));
             ui.add(egui::TextEdit::singleline(&mut state.fee_rate).desired_width(48.0));
         });

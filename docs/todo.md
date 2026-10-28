@@ -34,6 +34,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ### Consensus
 
+- [ ] **Polish the explorer and the wallet.** A pass over both apps as people use them, on a phone
+  first: what each page says and in what order, empty and loading states, what is hard to find
+  or to read, and the tools the explorer still lacks (see the queued explorer batch).
 - [ ] **The directory: governance, or an admin key, not genesis.** Genesis may name a `directory`
   today, which makes little sense: the contracts it names do not exist before the chain does.
   Drop it from genesis, keep `Change::Directory` for chains with governance, and give a chain
@@ -355,6 +358,11 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   coin, tokens and ERC-20s on the EVM, each pool's shares a clone of `contracts/lua/lp_token.lua`,
   and `contracts/evm/Dex.sol`'s WDEV, factory, pairs and router; `contracts.clone` for contracts
   that make contracts; `chainv4 dex`; the wallet's Trade page. See [DEX](dex.md).
+- [ ] **Decide what the DEXes' fees are for.** Today every trade's 0.3% stays in the pool, for its
+  liquidity providers alone, on both DEXes, fixed in the code. Decide whether part of it goes
+  elsewhere (a protocol share to a treasury, burned like the chain's fees, or to stakers), whether
+  the rate is one for all pools or set per pool, and whether governance sets either, as it sets
+  the chain's own fees; then the native DEX, Dex.sol and the apps' quotes follow.
 - [x] **The DEX and swaps in the explorer.** A DEX page, both DEXes' pools with prices, volume and
   fees over a day and a week, a pool's price chart and latest activity; a Swaps page, the swap
   contract's locks, claims and refunds with each lock's finality, and a swap found by hash or by

@@ -31,6 +31,49 @@ const MAX_CHECKED: usize = 2_000;
 /// Below this width, in points, as on a phone, the sidebar gives way to a bar on top and tabs at
 /// the bottom.
 const NARROW: f32 = 640.0;
+/// How many pages the back gesture remembers.
+const VISITED: usize = 32;
+
+/// The pages left, latest last, each once, for the back gesture: a page left again moves to the
+/// end, so going back never loops between two.
+pub(crate) struct Visits {
+    left: Vec<Page>,
+    shown: Page,
+}
+
+impl Visits {
+    pub(crate) fn new(first: Page) -> Visits {
+        Visits { left: Vec::new(), shown: first }
+    }
+
+    /// Notes the page shown now; the one before is left, if it changed.
+    pub(crate) fn see(&mut self, page: Page) {
+        if page == self.shown {
+            return;
+        }
+
+        let left = self.shown;
+        self.left.retain(|known| *known != left);
+        self.left.push(left);
+        self.shown = page;
+
+        if self.left.len() > VISITED {
+            self.left.remove(0);
+        }
+    }
+
+    /// The page to go back to, now shown; None at the first.
+    pub(crate) fn back(&mut self) -> Option<Page> {
+        let page = self.left.pop()?;
+        self.shown = page;
+
+        Some(page)
+    }
+}
+/// The narrowest a bottom tab gets before the row scrolls, wide enough for "Contracts".
+const TAB_WIDTH: f32 = 72.0;
+/// How wide the fade is at a scrolling row's edge.
+const TAB_FADE: f32 = 24.0;
 
 /// What this install is, chosen on its first launch. Changing it takes removing its wallets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +303,11 @@ pub struct Wallet {
     book: Book,
     holders: Vec<Holder>,
     page: Page,
+    /// The pages left, for the back gesture to return to.
+    visits: Visits,
+    /// The page the bottom tabs last scrolled to, so they bring a newly opened one into view and
+    /// otherwise stay where a finger left them.
+    tabs_at: Option<Page>,
     coin: Coin,
     /// The node's faucet, as its status describes it, on a node that runs one.
     faucet: Option<serde_json::Value>,
@@ -310,6 +358,8 @@ impl Wallet {
             book: Book::default(),
             holders: Vec::new(),
             page: Page::Overview,
+            tabs_at: None,
+            visits: Visits::new(Page::Overview),
             coin: Coin {
                 symbol: "DEV".to_string(),
                 decimals: 18,
@@ -748,32 +798,92 @@ impl Wallet {
         });
     }
 
-    /// On a narrow screen, the pages, as tabs along the bottom.
+    /// Keeps the pages left, and takes Android's back gesture, or a mouse's back button: a view the
+    /// page opened closes first, such as a swap, then the page before comes back. With neither, it
+    /// is left for the platform, which sends the app to the background.
+    fn go_back(&mut self, ui: &mut Ui) {
+        self.visits.see(self.page);
+
+        if !ui.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
+            return;
+        }
+
+        let went = self.views.back(self.page) || self.visits.back().inspect(|page| self.page = *page).is_some();
+
+        if went {
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack));
+        }
+    }
+
+    /// On a narrow screen, the pages, as tabs along the bottom: sharing the width when they fit,
+    /// each as wide as its name needs, otherwise, in a row that scrolls sideways.
     fn tabs(&mut self, ui: &mut Ui) {
-        let palette = self.palette;
         let nav = views::nav(self.settings.role());
-        let width = ui.available_width() / nav.len() as f32;
+        let shared = ui.available_width() / nav.len() as f32;
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.spacing_mut().button_padding = egui::vec2(2.0, 4.0);
-        ui.horizontal(|ui| {
-            for &(page, name) in nav {
-                let selected = self.page == page;
-                let name = if page == Page::Overview { "Home" } else { name };
-                let text = theme::strong(name, 12.0).color(if selected { palette.ink } else { palette.muted });
-                let button = egui::Button::new(text).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
-                let response = ui.add_sized([width, 46.0], button);
 
-                if selected {
-                    let rect = response.rect;
-                    ui.painter()
-                        .rect_filled(egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 1.5), egui::vec2(28.0, 3.0)), 2.0, palette.accent);
-                }
+        if shared >= TAB_WIDTH {
+            ui.horizontal(|ui| self.tab_row(ui, nav, shared));
 
-                if response.clicked() {
-                    self.page = page;
+            return;
+        }
+
+        egui::ScrollArea::horizontal()
+            .id_salt("tabs")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| ui.horizontal(|ui| self.tab_row(ui, nav, TAB_WIDTH)));
+    }
+
+    fn tab_row(&mut self, ui: &mut Ui, nav: &[(Page, &'static str)], width: f32) {
+        let palette = self.palette;
+
+        for &(page, name) in nav {
+            let selected = self.page == page;
+            let name = if page == Page::Overview { "Home" } else { name };
+            let text = theme::strong(name, 12.0).color(if selected { palette.ink } else { palette.muted });
+            let button = egui::Button::new(text).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
+            let response = ui.add_sized([width, 46.0], button);
+
+            if selected {
+                let rect = response.rect;
+                ui.painter()
+                    .rect_filled(egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 1.5), egui::vec2(28.0, 3.0)), 2.0, palette.accent);
+
+                // A page opened elsewhere, a link or another page's button, comes into view.
+                if self.tabs_at != Some(page) {
+                    response.scroll_to_me(Some(egui::Align::Center));
+                    self.tabs_at = Some(page);
                 }
             }
-        });
+
+            if response.clicked() {
+                self.page = page;
+            }
+        }
+
+        // The edges fade where more tabs wait, so a row that scrolls says so.
+        let shown = ui.clip_rect();
+        let row = ui.min_rect();
+        let fade = |inner: f32, edge: f32| {
+            let clear = egui::Color32::TRANSPARENT;
+            let mut mesh = egui::Mesh::default();
+            mesh.colored_vertex(egui::pos2(inner, shown.top()), clear);
+            mesh.colored_vertex(egui::pos2(edge, shown.top()), palette.nav);
+            mesh.colored_vertex(egui::pos2(edge, shown.bottom()), palette.nav);
+            mesh.colored_vertex(egui::pos2(inner, shown.bottom()), clear);
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+            ui.painter().add(mesh);
+        };
+
+        if row.left() < shown.left() - 1.0 {
+            fade(shown.left() + TAB_FADE, shown.left());
+        }
+
+        if row.right() > shown.right() + 1.0 {
+            fade(shown.right() - TAB_FADE, shown.right());
+        }
     }
 }
 
@@ -810,6 +920,7 @@ impl eframe::App for Wallet {
             return;
         }
 
+        self.go_back(ui);
         let narrow = ui.available_width() < NARROW;
         let bar = egui::Frame::new().fill(palette.nav).stroke(egui::Stroke::new(1.0, palette.line));
 
@@ -948,6 +1059,22 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use {super::*, serde_json::json};
+
+    #[test]
+    fn back_returns_through_the_pages_left_each_once_and_stops_at_the_first() {
+        let mut visits = Visits::new(Page::Overview);
+        visits.see(Page::Overview);
+        visits.see(Page::Swaps);
+        visits.see(Page::Send);
+        // Back to Swaps, then on to Send again: Swaps is left once, not twice.
+        assert_eq!(visits.back(), Some(Page::Swaps));
+        visits.see(Page::Swaps);
+        visits.see(Page::Send);
+
+        assert_eq!(visits.back(), Some(Page::Swaps));
+        assert_eq!(visits.back(), Some(Page::Overview));
+        assert_eq!(visits.back(), None, "the first page: left to the platform");
+    }
 
     #[test]
     fn the_vault_of_a_wallet_from_before_several_becomes_the_first() {

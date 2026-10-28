@@ -780,6 +780,13 @@ impl eframe::App for Explorer {
         self.take(now, time);
         self.poll(time);
         layout::suit_touch(ui.ctx());
+
+        // Android's back gesture, and a mouse's back button: the page before, while there is one.
+        // At the first, it is left for the platform, which sends the app to the background.
+        if !self.back.is_empty() && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack)) {
+            self.back();
+        }
+
         let palette = self.palette;
         let narrow = layout::is_narrow(ui.available_width());
         let bar = egui::Frame::new().fill(palette.nav).stroke(egui::Stroke::new(1.0, palette.line));

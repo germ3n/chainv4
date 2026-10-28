@@ -108,6 +108,22 @@ struct OnAndroid {
 }
 
 impl OnAndroid {
+    /// Android's back gesture or button comes to egui as `Key::BrowserBack`, which an app takes
+    /// when it has somewhere to go back to, a page or a view it opened. One it left alone is at its
+    /// first page: as Android apps do there, it goes to the background, still running, rather than
+    /// leaving the gesture doing nothing.
+    fn back_out(&self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
+            return;
+        }
+
+        let moved = java(&self.app, |env, activity| env.call_method(activity, jni_str!("moveTaskToBack"), jni_sig!("(Z)Z"), &[JValue::Bool(true)])?.z());
+
+        if let Err(err) = moved {
+            log::warn!("could not move the app to the background: {err}");
+        }
+    }
+
     /// Shows the soft keyboard while a text field has focus, and hides it once none does.
     /// egui-winit would, from egui's IME output, but it also hides and shows the keyboard again
     /// whenever egui interrupts a composition, which a text field does on every tap on it and every
@@ -652,6 +668,7 @@ impl eframe::App for OnAndroid {
         ui.scope_builder(egui::UiBuilder::new().max_rect(seen), |ui| self.inner.ui(ui, frame));
 
         let ctx = ui.ctx().clone();
+        self.back_out(&ctx);
         self.editing.show(&ctx, self.keyboard, &mut AndroidClipboard(&self.app));
         self.keep_keyboard(&ctx);
         self.copy(&ctx);

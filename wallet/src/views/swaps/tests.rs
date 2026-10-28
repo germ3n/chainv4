@@ -242,3 +242,15 @@ fn a_multisig_swaps_with_its_keys_at_the_swap_s_index_and_its_members_sign_the_c
     assert_eq!(claim.inputs[0].witness.len(), 6);
     assert!(matches!(for_members(&terms, Spend::Refund, &form, &wallet), Err(why) if why.contains("not the multisig's")), "the refund is Alice's");
 }
+
+#[test]
+fn a_swap_s_steps_mark_what_is_done_the_one_now_and_the_rest_to_come() {
+    use super::Step::{Done, Later, Now};
+
+    assert_eq!(super::marks([true, false, false, false, false, false]), [Done, Now, Later, Later, Later, Later], "offered, waiting for the answer");
+    assert_eq!(super::marks([true, true, true, false, false, false]), [Done, Done, Done, Now, Later, Later], "the first lock in");
+    assert_eq!(super::marks([true; 6]), [Done; 6], "both claimed");
+    // A step seen done out of order, such as a Bitcoin lock the light client cannot see, leaves the
+    // earliest open one as now's.
+    assert_eq!(super::marks([true, true, false, true, false, false]), [Done, Done, Now, Done, Later, Later]);
+}

@@ -240,7 +240,7 @@ impl<R: Send + 'static> Link<R> {
                 }
                 Stage::Priced(tx) => {
                     review(ui, &palette, &pending.call, tx, pending.chain_id);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let away = secret(ctx, &pending.from).is_none();
 
                         if theme::primary(ui, &palette, if away { "Ask the signer" } else { "Sign and send" }, true).clicked() {

@@ -445,7 +445,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, send: &mut SendS
     }
 
     if native.is_some() && evm.is_some() {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut state.venue, Venue::Native, "Native pools");
             ui.selectable_value(&mut state.venue, Venue::Evm, "EVM pools");
         });
@@ -556,7 +556,7 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
             return;
         };
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if state.from != COIN && theme::quiet(ui, &palette, &format!("1. Let the DEX move {}", symbol(ctx, &state.from))).clicked() {
                 *prepared = approve(ctx, state.venue, me, &state.from, amount);
             }
@@ -692,7 +692,7 @@ fn liquidity(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pools: &[DexPoo
             super::row(ui, &palette, "With", |ui| {
                 ui.label(shown(ctx, &pool.b, amount_b));
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for (asset, amount) in [(pool.a, amount_a), (pool.b, amount_b)] {
                     if asset != COIN && theme::quiet(ui, &palette, &format!("Let it move {}", symbol(ctx, &asset))).clicked() {
                         *prepared = approve(ctx, state.venue, me, &asset, amount);
@@ -723,7 +723,7 @@ fn liquidity(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pools: &[DexPoo
                 super::row(ui, &palette, "For", |ui| {
                     ui.label(format!("{} and {}", shown(ctx, &pool.a, a), shown(ctx, &pool.b, b)));
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if state.venue == Venue::Evm && theme::quiet(ui, &palette, "1. Let the router take the shares").clicked() {
                         *prepared = router(ctx).and_then(|router| match pool.share {
                             Address::Evm(pair) => Some(evm_call(me, pair, approve_input(router, shares), u256::ZERO, "Let the router take the shares".to_string())),
@@ -868,7 +868,7 @@ fn create(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, prepared: &mut Option<
             let price = amount_b.as_f64() / 10f64.powi(i32::from(decimals(ctx, &b))) / (amount_a.as_f64() / 10f64.powi(i32::from(decimals(ctx, &a))));
             ui.label(format!("1 {} = {price:.6} {}", symbol(ctx, &a), symbol(ctx, &b)));
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for (asset, amount) in [(a, amount_a), (b, amount_b)] {
                 if asset != COIN && theme::quiet(ui, &palette, &format!("Let it move {}", symbol(ctx, &asset))).clicked() {
                     *prepared = approve(ctx, state.venue, me, &asset, amount);
