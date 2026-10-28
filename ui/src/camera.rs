@@ -2,7 +2,8 @@
 //! the newest at a time, for the app to search and to draw. In the browser, getUserMedia, the back
 //! camera where there is one. On the desktop, the first webcam, through nokhwa. On Android, the back
 //! camera through Camera2, by the APK's own Java class, which the app's Android glue drives, as it
-//! drives the picker. Behind the camera feature: only an app that reads codes needs it.
+//! drives the picker. On iOS, the back camera through AVFoundation. Behind the camera feature: only
+//! an app that reads codes needs it.
 //!
 //! A camera runs from open until it is dropped. Frames come as fast as the camera gives them; an
 //! app that is slower to read them than that only ever sees the newest.
@@ -110,9 +111,16 @@ impl Camera {
             Camera { slot, ctx: ctx.clone() }
         }
 
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
         {
             desktop::open(ctx.clone(), slot.clone());
+
+            Camera { slot }
+        }
+
+        #[cfg(target_os = "ios")]
+        {
+            ios::open(ctx.clone(), slot.clone());
 
             Camera { slot }
         }
@@ -144,6 +152,9 @@ impl Drop for Camera {
 
         #[cfg(target_os = "android")]
         android::want(&self.ctx, None);
+
+        #[cfg(target_os = "ios")]
+        ios::stop();
     }
 }
 
@@ -176,7 +187,7 @@ fn fail(slot: &Slot, ctx: &egui::Context, why: String) {
 
 /// The first webcam, on a thread of its own, through nokhwa: AVFoundation on macOS, V4L2 on Linux,
 /// Media Foundation on Windows.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 mod desktop {
     use {
         super::{Frame, Slot, fail, hand, lock},
@@ -431,3 +442,205 @@ pub(crate) mod android {
 
 #[cfg(test)]
 mod tests;
+
+/// The back camera through AVFoundation: a capture session on the app's own thread, its frames
+/// delivered on a queue of their own, each one's luma copied out, the first plane of the
+/// bi-planar YUV iOS gives, or worked out from BGRA, and turned upright, as the sensor lies
+/// sideways in a phone held up.
+#[cfg(target_os = "ios")]
+mod ios {
+    use {
+        super::{Frame, Slot, fail, hand},
+        dispatch2::{DispatchQueue, DispatchRetained},
+        objc2::rc::Retained,
+        objc2::runtime::{Bool, ProtocolObject},
+        objc2::{AllocAnyThread, DefinedClass, define_class, msg_send},
+        objc2_av_foundation::{
+            AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput, AVCaptureOutput, AVCaptureSession, AVCaptureSessionPreset640x480,
+            AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeVideo,
+        },
+        objc2_core_media::CMSampleBuffer,
+        objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
+            CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidth, CVPixelBufferGetWidthOfPlane, CVPixelBufferIsPlanar, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+            CVPixelBufferUnlockBaseAddress,
+        },
+        objc2_foundation::{NSObject, NSObjectProtocol},
+        std::cell::RefCell,
+    };
+
+    /// The session running, its delegate and its queue, kept on the app's thread until stopped.
+    struct Live {
+        session: Retained<AVCaptureSession>,
+        _delegate: Retained<Delegate>,
+        queue: DispatchRetained<DispatchQueue>,
+    }
+
+    std::thread_local! {
+        static LIVE: RefCell<Option<Live>> = const { RefCell::new(None) };
+    }
+
+    /// The session, for its own queue to start and stop: AVFoundation lets any thread do that.
+    struct Session(Retained<AVCaptureSession>);
+
+    // SAFETY: startRunning and stopRunning may be called from any thread, as Apple documents; they
+    // are only ever called from the camera's own serial queue.
+    unsafe impl Send for Session {}
+
+    impl Session {
+        // Taking self whole, so a closure moves the Session, not its field.
+        fn start(self) {
+            // SAFETY: as above.
+            unsafe { self.0.startRunning() };
+        }
+
+        fn stop(self) {
+            // SAFETY: as above.
+            unsafe { self.0.stopRunning() };
+        }
+    }
+
+    pub(super) struct Ivars {
+        slot: Slot,
+        ctx: egui::Context,
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[name = "Chainv4CameraDelegate"]
+        #[ivars = Ivars]
+        struct Delegate;
+
+        unsafe impl NSObjectProtocol for Delegate {}
+
+        unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for Delegate {
+            #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
+            fn captured(&self, _output: &AVCaptureOutput, buffer: &CMSampleBuffer, _connection: &AVCaptureConnection) {
+                if let Some(frame) = luma(buffer) {
+                    hand(&self.ivars().slot, &self.ivars().ctx, frame.turned(1));
+                }
+            }
+        }
+    );
+
+    impl Delegate {
+        fn new(slot: Slot, ctx: egui::Context) -> Retained<Delegate> {
+            let this = Delegate::alloc().set_ivars(Ivars { slot, ctx });
+
+            // SAFETY: NSObject's init, on a fresh instance.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// A frame's grey, row after row: the luma plane of the bi-planar YUV iOS gives by default, or
+    /// worked out from BGRA should it give that.
+    fn luma(buffer: &CMSampleBuffer) -> Option<Frame> {
+        // SAFETY: a video sample buffer, as the delegate gets it, holds an image buffer.
+        let image = unsafe { buffer.image_buffer() }?;
+        // SAFETY: the image buffer is alive while it is locked, read and unlocked here.
+        unsafe { CVPixelBufferLockBaseAddress(&image, CVPixelBufferLockFlags::ReadOnly) };
+        let planar = CVPixelBufferIsPlanar(&image);
+        let (width, height, row, base) = match planar {
+            true => (CVPixelBufferGetWidthOfPlane(&image, 0), CVPixelBufferGetHeightOfPlane(&image, 0), CVPixelBufferGetBytesPerRowOfPlane(&image, 0), CVPixelBufferGetBaseAddressOfPlane(&image, 0)),
+            false => (CVPixelBufferGetWidth(&image), CVPixelBufferGetHeight(&image), CVPixelBufferGetBytesPerRow(&image), CVPixelBufferGetBaseAddress(&image)),
+        };
+        let mut luma = Vec::with_capacity(width * height);
+
+        if !base.is_null() {
+            for y in 0..height {
+                // SAFETY: the base address is locked, and each row holds bytes_per_row bytes, at
+                // least a byte a pixel in the luma plane and four in BGRA.
+                let line = unsafe { std::slice::from_raw_parts(base.cast::<u8>().add(y * row), row) };
+
+                match planar {
+                    true => luma.extend_from_slice(&line[..width]),
+                    false => luma.extend(line.chunks_exact(4).take(width).map(|bgra| ((u32::from(bgra[2]) * 77 + u32::from(bgra[1]) * 150 + u32::from(bgra[0]) * 29) >> 8) as u8)),
+                }
+            }
+        }
+
+        // SAFETY: as it was locked above.
+        unsafe { CVPixelBufferUnlockBaseAddress(&image, CVPixelBufferLockFlags::ReadOnly) };
+
+        (luma.len() == width * height && width > 0).then_some(Frame { width, height, luma })
+    }
+
+    pub(super) fn open(ctx: egui::Context, slot: Slot) {
+        // SAFETY: AVFoundation's own constant.
+        let Some(video) = (unsafe { AVMediaTypeVideo }) else {
+            return fail(&slot, &ctx, "this system has no video".to_string());
+        };
+
+        // SAFETY: asking, and asking for, the camera's permission takes no other state.
+        match unsafe { AVCaptureDevice::authorizationStatusForMediaType(video) } {
+            AVAuthorizationStatus::Authorized => start(ctx, slot),
+            AVAuthorizationStatus::NotDetermined => {
+                let asked = block2::RcBlock::new(move |granted: Bool| {
+                    let (ctx, slot) = (ctx.clone(), slot.clone());
+
+                    // Started on the app's thread, which keeps the session.
+                    DispatchQueue::main().exec_async(move || match granted.as_bool() {
+                        true => start(ctx, slot),
+                        false => fail(&slot, &ctx, denied()),
+                    });
+                });
+                unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(video, &asked) };
+            }
+            _ => fail(&slot, &ctx, denied()),
+        }
+    }
+
+    fn denied() -> String {
+        "the camera is not allowed: let this app use it in Settings, Privacy & Security, Camera".to_string()
+    }
+
+    fn start(ctx: egui::Context, slot: Slot) {
+        if let Err(why) = started(&ctx, &slot) {
+            fail(&slot, &ctx, why);
+        }
+    }
+
+    fn started(ctx: &egui::Context, slot: &Slot) -> Result<(), String> {
+        stop();
+        // SAFETY: a fresh session and output, set up before they run, on the app's thread.
+        unsafe {
+            let video = AVMediaTypeVideo.ok_or("this system has no video")?;
+            let session = AVCaptureSession::new();
+            session.setSessionPreset(AVCaptureSessionPreset640x480);
+            let device = AVCaptureDevice::defaultDeviceWithMediaType(video).ok_or("no camera to open")?;
+            let input = AVCaptureDeviceInput::deviceInputWithDevice_error(&device).map_err(|err| format!("the camera would not open: {}", err.localizedDescription()))?;
+
+            if !session.canAddInput(&input) {
+                return Err("the camera would not start".to_string());
+            }
+
+            session.addInput(&input);
+            let output = AVCaptureVideoDataOutput::new();
+            output.setAlwaysDiscardsLateVideoFrames(true);
+            let queue = DispatchQueue::new("org.chainv4.ui.camera", None);
+            let delegate = Delegate::new(slot.clone(), ctx.clone());
+            output.setSampleBufferDelegate_queue(Some(ProtocolObject::from_ref(&*delegate)), Some(&queue));
+
+            if !session.canAddOutput(&output) {
+                return Err("the camera would not give frames".to_string());
+            }
+
+            session.addOutput(&output);
+            let running = Session(session.clone());
+            // startRunning blocks until the camera runs: off the app's thread.
+            queue.exec_async(move || running.start());
+            LIVE.with(|live| *live.borrow_mut() = Some(Live { session, _delegate: delegate, queue }));
+        }
+
+        Ok(())
+    }
+
+    /// Stops the session running, if one is.
+    pub(super) fn stop() {
+        if let Some(live) = LIVE.with(|live| live.borrow_mut().take()) {
+            let stopping = Session(live.session);
+            live.queue.exec_async(move || stopping.stop());
+        }
+    }
+}
+

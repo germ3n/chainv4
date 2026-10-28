@@ -445,6 +445,19 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 same trouble: on a fork above the justified checkpoint it stepped back a whole batch, took the
 batch's start, below the checkpoint, for the fork, and failed as `ConflictsWithFinality`; under
 voting finality it now goes back to the checkpoint and follows the node from there.
+- **iOS renders with wgpu, everything else with glow.** Each app's manifest asks eframe for glow
+  off iOS and wgpu on it, as does `ui`'s: a renderer feature for both would build glutin for iOS,
+  which has no OpenGL to give it. iOS also leaves out rfd and nokhwa, which have no iOS side;
+  `ui/src/files.rs` and `ui/src/camera.rs` have their own iOS modules on UIKit and AVFoundation,
+  and Face ID shares the macOS module, `mac`, the Keychain and LocalAuthentication being both
+  systems'.
+- **iOS's back is a swipe.** iOS has no back button, so `ui/src/ios.rs` turns a touch that starts
+  within 24 points of the left edge and moves 80 points right into `Key::BrowserBack`, the key
+  Android's gesture sends; the apps handle both the same.
+- **A free Apple ID signs through a stub app.** Xcode makes a provisioning profile only for an
+  app it builds, so `ui/build-ios.sh --provision` has XcodeGen write a stub of the same bundle id,
+  which Xcode signs automatically; the real app is then signed with that profile's entitlements
+  and installed with `devicectl`.
 - **The anvil test is ignored** (`a_multisig_s_contract_sits_at_one_address_on_anvil_and_chainv4_and_pays_on_anvil`):
   run it with `--ignored` where Foundry's `anvil` is installed; it takes port 18965.
 - **Light updates gained a field again.** `LightUpdate::switched` is a plain field, not an

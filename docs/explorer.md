@@ -329,6 +329,15 @@ artifacts named `chainv4-explorer-android-ARCH`, and a `v*` tag attaches them to
 - **The bars and the keyboard:** the app keeps out from under the status bar, the navigation bar
   and the keyboard, and the keyboard comes up for a focused field.
 
+
+## iOS
+
+`explorer/build-ios.sh` builds the iOS app through `ui/build-ios.sh`, just as the wallet's is
+built: the Simulator with `--sim`, an unsigned IPA with `--ipa`, and a free Apple ID's signing
+with `--provision TEAMID` once and then `--install` (see [iOS](wallet.md#ios) in the wallet's
+guide). It is `org.chainv4.explorer`, for iOS 16 and up, its icon from
+`explorer/assets/icon.png`; iOS's swipe in from the left edge goes back a page.
+
 ## What to keep in mind
 
 - **The API is plain HTTP.** Keep a node's API, and so the explorer's traffic, on a trusted

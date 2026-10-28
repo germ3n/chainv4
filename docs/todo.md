@@ -60,6 +60,11 @@ offline; these would make that hold up as a treasury.
 
 ### Consensus
 
+- [ ] **Mining pools.** Many miners sharing one node's work and its rewards: the node already
+  hands work to workers over its mining port; a pool would count each miner's shares at an
+  easier difficulty, pay out by them (on chain, by a pool contract, or from the pool's
+  account), and show each miner what it found and is owed. A batch of its own, its design asked
+  for when it starts.
 - [ ] **Polish the explorer and the wallet.** A pass over both apps as people use them, on a phone
   first: what each page says and in what order, empty and loading states, what is hard to find
   or to read, and the tools the explorer still lacks (see the queued explorer batch).

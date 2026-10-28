@@ -5,7 +5,7 @@ name = "chainv4-explorer"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "A chainv4 explorer: blocks, transactions and their hops, the network and the mempool, live. Runs as a desktop app, in the browser, and on Android."
+description = "A chainv4 explorer: blocks, transactions and their hops, the network and the mempool, live. Runs as a desktop app, in the browser, on Android and on iOS."
 
 # The app is a library, as Android loads it; the binary runs it on the desktop and in the browser.
 [lib]
@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 # Only the parts that build for the browser too: transactions, keys and hashes.
 chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "abi", "swap", "dex"] }
-eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "persistence"] }
 egui = "0.37.0"
 zeroize = "1.9.1"
 # The look's widgets, talking to the node through a proxy, and running on Android, shared with the
@@ -30,7 +30,13 @@ serde_json = "1.0.154"
 web-time = "1.1.0"
 wincode = "0.6.3"
 
-[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+# glow everywhere but iOS: eframe builds with a renderer only.
+[target.'cfg(not(target_os = "ios"))'.dependencies.eframe]
+version = "0.37.0"
+default-features = false
+features = ["glow"]
+
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "links", "wayland", "x11"] }
 env_logger = "0.11.11"
 
@@ -42,6 +48,10 @@ web-sys = { version = "0.3.85", features = ["Document", "Element", "HtmlCanvasEl
 
 # Android runs it in a NativeActivity: no Java of its own, and chainv4-ui does the rest.
 # accesskit does not work with one.
+# iOS draws through Metal, wgpu's, as Apple has deprecated OpenGL there; chainv4-ui does the rest.
+[target.'cfg(target_os = "ios")'.dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["android-native-activity"] }
 

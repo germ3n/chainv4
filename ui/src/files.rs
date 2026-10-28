@@ -24,7 +24,7 @@ pub struct Pick {
     pub camera: bool,
 }
 
-/// The images a photo picked on the desktop or in the browser may be.
+/// The images a photo picked on the desktop, in the browser or on iOS without a camera may be.
 #[cfg(not(target_os = "android"))]
 const IMAGES: (&str, &[&str]) = ("Images", &["png", "jpg", "jpeg"]);
 
@@ -58,7 +58,7 @@ pub fn pick(ctx: &egui::Context, pick: Pick, done: impl FnOnce(Picked) + Send + 
         wake.request_repaint();
     };
 
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
     {
         let mut dialog = rfd::FileDialog::new();
 
@@ -111,6 +111,156 @@ pub fn pick(ctx: &egui::Context, pick: Pick, done: impl FnOnce(Picked) + Send + 
 
     #[cfg(target_os = "android")]
     android::ask(ctx, pick, Box::new(done));
+
+    #[cfg(target_os = "ios")]
+    ios::pick(pick, Box::new(done));
+}
+
+/// On iOS, UIKit's document picker, a copy of each file picked read from where it lands; or for a
+/// photo, the system's camera, the photo as a JPEG. Each is presented over the app's window and
+/// answers its delegate, kept until it does.
+#[cfg(target_os = "ios")]
+mod ios {
+    use {
+        super::{Done, File, Pick, Picked},
+        objc2::rc::Retained,
+        objc2::runtime::{AnyObject, ProtocolObject},
+        objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send},
+        objc2_foundation::{NSArray, NSDictionary, NSObject, NSObjectProtocol, NSString, NSURL},
+        objc2_ui_kit::{
+            UIApplication, UIDocumentPickerDelegate, UIDocumentPickerViewController, UIImage, UIImagePickerController, UIImagePickerControllerDelegate,
+            UIImagePickerControllerInfoKey, UIImagePickerControllerOriginalImage, UIImagePickerControllerSourceType, UINavigationControllerDelegate,
+            UIViewController,
+        },
+        objc2_uniform_type_identifiers::{UTType, UTTypeItem},
+        std::cell::RefCell,
+    };
+
+    std::thread_local! {
+        /// The delegate of the picker shown, kept until it answers.
+        static SHOWN: RefCell<Option<Retained<Delegate>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Ivars {
+        done: RefCell<Option<Done>>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "Chainv4PickDelegate"]
+        #[ivars = Ivars]
+        pub(super) struct Delegate;
+
+        unsafe impl NSObjectProtocol for Delegate {}
+
+        unsafe impl UIDocumentPickerDelegate for Delegate {
+            #[unsafe(method(documentPicker:didPickDocumentsAtURLs:))]
+            fn picked(&self, _controller: &UIDocumentPickerViewController, urls: &NSArray<NSURL>) {
+                let files = urls
+                    .iter()
+                    .filter_map(|url| url.path().map(|path| path.to_string()))
+                    .map(|path| {
+                        let name = std::path::Path::new(&path).file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+
+                        std::fs::read(&path).map(|bytes| File { name: name.clone(), bytes }).map_err(|err| format!("{name}: {err}"))
+                    })
+                    .collect();
+                self.finish(files);
+            }
+
+            #[unsafe(method(documentPickerWasCancelled:))]
+            fn canceled(&self, _controller: &UIDocumentPickerViewController) {
+                self.finish(Ok(Vec::new()));
+            }
+        }
+
+        unsafe impl UINavigationControllerDelegate for Delegate {}
+
+        unsafe impl UIImagePickerControllerDelegate for Delegate {
+            #[unsafe(method(imagePickerController:didFinishPickingMediaWithInfo:))]
+            unsafe fn photographed(&self, picker: &UIImagePickerController, info: &NSDictionary<UIImagePickerControllerInfoKey, AnyObject>) {
+                // SAFETY: the key is UIKit's own, and what it names is a UIImage.
+                let image = unsafe { info.objectForKey(UIImagePickerControllerOriginalImage) }.and_then(|image| image.downcast::<UIImage>().ok());
+                let jpeg = image.and_then(|image| image.jpeg_representation(0.9));
+                picker.dismissViewControllerAnimated_completion(true, None);
+                self.finish(match jpeg {
+                    Some(jpeg) => Ok(vec![File { name: "photo.jpg".to_string(), bytes: jpeg.to_vec() }]),
+                    None => Err("the camera gave no photo".to_string()),
+                });
+            }
+
+            #[unsafe(method(imagePickerControllerDidCancel:))]
+            fn photo_canceled(&self, picker: &UIImagePickerController) {
+                picker.dismissViewControllerAnimated_completion(true, None);
+                self.finish(Ok(Vec::new()));
+            }
+        }
+    );
+
+    impl Delegate {
+        fn new(done: Done, mtm: MainThreadMarker) -> Retained<Delegate> {
+            let this = Delegate::alloc(mtm).set_ivars(Ivars { done: RefCell::new(Some(done)) });
+
+            // SAFETY: NSObject's init, on a fresh instance.
+            unsafe { msg_send![super(this), init] }
+        }
+
+        fn finish(&self, picked: Picked) {
+            if let Some(done) = self.ivars().done.borrow_mut().take() {
+                done(picked);
+            }
+
+            SHOWN.with(|shown| shown.borrow_mut().take());
+        }
+    }
+
+    /// What presents the picker: the app window's root view controller.
+    fn presenter(mtm: MainThreadMarker) -> Option<Retained<UIViewController>> {
+        #[allow(deprecated)]
+        let windows = UIApplication::sharedApplication(mtm).windows();
+
+        windows.iter().find_map(|window| window.rootViewController())
+    }
+
+    pub(super) fn pick(pick: Pick, done: Done) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return done(Err("a pick is asked for from the app's own thread".to_string()));
+        };
+        let Some(presenter) = presenter(mtm) else {
+            return done(Err("the app has no window to show the picker over".to_string()));
+        };
+        let delegate = Delegate::new(done, mtm);
+
+        let shown: Retained<UIViewController> = match pick.camera && UIImagePickerController::isSourceTypeAvailable(UIImagePickerControllerSourceType::Camera, mtm) {
+            true => {
+                let camera = UIImagePickerController::new(mtm);
+                camera.setSourceType(UIImagePickerControllerSourceType::Camera);
+                // SAFETY: the delegate is both a navigation controller's and an image picker's.
+                unsafe { camera.setDelegate(Some(&delegate)) };
+
+                Retained::into_super(Retained::into_super(camera))
+            }
+            false => {
+                // Files of the kinds named, by their extensions; otherwise any.
+                let kinds: Vec<Retained<UTType>> = pick
+                    .kind
+                    .or(pick.camera.then_some(super::IMAGES))
+                    .map(|(_, extensions)| extensions.iter().filter_map(|extension| UTType::typeWithFilenameExtension(&NSString::from_str(extension))).collect())
+                    .unwrap_or_default();
+                // SAFETY: UTTypeItem is UniformTypeIdentifiers' own constant.
+                let kinds = if kinds.is_empty() { vec![unsafe { UTTypeItem }.retain()] } else { kinds };
+                let documents = UIDocumentPickerViewController::initForOpeningContentTypes_asCopy(UIDocumentPickerViewController::alloc(mtm), &NSArray::from_retained_slice(&kinds), true);
+                documents.setAllowsMultipleSelection(pick.many);
+                documents.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+
+                Retained::into_super(documents)
+            }
+        };
+
+        presenter.presentViewController_animated_completion(&shown, true, None);
+        SHOWN.with(|kept| *kept.borrow_mut() = Some(delegate));
+    }
 }
 
 /// On Android, a pick is asked for through the egui context, which the app's Android glue owns

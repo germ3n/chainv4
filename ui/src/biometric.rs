@@ -42,15 +42,17 @@ pub enum Kind {
     /// Android's fingerprint or face.
     Biometrics,
     TouchId,
+    FaceId,
     Passkey,
 }
 
 impl Kind {
-    /// How the app names it: "fingerprint or face", "Touch ID" or "a passkey".
+    /// How the app names it: "fingerprint or face", "Touch ID", "Face ID" or "a passkey".
     pub fn name(self) -> &'static str {
         match self {
             Kind::Biometrics => "fingerprint or face",
             Kind::TouchId => "Touch ID",
+            Kind::FaceId => "Face ID",
             Kind::Passkey => "a passkey",
         }
     }
@@ -102,14 +104,14 @@ pub fn availability(ctx: &egui::Context) -> Availability {
         web::availability()
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         let _ = ctx;
 
         mac::availability()
     }
 
-    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "macos")))]
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
     {
         let _ = ctx;
 
@@ -131,10 +133,10 @@ pub fn enroll(ctx: &egui::Context, name: &str, secret: Secret, done: impl FnOnce
         wasm_bindgen_futures::spawn_local(async move { done(web::enroll(&name, secret).await) });
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     mac::enroll(name, secret, done);
 
-    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "macos")))]
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
     {
         let _ = (name, secret);
         done(Err(Failure::Failed("this system has no biometrics the app can use".to_string())));
@@ -155,10 +157,10 @@ pub fn open(ctx: &egui::Context, enrolled: &Enrolled, reason: &str, done: impl F
         wasm_bindgen_futures::spawn_local(async move { done(web::open(&enrolled).await) });
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     mac::open(enrolled, reason, done);
 
-    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "macos")))]
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
     {
         let _ = (enrolled, reason);
         done(Err(Failure::Failed("this system has no biometrics the app can use".to_string())));
@@ -171,13 +173,13 @@ pub fn forget(ctx: &egui::Context, enrolled: &Enrolled) {
     #[cfg(target_os = "android")]
     android::forget(ctx, enrolled);
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         let _ = ctx;
         mac::forget(enrolled);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "macos")))]
+    #[cfg(not(any(target_os = "android", target_os = "macos", target_os = "ios")))]
     let _ = (ctx, enrolled);
 }
 
@@ -214,7 +216,7 @@ fn parts<'a>(enrolled: &'a Enrolled, tag: &str, count: usize) -> Result<Vec<&'a 
 }
 
 /// Fresh random bytes, as hex: a name for a key no other has.
-#[cfg_attr(not(any(target_os = "android", target_os = "macos")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "android", target_os = "macos", target_os = "ios")), allow(dead_code))]
 fn random_name() -> Result<String, Failure> {
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).map_err(|err| Failure::Failed(format!("no randomness: {err}")))?;
@@ -533,15 +535,16 @@ mod web {
     }
 }
 
-/// Touch ID, through LocalAuthentication, and the secret in the login Keychain.
-#[cfg(target_os = "macos")]
+/// Touch ID or Face ID, through LocalAuthentication, and the secret in the Keychain: the login
+/// Keychain on macOS, the app's own on iOS.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod mac {
     use {
         super::{Availability, Enrolled, Failure, Kind, Secret},
         block2::RcBlock,
         objc2::runtime::Bool,
         objc2_foundation::{NSError, NSString},
-        objc2_local_authentication::{LAContext, LAError, LAPolicy},
+        objc2_local_authentication::{LABiometryType, LAContext, LAError, LAPolicy},
         std::sync::Mutex,
         zeroize::Zeroizing,
     };
@@ -550,12 +553,24 @@ mod mac {
     const SERVICE: &str = "org.chainv4.ui biometric";
     const POLICY: LAPolicy = LAPolicy::DeviceOwnerAuthenticationWithBiometrics;
 
+    /// What the device's biometry is called: Face ID or Touch ID.
+    fn named() -> &'static str {
+        match availability() {
+            Availability::Ready(kind) => kind.name(),
+            Availability::Unavailable(_) => "biometrics",
+        }
+    }
+
     pub(super) fn availability() -> Availability {
         // SAFETY: a fresh context, asked about a policy; nothing else holds it.
         let context = unsafe { LAContext::new() };
 
         match unsafe { context.canEvaluatePolicy_error(POLICY) } {
-            Ok(()) => Availability::Ready(Kind::TouchId),
+            // Which the device has is known once the policy was asked about.
+            Ok(()) => Availability::Ready(match unsafe { context.biometryType() } {
+                LABiometryType::FaceID => Kind::FaceId,
+                _ => Kind::TouchId,
+            }),
             Err(err) => Availability::Unavailable(err.localizedDescription().to_string()),
         }
     }
@@ -586,7 +601,7 @@ mod mac {
                 Some(error) if [LAError::UserCancel, LAError::UserFallback, LAError::SystemCancel, LAError::AppCancel].contains(&LAError(error.code())) => Failure::Canceled,
                 Some(error) if LAError(error.code()) == LAError::BiometryNotEnrolled => Failure::Invalidated,
                 Some(error) => Failure::Failed(error.localizedDescription().to_string()),
-                None => Failure::Failed("Touch ID failed".to_string()),
+                None => Failure::Failed(format!("{} failed", named())),
             };
             then(Err(failure));
         });
@@ -596,7 +611,7 @@ mod mac {
     }
 
     pub(super) fn enroll(name: &str, secret: Secret, done: impl FnOnce(Result<Enrolled, Failure>) + Send + 'static) {
-        check(&format!("turn on Touch ID for {name}"), move |checked| {
+        check(&format!("turn on {} for {name}", named()), move |checked| {
             done(checked.and_then(|state| {
                 let account = super::random_name()?;
                 let text = Zeroizing::new(super::hex(&*secret));

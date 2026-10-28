@@ -3,11 +3,10 @@ name = "chainv4-ui"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "What chainv4's egui apps share: a palette, type and density each app picks for its own look, the widgets their pages are built from, and running on Android."
+description = "What chainv4's egui apps share: a palette, type and density each app picks for its own look, the widgets their pages are built from, and running on Android and iOS."
 
 [dependencies]
-# glow, as both apps render with it: eframe builds with a renderer only.
-eframe = { version = "0.37.0", default-features = false, features = ["glow"] }
+eframe = { version = "0.37.0", default-features = false }
 egui = "0.37.0"
 log = "0.4.34"
 # Names for biometric keys, and the passkey salt in the browser.
@@ -30,8 +29,22 @@ tls = ["ureq/rustls"]
 # reads no codes.
 camera = ["dep:nokhwa", "web-sys/MediaDevices", "web-sys/MediaStream", "web-sys/MediaStreamConstraints", "web-sys/MediaStreamTrack", "web-sys/HtmlVideoElement", "web-sys/HtmlCanvasElement", "web-sys/CanvasRenderingContext2d", "web-sys/ImageData", "web-sys/Document", "web-sys/Element", "web-sys/HtmlElement", "web-sys/Node"]
 
+# glow everywhere but iOS, as the apps render with it: eframe builds with a renderer only.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow"] }
+
+# iOS draws through Metal, wgpu's: Apple has deprecated OpenGL there.
+[target.'cfg(target_os = "ios")'.dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu"] }
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "UIPasteboard", "UIApplication", "UIResponder", "UIViewController", "UIView", "UIWindow", "UIScene", "UIWindowScene", "UISceneDefinitions", "UIDocumentPickerViewController", "UIDevice", "UIImagePickerController", "UIImage", "UINavigationController", "objc2-uniform-type-identifiers"] }
+objc2-uniform-type-identifiers = { version = "0.3.2", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-media", "objc2-core-video", "AVCaptureSession", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVCaptureSessionPreset"] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMSampleBuffer", "objc2-core-video"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn"] }
+dispatch2 = "0.3.0"
+
 # Picking files: a native dialog on the desktop, the browser's in the browser.
-[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dependencies]
 rfd = "0.17.2"
 # The camera on the desktop: AVFoundation on macOS, V4L2 on Linux, Media Foundation on Windows,
 # with MJPEG frames decoded.
@@ -49,11 +62,12 @@ wasm-bindgen = "0.2.108"
 web-sys = { version = "0.3.85", features = ["Window", "Navigator", "CredentialsContainer", "Location"] }
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
 
-# Biometrics on macOS: Touch ID through LocalAuthentication, and the secret in the Keychain.
-[target.'cfg(target_os = "macos")'.dependencies]
+# Biometrics on macOS and iOS: Touch ID or Face ID through LocalAuthentication, and the secret in
+# the Keychain.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = "0.6.3"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSError", "NSData"] }
-objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "block2", "LAContext", "LAError"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSError", "NSData", "NSArray", "NSURL", "NSObject", "NSValue", "NSDictionary", "NSPathUtilities", "NSSet"] }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "block2", "LAContext", "LAError", "LABiometryType"] }
 block2 = "0.6.2"
 security-framework = "3.5.1"
 

@@ -913,6 +913,53 @@ out when it builds without one, as Android refuses an app that declares code it 
 - **Scrolling:** a swipe scrolls the page wherever it starts, text included, as text is not
   selectable on a touch screen.
 
+
+## iOS
+
+`wallet/build-ios.sh` builds the iOS app, through `ui/build-ios.sh`, which builds the explorer's
+the same way (see [iOS](explorer.md#ios)). It draws through Metal, wgpu's, as Apple has deprecated
+OpenGL on iOS; everywhere else the apps keep glow.
+
+```sh
+wallet/build-ios.sh --sim                  # in the iOS Simulator, installed and started
+wallet/build-ios.sh --ipa                  # wallet/target/ios/wallet.ipa, unsigned
+wallet/build-ios.sh --provision TEAMID     # once, with the iPhone connected (see below)
+wallet/build-ios.sh --install              # signed and installed on the iPhone connected
+```
+
+**What it needs:** Xcode, and Rust's iOS targets (`rustup target add aarch64-apple-ios
+aarch64-apple-ios-sim`); for the Simulator, an iOS runtime (`xcodebuild -downloadPlatform iOS`);
+for `--provision`, XcodeGen (`brew install xcodegen`).
+
+**Getting it on an iPhone,** three ways:
+- **Your own Apple ID, free:** sign in to Xcode (Settings › Accounts), note the personal team's id
+  there, connect the iPhone, trust the Mac and turn on Developer Mode (Settings › Privacy &
+  Security). `--provision TEAMID` has Xcode build a stub app of the same bundle id, which makes
+  the Apple Development certificate and the provisioning profile; `--install` then signs the
+  wallet with them and installs it through `devicectl`. A free team's profile lasts 7 days:
+  provision and install again after.
+- **Sideloading:** `--ipa` packs an unsigned IPA that AltStore or Sideloadly sign with your Apple
+  ID as they install it, and renew.
+- **The Simulator,** for the layout and everything but the camera.
+
+**The app:** `org.chainv4.wallet`, for iOS 16 and up, its icon sized from
+`wallet/assets/icon.png`, and an Info.plist that says why it wants the camera, Face ID and the
+local network. App storage is `wallet.ron` under its Application Support folder.
+
+**What `ui/src/ios.rs` and the `ui` crate do on iOS,** as `ui/src/android.rs` does on Android:
+- **the keyboard and the safe area** are winit's and egui-winit's own: the keyboard rises while a
+  text field wants it, and the app keeps inside the notch and the home indicator;
+- **the clipboard** is UIPasteboard's: what the app copies goes there, and a held finger over a
+  field brings up the same bar Android has, Paste among it;
+- **back** is iOS's own gesture: a swipe in from the left edge comes to the app as the back key,
+  which closes an open view or returns to the page before;
+- **files** are picked with UIKit's document picker, a copy of each read; a photo is taken with
+  the system's camera and comes back as a JPEG;
+- **the camera** for reading codes is the back camera through AVFoundation, each frame's luma
+  turned upright;
+- **Face ID or Touch ID** keep the vault's key in the Keychain, behind LocalAuthentication, as
+  Touch ID does on a Mac, and say which the phone has.
+
 ## What to keep in mind
 
 - **Keep the words.** They bring every account back, on any device. Without them, a lost device

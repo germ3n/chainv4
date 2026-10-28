@@ -1,13 +1,20 @@
-//! Starts the wallet on the desktop and in the browser. Android loads the library itself, from
-//! `android_main`.
+//! Starts the wallet on the desktop, in the browser and on iOS. Android loads the library itself,
+//! from `android_main`.
 
 /// The node the desktop app, and the browser extension, talk to unless told otherwise.
 #[cfg(not(target_os = "android"))]
 const LOCAL_NODE: &str = "http://127.0.0.1:8080";
 
+/// Runs the app on iOS, from its own main as UIKit wants: it talks to the node it talked to last,
+/// or to one on this machine, which the Simulator reaches; on a phone, Settings names the node.
+#[cfg(target_os = "ios")]
+fn main() -> eframe::Result {
+    chainv4_ui::ios::run("chainv4 wallet", "wallet.ron", |creation| chainv4_wallet::wallet(creation, None, LOCAL_NODE))
+}
+
 /// Runs the desktop app: `wallet --node http://host:port`, or CHAINV4_NODE, or the node it talked
 /// to last.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 

@@ -1,5 +1,5 @@
-//! The explorer on the desktop and in the browser. The app itself is the library, which Android
-//! loads too.
+//! The explorer on the desktop, in the browser and on iOS. The app itself is the library, which
+//! Android loads too.
 
 use chainv4_explorer::explorer;
 
@@ -7,9 +7,16 @@ use chainv4_explorer::explorer;
 #[cfg(not(target_arch = "wasm32"))]
 const LOCAL_NODE: &str = "http://127.0.0.1:8080";
 
+/// Runs the app on iOS, from its own main as UIKit wants: it talks to the node it talked to last,
+/// or to one on this machine, which the Simulator reaches; on a phone, Settings names the node.
+#[cfg(target_os = "ios")]
+fn main() -> eframe::Result {
+    chainv4_ui::ios::run("chainv4 explorer", "explorer.ron", |creation| explorer(creation, None, LOCAL_NODE))
+}
+
 /// Runs the desktop app: `explorer --node http://host:port`, or CHAINV4_NODE, or the node it
 /// talked to last.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
