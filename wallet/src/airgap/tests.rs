@@ -92,6 +92,20 @@ fn every_message_reads_back_from_its_ur_and_a_short_one_fits_one_code() {
         origin: Some(crate::airgap::Origin { account: 3, fingerprint: [0x73, 0xc5, 0xda, 0x0a] }),
     };
     let signed = sign(&transfer(&key), &key).unwrap();
+    let account = chainv4::structs::address::Address::Multisig([5; 32]);
+    let mut bundle = chainv4::registry::multisig::MultisigBundle {
+        genesis: chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()),
+        body: chainv4::registry::multisig::MultisigBody { account, tx: transfer(&key).tx, nonce: 3, fee: FeeOffer::NONE },
+        signatures: Vec::new(),
+    };
+    bundle.sign(&key);
+
+    // A bundle, with a signature, is longer than one code: it reads back all the same.
+    let multisig = Message::Multisig(Box::new(bundle));
+
+    assert!(multisig.to_text().starts_with("UR:CHAINV4-MULTISIG/"));
+    assert_eq!(Message::from_text(&multisig.to_text()), Ok(multisig.clone()));
+    assert_eq!(Message::from_ur(multisig.ur_type(), &multisig.bytes()), Ok(multisig.clone()));
 
     for (message, kind) in [
         (Message::Pair(pairing), "UR:CHAINV4-PAIRING/"),

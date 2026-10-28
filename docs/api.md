@@ -82,6 +82,11 @@ Each summary has:
 - `approve_change`, with its `version` and `change`, which holds the new `consensus` as a genesis
   file writes one, the new `bootnodes`, or the new `name_prices` as decimal strings, and
   `withdraw_change`;
+- `multisig`, a multisig's own: its `account`, the `tx` it sends and the members' `signatures`,
+  each with `key` and `signature`; `create_multisig` and `change_multisig` with `members`, each a
+  `key` and its `bitcoin` key and `evm` address in hex or `null`, and `threshold`;
+  `approve_multisig` with `account`, `nonce`, `fee` and `tx`; `withdraw_multisig` with `account`
+  and `proposal`;
 - `ethereum`, with its signed bytes as `raw`, its Ethereum `hash`, and what they say: `kind`, 0, 1
   or 2, `chain_id`, `to`, `value` and `input`;
 - `name`, with the `name`, without the suffix, and its `action`: a `type` of `register` or `renew`
@@ -473,6 +478,13 @@ Under `ffg` or `authority`:
 Under `authority`, `validators` is empty and `active` lists the signers, each weighing 1.
 
 404 without finality or under `depth`.
+
+### `GET /multisig/{address}`
+
+A [multisig](multisig.md): its `members`, each a `key` and its `bitcoin` key and `evm` address in
+hex or `null`, its `threshold`, its next `nonce` and `balance`, and the `proposals` open on chain
+for that nonce, each with its `id`, the `tx` as JSON and `encoded` in hex, its `fee` offer and the
+member keys that `approvals` back it. 404 for an address that is not one.
 
 ### `GET /validators/{voter}`
 

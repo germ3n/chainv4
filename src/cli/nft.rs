@@ -235,6 +235,8 @@ impl Nft {
             eip712: false,
             max_price: None,
             tip: None,
+            multisig: None,
+            out: None,
             tx: TxArgs::Call { to, function: function.to_string(), amount: u256::ZERO, args },
         })
     }
@@ -259,6 +261,8 @@ impl Nft {
             eip712: false,
             max_price: None,
             tip: None,
+            multisig: None,
+            out: None,
             tx: TxArgs::Deploy { lua: Some(path), wasm: None, evm: None, constructor: None, constructor_args: Vec::new() },
         });
         let _ = std::fs::remove_dir_all(&dir);

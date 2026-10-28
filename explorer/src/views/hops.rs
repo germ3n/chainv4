@@ -81,6 +81,23 @@ pub fn of(tx: &TxView, outcome: Option<&Outcome>) -> Vec<Hop> {
         }
         "ethereum" => ("Ethereum", field("to"), String::new(), field("value")),
         "primary_name" => ("primary name", tx.tx.get("name").and_then(Value::as_str).unwrap_or("(cleared)").to_string(), String::new(), "0".to_string()),
+        // A multisig's own transaction is the step it takes, by the multisig.
+        "multisig" => {
+            let inner = |name: &str| tx.tx["tx"].get(name).and_then(Value::as_str).unwrap_or_default().to_string();
+            let to = ["to", "contract"].iter().map(|name| inner(name)).find(|to| !to.is_empty()).unwrap_or_else(|| "(the multisig)".to_string());
+            let value = ["amount", "value"].iter().map(|name| inner(name)).find(|value| !value.is_empty()).unwrap_or_else(|| "0".to_string());
+
+            ("multisig", to, inner("func"), value)
+        }
+        "create_multisig" => (
+            "create multisig",
+            outcome.and_then(|outcome| outcome.contract.clone()).unwrap_or_else(|| "(new multisig)".to_string()),
+            String::new(),
+            "0".to_string(),
+        ),
+        "change_multisig" => ("change multisig", "(its members)".to_string(), String::new(), "0".to_string()),
+        "approve_multisig" => ("approve", field("account"), String::new(), "0".to_string()),
+        "withdraw_multisig" => ("withdraw approval", field("account"), String::new(), "0".to_string()),
         other => (other, "?".to_string(), String::new(), "0".to_string()),
     };
 

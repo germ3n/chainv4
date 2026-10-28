@@ -392,19 +392,15 @@ pub fn signed_tx(signed: &SignedTx, hash: HashType) -> Value {
         "id": signed.id(hash).to_string(),
         "sender": signed.sender().to_string(),
         "nonce": signed.nonce,
-        "fee": {
-            "gas_limit": signed.fee.gas_limit,
-            "max_price": signed.fee.max_price.to_string(),
-            "tip": signed.fee.tip.to_string(),
-        },
+        "fee": fee_offer(&signed.fee),
         "signer": signed.signer.to_string(),
         "signature": signed.signature.to_string(),
         "tx": tx(&signed.tx),
     })
 }
 
-pub fn tx(tx: &Tx) -> Value {
-    match tx {
+pub fn tx(transaction: &Tx) -> Value {
+    match transaction {
         Tx::Transfer { from, to, amount } => json!({
             "type": "transfer",
             "from": from.to_string(),
@@ -436,12 +432,12 @@ pub fn tx(tx: &Tx) -> Value {
         }),
         Tx::Deploy { code } | Tx::Upgrade { code, .. } => {
             let mut value = json!({
-                "type": if matches!(tx, Tx::Deploy { .. }) { "deploy" } else { "upgrade" },
+                "type": if matches!(transaction, Tx::Deploy { .. }) { "deploy" } else { "upgrade" },
                 "engine": code.engine().name(),
                 "code_size": code.bytes().len(),
             });
 
-            if let Tx::Upgrade { contract, .. } = tx {
+            if let Tx::Upgrade { contract, .. } = transaction {
                 value["contract"] = contract.to_string().into();
             }
 
@@ -483,7 +479,32 @@ pub fn tx(tx: &Tx) -> Value {
         Tx::Name { name, action } => json!({ "type": "name", "name": name, "action": name_action(action) }),
         Tx::PrimaryName { name } => json!({ "type": "primary_name", "name": name }),
         Tx::Ethereum { raw } => ethereum(raw),
+        Tx::Multisig { account, tx: inner, signatures } => json!({
+            "type": "multisig",
+            "account": account.to_string(),
+            "tx": tx(inner),
+            "signatures": signatures.iter().map(|signed| json!({ "key": signed.key.to_string(), "signature": signed.signature.to_string() })).collect::<Vec<_>>(),
+        }),
+        Tx::CreateMultisig { members, threshold } => json!({ "type": "create_multisig", "members": members.iter().map(multisig_member).collect::<Vec<_>>(), "threshold": threshold }),
+        Tx::ChangeMultisig { members, threshold } => json!({ "type": "change_multisig", "members": members.iter().map(multisig_member).collect::<Vec<_>>(), "threshold": threshold }),
+        Tx::ApproveMultisig { account, nonce, fee, tx: inner } => json!({
+            "type": "approve_multisig",
+            "account": account.to_string(),
+            "nonce": nonce,
+            "fee": fee_offer(fee),
+            "tx": tx(inner),
+        }),
+        Tx::WithdrawMultisig { account, proposal } => json!({ "type": "withdraw_multisig", "account": account.to_string(), "proposal": proposal.to_string() }),
     }
+}
+
+/// A multisig's member: its key here, and its Bitcoin key and EVM address, hex, or null.
+pub fn multisig_member(member: &crate::registry::multisig::MultisigMember) -> Value {
+    json!({
+        "key": member.key.to_string(),
+        "bitcoin": member.bitcoin.map(|key| to_hex(&key)),
+        "evm": member.evm.map(|address| to_hex(&address)),
+    })
 }
 
 /// An Ethereum-signed transaction: its bytes and hash, and what they say.

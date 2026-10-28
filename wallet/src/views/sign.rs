@@ -46,6 +46,8 @@ enum Step {
     Bitcoin { request: Box<bitcoin::Request>, review: Option<Box<Review>>, trouble: Option<String> },
     /// Signed for the Bitcoin wallet: the PSBT it reads back.
     BitcoinSigned { message: Box<Message> },
+    /// A multisig's transaction, read, with the key to sign it with as a member.
+    Multisig { bundle: Box<chainv4::registry::multisig::MultisigBundle>, key: Option<chainv4::crypto::keypair::PublicKey>, trouble: Option<String> },
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
@@ -57,6 +59,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         Step::Review { .. } => review(ui, ctx, state),
         Step::MetaMask { .. } => metamask(ui, ctx, state),
         Step::Bitcoin { .. } => bitcoin_review(ui, ctx, state),
+        Step::Multisig { .. } => multisig_review(ui, ctx, state),
         Step::BitcoinSigned { message } => {
             let message = message.clone();
             theme::card(ui, &palette, |ui| {
@@ -139,6 +142,11 @@ fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     Ok(review) => Step::Bitcoin { request, review: Some(Box::new(review)), trouble: None },
                     Err(why) => Step::Bitcoin { request, review: None, trouble: Some(why) },
                 };
+            }
+            Some(Message::Multisig(bundle)) => {
+                let key = ctx.holders.iter().flat_map(|holder| holder.keys.iter()).map(|key| key.public()).find(|key| !matches!(key, chainv4::crypto::keypair::PublicKey::Bitcoin(_)));
+                let trouble = key.is_none().then(|| "This wallet holds no keys to sign with, only public ones.".to_string());
+                state.step = Step::Multisig { bundle, key, trouble };
             }
             Some(other) => state.scan.refuse(&other, "a request to sign, this wallet's, MetaMask's or a Bitcoin wallet's"),
             None => {}
@@ -231,6 +239,112 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                 match signed {
                     Ok(signed) => next = Some(Step::Signed { message: Box::new(Message::Signed(signed)) }),
                     Err(why) => *trouble = Some(why),
+                }
+            }
+
+            if theme::quiet(ui, &palette, "Cancel").clicked() {
+                next = Some(Step::Reading);
+                state.confirming = None;
+            }
+        });
+    });
+
+    if let Some(next) = next {
+        state.step = next;
+    }
+}
+
+/// A multisig's transaction laid out: what it does, from which multisig, at which nonce and fee,
+/// who signed already, and the key to sign with as a member. Whether that key is one of the
+/// multisig's members the signer cannot know: the chain checks it.
+fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
+    let palette = *ctx.palette;
+    let Step::Multisig { bundle, key, trouble } = &mut state.step else {
+        return;
+    };
+    let mut next = None;
+    let mut confirmed = false;
+
+    if let Some(came) = state.confirming.as_ref().and_then(Check::take) {
+        state.confirming = None;
+
+        match came {
+            Ok(_) => confirmed = true,
+            Err(Failure::Canceled) => {}
+            Err(Failure::Invalidated) => {
+                biometrics::turn_off(ctx.wake, ctx.settings);
+                *ctx.lock = Some(biometrics::CHANGED.to_string());
+            }
+            Err(Failure::Failed(why)) => *trouble = Some(why),
+        }
+    }
+
+    let request = airgap::Request {
+        tx: bundle.body.tx.clone(),
+        nonce: bundle.body.nonce,
+        fee: bundle.body.fee,
+        signer: key.unwrap_or(chainv4::crypto::keypair::PublicKey::Ed25519([0; 32])),
+        coin: airgap::Shown { symbol: "units".to_string(), decimals: 0 },
+        token: None,
+    };
+    let described = airgap::describe(&request);
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, &format!("A multisig's transaction: {}", described.kind));
+        super::row(ui, &palette, "Multisig", |ui| super::address(ui, &palette, &bundle.body.account.to_string()));
+
+        if let Some(to) = &described.to {
+            super::row(ui, &palette, "To", |ui| super::address(ui, &palette, to));
+        }
+
+        if let Some((_, raw)) = &described.what {
+            super::row(ui, &palette, "Amount", |ui| {
+                ui.label(format!("{raw} units"));
+            });
+        }
+
+        super::row(ui, &palette, "Nonce", |ui| {
+            ui.label(bundle.body.nonce.to_string());
+        });
+        super::row(ui, &palette, "Signed by", |ui| {
+            ui.label(format!("{} member{} so far", bundle.signatures.len(), if bundle.signatures.len() == 1 { "" } else { "s" }));
+        });
+
+        let keys: Vec<chainv4::crypto::keypair::PublicKey> = ctx.holders.iter().flat_map(|holder| holder.keys.iter()).map(|key| key.public()).filter(|key| !matches!(key, chainv4::crypto::keypair::PublicKey::Bitcoin(_))).collect();
+
+        if keys.len() > 1 {
+            theme::caps(ui, &palette, "Sign as");
+            egui::ComboBox::from_id_salt("multisig-key").selected_text(key.map(|key| format::short(&key.to_string())).unwrap_or_default()).width(ui.available_width()).show_ui(ui, |ui| {
+                for candidate in &keys {
+                    ui.selectable_value(key, Some(*candidate), format::short(&candidate.to_string()));
+                }
+            });
+        }
+
+        ui.label(RichText::new("Amounts are the chain's units: the multisig's transaction names no coin. The chain counts this signature only if the key is one of its members'.").small().color(palette.warn));
+        egui::CollapsingHeader::new(RichText::new("Everything it holds").color(palette.soft)).id_salt("multisig-everything").show(ui, |ui| {
+            ui.add(egui::Label::new(theme::mono(&described.everything).color(palette.soft)).wrap());
+        });
+
+        if let Some(trouble) = trouble.as_ref() {
+            ui.colored_label(palette.bad, trouble.as_str());
+        }
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            let tapped = theme::primary(ui, &palette, "Sign", trouble.is_none() && key.is_some() && state.confirming.is_none()).clicked();
+            let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
+
+            if tapped && !confirmed && let Some((enrolled, _)) = biometric {
+                state.confirming = Some(Check::start(ctx.wake, &enrolled, "Sign this multisig transaction"));
+            } else if tapped || confirmed {
+                match ctx.holders.iter().find_map(|holder| holder.keys.iter().find(|held| Some(held.public()) == *key)) {
+                    Some(keypair) => {
+                        let mut signed = (**bundle).clone();
+                        signed.sign(keypair);
+                        next = Some(Step::Signed { message: Box::new(Message::Multisig(Box::new(signed))) });
+                    }
+                    None => *trouble = Some("the key is gone from this wallet".to_string()),
                 }
             }
 

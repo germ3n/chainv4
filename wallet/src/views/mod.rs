@@ -10,6 +10,7 @@ mod faucet;
 pub mod dapp;
 #[cfg(feature = "swap")]
 pub mod evm;
+mod multisig;
 mod names;
 #[cfg(feature = "nft")]
 mod nfts;
@@ -46,6 +47,8 @@ pub enum Page {
     Receive,
     Activity,
     Names,
+    /// Native multisigs: making one, and taking their transactions round the members.
+    Multisig,
     Contracts,
     /// Atomic swaps between this chain, Bitcoin and EVM chains.
     #[cfg(feature = "swap")]
@@ -79,6 +82,7 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             #[cfg(feature = "nft")]
             (Page::Nfts, "NFTs"),
             (Page::Names, "Names"),
+            (Page::Multisig, "Multisig"),
             (Page::Contracts, "Contracts"),
             #[cfg(feature = "swap")]
             (Page::Swaps, "Swaps"),
@@ -195,6 +199,7 @@ impl Ctx<'_> {
 pub struct States {
     pub send: send::SendState,
     names: names::NamesState,
+    pub multisig: multisig::MultisigState,
     contracts: contracts::ContractsState,
     receive: receive::ReceiveState,
     accounts: accounts::AccountsState,
@@ -278,6 +283,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Receive => receive::show(ui, ctx, &mut states.receive),
         Page::Activity => activity::show(ui, ctx),
         Page::Names => names::show(ui, ctx, &mut states.names, &mut states.send),
+        Page::Multisig => multisig::show(ui, ctx, &mut states.multisig, &mut states.send),
         Page::Contracts => contracts::show(ui, ctx, &mut states.contracts, &mut states.send),
         #[cfg(feature = "swap")]
         Page::Swaps => swaps::show(ui, ctx, &mut states.swaps, &mut states.send),

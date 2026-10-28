@@ -17,6 +17,7 @@ pub mod directory;
 pub mod changes;
 pub mod collections;
 pub mod federation;
+pub mod multisig;
 pub mod names;
 pub mod signers;
 pub mod tokens;
@@ -29,6 +30,7 @@ pub use accounts::Accounts;
 pub use names::Names;
 #[cfg(feature = "vm")]
 pub use contracts::Contracts;
+pub use multisig::Multisigs;
 pub use tokens::Tokens;
 pub use collections::Collections;
 
@@ -113,6 +115,24 @@ pub enum RegistryError {
     Layout(String),
     #[document(summary = "A name transaction that cannot go through, and why: a name taken, not the sender's, expired, or not one at all.")]
     Name(String),
+    #[document(summary = "A multisig policy no multisig may have, and why.")]
+    BadMultisig(&'static str),
+    #[document(summary = "A multisig already lives at the address.")]
+    MultisigExists,
+    #[document(summary = "The address is not a multisig.")]
+    NotMultisig,
+    #[document(summary = "The key, or the account approving, is not one of the multisig's members.")]
+    NotMember,
+    #[document(summary = "An approval for another nonce than the multisig's next; its next nonce.")]
+    StaleMultisigNonce(u64),
+    #[document(summary = "A member's signature over a multisig's transaction does not check out.")]
+    BadMemberSignature,
+    #[document(summary = "The member backs no open proposal with that id.")]
+    NoMultisigApproval,
+    #[document(summary = "A multisig's transaction backed by fewer members than its threshold: how many back it, and how many it needs.")]
+    NotEnoughMembers { backed: u32, needed: u32 },
+    #[document(summary = "A multisig's own change of members, sent by an account that is not a multisig.")]
+    OnlyMultisig,
 }
 
 impl fmt::Display for RegistryError {
@@ -152,6 +172,15 @@ impl fmt::Display for RegistryError {
             RegistryError::Vm(err) => write!(f, "{err}"),
             RegistryError::Layout(why) => write!(f, "the new code does not keep the storage layout: {why}"),
             RegistryError::Name(why) => write!(f, "{why}"),
+            RegistryError::BadMultisig(why) => write!(f, "{why}"),
+            RegistryError::MultisigExists => write!(f, "a multisig lives there already"),
+            RegistryError::NotMultisig => write!(f, "that address is not a multisig"),
+            RegistryError::NotMember => write!(f, "not one of the multisig's members"),
+            RegistryError::StaleMultisigNonce(next) => write!(f, "the multisig's next nonce is {next}"),
+            RegistryError::BadMemberSignature => write!(f, "a member's signature does not check out"),
+            RegistryError::NoMultisigApproval => write!(f, "this member backs no open proposal with that id"),
+            RegistryError::NotEnoughMembers { backed, needed } => write!(f, "{backed} of the multisig's members back it, and it needs {needed}"),
+            RegistryError::OnlyMultisig => write!(f, "only a multisig changes its own members"),
         }
     }
 }

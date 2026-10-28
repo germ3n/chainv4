@@ -70,6 +70,15 @@ pub struct SendArgs {
     /// Under a base fee, what it adds per gas for the producer. Defaults to 0.
     #[arg(long, value_parser = parse_amount)]
     pub tip: Option<u256>,
+    /// Send it as this multisig, such as multisig:0x…, signed by --key as one of its members: at
+    /// the multisig's nonce, its fee from the multisig's balance. Submitted at once when this
+    /// signature is enough; otherwise written as a bundle for the other members to sign, with
+    /// chainv4 multisig sign, approve on chain, and submit.
+    #[arg(long, conflicts_with = "eip712")]
+    pub multisig: Option<Address>,
+    /// Where to write the bundle under --multisig, rather than printing it.
+    #[arg(long, requires = "multisig")]
+    pub out: Option<PathBuf>,
     #[command(subcommand)]
     pub tx: TxArgs,
 }
@@ -246,6 +255,26 @@ pub enum TxArgs {
         /// The version of the decision this changes. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
+    },
+    /// Makes a new multisig, M of N members' keys, and prints its address. Each --member is its
+    /// key here, and for a multisig that reaches Bitcoin and EVM chains its compressed Bitcoin key
+    /// and EVM address after slashes: ed25519:0x…/0x02…/0x…, every member naming those or none.
+    CreateMultisig {
+        /// A member: KEY, or KEY/BITCOIN_KEY/EVM_ADDRESS. Repeat for each, 1 to 20.
+        #[arg(long = "member", required = true, value_parser = parse_member)]
+        members: Vec<crate::registry::multisig::MultisigMember>,
+        /// How many members each of its transactions needs.
+        #[arg(long)]
+        threshold: u32,
+    },
+    /// Replaces a multisig's members and threshold, the address kept: send with --multisig.
+    ChangeMultisig {
+        /// A member, as create-multisig takes one. Repeat for each.
+        #[arg(long = "member", required = true, value_parser = parse_member)]
+        members: Vec<crate::registry::multisig::MultisigMember>,
+        /// The new threshold.
+        #[arg(long)]
+        threshold: u32,
     },
     #[cfg(feature = "governance")]
     /// Takes back the sender's approval of a change under governance.
@@ -479,6 +508,10 @@ fn typed(_: &Value, _: Tx, _: u64, _: FeeOffer, _: &Keypair) -> CliResult<Signed
 }
 
 pub fn send(args: SendArgs) -> CliResult<()> {
+    if let Some(account) = args.multisig {
+        return super::multisig::propose(args, account);
+    }
+
     let keypair = signer(args.key.as_deref())?;
     let sender = keypair.public().address();
     let node = args.node.trim_end_matches('/');
@@ -525,6 +558,11 @@ pub fn send(args: SendArgs) -> CliResult<()> {
 
     println!("submitted {id}");
 
+    if matches!(signed.tx, Tx::CreateMultisig { .. }) {
+        let hash: HashType = status["hash"].as_str().ok_or("the node did not say its chain's hash")?.parse()?;
+        println!("multisig {}", crate::structs::address::multisig_address(&sender, nonce, hash));
+    }
+
     if deploys_evm {
         #[cfg(feature = "evm")]
         println!("contract {}", crate::vm::evm::create_address(&sender, nonce));
@@ -549,6 +587,23 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     report(&receipt)
 }
 
+/// A multisig member as --member takes it: KEY, or KEY/BITCOIN_KEY/EVM_ADDRESS.
+pub(super) fn parse_member(text: &str) -> Result<crate::registry::multisig::MultisigMember, String> {
+    let parts: Vec<&str> = text.split('/').collect();
+    let key: PublicKey = parts[0].parse().map_err(|_| format!("{} is not a public key", parts[0]))?;
+
+    match parts[1..] {
+        [] => Ok(crate::registry::multisig::MultisigMember { key, bitcoin: None, evm: None }),
+        [bitcoin, evm] => {
+            let bitcoin = from_hex(bitcoin).and_then(|bytes| <[u8; 33]>::try_from(bytes).ok()).ok_or_else(|| format!("{bitcoin} is not a compressed Bitcoin key, 33 bytes in hex"))?;
+            let evm = from_hex(evm).and_then(|bytes| <[u8; 20]>::try_from(bytes).ok()).ok_or_else(|| format!("{evm} is not an EVM address, 20 bytes in hex"))?;
+
+            Ok(crate::registry::multisig::MultisigMember { key, bitcoin: Some(bitcoin), evm: Some(evm) })
+        }
+        _ => Err("a member is KEY, or KEY/BITCOIN_KEY/EVM_ADDRESS".to_string()),
+    }
+}
+
 /// A signer as --add takes it: KEY, or KEY@ACCOUNT.
 fn parse_signer(text: &str) -> CliResult<Signer> {
     let (key, account) = match text.rsplit_once('@') {
@@ -567,7 +622,7 @@ fn parse_signer(text: &str) -> CliResult<Signer> {
 /// What to offer for a transaction, as the node works it out at POST /offer for a probe signed
 /// with none: the flags given, and for the rest what covers it, its gas limit from a dry run. Also
 /// why that dry run failed, if it did, and the dry run itself.
-fn offer(agent: &Agent, node: &str, probe: &SignedTx, chosen: OfferChoice) -> CliResult<(FeeOffer, Option<String>, Value)> {
+pub(super) fn offer(agent: &Agent, node: &str, probe: &SignedTx, chosen: OfferChoice) -> CliResult<(FeeOffer, Option<String>, Value)> {
     let mut body = json!({ "tx": to_hex(&wincode::serialize(probe)?) });
 
     if let Some(gas_limit) = chosen.gas_limit {
@@ -616,9 +671,9 @@ pub(super) fn read(estimate: &Value) -> CliResult<String> {
 
 /// What a transaction's block must reach before send returns.
 #[derive(Clone, Copy)]
-struct Wanted {
-    confirmations: u64,
-    finalized: bool,
+pub(super) struct Wanted {
+    pub(super) confirmations: u64,
+    pub(super) finalized: bool,
 }
 
 /// A signed vote, encoded in hex as GET /evidence shows it.
@@ -686,7 +741,7 @@ fn check(bundle: &Bundle) -> Result<(), String> {
 
 /// Asks the node about the transaction until its block is deep enough, or final when asked, or
 /// the time runs out.
-fn wait(agent: &Agent, node: &str, id: &str, wanted: Wanted, timeout: Duration) -> CliResult<Value> {
+pub(super) fn wait(agent: &Agent, node: &str, id: &str, wanted: Wanted, timeout: Duration) -> CliResult<Value> {
     let deadline = Instant::now() + timeout;
 
     loop {
@@ -715,7 +770,7 @@ fn wait(agent: &Agent, node: &str, id: &str, wanted: Wanted, timeout: Duration) 
 }
 
 /// Prints where the transaction landed, what it did and what it emitted.
-fn report(receipt: &Value) -> CliResult<()> {
+pub(super) fn report(receipt: &Value) -> CliResult<()> {
     let confirmations = receipt["confirmations"].as_u64().unwrap_or(0);
 
     println!(
@@ -757,7 +812,7 @@ fn report(receipt: &Value) -> CliResult<()> {
     }
 }
 
-fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliResult<Tx> {
+pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliResult<Tx> {
     let tx = match tx {
         TxArgs::Transfer { to, amount: value } => Tx::Transfer {
             to: match to {
@@ -996,6 +1051,8 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
 
             Tx::WithdrawChange { version }
         }
+        TxArgs::CreateMultisig { members, threshold } => Tx::CreateMultisig { members, threshold },
+        TxArgs::ChangeMultisig { members, threshold } => Tx::ChangeMultisig { members, threshold },
         #[cfg(feature = "names")]
         TxArgs::Name { action } => name_transaction(action, sender, agent, node)?,
         TxArgs::Call {

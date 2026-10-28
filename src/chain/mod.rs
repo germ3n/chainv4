@@ -502,7 +502,7 @@ pub struct DryRun {
 }
 
 #[document(
-    summary = "Runs a transaction as the next block would, on a throwaway layer over the committed state, to see what gas it uses and whether it would fail; nothing it does is kept. It runs at its sender's next nonce whatever its own says, with the gas limit given at the base price, so a probe signed with any offer will do. Its signature is not checked.",
+    summary = "Runs a transaction as the next block would, on a throwaway layer over the committed state, to see what gas it uses and whether it would fail; nothing it does is kept. It runs at its sender's next nonce whatever its own says, with the gas limit given at the base price, so a probe signed with any offer will do. Its signature is not checked, nor, for a multisig's own, whether its members back it.",
     category = "Chain",
     params = {
         db = "The node's database.",
@@ -526,7 +526,9 @@ pub fn dry_run(db: Arc<dyn crate::db::Committed>, rules: &Rules, vm: &Arc<Vm>, p
     let genesis = stored_header_at(&*db, 0)?.map_or_else(|| Hash::zero(rules.hash), |genesis| genesis.id());
     let context = BlockContext { height, timestamp, producer: Address::Ed25519([0; 32]), base_price, genesis };
 
-    match execute::execute_verified(&layer, &tx, rules, vm, &context) {
+    // As its signature, so a multisig's members' backing: a dry run sizes their transaction before
+    // they sign it.
+    match execute::execute_authorized(&layer, &tx, rules, vm, &context) {
         Ok(executed) => Ok(DryRun {
             gas_used: executed.receipt.gas_used,
             fuel_used: executed.receipt.fuel_used,

@@ -4,10 +4,10 @@ use {
     crate::chain::{Fees, tx_bytes},
     crate::crypto::verifiable::VerifyError,
     crate::db::{DbError, State},
-    crate::registry::Accounts,
+    crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
     crate::structs::hash::Hash,
-    crate::structs::tx::SignedTx,
+    crate::structs::tx::{SignedTx, Tx},
     crate::structs::u256::u256,
     r#macro::document,
     std::cmp::Reverse,
@@ -86,6 +86,8 @@ pub enum MempoolError {
     Syncing,
     #[document(summary = "The database failed.")]
     Db(DbError),
+    #[document(summary = "A multisig's transaction its members do not back, and why.")]
+    Multisig(RegistryError),
 }
 
 impl fmt::Display for MempoolError {
@@ -100,6 +102,7 @@ impl fmt::Display for MempoolError {
             MempoolError::CannotPay => write!(f, "the sender cannot pay for its gas limit"),
             MempoolError::Syncing => write!(f, "the node is still syncing its state from a snapshot"),
             MempoolError::Db(err) => write!(f, "{err}"),
+            MempoolError::Multisig(err) => write!(f, "{err}"),
         }
     }
 }
@@ -155,7 +158,7 @@ impl Mempool {
 
         let checked = tx.verify_on(genesis);
 
-        self.add_checked(tx, checked, state, fees)
+        self.add_checked(tx, checked, genesis, state, fees)
     }
 
     #[document(
@@ -164,33 +167,48 @@ impl Mempool {
         params = {
             tx = "The transaction.",
             checked = "What its verify returned.",
+            genesis = "The chain's genesis id, which a multisig's members sign over.",
             state = "The state at the tip.",
             fees = "The chain's fees, if it has any.",
         },
     )]
-    pub fn add_checked(&mut self, tx: SignedTx, checked: Result<(), VerifyError>, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
+    pub fn add_checked(&mut self, tx: SignedTx, checked: Result<(), VerifyError>, genesis: &Hash, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
         if self.txs.len() >= self.capacity {
             return Err(MempoolError::Full);
         }
 
-        Mempool::check(&tx, checked, state, fees)?;
+        Mempool::check(&tx, checked, genesis, state, fees)?;
 
         self.insert(tx)
     }
 
     #[document(
         parent = "Mempool",
-        summary = "Checks what admission checks that does not depend on what else waits: the signature, going by what checking it found; that its nonce is not used; and on a chain with fees, that its gas limit could fit a block, its price could be taken and its sender can pay for it now. It needs no mempool, so a node checks off its loop and locks the mempool only to insert.",
+        summary = "Checks what admission checks that does not depend on what else waits: the signature, going by what checking it found; for a multisig's own transaction, that enough of its members back it; that its nonce is not used; and on a chain with fees, that its gas limit could fit a block, its price could be taken and its sender can pay for it now. It needs no mempool, so a node checks off its loop and locks the mempool only to insert.",
         params = {
             tx = "The transaction.",
             checked = "What its verify returned.",
+            genesis = "The chain's genesis id, which a multisig's members sign over.",
             state = "The state at the tip.",
             fees = "The chain's fees, if it has any.",
         },
         see_also = "Mempool::insert",
     )]
-    pub fn check(tx: &SignedTx, checked: Result<(), VerifyError>, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
+    pub fn check(tx: &SignedTx, checked: Result<(), VerifyError>, genesis: &Hash, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
         checked.map_err(MempoolError::Invalid)?;
+
+        // A multisig's transaction that its members do not back yet never waits: it could not run,
+        // and nobody would pay for the room it took.
+        if let Tx::Multisig { account, tx: inner, signatures } = &tx.tx {
+            let body = crate::registry::multisig::MultisigBody { account: *account, tx: (**inner).clone(), nonce: tx.nonce, fee: tx.fee };
+
+            match crate::registry::Multisigs::new(state).backing(&body, signatures, genesis) {
+                Ok((policy, backed)) if backed >= policy.threshold => {}
+                Ok((policy, backed)) => return Err(MempoolError::Multisig(RegistryError::NotEnoughMembers { backed, needed: policy.threshold })),
+                Err(RegistryError::Db(err)) => return Err(MempoolError::Db(err)),
+                Err(err) => return Err(MempoolError::Multisig(err)),
+            }
+        }
         let account = Accounts::new(state).get(&tx.sender())?;
 
         if tx.nonce < account.nonce {
@@ -449,8 +467,8 @@ mod tests {
         let keypair = keypair();
         let tx = transfer(&keypair, 0);
 
-        assert_eq!(Mempool::check(&tx, Ok(()), &state, None), Ok(()));
-        assert!(matches!(Mempool::check(&tx, Err(VerifyError::InvalidSignature), &state, None), Err(MempoolError::Invalid(_))));
+        assert_eq!(Mempool::check(&tx, Ok(()), &Hash::zero(crate::structs::hash::HashType::default_chain()), &state, None), Ok(()));
+        assert!(matches!(Mempool::check(&tx, Err(VerifyError::InvalidSignature), &Hash::zero(crate::structs::hash::HashType::default_chain()), &state, None), Err(MempoolError::Invalid(_))));
 
         let mut mempool = Mempool::new(1);
 

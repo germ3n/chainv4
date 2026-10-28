@@ -5,6 +5,7 @@ use {
     crate::crypto::verifiable::VerifyError,
     crate::structs::address::Address,
     crate::structs::amount::Amount,
+    crate::registry::multisig::MultisigMember,
     crate::registry::signers::Signer,
     crate::governance::Change,
     crate::registry::names::{NameAction, name_problem},
@@ -208,6 +209,131 @@ pub enum Tx {
     )]
     #[wincode(tag = 17)]
     Ethereum { raw: Vec<u8> },
+    #[document(
+        summary = "A multisig's own transaction, carried by whoever submits it: its SignedTx's nonce and fee offer are the multisig's, so the multisig is the sender, pays the fee from its balance and takes the nonce; the carrier's key only signs the envelope. It needs threshold of the members: signatures in it over the body (MultisigBody::signing_bytes), and approvals made on chain for the same body, count together. One that falls short is refused before it runs, so nobody but the quorum moves the multisig's nonce.",
+        params = {
+            account = "The multisig.",
+            tx = "What it does, as the multisig: any transaction a key's account sends, but another multisig's, an approval of one, or an Ethereum-signed one.",
+            signatures = "Members' signatures over the body, collected off chain; empty when approvals on chain are enough.",
+        },
+        see_also = "MultisigBody, Tx::ApproveMultisig, Multisigs",
+    )]
+    #[wincode(tag = 18)]
+    Multisig {
+        account: Address,
+        #[wincode(with = "Nested")]
+        tx: Box<Tx>,
+        signatures: Vec<MemberSignature>,
+    },
+    #[document(
+        summary = "Makes a new multisig, at multisig_address of the sender and this nonce. The sender pays for it and has no say in it after, unless it is a member.",
+        params = {
+            members = "Its members, 1 to 20: each a key here, and a Bitcoin key and EVM address for the other chains, every member naming those or none.",
+            threshold = "How many members each of its transactions needs.",
+        },
+        see_also = "MultisigPolicy, multisig_address",
+    )]
+    #[wincode(tag = 19)]
+    CreateMultisig { members: Vec<MultisigMember>, threshold: u32 },
+    #[document(
+        summary = "Replaces the sending multisig's members and threshold; the address stays and the open proposals go. Only a multisig sends it, through Tx::Multisig, so its quorum decides.",
+        params = {
+            members = "The new members.",
+            threshold = "The new threshold.",
+        },
+        see_also = "Tx::Multisig, Multisigs::change",
+    )]
+    #[wincode(tag = 20)]
+    ChangeMultisig { members: Vec<MultisigMember>, threshold: u32 },
+    #[document(
+        summary = "A member approves a multisig's transaction on chain, from its own account and at its own cost, for the multisig's next nonce: what a Tx::Multisig counts with the signatures it carries. A member backs one proposal at a time; approving another moves its approval. Once any of the multisig's transactions runs, every open proposal is void.",
+        params = {
+            account = "The multisig.",
+            nonce = "The multisig's next nonce, which the transaction is for.",
+            fee = "The fee offer the multisig's transaction will run with.",
+            tx = "What it does, as the multisig.",
+        },
+        see_also = "Tx::Multisig, Multisigs::approve",
+    )]
+    #[wincode(tag = 21)]
+    ApproveMultisig {
+        account: Address,
+        nonce: u64,
+        fee: FeeOffer,
+        #[wincode(with = "Nested")]
+        tx: Box<Tx>,
+    },
+    #[document(
+        summary = "A member takes back its approval of an open proposal of a multisig.",
+        params = {
+            account = "The multisig.",
+            proposal = "The proposal's id, MultisigBody::id.",
+        },
+        see_also = "Tx::ApproveMultisig",
+    )]
+    #[wincode(tag = 22)]
+    WithdrawMultisig { account: Address, proposal: Hash },
+}
+
+/// Encodes a transaction inside another, as a multisig's: its own encoding, with no size known
+/// ahead, which a type holding itself could not tell without asking itself.
+pub struct Nested;
+
+// SAFETY: size_of is exactly what write writes: the transaction's own encoding.
+unsafe impl<C: wincode::config::Config> SchemaWrite<C> for Nested {
+    type Src = Box<Tx>;
+
+    fn size_of(src: &Box<Tx>) -> wincode::WriteResult<usize> {
+        <Tx as SchemaWrite<C>>::size_of(src)
+    }
+
+    fn write(writer: impl wincode::io::Writer, src: &Box<Tx>) -> wincode::WriteResult<()> {
+        <Tx as SchemaWrite<C>>::write(writer, src)
+    }
+}
+
+// SAFETY: read initializes dst before it returns Ok, from the transaction's own encoding.
+unsafe impl<'de, C: wincode::config::Config> SchemaRead<'de, C> for Nested {
+    type Dst = Box<Tx>;
+
+    fn read(reader: impl wincode::io::Reader<'de>, dst: &mut std::mem::MaybeUninit<Box<Tx>>) -> wincode::ReadResult<()> {
+        dst.write(Box::new(<Tx as SchemaRead<'de, C>>::get(reader)?));
+
+        Ok(())
+    }
+}
+
+#[document(
+    summary = "A member's signature over a multisig's transaction, and the key that made it.",
+    category = "Multisig",
+    see_also = "Tx::Multisig, MultisigBody::signing_bytes",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct MemberSignature {
+    #[document(summary = "The member's key.")]
+    pub key: PublicKey,
+    #[document(summary = "Its signature over the body's signing bytes.")]
+    pub signature: Signature,
+}
+
+impl Hashable for MemberSignature {}
+
+impl MemberSignature {
+    #[document(
+        parent = "MemberSignature",
+        summary = "A member signs a multisig's transaction.",
+        params = {
+            body = "The transaction, with the multisig's nonce and fee offer.",
+            keypair = "The member's key.",
+            genesis = "The chain's genesis id, so the signature holds on this chain only.",
+        },
+    )]
+    pub fn sign(body: &crate::registry::multisig::MultisigBody, keypair: &Keypair, genesis: &Hash) -> MemberSignature {
+        MemberSignature {
+            key: keypair.public(),
+            signature: keypair.sign(&body.signing_bytes(genesis)),
+        }
+    }
 }
 
 #[document(
@@ -342,6 +468,20 @@ impl Verifiable for Tx {
             // Whether the list is one a chain takes is decided when the transaction runs, and so are
             // name prices and collection standards.
             Tx::ApproveChange { change: Change::Bootnodes(_) | Change::NamePrices(_) | Change::Collections(_) | Change::Federation(_) | Change::Directory(_) | Change::Fees(_) | Change::Reward(_) | Change::Limits(_) | Change::Finality(_) | Change::SwitchFinality { .. }, .. } => Ok(()),
+            // The members' signatures are checked when it runs, against the chain's genesis id and
+            // the policy in state.
+            Tx::Multisig { account, tx, signatures } => {
+                multisig_inner(account, tx)?;
+
+                if signatures.len() > crate::registry::multisig::MAX_MEMBERS {
+                    return Err(VerifyError::BadMultisig);
+                }
+
+                signatures.iter().try_for_each(|signed| signed.key.verify())
+            }
+            Tx::ApproveMultisig { account, tx, .. } => multisig_inner(account, tx),
+            Tx::CreateMultisig { members, .. } | Tx::ChangeMultisig { members, .. } => members.iter().try_for_each(|member| member.key.verify()),
+            Tx::WithdrawMultisig { .. } => Ok(()),
             // The signatures are checked when it runs, against the chain's genesis id.
             Tx::Slash { first, second } => {
                 if !first.vote.conflicts(&second.vote) {
@@ -352,6 +492,16 @@ impl Verifiable for Tx {
             }
         }
     }
+}
+
+/// A multisig's transaction comes from a multisig, and does what a key's account could: nothing
+/// another multisig's, no approval of one, nothing one key signs for Ethereum.
+fn multisig_inner(account: &Address, tx: &Tx) -> Result<(), VerifyError> {
+    if !matches!(account, Address::Multisig(_)) || matches!(tx, Tx::Multisig { .. } | Tx::ApproveMultisig { .. } | Tx::WithdrawMultisig { .. } | Tx::Ethereum { .. }) {
+        return Err(VerifyError::BadMultisig);
+    }
+
+    tx.verify()
 }
 
 fn nonzero(amount: &Amount) -> Result<(), VerifyError> {
@@ -543,10 +693,13 @@ impl SignedTx {
 
     #[document(
         parent = "SignedTx",
-        summary = "The address sending the transaction: the signer's.",
+        summary = "The address sending the transaction: the signer's, or for a multisig's own transaction the multisig, whose nonce and fee offer it carries.",
     )]
     pub fn sender(&self) -> Address {
-        self.signer.address()
+        match &self.tx {
+            Tx::Multisig { account, .. } => *account,
+            _ => self.signer.address(),
+        }
     }
 
     #[document(
@@ -701,7 +854,12 @@ impl SignedTx {
 
     /// Whether a transfer or burn takes from its sender alone.
     fn check_sender(&self) -> Result<(), VerifyError> {
-        match &self.tx {
+        let tx = match &self.tx {
+            Tx::Multisig { tx, .. } => tx,
+            tx => tx,
+        };
+
+        match tx {
             Tx::Transfer { from, .. } | Tx::Burn { from, .. } if *from != self.sender() => Err(VerifyError::NotSender),
             _ => Ok(()),
         }

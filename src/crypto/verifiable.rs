@@ -49,6 +49,8 @@ pub enum VerifyError {
     BadName,
     #[document(summary = "An Ethereum-signed transaction that does not read, is for another chain, or whose nonce, fee offer or signer are not what its signed bytes say.")]
     BadEthereum,
+    #[document(summary = "A multisig's transaction that is not one: from an address that is no multisig, carrying another multisig's, an approval or an Ethereum-signed transaction, or more signatures than members.")]
+    BadMultisig,
 }
 
 impl fmt::Display for VerifyError {
@@ -66,6 +68,7 @@ impl fmt::Display for VerifyError {
             VerifyError::NotConflicting => write!(f, "the votes are not conflicting votes by one voter"),
             VerifyError::BadName => write!(f, "not a name, or not what a name holds: labels of a to z, 0 to 9 and hyphens, the last at least 3 long"),
             VerifyError::BadEthereum => write!(f, "not an Ethereum transaction for this chain, as signed"),
+            VerifyError::BadMultisig => write!(f, "not a multisig's transaction a multisig may send"),
         }
     }
 }

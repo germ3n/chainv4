@@ -23,6 +23,7 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Ethereum's tools](ethereum.md) | Ethereum-signed transactions and JSON-RPC at POST /rpc: MetaMask, Foundry and ethers against chainv4, and what differs from an Ethereum node. |
 | [EVM](evm.md) | Solidity contracts on revm: addresses and aliases, deploying, calling and reading, gas, logs and reverts, and the example counter. |
 | [Contract storage](contract-storage.md) | A guide to how contracts keep state: plain storage, namespaces, the own space, layouts with key kinds and units that upgrades must keep, and moving a contract between engines, with a worked example. |
+| [Multisig](multisig.md) | Native multisig accounts: M of N members' keys, any kind, signatures collected off chain or approvals on chain, the multisig paying its own fee, members changed by its quorum, in the CLI, the wallet and the offline signer. |
 | [Names](names.md) | Names such as alice.dev: registering for years at a price by length, burned, records, subnames, primary names, expiry and grace, and prices changed by governance. |
 | [Token standard](token-standard.md) | The interface every token contract follows, and the registry that lists them. |
 | [NFT standards](nft-standard.md) | NFTs, one owner a token, and multi-token collections, amounts of each id: their interfaces, safe transfers, provable owners, metadata, the collection registry, the factory and the CLI. |

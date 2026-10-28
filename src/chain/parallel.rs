@@ -138,14 +138,22 @@ enum Touch {
 }
 
 fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
-    let sender = tx.sender();
+    touches_of(&tx.tx, tx.sender(), tx.nonce, hash)
+}
+
+fn touches_of(tx: &Tx, sender: Address, nonce: u64, hash: HashType) -> Vec<Touch> {
     let mut touched = vec![Touch::Address(sender)];
 
-    match &tx.tx {
+    match tx {
+        // A multisig's own transaction touches what it does, as the multisig.
+        Tx::Multisig { tx, .. } => return touches_of(tx, sender, nonce, hash),
+        Tx::CreateMultisig { .. } => touched.push(Touch::Address(crate::structs::address::multisig_address(&sender, nonce, hash))),
+        Tx::ChangeMultisig { .. } => {}
+        Tx::ApproveMultisig { account, .. } | Tx::WithdrawMultisig { account, .. } => touched.push(Touch::Address(*account)),
         Tx::Transfer { to, .. } | Tx::Mint { to, .. } | Tx::ContractCall { to, .. } | Tx::EvmCall { to, .. } => touched.push(Touch::Address(*to)),
         #[cfg(feature = "evm")]
-        Tx::Deploy { code: crate::structs::code::Code::Evm(_) } => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, tx.nonce))),
-        Tx::Deploy { .. } => touched.push(Touch::Address(contract_address(&sender, tx.nonce, hash))),
+        Tx::Deploy { code: crate::structs::code::Code::Evm(_) } => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, nonce))),
+        Tx::Deploy { .. } => touched.push(Touch::Address(contract_address(&sender, nonce, hash))),
         Tx::Upgrade { contract, .. } => touched.push(Touch::Address(*contract)),
         Tx::Burn { .. } => {}
         Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::Slash { .. } => touched.push(Touch::Staking),
@@ -156,7 +164,7 @@ fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
         Tx::Ethereum { raw } => match crate::crypto::ethereum::decode(raw).map(|ethereum| ethereum.to) {
             Ok(Some(to)) => touched.extend([Touch::Address(Address::Evm(to)), Touch::Address(Address::Secp256k1(to))]),
             #[cfg(feature = "evm")]
-            Ok(None) => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, tx.nonce))),
+            Ok(None) => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, nonce))),
             _ => {}
         },
     }

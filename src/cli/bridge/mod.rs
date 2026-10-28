@@ -190,6 +190,8 @@ impl Bridge {
             eip712: false,
             max_price: None,
             tip: None,
+            multisig: None,
+            out: None,
             tx,
         })
     }

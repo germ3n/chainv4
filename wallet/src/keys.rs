@@ -133,14 +133,14 @@ pub fn label(scheme: KeyType) -> &'static str {
     }
 }
 
-/// The scheme an address belongs to; None for a contract's.
+/// The scheme an address belongs to; None for a contract's or a multisig's.
 pub fn scheme_of(address: &Address) -> Option<KeyType> {
     match address {
         Address::Ed25519(_) => Some(KeyType::Ed25519),
         Address::EdBlake(_) => Some(KeyType::EdBlake),
         Address::Secp256k1(_) => Some(KeyType::Secp256k1),
         Address::Bitcoin(_) => Some(KeyType::Bitcoin),
-        Address::Contract(_) | Address::Evm(_) => None,
+        Address::Contract(_) | Address::Evm(_) | Address::Multisig(_) => None,
     }
 }
 

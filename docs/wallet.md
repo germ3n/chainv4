@@ -351,6 +351,15 @@ period, and which names each address owns; what each name is, the wallet proves.
   pointing, and so on, with the name and what it sets. It cannot know what a registration burns;
   the chain charges that as it runs.
 
+## Multisig
+
+The **Multisig** page makes [multisigs](multisig.md#in-the-wallet), follows them, and takes their
+transactions round the members: a payment proposed and priced, signed with the account's key or on
+the offline signer from a `ur:chainv4-multisig` code, approved on chain through Send, and submitted
+once enough back it, under a key made for the moment, the multisig paying. What the node says of a
+multisig is shown as its word; nothing signed rests on it. The offline signer reads a bundle on
+Sign and shows it back signed.
+
 ## Faucet
 
 On a node that runs a [faucet](faucet.md), as a dev or test chain's may, the Overview has a

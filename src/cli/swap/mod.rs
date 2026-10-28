@@ -658,6 +658,8 @@ fn call(action: &LegAction, to: Address, function: &str, amount: u256, args: Vec
         eip712: false,
         max_price: None,
         tip: None,
+        multisig: None,
+        out: None,
         tx: TxArgs::Call { to, function: function.to_string(), amount, args },
     })
 }

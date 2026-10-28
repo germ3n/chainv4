@@ -33,6 +33,9 @@ use {
 pub const PAIR_TYPE: &str = "chainv4-pairing";
 pub const SIGN_TYPE: &str = "chainv4-sign-request";
 pub const SIGNED_TYPE: &str = "chainv4-signed";
+/// A multisig's transaction on its way round the members: the same bundle chainv4 multisig
+/// passes as text, read by the signer to add its member's signature, and shown back.
+pub const MULTISIG_TYPE: &str = "chainv4-multisig";
 
 /// The most bytes of a message one code holds: as dense as a code a phone reads off a screen
 /// reliably, about 620 characters, as many as a token transfer's request takes. Longer ones
@@ -96,6 +99,8 @@ pub enum Message {
     /// A swap's terms: an offer, or its answer.
     #[cfg(feature = "swap")]
     Swap(Box<chainv4::swap::Terms>),
+    /// A multisig's transaction and the members' signatures so far: to sign, and signed.
+    Multisig(Box<chainv4::registry::multisig::MultisigBundle>),
 }
 
 impl Message {
@@ -110,6 +115,7 @@ impl Message {
             Message::Bitcoin(request) => request.kind,
             #[cfg(feature = "swap")]
             Message::Swap(_) => chainv4::swap::UR_TYPE,
+            Message::Multisig(_) => MULTISIG_TYPE,
         }
     }
 
@@ -119,6 +125,7 @@ impl Message {
             Message::Pair(pairing) => wincode::serialize(pairing),
             Message::Sign(request) => wincode::serialize(request),
             Message::Signed(signed) => wincode::serialize(signed),
+            Message::Multisig(bundle) => wincode::serialize(bundle),
             Message::MetaMask(request) => return request.to_cbor().expect("a request read always writes back"),
             Message::EthSignature(signature) => return signature.to_cbor().expect("a signature always writes"),
             Message::Bitcoin(request) => return request.to_cbor(),
@@ -139,6 +146,7 @@ impl Message {
             PAIR_TYPE => whole::<Pairing>(bytes).map(Message::Pair),
             SIGN_TYPE => whole::<Request>(bytes).map(Message::Sign),
             SIGNED_TYPE => whole::<SignedTx>(bytes).map(Message::Signed),
+            MULTISIG_TYPE => whole::<chainv4::registry::multisig::MultisigBundle>(bytes).map(|bundle| Message::Multisig(Box::new(bundle))),
             crate::hardware::REQUEST_TYPE => crate::hardware::SignRequest::from_cbor(bytes).map(|request| Message::MetaMask(Box::new(request))),
             crate::hardware::SIGNATURE_TYPE => crate::hardware::Signature::from_cbor(bytes).map(|signature| Message::EthSignature(Box::new(signature))),
             #[cfg(feature = "swap")]
@@ -178,6 +186,7 @@ impl Message {
             Message::Bitcoin(_) => "a Bitcoin wallet's PSBT",
             #[cfg(feature = "swap")]
             Message::Swap(_) => "a swap's terms",
+            Message::Multisig(_) => "a multisig's transaction",
         }
     }
 }

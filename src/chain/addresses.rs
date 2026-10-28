@@ -59,7 +59,17 @@ impl Hashable for IndexedTx {}
 pub fn touched(signed: &SignedTx, status: &TxStatus, payments: &[Payment]) -> BTreeSet<Address> {
     let mut touched = BTreeSet::from([signed.sender()]);
 
-    match &signed.tx {
+    // A multisig's own transaction is listed as what it does, and under the members who signed it.
+    let tx = match &signed.tx {
+        Tx::Multisig { tx, signatures, .. } => {
+            touched.extend(signatures.iter().map(|signed| signed.key.address()));
+
+            tx
+        }
+        tx => tx,
+    };
+
+    match tx {
         Tx::Transfer { from, to, .. } => touched.extend([*from, *to]),
         Tx::Mint { to, .. } => {
             touched.insert(*to);
@@ -103,6 +113,14 @@ pub fn touched(signed: &SignedTx, status: &TxStatus, payments: &[Payment]) -> BT
         | Tx::ApproveChange { .. }
         | Tx::WithdrawChange { .. }
         | Tx::PrimaryName { .. } => {}
+        // A new multisig, or a change of one, shows in its members' histories; an approval in
+        // the multisig's.
+        Tx::CreateMultisig { members, .. } | Tx::ChangeMultisig { members, .. } => touched.extend(members.iter().map(|member| member.key.address())),
+        Tx::ApproveMultisig { account, .. } | Tx::WithdrawMultisig { account, .. } => {
+            touched.insert(*account);
+        }
+        // Read past above: never what a multisig sends.
+        Tx::Multisig { .. } => {}
     }
 
     if let TxStatus::Deployed(contract) = status {

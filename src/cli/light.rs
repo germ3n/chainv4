@@ -222,6 +222,11 @@ fn summary(tx: &Tx) -> String {
         Tx::PrimaryName { name: Some(name) } => format!("make {name} the sender's primary name"),
         Tx::PrimaryName { name: None } => "clear the sender's primary name".to_string(),
         Tx::Ethereum { raw } => format!("an Ethereum-signed transaction of {} bytes", raw.len()),
+        Tx::Multisig { account, tx, signatures } => format!("as the multisig {account}, with {} signature{}: {}", signatures.len(), if signatures.len() == 1 { "" } else { "s" }, summary(tx)),
+        Tx::CreateMultisig { members, threshold } => format!("create a multisig of {threshold} of {} members", members.len()),
+        Tx::ChangeMultisig { members, threshold } => format!("make the multisig {threshold} of {} members", members.len()),
+        Tx::ApproveMultisig { account, nonce, tx, .. } => format!("approve the multisig {account}'s transaction {nonce}: {}", summary(tx)),
+        Tx::WithdrawMultisig { account, proposal } => format!("withdraw approval of {proposal} from the multisig {account}"),
     }
 }
 

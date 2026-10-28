@@ -112,6 +112,10 @@ pub const TX_KINDS: &[&str] = &[
     "name",
     "primary_name",
     "ethereum",
+    "create_multisig",
+    "change_multisig",
+    "approve_multisig",
+    "withdraw_multisig",
 ];
 
 impl ContractScorer {
@@ -166,6 +170,12 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::Name { .. } => ("name", sender),
         Tx::PrimaryName { .. } => ("primary_name", sender),
         Tx::Ethereum { raw } => ("ethereum", crate::crypto::ethereum::decode(raw).ok().and_then(|ethereum| ethereum.to).map_or(sender, Address::Evm)),
+        // A multisig's own transaction is scored as what it does.
+        Tx::Multisig { tx, .. } => describe(tx, sender),
+        Tx::CreateMultisig { .. } => ("create_multisig", sender),
+        Tx::ChangeMultisig { .. } => ("change_multisig", sender),
+        Tx::ApproveMultisig { account, .. } => ("approve_multisig", *account),
+        Tx::WithdrawMultisig { account, .. } => ("withdraw_multisig", *account),
     }
 }
 

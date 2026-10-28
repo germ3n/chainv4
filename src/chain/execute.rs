@@ -7,6 +7,7 @@ use {
     crate::chain::FinalityConfig,
     crate::registry::validators::Staking,
     crate::registry::contracts::{Failed, Hooked},
+    crate::registry::multisig::{MultisigBody, MultisigPolicy, Multisigs},
     crate::registry::{Accounts, Contracts, RegistryError},
     crate::structs::address::Address,
     crate::structs::code::Engine,
@@ -267,6 +268,8 @@ pub enum TxError {
     CannotPay,
     #[document(summary = "Its gas limit is more than the block has left.")]
     BlockFull { left: u64 },
+    #[document(summary = "A multisig's transaction its members do not back, and why: too few of them, a signature by a key that is no member's or that does not check out, or an address that is no multisig. It never takes the multisig's nonce or fee.")]
+    Multisig(RegistryError),
 }
 
 impl fmt::Display for TxError {
@@ -280,6 +283,7 @@ impl fmt::Display for TxError {
             TxError::PriceTooLow { base } => write!(f, "max price under the base price of {base}"),
             TxError::CannotPay => write!(f, "the sender cannot pay for its gas limit"),
             TxError::BlockFull { left } => write!(f, "its gas limit is more than the {left} the block has left"),
+            TxError::Multisig(err) => write!(f, "{err}"),
         }
     }
 }
@@ -362,10 +366,41 @@ pub(crate) fn execute(
     execute_verified(block, tx, rules, vm, context)
 }
 
-/// Runs a transaction whose form and signature were checked already. The nonce and its fee are
-/// settled in the block's layer either way; everything else happens in a layer of its own that is
-/// kept only on success.
+/// Runs a transaction whose form and signature were checked already, once its multisig's members
+/// back it, for a multisig's own. The nonce and its fee are settled in the block's layer either
+/// way; everything else happens in a layer of its own that is kept only on success.
 pub(crate) fn execute_verified(
+    block: &Arc<State>,
+    tx: &SignedTx,
+    rules: &Rules,
+    vm: &Arc<Vm>,
+    context: &BlockContext,
+) -> Result<Executed, ExecuteError> {
+    authorize(block, tx, context)?;
+
+    execute_authorized(block, tx, rules, vm, context)
+}
+
+/// A multisig's own transaction needs its quorum before anything else: one that falls short never
+/// takes the multisig's nonce or fee, so nobody else can spend them.
+fn authorize(block: &Arc<State>, tx: &SignedTx, context: &BlockContext) -> Result<(), ExecuteError> {
+    if let Tx::Multisig { account, tx: inner, signatures } = &tx.tx {
+        let body = MultisigBody { account: *account, tx: (**inner).clone(), nonce: tx.nonce, fee: tx.fee };
+
+        match Multisigs::new(block).backing(&body, signatures, &context.genesis) {
+            Ok((policy, backed)) if backed >= policy.threshold => {}
+            Ok((policy, backed)) => return Err(ExecuteError::Invalid(TxError::Multisig(RegistryError::NotEnoughMembers { backed, needed: policy.threshold }))),
+            Err(RegistryError::Db(err)) => return Err(ExecuteError::Db(err)),
+            Err(err) => return Err(ExecuteError::Invalid(TxError::Multisig(err))),
+        }
+    }
+
+    Ok(())
+}
+
+/// Runs a transaction as execute_verified does, whoever backs it: what a dry run of a multisig's
+/// transaction, before its members sign, runs.
+pub(crate) fn execute_authorized(
     block: &Arc<State>,
     tx: &SignedTx,
     rules: &Rules,
@@ -388,6 +423,11 @@ pub(crate) fn execute_verified(
         None => None,
     };
     accounts.bump_nonce(&sender).map_err(node_fault)?;
+
+    // Its nonce moved, so every proposal open for it is void.
+    if matches!(tx.tx, Tx::Multisig { .. }) {
+        Multisigs::new(block).clear(&sender);
+    }
 
     // On a chain with the EVM, any transaction makes its sender known there: coin the EVM sends
     // its alias reaches it from then on. Kept even when the transaction fails, as its nonce is.
@@ -619,6 +659,34 @@ fn run(
     };
 
     match &signed.tx {
+        // A multisig's own transaction runs as the multisig, its backing checked before.
+        Tx::Multisig { tx, .. } => run(layer, &SignedTx { tx: (**tx).clone(), ..signed.clone() }, sender, rules, limits, vm, context),
+        Tx::CreateMultisig { members, threshold } => {
+            let address = crate::structs::address::multisig_address(&sender, signed.nonce, rules.hash);
+            let policy = MultisigPolicy { members: members.clone(), threshold: *threshold };
+
+            match Multisigs::new(layer).create(&address, policy) {
+                Ok(()) => (Ok(Effect::Deployed(address)), Contracted::default()),
+                Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
+            }
+        }
+        Tx::ChangeMultisig { .. } if !matches!(sender, Address::Multisig(_)) => (Err(Failure::Registry(RegistryError::OnlyMultisig)), Contracted::default()),
+        Tx::ChangeMultisig { members, threshold } => {
+            let policy = MultisigPolicy { members: members.clone(), threshold: *threshold };
+
+            (moved(Multisigs::new(layer).change(&sender, policy)), Contracted::default())
+        }
+        Tx::ApproveMultisig { account, nonce, fee, tx } => {
+            let body = MultisigBody { account: *account, tx: (**tx).clone(), nonce: *nonce, fee: *fee };
+            let approved = accounts.get(account).map_err(RegistryError::Db).and_then(|multisig| Multisigs::new(layer).approve(&sender, &body, multisig.nonce, &context.genesis));
+
+            (moved(approved.map(|_| ())), Contracted::default())
+        }
+        Tx::WithdrawMultisig { account, proposal } => {
+            let withdrawn = accounts.get(account).map_err(RegistryError::Db).and_then(|multisig| Multisigs::new(layer).withdraw(&sender, account, proposal, multisig.nonce));
+
+            (moved(withdrawn), Contracted::default())
+        }
         Tx::Transfer { from, to, amount } => (moved(accounts.transfer(from, to, amount.to_u256())), Contracted::default()),
         Tx::Mint { to, amount } => {
             if rules.minter != Some(sender) {

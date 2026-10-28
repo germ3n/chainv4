@@ -33,6 +33,8 @@ mod light;
 #[cfg(feature = "client")]
 pub(crate) mod bench;
 #[cfg(feature = "client")]
+pub(crate) mod multisig;
+#[cfg(feature = "client")]
 mod send;
 #[cfg(all(feature = "client", feature = "swap"))]
 mod swap;
@@ -47,6 +49,8 @@ pub use worker::gpus;
 
 #[cfg(feature = "client")]
 pub use light::{LightArgs, light};
+#[cfg(feature = "client")]
+pub use multisig::{MultisigArgs, multisig};
 #[cfg(feature = "client")]
 pub use send::{SendArgs, TlsArgs, TxArgs, send};
 #[cfg(feature = "client")]

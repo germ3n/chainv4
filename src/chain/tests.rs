@@ -1783,6 +1783,7 @@ mod dex;
 mod evm;
 #[cfg(feature = "names")]
 mod names;
+mod multisig;
 
 /// The state at a main-chain height, through history.
 fn state_at(db: &Arc<MemoryDb>, chain: &Chain, height: u64) -> Option<Arc<State>> {

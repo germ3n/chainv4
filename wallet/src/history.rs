@@ -64,7 +64,13 @@ impl Checked {
         if done {
             let coin = |from: Option<String>, to: Option<String>, amount: String| Move { token: None, from, to, amount };
 
-            match &signed.tx {
+            // A multisig's own transaction moves what it does.
+            let tx = match &signed.tx {
+                Tx::Multisig { tx, .. } => tx,
+                tx => tx,
+            };
+
+            match tx {
                 Tx::Transfer { from, to, amount } => moves.push(coin(Some(from.to_string()), Some(to.to_string()), amount.to_u256().to_string())),
                 Tx::Mint { to, amount } => moves.push(coin(None, Some(to.to_string()), amount.to_u256().to_string())),
                 Tx::Burn { from, amount } => moves.push(coin(Some(from.to_string()), None, amount.to_u256().to_string())),
@@ -144,7 +150,7 @@ fn whole(value: &TxCallArgumentType) -> Option<String> {
 }
 
 /// What a transaction asked for, in a few words.
-fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
+pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
     match (tx, outcome) {
         (Tx::Transfer { .. }, _) => "Transfer".to_string(),
         (Tx::Mint { .. }, _) => "Mint".to_string(),
@@ -182,6 +188,14 @@ fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
             Some(to) => format!("Sent from an Ethereum wallet to {}", format::short(&chainv4::structs::hex::to_hex(&to))),
             None => "Deploy from an Ethereum wallet".to_string(),
         },
+        (Tx::Multisig { account, tx, .. }, _) => format!("{} · by the multisig {}", action(tx, outcome), format::short(&account.to_string())),
+        (Tx::CreateMultisig { members, threshold }, CommittedOutcome::Deployed(account)) => {
+            format!("Created the multisig {}, {threshold} of {}", format::short(&account.to_string()), members.len())
+        }
+        (Tx::CreateMultisig { members, threshold }, _) => format!("Create a multisig, {threshold} of {}", members.len()),
+        (Tx::ChangeMultisig { members, threshold }, _) => format!("Made the multisig {threshold} of {}", members.len()),
+        (Tx::ApproveMultisig { account, nonce, .. }, _) => format!("Approved {}'s transaction {nonce}", format::short(&account.to_string())),
+        (Tx::WithdrawMultisig { account, .. }, _) => format!("Withdrew an approval of {}'s", format::short(&account.to_string())),
     }
 }
 

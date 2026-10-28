@@ -391,6 +391,18 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   sets, which is what makes `LightUpdate::switched` provable. A switch into FFG lapses at the
   checkpoint that would fix its first set if nobody bonded; bonds made in that checkpoint's own
   block vote only an epoch later, so they are paid back.
+- **A multisig's transaction carries the multisig's nonce and fee.** `SignedTx::sender` is the
+  multisig for a `Tx::Multisig`, so the nonce, fee reserve and refund, mempool and receipts all
+  work as for a key's account; the carrier's signature only wraps it. The quorum is checked before
+  the nonce (`execute::authorize`), and again at mempool admission, which now takes the genesis id,
+  so an under-signed one never costs the multisig anything or takes room. A dry run skips the check,
+  as it skips signatures, so a proposal is priced before its members sign.
+- **A transaction inside a transaction needs `Nested`.** wincode's derive works out a type's
+  static size from its fields, and `Tx` holding a `Box<Tx>` asks itself: the cycle only shows once
+  something evaluates it, as tests do. `Nested` encodes the inner one as itself, with no size known
+  ahead.
+- **Multisig policies live in `Column::Accounts`** beside the accounts, under `multisig:` and
+  `proposals:` prefixes, which no account key starts with; nothing scans the column.
 - **Light updates gained a field again.** `LightUpdate::switched` is a plain field, not an
   Unset one, since updates travel inside lists; stored updates from before read back through
   `ErasLightUpdate` and `LegacyLightUpdate`, but a wallet or explorer built before it cannot read a

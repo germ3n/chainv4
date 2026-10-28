@@ -192,7 +192,7 @@ impl Gate {
 
         let checked = checked.unwrap_or_else(|| tx.verify_on(&self.genesis));
         let fees = self.fees.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        Mempool::check(&tx, checked, &State::new(self.db.clone()), fees.as_deref())?;
+        Mempool::check(&tx, checked, &self.genesis, &State::new(self.db.clone()), fees.as_deref())?;
 
         self.mempool().insert(tx)
     }

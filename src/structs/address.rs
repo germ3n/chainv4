@@ -50,6 +50,12 @@ pub enum Address {
     )]
     #[wincode(tag = 5)]
     Bitcoin([u8; 20]),
+    #[document(
+        summary = "A native multisig: an account that M of its N members' keys control, its policy kept in state. The bytes are derived from its creator and their nonce, as a contract's are, so the address stays when the members change.",
+        see_also = "Tx::CreateMultisig, Tx::Multisig, Multisigs",
+    )]
+    #[wincode(tag = 6)]
+    Multisig([u8; 32]),
 }
 
 impl Address {
@@ -59,7 +65,7 @@ impl Address {
     )]
     pub fn bytes(&self) -> &[u8] {
         match self {
-            Address::Ed25519(bytes) | Address::Contract(bytes) | Address::EdBlake(bytes) => bytes,
+            Address::Ed25519(bytes) | Address::Contract(bytes) | Address::EdBlake(bytes) | Address::Multisig(bytes) => bytes,
             Address::Secp256k1(bytes) | Address::Evm(bytes) | Address::Bitcoin(bytes) => bytes,
         }
     }
@@ -110,6 +116,7 @@ impl Address {
             Address::Secp256k1(_) => "secp256k1",
             Address::Evm(_) => "evm",
             Address::Bitcoin(_) => "bitcoin",
+            Address::Multisig(_) => "multisig",
         }
     }
 }
@@ -145,6 +152,7 @@ impl FromStr for Address {
             "ed25519" => Ok(Address::Ed25519(wide()?)),
             "contract" => Ok(Address::Contract(wide()?)),
             "edblake" => Ok(Address::EdBlake(wide()?)),
+            "multisig" => Ok(Address::Multisig(wide()?)),
             "secp256k1" => bytes.try_into().map(Address::Secp256k1).map_err(|_| ParseAddressError),
             "evm" => bytes.try_into().map(Address::Evm).map_err(|_| ParseAddressError),
             _ => Err(ParseAddressError),
@@ -153,7 +161,7 @@ impl FromStr for Address {
 }
 
 #[document(
-    summary = "Text that is not an address: it must be a kind, a colon and 64 hex digits, such as ed25519:0x3b6a…, or 40 for secp256k1 and evm; or a bitcoin address, bc1q… and 38 more letters.",
+    summary = "Text that is not an address: it must be a kind, a colon and 64 hex digits, such as ed25519:0x3b6a… or multisig:0x…, or 40 for secp256k1 and evm; or a bitcoin address, bc1q… and 38 more letters.",
     category = "Primitives",
     see_also = "Address::kind",
 )]
@@ -162,7 +170,7 @@ pub struct ParseAddressError;
 
 impl fmt::Display for ParseAddressError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "an address is ed25519:, edblake: or contract: and 64 hex digits, secp256k1: or evm: and 40, or a bc1q… bitcoin address")
+        write!(f, "an address is ed25519:, edblake:, contract: or multisig: and 64 hex digits, secp256k1: or evm: and 40, or a bc1q… bitcoin address")
     }
 }
 
@@ -177,7 +185,7 @@ impl Verifiable for Address {
     fn verify(&self) -> Result<(), VerifyError> {
         match self {
             Address::Ed25519(key) | Address::EdBlake(key) => curve_point(key),
-            Address::Contract(_) | Address::Secp256k1(_) | Address::Evm(_) | Address::Bitcoin(_) => Ok(()),
+            Address::Contract(_) | Address::Secp256k1(_) | Address::Evm(_) | Address::Bitcoin(_) | Address::Multisig(_) => Ok(()),
         }
     }
 }
@@ -207,6 +215,30 @@ pub fn contract_address(deployer: &Address, nonce: u64, hash: crate::structs::ha
         .expect("genesis only allows 256-bit chain hashes");
 
     Address::Contract(bytes)
+}
+
+#[document(
+    summary = "Where Tx::CreateMultisig puts a multisig: the chain hash of a domain tag, the creator's address and their nonce. The same creator and nonce always give the same address on a chain.",
+    category = "Primitives",
+    params = {
+        creator = "Who creates it.",
+        nonce = "The creating transaction's nonce.",
+        hash = "The chain's hash: any secure, 256-bit one.",
+    },
+    see_also = "Address::Multisig",
+)]
+pub fn multisig_address(creator: &Address, nonce: u64, hash: crate::structs::hash::HashType) -> Address {
+    let mut hasher = crate::crypto::hasher::Hasher::new(hash);
+    hasher.update(b"chainv4 multisig address");
+    hasher.update(&creator.hashable_bytes_with_tag());
+    hasher.update(&nonce.to_le_bytes());
+    let bytes: [u8; 32] = hasher
+        .finalize()
+        .to_bytes()
+        .try_into()
+        .expect("genesis only allows 256-bit chain hashes");
+
+    Address::Multisig(bytes)
 }
 
 #[document(

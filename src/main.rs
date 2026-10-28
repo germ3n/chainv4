@@ -24,6 +24,10 @@ enum Command {
     /// Signs a transaction and submits it to a node's HTTP API.
     #[cfg(feature = "client")]
     Send(Box<cli::SendArgs>),
+    /// A native multisig's transactions: shows one, signs a bundle send --multisig wrote, approves
+    /// it on chain, withdraws an approval, and submits it once enough members back it.
+    #[cfg(feature = "client")]
+    Multisig(cli::MultisigArgs),
     /// Asks a node's faucet for a drip, for a dev or test chain, doing the proof of work it wants.
     #[cfg(all(feature = "client", feature = "sha256"))]
     Faucet(cli::FaucetArgs),
@@ -298,6 +302,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Send(args)) => cli::send(*args),
         #[cfg(all(feature = "client", feature = "sha256"))]
         Some(Command::Faucet(args)) => cli::faucet(args),
+        #[cfg(feature = "client")]
+        Some(Command::Multisig(args)) => cli::multisig(args),
         #[cfg(all(feature = "client", feature = "swap"))]
         Some(Command::Swap(args)) => cli::swap(args),
         #[cfg(all(feature = "client", feature = "dex", feature = "evm"))]

@@ -456,6 +456,7 @@ fn router(api: Api) -> Router {
         .route("/txs/{id}", get(transaction))
         .route("/validators", get(validators))
         .route("/validators/{voter}", get(validator))
+        .route("/multisig/{address}", get(multisig))
         .route("/signers", get(signers))
         .route("/evidence", get(evidence))
         .route("/forks", get(forks))
@@ -775,6 +776,32 @@ async fn validators(Shared(api): Shared<Api>) -> Answer {
             "weight": member.weight.to_string(),
         })).collect::<Vec<_>>(),
         "total_weight": set.total().to_string(),
+    })))
+}
+
+/// A multisig: its policy, its next nonce and balance, and the proposals open for that nonce,
+/// each with the members that approve it.
+async fn multisig(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
+    let address: Address = address.parse().map_err(|_| ApiError::BadRequest(format!("not an address: {address}")))?;
+    let state = State::new(api.db);
+    let multisigs = crate::registry::Multisigs::new(&state);
+    let policy = multisigs.get(&address)?.ok_or_else(|| ApiError::NotFound(format!("{address} is not a multisig")))?;
+    let account = crate::registry::Accounts::new(&state).get(&address)?;
+    let open = multisigs.proposals(&address, account.nonce)?;
+
+    Ok(Json(json!({
+        "address": address.to_string(),
+        "members": policy.members.iter().map(json::multisig_member).collect::<Vec<_>>(),
+        "threshold": policy.threshold,
+        "nonce": account.nonce,
+        "balance": account.balance.to_string(),
+        "proposals": open.proposals.iter().map(|proposal| json!({
+            "id": proposal.id.to_string(),
+            "tx": json::tx(&proposal.tx),
+            "encoded": to_hex(&wincode::serialize(&proposal.tx).expect("transactions always encode")),
+            "fee": json::fee_offer(&proposal.fee),
+            "approvals": proposal.approvals.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
     })))
 }
 
@@ -1498,7 +1525,8 @@ async fn submit(Shared(api): Shared<Api>, body: Bytes) -> Result<(StatusCode, Js
             MempoolError::Invalid(_)
             | MempoolError::BadGasLimit
             | MempoolError::PriceTooLow
-            | MempoolError::CannotPay => ApiError::BadRequest(err.to_string()),
+            | MempoolError::CannotPay
+            | MempoolError::Multisig(_) => ApiError::BadRequest(err.to_string()),
             MempoolError::Stale | MempoolError::Duplicate => ApiError::Conflict(err.to_string()),
             MempoolError::Full | MempoolError::Syncing => ApiError::Unavailable(err.to_string()),
             MempoolError::Db(err) => ApiError::Db(err),

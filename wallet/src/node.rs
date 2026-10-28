@@ -61,6 +61,9 @@ pub enum Ask {
     /// A JSON-RPC request to POST /rpc, as its body: what a site's transaction is priced and sent
     /// by, as Ethereum's tools do.
     Rpc(String),
+    /// A multisig's members, nonce and open proposals, as the node says: what the Multisig page
+    /// shows and counts approvals by. Nothing it signs rests on it: a bundle says what it does.
+    Multisig(String),
     /// The collection registry's first page, for the NFTs page to look through.
     #[cfg_attr(not(feature = "nft"), allow(dead_code))]
     Collections,
@@ -85,6 +88,7 @@ impl Ask {
             Ask::Names => "/names".to_string(),
             Ask::OwnedNames(address) => format!("/accounts/{address}/names?limit=100"),
             Ask::Contract(address) => format!("/contracts/{address}"),
+            Ask::Multisig(address) => format!("/multisig/{address}"),
             Ask::Call(_) => "/call".to_string(),
             Ask::Read(_) => "/offer".to_string(),
             Ask::Offer(_) => "/offer".to_string(),

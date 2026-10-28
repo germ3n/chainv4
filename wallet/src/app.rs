@@ -113,6 +113,8 @@ pub struct Settings {
     pub nft_media: bool,
     /// The IPFS gateway ipfs:// URIs are fetched through, ending in a slash.
     pub ipfs_gateway: String,
+    /// The multisigs the Multisig page follows, by address: those made here, and those added.
+    pub multisigs: Vec<String>,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -178,6 +180,7 @@ impl Default for Settings {
             nft_media: false,
             // chainv4::nft::DEFAULT_GATEWAY, which a build without NFTs has no copy of.
             ipfs_gateway: "https://ipfs.io/ipfs/".to_string(),
+            multisigs: Vec::new(),
             vault: None,
             current: String::new(),
         }
@@ -414,6 +417,10 @@ impl Wallet {
                 #[cfg(feature = "dex")]
                 (Ask::Named { .. }, _) => self.views.trade.events(&result),
                 (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
+                (Ask::Multisig(_), _) => {
+                    self.views.multisig.answered(&ask, &result);
+                }
+                (Ask::Offer(_) | Ask::Submit(_), _) if self.views.multisig.answered(&ask, &result) => {}
                 #[cfg(feature = "nft")]
                 (Ask::Collections, _) => self.views.nfts.collections(&result),
                 (Ask::Offer(_) | Ask::Submit(_), _) => {

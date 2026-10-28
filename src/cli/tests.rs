@@ -380,6 +380,8 @@ mod send {
                 eip712: false,
                 max_price: None,
                 tip: None,
+                multisig: None,
+                out: None,
                 tx,
             }
         }
@@ -572,6 +574,61 @@ mod send {
         // In block 1 or 2, so final once the tip is 5 blocks further.
         assert!(node.chain().tip().height >= 6);
         assert!(node.chain().finalized().unwrap().epoch >= 1);
+    }
+
+    #[test]
+    fn a_multisig_is_created_proposed_signed_approved_and_submitted() {
+        use crate::cli::multisig::{MultisigAction, MultisigArgs};
+        use crate::registry::multisig::MultisigMember;
+
+        let running = Running::start(true);
+        let dir = TempDir::new("multisig");
+        let members: Vec<Keypair> = (41..44).map(|seed| Keypair::from_seed([seed; 32])).collect();
+        let files: Vec<PathBuf> = members.iter().enumerate().map(|(index, keypair)| {
+            let path = dir.0.join(format!("member{index}.key"));
+            write_key(&path, keypair).unwrap();
+
+            path
+        }).collect();
+        let api = format!("http://{}", running.api);
+        let multisig = |key: &PathBuf, action: MultisigAction| crate::cli::multisig(MultisigArgs { node: api.clone(), tls: Default::default(), key: Some(key.clone()), timeout: 10, action });
+
+        // The dev key makes a 2-of-3 and funds it; each member has a little to approve with.
+        let members_given = members.iter().map(|keypair| MultisigMember { key: keypair.public(), bitcoin: None, evm: None }).collect();
+        send(running.args(TxArgs::CreateMultisig { members: members_given, threshold: 2 })).unwrap();
+        let creator = DevAuthority::dev_keypair().public().address();
+        let account = crate::structs::address::multisig_address(&creator, 0, crate::structs::hash::HashType::default_chain());
+
+        for to in [account].into_iter().chain(members.iter().map(|keypair| keypair.public().address())) {
+            send(running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(10u128.pow(18)) })).unwrap();
+        }
+
+        // Member 0 proposes; member 1 signs, offline as far as the bundle cares, and submits.
+        let bundle = dir.0.join("pay.bundle");
+        let to = Address::Ed25519([9; 32]);
+        let propose = |out: &PathBuf, amount: u64| send(SendArgs {
+            key: Some(files[0].clone()),
+            multisig: Some(account),
+            out: Some(out.clone()),
+            ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(amount.into()) })
+        });
+        propose(&bundle, 10).unwrap();
+        let submitted_short = multisig(&files[0], MultisigAction::Submit { bundle: bundle.clone() });
+        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true }).unwrap();
+
+        // The next one goes by approval on chain: member 2 approves, and that is enough with the
+        // proposer's signature, so approving submits it.
+        let second = dir.0.join("again.bundle");
+        propose(&second, 5).unwrap();
+        multisig(&files[2], MultisigAction::Approve { bundle: second.clone() }).unwrap();
+        let shown = multisig(&files[0], MultisigAction::Show { account });
+        let node = running.stop();
+        let balance = |address: &Address| crate::registry::Accounts::new(&node.chain().state()).get(address).unwrap().balance;
+
+        assert!(submitted_short.unwrap_err().to_string().contains("1 of the multisig's members back it, and it needs 2"));
+        assert_eq!(balance(&to), u256::new(15));
+        assert_eq!(crate::registry::Accounts::new(&node.chain().state()).get(&account).unwrap().nonce, 2);
+        shown.unwrap();
     }
 
     #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
