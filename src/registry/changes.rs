@@ -27,6 +27,7 @@ const FEES: &[u8] = b"change:fees";
 const REWARD: &[u8] = b"change:reward";
 const LIMITS: &[u8] = b"change:limits";
 const FINALITY: &[u8] = b"change:finality";
+const UPGRADE: &[u8] = b"change:upgrade";
 
 #[document(
     summary = "Where an approval is made: its block's height and epoch, and how many epochs ahead finality fixes what is decided, which Change::Finality takes effect after.",
@@ -314,6 +315,11 @@ impl<'a> Changes<'a> {
         self.state.get_value(Column::Validators, REWARD)
     }
 
+    #[document(parent = "Changes", summary = "The upgrade governance decided last, or None while it decided none: from its height on, nodes older than its version stop.")]
+    pub fn upgrade(&self) -> Result<Option<crate::structs::version::Upgrade>, DbError> {
+        self.state.get_value(Column::Validators, UPGRADE)
+    }
+
     #[document(parent = "Changes", summary = "The limits governance decided last, or None while it decided none, when genesis's stand.")]
     pub fn limits(&self) -> Result<Option<crate::params::BlockLimits>, DbError> {
         self.state.get_value(Column::Validators, LIMITS)
@@ -450,6 +456,7 @@ impl<'a> Changes<'a> {
             Change::Reward(reward) => self.reward()?.map(|decided| decided.reward).as_ref() == Some(reward),
             Change::Limits(limits) => self.limits()?.as_ref() == Some(limits),
             Change::Finality(config) | Change::SwitchFinality { config, .. } => self.finality_eras()?.eras.last().map(|era| &era.config) == Some(config),
+            Change::Upgrade(upgrade) => self.upgrade()?.as_ref() == Some(upgrade),
         };
 
         if same {
@@ -521,6 +528,12 @@ impl<'a> Changes<'a> {
             }
             Change::Limits(limits) => {
                 self.state.put_value(Column::Validators, LIMITS.to_vec(), &limits);
+
+                decided.consensus
+            }
+            // An upgrade only tells nodes when to stop: blocks are never checked by it.
+            Change::Upgrade(upgrade) => {
+                self.state.put_value(Column::Validators, UPGRADE.to_vec(), &upgrade);
 
                 decided.consensus
             }

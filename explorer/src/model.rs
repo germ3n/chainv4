@@ -52,6 +52,12 @@ pub struct Status {
     /// The chain's id as the bridges name it: what its EVM answers CHAINID with.
     #[serde(default)]
     pub chain_id: Option<u64>,
+    /// The node's chainv4, such as 0.1.0; none from older nodes.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The upgrade governance decided, if any: from a height on, nodes older than a version stop.
+    #[serde(default)]
+    pub upgrade: Option<UpgradeView>,
 }
 
 impl Status {
@@ -69,6 +75,48 @@ impl Status {
     pub fn block_gas_limit(&self) -> Option<u64> {
         self.fees.as_ref()?.get("block_gas_limit")?.as_u64()
     }
+}
+
+/// GET /release: the newest release the node took, as signed, for the explorer to check against
+/// its own release keys, and where the node's own chainv4 stands against it. Older nodes answer
+/// 404.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct NodeRelease {
+    /// The node's chainv4.
+    pub version: String,
+    /// Whether the node fetches releases at all: a build without release keys does not.
+    #[serde(default)]
+    pub updates: bool,
+    /// The manifest, as its keys signed it, or null while the node has none. The node only
+    /// relays it: the explorer checks it itself.
+    #[serde(default)]
+    pub manifest: Value,
+    /// The node's chainv4 against the newest: current, behind, unsupported or unknown.
+    #[serde(default)]
+    pub standing: String,
+    /// The newest chainv4, when the node is behind it or too old.
+    #[serde(default)]
+    pub newest: Option<String>,
+    /// Why the node's last fetch of the manifest failed, if it did.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// The version the node put in place of itself, which runs once it restarts.
+    #[serde(default)]
+    pub installed: Option<String>,
+    /// The upgrade that stops the node first, governance's or a release's.
+    #[serde(default)]
+    pub upgrade: Option<UpgradeView>,
+}
+
+/// An upgrade: from block from on, nodes older than least stop.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct UpgradeView {
+    pub least: String,
+    pub from: u64,
+    /// Who decided it: governance, or a release, for a chain without governance. /status's says
+    /// none, being governance's.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -936,5 +984,26 @@ mod tests {
         .unwrap();
 
         assert_eq!((worker.payout, worker.shares), (None, 0), "an older node says nothing of shares");
+    }
+
+    #[test]
+    fn a_node_s_release_reads_as_get_release_writes_it() {
+        let release: NodeRelease = serde_json::from_value(json!({
+            "version": "0.1.0", "target": "aarch64-apple-darwin", "updates": true, "manifest": null,
+            "standing": "behind", "newest": "0.2.0", "checked": 1, "error": null, "installed": "0.2.0",
+            "upgrade": { "least": "0.2.0", "from": 150_000, "source": "governance" },
+        }))
+        .unwrap();
+
+        assert_eq!((release.manifest, release.newest.as_deref(), release.installed.as_deref()), (Value::Null, Some("0.2.0"), Some("0.2.0")));
+        assert_eq!(release.upgrade.map(|upgrade| (upgrade.from, upgrade.source)), Some((150_000, Some("governance".to_string()))));
+
+        let status: Status = serde_json::from_value(json!({
+            "genesis": "g", "tip": "t", "height": 1, "timestamp": 0, "difficulty": "0", "work": "1",
+            "hash": "blake3", "coin": { "symbol": "DEV", "decimals": 18 }, "finality": null, "fees": null,
+        }))
+        .unwrap();
+
+        assert_eq!((status.version, status.upgrade), (None, None), "an older node names neither");
     }
 }

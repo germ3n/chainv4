@@ -123,6 +123,14 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `dex` | The [DEX](dex.md)'s arithmetic, `--dex-contract` and `--dex-router`, and, with `client` and `evm`, `chainv4 dex`. |
 | `bridge` | [Bridges](bridges.md) for the apps and the federation's tools: transfers as the gateways hash and the signers sign them, and, with `client` and `swap`, `chainv4 bridge`, `chainv4 bridge btc` among it. The gateways and the federation are contracts and consensus, in every build. |
 | `nft` | [NFTs](nft-standard.md) for the apps: where a token URI leads and the metadata it names, and, with `client`, `chainv4 nft`. The collection registry itself is every build's, as it is consensus. |
+| `pool` | A [mining pool](consensus.md#mining-pools) on the mining port: `--pool`, shares, PPLNS, `GET /pool` and pushed claims. Blocks that split their reward, and claims, run in every build. |
+| `release` | [Releases](updates.md) for the apps and tools: the signed manifest, checked against the release keys built in, and putting a downloaded binary in place. |
+| `updates` | A node fetching releases (`--updates`), serving them at `GET /release`, telling workers, stopping at an upgrade a release announces, and `--auto-update`; `chainv4 update` and `chainv4 release`. Brings `release` and `client`. An upgrade governance decides stops a node in every build. |
+
+**Release keys:** `build.rs` builds in `release/keys.json`, or the file `CHAINV4_RELEASE_KEYS`
+names, as the keys a binary trusts releases from (see [Updates](updates.md#release-keys)). The
+checked-in file names none, so a build from it takes no releases; a release pipeline sets the
+variable, or the file, to its own.
 
 **What a build must have:** at least one key scheme, and for contracts and nodes, at least one
 secure hash, or they fail to build.

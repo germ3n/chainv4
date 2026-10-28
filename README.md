@@ -93,8 +93,15 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--snapshot` | | On a fresh database, sync from a snapshot: check every header peers have, take the state of a block 16 below the best tip from them, checking every part against its state root, and run only the blocks after it. See [Syncing from a snapshot](docs/node.md#syncing-from-a-snapshot). |
 | `--index-events[=FROM]` | | Index events by contract, by name and by the addresses in them, for `GET /events`. `FROM` is `genesis` (when left out), a height, or `latest-N` for a window of the latest N blocks. Older blocks are indexed in the background. Once on, it stays on until `--index-events=off` deletes it. |
 | `--index-addresses[=FROM]` | | Index transactions by every address they touch, for `GET /accounts/{address}/txs`: what the [wallet](docs/wallet.md) lists a history from. `FROM` and `=off` as for `--index-events`. |
+| `--updates URL\|off` | the release keys' | Where to look for [releases](docs/updates.md) every hour: the node warns while it is behind, serves them at `GET /release`, and stops at an upgrade a release announces for its chain. A build with no release keys looks nowhere. |
+| `--auto-update` | | Put a newer chainv4 in place of this binary once a release names one, and restart on it with the same flags. Not for a container. |
 
 Logs go to stderr; set `RUST_LOG`, such as `RUST_LOG=debug`, for more.
+
+`chainv4 update` puts the newest release in place of the binary, from a node (`--node URL`) or
+the manifest, once a threshold of the release keys built in have signed it. A node too old for an
+upgrade, decided by governance or announced by a release, stops before the block it names and
+says to update (see [Updates](docs/updates.md)).
 
 ### The dev chains
 

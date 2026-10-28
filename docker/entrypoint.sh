@@ -27,6 +27,8 @@
 #   POOL_PUSH        claim for miners owed at least this, in the coin's smallest unit, from
 #   POOL_PUSH_KEY    this key file, which pays the fees: /config/pool-push.key when there is one
 #   PROTOCOL         the name every protocol and topic starts with: chainv4 unless set
+#   UPDATES          where the node looks for releases, a manifest's URL, or off: the release
+#                    keys' own unless set. The image never updates itself: pull a new one
 #   PEERS            multiaddrs to dial, separated by spaces
 #   BOOTNODES        this node's own bootnodes, beside the chain's, separated by spaces
 #   INDEX_EVENTS     which blocks the event index keeps: genesis (the default), a height,
@@ -89,6 +91,7 @@ set -- --db "$data/chain.db" \
     --index-addresses="${INDEX_ADDRESSES:-genesis}"
 
 if [ -n "${PROTOCOL:-}" ]; then set -- "$@" --protocol "$PROTOCOL"; fi
+if [ -n "${UPDATES:-}" ]; then set -- "$@" --updates "$UPDATES"; fi
 
 blocks=${BLOCKS:-auto}
 

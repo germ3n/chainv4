@@ -40,6 +40,8 @@ pub(crate) mod multisig;
 mod send;
 #[cfg(all(feature = "client", feature = "swap"))]
 mod swap;
+#[cfg(feature = "updates")]
+pub(crate) mod update;
 mod worker;
 
 pub use db::{DbArgs, db};
@@ -69,6 +71,8 @@ pub use nft::{NftArgs, nft};
 pub use bridge::{BridgeArgs, bridge};
 #[cfg(all(feature = "client", feature = "sha256"))]
 pub use faucet::{FaucetArgs, faucet};
+#[cfg(feature = "updates")]
+pub use update::{ReleaseArgs, UpdateArgs, release, update};
 
 type CliResult<T> = Result<T, Box<dyn Error>>;
 

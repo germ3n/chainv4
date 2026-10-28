@@ -65,6 +65,7 @@ pub fn percent(parts: u32) -> f64 {
 }
 
 /// Each miner's parts of a pool's block, and what they came to once what it shared out is known.
+#[cfg(feature = "pool")]
 pub fn payouts(payouts: &[crate::structs::block::Payout], shared: Option<u256>) -> Vec<Value> {
     payouts
         .iter()
@@ -615,6 +616,7 @@ pub fn change(change: &Change) -> Value {
         Change::Limits(limits) => json!({ "limits": crate::cli::genesis::limits_json(limits) }),
         Change::Finality(finality) => json!({ "finality": crate::cli::genesis::finality_json(finality) }),
         Change::SwitchFinality { epoch, config } => json!({ "switch_finality": { "epoch": epoch, "finality": crate::cli::genesis::finality_json(config) } }),
+        Change::Upgrade(upgrade) => json!({ "upgrade": { "least": upgrade.least.to_string(), "from": upgrade.from } }),
     }
 }
 

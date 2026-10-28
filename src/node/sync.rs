@@ -155,6 +155,11 @@ impl Node {
         }
 
         for (position, block) in blocks.iter().enumerate() {
+            // Blocks an upgrade stops this version at are left for a newer node.
+            if self.stopped_at(block.header.height) {
+                break;
+            }
+
             match self.chain.import(block, now) {
                 Ok(imported) => {
                     self.imported(block, imported, &format!("synced from {peer}"))?;

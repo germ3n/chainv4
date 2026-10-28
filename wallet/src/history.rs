@@ -7,6 +7,7 @@ use {
     crate::chain::{Landed, Proven},
     crate::format,
     chainv4::crypto::hasher::Hasher,
+    chainv4::governance::Change,
     chainv4::structs::address::Address,
     chainv4::structs::event::Event,
     chainv4::structs::hash::{Hash, HashType},
@@ -175,6 +176,9 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::Slash { .. }, _) => "Reported a double vote".to_string(),
         (Tx::ApproveSigners { version, .. }, _) => format!("Approved signers v{version}"),
         (Tx::WithdrawApproval { version }, _) => format!("Withdrew approval of signers v{version}"),
+        (Tx::ApproveChange { change: Change::Upgrade(upgrade), .. }, _) => {
+            format!("Approved an upgrade: nodes older than {} stop at block {}", upgrade.least, upgrade.from)
+        }
         (Tx::ApproveChange { version, change }, _) => format!("Approved a {} change from v{version}", change.name().replace('_', " ")),
         (Tx::WithdrawChange { version }, _) => format!("Withdrew approval of a change from v{version}"),
         (Tx::Name { name, action }, _) => match action {
@@ -270,8 +274,8 @@ mod tests {
     }
 
     #[test]
-    fn changes_to_fees_the_reward_limits_and_finality_read_back_without_the_node() {
-        use chainv4::governance::Change;
+    fn changes_to_fees_the_reward_limits_finality_and_upgrades_read_back_without_the_node() {
+        use chainv4::structs::version::{Upgrade, Version};
         use chainv4::params::fees::{Bid, FeeConfig, PricingConfig, ScheduleConfig, Weighted};
         use chainv4::params::finality::{DepthConfig, FfgConfig, FinalityConfig};
         use chainv4::params::{BlockLimits, Limits, Reward};
@@ -301,6 +305,7 @@ mod tests {
             (Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 64 << 20 }, max_block_bytes: None }), "Approved a limits change from v3"),
             (Change::Finality(FinalityConfig::Ffg(ffg)), "Approved a finality change from v3"),
             (Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 })), "Approved a finality change from v3"),
+            (Change::Upgrade(Upgrade { least: Version::new(0, 2, 0), from: 150_000 }), "Approved an upgrade: nodes older than 0.2.0 stop at block 150000"),
         ];
 
         for (change, said) in changes {

@@ -120,6 +120,28 @@ The explorer does not have to take the node's word for balances. It runs the lib
 - **An account's page** shows the balance it proved, from the node's proofs, at the finalized
   block and at the tip, each marked final or not yet. A proof that does not check is shown in red.
 
+## Updates
+
+The explorer learns of new releases from the node it talks to, which relays the
+[release manifest](updates.md) at `GET /release`. It asks when it connects, then about every
+hour. An older node answers 404, and the explorer shows nothing.
+- **Checked here:** the node only relays the manifest. The explorer counts it once a threshold
+  of the release keys built into it signed it. A build without keys, as `release/keys.json` is
+  as checked in, shows no update notices at all.
+- **Its own version:** what it compares is the explorer's version, from `explorer/Cargo.toml`,
+  not the chainv4 library's.
+- **A newer explorer:** a notice over every page says `Explorer 0.2.0 is out (this is 0.1.0)`,
+  with the release's notes, until dismissed; a still newer one shows again.
+- **One too old:** below the release's `least` version, a screen in place of every page says
+  this explorer no longer works with the network, with **Update** and **Quit**. In the browser
+  there is no Quit.
+- **Update,** on the desktop, when the release has a binary for the target the explorer was
+  built for: it downloads it through the proxy set, off the UI thread, and checks its size and
+  SHA-256 against the signed release. It writes it beside the running binary, then renames it
+  over. It then says `Restart the explorer to run 0.2.0`.
+- **Elsewhere,** in the browser, on Android and on iOS, or without a binary for this target, it
+  says `Update it from where you installed it.`
+
 ## Pages
 
 | Page | Shows |
@@ -127,11 +149,11 @@ The explorer does not have to take the node's word for balances. It runs the lib
 | Overview | Height, block time, throughput, peers, mempool, finality, base price and the chain's coin. Under proof of work, the network's hashrate as difficulty over block time, and the node's own when it mines, its workers' included. Charts of the last 120 blocks: block times, transactions, gas used against the limit, and the base price or the difficulty. The latest blocks, and the live feed. |
 | Block map | Every loaded block by height. The main chain runs along the middle, with finalized blocks green. Side branches sit in lanes above and below, each block joined to its parent. The tip and the justified checkpoint are outlined. Brighter blocks hold more transactions. |
 | Block | The header, its roots included, seal and finality proofs, and every transaction with its status and fee. For a mining pool's block: what went to the pool's escrow and its percent of the reward and fees, the escrow, what the producer kept as the pool's fee, and the root its miners claim against, over how many miners. |
-| Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, what its contracts paid out, its events, its fields and its signature. A claim says whose mining pool earnings it claims and from which of the pool's blocks, its `earned` being the miner's lifetime total, not what it paid. |
+| Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, what its contracts paid out, its events, its fields and its signature. A claim says whose mining pool earnings it claims and from which of the pool's blocks, its `earned` being the miner's lifetime total, not what it paid. A governance approval says what it changes, an upgrade as the nodes it stops: `an upgrade: nodes older than 0.2.0 stop at block 150,000`. |
 | Account | The balance and nonce, and the balance the light client proved, at the finalized block and the tip. For a contract: its deployer, engine, code size and functions, the storage layout its code declares, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, every transaction that touched them, with its type, parties, status and fee, and the events that mention them, token transfers and approvals in the token's units. Transactions need a node started with `--index-addresses`, events one started with `--index-events`. On a chain with names, the name the address goes by and the names it owns. |
 | EVM contract | An [EVM](evm.md) contract's account page: its deployer and code size, and with its ABI pasted, kept on this device per chain, its read functions, run with `eth_call`, and its logs and calls read by name, here and on its transactions' pages. |
 | Name | A [name](names.md), such as `alice.dev`: whether it is active, in its grace period or available, its owner, what it resolves to, when it expires and its grace ends, its text records, what a year of it costs, and for a subname, its name. |
-| Network | The node's roles, uptime, listening addresses and sync state, its gossip backlog, and what it counted since it started. The chain's bootnodes. When it mines: its hashrate over the last ten minutes, its own GPUs or threads, and a table of its workers, each with its address, when it connected, its hashrate, its devices and the seals it found; a pool's worker also with its payout address and the shares it sent. When it runs a pool: its fee, window and miners, and a link to the Mining pool page. A graph of its peers, and a table of them with what each gossiped, how much of that was dropped, and how far its chain got. |
+| Network | The node's roles, uptime, listening addresses and sync state, its chainv4 version and how it stands against the newest release (`chainv4 0.2.0 is out`, or `0.2.0 installed, restarting` once it put one in place), any [upgrade](updates.md) that stops older nodes, decided by governance or announced by a release, with the blocks left to it from the tip, its gossip backlog, and what it counted since it started. The chain's bootnodes. When it mines: its hashrate over the last ten minutes, its own GPUs or threads, and a table of its workers, each with its address, when it connected, its hashrate, its devices and the seals it found; a pool's worker also with its payout address and the shares it sent. When it runs a pool: its fee, window and miners, and a link to the Mining pool page. A graph of its peers, and a table of them with what each gossiped, how much of that was dropped, and how far its chain got. |
 | Mempool | What waits for a block, by sender and nonce. |
 | Tokens | The token registry by symbol, with a search by how a symbol starts: each token's symbol, decimals, contract and name, and what makes a token on this chain. |
 | NFTs | The [collection registry](nft-standard.md#the-collection-registry): each collection's name, kind, NFT or multi-token, symbol and contract. A collection's page looks a token up, its owner, or how many exist, and its token URI, as text: the explorer fetches nothing from where it points. It lists what an address holds of it, and what moved, from its `Transfer` or `TransferSingle` events on a node with `--index-events`. An account's page lists the NFTs it holds, and a collection's contract links to its page. |
@@ -276,6 +298,7 @@ browser crates never meet the node's lockfile, and the node's build never compil
 
 **The chainv4 library:** it links only chainv4's parts that build for the browser too:
 - transactions, keys and hashes;
+- releases, which it checks against the release keys built in, and on the desktop installs;
 - every hash and key feature, and none of the node's.
 
 **One app, three starts.** The app is a library (`src/lib.rs`), as Android loads it, so the

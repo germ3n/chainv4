@@ -213,7 +213,38 @@ fn means(tx: &TxView) -> Option<String> {
             tx.tx["to"].as_str().map_or_else(|| "?".to_string(), format::short),
             tx.tx["height"].as_u64().map_or_else(|| "?".to_string(), |height| format::thousands(&height.to_string())),
         )),
+        "approve_change" => Some(format!(
+            "Approves {}, as governance's decision {}",
+            change(&tx.tx["change"]),
+            tx.tx["version"].as_u64().map_or_else(|| "?".to_string(), |version| version.to_string()),
+        )),
         _ => None,
+    }
+}
+
+/// A change under governance, as Tx::ApproveChange carries it: { what it is of: its new value }.
+pub fn change(change: &Value) -> String {
+    let Some((what, value)) = change.as_object().and_then(|change| change.iter().next()) else {
+        return "a change".to_string();
+    };
+
+    match what.as_str() {
+        "upgrade" => format!(
+            "an upgrade: {}",
+            super::network::stopping(value["least"].as_str().unwrap_or("?"), value["from"].as_u64().unwrap_or_default())
+        ),
+        "switch_finality" => format!("a switch of finality at epoch {}", value["epoch"].as_u64().map_or_else(|| "?".to_string(), |epoch| epoch.to_string())),
+        "consensus" => "a new consensus".to_string(),
+        "bootnodes" => "new bootnodes".to_string(),
+        "name_prices" => "new name prices".to_string(),
+        "collections" => "new collection standards".to_string(),
+        "federation" => "a new bridge federation".to_string(),
+        "directory" => "a new directory".to_string(),
+        "fees" => "new fee settings".to_string(),
+        "reward" => "a new block reward".to_string(),
+        "limits" => "new limits".to_string(),
+        "finality" => "new finality settings".to_string(),
+        other => format!("a change of its {}", other.replace('_', " ")),
     }
 }
 
@@ -361,4 +392,18 @@ fn signature(ui: &mut Ui, look: Look, tx: &TxView) {
         facts.row("signer", |ui| super::copyable(ui, &tx.signer));
         facts.row("signature", |ui| super::copyable(ui, &tx.signature));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, serde_json::json};
+
+    #[test]
+    fn an_upgrade_under_governance_reads_as_the_nodes_it_stops() {
+        assert_eq!(change(&json!({ "upgrade": { "least": "0.2.0", "from": 150_000 } })), "an upgrade: nodes older than 0.2.0 stop at block 150,000");
+        assert_eq!(change(&json!({ "switch_finality": { "epoch": 9, "finality": {} } })), "a switch of finality at epoch 9");
+        assert_eq!(change(&json!({ "fees": {} })), "new fee settings");
+        assert_eq!(change(&json!({ "something_new": 1 })), "a change of its something new");
+        assert_eq!(change(&Value::Null), "a change");
+    }
 }

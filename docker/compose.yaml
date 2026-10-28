@@ -36,6 +36,7 @@ services:
       POOL_PUSH: ${POOL_PUSH:-}
       POOL_PUSH_KEY: ${POOL_PUSH_KEY:-}
       PROTOCOL: ${PROTOCOL:-}
+      UPDATES: ${UPDATES:-}
       PEERS: ${PEERS:-}
       BOOTNODES: ${BOOTNODES:-}
       INDEX_EVENTS: ${INDEX_EVENTS:-genesis}

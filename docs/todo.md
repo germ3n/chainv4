@@ -677,12 +677,18 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
-- [ ] **Updates: a warning, an updater, and a stop for breaking releases.** A node, a worker and
-  the apps learn the newest release as they run, warn when they are behind, update themselves on
-  request, and a node refuses to go on past a release marked breaking, such as a new block format.
-  A batch of its own, queued after the mining pools; its design asked for when it starts: where
-  releases are announced (a signed manifest, or on chain by governance), who signs them, what
-  "breaking" stops (the node, or blocks past a height), and whether updating is ever automatic.
+- [x] **Updates: a warning, an updater, and a stop for upgrades.** A manifest a threshold of the
+  release keys built in signs names the newest chainv4, wallet and explorer with a binary for each
+  target; nodes fetch it with `--updates`, keep the newest in `release.json`, warn while behind,
+  serve it at `GET /release` and tell workers; the apps check it themselves and offer Update on
+  the desktop, and a screen past `least`. `chainv4 update`, `--auto-update` restarting in place,
+  and `chainv4 release new/sign/verify` to publish. `Change::Upgrade`, or a release's `breaking`
+  for a chain without governance, stops older nodes before a height. See [Updates](updates.md).
+- [ ] **Updates: next.** Release keys are the build's, so replacing a stolen one needs a new
+  build; a rotation signed by the threshold, in the manifest, would let a running binary follow.
+  The apps' Update replaces a desktop binary but not a macOS app bundle's signature, nor an APK or
+  the iOS app, which update from where they were installed. A release's binaries are built by hand
+  today; the build workflow could publish them and the manifest on a `v*` tag.
 - [x] **A faucet for dev chains.** `--faucet-key` serves `POST /faucet`: a drip per address and
   per IP each period, each request with a moment's proof of work; the wallet, the explorer and
   `chainv4 faucet` ask it, and `docker/pow.sh faucet` sets one up on the VPS. See

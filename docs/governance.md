@@ -29,6 +29,8 @@ What can change today:
   inactivity leak (see [Finality](#finality)).
 - **Finality's kind:** FFG to authority or back, from an epoch on (see
   [Switching finality](#switching-finality)).
+- **An upgrade:** from a block on, nodes older than a version stop, for a release that changes the
+  rules (see [Upgrade](#upgrade)).
 
 The parameters that define finality's epochs, `checkpoint_interval` and `activation_delay`, stay
 what genesis says: every node's and light client's epoch arithmetic rests on them.
@@ -298,6 +300,21 @@ Fees, reward, limits and finality each keep their own state entry (`change:fees`
 `change:reward`, `change:limits`, `change:finality`), read for each block from its parent's state,
 so a reorg past a decision undoes it with the rest. The mempool, the producer and the API read
 what the tip's next block runs by.
+
+## Upgrade
+
+A change names the oldest release that runs past a block:
+
+```sh
+chainv4 send --key member.key approve-change --upgrade 0.2.0 --upgrade-from 150000
+```
+
+- **Older nodes stop before that block,** warning every ten minutes as it nears, and say to
+  update; newer ones run on as before. It is advice to nodes, never a rule blocks are checked by.
+- **`from` must be ahead** of the block deciding it, and the least version above 0.0.0.
+- **A later upgrade replaces it.** It is kept in `change:upgrade` and shown as `upgrade` in
+  `GET /status`.
+- A chain without governance announces one in a release instead. See [Updates](updates.md).
 
 ## What the chain does with it
 

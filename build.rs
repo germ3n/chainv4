@@ -3,6 +3,25 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     write_wiki();
+    write_release_keys();
+}
+
+/// Puts the release keys this build trusts where src/release reads them: the file
+/// CHAINV4_RELEASE_KEYS names, or release/keys.json; and names the target, which of a release's
+/// binaries is this one.
+fn write_release_keys() {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let keys = match env::var_os("CHAINV4_RELEASE_KEYS") {
+        Some(path) => PathBuf::from(path),
+        None => manifest_dir.join("release/keys.json"),
+    };
+    println!("cargo:rerun-if-env-changed=CHAINV4_RELEASE_KEYS");
+    println!("cargo:rerun-if-changed={}", keys.display());
+    println!("cargo:rustc-env=CHAINV4_TARGET={}", env::var("TARGET").unwrap());
+
+    let text = std::fs::read_to_string(&keys).unwrap_or_else(|err| panic!("release keys {}: {err}", keys.display()));
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    std::fs::write(out_dir.join("release-keys.json"), text).expect("OUT_DIR is writable");
 }
 
 /// Builds target/wiki/index.html from every `#[document]` in src and the guides in docs/ and the

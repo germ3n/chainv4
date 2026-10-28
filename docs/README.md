@@ -37,6 +37,7 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [HTTP API](api.md) | Every route and what it answers. |
 | [Explorer](explorer.md) | The egui explorer for the desktop, the browser, Android and iOS: pages, hops, tokens, sending and how it stays live. |
 | [Wallet](wallet.md) | The egui light wallet: sealed keys, proven balances and history, sending and receiving. |
+| [Updates](updates.md) | Releases: the signed manifest, release keys and their threshold, publishing, nodes and apps warning while behind, chainv4 update and --auto-update, and upgrades that stop older nodes at a height. |
 | [Deploying](deploy.md) | Starting a fresh test chain on the VPS with everything enabled: the runbook, and what bit. |
 | [Docker](docker.md) | A node in a container behind nginx, with HTTPS from your certificate, Let's Encrypt, or a self-signed one. |
 | [Development](development.md) | Building, features, tests, CI, the ui crate the apps share, the wiki, and the conventions the code follows. |

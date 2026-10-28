@@ -249,6 +249,9 @@ pub enum Change {
         #[wincode(with = "crate::structs::unset::Framed<crate::params::finality::FinalityConfig>")]
         config: crate::params::finality::FinalityConfig,
     },
+    #[document(summary = "An upgrade: from block from on, nodes older than least stop before importing it and say to update, so a release that changes the rules reaches the chain without old nodes following on alone. from must be ahead of the block deciding it; a later upgrade replaces it. Advice to nodes, never a rule blocks are checked by.")]
+    #[wincode(tag = 11)]
+    Upgrade(crate::structs::version::Upgrade),
 }
 
 #[document(summary = "The most bootnodes genesis or a change may name.", category = "Governance", see_also = "Change::Bootnodes, Genesis::bootnodes")]
@@ -280,7 +283,7 @@ impl Hashable for Change {
 }
 
 impl Change {
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits, finality or switch_finality.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits, finality, switch_finality or upgrade.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
@@ -294,6 +297,7 @@ impl Change {
             Change::Limits(_) => "limits",
             Change::Finality(_) => "finality",
             Change::SwitchFinality { .. } => "switch_finality",
+            Change::Upgrade(_) => "upgrade",
         }
     }
 }

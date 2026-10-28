@@ -319,6 +319,9 @@ on, arm64 or amd64.
 
 ## What to keep in mind
 
+- **The image never updates itself.** A node in it warns while a newer [release](updates.md) is
+  out, and stops at an upgrade it is too old for; update by building or pulling a new image. Set
+  `UPDATES` in `docker/.env` to look for releases at another manifest, or `off` for none.
 - **The development key is public.** A chain made from the presets gives it the coin and every
   role. Fine to try things on; for a chain of value, bring a genesis and keys of your own.
 - **A self-signed certificate is trusted only where you accept it.** Browsers ask once. The

@@ -21,6 +21,7 @@ mod lock;
 mod metamask;
 mod node;
 mod theme;
+mod updates;
 mod vault;
 mod views;
 

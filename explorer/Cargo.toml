@@ -16,8 +16,9 @@ name = "explorer"
 path = "src/main.rs"
 
 [dependencies]
-# Only the parts that build for the browser too: transactions, keys and hashes.
-chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "abi", "swap", "dex"] }
+# Only the parts that build for the browser too: transactions, keys and hashes, and releases, which
+# it checks against the release keys built in and, on the desktop, puts in place of itself.
+chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "abi", "swap", "dex", "release"] }
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "persistence"] }
 egui = "0.37.0"
 zeroize = "1.9.1"

@@ -17,7 +17,9 @@ use {
     crate::views::{
         self, Ctx, Look, Settings, View, account::AccountState, hops::HopState, map::MapState, network::Streaming, send::SendState,
         settings::SettingsState, tokens::TokensState, dex::DexState, swaps::SwapsState, bridge::BridgeState, collections::CollectionsState,
+        update::UpdateState,
     },
+    chainv4::release::{ReleaseError, ReleaseKeys},
     chainv4_ui::{Palette, layout, widgets},
     egui::{RichText, Ui},
     serde_json::Value,
@@ -34,6 +36,10 @@ const STATUS_STREAMED: f64 = 3.0;
 const NODE_EVERY: f64 = 2.0;
 const PAGE_EVERY: f64 = 2.5;
 const FORKS_EVERY: f64 = 5.0;
+/// The node's release: on connecting, then about every hour, and a minute after it failed to
+/// answer.
+const RELEASE_EVERY: f64 = 3600.0;
+const RELEASE_RETRY: f64 = 60.0;
 /// How long a failure stands before what failed is asked again.
 const RETRY_AFTER: f64 = 3.0;
 /// How long after the stream drops it is opened again.
@@ -48,6 +54,7 @@ struct Asked {
     forks: f64,
     failures: f64,
     stream: f64,
+    release: f64,
 }
 
 pub struct Explorer {
@@ -77,6 +84,10 @@ pub struct Explorer {
     settings_page: SettingsState,
     /// The light client, which checks what the node says about balances.
     light: Light,
+    /// The release keys built in, which the release a node relays must be signed by.
+    keys: ReleaseKeys,
+    /// A newer explorer, if one is out, and putting it in place.
+    update: UpdateState,
     /// Something to tell the person, and whether it is bad news.
     notice: Option<(String, bool)>,
     palette: Palette,
@@ -124,6 +135,12 @@ impl Explorer {
             pool: views::pool::PoolPage::default(),
             settings_page: SettingsState::default(),
             light: Light::default(),
+            keys: ReleaseKeys::built_in().unwrap_or_else(|why| {
+                log::warn!("{why}: no update notices");
+
+                ReleaseKeys::default()
+            }),
+            update: UpdateState::default(),
             notice: None,
             palette,
             moved: false,
@@ -189,6 +206,12 @@ impl Explorer {
                                 Ask::PoolMiner(address) if failure.status == 404 => {
                                     self.store.pool_miners.remove(address);
                                 }
+                                // An older node, which has no releases to relay.
+                                Ask::Release if failure.status == 404 => {
+                                    self.store.release = None;
+                                    self.update.found = None;
+                                }
+                                Ask::Release => self.asked.release = time - RELEASE_EVERY + RELEASE_RETRY,
                                 _ => {}
                             }
 
@@ -210,6 +233,7 @@ impl Explorer {
                     if store.status.as_ref().is_some_and(|known| known.genesis != status.genesis) {
                         // Another chain behind the same address: start over.
                         *store = Store::default();
+                        self.asked.release = 0.0;
                     }
 
                     store.status = Some(status);
@@ -261,6 +285,21 @@ impl Explorer {
                 store.calls.insert(ask.clone(), value);
             }
             Ask::Pool => store.pool = parse(value),
+            Ask::Release => {
+                if let Some(release) = parse::<crate::model::NodeRelease>(value) {
+                    self.update.found = match crate::release::update(&release.manifest, &self.keys, crate::release::ours()) {
+                        Ok(found) => found,
+                        // A build without release keys shows no update notices at all.
+                        Err(ReleaseError::NoKeys) => None,
+                        Err(why) => {
+                            log::warn!("the release the node relays does not count: {why}");
+
+                            None
+                        }
+                    };
+                    store.release = Some(release);
+                }
+            }
             Ask::PoolMiner(address) => {
                 if let Some(books) = parse(value) {
                     store.pool_miners.insert(address, books);
@@ -428,6 +467,10 @@ impl Explorer {
 
         if due(&mut self.asked.node, NODE_EVERY) {
             self.api.ask(Ask::Node);
+        }
+
+        if due(&mut self.asked.release, RELEASE_EVERY) {
+            self.api.ask(Ask::Release);
         }
 
         // The pool's page asks again on its own, so why it failed stands till then: a node without
@@ -729,6 +772,11 @@ impl Explorer {
         let mut go = None;
         let mut connect = None;
         let look = self.look(narrow);
+
+        if views::update::notice(ui, look, &mut self.update) {
+            self.update.start(client(&self.settings), self.wake.clone());
+        }
+
         self.notice(ui);
         let mut ctx = Ctx {
             store: &self.store,
@@ -808,6 +856,21 @@ impl eframe::App for Explorer {
 
         let palette = self.palette;
         let narrow = layout::is_narrow(ui.available_width());
+
+        // An explorer the network no longer works with shows nothing but how to update it.
+        if self.update.blocks() {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(palette.paper).inner_margin(egui::Margin::symmetric(16, 16)))
+                .show(ui, |ui| {
+                    if views::update::blocking(ui, self.look(narrow), &self.update) {
+                        self.update.start(client(&self.settings), self.wake.clone());
+                    }
+                });
+            ui.ctx().request_repaint_after(Duration::from_millis(500));
+
+            return;
+        }
+
         let bar = egui::Frame::new().fill(palette.nav).stroke(egui::Stroke::new(1.0, palette.line));
 
         match narrow {

@@ -44,6 +44,8 @@ Where the chain stands:
 | `vote_rewards` | Where vote rewards come from: `source` `mint`, or `fees` with the `pool` address and its `balance`. |
 | `max_block_bytes` | The most bytes the next block's transactions may take, encoded, as governance or genesis set it, or `null` for none. |
 | `bootnodes` | The chain's bootnodes at the tip: the ones governance decided last, or genesis's. |
+| `upgrade` | `null`, or the [upgrade](updates.md#upgrades) governance decided last: nodes older than `least` stop before block `from`. |
+| `version` | The node's own chainv4 version, such as `0.1.0`. |
 | `swap` | `null`, or `{"contract": …}`: the [swap contract](swaps.md) a node started with `--swap-contract` names, for the wallet and `chainv4 swap`. |
 | `dex` | `null`, or `{"contract": …, "router": …}`, either `null`: the [DEX](dex.md) and the EVM DEX's router a node started with `--dex-contract` and `--dex-router` names. |
 
@@ -470,6 +472,22 @@ to. Amounts are decimal strings.
 the `height` and `block` of the newest of the pool's blocks on the main chain whose root holds it,
 all it `earned`, what it `claimed` and what is `claimable`, and its leaf's `index`, the root's
 `count` and the Merkle `path`. 404 for a miner the pool owes nothing yet.
+
+### `GET /release`
+
+The newest [release](updates.md) the node took, for the apps, workers and `chainv4 update` to check
+against their own release keys: the node only relays it.
+
+| Field | What it is |
+| --- | --- |
+| `version`, `target` | The node's chainv4 version and the target it was built for. |
+| `updates` | Whether its build trusts any release keys; without, it takes no releases. |
+| `manifest` | `null`, or the manifest as signed: `release` and `signatures`. |
+| `standing` | Where the node stands against the newest chainv4: `current`, `behind`, `unsupported` (below its `least`), or `unknown` without a manifest. |
+| `newest` | The newest chainv4, when the node is behind. |
+| `checked`, `error` | When the node last looked, in milliseconds, and why that failed, or `null`. |
+| `installed` | The version `--auto-update` put in place, which runs once the node restarts, or `null`. |
+| `upgrade` | `null`, or the upgrade that stops this node first, with `least`, `from` and its `source`, `governance` or `release`. |
 
 ### `GET /mempool?limit=N`
 

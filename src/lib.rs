@@ -26,6 +26,8 @@ pub mod net;
 #[cfg(feature = "node")]
 pub mod node;
 pub mod registry;
+#[cfg(feature = "release")]
+pub mod release;
 pub mod structs;
 #[cfg(feature = "swap")]
 pub mod swap;

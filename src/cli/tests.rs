@@ -702,15 +702,15 @@ mod send {
         // A window stays genesis's; nothing to withdraw before approving; the council of one
         // decides at once, so there is nothing to withdraw after either.
         let bootnode = "/ip4/203.0.113.7/udp/4001/quic-v1".to_string();
-        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, version: None }));
+        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, version: None }));
         let nothing = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, version: None }));
+        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, version: None }));
         let decided = send(running.args(TxArgs::WithdrawChange { version: None }));
         // Production by stake needs FFG, so finality cannot switch away from it under staked.
         let authority = crate::cli::genesis::finality_json(&FinalityConfig::Authority(crate::chain::AuthorityConfig::dev(dev.public()))).to_string();
-        let switched = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: Some(authority), switch_epoch: Some(1_000), version: None }));
-        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, version: None }));
-        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, version: None }));
+        let switched = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: Some(authority), switch_epoch: Some(1_000), upgrade: None, upgrade_from: None, version: None }));
+        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, version: None }));
+        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, version: None }));
         let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
         let node = running.stop();
 
@@ -951,6 +951,60 @@ mod send {
         assert_eq!(record.bond, bond);
         assert!(record.active_until.is_some());
         assert!(early.unwrap_err().to_string().contains("the transaction failed"));
+    }
+
+    #[cfg(feature = "updates")]
+    #[test]
+    fn update_takes_the_binary_a_threshold_signed_from_the_release_a_node_relays() {
+        use crate::cli::update::update_reading;
+        use crate::cli::UpdateArgs;
+        use crate::release::{Product, Release, ReleaseFile, ReleaseKeys, SignedRelease, TARGET, sha256};
+        use crate::structs::version::Version;
+
+        let dir = std::env::temp_dir().join(format!("chainv4-update-{}", std::process::id()));
+        let served = dir.join("served");
+        std::fs::create_dir_all(&served).unwrap();
+        let next = b"the next chainv4".to_vec();
+        std::fs::write(served.join("chainv4-next"), &next).unwrap();
+        let path = dir.join("chainv4");
+        std::fs::write(&path, b"this chainv4").unwrap();
+        let signers: Vec<Keypair> = (1..=3).map(|seed| Keypair::from_seed([seed; 32])).collect();
+        let keys = ReleaseKeys { threshold: 2, keys: signers.iter().map(Keypair::public).collect(), updates: None };
+        let releases = Arc::new(crate::node::Releases::new(keys.clone(), None));
+        // The API serves the directory from /, as it would an explorer, so the binary downloads from it.
+        let options = crate::api::ApiOptions { explorer: Some(served.clone()), releases: Some(releases.clone()), ..Default::default() };
+        let running = Running::launch_serving(false, false, None, None, |node| node, options);
+        let ours = Version::ours();
+        let newest = Version::new(ours.major, ours.minor + 1, 0);
+        let file = ReleaseFile { target: TARGET.to_string(), url: format!("http://{}/chainv4-next", running.api), sha256: sha256(&next), size: next.len() as u64 };
+        let product = Product { name: "chainv4".to_string(), version: newest, least: ours, notes: "the next one".to_string(), files: vec![file] };
+        let mut signed = SignedRelease { release: Release { issued: 1, products: vec![product], breaking: Vec::new() }, signatures: Vec::new() };
+        signed.sign(&signers[0]);
+
+        assert!(releases.offer(signed.clone(), 1).is_err(), "one of the three keys is too few");
+
+        signed.sign(&signers[2]);
+        assert_eq!(releases.offer(signed.clone(), 1), Ok(true));
+        assert_eq!(releases.offer(signed, 2), Ok(false), "the same release again is no newer");
+
+        let release: serde_json::Value = serde_json::from_str(&ureq::get(format!("http://{}/release", running.api)).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
+
+        assert_eq!(release["standing"], "behind");
+        assert_eq!(release["newest"], newest.to_string());
+
+        let args = || UpdateArgs { node: Some(format!("http://{}", running.api)), updates: None, proxy: None, check: false, yes: false };
+        let stricter = ReleaseKeys { threshold: 3, ..keys.clone() };
+        let refused = update_reading(args(), &stricter, &path, &mut "yes\n".as_bytes()).unwrap_err();
+
+        assert!(refused.to_string().contains("2 of the release keys signed it, and it takes 3"), "{refused}");
+        assert!(update_reading(args(), &keys, &path, &mut "no\n".as_bytes()).is_err(), "only yes replaces it");
+        assert_eq!(std::fs::read(&path).unwrap(), b"this chainv4");
+
+        update_reading(args(), &keys, &path, &mut "yes\n".as_bytes()).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), next);
+        running.stop();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(feature = "faucet")]

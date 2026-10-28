@@ -8,6 +8,7 @@ mod app;
 mod format;
 mod light;
 mod model;
+mod release;
 mod sse;
 mod store;
 mod theme;

@@ -14,6 +14,7 @@ use {
     crate::vault::{Vault, Words},
     chainv4::crypto::mnemonic::Phrase,
     chainv4::structs::hex::{from_hex, to_hex},
+    chainv4::structs::version::Upgrade,
     egui::{RichText, Ui},
 };
 
@@ -146,6 +147,10 @@ fn online(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, node: String) {
 
         if connect {
             *ctx.connect = Some(typed.trim().to_string());
+        }
+
+        if let Some(upgrade) = ctx.node_stops {
+            node_stops(ui, ctx, upgrade);
         }
     });
 
@@ -290,6 +295,25 @@ fn online(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, node: String) {
             *ctx.connect = Some(node.clone());
         }
     });
+}
+
+/// The upgrade that stops the node: the node's own chainv4 is older than the upgrade's least, so
+/// it imports no block from the upgrade's height on, and the wallet follows it no further.
+fn node_stops(ui: &mut Ui, ctx: &Ctx, upgrade: Upgrade) {
+    let palette = *ctx.palette;
+    let from = format::thousands(&upgrade.from.to_string());
+    let reached = ctx.chain.following().is_some_and(|(tip, _)| tip + 1 >= upgrade.from);
+
+    ui.add_space(6.0);
+    ui.colored_label(palette.warn, match reached {
+        true => format!("Your node stopped before block {from}: it needs updating to chainv4 {}.", upgrade.least),
+        false => format!("Your node stops at block {from} unless updated to chainv4 {}.", upgrade.least),
+    });
+    ui.label(
+        RichText::new("Past it, the node imports no blocks, and the wallet sees none. Until whoever runs it updates it, another node keeps you following the chain.")
+            .small()
+            .color(palette.muted),
+    );
 }
 
 /// The wallet open: its name, its words, and removing it.

@@ -30,7 +30,7 @@ fn header(height: u64, timestamp: u64, difficulty: u128) -> BlockHeader {
 }
 
 fn port() -> MiningPort {
-    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None }
+    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None }
 }
 
 /// A pool on a port of its own, its seals coming out of the channel.

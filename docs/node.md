@@ -25,6 +25,9 @@ tests, check and admit on the loop's own thread instead, so a test's events are 
 it sends them.
 
 Its loop, `Node::run`, repeats two steps. **`step`** does the work:
+0. It stops, with `NodeError::Upgrade`, once the next block is one an [upgrade](updates.md#upgrades)
+   stops this version at, and says so every ten minutes until then. Blocks at or past that
+   height are never imported.
 1. It handles what arrived, at most 256 events a pass so a flood cannot starve block production:
    - gossiped blocks and votes;
    - the gate's tallies of what came of transactions;

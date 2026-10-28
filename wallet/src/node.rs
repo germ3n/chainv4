@@ -74,6 +74,10 @@ pub enum Ask {
     /// The collection registry's first page, for the NFTs page to look through.
     #[cfg_attr(not(feature = "nft"), allow(dead_code))]
     Collections,
+    /// The newest release the node took, as signed, beside where the node's own chainv4 stands:
+    /// what the wallet checks its own version against, with the keys built in, as the node only
+    /// relays it.
+    Release,
 }
 
 impl Ask {
@@ -98,6 +102,7 @@ impl Ask {
             Ask::Multisig(address) => format!("/multisig/{address}"),
             Ask::PoolClaim(address) => format!("/pool/claim/{address}"),
             Ask::Pool(address) => format!("/pool/{address}"),
+            Ask::Release => "/release".to_string(),
             Ask::Call(_) => "/call".to_string(),
             Ask::Read(_) => "/offer".to_string(),
             Ask::Offer(_) => "/offer".to_string(),

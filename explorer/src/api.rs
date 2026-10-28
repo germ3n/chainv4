@@ -74,6 +74,8 @@ pub enum Ask {
     Pool,
     /// The same, for one miner by its payout address, with its workers.
     PoolMiner(String),
+    /// The newest release the node took, as signed, and where the node stands against it.
+    Release,
 }
 
 impl Ask {
@@ -94,6 +96,7 @@ impl Ask {
             Ask::Faucet(_) => "/faucet".to_string(),
             Ask::Pool => "/pool".to_string(),
             Ask::PoolMiner(address) => format!("/pool/{address}"),
+            Ask::Release => "/release".to_string(),
             Ask::Contract(address) => format!("/contracts/{address}"),
             Ask::Validators => "/validators".to_string(),
             Ask::Signers => "/signers".to_string(),
@@ -464,6 +467,11 @@ mod tests {
         assert_eq!(Ask::Pool.path(), "/pool");
         assert_eq!(Ask::PoolMiner("ed25519:0x01".to_string()).path(), "/pool/ed25519:0x01");
         assert_eq!(Ask::Pool.body(), None);
+    }
+
+    #[test]
+    fn a_release_becomes_a_path() {
+        assert_eq!((Ask::Release.path(), Ask::Release.body()), ("/release".to_string(), None));
     }
 
     #[test]

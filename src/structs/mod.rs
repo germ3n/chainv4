@@ -13,4 +13,5 @@ pub mod receipt;
 pub mod trace;
 pub mod u256;
 pub mod unset;
+pub mod version;
 pub mod vote;

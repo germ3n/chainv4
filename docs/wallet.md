@@ -711,6 +711,31 @@ every token arrive at any of them; each keeps its own balance.
 for a moment. Hovering over a shortened one shows it whole. Receive's **Copy address** button
 copies the one shown.
 
+## Updates
+
+The wallet asks its node for the newest [release](updates.md) (`GET /release`) on connecting and
+then hourly, and checks it itself against the release keys built in: the node only relays it. A
+build without release keys, as one from the checked-in `release/keys.json`, shows nothing, and so
+does a node from before releases, which answers 404.
+
+- **Behind:** a card above every page says "Wallet 0.2.0 is out (this is 0.1.0)", with the
+  release's notes. **Not now** puts it away until the wallet starts again.
+- **Update, on the desktop:** with a binary in the release for the target the wallet was built
+  for, **Update** downloads it through the proxy set, off the UI thread, checks its size and
+  SHA-256 against what the keys signed, and puts it in place of the wallet's own binary. It says
+  "Restart the wallet to run 0.2.0" once done; the running wallet carries on as it was.
+- **Elsewhere:** in the browser, on Android and on iOS, and on a desktop with no binary for its
+  target, it says to update it from where you installed it.
+- **Unsupported:** a wallet older than the release's oldest that still works shows only a screen
+  saying it no longer works with the network, locked or open, with **Update** on the desktop and
+  **Quit**.
+- **The node's own upgrade:** when governance's upgrade (`GET /status`) or the release's
+  (`GET /release`) stops the node's chainv4 at a height, Settings → Node says "Your node stops at
+  block H unless updated to chainv4 L". Past it the node imports no blocks, so the wallet follows
+  no further until it is updated or you connect to another.
+- **History** shows an approved upgrade as "Approved an upgrade: nodes older than 0.2.0 stop at
+  block 150000".
+
 ## What it remembers
 
 Everything is in app storage under one key, `chainv4-wallet`, saved by eframe every 30 seconds,

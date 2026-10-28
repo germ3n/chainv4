@@ -11,7 +11,7 @@ members = ["macro", "wiki", "gpu"]
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -89,6 +89,13 @@ gpu = ["dep:chainv4-gpu", "node"]
 # open port with --mining-open, and GET /pool. Without it the port mines for --reward-to alone;
 # blocks that split their reward import either way.
 pool = ["node"]
+# Releases for the apps and tools (docs/updates.md): the signed manifest of the newest chainv4,
+# wallet and explorer, checked against the release keys built in, and putting a downloaded binary
+# in place.
+release = ["dep:serde_json", "sha256"]
+# A node fetching releases with --updates and serving them at GET /release, warning while it is
+# behind and stopping at an upgrade it is too old for; --auto-update, and chainv4 update.
+updates = ["release", "client", "ureq/socks-proxy"]
 node = ["dep:rayon", "dep:signal-hook", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "dep:serde_json", "dep:hmac", "dep:sha2", "lvm", "rocksdb"]
 
 [dependencies]

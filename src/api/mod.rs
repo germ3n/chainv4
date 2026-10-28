@@ -150,6 +150,9 @@ struct Api {
     dex_contract: Option<Address>,
     #[cfg(feature = "dex")]
     dex_router: Option<[u8; 20]>,
+    /// The releases the node fetches.
+    #[cfg(feature = "updates")]
+    releases: Option<Arc<crate::node::Releases>>,
     /// Requests in flight, by client.
     in_flight: Arc<InFlight>,
 }
@@ -328,6 +331,9 @@ pub struct ApiOptions {
     pub threads: usize,
     #[document(summary = "How many requests one client may have in flight at once; DEFAULT_PER_IP when 0.")]
     pub per_ip: usize,
+    #[document(summary = "The releases the node fetches, which GET /release serves; None for a node that fetches none.")]
+    #[cfg(feature = "updates")]
+    pub releases: Option<Arc<crate::node::Releases>>,
 }
 
 #[document(
@@ -420,6 +426,8 @@ pub fn start(
                     dex_contract: options.dex_contract,
                     #[cfg(feature = "dex")]
                     dex_router: options.dex_router,
+                    #[cfg(feature = "updates")]
+                    releases: options.releases,
                     in_flight: Arc::new(InFlight { per_ip, counts: Default::default() }),
                 })
                 // Who connects, for the faucet's limits by IP.
@@ -478,6 +486,8 @@ fn router(api: Api) -> Router {
     let router = router.route("/names", get(names)).route("/names/{name}", get(name)).route("/accounts/{address}/names", get(account_names));
     #[cfg(feature = "stream")]
     let router = router.route("/stream", get(stream));
+    #[cfg(feature = "updates")]
+    let router = router.route("/release", get(release));
     #[cfg(feature = "pool")]
     let router = router.route("/pool", get(pool)).route("/pool/{address}", get(pool_miner)).route("/pool/claim/{address}", get(pool_claim));
     let router = router.fallback(apps).layer(DefaultBodyLimit::max(MAX_BODY)).layer(middleware::from_fn_with_state(api.clone(), per_client));
@@ -674,6 +684,8 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "token_functions": &*api.token_functions,
         "federation": federation_json(&api, &State::new(db.clone()))?,
         "directory": crate::registry::changes::Changes::new(&State::new(db.clone())).directory()?.as_ref().map(crate::cli::genesis::directory_json),
+        "upgrade": crate::registry::changes::Changes::new(&State::new(db.clone())).upgrade()?.map(|upgrade| json!({ "least": upgrade.least.to_string(), "from": upgrade.from })),
+        "version": crate::structs::version::Version::ours().to_string(),
         "collections": api.rules.standards_in(&State::new(db.clone()))?.collections.as_ref().map(crate::cli::genesis::collections_json),
         "finality": finality,
         "fees": fees,
@@ -683,6 +695,44 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "faucet": faucet_json(&api),
         "swap": swap_json(&api),
         "dex": dex_json(&api),
+    })))
+}
+
+/// The newest release the node took, as signed, for the apps and workers to check themselves; where
+/// this node stands against it; and the upgrade that stops it first, governance's or the release's.
+#[cfg(feature = "updates")]
+async fn release(Shared(api): Shared<Api>) -> Answer {
+    use crate::release::Standing;
+    use crate::structs::version::Version;
+
+    let ours = Version::ours();
+    let known = api.releases.as_ref().map(|releases| releases.known()).unwrap_or_default();
+    let genesis = at_height(&*api.db, 0)?.id().to_bytes();
+    let decided = Changes::new(&State::new(api.db.clone())).upgrade()?.filter(|upgrade| upgrade.stops(ours));
+    let announced = known.signed.as_ref().and_then(|signed| signed.release.stopping(&genesis, ours));
+    let upgrade = match (decided, announced) {
+        (Some(decided), Some(announced)) if announced.from < decided.from => Some((announced, "release")),
+        (Some(decided), _) => Some((decided, "governance")),
+        (None, announced) => announced.map(|announced| (announced, "release")),
+    };
+    let (standing, newest) = match known.standing() {
+        Some(Standing::Current) => ("current", None),
+        Some(Standing::Behind { newest }) => ("behind", Some(newest)),
+        Some(Standing::Unsupported { newest, .. }) => ("unsupported", Some(newest)),
+        None => ("unknown", None),
+    };
+
+    Ok(Json(json!({
+        "version": ours.to_string(),
+        "target": crate::release::TARGET,
+        "updates": api.releases.as_ref().is_some_and(|releases| releases.keys().on()),
+        "manifest": known.signed.as_ref().map(crate::release::SignedRelease::to_json),
+        "standing": standing,
+        "newest": newest.map(|newest| newest.to_string()),
+        "checked": known.checked,
+        "error": known.error,
+        "installed": known.installed.map(|installed| installed.to_string()),
+        "upgrade": upgrade.map(|(upgrade, source)| json!({ "least": upgrade.least.to_string(), "from": upgrade.from, "source": source })),
     })))
 }
 

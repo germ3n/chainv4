@@ -9,6 +9,7 @@ use {
     crate::lock::{self, Lock, Opened},
     crate::node::{Ask, Node},
     crate::theme::{self, DARK, LIGHT, Palette},
+    crate::updates::Updates,
     crate::vault::{Book, Sealed, StoredAccount, Vault},
     crate::views::{self, Ctx, Page},
     chainv4::structs::address::Address,
@@ -322,6 +323,9 @@ pub struct Wallet {
     swap_contract: Option<String>,
     /// The DEX, and the EVM DEX's router, the node names in GET /status.
     dex: (Option<String>, Option<String>),
+    /// Where this wallet stands against the newest release the node relays, and whether the node
+    /// stops at an upgrade.
+    updates: Updates,
     /// The Bitcoin light clients the settings ask for.
     #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
     lights: crate::light::Lights,
@@ -374,6 +378,7 @@ impl Wallet {
             faucet: None,
             swap_contract: None,
             dex: (None, None),
+            updates: Updates::default(),
             #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
             lights: crate::light::Lights {
                 kept: creation.storage.and_then(|storage| eframe::get_value(storage, BITCOIN_KEY)).unwrap_or_default(),
@@ -397,6 +402,7 @@ impl Wallet {
         self.chain = Chain::default();
         self.asked_status = None;
         self.asked_history = 0.0;
+        self.updates.connected();
     }
 
     /// Seals the wallet's accounts again after a change.
@@ -459,6 +465,7 @@ impl Wallet {
                     self.faucet = value.get("faucet").filter(|faucet| !faucet.is_null()).cloned();
                     self.swap_contract = value["swap"]["contract"].as_str().map(str::to_string);
                     self.dex = (value["dex"]["contract"].as_str().map(str::to_string), value["dex"]["router"].as_str().map(str::to_string));
+                    self.updates.status(value);
 
                     if let (Some(symbol), Some(decimals)) = (value["coin"]["symbol"].as_str(), value["coin"]["decimals"].as_u64()) {
                         self.coin = Coin {
@@ -475,6 +482,10 @@ impl Wallet {
                 (Ask::Named { .. }, _) => self.views.trade.events(&result),
                 (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
                 (Ask::PoolClaim(_) | Ask::Pool(_), _) => self.views.mining.answered(&ask, &result),
+                (Ask::Release, _) => match chainv4::release::ReleaseKeys::built_in() {
+                    Ok(keys) => self.updates.answered(&result, &keys, time),
+                    Err(why) => log::warn!("{why}"),
+                },
                 (Ask::Multisig(_), _) => {
                     #[cfg(feature = "swap")]
                     self.views.swaps.multisig_answered(&ask, &result);
@@ -492,6 +503,8 @@ impl Wallet {
                 _ => {}
             }
         }
+
+        self.updates.take();
 
         #[cfg(feature = "nft")]
         for (url, result) in self.node.fetched() {
@@ -573,6 +586,10 @@ impl Wallet {
         if self.asked_status.is_none_or(|asked| time - asked >= STATUS_EVERY) {
             self.asked_status = Some(time);
             self.node.ask(Ask::Status);
+        }
+
+        if self.updates.due(time) {
+            self.node.ask(Ask::Release);
         }
 
         let addresses: Vec<Address> = self.holders.iter().flat_map(Holder::addresses).collect();
@@ -921,6 +938,16 @@ impl eframe::App for Wallet {
         chainv4_ui::layout::suit_touch(ui.ctx());
         let palette = self.palette;
 
+        // A wallet too old for the network goes no further, locked or open.
+        if self.updates.blocks() {
+            egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(palette.paper).inner_margin(egui::Margin::symmetric(14, 0)))
+            .show(ui, |ui| self.updates.blocking(ui, &palette, &self.settings, &self.wake));
+            ui.ctx().request_repaint_after(Duration::from_millis(500));
+
+            return;
+        }
+
         if !matches!(self.lock, Lock::Open) {
             egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(palette.paper).inner_margin(egui::Margin::symmetric(14, 0)))
@@ -974,6 +1001,7 @@ impl eframe::App for Wallet {
                     ui.set_max_width(ui.available_width().min(760.0));
                     ui.add_space(if narrow { 18.0 } else { 34.0 });
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        self.updates.banner(ui, &palette, &self.settings, &self.wake);
                         let mut ctx = Ctx {
                             palette: &palette,
                             chain: &self.chain,
@@ -994,6 +1022,7 @@ impl eframe::App for Wallet {
                             faucet: self.faucet.as_ref(),
                             swap_contract: self.swap_contract.as_deref(),
                             dex: (self.dex.0.as_deref(), self.dex.1.as_deref()),
+                            node_stops: self.updates.stops(),
                             #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
                             lights: &mut self.lights,
                         };

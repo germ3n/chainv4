@@ -72,6 +72,9 @@ pub struct MiningPort {
     #[document(summary = "The pool it runs, with --pool; None for workers mining for the node's reward address alone.")]
     #[cfg(feature = "pool")]
     pub pool: Option<super::shares::PoolConfig>,
+    #[document(summary = "The releases the node fetches, which it tells each worker of as it connects, so an older worker says so; None tells them nothing.")]
+    #[cfg(feature = "updates")]
+    pub releases: Option<Arc<crate::node::Releases>>,
 }
 
 impl std::fmt::Debug for MiningPort {
@@ -118,6 +121,9 @@ struct State {
     workers: Mutex<BTreeMap<u64, WorkerReport>>,
     #[cfg(feature = "pool")]
     books: Option<Books>,
+    /// The releases the node fetches, told to workers as they connect.
+    #[cfg(feature = "updates")]
+    releases: Option<Arc<crate::node::Releases>>,
 }
 
 /// What became of a nonce a worker sent.
@@ -316,25 +322,24 @@ impl Pool {
         returns = "The pool, or why the port did not open.",
     )]
     pub fn new(address: Address, hash: HashType, port: MiningPort, found: Found) -> Result<Pool, String> {
-        #[cfg(feature = "pool")]
-        let MiningPort { listen, token, protocol, pool } = port;
-        #[cfg(not(feature = "pool"))]
-        let MiningPort { listen, token, protocol } = port;
+        let listen = port.listen;
         let listener = TcpListener::bind(listen).map_err(|err| format!("the mining port {listen} did not open: {err}"))?;
         let listening = listener.local_addr().map_err(|err| err.to_string())?;
         listener.set_nonblocking(true).map_err(|err| err.to_string())?;
         let state = Arc::new(State {
             hash,
-            token,
-            protocol,
+            token: port.token,
+            protocol: port.protocol,
             found,
             job: Mutex::new(Job { number: 0, work: None, height: 0, split: Vec::new(), root: None, recent: VecDeque::new() }),
             changed: Condvar::new(),
             stopped: AtomicBool::new(false),
             streams: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "updates")]
+            releases: port.releases,
             #[cfg(feature = "pool")]
-            books: pool.map(|config| Books { ledger: Mutex::new(super::shares::Ledger::open(config, hash)), workers: Mutex::new(BTreeMap::new()) }),
+            books: port.pool.map(|config| Books { ledger: Mutex::new(super::shares::Ledger::open(config, hash)), workers: Mutex::new(BTreeMap::new()) }),
         });
         let accepting = {
             let state = state.clone();
@@ -581,6 +586,12 @@ fn serve(state: &Arc<State>, stream: TcpStream, peer: SocketAddr, number: u64) -
         let config = State::lock(&books.ledger).config().clone();
         sender.send(&json!({ "type": "pool", "fee": config.fee, "window": config.window, "open": config.open, "min_share": config.min_share.to_string() }))?;
         State::lock(&books.workers).insert(number, super::shares::PoolWorker::new(payout));
+    }
+
+    // The newest release, as signed, so a worker older than it says so.
+    #[cfg(feature = "updates")]
+    if let Some(signed) = state.releases.as_ref().and_then(|releases| releases.known().signed) {
+        sender.send(&json!({ "type": "release", "manifest": signed.to_json() }))?;
     }
 
     log::info!("[mining] worker {} connected from {peer}", hello.name);

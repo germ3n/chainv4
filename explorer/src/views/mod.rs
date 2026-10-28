@@ -37,6 +37,7 @@ pub mod settings;
 pub mod swaps;
 pub mod tokens;
 pub mod tx;
+pub mod update;
 
 /// A page of the explorer.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -73,6 +73,14 @@ enum Command {
     /// Lists this machine's GPUs, by the numbers --gpus takes.
     #[cfg(feature = "gpu")]
     Gpus,
+    /// Puts the newest chainv4 in place of this binary: from a node's GET /release or the
+    /// manifest, once a threshold of the release keys built in signed it.
+    #[cfg(feature = "updates")]
+    Update(cli::UpdateArgs),
+    /// Publishes releases: writes a product's release and its binaries for a static host, signs
+    /// the manifest with a release key, and checks one.
+    #[cfg(feature = "updates")]
+    Release(cli::ReleaseArgs),
 }
 
 #[cfg(feature = "node")]
@@ -138,6 +146,19 @@ struct NodeArgs {
     /// there, then told to peers as the node's address.
     #[arg(long)]
     onion_file: Option<std::path::PathBuf>,
+    /// Where to look for releases every hour: a manifest's URL, or off. Defaults to the one the
+    /// release keys built in name; a build with no release keys looks nowhere. The node warns
+    /// while it is behind, stops at an upgrade a release announces for its chain, and serves the
+    /// release at GET /release.
+    #[cfg(feature = "updates")]
+    #[arg(long, value_name = "URL")]
+    updates: Option<String>,
+    /// Once a release names a newer chainv4 with a binary for this machine: download it, check it
+    /// is the one signed, put it in place of this binary and restart on it, with the same flags.
+    /// Not for a container, whose image is what updates it.
+    #[cfg(feature = "updates")]
+    #[arg(long)]
+    auto_update: bool,
     /// Do not wait for the disk on each commit: faster, but a power cut can lose the last few
     /// blocks, which peers give back. For benchmarks and tests.
     #[arg(long)]
@@ -374,6 +395,10 @@ fn main() -> std::process::ExitCode {
         Some(Command::Worker(args)) => cli::worker(args),
         #[cfg(feature = "gpu")]
         Some(Command::Gpus) => cli::gpus(),
+        #[cfg(feature = "updates")]
+        Some(Command::Update(args)) => cli::update(args),
+        #[cfg(feature = "updates")]
+        Some(Command::Release(args)) => cli::release(args),
         None => run(cli.node),
     };
 
@@ -463,6 +488,38 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             onion_file: args.onion_file.clone(),
         },
     })?;
+    // A container stops its node with SIGTERM, which a process with no handler ignores as PID 1;
+    // Ctrl-C sends SIGINT. Either stops the loop, and the database closes as the node is dropped.
+    // An update put in place stops it too, to start it again on the new binary.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restart = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Taken before an update can replace it: Linux names a replaced binary "… (deleted)".
+    let binary = std::env::current_exe()?;
+    #[cfg(feature = "updates")]
+    let releases = {
+        let keys = chainv4::release::ReleaseKeys::built_in()?;
+        let url = match args.updates.as_deref() {
+            Some("off") => None,
+            Some(url) => Some(url.to_string()),
+            None => keys.updates.clone(),
+        };
+        let on = keys.on();
+        let releases = Arc::new(chainv4::node::Releases::new(keys, Some(beside(&args.db, "release.json"))));
+
+        match (on, url) {
+            (true, Some(url)) => {
+                // Over Tor whenever the node keeps its IP to itself, and for an onion's manifest.
+                let proxy = (args.tor_only || url.contains(".onion/")).then(|| args.tor_proxy.clone()).flatten();
+                log::info!("[updates] looking for releases at {url} every hour{}", if args.auto_update { ", updating on its own" } else { "" });
+                let config = chainv4::node::UpdateConfig { url, proxy, auto: args.auto_update, binary: binary.clone() };
+                chainv4::node::spawn_updates(config, releases.clone(), stop.clone(), restart.clone())?;
+            }
+            (false, _) if args.updates.is_some() || args.auto_update => log::warn!("[updates] this build trusts no release keys, so it looks for no releases"),
+            _ => {}
+        }
+
+        releases
+    };
     // What this node produces with: a miner's settings, a signing key, or both. The node builds
     // the producer for whatever consensus the chain runs, and again when governance changes it.
     #[cfg(feature = "pool")]
@@ -484,8 +541,10 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 window: args.pool_window,
                 min_share: args.pool_min_share.max(1),
                 open,
-                file: Some(args.db.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")).join("pool.json")),
+                file: Some(beside(&args.db, "pool.json")),
             }),
+            #[cfg(feature = "updates")]
+            releases: Some(releases.clone()),
         }),
         _ => None,
     };
@@ -519,6 +578,11 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut node = Node::new(db.clone(), &genesis, None, net)?
         .max_block_txs(args.max_block_txs.map(|most| most as usize))
         .max_build_ms(args.max_build_ms);
+
+    #[cfg(feature = "updates")]
+    {
+        node = node.releases(releases.clone());
+    }
 
     if let Some(producing) = producing {
         node = node.producing(producing);
@@ -604,14 +668,12 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             },
             threads: args.http_threads,
             per_ip: args.http_per_ip,
+            #[cfg(feature = "updates")]
+            releases: Some(releases.clone()),
         };
         let address = api::start(db, Some(node.handle()), &genesis, address, options)?;
         log::info!("[http] listening on {address}");
     }
-
-    // A container stops its node with SIGTERM, which a process with no handler ignores as PID 1;
-    // Ctrl-C sends SIGINT. Either stops the loop, and the database closes as the node is dropped.
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(signal, stop.clone())?;
@@ -620,7 +682,39 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     node.run(stop)?;
     log::info!("[node] stopped");
 
+    if restart.load(std::sync::atomic::Ordering::Relaxed) {
+        return start_again(&binary);
+    }
+
     Ok(())
+}
+
+/// Starts the binary an update put in place with this one's flags: in this process on Unix, so
+/// whatever supervises it sees no exit, and as a new one elsewhere.
+#[cfg(feature = "node")]
+fn start_again(binary: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut command = std::process::Command::new(binary);
+    command.args(std::env::args_os().skip(1));
+    log::info!("[updates] starting {} again", binary.display());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        Err(format!("could not start {} again: {}", binary.display(), command.exec()).into())
+    }
+    #[cfg(not(unix))]
+    {
+        command.spawn()?;
+
+        Ok(())
+    }
+}
+
+/// A file beside the database's directory, as net.key and pool.json are.
+#[cfg(feature = "node")]
+fn beside(db: &std::path::Path, name: &str) -> std::path::PathBuf {
+    db.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")).join(name)
 }
 
 #[cfg(not(feature = "node"))]

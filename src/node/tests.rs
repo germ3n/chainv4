@@ -670,7 +670,7 @@ fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
             threads: 0,
             gpu: false,
             gpus: None,
-            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None }),
+            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None }),
         }),
         sign: None,
     });
@@ -713,7 +713,7 @@ fn a_pools_blocks_fund_its_escrow_and_its_node_claims_for_the_miner_once_they_ar
                 threads: 0,
                 gpu: false,
                 gpus: None,
-                port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), pool: Some(PoolConfig { min_share: 1, ..PoolConfig::default() }) }),
+                port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), pool: Some(PoolConfig { min_share: 1, ..PoolConfig::default() }), #[cfg(feature = "updates")] releases: None }),
             }),
             sign: None,
         })
@@ -1616,4 +1616,107 @@ fn peers_are_remembered_for_the_next_start_and_a_banned_one_is_forgotten() {
     node.step(2).unwrap();
     assert_eq!(remembered(db.as_ref()).unwrap(), [at(&kept)], "what the next start dials");
     assert_eq!(node.report(1, 0).counters.peers_banned, 1);
+}
+
+#[cfg(feature = "governance-council")]
+#[test]
+fn a_node_too_old_for_an_upgrade_governance_decided_stops_before_its_block() {
+    use crate::governance::{Change, GovernanceConfig};
+    use crate::structs::version::{Upgrade, Version};
+
+    let dev = DevAuthority::dev_keypair();
+    let genesis = Genesis {
+        fees: None,
+        governance: Some(GovernanceConfig::Council { members: vec![dev.public().address()], threshold: 1, approval_epochs: 64 }),
+        ..Genesis::dev_authority(dev.public())
+    };
+    let (mut node, _net) = producing_on(&genesis);
+    let ours = Version::ours();
+    let upgrade = Upgrade { least: Version::new(ours.major, ours.minor + 1, 0), from: 6 };
+    let behind = Upgrade { least: ours, from: 3 };
+    node.step(SLOT).unwrap();
+    // One this version already meets, which stops nothing, then one it does not.
+    node.submit(SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Upgrade(behind) }, 0, FeeOffer::NONE, &dev)).unwrap();
+    node.step(SLOT * 2).unwrap();
+    node.submit(SignedTx::sign(Tx::ApproveChange { version: 1, change: Change::Upgrade(upgrade) }, 1, FeeOffer::NONE, &dev)).unwrap();
+
+    for slot in 3..=4 {
+        node.step(SLOT * slot).unwrap();
+    }
+
+    assert_eq!(node.upgrade(), Some(upgrade));
+    node.step(SLOT * 5).unwrap();
+
+    match node.step(SLOT * 6) {
+        Err(NodeError::Upgrade { upgrade: stopped, ours: version }) => assert_eq!((stopped, version), (upgrade, ours)),
+        other => panic!("the node goes on: {other:?}"),
+    }
+
+    assert_eq!(node.chain().tip().height, 5, "it never builds the block the upgrade names");
+}
+
+#[test]
+fn a_node_too_old_for_an_upgrade_its_release_announces_takes_no_block_from_it_on() {
+    use crate::release::{Breaking, Release, ReleaseKeys, SignedRelease};
+    use crate::structs::version::{Upgrade, Version};
+
+    let (mut producer, mut producer_net) = node(true);
+    let (mut follower, follower_net) = node(false);
+    let signer = Keypair::from_seed([4; 32]);
+    let keys = ReleaseKeys { threshold: 1, keys: vec![signer.public()], updates: None };
+    let ours = Version::ours();
+    let upgrade = Upgrade { least: Version::new(ours.major + 1, 0, 0), from: 4 };
+    let other_chain = Breaking { chain: vec![9; 32], upgrade: Upgrade { least: upgrade.least, from: 2 } };
+    let ours_too = Breaking { chain: follower.chain().genesis().to_bytes(), upgrade };
+    let mut signed = SignedRelease { release: Release { issued: 1, products: Vec::new(), breaking: vec![other_chain, ours_too] }, signatures: Vec::new() };
+    signed.sign(&signer);
+    let releases = Arc::new(Releases::new(keys, None));
+    releases.offer(signed, 1).unwrap();
+    follower = follower.releases(releases);
+    let peer = PeerId::random();
+
+    for slot in 1..=5 {
+        producer.step(SLOT * slot).unwrap();
+        let block = published_block(&mut producer_net);
+        follower_net.events.send(NetEvent::Block { from: peer, block, gossip: None }).unwrap();
+        let stepped = follower.step(SLOT * slot);
+
+        match slot {
+            ..=3 => stepped.unwrap(),
+            _ => assert!(matches!(stepped, Err(NodeError::Upgrade { upgrade: stopped, .. }) if stopped == upgrade), "slot {slot}: {stepped:?}"),
+        }
+    }
+
+    assert_eq!(follower.chain().tip().height, 3, "the last block before the upgrade, and none after");
+}
+
+#[cfg(feature = "updates")]
+#[test]
+fn a_node_keeps_the_newest_release_across_restarts_and_never_an_older_one() {
+    use crate::release::{Release, ReleaseKeys, SignedRelease};
+
+    let signer = Keypair::from_seed([5; 32]);
+    let keys = ReleaseKeys { threshold: 1, keys: vec![signer.public()], updates: None };
+    let file = std::env::temp_dir().join(format!("chainv4-release-{}.json", std::process::id()));
+    let issued = |issued: u64| {
+        let mut signed = SignedRelease { release: Release { issued, ..Release::default() }, signatures: Vec::new() };
+        signed.sign(&signer);
+
+        signed
+    };
+    let releases = Releases::new(keys.clone(), Some(file.clone()));
+
+    assert_eq!(releases.offer(issued(10), 1), Ok(true));
+    assert_eq!(releases.offer(issued(9), 2), Ok(false), "an older release, as a stale host or relay serves");
+
+    let restarted = Releases::new(keys.clone(), Some(file.clone()));
+
+    assert_eq!(restarted.known().signed.map(|signed| signed.release.issued), Some(10));
+    assert_eq!(restarted.offer(issued(9), 3), Ok(false));
+    assert_eq!(restarted.offer(issued(11), 4), Ok(true));
+
+    let untrusted = Releases::new(ReleaseKeys { threshold: 1, keys: vec![Keypair::from_seed([6; 32]).public()], updates: None }, Some(file.clone()));
+
+    assert!(untrusted.known().signed.is_none(), "a kept release counts only while its keys are trusted");
+    std::fs::remove_file(&file).unwrap();
 }

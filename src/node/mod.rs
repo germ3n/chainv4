@@ -17,6 +17,7 @@ use {
     crate::structs::hash::Hash,
     crate::structs::hex::to_hex,
     crate::structs::tx::SignedTx,
+    crate::structs::version::{Upgrade, Version},
     crate::structs::vote::SignedVote,
     libp2p::{Multiaddr, PeerId},
     r#macro::document,
@@ -40,6 +41,8 @@ mod report;
 mod snapshot;
 mod stream;
 mod sync;
+#[cfg(feature = "updates")]
+mod updates;
 mod verifier;
 
 pub use crate::mining::pool::MiningPort;
@@ -48,6 +51,8 @@ pub use report::{Counters, Heard, NodeReport, PeerReport};
 pub use stream::NodeEvent;
 #[cfg(feature = "pool")]
 pub use push::PoolPush;
+#[cfg(feature = "updates")]
+pub use updates::{CHECK_EVERY_MS, KnownRelease, Releases, UpdateConfig, check, download, fetch_release, spawn_updates};
 
 /// The most events handled per pass, so a flood cannot starve block production.
 const EVENT_BUDGET: usize = 256;
@@ -60,6 +65,8 @@ const MEMPOOL_CAPACITY: usize = 50_000;
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// How often the node logs where it stands, in milliseconds.
 const REPORT_EVERY: u64 = 30_000;
+/// How often a node an upgrade will stop says so, in milliseconds.
+const UPGRADE_WARN_EVERY: u64 = 600_000;
 /// How long a miner works on one template before it is rebuilt with newer transactions and a
 /// newer timestamp, in milliseconds.
 const TEMPLATE_REFRESH: u64 = 2_000;
@@ -118,6 +125,15 @@ pub struct Node {
     /// How long this node runs transactions for a block it builds before it seals what it has, if
     /// it bounds that.
     max_build_ms: Option<u64>,
+    /// The releases it fetches, which may announce an upgrade of its chain.
+    #[cfg(feature = "updates")]
+    releases: Option<Arc<Releases>>,
+    /// The upgrade governance decided that stops this version, as of the tip it was read at; and
+    /// the one that stops the node first, either that or the releases', and when it last said so.
+    decided_upgrade: Option<Upgrade>,
+    upgrade_at: Option<Hash>,
+    upgrade: Option<Upgrade>,
+    upgrade_warned: u64,
 }
 
 #[document(
@@ -385,6 +401,8 @@ pub enum NodeError {
     NetworkStopped,
     #[document(summary = "A thread the node needs, such as its verifier, could not start.")]
     Thread(String),
+    #[document(summary = "An upgrade, decided by governance or announced by a release, stops this version before the block it names: the node needs updating.")]
+    Upgrade { upgrade: Upgrade, ours: Version },
 }
 
 impl fmt::Display for NodeError {
@@ -394,6 +412,11 @@ impl fmt::Display for NodeError {
             NodeError::Db(err) => write!(f, "{err}"),
             NodeError::NetworkStopped => write!(f, "the network stopped"),
             NodeError::Thread(why) => write!(f, "a thread would not start: {why}"),
+            NodeError::Upgrade { upgrade, ours } => write!(
+                f,
+                "blocks from {} on need chainv4 {} or newer, and this node runs {ours}: update it (chainv4 update) and start it again",
+                upgrade.from, upgrade.least
+            ),
         }
     }
 }
@@ -470,6 +493,12 @@ impl Node {
             catching_up: HashSet::new(),
             max_block_txs: None,
             max_build_ms: None,
+            #[cfg(feature = "updates")]
+            releases: None,
+            decided_upgrade: None,
+            upgrade_at: None,
+            upgrade: None,
+            upgrade_warned: 0,
         })
     }
 
@@ -685,6 +714,7 @@ impl Node {
             self.started = now;
         }
 
+        self.check_upgrade(now)?;
         self.gate.set_syncing(self.snapshotting());
 
         for _ in 0..EVENT_BUDGET {
@@ -704,6 +734,70 @@ impl Node {
 
         self.report_if_due(now);
         self.announce_bootnodes()?;
+
+        Ok(())
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Has the node fetch releases, which may announce an upgrade of its chain; spawn_updates keeps them up, and GET /release serves them.",
+        see_also = "Releases, spawn_updates",
+    )]
+    #[cfg(feature = "updates")]
+    pub fn releases(mut self, releases: Arc<Releases>) -> Node {
+        self.releases = Some(releases);
+
+        self
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "The upgrade that stops this node first, if any: the one governance decided, or one its releases announce for its chain, for a version older than this one.",
+    )]
+    pub fn upgrade(&self) -> Option<Upgrade> {
+        self.upgrade
+    }
+
+    /// Whether an upgrade stops this version before a block at this height.
+    fn stopped_at(&self, height: u64) -> bool {
+        self.upgrade.is_some_and(|upgrade| height >= upgrade.from)
+    }
+
+    /// Stops the node once the next block is one an upgrade stops this version at, and says how
+    /// far off that is every ten minutes until then.
+    fn check_upgrade(&mut self, now: u64) -> Result<(), NodeError> {
+        let (tip, height) = (self.chain.tip().id(), self.chain.tip().height);
+        let ours = Version::ours();
+
+        if self.upgrade_at != Some(tip) {
+            self.upgrade_at = Some(tip);
+            self.decided_upgrade = crate::registry::changes::Changes::new(&self.chain.state()).upgrade()?.filter(|upgrade| upgrade.stops(ours));
+        }
+
+        #[cfg(feature = "updates")]
+        let announced = self.releases.as_ref().and_then(|releases| releases.stopping(&self.chain.genesis().to_bytes()));
+        #[cfg(not(feature = "updates"))]
+        let announced = None;
+        self.upgrade = [self.decided_upgrade, announced].into_iter().flatten().min_by_key(|upgrade| upgrade.from);
+
+        let Some(upgrade) = self.upgrade else {
+            return Ok(());
+        };
+
+        if height + 1 >= upgrade.from {
+            return Err(NodeError::Upgrade { upgrade, ours });
+        }
+
+        if now >= self.upgrade_warned.saturating_add(UPGRADE_WARN_EVERY) {
+            self.upgrade_warned = now;
+            log::warn!(
+                "[node] blocks from {} on need chainv4 {} or newer, and this node runs {ours}: it stops before block {}, {} blocks from now, unless updated (chainv4 update)",
+                upgrade.from,
+                upgrade.least,
+                upgrade.from,
+                upgrade.from - height - 1
+            );
+        }
 
         Ok(())
     }
@@ -786,6 +880,8 @@ impl Node {
                 log::debug!("[node] ignored gossip from {from} while syncing from a snapshot");
                 self.judge(from, gossip, Verdict::Ignore);
             }
+            // A block an upgrade stops this version at is left for a newer node.
+            NetEvent::Block { from, block, gossip } if self.stopped_at(block.header.height) => self.judge(from, gossip, Verdict::Ignore),
             NetEvent::Block { from, block, gossip } => {
                 let height = block.header.height;
                 self.counters.blocks_heard += 1;

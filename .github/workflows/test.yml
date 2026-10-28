@@ -155,6 +155,9 @@ jobs:
           - http,client,sha256,edblake,finality-authority,governance-council
           # Mining on the GPU through wgpu: builds everywhere, and its tests skip without a GPU.
           - node,blake3,ed25519,gpu
+          # Releases for the apps alone, and a node fetching them with HTTP but no pool.
+          - release,blake3,ed25519
+          - updates,http,sha256,edblake
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

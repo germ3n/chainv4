@@ -148,6 +148,9 @@ pub struct Ctx<'a> {
     /// The DEX, and the EVM DEX's router, the node names, if it names them.
     #[cfg_attr(not(feature = "dex"), allow(dead_code))]
     pub dex: (Option<&'a str>, Option<&'a str>),
+    /// The upgrade that stops the node's own chainv4 at a height, as GET /status or GET /release
+    /// says, if one does.
+    pub node_stops: Option<chainv4::structs::version::Upgrade>,
     /// The Bitcoin light clients running, and what they found.
     #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
     pub lights: &'a mut crate::light::Lights,

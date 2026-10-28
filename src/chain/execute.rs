@@ -903,6 +903,7 @@ fn run(
                 Change::Limits(limits) => Ok(limits.problem()),
                 Change::Finality(tuned) => settled(&|decided| tuned.retune_problem(decided)),
                 Change::SwitchFinality { epoch: named, config } => crate::chain::switch::switch_problem(layer, finality, epoch, *named, config),
+                Change::Upgrade(upgrade) => Ok(upgrade.problem(height)),
             };
 
             match problem {

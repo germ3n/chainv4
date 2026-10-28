@@ -1064,6 +1064,28 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **The pool's books grow with its miners.** `pool.json` keeps each miner's earnings, and the node
   keeps the last four claim trees in memory for paths to the roots blocks committed already.
 
+## Updates
+
+- **No release keys, no updates.** `release/keys.json` names none, so a build from the repo takes
+  no releases: nodes fetch nothing, the apps show nothing, `chainv4 update` refuses. A release
+  build names the keys in that file or in the one `CHAINV4_RELEASE_KEYS` points to.
+- **The signatures are what count, never the host.** A threshold of the keys built in signs each
+  manifest, covering every binary's URL, size and SHA-256, so a node relaying it at
+  `GET /release`, a mirror or a CDN can withhold a release but never change one. Workers, the apps
+  and `chainv4 update` check it again themselves.
+- **An older manifest never replaces a newer.** Releases order by `issued`, and a node keeps the
+  newest in `release.json` beside its database: `chainv4 release new` issues each one after the
+  last.
+- **An upgrade stops nodes, not blocks.** `Change::Upgrade`, or a release's `breaking`, makes a
+  node older than its version stop before its height; nothing about the blocks is checked by it,
+  so a node new enough never notices. Decide it after the release with the new binary is out.
+- **`--auto-update` restarts the node in place.** On Unix it starts the new binary in the same
+  process with the same flags, so a supervisor sees no exit. A container's binary is the image's:
+  leave it off there and update the image.
+- **A replaced binary runs only once started again.** `chainv4 update` and the apps' Update button
+  rename the new binary over the old one; whatever runs keeps the old one in memory until it
+  restarts.
+
 ## Building and testing
 
 - **The end-to-end SDK test needs the wasm32 target.** It builds `contracts/` with cargo:

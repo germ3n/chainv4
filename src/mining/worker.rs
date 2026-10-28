@@ -407,6 +407,8 @@ fn take_work(
                 message["window"].as_u64().unwrap_or(0)
             ),
             Some("refused") => return Err(format!("the node refused this worker: {}", message["why"].as_str().unwrap_or(""))),
+            #[cfg(feature = "release")]
+            Some("release") => said_release(&message["manifest"]),
             Some("standing") => log::info!(
                 "[worker] {shares} shares taken since connecting; {} in the window, {:.4}% of the next block; {} earned in all for {}, claimed with chainv4 claim",
                 message["shares"].as_u64().unwrap_or(0),
@@ -417,6 +419,27 @@ fn take_work(
             // Pings, and a newer node's messages this worker does not know.
             _ => {}
         }
+    }
+}
+
+/// Warns when the release the node told of names a newer chainv4 than this worker, once it checks
+/// against the release keys built in: the node only relays it.
+#[cfg(feature = "release")]
+fn said_release(manifest: &serde_json::Value) {
+    use crate::release::{ReleaseKeys, SignedRelease, Standing};
+    use crate::structs::version::Version;
+
+    let Ok(keys) = ReleaseKeys::built_in() else {
+        return;
+    };
+    let Some(signed) = SignedRelease::from_json(manifest).ok().filter(|signed| signed.verify(&keys).is_ok()) else {
+        return log::debug!("[worker] the node told of a release that does not verify");
+    };
+
+    match signed.release.product("chainv4").map(|product| product.standing(Version::ours())) {
+        Some(Standing::Behind { newest }) => log::warn!("[worker] chainv4 {newest} is out, and this worker runs {}: update it with chainv4 update", Version::ours()),
+        Some(Standing::Unsupported { newest, least }) => log::warn!("[worker] chainv4 {newest} is out, and versions older than {least} are no longer supported; this worker runs {}: update it with chainv4 update", Version::ours()),
+        _ => {}
     }
 }
 

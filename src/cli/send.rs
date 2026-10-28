@@ -201,7 +201,7 @@ pub enum TxArgs {
     /// Approves a change under the chain's governance: a new consensus, as a genesis file's
     /// consensus object, or new bootnodes. Sign with an account governance lets approve: a
     /// validator's or signer's account under the electorate, a member's under a council.
-    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality"]))]
+    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality", "upgrade"]))]
     ApproveChange {
         /// The new consensus as JSON, such as '{"type":"staked","slot_ms":2000,"schedule":"draw"}'
         /// or '{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1000","min_difficulty":"1000"}'.
@@ -252,6 +252,14 @@ pub enum TxArgs {
         /// decided in: later gives validators time to bond.
         #[arg(long, requires = "switch_finality")]
         switch_epoch: Option<u64>,
+        /// An upgrade: the oldest release, such as 0.2.0, that runs past --upgrade-from. Older
+        /// nodes stop before importing that block and say to update.
+        #[arg(long, requires = "upgrade_from")]
+        upgrade: Option<crate::structs::version::Version>,
+        /// The first block nodes older than --upgrade do not import: ahead of the chain, far
+        /// enough for their operators to update.
+        #[arg(long, requires = "upgrade")]
+        upgrade_from: Option<u64>,
         /// The version of the decision this changes. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
@@ -967,6 +975,8 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             finality,
             switch_finality,
             switch_epoch,
+            upgrade,
+            upgrade_from,
             version,
         } => {
             use crate::governance::Change;
@@ -976,6 +986,10 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 (_, _, _, _, _, _) if reward.is_some() => Change::Reward(super::genesis::reward_from_text(reward.as_deref().unwrap_or_default()).map_err(|why| format!("--reward: {why}"))?),
                 (_, _, _, _, _, _) if limits.is_some() => Change::Limits(super::genesis::limits_from_text(limits.as_deref().unwrap_or_default()).map_err(|why| format!("--limits: {why}"))?),
                 (_, _, _, _, _, _) if finality.is_some() => Change::Finality(super::genesis::finality_from_text(finality.as_deref().unwrap_or_default()).map_err(|why| format!("--finality: {why}"))?),
+                (_, _, _, _, _, _) if upgrade.is_some() => Change::Upgrade(crate::structs::version::Upgrade {
+                    least: upgrade.unwrap_or_default(),
+                    from: upgrade_from.ok_or("--upgrade needs --upgrade-from")?,
+                }),
                 (_, _, _, _, _, _) if switch_finality.is_some() => Change::SwitchFinality {
                     epoch: switch_epoch.ok_or("--switch-finality needs --switch-epoch")?,
                     config: super::genesis::finality_from_text(switch_finality.as_deref().unwrap_or_default()).map_err(|why| format!("--switch-finality: {why}"))?,
@@ -1048,6 +1062,7 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 crate::governance::Change::Limits(limits) => println!("approving limits of {} fuel a transaction, from version {version}", limits.tx_limits.fuel),
                 crate::governance::Change::Finality(finality) => println!("approving {} finality's settings, from version {version}", finality.name()),
                 crate::governance::Change::SwitchFinality { epoch, config } => println!("approving a switch to {} finality from epoch {epoch}, from version {version}", config.name()),
+                crate::governance::Change::Upgrade(upgrade) => println!("approving an upgrade: nodes older than {} stop at block {}, from version {version}", upgrade.least, upgrade.from),
                 crate::governance::Change::Directory(directory) => {
                     let named = [("gateway", directory.gateway), ("Bitcoin gateway", directory.btc_gateway), ("swap", directory.swap), ("DEX", directory.dex), ("NFT factory", directory.nft_factory)];
                     let mut listed: Vec<String> = named.iter().filter_map(|(what, address)| address.map(|address| format!("the {what} {address}"))).collect();
@@ -1189,6 +1204,7 @@ pub(super) fn pooled(tls: &TlsArgs, connections: usize) -> CliResult<Agent> {
 /// The JSON a request came back with, or the node's error.
 /// A contract the chain announces in its directory, by its key in GET /status's directory, such as
 /// swap or gateway: what the tools use when none is given, never a name someone could register.
+#[cfg(any(feature = "nft", all(feature = "bridge", feature = "swap")))]
 pub(super) fn announced(agent: &Agent, node: &str, key: &str) -> CliResult<Option<Address>> {
     match ok(agent.get(format!("{node}/status")).call())?["directory"][key].as_str() {
         Some(text) => Ok(Some(text.parse().map_err(|_| format!("the chain announces a {key} that does not read: {text}"))?)),

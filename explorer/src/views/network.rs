@@ -5,7 +5,7 @@ use {
     super::{Ctx, Look},
     crate::api::Ask,
     crate::format,
-    crate::model::{Device, MiningView, NodeView, Peer},
+    crate::model::{Device, MiningView, NodeRelease, NodeView, Peer, UpgradeView},
     chainv4_ui::{Palette, widgets},
     egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Ui, pos2, vec2},
 };
@@ -104,6 +104,37 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                 let (color, text) = updates(&palette, streaming);
                 ui.label(RichText::new(text).color(color));
             });
+
+            let status = ctx.store.status.as_ref();
+            let release = ctx.store.release.as_ref();
+            facts.row("chainv4", |ui| {
+                match release.map(|release| release.version.as_str()).or(status.and_then(|status| status.version.as_deref())) {
+                    Some(version) => ui.monospace(version),
+                    None => ui.label(RichText::new("not told: a node from before versions").color(palette.muted)),
+                };
+
+                if let Some(release) = release {
+                    let standing = match standing(release) {
+                        Some((text, Tone::Good)) => Some(widgets::pill(ui, &text, palette.good)),
+                        Some((text, Tone::Warn)) => Some(widgets::pill(ui, &text, palette.warn)),
+                        Some((text, Tone::Bad)) => Some(widgets::pill(ui, &text, palette.bad)),
+                        Some((text, Tone::Quiet)) => Some(ui.label(RichText::new(text).color(palette.muted))),
+                        None => None,
+                    };
+
+                    if let (Some(standing), Some(error)) = (standing, &release.error) {
+                        standing.on_hover_text(format!("Its last check for releases failed: {error}"));
+                    }
+                }
+            });
+
+            // The upgrade that stops this node first, else the one governance decided.
+            if let Some(upgrade) = release.and_then(|release| release.upgrade.as_ref()).or(status.and_then(|status| status.upgrade.as_ref())) {
+                let height = status.map_or(0, |status| status.height);
+                facts.row("upgrade", |ui| {
+                    ui.add(egui::Label::new(RichText::new(self::upgrade(upgrade, height)).color(palette.warn)).wrap());
+                });
+            }
             facts.row("syncing", |ui| match &node.syncing {
                 Some(syncing) => {
                     ui.label(format!("from height {} off {}", syncing.from, format::short(&syncing.peer)));
@@ -159,6 +190,52 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
             });
         });
     });
+}
+
+/// How a line about the node reads: well, as a warning, as trouble, or quietly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    Good,
+    Warn,
+    Bad,
+    Quiet,
+}
+
+/// Where the node's own chainv4 stands against the newest release, as its GET /release says.
+fn standing(release: &NodeRelease) -> Option<(String, Tone)> {
+    if let Some(installed) = &release.installed {
+        return Some((format!("{installed} installed, restarting"), Tone::Good));
+    }
+
+    match (release.standing.as_str(), &release.newest) {
+        ("current", _) => Some(("the newest".to_string(), Tone::Good)),
+        ("behind", Some(newest)) => Some((format!("chainv4 {newest} is out"), Tone::Warn)),
+        ("unsupported", Some(newest)) => Some((format!("chainv4 {newest} is out, and this one is too old for it"), Tone::Bad)),
+        _ if !release.updates => Some(("fetches no releases".to_string(), Tone::Quiet)),
+        _ => None,
+    }
+}
+
+/// What an upgrade does, as a transaction approving it says it.
+pub fn stopping(least: &str, from: u64) -> String {
+    format!("nodes older than {least} stop at block {}", format::thousands(&from.to_string()))
+}
+
+/// An upgrade, who decided it, and how far off it is from the tip at height.
+pub fn upgrade(upgrade: &UpgradeView, height: u64) -> String {
+    let by = match upgrade.source.as_deref() {
+        Some("release") => "announced by a release",
+        _ => "decided by governance",
+    };
+    let left = match upgrade.from.checked_sub(height) {
+        Some(0) | None => "reached".to_string(),
+        Some(1) => "1 block from the tip".to_string(),
+        Some(left) => format!("{} blocks from the tip", format::thousands(&left.to_string())),
+    };
+    let mut text = stopping(&upgrade.least, upgrade.from);
+    text[..1].make_ascii_uppercase();
+
+    format!("{text} ({by}) · {left}")
 }
 
 /// The node's mining: the hashrate over the last minutes, its own devices, the pool it runs, if
@@ -466,4 +543,38 @@ fn peers(ui: &mut Ui, ctx: &mut Ctx, peers: &[Peer], height: u64) {
             ui.end_row();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_upgrade_says_who_decided_it_and_how_far_off_it_is() {
+        let decided = UpgradeView { least: "0.2.0".to_string(), from: 150_000, source: None };
+        let announced = UpgradeView { source: Some("release".to_string()), ..decided.clone() };
+
+        assert_eq!(upgrade(&decided, 148_766), "Nodes older than 0.2.0 stop at block 150,000 (decided by governance) · 1,234 blocks from the tip");
+        assert_eq!(upgrade(&announced, 149_999), "Nodes older than 0.2.0 stop at block 150,000 (announced by a release) · 1 block from the tip");
+        assert!(upgrade(&announced, 150_000).ends_with("· reached"));
+    }
+
+    #[test]
+    fn the_node_s_standing_follows_its_release() {
+        let release = |standing: &str, newest: Option<&str>, installed: Option<&str>| NodeRelease {
+            version: "0.1.0".to_string(),
+            updates: true,
+            standing: standing.to_string(),
+            newest: newest.map(str::to_string),
+            installed: installed.map(str::to_string),
+            ..NodeRelease::default()
+        };
+
+        assert_eq!(standing(&release("behind", Some("0.2.0"), None)), Some(("chainv4 0.2.0 is out".to_string(), Tone::Warn)));
+        assert_eq!(standing(&release("behind", Some("0.2.0"), Some("0.2.0"))), Some(("0.2.0 installed, restarting".to_string(), Tone::Good)));
+        assert_eq!(standing(&release("unsupported", Some("0.3.0"), None)).map(|(_, tone)| tone), Some(Tone::Bad));
+        assert_eq!(standing(&release("current", None, None)).map(|(_, tone)| tone), Some(Tone::Good));
+        assert_eq!(standing(&release("unknown", None, None)), None);
+        assert_eq!(standing(&NodeRelease { updates: false, ..release("unknown", None, None) }).map(|(_, tone)| tone), Some(Tone::Quiet));
+    }
 }
