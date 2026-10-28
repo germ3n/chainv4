@@ -302,6 +302,41 @@ fn accounts_and_contracts_are_read_from_state() {
 }
 
 #[test]
+fn any_node_says_what_a_miner_claimed_and_the_root_its_pools_block_committed_to() {
+    use crate::registry::pools::{PoolClaim, PoolRoot, claim_leaf, pool_escrow};
+    use crate::structs::block::PoolCommitment;
+    use crate::structs::u256::u256;
+
+    let authority = DevAuthority::dev_keypair();
+    let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let hash = chain.hash();
+    let (pool, miner) = (producer.address(&[]), Keypair::from_seed([8; 32]).public().address());
+    let leaves = [claim_leaf(hash, &miner, u256::new(40))];
+    let root = crate::crypto::merkle::root(hash, &leaves);
+    let now = chain.tip().timestamp + SLOT;
+    let mut block = chain.build_declaring(Vec::new(), Vec::new(), pool, now, None, None, Some(PoolCommitment { parts: 0, root, count: 1 })).unwrap();
+    block.seal = producer.seal(&block.header).unwrap();
+    chain.import(&block, now).unwrap();
+    let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+
+    // No pool's node behind it, and still it checks a claim a miner kept.
+    let claims = ok(address, &format!("/claims/{pool}/{miner}?height=1"));
+    assert_eq!((claims["claimed"].as_str(), claims["height"].as_u64()), (Some("0"), Some(1)));
+    assert_eq!(claims["escrow"], pool_escrow(&pool, hash).to_string());
+    assert_eq!(claims["root"], json!({ "root": root.to_string(), "count": 1 }));
+
+    let kept = PoolClaim { pool, height: 1, block: block.id(), to: miner, earned: u256::new(40), index: 0, count: 1, path: Vec::new() };
+    let on_chain = PoolRoot { pool, root: from_hex(claims["root"]["root"].as_str().unwrap()).and_then(|bytes| Hash::from_bytes(hash, &bytes)).unwrap(), count: 1 };
+    assert!(kept.holds(&on_chain, hash));
+
+    assert_eq!(ok(address, &format!("/claims/{pool}/{miner}"))["root"], Value::Null, "no height asked about");
+    assert_eq!(ok(address, &format!("/claims/{pool}/{miner}?height=0"))["root"], Value::Null, "a block with no root");
+    assert_eq!(ok(address, &format!("/claims/{miner}/{miner}?height=1"))["root"], Value::Null, "another pool's");
+}
+
+#[test]
 fn bad_requests_and_missing_things_answer_with_an_error() {
     let fixture = serve();
     let nobody = Address::Contract([9; 32]);

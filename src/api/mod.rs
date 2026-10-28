@@ -488,6 +488,7 @@ fn router(api: Api) -> Router {
     let router = router.route("/stream", get(stream));
     #[cfg(feature = "updates")]
     let router = router.route("/release", get(release));
+    let router = router.route("/claims/{pool}/{address}", get(claims));
     #[cfg(feature = "pool")]
     let router = router.route("/pool", get(pool)).route("/pool/{address}", get(pool_miner)).route("/pool/claim/{address}", get(pool_claim));
     let router = router.fallback(apps).layer(DefaultBodyLimit::max(MAX_BODY)).layer(middleware::from_fn_with_state(api.clone(), per_client));
@@ -1204,7 +1205,8 @@ async fn pool_for(api: &Api, miner: Option<crate::structs::address::Address>) ->
 
 /// A miner's claim on the pool this node runs: all it earned, what it claimed, and the Merkle path
 /// from its leaf to the newest root a block on the main chain committed to, which Tx::Claim
-/// takes as it is. A 404 for a miner the pool owes nothing yet.
+/// takes as it is. With the height the pool's blocks are settled to, so a miner keeping its
+/// claims knows which can no longer be undone. A 404 for a miner the pool owes nothing yet.
 #[cfg(feature = "pool")]
 async fn pool_claim(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
     use crate::registry::pools::{Pools, pool_escrow};
@@ -1222,28 +1224,47 @@ async fn pool_claim(Shared(api): Shared<Api>, Path(address): Path<String>) -> An
                 continue;
             }
 
-            let Some((index, earned, path)) = tree.proof(api.hash, &miner) else {
+            let Some(claim) = tree.claim(api.hash, producer, *height, *block, &miner) else {
                 return Err(ApiError::NotFound(format!("the pool owes {miner} nothing yet")));
             };
             let claimed = pools.claimed(&producer, &miner)?;
+            let mut value = crate::mining::claims::claim_to_json(&claim);
+            value["escrow"] = json!(pool_escrow(&producer, api.hash).to_string());
+            value["claimed"] = json!(claimed.to_string());
+            value["claimable"] = json!(claim.earned.saturating_sub(claimed).to_string());
+            value["settled"] = json!(pool.settled());
 
-            return Ok(Json(json!({
-                "pool": producer.to_string(),
-                "escrow": pool_escrow(&producer, api.hash).to_string(),
-                "height": height,
-                "block": block.to_string(),
-                "to": miner.to_string(),
-                "earned": earned.to_string(),
-                "claimed": claimed.to_string(),
-                "claimable": earned.saturating_sub(claimed).to_string(),
-                "index": index,
-                "count": tree.leaves.len(),
-                "path": path.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            })));
+            return Ok(Json(value));
         }
     }
 
     Err(ApiError::NotFound("no block on the main chain carries the pool's claims yet".to_string()))
+}
+
+/// What a miner has claimed from a pool, which any node answers, the pool's or not: with the root
+/// the pool's block at ?height= committed to, if a block on the main chain there carries one of
+/// the pool's, for a claim the miner kept to be checked against before it is sent.
+async fn claims(Shared(api): Shared<Api>, Path((pool, address)): Path<(String, String)>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    use crate::registry::pools::{Pools, pool_escrow};
+
+    let (pool, miner) = (parse_address(&pool)?, parse_address(&address)?);
+    let (state, header) = state_at(&api, None)?;
+    let pools = Pools::new(&state, api.hash);
+    let escrow = pool_escrow(&pool, api.hash);
+    let root = match number(&query, "height")? {
+        Some(height) => pools.root(height)?.filter(|root| root.pool == pool),
+        None => None,
+    };
+
+    Ok(Json(json!({
+        "pool": pool.to_string(),
+        "to": miner.to_string(),
+        "escrow": escrow.to_string(),
+        "escrow_balance": Accounts::new(&state).get(&escrow)?.balance.to_string(),
+        "claimed": pools.claimed(&pool, &miner)?.to_string(),
+        "height": header.height,
+        "root": root.map(|root| json!({ "root": root.root.to_string(), "count": root.count })),
+    })))
 }
 
 /// The side branches this node stores: every block off the main chain, newest first, from each

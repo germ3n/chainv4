@@ -162,6 +162,10 @@ pub struct Settings {
     /// The HTTP API of the node that runs the mining pool the Mining page asks, for a pool on
     /// another node than the wallet's: empty to ask the wallet's own.
     pub pool_node: String,
+    /// The mining pools' claims kept for the accounts' addresses, by the genesis of the chain
+    /// they are on: SavedClaims, as the hex of its bytes. With them the Mining page claims even
+    /// once a pool's node is gone.
+    pub pool_claims: HashMap<String, String>,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -229,6 +233,7 @@ impl Default for Settings {
             ipfs_gateway: "https://ipfs.io/ipfs/".to_string(),
             multisigs: Vec::new(),
             pool_node: String::new(),
+            pool_claims: HashMap::new(),
             vault: None,
             current: String::new(),
         }
@@ -481,7 +486,7 @@ impl Wallet {
                 #[cfg(feature = "dex")]
                 (Ask::Named { .. }, _) => self.views.trade.events(&result),
                 (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
-                (Ask::PoolClaim(_) | Ask::Pool(_), _) => self.views.mining.answered(&ask, &result),
+                (Ask::PoolClaim(_) | Ask::Pool(_) | Ask::Claims { .. }, _) => self.views.mining.answered(&ask, &result),
                 (Ask::Release, _) => match chainv4::release::ReleaseKeys::built_in() {
                     Ok(keys) => self.updates.answered(&result, &keys, time),
                     Err(why) => log::warn!("{why}"),

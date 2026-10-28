@@ -102,6 +102,8 @@ struct Job {
 /// A pool's books and its view of each worker.
 #[cfg(feature = "pool")]
 struct Books {
+    /// The pool's address, whose escrow its miners' claims are paid from.
+    address: Address,
     ledger: Mutex<super::shares::Ledger>,
     workers: Mutex<BTreeMap<u64, super::shares::PoolWorker>>,
 }
@@ -276,6 +278,14 @@ impl State {
         let payout = Self::lock(&books.workers).get(&worker)?.payout;
         let report = Self::lock(&books.ledger).report();
         let mine = report.miners.iter().find(|miner| miner.to == payout);
+        // Its claim under the newest root a block of the pool's committed to, one not found
+        // dropped, for the worker to keep: with it, it claims even should the pool be gone.
+        let dropped = |id: &crate::structs::hash::Hash| report.blocks.iter().any(|block| block.id == *id && block.credited == Some(false));
+        let claim = report.claims.iter().find_map(|tree| {
+            let (height, id) = tree.committed.iter().rev().find(|(_, id)| !dropped(id))?;
+
+            tree.claim(self.hash, books.address, *height, *id, &payout)
+        });
 
         Some(json!({
             "type": "standing",
@@ -287,6 +297,8 @@ impl State {
             "window": report.work.to_string(),
             "miners": report.miners.len(),
             "fee": report.fee,
+            "claim": claim.as_ref().map(super::claims::claim_to_json),
+            "settled": report.settled(),
         }))
     }
 }
@@ -339,7 +351,7 @@ impl Pool {
             #[cfg(feature = "updates")]
             releases: port.releases,
             #[cfg(feature = "pool")]
-            books: port.pool.map(|config| Books { ledger: Mutex::new(super::shares::Ledger::open(config, hash)), workers: Mutex::new(BTreeMap::new()) }),
+            books: port.pool.map(|config| Books { address, ledger: Mutex::new(super::shares::Ledger::open(config, hash)), workers: Mutex::new(BTreeMap::new()) }),
         });
         let accepting = {
             let state = state.clone();

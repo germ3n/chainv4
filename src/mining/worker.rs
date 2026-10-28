@@ -61,6 +61,8 @@ pub struct WorkerConfig {
     pub proxy: Option<String>,
     #[document(summary = "Where a pool pays this worker's shares; a node that runs a pool takes no worker without one, and one that runs none pays its own address whatever this says.")]
     pub payout: Option<Address>,
+    #[document(summary = "The file to keep the payout's claims on the pool in, as the pool tells of each new one, so they can be claimed from any node should the pool's be gone; None to keep none.")]
+    pub claims: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -73,6 +75,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("devices", &self.devices)
             .field("proxy", &self.proxy)
             .field("payout", &self.payout)
+            .field("claims", &self.claims)
             .finish_non_exhaustive()
     }
 }
@@ -409,16 +412,44 @@ fn take_work(
             Some("refused") => return Err(format!("the node refused this worker: {}", message["why"].as_str().unwrap_or(""))),
             #[cfg(feature = "release")]
             Some("release") => said_release(&message["manifest"]),
-            Some("standing") => log::info!(
-                "[worker] {shares} shares taken since connecting; {} in the window, {:.4}% of the next block; {} earned in all for {}, claimed with chainv4 claim",
-                message["shares"].as_u64().unwrap_or(0),
-                message["parts"].as_u64().unwrap_or(0) as f64 / 1e7,
-                message["earned"].as_str().unwrap_or("0"),
-                message["payout"].as_str().unwrap_or("")
-            ),
+            Some("standing") => {
+                log::info!(
+                    "[worker] {shares} shares taken since connecting; {} in the window, {:.4}% of the next block; {} earned in all for {}, claimed with chainv4 claim",
+                    message["shares"].as_u64().unwrap_or(0),
+                    message["parts"].as_u64().unwrap_or(0) as f64 / 1e7,
+                    message["earned"].as_str().unwrap_or("0"),
+                    message["payout"].as_str().unwrap_or("")
+                );
+                keep_claim(config, &message);
+            }
             // Pings, and a newer node's messages this worker does not know.
             _ => {}
         }
+    }
+}
+
+/// Keeps the claim a pool's standing message carries, in the worker's claims file: only one for
+/// its own payout, whatever the pool says.
+fn keep_claim(config: &WorkerConfig, message: &serde_json::Value) {
+    let (Some(file), Some(payout)) = (&config.claims, config.payout) else {
+        return;
+    };
+
+    if message["claim"].is_null() {
+        return;
+    }
+
+    let claim = match super::claims::claim_from_json(&message["claim"], None) {
+        Ok(claim) if claim.to == payout => claim,
+        Ok(claim) => return log::warn!("[worker] the pool sent a claim for {}, not {payout}; not kept", claim.to),
+        Err(why) => return log::warn!("[worker] the pool's claim does not read: {why}"),
+    };
+    let (height, earned) = (claim.height, claim.earned);
+
+    match super::claims::save_claim(file, claim, message["settled"].as_u64()) {
+        Ok(true) => log::info!("[worker] kept the claim on {earned} earned, at block {height}, in {}: chainv4 claim --saved takes it", file.display()),
+        Ok(false) => {}
+        Err(why) => log::warn!("[worker] the claim was not kept: {why}"),
     }
 }
 

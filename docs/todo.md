@@ -66,6 +66,10 @@ offline; these would make that hold up as a treasury.
   with `Tx::Claim`: any number of miners in 44 bytes a block, credited once final, an optional
   fee, open or token pools, `--pool-push` claiming for them, `GET /pool`, the worker's log, the
   explorer's Pool page and the wallet's Mining page. See [Mining pools](consensus.md#mining-pools).
+- [x] **Miners keep their own claims.** The pool sends each worker its claim, kept in `--claims`
+  as `SavedClaims` keeps them, the wallet keeps those it is given, and `chainv4 claim --saved` and
+  the wallet claim by them at any node, checked with `GET /claims/{pool}/{address}`: a pool whose
+  node is gone still pays.
 - [ ] **Mining pools: next.** The wallet's claim figures come from the pool's node; proving what an
   address claimed (the pools column) and the root a block holds, through the light client, would
   leave only the leaf to the pool's word. A pool's node keeps four claim trees in memory, which a

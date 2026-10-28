@@ -71,6 +71,10 @@ pub enum Ask {
     /// A mining pool's standing for an address: its work in the window, its part of the next
     /// block, its workers and the blocks it shared in.
     Pool(String),
+    /// What an address has claimed from a pool, and the root the pool's block at a height
+    /// committed to, as the wallet's own node says: what a claim kept on this device is checked
+    /// against before it is sent, the pool's node no matter.
+    Claims { pool: String, to: String, height: u64 },
     /// The collection registry's first page, for the NFTs page to look through.
     #[cfg_attr(not(feature = "nft"), allow(dead_code))]
     Collections,
@@ -102,6 +106,7 @@ impl Ask {
             Ask::Multisig(address) => format!("/multisig/{address}"),
             Ask::PoolClaim(address) => format!("/pool/claim/{address}"),
             Ask::Pool(address) => format!("/pool/{address}"),
+            Ask::Claims { pool, to, height } => format!("/claims/{pool}/{to}?height={height}"),
             Ask::Release => "/release".to_string(),
             Ask::Call(_) => "/call".to_string(),
             Ask::Read(_) => "/offer".to_string(),

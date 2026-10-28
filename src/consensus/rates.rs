@@ -170,6 +170,24 @@ impl ClaimTree {
 
         Some((index as u64, self.leaves[index].1, crate::crypto::merkle::audit_path(hash, &hashes, index)))
     }
+
+    #[document(
+        parent = "ClaimTree",
+        summary = "A miner's claim under this tree's root, as the block at this height committed to it, for the miner to keep. None for a miner the tree does not hold.",
+        params = { pool = "The pool, whose escrow pays it.", height = "The height of a block that committed to the root.", block = "That block's id." },
+    )]
+    pub fn claim(
+        &self,
+        hash: crate::structs::hash::HashType,
+        pool: crate::structs::address::Address,
+        height: u64,
+        block: crate::structs::hash::Hash,
+        to: &crate::structs::address::Address,
+    ) -> Option<crate::registry::pools::PoolClaim> {
+        let (index, earned, path) = self.proof(hash, to)?;
+
+        Some(crate::registry::pools::PoolClaim { pool, height, block, to: *to, earned, index, count: self.leaves.len() as u64, path })
+    }
 }
 
 #[document(
@@ -199,6 +217,17 @@ pub struct PoolReport {
     pub earned: crate::structs::u256::u256,
     #[document(summary = "Its claim trees, newest first: the one its next block commits to, and the few before, for the paths to roots blocks committed already.")]
     pub claims: Vec<std::sync::Arc<ClaimTree>>,
+}
+
+impl PoolReport {
+    #[document(
+        parent = "PoolReport",
+        summary = "The highest height at which the pool's blocks can no longer be undone, as far as its books know: that of the newest block it credited or found dropped. Every height under it is settled too. None before any was.",
+        see_also = "SavedClaims::keep",
+    )]
+    pub fn settled(&self) -> Option<u64> {
+        self.blocks.iter().filter(|block| block.credited.is_some()).map(|block| block.height).max()
+    }
 }
 
 #[document(

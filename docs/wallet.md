@@ -393,6 +393,12 @@ yet in a root on chain, the pool's fee, and each worker connected for it with it
 - **Starting:** the page shows the worker's command with the address filled in,
   `chainv4 worker --node HOST:PORT --payout ADDRESS`, `HOST:PORT` being the pool's mining port,
   with `--token FILE` for a private pool.
+- **Kept claims:** each claim the pool's node gives is kept on the device, by chain, in settings as
+  `pool_claims` (the newest few, the next to settle, and the newest settled: see
+  [Mining pools](consensus.md#mining-pools)). When the pool's node does not answer, **Kept claims**
+  checks them at the wallet's own node, `GET /claims/{pool}/{address}?height=`, newest first, and
+  **Claim** sends the first whose root is still on chain: all the address earned up to it, less
+  what it claimed.
 - **History** shows a claim as "Claimed mining pool earnings for" the miner: the transaction
   names all the miner earned, not what the claim paid.
 

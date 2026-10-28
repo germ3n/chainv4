@@ -63,7 +63,9 @@ for its shares, through an escrow it claims from (see [Mining pools](consensus.m
 `POOL_OPEN=1` makes it an open one, which anyone joins with a payout address and no token.
 `POOL_FEE` is the percent the pool keeps, `POOL_WINDOW` how many blocks' worth of shares each block
 shares out by, and `POOL_PUSH` with `docker/config/pool-push.key` (or `POOL_PUSH_KEY`) has the node
-claim for miners owed that much. A rig joins with `PAYOUT=ADDRESS docker/pow.sh worker HOST`.
+claim for miners owed that much. A rig joins with `PAYOUT=ADDRESS docker/pow.sh worker HOST`, and
+keeps its claims in `POW_HOME`'s `pool-claims.json`, which `chainv4 claim --saved` claims by from
+any node should the pool's be gone.
 
 **Who reads the secrets:** `docker/pow.sh up` gives the token and `validator.key` to the node's
 user in its container, uid 10001, with `podman unshare` under rootless Podman and as root

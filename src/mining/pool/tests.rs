@@ -111,6 +111,7 @@ fn a_worker_on_another_thread_seals_blocks_the_rules_accept() {
         devices: Devices::Cpu(2),
         proxy: None,
         payout: None,
+        claims: None,
     })
     .unwrap();
     let parent = header(5, 10_000, 500);
@@ -364,6 +365,23 @@ fn a_pool_counts_each_workers_shares_once_and_its_blocks_commit_to_their_split()
     assert_eq!(commitment.count, 2);
     assert_eq!(report.claims[0].root, commitment.root);
     assert_eq!(report.miners.iter().map(|miner| (miner.to, miner.earned)).collect::<Vec<_>>(), vec![(bob, u256::new(742)), (alice, u256::new(247))]);
+
+    // The block after, bob's again, commits to that root, and each worker's standing then
+    // carries its own claim under it, to keep, with the height the pool's blocks settled to.
+    let after = header(3, 3, 16);
+    pool.seal(&after);
+    let work = next(&mut from_bob, "work");
+    let nonce = nonces(&after.id(), 16, work["start"].as_u64().unwrap(), 1)[0];
+    to_bob.send(&json!({ "type": "found", "job": work["job"], "nonce": nonce })).unwrap();
+    assert_eq!(next(&mut from_bob, "verdict")["kind"], "block");
+    let range = State::lock(&pool.state.workers).iter().find(|(_, worker)| worker.name == "bob's rig").map(|(range, _)| *range).unwrap();
+    let standing = pool.state.standing(range).unwrap();
+    let claim = crate::mining::claims::claim_from_json(&standing["claim"], None).unwrap();
+    let root = crate::registry::pools::PoolRoot { pool: Address::Ed25519([1; 32]), root: commitment.root, count: 2 };
+
+    assert_eq!((claim.to, claim.earned, claim.height, claim.block), (bob, u256::new(742), 3, after.id()));
+    assert!(claim.holds(&root, HashType::default_chain()), "it holds under the root on chain");
+    assert_eq!(standing["settled"], 2, "block 2 was credited");
 }
 
 #[cfg(feature = "pool")]
@@ -389,6 +407,7 @@ fn a_worker_mining_for_a_pool_sends_share_after_share_on_one_job() {
         devices: Devices::Cpu(1),
         proxy: None,
         payout: Some(payout),
+        claims: None,
     })
     .unwrap();
     until(&pool, |report| report.workers.len() == 1);

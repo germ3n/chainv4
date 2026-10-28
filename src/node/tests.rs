@@ -675,7 +675,7 @@ fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
         sign: None,
     });
     node.step(now_ms()).unwrap();
-    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: None }).unwrap();
+    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: None, claims: None }).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
     while node.chain().tip().height < 2 {
@@ -721,7 +721,7 @@ fn a_pools_blocks_fund_its_escrow_and_its_node_claims_for_the_miner_once_they_ar
     // A clock fifty times faster than the wall's, so a minute between pushes passes in a second.
     let mut clock = now_ms();
     node.step(clock).unwrap();
-    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: Some(miner) }).unwrap();
+    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: Some(miner), claims: None }).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
 
     while Accounts::new(&node.chain().state()).get(&miner).unwrap().balance == u256::ZERO {

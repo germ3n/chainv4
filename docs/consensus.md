@@ -283,6 +283,9 @@ chainv4 worker --node 203.0.113.7:4002 --payout ed25519:0x… --threads 8
 
 # A miner claims what it earned, from any key that pays the fee.
 chainv4 claim --node http://203.0.113.7:8080 --to ed25519:0x… --key mine.key
+
+# The same from the claims the worker kept, at any node: the pool's node may be gone.
+chainv4 claim --node http://198.51.100.4:8080 --saved pool-claims.json --to ed25519:0x… --key mine.key
 ```
 
 **How it goes:**
@@ -311,6 +314,18 @@ chainv4 claim --node http://203.0.113.7:8080 --to ed25519:0x… --key mine.key
    whoever pays the fee. `--pool-push` has the pool's node send claims for miners owed at least
    that much, up to 64 a minute, paying the fees from `--pool-push-key`.
 
+**Miners keep their own claims.** The chain holds each root and the escrow, but only the pool's
+node holds the leaves under them; were it gone, nobody could prove a miner's leaf. So the pool
+tells each worker its claim with every standing message, and `chainv4 worker` keeps it in
+`--claims` (`pool-claims.json` in the working directory by default); the wallet's Mining page keeps
+each one it is given too. A claim names the height of the pool's block whose root holds it, and
+the newest is the tip's, the likeliest to be undone, so a miner keeps the newest few, the oldest
+not yet settled, which settles next, and the newest two settled ones (`SavedClaims`): one of those
+always holds. `chainv4 claim --saved FILE` and the wallet check each against the chain at any node,
+`GET /claims/{pool}/{address}?height=`, newest first, and claim by the first that holds. It pays
+all the miner earned up to that root; what the pool credited after it, only the pool's node can
+give.
+
 **What it trusts:** the pool's node, for the split: it says who did the work. Everything it says
 is public, every root on chain and every leaf from `GET /pool/claim/{address}`, so a miner can
 check it was counted, and the pool can never take back what it sent to the escrow, which pays only
@@ -325,7 +340,7 @@ leaves its own transactions out of the blocks it builds.
 so a restart loses no miner's work in the window or its earnings.
 
 **What miners see:** `chainv4 worker` logs its share difficulty, and every 30 seconds its shares in
-the window, its part of the next block and all it has earned. `GET /pool` lists the pool's fee,
+the window, its part of the next block and all it has earned, and each new claim it keeps. `GET /pool` lists the pool's fee,
 window and escrow, every miner with its work, part of the next block, earnings and what it
 claimed, and the blocks the pool found, each waiting, credited or dropped. `GET /pool/{address}`
 is one miner's, with its workers, and `GET /pool/claim/{address}` its claim, ready for

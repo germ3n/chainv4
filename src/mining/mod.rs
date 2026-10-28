@@ -3,6 +3,7 @@
 //! one finds, which pays the node's reward address. A worker runs no node: `chainv4 worker`, on
 //! its GPUs or CPU threads. They share a token, which neither ever sends.
 
+pub mod claims;
 pub mod pool;
 pub mod protocol;
 #[cfg(feature = "pool")]

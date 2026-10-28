@@ -8,6 +8,11 @@
 //! the chain checks the path against the root on chain and pays what the leaf says less what was
 //! claimed before, so a path that does not hold fails and moves nothing. The claim is signed and
 //! sent on the Send page, as any other transaction, through the wallet's own node.
+//!
+//! Each claim the pool's node gives is kept on this device, as SavedClaims keeps them: the newest
+//! few, the next to settle, and the newest settled. Should the pool's node be gone, the page
+//! checks the kept ones against the wallet's own node, GET /claims/{pool}/{address}, newest
+//! first, and claims by the first whose root is still on chain.
 
 use {
     super::send::{Prepared, SendState},
@@ -15,10 +20,12 @@ use {
     crate::format,
     crate::node::{Ask, Failure, Node},
     crate::theme,
+    chainv4::registry::pools::{PoolClaim, PoolRoot, SavedClaims},
     chainv4::structs::address::Address,
     chainv4::structs::hash::{Hash, HashType},
-    chainv4::structs::hex::from_hex,
-    chainv4::structs::tx::{MAX_CLAIM_PATH, Tx},
+    chainv4::structs::hex::{from_hex, to_hex},
+    std::collections::HashMap,
+    chainv4::structs::tx::MAX_CLAIM_PATH,
     chainv4::structs::u256::u256,
     egui::{RichText, Ui},
     serde_json::Value,
@@ -45,12 +52,26 @@ pub struct MiningState {
     standing: Option<(String, Result<Value, Failure>)>,
     /// The address last asked about, and when.
     asked: Option<(String, u64)>,
+    /// Whether the pool's claim came since it was last kept.
+    fresh: bool,
+    /// The claims kept on this device, with the genesis of the chain they are on: read from the
+    /// settings once, written back as they change.
+    kept: Option<(String, SavedClaims)>,
+    /// What the wallet's node said of kept claims, by pool, miner and height: None while asked.
+    checks: HashMap<(String, String, u64), Option<Result<Value, Failure>>>,
 }
 
 impl MiningState {
     /// The wallet's node's answer to something this page asked: it counts only while the pool is
     /// asked there, not at a node of its own.
     pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>) {
+        // A kept claim is always checked at the wallet's own node, the pool's no matter.
+        if let Ask::Claims { pool, to, height } = ask {
+            self.checks.insert((pool.clone(), to.clone(), *height), Some(result.clone()));
+
+            return;
+        }
+
         if self.remote.is_none() {
             self.take(ask, result);
         }
@@ -58,7 +79,10 @@ impl MiningState {
 
     fn take(&mut self, ask: &Ask, result: &Result<Value, Failure>) {
         match ask {
-            Ask::PoolClaim(address) => self.claim = Some((address.clone(), result.clone())),
+            Ask::PoolClaim(address) => {
+                self.claim = Some((address.clone(), result.clone()));
+                self.fresh = true;
+            }
             Ask::Pool(address) => self.standing = Some((address.clone(), result.clone())),
             _ => {}
         }
@@ -128,13 +152,21 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState, send: &mut Send
         node.ask(Ask::PoolClaim(address.clone()));
         node.ask(Ask::Pool(address.clone()));
         state.asked = Some((address.clone(), ctx.now));
+        // What was claimed moves too: kept claims are checked again as they show.
+        state.checks.clear();
     }
 
     let claim = state.claim.as_ref().filter(|(asked, _)| *asked == address).map(|(_, result)| result.clone());
     let standing = state.standing.as_ref().filter(|(asked, _)| *asked == address).map(|(_, result)| result.clone());
     let mut prepared = None;
 
-    earnings(ui, ctx, &from, claim.as_ref(), standing.as_ref(), &mut prepared);
+    keep(ctx, state, &from, claim.as_ref());
+    let kept = state.kept.as_ref().map_or(0, |(_, saved)| saved.of(None, &from).count());
+    earnings(ui, ctx, &from, claim.as_ref(), standing.as_ref(), kept, &mut prepared);
+
+    if !matches!(claim, None | Some(Ok(_))) {
+        kept_claims(ui, ctx, state, &from, &mut prepared);
+    }
 
     if let Some(Ok(value)) = &standing {
         in_the_pool(ui, ctx, value, claim.as_ref().and_then(|claim| claim.as_ref().ok()));
@@ -150,7 +182,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState, send: &mut Send
 }
 
 /// What the pool owes the address: all it earned, what it claimed, and what a claim pays now.
-fn earnings(ui: &mut Ui, ctx: &mut Ctx, from: &Address, claim: Option<&Result<Value, Failure>>, standing: Option<&Result<Value, Failure>>, prepared: &mut Option<Prepared>) {
+fn earnings(ui: &mut Ui, ctx: &mut Ctx, from: &Address, claim: Option<&Result<Value, Failure>>, standing: Option<&Result<Value, Failure>>, kept: usize, prepared: &mut Option<Prepared>) {
     let palette = *ctx.palette;
     let note = |ui: &mut Ui, text: &str| {
         ui.label(RichText::new(text).small().color(palette.muted));
@@ -216,11 +248,11 @@ fn earnings(ui: &mut Ui, ctx: &mut Ctx, from: &Address, claim: Option<&Result<Va
         };
 
         match claim_of(value, from, hash) {
-            Ok((tx, claimable)) => {
+            Ok((claim, claimable)) => {
                 if theme::primary(ui, &palette, "Claim", claimable > u256::ZERO).clicked() {
                     *prepared = Some(Prepared {
                         from: *from,
-                        tx,
+                        tx: claim.tx(),
                         what: "Claim mining earnings".to_string(),
                         about: format!("{} from the pool's escrow", ctx.amount(None, &claimable.to_string())),
                         coin: u256::ZERO,
@@ -229,6 +261,10 @@ fn earnings(ui: &mut Ui, ctx: &mut Ctx, from: &Address, claim: Option<&Result<Va
 
                 if claimable == u256::ZERO {
                     note(ui, "Nothing to claim: all it credited is claimed. The pool may send claims for its miners itself.");
+                }
+
+                if kept > 0 {
+                    note(ui, &format!("This device keeps {kept} of the pool's claims for this address, so it can claim from any node should the pool's be gone."));
                 }
             }
             Err(why) => {
@@ -353,9 +389,9 @@ fn how_to_mine(ui: &mut Ui, ctx: &mut Ctx, from: &Address) {
     });
 }
 
-/// The claim a pool's answer describes, as Tx::Claim takes it, with what it would pay now: none
-/// for an answer about another address than the one asked about.
-fn claim_of(value: &Value, miner: &Address, hash: HashType) -> Result<(Tx, u256), String> {
+/// The claim a pool's answer describes, to send or keep, with what it would pay now: none for an
+/// answer about another address than the one asked about.
+fn claim_of(value: &Value, miner: &Address, hash: HashType) -> Result<(PoolClaim, u256), String> {
     let to: Address = value["to"].as_str().and_then(|text| text.parse().ok()).ok_or("it names no miner")?;
 
     if to != *miner {
@@ -375,9 +411,133 @@ fn claim_of(value: &Value, miner: &Address, hash: HashType) -> Result<(Tx, u256)
         return Err(format!("its path is longer than the {MAX_CLAIM_PATH} hashes a claim may carry"));
     }
 
-    let tx = Tx::Claim { height: whole("height")?, to, earned: number("earned")?, index: whole("index")?, path };
+    let pool: Address = value["pool"].as_str().and_then(|text| text.parse().ok()).ok_or("it names no pool")?;
+    let block = value["block"].as_str().and_then(from_hex).and_then(|bytes| Hash::from_bytes(hash, &bytes)).ok_or("it names no block")?;
+    let claim = PoolClaim { pool, height: whole("height")?, block, to, earned: number("earned")?, index: whole("index")?, count: whole("count")?, path };
 
-    Ok((tx, number("claimable")?))
+    Ok((claim, number("claimable")?))
+}
+
+/// Claims kept, from the hex the settings keep them as.
+fn read_kept(hex: &str) -> Option<SavedClaims> {
+    from_hex(hex).and_then(|bytes| wincode::deserialize(&bytes).ok())
+}
+
+/// Keeps the pool's newest claim, once, as it comes: in the settings, under the chain's genesis.
+fn keep(ctx: &mut Ctx, state: &mut MiningState, from: &Address, claim: Option<&Result<Value, Failure>>) {
+    let (Some(genesis), Some(hash)) = (ctx.chain.genesis.map(|genesis| genesis.to_string()), ctx.chain.client.as_ref().map(|client| client.params().hash)) else {
+        return;
+    };
+
+    if state.kept.as_ref().is_none_or(|(kept, _)| *kept != genesis) {
+        let saved = ctx.settings.pool_claims.get(&genesis).and_then(|hex| read_kept(hex)).unwrap_or_default();
+        state.kept = Some((genesis.clone(), saved));
+        state.fresh = true;
+    }
+
+    let Some(Ok(value)) = claim.filter(|_| std::mem::take(&mut state.fresh)) else {
+        return;
+    };
+    let Some((_, saved)) = state.kept.as_mut() else {
+        return;
+    };
+
+    if let Ok((claim, _)) = claim_of(value, from, hash)
+        && saved.keep(claim, value["settled"].as_u64())
+        && let Ok(bytes) = wincode::serialize(saved)
+    {
+        ctx.settings.pool_claims.insert(genesis, to_hex(&bytes));
+    }
+}
+
+/// With the pool's node not answering: the newest kept claim that still holds on the wallet's
+/// node's chain, checked there one at a time, and claiming by it.
+fn kept_claims(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState, from: &Address, prepared: &mut Option<Prepared>) {
+    let palette = *ctx.palette;
+    let mut claims: Vec<PoolClaim> = state.kept.as_ref().map(|(_, saved)| saved.of(None, from).cloned().collect()).unwrap_or_default();
+    claims.sort_by_key(|claim| std::cmp::Reverse(claim.height));
+
+    if claims.is_empty() {
+        return;
+    }
+
+    let Some(hash) = ctx.chain.client.as_ref().map(|client| client.params().hash) else {
+        return;
+    };
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Kept claims");
+        ui.label(
+            RichText::new(format!("The pool's node did not give a claim, but this device keeps {} for this address. A kept claim is checked against the chain at the wallet's own node and pays from the pool's escrow as any other, the pool's node no matter.", claims.len()))
+                .small()
+                .color(palette.muted),
+        );
+        ui.add_space(4.0);
+
+        for claim in &claims {
+            let key = (claim.pool.to_string(), claim.to.to_string(), claim.height);
+            let answer = match state.checks.get(&key) {
+                None => {
+                    ctx.node.ask(Ask::Claims { pool: key.0.clone(), to: key.1.clone(), height: claim.height });
+                    state.checks.insert(key, None);
+                    None
+                }
+                Some(answer) => answer.clone(),
+            };
+            let value = match answer {
+                None => return super::waiting(ui, &palette, &format!("Checking the claim kept at block {} against the chain…", format::thousands(&claim.height.to_string()))),
+                Some(Err(failure)) => {
+                    ui.colored_label(palette.bad, format!("The wallet's node did not answer: {}", failure.message));
+
+                    return;
+                }
+                Some(Ok(value)) => value,
+            };
+            let root = value["root"]["root"].as_str().and_then(from_hex).and_then(|bytes| Hash::from_bytes(hash, &bytes));
+
+            let (Some(root), Some(count)) = (root, value["root"]["count"].as_u64()) else {
+                continue;
+            };
+
+            if !claim.holds(&PoolRoot { pool: claim.pool, root, count }, hash) {
+                continue;
+            }
+
+            let claimed = value["claimed"].as_str().and_then(|text| u256::from_str_radix(text, 10).ok()).unwrap_or(u256::ZERO);
+            let claimable = claim.earned.saturating_sub(claimed);
+
+            super::row(ui, &palette, "Earned", |ui| {
+                ui.label(RichText::new(ctx.amount(None, &claim.earned.to_string())).color(palette.ink));
+            });
+            super::row(ui, &palette, "Claimed", |ui| {
+                ui.label(ctx.amount(None, &claimed.to_string()));
+            });
+            super::row(ui, &palette, "Claimable", |ui| {
+                ui.label(RichText::new(ctx.amount(None, &claimable.to_string())).color(palette.good).size(16.0));
+            });
+            super::row(ui, &palette, "Pool", |ui| super::address(ui, &palette, &claim.pool.to_string()));
+            ui.label(
+                RichText::new(format!("By the claim kept at block {}, whose root is on chain. The pool may have credited more since, which only its node can give.", format::thousands(&claim.height.to_string())))
+                    .small()
+                    .color(palette.muted),
+            );
+            ui.add_space(8.0);
+
+            if theme::primary(ui, &palette, "Claim", claimable > u256::ZERO).clicked() {
+                *prepared = Some(Prepared {
+                    from: *from,
+                    tx: claim.tx(),
+                    what: "Claim mining earnings".to_string(),
+                    about: format!("{} from the pool's escrow, by a claim kept on this device", ctx.amount(None, &claimable.to_string())),
+                    coin: u256::ZERO,
+                });
+            }
+
+            return;
+        }
+
+        ui.label(RichText::new("None of the kept claims holds on this chain: the blocks they name were undone.").color(palette.muted));
+    });
 }
 
 /// The API's lowercase message as a sentence's start.
@@ -389,7 +549,7 @@ fn capital(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, serde_json::json};
+    use {super::*, chainv4::structs::tx::Tx, serde_json::json};
 
     fn answer(to: &Address, path: Vec<String>) -> Value {
         json!({
@@ -412,10 +572,24 @@ mod tests {
         let hash = HashType::default_chain();
         let miner = Address::Ed25519([3; 32]);
         let steps = [Hash::zero(hash), chainv4::crypto::hasher::Hasher::digest(hash, b"leaf")];
-        let (tx, claimable) = claim_of(&answer(&miner, steps.iter().map(ToString::to_string).collect()), &miner, hash).expect("reads");
+        let (claim, claimable) = claim_of(&answer(&miner, steps.iter().map(ToString::to_string).collect()), &miner, hash).expect("reads");
 
-        assert_eq!(tx, Tx::Claim { height: 120, to: miner, earned: u256::new(5_000_000_000_000_000_000), index: 3, path: steps.to_vec() });
+        assert_eq!(claim.tx(), Tx::Claim { height: 120, to: miner, earned: u256::new(5_000_000_000_000_000_000), index: 3, path: steps.to_vec() });
+        assert_eq!((claim.pool, claim.count, claim.block), (Address::Ed25519([1; 32]), 7, Hash::zero(hash)));
         assert_eq!(claimable, u256::new(3_000_000_000_000_000_000));
+    }
+
+    #[test]
+    fn a_kept_claim_reads_back_from_the_settings_hex() {
+        let hash = HashType::default_chain();
+        let miner = Address::Ed25519([3; 32]);
+        let (claim, _) = claim_of(&answer(&miner, vec![Hash::zero(hash).to_string()]), &miner, hash).unwrap();
+        let mut saved = SavedClaims::default();
+        assert!(saved.keep(claim.clone(), Some(100)));
+
+        let hex = to_hex(&wincode::serialize(&saved).unwrap());
+        assert_eq!(read_kept(&hex).unwrap().newest(&claim.pool, &miner), Some(&claim));
+        assert!(read_kept("0x12").is_none());
     }
 
     #[test]

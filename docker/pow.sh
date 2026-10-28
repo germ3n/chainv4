@@ -49,8 +49,8 @@
 #   PROXY          worker's SOCKS5 proxy, socks5h://host:port: for an .onion host, Tor's on
 #                  127.0.0.1:9050 unless set
 #   TOKEN          worker's token file: POW_HOME's mining.token, else docker/config's
-#   PAYOUT         worker's address for a mining pool to pay its shares to; alone, without a
-#                  token, for an open pool
+#   PAYOUT         worker's address for a mining pool to pay its shares to, its claims kept in
+#                  POW_HOME's pool-claims.json; alone, without a token, for an open pool
 #   PROTOCOL       the chain's protocol name, for join and worker, as the VPS's .env has it
 #   EXTRA_ARGS     anything else for join's node, such as --no-mdns
 #   CONTAINER_ENGINE  docker or podman, for up: as docker/compose.sh picks it, unset
@@ -623,10 +623,11 @@ worker() {
         *) node="$host:$mining_port" ;;
     esac
 
-    # A pool pays each worker's shares to the address it gives.
+    # A pool pays each worker's shares to the address it gives, and tells it each new claim on
+    # them, kept in POW_HOME: chainv4 claim --saved claims by them should the pool's node be gone.
     if [ -n "${PAYOUT:-}" ]; then
-        set -- "$@" --payout "$PAYOUT"
-        say "mining for $node; a pool's earnings go to $PAYOUT, claimed with chainv4 claim. Ctrl-C stops"
+        set -- "$@" --payout "$PAYOUT" --claims "$home/pool-claims.json"
+        say "mining for $node; a pool's earnings go to $PAYOUT, claimed with chainv4 claim, its claims kept in $home/pool-claims.json. Ctrl-C stops"
     else
         say "mining for $node; the block rewards go to the node's REWARD_TO. Ctrl-C stops"
     fi

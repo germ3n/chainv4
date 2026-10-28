@@ -1061,6 +1061,17 @@ voting finality it now goes back to the checkpoint and follows the node from the
   pays only its `--reward-to`; every build checks pool commitments and runs claims.
 - **Open pools take a public token.** `--mining-open` uses `OPEN_TOKEN`, which every worker without
   `--token` proves, so its messages are still numbered and checked, but anyone may join.
+- **Miners keep their own claims; the pool's node is not needed to claim.** Only the pool holds
+  the leaves under its roots, so the pool sends each worker its claim, kept in `--claims`, and the
+  wallet keeps those it is given. `chainv4 claim --saved` and the wallet check them against any
+  node, `GET /claims/{pool}/{address}?height=`. A worker run without a payout keeps nothing; one
+  started before this kept nothing either, so its first claims arrive with its next standing.
+- **The newest claim is the likeliest to be undone.** It names the pool's newest block, at the
+  tip. Kept claims are the newest 32 not yet settled, counting the oldest of them, which settles
+  next, and the newest two settled: one of those always holds. A pool that seals no block for a
+  while leaves its settled height behind, which only keeps more claims around.
+- **A kept claim pays up to its root.** What the pool credited after it lives only in the pool's
+  books; claims carry the miner's whole earnings to then, so nothing older is ever needed.
 - **The pool's books grow with its miners.** `pool.json` keeps each miner's earnings, and the node
   keeps the last four claim trees in memory for paths to the roots blocks committed already.
 

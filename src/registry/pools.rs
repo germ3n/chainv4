@@ -13,6 +13,7 @@ use {
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
     crate::structs::hash::{Hash, HashType},
+    crate::structs::tx::Tx,
     crate::structs::u256::{U256Le, u256},
     r#macro::document,
     wincode::{SchemaRead, SchemaWrite},
@@ -193,6 +194,154 @@ impl<'a> Pools<'a> {
     }
 }
 
+#[document(
+    summary = "A miner's claim on a pool: all it earned at one of the pool's roots, and the Merkle path to it, as the pool's node serves it and as a miner keeps it. With it a miner claims from any node, the pool's or not, even once the pool is gone: the chain holds the root and the escrow, and only the leaf and its path were the pool's to give.",
+    category = "Mining",
+    see_also = "SavedClaims, Tx::Claim, Pools::claim",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct PoolClaim {
+    #[document(summary = "The pool: its blocks' producer, whose escrow pays the claim.")]
+    pub pool: Address,
+    #[document(summary = "The height of the pool's block whose root holds the claim.")]
+    pub height: u64,
+    #[document(summary = "That block's id, when the claim was given.")]
+    pub block: Hash,
+    #[document(summary = "The miner.")]
+    pub to: Address,
+    #[document(summary = "All the miner earned from the pool, as its leaf says.")]
+    #[wincode(with = "U256Le")]
+    pub earned: u256,
+    #[document(summary = "The leaf's place among the root's claims.")]
+    pub index: u64,
+    #[document(summary = "How many claims the root holds.")]
+    pub count: u64,
+    #[document(summary = "The Merkle path from the leaf to the root.")]
+    pub path: Vec<Hash>,
+}
+
+impl PoolClaim {
+    #[document(parent = "PoolClaim", summary = "The claim as a transaction, which anyone may send: the coins go to the miner.")]
+    pub fn tx(&self) -> Tx {
+        Tx::Claim { height: self.height, to: self.to, earned: self.earned, index: self.index, path: self.path.clone() }
+    }
+
+    #[document(
+        parent = "PoolClaim",
+        summary = "Whether the claim holds under a root on chain, the one at its height: the same pool, as many claims, and a path from its leaf to the root. One that does not, its block undone since, pays nothing.",
+    )]
+    pub fn holds(&self, root: &PoolRoot, hash: HashType) -> bool {
+        let (Ok(index), Ok(count)) = (usize::try_from(self.index), usize::try_from(self.count)) else {
+            return false;
+        };
+
+        root.pool == self.pool && root.count == self.count && merkle::verify(&root.root, &claim_leaf(hash, &self.to, self.earned), index, count, &self.path)
+    }
+}
+
+#[document(
+    summary = "How many claims on a pool not yet settled a miner keeps, at most: the oldest, the one to settle next, and the newest after it.",
+    category = "Mining",
+    see_also = "SavedClaims",
+)]
+pub const KEPT_PENDING: usize = 32;
+
+#[document(
+    summary = "How many settled claims on a pool a miner keeps: the newest, and one before it should the newest's block have been dropped.",
+    category = "Mining",
+    see_also = "SavedClaims",
+)]
+pub const KEPT_SETTLED: usize = 2;
+
+/// The order claims are kept in: by pool and miner, then newest first.
+fn in_order(a: &PoolClaim, b: &PoolClaim) -> std::cmp::Ordering {
+    (a.pool, a.to).cmp(&(b.pool, b.to)).then(b.height.cmp(&a.height))
+}
+
+#[document(
+    summary = "The claims a miner keeps, on each pool it mines for: enough that one holds whatever happens to the pool. The newest pays the most, but its block is the newest the pool sealed, the likeliest to be undone; one at or under a settled height can no longer be. So it keeps the newest few, the oldest not yet settled, which settles next, and the newest settled.",
+    category = "Mining",
+    see_also = "PoolClaim, KEPT_PENDING, KEPT_SETTLED",
+    note = "Every claim on a pool holds all the miner earned there up to its root, so one that holds pays everything up to it, less what was claimed before. Older claims pay less, never more.",
+)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct SavedClaims {
+    /// Each pool's and miner's claims, newest first, in_order.
+    claims: Vec<PoolClaim>,
+    /// The highest settled height told so far, so a claim kept later without one still knows
+    /// which of those kept can no longer be undone.
+    settled: Option<u64>,
+}
+
+impl SavedClaims {
+    #[document(
+        parent = "SavedClaims",
+        summary = "Keeps a claim, in place of one at its height, and forgets the claims on its pool for its miner it no longer needs.",
+        params = {
+            claim = "The claim, as the pool gave it.",
+            settled = "The highest height the pool's blocks can no longer be undone at, as far as is known: None while none is known. The highest told before stands when it is lower or None.",
+        },
+        returns = "Whether anything changed, so whether to write it out again.",
+    )]
+    pub fn keep(&mut self, claim: PoolClaim, settled: Option<u64>) -> bool {
+        let before = (self.claims.clone(), self.settled);
+        // Settled stays settled: a height told before holds whatever this call knows.
+        let settled = settled.max(self.settled);
+        self.settled = settled;
+        let (pool, to) = (claim.pool, claim.to);
+        let (mut theirs, others): (Vec<PoolClaim>, Vec<PoolClaim>) = std::mem::take(&mut self.claims).into_iter().partition(|kept| kept.pool == pool && kept.to == to);
+        theirs.retain(|kept| kept.height != claim.height);
+        theirs.push(claim);
+        theirs.sort_by_key(|claim| std::cmp::Reverse(claim.height));
+
+        let is_settled = |claim: &PoolClaim| settled.is_some_and(|settled| claim.height <= settled);
+        let (done, mut pending): (Vec<PoolClaim>, Vec<PoolClaim>) = theirs.into_iter().partition(is_settled);
+
+        if pending.len() > KEPT_PENDING {
+            let oldest = pending.pop().expect("more than any");
+            pending.truncate(KEPT_PENDING - 1);
+            pending.push(oldest);
+        }
+
+        self.claims = others;
+        self.claims.extend(pending);
+        self.claims.extend(done.into_iter().take(KEPT_SETTLED));
+        self.claims.sort_by(in_order);
+
+        (self.claims.clone(), self.settled) != before
+    }
+
+    #[document(parent = "SavedClaims", summary = "The claims kept for a miner, on one pool or any, newest first within each pool.")]
+    pub fn of<'a>(&'a self, pool: Option<&'a Address>, to: &'a Address) -> impl Iterator<Item = &'a PoolClaim> + 'a {
+        self.claims.iter().filter(move |claim| claim.to == *to && pool.is_none_or(|pool| claim.pool == *pool))
+    }
+
+    #[document(
+        parent = "SavedClaims",
+        summary = "The newest claim kept for a miner on one pool, which pays the most there should it hold. Claims on different pools pay from different escrows: their heights say nothing of which pays more.",
+    )]
+    pub fn newest(&self, pool: &Address, to: &Address) -> Option<&PoolClaim> {
+        self.claims.iter().filter(|claim| claim.pool == *pool && claim.to == *to).max_by_key(|claim| claim.height)
+    }
+
+    #[document(parent = "SavedClaims", summary = "The highest settled height told so far, or None.")]
+    pub fn settled(&self) -> Option<u64> {
+        self.settled
+    }
+
+    #[document(parent = "SavedClaims", summary = "Claims kept before, as they were, with the highest settled height told then: none forgotten, as keeping them did that already.")]
+    pub fn kept(mut claims: Vec<PoolClaim>, settled: Option<u64>) -> SavedClaims {
+        claims.sort_by(in_order);
+
+        SavedClaims { claims, settled }
+    }
+
+    #[document(parent = "SavedClaims", summary = "Every claim kept.")]
+    pub fn all(&self) -> &[PoolClaim] {
+        &self.claims
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {super::*, crate::db::MemoryDb, std::sync::Arc};
@@ -244,5 +393,71 @@ mod tests {
 
         assert_eq!(pools.claim(1, &alice, u256::new(50), 0, &[]), Err(ClaimError::Escrow));
         assert_eq!(pools.claimed(&pool, &alice), Ok(u256::ZERO), "nothing changed");
+    }
+
+    fn claim(pool: Address, to: Address, height: u64) -> PoolClaim {
+        PoolClaim { pool, height, block: Hash::zero(HashType::default_chain()), to, earned: u256::new(u128::from(height)), index: 0, count: 1, path: Vec::new() }
+    }
+
+    #[test]
+    fn a_saved_claim_holds_under_its_pools_root_and_no_other() {
+        let hash = HashType::default_chain();
+        let (pool, alice, bob) = (Address::Ed25519([1; 32]), Address::Ed25519([2; 32]), Address::Ed25519([3; 32]));
+        let leaves = [claim_leaf(hash, &alice, u256::new(300)), claim_leaf(hash, &bob, u256::new(100))];
+        let root = PoolRoot { pool, root: merkle::root(hash, &leaves), count: 2 };
+        let saved = PoolClaim { pool, height: 7, block: Hash::zero(hash), to: bob, earned: u256::new(100), index: 1, count: 2, path: merkle::audit_path(hash, &leaves, 1) };
+
+        assert!(saved.holds(&root, hash));
+        assert!(!PoolClaim { earned: u256::new(101), ..saved.clone() }.holds(&root, hash), "more than its leaf");
+        assert!(!saved.holds(&PoolRoot { pool: alice, ..root }, hash), "another pool's root");
+        assert!(!saved.holds(&PoolRoot { root: leaves[0], ..root }, hash), "a root its block was undone for");
+        assert_eq!(saved.tx(), Tx::Claim { height: 7, to: bob, earned: u256::new(100), index: 1, path: saved.path.clone() });
+
+        // It claims on a chain as the pool's node would have.
+        let state = state();
+        let pools = Pools::new(&state, hash);
+        pools.commit(7, root);
+        Accounts::new(&state).credit(&pool_escrow(&pool, hash), u256::new(100)).unwrap();
+        assert_eq!(pools.claim(saved.height, &saved.to, saved.earned, saved.index, &saved.path), Ok(u256::new(100)));
+    }
+
+    #[test]
+    fn a_miner_keeps_its_newest_claims_the_next_to_settle_and_the_newest_settled() {
+        let (pool, other, alice, bob) = (Address::Ed25519([1; 32]), Address::Ed25519([4; 32]), Address::Ed25519([2; 32]), Address::Ed25519([3; 32]));
+        let mut saved = SavedClaims::default();
+
+        // Nothing settled yet: all kept, up to the newest and the oldest.
+        for height in 1..=100 {
+            assert!(saved.keep(claim(pool, alice, height), None));
+        }
+
+        let heights: Vec<u64> = saved.of(Some(&pool), &alice).map(|claim| claim.height).collect();
+        assert_eq!(heights.len(), KEPT_PENDING);
+        assert_eq!((heights[0], heights[KEPT_PENDING - 2], heights[KEPT_PENDING - 1]), (100, 70, 1), "the newest, and the oldest, which settles first");
+
+        // Bob's and another pool's are kept beside alice's, each by its own.
+        saved.keep(claim(pool, bob, 50), None);
+        saved.keep(claim(other, alice, 60), Some(60));
+        assert_eq!(saved.of(Some(&pool), &bob).count(), 1);
+        assert_eq!(saved.newest(&pool, &alice).map(|claim| claim.height), Some(100));
+
+        // The same claim again changes nothing; one at its height from another block takes its place.
+        assert!(!saved.keep(claim(pool, alice, 100), None));
+        assert!(saved.keep(PoolClaim { block: Hash::from_bytes(HashType::default_chain(), &[9; 32]).unwrap(), ..claim(pool, alice, 100) }, None));
+        assert_eq!(saved.of(Some(&pool), &alice).count(), KEPT_PENDING);
+
+        // Once 75 is settled, the settled ones down to the newest two go.
+        saved.keep(claim(pool, alice, 101), Some(75));
+        let heights: Vec<u64> = saved.of(Some(&pool), &alice).map(|claim| claim.height).collect();
+        assert_eq!(heights.first(), Some(&101));
+        assert_eq!(&heights[heights.len() - 2..], &[75, 74], "the newest settled, and one before it");
+        assert!(heights.iter().filter(|height| **height <= 75).count() == KEPT_SETTLED);
+        assert_eq!(saved.of(Some(&other), &alice).count(), 1, "another pool's, untouched");
+
+        // A claim told with no settled height still knows 75 is: the newest settled stays.
+        saved.keep(claim(pool, alice, 102), None);
+        let heights: Vec<u64> = saved.of(Some(&pool), &alice).map(|claim| claim.height).collect();
+        assert_eq!(saved.settled(), Some(75));
+        assert_eq!(&heights[heights.len() - 2..], &[75, 74], "not trimmed away as though it were pending");
     }
 }

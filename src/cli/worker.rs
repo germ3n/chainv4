@@ -18,6 +18,11 @@ pub struct WorkerArgs {
     #[cfg(feature = "pool")]
     #[arg(long)]
     payout: Option<crate::structs::address::Address>,
+    /// Where to keep the payout's claims on the pool, as the pool tells of each new one: with
+    /// them, chainv4 claim --saved claims from any node, should the pool's be gone.
+    #[cfg(feature = "pool")]
+    #[arg(long, default_value = "pool-claims.json")]
+    claims: PathBuf,
     /// Mine on the GPUs instead of CPU threads: every one, or those --gpus picks. Needs a build
     /// with the gpu feature.
     #[arg(long)]
@@ -73,6 +78,10 @@ pub fn worker(args: WorkerArgs) -> CliResult<()> {
         payout: args.payout,
         #[cfg(not(feature = "pool"))]
         payout: None,
+        #[cfg(feature = "pool")]
+        claims: Some(args.claims),
+        #[cfg(not(feature = "pool"))]
+        claims: None,
     })?
     .wait();
 

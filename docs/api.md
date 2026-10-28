@@ -452,6 +452,15 @@ How the node behind the API is doing. 503 when no node runs behind it.
 | `peers` | Each connected peer's `id`, `address` and `since`, what it gossiped (`heard`: `blocks`, `txs`, `votes`), how much of it the backlog `dropped`, and its `chain` from its last status (`height`, `work`, `justified`), or `null`. |
 | `mining` | `null` for a node that does not mine. Otherwise the hashes a second of everything mining for it (`rate`); its own `devices`, each a `name` and `rate`, its GPUs or CPU threads; where it takes workers (`listening`), or `null`; its `workers`, each with its `name`, `address`, `since`, `rate`, `devices`, the seals it `found` and the nonces `refused`, and under a pool its `payout` address, the `shares` taken and its `share_difficulty` (see [Mining with workers](consensus.md#mining-with-workers)); and `pool`, `null` or the pool's `fee`, `window`, whether it is `open`, and how many `miners` and `blocks` it counts. Rates are measured over the last few seconds. |
 
+### `GET /claims/{pool}/{address}`
+
+On every node, pool or not: what `address` has `claimed` from `pool`, the pool's `escrow` and its
+`escrow_balance`, and the tip's `height`. With `?height=`, `root` is the root the pool's block at
+that height on the main chain committed to, its `root` and `count`, or `null` for a block that is
+not the pool's or carries none. What a miner's kept claim (see
+[Mining pools](consensus.md#mining-pools)) is checked against before it is sent: one that holds
+under that root pays.
+
 ### `GET /pool`, `GET /pool/{address}` and `GET /pool/claim/{address}`
 
 On a node that runs a [mining pool](consensus.md#mining-pools); 404 otherwise.
@@ -471,7 +480,9 @@ to. Amounts are decimal strings.
 `GET /pool/claim/{address}` is a miner's claim, ready for `Tx::Claim`: the `pool` and `escrow`,
 the `height` and `block` of the newest of the pool's blocks on the main chain whose root holds it,
 all it `earned`, what it `claimed` and what is `claimable`, and its leaf's `index`, the root's
-`count` and the Merkle `path`. 404 for a miner the pool owes nothing yet.
+`count`, the Merkle `path` and the chain's `hash` it is in. `settled` is the highest height the
+pool's blocks can no longer be undone at, as its books know, or `null`: what a miner keeping its
+claims prunes by. 404 for a miner the pool owes nothing yet.
 
 ### `GET /release`
 
