@@ -17,7 +17,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   - tests that test nothing, or the wrong thing, and places that want more;
   - then measure coverage, run the analysis tools (clippy pedantic, cargo-audit, fuzzing where the
     todo asks for it), and fix what turns up, a commit per feature.
-- [ ] **A fresh test chain on the VPS.** Once all queued changes and batches are in, delete the
+- [x] **A fresh test chain on the VPS.** Done 2026-10-28, genesis `0x9a7fbd89…`, as
+  [Deploying](deploy.md) records; external EVM gateways wait for a funded key there, and the
+  review pass runs on it. Once all queued changes and batches are in, delete the
   VPS's chain and start a new one from a new genesis with everything enabled, so all of it can be
   tried end to end:
   - every engine, finality with governance, names, the collection registry, fees;
@@ -32,6 +34,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ### Consensus
 
+- [ ] **The directory: governance, or an admin key, not genesis.** Genesis may name a `directory`
+  today, which makes little sense: the contracts it names do not exist before the chain does.
+  Drop it from genesis, keep `Change::Directory` for chains with governance, and give a chain
+  without governance an admin key, named in genesis, that sets the directory instead.
+- [ ] **keygen prints the public key.** The federation and multisig members list compressed
+  public keys, and `keygen` prints only the address, so a deploy works them out elsewhere (see
+  [Deploying](deploy.md#1-keys)).
 - [ ] **Revisit the deployment proxy at genesis.** A chain running the EVM starts with the
   deterministic deployment proxy at `0x4e59…956c` (`Genesis::write_state`), since the chain
   refuses the proxy's own pre-EIP-155 deploy, so a multisig's MultiSig.sol and Swap.sol land at

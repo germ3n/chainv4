@@ -1,0 +1,167 @@
+# Deploying a fresh test chain
+
+How the VPS's test chain was last started from nothing (2026-10-28, commit `29934e3`), step by
+step, with everything enabled: a runbook for the next one. [Docker](docker.md) explains the
+pieces; this is the order they go in, and what bit along the way.
+
+It assumes what `docker/pow.sh init` made once: `~/.chainv4-pow` with `owner.key` (the account
+holding the coin, the council, and the validator's account), `validator.key`, `faucet.key` and
+the binary `~/.chainv4-pow/bin/chainv4`, built by `regenesis` from the checkout. Use that binary
+for every command below: a newly built one elsewhere may be blocked by the Mac's firewall (LuLu),
+which shows as `cannot reach the node: timeout`.
+
+```sh
+B=~/.chainv4-pow/bin/chainv4
+N=https://150-40-117-173.sslip.io     # the VPS's API, behind nginx
+K=~/.chainv4-pow/owner.key
+VPS=root@150.40.117.173; SSH="ssh -i ~/.ssh/id_kyun -o IdentitiesOnly=yes"
+```
+
+## 1. Keys
+
+The federation, 2 of 3 secp256k1 keys kept on this machine, and two working keys: `evm.key`
+pays gas on EVM chains (chainv4's own EVM too) and `relay.key` pays the Bitcoin relay's headers.
+
+```sh
+mkdir -p ~/.chainv4-pow/federation
+for i in 1 2 3; do $B keygen --scheme secp256k1 --out ~/.chainv4-pow/federation/signer$i.key; done
+$B keygen --scheme secp256k1 --out ~/.chainv4-pow/evm.key
+$B keygen --scheme secp256k1 --out ~/.chainv4-pow/relay.key
+```
+
+keygen prints the address, not the compressed public key the federation lists. The public key
+is the secret's multiple of secp256k1's generator, `02` or `03` by y's parity, then x: any
+secp256k1 library gives it, and its keccak address must match what keygen printed. (A `keygen`
+that prints it is in the [todo](todo.md).)
+
+## 2. Genesis
+
+```sh
+docker/pow.sh regenesis --yes      # same keys, this build's defaults; old genesis and chain set aside
+```
+
+Then add the federation to `docker/config/genesis.json` and copy it over
+`~/.chainv4-pow/genesis.json`, so both are the same file:
+
+```json
+"federation": { "signers": ["0x02…", "0x03…", "0x03…"], "threshold": 2,
+                "chain_depth": 20, "evm_depth": 12, "bitcoin_depth": 6 }
+```
+
+What the defaults already hold: every engine (`lua`, `wasm`, `evm`), FFG finality on the VPS's
+votes, council governance (the owner), names under `dev`, the collection registry, base fees.
+The deployment proxy comes with the EVM. Leave `directory` null: the council names the contracts
+once they exist (step 5). Check the file opens before shipping it:
+
+```sh
+$B --db /tmp/check.db --genesis docker/config/genesis.json --http 127.0.0.1:18777 --no-mdns &
+curl -s 127.0.0.1:18777/status    # its genesis id and federation; then stop it and rm the db
+```
+
+## 3. The VPS
+
+In `docker/.env`: `EXTRA_ARGS=--no-mdns --archive` (every height's state kept),
+`INDEX_EVENTS=genesis` and `INDEX_ADDRESSES=genesis` (events and addresses indexed from the
+start), and no `SWAP_CONTRACT`, `DEX_CONTRACT` or `DEX_ROUTER` left from the old chain: the
+directory names them now.
+
+```sh
+docker/pow.sh push $VPS -i ~/.ssh/id_kyun
+$SSH $VPS 'cd chainv4 && docker/pow.sh reset --yes'
+$SSH $VPS 'cd chainv4 && (setsid nohup docker/pow.sh up > /root/pow-up.log 2>&1 < /dev/null &)'
+until curl -s $N/status | grep -q '"genesis":"0x<new id>'; do sleep 20; done    # ~5 minutes
+```
+
+The node's log says `keeping the state of every height, as an archive` and that both indexes
+hold blocks from height 0.
+
+## 4. Contracts
+
+Fund the faucet (its address is in `GET /status`), `evm.key`, `relay.key` and each federation
+key from the owner, `send transfer --to … --amount …` in the smallest unit (18 decimals). Then:
+
+```sh
+$B send --node $N --key $K deploy --lua contracts/lua/swap.lua           # swap contract
+$B dex --node $N --key $K deploy                                         # native DEX
+$B dex --node $N --key $K --evm deploy                                   # WDEV, factory, router
+$B nft --node $N --key $K factory                                        # NFT factory
+$B bridge --node $N --key $K deploy                                      # gateway here
+$B swap evm-deploy --eth-rpc $N/rpc --key ~/.chainv4-pow/evm.key         # Swap.sol, via the proxy
+cargo build --manifest-path contracts/Cargo.toml --target wasm32-unknown-unknown --release \
+  --workspace --exclude chainv4-sdk --exclude chainv4-sdk-macros
+$B send --node $N --key $K deploy --wasm contracts/target/wasm32-unknown-unknown/release/btc_relay.wasm
+$B bridge --node $N --key $K --esplora https://mempool.space/testnet4/api \
+  btc relay-start <relay> <testnet4 tip rounded down to 2016> --network test
+$B bridge --node $N --key $K btc deploy <relay>                           # Bitcoin gateway
+```
+
+Samples: tokens are `contracts/lua/token.lua` with `NAME` and `SYMBOL` changed (GLD, SLV, TUSD);
+`nft create nft "Test Pixels" PIX --factory …` and `nft create multi "Test Items" ITEM`, then
+`nft mint`; pools with `dex add coin <token> <coin amount> <token amount> --dex …`, and on the EVM
+DEX a `Token.sol` from `evm.key` (`send deploy --evm contracts/evm/Token.bin --constructor
+"(string,string,uint256)" --arg … `) with `dex --evm --router … add`; examples on each engine:
+`guestbook.lua`, `counter.wasm`, `Counter.bin` (`--constructor "(uint256)" --arg 0`); names with
+`send name register LABEL` then `send name target LABEL.dev --to …`; a 2-of-3 multisig with EVM
+members (`create-multisig --member KEY,,0x…`) and its contract, `multisig --key evm.key evm …
+deploy --eth-rpc $N/rpc`.
+
+**What bit:**
+- `dex add` sometimes stopped after its approval, the pool never opened: run it again, the
+  approval being there already.
+- Esplora (mempool.space) throttles a burst of header fetches, answering an HTML page or timing
+  out, and `relay-sync` submits only every `--batch` headers (500 by default), so a pass failing
+  midway kept nothing: the relay sat at its checkpoint. With `--batch 25` each pass keeps what it
+  fetched, and the looping service in step 6 catches up.
+- A name's `target` once did not take; check `GET /names/LABEL.dev` and send it again.
+
+## 5. The directory
+
+The council, the owner alone, names the contracts; it is in force at once with one member:
+
+```sh
+$B send --node $N --key $K approve-change --directory '{"gateway":"contract:0x…",
+  "btc_gateway":"contract:0x…","evm_gateways":[],"swap":"contract:0x…","dex":"contract:0x…",
+  "dex_router":"0x…","nft_factory":"contract:0x…"}'
+curl -s $N/status    # directory
+```
+
+The apps take the directory first; names such as `swap.dev` and the node's flags are fallbacks.
+
+## 6. The Bitcoin relay on the VPS
+
+The node's binary copied out of its container (`podman cp chainv4_node_1:/usr/local/bin/chainv4
+/root/chainv4-relay/`), `relay.key` beside it, and `/root/chainv4-relay/relay.sh`: `bridge btc
+relay-sync <relay> --batch 25` against `https://mempool.space/testnet4/api`, then two minutes' sleep, for
+ever, under `/etc/systemd/system/chainv4-relay.service` (`Restart=always`). After a rebuild of the
+image, copy the binary out again and `systemctl restart chainv4-relay`.
+
+## 7. The laptop and the apps
+
+```sh
+nohup docker/pow.sh join 150.40.117.173 --cpu > ~/.chainv4-pow/join.log 2>&1 &   # never the GPU
+sh <scratchpad>/apps-build.sh      # trunk web bundles, then arm64 APKs of the explorer and wallet
+```
+
+The APKs (`wallet/target/android/chainv4-wallet-arm64.apk`, the explorer's beside it) go to
+gofile anonymously: the first `curl -F file=@… https://upload.gofile.io/uploadfile` answers a
+folder and a guest token, and the second goes into that folder with the token. Publish their
+SHA-256s with the link.
+
+## The last one
+
+| What | Where |
+| --- | --- |
+| Genesis | `0x9a7fbd8953b9a3b0…` |
+| Swap contract, `swap.dev` | `contract:0xc4ad35b6…68fb7` |
+| Native DEX, `dex.dev` | `contract:0x6c1df38c…90a4` |
+| EVM DEX router | `0xfd9524e58c1a904b439e9a3292a95cf6562aa458` |
+| NFT factory, `nfts.dev` | `contract:0x5c352729…4297` |
+| Gateway, `gateway.dev` | `contract:0xe6912df3…55dc` |
+| Bitcoin relay, `btcrelay.dev` | `contract:0x717374cf…e9c0` (testnet4 from 157248) |
+| Bitcoin gateway, `btcgateway.dev` | `contract:0xc53df990…04e7` |
+| Swap.sol | `0xb3f77d55ac803f023df8f4d21fd1d103e5be2d50` |
+| Tokens `gold.dev`, `silver.dev`, `tusd.dev`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin; TETH on the EVM DEX |
+| Collections `pixels.dev`, `items.dev` | 3 NFTs; ids 1 and 2, 100 each |
+| Examples | `guestbook.dev`, `counter.dev`, Counter.sol `0x3ad60afc…b34f` |
+| Sample multisig | `multisig:0xa3a6f185…3fab`, 2 of 3, its contract `0x383057bb…1038` |
+| Apps | https://gofile.io/d/suZUx3EI |
