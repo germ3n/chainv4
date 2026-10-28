@@ -258,6 +258,28 @@ impl<'a> Signers<'a> {
         Ok(())
     }
 
+    #[document(
+        parent = "Signers",
+        summary = "Makes a set the decided one as finality switches to authority: one version after any decided before, the ballot emptied, so approvals made under an earlier authority era never count.",
+    )]
+    pub fn start(&self, set: &SignerSet) -> Result<(), DbError> {
+        let version = self.state.get_value::<Decided>(Column::Validators, DECIDED)?.map_or(0, |decided| decided.version + 1);
+        self.state.put_value(Column::Validators, DECIDED.to_vec(), &Decided { version, set: set.clone() });
+        self.state.delete(Column::Validators, BALLOT.to_vec());
+
+        Ok(())
+    }
+
+    #[document(
+        parent = "Signers",
+        summary = "The account a signer of the set decided last speaks through, or None for a key it does not name, or a chain that never ran authority finality.",
+    )]
+    pub fn account_of(&self, key: &PublicKey) -> Result<Option<Address>, DbError> {
+        let decided: Option<Decided> = self.state.get_value(Column::Validators, DECIDED)?;
+
+        Ok(decided.and_then(|decided| decided.set.signers.iter().find(|signer| signer.key == *key).map(|signer| signer.account)))
+    }
+
     #[document(parent = "Signers", summary = "The signers fixed for an epoch, if any are yet.")]
     pub fn set(&self, epoch: u64) -> Result<Option<SignerSet>, DbError> {
         self.state.get_value(Column::Epochs, &Signers::set_key(epoch))

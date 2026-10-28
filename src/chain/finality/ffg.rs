@@ -5,13 +5,12 @@
 //! the whole bond, part of it paid to whoever reports them.
 
 use {
-    super::votes::{Electorate, VoteParams, Voters},
+    super::votes::Voters,
     crate::crypto::keypair::PublicKey,
     crate::db::{DbError, State},
     crate::registry::validators::{Staking, ValidatorRecord, Validators},
     crate::structs::u256::u256,
     r#macro::document,
-    std::sync::Arc,
 };
 
 pub use crate::params::finality::{FfgConfig, GenesisValidator};
@@ -112,64 +111,25 @@ pub(super) fn write_genesis(state: &State, config: &FfgConfig) -> Result<(), DbE
     Ok(())
 }
 
-/// Bonded validators, weighted by bond, two thirds of the weight justifying.
-pub(super) struct Staked {
-    config: FfgConfig,
+/// Bonded validators, weighted by bond, two thirds of the weight justifying: the smallest weight
+/// w with 3w >= 2 total, and never nothing, so an empty set justifies nothing.
+pub(super) fn voters(state: &State, epoch: u64) -> Result<Option<Voters>, DbError> {
+    Ok(Validators::new(state).set(epoch)?.map(|set| Voters {
+        needed: set.two_thirds(),
+        set,
+    }))
 }
 
-impl Staked {
-    pub(super) fn new(config: FfgConfig) -> Staked {
-        Staked { config }
-    }
-}
+/// Leaks, at a checkpoint, the bonds of validators that stopped voting while the chain is stalled,
+/// by the leak and staking rules the epoch runs.
+pub(super) fn leak_at(state: &State, config: &FfgConfig, epoch: u64) -> Result<(), DbError> {
+    let validators = Validators::new(state);
 
-impl Electorate for Staked {
-    fn name(&self) -> &'static str {
-        "ffg"
-    }
-
-    fn params(&self) -> VoteParams {
-        VoteParams {
-            checkpoint_interval: self.config.checkpoint_interval,
-            vote_depth: self.config.vote_depth,
-            vote_reward: self.config.vote_reward,
-            max_proofs_per_block: self.config.max_proofs_per_block,
-        }
+    if let Some(leak) = config.leak
+        && epoch.saturating_sub(validators.proven()?) > leak.after_epochs
+    {
+        validators.leak(epoch, &leak, &config.staking())?;
     }
 
-    /// Two thirds of the bonded weight: the smallest weight w with 3w >= 2 total, and never
-    /// nothing, so an empty set justifies nothing.
-    fn voters(&self, state: &State, epoch: u64) -> Result<Option<Voters>, DbError> {
-        Ok(Validators::new(state).set(epoch)?.map(|set| Voters {
-            needed: set.two_thirds(),
-            set,
-        }))
-    }
-
-    fn fixed_ahead(&self) -> u64 {
-        self.config.activation_delay
-    }
-
-    fn leak(&self) -> Option<Leak> {
-        self.config.leak
-    }
-
-    /// Each checkpoint leaks the bonds of validators that stopped voting while the chain is
-    /// stalled, then fixes the validator set activation_delay epochs ahead.
-    fn at_checkpoint(&self, state: &Arc<State>, epoch: u64) -> Result<(), DbError> {
-        let validators = Validators::new(state);
-        // The leak and the staking rules as they stand at the epoch: governance's, by then.
-        let config = match crate::registry::changes::Changes::new(state).finality_at(epoch)? {
-            Some(super::FinalityConfig::Ffg(tuned)) => tuned,
-            _ => self.config.clone(),
-        };
-
-        if let Some(leak) = config.leak
-            && epoch.saturating_sub(validators.proven()?) > leak.after_epochs
-        {
-            validators.leak(epoch, &leak, &config.staking())?;
-        }
-
-        validators.fix_set(epoch + self.config.activation_delay).map(|_| ())
-    }
+    Ok(())
 }

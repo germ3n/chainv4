@@ -332,6 +332,51 @@ impl<'a> Changes<'a> {
         Ok(self.finality_eras()?.eras.into_iter().rev().find(|era| era.from <= epoch).map(|era| era.config))
     }
 
+    #[document(
+        parent = "Changes",
+        summary = "The finality an epoch runs: the config governance decided for it, or genesis's.",
+        params = { genesis = "The chain's finality from genesis." },
+    )]
+    pub fn finality_in(&self, epoch: u64, genesis: &crate::params::finality::FinalityConfig) -> Result<crate::params::finality::FinalityConfig, DbError> {
+        Ok(self.finality_at(epoch)?.unwrap_or_else(|| genesis.clone()))
+    }
+
+    #[document(
+        parent = "Changes",
+        summary = "The finality decided last, whether or not it runs yet: what a new change of finality is checked against.",
+        params = { genesis = "The chain's finality from genesis." },
+    )]
+    pub fn finality_decided(&self, genesis: &crate::params::finality::FinalityConfig) -> Result<crate::params::finality::FinalityConfig, DbError> {
+        Ok(self.finality_eras()?.eras.pop().map_or_else(|| genesis.clone(), |era| era.config))
+    }
+
+    #[document(
+        parent = "Changes",
+        summary = "A decided switch of finality's kind that has not taken effect by an epoch: the epoch it runs from and the new config, or None.",
+        params = { genesis = "The chain's finality from genesis." },
+    )]
+    pub fn switch_ahead(&self, epoch: u64, genesis: &crate::params::finality::FinalityConfig) -> Result<Option<FinalityEra>, DbError> {
+        let running = self.finality_in(epoch, genesis)?;
+
+        Ok(self.finality_eras()?.eras.into_iter().find(|era| era.from > epoch && era.config.name() != running.name()))
+    }
+
+    #[document(
+        parent = "Changes",
+        summary = "Drops the finality decided to run from an epoch, and whatever was decided after it: a switch into FFG that lapsed, no validator having bonded.",
+    )]
+    pub fn lapse_finality(&self, from: u64) -> Result<(), DbError> {
+        let mut eras = self.finality_eras()?;
+        eras.eras.retain(|era| era.from < from);
+
+        match eras.eras.is_empty() {
+            true => self.state.delete(Column::Validators, FINALITY.to_vec()),
+            false => self.state.put_value(Column::Validators, FINALITY.to_vec(), &eras),
+        }
+
+        Ok(())
+    }
+
     #[document(parent = "Changes", summary = "Writes a directory as the one in force: genesis's as the chain starts, or one governance decided.")]
     pub fn write_directory(&self, directory: &crate::registry::directory::Directory) {
         self.state.put_value(Column::Validators, DIRECTORY.to_vec(), directory);
@@ -404,7 +449,7 @@ impl<'a> Changes<'a> {
             Change::Fees(fees) => self.fees()?.as_ref() == Some(fees),
             Change::Reward(reward) => self.reward()?.map(|decided| decided.reward).as_ref() == Some(reward),
             Change::Limits(limits) => self.limits()?.as_ref() == Some(limits),
-            Change::Finality(config) => self.finality_eras()?.eras.last().map(|era| &era.config) == Some(config),
+            Change::Finality(config) | Change::SwitchFinality { config, .. } => self.finality_eras()?.eras.last().map(|era| &era.config) == Some(config),
         };
 
         if same {
@@ -484,6 +529,16 @@ impl<'a> Changes<'a> {
             Change::Finality(config) => {
                 let mut eras = self.finality_eras()?;
                 let from = epoch + at.activation_delay + 1;
+                eras.eras.retain(|era| era.from < from);
+                eras.eras.push(FinalityEra { from, config });
+                self.state.put_value(Column::Validators, FINALITY.to_vec(), &eras);
+
+                decided.consensus
+            }
+            // A switch of kind runs from the epoch it names, or the first one far enough ahead.
+            Change::SwitchFinality { epoch: named, config } => {
+                let mut eras = self.finality_eras()?;
+                let from = named.max(epoch + at.activation_delay + 1);
                 eras.eras.retain(|era| era.from < from);
                 eras.eras.push(FinalityEra { from, config });
                 self.state.put_value(Column::Validators, FINALITY.to_vec(), &eras);

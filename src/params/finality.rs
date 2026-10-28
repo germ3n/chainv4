@@ -2,6 +2,12 @@
 //! chain::finality's. In a node each kind is there only with its feature; every build without the
 //! node has them all, so it decodes whatever a chain or a change names.
 
+
+// A node built without any kind has an empty FinalityConfig, whose encoding nothing reaches.
+#![cfg_attr(
+    all(feature = "node", not(any(feature = "finality-ffg", feature = "finality-authority", feature = "finality-depth"))),
+    allow(unreachable_code)
+)]
 use {
     crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
@@ -38,6 +44,20 @@ pub enum FinalityConfig {
 
 impl Hashable for FinalityConfig {
     const TAG_LEN: usize = 1;
+}
+
+impl FinalityConfig {
+    #[document(parent = "FinalityConfig", summary = "The kind's name: ffg, authority or depth.")]
+    pub fn name(&self) -> &'static str {
+        match *self {
+            #[cfg(any(feature = "finality-ffg", not(feature = "node")))]
+            FinalityConfig::Ffg(_) => "ffg",
+            #[cfg(any(feature = "finality-authority", not(feature = "node")))]
+            FinalityConfig::Authority(_) => "authority",
+            #[cfg(any(feature = "finality-depth", not(feature = "node")))]
+            FinalityConfig::Depth(_) => "depth",
+        }
+    }
 }
 
 #[document(

@@ -10,7 +10,7 @@
 //! that signs conflicting votes is thrown out by the evidence (Tx::Slash), with no bond to take.
 
 use {
-    super::votes::{Electorate, VoteParams, Voters},
+    super::votes::Voters,
     crate::chain::SignerRules,
     crate::crypto::keypair::PublicKey,
     crate::db::{DbError, State},
@@ -18,7 +18,6 @@ use {
     crate::structs::hash::Hash,
     crate::structs::u256::u256,
     r#macro::document,
-    std::sync::Arc,
 };
 
 pub use crate::params::finality::AuthorityConfig;
@@ -87,48 +86,10 @@ pub(super) fn write_genesis(state: &State, config: &AuthorityConfig) -> Result<(
     Signers::new(state).write_genesis(&config.genesis_set(), config.activation_delay)
 }
 
-/// The signers fixed for each epoch, a threshold of them justifying.
-pub(super) struct Appointed {
-    params: VoteParams,
-    activation_delay: u64,
-}
-
-impl Appointed {
-    pub(super) fn new(config: &AuthorityConfig) -> Appointed {
-        Appointed {
-            params: VoteParams {
-                checkpoint_interval: config.checkpoint_interval,
-                vote_depth: config.vote_depth,
-                vote_reward: config.vote_reward,
-                max_proofs_per_block: config.max_proofs_per_block,
-            },
-            activation_delay: config.activation_delay,
-        }
-    }
-}
-
-impl Electorate for Appointed {
-    fn name(&self) -> &'static str {
-        "authority"
-    }
-
-    fn params(&self) -> VoteParams {
-        self.params
-    }
-
-    fn voters(&self, state: &State, epoch: u64) -> Result<Option<Voters>, DbError> {
-        Ok(Signers::new(state).set(epoch)?.map(|set| Voters {
-            set: set.validators(),
-            needed: u256::from(set.threshold),
-        }))
-    }
-
-    fn fixed_ahead(&self) -> u64 {
-        self.activation_delay
-    }
-
-    /// Each checkpoint fixes the decided signers activation_delay epochs ahead.
-    fn at_checkpoint(&self, state: &Arc<State>, epoch: u64) -> Result<(), DbError> {
-        Signers::new(state).fix_set(epoch + self.activation_delay)
-    }
+/// The signers fixed for an epoch, a threshold of them justifying.
+pub(super) fn voters(state: &State, epoch: u64) -> Result<Option<Voters>, DbError> {
+    Ok(Signers::new(state).set(epoch)?.map(|set| Voters {
+        set: set.validators(),
+        needed: u256::from(set.threshold),
+    }))
 }

@@ -1945,6 +1945,198 @@ mod voting {
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: standard }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 
+    /// A chain the council governs, starting with this finality, and its genesis.
+    #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
+    fn council_chain(finality: FinalityConfig) -> (Chain, Genesis) {
+        let genesis = Genesis {
+            governance: chain_governance(),
+            ..genesis_with(Some(finality))
+        };
+
+        (Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap(), genesis)
+    }
+
+    /// Both members approve a change, which decides it.
+    #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
+    fn council_decides(chain: &mut Chain, change: crate::governance::Change) {
+        let version = crate::registry::changes::Changes::new(&chain.state()).decided().unwrap().version;
+
+        for member in [dev(), key(70)] {
+            assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(Effect::Done));
+        }
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
+    fn refused_change(chain: &mut Chain, change: crate::governance::Change, why: &str) {
+        let version = crate::registry::changes::Changes::new(&chain.state()).decided().unwrap().version;
+        let receipt = send_as(chain, &dev(), Tx::ApproveChange { version, change });
+
+        assert!(matches!(&receipt.result, Err(failure) if failure.to_string().contains(why)), "{why}: {:?}", receipt.result);
+    }
+
+    /// FFG for a switch into it: the test settings, naming no validators.
+    #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
+    fn ffg_to_bond_for() -> FinalityConfig {
+        let FinalityConfig::Ffg(config) = ffg() else { unreachable!("ffg") };
+
+        FinalityConfig::Ffg(FfgConfig { validators: Vec::new(), ..config })
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
+    #[test]
+    fn a_council_switches_ffg_to_authority_and_the_validators_unbond_there() {
+        use crate::governance::Change;
+        use crate::light::LightClient;
+        use crate::registry::changes::Changes;
+        use crate::registry::signers::Signers;
+        use crate::structs::amount::Amount;
+
+        let (mut chain, genesis) = council_chain(ffg());
+        let switch = |epoch: u64, config: FinalityConfig| Change::SwitchFinality { epoch, config };
+
+        refused_change(&mut chain, switch(9, ffg()), "other kind");
+        refused_change(&mut chain, switch(9, FinalityConfig::Authority(AuthorityConfig { checkpoint_interval: INTERVAL + 1, ..signers() })), "keeps genesis's checkpoint_interval");
+        refused_change(&mut chain, switch(1, authority()), "at the earliest");
+
+        // Decided in epoch 1, for epoch 5.
+        const SWITCH: u64 = 5;
+        council_decides(&mut chain, switch(SWITCH, authority()));
+        let state = chain.state();
+
+        assert_eq!(Changes::new(&state).switch_ahead(1, &ffg()).unwrap().map(|era| era.from), Some(SWITCH));
+        refused_change(&mut chain, Change::Finality(ffg()), "has yet to take effect");
+        refused_change(&mut chain, to_staked(), "has yet to take effect");
+
+        // The same keys vote throughout: as validators to epoch 4, as signers from 5, the old
+        // electorate's last justified checkpoint the new one's first source.
+        finalize_through(&mut chain, SWITCH + 2);
+
+        assert!(chain.finalized().unwrap().epoch > SWITCH, "finality carries on over the switch");
+        let state = chain.state();
+        let validators = crate::registry::validators::Validators::new(&state);
+
+        assert!(validators.set(SWITCH - 1).unwrap().is_some());
+        assert_eq!(validators.set(SWITCH).unwrap(), None, "an epoch has one kind's voters");
+        assert!(Signers::new(&state).set(SWITCH).unwrap().is_some());
+        assert_eq!(Changes::new(&state).finality_in(SWITCH, &ffg()).unwrap().name(), "authority");
+
+        // Every validator is unbonding from the switch, withdrawable withdrawal_delay epochs on.
+        let alice = &voters()[0];
+        let record = validators.get(&alice.public()).unwrap().unwrap();
+
+        assert_eq!((record.active_until, record.withdrawable_from), (Some(SWITCH), Some(SWITCH + 3)));
+        let params = chain.params_in(&state, chain.tip().height + 1).unwrap().rules;
+
+        assert!(params.signers.is_some());
+        assert!(params.staking.is_some_and(|staking| !staking.bonding), "withdrawing and slashing stay, bonding closes");
+        assert_eq!(send(&mut chain, Tx::Bond { voter: key(14).public(), amount: Amount::U128(100) })[0].result, Err(Failure::BondingClosed));
+
+        // A double vote from an FFG epoch, reported under authority, still costs the bond: the
+        // evidence is judged by the kind its epoch ran.
+        let carol = &voters()[2];
+        let honest = signed(&chain, carol, start(&chain), checkpoint(&chain, 2));
+        let double = signed(&chain, carol, start(&chain), Checkpoint { epoch: 2, block: Hash::zero(chain.hash()) });
+
+        assert_eq!(send(&mut chain, Tx::Slash { first: Box::new(honest), second: Box::new(double) })[0].result, Ok(Effect::Done));
+        let record = crate::registry::validators::Validators::new(&chain.state()).get(&carol.public()).unwrap().unwrap();
+
+        assert!(record.slashed && record.bond == u256::ZERO);
+        assert!(Signers::new(&chain.state()).decided().unwrap().set.signers.iter().any(|signer| signer.key == carol.public()), "not thrown out as a signer");
+
+        grow_to(&mut chain, (SWITCH + 3) * INTERVAL);
+        let before = balance(&chain, &alice.public().address());
+
+        assert_eq!(send_as(&mut chain, alice, Tx::Withdraw { voter: alice.public() }).result, Ok(Effect::Done));
+        assert_eq!(balance(&chain, &alice.public().address()), before + u256::new(10));
+
+        // A light client follows from the genesis id alone, the update that fixed the switch
+        // epoch naming it switched, and refuses one that hides it.
+        let header = stored_header_at(&*chain.db, 0).unwrap().unwrap();
+        let mut client = LightClient::new(genesis.light_params(), header, chain.genesis()).unwrap();
+        serve(&chain, &mut client);
+
+        assert!(client.finalized().epoch > SWITCH);
+        let fixing = stored_header_at(&*chain.db, (SWITCH - 2) * INTERVAL).unwrap().unwrap();
+        let finality = genesis.light_params().finality.unwrap();
+        let mut update = stored_light_update(&*chain.db, &fixing.id()).unwrap().unwrap();
+
+        assert_eq!(update.switched, vec![SWITCH]);
+        assert!(update.check(&fixing.id(), &finality, fixing.header.height, &fixing.header.state_root).is_ok());
+        update.switched.clear();
+
+        assert_eq!(update.check(&fixing.id(), &finality, fixing.header.height, &fixing.header.state_root).err(), Some(crate::light::LightError::BadProof));
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
+    #[test]
+    fn a_council_switches_authority_to_ffg_once_validators_bond_for_it() {
+        use crate::registry::changes::Changes;
+        use crate::registry::signers::Signers;
+        use crate::structs::amount::Amount;
+
+        let (mut chain, _) = council_chain(authority());
+        let bond = |chain: &mut Chain, voter: &Keypair| send(chain, Tx::Bond { voter: voter.public(), amount: Amount::U128(100) }).remove(0).result;
+
+        assert_eq!(bond(&mut chain, &voters()[0]), Err(Failure::NoStaking), "no bonds under authority");
+        refused_change(&mut chain, crate::governance::Change::SwitchFinality { epoch: 9, config: ffg() }, "names no validators");
+
+        // Decided in epoch 1, for epoch 5: bonds from then on vote from it.
+        const SWITCH: u64 = 5;
+        council_decides(&mut chain, crate::governance::Change::SwitchFinality { epoch: SWITCH, config: ffg_to_bond_for() });
+
+        for voter in &voters()[..2] {
+            assert_eq!(bond(&mut chain, voter), Ok(Effect::Done));
+        }
+
+        finalize_through(&mut chain, SWITCH + 2);
+
+        assert!(chain.finalized().unwrap().epoch > SWITCH);
+        let state = chain.state();
+
+        assert_eq!(crate::registry::validators::Validators::new(&state).set(SWITCH).unwrap().map(|set| set.members.len()), Some(2));
+        assert_eq!(Signers::new(&state).set(SWITCH).unwrap(), None);
+        assert_eq!(Changes::new(&state).finality_in(SWITCH, &authority()).unwrap().name(), "ffg");
+        assert!(chain.params_in(&state, chain.tip().height + 1).unwrap().rules.signers.is_none());
+        assert_eq!(send(&mut chain, Tx::ApproveSigners { version: 0, signers: Vec::new(), threshold: 1, change_threshold: 1 })[0].result, Err(Failure::NoSigners));
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
+    #[test]
+    fn a_switch_into_ffg_nobody_bonded_for_in_time_lapses() {
+        use crate::registry::changes::Changes;
+        use crate::registry::signers::Signers;
+        use crate::structs::amount::Amount;
+
+        let (mut chain, _) = council_chain(authority());
+        const SWITCH: u64 = 5;
+        council_decides(&mut chain, crate::governance::Change::SwitchFinality { epoch: SWITCH, config: ffg_to_bond_for() });
+
+        // A bond in the checkpoint that fixes the switch epoch's voters votes only from the epoch
+        // after it: too late, so that checkpoint finds nobody and the switch lapses.
+        let fixing = (SWITCH - 2) * INTERVAL;
+        finalize_through(&mut chain, SWITCH - 3);
+        grow_to(&mut chain, fixing - 1);
+        let voter = key(14).public();
+        let before = balance(&chain, &dev().public().address());
+
+        assert_eq!(send(&mut chain, Tx::Bond { voter, amount: Amount::U128(100) })[0].result, Ok(Effect::Done));
+        assert_eq!(chain.tip().height, fixing);
+        let state = chain.state();
+        let changes = Changes::new(&state);
+
+        assert_eq!(changes.finality_at(SWITCH).unwrap(), None, "the switch lapsed");
+        assert_eq!(changes.switch_ahead(SWITCH - 2, &authority()).unwrap(), None);
+        assert!(Signers::new(&state).set(SWITCH).unwrap().is_some());
+        assert_eq!(crate::registry::validators::Validators::new(&state).set(SWITCH).unwrap(), None);
+
+        // The bond came back with the lapse, and the signers carry on.
+        assert_eq!(crate::registry::validators::Validators::new(&state).get(&voter).unwrap(), None);
+        assert_eq!(balance(&chain, &dev().public().address()), before);
+        finalize_through(&mut chain, SWITCH + 1);
+
+        assert!(chain.finalized().unwrap().epoch >= SWITCH);
+    }
+
     #[cfg(feature = "finality-authority")]
     #[test]
     fn signers_cannot_stake_but_a_double_voter_is_thrown_out() {

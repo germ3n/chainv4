@@ -236,6 +236,19 @@ pub enum Change {
     #[document(summary = "Finality's tunable settings, as the chain's whole finality config with only those changed: under FFG the vote depth, minimum bond, withdrawal delay, reporter divisor, most validators, vote reward, proofs per block and the leak; under authority the vote depth, most signers, approval epochs, vote reward and proofs per block; under depth the depth. Fixed for the epoch activation_delay + 1 after the one that decides it, so no epoch changes rules halfway.")]
     #[wincode(tag = 9)]
     Finality(#[wincode(with = "crate::structs::unset::Framed<crate::params::finality::FinalityConfig>")] crate::params::finality::FinalityConfig),
+    #[document(
+        summary = "A switch to the other kind of voting finality, FFG or authority, from an epoch on: the new kind's whole config, with genesis's checkpoint_interval and activation_delay. Into FFG the config names no validators: they bond from the block that decides it, and should none have by the checkpoint that fixes the switch epoch's voters, the switch lapses, the chain stays as it was, and bonds made too late are paid back. Into authority the config's signers vote from the switch epoch, and every FFG validator is unbonding from it. It runs from its epoch, or from activation_delay + 1 after the one that decides it, whichever is later; the justified and finalized checkpoints carry over.",
+        params = {
+            epoch = "The first epoch the new kind runs, at the earliest.",
+            config = "The new kind and its settings.",
+        },
+    )]
+    #[wincode(tag = 10)]
+    SwitchFinality {
+        epoch: u64,
+        #[wincode(with = "crate::structs::unset::Framed<crate::params::finality::FinalityConfig>")]
+        config: crate::params::finality::FinalityConfig,
+    },
 }
 
 #[document(summary = "The most bootnodes genesis or a change may name.", category = "Governance", see_also = "Change::Bootnodes, Genesis::bootnodes")]
@@ -267,7 +280,7 @@ impl Hashable for Change {
 }
 
 impl Change {
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits or finality.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits, finality or switch_finality.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
@@ -280,6 +293,7 @@ impl Change {
             Change::Reward(_) => "reward",
             Change::Limits(_) => "limits",
             Change::Finality(_) => "finality",
+            Change::SwitchFinality { .. } => "switch_finality",
         }
     }
 }
@@ -313,11 +327,13 @@ mod tests {
 
         // The leak reads only at a message's end; framed, it reads in the middle of a transaction.
         for leak in [None, Some(Leak { after_epochs: 4, permille: 10 })] {
-            let tx = Tx::ApproveChange { version: 3, change: Change::Finality(config(leak)) };
-            let signed = SignedTx::sign(tx, 7, FeeOffer::NONE, &crate::crypto::keypair::Keypair::development());
-            let read: SignedTx = wincode::deserialize(&wincode::serialize(&signed).unwrap()).unwrap();
+            for change in [Change::Finality(config(leak)), Change::SwitchFinality { epoch: 40, config: config(leak) }] {
+                let tx = Tx::ApproveChange { version: 3, change };
+                let signed = SignedTx::sign(tx, 7, FeeOffer::NONE, &crate::crypto::keypair::Keypair::development());
+                let read: SignedTx = wincode::deserialize(&wincode::serialize(&signed).unwrap()).unwrap();
 
-            assert_eq!(read, signed);
+                assert_eq!(read, signed);
+            }
         }
     }
 

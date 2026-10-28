@@ -533,6 +533,7 @@ pub fn change(change: &Change) -> Value {
         Change::Reward(reward) => json!({ "reward": crate::cli::genesis::reward_json(reward) }),
         Change::Limits(limits) => json!({ "limits": crate::cli::genesis::limits_json(limits) }),
         Change::Finality(finality) => json!({ "finality": crate::cli::genesis::finality_json(finality) }),
+        Change::SwitchFinality { epoch, config } => json!({ "switch_finality": { "epoch": epoch, "finality": crate::cli::genesis::finality_json(config) } }),
     }
 }
 

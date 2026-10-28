@@ -288,6 +288,58 @@ impl<'a> Validators<'a> {
         Ok(reward)
     }
 
+    #[document(
+        parent = "Validators",
+        summary = "Stops every validator still bonded voting from an epoch on, as an unbond would, its bond withdrawable withdrawal_delay epochs later: what a switch of finality away from FFG does at the switch.",
+        params = {
+            until = "The first epoch they no longer vote in.",
+            withdrawal_delay = "Epochs from then until their bonds can be withdrawn.",
+        },
+    )]
+    pub fn unbond_all(&self, until: u64, withdrawal_delay: u64) -> Result<(), DbError> {
+        for voter in self.voters()? {
+            let Some(mut record) = self.get(&voter)? else {
+                continue;
+            };
+
+            if record.active_until.is_some_and(|current| current <= until) {
+                continue;
+            }
+
+            record.active_until = Some(until);
+            record.withdrawable_from = Some(until + withdrawal_delay);
+            self.state.put_value(Column::Validators, voter_key(&voter), &record);
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "staking")]
+    #[document(
+        parent = "Validators",
+        summary = "Pays every bond not unbonding back to its account and forgets its validator: what a switch into FFG that lapsed does, since none of them ever voted. Validators still unbonding from an FFG era before keep their records, to withdraw as usual.",
+    )]
+    pub fn refund_bonded(&self) -> Result<(), DbError> {
+        let mut kept = Vec::new();
+
+        for voter in self.voters()? {
+            match self.get(&voter)? {
+                Some(record) if record.active_until.is_none() && !record.slashed => {
+                    Accounts::new(self.state)
+                        .credit(&record.account, record.bond)
+                        .map_err(|err| DbError::Corrupt(format!("refunding {voter}: {err}")))?;
+                    self.state.delete(Column::Validators, voter_key(&voter));
+                }
+                Some(_) => kept.push(voter),
+                None => {}
+            }
+        }
+
+        self.put_voters(&kept);
+
+        Ok(())
+    }
+
     /// Takes a voter out of the sets fixed for these epochs, those that are fixed already.
     #[cfg(feature = "staking")]
     fn drop_from_fixed_sets(&self, voter: &PublicKey, from: u64, through: u64) -> Result<(), DbError> {

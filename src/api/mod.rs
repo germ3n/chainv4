@@ -272,10 +272,9 @@ impl Api {
 
         let mut rules = (*self.rules).clone();
 
-        if let Some(tuned) = tuned
-            && let Some(genesis) = stored_header_at(&*self.db, 0)?
-        {
-            (rules.staking, rules.signers) = (tuned.staking(genesis.id()), tuned.signer_rules(genesis.id()));
+        if let (Some(governance), Some(tip), Some(genesis)) = (&self.rules.governance, stored_tip(&*self.db)?, stored_header_at(&*self.db, 0)?) {
+            let finality = &governance.finality;
+            (rules.staking, rules.signers) = crate::chain::switch::rules_at(&state, finality, finality.epoch_of(tip.header.height + 1), genesis.id())?;
         }
 
         if let Some(config) = fees {
@@ -625,7 +624,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
             };
 
             json!({
-                "type": config.name(),
+                "type": crate::registry::changes::Changes::new(&State::new(db.clone())).finality_in(config.epoch_of(tip.header.height), config)?.name(),
                 "epoch": config.epoch_of(tip.header.height),
                 "checkpoint_interval": config.checkpoint_interval(),
                 "justified": checkpoint_at(&*db, &justified.unwrap_or(start))?,
@@ -765,7 +764,7 @@ async fn validators(Shared(api): Shared<Api>) -> Answer {
         }
     }
 
-    let set = config.voters(&state, epoch)?.unwrap_or_default();
+    let set = config.voters_in(&state, epoch)?.unwrap_or_default();
 
     Ok(Json(json!({
         "epoch": epoch,
@@ -879,6 +878,8 @@ async fn governance(Shared(api): Shared<Api>) -> Answer {
         "approval_epochs": rules.approval_epochs,
         "needed": needed.to_string(),
         "bootnodes": api.bootnodes(&state)?,
+        "finality": changes.finality_in(epoch, &rules.finality)?.name(),
+        "switch": changes.switch_ahead(epoch, &rules.finality)?.map(|era| json!({ "epoch": era.from, "type": era.config.name() })),
         "proposals": proposals,
     })))
 }

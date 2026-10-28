@@ -276,6 +276,27 @@ impl LightFinality {
         }
     }
 
+    #[document(parent = "LightFinality", summary = "The kind's name, as genesis files spell it: ffg, authority or depth.")]
+    pub fn name(&self) -> &'static str {
+        match self {
+            LightFinality::Ffg { .. } => "ffg",
+            LightFinality::Authority { .. } => "authority",
+            LightFinality::Depth { .. } => "depth",
+        }
+    }
+
+    #[document(
+        parent = "LightFinality",
+        summary = "The other kind that votes, with the same epochs: what a chain whose governance switched finality's kind runs in the epochs a light update names as switched. None for depth finality, which no chain switches to or from.",
+    )]
+    pub fn other(&self) -> Option<LightFinality> {
+        match *self {
+            LightFinality::Ffg { checkpoint_interval, fixed_ahead } => Some(LightFinality::Authority { checkpoint_interval, fixed_ahead }),
+            LightFinality::Authority { checkpoint_interval, fixed_ahead } => Some(LightFinality::Ffg { checkpoint_interval, fixed_ahead }),
+            LightFinality::Depth { .. } => None,
+        }
+    }
+
     #[document(parent = "LightFinality", summary = "Where an epoch's voters are kept, in Column::Epochs.")]
     pub fn voters_key(&self, epoch: u64) -> Option<Vec<u8>> {
         match self {
@@ -323,6 +344,8 @@ pub struct LightUpdate {
     pub voters: Vec<VoterProof>,
     #[document(summary = "Under governance, the consensus it fixed for the same epochs, each with its proof; empty on a chain without. Added after chains launched: an update stored before it reads as one with none, through stored_light_update.")]
     pub eras: Vec<EraProof>,
+    #[document(summary = "The epochs among them whose voters are the other voting kind's, FFG's validators on a chain that started under authority or authority's signers on one that started under FFG, since governance switched finality's kind; their proofs are at that kind's keys. A state only ever fixes one kind's voters for an epoch, so a node can neither hide a switch nor claim one that did not happen. Added after chains launched: an update stored before it reads as one with none, through stored_light_update.")]
+    pub switched: Vec<u64>,
 }
 
 impl Hashable for LightUpdate {}
@@ -340,12 +363,39 @@ pub struct LegacyLightUpdate {
     pub voters: Vec<VoterProof>,
 }
 
+#[document(
+    summary = "A light update as nodes stored them before switches of finality's kind: with eras, without switched epochs. What stored_light_update reads next.",
+    category = "Light client",
+    see_also = "LightUpdate",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct ErasLightUpdate {
+    #[document(summary = "The block whose state root the proofs are against.")]
+    pub block: Hash,
+    #[document(summary = "The voters it fixed, each with its proof.")]
+    pub voters: Vec<VoterProof>,
+    #[document(summary = "The consensus it fixed, each with its proof.")]
+    pub eras: Vec<EraProof>,
+}
+
+impl From<ErasLightUpdate> for LightUpdate {
+    fn from(update: ErasLightUpdate) -> LightUpdate {
+        LightUpdate {
+            block: update.block,
+            voters: update.voters,
+            eras: update.eras,
+            switched: Vec::new(),
+        }
+    }
+}
+
 impl From<LegacyLightUpdate> for LightUpdate {
     fn from(legacy: LegacyLightUpdate) -> LightUpdate {
         LightUpdate {
             block: legacy.block,
             voters: legacy.voters,
             eras: Vec::new(),
+            switched: Vec::new(),
         }
     }
 }
@@ -441,6 +491,7 @@ impl LightUpdate {
         let tree = StateTree::new(state, hash);
         let mut voters = Vec::new();
         let mut eras = Vec::new();
+        let mut switched = Vec::new();
 
         for epoch in epochs.clone() {
             let key = Changes::consensus_key(epoch);
@@ -455,7 +506,15 @@ impl LightUpdate {
         }
 
         for epoch in epochs {
-            let key = finality.voters_key(epoch).expect("kinds that fix voters keep them");
+            let kind = match governed && Changes::new(state).finality_at(epoch)?.is_some_and(|config| config.name() != finality.name()) {
+                true => {
+                    switched.push(epoch);
+
+                    finality.other().unwrap_or(*finality)
+                }
+                false => *finality,
+            };
+            let key = kind.voters_key(epoch).expect("kinds that fix voters keep them");
 
             if let Some(value) = state.get(Column::Epochs, &key)? {
                 voters.push(VoterProof {
@@ -466,7 +525,7 @@ impl LightUpdate {
             }
         }
 
-        Ok(Some(LightUpdate { block, voters, eras }))
+        Ok(Some(LightUpdate { block, voters, eras, switched }))
     }
 
     #[document(
@@ -488,21 +547,32 @@ impl LightUpdate {
         }
 
         let epochs: BTreeSet<u64> = self.voters.iter().map(|voter| voter.epoch).collect();
+        let switched: BTreeSet<u64> = self.switched.iter().copied().collect();
 
         if epochs.len() != self.voters.len() || !fixed.clone().all(|epoch| epochs.contains(&epoch)) {
+            return Err(LightError::BadProof);
+        }
+
+        if switched.len() != self.switched.len() || !switched.iter().all(|epoch| fixed.contains(epoch)) {
             return Err(LightError::BadProof);
         }
 
         let mut learned = Vec::new();
 
         for voter in &self.voters {
-            let key = finality.voters_key(voter.epoch).ok_or(LightError::BadProof)?;
+            // A switched epoch's voters are the other kind's, at its key: a state holds only one
+            // kind's for an epoch, so the proof fails for whichever it does not.
+            let kind = match switched.contains(&voter.epoch) {
+                true => finality.other().ok_or(LightError::BadProof)?,
+                false => *finality,
+            };
+            let key = kind.voters_key(voter.epoch).ok_or(LightError::BadProof)?;
 
             if !fixed.contains(&voter.epoch) || !voter.proof.verify(root, Column::Epochs, &key, Some(&voter.value)) {
                 return Err(LightError::BadProof);
             }
 
-            learned.push((voter.epoch, finality.voters(&voter.value).ok_or(LightError::Undecodable)?));
+            learned.push((voter.epoch, kind.voters(&voter.value).ok_or(LightError::Undecodable)?));
         }
 
         let mut eras = Vec::new();

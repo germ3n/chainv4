@@ -41,6 +41,7 @@ mod config;
 mod depth;
 #[cfg(feature = "finality-ffg")]
 mod ffg;
+pub(crate) mod switch;
 #[cfg(all(test, any(feature = "finality-ffg", feature = "finality-authority", feature = "finality-depth")))]
 mod tests;
 #[cfg(any(feature = "finality-ffg", feature = "finality-authority"))]

@@ -383,6 +383,18 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   there, in every build, so a light build decodes every `Change`; `chain` and `vm` re-export them
   and keep the methods. In a node each finality kind is there only with its feature; a build
   without `node`, such as the wallet's, has them all.
+- **Finality's kind is per epoch, its epochs are not.** After a `Change::SwitchFinality`,
+  `Changes::finality_in` says which kind an epoch runs, and every reader asks it: the vote engine
+  (one `Elected` electorate for both kinds), the staking and signer rules, slashing evidence by
+  its own epoch, governance's electorate, the producers and the API. Each checkpoint fixes the
+  voters `activation_delay` ahead by that epoch's kind only, so an epoch never has both kinds'
+  sets, which is what makes `LightUpdate::switched` provable. A switch into FFG lapses at the
+  checkpoint that would fix its first set if nobody bonded; bonds made in that checkpoint's own
+  block vote only an epoch later, so they are paid back.
+- **Light updates gained a field again.** `LightUpdate::switched` is a plain field, not an
+  Unset one, since updates travel inside lists; stored updates from before read back through
+  `ErasLightUpdate` and `LegacyLightUpdate`, but a wallet or explorer built before it cannot read a
+  newer node's light finality, so the apps and nodes update together.
 - **A decided finality change is a framed encoding.** `FfgConfig::leak` decodes only at the end of
   a message, as a chain from before it encodes nothing there; inside `Change::Finality` and the
   kept eras it goes length-prefixed (`Framed`), so what follows still reads.

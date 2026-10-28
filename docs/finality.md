@@ -267,7 +267,8 @@ or signer, of the dev settings.
   A node that replays from genesis instead trusts every validator set since genesis.
 - **Vote rewards are minted unless genesis says `fees`,** which pays them from the burned share
   of fees and no more.
-- **Governance retunes finality, not its shape.** A `Change::Finality` may move the vote depth,
-  rewards, bond rules and leak, from the epoch `activation_delay + 1` after it is decided; the
-  kind, epochs, genesis voters and thresholds stay genesis's (see
-  [Governance](governance.md#finality)).
+- **Governance retunes finality, and switches its kind.** A `Change::Finality` may move the vote
+  depth, rewards, bond rules and leak, from the epoch `activation_delay + 1` after it is decided;
+  a `Change::SwitchFinality` moves FFG to authority or back from an epoch it names, validators
+  bonding for it or unbonding at it, the epochs and the justified checkpoints carrying over (see
+  [Governance](governance.md#switching-finality)).

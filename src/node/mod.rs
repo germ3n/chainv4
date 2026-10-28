@@ -207,7 +207,7 @@ impl Producing {
         config: &ConsensusConfig,
         hash: crate::structs::hash::HashType,
         checkpoint_interval: u64,
-        finality: Option<&crate::chain::FinalityConfig>,
+        signer_account: Option<Address>,
         found: impl Fn(Hash, crate::structs::block::Seal) + Send + Sync + 'static,
     ) -> Result<Option<Box<dyn Producer>>, NodeError> {
         use crate::consensus::{AuthorityProducer, RotatingProducer, Staked, StakedProducer};
@@ -241,7 +241,7 @@ impl Producing {
             ConsensusConfig::Rotating { slot_ms } => match &self.sign {
                 Some(keypair) => {
                     // The signer's voting key signs its blocks; the blocks name its account.
-                    let account = finality.and_then(|finality| finality.signer_account(&keypair.public())).unwrap_or_else(|| keypair.public().address());
+                    let account = signer_account.unwrap_or_else(|| keypair.public().address());
                     log::info!("[node] producing blocks in turn as {}, for {account}", keypair.public());
 
                     Some(Box::new(RotatingProducer::new(keypair.clone(), account, *slot_ms)))
@@ -492,7 +492,11 @@ impl Node {
         // The old producer goes first: its threads stop, and a pool lets go of its mining port for
         // the new one to take.
         self.producer = None;
-        self.producer = setup.build(&config, self.chain.hash(), interval, self.chain.finality_config(), found)?;
+        let signer_account = match &setup.sign {
+            Some(keypair) => self.chain.signer_account(&keypair.public())?,
+            None => None,
+        };
+        self.producer = setup.build(&config, self.chain.hash(), interval, signer_account, found)?;
         self.producer_for = Some(config);
         self.template = None;
 

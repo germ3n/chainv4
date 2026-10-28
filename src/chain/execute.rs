@@ -140,6 +140,8 @@ pub struct StakingRules {
     pub checkpoint_interval: u64,
     #[document(summary = "The chain's genesis id, which votes are signed over.")]
     pub chain: Hash,
+    #[document(summary = "Whether validators may bond: under FFG, or while a switch into it is on its way. After a switch away from FFG, bonds can only be withdrawn, and slashed for votes from before.")]
+    pub bonding: bool,
 }
 
 #[document(
@@ -184,6 +186,8 @@ pub enum Failure {
     BadEvidence,
     #[document(summary = "A name transaction, or a change of name prices, on a chain without names.")]
     NoNames,
+    #[document(summary = "A bond while finality is not FFG and no switch into it is on its way.")]
+    BondingClosed,
 }
 
 impl fmt::Display for Failure {
@@ -198,6 +202,7 @@ impl fmt::Display for Failure {
             Failure::NoGovernance => write!(f, "this chain has no governance"),
             Failure::BadEvidence => write!(f, "the evidence's signatures do not check out"),
             Failure::NoNames => write!(f, "this chain has no names"),
+            Failure::BondingClosed => write!(f, "validators bond only under FFG finality, or before a switch into it"),
         }
     }
 }
@@ -720,6 +725,8 @@ fn run(
             }
         }
         #[cfg(feature = "staking")]
+        Tx::Bond { .. } if rules.staking.as_ref().is_some_and(|staking| !staking.bonding) => (Err(Failure::BondingClosed), Contracted::default()),
+        #[cfg(feature = "staking")]
         Tx::Bond { voter, amount } => staking(&|validators, finality, epoch| {
             validators.bond(&sender, voter, amount.to_u256(), epoch, &finality.staking)
         }),
@@ -743,14 +750,24 @@ fn run(
                 return (Err(Failure::BadEvidence), Contracted::default());
             }
 
-            // Under FFG the bond goes; under authority finality the signer is thrown out.
+            // Under FFG the bond goes; under authority finality the signer is thrown out: by the kind
+            // the votes' epoch ran, which a switch may have changed since.
+            let authority = match &rules.governance {
+                Some(governance) => match crate::registry::changes::Changes::new(layer).finality_in(first.vote.target.epoch, &governance.finality) {
+                    Ok(config) => config.signer_rules(chain).is_some(),
+                    Err(err) => return (Err(Failure::Registry(err.into())), Contracted::default()),
+                },
+                None => rules.staking.is_none(),
+            };
+
             match &rules.signers {
-                Some(signers) if rules.staking.is_none() => {
+                Some(signers) if authority => {
                     let epoch = height / signers.checkpoint_interval.max(1);
                     let ejected = Signers::new(layer).eject(&first.vote.voter, epoch, signers.activation_delay, signers.max_signers);
 
                     (moved(ejected.map(|_| ())), Contracted::default())
                 }
+                None if authority => (Err(Failure::NoSigners), Contracted::default()),
                 #[cfg(feature = "staking")]
                 _ => staking(&|validators, finality, epoch| {
                     validators.slash(&sender, &first.vote.voter, epoch, &finality.staking).map(|_| ())
@@ -787,25 +804,37 @@ fn run(
             let Some(governance) = &rules.governance else {
                 return (Err(Failure::NoGovernance), Contracted::default());
             };
+            let epoch = height / governance.checkpoint_interval.max(1);
+            let finality = &governance.finality;
+            // A switch of finality's kind on its way holds back every other change of consensus or
+            // finality, which are checked against the finality decided last.
+            let settled = |problem: &dyn Fn(&FinalityConfig) -> Option<&'static str>| -> Result<Option<&'static str>, DbError> {
+                match crate::chain::switch::switching(layer, finality, epoch)? {
+                    true => Ok(Some("a switch of finality's kind decided earlier has yet to take effect")),
+                    false => Ok(problem(&Changes::new(layer).finality_decided(finality)?)),
+                }
+            };
             let problem = match change {
-                Change::Consensus(consensus) => crate::chain::consensus_problem(consensus, Some(&governance.finality)),
-                Change::Bootnodes(bootnodes) => crate::governance::bootnodes_problem(bootnodes),
+                Change::Consensus(consensus) => settled(&|decided| crate::chain::consensus_problem(consensus, Some(decided))),
+                Change::Bootnodes(bootnodes) => Ok(crate::governance::bootnodes_problem(bootnodes)),
                 Change::NamePrices(_) if rules.names.is_none() => return (Err(Failure::NoNames), Contracted::default()),
-                Change::NamePrices(prices) => crate::registry::names::prices_problem(prices),
-                Change::Collections(functions) => functions.problem(),
-                Change::Federation(federation) => federation.problem(),
-                Change::Directory(directory) => directory.problem(),
-                Change::Fees(fees) => fees.problem(),
-                Change::Reward(reward) => crate::chain::reward_problem(reward),
-                Change::Limits(limits) => limits.problem(),
-                Change::Finality(finality) => finality.retune_problem(&governance.finality),
+                Change::NamePrices(prices) => Ok(crate::registry::names::prices_problem(prices)),
+                Change::Collections(functions) => Ok(functions.problem()),
+                Change::Federation(federation) => Ok(federation.problem()),
+                Change::Directory(directory) => Ok(directory.problem()),
+                Change::Fees(fees) => Ok(fees.problem()),
+                Change::Reward(reward) => Ok(crate::chain::reward_problem(reward)),
+                Change::Limits(limits) => Ok(limits.problem()),
+                Change::Finality(tuned) => settled(&|decided| tuned.retune_problem(decided)),
+                Change::SwitchFinality { epoch: named, config } => crate::chain::switch::switch_problem(layer, finality, epoch, *named, config),
             };
 
-            if let Some(problem) = problem {
-                return (Err(Failure::Registry(RegistryError::BadChange(problem))), Contracted::default());
+            match problem {
+                Ok(None) => {}
+                Ok(Some(problem)) => return (Err(Failure::Registry(RegistryError::BadChange(problem))), Contracted::default()),
+                Err(err) => return (Err(Failure::Registry(err.into())), Contracted::default()),
             }
 
-            let epoch = height / governance.checkpoint_interval.max(1);
             let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: governance.finality.activation_delay() };
             let approved = Changes::new(layer).approve(&sender, *version, change.clone(), at, governance.approval_epochs, &*governance.governance);
 

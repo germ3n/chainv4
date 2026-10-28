@@ -39,6 +39,7 @@ mod events;
 mod execute;
 pub mod fees;
 mod finality;
+pub(crate) use finality::switch;
 mod index;
 pub mod migrate;
 mod parallel;
@@ -1830,10 +1831,9 @@ impl Chain {
         }
 
         if let Some(config) = &self.finality_config
-            && let Some(tuned) = changes.finality_at(config.epoch_of(height))?
+            && config.votes()
         {
-            params.rules.staking = tuned.staking(self.genesis);
-            params.rules.signers = tuned.signer_rules(self.genesis);
+            (params.rules.staking, params.rules.signers) = switch::rules_at(state, config, config.epoch_of(height), self.genesis)?;
         }
 
         Ok(params)
@@ -1996,13 +1996,23 @@ impl Chain {
         self.producers_in(&self.state(), height)
     }
 
+    #[document(
+        parent = "Chain",
+        summary = "The account a signer's key speaks through, under authority finality: the decided set's, which a switch into authority names, or genesis's.",
+    )]
+    pub fn signer_account(&self, key: &PublicKey) -> Result<Option<Address>, DbError> {
+        let decided = crate::registry::signers::Signers::new(&self.state()).account_of(key)?;
+
+        Ok(decided.or_else(|| self.finality_config.as_ref().and_then(|config| config.signer_account(key))))
+    }
+
     /// The producers for a height, in a state: the epoch's voters.
     fn producers_in(&self, state: &State, height: u64) -> Result<Vec<Member>, DbError> {
         let Some(config) = &self.finality_config else {
             return Ok(Vec::new());
         };
 
-        Ok(config.voters(state, config.epoch_of(height))?.map(|set| set.members).unwrap_or_default())
+        Ok(config.voters_in(state, config.epoch_of(height))?.map(|set| set.members).unwrap_or_default())
     }
 
     fn runner<'a>(&'a self, rules: &'a Rules) -> Runner<'a> {
@@ -2772,15 +2782,20 @@ pub fn stored_light_update(db: &dyn Read, block: &Hash) -> Result<Option<LightUp
         return Ok(None);
     };
 
-    // Updates stored before eras were added lack the field.
-    match wincode::deserialize::<LightUpdate>(&bytes) {
-        Ok(update) => Ok(Some(update)),
-        Err(_) => Ok(Some(
-            wincode::deserialize::<crate::light::LegacyLightUpdate>(&bytes)
-                .map_err(|err| DbError::Corrupt(format!("light update {block}: {err}")))?
-                .into(),
-        )),
+    // Updates stored before switched epochs, or before eras, lack those fields.
+    if let Ok(update) = wincode::deserialize::<LightUpdate>(&bytes) {
+        return Ok(Some(update));
     }
+
+    if let Ok(update) = wincode::deserialize::<crate::light::ErasLightUpdate>(&bytes) {
+        return Ok(Some(update.into()));
+    }
+
+    Ok(Some(
+        wincode::deserialize::<crate::light::LegacyLightUpdate>(&bytes)
+            .map_err(|err| DbError::Corrupt(format!("light update {block}: {err}")))?
+            .into(),
+    ))
 }
 
 #[document(

@@ -192,7 +192,7 @@ pub enum TxArgs {
     /// Approves a change under the chain's governance: a new consensus, as a genesis file's
     /// consensus object, or new bootnodes. Sign with an account governance lets approve: a
     /// validator's or signer's account under the electorate, a member's under a council.
-    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality"]))]
+    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality"]))]
     ApproveChange {
         /// The new consensus as JSON, such as '{"type":"staked","slot_ms":2000,"schedule":"draw"}'
         /// or '{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1000","min_difficulty":"1000"}'.
@@ -234,6 +234,15 @@ pub enum TxArgs {
         /// file with only those changed.
         #[arg(long)]
         finality: Option<String>,
+        /// A switch to the other kind of finality, FFG or authority, as a genesis file's finality
+        /// object with genesis's checkpoint_interval and activation_delay: an FFG one names no
+        /// validators, who bond once it is decided; an authority one names its signers.
+        #[arg(long, requires = "switch_epoch")]
+        switch_finality: Option<String>,
+        /// The first epoch the new kind runs, at least activation_delay + 1 after the one it is
+        /// decided in: later gives validators time to bond.
+        #[arg(long, requires = "switch_finality")]
+        switch_epoch: Option<u64>,
         /// The version of the decision this changes. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
@@ -880,6 +889,8 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
             reward,
             limits,
             finality,
+            switch_finality,
+            switch_epoch,
             version,
         } => {
             use crate::governance::Change;
@@ -889,6 +900,10 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
                 (_, _, _, _, _, _) if reward.is_some() => Change::Reward(super::genesis::reward_from_text(reward.as_deref().unwrap_or_default()).map_err(|why| format!("--reward: {why}"))?),
                 (_, _, _, _, _, _) if limits.is_some() => Change::Limits(super::genesis::limits_from_text(limits.as_deref().unwrap_or_default()).map_err(|why| format!("--limits: {why}"))?),
                 (_, _, _, _, _, _) if finality.is_some() => Change::Finality(super::genesis::finality_from_text(finality.as_deref().unwrap_or_default()).map_err(|why| format!("--finality: {why}"))?),
+                (_, _, _, _, _, _) if switch_finality.is_some() => Change::SwitchFinality {
+                    epoch: switch_epoch.ok_or("--switch-finality needs --switch-epoch")?,
+                    config: super::genesis::finality_from_text(switch_finality.as_deref().unwrap_or_default()).map_err(|why| format!("--switch-finality: {why}"))?,
+                },
                 (Some(consensus), _, _, _, _, _) => {
                     let value: Value = serde_json::from_str(&consensus).map_err(|err| format!("--consensus is not JSON: {err}"))?;
                     let (consensus, window) = super::genesis::consensus_from_json(&value, "consensus")?;
@@ -956,6 +971,7 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
                 crate::governance::Change::Reward(reward) => println!("approving a block reward of {}, from version {version}", reward.initial),
                 crate::governance::Change::Limits(limits) => println!("approving limits of {} fuel a transaction, from version {version}", limits.tx_limits.fuel),
                 crate::governance::Change::Finality(finality) => println!("approving {} finality's settings, from version {version}", finality.name()),
+                crate::governance::Change::SwitchFinality { epoch, config } => println!("approving a switch to {} finality from epoch {epoch}, from version {version}", config.name()),
                 crate::governance::Change::Directory(directory) => {
                     let named = [("gateway", directory.gateway), ("Bitcoin gateway", directory.btc_gateway), ("swap", directory.swap), ("DEX", directory.dex), ("NFT factory", directory.nft_factory)];
                     let mut listed: Vec<String> = named.iter().filter_map(|(what, address)| address.map(|address| format!("the {what} {address}"))).collect();

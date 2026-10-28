@@ -1911,3 +1911,25 @@ fn a_reorg_takes_the_history_of_the_blocks_it_undoes() {
         assert_eq!(StateTree::new(&state, chain.hash()).root().unwrap(), chain.block_at(height).unwrap().unwrap().header.state_root);
     }
 }
+
+#[test]
+fn light_updates_stored_before_eras_or_switched_epochs_read_back() {
+    use crate::light::{ErasLightUpdate, LegacyLightUpdate, LightUpdate};
+
+    let db = Arc::new(MemoryDb::default());
+    let block = Hash::zero(HashType::default_chain());
+    let current = LightUpdate { block, voters: Vec::new(), eras: Vec::new(), switched: vec![7, 8] };
+    let stored = [
+        wincode::serialize(&current).unwrap(),
+        wincode::serialize(&ErasLightUpdate { block, voters: Vec::new(), eras: Vec::new() }).unwrap(),
+        wincode::serialize(&LegacyLightUpdate { block, voters: Vec::new() }).unwrap(),
+    ];
+
+    for (bytes, switched) in stored.into_iter().zip([vec![7, 8], Vec::new(), Vec::new()]) {
+        let state = State::new(db.clone());
+        state.put(Column::Light, id_key(&block), bytes);
+        db.commit(state.take_changes()).unwrap();
+
+        assert_eq!(stored_light_update(&*db, &block).unwrap(), Some(LightUpdate { switched, ..current.clone() }));
+    }
+}

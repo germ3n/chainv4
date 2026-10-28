@@ -2,11 +2,13 @@
 //! account weighs the stake of the validators it bonded, as the epoch's set fixes them, and two
 //! thirds of the set decide, as a justification takes; under authority finality an account weighs
 //! the decided signers it speaks for, and change_threshold of them decide, as a signer change
-//! takes. Depth finality has no electorate, so genesis refuses the pair.
+//! takes. Depth finality has no electorate, so genesis refuses the pair. After a switch of
+//! finality's kind, the electorate is the kind the epoch runs.
 
 use {
     super::Governance,
     crate::chain::FinalityConfig,
+    crate::registry::changes::Changes,
     crate::db::{DbError, State},
     crate::structs::address::Address,
     crate::structs::u256::u256,
@@ -30,7 +32,7 @@ impl Governance for Electorate {
 
     #[cfg_attr(not(any(feature = "finality-ffg", feature = "finality-authority")), allow(unused_variables))]
     fn weight(&self, state: &State, epoch: u64, account: &Address) -> Result<Option<u256>, DbError> {
-        let weight = match self.finality {
+        let weight = match Changes::new(state).finality_in(epoch, &self.finality)? {
             #[cfg(feature = "finality-ffg")]
             FinalityConfig::Ffg(_) => crate::registry::validators::Validators::new(state)
                 .set(epoch)?
@@ -51,7 +53,7 @@ impl Governance for Electorate {
 
     #[cfg_attr(not(any(feature = "finality-ffg", feature = "finality-authority")), allow(unused_variables))]
     fn needed(&self, state: &State, epoch: u64) -> Result<u256, DbError> {
-        Ok(match self.finality {
+        Ok(match Changes::new(state).finality_in(epoch, &self.finality)? {
             #[cfg(feature = "finality-ffg")]
             FinalityConfig::Ffg(_) => crate::registry::validators::Validators::new(state)
                 .set(epoch)?

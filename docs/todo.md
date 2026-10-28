@@ -237,10 +237,12 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   and `approval_epochs` under authority. The kind, `checkpoint_interval`, `activation_delay`,
   the genesis voters and the thresholds stay, since light clients and the fixed-ahead sets rest
   on them. Decided in epoch e, it runs from `e + activation_delay + 1`, each era kept in state.
-- [ ] **Switching the finality kind by governance.** The hardest change: a switch to FFG or
-  authority has to name the new validators or signers in the proposal, and a switch to depth
-  dissolves the electorate. Finality would become per era in the chain, the votes and the light
-  client.
+- [x] **Switching the finality kind by governance.** `Change::SwitchFinality` moves FFG to
+  authority or back from an epoch it names, the epochs kept: validators bond for a switch into
+  FFG, which lapses should none have by the checkpoint that fixes its first set, and unbond at a
+  switch out of it, still slashable; signers come from the switch. One electorate asks each
+  epoch's kind, the checkpoints carry over, and light updates name the switched epochs. Depth
+  is out: governance needs voting finality.
 - [x] **Governance over fees, rewards and limits.** `Change::Fees`, `Change::Reward` (halving
   from its first block) and `Change::Limits` (`tx_limits` with `max_block_bytes`), on the same
   ballot, each from the block after the deciding one. Every block reads them from its parent's

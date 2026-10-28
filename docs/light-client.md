@@ -86,7 +86,12 @@ by stake works the same way, with the epoch's validators and their weights.
 epoch's consensus comes from a light update too (`EraProof`), fixed and trusted as the epoch's
 voters are, and a header whose epoch's consensus the client does not know yet waits the same way.
 The client builds the rules for each consensus it learns, checks every header by its own epoch's,
-and keeps the eras it learned in its saved state (`LightClient::consensus_at`).
+and keeps the eras it learned in its saved state (`LightClient::consensus_at`). Should governance
+switch finality's kind, the update that fixes an epoch of the other kind names it
+(`LightUpdate::switched`), and the client proves that epoch's voters at the other kind's key and
+weighs them as that kind does: validators by bond, two thirds deciding, or signers by threshold.
+A state fixes only one kind's voters for an epoch, so a node that hides a switch, or claims one,
+sends a proof that fails.
 
 **Reorgs.** When the node's chain no longer links to the client's, the client steps back until it
 finds where they split. It follows the new branch only if it holds more work, and never past a

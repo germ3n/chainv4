@@ -27,10 +27,11 @@ What can change today:
   [Reward](#reward) and [Limits](#limits)).
 - **Finality's tunables:** how deep votes wait, what they pay, the staking rules and the
   inactivity leak (see [Finality](#finality)).
+- **Finality's kind:** FFG to authority or back, from an epoch on (see
+  [Switching finality](#switching-finality)).
 
-The finality kind, and the parameters that define its epochs, stay what genesis says: the
-electorate that approves is finality's own, and every light client's epoch arithmetic rests on
-them.
+The parameters that define finality's epochs, `checkpoint_interval` and `activation_delay`, stay
+what genesis says: every node's and light client's epoch arithmetic rests on them.
 
 ## The kinds
 
@@ -247,6 +248,51 @@ chainv4 send --key member.key approve-change --finality "$(jq -c '.finality | .m
   a vote pays and how many proofs a block carries.
 - **Light clients need nothing new:** the thresholds and validator sets they check stay as they
   were, and the sets reach them as before.
+- **It retunes the finality decided last:** after a switch of kind, the switch's config is what
+  a retune keeps the starting voters and thresholds of.
+
+## Switching finality
+
+A change switches finality to the other kind that votes, FFG to authority or authority to FFG,
+from an epoch it names, given as a whole genesis `finality` object of the new kind:
+
+```sh
+chainv4 send --key member.key approve-change --switch-epoch 400 --switch-finality '{"type":"authority","checkpoint_interval":32,"vote_depth":2,"activation_delay":2,"max_signers":100,"signers":[…],"threshold":3,"change_threshold":3,"approval_epochs":64,"vote_reward":"0","max_proofs_per_block":4}'
+```
+
+- **The epochs stay.** The new config carries genesis's `checkpoint_interval` and
+  `activation_delay`, so a block's epoch is the same sum before and after, and only who votes
+  changes.
+- **It runs from the epoch named,** or from `activation_delay + 1` after the one that decides it,
+  whichever is later; approving one for an earlier epoch is refused. Each epoch's voters are
+  fixed `activation_delay` ahead by the kind it runs, so the checkpoint that fixes the switch
+  epoch's voters fixes the new kind's.
+- **Into FFG:** the config names no `validators`. From the block that decides the switch,
+  validators bond (`Tx::Bond`) under the new config's rules, and those bonded by the checkpoint
+  that fixes the switch epoch make its set. Should nobody have, the switch **lapses**: the signers
+  carry on as if it had never been decided, and bonds made too late are paid back. Name an epoch
+  far enough ahead for validators to bond.
+- **Into authority:** the config's `signers` become the decided set, voting from the switch
+  epoch, its thresholds theirs; `Tx::ApproveSigners` changes them from then on. Every FFG
+  validator is unbonding from the switch epoch: it votes until then, withdraws
+  `withdrawal_delay` epochs later, and a double vote from before can still be reported and cost
+  its bond. Nobody bonds under authority.
+- **Finality carries on.** The justified and finalized checkpoints stay; the new electorate's
+  first votes link from the old one's last justified checkpoint. Evidence of a double vote is
+  judged by the kind its epoch ran.
+- **One transition at a time.** A switch is refused while a change of finality or of the
+  consensus decided earlier is still to take effect, and nothing else touching either is
+  approved while a switch is.
+- **The consensus must fit.** `staked` needs FFG and `rotating` needs authority, so a chain
+  producing by stake moves to `pow` or `authority` first, and from `pow` or `authority` to
+  `rotating` once the signers vote. A switch is checked against the consensus decided last.
+- **Depth finality neither switches nor is switched to:** governance needs voting finality.
+- **Light clients follow it.** A checkpoint's light update names the epochs among those it fixes
+  whose voters are the other kind's (`LightUpdate::switched`), proved at that kind's keys; a state
+  only ever fixes one kind's voters for an epoch, so a node can neither hide a switch nor make one
+  up (see [Light client](light-client.md)).
+- `GET /governance` shows the `finality` the tip's epoch runs and a `switch` on its way, with its
+  `epoch` and `type`; `GET /status` shows the tip epoch's kind.
 
 Fees, reward, limits and finality each keep their own state entry (`change:fees`,
 `change:reward`, `change:limits`, `change:finality`), read for each block from its parent's state,
@@ -286,8 +332,7 @@ what the tip's next block runs by.
   `pow` needs miners. Nobody checks that for you: a chain that switches to a scheme nobody serves
   stops until someone does, and governance cannot move it back without blocks to carry the
   approvals.
-- **The finality kind does not change,** nor `checkpoint_interval` or `activation_delay`;
-  switching the kind is a batch of its own.
+- **`checkpoint_interval` and `activation_delay` never change,** whatever kind runs.
 - **A genesis file from before governance keeps its id:** `governance` encodes as nothing while
   unset, and so does the governance kind in the light parameters. `bootnodes`, after it, does the
   same while empty.
