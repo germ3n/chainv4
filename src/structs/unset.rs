@@ -117,9 +117,72 @@ unsafe impl<C: Config, T: SchemaWrite<C, Src = T>> SchemaWrite<C> for UnsetOptio
     }
 }
 
+#[document(
+    summary = "Encodes a value framed: its encoding's length, eight bytes little-endian, then the encoding, read back as a message of its own. For a type whose last fields are Unset ones, which read only at a message's end, carried in the middle of another: the finality config a governance change names.",
+    category = "Chain",
+    see_also = "Unset, Change::Finality",
+)]
+pub struct Framed<T>(std::marker::PhantomData<T>);
+
+// SAFETY: size_of is exactly what write writes: the eight-byte length, then the encoding.
+unsafe impl<C: Config, T: SchemaWrite<C, Src = T>> SchemaWrite<C> for Framed<T> {
+    type Src = T;
+
+    fn size_of(src: &T) -> WriteResult<usize> {
+        Ok(8 + T::size_of(src)?)
+    }
+
+    fn write(mut writer: impl Writer, src: &T) -> WriteResult<()> {
+        let len = T::size_of(src)? as u64;
+        <[u8; 8] as SchemaWrite<C>>::write(&mut writer, &len.to_le_bytes())?;
+
+        T::write(writer, src)
+    }
+}
+
+// SAFETY: read initializes dst before it returns Ok, from the framed bytes alone, read to their end.
+unsafe impl<'de, C: Config, T> SchemaRead<'de, C> for Framed<T>
+where
+    T: for<'a> SchemaRead<'a, C, Dst = T>,
+{
+    type Dst = T;
+
+    fn read(mut reader: impl Reader<'de>, dst: &mut MaybeUninit<T>) -> ReadResult<()> {
+        let len = u64::from_le_bytes(reader.take_array::<8>()?) as usize;
+        let framed = reader.take_scoped(len)?;
+        dst.write(T::get(framed)?);
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value whose last field reads only at a message's end, as FfgConfig's leak does.
+    #[derive(SchemaWrite, SchemaRead, PartialEq, Debug)]
+    struct Trailing {
+        first: u32,
+        #[wincode(with = "Unset")]
+        last: Option<u64>,
+    }
+
+    #[derive(SchemaWrite, SchemaRead, PartialEq, Debug)]
+    struct Carrying {
+        #[wincode(with = "Framed<Trailing>")]
+        inner: Trailing,
+        after: u32,
+    }
+
+    #[test]
+    fn a_framed_value_reads_back_in_the_middle_of_another() {
+        for last in [None, Some(9)] {
+            let carrying = Carrying { inner: Trailing { first: 1, last }, after: 7 };
+
+            assert_eq!(wincode::deserialize::<Carrying>(&wincode::serialize(&carrying).unwrap()).unwrap(), carrying);
+        }
+    }
 
     #[derive(SchemaWrite, SchemaRead, PartialEq, Debug)]
     struct Listed {

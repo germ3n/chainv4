@@ -232,16 +232,19 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   each epoch's consensus with a proof, light clients and snapshot sync wait for it as they wait
   for producers, and a node started with `--mine` and `--produce` builds the producer for
   whatever the chain runs. `GET /governance` shows the ballot.
-- [ ] **Finality's parameters by governance.** A `Change::Finality` with the same kind's tunable
-  settings: thresholds, rewards, bonds, the leak, and the delays other than the epoch ones.
-  `checkpoint_interval` and `activation_delay` define the epochs light clients and the
-  fixed-ahead sets rest on, so they stay.
+- [x] **Finality's parameters by governance.** `Change::Finality` retunes the same kind:
+  `vote_depth`, rewards, proofs per block, the bond rules and the leak under FFG, `max_signers`
+  and `approval_epochs` under authority. The kind, `checkpoint_interval`, `activation_delay`,
+  the genesis voters and the thresholds stay, since light clients and the fixed-ahead sets rest
+  on them. Decided in epoch e, it runs from `e + activation_delay + 1`, each era kept in state.
 - [ ] **Switching the finality kind by governance.** The hardest change: a switch to FFG or
   authority has to name the new validators or signers in the proposal, and a switch to depth
   dissolves the electorate. Finality would become per era in the chain, the votes and the light
   client.
-- [ ] **No governance over fees, rewards or limits.** The same ballot could carry them; each is a
-  question of what the chain's rules read from state instead of genesis.
+- [x] **Governance over fees, rewards and limits.** `Change::Fees`, `Change::Reward` (halving
+  from its first block) and `Change::Limits` (`tx_limits` with `max_block_bytes`), on the same
+  ballot, each from the block after the deciding one. Every block reads them from its parent's
+  state, so reorgs undo them; the mempool, the producer and the API read the tip's.
 - [ ] **Fuel costs measured, not guessed.** `vm::cost` is a table of hand-picked constants
   (a storage write 500, a call 1,000, a hash 20…) compiled into the node. A Rust tool, run at
   build time or as `chainv4 calibrate`, would time each fuel-charged operation on a reference

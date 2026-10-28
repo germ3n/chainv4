@@ -5,7 +5,7 @@
 use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
-        DryRun, Rules, dry_run, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, Reward, VoteRewardSource, stored_address_txs, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        DryRun, Rules, dry_run, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, VoteRewardSource, stored_address_txs, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
         stored_light_finality, stored_light_update, stored_state_at, stored_checkpoint_start, StartProblem,
     },
@@ -132,7 +132,9 @@ struct Api {
     /// The most bytes a block's transactions may take, if genesis bounds them.
     max_block_bytes: Option<u64>,
     /// What each block mints for its producer, to show with the block.
-    reward: Reward,
+    reward: crate::chain::RewardSchedule,
+    /// The fees last built from a decided config, kept between requests.
+    built_fees: Arc<crate::chain::BuiltFees>,
     /// Where vote rewards come from, and so whether the pool is worth showing.
     vote_rewards: VoteRewardSource,
     /// Genesis's bootnodes, which stand until governance decides others.
@@ -235,11 +237,63 @@ impl FromRequestParts<Api> for Shared<Api> {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(_: &mut axum::http::request::Parts, api: &Api) -> Result<Shared<Api>, std::convert::Infallible> {
-        Ok(Shared(Api { db: api.live.snapshot(), ..api.clone() }))
+        let mut snapped = Api { db: api.live.snapshot(), ..api.clone() };
+
+        // What governance decided stands in for genesis's, as of the snapshot. A database that
+        // fails here fails the handler's own reads too, which say so.
+        if let Err(err) = snapped.govern() {
+            log::warn!("[http] reading what governance decided: {err}");
+        }
+
+        Ok(Shared(snapped))
     }
 }
 
 impl Api {
+    /// Puts what governance decided in the database's state in place of genesis's fees, limits
+    /// and reward: what the next block runs with, which every answer about fees and calls reads.
+    fn govern(&mut self) -> Result<(), DbError> {
+        if self.rules.governance.is_none() {
+            return Ok(());
+        }
+
+        let state = State::new(self.db.clone());
+        let changes = crate::registry::changes::Changes::new(&state);
+        let (fees, limits, reward) = (changes.fees()?, changes.limits()?, changes.reward()?);
+        // Finality's settings as they stand for the next block, which dry runs run as.
+        let tuned = match (&self.rules.governance, stored_tip(&*self.db)?) {
+            (Some(governance), Some(tip)) => changes.finality_at(governance.finality.epoch_of(tip.header.height + 1))?,
+            _ => None,
+        };
+
+        if fees.is_none() && limits.is_none() && reward.is_none() && tuned.is_none() {
+            return Ok(());
+        }
+
+        let mut rules = (*self.rules).clone();
+
+        if let Some(tuned) = tuned
+            && let Some(genesis) = stored_header_at(&*self.db, 0)?
+        {
+            (rules.staking, rules.signers) = (tuned.staking(genesis.id()), tuned.signer_rules(genesis.id()));
+        }
+
+        if let Some(config) = fees {
+            let fees = crate::chain::built_fees(&self.built_fees, config);
+            (self.fees, rules.fees) = (Some(fees.clone()), Some(fees));
+        }
+
+        if let Some(limits) = limits {
+            (self.limits, self.tx_fuel, self.max_block_bytes) = (limits.tx_limits, limits.tx_limits.fuel, limits.max_block_bytes);
+            rules.limits = limits.tx_limits;
+        }
+
+        self.reward.decided = reward;
+        self.rules = Arc::new(rules);
+
+        Ok(())
+    }
+
     /// The chain's bootnodes now: the ones governance decided last, or genesis's.
     fn bootnodes(&self, state: &State) -> Result<Vec<String>, ApiError> {
         Ok(Changes::new(state).bootnodes()?.unwrap_or_else(|| (*self.genesis_bootnodes).clone()))
@@ -355,7 +409,8 @@ pub fn start(
                     light,
                     rules,
                     max_block_bytes,
-                    reward,
+                    reward: crate::chain::RewardSchedule { genesis: reward, decided: None },
+                    built_fees: Arc::default(),
                     vote_rewards,
                     genesis_bootnodes,
                     #[cfg(feature = "faucet")]

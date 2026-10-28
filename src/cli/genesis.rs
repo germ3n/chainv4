@@ -646,6 +646,55 @@ pub fn fees_json(fees: &FeeConfig) -> Value {
 }
 
 /// Reads fees as fees_json writes them.
+/// Fees from approve-change's --fees: a genesis file's fees object, checked as genesis is.
+pub fn fees_from_text(text: &str) -> Result<FeeConfig, String> {
+    let value: Value = serde_json::from_str(text).map_err(|err| format!("not JSON: {err}"))?;
+    let fees = fees_from_json(&value)?;
+
+    fees.problem().map_or(Ok(fees), |problem| Err(problem.to_string()))
+}
+
+/// A block reward as JSON: the shape genesis files and approve-change use.
+pub fn reward_json(reward: &Reward) -> Value {
+    json!({ "initial": reward.initial.to_string(), "halving_interval": reward.halving_interval })
+}
+
+/// A reward from approve-change's --reward.
+pub fn reward_from_text(text: &str) -> Result<Reward, String> {
+    let value: Value = serde_json::from_str(text).map_err(|err| format!("not JSON: {err}"))?;
+    let mut fields = Fields::of(&value, "reward")?;
+    let reward = Reward { initial: fields.amount("initial")?, halving_interval: fields.optional_whole("halving_interval")? };
+    fields.done()?;
+
+    crate::chain::reward_problem(&reward).map_or(Ok(reward), |problem| Err(problem.to_string()))
+}
+
+/// Limits as JSON: genesis's tx_limits and max_block_bytes, together.
+pub fn limits_json(limits: &crate::chain::BlockLimits) -> Value {
+    json!({ "tx_limits": { "fuel": limits.tx_limits.fuel, "memory": limits.tx_limits.memory }, "max_block_bytes": limits.max_block_bytes })
+}
+
+/// Limits from approve-change's --limits.
+pub fn limits_from_text(text: &str) -> Result<crate::chain::BlockLimits, String> {
+    let value: Value = serde_json::from_str(text).map_err(|err| format!("not JSON: {err}"))?;
+    let mut fields = Fields::of(&value, "limits")?;
+    let mut tx = fields.object("tx_limits")?;
+    let tx_limits = Limits { fuel: tx.whole("fuel")?, memory: usize::try_from(tx.whole("memory")?).map_err(|_| "limits.tx_limits.memory is too large".to_string())? };
+    tx.done()?;
+    let limits = crate::chain::BlockLimits { tx_limits, max_block_bytes: fields.optional_whole("max_block_bytes")? };
+    fields.done()?;
+
+    limits.problem().map_or(Ok(limits), |problem| Err(problem.to_string()))
+}
+
+/// Finality from approve-change's --finality: a genesis file's finality object. Whether it only
+/// changes what may change is the chain's to check, against its genesis.
+pub fn finality_from_text(text: &str) -> Result<FinalityConfig, String> {
+    let value: Value = serde_json::from_str(text).map_err(|err| format!("not JSON: {err}"))?;
+
+    finality_from_json(Fields::of(&value, "finality")?)
+}
+
 pub fn fees_from_json(value: &Value) -> Result<FeeConfig, String> {
     fees_from_fields(Fields::of(value, "fees")?)
 }
@@ -699,7 +748,7 @@ fn fees_from_fields(mut fees: Fields) -> Result<FeeConfig, String> {
 }
 
 /// Finality as JSON, its kind in "type" as consensus has it.
-fn finality_json(config: &FinalityConfig) -> Value {
+pub fn finality_json(config: &FinalityConfig) -> Value {
     match *config {
         #[cfg(feature = "finality-ffg")]
         FinalityConfig::Ffg(ref ffg) => {
@@ -1375,6 +1424,30 @@ mod tests {
         short["signers"] = json!(["0x1234"]);
 
         assert!(federation_from_text(&short.to_string()).unwrap_err().contains("compressed key"));
+    }
+
+    #[test]
+    fn approve_change_reads_fees_a_reward_limits_and_finality_as_genesis_writes_them() {
+        let genesis = dev(DevChain::Authority);
+        let value = to_json(&genesis);
+
+        // Fees and finality as a genesis file has them, a reward and limits in genesis's shape.
+        assert_eq!(fees_from_text(&value["fees"].to_string()).unwrap(), genesis.fees.clone().unwrap());
+        assert_eq!(reward_from_text(&value["reward"].to_string()).unwrap(), genesis.reward);
+        assert_eq!(reward_from_text(&reward_json(&genesis.reward).to_string()).unwrap(), genesis.reward);
+        let limits = crate::chain::BlockLimits { tx_limits: genesis.tx_limits, max_block_bytes: Some(2 << 20) };
+        assert_eq!(limits_from_text(&limits_json(&limits).to_string()).unwrap(), limits);
+
+        if let Some(finality) = &genesis.finality {
+            assert_eq!(&finality_from_text(&value["finality"].to_string()).unwrap(), finality);
+        }
+
+        // And each checked as genesis is.
+        assert!(reward_from_text(r#"{"initial":"1","halving_interval":0}"#).unwrap_err().contains("halves"));
+        assert!(limits_from_text(r#"{"tx_limits":{"fuel":1,"memory":1},"max_block_bytes":null}"#).unwrap_err().contains("fuel"));
+        let mut broke = value["fees"].clone();
+        broke["block_gas_limit"] = json!(0);
+        assert!(fees_from_text(&broke.to_string()).unwrap_err().contains("block_gas_limit"));
     }
 
     #[test]

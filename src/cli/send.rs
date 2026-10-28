@@ -192,7 +192,7 @@ pub enum TxArgs {
     /// Approves a change under the chain's governance: a new consensus, as a genesis file's
     /// consensus object, or new bootnodes. Sign with an account governance lets approve: a
     /// validator's or signer's account under the electorate, a member's under a council.
-    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation", "directory"]))]
+    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality"]))]
     ApproveChange {
         /// The new consensus as JSON, such as '{"type":"staked","slot_ms":2000,"schedule":"draw"}'
         /// or '{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1000","min_difficulty":"1000"}'.
@@ -220,6 +220,20 @@ pub enum TxArgs {
         /// "dex":null,"dex_router":null,"nft_factory":null}', EVM chains in the order of their ids.
         #[arg(long)]
         directory: Option<String>,
+        /// New fees, as a genesis file's fees object: '{"block_gas_limit":50000000,"burn_permille":500,"schedule":{…},"pricing":{…}}'.
+        #[arg(long)]
+        fees: Option<String>,
+        /// A new block reward, as a genesis file's: '{"initial":"5000000000000000000","halving_interval":null}'.
+        /// Its halvings count from the block after the one that decides it.
+        #[arg(long)]
+        reward: Option<String>,
+        /// New limits: '{"tx_limits":{"fuel":10000000,"memory":33554432},"max_block_bytes":4194304}'.
+        #[arg(long)]
+        limits: Option<String>,
+        /// Finality's tunable settings, as the chain's whole finality object from its genesis
+        /// file with only those changed.
+        #[arg(long)]
+        finality: Option<String>,
         /// The version of the decision this changes. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
@@ -862,9 +876,19 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
             collections,
             federation,
             directory,
+            fees,
+            reward,
+            limits,
+            finality,
             version,
         } => {
+            use crate::governance::Change;
+
             let change = match (consensus, bootnodes, name_prices, collections, federation, directory) {
+                (_, _, _, _, _, _) if fees.is_some() => Change::Fees(super::genesis::fees_from_text(fees.as_deref().unwrap_or_default()).map_err(|why| format!("--fees: {why}"))?),
+                (_, _, _, _, _, _) if reward.is_some() => Change::Reward(super::genesis::reward_from_text(reward.as_deref().unwrap_or_default()).map_err(|why| format!("--reward: {why}"))?),
+                (_, _, _, _, _, _) if limits.is_some() => Change::Limits(super::genesis::limits_from_text(limits.as_deref().unwrap_or_default()).map_err(|why| format!("--limits: {why}"))?),
+                (_, _, _, _, _, _) if finality.is_some() => Change::Finality(super::genesis::finality_from_text(finality.as_deref().unwrap_or_default()).map_err(|why| format!("--finality: {why}"))?),
                 (Some(consensus), _, _, _, _, _) => {
                     let value: Value = serde_json::from_str(&consensus).map_err(|err| format!("--consensus is not JSON: {err}"))?;
                     let (consensus, window) = super::genesis::consensus_from_json(&value, "consensus")?;
@@ -928,6 +952,10 @@ fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliRes
                     federation.threshold,
                     federation.signers.len()
                 ),
+                crate::governance::Change::Fees(fees) => println!("approving new fees, a block gas limit of {}, from version {version}", fees.block_gas_limit),
+                crate::governance::Change::Reward(reward) => println!("approving a block reward of {}, from version {version}", reward.initial),
+                crate::governance::Change::Limits(limits) => println!("approving limits of {} fuel a transaction, from version {version}", limits.tx_limits.fuel),
+                crate::governance::Change::Finality(finality) => println!("approving {} finality's settings, from version {version}", finality.name()),
                 crate::governance::Change::Directory(directory) => {
                     let named = [("gateway", directory.gateway), ("Bitcoin gateway", directory.btc_gateway), ("swap", directory.swap), ("DEX", directory.dex), ("NFT factory", directory.nft_factory)];
                     let mut listed: Vec<String> = named.iter().filter_map(|(what, address)| address.map(|address| format!("the {what} {address}"))).collect();

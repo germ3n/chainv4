@@ -1722,6 +1722,109 @@ mod voting {
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: prices }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+    #[test]
+    fn a_council_changes_the_reward_limits_and_fees_from_the_next_block() {
+        use crate::chain::fees::FeeConfig;
+        use crate::governance::{Change, GovernanceConfig};
+
+        let council = GovernanceConfig::Council {
+            members: vec![dev().public().address(), key(70).public().address()],
+            threshold: 2,
+            approval_epochs: 8,
+        };
+        let mut chain = governed(council);
+        let decide = |chain: &mut Chain, version: u64, change: Change| {
+            for member in [dev(), key(70)] {
+                assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(Effect::Done));
+            }
+        };
+        let refused = |chain: &mut Chain, change: Change, why: &str| {
+            assert!(matches!(&send_as(chain, &dev(), Tx::ApproveChange { version: 0, change }).result, Err(failure) if failure.to_string().contains(why)), "{why}");
+        };
+
+        // What could not run a chain is refused before anyone counts it.
+        refused(&mut chain, Change::Reward(Reward { initial: u256::new(1), halving_interval: Some(0) }), "halves every 1 block");
+        refused(&mut chain, Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10, memory: 1 << 20 }, max_block_bytes: None }), "100,000 fuel");
+        refused(&mut chain, Change::Fees(FeeConfig { block_gas_limit: 0, ..FeeConfig::dev() }), "block_gas_limit");
+
+        // A reward of 1,000 halving every two blocks, counted from the block after the decision.
+        let producer = dev().public().address();
+        decide(&mut chain, 0, Change::Reward(Reward { initial: u256::new(1_000), halving_interval: Some(2) }));
+        let mut paid = Vec::new();
+
+        for _ in 0..4 {
+            let before = balance(&chain, &producer);
+            advance(&mut chain, Vec::new(), Vec::new()).unwrap();
+            paid.push(balance(&chain, &producer) - before);
+        }
+
+        assert_eq!(paid, [u256::new(1_000), u256::new(1_000), u256::new(500), u256::new(500)]);
+
+        // Limits: the next block's, and what the node admits by.
+        let limits = BlockLimits { tx_limits: Limits { fuel: 200_000, memory: 2 << 20 }, max_block_bytes: Some(2 << 20) };
+        decide(&mut chain, 1, Change::Limits(limits));
+
+        assert_eq!((chain.next.rules.limits, chain.max_block_bytes()), (limits.tx_limits, limits.max_block_bytes));
+
+        // Fees, on a chain that had none: the next block charges, at the genesis price.
+        assert!(chain.fees().is_none());
+        decide(&mut chain, 2, Change::Fees(FeeConfig::dev()));
+
+        assert_eq!(chain.fees().map(|fees| fees.block_gas_limit()), Some(FeeConfig::dev().block_gas_limit));
+        assert!(chain.next_base_price() > u256::ZERO, "priced from the next block on");
+        // Reopened, the node reads them all again from state.
+        let reopened = Chain::open(chain.db().clone(), &Genesis { governance: chain_governance(), ..genesis_with(Some(ffg())) }).unwrap();
+        assert_eq!((reopened.fees().is_some(), reopened.max_block_bytes()), (true, limits.max_block_bytes));
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+    fn chain_governance() -> Option<crate::governance::GovernanceConfig> {
+        Some(crate::governance::GovernanceConfig::Council {
+            members: vec![dev().public().address(), key(70).public().address()],
+            threshold: 2,
+            approval_epochs: 8,
+        })
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+    #[test]
+    fn a_council_retunes_finality_from_an_epoch_far_enough_ahead() {
+        use crate::governance::Change;
+        use crate::registry::changes::Changes;
+
+        let mut chain = governed(chain_governance().unwrap());
+        let FinalityConfig::Ffg(genesis) = ffg() else { unreachable!("ffg") };
+        let tuned = FinalityConfig::Ffg(FfgConfig { min_bond: u256::new(500), max_proofs_per_block: 2, ..genesis.clone() });
+        let refused = |chain: &mut Chain, change: Change, why: &str| {
+            assert!(matches!(&send_as(chain, &dev(), Tx::ApproveChange { version: 0, change }).result, Err(failure) if failure.to_string().contains(why)), "{why}");
+        };
+
+        // What the epochs, the fixed-ahead sets and the history rest on stays.
+        refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { checkpoint_interval: INTERVAL + 1, ..genesis.clone() })), "keeps checkpoint_interval");
+        refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { validators: Vec::new(), ..genesis.clone() })), "keeps checkpoint_interval");
+
+        for member in [dev(), key(70)] {
+            assert_eq!(send_as(&mut chain, &member, Tx::ApproveChange { version: 0, change: Change::Finality(tuned.clone()) }).result, Ok(Effect::Done));
+        }
+
+        // Decided in this epoch, it stands from activation_delay + 1 epochs on, not before.
+        let decided = chain.tip().height / INTERVAL;
+        let from = decided + 2 + 1;
+        let state = chain.state();
+
+        assert_eq!(Changes::new(&state).finality_at(from - 1).unwrap(), None);
+        assert_eq!(Changes::new(&state).finality_at(from).unwrap(), Some(tuned.clone()));
+        let min_bond = |chain: &Chain, height: u64| chain.params_in(&chain.state(), height).unwrap().rules.staking.unwrap().staking.min_bond;
+
+        assert_eq!(min_bond(&chain, from * INTERVAL - 1), u256::new(100));
+        assert_eq!(min_bond(&chain, from * INTERVAL), u256::new(500));
+
+        // At that epoch the chain runs with it: blocks take at most two proofs now.
+        grow_to(&mut chain, from * INTERVAL - 1);
+        assert_eq!(chain.next.rules.staking.as_ref().map(|staking| staking.staking.min_bond), Some(u256::new(500)));
+    }
+
     #[cfg(all(feature = "finality-ffg", feature = "governance-council", feature = "secp256k1"))]
     #[test]
     fn a_council_names_the_federation_and_each_one_counts_up_a_version() {

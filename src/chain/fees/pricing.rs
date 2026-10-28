@@ -3,35 +3,12 @@
 //! where each sender names its price, at least a minimum.
 
 use {
-    super::Pricing,
-    crate::crypto::hashable::Hashable,
+    super::{BaseFee, Bid, Pricing, PricingConfig},
     crate::structs::tx::FeeOffer,
-    crate::structs::u256::{U256Le, u256},
+    crate::structs::u256::u256,
     r#macro::document,
     std::cmp::Ordering,
-    wincode::{SchemaRead, SchemaWrite},
 };
-
-#[document(
-    summary = "Which pricing a chain runs, and its parameters.",
-    category = "Fees",
-    see_also = "FeeConfig, Pricing",
-    note = "Tags are pinned, so encodings match across builds.",
-)]
-#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-#[wincode(tag_encoding = "u8")]
-pub enum PricingConfig {
-    #[document(summary = "A base price that follows how full blocks are, plus a tip.")]
-    #[wincode(tag = 0)]
-    BaseFee(BaseFee),
-    #[document(summary = "Each sender bids its price, at least a minimum.")]
-    #[wincode(tag = 1)]
-    Bid(Bid),
-}
-
-impl Hashable for PricingConfig {
-    const TAG_LEN: usize = 1;
-}
 
 impl PricingConfig {
     #[document(parent = "PricingConfig", summary = "The kind's name: base_fee or bid.")]
@@ -57,27 +34,6 @@ impl PricingConfig {
         }
     }
 }
-
-#[document(
-    summary = "A base price per gas that every transaction pays, set by how full the parent block was against a target of block_gas_limit / elasticity: fuller raises it, emptier lowers it, by at most 1 / change_denominator a block. Senders add a tip for the producer and name the most they pay; a transaction pays the base plus its tip, as far as its max_price allows, and is not taken while its max_price is under the base.",
-    category = "Fees",
-    see_also = "PricingConfig, FeeOffer",
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct BaseFee {
-    #[document(summary = "The base price of the genesis block.")]
-    #[wincode(with = "U256Le")]
-    pub initial: u256,
-    #[document(summary = "The base price never falls below this. At least 1, or it could never rise again.")]
-    #[wincode(with = "U256Le")]
-    pub min: u256,
-    #[document(summary = "The block gas limit divided by this is the target: blocks using more raise the base price. 2 aims for half-full blocks.")]
-    pub elasticity: u64,
-    #[document(summary = "The base price moves by at most this fraction of itself a block: 8 is at most an eighth.")]
-    pub change_denominator: u64,
-}
-
-impl Hashable for BaseFee {}
 
 impl BaseFee {
     #[document(
@@ -146,20 +102,6 @@ impl Pricing for BaseFee {
         self.min
     }
 }
-
-#[document(
-    summary = "Each sender bids its price per gas, which it pays whole, and blocks take the highest bids first. Bids under min_price are not taken; min_price is every block's base price, so that much of each fee is split by burn_permille, and the rest of a bid goes to the producer.",
-    category = "Fees",
-    see_also = "PricingConfig, FeeOffer",
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct Bid {
-    #[document(summary = "The lowest bid taken. 0 lets transactions in for nothing, with only the block gas limit to bound them.")]
-    #[wincode(with = "U256Le")]
-    pub min_price: u256,
-}
-
-impl Hashable for Bid {}
 
 impl Bid {
     #[document(parent = "Bid", summary = "Development settings: bids of at least 1 gwei.")]

@@ -23,6 +23,63 @@ const NAME_PRICES: &[u8] = b"change:name-prices";
 const COLLECTIONS: &[u8] = b"change:collections";
 const FEDERATION: &[u8] = crate::registry::federation::FEDERATION_KEY;
 const DIRECTORY: &[u8] = crate::registry::directory::DIRECTORY_KEY;
+const FEES: &[u8] = b"change:fees";
+const REWARD: &[u8] = b"change:reward";
+const LIMITS: &[u8] = b"change:limits";
+const FINALITY: &[u8] = b"change:finality";
+
+#[document(
+    summary = "Where an approval is made: its block's height and epoch, and how many epochs ahead finality fixes what is decided, which Change::Finality takes effect after.",
+    category = "Governance",
+    see_also = "Changes::approve",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecidedAt {
+    #[document(summary = "The block's height.")]
+    pub height: u64,
+    #[document(summary = "Its epoch.")]
+    pub epoch: u64,
+    #[document(summary = "Finality's activation_delay.")]
+    pub activation_delay: u64,
+}
+
+#[document(
+    summary = "The block reward governance decided last, and the height it took effect at: the block after the one that decided it, where its halvings count from.",
+    category = "Governance",
+    see_also = "Change::Reward, Reward::since",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct DecidedReward {
+    #[document(summary = "The reward.")]
+    pub reward: crate::params::Reward,
+    #[document(summary = "The height it took effect at.")]
+    pub from: u64,
+}
+
+impl Hashable for DecidedReward {}
+
+#[document(
+    summary = "Finality's settings as governance decided them, each with the epoch it took effect from, oldest first: what an epoch runs with is the last that took effect by it, or genesis's before any.",
+    category = "Governance",
+    see_also = "Change::Finality, Changes::finality_at",
+)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct FinalityEras {
+    #[document(summary = "Each decided config, with the epoch it took effect from.")]
+    pub eras: Vec<FinalityEra>,
+}
+
+impl Hashable for FinalityEras {}
+
+#[document(summary = "One finality config governance decided, and the epoch it took effect from.", category = "Governance", see_also = "FinalityEras")]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct FinalityEra {
+    #[document(summary = "The first epoch it runs.")]
+    pub from: u64,
+    #[document(summary = "The config.")]
+    #[wincode(with = "crate::structs::unset::Framed<crate::params::finality::FinalityConfig>")]
+    pub config: crate::params::finality::FinalityConfig,
+}
 
 #[document(
     summary = "The consensus decided last, and how many changes of any kind came before it.",
@@ -247,6 +304,34 @@ impl<'a> Changes<'a> {
         self.state.put_value(Column::Validators, FEDERATION.to_vec(), &crate::registry::federation::DecidedFederation { version: 0, federation: federation.clone() });
     }
 
+    #[document(parent = "Changes", summary = "The fees governance decided last, or None while it decided none, when genesis's stand.")]
+    pub fn fees(&self) -> Result<Option<crate::params::fees::FeeConfig>, DbError> {
+        self.state.get_value(Column::Validators, FEES)
+    }
+
+    #[document(parent = "Changes", summary = "The block reward governance decided last, with the height it took effect at, or None while it decided none, when genesis's stands.")]
+    pub fn reward(&self) -> Result<Option<DecidedReward>, DbError> {
+        self.state.get_value(Column::Validators, REWARD)
+    }
+
+    #[document(parent = "Changes", summary = "The limits governance decided last, or None while it decided none, when genesis's stand.")]
+    pub fn limits(&self) -> Result<Option<crate::params::BlockLimits>, DbError> {
+        self.state.get_value(Column::Validators, LIMITS)
+    }
+
+    #[document(parent = "Changes", summary = "Every finality config governance decided, with the epoch each took effect from.")]
+    pub fn finality_eras(&self) -> Result<FinalityEras, DbError> {
+        Ok(self.state.get_value(Column::Validators, FINALITY)?.unwrap_or_default())
+    }
+
+    #[document(
+        parent = "Changes",
+        summary = "The finality config an epoch runs with, as governance decided it: the last that took effect by the epoch, or None before any, when genesis's stands.",
+    )]
+    pub fn finality_at(&self, epoch: u64) -> Result<Option<crate::params::finality::FinalityConfig>, DbError> {
+        Ok(self.finality_eras()?.eras.into_iter().rev().find(|era| era.from <= epoch).map(|era| era.config))
+    }
+
     #[document(parent = "Changes", summary = "Writes a directory as the one in force: genesis's as the chain starts, or one governance decided.")]
     pub fn write_directory(&self, directory: &crate::registry::directory::Directory) {
         self.state.put_value(Column::Validators, DIRECTORY.to_vec(), directory);
@@ -300,13 +385,14 @@ impl<'a> Changes<'a> {
             sender = "Who sent the approval: an account governance lets approve.",
             version = "The version it changes, which must be the decided one's.",
             change = "The change it approves, checked to fit the chain already.",
-            epoch = "The epoch the approval is made in.",
+            at = "Where the approval is made: the block, its epoch and finality's activation_delay.",
             approval_epochs = "How many epochs an approval counts for.",
             governance = "Who may approve, and what it takes.",
         },
         returns = "Whether that decided it. NotGoverning for a sender that may not approve, StaleChange for an older version, SameChange for the consensus, bootnodes, name prices, collection standards, federation or directory already decided.",
     )]
-    pub fn approve(&self, sender: &Address, version: u64, change: Change, epoch: u64, approval_epochs: u64, governance: &dyn Governance) -> Result<ChangeApproved, RegistryError> {
+    pub fn approve(&self, sender: &Address, version: u64, change: Change, at: DecidedAt, approval_epochs: u64, governance: &dyn Governance) -> Result<ChangeApproved, RegistryError> {
+        let epoch = at.epoch;
         let decided = self.standing(sender, version, epoch, governance)?;
         let same = match &change {
             Change::Consensus(consensus) => *consensus == decided.consensus,
@@ -315,6 +401,10 @@ impl<'a> Changes<'a> {
             Change::Collections(functions) => self.collections()?.as_ref() == Some(functions),
             Change::Federation(federation) => self.federation()?.map(|decided| decided.federation).as_ref() == Some(federation),
             Change::Directory(directory) => self.directory()?.as_ref() == Some(directory),
+            Change::Fees(fees) => self.fees()?.as_ref() == Some(fees),
+            Change::Reward(reward) => self.reward()?.map(|decided| decided.reward).as_ref() == Some(reward),
+            Change::Limits(limits) => self.limits()?.as_ref() == Some(limits),
+            Change::Finality(config) => self.finality_eras()?.eras.last().map(|era| &era.config) == Some(config),
         };
 
         if same {
@@ -369,6 +459,34 @@ impl<'a> Changes<'a> {
             // And the directory: only the apps and tools read it.
             Change::Directory(directory) => {
                 self.write_directory(&directory);
+
+                decided.consensus
+            }
+            // Fees, the reward and limits apply from the next block: the chain reads them from
+            // state for each block it runs.
+            Change::Fees(fees) => {
+                self.state.put_value(Column::Validators, FEES.to_vec(), &fees);
+
+                decided.consensus
+            }
+            Change::Reward(reward) => {
+                self.state.put_value(Column::Validators, REWARD.to_vec(), &DecidedReward { reward, from: at.height + 1 });
+
+                decided.consensus
+            }
+            Change::Limits(limits) => {
+                self.state.put_value(Column::Validators, LIMITS.to_vec(), &limits);
+
+                decided.consensus
+            }
+            // Finality's settings wait for an epoch far enough ahead that every node has fixed
+            // it the same way, as the consensus does.
+            Change::Finality(config) => {
+                let mut eras = self.finality_eras()?;
+                let from = epoch + at.activation_delay + 1;
+                eras.eras.retain(|era| era.from < from);
+                eras.eras.push(FinalityEra { from, config });
+                self.state.put_value(Column::Validators, FINALITY.to_vec(), &eras);
 
                 decided.consensus
             }
@@ -430,6 +548,11 @@ impl<'a> Changes<'a> {
 #[cfg(all(test, feature = "governance"))]
 mod tests {
     use super::*;
+
+    /// An approval made at an epoch, finality fixing what is decided two epochs ahead.
+    fn at(epoch: u64) -> DecidedAt {
+        DecidedAt { height: epoch * 10, epoch, activation_delay: 2 }
+    }
     use crate::db::MemoryDb;
     use crate::structs::address::Address;
     use std::sync::Arc;
@@ -486,18 +609,18 @@ mod tests {
         assert_eq!(changes.consensus_for(3).unwrap(), None);
 
         // A stranger may not; the same consensus is no change; a stale version is refused.
-        assert_eq!(changes.approve(&member(9), 0, staked(), 1, 4, &Weighted), Err(RegistryError::NotGoverning));
-        assert_eq!(changes.approve(&member(2), 0, Change::Consensus(pow()), 1, 4, &Weighted), Err(RegistryError::SameChange));
-        assert_eq!(changes.approve(&member(2), 1, staked(), 1, 4, &Weighted), Err(RegistryError::StaleChange(0)));
+        assert_eq!(changes.approve(&member(9), 0, staked(), at(1), 4, &Weighted), Err(RegistryError::NotGoverning));
+        assert_eq!(changes.approve(&member(2), 0, Change::Consensus(pow()), at(1), 4, &Weighted), Err(RegistryError::SameChange));
+        assert_eq!(changes.approve(&member(2), 1, staked(), at(1), 4, &Weighted), Err(RegistryError::StaleChange(0)));
 
         // One of weight one, then the one of weight two decide it: three of three.
         assert_eq!(
-            changes.approve(&member(2), 0, staked(), 1, 4, &Weighted),
+            changes.approve(&member(2), 0, staked(), at(1), 4, &Weighted),
             Ok(ChangeApproved::Counted { weight: u256::ONE, needed: u256::from(3u64) })
         );
         assert_eq!(changes.ballot().unwrap().approvers(&staked()), [member(2)]);
         assert_eq!(changes.ballot().unwrap().changes(), [staked()]);
-        assert_eq!(changes.approve(&member(1), 0, staked(), 2, 4, &Weighted), Ok(ChangeApproved::DecidedChange(1)));
+        assert_eq!(changes.approve(&member(1), 0, staked(), at(2), 4, &Weighted), Ok(ChangeApproved::DecidedChange(1)));
 
         let Change::Consensus(consensus) = staked() else { unreachable!() };
 
@@ -520,20 +643,20 @@ mod tests {
 
         assert_eq!(changes.bootnodes().unwrap(), None, "genesis's stand until governance decides");
 
-        changes.approve(&member(2), 0, bootnodes.clone(), 1, 4, &Weighted).unwrap();
+        changes.approve(&member(2), 0, bootnodes.clone(), at(1), 4, &Weighted).unwrap();
         // Bootnodes and a consensus on one ballot: an account backs one change at a time.
-        changes.approve(&member(3), 0, staked(), 1, 4, &Weighted).unwrap();
+        changes.approve(&member(3), 0, staked(), at(1), 4, &Weighted).unwrap();
 
         assert_eq!(changes.ballot().unwrap().changes(), [bootnodes.clone(), staked()]);
-        assert_eq!(changes.approve(&member(1), 0, bootnodes.clone(), 1, 4, &Weighted), Ok(ChangeApproved::DecidedChange(1)));
+        assert_eq!(changes.approve(&member(1), 0, bootnodes.clone(), at(1), 4, &Weighted), Ok(ChangeApproved::DecidedChange(1)));
         assert_eq!(changes.bootnodes().unwrap(), Some(vec!["/ip4/203.0.113.7/udp/4001/quic-v1".to_string()]));
         assert_eq!(changes.decided().unwrap(), DecidedChange { version: 1, consensus: pow() }, "the consensus stays, the version moves");
         assert!(changes.ballot().unwrap().approvals.is_empty(), "the other change's approvals were for version 0");
-        assert_eq!(changes.approve(&member(1), 1, bootnodes, 1, 4, &Weighted), Err(RegistryError::SameChange));
+        assert_eq!(changes.approve(&member(1), 1, bootnodes, at(1), 4, &Weighted), Err(RegistryError::SameChange));
 
         // An empty list is a change too: the chain has no bootnodes from then on.
-        changes.approve(&member(1), 1, Change::Bootnodes(Vec::new()), 1, 4, &Weighted).unwrap();
-        changes.approve(&member(2), 1, Change::Bootnodes(Vec::new()), 1, 4, &Weighted).unwrap();
+        changes.approve(&member(1), 1, Change::Bootnodes(Vec::new()), at(1), 4, &Weighted).unwrap();
+        changes.approve(&member(2), 1, Change::Bootnodes(Vec::new()), at(1), 4, &Weighted).unwrap();
 
         assert_eq!(changes.bootnodes().unwrap(), Some(Vec::new()));
         assert_eq!(changes.decided().unwrap().version, 2);
@@ -546,11 +669,11 @@ mod tests {
         changes.write_genesis(&pow(), 2).unwrap();
         let other = Change::Consensus(ConsensusConfig::Rotating { slot_ms: 1_000 });
 
-        changes.approve(&member(2), 0, staked(), 1, 2, &Weighted).unwrap();
-        changes.approve(&member(3), 0, staked(), 1, 2, &Weighted).unwrap();
+        changes.approve(&member(2), 0, staked(), at(1), 2, &Weighted).unwrap();
+        changes.approve(&member(3), 0, staked(), at(1), 2, &Weighted).unwrap();
 
         // Moving an approval takes it from the other change.
-        changes.approve(&member(3), 0, other.clone(), 1, 2, &Weighted).unwrap();
+        changes.approve(&member(3), 0, other.clone(), at(1), 2, &Weighted).unwrap();
 
         assert_eq!(changes.ballot().unwrap().approvers(&staked()), [member(2)]);
         assert_eq!(changes.ballot().unwrap().approvers(&other), [member(3)]);
@@ -565,7 +688,7 @@ mod tests {
         assert_eq!(changes.ballot().unwrap().counting(2, 2).approvers(&staked()), [member(2)]);
         assert!(changes.ballot().unwrap().counting(3, 2).approvers(&staked()).is_empty());
         assert_eq!(
-            changes.approve(&member(1), 0, staked(), 3, 2, &Weighted),
+            changes.approve(&member(1), 0, staked(), at(3), 2, &Weighted),
             Ok(ChangeApproved::Counted { weight: u256::from(2u64), needed: u256::from(3u64) })
         );
     }

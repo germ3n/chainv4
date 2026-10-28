@@ -49,6 +49,7 @@ pub use events::{EventFilter, IndexedEvent, stored_events};
 pub use index::{IndexKind, IndexWindow, Indexing, KeepFrom, stored_index};
 pub use execute::{BlockContext, Effect, Failure, GovernanceRules, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
+pub use crate::params::{BlockLimits, Reward};
 pub use parallel::Workers;
 use parallel::{Runner, Unfit};
 #[cfg(feature = "finality-authority")]
@@ -72,6 +73,24 @@ pub const DEV_TX_LIMITS: Limits = Limits {
 
 /// The development chains' reorg limit.
 pub const DEV_MAX_REORG_DEPTH: u64 = 100;
+
+impl BlockLimits {
+    #[document(
+        parent = "BlockLimits",
+        summary = "Why they cannot be a chain's: fuel below 100,000 or memory below 1 MiB, which no contract call fits in, or max_block_bytes outside 1 to 6 MiB, as genesis's.",
+    )]
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.tx_limits.fuel < 100_000 || self.tx_limits.memory < 1024 * 1024 {
+            return Some("a transaction needs at least 100,000 fuel and 1 MiB of memory");
+        }
+
+        if self.max_block_bytes.is_some_and(|bytes| !(MIN_BLOCK_BYTES..=MAX_BLOCK_BYTES).contains(&bytes)) {
+            return Some("max_block_bytes must be 1 MiB to 6 MiB, 1048576 to 6291456");
+        }
+
+        None
+    }
+}
 
 #[document(
     summary = "The development proof-of-work chain's difficulty window, 11 blocks: Bitcoin's median-time window, and the blocks difficulty retargets over.",
@@ -149,22 +168,6 @@ pub struct Allocation {
 
 impl Hashable for Allocation {}
 
-#[document(
-    summary = "What each block mints for its producer, credited after its transactions run. A fixed reward has no halving interval; with one, the reward halves every that many blocks until it reaches zero.",
-    category = "Chain",
-    see_also = "Genesis",
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct Reward {
-    #[document(summary = "The reward for the first blocks.")]
-    #[wincode(with = "U256Le")]
-    pub initial: u256,
-    #[document(summary = "Blocks between halvings, or None for a reward that never changes.")]
-    pub halving_interval: Option<u64>,
-}
-
-impl Hashable for Reward {}
-
 impl Reward {
     #[document(parent = "Reward", summary = "No reward at all.")]
     pub const NONE: Reward = Reward {
@@ -174,8 +177,17 @@ impl Reward {
 
     #[document(parent = "Reward", summary = "The reward for the block at a height.")]
     pub fn at(&self, height: u64) -> u256 {
+        self.since(height, 0)
+    }
+
+    #[document(
+        parent = "Reward",
+        summary = "The reward for the block at a height, for a reward that took effect at another: governance's, whose halvings count from the block after the one that decided it.",
+        params = { height = "The block's height.", from = "The height it took effect at: initial there." },
+    )]
+    pub fn since(&self, height: u64, from: u64) -> u256 {
         let halvings = match self.halving_interval {
-            Some(interval) if interval > 0 => height / interval,
+            Some(interval) if interval > 0 => height.saturating_sub(from) / interval,
             _ => 0,
         };
 
@@ -185,6 +197,38 @@ impl Reward {
 
         self.initial >> halvings as u32
     }
+}
+
+#[document(
+    summary = "The block reward as it stood at each height: genesis's, then the one governance decided last, from the height it took effect at. What the API shows each block minted.",
+    category = "Chain",
+    see_also = "Reward, DecidedReward",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RewardSchedule {
+    #[document(summary = "Genesis's.")]
+    pub genesis: Reward,
+    #[document(summary = "Governance's last, with where it took effect.")]
+    pub decided: Option<crate::registry::changes::DecidedReward>,
+}
+
+impl RewardSchedule {
+    #[document(parent = "RewardSchedule", summary = "The reward for the block at a height.")]
+    pub fn at(&self, height: u64) -> u256 {
+        match &self.decided {
+            Some(decided) if height >= decided.from => decided.reward.since(height, decided.from),
+            _ => self.genesis.at(height),
+        }
+    }
+}
+
+#[document(
+    summary = "Why a reward cannot be a chain's: a halving interval of 0.",
+    category = "Chain",
+    see_also = "Reward, Change::Reward",
+)]
+pub fn reward_problem(reward: &Reward) -> Option<&'static str> {
+    (reward.halving_interval == Some(0)).then_some("a reward halves every 1 block or more, or never")
 }
 
 #[document(
@@ -1024,6 +1068,44 @@ pub struct Chain {
     snapshot: Option<u64>,
     /// How many blocks back state is kept to read at, or None to keep every height.
     state_history: Option<u64>,
+    /// What the block on the tip runs with, as the tip's state decides: what the node charges
+    /// and admits by, and builds the next block with.
+    next: BlockParams,
+    /// The fees last built from a decided config, so a block does not build them again.
+    built_fees: BuiltFees,
+}
+
+#[document(
+    summary = "The fees last built from a decided config, kept so each block, or each API request, does not build them again.",
+    category = "Fees",
+    see_also = "built_fees",
+)]
+#[derive(Default)]
+pub struct BuiltFees(Mutex<Option<(FeeConfig, Arc<Fees>)>>);
+
+#[document(summary = "The fees of a decided config: those built last when it is the same, else built now and kept.", category = "Fees", see_also = "BuiltFees")]
+pub fn built_fees(cache: &BuiltFees, config: FeeConfig) -> Arc<Fees> {
+    let mut built = cache.0.lock().expect("no panic holds it");
+
+    match built.as_ref() {
+        Some((kept, fees)) if *kept == config => fees.clone(),
+        _ => {
+            let fees = Arc::new(config.build());
+            *built = Some((config, fees.clone()));
+
+            fees
+        }
+    }
+}
+
+/// What a block runs with: genesis's rules, reward and size, with what governance decided in the
+/// state its parent left, finality's settings as they stand at its epoch.
+#[derive(Clone)]
+pub(crate) struct BlockParams {
+    pub(crate) rules: Rules,
+    /// The reward, and the height it took effect at.
+    pub(crate) reward: (Reward, u64),
+    pub(crate) max_block_bytes: Option<u64>,
 }
 
 /// The lowest height whose state history holds.
@@ -1166,7 +1248,10 @@ impl Chain {
             addresses,
             snapshot,
             state_history: Some(DEFAULT_STATE_HISTORY),
+            next: BlockParams { rules: genesis.rules(), reward: (genesis.reward, 0), max_block_bytes: genesis.max_block_bytes },
+            built_fees: BuiltFees::default(),
         };
+        chain.next = chain.params_in(&chain.state(), chain.tip.height + 1)?;
         // In case the node stopped between committing a block and catching finality up with it.
         chain.tip_moved()?;
 
@@ -1435,15 +1520,16 @@ impl Chain {
     /// deadline stops the transactions once it passes, and the block holds those that ran by then.
     fn build_in(&self, layer: &Arc<State>, parent: &BlockHeader, draft: Draft) -> Result<Block, DbError> {
         let Draft { txs, proofs, producer, timestamp, deadline, difficulty } = draft;
+        let params = self.params_in(layer, parent.height + 1)?;
         let context = BlockContext {
             height: parent.height + 1,
             timestamp,
             producer,
-            base_price: self.base_price_after(parent),
+            base_price: base_price_after(params.rules.fees.as_deref(), parent),
             genesis: self.genesis(),
         };
-        let txs = self.within_bytes(txs);
-        let ran = match self.runner().run(layer, &txs, &context, Unfit::Skip, deadline) {
+        let txs = Chain::within_bytes(txs, params.max_block_bytes);
+        let ran = match self.runner(&params.rules).run(layer, &txs, &context, Unfit::Skip, deadline) {
             Ok(ran) => ran,
             Err(ImportError::Db(err)) => return Err(err),
             Err(err) => unreachable!("building skips what does not fit, so only the database fails it: {err}"),
@@ -1486,7 +1572,7 @@ impl Chain {
         // The reward and the proofs change state too, so the root is the one importing reaches.
         // A block whose reward or proofs do not hold is refused for that on import, whatever its
         // root says.
-        match self.settle(layer, &block) {
+        match self.settle(layer, &block, params.reward) {
             Ok(()) | Err(ImportError::Invalid(_)) => {}
             Err(ImportError::Db(err)) => return Err(err),
             Err(err) => unreachable!("settling a block only fails it or the database: {err}"),
@@ -1711,12 +1797,53 @@ impl Chain {
 
     #[document(parent = "Chain", summary = "The chain's fees, or None when transactions are free.")]
     pub fn fees(&self) -> Option<&Fees> {
-        self.rules.fees.as_deref()
+        self.next.rules.fees.as_deref()
     }
 
     /// The chain's fees, shared, for what checks transactions off the node loop.
     pub(crate) fn shared_fees(&self) -> Option<Arc<Fees>> {
-        self.rules.fees.clone()
+        self.next.rules.fees.clone()
+    }
+
+    /// What a block at a height runs with, in the state its parent left: genesis's, with what
+    /// governance decided there. Fees, limits and the reward stand from the block after the one
+    /// that decided them; finality's settings by the epoch.
+    pub(crate) fn params_in(&self, state: &State, height: u64) -> Result<BlockParams, DbError> {
+        let mut params = BlockParams { rules: self.rules.clone(), reward: (self.reward, 0), max_block_bytes: self.max_block_bytes };
+
+        if !self.governed {
+            return Ok(params);
+        }
+
+        let changes = Changes::new(state);
+
+        if let Some(config) = changes.fees()? {
+            params.rules.fees = Some(built_fees(&self.built_fees, config));
+        }
+
+        if let Some(limits) = changes.limits()? {
+            (params.rules.limits, params.max_block_bytes) = (limits.tx_limits, limits.max_block_bytes);
+        }
+
+        if let Some(decided) = changes.reward()? {
+            params.reward = (decided.reward, decided.from);
+        }
+
+        if let Some(config) = &self.finality_config
+            && let Some(tuned) = changes.finality_at(config.epoch_of(height))?
+        {
+            params.rules.staking = tuned.staking(self.genesis);
+            params.rules.signers = tuned.signer_rules(self.genesis);
+        }
+
+        Ok(params)
+    }
+
+    /// Reads what the next block runs with again, once the tip moved.
+    pub(super) fn refresh_params(&mut self) -> Result<(), DbError> {
+        self.next = self.params_in(&self.state(), self.tip.height + 1)?;
+
+        Ok(())
     }
 
     #[document(
@@ -1733,14 +1860,14 @@ impl Chain {
 
     #[document(parent = "Chain", summary = "The most bytes a block's transactions may take, encoded, if genesis bounds them.")]
     pub fn max_block_bytes(&self) -> Option<u64> {
-        self.max_block_bytes
+        self.next.max_block_bytes
     }
 
     /// The transactions a block can hold within max_block_bytes, in order. One that would pass
     /// it is left out and the rest still tried: a sender's later ones then fail at their nonce and
     /// are left out by running too.
-    fn within_bytes(&self, txs: Vec<SignedTx>) -> Vec<SignedTx> {
-        let Some(limit) = self.max_block_bytes else {
+    fn within_bytes(txs: Vec<SignedTx>, max_block_bytes: Option<u64>) -> Vec<SignedTx> {
+        let Some(limit) = max_block_bytes else {
             return txs;
         };
         let mut used = 0u64;
@@ -1758,7 +1885,7 @@ impl Chain {
 
     #[document(parent = "Chain", summary = "The base price of gas in the next block, the one on the tip: what a transaction sent now must offer at least.")]
     pub fn next_base_price(&self) -> u256 {
-        self.base_price_after(&self.tip)
+        base_price_after(self.fees(), &self.tip)
     }
 
     #[document(
@@ -1784,13 +1911,6 @@ impl Chain {
         fees.pricing().price(base, &tx.fee).map(|_| fees.priority(base, &tx.fee))
     }
 
-    /// The base price of the block after parent.
-    fn base_price_after(&self, parent: &BlockHeader) -> u256 {
-        match self.fees() {
-            Some(fees) => fees.pricing().next_price(parent.base_price, parent.gas_used, fees.block_gas_limit()),
-            None => u256::ZERO,
-        }
-    }
 
     /// What a block's transactions run with.
     /// The headers consensus looks at when checking the block after parent: the parent first,
@@ -1885,9 +2005,9 @@ impl Chain {
         Ok(config.voters(state, config.epoch_of(height))?.map(|set| set.members).unwrap_or_default())
     }
 
-    fn runner(&self) -> Runner<'_> {
+    fn runner<'a>(&'a self, rules: &'a Rules) -> Runner<'a> {
         Runner {
-            rules: &self.rules,
+            rules,
             vm: &self.vm,
             workers: &self.workers,
         }
@@ -1938,25 +2058,14 @@ impl Chain {
             return Err(ImportError::Invalid(BlockError::TxRoot));
         }
 
-        if let Some(limit) = self.max_block_bytes {
-            let bytes = txs_bytes(&block.txs);
-
-            if bytes > limit {
-                return Err(ImportError::Invalid(BlockError::TooBig { bytes, limit }));
-            }
-        }
-
         if block.header.proof_root != Block::proof_root(self.hash, &block.proofs) {
             return Err(ImportError::Invalid(BlockError::ProofRoot));
         }
 
-        let base_price = self.base_price_after(&parent.header);
-
-        if block.header.base_price != base_price {
-            return Err(ImportError::Invalid(BlockError::BasePrice {
-                expected: base_price,
-                got: block.header.base_price,
-            }));
+        // On the tip, its size and base price check against what the next block runs with. On a
+        // branch, they wait for running it, on its parent's state, which decides them there.
+        if parent_id == self.tip.id() {
+            check_size_and_price(block, &parent.header, &self.next)?;
         }
 
         let consensus = self.consensus_at(block.header.height)?;
@@ -2225,8 +2334,8 @@ impl Chain {
 
     /// What a block does to state past its transactions: the producer's reward, and what its
     /// finality proofs pay and record.
-    fn settle(&self, layer: &Arc<State>, block: &Block) -> Result<(), ImportError> {
-        let reward = self.reward.at(block.header.height);
+    fn settle(&self, layer: &Arc<State>, block: &Block, (reward, from): (Reward, u64)) -> Result<(), ImportError> {
+        let reward = reward.since(block.header.height, from);
 
         if reward > u256::ZERO {
             Accounts::new(layer)
@@ -2268,7 +2377,10 @@ impl Chain {
             base_price: block.header.base_price,
             genesis: self.genesis(),
         };
-        let ran = self.runner().run(&layer, &block.txs, &context, Unfit::Refuse, None)?;
+        let params = self.params_in(below, height)?;
+        let parent = stored_header(&*self.db, &block.header.parent)?.ok_or_else(|| missing(&block.header.parent))?.header;
+        check_size_and_price(block, &parent, &params)?;
+        let ran = self.runner(&params.rules).run(&layer, &block.txs, &context, Unfit::Refuse, None)?;
         let receipts = ran.receipts;
 
         if ran.gas_used != block.header.gas_used {
@@ -2278,7 +2390,7 @@ impl Chain {
             }));
         }
 
-        self.settle(&layer, block)?;
+        self.settle(&layer, block, params.reward)?;
 
         let committed: Vec<CommittedReceipt> = receipts.iter().map(CommittedReceipt::of).collect();
 
@@ -2431,6 +2543,33 @@ fn revert(state: &Arc<State>, id: &Hash) -> Result<(), DbError> {
             Some(value) => state.put(entry.column, entry.key, value),
             None => state.delete(entry.column, entry.key),
         }
+    }
+
+    Ok(())
+}
+
+/// The base price of the block after parent, under these fees.
+fn base_price_after(fees: Option<&Fees>, parent: &BlockHeader) -> u256 {
+    match fees {
+        Some(fees) => fees.pricing().next_price(parent.base_price, parent.gas_used, fees.block_gas_limit()),
+        None => u256::ZERO,
+    }
+}
+
+/// A block's size and base price, against what it runs with.
+fn check_size_and_price(block: &Block, parent: &BlockHeader, params: &BlockParams) -> Result<(), ImportError> {
+    if let Some(limit) = params.max_block_bytes {
+        let bytes = txs_bytes(&block.txs);
+
+        if bytes > limit {
+            return Err(ImportError::Invalid(BlockError::TooBig { bytes, limit }));
+        }
+    }
+
+    let base_price = base_price_after(params.rules.fees.as_deref(), parent);
+
+    if block.header.base_price != base_price {
+        return Err(ImportError::Invalid(BlockError::BasePrice { expected: base_price, got: block.header.base_price }));
     }
 
     Ok(())

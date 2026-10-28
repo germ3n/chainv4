@@ -365,13 +365,27 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   a validator's turn is luck per slot; `priority` gives each validator its exact share and a known
   order, and checking a block replays its epoch's heights, `checkpoint_interval` rounds over the
   set. Both weigh an in-turn block 2 and a stepped-in one 1.
-- **Governance changes the consensus, and only that, for now.** With `governance` in genesis,
+- **Governance changes the consensus as finality fixes voters.** With `governance` in genesis,
   `Tx::ApproveChange` from the electorate or the council decides a new consensus, fixed
   `activation_delay` epochs ahead at the next checkpoint; the finality kind and its epochs stay.
   A node started with `--mine` and `--produce` together serves whichever the chain runs. Light
   clients then wait for each epoch's consensus from a light update, on any chain with governance,
   so they follow `activation_delay` epochs behind finality. A chain that switches to a scheme
   nobody produces for stops; have the producers ready first.
+- **Fees, the reward and the limits change from the next block; finality's tunables an epoch
+  boundary ahead.** Each block reads them from its parent's state, so a reorg past the decision
+  takes it back, and a block is never checked by rules decided after it. A finality change runs
+  from `e + activation_delay + 1`, the first epoch whose voters were fixed after the decision.
+  It keeps the kind, the epochs, the genesis voters and the thresholds: light clients check
+  nothing new. A new reward halves from its own first block, not from genesis.
+- **Settings live in `src/params/`, their behaviour with what uses them.** `FeeConfig`,
+  `Reward`, `BlockLimits`, `Limits` and `FinalityConfig` with each kind's config are plain data
+  there, in every build, so a light build decodes every `Change`; `chain` and `vm` re-export them
+  and keep the methods. In a node each finality kind is there only with its feature; a build
+  without `node`, such as the wallet's, has them all.
+- **A decided finality change is a framed encoding.** `FfgConfig::leak` decodes only at the end of
+  a message, as a chain from before it encodes nothing there; inside `Change::Finality` and the
+  kept eras it goes length-prefixed (`Framed`), so what follows still reads.
 - **Mint is for development chains.** Genesis's `minter` may name the development key or
   nobody; a genesis file naming any other address is refused as `BadGenesis`. Coins on a chain
   of value come from block rewards and allocations alone.

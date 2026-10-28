@@ -592,12 +592,12 @@ mod send {
         // A window stays genesis's; nothing to withdraw before approving; the council of one
         // decides at once, so there is nothing to withdraw after either.
         let bootnode = "/ip4/203.0.113.7/udp/4001/quic-v1".to_string();
-        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, version: None }));
+        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, version: None }));
         let nothing = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, version: None }));
+        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, version: None }));
         let decided = send(running.args(TxArgs::WithdrawChange { version: None }));
-        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, federation: None, directory: None, version: None }));
-        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, federation: None, directory: None, version: None }));
+        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, version: None }));
+        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, version: None }));
         let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
         let node = running.stop();
 

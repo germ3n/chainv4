@@ -456,6 +456,9 @@ impl Chain {
     /// Lets finality catch up with the tip, then lets go of the side branches the chain can no
     /// longer follow.
     pub(super) fn tip_moved(&mut self) -> Result<(), DbError> {
+        // What the next block runs with, as the new tip's state decides.
+        self.refresh_params()?;
+
         if let (Some(finality), view) = self.parts() {
             finality.tip_moved(&view)?;
         }

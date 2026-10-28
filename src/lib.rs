@@ -16,6 +16,7 @@ pub mod db;
 pub mod faucet;
 pub mod governance;
 pub mod light;
+pub mod params;
 #[cfg(feature = "node")]
 pub mod mempool;
 #[cfg(feature = "node")]

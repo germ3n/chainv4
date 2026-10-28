@@ -45,7 +45,11 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `vote_reward_source` | Where finality's vote rewards come from: `mint`, new supply, or `fees`, the burned share of every fee, pooled and paid out. Needs `fees`. Left out or `null`, `mint`, and a file from before it keeps its id. `chainv4 genesis --vote-rewards fees` sets it. |
 | `bootnodes` | Where nodes of the chain find their first peers: up to 32 libp2p addresses, such as `/ip4/203.0.113.7/udp/4001/quic-v1`, each named once. Every node dials them while it has fewer peers than `--target-peers`. Fixed with the chain's id; under governance, `approve-change --bootnodes` replaces them on the live chain. Left out or `[]`, none, and a file from before it keeps its id. See [Node](node.md#finding-peers). |
 | `names` | `null` for a chain without names, or the [name registry](names.md#turning-it-on): `suffix`, `prices` by length, `grace_ms` and `max_years`. The dev chains have names under `dev`. Left out, `null`, and a file from before it keeps its id. `chainv4 genesis --names SUFFIX` sets the suffix, `--names none` leaves them out. |
-| `governance` | `null`, or how the chain changes its consensus by transaction: the kind and its settings, by `type`: `electorate` or `council`. Needs finality that votes. Left out or `null`, nothing changes, and a file from before it keeps its id. `chainv4 genesis --governance electorate` sets it. See [Governance](governance.md). |
+| `governance` | `null`, or how the chain changes what genesis set by transaction: the kind and its settings, by `type`: `electorate` or `council`. Needs finality that votes. Left out or `null`, nothing changes, and a file from before it keeps its id. `chainv4 genesis --governance electorate` sets it. See [Governance](governance.md). |
+
+Governance may replace `fees`, `reward`, `tx_limits` with `max_block_bytes`, and finality's
+tunables on a running chain (see [Governance](governance.md#fees)); the file, and the chain's id,
+keep what genesis set.
 
 ### coin
 

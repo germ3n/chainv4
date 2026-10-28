@@ -40,9 +40,9 @@ Where the chain stands:
 | `coin` | The chain's coin as genesis names it: its `symbol` and `decimals`, for showing amounts. |
 | `token_functions` | The functions that make a contract a token on this chain, as genesis names them; `[]` when it keeps no token registry. |
 | `finality` | `null`, or `type`, `epoch`, `checkpoint_interval`, and the `justified` and `finalized` checkpoints, each with `epoch`, `block` and `height`. |
-| `fees` | `null`, or the fee settings as genesis files write them, with `base_price`, what a transaction sent now must offer at least, and `tx_fuel`, the chain's fuel cap per transaction. |
+| `fees` | `null`, or the fee settings in force, governance's or genesis's, as genesis files write them, with `base_price`, what a transaction sent now must offer at least, and `tx_fuel`, the chain's fuel cap per transaction. |
 | `vote_rewards` | Where vote rewards come from: `source` `mint`, or `fees` with the `pool` address and its `balance`. |
-| `max_block_bytes` | The most bytes a block's transactions may take, encoded, or `null` when genesis sets none. |
+| `max_block_bytes` | The most bytes the next block's transactions may take, encoded, as governance or genesis set it, or `null` for none. |
 | `bootnodes` | The chain's bootnodes at the tip: the ones governance decided last, or genesis's. |
 | `swap` | `null`, or `{"contract": …}`: the [swap contract](swaps.md) a node started with `--swap-contract` names, for the wallet and `chainv4 swap`. |
 | `dex` | `null`, or `{"contract": …, "router": …}`, either `null`: the [DEX](dex.md) and the EVM DEX's router a node started with `--dex-contract` and `--dex-router` names. |

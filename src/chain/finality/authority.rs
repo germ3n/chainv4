@@ -12,48 +12,16 @@
 use {
     super::votes::{Electorate, VoteParams, Voters},
     crate::chain::SignerRules,
-    crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::db::{DbError, State},
     crate::registry::signers::{Signer, SignerSet, Signers},
     crate::structs::hash::Hash,
-    crate::structs::u256::{U256Le, u256},
+    crate::structs::u256::u256,
     r#macro::document,
     std::sync::Arc,
-    wincode::{SchemaRead, SchemaWrite},
 };
 
-#[document(
-    summary = "Every parameter of authority finality, set in genesis. The signers are where the chain starts; they change by their own approval.",
-    category = "Finality",
-    see_also = "FinalityConfig, SignerSet, Tx::ApproveSigners",
-)]
-#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct AuthorityConfig {
-    #[document(summary = "Blocks per epoch. Each epoch's first block is its checkpoint.")]
-    pub checkpoint_interval: u64,
-    #[document(summary = "How many blocks on top of a checkpoint before signers vote for it.")]
-    pub vote_depth: u64,
-    #[document(summary = "Epochs before a decided change of signers takes effect. At least 1; larger keeps the signers agreeing across deeper forks.")]
-    pub activation_delay: u64,
-    #[document(summary = "The most signers a set may have.")]
-    pub max_signers: u32,
-    #[document(summary = "The signers from genesis, each counting once: its voting key and the account that speaks for it.")]
-    pub signers: Vec<Signer>,
-    #[document(summary = "How many signers voting for one link justify it: more than half of them, and at most all.")]
-    pub threshold: u32,
-    #[document(summary = "How many signers must approve a change to the set: more than half of them, and at most all.")]
-    pub change_threshold: u32,
-    #[document(summary = "How many epochs an approval of a change counts for, the epoch it was made in included. At least 1. A change is only decided by approvals that still count, so it always reflects what the signers want now.")]
-    pub approval_epochs: u64,
-    #[document(summary = "What every signer in a justification gets when a block carries it, paid to its key's address. With none, blocks carry no proofs.")]
-    #[wincode(with = "U256Le")]
-    pub vote_reward: u256,
-    #[document(summary = "The most justifications one block may carry.")]
-    pub max_proofs_per_block: u32,
-}
-
-impl Hashable for AuthorityConfig {}
+pub use crate::params::finality::AuthorityConfig;
 
 impl AuthorityConfig {
     #[document(

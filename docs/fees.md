@@ -186,3 +186,5 @@ receipts their gas and fee.
   given `--anyway`. The wallet and the explorer show why and ask first.
 - **A chain without fees is bounded by bytes alone,** when its genesis sets `max_block_bytes`.
 - **Fee kinds are not behind cargo features.** Every node has both schedules and both pricings.
+- **Governance replaces fees whole,** from the block after the one that decides them, and can
+  turn them on for a chain launched without (see [Governance](governance.md#fees)).

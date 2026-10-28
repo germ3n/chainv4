@@ -16,7 +16,6 @@
 //! pay too.
 
 use {
-    crate::crypto::hashable::Hashable,
     crate::db::State,
     crate::structs::address::Address,
     crate::structs::tx::{FeeOffer, SignedTx, Tx},
@@ -24,7 +23,6 @@ use {
     crate::vm::{Limits, Vm},
     r#macro::document,
     std::sync::Arc,
-    wincode::{SchemaRead, SchemaWrite},
 };
 
 mod pricing;
@@ -32,27 +30,8 @@ mod schedule;
 #[cfg(test)]
 mod tests;
 
-pub use pricing::{BaseFee, Bid, PricingConfig};
-pub use schedule::{ContractScorer, ScheduleConfig, TX_KINDS, Weighted};
-
-#[document(
-    summary = "Every parameter of a chain's fees, set in genesis.",
-    category = "Fees",
-    see_also = "Genesis, GasSchedule, Pricing, FeeOffer",
-)]
-#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct FeeConfig {
-    #[document(summary = "The most gas one block's transactions may use together. A transaction is only taken while its gas limit fits in what the block has left.")]
-    pub block_gas_limit: u64,
-    #[document(summary = "How much of the base part of every fee is burned, in thousandths: 0 sends it all to the producer, 1000 burns it all. What senders pay above the base price always goes to the producer.")]
-    pub burn_permille: u16,
-    #[document(summary = "The scorer: how much gas a transaction costs.")]
-    pub schedule: ScheduleConfig,
-    #[document(summary = "What gas costs.")]
-    pub pricing: PricingConfig,
-}
-
-impl Hashable for FeeConfig {}
+pub use crate::params::fees::{BaseFee, Bid, ContractScorer, FeeConfig, PricingConfig, ScheduleConfig, Weighted};
+pub use schedule::TX_KINDS;
 
 impl FeeConfig {
     #[document(
@@ -69,7 +48,7 @@ impl FeeConfig {
     }
 
     /// Settings no chain could charge with.
-    pub(in crate::chain) fn problem(&self) -> Option<&'static str> {
+    pub fn problem(&self) -> Option<&'static str> {
         if self.block_gas_limit == 0 {
             return Some("block_gas_limit must be at least 1");
         }

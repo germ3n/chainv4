@@ -24,7 +24,8 @@ use {
 pub(super) struct Gate {
     mempool: Mutex<Mempool>,
     db: Arc<dyn Database>,
-    fees: Option<Arc<Fees>>,
+    /// The fees the next block charges, as the tip's state decides: what governance changes.
+    fees: Mutex<Option<Arc<Fees>>>,
     hash: HashType,
     /// The chain's genesis id, which EIP-712 signatures are bound to.
     genesis: Hash,
@@ -63,6 +64,11 @@ impl Tally {
 }
 
 impl Gate {
+    /// Charges what the next block charges, once the tip moved and governance may have changed it.
+    pub(super) fn set_fees(&self, fees: Option<Arc<Fees>>) {
+        *self.fees.lock().unwrap_or_else(PoisonError::into_inner) = fees;
+    }
+
     pub(super) fn new(
         mempool: Mempool,
         db: Arc<dyn Database>,
@@ -75,7 +81,7 @@ impl Gate {
         Gate {
             mempool: Mutex::new(mempool),
             db,
-            fees,
+            fees: Mutex::new(fees),
             hash,
             genesis,
             syncing: AtomicBool::new(false),
@@ -185,7 +191,8 @@ impl Gate {
         }
 
         let checked = checked.unwrap_or_else(|| tx.verify_on(&self.genesis));
-        Mempool::check(&tx, checked, &State::new(self.db.clone()), self.fees.as_deref())?;
+        let fees = self.fees.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        Mempool::check(&tx, checked, &State::new(self.db.clone()), fees.as_deref())?;
 
         self.mempool().insert(tx)
     }

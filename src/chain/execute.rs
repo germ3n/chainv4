@@ -795,6 +795,10 @@ fn run(
                 Change::Collections(functions) => functions.problem(),
                 Change::Federation(federation) => federation.problem(),
                 Change::Directory(directory) => directory.problem(),
+                Change::Fees(fees) => fees.problem(),
+                Change::Reward(reward) => crate::chain::reward_problem(reward),
+                Change::Limits(limits) => limits.problem(),
+                Change::Finality(finality) => finality.retune_problem(&governance.finality),
             };
 
             if let Some(problem) = problem {
@@ -802,7 +806,8 @@ fn run(
             }
 
             let epoch = height / governance.checkpoint_interval.max(1);
-            let approved = Changes::new(layer).approve(&sender, *version, change.clone(), epoch, governance.approval_epochs, &*governance.governance);
+            let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: governance.finality.activation_delay() };
+            let approved = Changes::new(layer).approve(&sender, *version, change.clone(), at, governance.approval_epochs, &*governance.governance);
 
             (moved(approved.map(|_| ())), Contracted::default())
         }

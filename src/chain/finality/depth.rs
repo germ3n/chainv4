@@ -8,28 +8,15 @@
 use {
     super::{FINALIZED_KEY, Finality, JUSTIFIED_KEY, View},
     crate::chain::{BlockError, ImportError, read_value},
-    crate::crypto::hashable::Hashable,
     crate::db::{Column, DbError, Read, State},
     crate::structs::block::Block,
     crate::structs::hash::Hash,
     crate::structs::vote::Checkpoint,
     r#macro::document,
     std::sync::Arc,
-    wincode::{SchemaRead, SchemaWrite},
 };
 
-#[document(
-    summary = "The one parameter of depth finality, set in genesis.",
-    category = "Finality",
-    see_also = "FinalityConfig",
-)]
-#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct DepthConfig {
-    #[document(summary = "How many blocks must be on top of a block for it to be final. 0 makes every block final as soon as it is the tip, so the chain never reorganizes.")]
-    pub depth: u64,
-}
-
-impl Hashable for DepthConfig {}
+pub use crate::params::finality::DepthConfig;
 
 impl DepthConfig {
     #[document(parent = "DepthConfig", summary = "Development settings: final under 6 blocks.")]
@@ -85,7 +72,12 @@ impl Finality for Depth {
     /// Moves the finalized checkpoint up to depth blocks below the tip, and stores it for readers
     /// such as the API.
     fn tip_moved(&mut self, chain: &View) -> Result<(), DbError> {
-        let height = chain.tip().height.saturating_sub(self.depth);
+        // The depth as governance left it at the tip, every block its own epoch.
+        let depth = match crate::registry::changes::Changes::new(&chain.state()).finality_at(chain.tip().height)? {
+            Some(super::FinalityConfig::Depth(tuned)) => tuned.depth,
+            _ => self.depth,
+        };
+        let height = chain.tip().height.saturating_sub(depth);
 
         if height <= self.finalized.epoch {
             return Ok(());

@@ -22,9 +22,15 @@ What can change today:
 - **What makes a collection:** the functions NFT and multi-token collections export, which turns
   the collection registry on for a chain whose genesis kept none (see
   [Collections](#collections)).
- The finality kind, and the parameters that define
-its epochs, stay what genesis says: the electorate that approves is finality's own, and every
-light client's epoch arithmetic rests on them.
+- **Fees, the block reward and the limits:** the whole fee configuration, what a block mints and
+  how it halves, and what a transaction and a block may use (see [Fees](#fees),
+  [Reward](#reward) and [Limits](#limits)).
+- **Finality's tunables:** how deep votes wait, what they pay, the staking rules and the
+  inactivity leak (see [Finality](#finality)).
+
+The finality kind, and the parameters that define its epochs, stay what genesis says: the
+electorate that approves is finality's own, and every light client's epoch arithmetic rests on
+them.
 
 ## The kinds
 
@@ -50,7 +56,7 @@ through finality's light updates; genesis refuses it with depth finality or none
 
 1. **Proposing and approving** are one transaction: `Tx::ApproveChange` names the `version` of
    the decision it changes, how many changes of any kind were decided before, and the `change`:
-   `consensus` with a whole new consensus, or `bootnodes` with a whole new list. `chainv4 send
+   `consensus` with a whole new consensus, or any of the others below, each whole. `chainv4 send
    --key account.key approve-change --consensus '{"type":"staked","slot_ms":2000,"schedule":"draw"}'`
    sends one, taking the version from the node. The consensus must fit the chain's finality as genesis's must: `rotating` needs
    authority finality, `staked` needs FFG; `pow` keeps the chain's window, if genesis set one.
@@ -105,6 +111,8 @@ chainv4 send --key member.key approve-change --name-prices 100000000000000000000
 - **The list is checked as genesis's is:** 1 to 61 prices, in the smallest unit, the first for
   names of 3 characters and the last for every length from its own on. A chain without names
   refuses the change.
+- **Names already held keep the years they paid for.** `GET /names` shows the prices in force
+  and genesis's.
 
 ## Federation
 
@@ -172,8 +180,78 @@ chainv4 send --key member.key approve-change --collections '{"nft":["owner_of",â
   register by it. Contracts deployed before join at their next upgrade or refresh.
 - **The lists are checked as genesis's are:** each function named once in each list.
   `GET /status` shows what is in force, in `collections`.
-- **Names already held keep the years they paid for.** `GET /names` shows the prices in force
-  and genesis's.
+
+## Fees
+
+A change replaces the whole [fee configuration](fees.md), genesis's `fees` or the last decided,
+in the shape genesis writes it (see [Genesis](genesis.md#fees)):
+
+```sh
+chainv4 send --key member.key approve-change --fees '{"block_gas_limit":50000000,"burn_permille":500,"schedule":{"type":"weighted","per_tx":1000,"per_byte":10,"per_code_byte":20,"fuel_per_gas":1},"pricing":{"type":"base_fee","initial":"1000000000","min":"10000000","elasticity":2,"change_denominator":8}}'
+```
+
+- **The same ballot and version** as the other kinds.
+- **It takes effect from the next block:** the block after the one that decides it is checked,
+  priced and charged by it. Under `base_fee` pricing, that block's base price follows from its
+  parent's by the new rules; `initial` only starts a chain.
+- **A chain without fees gets them** from a change; no change takes them away again.
+- **It is checked as genesis's is.** `GET /status` shows what is in force, in `fees`.
+
+## Reward
+
+A change replaces what a block mints for its producer:
+
+```sh
+chainv4 send --key member.key approve-change --reward '{"initial":"25000000000000000000","halving_interval":210000}'
+```
+
+- **It takes effect from the next block,** and halves from there: the block after the decision
+  mints `initial`, and `halving_interval` counts from it, not from genesis. `null` never halves.
+- **Blocks before keep what they minted.** The schedule is genesis's until the deciding block,
+  the decided one after; the API's `reward` on a block reads it at the block's height.
+- **A halving interval of 0 is refused,** as in genesis.
+
+## Limits
+
+A change replaces genesis's `tx_limits` and `max_block_bytes` together:
+
+```sh
+chainv4 send --key member.key approve-change --limits '{"tx_limits":{"fuel":10000000,"memory":67108864},"max_block_bytes":4194304}'
+```
+
+- **It takes effect from the next block:** the transactions in it run under the new limits, and
+  its size is checked by them. `max_block_bytes: null` bounds blocks by gas alone.
+- **A change no contract could run under is refused:** fuel below 100,000, memory below 1 MiB, or
+  `max_block_bytes` outside 1 MiB to 6 MiB, as genesis's.
+
+## Finality
+
+A change retunes finality, given as a whole genesis `finality` object (see
+[Genesis](genesis.md#finality)):
+
+```sh
+chainv4 send --key member.key approve-change --finality "$(jq -c '.finality | .min_bond = "500000000000000000000"' genesis.json)"
+```
+
+- **Only what may change, changes.** The kind, `checkpoint_interval`, `activation_delay`, the
+  genesis validators or signers and the thresholds must be genesis's; a change that moves any of
+  them is refused. Under FFG that leaves `vote_depth`, the bond rules (`min_bond`,
+  `withdrawal_delay`, `reporter_divisor`, `max_validators`), `vote_reward`,
+  `max_proofs_per_block` and the `leak`; under authority, `vote_depth`, `max_signers`,
+  `approval_epochs`, `vote_reward` and `max_proofs_per_block`.
+- **It takes effect an epoch boundary ahead:** decided in epoch e, it runs from epoch
+  `e + activation_delay + 1`, whose voters are already fixed by then, so every branch that split
+  off after it counts votes and pays them the same. Each era is kept in `change:finality`, so a
+  block of an older epoch is checked by the tuning of its own.
+- **The leak and staking rules** a checkpoint applies are its epoch's; so are `vote_depth`, what
+  a vote pays and how many proofs a block carries.
+- **Light clients need nothing new:** the thresholds and validator sets they check stay as they
+  were, and the sets reach them as before.
+
+Fees, reward, limits and finality each keep their own state entry (`change:fees`,
+`change:reward`, `change:limits`, `change:finality`), read for each block from its parent's state,
+so a reorg past a decision undoes it with the rest. The mempool, the producer and the API read
+what the tip's next block runs by.
 
 ## What the chain does with it
 
@@ -208,8 +286,8 @@ chainv4 send --key member.key approve-change --collections '{"nft":["owner_of",â
   `pow` needs miners. Nobody checks that for you: a chain that switches to a scheme nobody serves
   stops until someone does, and governance cannot move it back without blocks to carry the
   approvals.
-- **The finality kind does not change,** nor `checkpoint_interval` or `activation_delay`.
-  Changing finality's other parameters, and switching its kind, are batches of their own.
+- **The finality kind does not change,** nor `checkpoint_interval` or `activation_delay`;
+  switching the kind is a batch of its own.
 - **A genesis file from before governance keeps its id:** `governance` encodes as nothing while
   unset, and so does the governance kind in the light parameters. `bootnodes`, after it, does the
   same while empty.

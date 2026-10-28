@@ -959,6 +959,7 @@ impl Node {
     /// Brings the mempool in line with the tip: what landed, what can no longer pay and what has
     /// offered too little for too long leave it.
     fn prune_mempool(&self) -> Result<(), NodeError> {
+        self.gate.set_fees(self.chain.shared_fees());
         let dropped = self.gate.mempool().prune(&self.chain.state(), self.chain.fees(), self.chain.next_base_price())?;
 
         if dropped > 0 {

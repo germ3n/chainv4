@@ -3,8 +3,7 @@
 //! chain what to charge.
 
 use {
-    crate::structs::unset::UnsetList,
-    super::{GasSchedule, Scoring},
+    super::{ContractScorer, GasSchedule, ScheduleConfig, Scoring, Weighted},
     crate::crypto::hashable::Hashable,
     crate::db::State,
     crate::registry::contracts::Contracts,
@@ -15,29 +14,7 @@ use {
     crate::vm::{CallContext, Limits, selector},
     r#macro::document,
     std::sync::Arc,
-    wincode::{SchemaRead, SchemaWrite},
 };
-
-#[document(
-    summary = "Which scorer a chain runs, and its parameters.",
-    category = "Fees",
-    see_also = "FeeConfig, GasSchedule",
-    note = "Tags are pinned, so encodings match across builds.",
-)]
-#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-#[wincode(tag_encoding = "u8")]
-pub enum ScheduleConfig {
-    #[document(summary = "Gas by what a transaction is, how big it is and the fuel it burns.")]
-    #[wincode(tag = 0)]
-    Weighted(Weighted),
-    #[document(summary = "Weighted, then a contract says what the sender is charged.")]
-    #[wincode(tag = 1)]
-    Contract(ContractScorer),
-}
-
-impl Hashable for ScheduleConfig {
-    const TAG_LEN: usize = 1;
-}
 
 impl ScheduleConfig {
     #[document(parent = "ScheduleConfig", summary = "The kind's name: weighted or contract.")]
@@ -63,25 +40,6 @@ impl ScheduleConfig {
         }
     }
 }
-
-#[document(
-    summary = "A scorer that weighs a transaction: a fixed cost, a cost per byte of it, a cost per byte of code it deploys or upgrades to, which every node keeps, and gas for the fuel its contracts burn.",
-    category = "Fees",
-    see_also = "ScheduleConfig, GasSchedule",
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct Weighted {
-    #[document(summary = "Gas every transaction costs.")]
-    pub per_tx: u64,
-    #[document(summary = "Gas per byte of the signed transaction, as it travels and is stored.")]
-    pub per_byte: u64,
-    #[document(summary = "Gas per byte of code a deploy or upgrade stores, on top of per_byte.")]
-    pub per_code_byte: u64,
-    #[document(summary = "How much fuel one gas buys. At least 1.")]
-    pub fuel_per_gas: u64,
-}
-
-impl Hashable for Weighted {}
 
 impl Weighted {
     #[document(
@@ -130,27 +88,6 @@ impl GasSchedule for Weighted {
         gas.saturating_mul(self.fuel_per_gas)
     }
 }
-
-#[document(
-    summary = "A scorer that weighs a transaction as Weighted does, then calls score on a contract to say what the sender is charged, for the kinds of transaction it names, or every kind. The contract can make some transactions cheaper or dearer: by sender, by what they touch, by anything in chain state. Until a contract lives there, or when it fails, the weighted figure stands.",
-    category = "Fees",
-    see_also = "ScheduleConfig, GasSchedule::charge",
-    note = "score is called as score(sender: address, kind: string, target: address, bytes: u64, fuel: u64, gas: u64, failed: bool) and returns the gas to charge as a whole number. kind is the transaction's type as the API names it, such as transfer or call; target is what it is sent to, or the sender. Nothing the call writes or emits is kept, it gets fuel of its own, and what it returns is capped at the transaction's gas limit.",
-)]
-#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct ContractScorer {
-    #[document(summary = "The weights for the gas a transaction uses, which bound what it may run and count against the block's limit.")]
-    pub weights: Weighted,
-    #[document(summary = "The contract whose score function says what to charge.")]
-    pub contract: Address,
-    #[document(summary = "Fuel each score call may burn. The chain pays for it, not the sender.")]
-    pub fuel: u64,
-    #[document(summary = "The kinds of transaction score is called for, as the API names them, such as call or deploy; any other kind is charged what the weights say, with no call. Empty scores every kind. Added after chains launched: empty, it adds nothing to genesis's encoding, so chains from before keep their ids.")]
-    #[wincode(with = "UnsetList")]
-    pub kinds: Vec<String>,
-}
-
-impl Hashable for ContractScorer {}
 
 #[document(
     summary = "Every kind of transaction, as the API and a scorer's kind argument name them.",

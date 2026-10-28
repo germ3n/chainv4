@@ -499,6 +499,17 @@ fn forget(chain: &View, key: Vec<u8>) -> Result<(), DbError> {
     chain.db().commit(state.take_changes())
 }
 
+impl<E: Electorate> Votes<E> {
+    /// What it votes by at an epoch, in this state, and the leak: genesis's settings, or those
+    /// governance decided by then.
+    fn tuned(&self, state: &State, epoch: u64) -> Result<(VoteParams, Option<Leak>), DbError> {
+        Ok(match crate::registry::changes::Changes::new(state).finality_at(epoch)? {
+            Some(config) => (config.vote_params().unwrap_or(self.params), config.leak()),
+            None => (self.params, self.electorate.leak()),
+        })
+    }
+}
+
 impl<E: Electorate> Finality for Votes<E> {
     fn name(&self) -> &'static str {
         self.electorate.name()
@@ -523,15 +534,15 @@ impl<E: Electorate> Finality for Votes<E> {
     /// still votes, for the leak to spare.
     fn apply(&self, state: &Arc<State>, block: &Block) -> Result<(), ImportError> {
         let bad = |why: String| ImportError::Invalid(BlockError::Proof(why));
+        let (params, leak) = self.tuned(state, self.epoch_of(block.header.height))?;
 
-        if block.proofs.len() > self.params.max_proofs_per_block as usize {
-            return Err(bad(format!("more than {} proofs", self.params.max_proofs_per_block)));
+        if block.proofs.len() > params.max_proofs_per_block as usize {
+            return Err(bad(format!("more than {} proofs", params.max_proofs_per_block)));
         }
 
         let validators = Validators::new(state);
         // Bundles are taken from after_epochs epochs without a proven checkpoint, one epoch before
         // the leak starts, so the first leak already sees who voted.
-        let leak = self.electorate.leak();
         let bundling = match leak {
             Some(leak) => self.epoch_of(block.header.height).saturating_sub(validators.proven()?) >= leak.after_epochs,
             None => false,
@@ -605,7 +616,7 @@ impl<E: Electorate> Finality for Votes<E> {
                 validators.mark_proven(target.epoch)?;
             }
 
-            if self.params.vote_reward > u256::ZERO {
+            if params.vote_reward > u256::ZERO {
                 let accounts = Accounts::new(state);
                 let registry = |err| match err {
                     RegistryError::Db(err) => ImportError::Db(err),
@@ -616,10 +627,10 @@ impl<E: Electorate> Finality for Votes<E> {
                 // of its reward as the pool still holds; minted, each gets it whole.
                 for account in paid {
                     let reward = match self.source {
-                        VoteRewardSource::Mint => self.params.vote_reward,
+                        VoteRewardSource::Mint => params.vote_reward,
                         VoteRewardSource::Fees => {
                             let pool = accounts.get(&REWARD_POOL).map_err(ImportError::Db)?.balance;
-                            let reward = self.params.vote_reward.min(pool);
+                            let reward = params.vote_reward.min(pool);
 
                             if reward > u256::ZERO {
                                 accounts.debit(&REWARD_POOL, reward).map_err(registry)?;
@@ -764,7 +775,8 @@ impl<E: Electorate> Finality for Votes<E> {
     }
 
     fn vote_for(&self, chain: &View, voter: &PublicKey) -> Result<Option<Vote>, DbError> {
-        let Some(deep) = chain.tip().height.checked_sub(self.params.vote_depth) else {
+        let (params, _) = self.tuned(&chain.state(), self.epoch_of(chain.tip().height))?;
+        let Some(deep) = chain.tip().height.checked_sub(params.vote_depth) else {
             return Ok(None);
         };
         let epoch = self.epoch_of(deep);
@@ -805,20 +817,21 @@ impl<E: Electorate> Finality for Votes<E> {
     }
 
     fn unpaid_proofs(&self, chain: &View) -> Result<Vec<Justification>, DbError> {
-        let leak = self.electorate.leak();
+        let state = chain.state();
+        // As the block they go in runs them: the next one.
+        let (params, leak) = self.tuned(&state, self.epoch_of(chain.tip().height + 1))?;
 
-        if self.params.vote_reward == u256::ZERO && leak.is_none() {
+        if params.vote_reward == u256::ZERO && leak.is_none() {
             return Ok(Vec::new());
         }
 
-        let state = chain.state();
         let validators = Validators::new(&state);
         let newest = self.justified.epoch;
         let proven = validators.proven()?;
         let mut proofs = Vec::new();
 
         for epoch in newest.saturating_sub(UNPAID_WINDOW).max(1)..=newest {
-            if proofs.len() >= self.params.max_proofs_per_block as usize {
+            if proofs.len() >= params.max_proofs_per_block as usize {
                 break;
             }
 
@@ -826,7 +839,7 @@ impl<E: Electorate> Finality for Votes<E> {
                 continue;
             };
             // Unpaid, under a reward; or unproven, under a leak, so state sees finality move.
-            let wanted = (self.params.vote_reward > u256::ZERO && !validators.paid(epoch)?) || (leak.is_some() && epoch > proven);
+            let wanted = (params.vote_reward > u256::ZERO && !validators.paid(epoch)?) || (leak.is_some() && epoch > proven);
 
             if wanted
                 && let Some(proof) = stored_justification(&**chain.db(), &header.id())?
@@ -848,7 +861,7 @@ impl<E: Electorate> Finality for Votes<E> {
             links.sort_by_key(|((_, target), _)| std::cmp::Reverse(target.epoch));
 
             for ((source, target), tally) in links {
-                if proofs.len() >= self.params.max_proofs_per_block as usize {
+                if proofs.len() >= params.max_proofs_per_block as usize {
                     break;
                 }
 

@@ -3,7 +3,7 @@
 
 use {
     crate::governance::Change,
-    crate::chain::{CommittedReceipt, IndexedEvent, IndexedTx, Reward, TxReceipt, TxStatus},
+    crate::chain::{CommittedReceipt, IndexedEvent, IndexedTx, TxReceipt, TxStatus},
     crate::crypto::hashable::Hashable,
     crate::db::{Column, StateProof},
     crate::crypto::keypair::PublicKey,
@@ -31,7 +31,7 @@ use {
 };
 
 /// A block's id and header, how many transactions it holds, and what it minted for its producer.
-pub fn summary(block: &Block, reward: &Reward) -> Value {
+pub fn summary(block: &Block, reward: &crate::chain::RewardSchedule) -> Value {
     let header = &block.header;
 
     json!({
@@ -54,7 +54,7 @@ pub fn summary(block: &Block, reward: &Reward) -> Value {
 
 /// What a block at a height minted for its producer: the reward schedule's figure, and nothing
 /// for genesis, which no producer made.
-pub fn minted(reward: &Reward, height: u64) -> u256 {
+pub fn minted(reward: &crate::chain::RewardSchedule, height: u64) -> u256 {
     match height {
         0 => u256::ZERO,
         height => reward.at(height),
@@ -97,7 +97,7 @@ pub fn receipt_proof(block: &Block, receipt: &CommittedReceipt, index: usize, co
 
 /// A block this node keeps the header of alone, as one that synced from a snapshot does for those
 /// before it: the summary but for what the body holds, marked pruned, with its seal.
-pub fn pruned(sealed: &SealedHeader, reward: &Reward) -> Value {
+pub fn pruned(sealed: &SealedHeader, reward: &crate::chain::RewardSchedule) -> Value {
     let header = &sealed.header;
 
     json!({
@@ -125,7 +125,7 @@ pub fn pruned(sealed: &SealedHeader, reward: &Reward) -> Value {
 
 /// The summary, the seal and every transaction, each with its receipt when the block is on the
 /// main chain.
-pub fn block(block: &Block, receipts: &[Option<TxReceipt>], hash: HashType, reward: &Reward) -> Value {
+pub fn block(block: &Block, receipts: &[Option<TxReceipt>], hash: HashType, reward: &crate::chain::RewardSchedule) -> Value {
     let mut value = summary(block, reward);
     value["seal"] = seal(&block.seal);
     value["txs"] = block
@@ -255,7 +255,7 @@ pub fn dry_run(ran: &crate::chain::DryRun) -> Value {
 
 /// What a streaming node did: the event's name, and its data.
 #[cfg(feature = "stream")]
-pub fn node_event(event: &crate::node::NodeEvent, hash: HashType, reward: &Reward) -> (&'static str, Value) {
+pub fn node_event(event: &crate::node::NodeEvent, hash: HashType, reward: &crate::chain::RewardSchedule) -> (&'static str, Value) {
     use crate::node::NodeEvent;
 
     match event {
@@ -529,6 +529,10 @@ pub fn change(change: &Change) -> Value {
         Change::Collections(functions) => json!({ "collections": { "nft": functions.nft, "multi": functions.multi } }),
         Change::Federation(federation) => json!({ "federation": crate::cli::genesis::federation_json(federation) }),
         Change::Directory(directory) => json!({ "directory": crate::cli::genesis::directory_json(directory) }),
+        Change::Fees(fees) => json!({ "fees": crate::cli::genesis::fees_json(fees) }),
+        Change::Reward(reward) => json!({ "reward": crate::cli::genesis::reward_json(reward) }),
+        Change::Limits(limits) => json!({ "limits": crate::cli::genesis::limits_json(limits) }),
+        Change::Finality(finality) => json!({ "finality": crate::cli::genesis::finality_json(finality) }),
     }
 }
 

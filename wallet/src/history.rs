@@ -164,7 +164,7 @@ fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::Slash { .. }, _) => "Reported a double vote".to_string(),
         (Tx::ApproveSigners { version, .. }, _) => format!("Approved signers v{version}"),
         (Tx::WithdrawApproval { version }, _) => format!("Withdrew approval of signers v{version}"),
-        (Tx::ApproveChange { version, .. }, _) => format!("Approved a change from v{version}"),
+        (Tx::ApproveChange { version, change }, _) => format!("Approved a {} change from v{version}", change.name().replace('_', " ")),
         (Tx::WithdrawChange { version }, _) => format!("Withdrew approval of a change from v{version}"),
         (Tx::Name { name, action }, _) => match action {
             NameAction::Register { years } => format!("Registered the name {name} for {years} year{}", if *years == 1 { "" } else { "s" }),
@@ -244,6 +244,50 @@ mod tests {
                 height: 9,
                 final_: true,
             },
+        }
+    }
+
+    #[test]
+    fn changes_to_fees_the_reward_limits_and_finality_read_back_without_the_node() {
+        use chainv4::governance::Change;
+        use chainv4::params::fees::{Bid, FeeConfig, PricingConfig, ScheduleConfig, Weighted};
+        use chainv4::params::finality::{DepthConfig, FfgConfig, FinalityConfig};
+        use chainv4::params::{BlockLimits, Limits, Reward};
+        use chainv4::registry::validators::Leak;
+
+        let ffg = FfgConfig {
+            checkpoint_interval: 8,
+            vote_depth: 3,
+            min_bond: u256::new(500),
+            activation_delay: 2,
+            withdrawal_delay: 64,
+            reporter_divisor: 16,
+            max_validators: 1_000,
+            vote_reward: u256::new(1),
+            max_proofs_per_block: 4,
+            validators: Vec::new(),
+            leak: Some(Leak { after_epochs: 4, permille: 10 }),
+        };
+        let changes = [
+            (Change::Fees(FeeConfig {
+                block_gas_limit: 50_000_000,
+                burn_permille: 500,
+                schedule: ScheduleConfig::Weighted(Weighted { per_tx: 1_000, per_byte: 10, per_code_byte: 20, fuel_per_gas: 1 }),
+                pricing: PricingConfig::Bid(Bid { min_price: u256::new(7) }),
+            }), "Approved a fees change from v3"),
+            (Change::Reward(Reward { initial: u256::new(25), halving_interval: Some(210_000) }), "Approved a reward change from v3"),
+            (Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 64 << 20 }, max_block_bytes: None }), "Approved a limits change from v3"),
+            (Change::Finality(FinalityConfig::Ffg(ffg)), "Approved a finality change from v3"),
+            (Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 })), "Approved a finality change from v3"),
+        ];
+
+        for (change, said) in changes {
+            let signed = SignedTx::sign(Tx::ApproveChange { version: 3, change: change.clone() }, 4, FeeOffer::NONE, &Keypair::development());
+            let back: SignedTx = wincode::deserialize(&wincode::serialize(&signed).expect("encodes")).expect("decodes in a light build");
+
+            assert_eq!(back, signed);
+            assert!(matches!(&back.tx, Tx::ApproveChange { change: read, .. } if *read == change));
+            assert_eq!(Checked::of(&landed(back.tx, CommittedOutcome::Done, Vec::new())).action, said);
         }
     }
 

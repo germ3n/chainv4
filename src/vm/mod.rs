@@ -30,6 +30,7 @@ pub mod wasm;
 #[cfg(feature = "evm")]
 pub mod evm;
 
+pub use crate::params::Limits;
 pub use host::{Host, MAX_CALL_DEPTH, MAX_EVENTS, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_SCAN, MAX_VALUE_LEN, Space};
 pub use layout::{Access, Declared, Entry, Field, Kind, Layout, Shape, Typed, TypedField};
 
@@ -183,19 +184,6 @@ pub mod cost {
     /// reads them in order.
     pub const STORAGE_SCAN: u64 = 100;
     pub const STORAGE_SCAN_ENTRY: u64 = 40;
-}
-
-#[document(
-    summary = "What one call may use. Running out of either stops the contract.",
-    category = "VM",
-    see_also = "ScriptEngine::run, Host::call",
-)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, wincode::SchemaWrite, wincode::SchemaRead)]
-pub struct Limits {
-    #[document(summary = "Instruction budget, charged per instruction by the engine and per byte by host operations that do bulk work. A call to another contract spends from the caller's budget.")]
-    pub fuel: u64,
-    #[document(summary = "Most bytes one call's engine may allocate. Each contract in a chain of calls gets its own.")]
-    pub memory: usize,
 }
 
 #[document(

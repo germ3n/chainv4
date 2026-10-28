@@ -224,6 +224,18 @@ pub enum Change {
     #[document(summary = "A new directory, replacing genesis's or the last decided: the contracts the chain announces, the bridges' gateways and Gateway.sol on each EVM chain, the swap contract, the DEX and its router, and the NFT factory. What the apps and tools trust from the block that decides it on; it never changes the federation's version.")]
     #[wincode(tag = 5)]
     Directory(crate::registry::directory::Directory),
+    #[document(summary = "New fees, replacing genesis's or the last decided, or turning them on for a chain without: the block gas limit, the burned share, the gas schedule and the base price's rules. They apply from the block after the one that decides them; the base price carries on from where it was.")]
+    #[wincode(tag = 6)]
+    Fees(crate::params::fees::FeeConfig),
+    #[document(summary = "A new block reward, replacing genesis's or the last decided: initial from the block after the one that decides it, halving every halving_interval blocks counted from there.")]
+    #[wincode(tag = 7)]
+    Reward(crate::params::Reward),
+    #[document(summary = "New limits, replacing genesis's or the last decided: a transaction's fuel and memory, and max_block_bytes. They apply from the block after the one that decides them.")]
+    #[wincode(tag = 8)]
+    Limits(crate::params::BlockLimits),
+    #[document(summary = "Finality's tunable settings, as the chain's whole finality config with only those changed: under FFG the vote depth, minimum bond, withdrawal delay, reporter divisor, most validators, vote reward, proofs per block and the leak; under authority the vote depth, most signers, approval epochs, vote reward and proofs per block; under depth the depth. Fixed for the epoch activation_delay + 1 after the one that decides it, so no epoch changes rules halfway.")]
+    #[wincode(tag = 9)]
+    Finality(#[wincode(with = "crate::structs::unset::Framed<crate::params::finality::FinalityConfig>")] crate::params::finality::FinalityConfig),
 }
 
 #[document(summary = "The most bootnodes genesis or a change may name.", category = "Governance", see_also = "Change::Bootnodes, Genesis::bootnodes")]
@@ -255,7 +267,7 @@ impl Hashable for Change {
 }
 
 impl Change {
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections, federation or directory.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits or finality.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
@@ -264,6 +276,10 @@ impl Change {
             Change::Collections(_) => "collections",
             Change::Federation(_) => "federation",
             Change::Directory(_) => "directory",
+            Change::Fees(_) => "fees",
+            Change::Reward(_) => "reward",
+            Change::Limits(_) => "limits",
+            Change::Finality(_) => "finality",
         }
     }
 }
@@ -271,6 +287,39 @@ impl Change {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "finality-ffg")]
+    #[test]
+    fn a_change_of_finality_crosses_the_wire_with_its_leak_or_without() {
+        use crate::chain::{FfgConfig, FinalityConfig};
+        use crate::registry::validators::Leak;
+        use crate::structs::tx::{FeeOffer, SignedTx, Tx};
+
+        let config = |leak: Option<Leak>| {
+            FinalityConfig::Ffg(FfgConfig {
+                checkpoint_interval: 8,
+                vote_depth: 1,
+                min_bond: u256::new(100),
+                activation_delay: 2,
+                withdrawal_delay: 3,
+                reporter_divisor: 4,
+                max_validators: 10,
+                vote_reward: u256::ZERO,
+                max_proofs_per_block: 4,
+                validators: Vec::new(),
+                leak,
+            })
+        };
+
+        // The leak reads only at a message's end; framed, it reads in the middle of a transaction.
+        for leak in [None, Some(Leak { after_epochs: 4, permille: 10 })] {
+            let tx = Tx::ApproveChange { version: 3, change: Change::Finality(config(leak)) };
+            let signed = SignedTx::sign(tx, 7, FeeOffer::NONE, &crate::crypto::keypair::Keypair::development());
+            let read: SignedTx = wincode::deserialize(&wincode::serialize(&signed).unwrap()).unwrap();
+
+            assert_eq!(read, signed);
+        }
+    }
 
     #[test]
     fn a_chains_bootnodes_are_a_short_list_of_addresses_each_named_once() {

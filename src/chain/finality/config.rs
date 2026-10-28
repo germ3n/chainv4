@@ -9,11 +9,11 @@
 )]
 
 #[cfg(feature = "finality-authority")]
-use super::authority::{self, AuthorityConfig};
+use super::authority::{self};
 #[cfg(feature = "finality-authority")]
 use crate::registry::signers::Signers;
 #[cfg(feature = "finality-depth")]
-use super::depth::{Depth, DepthConfig};
+use super::depth::Depth;
 #[cfg(feature = "finality-ffg")]
 use super::ffg::{self, FfgConfig};
 #[cfg(any(feature = "finality-ffg", feature = "finality-authority"))]
@@ -21,41 +21,14 @@ use super::votes::Votes;
 use {
     super::{Finality, View},
     crate::chain::{SignerRules, StakingRules, VoteRewardSource},
-    crate::crypto::hashable::Hashable,
     crate::crypto::keypair::PublicKey,
     crate::db::{DbError, State},
     crate::registry::validators::ValidatorSet,
     crate::structs::hash::Hash,
     r#macro::document,
-    wincode::{SchemaRead, SchemaWrite},
 };
 
-#[document(
-    summary = "Which finality a chain runs, and every parameter of it. Part of genesis, so every node agrees on it; nothing about finality is fixed in code.",
-    category = "Finality",
-    see_also = "Genesis, Finality, FfgConfig, AuthorityConfig, DepthConfig",
-    note = "Each kind sits behind its own cargo feature, finality-ffg, finality-authority and finality-depth, all on by default. Tags are pinned, so encodings match across builds.",
-)]
-#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-#[wincode(tag_encoding = "u8")]
-pub enum FinalityConfig {
-    #[document(summary = "Casper FFG-style: validators bond on chain and vote on checkpoints. Two thirds by bond justify, a justified direct child finalizes its parent, and cheaters lose their bond.")]
-    #[cfg(feature = "finality-ffg")]
-    #[wincode(tag = 0)]
-    Ffg(FfgConfig),
-    #[document(summary = "The same votes, from signers genesis names, a threshold of them justifying, who change by their own approval. No bonds: a signer that signs conflicting votes is thrown out instead of slashed.")]
-    #[cfg(feature = "finality-authority")]
-    #[wincode(tag = 1)]
-    Authority(AuthorityConfig),
-    #[document(summary = "No votes: a block is final once enough blocks are on top of it on the main chain.")]
-    #[cfg(feature = "finality-depth")]
-    #[wincode(tag = 2)]
-    Depth(DepthConfig),
-}
-
-impl Hashable for FinalityConfig {
-    const TAG_LEN: usize = 1;
-}
+pub use crate::params::finality::FinalityConfig;
 
 impl FinalityConfig {
     #[document(parent = "FinalityConfig", summary = "The names of the kinds this build has, as genesis files spell them.")]
@@ -136,6 +109,51 @@ impl FinalityConfig {
         }
     }
 
+    /// What its votes run by: blocks per epoch, the vote depth, the vote reward and proofs per
+    /// block; None for a kind without votes.
+    pub(super) fn vote_params(&self) -> Option<super::votes::VoteParams> {
+        match *self {
+            #[cfg(feature = "finality-ffg")]
+            FinalityConfig::Ffg(ref config) => Some(super::votes::VoteParams {
+                checkpoint_interval: config.checkpoint_interval,
+                vote_depth: config.vote_depth,
+                vote_reward: config.vote_reward,
+                max_proofs_per_block: config.max_proofs_per_block,
+            }),
+            #[cfg(feature = "finality-authority")]
+            FinalityConfig::Authority(ref config) => Some(super::votes::VoteParams {
+                checkpoint_interval: config.checkpoint_interval,
+                vote_depth: config.vote_depth,
+                vote_reward: config.vote_reward,
+                max_proofs_per_block: config.max_proofs_per_block,
+            }),
+            #[cfg(feature = "finality-depth")]
+            FinalityConfig::Depth(_) => None,
+        }
+    }
+
+    /// FFG's inactivity leak, if it has one; no other kind leaks.
+    pub(super) fn leak(&self) -> Option<crate::registry::validators::Leak> {
+        match *self {
+            #[cfg(feature = "finality-ffg")]
+            FinalityConfig::Ffg(ref config) => config.leak,
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    #[document(parent = "FinalityConfig", summary = "Epochs before what is decided for voters takes effect: activation_delay under ffg and authority, 0 under depth.")]
+    pub fn activation_delay(&self) -> u64 {
+        match *self {
+            #[cfg(feature = "finality-ffg")]
+            FinalityConfig::Ffg(ref config) => config.activation_delay,
+            #[cfg(feature = "finality-authority")]
+            FinalityConfig::Authority(ref config) => config.activation_delay,
+            #[cfg(feature = "finality-depth")]
+            FinalityConfig::Depth(_) => 0,
+        }
+    }
+
     #[document(parent = "FinalityConfig", summary = "The epoch a height falls in.")]
     pub fn epoch_of(&self, height: u64) -> u64 {
         height / self.checkpoint_interval().max(1)
@@ -194,6 +212,37 @@ impl FinalityConfig {
             FinalityConfig::Authority(_) => Ok(Signers::new(state).set(epoch)?.map(|set| set.validators())),
             #[cfg(feature = "finality-depth")]
             FinalityConfig::Depth(_) => Ok(None),
+        }
+    }
+
+    #[document(
+        parent = "FinalityConfig",
+        summary = "Why governance cannot put this in genesis's place, as Change::Finality: another kind, another checkpoint_interval or activation_delay, which the epochs and the fixed-ahead sets rest on, other genesis validators or signers, which history keeps, or other thresholds, which the signers change by their own approval; or settings no chain could finalize with.",
+        params = { genesis = "The chain's finality from genesis." },
+    )]
+    pub fn retune_problem(&self, genesis: &FinalityConfig) -> Option<&'static str> {
+        let kept = match (self, genesis) {
+            #[cfg(feature = "finality-ffg")]
+            (FinalityConfig::Ffg(new), FinalityConfig::Ffg(old)) => {
+                new.checkpoint_interval == old.checkpoint_interval && new.activation_delay == old.activation_delay && new.validators == old.validators
+            }
+            #[cfg(feature = "finality-authority")]
+            (FinalityConfig::Authority(new), FinalityConfig::Authority(old)) => {
+                new.checkpoint_interval == old.checkpoint_interval
+                    && new.activation_delay == old.activation_delay
+                    && new.signers == old.signers
+                    && new.threshold == old.threshold
+                    && new.change_threshold == old.change_threshold
+            }
+            #[cfg(feature = "finality-depth")]
+            (FinalityConfig::Depth(_), FinalityConfig::Depth(_)) => true,
+            #[allow(unreachable_patterns)]
+            _ => return Some("a change keeps the chain's kind of finality"),
+        };
+
+        match kept {
+            false => Some("a change keeps checkpoint_interval, activation_delay, the genesis validators or signers and the thresholds as genesis has them"),
+            true => self.problem(),
         }
     }
 

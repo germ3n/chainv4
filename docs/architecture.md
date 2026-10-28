@@ -17,7 +17,8 @@ the [wallet](wallet.md) runs its light client too.
 | Chain | `src/chain/` | The blocks, which branch is the main chain, and the rules blocks run under. |
 | Consensus | `src/consensus/` | Who may produce, how blocks are sealed, and how much each weighs. |
 | Finality | `src/chain/finality/` | When blocks can no longer come off. |
-| Governance | `src/governance/` | Who may change the consensus of a running chain, and what their approvals must weigh. |
+| Governance | `src/governance/` | Who may change what genesis set on a running chain, and what their approvals must weigh. |
+| Parameters | `src/params/` | The settings genesis fixes and governance may replace, the fees, the reward, the limits and finality, as plain data in every build, so the wallet and the explorer decode any change; what the node does with them stays in `src/chain/`. |
 | Fees | `src/chain/fees/` | What transactions pay, and the block gas limit. |
 | Registries | `src/registry/` | Accounts, contracts, validators, signers and governance's changes, read and written in state layers. |
 | VM | `src/vm/` | Runs contracts: Luau scripts and WebAssembly modules. |
