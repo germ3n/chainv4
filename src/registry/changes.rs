@@ -28,6 +28,15 @@ const REWARD: &[u8] = b"change:reward";
 const LIMITS: &[u8] = b"change:limits";
 const FINALITY: &[u8] = b"change:finality";
 const UPGRADE: &[u8] = b"change:upgrade";
+const NAME: &[u8] = b"change:name";
+
+/// The chain's name in force, as a state value.
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+struct ChainName {
+    name: String,
+}
+
+impl Hashable for ChainName {}
 
 #[document(
     summary = "Where an approval is made: its block's height and epoch, and how many epochs ahead finality fixes what is decided, which Change::Finality takes effect after.",
@@ -315,6 +324,16 @@ impl<'a> Changes<'a> {
         self.state.get_value(Column::Validators, REWARD)
     }
 
+    #[document(parent = "Changes", summary = "The chain's name in force: genesis's, written as the chain starts, or the one governance decided last; None for a chain with neither.")]
+    pub fn name(&self) -> Result<Option<String>, DbError> {
+        Ok(self.state.get_value::<ChainName>(Column::Validators, NAME)?.map(|chain| chain.name))
+    }
+
+    #[document(parent = "Changes", summary = "Writes a name as the chain's in force: genesis's as the chain starts, or one governance decided.")]
+    pub fn write_name(&self, name: &str) {
+        self.state.put_value(Column::Validators, NAME.to_vec(), &ChainName { name: name.to_string() });
+    }
+
     #[document(parent = "Changes", summary = "The upgrade governance decided last, or None while it decided none: from its height on, nodes older than its version stop.")]
     pub fn upgrade(&self) -> Result<Option<crate::structs::version::Upgrade>, DbError> {
         self.state.get_value(Column::Validators, UPGRADE)
@@ -457,6 +476,7 @@ impl<'a> Changes<'a> {
             Change::Limits(limits) => self.limits()?.as_ref() == Some(limits),
             Change::Finality(config) | Change::SwitchFinality { config, .. } => self.finality_eras()?.eras.last().map(|era| &era.config) == Some(config),
             Change::Upgrade(upgrade) => self.upgrade()?.as_ref() == Some(upgrade),
+            Change::Name(name) => self.name()?.as_ref() == Some(name),
         };
 
         if same {
@@ -528,6 +548,12 @@ impl<'a> Changes<'a> {
             }
             Change::Limits(limits) => {
                 self.state.put_value(Column::Validators, LIMITS.to_vec(), &limits);
+
+                decided.consensus
+            }
+            // A name only tells the apps what to call the chain.
+            Change::Name(name) => {
+                self.write_name(&name);
 
                 decided.consensus
             }
@@ -700,6 +726,23 @@ mod tests {
 
         assert_eq!(changes.consensus_for(5).unwrap(), Some(consensus));
         assert_eq!(changes.consensus_for(2).unwrap(), Some(pow()));
+    }
+
+    #[test]
+    fn a_name_is_decided_on_the_ballot_in_place_of_genesis_s() {
+        let state = State::new(Arc::new(MemoryDb::default()));
+        let changes = Changes::new(&state);
+        changes.write_genesis(&pow(), 2).unwrap();
+        changes.write_name("chainv4 testnet");
+        let renamed = Change::Name("chainv4 mainnet".to_string());
+
+        assert_eq!(changes.approve(&member(1), 0, Change::Name("chainv4 testnet".to_string()), at(1), 4, &Weighted), Err(RegistryError::SameChange));
+
+        changes.approve(&member(1), 0, renamed.clone(), at(1), 4, &Weighted).unwrap();
+        assert_eq!(changes.name().unwrap().as_deref(), Some("chainv4 testnet"), "genesis's stands until decided");
+        assert_eq!(changes.approve(&member(2), 0, renamed, at(1), 4, &Weighted), Ok(ChangeApproved::DecidedChange(1)));
+        assert_eq!(changes.name().unwrap().as_deref(), Some("chainv4 mainnet"));
+        assert_eq!(changes.decided().unwrap().consensus, pow(), "the consensus stays");
     }
 
     #[test]

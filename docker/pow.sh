@@ -35,6 +35,8 @@
 #
 #   POW_HOME       where the key, genesis, this machine's chain and binary live
 #   SYMBOL         the coin's ticker, for init: DEV unless set
+#   CHAIN_NAME     the chain's name, for init and regenesis, as the apps show it: chainv4
+#                  testnet unless set
 #   NAMES          the suffix of the names init or regenesis gives the chain, such as dev for
 #                  alice.dev: SYMBOL in lower case unless set; none for a chain without names
 #   FINALITY       init's --finality; GOVERNANCE its --governance
@@ -210,15 +212,16 @@ make_genesis() {
     chainv4=$1 finality=$2 governance=$3 address=$4 voter=$5
     names=${NAMES:-$(printf %s "${SYMBOL:-DEV}" | tr '[:upper:]' '[:lower:]')}
     "$chainv4" genesis --consensus pow --finality "$finality" --governance "$governance" --fees base-fee --names "$names" --out "$home/genesis.json" > /dev/null
-    python3 -I - "$home/genesis.json" "$address" "${SYMBOL:-DEV}" "$voter" <<'EOF'
+    python3 -I - "$home/genesis.json" "$address" "${SYMBOL:-DEV}" "$voter" "${CHAIN_NAME:-chainv4 testnet}" <<'EOF'
 import json, sys, time
-path, address, symbol, voter = sys.argv[1:]
+path, address, symbol, voter, name = sys.argv[1:]
 with open(path) as f:
     genesis = json.load(f)
 genesis["allocations"] = [{"address": address, "amount": str(10**6 * 10**genesis["coin"]["decimals"])}]
 # Mint is for development chains alone, signed by the development key.
 genesis["minter"] = None
 genesis["coin"]["symbol"] = symbol
+genesis["name"] = name
 genesis["timestamp"] = int(time.time() * 1000)
 finality = genesis.get("finality") or {}
 if finality.get("type") == "ffg":

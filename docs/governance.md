@@ -31,6 +31,7 @@ What can change today:
   [Switching finality](#switching-finality)).
 - **An upgrade:** from a block on, nodes older than a version stop, for a release that changes the
   rules (see [Upgrade](#upgrade)).
+- **The chain's name:** what the apps call the network (see [Name](#name)).
 
 The parameters that define finality's epochs, `checkpoint_interval` and `activation_delay`, stay
 what genesis says: every node's and light client's epoch arithmetic rests on them.
@@ -315,6 +316,20 @@ chainv4 send --key member.key approve-change --upgrade 0.2.0 --upgrade-from 1500
 - **A later upgrade replaces it.** It is kept in `change:upgrade` and shown as `upgrade` in
   `GET /status`.
 - A chain without governance announces one in a release instead. See [Updates](updates.md).
+
+## Name
+
+A change renames the chain, replacing genesis's `name` or the last decided:
+
+```sh
+chainv4 send --key member.key approve-change --chain-name "chainv4 mainnet"
+```
+
+- **It takes effect at once,** from the block that decides it: only the apps read it, as
+  `GET /status`'s `name`.
+- **It is checked as genesis's is:** 1 to 40 characters, no control characters, no space at
+  either end. A chain whose genesis named none gets one this way.
+- It is kept in `change:name`, beside genesis's, so a light client proves either.
 
 ## What the chain does with it
 

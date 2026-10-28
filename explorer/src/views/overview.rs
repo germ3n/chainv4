@@ -33,7 +33,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         ui,
         look,
         "Overview",
-        &format!("{} · {} hashes · genesis {}", status.coin.symbol, status.hash, format::short(&status.genesis)),
+        &format!("{} · {} · {} hashes · genesis {}", status.chain_name(), status.coin.symbol, status.hash, format::short(&status.genesis)),
         |_| {},
     );
 

@@ -57,7 +57,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
             });
 
             if let Some(status) = &status {
-                facts.text("chain", format!("{} · {} hashes · {} decimals", status.coin.symbol, status.hash, status.coin.decimals));
+                facts.text("chain", format!("{} · {} · {} hashes · {} decimals", status.chain_name(), status.coin.symbol, status.hash, status.coin.decimals));
                 facts.row("genesis", |ui| super::copyable(ui, &status.genesis));
                 facts.text("height", format::thousands(&status.height.to_string()));
             }

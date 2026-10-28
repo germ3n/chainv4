@@ -1075,6 +1075,13 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **The pool's books grow with its miners.** `pool.json` keeps each miner's earnings, and the node
   keeps the last four claim trees in memory for paths to the roots blocks committed already.
 
+## The chain's name
+
+- **The chain's name is not the software's.** Genesis's `name`, or governance's `Change::Name`,
+  is what the apps call the network; the binary, its commands (`chainv4 worker`, `chainv4
+  update`), the releases and the EIP-712 domain stay chainv4, as changing that domain would change
+  what every wallet signs. A chain with no name shows as chainv4.
+
 ## Updates
 
 - **No release keys, no updates.** `release/keys.json` names none, so a build from the repo takes

@@ -688,6 +688,9 @@ offline; these would make that hold up as a treasury.
   the desktop, and a screen past `least`. `chainv4 update`, `--auto-update` restarting in place,
   and `chainv4 release new/sign/verify` to publish. `Change::Upgrade`, or a release's `breaking`
   for a chain without governance, stops older nodes before a height. See [Updates](updates.md).
+- [x] **The chain names itself.** Genesis's `name`, renamed by `Change::Name`, is what the apps
+  call the network, from `GET /status`, in place of chainv4 hardcoded; the software keeps its own
+  name in its commands, its releases and the EIP-712 signing domain.
 - [ ] **Updates: next.** Release keys are the build's, so replacing a stolen one needs a new
   build; a rotation signed by the threshold, in the manifest, would let a running binary follow.
   The apps' Update replaces a desktop binary but not a macOS app bundle's signature, nor an APK or

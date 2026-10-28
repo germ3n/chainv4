@@ -146,14 +146,14 @@ hour. An older node answers 404, and the explorer shows nothing.
 
 | Page | Shows |
 | --- | --- |
-| Overview | Height, block time, throughput, peers, mempool, finality, base price and the chain's coin. Under proof of work, the network's hashrate as difficulty over block time, and the node's own when it mines, its workers' included. Charts of the last 120 blocks: block times, transactions, gas used against the limit, and the base price or the difficulty. The latest blocks, and the live feed. |
+| Overview | The chain's name, coin, hash and genesis. Height, block time, throughput, peers, mempool, finality, base price and the chain's coin. Under proof of work, the network's hashrate as difficulty over block time, and the node's own when it mines, its workers' included. Charts of the last 120 blocks: block times, transactions, gas used against the limit, and the base price or the difficulty. The latest blocks, and the live feed. |
 | Block map | Every loaded block by height. The main chain runs along the middle, with finalized blocks green. Side branches sit in lanes above and below, each block joined to its parent. The tip and the justified checkpoint are outlined. Brighter blocks hold more transactions. |
 | Block | The header, its roots included, seal and finality proofs, and every transaction with its status and fee. For a mining pool's block: what went to the pool's escrow and its percent of the reward and fees, the escrow, what the producer kept as the pool's fee, and the root its miners claim against, over how many miners. |
-| Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, what its contracts paid out, its events, its fields and its signature. A claim says whose mining pool earnings it claims and from which of the pool's blocks, its `earned` being the miner's lifetime total, not what it paid. A governance approval says what it changes, an upgrade as the nodes it stops: `an upgrade: nodes older than 0.2.0 stop at block 150,000`. |
+| Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, what its contracts paid out, its events, its fields and its signature. A claim says whose mining pool earnings it claims and from which of the pool's blocks, its `earned` being the miner's lifetime total, not what it paid. A governance approval says what it changes, an upgrade as the nodes it stops: `an upgrade: nodes older than 0.2.0 stop at block 150,000`, and a rename as the new name: `Approves renaming the chain to chainv4 mainnet`. |
 | Account | The balance and nonce, and the balance the light client proved, at the finalized block and the tip. For a contract: its deployer, engine, code size and functions, the storage layout its code declares, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, every transaction that touched them, with its type, parties, status and fee, and the events that mention them, token transfers and approvals in the token's units. Transactions need a node started with `--index-addresses`, events one started with `--index-events`. On a chain with names, the name the address goes by and the names it owns. |
 | EVM contract | An [EVM](evm.md) contract's account page: its deployer and code size, and with its ABI pasted, kept on this device per chain, its read functions, run with `eth_call`, and its logs and calls read by name, here and on its transactions' pages. |
 | Name | A [name](names.md), such as `alice.dev`: whether it is active, in its grace period or available, its owner, what it resolves to, when it expires and its grace ends, its text records, what a year of it costs, and for a subname, its name. |
-| Network | The node's roles, uptime, listening addresses and sync state, its chainv4 version and how it stands against the newest release (`chainv4 0.2.0 is out`, or `0.2.0 installed, restarting` once it put one in place), any [upgrade](updates.md) that stops older nodes, decided by governance or announced by a release, with the blocks left to it from the tip, its gossip backlog, and what it counted since it started. The chain's bootnodes. When it mines: its hashrate over the last ten minutes, its own GPUs or threads, and a table of its workers, each with its address, when it connected, its hashrate, its devices and the seals it found; a pool's worker also with its payout address and the shares it sent. When it runs a pool: its fee, window and miners, and a link to the Mining pool page. A graph of its peers, and a table of them with what each gossiped, how much of that was dropped, and how far its chain got. |
+| Network | The node's roles, uptime, listening addresses and sync state, its chainv4 version and how it stands against the newest release (`chainv4 0.2.0 is out`, or `0.2.0 installed, restarting` once it put one in place), any [upgrade](updates.md) that stops older nodes, decided by governance or announced by a release, with the blocks left to it from the tip, its gossip backlog, and what it counted since it started. The chain's name, or that it gave none, and its bootnodes. When it mines: its hashrate over the last ten minutes, its own GPUs or threads, and a table of its workers, each with its address, when it connected, its hashrate, its devices and the seals it found; a pool's worker also with its payout address and the shares it sent. When it runs a pool: its fee, window and miners, and a link to the Mining pool page. A graph of its peers, and a table of them with what each gossiped, how much of that was dropped, and how far its chain got. |
 | Mempool | What waits for a block, by sender and nonce. |
 | Tokens | The token registry by symbol, with a search by how a symbol starts: each token's symbol, decimals, contract and name, and what makes a token on this chain. |
 | NFTs | The [collection registry](nft-standard.md#the-collection-registry): each collection's name, kind, NFT or multi-token, symbol and contract. A collection's page looks a token up, its owner, or how many exist, and its token URI, as text: the explorer fetches nothing from where it points. It lists what an address holds of it, and what moved, from its `Transfer` or `TransferSingle` events on a node with `--index-events`. An account's page lists the NFTs it holds, and a collection's contract links to its page. |
@@ -176,6 +176,13 @@ Mempool, Tokens, NFTs), Markets (DEX, Swaps), Network (Network, Finality, Mining
 Settings). Under them sit the node's address, whether it answers and how, how old its tip is,
 and the light client's state.
 Over the page are back and forward, the search box and the chain's height.
+
+**The chain's name** heads the sidebar, or the bar on a phone, and titles the window or the
+browser's tab, such as `chainv4 testnet explorer`. It comes from `GET /status`'s `name`, which
+genesis sets and governance renames (see [Name](governance.md#name)), and is remembered per node,
+so the next launch shows it before the node answers. A chain without one, or an older node that
+sends none, shows as `chainv4`. The software's own name stays `chainv4`, as in the Network page's
+version row and its release notices.
 
 **On a phone,** below 640 points wide, the sidebar gives way to:
 - **a bar on top:** back, once there is somewhere to go back to, the node's state as a dot, and
@@ -275,7 +282,7 @@ it cannot find; a deploy that lands and fails says where, in the files it came f
 ## What it remembers
 
 The node address, the proxy, dark or light, any token decimals set by hand, and the genesis the
-light client pinned for each node. It keeps them where eframe keeps app data: the platform's app-data directory
+light client pinned and the chain's name last seen for each node. It keeps them where eframe keeps app data: the platform's app-data directory
 on the desktop, the page's local storage in the browser, and `explorer.ron` in the app's data
 folder on Android.
 

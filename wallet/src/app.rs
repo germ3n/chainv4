@@ -34,6 +34,9 @@ const MAX_CHECKED: usize = 2_000;
 const NARROW: f32 = 640.0;
 /// How many pages the back gesture remembers.
 const VISITED: usize = 32;
+/// What the titles call the network while no name is known for it: before its node answers, on a
+/// chain with none, or from a node from before chains had names.
+const FALLBACK_NAME: &str = "chainv4";
 
 /// The pages left, latest last, each once, for the back gesture: a page left again moves to the
 /// end, so going back never loops between two.
@@ -166,6 +169,9 @@ pub struct Settings {
     /// they are on: SavedClaims, as the hex of its bytes. With them the Mining page claims even
     /// once a pool's node is gone.
     pub pool_claims: HashMap<String, String>,
+    /// The chain's name its node last said, by genesis id: what the titles show before the node
+    /// answers, as on the lock screen.
+    pub names: HashMap<String, String>,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -234,6 +240,7 @@ impl Default for Settings {
             multisigs: Vec::new(),
             pool_node: String::new(),
             pool_claims: HashMap::new(),
+            names: HashMap::new(),
             vault: None,
             current: String::new(),
         }
@@ -241,6 +248,16 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// What the titles call the network: the name its node says, else the one kept for the genesis
+    /// pinned at the node, else chainv4. An offline signer follows no chain, so it says chainv4.
+    fn chain_name<'a>(&'a self, said: Option<&'a str>) -> &'a str {
+        if self.role == Some(Role::Signer) {
+            return FALLBACK_NAME;
+        }
+
+        said.or_else(|| self.names.get(self.pinned.get(&self.node)?).map(String::as_str)).unwrap_or(FALLBACK_NAME)
+    }
+
     /// Settings as kept, with the vault of a wallet from before there could be several made the
     /// first wallet.
     fn migrated(mut self) -> Settings {
@@ -298,6 +315,13 @@ pub struct Sent {
     pub genesis: String,
 }
 
+/// The chain's name in GET /status, as a chain could have it: none on a chain without one, which
+/// says null, nor from a node from before chains had names, which leaves it out. Nothing proven
+/// rests on it: it only titles the wallet.
+fn status_name(status: &serde_json::Value) -> Option<String> {
+    status["name"].as_str().filter(|name| chainv4::governance::chain_name_problem(name).is_none()).map(str::to_string)
+}
+
 /// The chain's coin, as the node names it.
 #[derive(Clone, Debug)]
 pub struct Coin {
@@ -322,6 +346,10 @@ pub struct Wallet {
     /// otherwise stay where a finger left them.
     tabs_at: Option<Page>,
     coin: Coin,
+    /// The chain's name, as the node's status says it, if it says one.
+    name: Option<String>,
+    /// The window's title as last set, to set it again only when the name changes.
+    titled: String,
     /// The node's faucet, as its status describes it, on a node that runs one.
     faucet: Option<serde_json::Value>,
     /// The swap contract the node names in GET /status, if it names one.
@@ -380,6 +408,8 @@ impl Wallet {
                 symbol: "DEV".to_string(),
                 decimals: 18,
             },
+            name: None,
+            titled: String::new(),
             faucet: None,
             swap_contract: None,
             dex: (None, None),
@@ -405,6 +435,7 @@ impl Wallet {
         announce(&self.settings.node);
         self.node = Node::new(&self.settings.node, client(&self.settings), self.wake.clone());
         self.chain = Chain::default();
+        self.name = None;
         self.asked_status = None;
         self.asked_history = 0.0;
         self.updates.connected();
@@ -471,6 +502,7 @@ impl Wallet {
                     self.swap_contract = value["swap"]["contract"].as_str().map(str::to_string);
                     self.dex = (value["dex"]["contract"].as_str().map(str::to_string), value["dex"]["router"].as_str().map(str::to_string));
                     self.updates.status(value);
+                    self.name = status_name(value);
 
                     if let (Some(symbol), Some(decimals)) = (value["coin"]["symbol"].as_str(), value["coin"]["decimals"].as_u64()) {
                         self.coin = Coin {
@@ -544,6 +576,14 @@ impl Wallet {
         // Sent ones that are final are the history's now; the log keeps only what waits.
         let checked = &self.settings.checked;
         self.settings.sent.retain(|sent| !checked.get(&sent.id).is_some_and(|checked| checked.final_));
+
+        // The name the node says is kept with its chain, for the titles before it answers again.
+        if !genesis.is_empty()
+            && let Some(name) = &self.name
+            && self.settings.names.get(&genesis) != Some(name)
+        {
+            self.settings.names.insert(genesis, name.clone());
+        }
 
         if let Some((genesis, state)) = self.chain.saved() {
             self.settings.light.insert(genesis, state);
@@ -668,6 +708,24 @@ impl Wallet {
         }
     }
 
+    /// Names the window, or the browser's tab, after the chain: chainv4 testnet wallet.
+    fn title(&mut self, ctx: &egui::Context) {
+        let title = format!("{} wallet", self.settings.chain_name(self.name.as_deref()));
+
+        if title == self.titled {
+            return;
+        }
+
+        // The browser's tab is the page's title, which eframe leaves alone.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+            document.set_title(&title);
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+        self.titled = title;
+    }
+
     fn lock_screen(&mut self, ui: &mut Ui) {
         let palette = self.palette;
         let (width, height) = (ui.available_width(), ui.available_height());
@@ -684,7 +742,8 @@ impl Wallet {
             ui.vertical_centered(|ui| {
                 ui.add_space((tallest * 0.16).max(24.0));
                 ui.set_max_width(ui.available_width().min(380.0));
-                ui.label(RichText::new("chainv4").font(egui::FontId::new(44.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
+                let name = self.settings.chain_name(self.name.as_deref());
+                ui.add(egui::Label::new(RichText::new(name).font(egui::FontId::new(44.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink)).wrap());
                 theme::caps(ui, &palette, match self.settings.role {
                     Some(Role::Signer) => "Offline signer",
                     _ => "Light wallet",
@@ -736,7 +795,8 @@ impl Wallet {
         ui.horizontal(|ui| {
             ui.add_space(6.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new("chainv4").font(egui::FontId::new(26.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
+                let name = self.settings.chain_name(self.name.as_deref());
+                ui.add(egui::Label::new(RichText::new(name).font(egui::FontId::new(26.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink)).wrap());
                 theme::caps(ui, &palette, match (self.settings.role(), self.book.watch) {
                     (Role::Signer, _) => "Offline signer",
                     (Role::Online, true) => "Watch-only",
@@ -826,7 +886,13 @@ impl Wallet {
     fn top_bar(&mut self, ui: &mut Ui) {
         let palette = self.palette;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("chainv4").font(egui::FontId::new(21.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink));
+            // A long name is cut short, leaving the account and Lock their room.
+            let name = self.settings.chain_name(self.name.as_deref());
+            let room = ui.available_width() * 0.45;
+            ui.scope(|ui| {
+                ui.set_max_width(room);
+                ui.add(egui::Label::new(RichText::new(name).font(egui::FontId::new(21.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink)).truncate());
+            });
 
             if self.settings.role() != Role::Signer {
                 views::light_dot(ui, &palette, &self.chain);
@@ -940,6 +1006,7 @@ impl eframe::App for Wallet {
         #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
         self.follow_bitcoin();
         self.sites();
+        self.title(ui.ctx());
         chainv4_ui::layout::suit_touch(ui.ctx());
         let palette = self.palette;
 
@@ -1213,6 +1280,38 @@ mod tests {
 
         assert_eq!(kept["role"], "signer");
         assert_eq!(serde_json::from_value::<Settings>(kept).unwrap().migrated().role, Some(Role::Signer));
+    }
+
+    #[test]
+    fn the_titles_name_the_chain_its_node_says_else_the_one_kept_else_chainv4() {
+        assert_eq!(status_name(&json!({ "name": "chainv4 testnet", "height": 4 })).as_deref(), Some("chainv4 testnet"));
+        assert_eq!(status_name(&json!({ "name": null })), None, "a chain with no name");
+        assert_eq!(status_name(&json!({ "height": 4 })), None, "a node from before names");
+        assert_eq!(status_name(&json!({ "name": "" })), None, "no name a chain could have");
+        assert_eq!(status_name(&json!({ "name": " padded" })), None);
+        assert_eq!(status_name(&json!({ "name": "x".repeat(41) })), None);
+        assert_eq!(status_name(&json!({ "name": 7 })), None);
+
+        let mut settings = Settings {
+            role: Some(Role::Online),
+            node: "http://node".to_string(),
+            ..Settings::default()
+        };
+
+        assert_eq!(settings.chain_name(None), "chainv4", "no node answered yet");
+
+        settings.pinned.insert("http://node".to_string(), "0xgenesis".to_string());
+        settings.names.insert("0xgenesis".to_string(), "chainv4 testnet".to_string());
+        settings.names.insert("0xother".to_string(), "another chain".to_string());
+
+        assert_eq!(settings.chain_name(None), "chainv4 testnet", "kept for the genesis pinned at the node");
+        assert_eq!(settings.chain_name(Some("chainv4 mainnet")), "chainv4 mainnet", "the node's word first");
+
+        let kept = serde_json::from_value::<Settings>(serde_json::to_value(&settings).unwrap()).unwrap();
+
+        assert_eq!(kept.chain_name(None), "chainv4 testnet", "and kept between runs");
+        assert_eq!(serde_json::from_value::<Settings>(json!({ "node": "http://node" })).unwrap().names, HashMap::new(), "settings from before names");
+        assert_eq!(Settings { role: Some(Role::Signer), ..settings }.chain_name(None), "chainv4", "a signer follows no chain");
     }
 
     #[test]

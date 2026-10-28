@@ -321,6 +321,9 @@ on, arm64 or amd64.
 
 ## What to keep in mind
 
+- **A preset chain's name** comes from `CHAIN_NAME` in `docker/.env`, written into its genesis on
+  the first start; `docker/pow.sh init` and `regenesis` take `CHAIN_NAME` too, `chainv4 testnet`
+  unless set. The apps show it wherever they name the network.
 - **The image never updates itself.** A node in it warns while a newer [release](updates.md) is
   out, and stops at an upgrade it is too old for; update by building or pulling a new image. Set
   `UPDATES` in `docker/.env` to look for releases at another manifest, or `off` for none.

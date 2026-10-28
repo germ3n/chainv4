@@ -252,6 +252,29 @@ pub enum Change {
     #[document(summary = "An upgrade: from block from on, nodes older than least stop before importing it and say to update, so a release that changes the rules reaches the chain without old nodes following on alone. from must be ahead of the block deciding it; a later upgrade replaces it. Advice to nodes, never a rule blocks are checked by.")]
     #[wincode(tag = 11)]
     Upgrade(crate::structs::version::Upgrade),
+    #[document(summary = "A new name for the chain, replacing genesis's or the last decided, as chain_name_problem allows: what the apps call the network from the block that decides it on. Only displays read it.")]
+    #[wincode(tag = 12)]
+    Name(String),
+}
+
+#[document(summary = "The longest a chain's name may be, in characters.", category = "Governance", see_also = "chain_name_problem")]
+pub const MOST_NAME_CHARS: usize = 40;
+
+#[document(
+    summary = "Why a name cannot be a chain's: empty, longer than MOST_NAME_CHARS characters, with a control character, or with a space at either end.",
+    category = "Governance",
+    see_also = "Change::Name, Genesis::name",
+)]
+pub fn chain_name_problem(name: &str) -> Option<&'static str> {
+    if name.is_empty() || name.chars().count() > MOST_NAME_CHARS {
+        Some("a chain's name is 1 to 40 characters")
+    } else if name.chars().any(char::is_control) {
+        Some("a chain's name holds no control characters")
+    } else if name.trim() != name {
+        Some("a chain's name starts and ends with something other than a space")
+    } else {
+        None
+    }
 }
 
 #[document(summary = "The most bootnodes genesis or a change may name.", category = "Governance", see_also = "Change::Bootnodes, Genesis::bootnodes")]
@@ -283,7 +306,7 @@ impl Hashable for Change {
 }
 
 impl Change {
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits, finality, switch_finality or upgrade.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade or name.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
@@ -298,6 +321,7 @@ impl Change {
             Change::Finality(_) => "finality",
             Change::SwitchFinality { .. } => "switch_finality",
             Change::Upgrade(_) => "upgrade",
+            Change::Name(_) => "name",
         }
     }
 }

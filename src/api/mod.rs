@@ -687,6 +687,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "directory": crate::registry::changes::Changes::new(&State::new(db.clone())).directory()?.as_ref().map(crate::cli::genesis::directory_json),
         "upgrade": crate::registry::changes::Changes::new(&State::new(db.clone())).upgrade()?.map(|upgrade| json!({ "least": upgrade.least.to_string(), "from": upgrade.from })),
         "version": crate::structs::version::Version::ours().to_string(),
+        "name": crate::registry::changes::Changes::new(&State::new(db.clone())).name()?,
         "collections": api.rules.standards_in(&State::new(db.clone()))?.collections.as_ref().map(crate::cli::genesis::collections_json),
         "finality": finality,
         "fees": fees,

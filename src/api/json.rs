@@ -617,6 +617,7 @@ pub fn change(change: &Change) -> Value {
         Change::Finality(finality) => json!({ "finality": crate::cli::genesis::finality_json(finality) }),
         Change::SwitchFinality { epoch, config } => json!({ "switch_finality": { "epoch": epoch, "finality": crate::cli::genesis::finality_json(config) } }),
         Change::Upgrade(upgrade) => json!({ "upgrade": { "least": upgrade.least.to_string(), "from": upgrade.from } }),
+        Change::Name(name) => json!({ "name": name }),
     }
 }
 

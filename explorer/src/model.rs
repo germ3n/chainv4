@@ -18,6 +18,10 @@ pub struct Status {
     pub work: String,
     pub hash: String,
     pub coin: Coin,
+    /// The chain's name, from genesis or governance, such as chainv4 testnet; none for a chain
+    /// without one, and from older nodes.
+    #[serde(default)]
+    pub name: Option<String>,
     /// The functions that make a contract a token on this chain; none keeps no registry.
     #[serde(default)]
     pub token_functions: Vec<String>,
@@ -60,7 +64,21 @@ pub struct Status {
     pub upgrade: Option<UpgradeView>,
 }
 
+/// What the explorer calls a chain that names itself nothing, or before it knows.
+pub const UNNAMED: &str = "chainv4";
+
+/// The chain's name to show: the one it gives, if it gives one that is not blank, else
+/// [`UNNAMED`].
+pub fn chain_name(name: Option<&str>) -> &str {
+    name.map(str::trim).filter(|name| !name.is_empty()).unwrap_or(UNNAMED)
+}
+
 impl Status {
+    /// The chain's name to show, [`UNNAMED`] for a chain without one.
+    pub fn chain_name(&self) -> &str {
+        chain_name(self.name.as_deref())
+    }
+
     /// A contract the chain's directory names, by its key there, such as swap or gateway.
     pub fn announced(&self, key: &str) -> Option<String> {
         self.directory.as_ref()?.get(key)?.as_str().map(str::to_string)
@@ -803,6 +821,34 @@ pub struct PeerChange {
 #[cfg(test)]
 mod tests {
     use {super::*, serde_json::json};
+
+    #[test]
+    fn a_status_reads_the_chains_name_and_falls_back_without_one() {
+        let status = |name: Option<Value>| {
+            let mut value = json!({
+                "genesis": "g", "tip": "t", "height": 1, "timestamp": 0, "difficulty": "0", "work": "1",
+                "hash": "blake3", "coin": { "symbol": "DEV", "decimals": 18 }, "finality": null, "fees": null,
+            });
+
+            if let Some(name) = name {
+                value["name"] = name;
+            }
+
+            serde_json::from_value::<Status>(value).unwrap()
+        };
+
+        let named = status(Some(json!("chainv4 testnet")));
+        assert_eq!((named.name.as_deref(), named.chain_name()), (Some("chainv4 testnet"), "chainv4 testnet"));
+
+        let unnamed = status(Some(Value::Null));
+        assert_eq!((unnamed.name.as_deref(), unnamed.chain_name()), (None, "chainv4"));
+
+        let older = status(None);
+        assert_eq!((older.name.as_deref(), older.chain_name()), (None, "chainv4"), "a node from before names");
+
+        assert_eq!(status(Some(json!("  "))).chain_name(), "chainv4", "a blank name is none");
+        assert_eq!(chain_name(None), "chainv4", "before any status");
+    }
 
     #[test]
     fn a_receipt_reads_what_its_contracts_paid_and_one_from_before_reads_none() {

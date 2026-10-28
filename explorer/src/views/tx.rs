@@ -234,6 +234,7 @@ pub fn change(change: &Value) -> String {
             super::network::stopping(value["least"].as_str().unwrap_or("?"), value["from"].as_u64().unwrap_or_default())
         ),
         "switch_finality" => format!("a switch of finality at epoch {}", value["epoch"].as_u64().map_or_else(|| "?".to_string(), |epoch| epoch.to_string())),
+        "name" => format!("renaming the chain to {}", value.as_str().unwrap_or("?")),
         "consensus" => "a new consensus".to_string(),
         "bootnodes" => "new bootnodes".to_string(),
         "name_prices" => "new name prices".to_string(),
@@ -398,6 +399,16 @@ fn signature(ui: &mut Ui, look: Look, tx: &TxView) {
 mod tests {
     use {super::*, serde_json::json};
 
+    /// A governance approval of this change, as decision 4.
+    fn approval(change: Value) -> TxView {
+        serde_json::from_value(json!({
+            "id": "0x01", "sender": "ed25519:0x02", "nonce": 0, "signer": "0x03", "signature": "0x04",
+            "fee": { "gas_limit": 0, "max_price": "0", "tip": "0" },
+            "tx": { "type": "approve_change", "version": 4, "change": change },
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn an_upgrade_under_governance_reads_as_the_nodes_it_stops() {
         assert_eq!(change(&json!({ "upgrade": { "least": "0.2.0", "from": 150_000 } })), "an upgrade: nodes older than 0.2.0 stop at block 150,000");
@@ -405,5 +416,14 @@ mod tests {
         assert_eq!(change(&json!({ "fees": {} })), "new fee settings");
         assert_eq!(change(&json!({ "something_new": 1 })), "a change of its something new");
         assert_eq!(change(&Value::Null), "a change");
+    }
+
+    #[test]
+    fn a_rename_under_governance_reads_as_the_chains_new_name() {
+        assert_eq!(change(&json!({ "name": "chainv4 mainnet" })), "renaming the chain to chainv4 mainnet");
+        assert_eq!(
+            means(&approval(json!({ "name": "chainv4 mainnet" }))).as_deref(),
+            Some("Approves renaming the chain to chainv4 mainnet, as governance's decision 4")
+        );
     }
 }

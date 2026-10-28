@@ -37,6 +37,7 @@ services:
       POOL_PUSH_KEY: ${POOL_PUSH_KEY:-}
       PROTOCOL: ${PROTOCOL:-}
       UPDATES: ${UPDATES:-}
+      CHAIN_NAME: ${CHAIN_NAME:-}
       PEERS: ${PEERS:-}
       BOOTNODES: ${BOOTNODES:-}
       INDEX_EVENTS: ${INDEX_EVENTS:-genesis}

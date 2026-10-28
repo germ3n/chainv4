@@ -179,6 +179,7 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::ApproveChange { change: Change::Upgrade(upgrade), .. }, _) => {
             format!("Approved an upgrade: nodes older than {} stop at block {}", upgrade.least, upgrade.from)
         }
+        (Tx::ApproveChange { change: Change::Name(name), .. }, _) => format!("Approved renaming the chain to {name}"),
         (Tx::ApproveChange { version, change }, _) => format!("Approved a {} change from v{version}", change.name().replace('_', " ")),
         (Tx::WithdrawChange { version }, _) => format!("Withdrew approval of a change from v{version}"),
         (Tx::Name { name, action }, _) => match action {
@@ -274,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn changes_to_fees_the_reward_limits_finality_and_upgrades_read_back_without_the_node() {
+    fn changes_to_fees_the_reward_limits_finality_upgrades_and_the_name_read_back_without_the_node() {
         use chainv4::structs::version::{Upgrade, Version};
         use chainv4::params::fees::{Bid, FeeConfig, PricingConfig, ScheduleConfig, Weighted};
         use chainv4::params::finality::{DepthConfig, FfgConfig, FinalityConfig};
@@ -306,6 +307,7 @@ mod tests {
             (Change::Finality(FinalityConfig::Ffg(ffg)), "Approved a finality change from v3"),
             (Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 })), "Approved a finality change from v3"),
             (Change::Upgrade(Upgrade { least: Version::new(0, 2, 0), from: 150_000 }), "Approved an upgrade: nodes older than 0.2.0 stop at block 150000"),
+            (Change::Name("chainv4 mainnet".to_string()), "Approved renaming the chain to chainv4 mainnet"),
         ];
 
         for (change, said) in changes {

@@ -27,6 +27,8 @@
 #   POOL_PUSH        claim for miners owed at least this, in the coin's smallest unit, from
 #   POOL_PUSH_KEY    this key file, which pays the fees: /config/pool-push.key when there is one
 #   PROTOCOL         the name every protocol and topic starts with: chainv4 unless set
+#   CHAIN_NAME       the chain's name in a preset's genesis, as the apps show it: none unless
+#                    set, which the apps show as chainv4
 #   UPDATES          where the node looks for releases, a manifest's URL, or off: the release
 #                    keys' own unless set. The image never updates itself: pull a new one
 #   PEERS            multiaddrs to dial, separated by spaces
@@ -72,6 +74,7 @@ fi
 
 if [ ! -s "$genesis" ]; then
     chainv4 genesis --consensus "$consensus" --finality "$finality" --fees "$fees" --out "$genesis"
+    if [ -n "${CHAIN_NAME:-}" ]; then jq --arg name "$CHAIN_NAME" '.name = $name' "$genesis" > "$genesis.new" && mv "$genesis.new" "$genesis"; fi
     echo "[docker] wrote $genesis: $consensus blocks, $finality finality, $fees fees"
 fi
 

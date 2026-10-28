@@ -83,6 +83,8 @@ pub struct SendArgs {
     pub tx: TxArgs,
 }
 
+// Parsed once per command: approve-change's many flags make it large, and nothing keeps many.
+#[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand)]
 pub enum TxArgs {
     /// Sends funds to an address, or to whatever a name resolves to.
@@ -201,7 +203,7 @@ pub enum TxArgs {
     /// Approves a change under the chain's governance: a new consensus, as a genesis file's
     /// consensus object, or new bootnodes. Sign with an account governance lets approve: a
     /// validator's or signer's account under the electorate, a member's under a council.
-    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality", "upgrade"]))]
+    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality", "upgrade", "chain_name"]))]
     ApproveChange {
         /// The new consensus as JSON, such as '{"type":"staked","slot_ms":2000,"schedule":"draw"}'
         /// or '{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1000","min_difficulty":"1000"}'.
@@ -260,6 +262,9 @@ pub enum TxArgs {
         /// enough for their operators to update.
         #[arg(long, requires = "upgrade")]
         upgrade_from: Option<u64>,
+        /// A new name for the chain, such as "chainv4 testnet": what the apps call the network.
+        #[arg(long)]
+        chain_name: Option<String>,
         /// The version of the decision this changes. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
@@ -977,6 +982,7 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             switch_epoch,
             upgrade,
             upgrade_from,
+            chain_name,
             version,
         } => {
             use crate::governance::Change;
@@ -986,6 +992,15 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 (_, _, _, _, _, _) if reward.is_some() => Change::Reward(super::genesis::reward_from_text(reward.as_deref().unwrap_or_default()).map_err(|why| format!("--reward: {why}"))?),
                 (_, _, _, _, _, _) if limits.is_some() => Change::Limits(super::genesis::limits_from_text(limits.as_deref().unwrap_or_default()).map_err(|why| format!("--limits: {why}"))?),
                 (_, _, _, _, _, _) if finality.is_some() => Change::Finality(super::genesis::finality_from_text(finality.as_deref().unwrap_or_default()).map_err(|why| format!("--finality: {why}"))?),
+                (_, _, _, _, _, _) if chain_name.is_some() => {
+                    let name = chain_name.unwrap_or_default();
+
+                    if let Some(problem) = crate::governance::chain_name_problem(&name) {
+                        return Err(format!("--chain-name: {problem}").into());
+                    }
+
+                    Change::Name(name)
+                }
                 (_, _, _, _, _, _) if upgrade.is_some() => Change::Upgrade(crate::structs::version::Upgrade {
                     least: upgrade.unwrap_or_default(),
                     from: upgrade_from.ok_or("--upgrade needs --upgrade-from")?,
@@ -1062,6 +1077,7 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 crate::governance::Change::Limits(limits) => println!("approving limits of {} fuel a transaction, from version {version}", limits.tx_limits.fuel),
                 crate::governance::Change::Finality(finality) => println!("approving {} finality's settings, from version {version}", finality.name()),
                 crate::governance::Change::SwitchFinality { epoch, config } => println!("approving a switch to {} finality from epoch {epoch}, from version {version}", config.name()),
+                crate::governance::Change::Name(name) => println!("approving the name {name} for the chain, from version {version}"),
                 crate::governance::Change::Upgrade(upgrade) => println!("approving an upgrade: nodes older than {} stop at block {}, from version {version}", upgrade.least, upgrade.from),
                 crate::governance::Change::Directory(directory) => {
                     let named = [("gateway", directory.gateway), ("Bitcoin gateway", directory.btc_gateway), ("swap", directory.swap), ("DEX", directory.dex), ("NFT factory", directory.nft_factory)];

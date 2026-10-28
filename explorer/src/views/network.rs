@@ -176,6 +176,16 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                 });
             });
 
+            // The software is chainv4, above; the chain it runs may go by a name of its own.
+            if let Some(status) = status {
+                facts.row("chain's name", |ui| {
+                    match status.name.is_some() {
+                        true => ui.label(status.chain_name()),
+                        false => ui.label(RichText::new(format!("none given: shown as {}", status.chain_name())).color(palette.muted)),
+                    };
+                });
+            }
+
             let bootnodes = ctx.store.status.as_ref().map(|status| status.bootnodes.as_slice()).unwrap_or_default();
             facts.row("chain's bootnodes", |ui| {
                 ui.vertical(|ui| {

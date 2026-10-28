@@ -93,6 +93,8 @@ pub struct Explorer {
     palette: Palette,
     /// Whether the page changed, so the next one starts at its top.
     moved: bool,
+    /// The window's title as last set, which follows the chain's name.
+    title: String,
 }
 
 impl Explorer {
@@ -144,6 +146,7 @@ impl Explorer {
             notice: None,
             palette,
             moved: false,
+            title: String::new(),
         };
         explorer.connect(&node);
 
@@ -236,6 +239,11 @@ impl Explorer {
                         self.asked.release = 0.0;
                     }
 
+                    // Kept per node, so the next launch names the chain before the node answers.
+                    match status.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+                        Some(name) => self.settings.names.insert(self.settings.node.clone(), name.to_string()),
+                        None => self.settings.names.remove(&self.settings.node),
+                    };
                     store.status = Some(status);
                 }
             }
@@ -549,6 +557,29 @@ impl Explorer {
         }
     }
 
+    /// The chain's name: as the node says it, else as it said it last time, else chainv4.
+    fn chain_name(&self) -> &str {
+        shown_name(self.store.status.as_ref(), self.settings.names.get(&self.settings.node).map(String::as_str))
+    }
+
+    /// Titles the window, or the browser's tab, after the chain, when its name changed.
+    fn retitle(&mut self, ctx: &egui::Context) {
+        let title = window_title(self.chain_name());
+
+        if title == self.title {
+            return;
+        }
+
+        // The web runner ignores the viewport's title, so the page's own is set there.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+            document.set_title(&title);
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+        self.title = title;
+    }
+
     /// The light client's state: a color, a few words, and the whole story.
     fn light_state(&self) -> (egui::Color32, &'static str, String) {
         let palette = self.palette;
@@ -568,9 +599,17 @@ impl Explorer {
     /// On a wide screen: the name, the pages in groups, and the node's state at the bottom.
     fn sidebar(&mut self, ui: &mut Ui, now: u64) {
         let palette = self.palette;
+        let name = self.chain_name().to_string();
         ui.add_space(16.0);
         ui.horizontal(|ui| {
-            ui.label(widgets::strong("chainv4", 17.0).color(palette.ink));
+            // A long name is cut short, leaving room for the word after it.
+            let room = ui.available_width() - 70.0;
+            ui.scope(|ui| {
+                ui.set_max_width(room);
+                ui.add(egui::Label::new(widgets::strong(&name, 17.0).color(palette.ink)).truncate())
+            })
+            .inner
+            .on_hover_text(&name);
             widgets::caps(ui, &palette, "explorer");
         });
         ui.add_space(14.0);
@@ -656,10 +695,17 @@ impl Explorer {
     /// On a phone, over the page: back or the name, the node's state as a dot, and the search.
     fn bar(&mut self, ui: &mut Ui) {
         let palette = self.palette;
+        let name = self.chain_name().to_string();
         ui.horizontal(|ui| {
             match self.back.is_empty() {
+                // A long name is cut short, leaving the search its room.
                 true => {
-                    ui.label(widgets::strong("chainv4", 16.0).color(palette.ink));
+                    ui.scope(|ui| {
+                        ui.set_max_width(140.0);
+                        ui.add(egui::Label::new(widgets::strong(&name, 16.0).color(palette.ink)).truncate())
+                    })
+                    .inner
+                    .on_hover_text(&name);
                 }
                 false => {
                     if ui.add(egui::Button::new(RichText::new("‹").size(18.0)).min_size(egui::vec2(34.0, 30.0))).clicked() {
@@ -845,6 +891,7 @@ impl eframe::App for Explorer {
         let time = ui.input(|input| input.time);
         let now = now_ms();
         self.take(now, time);
+        self.retitle(ui.ctx());
         self.poll(time);
         layout::suit_touch(ui.ctx());
 
@@ -915,6 +962,20 @@ impl eframe::App for Explorer {
     }
 }
 
+/// The chain's name to show: the status's, else the one remembered, else chainv4. A status that
+/// names none wins over what was remembered: the chain has none now.
+fn shown_name<'a>(status: Option<&'a Status>, remembered: Option<&'a str>) -> &'a str {
+    match status {
+        Some(status) => status.chain_name(),
+        None => crate::model::chain_name(remembered),
+    }
+}
+
+/// The window's title on a chain of this name.
+fn window_title(name: &str) -> String {
+    format!("{name} explorer")
+}
+
 fn parse<T: serde::de::DeserializeOwned>(value: Value) -> Option<T> {
     match serde_json::from_value(value) {
         Ok(parsed) => Some(parsed),
@@ -940,4 +1001,29 @@ fn now_ms() -> u64 {
     web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, serde_json::json};
+
+    #[test]
+    fn the_header_names_the_chain_as_the_node_says_else_as_remembered_else_chainv4() {
+        let status = |name: Value| -> Status {
+            serde_json::from_value(json!({
+                "genesis": "g", "tip": "t", "height": 1, "timestamp": 0, "difficulty": "0", "work": "1",
+                "hash": "blake3", "coin": { "symbol": "DEV", "decimals": 18 }, "finality": null, "fees": null, "name": name,
+            }))
+            .unwrap()
+        };
+        let named = status(json!("chainv4 mainnet"));
+        let unnamed = status(Value::Null);
+
+        assert_eq!(shown_name(None, None), "chainv4", "nothing known yet");
+        assert_eq!(shown_name(None, Some("chainv4 testnet")), "chainv4 testnet", "before the node answers");
+        assert_eq!(shown_name(Some(&named), Some("chainv4 testnet")), "chainv4 mainnet", "renamed since");
+        assert_eq!(shown_name(Some(&unnamed), Some("chainv4 testnet")), "chainv4", "the node names none now");
+        assert_eq!(window_title(shown_name(Some(&named), None)), "chainv4 mainnet explorer");
+        assert_eq!(window_title(shown_name(None, None)), "chainv4 explorer");
+    }
 }

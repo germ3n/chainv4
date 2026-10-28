@@ -143,6 +143,8 @@ pub struct Settings {
     pub checkpoints: HashMap<String, String>,
     /// The light palette rather than the dark one.
     pub light_theme: bool,
+    /// The chain's name as each node last gave it, for the header before the node answers.
+    pub names: HashMap<String, String>,
 }
 
 /// The look a page is drawn in: its colors, and whether the screen is a phone's.

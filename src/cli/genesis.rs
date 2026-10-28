@@ -299,6 +299,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "collections": genesis.collections.as_ref().map(collections_json),
         "federation": genesis.federation.as_ref().map(federation_json),
         "directory": genesis.directory.as_ref().map(directory_json),
+        "name": genesis.name,
     })
 }
 
@@ -956,6 +957,11 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.optional_object("directory")?.map(directory_from_json).transpose()?,
         false => None,
     };
+    // Absent from files written before it too: those chains keep their id, and are called chainv4.
+    let name = match root.map.contains_key("name") {
+        true => root.optional_text("name")?,
+        false => None,
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -979,6 +985,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         collections,
         federation,
         directory,
+        name,
     };
     root.done()?;
 
@@ -1096,6 +1103,13 @@ impl<'a> Fields<'a> {
         let text = self.text(key)?;
 
         text.parse().map_err(|_| format!("{name}: cannot read {text}"))
+    }
+
+    fn optional_text(&mut self, key: &'a str) -> Result<Option<String>, String> {
+        match self.get(key)? {
+            Value::Null => Ok(None),
+            _ => self.text(key).map(Some),
+        }
     }
 
     fn optional_parse<T: std::str::FromStr>(&mut self, key: &'a str) -> Result<Option<T>, String> {
@@ -1449,6 +1463,31 @@ mod tests {
         let mut broke = value["fees"].clone();
         broke["block_gas_limit"] = json!(0);
         assert!(fees_from_text(&broke.to_string()).unwrap_err().contains("block_gas_limit"));
+    }
+
+    #[test]
+    fn a_name_round_trips_changes_the_chain_lands_in_state_and_a_file_without_one_has_none() {
+        let genesis = Genesis { name: Some("chainv4 testnet".to_string()), ..dev(DevChain::Pow) };
+        let value = to_json(&genesis);
+
+        assert_eq!(value["name"], "chainv4 testnet");
+        assert_eq!(from_json(&value).unwrap(), genesis);
+        assert_ne!(genesis.block().id(), Genesis { name: None, ..genesis.clone() }.block().id());
+
+        let mut without = value.clone();
+        without.as_object_mut().unwrap().remove("name");
+
+        assert_eq!(from_json(&without).unwrap().block().id(), Genesis { name: None, ..genesis.clone() }.block().id(), "a file from before names none, and keeps its id");
+
+        let chain = crate::chain::Chain::open(std::sync::Arc::new(crate::db::MemoryDb::default()), &genesis).unwrap();
+
+        assert_eq!(crate::registry::changes::Changes::new(&chain.state()).name().unwrap().as_deref(), Some("chainv4 testnet"));
+
+        for bad in ["", " padded", "line\nbreak", &"x".repeat(41)] {
+            let bad = Genesis { name: Some(bad.to_string()), ..dev(DevChain::Pow) };
+
+            assert!(crate::chain::Chain::open(std::sync::Arc::new(crate::db::MemoryDb::default()), &bad).is_err(), "{:?}", bad.name);
+        }
     }
 
     #[test]

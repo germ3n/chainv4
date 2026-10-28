@@ -254,6 +254,7 @@ See [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint).
   and each balance of it, is then proven;
 - which transactions touched an account, from its address index. Each is then proven;
 - the coin's symbol and decimals, from `GET /status`, which only change how amounts read;
+- the chain's name, from `GET /status`, which only titles the wallet;
 - the fee offer, which the review shows before you sign.
 
 ## What it proves
@@ -742,6 +743,17 @@ does a node from before releases, which answers 404.
 - **History** shows an approved upgrade as "Approved an upgrade: nodes older than 0.2.0 stop at
   block 150000".
 
+## The chain's name
+
+The lock screen, the sidebar, the bar on top and the window's title (the browser's tab) name the
+network as `GET /status` names it, such as "chainv4 testnet" and "chainv4 testnet wallet". The
+wallet keeps the last name it saw for each genesis, so the lock screen shows it before the node
+answers. With no name known, from no answer yet, a chain with none (`null`) or a node from before
+names, it says "chainv4", and so does an offline signer. A name a chain could not have is taken
+as none. The wallet's own name stays chainv4 wherever it means the software: commands such as
+`chainv4 multisig`, releases and updates, and what it calls itself to MetaMask and sites.
+**History** shows a governance rename as "Approved renaming the chain to chainv4 mainnet".
+
 ## What it remembers
 
 Everything is in app storage under one key, `chainv4-wallet`, saved by eframe every 30 seconds,
@@ -750,6 +762,7 @@ on exit, and when Android sends the app to the background:
 - the mining pool's node, for a pool on another node;
 - each wallet: its name, its vault, and the account in use in it;
 - the light client's state, by genesis, to resume from the finalized block, not genesis;
+- the chain's name its node last said, by genesis, for the titles before the node answers;
 - what it sent that is not final yet, and what it proved, the newest 2,000;
 - the wallet last opened, the lock time, and the theme.
 
