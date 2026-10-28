@@ -485,8 +485,8 @@ pub fn tx(transaction: &Tx) -> Value {
             "tx": tx(inner),
             "signatures": signatures.iter().map(|signed| json!({ "key": signed.key.to_string(), "signature": signed.signature.to_string() })).collect::<Vec<_>>(),
         }),
-        Tx::CreateMultisig { members, threshold } => json!({ "type": "create_multisig", "members": members.iter().map(multisig_member).collect::<Vec<_>>(), "threshold": threshold }),
-        Tx::ChangeMultisig { members, threshold } => json!({ "type": "change_multisig", "members": members.iter().map(multisig_member).collect::<Vec<_>>(), "threshold": threshold }),
+        Tx::CreateMultisig { members, threshold, testnet } => json!({ "type": "create_multisig", "members": members.iter().map(|member| multisig_member(member, *testnet)).collect::<Vec<_>>(), "threshold": threshold, "testnet": testnet }),
+        Tx::ChangeMultisig { members, threshold, testnet } => json!({ "type": "change_multisig", "members": members.iter().map(|member| multisig_member(member, *testnet)).collect::<Vec<_>>(), "threshold": threshold, "testnet": testnet }),
         Tx::ApproveMultisig { account, nonce, fee, tx: inner } => json!({
             "type": "approve_multisig",
             "account": account.to_string(),
@@ -498,13 +498,28 @@ pub fn tx(transaction: &Tx) -> Value {
     }
 }
 
-/// A multisig's member: its key here, and its Bitcoin key and EVM address, hex, or null.
-pub fn multisig_member(member: &crate::registry::multisig::MultisigMember) -> Value {
+/// A multisig's member: its key here, its Bitcoin xpub with its origin as descriptors write it,
+/// and its EVM address in hex, each or null.
+pub fn multisig_member(member: &crate::registry::multisig::MultisigMember, testnet: bool) -> Value {
+    #[cfg(feature = "bitcoin")]
+    let bitcoin = member.bitcoin.map(|xpub| crate::crypto::bitcoin::multisig::xpub_text(&xpub, network(testnet)));
+    #[cfg(not(feature = "bitcoin"))]
+    let bitcoin = member.bitcoin.map(|xpub| { let _ = testnet; to_hex(&xpub.public) });
+
     json!({
         "key": member.key.to_string(),
-        "bitcoin": member.bitcoin.map(|key| to_hex(&key)),
+        "bitcoin": bitcoin,
         "evm": member.evm.map(|address| to_hex(&address)),
     })
+}
+
+/// The Bitcoin network a multisig's xpubs are for.
+#[cfg(feature = "bitcoin")]
+pub fn network(testnet: bool) -> crate::crypto::bitcoin::tx::Network {
+    match testnet {
+        true => crate::crypto::bitcoin::tx::Network::Test,
+        false => crate::crypto::bitcoin::tx::Network::Main,
+    }
 }
 
 /// An Ethereum-signed transaction: its bytes and hash, and what they say.

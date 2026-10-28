@@ -228,23 +228,25 @@ pub enum Tx {
     #[document(
         summary = "Makes a new multisig, at multisig_address of the sender and this nonce. The sender pays for it and has no say in it after, unless it is a member.",
         params = {
-            members = "Its members, 1 to 20: each a key here, and a Bitcoin key and EVM address for the other chains, every member naming those or none.",
+            members = "Its members, 1 to 20: each a key here, and a Bitcoin xpub and EVM address for the other chains, every member naming those or none.",
             threshold = "How many members each of its transactions needs.",
+            testnet = "Whether the members' Bitcoin xpubs are for Bitcoin's test networks rather than Bitcoin.",
         },
         see_also = "MultisigPolicy, multisig_address",
     )]
     #[wincode(tag = 19)]
-    CreateMultisig { members: Vec<MultisigMember>, threshold: u32 },
+    CreateMultisig { members: Vec<MultisigMember>, threshold: u32, testnet: bool },
     #[document(
         summary = "Replaces the sending multisig's members and threshold; the address stays and the open proposals go. Only a multisig sends it, through Tx::Multisig, so its quorum decides.",
         params = {
             members = "The new members.",
             threshold = "The new threshold.",
+            testnet = "Which network the new members' Bitcoin xpubs are for.",
         },
         see_also = "Tx::Multisig, Multisigs::change",
     )]
     #[wincode(tag = 20)]
-    ChangeMultisig { members: Vec<MultisigMember>, threshold: u32 },
+    ChangeMultisig { members: Vec<MultisigMember>, threshold: u32, testnet: bool },
     #[document(
         summary = "A member approves a multisig's transaction on chain, from its own account and at its own cost, for the multisig's next nonce: what a Tx::Multisig counts with the signatures it carries. A member backs one proposal at a time; approving another moves its approval. Once any of the multisig's transactions runs, every open proposal is void.",
         params = {

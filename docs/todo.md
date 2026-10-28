@@ -377,9 +377,11 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 - [ ] **Native multisig, across chains.** On chainv4 itself, done: `Address::Multisig`, made by
   `Tx::CreateMultisig`, its transactions `Tx::Multisig` backed by members' signatures off chain
   and `Tx::ApproveMultisig` on chain together, the multisig paying, members changed by its own
-  quorum, in the CLI, the wallet and the offline signer (see [Multisig](multisig.md)). Left: the
-  matching Bitcoin P2WSH M-of-N and EVM Safe-style contract, from the members' keys the policy
-  records, and swaps from a multisig. The original note: Accounts that need M of N keys to move anything,
+  quorum, in the CLI, the wallet and the offline signer (see [Multisig](multisig.md)). On Bitcoin,
+  done too: members name BIP48 xpubs, wsh(sortedmulti(…)) with fresh addresses and a descriptor
+  other wallets import, PSBTs built, signed, combined and finished in the CLI, the wallet and the
+  offline signer, checked against Bitcoin Core on regtest. Left: swaps from a multisig, and the EVM
+  Safe-style contract. The original note: Accounts that need M of N keys to move anything,
   built into the chain rather than a contract: the keys may be any kind the chain takes
   (Ed25519, secp256k1, Bitcoin), and the same signers hold matching multisig on the other
   chains swaps reach, a Bitcoin P2WSH M-of-N and an EVM Safe-style contract, so one quorum

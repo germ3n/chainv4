@@ -27,14 +27,17 @@ use {
     serde_json::{Value, json},
 };
 
+mod bitcoin;
+
 /// How often the followed multisig is asked of the node again, in milliseconds.
 const REFRESH: u64 = 10_000;
 
 #[derive(Default)]
 pub struct MultisigState {
-    /// The members to make a multisig of, one a line, and its threshold.
+    /// The members to make a multisig of, one a line, its threshold, and its Bitcoin network.
     members: String,
     threshold: String,
+    testnet: bool,
     /// A multisig to follow, as typed.
     adding: String,
     selected: Option<String>,
@@ -54,6 +57,8 @@ pub struct MultisigState {
     submitting: Option<Ask>,
     note: Option<String>,
     trouble: Option<String>,
+    /// Its coins on Bitcoin, for one whose members name xpubs.
+    bitcoin: bitcoin::BitcoinState,
 }
 
 impl MultisigState {
@@ -129,6 +134,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, send: &mut Se
             let value = value.clone();
             details(ui, ctx, state, &value, &mut prepared);
             propose(ui, ctx, state, &selected, &value, genesis);
+
+            if let Some(wallet) = bitcoin::wallet_of(&value) {
+                bitcoin::show(ui, ctx, &mut state.bitcoin, &selected, &wallet);
+            }
         }
     }
 
@@ -518,11 +527,12 @@ fn create(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, prepared: &mut 
 
     egui::CollapsingHeader::new(RichText::new("Make a multisig").color(palette.soft)).id_salt("make-multisig").show(ui, |ui| {
         theme::card(ui, &palette, |ui| {
-            ui.label(RichText::new("One member a line: a key here, and for a multisig that reaches Bitcoin and EVM chains its Bitcoin key and EVM address after slashes, every member or none.").small().color(palette.muted));
-            ui.add(egui::TextEdit::multiline(&mut state.members).hint_text("ed25519:0x…/02…/0x…").font(egui::TextStyle::Monospace).desired_rows(3).desired_width(f32::INFINITY));
+            ui.label(RichText::new("One member a line: a key here, and for a multisig that reaches Bitcoin and EVM chains its Bitcoin multisig xpub, with its origin, and EVM address, after commas, every member or none.").small().color(palette.muted));
+            ui.add(egui::TextEdit::multiline(&mut state.members).hint_text("ed25519:0x…,[73c5da0a/48h/0h/0h/2h]xpub…,0x…").font(egui::TextStyle::Monospace).desired_rows(3).desired_width(f32::INFINITY));
+            ui.checkbox(&mut state.testnet, "On Bitcoin's test networks, not Bitcoin");
 
             if theme::quiet(ui, &palette, "Add this account").clicked()
-                && let Some(line) = ctx.holder().and_then(member_line)
+                && let Some(line) = ctx.holder().and_then(|holder| member_line(holder, crate::keys::seed(ctx.book).as_ref(), state.testnet))
             {
                 if !state.members.is_empty() && !state.members.ends_with('\n') {
                     state.members.push('\n');
@@ -545,32 +555,43 @@ fn create(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, prepared: &mut 
     });
 }
 
-/// The line Add this account adds: its first key, and its Bitcoin key and EVM address when it
-/// has both.
-fn member_line(holder: &crate::keys::Holder) -> Option<String> {
+/// The line Add this account adds: its first key, and, for an account its words make, its Bitcoin
+/// multisig xpub on the network picked and its EVM address.
+pub(super) fn member_line(holder: &crate::keys::Holder, seed: Option<&chainv4::crypto::mnemonic::Seed>, testnet: bool) -> Option<String> {
     let publics: Vec<PublicKey> = holder.addresses().iter().filter_map(|address| holder.public(address)).collect();
     let key = publics.iter().find(|key| !matches!(key, PublicKey::Bitcoin(_))).or(publics.first())?;
-    let bitcoin = publics.iter().find_map(|key| match key {
-        PublicKey::Bitcoin(point) => Some(to_hex(point)),
-        _ => None,
-    });
     let evm = publics.iter().find_map(|key| match key.address() {
         Address::Secp256k1(address) => Some(to_hex(&address)),
         _ => None,
     });
+    let network = network(testnet);
+    let xpub = seed.filter(|_| holder.number().is_some()).map(|seed| chainv4::crypto::bitcoin::multisig::xpub_text(&seed.multisig_account(network.coin()), network));
 
-    Some(match (bitcoin, evm) {
-        (Some(bitcoin), Some(evm)) => format!("{key}/{bitcoin}/{evm}"),
+    Some(match (xpub, evm) {
+        (Some(xpub), Some(evm)) => format!("{key},{xpub},{evm}"),
         _ => key.to_string(),
     })
+}
+
+fn network(testnet: bool) -> chainv4::crypto::bitcoin::tx::Network {
+    match testnet {
+        true => chainv4::crypto::bitcoin::tx::Network::Test,
+        false => chainv4::crypto::bitcoin::tx::Network::Main,
+    }
 }
 
 /// The transaction making the multisig, from the account's first address, and the address it will
 /// be at, which the page follows at once.
 fn made(ctx: &mut Ctx, state: &MultisigState) -> Result<Prepared, String> {
-    let members = state.members.lines().map(str::trim).filter(|line| !line.is_empty()).map(member).collect::<Result<Vec<_>, _>>()?;
+    let read = state.members.lines().map(str::trim).filter(|line| !line.is_empty()).map(member).collect::<Result<Vec<_>, _>>()?;
     let threshold: u32 = state.threshold.trim().parse().map_err(|_| "Members needed is a whole number.".to_string())?;
-    let policy = chainv4::registry::multisig::MultisigPolicy { members, threshold };
+
+    if read.iter().any(|(_, testnet)| testnet.is_some_and(|testnet| testnet != state.testnet)) {
+        return Err(format!("A member's xpub is for {}: tick the test networks box to match, or take the other xpub.", if state.testnet { "Bitcoin" } else { "Bitcoin's test networks" }));
+    }
+
+    let members = read.into_iter().map(|(member, _)| member).collect();
+    let policy = chainv4::registry::multisig::MultisigPolicy { members, threshold, testnet: state.testnet };
 
     if let Some(problem) = policy.problem() {
         return Err(format!("Not a multisig: {problem}."));
@@ -584,26 +605,28 @@ fn made(ctx: &mut Ctx, state: &MultisigState) -> Result<Prepared, String> {
 
     Ok(Prepared {
         from,
-        tx: Tx::CreateMultisig { members: policy.members, threshold },
+        tx: Tx::CreateMultisig { members: policy.members, threshold, testnet: policy.testnet },
         what: format!("Make a multisig, {threshold} of {}", state.members.lines().filter(|line| !line.trim().is_empty()).count()),
         about: format::short(&address.to_string()),
         coin: u256::ZERO,
     })
 }
 
-/// A member as a line gives it: KEY, or KEY/BITCOIN_KEY/EVM_ADDRESS.
-fn member(line: &str) -> Result<MultisigMember, String> {
-    let parts: Vec<&str> = line.split('/').collect();
+/// A member as a line gives it, KEY or KEY,[origin]xpub…,EVM_ADDRESS, and whether its xpub is for
+/// Bitcoin's test networks.
+fn member(line: &str) -> Result<(MultisigMember, Option<bool>), String> {
+    let parts: Vec<&str> = line.split(',').map(str::trim).collect();
     let key: PublicKey = parts[0].parse().map_err(|_| format!("{} is not a key", format::short(parts[0])))?;
 
     match parts[1..] {
-        [] => Ok(MultisigMember { key, bitcoin: None, evm: None }),
-        [bitcoin, evm] => Ok(MultisigMember {
-            key,
-            bitcoin: Some(from_hex(bitcoin).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{} is not a compressed Bitcoin key", format::short(bitcoin)))?),
-            evm: Some(from_hex(evm).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{} is not an EVM address", format::short(evm)))?),
-        }),
-        _ => Err("A member is a key, or a key, a Bitcoin key and an EVM address with slashes between.".to_string()),
+        [] => Ok((MultisigMember { key, bitcoin: None, evm: None }, None)),
+        [xpub, evm] => {
+            let (bitcoin, network) = chainv4::crypto::bitcoin::multisig::parse_xpub(xpub).map_err(|why| format!("{}: {why}", format::short(xpub)))?;
+            let evm = from_hex(evm).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{} is not an EVM address", format::short(evm)))?;
+
+            Ok((MultisigMember { key, bitcoin: Some(bitcoin), evm: Some(evm) }, Some(network == chainv4::crypto::bitcoin::tx::Network::Test)))
+        }
+        _ => Err("A member is a key, or a key, a Bitcoin xpub with its origin and an EVM address with commas between.".to_string()),
     }
 }
 
@@ -611,7 +634,7 @@ fn member(line: &str) -> Result<MultisigMember, String> {
 fn describe(ctx: &Ctx, tx: &Tx) -> String {
     match tx {
         Tx::Transfer { to, amount, .. } => format!("Pay {} to {}", ctx.amount(None, &amount.to_u256().to_string()), format::short(&to.to_string())),
-        Tx::ChangeMultisig { members, threshold } => format!("Make it {threshold} of {} members", members.len()),
+        Tx::ChangeMultisig { members, threshold, .. } => format!("Make it {threshold} of {} members", members.len()),
         other => crate::history::action(other, &chainv4::structs::receipt::CommittedOutcome::Done),
     }
 }
@@ -643,17 +666,18 @@ mod tests {
     #[test]
     fn members_read_as_a_line_gives_them_and_bad_ones_say_why() {
         let key = Keypair::from_seed([3; 32]).public();
-        let bitcoin = format!("0x02{}", "11".repeat(32));
+        let seed = chainv4::crypto::mnemonic::Phrase::parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap().seed("");
+        let xpub = chainv4::crypto::bitcoin::multisig::xpub_text(&seed.multisig_account(1), network(true));
         let evm = format!("0x{}", "22".repeat(20));
 
-        assert_eq!(member(&key.to_string()), Ok(MultisigMember { key, bitcoin: None, evm: None }));
+        assert_eq!(member(&key.to_string()), Ok((MultisigMember { key, bitcoin: None, evm: None }, None)));
         assert_eq!(
-            member(&format!("{key}/{bitcoin}/{evm}")).map(|member| (member.bitcoin.is_some(), member.evm)),
-            Ok((true, Some([0x22; 20])))
+            member(&format!("{key},{xpub},{evm}")).map(|(member, testnet)| (member.bitcoin, member.evm, testnet)),
+            Ok((Some(seed.multisig_account(1)), Some([0x22; 20]), Some(true)))
         );
         assert!(member("not a key").is_err());
-        assert!(member(&format!("{key}/{bitcoin}")).unwrap_err().contains("slashes"));
-        assert!(member(&format!("{key}/0x02/{evm}")).unwrap_err().contains("Bitcoin key"));
+        assert!(member(&format!("{key},{xpub}")).unwrap_err().contains("commas"));
+        assert!(member(&format!("{key},xpub123,{evm}")).is_err(), "an xpub without its origin");
     }
 
     #[test]

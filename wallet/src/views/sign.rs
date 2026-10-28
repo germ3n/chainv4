@@ -14,7 +14,7 @@ use {
     super::scan::Scan,
     crate::airgap::{self, Message, Request},
     crate::format,
-    crate::bitcoin::{self, Review},
+    crate::bitcoin::{self, Review, Signs},
     crate::hardware::{self, Asked, SignRequest},
     crate::biometrics::{self, Check},
     crate::theme,

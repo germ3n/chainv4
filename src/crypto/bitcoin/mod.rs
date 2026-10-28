@@ -11,6 +11,8 @@ use {
     sha2::{Digest, Sha256},
 };
 
+pub mod multisig;
+pub mod psbt;
 pub mod tx;
 
 /// SHA-256 once: what a P2WSH output commits its script by, and a swap's hash lock its secret.

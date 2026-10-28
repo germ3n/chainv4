@@ -10,7 +10,7 @@ mod faucet;
 pub mod dapp;
 #[cfg(feature = "swap")]
 pub mod evm;
-mod multisig;
+pub(crate) mod multisig;
 mod names;
 #[cfg(feature = "nft")]
 mod nfts;

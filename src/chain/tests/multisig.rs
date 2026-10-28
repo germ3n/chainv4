@@ -21,7 +21,7 @@ fn member(keypair: &Keypair) -> MultisigMember {
 fn two_of_three(chain: &mut Chain) -> Address {
     let creator = authority();
     let at = nonce(chain, &creator);
-    let create = Tx::CreateMultisig { members: members().iter().map(member).collect(), threshold: 2 };
+    let create = Tx::CreateMultisig { members: members().iter().map(member).collect(), threshold: 2, testnet: false };
     let receipts = advance(chain, vec![SignedTx::sign(create, at, FeeOffer::NONE, &creator)]);
     let account = multisig_address(&creator.public().address(), at, chain.hash());
 
@@ -153,7 +153,7 @@ fn a_multisig_changes_its_members_by_its_own_quorum_and_keeps_its_address() {
     let account = two_of_three(&mut chain);
     let [alice, bob, carol] = members();
     let dave = Keypair::from_seed([34; 32]);
-    let change = Tx::ChangeMultisig { members: vec![member(&carol), member(&dave)], threshold: 2 };
+    let change = Tx::ChangeMultisig { members: vec![member(&carol), member(&dave)], threshold: 2, testnet: false };
 
     // A key's account cannot send it; nor can the multisig hand itself a policy no multisig has.
     let sent = SignedTx::sign(change.clone(), nonce(&chain, &alice), FeeOffer::NONE, &alice);
@@ -166,7 +166,7 @@ fn a_multisig_changes_its_members_by_its_own_quorum_and_keeps_its_address() {
 
         SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, body.nonce, FeeOffer::NONE, signers[0])
     };
-    let sent = sign(&chain, Tx::ChangeMultisig { members: vec![member(&dave)], threshold: 2 }, &[&alice, &bob]);
+    let sent = sign(&chain, Tx::ChangeMultisig { members: vec![member(&dave)], threshold: 2, testnet: false }, &[&alice, &bob]);
     let bad = advance(&mut chain, vec![sent]);
 
     assert!(matches!(&bad[0].result, Err(failure) if failure.to_string().contains("threshold")));
@@ -176,7 +176,7 @@ fn a_multisig_changes_its_members_by_its_own_quorum_and_keeps_its_address() {
     advance(&mut chain, vec![sent]);
     let policy = Multisigs::new(&chain.state()).get(&account).unwrap().unwrap();
 
-    assert_eq!(policy, MultisigPolicy { members: vec![member(&carol), member(&dave)], threshold: 2 });
+    assert_eq!(policy, MultisigPolicy { members: vec![member(&carol), member(&dave)], threshold: 2, testnet: false });
     let sent = pay(&chain, &account, &Address::Ed25519([9; 32]), 1, &[&alice, &bob]);
     refused(&mut chain, sent, "not one of the multisig's members");
     let sent = pay(&chain, &account, &Address::Ed25519([9; 32]), 1, &[&carol, &dave]);
@@ -187,7 +187,7 @@ fn a_multisig_changes_its_members_by_its_own_quorum_and_keeps_its_address() {
 
 #[test]
 fn multisig_policies_are_checked() {
-    let policy = |members: Vec<MultisigMember>, threshold: u32| MultisigPolicy { members, threshold }.problem();
+    let policy = |members: Vec<MultisigMember>, threshold: u32| MultisigPolicy { members, threshold, testnet: false }.problem();
     let [alice, bob, _] = members();
 
     assert_eq!(policy(vec![member(&alice), member(&bob)], 2), None);
@@ -198,7 +198,13 @@ fn multisig_policies_are_checked() {
     assert!(policy((0..21).map(|seed| member(&Keypair::from_seed([seed; 32]))).collect(), 1).is_some(), "more than 20");
 
     // Every member names its other chains' keys, or none does.
-    let with = |keypair: &Keypair, seed: u8| MultisigMember { bitcoin: Some([[2].as_slice(), &[seed; 32]].concat().try_into().unwrap()), evm: Some([seed; 20]), ..member(keypair) };
+    let xpub = |seed: u8| crate::registry::multisig::BitcoinXpub {
+        fingerprint: [seed; 4],
+        parent: [0; 4],
+        public: crate::crypto::secp256k1::public_key(&[seed; 32]).unwrap(),
+        chain_code: [seed; 32],
+    };
+    let with = |keypair: &Keypair, seed: u8| MultisigMember { bitcoin: Some(xpub(seed)), evm: Some([seed; 20]), ..member(keypair) };
 
     assert!(policy(vec![with(&alice, 1), member(&bob)], 1).is_some());
     assert!(policy(vec![with(&alice, 1), with(&bob, 1)], 1).is_some(), "the same Bitcoin key twice");
@@ -212,7 +218,7 @@ fn a_multisig_pays_its_own_fee() {
     let price = chain.next_base_price().saturating_mul(u256::new(2));
     let fee = FeeOffer { gas_limit: 200_000, max_price: price, tip: u256::ZERO };
     let at = nonce(&chain, &creator);
-    let create = Tx::CreateMultisig { members: members().iter().map(member).collect(), threshold: 2 };
+    let create = Tx::CreateMultisig { members: members().iter().map(member).collect(), threshold: 2, testnet: false };
     advance(&mut chain, vec![SignedTx::sign(create, at, fee, &creator)]);
     let account = multisig_address(&creator.public().address(), at, chain.hash());
     let funding = Tx::Transfer { from: creator.public().address(), to: account, amount: Amount::U128(10u128.pow(18)) };

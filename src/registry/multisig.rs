@@ -34,13 +34,32 @@ pub const MAX_MEMBERS: usize = 20;
 pub struct MultisigMember {
     #[document(summary = "Its key on this chain, any kind the chain takes: what it signs and approves the multisig's transactions with.")]
     pub key: PublicKey,
-    #[document(summary = "Its compressed secp256k1 key on Bitcoin, for the matching P2WSH M-of-N, or None. Every member names one, or none does.")]
-    pub bitcoin: Option<[u8; 33]>,
+    #[document(summary = "Its multisig account xpub on Bitcoin, at m/48'/coin'/0'/2' on the policy's network, for the matching P2WSH M-of-N, or None. Every member names one, or none does.")]
+    pub bitcoin: Option<BitcoinXpub>,
     #[document(summary = "Its address on EVM chains, for the matching Safe-style contract, or None. Every member names one, or none does.")]
     pub evm: Option<[u8; 20]>,
 }
 
 impl Hashable for MultisigMember {}
+
+#[document(
+    summary = "A member's multisig account on Bitcoin: its extended public key at m/48'/coin'/0'/2', BIP48's for native segwit multisig, and where it sits, so the multisig's addresses derive below it and Bitcoin's wallets name it as the member's own does.",
+    category = "Multisig",
+    see_also = "MultisigMember, MultisigPolicy::testnet",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct BitcoinXpub {
+    #[document(summary = "The fingerprint of the member's seed, its master key: what a PSBT names the key's origin by.")]
+    pub fingerprint: [u8; 4],
+    #[document(summary = "The fingerprint of the key one step up, at m/48'/coin'/0'.")]
+    pub parent: [u8; 4],
+    #[document(summary = "The account's compressed key.")]
+    pub public: [u8; 33],
+    #[document(summary = "Its chain code.")]
+    pub chain_code: [u8; 32],
+}
+
+impl Hashable for BitcoinXpub {}
 
 #[document(
     summary = "Who controls a multisig: its members, and how many of them a transaction needs.",
@@ -53,6 +72,8 @@ pub struct MultisigPolicy {
     pub members: Vec<MultisigMember>,
     #[document(summary = "How many of them each transaction needs: at least 1, at most all.")]
     pub threshold: u32,
+    #[document(summary = "Which network the members' Bitcoin xpubs are for: false for Bitcoin, true for its test networks. A test multisig and a real one are separate multisigs.")]
+    pub testnet: bool,
 }
 
 impl Hashable for MultisigPolicy {}
@@ -60,7 +81,7 @@ impl Hashable for MultisigPolicy {}
 impl MultisigPolicy {
     #[document(
         parent = "MultisigPolicy",
-        summary = "Why it cannot be a multisig's: no members or more than MAX_MEMBERS, a key, Bitcoin key or EVM address named twice, some members naming a Bitcoin key or EVM address and others not, a Bitcoin key that is not a compressed secp256k1 point, a zero EVM address, or a threshold of 0 or more than the members.",
+        summary = "Why it cannot be a multisig's: no members or more than MAX_MEMBERS, a key, Bitcoin xpub or EVM address named twice, some members naming a Bitcoin xpub or EVM address and others not, an xpub whose key is not a compressed secp256k1 point, a zero EVM address, or a threshold of 0 or more than the members.",
     )]
     pub fn problem(&self) -> Option<&'static str> {
         let count = self.members.len();
@@ -85,19 +106,19 @@ impl MultisigPolicy {
             return Some("a multisig names each member's key once");
         }
 
-        let bitcoin: Vec<[u8; 33]> = self.members.iter().filter_map(|member| member.bitcoin).collect();
+        let bitcoin: Vec<[u8; 33]> = self.members.iter().filter_map(|member| member.bitcoin.map(|xpub| xpub.public)).collect();
         let evm: Vec<[u8; 20]> = self.members.iter().filter_map(|member| member.evm).collect();
 
         if !(bitcoin.is_empty() || bitcoin.len() == count) || !(evm.is_empty() || evm.len() == count) {
-            return Some("every member names a Bitcoin key and an EVM address, or none does");
+            return Some("every member names a Bitcoin xpub and an EVM address, or none does");
         }
 
         if !distinct(bitcoin.iter().map(|key| key.to_vec()).collect()) || !distinct(evm.iter().map(|address| address.to_vec()).collect()) {
-            return Some("a multisig names each Bitcoin key and EVM address once");
+            return Some("a multisig names each Bitcoin xpub and EVM address once");
         }
 
         if bitcoin.iter().any(|key| !bitcoin_key(key)) {
-            return Some("a member's Bitcoin key is a compressed secp256k1 key, 02 or 03 and 32 bytes");
+            return Some("a member's Bitcoin xpub holds a compressed secp256k1 key");
         }
 
         if evm.contains(&[0; 20]) {

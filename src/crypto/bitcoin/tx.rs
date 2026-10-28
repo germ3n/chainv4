@@ -443,6 +443,24 @@ pub fn base58check(version: u8, payload: &[u8]) -> String {
     "1".repeat(zeros) + &digits.iter().rev().map(|digit| char::from(ALPHABET[usize::from(*digit)])).collect::<String>()
 }
 
+#[document(
+    summary = "The output script a native segwit address pays: bc1q… or tb1q…, a key's P2WPKH or a script's P2WSH, on the network named.",
+    category = "Bitcoin",
+    returns = "Why it is not one of those on that network, otherwise.",
+)]
+pub fn script_of(text: &str, network: Network) -> Result<Vec<u8>, String> {
+    let (hrp, program) = crate::structs::bech32::decode_segwit(text.trim()).ok_or("a native segwit address, bc1q… or tb1q…")?;
+
+    if hrp != network.hrp() {
+        return Err(format!("an address on {}, {}1q…", network.name(), network.hrp()));
+    }
+
+    match program.len() {
+        20 | 32 => Ok([&[0x00, program.len() as u8][..], &program].concat()),
+        _ => Err("a native segwit address of a key or a script".to_string()),
+    }
+}
+
 #[document(summary = "Bitcoin's compact size, in its fewest bytes.", category = "Bitcoin")]
 pub fn compact(out: &mut Vec<u8>, size: usize) {
     match size {

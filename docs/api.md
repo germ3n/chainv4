@@ -84,7 +84,7 @@ Each summary has:
   `withdraw_change`;
 - `multisig`, a multisig's own: its `account`, the `tx` it sends and the members' `signatures`,
   each with `key` and `signature`; `create_multisig` and `change_multisig` with `members`, each a
-  `key` and its `bitcoin` key and `evm` address in hex or `null`, and `threshold`;
+  `key`, its `bitcoin` xpub and its `evm` address or `null`, `threshold` and `testnet`;
   `approve_multisig` with `account`, `nonce`, `fee` and `tx`; `withdraw_multisig` with `account`
   and `proposal`;
 - `ethereum`, with its signed bytes as `raw`, its Ethereum `hash`, and what they say: `kind`, 0, 1
@@ -481,8 +481,10 @@ Under `authority`, `validators` is empty and `active` lists the signers, each we
 
 ### `GET /multisig/{address}`
 
-A [multisig](multisig.md): its `members`, each a `key` and its `bitcoin` key and `evm` address in
-hex or `null`, its `threshold`, its next `nonce` and `balance`, and the `proposals` open on chain
+A [multisig](multisig.md): its `members`, each a `key`, its `bitcoin` xpub with its origin as a
+descriptor writes it and its `evm` address in hex, each or `null`, its `threshold`, `testnet`, and
+`bitcoin`: `null`, or its `network`, its `receiving` and `change` descriptors with their checksums
+and its `first_address`; its next `nonce` and `balance`, and the `proposals` open on chain
 for that nonce, each with its `id`, the `tx` as JSON and `encoded` in hex, its `fee` offer and the
 member keys that `approvals` back it. 404 for an address that is not one.
 

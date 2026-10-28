@@ -579,8 +579,6 @@ mod send {
     #[test]
     fn a_multisig_is_created_proposed_signed_approved_and_submitted() {
         use crate::cli::multisig::{MultisigAction, MultisigArgs};
-        use crate::registry::multisig::MultisigMember;
-
         let running = Running::start(true);
         let dir = TempDir::new("multisig");
         let members: Vec<Keypair> = (41..44).map(|seed| Keypair::from_seed([seed; 32])).collect();
@@ -594,7 +592,7 @@ mod send {
         let multisig = |key: &PathBuf, action: MultisigAction| crate::cli::multisig(MultisigArgs { node: api.clone(), tls: Default::default(), key: Some(key.clone()), timeout: 10, action });
 
         // The dev key makes a 2-of-3 and funds it; each member has a little to approve with.
-        let members_given = members.iter().map(|keypair| MultisigMember { key: keypair.public(), bitcoin: None, evm: None }).collect();
+        let members_given = members.iter().map(|keypair| crate::cli::send::parse_member(&keypair.public().to_string()).unwrap()).collect();
         send(running.args(TxArgs::CreateMultisig { members: members_given, threshold: 2 })).unwrap();
         let creator = DevAuthority::dev_keypair().public().address();
         let account = crate::structs::address::multisig_address(&creator, 0, crate::structs::hash::HashType::default_chain());
@@ -629,6 +627,61 @@ mod send {
         assert_eq!(balance(&to), u256::new(15));
         assert_eq!(crate::registry::Accounts::new(&node.chain().state()).get(&account).unwrap().nonce, 2);
         shown.unwrap();
+    }
+
+    #[cfg(all(feature = "bitcoin", feature = "mnemonic"))]
+    #[test]
+    fn a_multisig_s_bitcoin_side_is_described_signed_combined_and_finished() {
+        use crate::cli::multisig::{BitcoinAction, MultisigAction, MultisigArgs, sign_file};
+        use crate::crypto::bitcoin::multisig::{descriptor, xpub_text};
+        use crate::crypto::bitcoin::psbt::{MultisigCoin, Psbt, Utxo};
+        use crate::crypto::bitcoin::tx::Network;
+        use crate::crypto::mnemonic::Phrase;
+
+        let running = Running::start(true);
+        let dir = TempDir::new("multisig-bitcoin");
+        let seeds: Vec<_> = [
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+            "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+        ]
+        .iter()
+        .map(|words| Phrase::parse(words).unwrap().seed(""))
+        .collect();
+        let members = seeds.iter().enumerate().map(|(at, seed)| {
+            let key = seed.key(crate::crypto::keypair::KeyType::Ed25519, 0).public();
+            let xpub = xpub_text(&seed.multisig_account(1), Network::Test);
+
+            crate::cli::send::parse_member(&format!("{key},{xpub},0x{}", format!("{:02x}", 0x31 + at).repeat(20))).unwrap()
+        }).collect();
+        send(running.args(TxArgs::CreateMultisig { members, threshold: 2 })).unwrap();
+        let account = crate::structs::address::multisig_address(&DevAuthority::dev_keypair().public().address(), 0, crate::structs::hash::HashType::default_chain());
+        let api = format!("http://{}", running.api);
+        let run = |action: BitcoinAction| crate::cli::multisig(MultisigArgs { node: api.clone(), tls: Default::default(), key: None, timeout: 10, action: MultisigAction::Bitcoin { account, action } });
+
+        run(BitcoinAction::Descriptor).unwrap();
+        run(BitcoinAction::Address { change: true, index: 3 }).unwrap();
+        let wallet = crate::cli::multisig::bitcoin_wallet(&crate::cli::send::agent(&Default::default()).unwrap(), &api, &account).unwrap();
+        running.stop();
+
+        assert_eq!((wallet.threshold, wallet.network), (2, Network::Test), "a tpub made it a testnet multisig");
+        assert_eq!(descriptor(2, &wallet.xpubs, Network::Test, 0), descriptor(2, &seeds.iter().map(|seed| seed.multisig_account(1)).collect::<Vec<_>>(), Network::Test, 0));
+
+        // Two members sign their copies, one combines them, and it finishes.
+        let utxos = [Utxo { txid: [9; 32], vout: 1, coin: MultisigCoin { value: 50_000, chain: 0, index: 0 } }];
+        let psbt = wallet.spend(&utxos, crate::crypto::bitcoin::tx::script_of("tb1qqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesrxh6hy", Network::Test).unwrap(), 20_000, 2, 0).unwrap();
+        let (first, second) = (dir.0.join("spend.psbt"), dir.0.join("other.psbt"));
+        fs::write(&first, psbt.to_base64()).unwrap();
+        fs::write(&second, psbt.to_base64()).unwrap();
+        sign_file(&first, &seeds[0]).unwrap();
+        sign_file(&second, &seeds[2]).unwrap();
+
+        assert!(Psbt::from_base64(&fs::read_to_string(&first).unwrap()).unwrap().finish_multisig().is_err(), "one of two");
+        // Combining and finishing need no node, only the files.
+        run(BitcoinAction::Combine { psbt: first.clone(), others: vec![second] }).unwrap();
+        run(BitcoinAction::Finish { psbt: first.clone(), esplora: None }).unwrap();
+
+        assert_eq!(Psbt::from_base64(&fs::read_to_string(&first).unwrap()).unwrap().finish_multisig().unwrap().inputs[0].witness.len(), 4);
     }
 
     #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]

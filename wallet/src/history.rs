@@ -189,11 +189,11 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
             None => "Deploy from an Ethereum wallet".to_string(),
         },
         (Tx::Multisig { account, tx, .. }, _) => format!("{} · by the multisig {}", action(tx, outcome), format::short(&account.to_string())),
-        (Tx::CreateMultisig { members, threshold }, CommittedOutcome::Deployed(account)) => {
+        (Tx::CreateMultisig { members, threshold, .. }, CommittedOutcome::Deployed(account)) => {
             format!("Created the multisig {}, {threshold} of {}", format::short(&account.to_string()), members.len())
         }
-        (Tx::CreateMultisig { members, threshold }, _) => format!("Create a multisig, {threshold} of {}", members.len()),
-        (Tx::ChangeMultisig { members, threshold }, _) => format!("Made the multisig {threshold} of {}", members.len()),
+        (Tx::CreateMultisig { members, threshold, .. }, _) => format!("Create a multisig, {threshold} of {}", members.len()),
+        (Tx::ChangeMultisig { members, threshold, .. }, _) => format!("Made the multisig {threshold} of {}", members.len()),
         (Tx::ApproveMultisig { account, nonce, .. }, _) => format!("Approved {}'s transaction {nonce}", format::short(&account.to_string())),
         (Tx::WithdrawMultisig { account, .. }, _) => format!("Withdrew an approval of {}'s", format::short(&account.to_string())),
     }

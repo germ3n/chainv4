@@ -18,25 +18,27 @@
 //! are told two ways that disagree, or whose previous transaction is not the one spent from, is
 //! refused.
 
+pub use chainv4::crypto::bitcoin::psbt::Psbt;
 pub use chainv4::crypto::bitcoin::tx::Network;
 
 use {
     crate::hardware::{HdKey, KeyPath, Step},
     chainv4::crypto::bitcoin::hash160,
-    chainv4::crypto::bitcoin::tx::{Reader, SIGHASH_ALL, Transaction, TxOut, address, compact, der, p2wpkh},
+    chainv4::crypto::bitcoin::psbt::{
+        Derived, HARDENED, IN_BIP32_DERIVATION, IN_WITNESS_SCRIPT, OUT_WITNESS_SCRIPT, IN_FINAL_SCRIPTSIG, IN_FINAL_SCRIPTWITNESS, IN_PARTIAL_SIG, IN_SIGHASH_TYPE, OUT_BIP32_DERIVATION, Pair, derivations, find, path_text,
+        total,
+    },
+    chainv4::crypto::bitcoin::multisig::parse_multisig_script,
+    chainv4::crypto::bitcoin::tx::{SIGHASH_ALL, address, der, p2wpkh, p2wsh},
     chainv4::crypto::keypair::{PrivateKey, PublicKey},
     chainv4::crypto::mnemonic::Seed,
     chainv4::structs::bech32,
     minicbor::data::Tag,
     minicbor::{Decoder, Encoder},
-    std::collections::HashSet,
 };
 
 #[cfg(feature = "swap")]
-use {
-    chainv4::crypto::bitcoin::tx::TxIn,
-    chainv4::swap::htlc::{Htlc, Spend},
-};
+use chainv4::swap::htlc::Htlc;
 
 /// The UR types this module reads and writes: the pairing, and a PSBT, by the registry's name
 /// and by the newer one.
@@ -47,30 +49,6 @@ pub const NEW_PSBT_TYPE: &str = "psbt";
 /// The registry's CBOR tags: a crypto-hdkey, and an output descriptor's wpkh(), native segwit.
 const HDKEY: u64 = 303;
 const WPKH: u64 = 404;
-
-/// The key types this reads and writes, as BIP174 numbers them.
-const GLOBAL_UNSIGNED_TX: u8 = 0x00;
-const GLOBAL_VERSION: u8 = 0xfb;
-const IN_NON_WITNESS_UTXO: u8 = 0x00;
-const IN_WITNESS_UTXO: u8 = 0x01;
-const IN_PARTIAL_SIG: u8 = 0x02;
-const IN_SIGHASH_TYPE: u8 = 0x03;
-#[cfg(feature = "swap")]
-const IN_WITNESS_SCRIPT: u8 = 0x05;
-const IN_BIP32_DERIVATION: u8 = 0x06;
-const IN_FINAL_SCRIPTSIG: u8 = 0x07;
-const IN_FINAL_SCRIPTWITNESS: u8 = 0x08;
-const OUT_BIP32_DERIVATION: u8 = 0x02;
-
-/// What every PSBT starts with.
-const MAGIC: &[u8] = b"psbt\xff";
-
-
-/// An index at or above this is hardened.
-const HARDENED: u32 = 1 << 31;
-
-/// The most there are of bitcoin, in satoshis: no amount is more.
-const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
 
 /// The registry's number for a network in a coin-info: 0, or 1 for testnet.
 fn registry(network: Network) -> u64 {
@@ -124,256 +102,166 @@ pub fn receiving(seed: &Seed, network: Network, index: u32) -> String {
     bech32::encode_segwit(network.hrp(), &hash160(&public(&seed.bitcoin_key(network.coin(), 0, index).public())))
 }
 
-/// One of a PSBT's pairs, kept as it came.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Pair {
-    key: Vec<u8>,
-    value: Vec<u8>,
-}
+/// Everything to check before signing, and what this seed signs: each input it holds the key
+/// of. Refused: an input whose coins it does not know, one of this seed's that is not native
+/// segwit or not at BIP84's path, or asks for less than all of the transaction signed, outputs
+/// worth more than the inputs, nothing for this seed to sign, and both networks at once.
+fn plan(psbt: &Psbt, seed: &Seed) -> Result<(Review, Vec<Signing>), String> {
+    let fingerprint = seed.bitcoin_account(0).master_fingerprint;
+    let (mut inputs, mut signing, mut networks, mut unproven) = (Vec::new(), Vec::new(), Vec::new(), false);
 
-/// A partially signed transaction, BIP174's version 0: the transaction, unsigned, and what the
-/// wallet says of it, its inputs and its outputs, in maps of pairs kept as they came, so a signed
-/// PSBT goes back with all it held and the signatures added.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Psbt {
-    global: Vec<Pair>,
-    inputs: Vec<Vec<Pair>>,
-    outputs: Vec<Vec<Pair>>,
-    tx: Transaction,
-}
+    for (index, pairs) in psbt.inputs.iter().enumerate() {
+        let n = index + 1;
+        let (output, proven) = psbt.spent(index)?.ok_or_else(|| format!("input {n} says nothing of the coins it spends: the fee cannot be known"))?;
+        let finished = pairs.iter().any(|pair| pair.key == [IN_FINAL_SCRIPTSIG] || pair.key == [IN_FINAL_SCRIPTWITNESS]);
+        let ours = derivations(pairs, IN_BIP32_DERIVATION)?.into_iter().filter(|derived| derived.fingerprint == fingerprint).collect::<Vec<_>>();
+        unproven |= !proven;
 
-impl Psbt {
-    /// Reads one from all of these bytes. Refused: another version, a transaction signed already
-    /// or with nothing in or out, a map short of the transaction's inputs or outputs, a key twice
-    /// in one map, and anything after.
-    pub fn read(bytes: &[u8]) -> Result<Psbt, String> {
-        let mut r = Reader::new(bytes);
+        let (key, path) = match (finished, ours.as_slice()) {
+            (true, _) | (_, []) => {
+                inputs.push(Spent { value: output.value, yours: None, swap: None });
 
-        if r.take(MAGIC.len()).ok() != Some(MAGIC) {
-            return Err("not a PSBT: one starts psbt and 0xff".to_string());
+                continue;
+            }
+            (false, [derived]) => (derived.key, derived.path.clone()),
+            (false, _) => return Err(format!("input {n} names more than one of this wallet's keys")),
+        };
+        let shown = path_text(&path);
+        let (network, chain, number, multisig) = match (bip84(&path), bip48(&path)) {
+            (Some((network, chain, number)), _) => (network, chain, number, false),
+            (None, Some((network, chain, number))) => (network, chain, number, true),
+            _ => return Err(format!("input {n} asks for a key at {shown}, where this signer holds none: it signs at m/84'/0'/0' and m/84'/1'/0', and multisigs' at m/48'/0'/0'/2' and m/48'/1'/0'/2'")),
+        };
+        let held = match multisig {
+            true => seed.multisig_key(network.coin(), chain, number),
+            false => seed.bitcoin_key(network.coin(), chain, number),
+        };
+
+        if public(&held.public()) != key {
+            return Err(format!("input {n} asks for a key at {shown} that is not this wallet's: a PSBT for another seed"));
         }
 
-        let global = map(&mut r)?;
+        let swap = match multisig {
+            true => None,
+            false => htlc_input(pairs, &output.script, &key, n)?,
+        };
+        let shared = match multisig {
+            true => Some(multisig_input(pairs, &output.script, &key, n)?),
+            false => None,
+        };
 
-        if global.iter().any(|pair| pair.key.first() == Some(&GLOBAL_UNSIGNED_TX) && pair.key.len() > 1) {
-            return Err("a PSBT whose transaction's key holds more than its type".to_string());
-        }
-
-        if let Some(version) = find(&global, &[GLOBAL_VERSION])
-            && version != [0; 4]
-        {
-            return Err(match <[u8; 4]>::try_from(version) {
-                Ok(version) => format!("a PSBT of version {}, which this signer does not read: it reads version 0", u32::from_le_bytes(version)),
-                Err(_) => "a PSBT whose version does not read".to_string(),
+        if swap.is_none() && shared.is_none() && output.script != p2wpkh(&hash160(&key)) {
+            return Err(match kind(&output.script) {
+                Some("native segwit") => format!("input {n} spends coins of another key than the one at {shown}"),
+                Some(kind) => format!("input {n} spends a {kind} output, which this signer does not sign: it signs native segwit, bc1q, alone"),
+                None => format!("input {n} spends an output of a script this signer does not sign: it signs native segwit, bc1q, alone"),
             });
         }
 
-        let (tx, witnessed) = Transaction::read(find(&global, &[GLOBAL_UNSIGNED_TX]).ok_or("a PSBT with no transaction in it")?)?;
-
-        if witnessed || tx.inputs.iter().any(|input| !input.script_sig.is_empty()) {
-            return Err("a PSBT whose transaction is signed already: a PSBT holds it bare".to_string());
+        if find(pairs, &[IN_SIGHASH_TYPE]).is_some_and(|kind| kind != SIGHASH_ALL.to_le_bytes()) {
+            return Err(format!("input {n} asks for a signature that leaves the rest open to change: this signer signs all of a transaction, SIGHASH_ALL, alone"));
         }
 
-        if tx.inputs.is_empty() || tx.outputs.is_empty() {
-            return Err("a transaction that spends nothing, or pays no one".to_string());
-        }
-
-        let inputs = tx.inputs.iter().map(|_| map(&mut r)).collect::<Result<Vec<_>, _>>()?;
-        let outputs = tx.outputs.iter().map(|_| map(&mut r)).collect::<Result<Vec<_>, _>>()?;
-
-        match r.done() {
-            true => Ok(Psbt { global, inputs, outputs, tx }),
-            false => Err("a PSBT with more after it than it holds".to_string()),
-        }
+        networks.push(network);
+        let (code, swapped) = swap.map_or((shared, None), |(code, swapped)| (Some(code), Some(swapped)));
+        signing.push(Signing { index, network, chain, number, multisig, key, value: output.value, code });
+        inputs.push(Spent { value: output.value, yours: Some(shown), swap: swapped });
     }
 
-    /// Its bytes: every pair it was read with, and any signatures added.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = MAGIC.to_vec();
+    let Some(network) = networks.first().copied() else {
+        return Err("nothing here for this wallet to sign: no input is its keys'. Pair the Bitcoin wallet with this signer, on Pair, and ask again.".to_string());
+    };
+    let mut outputs = Vec::new();
 
-        for map in std::iter::once(&self.global).chain(&self.inputs).chain(&self.outputs) {
-            for pair in map {
-                compact(&mut out, pair.key.len());
-                out.extend(&pair.key);
-                compact(&mut out, pair.value.len());
-                out.extend(&pair.value);
-            }
+    for (output, pairs) in psbt.tx.outputs.iter().zip(&psbt.outputs) {
+        let mut yours = None;
 
-            out.push(0);
-        }
-
-        out
-    }
-
-    /// The transaction, unsigned.
-    #[cfg(test)]
-    pub fn transaction(&self) -> &Transaction {
-        &self.tx
-    }
-
-    /// The signatures an input holds, each a key's, 33 bytes, and the signature, DER and the
-    /// sighash type after it.
-    #[cfg(test)]
-    pub fn signatures(&self, index: usize) -> Vec<([u8; 33], Vec<u8>)> {
-        self.inputs[index]
-            .iter()
-            .filter(|pair| pair.key.first() == Some(&IN_PARTIAL_SIG))
-            .filter_map(|pair| Some((pair.key[1..].try_into().ok()?, pair.value.clone())))
-            .collect()
-    }
-
-    /// The output an input spends, as the PSBT tells it, and whether the transaction it came in
-    /// proves it, as that transaction's id, which the input names, covers its amount. Told both
-    /// ways, the two must agree.
-    fn spent(&self, index: usize) -> Result<Option<(TxOut, bool)>, String> {
-        let (pairs, input, n) = (&self.inputs[index], &self.tx.inputs[index], index + 1);
-        let told = match find(pairs, &[IN_WITNESS_UTXO]) {
-            Some(value) => {
-                let mut r = Reader::new(value);
-                let output = TxOut::read(&mut r)?;
-
-                if !r.done() {
-                    return Err(format!("input {n}'s coins, with more after them than they hold"));
-                }
-
-                Some(output)
-            }
-            None => None,
-        };
-
-        let Some(previous) = find(pairs, &[IN_NON_WITNESS_UTXO]) else {
-            return Ok(told.map(|output| (output, false)));
-        };
-        let (previous, _) = Transaction::read(previous)?;
-
-        if previous.txid() != input.txid {
-            return Err(format!("input {n}'s previous transaction is not the one it spends from"));
-        }
-
-        let output = usize::try_from(input.vout).ok().and_then(|vout| previous.outputs.get(vout)).cloned();
-        let output = output.ok_or_else(|| format!("input {n} spends an output its previous transaction does not have"))?;
-
-        match told.is_some_and(|told| told != output) {
-            true => Err(format!("input {n}'s coins, told two ways that disagree")),
-            false => Ok(Some((output, true))),
-        }
-    }
-
-    /// Everything to check before signing, and what this seed signs: each input it holds the key
-    /// of. Refused: an input whose coins it does not know, one of this seed's that is not native
-    /// segwit or not at BIP84's path, or asks for less than all of the transaction signed, outputs
-    /// worth more than the inputs, nothing for this seed to sign, and both networks at once.
-    fn plan(&self, seed: &Seed) -> Result<(Review, Vec<Signing>), String> {
-        let fingerprint = seed.bitcoin_account(0).master_fingerprint;
-        let (mut inputs, mut signing, mut networks, mut unproven) = (Vec::new(), Vec::new(), Vec::new(), false);
-
-        for (index, pairs) in self.inputs.iter().enumerate() {
-            let n = index + 1;
-            let (output, proven) = self.spent(index)?.ok_or_else(|| format!("input {n} says nothing of the coins it spends: the fee cannot be known"))?;
-            let finished = pairs.iter().any(|pair| pair.key == [IN_FINAL_SCRIPTSIG] || pair.key == [IN_FINAL_SCRIPTWITNESS]);
-            let ours = derivations(pairs, IN_BIP32_DERIVATION)?.into_iter().filter(|derived| derived.fingerprint == fingerprint).collect::<Vec<_>>();
-            unproven |= !proven;
-
-            let (key, path) = match (finished, ours.as_slice()) {
-                (true, _) | (_, []) => {
-                    inputs.push(Spent { value: output.value, yours: None, swap: None });
-
-                    continue;
-                }
-                (false, [derived]) => (derived.key, derived.path.clone()),
-                (false, _) => return Err(format!("input {n} names more than one of this wallet's keys")),
-            };
-            let shown = path_text(&path);
-            let (network, chain, number) = bip84(&path).ok_or_else(|| format!("input {n} asks for a key at {shown}, where this signer holds none: it signs at m/84'/0'/0' and m/84'/1'/0'"))?;
-
-            if public(&seed.bitcoin_key(network.coin(), chain, number).public()) != key {
-                return Err(format!("input {n} asks for a key at {shown} that is not this wallet's: a PSBT for another seed"));
-            }
-
-            let swap = htlc_input(pairs, &output.script, &key, n)?;
-
-            if swap.is_none() && output.script != p2wpkh(&hash160(&key)) {
-                return Err(match kind(&output.script) {
-                    Some("native segwit") => format!("input {n} spends coins of another key than the one at {shown}"),
-                    Some(kind) => format!("input {n} spends a {kind} output, which this signer does not sign: it signs native segwit, bc1q, alone"),
-                    None => format!("input {n} spends an output of a script this signer does not sign: it signs native segwit, bc1q, alone"),
-                });
-            }
-
-            if find(pairs, &[IN_SIGHASH_TYPE]).is_some_and(|kind| kind != SIGHASH_ALL.to_le_bytes()) {
-                return Err(format!("input {n} asks for a signature that leaves the rest open to change: this signer signs all of a transaction, SIGHASH_ALL, alone"));
-            }
-
-            networks.push(network);
-            let (code, swapped) = swap.map_or((None, None), |(code, swapped)| (Some(code), Some(swapped)));
-            signing.push(Signing { index, network, chain, number, key, value: output.value, code });
-            inputs.push(Spent { value: output.value, yours: Some(shown), swap: swapped });
-        }
-
-        let Some(network) = networks.first().copied() else {
-            return Err("nothing here for this wallet to sign: no input is its keys'. Pair the Bitcoin wallet with this signer, on Pair, and ask again.".to_string());
-        };
-        let mut outputs = Vec::new();
-
-        for (output, pairs) in self.tx.outputs.iter().zip(&self.outputs) {
-            let mut yours = None;
-
-            for Derived { key, fingerprint: from, path } in derivations(pairs, OUT_BIP32_DERIVATION)? {
-                let Some((at, chain, number)) = bip84(&path).filter(|_| from == fingerprint) else {
-                    continue;
-                };
+        for Derived { key, fingerprint: from, path } in derivations(pairs, OUT_BIP32_DERIVATION)? {
+            // Change back to a multisig this seed is a member of: its script, holding this key.
+            if let Some((at, chain, number)) = bip48(&path).filter(|_| from == fingerprint) {
                 networks.push(at);
+                let script = find(pairs, &[OUT_WITNESS_SCRIPT]).unwrap_or_default();
+                let holds = parse_multisig_script(script).is_some_and(|(_, keys)| keys.contains(&key));
 
-                if public(&seed.bitcoin_key(at.coin(), chain, number).public()) == key && output.script == p2wpkh(&hash160(&key)) {
-                    yours = Some(path_text(&path));
+                if public(&seed.multisig_key(at.coin(), chain, number).public()) == key && holds && output.script == p2wsh(script) {
+                    yours = Some(format!("{}, the multisig's", path_text(&path)));
                 }
+
+                continue;
             }
 
-            outputs.push(Paid {
-                value: output.value,
-                to: address(&output.script, network),
-                yours,
-            });
+            let Some((at, chain, number)) = bip84(&path).filter(|_| from == fingerprint) else {
+                continue;
+            };
+            networks.push(at);
+
+            if public(&seed.bitcoin_key(at.coin(), chain, number).public()) == key && output.script == p2wpkh(&hash160(&key)) {
+                yours = Some(path_text(&path));
+            }
         }
 
-        if networks.iter().any(|at| *at != network) {
-            return Err("a PSBT on Bitcoin and its testnet both: no transaction spends on both, so it is refused".to_string());
-        }
-
-        let spends = total(inputs.iter().map(|spent| spent.value)).ok_or("inputs worth more than there are bitcoin")?;
-        let pays = total(outputs.iter().map(|paid| paid.value)).ok_or("outputs worth more than there are bitcoin")?;
-        let fee = spends.checked_sub(pays).ok_or("it pays out more than it spends")?;
-        // Signed, each input's witness is two pushes: a signature, at most 73 bytes and mostly 72,
-        // and its key. Others' inputs, of any kind, cannot be weighed.
-        let vsize = (signing.len() == self.tx.inputs.len()).then(|| (4 * self.tx.base().len() as u64 + 2 + 108 * signing.len() as u64).div_ceil(4));
-
-        let review = Review {
-            network,
-            inputs,
-            outputs,
-            fee,
-            vsize,
-            unproven,
-            lock_time: self.tx.lock_time,
-        };
-
-        Ok((review, signing))
+        outputs.push(Paid {
+            value: output.value,
+            to: address(&output.script, network),
+            yours,
+        });
     }
 
+    if networks.iter().any(|at| *at != network) {
+        return Err("a PSBT on Bitcoin and its testnet both: no transaction spends on both, so it is refused".to_string());
+    }
+
+    let spends = total(inputs.iter().map(|spent| spent.value)).ok_or("inputs worth more than there are bitcoin")?;
+    let pays = total(outputs.iter().map(|paid| paid.value)).ok_or("outputs worth more than there are bitcoin")?;
+    let fee = spends.checked_sub(pays).ok_or("it pays out more than it spends")?;
+    // Signed, each input's witness is two pushes: a signature, at most 73 bytes and mostly 72,
+    // and its key. Others' inputs, of any kind, cannot be weighed.
+    // A multisig's inputs take its members' signatures and its script: weighed by none of this.
+    let vsize = (signing.len() == psbt.tx.inputs.len() && !signing.iter().any(|input| input.multisig)).then(|| (4 * psbt.tx.base().len() as u64 + 2 + 108 * signing.len() as u64).div_ceil(4));
+
+    let review = Review {
+        network,
+        inputs,
+        outputs,
+        fee,
+        vsize,
+        unproven,
+        lock_time: psbt.tx.lock_time,
+    };
+
+    Ok((review, signing))
+}
+
+
+/// What the offline signer does with a PSBT a Bitcoin wallet asks it to sign.
+pub trait Signs {
     /// What it spends and pays, laid out to check before signing; why it cannot be signed, if it
     /// cannot.
-    pub fn review(&self, seed: &Seed) -> Result<Review, String> {
-        self.plan(seed).map(|(review, _)| review)
+    fn review(&self, seed: &Seed) -> Result<Review, String>;
+
+    /// The PSBT with this seed's signatures added, one for each input it holds the key of, in
+    /// place of any it held for those keys. Refused as review refuses it.
+    fn sign(&self, seed: &Seed) -> Result<Psbt, String>;
+}
+
+impl Signs for Psbt {
+    /// What it spends and pays, laid out to check before signing; why it cannot be signed, if it
+    /// cannot.
+    fn review(&self, seed: &Seed) -> Result<Review, String> {
+        plan(self, seed).map(|(review, _)| review)
     }
 
     /// The PSBT with this seed's signatures added, one for each input it holds the key of, in
     /// place of any it held for those keys. Refused as review refuses it.
-    pub fn sign(&self, seed: &Seed) -> Result<Psbt, String> {
-        let (_, signing) = self.plan(seed)?;
+    fn sign(&self, seed: &Seed) -> Result<Psbt, String> {
+        let (_, signing) = plan(self, seed)?;
         let mut signed = self.clone();
 
         for input in signing {
-            let keypair = seed.bitcoin_key(input.network.coin(), input.chain, input.number);
+            let keypair = match input.multisig {
+                true => seed.multisig_key(input.network.coin(), input.chain, input.number),
+                false => seed.bitcoin_key(input.network.coin(), input.chain, input.number),
+            };
             let PrivateKey::Bitcoin(secret) = keypair.private() else {
                 unreachable!("a bitcoin key");
             };
@@ -400,9 +288,12 @@ struct Signing {
     network: Network,
     chain: u32,
     number: u32,
+    /// Whether the key is a multisig member's, at m/48'/coin'/0'/2'/chain/number.
+    multisig: bool,
     key: [u8; 33],
     value: u64,
-    /// The script a swap's HTLC is spent with, its BIP143 script code; None for a key's coins.
+    /// The script a swap's HTLC or a multisig is spent with, its BIP143 script code; None for a
+    /// key's coins.
     code: Option<Vec<u8>>,
 }
 
@@ -530,64 +421,38 @@ fn htlc_input(_: &[Pair], _: &[u8], _: &[u8; 33], _: usize) -> Result<Option<(Ve
     Ok(None)
 }
 
-#[cfg(feature = "swap")]
-impl Psbt {
-    /// A PSBT asking the offline signer to sign a swap's HTLC spend: the spend unsigned, the
-    /// coins it spends, the HTLC's script, and where the signer's words derive the key, at
-    /// fingerprint and path. Its outputs say nothing, so the review shows where the coins go.
-    pub fn for_htlc(tx: &Transaction, value: u64, htlc: &Htlc, key: [u8; 33], fingerprint: [u8; 4], path: &[u32]) -> Psbt {
-        let mut coins = Vec::new();
-        TxOut { value, script: htlc.output() }.write(&mut coins);
-        let derivation = fingerprint.iter().copied().chain(path.iter().flat_map(|step| step.to_le_bytes())).collect();
-
-        Psbt {
-            global: vec![Pair { key: vec![GLOBAL_UNSIGNED_TX], value: tx.base() }],
-            inputs: vec![vec![
-                Pair { key: vec![IN_WITNESS_UTXO], value: coins },
-                Pair { key: vec![IN_WITNESS_SCRIPT], value: htlc.script() },
-                Pair { key: [&[IN_BIP32_DERIVATION][..], &key].concat(), value: derivation },
-            ]],
-            outputs: vec![Vec::new(); tx.outputs.len()],
-            tx: Transaction { inputs: tx.inputs.iter().map(|input| TxIn { witness: Vec::new(), ..input.clone() }).collect(), ..tx.clone() },
-        }
-    }
-
-    /// The spend, finished with the signer's signature, worth value: the transaction to
-    /// broadcast. Refused: no signature by the key the spend needs, or one that does not hold.
-    pub fn finish_htlc(&self, htlc: &Htlc, value: u64, spend: Spend) -> Result<Transaction, String> {
-        let key = match spend {
-            Spend::Claim { .. } => htlc.claim,
-            Spend::Refund => htlc.refund,
-        };
-        let signature = find(&self.inputs[0], &[&[IN_PARTIAL_SIG][..], &key].concat()).ok_or("the signed PSBT holds no signature by the swap's key")?;
-        let preimage = self.tx.script_preimage(0, &htlc.script(), value);
-        let holds = signature
-            .split_last()
-            .filter(|(kind, _)| u32::from(**kind) == SIGHASH_ALL)
-            .and_then(|(_, der)| chainv4::crypto::bitcoin::tx::from_der(der))
-            .is_some_and(|signature| chainv4::crypto::bitcoin::verify(&key, &preimage, &signature));
-
-        if !holds {
-            return Err("the signer's signature does not hold for this spend".to_string());
-        }
-
-        let mut tx = self.tx.clone();
-        tx.inputs[0].witness = htlc.witness(signature, spend);
-
-        Ok(tx)
-    }
-}
-
-/// Amounts added up, None past all the bitcoin there are.
-fn total(values: impl Iterator<Item = u64>) -> Option<u64> {
-    values.into_iter().try_fold(0u64, |sum, value| sum.checked_add(value).filter(|sum| *sum <= MAX_MONEY))
-}
-
 /// A bitcoin key's 33 bytes.
 fn public(key: &PublicKey) -> [u8; 33] {
     match key {
         PublicKey::Bitcoin(bytes) => *bytes,
         _ => unreachable!("a bitcoin key"),
+    }
+}
+
+/// Where a multisig member's key of this seed's sits: m/48'/coin'/0'/2'/chain/index, BIP48's for
+/// native segwit multisig, chain 0 or 1, on one of the networks.
+fn bip48(path: &[u32]) -> Option<(Network, u32, u32)> {
+    match *path {
+        [purpose, coin, account, script, chain, index] if purpose == 48 | HARDENED && coin >= HARDENED && account == HARDENED && script == 2 | HARDENED && chain < 2 && index < HARDENED => {
+            Some((Network::from_coin(coin - HARDENED)?, chain, index))
+        }
+        _ => None,
+    }
+}
+
+/// A multisig's coins an input spends with this key: the witness script, which must be an M-of-N
+/// holding the key, and the one its coins are locked to.
+fn multisig_input(pairs: &[Pair], spent: &[u8], key: &[u8; 33], n: usize) -> Result<Vec<u8>, String> {
+    let script = find(pairs, &[IN_WITNESS_SCRIPT]).ok_or_else(|| format!("input {n} asks for a multisig key's signature and gives no witness script"))?;
+    let (_, keys) = parse_multisig_script(script).ok_or_else(|| format!("input {n}'s witness script is no M-of-N multisig"))?;
+
+    if !keys.contains(key) {
+        return Err(format!("input {n}'s multisig does not hold this wallet's key"));
+    }
+
+    match spent == p2wsh(script) {
+        true => Ok(script.to_vec()),
+        false => Err(format!("input {n}'s script is not the one its coins are locked to")),
     }
 }
 
@@ -599,65 +464,6 @@ fn bip84(path: &[u32]) -> Option<(Network, u32, u32)> {
             Some((Network::from_coin(coin - HARDENED)?, chain, index))
         }
         _ => None,
-    }
-}
-
-/// A path as wallets write it: m/84'/0'/0'/1/3.
-fn path_text(path: &[u32]) -> String {
-    std::iter::once("m".to_string())
-        .chain(path.iter().map(|step| match *step >= HARDENED {
-            true => format!("{}'", step - HARDENED),
-            false => step.to_string(),
-        }))
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-/// A key a map derives: its 33 bytes, the fingerprint of the seed it derives from, and the path
-/// below that.
-struct Derived {
-    key: [u8; 33],
-    fingerprint: [u8; 4],
-    path: Vec<u32>,
-}
-
-/// The keys a map derives, by type. Pairs of keys of another size are no key of this seed's.
-fn derivations(pairs: &[Pair], kind: u8) -> Result<Vec<Derived>, String> {
-    pairs
-        .iter()
-        .filter(|pair| pair.key.first() == Some(&kind) && pair.key.len() == 34)
-        .map(|pair| match pair.value.len() >= 4 && pair.value.len() % 4 == 0 {
-            true => Ok(Derived {
-                key: pair.key[1..].try_into().expect("33 bytes"),
-                fingerprint: pair.value[..4].try_into().expect("4 bytes"),
-                path: pair.value[4..].chunks(4).map(|step| u32::from_le_bytes(step.try_into().expect("4 bytes"))).collect(),
-            }),
-            false => Err("a key's derivation that does not read".to_string()),
-        })
-        .collect()
-}
-
-/// The value of the pair with this key.
-fn find<'a>(pairs: &'a [Pair], key: &[u8]) -> Option<&'a [u8]> {
-    pairs.iter().find(|pair| pair.key == key).map(|pair| pair.value.as_slice())
-}
-
-/// One of a PSBT's maps: its pairs, up to the empty key that ends it. A key twice is refused.
-fn map(r: &mut Reader) -> Result<Vec<Pair>, String> {
-    let (mut pairs, mut keys) = (Vec::new(), HashSet::new());
-
-    loop {
-        let key = r.sized()?;
-
-        if key.is_empty() {
-            return Ok(pairs);
-        }
-
-        if !keys.insert(key) {
-            return Err("a PSBT with a key twice in one map".to_string());
-        }
-
-        pairs.push(Pair { key: key.to_vec(), value: r.sized()?.to_vec() });
     }
 }
 

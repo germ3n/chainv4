@@ -661,9 +661,9 @@ fn run(
     match &signed.tx {
         // A multisig's own transaction runs as the multisig, its backing checked before.
         Tx::Multisig { tx, .. } => run(layer, &SignedTx { tx: (**tx).clone(), ..signed.clone() }, sender, rules, limits, vm, context),
-        Tx::CreateMultisig { members, threshold } => {
+        Tx::CreateMultisig { members, threshold, testnet } => {
             let address = crate::structs::address::multisig_address(&sender, signed.nonce, rules.hash);
-            let policy = MultisigPolicy { members: members.clone(), threshold: *threshold };
+            let policy = MultisigPolicy { members: members.clone(), threshold: *threshold, testnet: *testnet };
 
             match Multisigs::new(layer).create(&address, policy) {
                 Ok(()) => (Ok(Effect::Deployed(address)), Contracted::default()),
@@ -671,8 +671,8 @@ fn run(
             }
         }
         Tx::ChangeMultisig { .. } if !matches!(sender, Address::Multisig(_)) => (Err(Failure::Registry(RegistryError::OnlyMultisig)), Contracted::default()),
-        Tx::ChangeMultisig { members, threshold } => {
-            let policy = MultisigPolicy { members: members.clone(), threshold: *threshold };
+        Tx::ChangeMultisig { members, threshold, testnet } => {
+            let policy = MultisigPolicy { members: members.clone(), threshold: *threshold, testnet: *testnet };
 
             (moved(Multisigs::new(layer).change(&sender, policy)), Contracted::default())
         }

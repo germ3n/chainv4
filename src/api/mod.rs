@@ -791,8 +791,10 @@ async fn multisig(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
 
     Ok(Json(json!({
         "address": address.to_string(),
-        "members": policy.members.iter().map(json::multisig_member).collect::<Vec<_>>(),
+        "members": policy.members.iter().map(|member| json::multisig_member(member, policy.testnet)).collect::<Vec<_>>(),
         "threshold": policy.threshold,
+        "testnet": policy.testnet,
+        "bitcoin": bitcoin_side(&policy),
         "nonce": account.nonce,
         "balance": account.balance.to_string(),
         "proposals": open.proposals.iter().map(|proposal| json!({
@@ -803,6 +805,28 @@ async fn multisig(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
             "approvals": proposal.approvals.iter().map(ToString::to_string).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })))
+}
+
+/// A multisig's descriptors on Bitcoin, receiving and change, and its first receiving address,
+/// when its members name xpubs.
+fn bitcoin_side(policy: &crate::registry::multisig::MultisigPolicy) -> Value {
+    #[cfg(feature = "bitcoin")]
+    if let Some(xpubs) = policy.members.iter().map(|member| member.bitcoin).collect::<Option<Vec<_>>>() {
+        use crate::crypto::bitcoin::multisig::{bitcoin_address, descriptor};
+
+        let network = json::network(policy.testnet);
+
+        return json!({
+            "network": network.name(),
+            "receiving": descriptor(policy.threshold, &xpubs, network, 0),
+            "change": descriptor(policy.threshold, &xpubs, network, 1),
+            "first_address": bitcoin_address(policy.threshold, &xpubs, network, 0, 0),
+        });
+    }
+
+    let _ = policy;
+
+    Value::Null
 }
 
 async fn validator(Shared(api): Shared<Api>, Path(voter): Path<String>) -> Answer {

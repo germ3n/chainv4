@@ -55,6 +55,30 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     metamask(ui, ctx);
     ui.add_space(14.0);
     bitcoin(ui, ctx);
+    ui.add_space(14.0);
+    member(ui, ctx);
+}
+
+/// The account as a native multisig's member: the line a multisig's maker adds for it, its key
+/// here, its Bitcoin multisig xpub and its EVM address, so its keys stay on this signer.
+fn member(ui: &mut Ui, ctx: &mut Ctx) {
+    let palette = *ctx.palette;
+    let network_id = egui::Id::unique("member network");
+    let mut testnet = ui.data(|data| data.get_temp::<bool>(network_id)).unwrap_or(false);
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "As a multisig's member");
+        ui.label(RichText::new("Give this to whoever makes the multisig, for the members' list on its Multisig page: it holds this account's public keys alone.").color(palette.soft));
+        ui.checkbox(&mut testnet, "For a multisig on Bitcoin's test networks");
+        ui.data_mut(|data| data.insert_temp(network_id, testnet));
+
+        let Some(line) = ctx.holder().and_then(|holder| super::multisig::member_line(holder, crate::keys::seed(ctx.book).as_ref(), testnet)) else {
+            return;
+        };
+        let side = ui.available_width().clamp(200.0, 360.0);
+        ui.vertical_centered(|ui| super::receive::qr(ui, &line, side));
+        super::text_block(ui, &palette, &line);
+    });
 }
 
 /// The wallet's Ethereum accounts, for MetaMask: the extended key at m/44'/60'/0', which every

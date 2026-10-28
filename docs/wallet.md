@@ -358,7 +358,10 @@ transactions round the members: a payment proposed and priced, signed with the a
 the offline signer from a `ur:chainv4-multisig` code, approved on chain through Send, and submitted
 once enough back it, under a key made for the moment, the multisig paying. What the node says of a
 multisig is shown as its word; nothing signed rests on it. The offline signer reads a bundle on
-Sign and shows it back signed.
+Sign and shows it back signed. For a multisig on Bitcoin it shows the descriptor and fresh
+addresses, and with an Esplora API makes, combines and broadcasts its PSBTs; the offline signer
+signs a multisig's Bitcoin input at m/48'/coin'/0'/2', and its Pair page shows each account's member
+line.
 
 ## Faucet
 

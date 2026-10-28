@@ -401,6 +401,15 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   static size from its fields, and `Tx` holding a `Box<Tx>` asks itself: the cycle only shows once
   something evaluates it, as tests do. `Nested` encodes the inner one as itself, with no size known
   ahead.
+- **PSBTs live in the library now** (`src/crypto/bitcoin/psbt.rs`): the maps, reading and writing,
+  the HTLC spends, and a multisig's, built, signed, combined and finished. The wallet keeps its
+  signer's review and signing as the `Signs` trait over it, so the CLI and the wallet make the same
+  PSBTs.
+- **A multisig's Bitcoin side is checked against Bitcoin Core.** An ignored test
+  (`bitcoin_core_derives_the_descriptor_s_addresses_and_takes_a_two_of_three_spend`, run with
+  `--ignored` where `bitcoind` is installed) has Bitcoin Core derive our descriptor's address,
+  decode our PSBT and take the 2-of-3 spend. BIP32's public derivation, BIP380's checksum and the
+  test seed's BIP48 xpub as Sparrow exports it have vectors of their own.
 - **Multisig policies live in `Column::Accounts`** beside the accounts, under `multisig:` and
   `proposals:` prefixes, which no account key starts with; nothing scans the column.
 - **Light updates gained a field again.** `LightUpdate::switched` is a plain field, not an

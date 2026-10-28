@@ -1,5 +1,7 @@
 use {
     super::*,
+    chainv4::crypto::bitcoin::psbt::{GLOBAL_VERSION, IN_NON_WITNESS_UTXO, IN_WITNESS_UTXO},
+    chainv4::crypto::bitcoin::tx::{Reader, Transaction, compact},
     crate::airgap::Message,
     chainv4::crypto::bitcoin::sha256d,
     chainv4::crypto::bitcoin::tx::base58check,
@@ -374,4 +376,45 @@ fn the_signer_signs_a_swaps_htlc_spend_as_the_swap_tools_do() {
     let stranger = Htlc { claim: theirs, refund: chainv4::crypto::secp256k1::public_key(&[0x33; 32]).unwrap(), ..htlc };
     let wrong = Psbt::for_htlc(&stranger.unsigned(Coins { txid: [7; 32], vout: 0, value: 80_000 }, p2wpkh(&hash160(&ours)), 2, Spend::Refund).unwrap(), 80_000, &stranger, ours, seed.bitcoin_account(0).master_fingerprint, &path);
     assert!(wrong.review(&seed).unwrap_err().contains("neither of its swap's keys"));
+}
+
+#[test]
+fn the_signer_signs_its_part_of_a_multisig_spend_and_sees_its_change_come_back() {
+    use chainv4::crypto::bitcoin::psbt::{MultisigCoin, MultisigWallet};
+    use chainv4::crypto::bitcoin::tx::{TxIn, TxOut, p2wsh};
+
+    let ours = seed();
+    let other = Phrase::parse("legal winner thank year wave sausage worth useful legal winner thank yellow").unwrap().seed("");
+    let third = Phrase::parse("letter advice cage absurd amount doctor acoustic avoid letter advice cage above").unwrap().seed("");
+    let wallet = MultisigWallet { threshold: 2, xpubs: [&ours, &other, &third].iter().map(|seed| seed.multisig_account(1)).collect(), network: Network::Test };
+    let change = p2wsh(&chainv4::crypto::bitcoin::multisig::witness_script(2, &wallet.xpubs, 1, 0).unwrap());
+    let tx = Transaction {
+        version: 2,
+        inputs: vec![TxIn { txid: [7; 32], vout: 0, script_sig: Vec::new(), sequence: 0xffff_fffd, witness: Vec::new() }],
+        outputs: vec![TxOut { value: 60_000, script: p2wpkh(&[0x11; 20]) }, TxOut { value: 38_000, script: change }],
+        lock_time: 0,
+    };
+    let psbt = Psbt::for_multisig(&tx, &wallet, &[MultisigCoin { value: 100_000, chain: 0, index: 0 }], &[(1, 0)]).unwrap();
+    let review = psbt.review(&ours).unwrap();
+
+    assert_eq!((review.network, review.fee, review.vsize), (Network::Test, 2_000, None));
+    assert_eq!(review.inputs[0].yours.as_deref(), Some("m/48'/1'/0'/2'/0/0"));
+    assert!(review.outputs[1].yours.as_deref().is_some_and(|path| path.contains("multisig")), "the change comes back");
+    assert_eq!(review.sent(), 60_000);
+
+    // Signed here and by another member, it finishes.
+    let mut signed = psbt.sign(&ours).unwrap();
+    let theirs = psbt.sign(&other).unwrap();
+
+    assert_eq!(signed.multisig_progress(), vec![(1, 2)]);
+    signed.combine(&theirs).unwrap();
+    assert_eq!(signed.finish_multisig().unwrap().inputs[0].witness.len(), 4);
+
+    // A script that does not hold this key, or is not the coins', is refused.
+    let mut forged = psbt.clone();
+    let script = chainv4::crypto::bitcoin::multisig::multisig_script(1, &[[2; 33]]);
+    forged.inputs[0].retain(|pair| pair.key != [0x05]);
+    forged.inputs[0].push(chainv4::crypto::bitcoin::psbt::Pair { key: vec![0x05], value: script });
+
+    assert!(forged.review(&ours).unwrap_err().contains("does not hold"));
 }

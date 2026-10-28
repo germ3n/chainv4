@@ -1,5 +1,6 @@
 use {
     super::*,
+    crate::bitcoin::Signs,
     chainv4::crypto::mnemonic::Phrase,
     chainv4::crypto::secp256k1,
     chainv4::swap::evm::Call,

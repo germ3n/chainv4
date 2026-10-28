@@ -236,6 +236,45 @@ impl Seed {
         Keypair::from_private(PrivateKey::Bitcoin(self.bip84(coin, chain, index)))
     }
 
+    #[document(
+        parent = "Seed",
+        summary = "The member xpub a native multisig names this seed by on Bitcoin: the account at m/48'/coin'/0'/2', BIP48's for native segwit multisig, with its seed's and parent's fingerprints, as Sparrow and Nunchuk export a multisig key.",
+        params = { coin = "The coin type: 0 for Bitcoin, BITCOIN_TESTNET_COIN_TYPE for its test networks." },
+        see_also = "BitcoinXpub, Seed::multisig_key",
+    )]
+    #[cfg(feature = "bitcoin")]
+    pub fn multisig_account(&self, coin: u32) -> crate::registry::multisig::BitcoinXpub {
+        let path = [(48, true), (coin, true), (0, true), (2, true)];
+        let public = |node: &Node| crate::crypto::secp256k1::public_key(&node.secret).expect("a BIP32 key is a valid secret");
+        let master = bip32_node(&self.0, &[]).expect("a master key for every seed but one in 2^127");
+        let parent = bip32_node(&self.0, &path[..3]).expect("a key at every index but one in 2^127");
+        let account = bip32_node(&self.0, &path).expect("a key at every index but one in 2^127");
+
+        crate::registry::multisig::BitcoinXpub {
+            fingerprint: fingerprint(&public(&master)),
+            parent: fingerprint(&public(&parent)),
+            public: public(&account),
+            chain_code: account.chain,
+        }
+    }
+
+    #[document(
+        parent = "Seed",
+        summary = "The key at m/48'/coin'/0'/2'/chain/index, below multisig_account: what this seed signs a native multisig's Bitcoin spend with.",
+        params = {
+            coin = "The coin type.",
+            chain = "0 for receiving addresses, 1 for change.",
+            index = "The address's number on that chain. Below 2^31.",
+        },
+        see_also = "Seed::multisig_account",
+    )]
+    #[cfg(feature = "bitcoin")]
+    pub fn multisig_key(&self, coin: u32, chain: u32, index: u32) -> Keypair {
+        let path = [(48, true), (coin, true), (0, true), (2, true), (chain, false), (index, false)];
+
+        Keypair::from_private(PrivateKey::Bitcoin(bip32(&self.0, &path).expect("a key at every index but one in 2^127")))
+    }
+
     /// BIP84's key at m/84'/coin'/0'/chain/index. Not one seed in 2^127 lands on an index BIP32
     /// skips.
     #[cfg(feature = "bitcoin")]
@@ -518,6 +557,26 @@ mod tests {
     }
 
     #[cfg(feature = "bitcoin")]
+    #[cfg(feature = "bitcoin")]
+    #[test]
+    fn a_multisig_member_s_keys_derive_from_its_xpub_as_from_its_seed() {
+        let seed = Phrase::parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap().seed("");
+        let xpub = seed.multisig_account(0);
+
+        // The well-known test seed's fingerprint, and its BIP48 multisig xpub as Sparrow exports it.
+        assert_eq!(xpub.fingerprint, [0x73, 0xc5, 0xda, 0x0a]);
+        assert_eq!(
+            crate::crypto::bitcoin::multisig::xpub_text(&xpub, crate::crypto::bitcoin::tx::Network::Main),
+            "[73c5da0a/48h/0h/0h/2h]xpub6DkFAXWQ2dHxq2vatrt9qyA3bXYU4ToWQwCHbf5XB2mSTexcHZCeKS1VZYcPoBd5X8yVcbXFHJR9R8UCVpt82VX1VhR28mCyxUFL4r6KFrf"
+        );
+
+        for (chain, index) in [(0, 0), (1, 7)] {
+            let crate::crypto::keypair::PublicKey::Bitcoin(key) = seed.multisig_key(0, chain, index).public() else { unreachable!("a bitcoin key") };
+
+            assert_eq!(crate::crypto::bitcoin::multisig::member_key(&xpub, chain, index), Some(key));
+        }
+    }
+
     #[test]
     fn bitcoin_keys_follow_bip84_and_match_bitcoins_wallets() {
         // BIP84's test vector: the receiving addresses of its phrase's first account.

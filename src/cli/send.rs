@@ -257,12 +257,14 @@ pub enum TxArgs {
         version: Option<u64>,
     },
     /// Makes a new multisig, M of N members' keys, and prints its address. Each --member is its
-    /// key here, and for a multisig that reaches Bitcoin and EVM chains its compressed Bitcoin key
-    /// and EVM address after slashes: ed25519:0x…/0x02…/0x…, every member naming those or none.
+    /// key here, and for a multisig that reaches Bitcoin and EVM chains its Bitcoin multisig
+    /// account xpub with its origin and its EVM address, after commas:
+    /// ed25519:0x…,[73c5da0a/48'/0'/0'/2']xpub…,0x…, every member naming those or none. A tpub
+    /// makes it a multisig on Bitcoin's test networks.
     CreateMultisig {
-        /// A member: KEY, or KEY/BITCOIN_KEY/EVM_ADDRESS. Repeat for each, 1 to 20.
+        /// A member: KEY, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS. Repeat for each, 1 to 20.
         #[arg(long = "member", required = true, value_parser = parse_member)]
-        members: Vec<crate::registry::multisig::MultisigMember>,
+        members: Vec<Member>,
         /// How many members each of its transactions needs.
         #[arg(long)]
         threshold: u32,
@@ -271,7 +273,7 @@ pub enum TxArgs {
     ChangeMultisig {
         /// A member, as create-multisig takes one. Repeat for each.
         #[arg(long = "member", required = true, value_parser = parse_member)]
-        members: Vec<crate::registry::multisig::MultisigMember>,
+        members: Vec<Member>,
         /// The new threshold.
         #[arg(long)]
         threshold: u32,
@@ -587,21 +589,37 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     report(&receipt)
 }
 
-/// A multisig member as --member takes it: KEY, or KEY/BITCOIN_KEY/EVM_ADDRESS.
-pub(super) fn parse_member(text: &str) -> Result<crate::registry::multisig::MultisigMember, String> {
-    let parts: Vec<&str> = text.split('/').collect();
+/// A multisig member as --member takes it, and whether its xpub is for Bitcoin's test networks.
+#[derive(Clone, Debug)]
+pub struct Member(crate::registry::multisig::MultisigMember, Option<bool>);
+
+/// A multisig member as --member takes it: KEY, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS.
+pub(super) fn parse_member(text: &str) -> Result<Member, String> {
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
     let key: PublicKey = parts[0].parse().map_err(|_| format!("{} is not a public key", parts[0]))?;
 
     match parts[1..] {
-        [] => Ok(crate::registry::multisig::MultisigMember { key, bitcoin: None, evm: None }),
-        [bitcoin, evm] => {
-            let bitcoin = from_hex(bitcoin).and_then(|bytes| <[u8; 33]>::try_from(bytes).ok()).ok_or_else(|| format!("{bitcoin} is not a compressed Bitcoin key, 33 bytes in hex"))?;
+        [] => Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: None, evm: None }, None)),
+        #[cfg(feature = "bitcoin")]
+        [xpub, evm] => {
+            let (bitcoin, network) = crate::crypto::bitcoin::multisig::parse_xpub(xpub)?;
             let evm = from_hex(evm).and_then(|bytes| <[u8; 20]>::try_from(bytes).ok()).ok_or_else(|| format!("{evm} is not an EVM address, 20 bytes in hex"))?;
 
-            Ok(crate::registry::multisig::MultisigMember { key, bitcoin: Some(bitcoin), evm: Some(evm) })
+            Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: Some(bitcoin), evm: Some(evm) }, Some(network == crate::crypto::bitcoin::tx::Network::Test)))
         }
-        _ => Err("a member is KEY, or KEY/BITCOIN_KEY/EVM_ADDRESS".to_string()),
+        _ => Err("a member is KEY, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS".to_string()),
     }
+}
+
+/// The members, and whether their xpubs are for Bitcoin's test networks: the same for all.
+fn members_of(members: Vec<Member>) -> CliResult<(Vec<crate::registry::multisig::MultisigMember>, bool)> {
+    let networks: std::collections::BTreeSet<bool> = members.iter().filter_map(|member| member.1).collect();
+
+    if networks.len() > 1 {
+        return Err("the members' xpubs are for Bitcoin and for its test networks both: a multisig is on one".into());
+    }
+
+    Ok((members.into_iter().map(|member| member.0).collect(), networks.into_iter().next().unwrap_or(false)))
 }
 
 /// A signer as --add takes it: KEY, or KEY@ACCOUNT.
@@ -1051,8 +1069,16 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
 
             Tx::WithdrawChange { version }
         }
-        TxArgs::CreateMultisig { members, threshold } => Tx::CreateMultisig { members, threshold },
-        TxArgs::ChangeMultisig { members, threshold } => Tx::ChangeMultisig { members, threshold },
+        TxArgs::CreateMultisig { members, threshold } => {
+            let (members, testnet) = members_of(members)?;
+
+            Tx::CreateMultisig { members, threshold, testnet }
+        }
+        TxArgs::ChangeMultisig { members, threshold } => {
+            let (members, testnet) = members_of(members)?;
+
+            Tx::ChangeMultisig { members, threshold, testnet }
+        }
         #[cfg(feature = "names")]
         TxArgs::Name { action } => name_transaction(action, sender, agent, node)?,
         TxArgs::Call {
