@@ -1,6 +1,7 @@
 #!/bin/sh
 # Starts a chainv4 node in its container, with the API on :8080 for nginx in front, the explorer at
-# / and the wallet at /wallet/, both indexes, and peer-to-peer over QUIC on P2P_PORT.
+# / and the wallet at /wallet/, both indexes, and peer-to-peer over QUIC on P2P_PORT, and with
+# TOR=1 over TCP too, for its onion.
 #
 # Its chain is /data/genesis.json, written on the first start and kept, so the chain stays the same
 # across restarts: copied from /config/genesis.json (docker/config/genesis.json) when there is one,
@@ -178,6 +179,14 @@ fi
 if [ -n "${DEX_ROUTER:-}" ]; then
     set -- "$@" --dex-router "$DEX_ROUTER"
     echo "[docker] naming the EVM DEX's router $DEX_ROUTER"
+fi
+
+# With TOR=1, peer-to-peer over Tor too: TCP beside QUIC, which tor publishes in the node's onion,
+# onion peers dialed through tor's SOCKS port on compose's network, and the onion's address read
+# from the file tor writes, to tell peers.
+if [ "${TOR:-0}" = 1 ]; then
+    set -- "$@" --listen "/ip4/0.0.0.0/tcp/${P2P_PORT:-4001}" --tor-proxy socks5h://tor:9050 --onion-file /onion/p2p
+    echo "[docker] peer-to-peer over Tor too: TCP ${P2P_PORT:-4001} for the onion, onions dialed through tor"
 fi
 
 # Word-split on purpose: EXTRA_ARGS holds several arguments.

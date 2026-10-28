@@ -135,6 +135,17 @@ relay-sync <relay> --batch 25` against `https://mempool.space/testnet4/api`, the
 ever, under `/etc/systemd/system/chainv4-relay.service` (`Restart=always`). After a rebuild of the
 image, copy the binary out again and `systemctl restart chainv4-relay`.
 
+## 6b. The onion
+
+`TOR=1` and `TOR_MINING=1` in `docker/.env`, then push and up: tor starts with the stack, the
+node listens for peers over TCP for the onion as well, and `docker/pow.sh onion` on the VPS prints
+the address. Check it from here through a local Tor (`brew install tor`, then `tor &`), and join
+it over Tor alone with `docker/pow.sh join ADDRESS.onion --cpu`:
+
+```sh
+curl --socks5-hostname 127.0.0.1:9050 http://ADDRESS.onion/status
+```
+
 ## 7. The laptop and the apps
 
 ```sh

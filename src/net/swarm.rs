@@ -254,6 +254,8 @@ struct Net {
     tried: HashMap<PeerId, Instant>,
     /// Peers' faults and bans.
     bans: Bans,
+    /// Where tor writes the node's onion, until it is read and told to peers.
+    onion_file: Option<std::path::PathBuf>,
     /// Transactions waiting to be gossiped in the next batch.
     outgoing: Vec<SignedTx>,
     /// The transactions sent and heard of lately, by id: one is never sent twice, and one heard
@@ -291,9 +293,12 @@ impl Net {
         let (sync_protocol, kad_protocol, identify_protocol) = (names.sync.clone(), names.kad.clone(), names.identify.clone());
         // The node's own key, the same each start; a new one when none is given, as in tests.
         let identity = config.key.clone().unwrap_or_else(libp2p::identity::Keypair::generate_ed25519);
+        let tor = config.tor.clone();
         let mut swarm = SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
-            .with_quic()
+            // QUIC, TCP and Tor, as the node's Tor settings say (net::tor).
+            .with_other_transport(|key| super::tor::transport(key, &tor).map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) }))
+            .map_err(net_error)?
             .with_behaviour(|key| {
                 let peer_id = key.public().to_peer_id();
                 let gossip_config = gossipsub::ConfigBuilder::default()
@@ -383,6 +388,7 @@ impl Net {
             target_peers: config.target_peers,
             tried: HashMap::new(),
             bans: Bans::new(config.bans),
+            onion_file: config.tor.onion_file.clone(),
             outgoing: Vec::new(),
             seen: Seen::default(),
             hash: config.hash,
@@ -394,6 +400,13 @@ impl Net {
     /// while the node has fewer peers than it wants, the bootnodes not dialed in the last minute,
     /// and a few of the peers Kademlia knows.
     fn redial(&mut self) {
+        // The node's onion, once tor made it: told to peers as its address from then on.
+        if let Some(address) = self.onion_file.as_deref().and_then(super::tor::read_onion) {
+            log::info!("[net] reachable as the onion {address}");
+            self.swarm.add_external_address(address);
+            self.onion_file = None;
+        }
+
         let short = self.swarm.connected_peers().count() < self.target_peers;
         let now = Instant::now();
         self.bans.sweep(now);
@@ -859,6 +872,7 @@ mod tests {
             key: None,
             remembered: Vec::new(),
             bans: crate::net::BanLimits::default(),
+            tor: Default::default(),
         }
     }
 
@@ -957,6 +971,83 @@ mod tests {
     }
 
     /// The next event matching, waiting up to a deadline.
+    /// A SOCKS5 proxy on 127.0.0.1, as Tor's answers for an onion: every CONNECT, whatever name it
+    /// asks for, goes to the one address given, and the names asked for are kept.
+    fn onion_proxy(to: std::net::SocketAddr) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = format!("socks5h://{}", listener.local_addr().unwrap());
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = asked.clone();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let (mut client, kept) = (stream.unwrap(), kept.clone());
+
+                std::thread::spawn(move || {
+                    let mut greeting = [0; 3];
+                    client.read_exact(&mut greeting).unwrap();
+                    client.write_all(&[5, 0]).unwrap();
+                    let mut head = [0; 5];
+                    client.read_exact(&mut head).unwrap();
+                    let mut name = vec![0; usize::from(head[4]) + 2];
+                    client.read_exact(&mut name).unwrap();
+                    kept.lock().unwrap().push(String::from_utf8_lossy(&name[..name.len() - 2]).into_owned());
+                    let server = std::net::TcpStream::connect(to).unwrap();
+                    client.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).unwrap();
+                    let (mut up, mut down) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+                    std::thread::spawn(move || std::io::copy(&mut up, &mut down).ok());
+                    let (mut back, mut client) = (server, client);
+                    std::io::copy(&mut back, &mut client).ok();
+                });
+            }
+        });
+
+        (proxy, asked)
+    }
+
+    #[test]
+    #[ignore = "opens real sockets on 127.0.0.1"]
+    fn a_node_under_tor_alone_reaches_an_onion_peer_over_tcp_through_the_proxy() {
+        use crate::net::tor::TorConfig;
+
+        let network = format!("tor-{}", PeerId::random());
+        let onion_side = spawn(NetConfig {
+            mdns: false,
+            listen: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            ..config(&network, BacklogLimits::default(), Vec::new())
+        })
+        .unwrap();
+        let listening = wait_for(&onion_side, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+        let port = listening.iter().find_map(|part| match part {
+            libp2p::multiaddr::Protocol::Tcp(port) => Some(port),
+            _ => None,
+        });
+        let (proxy, asked) = onion_proxy(std::net::SocketAddr::from(([127, 0, 0, 1], port.unwrap())));
+
+        // The peer is named by an onion only the proxy knows the way to; nothing dials directly.
+        let onion: Multiaddr = format!("/onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:{}/p2p/{}", port.unwrap(), peer_of(&listening).unwrap()).parse().unwrap();
+        let hidden = spawn(NetConfig {
+            mdns: false,
+            listen: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            tor: TorConfig { proxy: Some(proxy), only: true, onion_file: None },
+            ..config(&network, BacklogLimits::default(), vec![onion])
+        })
+        .unwrap();
+
+        wait_for(&hidden, |event| match event {
+            NetEvent::PeerUp { .. } => Some(()),
+            _ => None,
+        });
+
+        assert_eq!(asked.lock().unwrap().first().map(String::as_str), Some("vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion"), "the onion's name, for Tor to resolve");
+        drop(onion_side);
+    }
+
     fn wait_for<T>(link: &NetLink, mut matches: impl FnMut(NetEvent) -> Option<T>) -> T {
         let deadline = Instant::now() + Duration::from_secs(30);
 

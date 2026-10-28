@@ -620,6 +620,13 @@ offline; these would make that hold up as a treasury.
 
 ### Network
 
+- [x] **An onion service.** With `TOR=1` the Docker stack runs Tor beside the node, its API,
+  explorer and wallet at an `.onion`, and with `TOR_MINING=1` its mining port; the apps reach it
+  through their SOCKS proxy, the worker through `--proxy`. See [Docker](docker.md#an-onion-service).
+- [x] **Peer-to-peer over Tor.** libp2p over TCP, with Noise and Yamux, beside QUIC: `/onion3`
+  peers dialed through `--tor-proxy`, the node reachable at its onion (`--onion-file`), and
+  `--tor-only`, every dial through Tor and no QUIC. The Docker stack does it with `TOR=1`, and
+  `docker/pow.sh join ADDRESS.onion` joins through Tor alone. See [Node](node.md#over-tor).
 - [x] **Sync.** A node asks each peer for its status when it connects, and again when it gossips a
   block that does not connect. While any peer's chain holds more work, it asks the heaviest one
   for the next 128 blocks and imports them in order, side branches and reorgs included. When a

@@ -675,7 +675,7 @@ fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
         sign: None,
     });
     node.step(now_ms()).unwrap();
-    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1) }).unwrap();
+    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None }).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
     while node.chain().tip().height < 2 {

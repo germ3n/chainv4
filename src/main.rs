@@ -122,6 +122,19 @@ struct NodeArgs {
     /// It can catch honest nodes behind the same NAT or VPN.
     #[arg(long)]
     ban_ips: bool,
+    /// Tor's SOCKS5 proxy, socks5h://host:port: /onion3 peers and bootnodes are dialed through it,
+    /// everything else directly. Listen on TCP too (--listen /ip4/0.0.0.0/tcp/4001) for tor to
+    /// publish as the node's onion.
+    #[arg(long)]
+    tor_proxy: Option<String>,
+    /// Every dial through --tor-proxy and no QUIC, so the node never shows its IP: it reaches onion
+    /// peers, and TCP ones through Tor's exits. Its own listeners should be on 127.0.0.1, for tor.
+    #[arg(long, requires = "tor_proxy")]
+    tor_only: bool,
+    /// The file tor writes the node's onion into, as a multiaddr, /onion3/…:PORT: read until it is
+    /// there, then told to peers as the node's address.
+    #[arg(long)]
+    onion_file: Option<std::path::PathBuf>,
     /// Do not wait for the disk on each commit: faster, but a power cut can lose the last few
     /// blocks, which peers give back. For benchmarks and tests.
     #[arg(long)]
@@ -381,6 +394,11 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         parent.join(net::NET_KEY_FILE)
     });
+    // Tor carries no UDP: under --tor-only the node listens on TCP alone, for its onion.
+    if args.tor_only && args.listen.iter().any(|address| !address.iter().any(|part| matches!(part, libp2p::multiaddr::Protocol::Tcp(_)))) {
+        return Err("--tor-only listens on TCP alone, for tor to publish: give --listen /ip4/127.0.0.1/tcp/4001".into());
+    }
+
     let net = net::spawn(NetConfig {
         listen: args.listen,
         peers: args.peer,
@@ -399,6 +417,11 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         bans: net::BanLimits {
             ban_for: std::time::Duration::from_millis(args.ban_for),
             ips: args.ban_ips,
+        },
+        tor: net::tor::TorConfig {
+            proxy: args.tor_proxy.clone(),
+            only: args.tor_only,
+            onion_file: args.onion_file.clone(),
         },
     })?;
     // What this node produces with: a miner's settings, a signing key, or both. The node builds

@@ -211,7 +211,12 @@ chainv4 --mine --mine-threads 0 --mining 0.0.0.0:4002 --mining-token mining.toke
 chainv4 worker --node 203.0.113.7:4002 --token mining.token --gpu          # every GPU
 chainv4 worker --node 203.0.113.7:4002 --token mining.token --gpu --gpus 1 # one of them
 chainv4 worker --node 203.0.113.7:4002 --token mining.token --threads 8    # CPU threads
+chainv4 worker --node ADDRESS.onion:4002 --token mining.token --proxy socks5h://127.0.0.1:9050 # over Tor
 ```
+
+**Through a proxy:** `--proxy socks5h://host:port` reaches the node through a SOCKS5 proxy, which
+resolves its name: Tor's, for a node's onion (see [An onion service](docker.md#an-onion-service)).
+Tor builds a circuit first, so the connection may take some seconds; the messages are the same.
 
 **How it goes:**
 1. The node's producer is a `Pool`: the node's own miner, if it has threads or GPUs, and the

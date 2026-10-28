@@ -107,6 +107,7 @@ DNS name pointing at the host, and port 80 reachable from the internet.
 | `HTTP_PORT` (80) | Let's Encrypt's challenges, and a redirect to HTTPS. |
 | `P2P_PORT` (4001, UDP) | Peer-to-peer, straight to the node. |
 | `MINING_PORT` (4002, TCP) | Workers, when `docker/config/mining.token` is there; nothing listens otherwise. |
+| An onion, with `TOR=1` | The API, the explorer and the wallet over Tor, and with `TOR_MINING=1` the mining port (see [An onion service](#an-onion-service)). Nothing is published for it: Tor reaches out. |
 
 **The API is never published itself.** Port 8080 is only on compose's own network, for nginx.
 
@@ -117,6 +118,44 @@ encrypted, and need not be (see [Consensus](consensus.md#mining-with-workers)).
 **Peer-to-peer needs no proxy for its encryption.** It is libp2p over QUIC, which is always TLS
 1.3, with certificates bound to each peer's id: every connection is encrypted and authenticated
 end to end. nginx could not carry it anyway, as it is UDP.
+
+## An onion service
+
+With `TOR=1` in `.env`, `docker/pow.sh up` runs Tor beside the node (`docker/tor`, the compose
+profile `tor`), and the node is also an onion service: `http://ADDRESS.onion` serves its API, the
+explorer and the wallet, as `HTTPS_PORT` does; `P2P_PORT` there takes peers over TCP, which the node
+then listens for beside QUIC and tells peers as `/onion3/ADDRESS:P2P_PORT`; and with
+`TOR_MINING=1` its mining port as well, on `MINING_PORT`. The node dials onion peers through tor's
+SOCKS port, which only compose's network may use.
+
+```sh
+# in docker/.env
+TOR=1
+TOR_MINING=1
+```
+
+```sh
+docker/pow.sh up       # on the VPS: tor starts with the rest, and prints the onion when it made it
+docker/pow.sh onion    # on the VPS: the onion's address again
+```
+
+- **No TLS, and none needed:** an onion address is the hash of the service's own key, and Tor
+  encrypts and authenticates every connection to it end to end, so `http://` is as private as
+  HTTPS and needs no certificate. Tor goes straight to the node's port 8080 on compose's network,
+  not through nginx.
+- **The address stays** while the `tor` volume does: it holds the onion's key. Removing the volume
+  makes a new address; backing it up keeps the old one on another machine.
+- **Tor's own SOCKS port is off** in the container: it serves the onion and is no proxy for the
+  machine.
+- **Peer-to-peer goes both ways:** over QUIC on `P2P_PORT` as before, for nodes on the internet,
+  and over TCP at the onion, for nodes behind Tor. `docker/pow.sh join ADDRESS.onion` joins it that
+  way, through the Tor on your machine alone, never showing your IP (see
+  [Over Tor](node.md#over-tor)).
+- **Reaching it:** Tor Browser opens the explorer and the wallet as any site; the apps reach it
+  through a SOCKS proxy, Settings › Proxy (**Orbot**, socks5h://127.0.0.1:9050, or **Tor
+  Browser**, 9150), which resolves the `.onion` name inside Tor; the CLI takes `--proxy`; workers
+  mine through it with `chainv4 worker --node ADDRESS.onion:4002 --proxy socks5h://127.0.0.1:9050`,
+  or `docker/pow.sh worker ADDRESS.onion`, which uses Tor's port by itself.
 
 ## A proof-of-work chain across machines
 

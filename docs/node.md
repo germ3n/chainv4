@@ -141,6 +141,7 @@ The node never sees libp2p itself.
 | Piece | What it does |
 | --- | --- |
 | QUIC | The transport. `--listen` picks addresses, `/ip4/0.0.0.0/udp/0/quic-v1` by default; port 0 picks one, and the log shows which. |
+| TCP, Noise, Yamux | For addresses `--listen` gives as TCP, `/ip4/0.0.0.0/tcp/4001`, and for peers over Tor (see [Over Tor](#over-tor)). |
 | gossipsub | Blocks, transactions and votes, on topics `/{protocol}/{network}/blocks`, `/txs-batch` and `/votes`. |
 | Kademlia | Finding peers, as `/{protocol}/{network}/kad/1`. |
 | mDNS | Finding peers on the local network; `--no-mdns` turns it off, as on a server. |
@@ -191,6 +192,34 @@ So a flood, or an invalid block, stops at the first honest node rather than pass
 is the same each start, so a peer can be named by it in `--peer` as `/p2p/<id>`, and is checked
 when it is. A file that does not read stops the node rather than giving it a new id; move it aside
 for a new one. It signs gossip and connections, nothing on the chain.
+
+## Over Tor
+
+Tor carries TCP alone, and QUIC is UDP, so a node meets peers over Tor on libp2p's TCP transport,
+with Noise and Yamux, through a Tor SOCKS5 proxy (`src/net/tor.rs`):
+
+| Flag | What it does |
+| --- | --- |
+| `--tor-proxy socks5h://host:port` | `/onion3` peers and bootnodes are dialed through it; everything else directly, as before. |
+| `--tor-only` | Every dial through the proxy and no QUIC: the node never shows its IP. It reaches onion peers, and TCP ones through Tor's exits, not QUIC ones. It must listen on TCP alone, `--listen /ip4/127.0.0.1/tcp/4001`. |
+| `--onion-file PATH` | The file tor writes the node's onion into, `/onion3/NAME:PORT`, read every redial until it is there and then told to peers as the node's address. |
+
+**Reachable as an onion:** listen on TCP too, have tor publish that port in a hidden service
+(`HiddenServicePort 4001 127.0.0.1:4001`), and give `--onion-file` the address, so identify tells
+peers. The Docker stack does all three with `TOR=1` (see [Docker](docker.md#an-onion-service)).
+
+```sh
+chainv4 … --listen /ip4/0.0.0.0/udp/4001/quic-v1 --listen /ip4/0.0.0.0/tcp/4001 \
+  --tor-proxy socks5h://127.0.0.1:9050 --onion-file /var/lib/tor/chainv4/p2p
+chainv4 … --listen /ip4/127.0.0.1/tcp/4001 --tor-proxy socks5h://127.0.0.1:9050 --tor-only --no-mdns \
+  --peer /onion3/NAME:4001                       # a node behind Tor alone, joining an onion
+```
+
+- **What a Tor-only node gives away:** nothing of its IP. It still runs gossip, Kademlia and sync
+  as any node, and its peers know its peer id; mDNS, which speaks on the local network, should be
+  off (`--no-mdns`).
+- **Kademlia tells it QUIC addresses too,** which it cannot dial; those dials fail at once and it
+  moves on. A Tor-only node needs onion peers or TCP ones to stay connected.
 
 ## Bans
 

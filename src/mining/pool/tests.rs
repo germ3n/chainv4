@@ -108,6 +108,7 @@ fn a_worker_on_another_thread_seals_blocks_the_rules_accept() {
         name: "rig 1".to_string(),
         protocol: "chainv4".to_string(),
         devices: Devices::Cpu(2),
+        proxy: None,
     })
     .unwrap();
     let parent = header(5, 10_000, 500);

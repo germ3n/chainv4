@@ -111,8 +111,8 @@ ur = { version = "0.5.2", optional = true }
 zeroize = "1.9.1"
 ethnum = "1.5.3"
 rayon = { version = "1.12.0", optional = true }
-libp2p = { version = "0.57.1", features = ["tokio", "quic", "gossipsub", "kad", "mdns", "identify", "request-response", "macros"], optional = true }
-tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros"], optional = true }
+libp2p = { version = "0.57.1", features = ["tokio", "quic", "tcp", "noise", "yamux", "gossipsub", "kad", "mdns", "identify", "request-response", "macros"], optional = true }
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "io-util"], optional = true }
 clap = { version = "4.6.7", features = ["derive"], optional = true }
 log = { version = "0.4.34", optional = true }
 env_logger = { version = "0.11.11", optional = true }

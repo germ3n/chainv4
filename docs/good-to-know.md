@@ -471,6 +471,22 @@ voting finality it now goes back to the checkpoint and follows the node from the
   app it builds, so `ui/build-ios.sh --provision` has XcodeGen write a stub of the same bundle id,
   which Xcode signs automatically; the real app is then signed with that profile's entitlements
   and installed with `devicectl`.
+- **The onion goes to the node, not through nginx.** nginx's port 80 redirects to HTTPS, which an
+  onion needs no part of, and its certificate would name the domain, not the onion; tor's
+  `HiddenServicePort 80 node:8080` reaches the node on compose's network directly, its port still
+  published nowhere. With `TOR_MINING=1` the mining port is offered on `MINING_PORT` and forwarded
+  to the 4002 the node takes workers on inside its container.
+- **The node builds its own transport stack** (`net::tor::transport`), handed to libp2p's builder
+  as one custom transport: QUIC, then direct TCP, then Tor for `/onion3`; or under `--tor-only`, a
+  TCP that only listens (`ListenOnly`, whose dials all refuse) before a Tor that dials every TCP
+  address, and no QUIC. A Tor that dialed only onions while TCP dialed the rest would leak the IP.
+- **The node learns its onion late.** tor makes the address after the node starts, so the stack's
+  tor writes `/onion3/NAME:PORT` into the `onion` volume and the node reads `--onion-file` on each
+  redial until it is there, then adds it as an external address, which identify tells peers.
+- **The worker speaks SOCKS5 itself** (`mining::worker::through`): a greeting with no
+  authentication, then CONNECT with the node's name, never an address, so a `.onion` resolves
+  inside Tor; the reply's bound address is read and dropped. It waits up to 90 seconds, as Tor
+  builds a circuit to an onion first.
 - **The anvil test is ignored** (`a_multisig_s_contract_sits_at_one_address_on_anvil_and_chainv4_and_pays_on_anvil`):
   run it with `--ignored` where Foundry's `anvil` is installed; it takes port 18965.
 - **Light updates gained a field again.** `LightUpdate::switched` is a plain field, not an

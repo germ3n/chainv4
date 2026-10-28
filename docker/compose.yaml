@@ -18,6 +18,7 @@ services:
     image: chainv4:latest
     restart: unless-stopped
     environment:
+      TOR: ${TOR:-0}
       CHAIN_CONSENSUS: ${CHAIN_CONSENSUS:-authority}
       CHAIN_FINALITY: ${CHAIN_FINALITY:-ffg}
       CHAIN_FEES: ${CHAIN_FEES:-base-fee}
@@ -43,6 +44,8 @@ services:
       EXTRA_ARGS: ${EXTRA_ARGS:-}
     volumes:
       - chain:/data
+      # The node's onion, as tor writes it, with TOR=1.
+      - onion:/onion:ro
       # A genesis.json to start from, producer.key and validator.key to sign with,
       # mining.token for workers to mine with, and faucet.key for a faucet to pay from.
       - ./config:/config:ro,z
@@ -77,6 +80,23 @@ services:
       - letsencrypt:/etc/letsencrypt:ro
       - acme:/var/www/certbot:ro
 
+  # Only with --profile tor: the node as an onion service (docker/tor).
+  tor:
+    build: tor
+    image: chainv4-tor:latest
+    profiles: [tor]
+    restart: unless-stopped
+    depends_on:
+      node:
+        condition: service_healthy
+    environment:
+      TOR_MINING: ${TOR_MINING:-0}
+      MINING_PORT: ${MINING_PORT:-4002}
+      P2P_PORT: ${P2P_PORT:-4001}
+    volumes:
+      - tor:/var/lib/tor
+      - onion:/onion
+
   # Only with --profile letsencrypt.
   certbot:
     image: docker.io/certbot/certbot:v5.8.0
@@ -96,6 +116,8 @@ services:
 
 volumes:
   chain:
+  tor:
+  onion:
   tls:
   letsencrypt:
   acme:

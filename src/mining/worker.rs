@@ -56,6 +56,8 @@ pub struct WorkerConfig {
     pub protocol: String,
     #[document(summary = "What it mines on.")]
     pub devices: Devices,
+    #[document(summary = "A SOCKS5 proxy to reach the node through, socks5h://host:port, such as Tor's for a node's onion; None to connect directly.")]
+    pub proxy: Option<String>,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -66,6 +68,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("name", &self.name)
             .field("protocol", &self.protocol)
             .field("devices", &self.devices)
+            .field("proxy", &self.proxy)
             .finish_non_exhaustive()
     }
 }
@@ -183,8 +186,12 @@ fn run(config: &WorkerConfig, stop: &AtomicBool, current: &Mutex<Option<TcpStrea
     }
 }
 
-/// A connection to the node, past its handshake's TCP part.
+/// A connection to the node, past its handshake's TCP part: directly, or through the proxy.
 fn connect(config: &WorkerConfig) -> Result<TcpStream, String> {
+    if let Some(proxy) = &config.proxy {
+        return through(proxy, &config.node);
+    }
+
     let addresses = config.node.to_socket_addrs().map_err(|err| format!("no address for it: {err}"))?;
     let mut last = "no address for it".to_string();
 
@@ -196,6 +203,73 @@ fn connect(config: &WorkerConfig) -> Result<TcpStream, String> {
     }
 
     Err(last)
+}
+
+/// How long a proxy may take to reach the node: Tor builds a circuit to an onion first.
+const THROUGH_PROXY: Duration = Duration::from_secs(90);
+
+/// A connection to the node through a SOCKS5 proxy, which resolves its name: a Tor onion's only
+/// resolves there. No authentication, as Tor's and Orbot's take none.
+fn through(proxy: &str, node: &str) -> Result<TcpStream, String> {
+    use std::io::{Read, Write};
+
+    let at = proxy.strip_prefix("socks5h://").or_else(|| proxy.strip_prefix("socks5://")).ok_or_else(|| format!("the proxy {proxy} is not socks5h://host:port"))?;
+    let (host, port) = node
+        .rsplit_once(':')
+        .and_then(|(host, port)| Some((host.trim_start_matches('[').trim_end_matches(']'), port.parse::<u16>().ok()?)))
+        .ok_or_else(|| format!("the node {node} is not host:port"))?;
+    let name = u8::try_from(host.len()).map_err(|_| "the node's name is too long for SOCKS5".to_string())?;
+    let address = at.to_socket_addrs().map_err(|err| format!("the proxy {at}: {err}"))?.next().ok_or_else(|| format!("no address for the proxy {at}"))?;
+    let mut stream = TcpStream::connect_timeout(&address, CONNECT).map_err(|err| format!("the proxy {at}: {err}"))?;
+    let failed = |err: std::io::Error| format!("the proxy {at}: {err}");
+    stream.set_read_timeout(Some(THROUGH_PROXY)).map_err(failed)?;
+
+    // No authentication, then CONNECT to the name and port.
+    stream.write_all(&[5, 1, 0]).map_err(failed)?;
+    let mut chosen = [0; 2];
+    stream.read_exact(&mut chosen).map_err(failed)?;
+
+    if chosen != [5, 0] {
+        return Err(format!("the proxy {at} wants authentication, or is no SOCKS5 proxy"));
+    }
+
+    let mut request = vec![5, 1, 0, 3, name];
+    request.extend(host.as_bytes());
+    request.extend(port.to_be_bytes());
+    stream.write_all(&request).map_err(failed)?;
+    let mut reply = [0; 4];
+    stream.read_exact(&mut reply).map_err(failed)?;
+
+    if reply[1] != 0 {
+        let why = match reply[1] {
+            1 => "it failed",
+            2 => "its rules refused it",
+            3 => "the network is unreachable",
+            4 => "the host is unreachable",
+            5 => "the node refused it",
+            6 => "it took too long",
+            _ => "it would not",
+        };
+
+        return Err(format!("the proxy {at} could not reach {node}: {why}"));
+    }
+
+    // The address it bound, which says nothing worth keeping.
+    let skip = match reply[3] {
+        1 => 4,
+        4 => 16,
+        3 => {
+            let mut length = [0; 1];
+            stream.read_exact(&mut length).map_err(failed)?;
+            usize::from(length[0])
+        }
+        _ => return Err(format!("the proxy {at} answered in no SOCKS5 it speaks")),
+    };
+    let mut bound = vec![0; skip + 2];
+    stream.read_exact(&mut bound).map_err(failed)?;
+    stream.set_read_timeout(None).map_err(failed)?;
+
+    Ok(stream)
 }
 
 /// One connection: the handshake, then work in on this thread and nonces and rates out on another,
@@ -358,3 +432,60 @@ fn mount(devices: &Devices, hash: HashType, found: mpsc::Sender<(Hash, u64)>) ->
 
 // The node pings more often than a worker takes it for gone.
 const _: () = assert!(PING.as_secs() * 2 < QUIET.as_secs());
+
+#[cfg(test)]
+mod tests {
+    use {super::*, std::io::{Read, Write}, std::net::TcpListener};
+
+    /// A SOCKS5 proxy for one connection, as Tor's answers: it checks the greeting and that it is
+    /// asked for the name, not an address, then answers with reply, and echoes what comes.
+    fn proxy(reply: u8) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = format!("socks5h://{}", listener.local_addr().unwrap());
+
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut greeting = [0; 3];
+            stream.read_exact(&mut greeting).unwrap();
+            assert_eq!(greeting, [5, 1, 0], "no authentication offered");
+            stream.write_all(&[5, 0]).unwrap();
+            let mut head = [0; 5];
+            stream.read_exact(&mut head).unwrap();
+            assert_eq!(head[..4], [5, 1, 0, 3], "CONNECT to a name");
+            let mut asked = vec![0; usize::from(head[4]) + 2];
+            stream.read_exact(&mut asked).unwrap();
+            stream.write_all(&[5, reply, 0, 1, 0, 0, 0, 0, 0, 0]).unwrap();
+
+            if reply == 0 {
+                let mut echoed = [0; 4];
+                stream.read_exact(&mut echoed).unwrap();
+                stream.write_all(&echoed).unwrap();
+            }
+
+            asked
+        });
+
+        (at, served)
+    }
+
+    #[test]
+    fn a_worker_reaches_an_onion_through_a_socks5_proxy_which_resolves_its_name() {
+        let onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+        let (at, served) = proxy(0);
+        let mut stream = through(&at, &format!("{onion}:4002")).unwrap();
+        stream.write_all(b"ping").unwrap();
+        let mut back = [0; 4];
+        stream.read_exact(&mut back).unwrap();
+
+        assert_eq!(&back, b"ping");
+        assert_eq!(served.join().unwrap(), [onion.as_bytes(), &4002u16.to_be_bytes()].concat(), "the name and port, as given");
+
+        // A proxy that cannot reach it says why.
+        let (at, served) = proxy(4);
+        let refused = through(&at, &format!("{onion}:4002")).unwrap_err();
+        served.join().unwrap();
+
+        assert!(refused.contains("the host is unreachable"), "{refused}");
+        assert!(through("http://127.0.0.1:1", "a:1").unwrap_err().contains("socks5h://"));
+    }
+}

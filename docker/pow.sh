@@ -17,7 +17,8 @@
 #   docker/pow.sh reset [--yes]       on the VPS: stop the node and move its chain and genesis
 #                                     aside, in its volume, for a new genesis; up starts it afresh
 #   docker/pow.sh join host           here: a node of the same chain that mines and dials the VPS,
-#                  [--gpu | --cpu]     on the GPU or the CPU; asked when neither is given
+#                  [--gpu | --cpu]     on the GPU or the CPU; asked when neither is given. Given the
+#                                     VPS's onion, it goes through Tor alone, never showing its IP
 #   docker/pow.sh token               here, once: the token workers mine for the VPS with; push
 #                                     takes it there, and up starts taking workers
 #   docker/pow.sh faucet url          here: a faucet for the VPS's chain: a key of its own, funded
@@ -27,6 +28,7 @@
 #      [--gpu [--gpus 0,2] | --cpu]    no chain of its own: every GPU, those picked, or threads
 #   docker/pow.sh status [url]        either: the node's chain, height, peers and mining
 #   docker/pow.sh logs                on the VPS: follow the node's log
+#   docker/pow.sh onion               on the VPS: the node's onion address, with TOR=1 in .env
 #
 # The key stays here, in POW_HOME (~/.chainv4-pow): of what init makes, only the genesis goes to
 # the VPS. Settings, all optional:
@@ -44,10 +46,14 @@
 #   REMOTE_DIR     where push puts the repository on the VPS: chainv4 under its home
 #   SSH_KEY        push's SSH private key, as -i gives it; SSH_PORT its port, as -p
 #   MINING_PORT    the VPS's mining port, for worker: 4002 unless set
+#   PROXY          worker's SOCKS5 proxy, socks5h://host:port: for an .onion host, Tor's on
+#                  127.0.0.1:9050 unless set
 #   TOKEN          worker's token file: POW_HOME's mining.token, else docker/config's
 #   PROTOCOL       the chain's protocol name, for join and worker, as the VPS's .env has it
 #   EXTRA_ARGS     anything else for join's node, such as --no-mdns
 #   CONTAINER_ENGINE  docker or podman, for up: as docker/compose.sh picks it, unset
+#   TOR=1          up runs tor too: the node's API, explorer and wallet as an onion service, and
+#                  with TOR_MINING=1 its mining port; the onion's key lives in the tor volume
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -455,14 +461,14 @@ up() {
     fi
 
     say "building and starting; the first build takes a while"
-    # Let's Encrypt's certbot runs as a profile of its own, when .env asks for it. Recreated
-    # always: podman-compose keeps a running container on its old image after a build, so an
-    # update would build and change nothing. The chain and certificates are in volumes.
-    if grep -q '^TLS_MODE=letsencrypt' "$root/docker/.env"; then
-        "$compose" --profile letsencrypt up -d --build --force-recreate
-    else
-        "$compose" up -d --build --force-recreate
-    fi
+    # Let's Encrypt's certbot and tor run as profiles of their own, when .env asks for them.
+    # Recreated always: podman-compose keeps a running container on its old image after a build, so
+    # an update would build and change nothing. The chain, certificates and onion key are in
+    # volumes.
+    set --
+    if grep -q '^TLS_MODE=letsencrypt' "$root/docker/.env"; then set -- "$@" --profile letsencrypt; fi
+    if grep -q '^TOR=1' "$root/docker/.env"; then set -- "$@" --profile tor; fi
+    "$compose" "$@" up -d --build --force-recreate
 
     say "waiting for the node"
     tries=0
@@ -516,8 +522,14 @@ join() {
         *) fail "GPU is 1 or 0, not $gpu" ;;
     esac
 
-    # QUIC dials an address, not a name: look the name up here.
+    # QUIC dials an address, not a name: look the name up here. An onion is dialed through Tor
+    # alone, the local Tor's unless PROXY names another: this node never shows its IP.
+    tor=
     case "$host" in
+        *.onion)
+            peer="/onion3/${host%.onion}:$p2p_port"
+            tor="--listen /ip4/127.0.0.1/tcp/0 --tor-proxy ${PROXY:-socks5h://127.0.0.1:9050} --tor-only --no-mdns"
+            ;;
         *:*) peer="/ip6/$host/udp/$p2p_port/quic-v1" ;;
         *[!0-9.]*)
             ip=$(python3 -I -c 'import socket, sys; print(socket.gethostbyname(sys.argv[1]))' "$host") || fail "cannot look up $host"
@@ -543,7 +555,7 @@ join() {
     say "the API is at http://${API:-127.0.0.1:8090}; Ctrl-C stops the node, and join starts it again where it was"
     # Word-split on purpose: EXTRA_ARGS holds several arguments.
     # shellcheck disable=SC2086
-    exec "$chainv4" "$@" $mining ${EXTRA_ARGS:-}
+    exec "$chainv4" "$@" $mining $tor ${EXTRA_ARGS:-}
 }
 
 # A rig mining for the VPS's node, with no chain of its own: on the GPUs or threads here, with
@@ -593,6 +605,12 @@ worker() {
 
     if [ -n "${PROTOCOL:-}" ]; then set -- "$@" --protocol "$PROTOCOL"; fi
 
+    # An onion is reached through Tor: the one running here, unless PROXY names another.
+    case "$host" in
+        *.onion) set -- "$@" --proxy "${PROXY:-socks5h://127.0.0.1:9050}" ;;
+        *) if [ -n "${PROXY:-}" ]; then set -- "$@" --proxy "$PROXY"; fi ;;
+    esac
+
     case "$host" in
         *:*:*) node="[$host]:$mining_port" ;;
         *) node="$host:$mining_port" ;;
@@ -600,6 +618,18 @@ worker() {
 
     say "mining for $node; the block rewards go to the node's REWARD_TO. Ctrl-C stops"
     exec "$chainv4" worker --node "$node" --token "$token" "$@"
+}
+
+# The node's onion address, once tor made it: on the VPS, where the stack runs with TOR=1.
+onion() {
+    cd "$root"
+    compose=$root/docker/compose.sh
+    address=$("$compose" --profile tor exec -T tor cat /var/lib/tor/chainv4/hostname 2>/dev/null) || fail "no onion yet: set TOR=1 in docker/.env, then docker/pow.sh up"
+    say "the node's onion: http://$address"
+
+    if grep -q '^TOR_MINING=1' "$root/docker/.env"; then
+        say "workers mine through it: chainv4 worker --node $address:$mining_port --proxy socks5h://127.0.0.1:9050 …"
+    fi
 }
 
 logs() {
@@ -659,5 +689,6 @@ case "$command" in
     worker) worker "$@" ;;
     status) status "$@" ;;
     logs) logs ;;
-    *) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    onion) onion ;;
+    *) sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

@@ -14,6 +14,8 @@ pub struct Proxy(String);
 impl Proxy {
     /// Orbot's SOCKS port on Android, and Tor's own.
     pub const ORBOT: &'static str = "socks5h://127.0.0.1:9050";
+    /// Tor Browser's own Tor, while it runs on this machine.
+    pub const TOR_BROWSER: &'static str = "socks5h://127.0.0.1:9150";
     /// i2pd's SOCKS port, which resolves .i2p names inside I2P as Tor does .onion ones. The Java
     /// I2P router has an HTTP proxy at http://127.0.0.1:4444 instead, unless a SOCKS tunnel is
     /// made.

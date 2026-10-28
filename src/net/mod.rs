@@ -24,6 +24,7 @@ mod bans;
 mod codec;
 mod key;
 mod swarm;
+pub mod tor;
 
 pub use backlog::{Admission, Backlog, BacklogLimits, MAX_STRIKES, Origin, STRIKE_WINDOW};
 pub use bans::{BAN_SCORE, BanLimits, Bans, DEFAULT_BAN, Fault, SCORE_WINDOW, Verdict};
@@ -262,6 +263,8 @@ pub struct NetConfig {
     pub remembered: Vec<Multiaddr>,
     #[document(summary = "How long a ban lasts, and whether it covers the IP.")]
     pub bans: BanLimits,
+    #[document(summary = "Peer-to-peer over Tor: the proxy onions are dialed through, Tor alone, and the node's onion.")]
+    pub tor: tor::TorConfig,
 }
 
 #[document(

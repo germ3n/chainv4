@@ -30,6 +30,10 @@ pub struct WorkerArgs {
     /// What to call this worker in the node's report and on the explorer; the host name by default.
     #[arg(long)]
     name: Option<String>,
+    /// Reach the node through a SOCKS5 proxy, socks5h://host:port: Tor's, socks5h://127.0.0.1:9050,
+    /// for a node's onion, --node ADDRESS.onion:PORT.
+    #[arg(long)]
+    proxy: Option<String>,
 }
 
 /// Mines for the node until the process is stopped.
@@ -54,6 +58,7 @@ pub fn worker(args: WorkerArgs) -> CliResult<()> {
         name,
         protocol: args.protocol,
         devices,
+        proxy: args.proxy,
     })?
     .wait();
 

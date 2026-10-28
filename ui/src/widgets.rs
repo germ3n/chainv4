@@ -177,7 +177,7 @@ pub fn proxy(ui: &mut Ui, palette: &Palette, typed: &mut String, trouble: &mut O
     let shown = crate::net::Proxy::parse(set).map(|proxy| proxy.shown().to_string());
     note(ui, match shown {
         Ok(shown) => format!("Every request goes through the proxy at {shown}, and only through it: while it is down, nothing is sent."),
-        Err(_) => "None: requests go straight to the node. Set one to send them all through it, such as Orbot's to reach the node over Tor, or I2P's for a .i2p node.".to_string(),
+        Err(_) => "None: requests go straight to the node. Set one to send them all through it, such as Orbot's or Tor Browser's to reach the node over Tor, as an .onion node needs, or I2P's for a .i2p node.".to_string(),
     });
     ui.add_space(4.0);
 
@@ -198,6 +198,10 @@ pub fn proxy(ui: &mut Ui, palette: &Palette, typed: &mut String, trouble: &mut O
     ui.horizontal(|ui| {
         if quiet(ui, palette, "Orbot").on_hover_text("Orbot's SOCKS port on this device, which is Tor's own too").clicked() {
             chosen = Some(crate::net::Proxy::ORBOT.to_string());
+        }
+
+        if quiet(ui, palette, "Tor Browser").on_hover_text("Tor Browser's Tor, on this machine while it runs").clicked() {
+            chosen = Some(crate::net::Proxy::TOR_BROWSER.to_string());
         }
 
         if quiet(ui, palette, "I2P")
