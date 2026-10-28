@@ -32,6 +32,32 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   - the laptop rejoining with `--cpu`, the apps pointed at it, and new wallet and explorer
     builds.
 
+### Multi-chain treasury
+
+One quorum controlling assets on every chain it reaches: native multisigs already hold the
+matching Bitcoin P2WSH and an EVM contract at one address everywhere, swap as one party, and sign
+offline; these would make that hold up as a treasury.
+
+- [ ] **Owners follow the members by themselves.** A change of members here is one transaction;
+  each EVM chain's contract and each Bitcoin script then needs its own, signed separately
+  (`multisig evm … sync`). Propose every chain's change with the native one, as one bundle the
+  members sign once, and show which chains are still behind.
+- [ ] **More kinds of keys and scripts elsewhere.** EVM owners are secp256k1 alone (see the item
+  on other key kinds below); Bitcoin is P2WSH `sortedmulti` alone. Taproot with MuSig2 for a
+  smaller, private spend, and miniscript policies for timelocked recovery and inheritance paths,
+  such as a backup key that may spend after a year without movement.
+- [ ] **Policies beyond M of N.** Spending limits by amount and period, a delay before large
+  transfers run that members may cancel, and roles (who proposes, who approves, who may only
+  watch), expressed once and enforced on each chain: natively here, in MultiSig.sol on EVM
+  chains, and as far as script allows on Bitcoin.
+- [ ] **One view of what it holds.** A multisig's page, in the wallet and the explorer, with its
+  balances on every chain together: here proven by the light client, Bitcoin by the wallet's own
+  Bitcoin light client, EVM chains through their RPCs; and its policy itself proven, not the
+  node's word.
+- [ ] **A chain worth trusting with it.** Many validators rather than one, an audit of the
+  multisig, swap and bridge contracts and of the light client, and a public test network run for
+  long enough to show it.
+
 ### Consensus
 
 - [ ] **Polish the explorer and the wallet.** A pass over both apps as people use them, on a phone

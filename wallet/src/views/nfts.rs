@@ -298,7 +298,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, send: &mut SendSt
     let time = ui.input(|input| input.time);
     refresh(ctx, state, time);
 
-    if !ctx.chain.caught_up() {
+    if !ctx.chain.has_followed() {
         theme::card(ui, &palette, |ui| super::waiting(ui, &palette, "Following the chain first, to prove what the account holds."));
 
         return;

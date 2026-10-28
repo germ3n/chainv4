@@ -198,6 +198,7 @@ impl Ctx<'_> {
 #[derive(Default)]
 pub struct States {
     pub send: send::SendState,
+    activity: activity::ActivityState,
     names: names::NamesState,
     pub multisig: multisig::MultisigState,
     contracts: contracts::ContractsState,
@@ -293,7 +294,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         }
         Page::Send => send::show(ui, ctx, &mut states.send),
         Page::Receive => receive::show(ui, ctx, &mut states.receive),
-        Page::Activity => activity::show(ui, ctx),
+        Page::Activity => activity::show(ui, ctx, &mut states.activity),
         Page::Names => names::show(ui, ctx, &mut states.names, &mut states.send),
         Page::Multisig => multisig::show(ui, ctx, &mut states.multisig, &mut states.send),
         Page::Contracts => contracts::show(ui, ctx, &mut states.contracts, &mut states.send),
@@ -336,7 +337,7 @@ pub fn light_dot(ui: &mut Ui, palette: &Palette, chain: &Chain) {
 
 /// The light client's state: its color, in a word or two, and in full.
 fn following(palette: &Palette, chain: &Chain) -> (egui::Color32, String, String) {
-    let (color, text) = match (&chain.trouble, chain.following(), chain.caught_up()) {
+    let (color, text) = match (&chain.trouble, chain.following(), chain.has_followed()) {
         (Some(_), _, _) => (palette.bad, "Stopped".to_string()),
         (None, None, _) => (palette.muted, "Starting".to_string()),
         (None, Some((tip, _)), false) => (palette.warn, format!("Catching up · {}", format::thousands(&tip.to_string()))),
@@ -439,11 +440,11 @@ impl Cycling {
         self.since = now;
     }
 
-    /// Which part shows, and how many parts the message is cut into.
-    fn counted(&self) -> (usize, usize) {
-        let encoder = self.encoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        (encoder.current_index(), encoder.fragment_count())
+    /// How many parts the message is cut into. The encoder goes on past them with parts mixed of
+    /// several, numbered on, so a camera that missed some finishes all the same: their numbers say
+    /// nothing worth showing.
+    fn count(&self) -> usize {
+        self.encoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fragment_count()
     }
 }
 
@@ -496,10 +497,10 @@ fn animated(ui: &mut Ui, palette: &Palette, kind: &'static str, bytes: &[u8], te
         cycling.next(now);
     }
 
-    let (index, count) = cycling.counted();
-    theme::caps(ui, palette, &format!("Part {index} · {count} make it"));
+    let count = cycling.count();
+    theme::caps(ui, palette, &format!("Animated code · {count} parts"));
     ui.label(
-        RichText::new("Too long for one code: it shows parts one after another. Hold the other device's camera on it; any enough of them, in any order, make the message.")
+        RichText::new("Too long for one code, so it changes several times a second. Hold the other device's camera on it until it has read it: it needs about as many frames as there are parts, in any order, and it never runs out.")
             .small()
             .color(palette.muted),
     );

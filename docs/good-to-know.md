@@ -441,7 +441,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   at the checkpoint failed as `BadJustification`, and the wallet stops its light client on any
   error, so a phone that saw the losing side of a fork, common with two machines mining, sat on a
   block the node had dropped, and every proof waited. `LightClient` now rewinds to its justified
-  checkpoint when such a justification's votes hold (`take_justification`).
+  checkpoint when such a justification's votes hold (`take_justification`). Its headers had the
+same trouble: on a fork above the justified checkpoint it stepped back a whole batch, took the
+batch's start, below the checkpoint, for the fork, and failed as `ConflictsWithFinality`; under
+voting finality it now goes back to the checkpoint and follows the node from there.
 - **The anvil test is ignored** (`a_multisig_s_contract_sits_at_one_address_on_anvil_and_chainv4_and_pays_on_anvil`):
   run it with `--ignored` where Foundry's `anvil` is installed; it takes port 18965.
 - **Light updates gained a field again.** `LightUpdate::switched` is a plain field, not an

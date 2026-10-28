@@ -133,6 +133,10 @@ pub struct Chain {
     /// What stopped the light client: a node on another chain than the one trusted, or one that
     /// sent something that does not check.
     pub trouble: Option<String>,
+    /// Whether the client caught up with the node at least once since it started: pages show
+    /// what it proved from then on, rather than going back to waiting each time it asks the node
+    /// what came since.
+    caught_up_once: bool,
     /// The genesis the client follows, once it started.
     pub genesis: Option<Hash>,
     /// Whether what the client checked changed since it was last saved.
@@ -229,11 +233,19 @@ impl Chain {
         self.client.as_ref().is_some_and(|client| client.next().is_none())
     }
 
+    /// Whether it caught up at least once since it started: for pages, which keep showing what
+    /// was proven while it asks after new blocks, as it does every few seconds.
+    pub fn has_followed(&self) -> bool {
+        self.caught_up_once || self.caught_up()
+    }
+
     /// What the light client needs next, if anything is due.
     pub fn next_ask(&mut self, time: f64) -> Option<Ask> {
         if self.trouble.is_some() || time < self.retry_at {
             return None;
         }
+
+        self.caught_up_once |= self.client.as_ref().is_some_and(|client| client.next().is_none());
 
         let Some(client) = &mut self.client else {
             return Some(match &self.starting {

@@ -147,6 +147,7 @@ impl SendState {
                     what: draft.what.clone(),
                     nonce: draft.nonce,
                     at: now,
+                    genesis: String::new(),
                 };
                 self.step = Step::Sent { id };
                 self.amount.clear();
@@ -350,6 +351,15 @@ fn paying(ctx: &Ctx, from: Option<&Address>) -> String {
     format!("{} · {hex} · {held}", super::scheme(from))
 }
 
+/// What the coin a prepared transaction carries does: a name's price is burned; any other goes
+/// with its call, into a pool, a swap's lock or the contract called.
+fn coin_label(tx: &Tx) -> &'static str {
+    match tx {
+        Tx::Name { .. } => "Burned",
+        _ => "Sends",
+    }
+}
+
 /// A transaction another page prepared, waiting to be reviewed.
 fn prepared(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, busy: bool) {
     let palette = *ctx.palette;
@@ -368,7 +378,7 @@ fn prepared(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, busy: bool) {
         });
 
         if prepared.coin != u256::ZERO {
-            super::row(ui, &palette, "Burned", |ui| {
+            super::row(ui, &palette, coin_label(&prepared.tx), |ui| {
                 ui.label(ctx.amount(None, &prepared.coin.to_string()));
             });
         }
@@ -869,6 +879,18 @@ fn offer(value: &Value) -> Result<(FeeOffer, Option<String>), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_name_s_price_is_burned_and_any_other_coin_goes_with_its_call() {
+        use chainv4::registry::names::NameAction;
+        use chainv4::structs::address::Address;
+
+        let name = Tx::Name { name: "alice".to_string(), action: NameAction::Register { years: 1 } };
+        let swap = Tx::EvmCall { to: Address::Evm([1; 20]), value: chainv4::structs::amount::Amount::U128(40), input: Vec::new() };
+
+        assert_eq!(coin_label(&name), "Burned");
+        assert_eq!(coin_label(&swap), "Sends", "into the pool, not burned");
+    }
+
     fn sent(nonce: u64, at: u64) -> Sent {
         Sent {
             id: format!("0x{nonce}"),
@@ -877,6 +899,7 @@ mod tests {
             what: "1 DEV".to_string(),
             nonce,
             at,
+            genesis: String::new(),
         }
     }
 

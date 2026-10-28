@@ -277,7 +277,12 @@ holds of the coin and of each token.
 
 **Activity:** for each address of the account in use, the node's address index lists the
 transactions that touched it (`GET /accounts/{address}/txs`), and the page merges them, newest
-first. The wallet proves each one with
+first, or oldest with the order turned round. **All**, **Sent**, **Received**, **Waiting** (not
+proven yet) and **Failed** filter it, and the search finds a line by its id, a party, a contract,
+what it did or its events. Only the chain the wallet follows now shows: each transaction kept
+records its chain's genesis, as a new chain of the same keys starts its heights again, so one
+from an older chain no longer sits above the newest; those kept from before that are this
+chain's once its node mentions them. The wallet proves each one with
 `GET /proofs/receipts/{id}`:
 - **Who sent what:** the signed transaction, against its block's `tx_root`, with `check_tx`.
 - **What it did:** its receipt, against the `receipts_root`, with `check_receipt`.

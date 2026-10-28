@@ -2620,6 +2620,41 @@ mod voting {
     }
 
     #[test]
+    fn a_light_client_whose_tip_the_chain_left_follows_it_again_from_its_justified_checkpoint() {
+        for finality in kinds() {
+            // As above, but the node only sends headers: the client's tip is on the branch left,
+            // and the node's next headers do not link to it.
+            let (mut kept, mut left) = (open(&finality), open(&finality));
+
+            for chain in [&mut kept, &mut left] {
+                finalize_through(chain, 2);
+            }
+
+            grow_to(&mut left, kept.tip().height + 3);
+            let later = kept.tip().timestamp + 2 * SLOT;
+            let mut producer = AuthorityProducer::new(dev(), SLOT);
+            let mut skipped = kept.build(Vec::new(), Vec::new(), producer.address(&[]), later).unwrap();
+            skipped.seal = producer.seal(&skipped.header).unwrap();
+            kept.import(&skipped, later).unwrap();
+            grow_to(&mut kept, left.tip().height + 4);
+
+            let params = genesis_with(Some(finality.clone())).light_params();
+            let genesis = stored_header_at(&*left.db, 0).unwrap().unwrap();
+            let mut client = crate::light::LightClient::new(params, genesis, left.genesis()).unwrap();
+            serve(&left, &mut client);
+
+            assert_eq!(client.tip().id(), left.tip().id(), "{}", finality.name());
+
+            // Served the other branch, it goes back to its justified checkpoint and follows it.
+            client.refresh();
+            serve(&kept, &mut client);
+
+            assert_eq!(client.tip().id(), kept.tip().id(), "{}", finality.name());
+            assert_eq!(client.justified().epoch, 2);
+        }
+    }
+
+    #[test]
     fn a_light_client_follows_headers_and_finality_from_the_genesis_id_alone() {
         use crate::light::{LightClient, LightError};
 

@@ -52,6 +52,10 @@ pub struct Checked {
     pub fee: String,
     /// What it emitted, described: Signed ed25519:0x3b…f2c0 "gm" 3.
     pub events: Vec<String>,
+    /// The chain it is on, by its genesis id: a node on a new chain of the same keys has its own
+    /// heights. Empty for one kept before it was said, until the chain's node mentions it.
+    #[serde(default)]
+    pub genesis: String,
 }
 
 impl Checked {
@@ -96,6 +100,7 @@ impl Checked {
             fee: receipt.fee.to_string(),
             events: receipt.events.iter().map(describe).collect(),
             sender,
+            genesis: String::new(),
         }
     }
 

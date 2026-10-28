@@ -283,6 +283,9 @@ pub struct Sent {
     pub nonce: u64,
     /// When, in milliseconds since the Unix epoch.
     pub at: u64,
+    /// The chain it was sent to, by its genesis id; empty for one sent before it was said.
+    #[serde(default)]
+    pub genesis: String,
 }
 
 /// The chain's coin, as the node names it.
@@ -476,7 +479,8 @@ impl Wallet {
                 #[cfg(feature = "nft")]
                 (Ask::Collections, _) => self.views.nfts.collections(&result),
                 (Ask::Offer(_) | Ask::Submit(_), _) => {
-                    if let Some(sent) = self.views.send.answered(&ask, &result, now) {
+                    if let Some(mut sent) = self.views.send.answered(&ask, &result, now) {
+                        sent.genesis = self.chain.genesis.map(|genesis| genesis.to_string()).unwrap_or_default();
                         self.settings.sent.push(sent);
                     }
                 }
@@ -489,16 +493,29 @@ impl Wallet {
             self.views.nfts.fetched(&url, result, self.settings.ipfs_gateway.trim());
         }
 
-        // What was proven is kept, so it shows without proving it again.
+        // What was proven is kept, so it shows without proving it again, with the chain it is on.
+        let genesis = self.chain.genesis.map(|genesis| genesis.to_string()).unwrap_or_default();
+
         for (tx, proven) in std::mem::take(&mut self.chain.receipts) {
-            self.settings.checked.insert(tx, Checked::of(&proven));
+            self.settings.checked.insert(tx, Checked { genesis: genesis.clone(), ..Checked::of(&proven) });
         }
 
+        // One kept before the chain was said is this chain's once its node mentions it.
+        if !genesis.is_empty() {
+            for mention in self.chain.mentions.values().flatten() {
+                if let Some(checked) = self.settings.checked.get_mut(&mention.tx).filter(|checked| checked.genesis.is_empty()) {
+                    checked.genesis = genesis.clone();
+                }
+            }
+        }
+
+        // Too many kept: another chain's go first, then this one's oldest.
         if self.settings.checked.len() > MAX_CHECKED {
-            let mut heights: Vec<u64> = self.settings.checked.values().map(|checked| checked.height).collect();
-            heights.sort_unstable();
-            let lowest = heights[heights.len() - MAX_CHECKED];
-            self.settings.checked.retain(|_, checked| checked.height >= lowest);
+            let rank = |checked: &Checked| (checked.genesis == genesis, checked.height);
+            let mut ranks: Vec<(bool, u64)> = self.settings.checked.values().map(rank).collect();
+            ranks.sort_unstable();
+            let lowest = ranks[ranks.len() - MAX_CHECKED];
+            self.settings.checked.retain(|_, checked| rank(checked) >= lowest);
         }
 
         // Sent ones that are final are the history's now; the log keeps only what waits.

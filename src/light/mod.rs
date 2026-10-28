@@ -1081,6 +1081,16 @@ impl LightClient {
                 return Err(LightError::ConflictsWithFinality);
             }
 
+            // Under voting finality, what lies past the justified checkpoint is not settled, and
+            // the voters, not work, settle it: two branches there may weigh the same. The client
+            // goes back to its justified checkpoint and follows the node from there, checking
+            // every header; a chain that leaves the checkpoint itself still fails, below.
+            if self.voted() && from - 1 > self.justified_height() {
+                self.rewind();
+
+                return Ok(Extended::Unlinked);
+            }
+
             // The node's chain split off below from: look further back.
             self.back = Some(from.saturating_sub(MAX_LIGHT_HEADERS as u64).max(self.base + 1));
 
@@ -1576,6 +1586,11 @@ impl LightClient {
         }
 
         Ok(Took::Taken)
+    }
+
+    /// Whether the chain's finality is the voters': checkpoints justified by votes.
+    fn voted(&self) -> bool {
+        self.params.finality.and_then(|finality| finality.checkpoint_interval()).is_some()
     }
 
     /// Whether the header followed at a checkpoint's height is its block.

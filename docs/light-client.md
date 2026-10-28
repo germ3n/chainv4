@@ -95,7 +95,11 @@ sends a proof that fails.
 
 **Reorgs.** When the node's chain no longer links to the client's, the client steps back until it
 finds where they split. It follows the new branch only if it holds more work, and never past a
-justified checkpoint (`ConflictsWithFinality`).
+justified checkpoint (`ConflictsWithFinality`). Under FFG or authority finality, nothing past the
+justified checkpoint is settled, and the voters settle it, not work: so where the node's headers
+stop linking above that checkpoint, the client goes back to it and follows the node from there,
+every header checked, rather than stepping back a whole batch, which took it below the
+checkpoint and read as leaving it.
 
 **A branch the voters left.** Two miners can find blocks at one height, and the two branches may
 weigh the same, so work alone keeps a client on the one it saw first. Under FFG or authority

@@ -1692,7 +1692,9 @@ fn a_light_client_follows_proof_of_work_through_a_reorg() {
 
     assert_eq!(client.tip().id(), a2.id());
 
-    // A heavier branch from genesis takes over; the client finds where it splits and follows it.
+    // A heavier branch from genesis takes over. Under the dev chain's voting finality nothing past
+    // the justified checkpoint, here genesis, is settled: the client goes back to it and follows
+    // the node's branch from there.
     let mut branch = genesis.clone();
 
     for _ in 0..3 {
@@ -1705,7 +1707,7 @@ fn a_light_client_follows_proof_of_work_through_a_reorg() {
 
     assert_eq!(chain.tip().id(), branch.id());
     assert_eq!(client.tip().id(), branch.id());
-    assert_eq!(outcomes[..2], [Extended::Unlinked, Extended::Switched(1)]);
+    assert_eq!(outcomes[..2], [Extended::Unlinked, Extended::Added(3)]);
 
     // A header consensus refuses is refused: here, one declaring a difficulty its parent does not
     // make it.

@@ -1,6 +1,8 @@
 //! What happened to the account, at all its addresses together, newest first: what it sent, from
 //! this wallet's own log until proven, and every transaction the node's address index says touched
-//! one of them, each shown once the light client proved who sent what and what it did.
+//! one of them, each shown once the light client proved who sent what and what it did. Only the
+//! chain the wallet follows now: a new chain of the same keys has its own heights. Filtered by
+//! kind, searched, and sorted either way.
 
 use {
     super::Ctx,
@@ -16,7 +18,26 @@ use {
 /// in milliseconds.
 pub const UNSEEN_AFTER: u64 = 10 * 60 * 1_000;
 
-pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
+/// Which lines show.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kind {
+    #[default]
+    All,
+    Sent,
+    Received,
+    /// Not proven yet.
+    Waiting,
+    Failed,
+}
+
+#[derive(Default)]
+pub struct ActivityState {
+    kind: Kind,
+    search: String,
+    oldest_first: bool,
+}
+
+pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
     let palette = *ctx.palette;
     theme::title(ui, &palette, "Activity", "Everything this account sent, and everything that touched its addresses, as the light client proved it.");
 
@@ -31,7 +52,48 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         ui.add_space(10.0);
     }
 
-    theme::card(ui, &palette, |ui| list(ui, ctx, usize::MAX));
+    ui.horizontal_wrapped(|ui| {
+        for (kind, name) in [(Kind::All, "All"), (Kind::Sent, "Sent"), (Kind::Received, "Received"), (Kind::Waiting, "Waiting"), (Kind::Failed, "Failed")] {
+            ui.selectable_value(&mut state.kind, kind, name);
+        }
+
+        ui.separator();
+        let order = if state.oldest_first { "Oldest first" } else { "Newest first" };
+
+        if ui.selectable_label(false, order).on_hover_text("Turn the order round").clicked() {
+            state.oldest_first = !state.oldest_first;
+        }
+    });
+    ui.add(egui::TextEdit::singleline(&mut state.search).hint_text("Search: a transaction, an address, a contract, what it did").desired_width(f32::INFINITY));
+    ui.add_space(8.0);
+
+    let addresses = ctx.addresses();
+    let mut entries = entries(ctx, &addresses);
+    entries.retain(|entry| entry.is(state.kind, &addresses) && entry.matches(&state.search));
+
+    if state.oldest_first {
+        entries.reverse();
+    }
+
+    theme::card(ui, &palette, |ui| {
+        if entries.is_empty() {
+            ui.label(RichText::new(match (state.kind, state.search.trim().is_empty(), ctx.chain.has_followed()) {
+                (Kind::All, true, true) => "Nothing yet.",
+                (Kind::All, true, false) => "Looking once the light client catches up…",
+                _ => "Nothing matches.",
+            }).color(palette.muted));
+
+            return;
+        }
+
+        for (index, entry) in entries.iter().enumerate() {
+            if index > 0 {
+                theme::rule(ui, &palette);
+            }
+
+            line(ui, ctx, &addresses, entry);
+        }
+    });
 }
 
 /// One line of the history.
@@ -44,6 +106,44 @@ struct Entry<'a> {
 }
 
 impl Entry<'_> {
+    /// Whether it is of a kind: sent by the account, bringing it something, not proven yet, or
+    /// failed.
+    fn is(&self, kind: Kind, addresses: &[String]) -> bool {
+        match (kind, self.checked) {
+            (Kind::All, _) => true,
+            (Kind::Sent, Some(checked)) => addresses.contains(&checked.sender),
+            (Kind::Sent, None) => self.sent.is_some(),
+            (Kind::Received, Some(checked)) => checked.for_account(addresses).any(|(incoming, _)| incoming),
+            (Kind::Waiting, checked) => checked.is_none(),
+            (Kind::Failed, Some(checked)) => !checked.done,
+            (Kind::Received | Kind::Failed, None) => false,
+        }
+    }
+
+    /// Whether what it says holds the search, its case aside: its id, who sent it and to whom,
+    /// what it did, what it moved where, and its events.
+    fn matches(&self, search: &str) -> bool {
+        let search = search.trim().to_lowercase();
+
+        if search.is_empty() {
+            return true;
+        }
+
+        let mut said = vec![self.tx.clone()];
+
+        if let Some(checked) = self.checked {
+            said.extend([checked.sender.clone(), checked.action.clone()]);
+            said.extend(checked.moves.iter().flat_map(|moved| [moved.from.clone(), moved.to.clone(), moved.token.clone()]).flatten());
+            said.extend(checked.events.iter().cloned());
+        }
+
+        if let Some(sent) = self.sent {
+            said.extend([sent.to.clone(), sent.what.clone()]);
+        }
+
+        said.iter().any(|text| text.to_lowercase().contains(&search))
+    }
+
     /// Newest first: what is still waiting, then by height.
     fn order(&self) -> (u64, u64) {
         match (self.checked, self.height, self.sent) {
@@ -61,7 +161,7 @@ pub fn list(ui: &mut Ui, ctx: &Ctx, limit: usize) {
     let entries = entries(ctx, &addresses);
 
     if entries.is_empty() {
-        let text = match ctx.chain.caught_up() {
+        let text = match ctx.chain.has_followed() {
             true => "Nothing yet.",
             false => "Looking once the light client catches up…",
         };
@@ -93,7 +193,11 @@ fn entries<'a>(ctx: &'a Ctx, addresses: &[String]) -> Vec<Entry<'a>> {
         }
     };
 
-    for sent in ctx.settings.sent.iter().filter(|sent| addresses.contains(&sent.from)) {
+    // The chain followed now; until it is known, everything kept.
+    let genesis = ctx.chain.genesis.map(|genesis| genesis.to_string());
+    let here = |kept: &str| genesis.as_deref().is_none_or(|genesis| kept == genesis);
+
+    for sent in ctx.settings.sent.iter().filter(|sent| addresses.contains(&sent.from) && here(&sent.genesis)) {
         add(&sent.id, Some(sent), None);
     }
 
@@ -103,7 +207,7 @@ fn entries<'a>(ctx: &'a Ctx, addresses: &[String]) -> Vec<Entry<'a>> {
 
     // What was proven before, whether or not the node still lists it. A move between two of the
     // account's own addresses moved nothing for it, but shows: one of them sent it.
-    for (tx, checked) in &ctx.settings.checked {
+    for (tx, checked) in ctx.settings.checked.iter().filter(|(_, checked)| here(&checked.genesis)) {
         if addresses.contains(&checked.sender) || checked.for_account(addresses).next().is_some() {
             add(tx, None, None);
         }
@@ -286,4 +390,49 @@ fn details(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry) {
     }
 
     ui.add_space(4.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, crate::history::Move};
+
+    fn checked(sender: &str, to: &str, done: bool) -> Checked {
+        Checked {
+            height: 7,
+            time: 0,
+            final_: true,
+            done,
+            sender: sender.to_string(),
+            nonce: 0,
+            action: "Called swap on contract:0x6c1d".to_string(),
+            moves: vec![Move { token: None, from: Some(sender.to_string()), to: Some(to.to_string()), amount: "40".to_string() }],
+            fee: "0".to_string(),
+            events: vec!["Swap contract:0x0000 contract:0x5119".to_string()],
+            genesis: "0x9a7f".to_string(),
+        }
+    }
+
+    #[test]
+    fn lines_are_told_apart_by_kind_and_found_by_what_they_say() {
+        let me = vec!["ed25519:0xaa".to_string()];
+        let (out, back, failed) = (checked("ed25519:0xaa", "contract:0x6c1d", true), checked("ed25519:0xbb", "ed25519:0xaa", true), checked("ed25519:0xaa", "ed25519:0xcc", false));
+        fn line(checked: &Checked) -> Entry<'_> {
+            Entry { tx: "0x01ab".to_string(), checked: Some(checked), sent: None, height: Some(7) }
+        }
+
+        let waiting = Entry { tx: "0x02cd".to_string(), checked: None, sent: None, height: None };
+
+        assert!(line(&out).is(Kind::Sent, &me) && !line(&out).is(Kind::Received, &me));
+        assert!(line(&back).is(Kind::Received, &me) && !line(&back).is(Kind::Sent, &me));
+        assert!(line(&failed).is(Kind::Failed, &me) && !line(&out).is(Kind::Failed, &me));
+        assert!(waiting.is(Kind::Waiting, &me) && !line(&out).is(Kind::Waiting, &me));
+        assert!([Kind::Sent, Kind::Received, Kind::Waiting, Kind::Failed, Kind::All].iter().any(|kind| line(&out).is(*kind, &me)));
+
+        // By its id, a party, what it did, or an event, its case aside.
+        for search in ["01AB", "0x6c1d", "called swap", "5119", ""] {
+            assert!(line(&out).matches(search), "{search}");
+        }
+
+        assert!(!line(&out).matches("0xdead"));
+    }
 }
