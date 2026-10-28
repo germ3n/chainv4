@@ -451,6 +451,19 @@ voting finality it now goes back to the checkpoint and follows the node from the
   `ui/src/files.rs` and `ui/src/camera.rs` have their own iOS modules on UIKit and AVFoundation,
   and Face ID shares the macOS module, `mac`, the Keychain and LocalAuthentication being both
   systems'.
+- **iOS 27 runs apps through the scene lifecycle alone,** and stops one that does not adopt it at
+  launch, which winit predates. The Info.plist names `Chainv4SceneDelegate`, a class
+  `ui/src/ios.rs` registers before UIKit starts, which keeps the scene; winit's window, made
+  outside any scene, draws nothing until it is the scene's, so it is caught from eframe's creation
+  context and joined to the scene by whichever of the two comes second.
+- **The device's own wgpu limits.** eframe asks for WebGPU's default limits, a little more than the
+  Simulator's GPU gives (`max_inter_stage_shader_variables`), and quits if refused, saying so only
+  through `log`; on iOS the app asks for the adapter's own limits, and logs to standard error.
+- **iOS's safe area is the app's whole screen.** winit's inner size on iOS is the safe area's, which
+  eframe sizes the Metal surface by, while egui-winit lays the app out over the whole screen: the
+  layout ran past the surface and lost its bottom, the tab bar with it. So winit's view is moved
+  into the safe area, egui is told that is the screen, touches, which come in the window's points,
+  move by its corner, and the window behind is painted the app's color.
 - **iOS's back is a swipe.** iOS has no back button, so `ui/src/ios.rs` turns a touch that starts
   within 24 points of the left edge and moves 80 points right into `Key::BrowserBack`, the key
   Android's gesture sends; the apps handle both the same.

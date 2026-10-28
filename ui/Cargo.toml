@@ -36,12 +36,15 @@ eframe = { version = "0.37.0", default-features = false, features = ["glow"] }
 # iOS draws through Metal, wgpu's: Apple has deprecated OpenGL there.
 [target.'cfg(target_os = "ios")'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["wgpu"] }
-objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "UIPasteboard", "UIApplication", "UIResponder", "UIViewController", "UIView", "UIWindow", "UIScene", "UIWindowScene", "UISceneDefinitions", "UIDocumentPickerViewController", "UIDevice", "UIImagePickerController", "UIImage", "UINavigationController", "objc2-uniform-type-identifiers"] }
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "UIPasteboard", "UIApplication", "UIResponder", "UIViewController", "UIView", "UIWindow", "UIScene", "UIWindowScene", "UISceneDefinitions", "UIDocumentPickerViewController", "UIDevice", "UIImagePickerController", "UIImage", "UINavigationController", "UISceneOptions", "UISceneSession", "UIGeometry", "UIColor", "objc2-uniform-type-identifiers"] }
 objc2-uniform-type-identifiers = { version = "0.3.2", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-media", "objc2-core-video", "AVCaptureSession", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVCaptureSessionPreset"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMSampleBuffer", "objc2-core-video"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn"] }
 dispatch2 = "0.3.0"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+# winit's window, which iOS 27 shows only once it is the scene's (src/ios.rs).
+raw-window-handle = "0.6.2"
 
 # Picking files: a native dialog on the desktop, the browser's in the browser.
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dependencies]

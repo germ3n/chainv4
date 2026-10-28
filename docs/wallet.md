@@ -947,8 +947,11 @@ for `--provision`, XcodeGen (`brew install xcodegen`).
 local network. App storage is `wallet.ron` under its Application Support folder.
 
 **What `ui/src/ios.rs` and the `ui` crate do on iOS,** as `ui/src/android.rs` does on Android:
-- **the keyboard and the safe area** are winit's and egui-winit's own: the keyboard rises while a
-  text field wants it, and the app keeps inside the notch and the home indicator;
+- **the safe area:** winit's view is moved inside the notch and the home indicator, and the window
+  around it painted the app's color; the keyboard is winit's own, rising while a text field wants
+  it;
+- **iOS 27's scene lifecycle:** a scene delegate the Info.plist names, and winit's window put in
+  its scene, without which iOS 27 stops the app at launch;
 - **the clipboard** is UIPasteboard's: what the app copies goes there, and a held finger over a
   field brings up the same bar Android has, Paste among it;
 - **back** is iOS's own gesture: a swipe in from the left edge comes to the app as the back key,

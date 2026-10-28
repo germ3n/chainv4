@@ -1,18 +1,110 @@
-//! Running an egui app on iOS, in winit's UIKit view, drawn through Metal. egui-winit keeps the app
-//! inside the safe area and raises the keyboard while a text field wants it. What it does not do,
-//! this does: egui reaches no clipboard on iOS, so what the app copies is put on the general
+//! Running an egui app on iOS, in winit's UIKit view, drawn through Metal. winit raises the keyboard
+//! while a text field wants it. What it does not do, this does: the app is drawn inside the safe
+//! area, as on Android, its view moved there and its edges painted the app's own color, as eframe
+//! sizes its surface to winit's inner size, which on iOS is the safe area's, while egui-winit would
+//! lay the app out over the whole screen; egui reaches no clipboard on iOS, so what the app copies is put on the general
 //! pasteboard here, and pasting is offered by [`crate::edit`], as on Android; and iOS has no back
 //! button, so a swipe in from the left edge, iOS's own gesture for going back, comes to the app as
 //! `Key::BrowserBack`, which it takes where Android's back gesture is. Files are picked through
 //! UIKit's document picker (see [`crate::files`]), Face ID or Touch ID checks made through
 //! LocalAuthentication (see [`crate::biometric`]), and the camera run through AVFoundation (see
 //! [`crate::camera`]).
+//!
+//! iOS 27 runs an app only through the scene lifecycle, which winit predates: UIKit asks for a
+//! scene delegate, so the app's Info.plist names `Chainv4SceneDelegate`, registered here before
+//! UIKit starts, which keeps the scene it is given; and winit's window, made outside any scene,
+//! shows only once it is that scene's, and draws nothing before: so it is caught as eframe hands
+//! the app its creation context, and the two are joined by whichever comes second.
 
 use {
     crate::edit::{Clipboard, Editing},
-    objc2_foundation::NSString,
-    objc2_ui_kit::UIPasteboard,
+    objc2::rc::Retained,
+    objc2::{ClassType, MainThreadOnly, Message, define_class},
+    objc2_foundation::{NSObject, NSObjectProtocol, NSString},
+    objc2_core_foundation::{CGPoint, CGRect, CGSize},
+    objc2_ui_kit::{UIColor, UIPasteboard, UIScene, UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIView, UIWindow, UIWindowScene, UIWindowSceneDelegate},
+    raw_window_handle::{HasWindowHandle, RawWindowHandle},
+    std::cell::RefCell,
 };
+
+std::thread_local! {
+    /// The scene UIKit connected, and winit's window, until both are there and joined.
+    static SCENE: RefCell<Option<Retained<UIWindowScene>>> = const { RefCell::new(None) };
+    static WINDOW: RefCell<Option<Retained<UIWindow>>> = const { RefCell::new(None) };
+    /// winit's view, which is moved into the safe area.
+    static VIEW: RefCell<Option<Retained<UIView>>> = const { RefCell::new(None) };
+}
+
+/// Moves winit's view into the window's safe area, as it changes with the device turned, and
+/// paints the window behind it the app's color. Where the safe area is, in points from the
+/// window's top left, and its size: what egui is told the screen is.
+fn safe_area(background: [f32; 4]) -> Option<egui::Rect> {
+    let window = WINDOW.with(|window| window.borrow().clone())?;
+    let view = VIEW.with(|view| view.borrow().clone())?;
+    let (bounds, insets) = (window.bounds(), window.safeAreaInsets());
+    let safe = CGRect {
+        origin: CGPoint { x: insets.left, y: insets.top },
+        size: CGSize { width: bounds.size.width - insets.left - insets.right, height: bounds.size.height - insets.top - insets.bottom },
+    };
+
+    if view.frame() != safe {
+        view.setFrame(safe);
+        let [red, green, blue, alpha] = background.map(f64::from);
+        window.setBackgroundColor(Some(&UIColor::colorWithRed_green_blue_alpha(red, green, blue, alpha)));
+    }
+
+    Some(egui::Rect::from_min_size(egui::pos2(safe.origin.x as f32, safe.origin.y as f32), egui::vec2(safe.size.width as f32, safe.size.height as f32)))
+}
+
+/// Puts winit's window in the scene and shows it, once both are there.
+fn join() {
+    let (Some(scene), Some(window)) = (SCENE.with(|scene| scene.borrow().clone()), WINDOW.with(|window| window.borrow().clone())) else {
+        return;
+    };
+
+    window.setWindowScene(Some(&scene));
+    window.makeKeyAndVisible();
+}
+
+/// Keeps winit's window, from what eframe hands the app as it makes it.
+fn keep_window(handle: &impl HasWindowHandle) {
+    let Ok(handle) = handle.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::UiKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: winit's view, alive as long as its window, which lives as long as the app.
+    let view = unsafe { &*handle.ui_view.as_ptr().cast::<UIView>() };
+
+    if let Some(window) = view.window() {
+        WINDOW.with(|kept| *kept.borrow_mut() = Some(window));
+        VIEW.with(|kept| *kept.borrow_mut() = Some(view.retain()));
+        join();
+    }
+}
+
+define_class!(
+    /// The scene delegate the Info.plist names: it keeps the window scene UIKit connects.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "Chainv4SceneDelegate"]
+    struct SceneDelegate;
+
+    unsafe impl NSObjectProtocol for SceneDelegate {}
+
+    unsafe impl UISceneDelegate for SceneDelegate {
+        #[unsafe(method(scene:willConnectToSession:options:))]
+        fn connect(&self, scene: &UIScene, _session: &UISceneSession, _options: &UISceneConnectionOptions) {
+            if let Ok(scene) = scene.retain().downcast::<UIWindowScene>() {
+                SCENE.with(|kept| *kept.borrow_mut() = Some(scene));
+                join();
+            }
+        }
+    }
+
+    unsafe impl UIWindowSceneDelegate for SceneDelegate {}
+);
 
 /// How near the left edge a swipe back starts, and how far right it goes, in points.
 const EDGE: f32 = 24.0;
@@ -22,9 +114,49 @@ const SWIPE: f32 = 80.0;
 /// Support folder.
 pub fn run(title: &str, storage_file: &str, make: impl FnOnce(&eframe::CreationContext) -> Box<dyn eframe::App> + 'static) -> eframe::Result {
     let storage = std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Library/Application Support").join(storage_file));
-    let options = eframe::NativeOptions { persistence_path: storage, ..Default::default() };
+    // The device's own limits, rather than WebGPU's defaults, which ask a little more than some
+    // iOS GPUs, the Simulator's among them, give: egui needs far less than either.
+    let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    setup.device_descriptor = std::sync::Arc::new(|adapter| eframe::wgpu::DeviceDescriptor {
+        label: Some("chainv4 device"),
+        required_limits: adapter.limits(),
+        ..Default::default()
+    });
+    let options = eframe::NativeOptions {
+        persistence_path: storage,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration { wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(setup), ..Default::default() },
+        ..Default::default()
+    };
+    let _ = log::set_logger(&StdErr).map(|()| log::set_max_level(log::LevelFilter::Info));
+    // Registered before UIKit looks it up by name, as it makes the app's scene.
+    let _ = SceneDelegate::class();
 
-    eframe::run_native(title, options, Box::new(|creation| Ok(Box::new(OnIos { inner: make(creation), editing: Editing::default(), swipe: None }))))
+    eframe::run_native(
+        title,
+        options,
+        Box::new(|creation| {
+            keep_window(creation);
+
+            Ok(Box::new(OnIos { inner: make(creation), editing: Editing::default(), swipe: None }))
+        }),
+    )
+}
+
+/// The log, to standard error, which Xcode and `simctl launch --console` show.
+struct StdErr;
+
+impl log::Log for StdErr {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("[{}] {}: {}", record.level(), record.target(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
 }
 
 /// An app on iOS: its clipboard, and the swipe back.
@@ -107,6 +239,21 @@ impl eframe::App for OnIos {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // The screen is the safe area, where the view is; touches come in the window's points, so
+        // they move by its corner.
+        if let Some(safe) = safe_area(self.inner.clear_color(&ctx.global_style().visuals)) {
+            raw_input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, safe.size()));
+            raw_input.safe_area_insets = None;
+            let shift = safe.min.to_vec2();
+
+            for event in &mut raw_input.events {
+                match event {
+                    egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } | egui::Event::Touch { pos, .. } => *pos -= shift,
+                    _ => {}
+                }
+            }
+        }
+
         self.editing.feed(raw_input);
         self.swipe_back(raw_input);
         self.inner.raw_input_hook(ctx, raw_input);

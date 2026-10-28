@@ -95,6 +95,7 @@ bundle() {
     <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
     <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
     <key>UILaunchScreen</key><dict/>
+    <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/><key>UISceneConfigurations</key><dict><key>UIWindowSceneSessionRoleApplication</key><array><dict><key>UISceneConfigurationName</key><string>Default</string><key>UISceneDelegateClassName</key><string>Chainv4SceneDelegate</string></dict></array></dict></dict>
     <key>UIStatusBarStyleDefault</key><string>UIStatusBarStyleDefault</string>
     <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
     <key>NSCameraUsageDescription</key><string>To read the codes another device shows, such as a request to sign, and to take a photo you choose to send.</string>
@@ -117,7 +118,9 @@ if [ -n "$sim" ]; then
         xcrun simctl boot "$device"
     fi
 
-    open -a Simulator
+    open -b com.apple.iphonesimulator 2> /dev/null || true
+    # A first boot takes a while: install once it is done.
+    xcrun simctl bootstatus "$device" -b > /dev/null
     xcrun simctl install "$device" "$out"
     xcrun simctl launch "$device" "$bundle_id"
     echo "== $name runs in the Simulator $device"
