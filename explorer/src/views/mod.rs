@@ -30,6 +30,7 @@ pub mod mempool;
 pub mod more;
 pub mod network;
 pub mod overview;
+pub mod pool;
 pub mod send;
 pub mod name;
 pub mod settings;
@@ -49,6 +50,8 @@ pub enum View {
     /// A name, such as alice.dev.
     Name(String),
     Network,
+    /// The mining pool the node runs: its miners, their shares and earnings, and its blocks.
+    Pool,
     Mempool,
     Tokens,
     /// The NFT and multi-token collections the registry lists.
@@ -79,7 +82,7 @@ impl View {
     pub const GROUPS: [(&'static str, &'static [(View, &'static str)]); 4] = [
         ("Chain", &[(View::Overview, "Overview"), (View::Map, "Block map"), (View::Mempool, "Mempool"), (View::Tokens, "Tokens"), (View::Collections, "NFTs")]),
         ("Markets", &[(View::Dex, "DEX"), (View::Swaps, "Swaps"), (View::Bridges, "Bridges")]),
-        ("Network", &[(View::Network, "Network"), (View::Finality, "Finality")]),
+        ("Network", &[(View::Network, "Network"), (View::Finality, "Finality"), (View::Pool, "Mining pool")]),
         ("Tools", &[(View::Send, "Send"), (View::Faucet, "Faucet"), (View::Settings, "Settings")]),
     ];
 
@@ -93,13 +96,14 @@ impl View {
     ];
 
     /// The pages More lists, with what each is for.
-    pub const MORE: [(View, &'static str, &'static str); 9] = [
+    pub const MORE: [(View, &'static str, &'static str); 10] = [
         (View::Collections, "NFTs", "Collections, their tokens and holders"),
         (View::Dex, "DEX", "Pools, prices, trades and volume"),
         (View::Swaps, "Swaps", "Atomic swaps and their finality"),
         (View::Bridges, "Bridges", "What crossed to other chains, and wrapped assets"),
         (View::Network, "Network", "The node, its peers, and what it heard"),
         (View::Finality, "Finality", "Checkpoints, voters and caught cheats"),
+        (View::Pool, "Mining pool", "The node's pool: miners, shares and payouts"),
         (View::Send, "Send", "Sign and send a transaction"),
         (View::Faucet, "Faucet", "Coins for a dev or test chain"),
         (View::Settings, "Settings", "The node, the theme, the light client"),
@@ -112,7 +116,7 @@ impl View {
             View::Map => View::Map,
             View::Mempool => View::Mempool,
             View::Tokens => View::Tokens,
-            View::Collections | View::Collection(_) | View::Dex | View::Swaps | View::Bridges | View::Transfer(_) | View::Release(_) | View::Network | View::Finality | View::Send | View::Faucet | View::Settings | View::More => View::More,
+            View::Collections | View::Collection(_) | View::Dex | View::Swaps | View::Bridges | View::Transfer(_) | View::Release(_) | View::Network | View::Finality | View::Pool | View::Send | View::Faucet | View::Settings | View::More => View::More,
         }
     }
 }

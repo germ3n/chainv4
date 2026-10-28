@@ -38,6 +38,8 @@ pub struct BlockHeader {
     pub tx_root: Hash,
     #[document(summary = "The chain hash of the finality proofs the block carries, in order.")]
     pub proof_root: Hash,
+    #[document(summary = "The chain hash of the mining pool's commitment the block carries, from Block::pool_root: the zero hash for a block that carries none, whose producer keeps its reward.")]
+    pub pool_root: Hash,
     #[document(summary = "The Merkle root of what its transactions did, in order: receipts_root over their CommittedReceipts. The zero hash for a block without transactions.")]
     pub receipts_root: Hash,
     #[document(summary = "The root of the state tree once the block has run: every chain-state entry, as StateTree keeps them. What snapshots and light clients check state against.")]
@@ -82,6 +84,8 @@ pub struct Block {
     pub txs: Vec<SignedTx>,
     #[document(summary = "Finality proofs for checkpoints on this branch, which pay every voter in them. Each checkpoint is paid for once.")]
     pub proofs: Vec<Justification>,
+    #[document(summary = "A mining pool's commitment: how much of the block's reward and fees go to the pool's escrow, and the root of what each of its miners has earned, which they claim from it. None for a block whose producer keeps it all.")]
+    pub pool: Option<PoolCommitment>,
     #[document(summary = "The proof that the producer had the right to make the block.")]
     pub seal: Seal,
 }
@@ -108,6 +112,66 @@ pub enum Seal {
 impl Hashable for Seal {
     const TAG_LEN: usize = 1;
 }
+
+#[document(
+    summary = "What a block's reward is split into: a billion parts, so a share is its parts per billion.",
+    category = "Chain",
+    see_also = "PoolCommitment, Payout",
+)]
+pub const PAYOUT_PARTS: u32 = 1_000_000_000;
+
+#[document(
+    summary = "One address's share of a block's reward: what a mining pool's books credit a miner with for its share of the pool's recent work.",
+    category = "Chain",
+    see_also = "PAYOUT_PARTS, PoolCommitment",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct Payout {
+    #[document(summary = "Who is paid.")]
+    pub to: Address,
+    #[document(summary = "Its share, in parts of PAYOUT_PARTS; at least one.")]
+    pub parts: u32,
+}
+
+impl Payout {
+    #[document(
+        parent = "Payout",
+        summary = "What this payout takes of a total: total × parts / PAYOUT_PARTS, rounded down.",
+    )]
+    pub fn of(&self, total: u256) -> u256 {
+        parts_of(total, self.parts)
+    }
+}
+
+#[document(
+    summary = "parts of PAYOUT_PARTS of a total, rounded down: total × parts / PAYOUT_PARTS, without overflow.",
+    category = "Chain",
+    see_also = "PAYOUT_PARTS",
+)]
+pub fn parts_of(total: u256, parts: u32) -> u256 {
+    // Under u256::MAX / PAYOUT_PARTS any total multiplies without overflow; past it, divide first.
+    match total.checked_mul(u256::from(parts)) {
+        Some(product) => product / u256::from(PAYOUT_PARTS),
+        None => total / u256::from(PAYOUT_PARTS) * u256::from(parts),
+    }
+}
+
+#[document(
+    summary = "What a mining pool's block commits to: the share of its reward and fees that goes to the pool's escrow, and the root of the pool's claims, every miner's earnings over the pool's life. Any number of miners fit in it, in 44 bytes: each claims its own with a Merkle path (Tx::Claim).",
+    category = "Chain",
+    see_also = "Block::pool, Tx::Claim, Pools, pool_escrow",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct PoolCommitment {
+    #[document(summary = "How much of the block's reward and its producer's fees goes to the pool's escrow, in parts of PAYOUT_PARTS: what is left of a billion after the pool's fee, which the producer keeps.")]
+    pub parts: u32,
+    #[document(summary = "The Merkle root, as RFC 6962 builds one, over the pool's claims, each a claim_leaf of a miner and all it has earned, in the order the pool keeps them.")]
+    pub root: Hash,
+    #[document(summary = "How many claims the root holds; 0 for a pool none of whose blocks has been credited yet.")]
+    pub count: u64,
+}
+
+impl Hashable for PoolCommitment {}
 
 impl Hashable for Block {}
 
@@ -182,5 +246,13 @@ impl Block {
         }
 
         hasher.finalize()
+    }
+
+    #[document(
+        parent = "Block",
+        summary = "What a header's pool_root must be for a block's pool commitment: its chain hash, or the zero hash for a block that carries none.",
+    )]
+    pub fn pool_root(hash: HashType, pool: Option<&PoolCommitment>) -> Hash {
+        pool.map_or_else(|| Hash::zero(hash), |pool| pool.hash(hash))
     }
 }

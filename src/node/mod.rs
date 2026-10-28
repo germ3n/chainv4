@@ -34,6 +34,8 @@ use {
 
 mod gate;
 mod peers;
+#[cfg(feature = "pool")]
+mod push;
 mod report;
 mod snapshot;
 mod stream;
@@ -44,6 +46,8 @@ pub use crate::mining::pool::MiningPort;
 pub use peers::{MAX_REMEMBERED, remembered};
 pub use report::{Counters, Heard, NodeReport, PeerReport};
 pub use stream::NodeEvent;
+#[cfg(feature = "pool")]
+pub use push::PoolPush;
 
 /// The most events handled per pass, so a flood cannot starve block production.
 const EVENT_BUDGET: usize = 256;
@@ -77,6 +81,11 @@ pub struct Node {
     /// chain runs, and the consensus the producer it holds serves.
     producing: Option<Producing>,
     producer_for: Option<ConsensusConfig>,
+    /// Claims pushed for a pool's miners, and when the node last looked.
+    #[cfg(feature = "pool")]
+    push: Option<push::PoolPush>,
+    #[cfg(feature = "pool")]
+    pushed: u64,
     /// The block the producer is sealing, until its seal arrives or the tip moves on.
     template: Option<Block>,
     /// What the node asks the network to do.
@@ -438,6 +447,10 @@ impl Node {
             producer,
             producing: None,
             producer_for: None,
+            #[cfg(feature = "pool")]
+            push: None,
+            #[cfg(feature = "pool")]
+            pushed: 0,
             template: None,
             commands,
             inbox,
@@ -685,6 +698,8 @@ impl Node {
             self.produce_if_due(now)?;
             self.vote_if_due()?;
             self.catch_up_indexes()?;
+            #[cfg(feature = "pool")]
+            self.push_if_due(now);
         }
 
         self.report_if_due(now);
@@ -1082,11 +1097,19 @@ impl Node {
             return Ok(());
         }
 
-        let txs = self.gate.mempool().select(&self.chain.state(), budget, &|tx| self.chain.worth(tx))?;
+        let address = producer.address(&producers);
+        // A pool's block: the chain says which of its blocks can no longer be undone, for it to
+        // credit their miners. One that fails to say waits for the next template.
+        let chain = &self.chain;
+        let pool = producer.pool(&|id, height| chain.pool_settled(id, height).unwrap_or(crate::consensus::PoolSettled::Pending));
+        // A block that sends its fees to an escrow needs them still in the producer's hands as it
+        // ends, so it carries none of the producer's own transactions.
+        let sends = pool.is_some();
+        let txs = self.gate.mempool().select(&self.chain.state(), budget, &|tx| if sends && tx.sender() == address { None } else { self.chain.worth(tx) })?;
         let proofs = self.chain.unpaid_proofs()?;
         let deadline = self.max_build_ms.map(|most| Instant::now() + Duration::from_millis(most));
         let declared = producer.difficulty(&tip, &producers);
-        let mut block = self.chain.build_declaring(txs, proofs, producer.address(&producers), now, deadline, declared)?;
+        let mut block = self.chain.build_declaring(txs, proofs, address, now, deadline, declared, pool)?;
 
         match producer.seal(&block.header) {
             Some(seal) => {

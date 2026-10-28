@@ -5,6 +5,8 @@
 
 pub mod pool;
 pub mod protocol;
+#[cfg(feature = "pool")]
+pub mod shares;
 pub mod worker;
 
 use {r#macro::document, std::path::Path};

@@ -11,9 +11,13 @@ pub struct WorkerArgs {
     /// The node's mining port, as host:port, such as 203.0.113.7:4002.
     #[arg(long)]
     node: String,
-    /// The file holding the token the node was given with --mining-token.
+    /// The file holding the token the node was given with --mining-token; none for an open pool's.
     #[arg(long)]
-    token: PathBuf,
+    token: Option<PathBuf>,
+    /// Where a pool pays this worker's shares: an address, which a node running a pool needs.
+    #[cfg(feature = "pool")]
+    #[arg(long)]
+    payout: Option<crate::structs::address::Address>,
     /// Mine on the GPUs instead of CPU threads: every one, or those --gpus picks. Needs a build
     /// with the gpu feature.
     #[arg(long)]
@@ -38,7 +42,13 @@ pub struct WorkerArgs {
 
 /// Mines for the node until the process is stopped.
 pub fn worker(args: WorkerArgs) -> CliResult<()> {
-    let token = crate::mining::read_token(&args.token)?;
+    let token = match &args.token {
+        Some(token) => crate::mining::read_token(token)?,
+        #[cfg(feature = "pool")]
+        None => crate::mining::pool::OPEN_TOKEN.to_vec(),
+        #[cfg(not(feature = "pool"))]
+        None => return Err("--token: the file holding the node's mining token".into()),
+    };
     let devices = match args.gpu {
         true => Devices::Gpu((!args.gpus.is_empty()).then_some(args.gpus)),
         false => Devices::Cpu(args.threads as usize),
@@ -59,6 +69,10 @@ pub fn worker(args: WorkerArgs) -> CliResult<()> {
         protocol: args.protocol,
         devices,
         proxy: args.proxy,
+        #[cfg(feature = "pool")]
+        payout: args.payout,
+        #[cfg(not(feature = "pool"))]
+        payout: None,
     })?
     .wait();
 

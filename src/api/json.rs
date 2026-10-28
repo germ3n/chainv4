@@ -49,7 +49,34 @@ pub fn summary(block: &Block, reward: &crate::chain::RewardSchedule) -> Value {
         "reward": minted(reward, header.height).to_string(),
         "tx_count": block.txs.len(),
         "proof_count": block.proofs.len(),
+        "pool_root": header.pool_root.to_string(),
+        "pool": block.pool.map(|pool| json!({
+            "parts": pool.parts,
+            "percent": percent(pool.parts),
+            "root": pool.root.to_string(),
+            "count": pool.count,
+        })),
     })
+}
+
+/// Parts of PAYOUT_PARTS as a percent.
+pub fn percent(parts: u32) -> f64 {
+    f64::from(parts) / f64::from(crate::structs::block::PAYOUT_PARTS) * 100.0
+}
+
+/// Each miner's parts of a pool's block, and what they came to once what it shared out is known.
+pub fn payouts(payouts: &[crate::structs::block::Payout], shared: Option<u256>) -> Vec<Value> {
+    payouts
+        .iter()
+        .map(|payout| {
+            json!({
+                "to": payout.to.to_string(),
+                "parts": payout.parts,
+                "percent": percent(payout.parts),
+                "amount": shared.map(|shared| payout.of(shared).to_string()),
+            })
+        })
+        .collect()
 }
 
 /// What a block at a height minted for its producer: the reward schedule's figure, and nothing
@@ -206,7 +233,17 @@ fn mining(report: &crate::consensus::MiningReport) -> Value {
             "devices": devices(&worker.devices),
             "found": worker.found,
             "refused": worker.refused,
+            "payout": worker.payout.map(|payout| payout.to_string()),
+            "shares": worker.shares,
+            "share_difficulty": worker.share_difficulty.to_string(),
         })).collect::<Vec<_>>(),
+        "pool": report.pool.as_ref().map(|pool| json!({
+            "fee": pool.fee,
+            "window": pool.window,
+            "open": pool.open,
+            "miners": pool.miners.len(),
+            "blocks": pool.blocks.len(),
+        })),
     })
 }
 
@@ -495,6 +532,14 @@ pub fn tx(transaction: &Tx) -> Value {
             "tx": tx(inner),
         }),
         Tx::WithdrawMultisig { account, proposal } => json!({ "type": "withdraw_multisig", "account": account.to_string(), "proposal": proposal.to_string() }),
+        Tx::Claim { height, to, earned, index, path } => json!({
+            "type": "claim",
+            "height": height,
+            "to": to.to_string(),
+            "earned": earned.to_string(),
+            "index": index,
+            "path": path.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        }),
     }
 }
 

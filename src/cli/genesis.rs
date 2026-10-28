@@ -1343,7 +1343,8 @@ mod tests {
         assert_eq!(from_json(&to_json(&read)).unwrap(), read, "null reads back as unset too");
 
         // The development authority chain's id from before the field, in the build it was taken
-        // from: its hash, key, engines and finality all go into it.
+        // from: its hash, key, engines and finality all go into it. Taken again for format 9,
+        // whose headers commit to their payouts too, which moved every block's id.
         if cfg!(all(
             feature = "blake3",
             feature = "ed25519",
@@ -1353,7 +1354,7 @@ mod tests {
             feature = "finality-authority",
             feature = "finality-depth"
         )) {
-            assert_eq!(read.block().id().to_string(), "0xf55e42d5e8776e763713812686978872028563a6640412515a05d6d64043b181");
+            assert_eq!(read.block().id().to_string(), "0x78d5a6025a07a45222126eb9c091768d86b90bbd1b8408e68a3eb35ff7cf8b88");
         }
 
         // Set, it is part of the chain: the dev chains now have their own ids.

@@ -1,7 +1,7 @@
-//! An example migration, written as the next format's would be: not in MIGRATIONS, since format 8
+//! An example migration, written as the next format's would be: not in MIGRATIONS, since format 9
 //! needs none, but tested as a real one is, on a real chain's database.
 //!
-//! The format 9 it imagines keeps each block's height in its work record, beside the total work, so
+//! The format 10 it imagines keeps each block's height in its work record, beside the total work, so
 //! fork choice could weigh two tips without loading their blocks. Every work record changes shape;
 //! nothing else does.
 
@@ -14,36 +14,36 @@ use {
     wincode::{SchemaRead, SchemaWrite, config::DefaultConfig},
 };
 
-/// A work record as format 8 keeps it: the total work of the chain up to its block. A migration
-/// keeps its own copy of each shape it reads or writes, so it still reads format 8 once the chain's
-/// own WorkRecord has moved on to format 9's.
+/// A work record as format 9 keeps it: the total work of the chain up to its block. A migration
+/// keeps its own copy of each shape it reads or writes, so it still reads format 9 once the chain's
+/// own WorkRecord has moved on to format 10's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-struct WorkV8 {
+struct WorkV9 {
     #[wincode(with = "U256Le")]
     total: u256,
 }
 
-impl Hashable for WorkV8 {}
+impl Hashable for WorkV9 {}
 
-/// A work record as format 9 keeps it: the same, and its block's height.
+/// A work record as format 10 keeps it: the same, and its block's height.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-struct WorkV9 {
+struct WorkV10 {
     #[wincode(with = "U256Le")]
     total: u256,
     height: u64,
 }
 
-impl Hashable for WorkV9 {}
+impl Hashable for WorkV10 {}
 
 /// Records as a scan finds them: each key and its value.
 type Records = Vec<(Vec<u8>, Vec<u8>)>;
 
-/// Format 8 to 9: work records keep their block's height.
+/// Format 9 to 10: work records keep their block's height.
 pub struct WorkHeights;
 
 impl Migration for WorkHeights {
     fn from(&self) -> u32 {
-        8
+        9
     }
 
     fn describe(&self) -> &'static str {
@@ -57,12 +57,12 @@ impl Migration for WorkHeights {
         let mut chunk = Chunk::default();
 
         for (key, value) in &records {
-            let old: WorkV8 = decode(value)?;
+            let old: WorkV9 = decode(value)?;
             let header: SealedHeader = match at.db.read(Column::Headers, key)? {
                 Some(bytes) => decode(&bytes)?,
                 None => return Err(DbError::Corrupt("a work record whose block has no header".to_string())),
             };
-            let new = WorkV9 {
+            let new = WorkV10 {
                 total: old.total,
                 height: header.header.height,
             };
@@ -74,15 +74,15 @@ impl Migration for WorkHeights {
         Ok(chunk)
     }
 
-    /// Takes the heights back out: format 8 has nowhere to keep them, and reads them from the
+    /// Takes the heights back out: format 9 has nowhere to keep them, and reads them from the
     /// blocks when it needs them.
     fn down(&self, at: &At) -> Result<Chunk, DbError> {
         let records = next_records(at)?;
         let mut chunk = Chunk::default();
 
         for (key, value) in &records {
-            let new: WorkV9 = decode(value)?;
-            let old = WorkV8 { total: new.total };
+            let new: WorkV10 = decode(value)?;
+            let old = WorkV9 { total: new.total };
             chunk.changes.insert((Column::Work, key.clone()), Some(old.hashable_bytes_with_tag()));
         }
 
@@ -165,17 +165,17 @@ mod tests {
 
         assert_eq!(before.len(), 26);
 
-        migrate(&*db, migrations, &plan(&*db, migrations, 9).unwrap(), 10).unwrap();
+        migrate(&*db, migrations, &plan(&*db, migrations, 10).unwrap(), 10).unwrap();
 
-        assert_eq!(format_of(&*db).unwrap(), Some(9));
+        assert_eq!(format_of(&*db).unwrap(), Some(10));
 
         let mut heights = Vec::new();
 
         for ((key, value), (_, old)) in work_records(&db).iter().zip(&before) {
-            let record: WorkV9 = decode(value).unwrap();
+            let record: WorkV10 = decode(value).unwrap();
             let header: SealedHeader = decode(&db.read(Column::Headers, key).unwrap().unwrap()).unwrap();
 
-            assert_eq!(record.total, decode::<WorkV8>(old).unwrap().total, "the total work kept");
+            assert_eq!(record.total, decode::<WorkV9>(old).unwrap().total, "the total work kept");
             assert_eq!(record.height, header.header.height);
             heights.push(record.height);
         }
@@ -184,8 +184,8 @@ mod tests {
 
         assert_eq!(heights, (0..=25).collect::<Vec<u64>>(), "every block's, once");
 
-        // And back: byte for byte what format 8 kept, which this build's chain opens again.
-        let down = plan(&*db, migrations, 8).unwrap();
+        // And back: byte for byte what format 9 kept, which this build's chain opens again.
+        let down = plan(&*db, migrations, 9).unwrap();
 
         assert!(down.goes_down());
 

@@ -29,6 +29,12 @@ services:
       REWARD_TO: ${REWARD_TO:-}
       MINE_THREADS: ${MINE_THREADS:-1}
       MINING_TOKEN: ${MINING_TOKEN:-}
+      POOL: ${POOL:-0}
+      POOL_OPEN: ${POOL_OPEN:-0}
+      POOL_FEE: ${POOL_FEE:-0}
+      POOL_WINDOW: ${POOL_WINDOW:-2}
+      POOL_PUSH: ${POOL_PUSH:-}
+      POOL_PUSH_KEY: ${POOL_PUSH_KEY:-}
       PROTOCOL: ${PROTOCOL:-}
       PEERS: ${PEERS:-}
       BOOTNODES: ${BOOTNODES:-}

@@ -10,6 +10,7 @@ mod faucet;
 pub mod dapp;
 #[cfg(feature = "swap")]
 pub mod evm;
+mod mining;
 pub(crate) mod multisig;
 mod names;
 #[cfg(feature = "nft")]
@@ -47,6 +48,8 @@ pub enum Page {
     Receive,
     Activity,
     Names,
+    /// What a mining pool owes the account's addresses, and claiming it.
+    Mining,
     /// Native multisigs: making one, and taking their transactions round the members.
     Multisig,
     Contracts,
@@ -82,6 +85,7 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             #[cfg(feature = "nft")]
             (Page::Nfts, "NFTs"),
             (Page::Names, "Names"),
+            (Page::Mining, "Mining"),
             (Page::Multisig, "Multisig"),
             (Page::Contracts, "Contracts"),
             #[cfg(feature = "swap")]
@@ -133,8 +137,8 @@ pub struct Ctx<'a> {
     /// Why to lock once the page is drawn, sealing what changed first, for the lock screen to say:
     /// as when biometrics found the fingers enrolled changed, so the password is needed again.
     pub lock: &'a mut Option<String>,
-    /// What wakes the app when something arrives later, as a key file picked.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    /// What wakes the app when something arrives later, as a key file picked or a pool's node's
+    /// answer.
     pub wake: &'a egui::Context,
     /// The node's faucet, as GET /status describes it, on a node that runs one.
     pub faucet: Option<&'a serde_json::Value>,
@@ -208,6 +212,7 @@ pub struct States {
     sign: sign::SignState,
     pub dapp: dapp::DappState,
     pub faucet: faucet::FaucetState,
+    pub mining: mining::MiningState,
     #[cfg(feature = "swap")]
     pub swaps: swaps::SwapsState,
     #[cfg(feature = "dex")]
@@ -296,6 +301,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Receive => receive::show(ui, ctx, &mut states.receive),
         Page::Activity => activity::show(ui, ctx, &mut states.activity),
         Page::Names => names::show(ui, ctx, &mut states.names, &mut states.send),
+        Page::Mining => mining::show(ui, ctx, &mut states.mining, &mut states.send),
         Page::Multisig => multisig::show(ui, ctx, &mut states.multisig, &mut states.send),
         Page::Contracts => contracts::show(ui, ctx, &mut states.contracts, &mut states.send),
         #[cfg(feature = "swap")]

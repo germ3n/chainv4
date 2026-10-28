@@ -1,9 +1,11 @@
 //! One block: its header, its seal and proofs, and every transaction in it with what it did.
 
 use {
-    super::{Ctx, TxLine, View},
+    super::{Ctx, TxLine, View, pool::percent},
     crate::api::Ask,
     crate::format,
+    crate::model::{self, PoolShare},
+    chainv4::structs::u256::u256,
     chainv4_ui::widgets,
     egui::Ui,
 };
@@ -75,8 +77,16 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, block: &str) {
                 facts.row("receipts root", |ui| super::copyable(ui, &summary.receipts_root));
                 facts.row("state root", |ui| super::copyable(ui, &summary.state_root));
             }
+
+            if summary.pool.is_some() {
+                facts.row("pool root", |ui| super::copyable(ui, &summary.pool_root));
+            }
         });
     });
+
+    if let Some(pool) = &summary.pool {
+        super::section(ui, look, "Mining pool", |ui| self::pool(ui, ctx, pool, &summary.producer));
+    }
 
     super::section_with(
         ui,
@@ -112,4 +122,59 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, block: &str) {
             });
         }
     });
+}
+
+/// What a pool's block sent its miners: the escrow's part of its reward and fees, what the
+/// producer kept as the pool's fee, and the root the miners claim against.
+fn pool(ui: &mut Ui, ctx: &mut Ctx, pool: &PoolShare, producer: &str) {
+    let look = ctx.look;
+    let muted = |text: String| egui::RichText::new(text).color(look.palette.muted);
+    let escrowed = model::percent(pool.parts);
+    let amount = |raw: &Option<String>| raw.as_deref().and_then(|raw| u256::from_str_radix(raw, 10).ok());
+    // The producer kept what the escrow did not get: the pool's fee.
+    let kept = amount(&pool.shared).zip(amount(&pool.escrowed)).map(|(shared, escrowed)| shared.saturating_sub(escrowed));
+
+    super::facts(ui, look, "block_pool", |facts| {
+        facts.row("to the escrow", |ui| {
+            if let Some(raw) = &pool.escrowed {
+                ui.label(ctx.coins(raw));
+            }
+
+            ui.label(muted(match &pool.shared {
+                Some(shared) => format!("{} of {}, the reward and the producer's fees", percent(escrowed), ctx.coins(shared)),
+                None => format!("{} of the reward and the producer's fees", percent(escrowed)),
+            }));
+        });
+
+        if let Some(escrow) = &pool.escrow {
+            facts.row("escrow", |ui| {
+                super::address(ui, ctx, escrow);
+                ui.label(muted("no key controls it: the pool's miners claim from it".to_string()));
+            });
+        }
+
+        facts.row("the producer kept", |ui| {
+            if let Some(kept) = kept {
+                ui.label(ctx.coins(&kept.to_string()));
+            }
+
+            ui.label(muted(format!("{}, the pool's fee", percent(100.0 - escrowed))));
+        });
+        facts.row("claims root", |ui| super::copyable(ui, &pool.root));
+        facts.text(
+            "claims",
+            match pool.count {
+                1 => "1 miner's earnings, all told".to_string(),
+                count => format!("{} miners' earnings, all told", format::thousands(&count.to_string())),
+            },
+        );
+    });
+
+    // The pool's own page, when it is the one this node runs, or may be.
+    let runs = ctx.store.node.as_ref().and_then(|node| node.mining.as_ref()).is_some_and(|mining| mining.pool.is_some());
+    let theirs = ctx.store.pool.as_ref().is_none_or(|known| known.producer == producer);
+
+    if runs && theirs && widgets::quiet(ui, &look.palette, "The pool's page ›").clicked() {
+        ctx.go(View::Pool);
+    }
 }

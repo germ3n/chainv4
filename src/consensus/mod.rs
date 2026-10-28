@@ -8,8 +8,8 @@ use {
     crate::crypto::keypair::PublicKey,
     crate::registry::validators::Member,
     crate::structs::address::Address,
-    crate::structs::block::{BlockHeader, Seal},
-    crate::structs::hash::HashType,
+    crate::structs::block::{BlockHeader, PoolCommitment, Seal},
+    crate::structs::hash::{Hash, HashType},
     crate::structs::u256::u256,
     r#macro::document,
     std::fmt,
@@ -26,7 +26,7 @@ pub mod staked;
 
 pub use dev::{AuthorityProducer, DevAuthority};
 pub use pow::{Miner, PowConfig, ProofOfWork, Rig, meets, work_hash};
-pub use rates::{DeviceReport, Meter, MiningReport, WorkerReport};
+pub use rates::{ClaimTree, DeviceReport, Meter, MinerStanding, MiningReport, PoolBlock, PoolReport, PoolSettled, WorkerReport};
 pub use rotating::{Rotating, RotatingProducer};
 pub use staked::{Schedule, Staked, StakedProducer};
 #[cfg(feature = "gpu")]
@@ -135,6 +135,17 @@ pub trait Producer: Send {
         returns = "The seal when it is ready at once, or None when it will arrive later through the callback the producer was made with.",
     )]
     fn seal(&mut self, header: &BlockHeader) -> Option<Seal>;
+
+    #[document(
+        parent = "Producer",
+        summary = "What the next block this producer builds commits to as a mining pool: the share of its reward and fees for the pool's escrow, and the root of its miners' claims. None, the default, for the producer to keep it all.",
+        params = { settled = "Whether a block, by id and height, can no longer be undone, as the chain says: the pool credits its miners for those that can not." },
+    )]
+    fn pool(&mut self, settled: &dyn Fn(&Hash, u64) -> PoolSettled) -> Option<PoolCommitment> {
+        let _ = settled;
+
+        None
+    }
 
     #[document(
         parent = "Producer",

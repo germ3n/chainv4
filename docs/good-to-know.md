@@ -1035,6 +1035,35 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **Names made new dev chains.** The dev genesis has names under `dev` now, so dev chains from
   before have other ids.
 
+## Mining pools
+
+- **Format 9 is a new chain.** Headers commit to a `pool_root` and blocks carry an optional
+  `PoolCommitment`, which changes every block's id, so a database in format 8 is refused and no
+  migration reaches it: start a new chain, with a new genesis. The dev chains' ids moved with it.
+- **Any number of miners, 44 bytes a block.** A pool's block carries the parts it sends to the
+  escrow and a Merkle root over every miner's earnings, never a list of them. Miners claim with
+  `Tx::Claim` and a path from `GET /pool/claim/{address}`, at most 64 hashes long.
+- **Claims name a height, not a block id.** A block's id hangs on the state it leaves, and the
+  root it commits is part of that state, so the pools column keeps each root by its block's
+  height: a branch holds one block at each height.
+- **Earnings are cumulative.** A leaf says all a miner earned from the pool; a claim pays that
+  less what it claimed before. One claim covers any number of blocks, and claiming against an
+  older root after a newer one pays nothing more.
+- **Credited once final.** The pool credits a block's miners only once it is under the finalized
+  checkpoint or deeper than `max_reorg_depth`, so a root never promises what a reorg took back. On
+  a chain whose `max_reorg_depth` is large, that wait is long.
+- **A pool's node leaves its own transactions out of its blocks.** The fees it sends to the
+  escrow must still be in the producer's account as the block ends; one of its own that spent
+  them would make the block invalid.
+- **The escrow is a Contract address with no code.** No key and no contract can spend it; only
+  `Tx::Claim` does. Anyone may send it more, which pays the pool's miners.
+- **The `pool` feature is the node's side alone.** Without it a node takes workers as before and
+  pays only its `--reward-to`; every build checks pool commitments and runs claims.
+- **Open pools take a public token.** `--mining-open` uses `OPEN_TOKEN`, which every worker without
+  `--token` proves, so its messages are still numbered and checked, but anyone may join.
+- **The pool's books grow with its miners.** `pool.json` keeps each miner's earnings, and the node
+  keeps the last four claim trees in memory for paths to the roots blocks committed already.
+
 ## Building and testing
 
 - **The end-to-end SDK test needs the wasm32 target.** It builds `contracts/` with cargo:

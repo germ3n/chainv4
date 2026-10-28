@@ -227,6 +227,7 @@ fn summary(tx: &Tx) -> String {
         Tx::ChangeMultisig { members, threshold, .. } => format!("make the multisig {threshold} of {} members", members.len()),
         Tx::ApproveMultisig { account, nonce, tx, .. } => format!("approve the multisig {account}'s transaction {nonce}: {}", summary(tx)),
         Tx::WithdrawMultisig { account, proposal } => format!("withdraw approval of {proposal} from the multisig {account}"),
+        Tx::Claim { to, earned, height, .. } => format!("claim {to}'s earnings from the mining pool of block {height}, {earned} in all"),
     }
 }
 

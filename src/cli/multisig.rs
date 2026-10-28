@@ -302,7 +302,7 @@ fn submit(agent: &Agent, node: &str, bundle: &MultisigBundle, carrier: &Keypair,
 }
 
 /// Sends one of --key's own transactions, with the fee a dry run of it says.
-fn send_own(agent: &Agent, node: &str, keypair: &Keypair, tx: Tx, timeout: Duration) -> CliResult<()> {
+pub(super) fn send_own(agent: &Agent, node: &str, keypair: &Keypair, tx: Tx, timeout: Duration) -> CliResult<()> {
     let sender = keypair.public().address();
     let nonce = ok(agent.get(format!("{node}/accounts/{sender}")).call())?["nonce"].as_u64().ok_or("the node sent no nonce")?;
     let (fee, failure, _) = offer(agent, node, &SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, keypair), Default::default())?;

@@ -49,6 +49,8 @@
 #   PROXY          worker's SOCKS5 proxy, socks5h://host:port: for an .onion host, Tor's on
 #                  127.0.0.1:9050 unless set
 #   TOKEN          worker's token file: POW_HOME's mining.token, else docker/config's
+#   PAYOUT         worker's address for a mining pool to pay its shares to; alone, without a
+#                  token, for an open pool
 #   PROTOCOL       the chain's protocol name, for join and worker, as the VPS's .env has it
 #   EXTRA_ARGS     anything else for join's node, such as --no-mdns
 #   CONTAINER_ENGINE  docker or podman, for up: as docker/compose.sh picks it, unset
@@ -584,7 +586,12 @@ worker() {
         done
     fi
 
-    [ -n "$token" ] && [ -s "$token" ] || fail "no mining token: copy the one docker/pow.sh token made to $home/mining.token, or give TOKEN"
+    # An open pool takes no token, only a payout address.
+    if [ -z "$token" ] && [ -n "${PAYOUT:-}" ]; then
+        token=open
+    fi
+
+    [ "$token" = open ] || { [ -n "$token" ] && [ -s "$token" ]; } || fail "no mining token: copy the one docker/pow.sh token made to $home/mining.token, or give TOKEN; for an open pool, give PAYOUT alone"
 
     if [ -z "$gpu" ] && [ -t 0 ]; then
         printf '[pow] mine on the GPUs rather than %s CPU thread(s)? [y/N] ' "${MINE_THREADS:-1}" >&2
@@ -616,7 +623,18 @@ worker() {
         *) node="$host:$mining_port" ;;
     esac
 
-    say "mining for $node; the block rewards go to the node's REWARD_TO. Ctrl-C stops"
+    # A pool pays each worker's shares to the address it gives.
+    if [ -n "${PAYOUT:-}" ]; then
+        set -- "$@" --payout "$PAYOUT"
+        say "mining for $node; a pool's earnings go to $PAYOUT, claimed with chainv4 claim. Ctrl-C stops"
+    else
+        say "mining for $node; the block rewards go to the node's REWARD_TO. Ctrl-C stops"
+    fi
+
+    if [ "$token" = open ]; then
+        exec "$chainv4" worker --node "$node" "$@"
+    fi
+
     exec "$chainv4" worker --node "$node" --token "$token" "$@"
 }
 

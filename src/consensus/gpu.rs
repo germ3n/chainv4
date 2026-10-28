@@ -144,10 +144,11 @@ fn mine(shared: &Shared, gpu: &Gpu, hash: WorkHash, index: u64, count: u64, foun
 
         loop {
             match gpu.search(hash, &prefix, &target, start, BATCH) {
+                // A batch reports its first find alone: shares come seconds apart, batches far faster.
                 Ok(Some(nonce)) => {
-                    shared.finish(generation, id, nonce, found);
-
-                    break;
+                    if !shared.finish(generation, id, nonce, found) {
+                        break;
+                    }
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -196,6 +197,7 @@ mod tests {
             difficulty,
             tx_root: Hash::zero(chain),
             proof_root: Hash::zero(chain),
+            pool_root: Hash::zero(chain),
             receipts_root: Hash::zero(chain),
             state_root: Hash::zero(chain),
             gas_used: 0,

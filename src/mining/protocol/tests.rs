@@ -23,7 +23,7 @@ fn pair(node_token: &'static [u8], worker_token: &'static [u8]) -> Handshakes {
 
         accepted
     });
-    let worker = connect(TcpStream::connect(address).unwrap(), worker_token, "chainv4", "rig 1");
+    let worker = connect(TcpStream::connect(address).unwrap(), worker_token, "chainv4", "rig 1", None);
 
     (node.join().unwrap(), worker)
 }

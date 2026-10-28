@@ -108,6 +108,8 @@ pub(super) struct Ran {
     /// Whether the deadline cut the block short: the transactions after the last kept one were
     /// left out unrun, not because they could not run.
     pub(super) cut: bool,
+    /// What the producer earned of their fees, which the block's payouts split with its reward.
+    pub(super) to_producer: u256,
 }
 
 /// What a block's transactions run with: the chain's rules and engines, and its workers.
@@ -135,6 +137,7 @@ enum Touch {
     Signers,
     Governance,
     Names,
+    Pools,
 }
 
 fn touches(tx: &SignedTx, hash: HashType) -> Vec<Touch> {
@@ -150,6 +153,9 @@ fn touches_of(tx: &Tx, sender: Address, nonce: u64, hash: HashType) -> Vec<Touch
         Tx::CreateMultisig { .. } => touched.push(Touch::Address(crate::structs::address::multisig_address(&sender, nonce, hash))),
         Tx::ChangeMultisig { .. } => {}
         Tx::ApproveMultisig { account, .. } | Tx::WithdrawMultisig { account, .. } => touched.push(Touch::Address(*account)),
+        // Claims on one pool share its escrow, so they take turns; the pool is not known before
+        // the root is read, so every claim shares one.
+        Tx::Claim { to, .. } => touched.extend([Touch::Address(*to), Touch::Pools]),
         Tx::Transfer { to, .. } | Tx::Mint { to, .. } | Tx::ContractCall { to, .. } | Tx::EvmCall { to, .. } => touched.push(Touch::Address(*to)),
         #[cfg(feature = "evm")]
         Tx::Deploy { code: crate::structs::code::Code::Evm(_) } => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, nonce))),
@@ -383,6 +389,7 @@ impl Runner<'_> {
                             written.extend(attempt.changes.keys().cloned());
                             layer.merge(attempt.changes);
                             self.pay_producer(layer, context, executed.to_producer, &mut written)?;
+                            ran.to_producer = ran.to_producer.saturating_add(executed.to_producer);
                             self.pool_burned(layer, executed.burned, &mut written)?;
                             ran.gas_used += executed.receipt.gas_used;
                             ran.kept.push(turn);

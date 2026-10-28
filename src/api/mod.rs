@@ -7,7 +7,7 @@ use {
     crate::chain::{
         DryRun, Rules, dry_run, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, VoteRewardSource, stored_address_txs, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
-        stored_light_finality, stored_light_update, stored_state_at, stored_checkpoint_start, StartProblem,
+        stored_light_finality, stored_light_update, stored_state_at, stored_checkpoint_start, stored_split, StartProblem,
     },
     crate::crypto::hashable::Hashable,
     crate::light::{LightParams, MAX_FINALITY_STEPS, MAX_LIGHT_HEADERS},
@@ -478,6 +478,8 @@ fn router(api: Api) -> Router {
     let router = router.route("/names", get(names)).route("/names/{name}", get(name)).route("/accounts/{address}/names", get(account_names));
     #[cfg(feature = "stream")]
     let router = router.route("/stream", get(stream));
+    #[cfg(feature = "pool")]
+    let router = router.route("/pool", get(pool)).route("/pool/{address}", get(pool_miner)).route("/pool/claim/{address}", get(pool_claim));
     let router = router.fallback(apps).layer(DefaultBodyLimit::max(MAX_BODY)).layer(middleware::from_fn_with_state(api.clone(), per_client));
 
     match cors {
@@ -1044,7 +1046,154 @@ async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
     let mut value = json::block(&found, &receipts, hash, &api.reward);
     value["main"] = stored_on_main_chain(&*db, &found)?.into();
 
+    // A pool's block: what it shared out, what went to the escrow, and whose escrow it is.
+    if let Some(pool) = &found.pool {
+        let shared = stored_split(&*db, &id)?;
+        value["pool"]["shared"] = shared.map(|shared| shared.to_string()).into();
+        value["pool"]["escrowed"] = shared.map(|shared| crate::structs::block::parts_of(shared, pool.parts).to_string()).into();
+        value["pool"]["escrow"] = crate::registry::pools::pool_escrow(&found.header.producer, hash).to_string().into();
+    }
+
     Ok(Json(value))
+}
+
+/// The pool this node runs: its fee and window, every miner with its work in the window, what the
+/// next block gives it and all it has earned, and the blocks it sealed lately, each with whether
+/// it was credited and what each miner's part came to. With an address, that miner alone, with
+/// what it claimed from the escrow.
+#[cfg(feature = "pool")]
+async fn pool(Shared(api): Shared<Api>) -> Answer {
+    pool_for(&api, None).await
+}
+
+#[cfg(feature = "pool")]
+async fn pool_miner(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
+    pool_for(&api, Some(parse_address(&address)?)).await
+}
+
+/// The pool this node runs, from its report, or a 404 for a node that runs none.
+#[cfg(feature = "pool")]
+async fn pool_report(api: &Api) -> Result<crate::consensus::PoolReport, ApiError> {
+    report(api, 0)
+        .await?
+        .mining
+        .and_then(|mining| mining.pool)
+        .ok_or_else(|| ApiError::NotFound("this node runs no mining pool".to_string()))
+}
+
+#[cfg(feature = "pool")]
+async fn pool_for(api: &Api, miner: Option<crate::structs::address::Address>) -> Answer {
+    use crate::registry::pools::{Pools, pool_escrow};
+
+    let report = report(api, 0).await?;
+    let pool = report.mining.as_ref().and_then(|mining| mining.pool.clone()).ok_or_else(|| ApiError::NotFound("this node runs no mining pool".to_string()))?;
+    let producer = pool.producer.ok_or_else(|| ApiError::Unavailable("the pool does not say its address".to_string()))?;
+    let (state, _) = state_at(api, None)?;
+    let escrow = pool_escrow(&producer, api.hash);
+    let mut blocks = Vec::new();
+
+    for sealed in &pool.blocks {
+        let paid = |payout: &&crate::structs::block::Payout| miner.is_none_or(|miner| payout.to == miner);
+
+        if miner.is_some() && !sealed.payouts.iter().any(|payout| paid(&payout)) {
+            continue;
+        }
+
+        let shared = stored_split(&*api.db, &sealed.id)?;
+        let payouts: Vec<_> = sealed.payouts.iter().filter(paid).copied().collect();
+        blocks.push(json!({
+            "height": sealed.height,
+            "id": sealed.id.to_string(),
+            "at": sealed.at,
+            "credited": sealed.credited,
+            "shared": shared.map(|shared| shared.to_string()),
+            "payouts": json::payouts(&payouts, shared),
+        }));
+    }
+
+    let mut miners = Vec::new();
+
+    for standing in pool.miners.iter().filter(|standing| miner.is_none_or(|miner| standing.to == miner)) {
+        let claimed = Pools::new(&state, api.hash).claimed(&producer, &standing.to)?;
+        miners.push(json!({
+            "to": standing.to.to_string(),
+            "work": standing.work.to_string(),
+            "shares": standing.shares,
+            "parts": standing.parts,
+            "percent": json::percent(standing.parts),
+            "earned": standing.earned.to_string(),
+            "claimed": claimed.to_string(),
+            "claimable": standing.earned.saturating_sub(claimed).to_string(),
+        }));
+    }
+
+    let workers: Vec<Value> = report
+        .mining
+        .iter()
+        .flat_map(|mining| &mining.workers)
+        .filter(|worker| miner.is_some_and(|miner| worker.payout == Some(miner)))
+        .map(|worker| json!({ "name": worker.name, "rate": worker.devices.iter().map(|device| device.rate).sum::<f64>(), "shares": worker.shares, "share_difficulty": worker.share_difficulty.to_string() }))
+        .collect();
+
+    Ok(Json(json!({
+        "producer": producer.to_string(),
+        "escrow": escrow.to_string(),
+        "escrow_balance": Accounts::new(&state).get(&escrow)?.balance.to_string(),
+        "fee": pool.fee,
+        "fee_percent": json::percent(pool.fee),
+        "window": pool.window,
+        "open": pool.open,
+        "min_share": pool.min_share.to_string(),
+        "work": pool.work.to_string(),
+        "earned": pool.earned.to_string(),
+        "miners": miners,
+        "workers": workers,
+        "blocks": blocks,
+    })))
+}
+
+/// A miner's claim on the pool this node runs: all it earned, what it claimed, and the Merkle path
+/// from its leaf to the newest root a block on the main chain committed to, which Tx::Claim
+/// takes as it is. A 404 for a miner the pool owes nothing yet.
+#[cfg(feature = "pool")]
+async fn pool_claim(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
+    use crate::registry::pools::{Pools, pool_escrow};
+
+    let miner = parse_address(&address)?;
+    let pool = pool_report(&api).await?;
+    let producer = pool.producer.ok_or_else(|| ApiError::Unavailable("the pool does not say its address".to_string()))?;
+    let (state, _) = state_at(&api, None)?;
+    let pools = Pools::new(&state, api.hash);
+
+    // The newest tree whose root a block on the main chain carries, by its newest such block.
+    for tree in &pool.claims {
+        for (height, block) in tree.committed.iter().rev() {
+            if pools.root(*height)?.is_none_or(|root| root.root != tree.root || root.pool != producer) {
+                continue;
+            }
+
+            let Some((index, earned, path)) = tree.proof(api.hash, &miner) else {
+                return Err(ApiError::NotFound(format!("the pool owes {miner} nothing yet")));
+            };
+            let claimed = pools.claimed(&producer, &miner)?;
+
+            return Ok(Json(json!({
+                "pool": producer.to_string(),
+                "escrow": pool_escrow(&producer, api.hash).to_string(),
+                "height": height,
+                "block": block.to_string(),
+                "to": miner.to_string(),
+                "earned": earned.to_string(),
+                "claimed": claimed.to_string(),
+                "claimable": earned.saturating_sub(claimed).to_string(),
+                "index": index,
+                "count": tree.leaves.len(),
+                "path": path.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            })));
+        }
+    }
+
+    Err(ApiError::NotFound("no block on the main chain carries the pool's claims yet".to_string()))
 }
 
 /// The side branches this node stores: every block off the main chain, newest first, from each

@@ -119,6 +119,10 @@ pub fn touched(signed: &SignedTx, status: &TxStatus, payments: &[Payment]) -> BT
         Tx::ApproveMultisig { account, .. } | Tx::WithdrawMultisig { account, .. } => {
             touched.insert(*account);
         }
+        // A claim shows in the miner's history.
+        Tx::Claim { to, .. } => {
+            touched.insert(*to);
+        }
         // Read past above: never what a multisig sends.
         Tx::Multisig { .. } => {}
     }

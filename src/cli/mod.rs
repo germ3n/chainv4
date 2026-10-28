@@ -33,6 +33,8 @@ mod light;
 #[cfg(feature = "client")]
 pub(crate) mod bench;
 #[cfg(feature = "client")]
+mod claim;
+#[cfg(feature = "client")]
 pub(crate) mod multisig;
 #[cfg(feature = "client")]
 mod send;
@@ -55,6 +57,8 @@ pub use multisig::{MultisigArgs, multisig};
 pub use send::{SendArgs, TlsArgs, TxArgs, send};
 #[cfg(feature = "client")]
 pub use bench::{BenchArgs, bench};
+#[cfg(feature = "client")]
+pub use claim::{ClaimArgs, claim};
 #[cfg(all(feature = "client", feature = "swap"))]
 pub use swap::{SwapArgs, swap};
 #[cfg(all(feature = "client", feature = "dex", feature = "evm"))]

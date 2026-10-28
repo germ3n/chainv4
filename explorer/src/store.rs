@@ -175,6 +175,11 @@ pub struct Store {
     pub names: HashMap<String, crate::model::NameView>,
     /// The names each address owns.
     pub owned_names: HashMap<String, Vec<crate::model::OwnedName>>,
+    /// The mining pool the node runs, as it last answered; None before then, and for a node that
+    /// runs none.
+    pub pool: Option<crate::model::PoolView>,
+    /// The pool's books for one miner each, by its payout address.
+    pub pool_miners: HashMap<String, crate::model::PoolView>,
 }
 
 impl Store {
@@ -492,6 +497,8 @@ pub(crate) mod tests {
             proof_count: 0,
             pruned: false,
             main: None,
+            pool_root: "0x00".to_string(),
+            pool: None,
         }
     }
 

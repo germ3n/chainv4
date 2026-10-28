@@ -127,6 +127,40 @@ pub struct Summary {
     /// blocks before it.
     #[serde(default)]
     pub pruned: bool,
+    /// The chain hash of the mining pool's commitment the block carries, the zero hash for one
+    /// that carries none; empty from older nodes.
+    #[serde(default)]
+    pub pool_root: String,
+    /// What a mining pool's block sent its miners, when its producer runs a pool; none from older
+    /// nodes.
+    #[serde(default)]
+    pub pool: Option<PoolShare>,
+}
+
+/// A pool's block's commitment: the part of its reward and fees that went to the pool's escrow,
+/// and the root its miners claim against. What it came to, and whose escrow it is, come with the
+/// full block alone, not in listings.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct PoolShare {
+    /// The escrow's part, of PAYOUT_PARTS: what is left after the pool's fee.
+    pub parts: u32,
+    /// The Merkle root over every miner's lifetime earnings.
+    pub root: String,
+    /// How many miners' earnings the root covers.
+    pub count: u64,
+    /// The block's reward and its producer's fees, once the node knows them.
+    #[serde(default)]
+    pub shared: Option<String>,
+    /// What of that went to the escrow; the producer kept the rest, the pool's fee.
+    #[serde(default)]
+    pub escrowed: Option<String>,
+    #[serde(default)]
+    pub escrow: Option<String>,
+}
+
+/// Parts of PAYOUT_PARTS, as a percent.
+pub fn percent(parts: u32) -> f64 {
+    f64::from(parts) / f64::from(chainv4::structs::block::PAYOUT_PARTS) * 100.0
 }
 
 /// A count, or 0 where the node does not know it, as for a pruned block.
@@ -444,6 +478,21 @@ pub struct MiningView {
     /// Where workers connect, when it takes them.
     pub listening: Option<String>,
     pub workers: Vec<MiningWorker>,
+    /// The mining pool it runs on its mining port, if it does; none from older nodes.
+    #[serde(default)]
+    pub pool: Option<PoolSettings>,
+}
+
+/// A node's mining pool, as GET /node sums it up: its full books are GET /pool's.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PoolSettings {
+    /// What its producer keeps of each block, of PAYOUT_PARTS.
+    pub fee: u32,
+    /// How many blocks' worth of the latest shares each block splits by.
+    pub window: u64,
+    /// Whether anyone may join with a payout address alone, without the mining token.
+    pub open: bool,
+    pub miners: u64,
 }
 
 /// A GPU, or a CPU's threads, and its hashrate.
@@ -463,6 +512,84 @@ pub struct MiningWorker {
     pub devices: Vec<Device>,
     pub found: u64,
     pub refused: u64,
+    /// Where a pool's worker has its part of each block credited; none outside a pool.
+    #[serde(default)]
+    pub payout: Option<String>,
+    /// The shares it sent, and the difficulty the pool set it, outside a pool none and "0".
+    #[serde(default)]
+    pub shares: u64,
+    #[serde(default)]
+    pub share_difficulty: String,
+}
+
+/// GET /pool, or GET /pool/{address} for one miner: the pool a node runs, its miners, and the
+/// blocks it sealed lately with what each paid whom.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PoolView {
+    /// The pool's producer, which keeps its fee, and the escrow no key controls, which holds what
+    /// its miners have yet to claim.
+    pub producer: String,
+    pub escrow: String,
+    pub escrow_balance: String,
+    /// What its producer keeps of each block, as a percent.
+    pub fee_percent: f64,
+    pub window: u64,
+    pub open: bool,
+    /// The easiest share difficulty it hands out.
+    pub min_share: String,
+    /// The work its miners' shares in the window add up to.
+    pub work: String,
+    /// What it credited every miner with, all told.
+    pub earned: String,
+    pub miners: Vec<PoolMiner>,
+    /// A miner's workers, for one miner; none for the whole pool.
+    #[serde(default)]
+    pub workers: Vec<PoolWorker>,
+    pub blocks: Vec<PoolBlock>,
+}
+
+/// One miner in a pool: its work in the window, what the next block gives it, and what it earned
+/// and claimed.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PoolMiner {
+    pub to: String,
+    pub work: String,
+    pub shares: u64,
+    /// Its part of the next block, as a percent.
+    pub percent: f64,
+    pub earned: String,
+    pub claimed: String,
+    pub claimable: String,
+}
+
+/// One of a miner's workers on the pool.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PoolWorker {
+    pub name: String,
+    pub rate: f64,
+    pub shares: u64,
+    pub share_difficulty: String,
+}
+
+/// A block a pool sealed, and whether its payouts were credited.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PoolBlock {
+    pub height: u64,
+    pub id: String,
+    /// When it was sealed, in milliseconds since the Unix epoch.
+    pub at: u64,
+    /// None while it waits to be final, false once a reorganization dropped it.
+    pub credited: Option<bool>,
+    pub shared: Option<String>,
+    pub payouts: Vec<PoolPayout>,
+}
+
+/// A miner's part of a pool's block, and what it came to once the block's total is known.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PoolPayout {
+    pub to: String,
+    pub percent: f64,
+    pub amount: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -757,5 +884,57 @@ mod tests {
 
         assert_eq!((mining.rate, mining.devices[0].name.as_str()), (3e8, "Apple M3 Pro (Metal)"));
         assert_eq!((mining.workers[0].found, mining.workers[0].devices[0].rate), (2, 1e8));
+    }
+
+    #[test]
+    fn a_pool_s_block_reads_its_commitment_and_one_from_an_older_node_none() {
+        let summary = json!({
+            "id": "0xaa", "height": 3, "parent": "0xbb", "timestamp": 6000, "producer": "ed25519:0x01",
+            "difficulty": "5", "tx_root": "0xcc", "gas_used": 0, "base_price": "0", "tx_count": 0, "proof_count": 0,
+        });
+        let older: Summary = serde_json::from_value(summary.clone()).unwrap();
+
+        assert_eq!((older.pool.as_ref(), older.pool_root.as_str()), (None, ""));
+
+        let mut pooled = summary;
+        pooled["pool_root"] = json!("0xdd");
+        pooled["pool"] = json!({
+            "parts": 990_000_000, "percent": 99.0, "root": "0xee", "count": 4,
+            "shared": "1000", "escrowed": "990", "escrow": "ed25519:0x02",
+        });
+        let pooled: Summary = serde_json::from_value(pooled).unwrap();
+        let pool = pooled.pool.unwrap();
+
+        assert_eq!((pool.count, pool.escrowed.as_deref(), pool.escrow.as_deref()), (4, Some("990"), Some("ed25519:0x02")));
+        assert_eq!(percent(pool.parts), 99.0);
+    }
+
+    #[test]
+    fn a_pool_reads_as_get_pool_writes_it() {
+        let pool: PoolView = serde_json::from_value(json!({
+            "producer": "ed25519:0x01", "escrow": "ed25519:0x02", "escrow_balance": "700", "fee": 10_000_000, "fee_percent": 1.0,
+            "window": 2, "open": true, "min_share": "1000", "work": "4000", "earned": "900",
+            "miners": [{ "to": "ed25519:0x03", "work": "1000", "shares": 1, "parts": 250_000_000, "percent": 25.0,
+                         "earned": "900", "claimed": "200", "claimable": "700" }],
+            "workers": [],
+            "blocks": [
+                { "height": 7, "id": "0xaa", "at": 1, "credited": null, "shared": null,
+                  "payouts": [{ "to": "ed25519:0x03", "parts": 250_000_000, "percent": 25.0, "amount": null }] },
+                { "height": 6, "id": "0xbb", "at": 1, "credited": false, "shared": "1000",
+                  "payouts": [{ "to": "ed25519:0x03", "parts": 250_000_000, "percent": 25.0, "amount": "250" }] },
+            ],
+        }))
+        .unwrap();
+
+        assert_eq!((pool.miners[0].claimable.as_str(), pool.miners[0].percent), ("700", 25.0));
+        assert_eq!((pool.blocks[0].credited, pool.blocks[1].credited), (None, Some(false)), "waiting, then dropped");
+        assert_eq!(pool.blocks[1].payouts[0].amount.as_deref(), Some("250"));
+
+        let worker: MiningWorker = serde_json::from_value(json!({
+            "name": "rig", "address": "10.0.0.3:5000", "since": 1, "rate": 1e8, "devices": [], "found": 0, "refused": 0,
+        }))
+        .unwrap();
+
+        assert_eq!((worker.payout, worker.shares), (None, 0), "an older node says nothing of shares");
     }
 }

@@ -7,7 +7,8 @@
 
 ## Blocks
 
-A block is a header, its transactions, the finality proofs it carries, and a seal.
+A block is a header, its transactions, the finality proofs it carries, a mining pool's commitment
+when its producer runs a pool, and a seal.
 
 | Header field | What it is |
 | --- | --- |
@@ -18,6 +19,7 @@ A block is a header, its transactions, the finality proofs it carries, and a sea
 | `difficulty` | The expected hashes to find its seal under proof of work; 0 under the authority. |
 | `tx_root` | The Merkle root of its transactions, in order, so one is proven without the others (see [Receipts](#receipts)). The zero hash for a block without transactions. For genesis, the hash of the genesis configuration. |
 | `proof_root` | The chain hash of its finality proofs, in order. |
+| `pool_root` | The chain hash of its mining pool's commitment, or the zero hash for a block that carries none (see [Mining pools](consensus.md#mining-pools)). |
 | `receipts_root` | The Merkle root of what its transactions did, in order (see [Receipts](#receipts)). The zero hash for a block without transactions. |
 | `state_root` | The root of the state tree once it has run: every chain-state entry (see [The state root](#the-state-root)). |
 | `gas_used` | The gas its transactions used; 0 without fees. |
@@ -68,8 +70,8 @@ included, hashed with the chain hash.
    is fetched for it, so a node never asks for a branch under its finality;
 3. that its parent is known (`UnknownParent`, which makes the node ask for the gap), and did not
    fail to run;
-4. its height, `tx_root` and `proof_root` (its `receipts_root` and `state_root` are checked once it
-   runs);
+4. its height, `tx_root`, `proof_root` and `pool_root`, and that its pool commitment sends at most
+   the whole reward (its `receipts_root` and `state_root` are checked once it runs);
 5. its base price, which its parent's base price and gas used decide;
 6. its seal, producer, timing and difficulty, by consensus.
 
@@ -94,7 +96,10 @@ all of it commits or none of it does.
    transaction whose gas limit is more than the block has left makes the block invalid
    (`BlockFull`).
 2. The gas they used must equal the header's `gas_used`.
-3. The producer gets the block reward, `reward.at(height)`.
+3. The producer gets the block reward, `reward.at(height)`. A pool's block then sends its
+   commitment's parts of the reward and of the fees its producer earned to the pool's escrow, and
+   keeps the commitment's root under its height in `Pools` (`Pool` when the producer no longer
+   holds them).
 4. Finality checks the proofs the block carries and pays their voters, and at a checkpoint updates
    what it keeps in state, such as the next validator set.
 5. The root of what its transactions did must equal the header's `receipts_root`

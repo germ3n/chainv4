@@ -19,6 +19,7 @@ pub mod collections;
 pub mod federation;
 pub mod multisig;
 pub mod names;
+pub mod pools;
 pub mod signers;
 pub mod tokens;
 pub mod validators;

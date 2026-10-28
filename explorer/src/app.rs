@@ -73,6 +73,7 @@ pub struct Explorer {
     bridge: BridgeState,
     send: SendState,
     faucet: views::faucet::FaucetPage,
+    pool: views::pool::PoolPage,
     settings_page: SettingsState,
     /// The light client, which checks what the node says about balances.
     light: Light,
@@ -120,6 +121,7 @@ impl Explorer {
             bridge: BridgeState::default(),
             send: SendState::default(),
             faucet: views::faucet::FaucetPage::default(),
+            pool: views::pool::PoolPage::default(),
             settings_page: SettingsState::default(),
             light: Light::default(),
             notice: None,
@@ -181,6 +183,11 @@ impl Explorer {
                                 Ask::Lookup(id) if failure.status == 404 => self.go(View::Tx(id.clone())),
                                 Ask::Contract(address) if failure.status == 404 => {
                                     self.store.contracts.insert(address.clone(), None);
+                                }
+                                // The node runs no pool, or no longer does.
+                                Ask::Pool if failure.status == 404 => self.store.pool = None,
+                                Ask::PoolMiner(address) if failure.status == 404 => {
+                                    self.store.pool_miners.remove(address);
                                 }
                                 _ => {}
                             }
@@ -252,6 +259,12 @@ impl Explorer {
             }
             Ask::Rpc(_) | Ask::Faucet(_) => {
                 store.calls.insert(ask.clone(), value);
+            }
+            Ask::Pool => store.pool = parse(value),
+            Ask::PoolMiner(address) => {
+                if let Some(books) = parse(value) {
+                    store.pool_miners.insert(address, books);
+                }
             }
             Ask::Name(name) => {
                 if let Some(found) = parse::<crate::model::NameView>(value) {
@@ -417,8 +430,12 @@ impl Explorer {
             self.api.ask(Ask::Node);
         }
 
+        // The pool's page asks again on its own, so why it failed stands till then: a node without
+        // a pool says so steadily, rather than between spells of loading.
         if due(&mut self.asked.failures, RETRY_AFTER) {
-            self.store.failures.retain(|ask, _| matches!(ask, Ask::Offer(_) | Ask::Submit(_) | Ask::Call { .. } | Ask::Rpc(_) | Ask::Faucet(_)));
+            self.store
+                .failures
+                .retain(|ask, _| matches!(ask, Ask::Offer(_) | Ask::Submit(_) | Ask::Call { .. } | Ask::Rpc(_) | Ask::Faucet(_) | Ask::Pool | Ask::PoolMiner(_)));
         }
 
         if matches!(self.view, View::Map | View::Overview) && due(&mut self.asked.forks, FORKS_EVERY) {
@@ -434,6 +451,7 @@ impl Explorer {
             View::Finality => vec![Ask::Validators, Ask::Signers, Ask::Evidence],
             View::Account(address) => [Ask::Account(address.clone()), Ask::AccountNames(address.clone())].into_iter().chain(self.light.prove(address)).collect(),
             View::Name(name) => vec![Ask::Name(name.clone())],
+            View::Pool => [Ask::Pool].into_iter().chain(self.pool.miner().map(|miner| Ask::PoolMiner(miner.to_string()))).collect(),
             _ => Vec::new(),
         };
 
@@ -755,6 +773,7 @@ impl Explorer {
                         View::Finality => views::finality::show(ui, &mut ctx),
                         View::Send => views::send::show(ui, &mut ctx, &mut self.send),
                         View::Faucet => views::faucet::show(ui, &mut ctx, &mut self.faucet),
+                        View::Pool => views::pool::show(ui, &mut ctx, &mut self.pool),
                         View::Settings => views::settings::show(ui, &mut ctx, &mut self.address, &mut self.settings_page, &self.streaming, &mut connect),
                         View::More => views::more::show(ui, &mut ctx),
                     });

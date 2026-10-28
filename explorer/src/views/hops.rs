@@ -98,6 +98,9 @@ pub fn of(tx: &TxView, outcome: Option<&Outcome>) -> Vec<Hop> {
         "change_multisig" => ("change multisig", "(its members)".to_string(), String::new(), "0".to_string()),
         "approve_multisig" => ("approve", field("account"), String::new(), "0".to_string()),
         "withdraw_multisig" => ("withdraw approval", field("account"), String::new(), "0".to_string()),
+        // A miner's earnings out of a pool's escrow: what it was paid, the receipt's balance change
+        // says; earned is its lifetime total, not this.
+        "claim" => ("claim", field("to"), String::new(), "0".to_string()),
         other => (other, "?".to_string(), String::new(), "0".to_string()),
     };
 
@@ -142,7 +145,7 @@ pub fn layout(hops: &[Hop]) -> Vec<(String, Pos2)> {
 fn color(look: Look, hop: &Hop) -> Color32 {
     match (hop.error.is_some(), hop.kind.as_str()) {
         (true, _) => look.palette.bad,
-        (false, "transfer" | "mint" | "burn" | "bond") => look.palette.good,
+        (false, "transfer" | "mint" | "burn" | "bond" | "claim") => look.palette.good,
         (false, "delegate") => Color32::from_rgb(0xb4, 0x8c, 0xf0),
         _ => look.roles.main,
     }
@@ -450,6 +453,20 @@ mod tests {
 
         assert_eq!(hops.len(), 1);
         assert_eq!((hops[0].kind.as_str(), hops[0].to.as_str(), hops[0].value.as_str()), ("transfer", "ed25519:0xbb", "5"));
+    }
+
+    #[test]
+    fn a_claim_goes_to_its_miner_and_sends_no_value_of_its_own() {
+        let tx: TxView = serde_json::from_value(json!({
+            "id": "0x01", "sender": "ed25519:0xaa", "nonce": 0, "signer": "ed25519:0xaa", "signature": "0x00",
+            "fee": { "gas_limit": 0, "max_price": "0", "tip": "0" },
+            "tx": { "type": "claim", "height": 9, "to": "ed25519:0xbb", "earned": "500", "index": 0, "path": ["0x02"] }
+        }))
+        .unwrap();
+        let hops = of(&tx, None);
+
+        assert_eq!((hops[0].kind.as_str(), hops[0].to.as_str(), hops[0].value.as_str()), ("claim", "ed25519:0xbb", "0"));
+        assert_eq!(tx.target(), Some("ed25519:0xbb"));
     }
 
     #[test]

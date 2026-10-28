@@ -165,9 +165,35 @@ pub fn compact(raw: &str, decimals: u8, places: usize) -> String {
     }
 }
 
+/// A hashrate, in the unit that keeps it short: 950 H/s, 205.8 MH/s, 1.25 TH/s.
+pub fn hashrate(rate: f64) -> String {
+    let units = ["H/s", "kH/s", "MH/s", "GH/s", "TH/s", "PH/s", "EH/s"];
+    let mut scaled = rate.max(0.0);
+    let mut unit = 0;
+
+    while scaled >= 1_000.0 && unit < units.len() - 1 {
+        scaled /= 1_000.0;
+        unit += 1;
+    }
+
+    match unit {
+        0 => format!("{scaled:.0} {}", units[0]),
+        _ if scaled >= 100.0 => format!("{scaled:.1} {}", units[unit]),
+        _ => format!("{scaled:.2} {}", units[unit]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hashrates_take_the_unit_that_keeps_them_short() {
+        assert_eq!(hashrate(950.0), "950 H/s");
+        assert_eq!(hashrate(205_812_000.0), "205.8 MH/s");
+        assert_eq!(hashrate(1.25e12), "1.25 TH/s");
+        assert_eq!(hashrate(-3.0), "0 H/s");
+    }
 
     #[test]
     fn amounts_round_trip_through_their_decimals() {

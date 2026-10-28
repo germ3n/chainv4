@@ -64,6 +64,13 @@ pub enum Ask {
     /// A multisig's members, nonce and open proposals, as the node says: what the Multisig page
     /// shows and counts approvals by. Nothing it signs rests on it: a bundle says what it does.
     Multisig(String),
+    /// What a mining pool owes an address, with the Merkle path a claim takes, as the pool's node
+    /// says: what the Mining page claims with. Nothing rests on it but the fee: the chain checks
+    /// the path against the root the pool's block committed to.
+    PoolClaim(String),
+    /// A mining pool's standing for an address: its work in the window, its part of the next
+    /// block, its workers and the blocks it shared in.
+    Pool(String),
     /// The collection registry's first page, for the NFTs page to look through.
     #[cfg_attr(not(feature = "nft"), allow(dead_code))]
     Collections,
@@ -89,6 +96,8 @@ impl Ask {
             Ask::OwnedNames(address) => format!("/accounts/{address}/names?limit=100"),
             Ask::Contract(address) => format!("/contracts/{address}"),
             Ask::Multisig(address) => format!("/multisig/{address}"),
+            Ask::PoolClaim(address) => format!("/pool/claim/{address}"),
+            Ask::Pool(address) => format!("/pool/{address}"),
             Ask::Call(_) => "/call".to_string(),
             Ask::Read(_) => "/offer".to_string(),
             Ask::Offer(_) => "/offer".to_string(),

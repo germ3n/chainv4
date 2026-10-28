@@ -1,17 +1,21 @@
 //! The node's side of the mining port: a producer that hands each template's work to the workers
 //! connected, a range of nonces apart, alongside the node's own miner if it has one, and checks
-//! every nonce a worker sends before it becomes a seal.
+//! every nonce a worker sends before it becomes a seal. With a pool (the pool feature, --pool),
+//! workers send shares too, at a difficulty set for each, which the pool's books count; every
+//! block sends the miners' share of its reward to the pool's escrow and commits to the root of
+//! their claims (see super::shares).
 
 use {
     super::protocol::{self, Receiver, Sender},
     crate::consensus::{DeviceReport, MiningReport, Producer, WorkerReport, meets, work_hash},
     crate::registry::validators::Member,
     crate::structs::address::Address,
-    crate::structs::block::{BlockHeader, Seal},
+    crate::consensus::PoolSettled,
+    crate::structs::block::{BlockHeader, Payout, PoolCommitment, Seal},
     crate::structs::hash::{Hash, HashType},
     r#macro::document,
     serde_json::{Value, json},
-    std::collections::BTreeMap,
+    std::collections::{BTreeMap, VecDeque},
     std::net::{SocketAddr, TcpListener, TcpStream},
     std::sync::atomic::{AtomicBool, Ordering},
     std::sync::{Arc, Condvar, Mutex, MutexGuard},
@@ -35,6 +39,19 @@ pub const QUIET: Duration = Duration::from_secs(60);
 pub const PING: Duration = Duration::from_secs(20);
 /// The most devices one worker's rates may name.
 const MOST_DEVICES: usize = 64;
+/// How often a pool tells each worker how it stands.
+#[cfg(feature = "pool")]
+const STANDING_EVERY: Duration = Duration::from_secs(30);
+/// How many jobs back shares are taken for: templates change every two seconds, and a share
+/// found as one changes, or sent over Tor, comes a moment late.
+const RECENT_JOBS: usize = 8;
+
+#[document(
+    summary = "The token every worker of an open pool proves it knows, which anyone may: --mining-open's, and a worker's without --token.",
+    category = "Mining",
+    see_also = "MiningPort",
+)]
+pub const OPEN_TOKEN: &[u8] = b"chainv4 open mining pool";
 
 /// A seal's callback, shared by the pool and the node's own miner.
 pub type Found = Arc<dyn Fn(Hash, Seal) + Send + Sync>;
@@ -52,6 +69,9 @@ pub struct MiningPort {
     pub token: Vec<u8>,
     #[document(summary = "The node's protocol name, as --protocol gives it: a worker must give the same.")]
     pub protocol: String,
+    #[document(summary = "The pool it runs, with --pool; None for workers mining for the node's reward address alone.")]
+    #[cfg(feature = "pool")]
+    pub pool: Option<super::shares::PoolConfig>,
 }
 
 impl std::fmt::Debug for MiningPort {
@@ -66,6 +86,21 @@ struct Job {
     number: u64,
     /// The block id and difficulty to find a nonce for; None once one was found.
     work: Option<(Hash, u128)>,
+    /// The template's height, how it shares out its reward and the claim root it commits to, for
+    /// the books once it is sealed.
+    height: u64,
+    split: Vec<Payout>,
+    root: Option<Hash>,
+    /// The recent jobs, the current one first, each with its block id and difficulty: what shares
+    /// are checked against.
+    recent: VecDeque<(u64, Hash, u128)>,
+}
+
+/// A pool's books and its view of each worker.
+#[cfg(feature = "pool")]
+struct Books {
+    ledger: Mutex<super::shares::Ledger>,
+    workers: Mutex<BTreeMap<u64, super::shares::PoolWorker>>,
 }
 
 /// What the pool's threads share.
@@ -81,16 +116,25 @@ struct State {
     streams: Mutex<BTreeMap<u64, TcpStream>>,
     /// The workers past their handshake.
     workers: Mutex<BTreeMap<u64, WorkerReport>>,
+    #[cfg(feature = "pool")]
+    books: Option<Books>,
 }
 
 /// What became of a nonce a worker sent.
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
     Took,
-    /// For a template no longer current, or one whose seal was found already.
+    /// A pool's share: it meets the worker's share difficulty, not the block's.
+    #[cfg_attr(not(feature = "pool"), allow(dead_code))]
+    Share,
+    /// For a template no longer current, or one whose seal was found already; for a pool's
+    /// share, a job too old.
     Stale,
     /// It does not meet the difficulty.
     Short,
+    /// A share sent already.
+    #[cfg_attr(not(feature = "pool"), allow(dead_code))]
+    Twice,
 }
 
 impl State {
@@ -98,30 +142,97 @@ impl State {
         mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Checks a worker's nonce, and makes it the seal when it is the first good one.
-    fn take(&self, number: u64, nonce: u64) -> Verdict {
+    /// Checks a worker's nonce, and makes it the seal when it is the first good one; under a
+    /// pool, counts it as a share when it meets the worker's share difficulty.
+    #[cfg_attr(not(feature = "pool"), allow(unused_variables))]
+    fn take(&self, number: u64, nonce: u64, worker: u64) -> Verdict {
         let mut job = Self::lock(&self.job);
 
-        let Some((id, difficulty)) = job.work.filter(|_| job.number == number) else {
+        let Some(&(_, id, difficulty)) = job.recent.iter().find(|(recent, _, _)| *recent == number) else {
+            return Verdict::Stale;
+        };
+        let work = work_hash(self.hash, &id, nonce);
+        let current = job.number == number && job.work.is_some();
+
+        if current && meets(work, difficulty) {
+            let (height, split, root) = (job.height, std::mem::take(&mut job.split), job.root);
+            job.work = None;
+            drop(job);
+            #[cfg(feature = "pool")]
+            {
+                let _ = self.share(worker, number, nonce, work, difficulty);
+                self.sealed(height, id, split, root);
+            }
+            #[cfg(not(feature = "pool"))]
+            let _ = (height, split, root);
+            (self.found)(id, Seal::Work { nonce });
+
+            return Verdict::Took;
+        }
+
+        drop(job);
+
+        #[cfg(feature = "pool")]
+        if self.books.is_some() {
+            return self.share(worker, number, nonce, work, difficulty);
+        }
+
+        match current {
+            true => Verdict::Short,
+            false => Verdict::Stale,
+        }
+    }
+
+    /// Counts a share, when it meets the share difficulty the worker had for its job.
+    #[cfg(feature = "pool")]
+    fn share(&self, worker: u64, number: u64, nonce: u64, work: crate::structs::u256::u256, block: u128) -> Verdict {
+        let Some(books) = &self.books else {
+            return Verdict::Short;
+        };
+        let mut workers = Self::lock(&books.workers);
+        let Some(standing) = workers.get_mut(&worker) else {
+            return Verdict::Stale;
+        };
+        let Some(difficulty) = standing.difficulty(number) else {
             return Verdict::Stale;
         };
 
-        if !meets(work_hash(self.hash, &id, nonce), difficulty) {
+        if !meets(work, difficulty) {
             return Verdict::Short;
         }
 
-        job.work = None;
-        drop(job);
-        (self.found)(id, Seal::Work { nonce });
+        if !standing.took(number, nonce, difficulty) {
+            return Verdict::Twice;
+        }
 
-        Verdict::Took
+        let payout = standing.payout;
+        drop(workers);
+        Self::lock(&books.ledger).add(payout, difficulty, crate::node::now_ms(), block);
+
+        if let Some(report) = Self::lock(&self.workers).get_mut(&worker) {
+            report.shares += 1;
+        }
+
+        Verdict::Share
     }
 
-    /// The work message for a worker, or None while there is nothing to mine.
+    /// Puts a block the pool sealed in its books, and saves them.
+    #[cfg(feature = "pool")]
+    fn sealed(&self, height: u64, id: Hash, split: Vec<Payout>, root: Option<Hash>) {
+        if let Some(books) = &self.books {
+            let mut ledger = Self::lock(&books.ledger);
+            ledger.sealed(height, id, crate::node::now_ms(), split, root);
+            ledger.save();
+        }
+    }
+
+    /// The work message for a worker, or None while there is nothing to mine. Under a pool, it
+    /// carries the worker's share difficulty for the job.
     fn work(&self, range: u64) -> (u64, Option<Value>) {
         let job = Self::lock(&self.job);
         let message = job.work.map(|(id, difficulty)| {
-            json!({
+            #[cfg_attr(not(feature = "pool"), allow(unused_mut))]
+            let mut message = json!({
                 "type": "work",
                 "job": job.number,
                 "chain": id.algorithm().name(),
@@ -130,10 +241,47 @@ impl State {
                 "hash": self.hash.name(),
                 "start": FIRST_RANGE + (range % RANGES) * SPAN,
                 "span": SPAN,
-            })
+            });
+
+            #[cfg(feature = "pool")]
+            if let Some(books) = &self.books
+                && let Some(worker) = Self::lock(&books.workers).get_mut(&range)
+            {
+                let min_share = Self::lock(&books.ledger).config().min_share;
+                let share = worker.job(job.number, min_share, difficulty);
+                message["share"] = json!(share.to_string());
+
+                if let Some(report) = Self::lock(&self.workers).get_mut(&range) {
+                    report.share_difficulty = share;
+                }
+            }
+
+            message
         });
 
         (job.number, message)
+    }
+
+    /// How a worker stands in the pool, for it to show: its work and shares in the window, and
+    /// its parts of the next block.
+    #[cfg(feature = "pool")]
+    fn standing(&self, worker: u64) -> Option<Value> {
+        let books = self.books.as_ref()?;
+        let payout = Self::lock(&books.workers).get(&worker)?.payout;
+        let report = Self::lock(&books.ledger).report();
+        let mine = report.miners.iter().find(|miner| miner.to == payout);
+
+        Some(json!({
+            "type": "standing",
+            "payout": payout.to_string(),
+            "work": mine.map_or(0, |miner| miner.work).to_string(),
+            "shares": mine.map_or(0, |miner| miner.shares),
+            "parts": mine.map_or(0, |miner| miner.parts),
+            "earned": mine.map_or(crate::structs::u256::u256::ZERO, |miner| miner.earned).to_string(),
+            "window": report.work.to_string(),
+            "miners": report.miners.len(),
+            "fee": report.fee,
+        }))
     }
 }
 
@@ -149,6 +297,10 @@ pub struct Pool {
     state: Arc<State>,
     accepting: Option<JoinHandle<()>>,
     local: Option<Box<dyn Producer>>,
+    /// The split and claim root pool last gave, which the next header to seal shares out by and
+    /// commits to.
+    split: Vec<Payout>,
+    root: Option<Hash>,
 }
 
 impl Pool {
@@ -164,6 +316,9 @@ impl Pool {
         returns = "The pool, or why the port did not open.",
     )]
     pub fn new(address: Address, hash: HashType, port: MiningPort, found: Found) -> Result<Pool, String> {
+        #[cfg(feature = "pool")]
+        let MiningPort { listen, token, protocol, pool } = port;
+        #[cfg(not(feature = "pool"))]
         let MiningPort { listen, token, protocol } = port;
         let listener = TcpListener::bind(listen).map_err(|err| format!("the mining port {listen} did not open: {err}"))?;
         let listening = listener.local_addr().map_err(|err| err.to_string())?;
@@ -173,11 +328,13 @@ impl Pool {
             token,
             protocol,
             found,
-            job: Mutex::new(Job { number: 0, work: None }),
+            job: Mutex::new(Job { number: 0, work: None, height: 0, split: Vec::new(), root: None, recent: VecDeque::new() }),
             changed: Condvar::new(),
             stopped: AtomicBool::new(false),
             streams: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "pool")]
+            books: pool.map(|config| Books { ledger: Mutex::new(super::shares::Ledger::open(config, hash)), workers: Mutex::new(BTreeMap::new()) }),
         });
         let accepting = {
             let state = state.clone();
@@ -195,6 +352,8 @@ impl Pool {
             state,
             accepting: Some(accepting),
             local: None,
+            split: Vec::new(),
+            root: None,
         })
     }
 
@@ -206,7 +365,19 @@ impl Pool {
         let state = self.state.clone();
 
         move |id, seal| {
-            State::lock(&state.job).work.take_if(|(current, _)| *current == id);
+            let mut job = State::lock(&state.job);
+
+            if job.work.take_if(|(current, _)| *current == id).is_some() {
+                let (height, split, root) = (job.height, std::mem::take(&mut job.split), job.root);
+                drop(job);
+                #[cfg(feature = "pool")]
+                state.sealed(height, id, split, root);
+                #[cfg(not(feature = "pool"))]
+                let _ = (height, split, root);
+            } else {
+                drop(job);
+            }
+
             (state.found)(id, seal);
         }
     }
@@ -242,13 +413,39 @@ impl Producer for Pool {
         {
             let mut job = State::lock(&self.state.job);
             job.number += 1;
-            job.work = Some((header.id(), header.difficulty));
+            let (number, id) = (job.number, header.id());
+            job.work = Some((id, header.difficulty));
+            job.height = header.height;
+            job.split = std::mem::take(&mut self.split);
+            job.root = self.root.take();
+            job.recent.push_front((number, id, header.difficulty));
+            job.recent.truncate(RECENT_JOBS);
+        }
+
+        #[cfg(feature = "pool")]
+        if let Some(books) = &self.state.books {
+            State::lock(&books.ledger).at_difficulty(header.difficulty);
         }
         self.state.changed.notify_all();
 
         // The node's own miner only ever finds its seal later; none is ready at once.
         if let Some(local) = self.local.as_mut() {
             let _ = local.seal(header);
+        }
+
+        None
+    }
+
+    #[cfg_attr(not(feature = "pool"), allow(unused_variables))]
+    fn pool(&mut self, settled: &dyn Fn(&Hash, u64) -> PoolSettled) -> Option<PoolCommitment> {
+        #[cfg(feature = "pool")]
+        if let Some(books) = &self.state.books {
+            let mut ledger = State::lock(&books.ledger);
+            ledger.credit(settled);
+            let (commitment, split) = ledger.commitment();
+            (self.split, self.root) = (split, commitment.map(|commitment| commitment.root));
+
+            return commitment;
         }
 
         None
@@ -261,6 +458,10 @@ impl Producer for Pool {
             devices,
             listening: Some(self.listening.to_string()),
             workers: State::lock(&self.state.workers).values().cloned().collect(),
+            #[cfg(feature = "pool")]
+            pool: self.state.books.as_ref().map(|books| crate::consensus::PoolReport { producer: Some(self.address), ..State::lock(&books.ledger).report() }),
+            #[cfg(not(feature = "pool"))]
+            pool: None,
         })
     }
 }
@@ -278,6 +479,11 @@ impl Drop for Pool {
         if let Some(accepting) = self.accepting.take() {
             let _ = accepting.join();
         }
+
+        #[cfg(feature = "pool")]
+        if let Some(books) = &self.state.books {
+            State::lock(&books.ledger).save();
+        }
     }
 }
 
@@ -285,8 +491,20 @@ impl Drop for Pool {
 fn accept(listener: &TcpListener, state: &Arc<State>) {
     let mut connections: Vec<JoinHandle<()>> = Vec::new();
     let mut next: u64 = 0;
+    #[cfg(feature = "pool")]
+    let mut saved = std::time::Instant::now();
 
     while !state.stopped.load(Ordering::SeqCst) {
+        // The books, every minute, so a crash loses at most that much of the window.
+        #[cfg(feature = "pool")]
+        if saved.elapsed() >= Duration::from_secs(60) {
+            saved = std::time::Instant::now();
+
+            if let Some(books) = &state.books {
+                State::lock(&books.ledger).save();
+            }
+        }
+
         match listener.accept() {
             Ok((stream, peer)) => {
                 connections.retain(|connection| !connection.is_finished());
@@ -306,6 +524,10 @@ fn accept(listener: &TcpListener, state: &Arc<State>) {
 
                     State::lock(&state.streams).remove(&number);
                     State::lock(&state.workers).remove(&number);
+                    #[cfg(feature = "pool")]
+                    if let Some(books) = &state.books {
+                        State::lock(&books.workers).remove(&number);
+                    }
                 });
 
                 match thread {
@@ -343,8 +565,24 @@ fn serve(state: &Arc<State>, stream: TcpStream, peer: SocketAddr, number: u64) -
     }
 
     stream.set_read_timeout(Some(HANDSHAKE)).map_err(|err| err.to_string())?;
-    let (sender, mut receiver, hello) = protocol::accept(stream.try_clone().map_err(|err| err.to_string())?, &state.token, &state.protocol)?;
+    #[cfg_attr(not(feature = "pool"), allow(unused_mut))]
+    let (mut sender, mut receiver, hello) = protocol::accept(stream.try_clone().map_err(|err| err.to_string())?, &state.token, &state.protocol)?;
     stream.set_read_timeout(Some(QUIET)).map_err(|err| err.to_string())?;
+
+    // A pool pays each worker's shares to the address it gave, and takes none without one.
+    #[cfg(feature = "pool")]
+    if let Some(books) = &state.books {
+        let Some(payout) = hello.payout else {
+            let why = "this node runs a pool: give the address to pay, --payout ADDRESS";
+            let _ = sender.send(&json!({ "type": "refused", "why": why }));
+
+            return Err(format!("worker {} gave no payout address", hello.name));
+        };
+        let config = State::lock(&books.ledger).config().clone();
+        sender.send(&json!({ "type": "pool", "fee": config.fee, "window": config.window, "open": config.open, "min_share": config.min_share.to_string() }))?;
+        State::lock(&books.workers).insert(number, super::shares::PoolWorker::new(payout));
+    }
+
     log::info!("[mining] worker {} connected from {peer}", hello.name);
 
     State::lock(&state.workers).insert(
@@ -356,6 +594,12 @@ fn serve(state: &Arc<State>, stream: TcpStream, peer: SocketAddr, number: u64) -
             devices: Vec::new(),
             found: 0,
             refused: 0,
+            #[cfg(feature = "pool")]
+            payout: hello.payout.filter(|_| state.books.is_some()),
+            #[cfg(not(feature = "pool"))]
+            payout: None,
+            shares: 0,
+            share_difficulty: 0,
         },
     );
 
@@ -383,8 +627,21 @@ fn serve(state: &Arc<State>, stream: TcpStream, peer: SocketAddr, number: u64) -
 /// Sends the worker each new job as it comes, and a ping when nothing came for a while.
 fn hand_out(state: &State, sender: &Mutex<Sender>, closed: &AtomicBool, range: u64) {
     let mut sent = None;
+    #[cfg(feature = "pool")]
+    let mut stood = std::time::Instant::now();
 
     loop {
+        #[cfg(feature = "pool")]
+        if stood.elapsed() >= STANDING_EVERY {
+            stood = std::time::Instant::now();
+
+            if let Some(standing) = state.standing(range)
+                && State::lock(sender).send(&standing).is_err()
+            {
+                return;
+            }
+        }
+
         let (number, message) = state.work(range);
 
         let message = match message {
@@ -425,28 +682,33 @@ fn listen(state: &State, receiver: &mut Receiver, sender: &Mutex<Sender>, number
                 let (Some(job), Some(nonce)) = (message["job"].as_u64(), message["nonce"].as_u64()) else {
                     return Err("a found message that does not read".to_string());
                 };
-                let verdict = state.take(job, nonce);
+                let verdict = state.take(job, nonce, number);
 
                 if let Some(worker) = State::lock(&state.workers).get_mut(&number) {
                     match verdict {
                         Verdict::Took => worker.found += 1,
+                        Verdict::Share => {}
                         _ => worker.refused += 1,
                     }
                 }
 
                 match verdict {
                     Verdict::Took => log::info!("[mining] worker {name} found the seal for job {job}"),
+                    Verdict::Share => log::debug!("[mining] worker {name} sent a share for job {job}"),
                     Verdict::Stale => log::debug!("[mining] worker {name} sent a nonce for job {job}, which is over"),
                     Verdict::Short => log::warn!("[mining] worker {name} sent a nonce for job {job} that does not meet its difficulty"),
+                    Verdict::Twice => log::warn!("[mining] worker {name} sent a share for job {job} twice"),
                 }
 
-                let took = verdict == Verdict::Took;
-                let why = match verdict {
-                    Verdict::Took => "",
-                    Verdict::Stale => "the block was found already, or the template moved on",
-                    Verdict::Short => "it does not meet the difficulty",
+                let took = matches!(verdict, Verdict::Took | Verdict::Share);
+                let (kind, why) = match verdict {
+                    Verdict::Took => ("block", ""),
+                    Verdict::Share => ("share", ""),
+                    Verdict::Stale => ("", "the block was found already, or the template moved on"),
+                    Verdict::Short => ("", "it does not meet the difficulty"),
+                    Verdict::Twice => ("", "it was sent already"),
                 };
-                State::lock(sender).send(&json!({ "type": "verdict", "job": job, "nonce": nonce, "took": took, "why": why }))?;
+                State::lock(sender).send(&json!({ "type": "verdict", "job": job, "nonce": nonce, "took": took, "kind": kind, "why": why }))?;
             }
             Some("rate") => {
                 let devices: Vec<DeviceReport> = message["devices"]
@@ -462,6 +724,13 @@ fn listen(state: &State, receiver: &mut Receiver, sender: &Mutex<Sender>, number
                             .collect()
                     })
                     .unwrap_or_default();
+
+                #[cfg(feature = "pool")]
+                if let Some(books) = &state.books
+                    && let Some(worker) = State::lock(&books.workers).get_mut(&number)
+                {
+                    worker.said(devices.iter().map(|device| device.rate).sum());
+                }
 
                 if let Some(worker) = State::lock(&state.workers).get_mut(&number) {
                     worker.devices = devices;

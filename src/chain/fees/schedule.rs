@@ -116,6 +116,7 @@ pub const TX_KINDS: &[&str] = &[
     "change_multisig",
     "approve_multisig",
     "withdraw_multisig",
+    "claim",
 ];
 
 impl ContractScorer {
@@ -176,6 +177,7 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::ChangeMultisig { .. } => ("change_multisig", sender),
         Tx::ApproveMultisig { account, .. } => ("approve_multisig", *account),
         Tx::WithdrawMultisig { account, .. } => ("withdraw_multisig", *account),
+        Tx::Claim { to, .. } => ("claim", *to),
     }
 }
 

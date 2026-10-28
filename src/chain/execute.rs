@@ -189,6 +189,8 @@ pub enum Failure {
     NoNames,
     #[document(summary = "A bond while finality is not FFG and no switch into it is on its way.")]
     BondingClosed,
+    #[document(summary = "A claim on a mining pool that pays nothing: see ClaimError.")]
+    Claim(String),
 }
 
 impl fmt::Display for Failure {
@@ -204,6 +206,7 @@ impl fmt::Display for Failure {
             Failure::BadEvidence => write!(f, "the evidence's signatures do not check out"),
             Failure::NoNames => write!(f, "this chain has no names"),
             Failure::BondingClosed => write!(f, "validators bond only under FFG finality, or before a switch into it"),
+            Failure::Claim(why) => write!(f, "{why}"),
         }
     }
 }
@@ -687,6 +690,11 @@ fn run(
 
             (moved(withdrawn), Contracted::default())
         }
+        Tx::Claim { height, to, earned, index, path } => match crate::registry::pools::Pools::new(layer, rules.hash).claim(*height, to, *earned, *index, path) {
+            Ok(_) => (Ok(Effect::Done), Contracted::default()),
+            Err(crate::registry::pools::ClaimError::Db(err)) => (Err(Failure::Registry(RegistryError::Db(err))), Contracted::default()),
+            Err(err) => (Err(Failure::Claim(err.to_string())), Contracted::default()),
+        },
         Tx::Transfer { from, to, amount } => (moved(accounts.transfer(from, to, amount.to_u256())), Contracted::default()),
         Tx::Mint { to, amount } => {
             if rules.minter != Some(sender) {

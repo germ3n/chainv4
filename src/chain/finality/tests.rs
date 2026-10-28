@@ -1139,7 +1139,7 @@ mod voting {
         let mut producer = RotatingProducer::new(keypair.clone(), keypair.public().address(), SLOT);
         let now = at.unwrap_or_else(|| producer.start_at(&tip, &producers));
         let declared = producer.difficulty(&tip, &producers);
-        let mut block = chain.build_declaring(Vec::new(), Vec::new(), producer.address(&[]), now, None, declared).unwrap();
+        let mut block = chain.build_declaring(Vec::new(), Vec::new(), producer.address(&[]), now, None, declared, None).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
 
         chain.import(&block, now)
@@ -1201,7 +1201,7 @@ mod voting {
         let producers = chain.producers_for(tip.height + 1).unwrap();
         let mut producer = crate::consensus::RotatingProducer::new(signer.clone(), signer.public().address(), SLOT);
         let now = producer.start_at(&tip, &producers);
-        let mut block = chain.build_declaring(txs, Vec::new(), producer.address(&[]), now, None, producer.difficulty(&tip, &producers)).unwrap();
+        let mut block = chain.build_declaring(txs, Vec::new(), producer.address(&[]), now, None, producer.difficulty(&tip, &producers), None).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
         chain.import(&block, now).unwrap();
 
@@ -1329,7 +1329,7 @@ mod voting {
         let mut producer = StakedProducer::new(keypair.clone(), rules);
         let now = at.unwrap_or_else(|| producer.start_at(&tip, &producers));
         let declared = producer.difficulty(&tip, &producers);
-        let mut block = chain.build_declaring(txs, Vec::new(), producer.address(&producers), now, None, declared).unwrap();
+        let mut block = chain.build_declaring(txs, Vec::new(), producer.address(&producers), now, None, declared, None).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
 
         chain.import(&block, now)

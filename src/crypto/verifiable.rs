@@ -51,6 +51,8 @@ pub enum VerifyError {
     BadEthereum,
     #[document(summary = "A multisig's transaction that is not one: from an address that is no multisig, carrying another multisig's, an approval or an Ethereum-signed transaction, or more signatures than members.")]
     BadMultisig,
+    #[document(summary = "A claim with a Merkle path longer than any root's: more than 64 hashes.")]
+    BadClaim,
 }
 
 impl fmt::Display for VerifyError {
@@ -69,6 +71,7 @@ impl fmt::Display for VerifyError {
             VerifyError::BadName => write!(f, "not a name, or not what a name holds: labels of a to z, 0 to 9 and hyphens, the last at least 3 long"),
             VerifyError::BadEthereum => write!(f, "not an Ethereum transaction for this chain, as signed"),
             VerifyError::BadMultisig => write!(f, "not a multisig's transaction a multisig may send"),
+            VerifyError::BadClaim => write!(f, "a claim's path is longer than any pool's root needs"),
         }
     }
 }

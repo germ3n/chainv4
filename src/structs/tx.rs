@@ -275,7 +275,34 @@ pub enum Tx {
     )]
     #[wincode(tag = 22)]
     WithdrawMultisig { account: Address, proposal: Hash },
+    #[document(
+        summary = "Claims a miner's earnings from a mining pool: what a leaf under a root the pool's block committed to says the miner earned, less what it claimed before, paid from the pool's escrow. Anyone may send it, the pool for its miners among them: the coins go to the miner whoever pays the fee.",
+        params = {
+            height = "The height of a block of the pool's whose root holds the leaf: any one, the newest paying the most.",
+            to = "The miner.",
+            earned = "All the miner has earned from the pool, as the leaf says.",
+            index = "The leaf's place among the root's claims.",
+            path = "The Merkle path from the leaf to the root, at most 64 hashes.",
+        },
+        see_also = "PoolCommitment, Pools::claim, claim_leaf",
+    )]
+    #[wincode(tag = 23)]
+    Claim {
+        height: u64,
+        to: Address,
+        #[wincode(with = "U256Le")]
+        earned: u256,
+        index: u64,
+        path: Vec<Hash>,
+    },
 }
+
+#[document(
+    summary = "The longest Merkle path a claim may carry, 64 hashes: enough for a pool root over every claim there could be.",
+    category = "Transactions",
+    see_also = "Tx::Claim",
+)]
+pub const MAX_CLAIM_PATH: usize = 64;
 
 /// Encodes a transaction inside another, as a multisig's: its own encoding, with no size known
 /// ahead, which a type holding itself could not tell without asking itself.
@@ -484,6 +511,14 @@ impl Verifiable for Tx {
             Tx::ApproveMultisig { account, tx, .. } => multisig_inner(account, tx),
             Tx::CreateMultisig { members, .. } | Tx::ChangeMultisig { members, .. } => members.iter().try_for_each(|member| member.key.verify()),
             Tx::WithdrawMultisig { .. } => Ok(()),
+            Tx::Claim { to, path, .. } => {
+                to.verify()?;
+
+                match path.len() <= MAX_CLAIM_PATH {
+                    true => Ok(()),
+                    false => Err(VerifyError::BadClaim),
+                }
+            }
             // The signatures are checked when it runs, against the chain's genesis id.
             Tx::Slash { first, second } => {
                 if !first.vote.conflicts(&second.vote) {

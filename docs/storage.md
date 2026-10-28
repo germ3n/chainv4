@@ -62,6 +62,7 @@ holds addresses that matter.
 | `StateTree` | The state tree's nodes, by depth and the path bits above them, kept in step with the chain-state columns block by block (see [Chain](chain.md#the-state-root)). Its root is each header's `state_root`. | Node's |
 | `Addresses` | The address index, on a node started with `--index-addresses`: each transaction under every address it touches, newest first. | Node's |
 | `Names` | The [name registry](names.md#in-the-state): each name's record by `n` and the name, and each account's primary name by `p` and its address's key. | Yes |
+| `Pools` | Mining pools' claims: each pool block's root by `r` and its height, and what each miner claimed from each pool by `c`, the pool's key and the miner's (see [Mining pools](consensus.md#mining-pools)). | Yes |
 | `Namespaces` | Contract storage in [namespaces](contracts.md#storage-namespaces) and each contract's own space: by the contract's address, the namespace's name with its length in front (none for the own space), then the contract's own key. Which namespaces a contract's code may use is its [layout](contracts.md#storage-layouts), kept in its `Contracts` record. | Yes |
 
 **Chain state** is what every node computes the same from the blocks.
@@ -143,18 +144,21 @@ clears its column the same way first, in case anything was left behind.
   key, and checkpoints keep light updates.
 - **Format 8:** `tx_root` is a Merkle root, so stored headers changed meaning, and the address
   index has a column of its own.
+- **Format 9:** headers commit to a `pool_root`, blocks carry a mining pool's commitment, and
+  `Pools` keeps the claims on them. Every block's id changed, so a format 8 database holds a chain
+  this build cannot follow, and no migration reaches 9: start a new chain.
 
-Formats before 8 have no migrations: delete such a database, or point `--db` elsewhere.
+Formats before 9 have no migrations: delete such a database, or point `--db` elsewhere.
 
 ## Migrations
 
-From format 8 on, each new format comes with a migration that moves a database to it from the
+From format 9 on, each new format comes with a migration that moves a database to it from the
 one before, and back (`chain::migrate`). `MIGRATIONS` lists them, oldest first.
 
 **What a node does as it starts:**
 1. finishes a migration a run before left part way;
 2. finds a database in an older format, copies it aside with a RocksDB checkpoint, beside it as
-   `chain.db.format-8`, and moves it up one format at a time, logging each step;
+   `chain.db.format-9`, and moves it up one format at a time, logging each step;
 3. opens the chain.
 
 A database in a newer format is refused: going back down is only ever asked for, never automatic.
@@ -187,20 +191,20 @@ leaves the database wholly in one format with a step under way:
 
 **Writing one:** bump `STORAGE_FORMAT`, note what changed in its documentation, and add a
 `Migration` to `MIGRATIONS`. `src/chain/migrate/example.rs` is a complete one, tested on a real
-chain's database though not in `MIGRATIONS`: an imagined format 9 whose work records keep their
+chain's database though not in `MIGRATIONS`: an imagined format 10 whose work records keep their
 block's height beside the total work.
 
 ```rust
-/// Work records as format 8 keeps them, and as format 9 does: the migration's own copies of each
-/// shape, so it still reads format 8 once the chain's WorkRecord has moved on.
-struct WorkV8 { #[wincode(with = "U256Le")] total: u256 }
-struct WorkV9 { #[wincode(with = "U256Le")] total: u256, height: u64 }
+/// Work records as format 9 keeps them, and as format 10 does: the migration's own copies of each
+/// shape, so it still reads format 9 once the chain's WorkRecord has moved on.
+struct WorkV9 { #[wincode(with = "U256Le")] total: u256 }
+struct WorkV10 { #[wincode(with = "U256Le")] total: u256, height: u64 }
 
 pub struct WorkHeights;
 
 impl Migration for WorkHeights {
     fn from(&self) -> u32 {
-        8
+        9
     }
 
     fn describe(&self) -> &'static str {
@@ -213,9 +217,9 @@ impl Migration for WorkHeights {
         let mut chunk = Chunk::default();
 
         for (key, value) in &records {
-            let old: WorkV8 = decode(value)?;
+            let old: WorkV9 = decode(value)?;
             let header: SealedHeader = decode(&at.db.read(Column::Headers, key)?.ok_or(…)?)?;
-            let new = WorkV9 { total: old.total, height: header.header.height };
+            let new = WorkV10 { total: old.total, height: header.header.height };
             chunk.changes.insert((Column::Work, key.clone()), Some(new.hashable_bytes_with_tag()));
         }
 
@@ -226,7 +230,7 @@ impl Migration for WorkHeights {
 
     /// Takes the heights back out: format 8 has nowhere to keep them.
     fn down(&self, at: &At) -> Result<Chunk, DbError> {
-        // The same scan, writing WorkV8 { total } for each WorkV9.
+        // The same scan, writing WorkV9 { total } for each WorkV10.
     }
 }
 ```

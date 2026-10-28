@@ -670,12 +670,12 @@ fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
             threads: 0,
             gpu: false,
             gpus: None,
-            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string() }),
+            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None }),
         }),
         sign: None,
     });
     node.step(now_ms()).unwrap();
-    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None }).unwrap();
+    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: None }).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
     while node.chain().tip().height < 2 {
@@ -690,6 +690,56 @@ fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
     assert_eq!(report.listening, Some(listen.to_string()));
     assert_eq!(report.workers[0].name, "rig");
     assert!(Accounts::new(&node.chain().state()).get(&Address::Ed25519([9; 32])).unwrap().balance >= u256::new(10));
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn a_pools_blocks_fund_its_escrow_and_its_node_claims_for_the_miner_once_they_are_final() {
+    use crate::mining::shares::PoolConfig;
+    use crate::mining::worker::{Devices, Worker, WorkerConfig};
+    use crate::registry::pools::Pools;
+
+    let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let token = b"0123456789abcdef0123456789abcdef".to_vec();
+    let (pool, miner) = (Address::Ed25519([9; 32]), Keypair::from_seed([4; 32]).public().address());
+    // Blocks two deep can no longer be undone, so the pool credits its miner soon.
+    let genesis = Genesis { max_reorg_depth: 2, ..easy_pow() };
+    let (link, _net) = NetLink::pair();
+    let mut node = Node::new(Arc::new(MemoryDb::default()), &genesis, None, link)
+        .unwrap()
+        .producing(Producing {
+            mine: Some(Mining {
+                reward_to: pool,
+                threads: 0,
+                gpu: false,
+                gpus: None,
+                port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), pool: Some(PoolConfig { min_share: 1, ..PoolConfig::default() }) }),
+            }),
+            sign: None,
+        })
+        .pushing(PoolPush { key: DevAuthority::dev_keypair(), least: u256::ONE });
+    // A clock fifty times faster than the wall's, so a minute between pushes passes in a second.
+    let mut clock = now_ms();
+    node.step(clock).unwrap();
+    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: Some(miner) }).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+
+    while Accounts::new(&node.chain().state()).get(&miner).unwrap().balance == u256::ZERO {
+        assert!(std::time::Instant::now() < deadline, "the miner was never paid: {:?}", node.report(clock, 0).mining.and_then(|mining| mining.pool));
+        clock += 100;
+        node.step(clock).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    let state = node.chain().state();
+    let paid = Accounts::new(&state).get(&miner).unwrap().balance;
+    let funded = (1..=node.chain().tip().height).any(|height| node.chain().block_at(height).unwrap().unwrap().pool.is_some_and(|pool| pool.parts > 0));
+
+    assert!(funded, "the pool's blocks sent its miner's share to the escrow");
+    assert_eq!(Pools::new(&state, node.chain().hash()).claimed(&pool, &miner), Ok(paid), "the node's claim paid all it said");
+    let report = node.report(clock, 0).mining.unwrap().pool.unwrap();
+    assert_eq!(report.miners[0].to, miner);
+    assert!(report.miners[0].earned >= paid, "earned {} claimed {paid}", report.miners[0].earned);
 }
 
 #[test]

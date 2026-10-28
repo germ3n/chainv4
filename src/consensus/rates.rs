@@ -81,6 +81,124 @@ pub struct WorkerReport {
     pub found: u64,
     #[document(summary = "Nonces it sent that did not meet the work, or came after the block was found.")]
     pub refused: u64,
+    #[document(summary = "Where its share of a pool's blocks goes, as it said: None on a node that runs no pool.")]
+    pub payout: Option<crate::structs::address::Address>,
+    #[document(summary = "Shares the pool took from it.")]
+    pub shares: u64,
+    #[document(summary = "The difficulty its shares meet now, as the pool set it for its hashrate; 0 on a node that runs no pool.")]
+    pub share_difficulty: u128,
+}
+
+#[document(summary = "One miner's standing in a pool: its work in the window the next block shares out by, that block's parts it would get, and all it has earned from the pool's blocks so far.", category = "Consensus", see_also = "PoolReport")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MinerStanding {
+    #[document(summary = "Where its earnings go.")]
+    pub to: crate::structs::address::Address,
+    #[document(summary = "Its shares' difficulties added up, of those in the window.")]
+    pub work: u128,
+    #[document(summary = "Its shares in the window.")]
+    pub shares: u64,
+    #[document(summary = "Its parts of the next block, of PAYOUT_PARTS.")]
+    pub parts: u32,
+    #[document(summary = "All it has earned from the pool's blocks credited so far, which it claims from the pool's escrow less what it claimed.")]
+    pub earned: crate::structs::u256::u256,
+}
+
+#[document(summary = "A block the pool's work sealed: each miner's parts of it, and whether it was credited.", category = "Consensus", see_also = "PoolReport")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoolBlock {
+    #[document(summary = "Its height.")]
+    pub height: u64,
+    #[document(summary = "Its id.")]
+    pub id: crate::structs::hash::Hash,
+    #[document(summary = "When it was sealed, in milliseconds since the Unix epoch.")]
+    pub at: u64,
+    #[document(summary = "Each miner's parts of its reward and fees, of PAYOUT_PARTS.")]
+    pub payouts: Vec<crate::structs::block::Payout>,
+    #[document(summary = "None while it may still be undone; then Some(true) once its miners were credited, or Some(false) for a block the chain dropped, which credits nobody.")]
+    pub credited: Option<bool>,
+}
+
+#[document(
+    summary = "Whether a pool's block can no longer be undone: Final once it is finalized, or deeper than the chain's max_reorg_depth, with what it shared out; Dropped once it can no longer be on the main chain; Pending until then.",
+    category = "Consensus",
+    see_also = "Producer::pool, Chain::pool_settled",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolSettled {
+    #[document(summary = "It may still be undone, or still come back.")]
+    Pending,
+    #[document(summary = "It is off the main chain for good.")]
+    Dropped,
+    #[document(summary = "It is on the main chain for good, and shared out this: its reward and its producer's fees, together.")]
+    Final(crate::structs::u256::u256),
+}
+
+#[document(
+    summary = "A pool's claims at one root: every miner and all it has earned, in address order, the leaves of the root, and the pool's blocks that committed to it. What a miner's Merkle path comes from.",
+    category = "Consensus",
+    see_also = "PoolReport, Tx::Claim, claim_leaf",
+)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClaimTree {
+    #[document(summary = "The root.")]
+    pub root: crate::structs::hash::Hash,
+    #[document(summary = "Each miner and all it has earned, in address order.")]
+    pub leaves: Vec<(crate::structs::address::Address, crate::structs::u256::u256)>,
+    #[document(summary = "The pool's blocks that carried this root, by height and id, oldest first: a claim names the height of any one on the main chain.")]
+    pub committed: Vec<(u64, crate::structs::hash::Hash)>,
+}
+
+impl ClaimTree {
+    #[document(
+        parent = "ClaimTree",
+        summary = "The tree over these earnings, in address order, committed to by no block yet.",
+    )]
+    pub fn new(hash: crate::structs::hash::HashType, leaves: Vec<(crate::structs::address::Address, crate::structs::u256::u256)>) -> ClaimTree {
+        let hashes: Vec<_> = leaves.iter().map(|(to, earned)| crate::registry::pools::claim_leaf(hash, to, *earned)).collect();
+
+        ClaimTree { root: crate::crypto::merkle::root(hash, &hashes), leaves, committed: Vec::new() }
+    }
+
+    #[document(
+        parent = "ClaimTree",
+        summary = "A miner's claim: its place, all it earned, and the Merkle path from its leaf to the root. None for a miner the tree does not hold.",
+    )]
+    pub fn proof(&self, hash: crate::structs::hash::HashType, to: &crate::structs::address::Address) -> Option<(u64, crate::structs::u256::u256, Vec<crate::structs::hash::Hash>)> {
+        let index = self.leaves.binary_search_by(|(miner, _)| miner.cmp(to)).ok()?;
+        let hashes: Vec<_> = self.leaves.iter().map(|(to, earned)| crate::registry::pools::claim_leaf(hash, to, *earned)).collect();
+
+        Some((index as u64, self.leaves[index].1, crate::crypto::merkle::audit_path(hash, &hashes, index)))
+    }
+}
+
+#[document(
+    summary = "How a node's mining pool stands: its fee, its window, every miner with work in the window and what the next block gives it, and the blocks it sealed lately. Whether each of those blocks is still on the main chain is the chain's to say.",
+    category = "Consensus",
+    see_also = "MiningReport, MinerStanding, PoolBlock",
+)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PoolReport {
+    #[document(summary = "The pool's address: its blocks' producer, which keeps the fee, and whose escrow its miners claim from.")]
+    pub producer: Option<crate::structs::address::Address>,
+    #[document(summary = "What the pool keeps of each block, in parts of PAYOUT_PARTS.")]
+    pub fee: u32,
+    #[document(summary = "How many blocks' worth of work the split counts.")]
+    pub window: u64,
+    #[document(summary = "Whether anyone may join, with only a payout address, rather than those who know the token.")]
+    pub open: bool,
+    #[document(summary = "The easiest share difficulty it hands out.")]
+    pub min_share: u128,
+    #[document(summary = "The work in the window, every miner's added up.")]
+    pub work: u128,
+    #[document(summary = "Every miner with work in the window, the most first.")]
+    pub miners: Vec<MinerStanding>,
+    #[document(summary = "The blocks it sealed lately, newest first: every one not yet credited, and the latest of the rest.")]
+    pub blocks: Vec<PoolBlock>,
+    #[document(summary = "All its miners have earned, every credited block's share added up.")]
+    pub earned: crate::structs::u256::u256,
+    #[document(summary = "Its claim trees, newest first: the one its next block commits to, and the few before, for the paths to roots blocks committed already.")]
+    pub claims: Vec<std::sync::Arc<ClaimTree>>,
 }
 
 #[document(
@@ -96,6 +214,8 @@ pub struct MiningReport {
     pub listening: Option<String>,
     #[document(summary = "The workers connected now.")]
     pub workers: Vec<WorkerReport>,
+    #[document(summary = "Its pool, when it runs one.")]
+    pub pool: Option<PoolReport>,
 }
 
 impl MiningReport {
@@ -133,7 +253,11 @@ mod tests {
                 devices: vec![DeviceReport { name: "GPU 0".to_string(), rate: 100.0 }, DeviceReport { name: "GPU 1".to_string(), rate: 50.0 }],
                 found: 1,
                 refused: 0,
+                payout: None,
+                shares: 0,
+                share_difficulty: 0,
             }],
+            pool: None,
         };
 
         assert_eq!(report.rate(), 155.0);

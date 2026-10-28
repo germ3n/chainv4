@@ -370,6 +370,7 @@ pub fn describe(request: &Request) -> Described {
         Tx::Name { name, action } => (name_kind(action), None, Some(name_detail(name, action)), None),
         Tx::PrimaryName { name: Some(name) } => ("Choose a primary name".to_string(), None, Some(name.clone()), None),
         Tx::PrimaryName { name: None } => ("Clear the primary name".to_string(), None, None, None),
+        Tx::Claim { to, .. } => ("Claim mining pool earnings".to_string(), None, Some(to.to_string()), None),
         other => (format!("{} transaction", variant(other)), None, None, None),
     };
 

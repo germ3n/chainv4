@@ -397,6 +397,7 @@ mod tests {
             difficulty: 0,
             tx_root: Hash::zero(chain),
             proof_root: Hash::zero(chain),
+            pool_root: Hash::zero(chain),
             receipts_root: Hash::zero(chain),
             state_root: Hash::zero(chain),
             gas_used: 0,

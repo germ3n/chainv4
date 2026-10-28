@@ -248,6 +248,9 @@ pub(super) struct Job {
     pub(super) work: Option<(Hash, u128)>,
     /// The first nonce to try: 0 for a node's own miner, and the start of its range for a worker.
     pub(super) start: u64,
+    /// Whether every nonce that meets the difficulty is reported, a pool's shares, rather than
+    /// the first alone.
+    pub(super) shares: bool,
     pub(super) stopped: bool,
 }
 
@@ -263,6 +266,7 @@ impl Shared {
                 generation: 0,
                 work: None,
                 start: 0,
+                shares: false,
                 stopped: false,
             }),
             changed: Condvar::new(),
@@ -298,15 +302,25 @@ impl Shared {
         !job.stopped && job.generation == generation && job.work.is_some()
     }
 
-    /// Hands in a seal for a job, if it is still the current one: only the first find counts.
-    pub(super) fn finish(&self, generation: u64, id: Hash, nonce: u64, found: &(dyn Fn(Hash, Seal) + Send + Sync)) {
+    /// Hands in a seal for a job, if it is still the current one: only the first find counts,
+    /// unless the job wants shares, when each does and the search goes on. Whether it goes on.
+    pub(super) fn finish(&self, generation: u64, id: Hash, nonce: u64, found: &(dyn Fn(Hash, Seal) + Send + Sync)) -> bool {
         let mut job = self.lock();
 
-        if job.generation == generation && job.work.is_some() {
-            job.work = None;
-            drop(job);
-            found(id, Seal::Work { nonce });
+        if job.generation != generation || job.work.is_none() {
+            return false;
         }
+
+        let shares = job.shares;
+
+        if !shares {
+            job.work = None;
+        }
+
+        drop(job);
+        found(id, Seal::Work { nonce });
+
+        shares
     }
 }
 
@@ -382,10 +396,28 @@ impl Rig {
         },
     )]
     pub fn work(&self, id: Hash, difficulty: u128, start: u64) {
+        self.set(id, difficulty, start, false);
+    }
+
+    #[document(
+        parent = "Rig",
+        summary = "Mines a block id for a pool's shares: as work, but every nonce that meets the difficulty, the worker's share difficulty, is reported, and the search goes on until new work comes.",
+        params = {
+            id = "The block id to find nonces for.",
+            difficulty = "What a share's work hash must meet: at most the block's own.",
+            start = "The first nonce to try; the threads go up from it.",
+        },
+    )]
+    pub fn shares(&self, id: Hash, difficulty: u128, start: u64) {
+        self.set(id, difficulty, start, true);
+    }
+
+    fn set(&self, id: Hash, difficulty: u128, start: u64, shares: bool) {
         let mut job = self.shared.lock();
         job.generation += 1;
         job.work = Some((id, difficulty));
         job.start = start;
+        job.shares = shares;
         self.shared.changed.notify_all();
     }
 
@@ -468,7 +500,7 @@ impl Producer for Miner {
 }
 
 /// One mining thread: tries nonces start + index, start + index + stride, … on the current job
-/// until it finds one, the job changes, or the miner stops.
+/// until it finds one, or for shares on and on, until the job changes or the miner stops.
 fn mine(shared: &Shared, hash: HashType, index: u64, stride: u64, found: &(dyn Fn(Hash, Seal) + Send + Sync), meter: &super::Meter) {
     let mut finished = 0;
 
@@ -478,9 +510,7 @@ fn mine(shared: &Shared, hash: HashType, index: u64, stride: u64, found: &(dyn F
 
         'search: loop {
             for _ in 0..NONCES_PER_CHECK {
-                if meets(search.work(nonce), difficulty) {
-                    shared.finish(generation, id, nonce, found);
-
+                if meets(search.work(nonce), difficulty) && !shared.finish(generation, id, nonce, found) {
                     break 'search;
                 }
 
@@ -537,6 +567,7 @@ mod tests {
             difficulty,
             tx_root: Hash::zero(chain),
             proof_root: Hash::zero(chain),
+            pool_root: Hash::zero(chain),
             receipts_root: Hash::zero(chain),
             state_root: Hash::zero(chain),
             gas_used: 0,

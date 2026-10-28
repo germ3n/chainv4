@@ -201,6 +201,9 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::ChangeMultisig { members, threshold, .. }, _) => format!("Made the multisig {threshold} of {}", members.len()),
         (Tx::ApproveMultisig { account, nonce, .. }, _) => format!("Approved {}'s transaction {nonce}", format::short(&account.to_string())),
         (Tx::WithdrawMultisig { account, .. }, _) => format!("Withdrew an approval of {}'s", format::short(&account.to_string())),
+        // What it names is all the miner earned, not what this claim paid: that is less what it
+        // claimed before, which the chain knows and the transaction does not say.
+        (Tx::Claim { to, .. }, _) => format!("Claimed mining pool earnings for {}", format::short(&to.to_string())),
     }
 }
 
@@ -373,6 +376,16 @@ mod tests {
 
         proven.value.receipt.outcome = CommittedOutcome::Failed;
         assert!(Checked::of(&proven).moves.is_empty(), "a failure paid nothing");
+    }
+
+    #[test]
+    fn a_claim_says_whom_it_was_for_and_not_what_it_paid() {
+        let miner = Address::Ed25519([3; 32]);
+        let claim = Tx::Claim { height: 40, to: miner, earned: u256::new(5_000), index: 2, path: vec![Hash::zero(HashType::default_chain())] };
+        let checked = Checked::of(&landed(claim, CommittedOutcome::Done, Vec::new()));
+
+        assert_eq!(checked.action, format!("Claimed mining pool earnings for {}", format::short(&miner.to_string())));
+        assert!(!checked.action.contains("5000"), "all it earned is not what this claim paid");
     }
 
     #[test]

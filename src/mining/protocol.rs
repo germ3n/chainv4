@@ -15,6 +15,12 @@
 //!   range of nonces this worker tries, so no two workers try the same ones.
 //! - `found`, from a worker: a nonce for a job; `verdict`, from the node: whether it took it.
 //! - `rate`, from a worker: its devices and their hashrates, for the node's report.
+//!
+//! **Under a pool**, the worker names its payout address in the handshake; the node answers with
+//! `pool`, its fee and window, or `refused` for a worker without one. Each `work` carries the
+//! worker's `share` difficulty, every nonce that meets it goes back as `found`, and the verdict
+//! says whether it was a `share` or the `block`; every 30 seconds `standing` tells the worker its
+//! work in the window and its parts of the next block.
 
 use {
     hmac::{Hmac, KeyInit, Mac},
@@ -162,6 +168,8 @@ fn read_json(reader: &mut BufReader<TcpStream>) -> Result<Value, String> {
 /// What a worker said of itself in the handshake.
 pub struct Hello {
     pub name: String,
+    /// Where a pool pays its shares, if it gave one that reads.
+    pub payout: Option<crate::structs::address::Address>,
 }
 
 /// The node's side of the handshake: the halves of the connection once the worker proved it knows
@@ -188,17 +196,18 @@ pub fn accept(stream: TcpStream, token: &[u8], protocol: &str) -> Result<(Sender
     write_line(&mut writer, &json!({ "proof": hex(&mac(token, &[b"node", &challenge, &nonce])) }))?;
     let key = mac(token, &[b"session", &challenge, &nonce]);
     let name: String = hello["name"].as_str().unwrap_or("worker").chars().filter(|c| !c.is_control()).take(64).collect();
+    let payout = hello["payout"].as_str().and_then(|payout| payout.parse().ok());
 
     Ok((
         Sender { stream: writer, key, way: Way::ToWorker, sent: 0 },
         Receiver { reader, key, way: Way::ToNode, received: 0 },
-        Hello { name },
+        Hello { name, payout },
     ))
 }
 
 /// The worker's side of the handshake: the halves of the connection once the node proved it knows
 /// the token too.
-pub fn connect(stream: TcpStream, token: &[u8], protocol: &str, name: &str) -> Result<(Sender, Receiver), String> {
+pub fn connect(stream: TcpStream, token: &[u8], protocol: &str, name: &str, payout: Option<&crate::structs::address::Address>) -> Result<(Sender, Receiver), String> {
     let version = version(protocol);
     let mut writer = stream.try_clone().map_err(|err| err.to_string())?;
     let mut reader = BufReader::new(stream.try_clone().map_err(|err| err.to_string())?);
@@ -211,7 +220,13 @@ pub fn connect(stream: TcpStream, token: &[u8], protocol: &str, name: &str) -> R
     let challenge: [u8; 32] = unhex(&greeting["challenge"])?;
     let nonce = random()?;
     let proof = mac(token, &[b"worker", &challenge, &nonce]);
-    write_line(&mut writer, &json!({ "version": version, "name": name, "nonce": hex(&nonce), "proof": hex(&proof) }))?;
+    let mut hello = json!({ "version": version, "name": name, "nonce": hex(&nonce), "proof": hex(&proof) });
+
+    if let Some(payout) = payout {
+        hello["payout"] = json!(payout.to_string());
+    }
+
+    write_line(&mut writer, &hello)?;
 
     // A node that refuses the token closes the connection.
     let answer = read_json(&mut reader).map_err(|_| "the node refused the token".to_string())?;

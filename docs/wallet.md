@@ -371,6 +371,31 @@ its owners; its calls are bundles signed with the account's EVM key or by the of
 EIP-712 typed data, deployed and sent from the account. The Swaps page swaps as a followed
 multisig too, its EVM locks going to the Multisig page as its contract's calls.
 
+## Mining
+
+The **Mining** page is for an address mining in a [pool](consensus.md#mining-pools). For the
+address picked, it asks the pool's node what the pool owes it (`GET /pool/claim/{address}`): all
+the pool credited it, what it claimed, and what a claim pays now. **Claim** prepares `Tx::Claim`
+from that answer, with its Merkle path, and hands it to Send, where it is reviewed, signed and
+sent like any other transaction, the address paying the fee. Under it, from `GET /pool/{address}`,
+the address's part of the pool's next block, its shares in the window, earnings credited but not
+yet in a root on chain, the pool's fee, and each worker connected for it with its hashrate.
+
+- **Which node:** the wallet's own, unless **Pool's node** names another's HTTP API, kept in
+  settings as `pool_node`. Only the pool is asked there; the claim goes through the wallet's node,
+  so the pool must be on the same chain.
+- **Trust:** the pool's numbers are shown as its node says them. A claim rests on nothing it says
+  but the fee: the chain checks the path against the root the pool's block committed to, and a
+  path that does not hold fails and moves nothing.
+- **Nothing yet:** a node with no pool says so, and so does a pool that owes the address nothing
+  yet. A pool credits its miners once its blocks are final, so earnings show a while after the
+  blocks are found.
+- **Starting:** the page shows the worker's command with the address filled in,
+  `chainv4 worker --node HOST:PORT --payout ADDRESS`, `HOST:PORT` being the pool's mining port,
+  with `--token FILE` for a private pool.
+- **History** shows a claim as "Claimed mining pool earnings for" the miner: the transaction
+  names all the miner earned, not what the claim paid.
+
 ## Faucet
 
 On a node that runs a [faucet](faucet.md), as a dev or test chain's may, the Overview has a
@@ -691,6 +716,7 @@ copies the one shown.
 Everything is in app storage under one key, `chainv4-wallet`, saved by eframe every 30 seconds,
 on exit, and when Android sends the app to the background:
 - the node, the proxy, and the genesis pinned at each node;
+- the mining pool's node, for a pool on another node;
 - each wallet: its name, its vault, and the account in use in it;
 - the light client's state, by genesis, to resume from the finalized block, not genesis;
 - what it sent that is not final yet, and what it proved, the newest 2,000;

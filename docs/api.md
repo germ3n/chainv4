@@ -57,7 +57,10 @@ Each summary has:
 - `difficulty`, `tx_root`, `receipts_root`, `state_root`, `gas_used`, `base_price`;
 - `reward`, what it minted for its producer by the genesis reward schedule, `"0"` for genesis
   and on a chain without a reward;
-- `tx_count` and `proof_count`.
+- `tx_count` and `proof_count`;
+- `pool_root`, and `pool`: `null`, or a mining pool's commitment, its `parts` of a billion sent
+  to the pool's escrow and their `percent`, and the `root` and `count` of its claims (see
+  [Mining pools](consensus.md#mining-pools)).
 
 ### `GET /blocks/{block}`
 
@@ -68,6 +71,8 @@ Each summary has:
 - whether it is on the main chain (`main`);
 - its `seal`;
 - its `proofs`, each with its link and voters;
+- for a pool's block, in `pool`: what it `shared` out, its reward and its producer's fees, what
+  went to the `escrowed` account, and the `escrow`;
 - every transaction.
 
 **Each transaction** has:
@@ -91,7 +96,9 @@ Each summary has:
   or 2, `chain_id`, `to`, `value` and `input`;
 - `name`, with the `name`, without the suffix, and its `action`: a `type` of `register` or `renew`
   with `years`, `transfer` with `to`, `target` with `target`, `text` with `key` and `value`, or
-  `subname` with `label` and `owner`; and `primary_name`, with the `name` or `null`.
+  `subname` with `label` and `owner`; and `primary_name`, with the `name` or `null`;
+- `claim`, a miner's claim on a mining pool: the `height` of a block of the pool's, the miner
+  `to`, all it `earned`, decimal, and its leaf's `index` and Merkle `path`.
 
 ### `GET /txs/{id}`
 
@@ -441,7 +448,28 @@ How the node behind the API is doing. 503 when no node runs behind it.
 | `counters` | What it heard and did since it started: blocks heard, imported, stored on side branches, rejected and produced; reorgs; transactions heard, submitted and refused; votes heard and cast; sync requests served, sent and failed; connections; gossip and submissions the backlog dropped (`gossip_dropped`), and peers disconnected for flooding (`flooders_disconnected`). |
 | `backlog` | What waits for the node loop now (`waiting`), and the backlog's limits, `total` and `per_peer` (see [Node](node.md#the-gossip-backlog)). |
 | `peers` | Each connected peer's `id`, `address` and `since`, what it gossiped (`heard`: `blocks`, `txs`, `votes`), how much of it the backlog `dropped`, and its `chain` from its last status (`height`, `work`, `justified`), or `null`. |
-| `mining` | `null` for a node that does not mine. Otherwise the hashes a second of everything mining for it (`rate`); its own `devices`, each a `name` and `rate`, its GPUs or CPU threads; where it takes workers (`listening`), or `null`; and its `workers`, each with its `name`, `address`, `since`, `rate`, `devices`, the seals it `found` and the nonces `refused` (see [Mining with workers](consensus.md#mining-with-workers)). Rates are measured over the last few seconds. |
+| `mining` | `null` for a node that does not mine. Otherwise the hashes a second of everything mining for it (`rate`); its own `devices`, each a `name` and `rate`, its GPUs or CPU threads; where it takes workers (`listening`), or `null`; its `workers`, each with its `name`, `address`, `since`, `rate`, `devices`, the seals it `found` and the nonces `refused`, and under a pool its `payout` address, the `shares` taken and its `share_difficulty` (see [Mining with workers](consensus.md#mining-with-workers)); and `pool`, `null` or the pool's `fee`, `window`, whether it is `open`, and how many `miners` and `blocks` it counts. Rates are measured over the last few seconds. |
+
+### `GET /pool`, `GET /pool/{address}` and `GET /pool/claim/{address}`
+
+On a node that runs a [mining pool](consensus.md#mining-pools); 404 otherwise.
+
+`GET /pool` answers its `producer`, which keeps the fee; its `escrow` and the `escrow_balance`;
+its `fee`, in parts of a billion, and `fee_percent`; its `window`, whether it is `open`, its
+`min_share`, the `work` in the window and all its miners have `earned`. Then its `miners`, each
+with its `work` and `shares` in the window, its `parts` and `percent` of the next block, all it
+`earned`, what it `claimed` and what is `claimable`; and its `blocks`, newest first, each with its
+`height`, `id`, `at`, whether it was `credited` (`null` while it may be undone, `false` for one
+the chain dropped), what it `shared` out, and each miner's `payouts`, with the `amount` each came
+to. Amounts are decimal strings.
+
+`GET /pool/{address}` is the same for one miner, with its connected `workers`, each with its
+`name`, `rate`, `shares` and `share_difficulty`.
+
+`GET /pool/claim/{address}` is a miner's claim, ready for `Tx::Claim`: the `pool` and `escrow`,
+the `height` and `block` of the newest of the pool's blocks on the main chain whose root holds it,
+all it `earned`, what it `claimed` and what is `claimable`, and its leaf's `index`, the root's
+`count` and the Merkle `path`. 404 for a miner the pool owes nothing yet.
 
 ### `GET /mempool?limit=N`
 

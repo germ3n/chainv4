@@ -19,6 +19,13 @@
 #   MINE_THREADS     how many threads mine, 1 by default; 0 for none, when workers mine
 #   MINING_TOKEN     the token workers must know: /config/mining.token when there is one. With
 #                    one, a mining node takes workers (chainv4 worker) on TCP 4002
+#   POOL             1 runs a mining pool on that port: workers' shares, and every block sends
+#                    their share to the pool's escrow, which they claim from
+#   POOL_OPEN        1 runs an open pool, which anyone joins with a payout address, no token
+#   POOL_FEE         what the pool keeps of each block, in percent: 0 unless set
+#   POOL_WINDOW      how many blocks' worth of shares each block shares out by: 2 unless set
+#   POOL_PUSH        claim for miners owed at least this, in the coin's smallest unit, from
+#   POOL_PUSH_KEY    this key file, which pays the fees: /config/pool-push.key when there is one
 #   PROTOCOL         the name every protocol and topic starts with: chainv4 unless set
 #   PEERS            multiaddrs to dial, separated by spaces
 #   BOOTNODES        this node's own bootnodes, beside the chain's, separated by spaces
@@ -100,11 +107,28 @@ case "$blocks" in
         set -- "$@" --mine --mine-threads "${MINE_THREADS:-1}"
         if [ -n "${REWARD_TO:-}" ]; then set -- "$@" --reward-to "$REWARD_TO"; fi
 
-        if [ -n "${MINING_TOKEN:-}" ] && [ ! -r "$MINING_TOKEN" ]; then
+        pool=${POOL:-0}
+
+        if [ "${POOL_OPEN:-0}" = 1 ]; then
+            set -- "$@" --mining 0.0.0.0:4002 --mining-open
+            pool=1
+            echo "[docker] an open mining pool on TCP 4002: anyone may join with a payout address"
+        elif [ -n "${MINING_TOKEN:-}" ] && [ ! -r "$MINING_TOKEN" ]; then
             echo "[docker] cannot read $MINING_TOKEN as uid $(id -u): taking no workers. Make it readable (docker/pow.sh up does)" >&2
+            pool=0
         elif [ -n "${MINING_TOKEN:-}" ]; then
             set -- "$@" --mining 0.0.0.0:4002 --mining-token "$MINING_TOKEN"
             echo "[docker] taking workers on TCP 4002"
+        else
+            pool=0
+        fi
+
+        if [ "$pool" = 1 ]; then
+            set -- "$@" --pool --pool-fee "${POOL_FEE:-0}" --pool-window "${POOL_WINDOW:-2}"
+
+            if [ -z "${POOL_PUSH_KEY:-}" ] && [ -s "$config/pool-push.key" ]; then POOL_PUSH_KEY=$config/pool-push.key; fi
+            if [ -n "${POOL_PUSH:-}" ] && [ -n "${POOL_PUSH_KEY:-}" ]; then set -- "$@" --pool-push "$POOL_PUSH" --pool-push-key "$POOL_PUSH_KEY"; fi
+            echo "[docker] running a mining pool: a fee of ${POOL_FEE:-0}%, shares over ${POOL_WINDOW:-2} blocks"
         fi
         ;;
     produce)

@@ -21,6 +21,7 @@ fn header(height: u64, timestamp: u64, difficulty: u128) -> BlockHeader {
         difficulty,
         tx_root: Hash::zero(chain),
         proof_root: Hash::zero(chain),
+        pool_root: Hash::zero(chain),
         receipts_root: Hash::zero(chain),
         state_root: Hash::zero(chain),
         gas_used: 0,
@@ -29,7 +30,7 @@ fn header(height: u64, timestamp: u64, difficulty: u128) -> BlockHeader {
 }
 
 fn port() -> MiningPort {
-    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string() }
+    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None }
 }
 
 /// A pool on a port of its own, its seals coming out of the channel.
@@ -48,7 +49,7 @@ fn raw(pool: &Pool, name: &str) -> (Sender, Receiver) {
     let stream = TcpStream::connect(pool.listening()).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
 
-    protocol::connect(stream, TOKEN, "chainv4", name).unwrap()
+    protocol::connect(stream, TOKEN, "chainv4", name, None).unwrap()
 }
 
 /// The next message of a type, past pings.
@@ -109,6 +110,7 @@ fn a_worker_on_another_thread_seals_blocks_the_rules_accept() {
         protocol: "chainv4".to_string(),
         devices: Devices::Cpu(2),
         proxy: None,
+        payout: None,
     })
     .unwrap();
     let parent = header(5, 10_000, 500);
@@ -149,7 +151,7 @@ fn a_worker_without_the_token_gets_no_work() {
     let stream = TcpStream::connect(pool.listening()).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
 
-    assert_eq!(protocol::connect(stream, b"a guess at the token, long enough", "chainv4", "thief").err().as_deref(), Some("the node refused the token"));
+    assert_eq!(protocol::connect(stream, b"a guess at the token, long enough", "chainv4", "thief", None).err().as_deref(), Some("the node refused the token"));
     assert!(pool.mining().unwrap().workers.is_empty());
 }
 
@@ -160,7 +162,7 @@ fn a_worker_of_another_protocol_name_is_told_apart() {
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
 
     assert_eq!(
-        protocol::connect(stream, TOKEN, "otherchain", "stray").err().as_deref(),
+        protocol::connect(stream, TOKEN, "otherchain", "stray", None).err().as_deref(),
         Some("a node speaking \"chainv4-mining/1\", not otherchain-mining/1")
     );
     assert!(pool.mining().unwrap().workers.is_empty());
@@ -261,4 +263,140 @@ fn dropping_the_pool_closes_its_port_and_its_workers() {
     // Past the pings sent before, the connection closed.
     assert!((0..10).any(|_| from_node.receive().is_err()), "the worker's connection closed");
     TcpListener::bind(listening).expect("the port is free again");
+}
+
+/// A pool that runs its books, in memory, with an easy floor for shares.
+#[cfg(feature = "pool")]
+fn books(fee: u32) -> (Pool, mpsc::Receiver<(Hash, Seal)>) {
+    let (sender, seals) = mpsc::channel();
+    let sender = Mutex::new(sender);
+    let found: Found = Arc::new(move |id, seal| {
+        let _ = State::lock(&sender).send((id, seal));
+    });
+    let port = MiningPort { pool: Some(super::super::shares::PoolConfig { fee, min_share: 16, ..Default::default() }), ..port() };
+
+    (Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), port, found).unwrap(), seals)
+}
+
+/// A pool worker's side of a connection, past the handshake and the pool's terms.
+#[cfg(feature = "pool")]
+fn paid(pool: &Pool, name: &str, payout: Address) -> (Sender, Receiver) {
+    let stream = TcpStream::connect(pool.listening()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let (sender, mut receiver) = protocol::connect(stream, TOKEN, "chainv4", name, Some(&payout)).unwrap();
+    assert_eq!(next(&mut receiver, "pool")["window"], 2);
+
+    (sender, receiver)
+}
+
+/// The first nonces from start whose work hash for id meets a difficulty.
+#[cfg(feature = "pool")]
+fn nonces(id: &Hash, difficulty: u128, start: u64, count: usize) -> Vec<u64> {
+    (start..).filter(|nonce| meets(work_hash(HashType::default_chain(), id, *nonce), difficulty)).take(count).collect()
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn a_pool_counts_each_workers_shares_once_and_its_blocks_commit_to_their_split() {
+    use crate::structs::block::PAYOUT_PARTS;
+
+    let (mut pool, seals) = books(10_000_000);
+    let (alice, bob) = (Address::Ed25519([8; 32]), Address::Ed25519([9; 32]));
+    let (mut to_alice, mut from_alice) = paid(&pool, "alice's rig", alice);
+    let (mut to_bob, mut from_bob) = paid(&pool, "bob's rig", bob);
+    until(&pool, |report| report.workers.len() == 2);
+    let pending = |_: &Hash, _: u64| crate::consensus::PoolSettled::Pending;
+    assert_eq!(pool.pool(&pending), None, "no shares yet, nothing earned: the producer keeps it all");
+
+    // A block far too hard to find here: every nonce sent is a share at most.
+    let hard = header(1, 1, 1 << 100);
+    pool.seal(&hard);
+    let (work_alice, work_bob) = (next(&mut from_alice, "work"), next(&mut from_bob, "work"));
+    assert_eq!(work_alice["share"], "16", "nothing said of its hashrate yet: the pool's floor");
+    let job = work_alice["job"].as_u64().unwrap();
+    let id = hard.id();
+
+    let verdict = |to: &mut Sender, from: &mut Receiver, nonce: u64| {
+        to.send(&json!({ "type": "found", "job": job, "nonce": nonce })).unwrap();
+
+        next(from, "verdict")
+    };
+    let alices = nonces(&id, 16, work_alice["start"].as_u64().unwrap(), 1);
+    let bobs = nonces(&id, 16, work_bob["start"].as_u64().unwrap(), 3);
+
+    assert_eq!(verdict(&mut to_alice, &mut from_alice, alices[0])["kind"], "share");
+    let twice = verdict(&mut to_alice, &mut from_alice, alices[0]);
+    assert_eq!((twice["took"].as_bool(), twice["why"].as_str()), (Some(false), Some("it was sent already")));
+    let short = (0..).find(|nonce| !meets(work_hash(HashType::default_chain(), &id, *nonce), 16)).unwrap();
+    assert_eq!(verdict(&mut to_alice, &mut from_alice, short)["why"], "it does not meet the difficulty");
+
+    for nonce in &bobs {
+        assert_eq!(verdict(&mut to_bob, &mut from_bob, *nonce)["kind"], "share");
+    }
+
+    // A quarter and three quarters of the 99% a 1% fee leaves, in address order, to the escrow.
+    let commitment = pool.pool(&pending).unwrap();
+    assert_eq!((commitment.parts, commitment.count), (990_000_000, 0), "nothing credited yet: an empty root");
+    let split = vec![Payout { to: alice, parts: 247_500_000 }, Payout { to: bob, parts: 742_500_000 }];
+    assert!(commitment.parts < PAYOUT_PARTS);
+    let report = until(&pool, |report| report.workers.iter().map(|worker| worker.shares).sum::<u64>() == 4);
+    assert_eq!(report.pool.as_ref().unwrap().miners.iter().map(|miner| (miner.to, miner.shares)).collect::<Vec<_>>(), vec![(bob, 3), (alice, 1)]);
+
+    // A block bob finds goes out with the split given for it, and into the books.
+    let easy = header(2, 2, 16);
+    pool.seal(&easy);
+    let work = next(&mut from_bob, "work");
+    let nonce = nonces(&easy.id(), 16, work["start"].as_u64().unwrap(), 1)[0];
+    to_bob.send(&json!({ "type": "found", "job": work["job"], "nonce": nonce })).unwrap();
+    assert_eq!(next(&mut from_bob, "verdict")["kind"], "block");
+    assert_eq!(seals.recv_timeout(Duration::from_secs(10)).unwrap().0, easy.id());
+
+    let report = pool.mining().unwrap().pool.unwrap();
+    assert_eq!((report.blocks[0].height, report.blocks[0].id, &report.blocks[0].payouts, report.blocks[0].credited), (2, easy.id(), &split, None));
+    assert_eq!(report.claims[0].committed, vec![(2, easy.id())], "the block committed to the newest root");
+
+    // Once the chain says it is final, having shared out 1,000, its miners are credited, and the
+    // next block commits to a root that holds them.
+    let commitment = pool.pool(&|id: &Hash, _| if *id == easy.id() { crate::consensus::PoolSettled::Final(u256::new(1_000)) } else { crate::consensus::PoolSettled::Pending }).unwrap();
+    let report = pool.mining().unwrap().pool.unwrap();
+    assert_eq!(commitment.count, 2);
+    assert_eq!(report.claims[0].root, commitment.root);
+    assert_eq!(report.miners.iter().map(|miner| (miner.to, miner.earned)).collect::<Vec<_>>(), vec![(bob, u256::new(742)), (alice, u256::new(247))]);
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn a_pool_turns_away_a_worker_with_nowhere_to_pay() {
+    let (pool, _seals) = books(0);
+    let (_sender, mut receiver) = raw(&pool, "anonymous");
+
+    assert_eq!(next(&mut receiver, "refused")["why"], "this node runs a pool: give the address to pay, --payout ADDRESS");
+    assert!(pool.mining().unwrap().workers.is_empty());
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn a_worker_mining_for_a_pool_sends_share_after_share_on_one_job() {
+    let (mut pool, _seals) = books(0);
+    let payout = Address::Ed25519([8; 32]);
+    let worker = Worker::start(WorkerConfig {
+        node: pool.listening().to_string(),
+        token: TOKEN.to_vec(),
+        name: "rig".to_string(),
+        protocol: "chainv4".to_string(),
+        devices: Devices::Cpu(1),
+        proxy: None,
+        payout: Some(payout),
+    })
+    .unwrap();
+    until(&pool, |report| report.workers.len() == 1);
+    pool.seal(&header(1, 1, 1 << 100));
+
+    // One job, and the search goes on past each share.
+    let report = until(&pool, |report| report.workers[0].shares >= 3);
+    assert_eq!((report.workers[0].payout, report.workers[0].found), (Some(payout), 0));
+    let commitment = pool.pool(&|_, _| crate::consensus::PoolSettled::Pending).unwrap();
+    assert_eq!(commitment.parts, crate::structs::block::PAYOUT_PARTS, "no fee: all of it to the escrow");
+
+    drop(worker);
 }

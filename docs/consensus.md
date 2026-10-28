@@ -199,6 +199,13 @@ hashrate, measured by a `Meter` over the last three seconds.
 | `--gpus 0,2` | every one | The GPUs `--mine-gpu` mines on. |
 | `--mining ADDR` | none | Take workers on this TCP address, such as `0.0.0.0:4002`. |
 | `--mining-token FILE` | none | The token workers must know, for `--mining`: at least 32 characters. |
+| `--pool` | off | Run a mining pool on the mining port (see [Mining pools](#mining-pools)). The `pool` feature, on by default. |
+| `--pool-fee PERCENT` | 0 | What the pool keeps of each block, such as `1.5`, for its `--reward-to`. |
+| `--pool-window N` | 2 | How many blocks' worth of the latest shares each block shares out by, 1 to 1000. |
+| `--pool-min-share D` | 1000 | The easiest share difficulty the pool hands out. |
+| `--mining-open` | off | Let anyone join the pool with a payout address alone, without a token. |
+| `--pool-push AMOUNT` | none | Claim for the pool's miners once they are owed this much, in the coin's smallest unit. |
+| `--pool-push-key FILE` | none | The key `--pool-push` claims from, which pays the fees. |
 
 ## Mining with workers
 
@@ -248,16 +255,81 @@ Tor builds a circuit first, so the connection may take some seconds; the message
   until the block is out, and cannot change them. Put the port behind a VPN or an SSH tunnel to
   hide even that.
 
-**What it does not do:**
-- **No shares.** Workers send only nonces that meet the block's difficulty, so a slow worker's
-  part shows in its hashrate, not in what it found. The node pays nobody; the rewards go to its
-  `--reward-to`, and splitting them among owners is up to them.
-- **The node's limits:** at most 256 connections, handshakes included, each with 10 seconds to
-  finish it.
+**What it does not do, without `--pool`:** pay anybody but the node. Workers send only nonces
+that meet the block's difficulty, and the rewards go to its `--reward-to`. For miners who are not
+the node's owner, run a pool.
+
+**The node's limits:** at most 256 connections, handshakes included, each with 10 seconds to
+finish it.
 
 `GET /node` reports it all under `mining`: the node's devices, `listening`, and each worker with
 its address, when it connected, its devices, and what it found and had refused. The explorer's
 Network page shows it with a hashrate chart, and the Overview a tile.
+
+## Mining pools
+
+A pool is a node's mining port with `--pool`: many miners share its work, and each is paid for
+its part of it. Any number of miners fit, at 44 bytes a block on chain, and the pool never holds
+what it owes them.
+
+```sh
+# A private pool: workers know the token, and each names where its earnings go.
+chainv4 --mine --mine-threads 0 --mining 0.0.0.0:4002 --mining-token mining.token --pool --pool-fee 1 …
+chainv4 worker --node 203.0.113.7:4002 --token mining.token --payout ed25519:0x… --gpu
+
+# An open pool: anyone joins with a payout address alone.
+chainv4 --mine --mine-threads 0 --mining 0.0.0.0:4002 --pool --mining-open …
+chainv4 worker --node 203.0.113.7:4002 --payout ed25519:0x… --threads 8
+
+# A miner claims what it earned, from any key that pays the fee.
+chainv4 claim --node http://203.0.113.7:8080 --to ed25519:0x… --key mine.key
+```
+
+**How it goes:**
+1. **Shares.** Each `work` message carries the worker's **share difficulty**, far easier than the
+   block's, and the worker sends every nonce that meets it. Each share is worth its difficulty:
+   the hashes it takes on average. A block's own nonce is a share too.
+2. **Vardiff.** A worker's share difficulty is set for about one share every ten seconds at the
+   higher of the hashrate it says and the hashrate its shares show, between `--pool-min-share`
+   and the block's difficulty. Saying less than it does gains a worker nothing: its shares come
+   faster and show it. Each job keeps the difficulty it was handed, so shares for the last eight
+   templates still count, which a slow link, such as Tor, needs.
+3. **The window (PPLNS).** The pool counts the latest `--pool-window` blocks' worth of shares.
+   Each block it builds shares out its reward and the fees its producer earns among the miners in
+   the window, by their work, less `--pool-fee`.
+4. **The escrow.** That share goes, in the block itself, to the pool's **escrow**: an address no
+   key and no contract controls (`pool_escrow`, a Contract address derived from the pool's). The
+   producer keeps the rest, the fee. The block commits to a **PoolCommitment**: the parts sent,
+   and the root of the pool's claims.
+5. **Crediting.** Once a block can no longer be undone (under the finalized checkpoint, or deeper
+   than the chain's `max_reorg_depth`), the pool credits each of its miners with its part of what
+   the block sent. A block the chain dropped credits nobody. Every miner's earnings over the
+   pool's life are the leaves of a Merkle tree, and the pool's next block commits to its root.
+6. **Claims.** `Tx::Claim` names the height of a block that committed a root, the miner, all it
+   earned and its Merkle path, and pays it all it earned less what it claimed before, from the
+   escrow. One claim covers any number of blocks; anyone may send it, as the coins go to the miner
+   whoever pays the fee. `--pool-push` has the pool's node send claims for miners owed at least
+   that much, up to 64 a minute, paying the fees from `--pool-push-key`.
+
+**What it trusts:** the pool's node, for the split: it says who did the work. Everything it says
+is public, every root on chain and every leaf from `GET /pool/claim/{address}`, so a miner can
+check it was counted, and the pool can never take back what it sent to the escrow, which pays only
+the miners its roots name. A pool that promised more than it sent shows as claims the escrow
+cannot pay.
+
+**What the chain checks:** the commitment's root in the header, and that it sends at most the whole
+reward and fees. The producer must still hold the fees it sends as the block ends, so a pool's node
+leaves its own transactions out of the blocks it builds.
+
+**The books** are kept in `pool.json` beside the database, saved every minute and with each block,
+so a restart loses no miner's work in the window or its earnings.
+
+**What miners see:** `chainv4 worker` logs its share difficulty, and every 30 seconds its shares in
+the window, its part of the next block and all it has earned. `GET /pool` lists the pool's fee,
+window and escrow, every miner with its work, part of the next block, earnings and what it
+claimed, and the blocks the pool found, each waiting, credited or dropped. `GET /pool/{address}`
+is one miner's, with its workers, and `GET /pool/claim/{address}` its claim, ready for
+`Tx::Claim`. The explorer's Pool page and the wallet's Mining page show them.
 
 ## Things to keep in mind
 

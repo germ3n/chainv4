@@ -104,6 +104,9 @@ pub enum Column {
     #[document(summary = "Recent state as it was: for each key a main-chain block changed in the state columns or the state tree, the value it held just before, by key and height; and each height's list of the keys, for pruning. Kept for the node's --state-history window, or every height with --archive. Not chain state: what a node can answer about past heights.")]
     #[wincode(tag = 22)]
     History,
+    #[document(summary = "Mining pools' claims: the root each pool block committed to, by block id, and how much each miner has claimed from each pool, by pool and miner. Chain state.")]
+    #[wincode(tag = 23)]
+    Pools,
 }
 
 impl Hashable for Column {
@@ -111,7 +114,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 23] = [
+    pub const ALL: [Column; 24] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -135,6 +138,7 @@ impl Column {
         Column::Ethereum,
         Column::Peers,
         Column::History,
+        Column::Pools,
     ];
 
     #[document(
@@ -166,6 +170,7 @@ impl Column {
             Column::Ethereum => "ethereum",
             Column::Peers => "peers",
             Column::History => "history",
+            Column::Pools => "pools",
         }
     }
 }

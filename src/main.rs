@@ -28,6 +28,9 @@ enum Command {
     /// it on chain, withdraws an approval, and submits it once enough members back it.
     #[cfg(feature = "client")]
     Multisig(cli::MultisigArgs),
+    /// Claims a miner's earnings from a mining pool's escrow, with the path the pool's node gives.
+    #[cfg(feature = "client")]
+    Claim(cli::ClaimArgs),
     /// Asks a node's faucet for a drip, for a dev or test chain, doing the proof of work it wants.
     #[cfg(all(feature = "client", feature = "sha256"))]
     Faucet(cli::FaucetArgs),
@@ -189,12 +192,46 @@ struct NodeArgs {
     gpus: Vec<usize>,
     /// Take workers on this address, such as 0.0.0.0:4002: machines running chainv4 worker that
     /// mine for this node with no chain of their own. Each gets a range of nonces apart.
-    #[arg(long, requires = "mine", requires = "mining_token")]
+    #[arg(long, requires = "mine")]
     mining: Option<std::net::SocketAddr>,
     /// The file holding the token workers must know, for --mining: at least 32 characters, such as
-    /// openssl rand -hex 32 makes.
+    /// openssl rand -hex 32 makes. An open pool, --mining-open, takes none.
     #[arg(long, requires = "mining")]
     mining_token: Option<std::path::PathBuf>,
+    /// Run a mining pool on the mining port: workers send shares at a difficulty set for each,
+    /// and every block splits its reward among the last --pool-window blocks' worth of them,
+    /// each worker's to the --payout address it gives. Their books are kept in pool.json beside
+    /// the database.
+    #[cfg(feature = "pool")]
+    #[arg(long, requires = "mining")]
+    pool: bool,
+    /// What the pool keeps of each block, in percent, such as 1.5: its producer's, --reward-to.
+    #[cfg(feature = "pool")]
+    #[arg(long, requires = "pool", default_value = "0", value_parser = chainv4::mining::shares::fee_parts)]
+    pool_fee: u32,
+    /// How many blocks' worth of the latest shares each block splits by: more evens out luck,
+    /// fewer pays sooner.
+    #[cfg(feature = "pool")]
+    #[arg(long, requires = "pool", default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=1000))]
+    pool_window: u64,
+    /// The easiest share difficulty the pool hands out, however slow the worker.
+    #[cfg(feature = "pool")]
+    #[arg(long, requires = "pool", default_value_t = 1_000)]
+    pool_min_share: u128,
+    /// Let anyone join the pool with only a payout address, without the token.
+    #[cfg(feature = "pool")]
+    #[arg(long, requires = "pool", conflicts_with = "mining_token")]
+    mining_open: bool,
+    /// Claim for the pool's miners once their unclaimed earnings reach this, in the coin's
+    /// smallest unit, from --pool-push-key, which pays the fees: miners who never claim still get
+    /// paid. Up to 64 claims a minute.
+    #[cfg(feature = "pool")]
+    #[arg(long, requires = "pool", requires = "pool_push_key")]
+    pool_push: Option<String>,
+    /// The key file that sends --pool-push's claims and pays their fees.
+    #[cfg(feature = "pool")]
+    #[arg(long, requires = "pool_push")]
+    pool_push_key: Option<std::path::PathBuf>,
     /// Produce blocks (authority, rotating and staked chains), with the development key unless
     /// --producer-key names the authority's, or a signer's or validator's voting, key file.
     #[arg(long)]
@@ -317,6 +354,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Faucet(args)) => cli::faucet(args),
         #[cfg(feature = "client")]
         Some(Command::Multisig(args)) => cli::multisig(args),
+        #[cfg(feature = "client")]
+        Some(Command::Claim(args)) => cli::claim(args),
         #[cfg(all(feature = "client", feature = "swap"))]
         Some(Command::Swap(args)) => cli::swap(args),
         #[cfg(all(feature = "client", feature = "dex", feature = "evm"))]
@@ -426,11 +465,27 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     })?;
     // What this node produces with: a miner's settings, a signing key, or both. The node builds
     // the producer for whatever consensus the chain runs, and again when governance changes it.
+    #[cfg(feature = "pool")]
+    let open = args.mining_open;
+    #[cfg(not(feature = "pool"))]
+    let open = false;
     let port = match (args.mining, &args.mining_token) {
-        (Some(listen), Some(token)) => Some(MiningPort {
+        (Some(listen), token) => Some(MiningPort {
             listen,
-            token: chainv4::mining::read_token(token)?,
+            token: match (token, open) {
+                (Some(token), _) => chainv4::mining::read_token(token)?,
+                (None, true) => chainv4::mining::pool::OPEN_TOKEN.to_vec(),
+                (None, false) => return Err("--mining needs --mining-token, or --pool --mining-open for a pool anyone may join".into()),
+            },
             protocol: args.protocol.clone(),
+            #[cfg(feature = "pool")]
+            pool: args.pool.then(|| chainv4::mining::shares::PoolConfig {
+                fee: args.pool_fee,
+                window: args.pool_window,
+                min_share: args.pool_min_share.max(1),
+                open,
+                file: Some(args.db.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")).join("pool.json")),
+            }),
         }),
         _ => None,
     };
@@ -467,6 +522,12 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(producing) = producing {
         node = node.producing(producing);
+    }
+
+    #[cfg(feature = "pool")]
+    if let (Some(least), Some(key)) = (&args.pool_push, &args.pool_push_key) {
+        let least = chainv4::structs::u256::u256::from_str_radix(least, 10).map_err(|_| format!("--pool-push {least} is not a whole number of the coin's smallest unit"))?;
+        node = node.pushing(chainv4::node::PoolPush { key: cli::signer(Some(key))?, least });
     }
 
     if args.snapshot {

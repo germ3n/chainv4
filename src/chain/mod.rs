@@ -18,7 +18,7 @@ use {
     crate::registry::validators::Member,
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
-    crate::structs::block::{Block, BlockHeader, Seal, SealedHeader},
+    crate::structs::block::{Block, BlockHeader, PAYOUT_PARTS, PoolCommitment, Seal, SealedHeader, parts_of},
     crate::structs::code::Engine,
     crate::structs::hash::{Hash, HashType},
     crate::structs::tx::SignedTx,
@@ -131,9 +131,9 @@ pub const MAX_BLOCK_BYTES: u64 = 6 * 1024 * 1024;
     summary = "The layout this node keeps its database in. It goes up whenever a stored record changes shape, so a node never reads a database it would misread.",
     category = "Chain",
     see_also = "ChainError::OldFormat",
-    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry. 4: contracts record their storage layout. 5: layouts declare record keys and checked kinds. 6: headers commit to a state root and a receipts root, and the state tree is kept. 7: every header is kept on its own, state tree leaves name their entries, and checkpoints keep what light clients need. 8: tx_root is a Merkle root, and the address index has a column of its own. From 8 on, each new format comes with a migration in migrate::MIGRATIONS, from the one before and back.",
+    note = "1: receipts carry traces, and the chain keeps its leaf blocks in the database. 2: authority finality's approvals of a signer change record the epoch they were made in. 3: the token registry. 4: contracts record their storage layout. 5: layouts declare record keys and checked kinds. 6: headers commit to a state root and a receipts root, and the state tree is kept. 7: every header is kept on its own, state tree leaves name their entries, and checkpoints keep what light clients need. 8: tx_root is a Merkle root, and the address index has a column of its own. From 8 on, each new format comes with a migration in migrate::MIGRATIONS, from the one before and back, but for 9. 9: blocks may carry a mining pool's commitment, which their headers commit to, and the pools column keeps the claims on them; that changes every block's id, so a database in 8 holds a chain this build cannot follow, and none migrates: start a new chain.",
 )]
-pub const STORAGE_FORMAT: u32 = 8;
+pub const STORAGE_FORMAT: u32 = 9;
 
 const TIP_KEY: &[u8] = b"tip";
 const TIPS_KEY: &[u8] = b"tips";
@@ -709,6 +709,7 @@ impl Genesis {
                 difficulty: 0,
                 tx_root: Hashable::hash(self, self.hash),
                 proof_root: Hashable::hash(&self.light_params(), self.hash),
+                pool_root: Hash::zero(self.hash),
                 receipts_root: receipts_root(self.hash, &[]),
                 state_root: self.state_root(),
                 gas_used: 0,
@@ -716,6 +717,7 @@ impl Genesis {
             },
             txs: Vec::new(),
             proofs: Vec::new(),
+            pool: None,
             seal: Seal::None,
         }
     }
@@ -997,6 +999,10 @@ pub enum BlockError {
     StateRoot { expected: Hash, got: Hash },
     #[document(summary = "Its transactions take more bytes, encoded, than genesis's max_block_bytes.")]
     TooBig { bytes: u64, limit: u64 },
+    #[document(summary = "Its pool_root does not match its pool commitment.")]
+    PoolRoot,
+    #[document(summary = "Its pool commitment sends more than all of the reward to the escrow, or its producer no longer holds the fees it sends.")]
+    Pool(String),
 }
 
 impl fmt::Display for BlockError {
@@ -1017,6 +1023,8 @@ impl fmt::Display for BlockError {
             BlockError::ReceiptsRoot => write!(f, "receipts_root does not match what its transactions did"),
             BlockError::StateRoot { expected, got } => write!(f, "state_root {got}, but running it reaches {expected}"),
             BlockError::TooBig { bytes, limit } => write!(f, "its transactions take {bytes} bytes, past the {limit} a block may hold"),
+            BlockError::PoolRoot => write!(f, "pool_root does not match"),
+            BlockError::Pool(why) => write!(f, "its pool commitment: {why}"),
         }
     }
 }
@@ -1138,6 +1146,15 @@ struct HistoryFrom {
 }
 
 impl Hashable for HistoryFrom {}
+
+/// What a block that split its reward split.
+#[derive(Clone, Copy, Debug, SchemaWrite, SchemaRead)]
+struct Split {
+    #[wincode(with = "U256Le")]
+    total: u256,
+}
+
+impl Hashable for Split {}
 
 /// The keys a block changed in the state columns and the tree: what pruning its history deletes.
 #[derive(Clone, Debug, Default, SchemaWrite, SchemaRead)]
@@ -1298,6 +1315,30 @@ impl Chain {
     #[document(parent = "Chain", summary = "How far back the main chain may be rolled back, from genesis.")]
     pub fn max_reorg_depth(&self) -> u64 {
         self.max_reorg_depth
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Whether a mining pool's block can no longer be undone, for the pool to credit its miners: once it is at or under the finalized checkpoint, or deeper than max_reorg_depth under the tip, it is Final, with what it shared out, on the main chain, and Dropped off it; Pending until then.",
+        params = {
+            id = "The block.",
+            height = "Its height.",
+        },
+    )]
+    pub fn pool_settled(&self, id: &Hash, height: u64) -> Result<crate::consensus::PoolSettled, DbError> {
+        use crate::consensus::PoolSettled;
+
+        let finalized = self.finalized().zip(self.finality_config()).map(|(checkpoint, config)| checkpoint.epoch * config.checkpoint_interval());
+        let settled = self.tip.height.saturating_sub(height) > self.max_reorg_depth || finalized.is_some_and(|finalized| height <= finalized);
+
+        if !settled {
+            return Ok(PoolSettled::Pending);
+        }
+
+        match self.on_main_chain(id)? {
+            true => Ok(stored_split(&*self.db, id)?.map_or(PoolSettled::Dropped, PoolSettled::Final)),
+            false => Ok(PoolSettled::Dropped),
+        }
     }
 
     #[document(
@@ -1490,13 +1531,18 @@ impl Chain {
         timestamp: u64,
         deadline: Option<Instant>,
     ) -> Result<Block, DbError> {
-        self.build_declaring(txs, proofs, producer, timestamp, deadline, None)
+        self.build_declaring(txs, proofs, producer, timestamp, deadline, None, None)
     }
 
     #[document(
         parent = "Chain",
-        summary = "The next block on the tip, as build_within makes it, declaring the difficulty the producer decides when consensus leaves it to the producer, as a rotating authority's offset in the schedule; None declares what consensus says.",
+        summary = "The next block on the tip, as build_within makes it, declaring the difficulty the producer decides when consensus leaves it to the producer, as a rotating authority's offset in the schedule, and carrying a mining pool's commitment.",
+        params = {
+            difficulty = "The difficulty to declare; None declares what consensus says.",
+            pool = "The pool's commitment: what goes to its escrow, and the root of its claims; None for the producer to keep the reward.",
+        },
     )]
+    #[allow(clippy::too_many_arguments)]
     pub fn build_declaring(
         &self,
         txs: Vec<SignedTx>,
@@ -1505,10 +1551,11 @@ impl Chain {
         timestamp: u64,
         deadline: Option<Instant>,
         difficulty: Option<u128>,
+        pool: Option<PoolCommitment>,
     ) -> Result<Block, DbError> {
         let layer = Arc::new(State::new(self.db.clone()));
 
-        self.build_in(&layer, &self.tip, Draft { txs, proofs, producer, timestamp, deadline, difficulty })
+        self.build_in(&layer, &self.tip, Draft { txs, proofs, producer, timestamp, deadline, difficulty, pool })
     }
 
     #[document(
@@ -1534,7 +1581,7 @@ impl Chain {
         let header = self.block(parent)?.ok_or(ImportError::UnknownParent(*parent))?.header;
         let layer = self.state_at(parent)?;
 
-        Ok(self.build_in(&layer, &header, Draft { txs, proofs, producer, timestamp, deadline: None, difficulty: None })?)
+        Ok(self.build_in(&layer, &header, Draft { txs, proofs, producer, timestamp, deadline: None, difficulty: None, pool: None })?)
     }
 
     /// Builds the next block on parent in layer, which holds the state at the end of parent. The
@@ -1542,7 +1589,7 @@ impl Chain {
     /// use, and so do the reward and the proofs, to learn the roots; the layer is thrown away. A
     /// deadline stops the transactions once it passes, and the block holds those that ran by then.
     fn build_in(&self, layer: &Arc<State>, parent: &BlockHeader, draft: Draft) -> Result<Block, DbError> {
-        let Draft { txs, proofs, producer, timestamp, deadline, difficulty } = draft;
+        let Draft { txs, proofs, producer, timestamp, deadline, difficulty, pool } = draft;
         let params = self.params_in(layer, parent.height + 1)?;
         let context = BlockContext {
             height: parent.height + 1,
@@ -1582,6 +1629,7 @@ impl Chain {
                 },
                 tx_root: Block::tx_root(self.hash, &kept),
                 proof_root: Block::proof_root(self.hash, &proofs),
+                pool_root: Block::pool_root(self.hash, pool.as_ref()),
                 receipts_root: receipts_root(self.hash, &committed),
                 state_root: Hash::zero(self.hash),
                 gas_used,
@@ -1589,14 +1637,16 @@ impl Chain {
             },
             txs: kept,
             proofs,
+            pool,
             seal: Seal::None,
         };
 
         // The reward and the proofs change state too, so the root is the one importing reaches.
         // A block whose reward or proofs do not hold is refused for that on import, whatever its
         // root says.
-        match self.settle(layer, &block, params.reward) {
-            Ok(()) | Err(ImportError::Invalid(_)) => {}
+        match self.settle(layer, &block, params.reward, ran.to_producer) {
+            Ok(()) => {}
+            Err(ImportError::Invalid(err)) => log::warn!("[chain] block {} will be refused: {err}", context.height),
             Err(ImportError::Db(err)) => return Err(err),
             Err(err) => unreachable!("settling a block only fails it or the database: {err}"),
         }
@@ -2094,6 +2144,14 @@ impl Chain {
             return Err(ImportError::Invalid(BlockError::ProofRoot));
         }
 
+        if block.header.pool_root != Block::pool_root(self.hash, block.pool.as_ref()) {
+            return Err(ImportError::Invalid(BlockError::PoolRoot));
+        }
+
+        if block.pool.is_some_and(|pool| pool.parts > PAYOUT_PARTS) {
+            return Err(ImportError::Invalid(BlockError::Pool(format!("it sends more than the {PAYOUT_PARTS} parts there are"))));
+        }
+
         // On the tip, its size and base price check against what the next block runs with. On a
         // branch, they wait for running it, on its parent's state, which decides them there.
         if parent_id == self.tip.id() {
@@ -2364,18 +2422,34 @@ impl Chain {
         })
     }
 
-    /// What a block does to state past its transactions: the producer's reward, and what its
-    /// finality proofs pay and record.
-    fn settle(&self, layer: &Arc<State>, block: &Block, (reward, from): (Reward, u64)) -> Result<(), ImportError> {
+    /// What a block does to state past its transactions: the producer's reward, a mining pool's
+    /// share of it and of the fees sent to the pool's escrow with the root of its claims, and what
+    /// its finality proofs pay and record.
+    fn settle(&self, layer: &Arc<State>, block: &Block, (reward, from): (Reward, u64), fees: u256) -> Result<(), ImportError> {
         let reward = reward.since(block.header.height, from);
+        let accounts = Accounts::new(layer);
 
         if reward > u256::ZERO {
-            Accounts::new(layer)
-                .credit(&block.header.producer, reward)
-                .map_err(|err| match err {
-                    RegistryError::Db(err) => ImportError::Db(err),
-                    _ => ImportError::Invalid(BlockError::Reward),
-                })?;
+            accounts.credit(&block.header.producer, reward).map_err(|err| match err {
+                RegistryError::Db(err) => ImportError::Db(err),
+                _ => ImportError::Invalid(BlockError::Reward),
+            })?;
+        }
+
+        // The producer holds the reward and its fees by now, and sends the pool's share of both
+        // to its escrow. It cannot have spent the fees in the block: a pool's node keeps its own
+        // transactions out of the blocks it builds.
+        if let Some(pool) = &block.pool {
+            let total = reward.saturating_add(fees);
+            let producer = &block.header.producer;
+            let escrow = crate::registry::pools::pool_escrow(producer, self.hash);
+            accounts.transfer(producer, &escrow, parts_of(total, pool.parts)).map_err(|err| match err {
+                RegistryError::Db(err) => ImportError::Db(err),
+                other => ImportError::Invalid(BlockError::Pool(other.to_string())),
+            })?;
+            crate::registry::pools::Pools::new(layer, self.hash).commit(block.header.height, crate::registry::pools::PoolRoot { pool: *producer, root: pool.root, count: pool.count });
+            // What was shared out, which the block alone does not say, as its fees are not in it.
+            layer.put_value(Column::Meta, split_key(&block.id()), &Split { total });
         }
 
         match &self.finality {
@@ -2422,7 +2496,7 @@ impl Chain {
             }));
         }
 
-        self.settle(&layer, block, params.reward)?;
+        self.settle(&layer, block, params.reward, ran.to_producer)?;
 
         let committed: Vec<CommittedReceipt> = receipts.iter().map(CommittedReceipt::of).collect();
 
@@ -2646,6 +2720,8 @@ struct Draft {
     deadline: Option<Instant>,
     /// The difficulty the producer declares, when consensus leaves it to the producer.
     difficulty: Option<u128>,
+    /// A mining pool's commitment.
+    pool: Option<PoolCommitment>,
 }
 
 /// The stored blocks no stored block builds on yet.
@@ -2761,6 +2837,20 @@ pub fn stored_block(db: &dyn Read, id: &Hash) -> Result<Option<Block>, DbError> 
 )]
 pub fn stored_header(db: &dyn Read, id: &Hash) -> Result<Option<SealedHeader>, DbError> {
     read_value(db, Column::Headers, &id_key(id))
+}
+
+/// Where a block that split its reward keeps what it split.
+fn split_key(id: &Hash) -> Vec<u8> {
+    [b"split/".as_slice(), &id_key(id)].concat()
+}
+
+#[document(
+    summary = "What a mining pool's block shared out: its reward and the fees its producer earned, together, of which its commitment's parts went to the pool's escrow. Read straight from a database; None for a block that carried no pool commitment, or one this node has not run.",
+    category = "Chain",
+    see_also = "PoolCommitment, parts_of",
+)]
+pub fn stored_split(db: &dyn Read, id: &Hash) -> Result<Option<u256>, DbError> {
+    Ok(read_value::<Split>(db, Column::Meta, &split_key(id))?.map(|split| split.total))
 }
 
 #[document(

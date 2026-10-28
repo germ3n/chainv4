@@ -161,7 +161,8 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
     });
 }
 
-/// The node's mining: the hashrate over the last minutes, its own devices, and its workers.
+/// The node's mining: the hashrate over the last minutes, its own devices, the pool it runs, if
+/// it does, and its workers, with whom a pool's pay.
 fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
     let look = ctx.look;
     let palette = look.palette;
@@ -194,6 +195,22 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
             }),
         }
 
+        if let Some(pool) = &mining.pool {
+            facts.row("pool", |ui| {
+                ui.label(format!(
+                    "{} fee · {} blocks' window · {} miners · {}",
+                    super::pool::percent(crate::model::percent(pool.fee)),
+                    pool.window,
+                    format::thousands(&pool.miners.to_string()),
+                    if pool.open { "open to anyone" } else { "members with the token" },
+                ));
+
+                if ui.link(RichText::new("Mining pool ›").color(palette.accent)).clicked() {
+                    ctx.go(super::View::Pool);
+                }
+            });
+        }
+
         facts.row("this node", |ui| {
             ui.vertical(|ui| {
                 if mining.devices.is_empty() {
@@ -221,6 +238,12 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
         0 => format!("{} found", worker.found),
         refused => format!("{} found · {refused} refused", worker.found),
     };
+    // A pool's worker: the shares it sent, at the difficulty the pool set it.
+    let shares = |worker: &crate::model::MiningWorker| match worker.share_difficulty.as_str() {
+        "" | "0" => format!("{} shares", format::thousands(&worker.shares.to_string())),
+        difficulty => format!("{} shares at {}", format::thousands(&worker.shares.to_string()), format::thousands(difficulty)),
+    };
+    let pooled = mining.pool.is_some() || mining.workers.iter().any(|worker| worker.payout.is_some());
 
     if look.narrow {
         for worker in &mining.workers {
@@ -233,6 +256,15 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
                     });
                 });
                 ui.label(RichText::new(&worker.address).monospace().small().color(palette.soft));
+
+                if let Some(payout) = &worker.payout {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("pays to").small().color(palette.muted));
+                        super::address(ui, ctx, payout);
+                        ui.label(RichText::new(shares(worker)).small().color(palette.muted));
+                    });
+                }
+
                 ui.label(RichText::new(found(worker)).small().color(palette.muted));
 
                 for device in &worker.devices {
@@ -244,10 +276,28 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
         return;
     }
 
-    super::table(ui, look, "workers", &["worker", "address", "connected", "hashrate", "devices", "seals"], |ui| {
+    let headings: &[&str] = match pooled {
+        true => &["worker", "address", "payout", "connected", "hashrate", "devices", "seals"],
+        false => &["worker", "address", "connected", "hashrate", "devices", "seals"],
+    };
+
+    super::table(ui, look, "workers", headings, |ui| {
         for worker in &mining.workers {
             ui.label(RichText::new(&worker.name).strong());
             ui.monospace(&worker.address);
+
+            if pooled {
+                ui.vertical(|ui| match &worker.payout {
+                    Some(payout) => {
+                        super::address(ui, ctx, payout);
+                        ui.label(RichText::new(shares(worker)).small().color(palette.muted));
+                    }
+                    None => {
+                        ui.label(RichText::new("—").color(palette.muted));
+                    }
+                });
+            }
+
             ui.label(RichText::new(format::ago(worker.since, ctx.now)).color(palette.muted));
             ui.monospace(format::hashrate(worker.rate));
             ui.vertical(|ui| {

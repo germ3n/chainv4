@@ -689,6 +689,7 @@ fn mine_after(chain: &Chain, parent: &Block, gap_ms: u64, txs: Vec<SignedTx>, mi
                 difficulty: chain.difficulty_after(&parent.header, timestamp).unwrap(),
                 tx_root: Block::tx_root(chain.hash(), &txs),
                 proof_root: Block::proof_root(chain.hash(), &[]),
+                pool_root: Block::pool_root(chain.hash(), None),
                 receipts_root: Hash::zero(chain.hash()),
                 state_root: Hash::zero(chain.hash()),
                 gas_used: 0,
@@ -696,6 +697,7 @@ fn mine_after(chain: &Chain, parent: &Block, gap_ms: u64, txs: Vec<SignedTx>, mi
             },
             txs,
             proofs: Vec::new(),
+            pool: None,
             seal: Seal::None,
         },
     };
@@ -968,6 +970,130 @@ fn rewards_are_fixed_or_halve() {
         u256::ZERO
     ]);
     assert_eq!(Reward::NONE.at(0), u256::ZERO);
+}
+
+/// Seals a block on a chain of difficulty 1, where the first nonce that meets it is near.
+fn sealed(chain: &Chain, mut block: Block) -> Block {
+    let nonce = (0..).find(|nonce| meets(work_hash(chain.hash(), &block.id(), *nonce), block.header.difficulty)).unwrap();
+    block.seal = Seal::Work { nonce };
+
+    block
+}
+
+#[test]
+fn a_pool_block_sends_its_miners_share_to_the_escrow_and_each_claims_what_it_earned() {
+    use crate::registry::pools::{Pools, claim_leaf, pool_escrow};
+    use crate::structs::block::{PAYOUT_PARTS, PoolCommitment, parts_of};
+
+    // Fees as the dev chains charge them, half of the base burned and half the producer's.
+    let genesis = Genesis { fees: Some(crate::chain::fees::FeeConfig::dev()), ..pow_genesis() };
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let hash = chain.hash();
+    // Real keys' addresses, as a claim checks the miner's is one.
+    let (pool, alice, bob) = (Address::Ed25519([7; 32]), Keypair::from_seed([8; 32]).public().address(), Keypair::from_seed([9; 32]).public().address());
+    let escrow = pool_escrow(&pool, hash);
+    let fee = |chain: &Chain| FeeOffer { gas_limit: 100_000, max_price: chain.next_base_price() * u256::new(4), tip: u256::new(3) };
+    let mut now = chain.tip().timestamp;
+    let mut next = |chain: &mut Chain, txs: Vec<SignedTx>, pool_commitment: Option<PoolCommitment>| {
+        now += 1_000;
+        let block = sealed(chain, chain.build_declaring(txs, Vec::new(), pool, now, None, None, pool_commitment).unwrap());
+        let receipts = extended(chain.import(&block, LATER));
+
+        (block, receipts)
+    };
+
+    // The pool's first block: 90% to the escrow, nothing credited yet.
+    let tx = SignedTx::sign(Tx::Transfer { from: authority().public().address(), to: Address::Ed25519([1; 32]), amount: Amount::U128(5) }, 0, fee(&chain), &authority());
+    let first = PoolCommitment { parts: 900_000_000, root: Hash::zero(hash), count: 0 };
+    let (block, _) = next(&mut chain, vec![tx], Some(first));
+    assert_eq!(block.header.pool_root, Block::pool_root(hash, Some(&first)));
+
+    let shared = stored_split(&*db, &block.id()).unwrap().expect("a pool's block keeps what it shared out");
+    let escrowed = parts_of(shared, 900_000_000);
+    assert!(shared > u256::new(100), "the reward and the producer's fees: {shared}");
+    assert_eq!(balance(&chain, &escrow), escrowed);
+    assert_eq!(balance(&chain, &pool) + escrowed, shared, "the producer keeps the rest: the pool's fee, and rounding");
+
+    // The next commits to what its miners earned: alice two thirds of it, bob the rest.
+    let earned = [(alice, escrowed * u256::new(2) / u256::new(3)), (bob, escrowed / u256::new(3))];
+    let leaves: Vec<Hash> = earned.iter().map(|(to, earned)| claim_leaf(hash, to, *earned)).collect();
+    let root = crate::crypto::merkle::root(hash, &leaves);
+    let (committed, _) = next(&mut chain, Vec::new(), Some(PoolCommitment { parts: 0, root, count: 2 }));
+
+    // Anyone claims for alice, who gets what she earned; again, and nothing is left.
+    let claim = |nonce: u64, chain: &Chain| {
+        let tx = Tx::Claim { height: committed.header.height, to: alice, earned: earned[0].1, index: 0, path: crate::crypto::merkle::audit_path(hash, &leaves, 0) };
+
+        SignedTx::sign(tx, nonce, fee(chain), &authority())
+    };
+    let tx = claim(1, &chain);
+    let (_, receipts) = next(&mut chain, vec![tx], None);
+    assert!(receipts[0].result.is_ok(), "{:?}", receipts[0].result);
+    assert_eq!(balance(&chain, &alice), earned[0].1);
+    assert_eq!(balance(&chain, &escrow), escrowed - earned[0].1);
+    assert_eq!(Pools::new(&chain.state(), hash).claimed(&pool, &alice), Ok(earned[0].1));
+
+    let tx = claim(2, &chain);
+    let (_, receipts) = next(&mut chain, vec![tx], None);
+    assert_eq!(receipts[0].result, Err(Failure::Claim("nothing left to claim: all it earned is claimed".to_string())));
+    assert_eq!(balance(&chain, &alice), earned[0].1);
+
+    // Bob's own claim names a leaf that is not his place.
+    let wrong = Tx::Claim { height: committed.header.height, to: bob, earned: earned[1].1, index: 0, path: crate::crypto::merkle::audit_path(hash, &leaves, 0) };
+    let tx = SignedTx::sign(wrong, 3, fee(&chain), &authority());
+    let (_, receipts) = next(&mut chain, vec![tx], None);
+    assert!(matches!(&receipts[0].result, Err(Failure::Claim(why)) if why.contains("path")));
+    let _ = PAYOUT_PARTS;
+}
+
+#[test]
+fn a_pool_commitment_the_header_does_not_hold_or_past_the_whole_reward_is_refused() {
+    use crate::structs::block::{PAYOUT_PARTS, PoolCommitment};
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &pow_genesis()).unwrap();
+    let pool = Address::Ed25519([7; 32]);
+    let now = chain.tip().timestamp + 1_000;
+    let build = |chain: &Chain, commitment: PoolCommitment| sealed(chain, chain.build_declaring(Vec::new(), Vec::new(), pool, now, None, None, Some(commitment)).unwrap());
+    let commitment = PoolCommitment { parts: 500_000_000, root: Hash::zero(chain.hash()), count: 0 };
+
+    // Changed after sealing: the header committed to another.
+    let mut changed = build(&chain, commitment);
+    changed.pool = Some(PoolCommitment { parts: PAYOUT_PARTS, ..commitment });
+    assert!(matches!(chain.import(&changed, LATER), Err(ImportError::Invalid(BlockError::PoolRoot))));
+
+    let past = build(&chain, PoolCommitment { parts: PAYOUT_PARTS + 1, ..commitment });
+    assert!(matches!(chain.import(&past, LATER), Err(ImportError::Invalid(BlockError::Pool(_)))));
+
+    // The whole reward to the escrow leaves the producer nothing, and is fine.
+    let whole = build(&chain, PoolCommitment { parts: PAYOUT_PARTS, ..commitment });
+    extended(chain.import(&whole, LATER));
+    assert_eq!(balance(&chain, &crate::registry::pools::pool_escrow(&pool, chain.hash())), u256::new(100));
+    assert_eq!(balance(&chain, &pool), u256::ZERO);
+}
+
+#[test]
+fn a_pool_block_settles_once_finalized_or_past_the_reorg_depth() {
+    use crate::consensus::PoolSettled;
+    use crate::structs::block::PoolCommitment;
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &Genesis { max_reorg_depth: 3, ..pow_genesis() }).unwrap();
+    let pool = Address::Ed25519([7; 32]);
+    let commitment = PoolCommitment { parts: 500_000_000, root: Hash::zero(chain.hash()), count: 0 };
+    let now = chain.tip().timestamp + 1_000;
+    let block = sealed(&chain, chain.build_declaring(Vec::new(), Vec::new(), pool, now, None, None, Some(commitment)).unwrap());
+    extended(chain.import(&block, LATER));
+    assert_eq!(chain.pool_settled(&block.id(), 1), Ok(PoolSettled::Pending));
+
+    for step in 1..=4 {
+        let next = sealed(&chain, chain.build(Vec::new(), Vec::new(), pool, now + 1_000 * step).unwrap());
+        extended(chain.import(&next, LATER));
+    }
+
+    assert_eq!(chain.pool_settled(&block.id(), 1), Ok(PoolSettled::Final(u256::new(100))));
+    assert_eq!(chain.pool_settled(&Hash::from_bytes(chain.hash(), &[1; 32]).unwrap(), 1), Ok(PoolSettled::Dropped), "a block never on the main chain");
 }
 
 #[test]

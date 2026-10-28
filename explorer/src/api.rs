@@ -70,6 +70,10 @@ pub enum Ask {
     Rpc(String),
     /// A request to the node's faucet, with its proof of work: the body of POST /faucet.
     Faucet(String),
+    /// The mining pool the node runs: its miners and its latest blocks.
+    Pool,
+    /// The same, for one miner by its payout address, with its workers.
+    PoolMiner(String),
 }
 
 impl Ask {
@@ -88,6 +92,8 @@ impl Ask {
             Ask::AccountNames(address) => format!("/accounts/{address}/names?limit=100"),
             Ask::Rpc(_) => "/rpc".to_string(),
             Ask::Faucet(_) => "/faucet".to_string(),
+            Ask::Pool => "/pool".to_string(),
+            Ask::PoolMiner(address) => format!("/pool/{address}"),
             Ask::Contract(address) => format!("/contracts/{address}"),
             Ask::Validators => "/validators".to_string(),
             Ask::Signers => "/signers".to_string(),
@@ -451,6 +457,13 @@ mod tests {
         assert!(matches!(&replies[0], Reply::Answer { ask: Ask::Status, result: Err(Failure { status: 0, message }) } if message == "the proxy set does not work: not a port: 0"));
         assert!(matches!(&replies[1], Reply::Stream(News::Closed { why, unsupported: false }) if why.starts_with("the proxy set does not work")));
         assert!(!api.asking(&Ask::Status), "answered, so asked again later");
+    }
+
+    #[test]
+    fn a_pool_and_one_of_its_miners_become_paths() {
+        assert_eq!(Ask::Pool.path(), "/pool");
+        assert_eq!(Ask::PoolMiner("ed25519:0x01".to_string()).path(), "/pool/ed25519:0x01");
+        assert_eq!(Ask::Pool.body(), None);
     }
 
     #[test]

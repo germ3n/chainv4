@@ -58,6 +58,13 @@ node takes workers on TCP 4002, `MINING_PORT` on the host. A token someone else 
 mine for the node, which pays the node, or report made-up hashrates, and nothing more: every nonce
 is checked.
 
+**A pool:** `POOL=1` in `docker/.env` makes the mining port a mining pool, which pays each worker
+for its shares, through an escrow it claims from (see [Mining pools](consensus.md#mining-pools));
+`POOL_OPEN=1` makes it an open one, which anyone joins with a payout address and no token.
+`POOL_FEE` is the percent the pool keeps, `POOL_WINDOW` how many blocks' worth of shares each block
+shares out by, and `POOL_PUSH` with `docker/config/pool-push.key` (or `POOL_PUSH_KEY`) has the node
+claim for miners owed that much. A rig joins with `PAYOUT=ADDRESS docker/pow.sh worker HOST`.
+
 **Who reads the secrets:** `docker/pow.sh up` gives the token and `validator.key` to the node's
 user in its container, uid 10001, with `podman unshare` under rootless Podman and as root
 otherwise, readable by nobody else; where it can do neither, it leaves them readable to every user

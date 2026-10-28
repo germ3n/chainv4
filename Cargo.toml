@@ -11,7 +11,7 @@ members = ["macro", "wiki", "gpu"]
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -84,6 +84,11 @@ ethereum = ["evm", "secp256k1", "http"]
 names = []
 # Mining on the GPU, through wgpu: Vulkan, Metal and WebGPU. --mine-gpu picks it over the threads.
 gpu = ["dep:chainv4-gpu", "node"]
+# Running a mining pool on the mining port: workers' shares at easier difficulties, set for each
+# one's hashrate, and every block split among the last window of them (PPLNS) with --pool, an
+# open port with --mining-open, and GET /pool. Without it the port mines for --reward-to alone;
+# blocks that split their reward import either way.
+pool = ["node"]
 node = ["dep:rayon", "dep:signal-hook", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "dep:serde_json", "dep:hmac", "dep:sha2", "lvm", "rocksdb"]
 
 [dependencies]

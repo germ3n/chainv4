@@ -60,11 +60,17 @@ offline; these would make that hold up as a treasury.
 
 ### Consensus
 
-- [ ] **Mining pools.** Many miners sharing one node's work and its rewards: the node already
-  hands work to workers over its mining port; a pool would count each miner's shares at an
-  easier difficulty, pay out by them (on chain, by a pool contract, or from the pool's
-  account), and show each miner what it found and is owed. A batch of its own, its design asked
-  for when it starts.
+- [x] **Mining pools.** `--pool` on the mining port: shares at a difficulty set for each worker's
+  hashrate, PPLNS over the latest blocks' worth, each block sending its miners' share to the
+  pool's escrow and committing to a Merkle root over every miner's earnings, which each claims
+  with `Tx::Claim`: any number of miners in 44 bytes a block, credited once final, an optional
+  fee, open or token pools, `--pool-push` claiming for them, `GET /pool`, the worker's log, the
+  explorer's Pool page and the wallet's Mining page. See [Mining pools](consensus.md#mining-pools).
+- [ ] **Mining pools: next.** The wallet's claim figures come from the pool's node; proving what an
+  address claimed (the pools column) and the root a block holds, through the light client, would
+  leave only the leaf to the pool's word. A pool's node keeps four claim trees in memory, which a
+  pool of millions of miners would want on disk. A share chain among the pool's own nodes, as
+  P2Pool keeps, would take the split out of one node's hands altogether.
 - [ ] **Polish the explorer and the wallet.** A pass over both apps as people use them, on a phone
   first: what each page says and in what order, empty and loading states, what is hard to find
   or to read, and the tools the explorer still lacks (see the queued explorer batch).
@@ -177,10 +183,8 @@ offline; these would make that hold up as a treasury.
   machine, which mine for it over a TCP port authenticated with a token, each in a range of nonces
   of its own, with no chain of their own; the node checks every nonce, and reports each device's
   and worker's hashrate on `GET /node` and the explorer.
-- [ ] **Workers find no shares.** A worker sends only nonces that meet the block's difficulty, so
-  the node cannot tell how much each worker did beyond its own word, and pays nobody: rewards go
-  to the node's address. Shares at a lower difficulty would measure the work, for a pool that
-  pays out.
+- [x] **Workers find no shares.** Under `--pool` they do: every nonce at the worker's share
+  difficulty, which measures the work each did, and the pool pays by it.
 - [ ] **The mining port is not encrypted.** Its messages are authenticated with the token; TLS
   on it would hide the work and nonces too, which matter only until the block is out.
 - [ ] **No CUDA kernels.** NVIDIA cards mine through Vulkan. Kernels in CUDA C, behind a `cuda`
@@ -673,6 +677,12 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [ ] **Updates: a warning, an updater, and a stop for breaking releases.** A node, a worker and
+  the apps learn the newest release as they run, warn when they are behind, update themselves on
+  request, and a node refuses to go on past a release marked breaking, such as a new block format.
+  A batch of its own, queued after the mining pools; its design asked for when it starts: where
+  releases are announced (a signed manifest, or on chain by governance), who signs them, what
+  "breaking" stops (the node, or blocks past a height), and whether updating is ever automatic.
 - [x] **A faucet for dev chains.** `--faucet-key` serves `POST /faucet`: a drip per address and
   per IP each period, each request with a moment's proof of work; the wallet, the explorer and
   `chainv4 faucet` ask it, and `docker/pow.sh faucet` sets one up on the VPS. See

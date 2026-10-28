@@ -150,10 +150,22 @@ fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>) {
     super::facts(ui, look, "asked", |facts| {
         facts.text("type", tx.kind());
 
+        if let Some(means) = means(tx) {
+            facts.text("means", means);
+        }
+
         for (name, value) in tx.tx.as_object().into_iter().flatten().filter(|(name, _)| *name != "type") {
             facts.row(name, |ui| match (name.as_str(), value) {
                 ("amount", Value::String(raw)) => {
                     ui.label(ctx.coins(raw)).on_hover_text(format!("{raw} units"));
+                }
+                // A claim's: all its miner earned from the pool, not what this one paid.
+                ("earned", Value::String(raw)) => {
+                    ui.label(ctx.coins(raw)).on_hover_text(format!("{raw} units, all told"));
+                }
+                // A claim's: the pool's block whose root it claims against.
+                ("height", Value::Number(height)) if tx.kind() == "claim" => {
+                    super::block(ui, ctx, &height.to_string(), &format::thousands(&height.to_string()));
                 }
                 ("func", Value::String(selector)) => {
                     match &called {
@@ -191,6 +203,18 @@ fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>) {
             });
         }
     });
+}
+
+/// What a transaction asks, in words, for kinds whose fields alone say it badly.
+fn means(tx: &TxView) -> Option<String> {
+    match tx.kind() {
+        "claim" => Some(format!(
+            "Claim of {}'s mining pool earnings, from the pool's block {}: what it earned, less what it claimed before",
+            tx.tx["to"].as_str().map_or_else(|| "?".to_string(), format::short),
+            tx.tx["height"].as_u64().map_or_else(|| "?".to_string(), |height| format::thousands(&height.to_string())),
+        )),
+        _ => None,
+    }
 }
 
 fn result(facts: &mut Facts, ctx: &mut Ctx, look: Look, outcome: &Outcome) {

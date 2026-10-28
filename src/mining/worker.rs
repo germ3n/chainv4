@@ -7,6 +7,7 @@ use {
     super::pool::{PING, QUIET},
     super::protocol::{self, Receiver, Sender},
     crate::consensus::{DeviceReport, Rig},
+    crate::structs::address::Address,
     crate::structs::block::Seal,
     crate::structs::hash::{Hash, HashType},
     r#macro::document,
@@ -58,6 +59,8 @@ pub struct WorkerConfig {
     pub devices: Devices,
     #[document(summary = "A SOCKS5 proxy to reach the node through, socks5h://host:port, such as Tor's for a node's onion; None to connect directly.")]
     pub proxy: Option<String>,
+    #[document(summary = "Where a pool pays this worker's shares; a node that runs a pool takes no worker without one, and one that runs none pays its own address whatever this says.")]
+    pub payout: Option<Address>,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -69,6 +72,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("protocol", &self.protocol)
             .field("devices", &self.devices)
             .field("proxy", &self.proxy)
+            .field("payout", &self.payout)
             .finish_non_exhaustive()
     }
 }
@@ -284,7 +288,7 @@ fn session(
 ) -> Result<(), String> {
     stream.set_nodelay(true).map_err(|err| err.to_string())?;
     stream.set_read_timeout(Some(QUIET)).map_err(|err| err.to_string())?;
-    let (sender, mut receiver) = protocol::connect(stream.try_clone().map_err(|err| err.to_string())?, &config.token, &config.protocol, &config.name)?;
+    let (sender, mut receiver) = protocol::connect(stream.try_clone().map_err(|err| err.to_string())?, &config.token, &config.protocol, &config.name, config.payout.as_ref())?;
     log::info!("[worker] mining for {} as {}", config.node, config.name);
 
     // Seals found for a job before this connection belong to no job it knows.
@@ -351,6 +355,10 @@ fn take_work(
     found: &mpsc::Sender<(Hash, u64)>,
     job: &Mutex<Option<(u64, Hash)>>,
 ) -> Result<(), String> {
+    // Under a pool: the shares it took this connection, and the share difficulty now.
+    let mut shares: u64 = 0;
+    let mut difficulty: Option<u128> = None;
+
     loop {
         let message = match receiver.receive() {
             Ok(message) => message,
@@ -370,11 +378,42 @@ fn take_work(
                 }
 
                 *lock(job) = Some((work.job, work.id));
-                mounted.as_ref().expect("mounted above").1.work(work.id, work.difficulty, work.start);
+                let rig = &mounted.as_ref().expect("mounted above").1;
+
+                // A pool's work: every nonce at the share difficulty goes back, the block's among them.
+                match work.share {
+                    Some(share) => {
+                        if difficulty != Some(share) {
+                            log::info!("[worker] share difficulty {share}");
+                            difficulty = Some(share);
+                        }
+
+                        rig.shares(work.id, share, work.start);
+                    }
+                    None => rig.work(work.id, work.difficulty, work.start),
+                }
+
                 log::debug!("[worker] job {} at difficulty {}, nonces from {}", work.job, work.difficulty, work.start);
             }
-            Some("verdict") if message["took"] == true => log::info!("[worker] the node took the nonce for job {}", message["job"]),
+            Some("verdict") if message["took"] == true && message["kind"] == "share" => {
+                shares += 1;
+                log::debug!("[worker] the pool took share {shares}, for job {}", message["job"]);
+            }
+            Some("verdict") if message["took"] == true => log::info!("[worker] the node took the nonce for job {}: a block", message["job"]),
             Some("verdict") => log::info!("[worker] the node refused the nonce for job {}: {}", message["job"], message["why"].as_str().unwrap_or("")),
+            Some("pool") => log::info!(
+                "[worker] the node runs a pool: a fee of {}%, each block split by the last {} blocks' worth of shares",
+                message["fee"].as_u64().unwrap_or(0) as f64 / 1e7,
+                message["window"].as_u64().unwrap_or(0)
+            ),
+            Some("refused") => return Err(format!("the node refused this worker: {}", message["why"].as_str().unwrap_or(""))),
+            Some("standing") => log::info!(
+                "[worker] {shares} shares taken since connecting; {} in the window, {:.4}% of the next block; {} earned in all for {}, claimed with chainv4 claim",
+                message["shares"].as_u64().unwrap_or(0),
+                message["parts"].as_u64().unwrap_or(0) as f64 / 1e7,
+                message["earned"].as_str().unwrap_or("0"),
+                message["payout"].as_str().unwrap_or("")
+            ),
             // Pings, and a newer node's messages this worker does not know.
             _ => {}
         }
@@ -388,6 +427,8 @@ struct Work {
     difficulty: u128,
     hash: HashType,
     start: u64,
+    /// A pool's share difficulty for this worker; None from a node that runs no pool.
+    share: Option<u128>,
 }
 
 impl Work {
@@ -401,6 +442,7 @@ impl Work {
             difficulty: message["difficulty"].as_str()?.parse().ok()?,
             hash: message["hash"].as_str()?.parse().ok()?,
             start: message["start"].as_u64()?,
+            share: message["share"].as_str().and_then(|share| share.parse().ok()),
         })
     }
 }
