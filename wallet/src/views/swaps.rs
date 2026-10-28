@@ -84,6 +84,9 @@ pub struct SwapsState {
     /// What the node said of the multisigs swapped as, by address: their Bitcoin side is read
     /// from their members' xpubs.
     multisigs: HashMap<String, Value>,
+    /// A multisig's calls on an EVM leg, its contract's approval and lock, for the Multisig page to
+    /// make into bundles: the multisig, the chain, and the calls.
+    to_multisig: Option<(String, u64, Vec<chainv4::swap::evm::Call>)>,
     /// A multisig's Bitcoin spend of the HTLC, collecting its members' signatures.
     shared: Option<Box<Shared>>,
 }
@@ -121,6 +124,7 @@ impl Default for SwapsState {
             relayed: None,
             as_multisig: None,
             multisigs: HashMap::new(),
+            to_multisig: None,
             shared: None,
         }
     }
@@ -320,6 +324,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
             ui.add_space(10.0);
             state.evm.show(ui, ctx, "a swap's transaction", "chainv4 · swap");
         }
+
+        // A multisig's EVM lock is its contract's calls: bundles for its owners, on its page.
+        if let Some((account, chain_id, calls)) = state.to_multisig.take() {
+            multisig.propose_evm(&account, chain_id, calls);
+            *ctx.page = Page::Multisig;
+        }
     }
 
     ui.add_space(14.0);
@@ -433,9 +443,9 @@ fn parties(ctx: &Ctx, holder: &Holder, testnet: Option<bool>) -> Result<Parties,
     })
 }
 
-/// Who a swap is made as: the account, or a followed multisig, its address here and, on a Bitcoin
-/// leg, its members' keys at the swap's own index, from what the node said of it. A multisig
-/// swaps on this chain and Bitcoin; its EVM side is to come.
+/// Who a swap is made as: the account, or a followed multisig, its address here, on a Bitcoin leg
+/// its members' keys at the swap's own index, and on an EVM leg its contract there, from what the
+/// node said of it.
 fn parties_as(ctx: &Ctx, known: &HashMap<String, Value>, holder: &Holder, multisig: Option<&str>, testnet: Option<bool>, hash: &[u8; 32]) -> Result<Parties, String> {
     let Some(multisig) = multisig else {
         return parties(ctx, holder, testnet);
@@ -455,7 +465,9 @@ fn parties_as(ctx: &Ctx, known: &HashMap<String, Value>, holder: &Holder, multis
         }
     };
 
-    Ok(Parties { chain: Some(address), bitcoin, evm: None })
+    let evm = super::multisig::evm::side_of(value).map(|(start, _)| chainv4::abi::multisig::multisig_contract(&address, &start));
+
+    Ok(Parties { chain: Some(address), bitcoin, evm })
 }
 
 /// Picks who to swap as: the account, or one of the multisigs the Multisig page follows.
@@ -1084,6 +1096,12 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                     }).color(palette.ink));
 
                     match on.lock_calls(&terms.hash, deadline) {
+                        // A multisig locks by its contract's calls, which its owners sign.
+                        Ok(calls) if let Some(account) = &record.multisig => {
+                            if theme::primary(ui, &palette, &format!("Propose the lock to its owners, on {}", chain_name(on.chain_id)), waiting.is_none()).clicked() {
+                                state.to_multisig = Some((account.clone(), on.chain_id, calls));
+                            }
+                        }
                         Ok(calls) => {
                             let steps = calls.len();
                             ui.horizontal(|ui| {

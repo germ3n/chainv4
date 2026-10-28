@@ -32,6 +32,13 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ### Consensus
 
+- [ ] **Revisit the deployment proxy at genesis.** A chain running the EVM starts with the
+  deterministic deployment proxy at `0x4e59…956c` (`Genesis::write_state`), since the chain
+  refuses the proxy's own pre-EIP-155 deploy, so a multisig's MultiSig.sol and Swap.sol land at
+  their everywhere-addresses here too. It is ownerless, holds nothing and is 69 bytes, as OP
+  Stack's preinstalls are; but it is always on, so a chain made before it no longer opens with
+  its old genesis (`WrongGenesis`). Maybe make it a genesis setting (`preinstalls`), off for old
+  genesis files, or drop it for something else.
 - [x] **Proof of work.** Genesis names the scheme. Under proof of work anyone mines: a nonce
   must make the work hash of the block id meet the block's difficulty, which retargets
   every block toward a target block time. Miners run on threads of their own (`--mine`,
@@ -374,19 +381,28 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   scanning them all. The explorer's block map lays its lanes out once a change, not every frame.
 - [x] **State reads copy no key.** A layer, and MemoryDb, keep their records by column then key,
   so a read borrows its key. Imports a full block of transfers about 6% faster in memory.
-- [ ] **Native multisig, across chains.** On chainv4 itself, done: `Address::Multisig`, made by
+- [x] **Native multisig, across chains.** On chainv4 itself, done: `Address::Multisig`, made by
   `Tx::CreateMultisig`, its transactions `Tx::Multisig` backed by members' signatures off chain
   and `Tx::ApproveMultisig` on chain together, the multisig paying, members changed by its own
   quorum, in the CLI, the wallet and the offline signer (see [Multisig](multisig.md)). On Bitcoin,
   done too: members name BIP48 xpubs, wsh(sortedmulti(…)) with fresh addresses and a descriptor
   other wallets import, PSBTs built, signed, combined and finished in the CLI, the wallet and the
   offline signer, checked against Bitcoin Core on regtest. Swaps from a multisig too, its quorum in
-  the HTLC's branch, in the CLI, the wallet and the signer. Left: the EVM Safe-style contract. The original note: Accounts that need M of N keys to move anything,
+  the HTLC's branch, in the CLI, the wallet and the signer. On EVM chains, done: MultiSig.sol at
+  one address on every chain, through the deployment proxy, its first owners kept on chain, calls
+  signed as EIP-712 bundles by the CLI, the wallet and the offline signer, owners synced when the
+  members change, and swaps from a multisig on EVM legs. The original note: Accounts that need M of N keys to move anything,
   built into the chain rather than a contract: the keys may be any kind the chain takes
   (Ed25519, secp256k1, Bitcoin), and the same signers hold matching multisig on the other
   chains swaps reach, a Bitcoin P2WSH M-of-N and an EVM Safe-style contract, so one quorum
   controls funds on all of them; the wallet and the offline signer collect signatures, and
   swaps can be made from a multisig.
+- [ ] **Owners of other key kinds on a multisig's EVM contract.** MultiSig.sol checks secp256k1
+  signatures alone, `ecrecover`'s, so every member names a secp256k1 EVM address. It could take
+  P-256 owners, passkeys, where a chain has RIP-7212's precompile; contract owners through
+  ERC-1271, another Safe or a smart-account wallet; or Ed25519 checked in Solidity, at hundreds of
+  thousands of gas a signature. Each changes the contract, and so the address, for multisigs made
+  after.
 - [x] **Delegate calls and fallback.** `contracts.delegate` / `delegate` run another contract's code
   on the caller's storage, like `delegatecall`; `fallback` answers functions a contract does not
   export. Together they make proxies, upgradable without the built-in upgrade, with examples in

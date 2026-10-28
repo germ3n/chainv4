@@ -19,6 +19,9 @@ use {
     ureq::Agent,
 };
 
+#[cfg(all(feature = "swap", feature = "abi"))]
+pub(crate) mod evm;
+
 #[derive(clap::Args)]
 pub struct MultisigArgs {
     /// The node's HTTP API: http://, or https:// behind TLS.
@@ -83,6 +86,16 @@ pub enum MultisigAction {
         account: Address,
         #[command(subcommand)]
         action: BitcoinAction,
+    },
+    /// The multisig's contract on EVM chains, for a multisig whose members name EVM addresses: a
+    /// MultiSig.sol at one address on every chain, its owners their EVM keys. Its address, its
+    /// deploy, and calls as bundles its owners sign, then sent.
+    #[cfg(all(feature = "swap", feature = "abi"))]
+    Evm {
+        /// The multisig, multisig:0x….
+        account: Address,
+        #[command(subcommand)]
+        action: evm::EvmAction,
     },
 }
 
@@ -182,6 +195,8 @@ pub fn multisig(args: MultisigArgs) -> CliResult<()> {
         }
         #[cfg(feature = "bitcoin")]
         MultisigAction::Bitcoin { account, action } => bitcoin(&agent, &node, &account, action),
+        #[cfg(all(feature = "swap", feature = "abi"))]
+        MultisigAction::Evm { account, action } => evm::evm(&agent, &node, &account, &keypair, action),
         MultisigAction::Submit { bundle: path } => {
             let bundle = read(&path)?;
             let (backed, needed) = backing(&agent, &node, &bundle)?;

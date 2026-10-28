@@ -88,6 +88,11 @@ impl Rpc {
         Ok(self.ask("eth_getLogs", json!([filter]))?.as_array().cloned().unwrap_or_default())
     }
 
+    /// An address's coin, in wei, at the latest block.
+    pub fn balance(&self, address: &[u8; 20]) -> CliResult<u256> {
+        self.number("eth_getBalance", json!([to_hex(address), "latest"]))
+    }
+
     /// Whether there is code at an address.
     pub fn has_code(&self, address: &[u8; 20]) -> CliResult<bool> {
         let answer = self.ask("eth_getCode", json!([to_hex(address), "latest"]))?;

@@ -795,6 +795,7 @@ async fn multisig(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
         "threshold": policy.threshold,
         "testnet": policy.testnet,
         "bitcoin": bitcoin_side(&policy),
+        "evm": evm_side(&address, &policy, multisigs.evm_start(&address)?),
         "nonce": account.nonce,
         "balance": account.balance.to_string(),
         "proposals": open.proposals.iter().map(|proposal| json!({
@@ -825,6 +826,29 @@ fn bitcoin_side(policy: &crate::registry::multisig::MultisigPolicy) -> Value {
     }
 
     let _ = policy;
+
+    Value::Null
+}
+
+/// A multisig's contract on EVM chains: its address, the owners and threshold it starts with, and
+/// the ones its members name now, which its owners should be; null while they name no EVM
+/// addresses.
+fn evm_side(address: &Address, policy: &crate::registry::multisig::MultisigPolicy, start: Option<crate::registry::multisig::EvmStart>) -> Value {
+    #[cfg(all(feature = "abi", feature = "secp256k1"))]
+    if let Some(start) = start {
+        let owners = |start: &crate::registry::multisig::EvmStart| json!({
+            "owners": start.owners.iter().map(|owner| to_hex(owner)).collect::<Vec<_>>(),
+            "threshold": start.threshold,
+        });
+
+        return json!({
+            "contract": to_hex(&crate::abi::multisig::multisig_contract(address, &start)),
+            "start": owners(&start),
+            "now": policy.evm().as_ref().map(owners),
+        });
+    }
+
+    let _ = (address, policy, start);
 
     Value::Null
 }

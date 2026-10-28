@@ -28,6 +28,8 @@ use {
 };
 
 pub(crate) mod bitcoin;
+#[cfg(feature = "swap")]
+pub(crate) mod evm;
 
 /// How often the followed multisig is asked of the node again, in milliseconds.
 const REFRESH: u64 = 10_000;
@@ -59,6 +61,9 @@ pub struct MultisigState {
     trouble: Option<String>,
     /// Its coins on Bitcoin, for one whose members name xpubs.
     bitcoin: bitcoin::BitcoinState,
+    /// Its contract on EVM chains, for one whose members name EVM addresses.
+    #[cfg(feature = "swap")]
+    evm: evm::EvmState,
     /// A transaction another page asked the multisig to send, waiting for its nonce to price.
     incoming: Option<(String, Tx)>,
 }
@@ -73,6 +78,15 @@ impl MultisigState {
         self.asked_at = 0;
         self.bundle = None;
         self.incoming = Some((account, prepared.tx));
+    }
+
+    /// Takes calls another page made for a followed multisig's contract on an EVM chain, such as a
+    /// swap's approval and lock: each becomes a bundle for its owners in turn.
+    #[cfg(feature = "swap")]
+    pub fn propose_evm(&mut self, account: &str, chain_id: u64, calls: Vec<chainv4::swap::evm::Call>) {
+        self.selected = Some(account.to_string());
+        self.asked_at = 0;
+        self.evm.queue(account, chain_id, calls);
     }
 
     /// Takes the node's answer to something this page asked; false when it asked none of it.
@@ -157,6 +171,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, send: &mut Se
 
             if let Some(wallet) = bitcoin::wallet_of(&value) {
                 bitcoin::show(ui, ctx, &mut state.bitcoin, &selected, &wallet);
+            }
+
+            #[cfg(feature = "swap")]
+            if let Some((start, now)) = evm::side_of(&value) {
+                evm::show(ui, ctx, &mut state.evm, &selected, &start, now.as_ref());
             }
         }
     }
@@ -593,6 +612,7 @@ pub(super) fn member_line(holder: &crate::keys::Holder, seed: Option<&chainv4::c
 
     Some(match (xpub, evm) {
         (Some(xpub), Some(evm)) => format!("{key},{xpub},{evm}"),
+        (None, Some(evm)) => format!("{key},,{evm}"),
         _ => key.to_string(),
     })
 }
@@ -636,21 +656,23 @@ fn made(ctx: &mut Ctx, state: &MultisigState) -> Result<Prepared, String> {
     })
 }
 
-/// A member as a line gives it, KEY or KEY,[origin]xpub…,EVM_ADDRESS, and whether its xpub is for
+/// A member as a line gives it, KEY, KEY,,EVM_ADDRESS or KEY,[origin]xpub…,EVM_ADDRESS, and whether its xpub is for
 /// Bitcoin's test networks.
 fn member(line: &str) -> Result<(MultisigMember, Option<bool>), String> {
     let parts: Vec<&str> = line.split(',').map(str::trim).collect();
     let key: PublicKey = parts[0].parse().map_err(|_| format!("{} is not a key", format::short(parts[0])))?;
 
+    let evm = |evm: &str| from_hex(evm).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{} is not an EVM address", format::short(evm)));
+
     match parts[1..] {
         [] => Ok((MultisigMember { key, bitcoin: None, evm: None }, None)),
-        [xpub, evm] => {
+        ["", address] => Ok((MultisigMember { key, bitcoin: None, evm: Some(evm(address)?) }, None)),
+        [xpub, address] => {
             let (bitcoin, network) = chainv4::crypto::bitcoin::multisig::parse_xpub(xpub).map_err(|why| format!("{}: {why}", format::short(xpub)))?;
-            let evm = from_hex(evm).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{} is not an EVM address", format::short(evm)))?;
 
-            Ok((MultisigMember { key, bitcoin: Some(bitcoin), evm: Some(evm) }, Some(network == chainv4::crypto::bitcoin::tx::Network::Test)))
+            Ok((MultisigMember { key, bitcoin: Some(bitcoin), evm: Some(evm(address)?) }, Some(network == chainv4::crypto::bitcoin::tx::Network::Test)))
         }
-        _ => Err("A member is a key, or a key, a Bitcoin xpub with its origin and an EVM address with commas between.".to_string()),
+        _ => Err("A member is a key; a key, two commas and an EVM address; or a key, a Bitcoin xpub with its origin and an EVM address, with commas between.".to_string()),
     }
 }
 
@@ -699,6 +721,7 @@ mod tests {
             member(&format!("{key},{xpub},{evm}")).map(|(member, testnet)| (member.bitcoin, member.evm, testnet)),
             Ok((Some(seed.multisig_account(1)), Some([0x22; 20]), Some(true)))
         );
+        assert_eq!(member(&format!("{key},,{evm}")), Ok((MultisigMember { key, bitcoin: None, evm: Some([0x22; 20]) }, None)), "on EVM chains alone");
         assert!(member("not a key").is_err());
         assert!(member(&format!("{key},{xpub}")).unwrap_err().contains("commas"));
         assert!(member(&format!("{key},xpub123,{evm}")).is_err(), "an xpub without its origin");

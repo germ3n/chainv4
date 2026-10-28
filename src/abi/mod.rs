@@ -756,5 +756,7 @@ impl AbiEvent {
     }
 }
 
+#[cfg(feature = "secp256k1")]
+pub mod multisig;
 #[cfg(test)]
 mod tests;

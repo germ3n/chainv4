@@ -352,3 +352,22 @@ fn the_wallets_own_requests_name_the_signers_key_and_the_site() {
     assert_eq!(Signature { signature: vec![0; 64], ..signature.clone() }.parts(), None, "no v");
     assert_eq!(Signature { signature: [vec![0; 64], vec![0x01, 0x23]].concat(), ..signature }.parts().map(|(_, parity)| parity), Some(0), "EIP-155's v, 291: 291 - 35 is even");
 }
+
+#[test]
+fn the_signer_signs_a_multisig_s_evm_call_as_typed_data_and_the_bundle_counts_its_owner() {
+    use chainv4::abi::multisig::EvmBundle;
+    use chainv4::structs::u256::u256;
+
+    let mut bundle = EvmBundle { chain_id: 11_155_111, contract: [9; 20], to: [7; 20], value: u256::new(5), data: Vec::new(), nonce: u256::ONE, signatures: Vec::new() };
+    let signature = request(DataKind::TypedData, bundle.typed_data().to_string().into_bytes(), 0).sign(&seed()).unwrap();
+    let (rs, parity) = signature.parts().unwrap();
+    let mut whole = [0; 65];
+    whole[..64].copy_from_slice(&rs);
+    whole[64] = 27 + parity;
+    let owner = match seed().key(chainv4::crypto::keypair::KeyType::Secp256k1, 0).public().address() {
+        chainv4::structs::address::Address::Secp256k1(bytes) => bytes,
+        other => panic!("{other:?}"),
+    };
+
+    assert_eq!(bundle.add(whole), Ok(owner));
+}

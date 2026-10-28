@@ -1270,3 +1270,153 @@ mod gateway {
         assert!(run(&mut chain, gateway, 0, again.deliver_input(&[again.sign(&[4; 32]), again.sign(&[5; 32])])).result.is_ok());
     }
 }
+
+/// An owner's EVM address, from its secret.
+#[cfg(feature = "secp256k1")]
+fn evm_owner(secret: &[u8; 32]) -> [u8; 20] {
+    match Keypair::from_private(crate::crypto::keypair::PrivateKey::Secp256k1(*secret)).public().address() {
+        Address::Secp256k1(address) => address,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// What a MultiSig.sol's reads answer: its owners and threshold, and its nonce.
+#[cfg(feature = "secp256k1")]
+fn multisig_state(chain: &mut Chain, contract: Address) -> (crate::registry::multisig::EvmStart, u256) {
+    let [owners, threshold, nonce] = crate::abi::multisig::multisig_reads().map(|input| {
+        let read = call(chain, &authority(), contract, 0, input);
+
+        returned(&advance(chain, vec![read])[0])
+    });
+
+    crate::abi::multisig::multisig_read(&owners, &threshold, &nonce).expect("a MultiSig.sol's answers")
+}
+
+#[cfg(feature = "secp256k1")]
+#[test]
+fn a_multisig_contract_runs_what_threshold_of_its_owners_sign_and_changes_owners_only_through_itself() {
+    use crate::abi::multisig::{EvmBundle, change_owners_input, multisig_execute_input, multisig_init_code};
+    use crate::registry::multisig::EvmStart;
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let secrets = [[1u8; 32], [2; 32], [3; 32], [5; 32]];
+    let mut owners: Vec<[u8; 20]> = secrets[..3].iter().map(evm_owner).collect();
+    owners.sort();
+    let start = EvmStart { owners, threshold: 2 };
+    let deployer = authority();
+    let contract = evm::create_address(&deployer.public().address(), nonce(&chain, &deployer));
+    let deploy = sign(&chain, &deployer, Tx::Deploy { code: Code::Evm(multisig_init_code(&Address::Multisig([4; 32]), &start)) });
+
+    assert_eq!(advance(&mut chain, vec![deploy])[0].result, Ok(Effect::Deployed(contract)));
+    assert_eq!(multisig_state(&mut chain, contract), (start.clone(), u256::ZERO));
+
+    let Address::Evm(at) = contract else { panic!("{contract:?}") };
+    let fund = call(&chain, &authority(), contract, 1_000, Vec::new());
+    advance(&mut chain, vec![fund]);
+    let payee = evm_owner(&[9; 32]);
+    let mut bundle = EvmBundle { chain_id: evm::chain_id(&chain.genesis()), contract: at, to: payee, value: u256::new(300), data: Vec::new(), nonce: u256::ZERO, signatures: Vec::new() };
+    let execute = |chain: &mut Chain, input: Vec<u8>| {
+        let sent = call(chain, &authority(), contract, 0, input);
+
+        advance(chain, vec![sent]).remove(0).result
+    };
+
+    // One of two is not enough.
+    bundle.sign(&secrets[0]);
+    assert!(execute(&mut chain, bundle.execute_input(&start.owners)).is_err());
+
+    // Two are, once each, by address ascending; the same signatures again are for a nonce gone.
+    bundle.sign(&secrets[2]);
+    assert!(execute(&mut chain, bundle.execute_input(&start.owners)).is_ok());
+    assert_eq!(balance(&chain, &Address::Secp256k1(payee)), u256::new(300));
+    assert_eq!(balance(&chain, &contract), u256::new(700));
+    assert!(execute(&mut chain, bundle.execute_input(&start.owners)).is_err(), "no replay");
+
+    // Signatures out of order count for nothing.
+    bundle.nonce = u256::ONE;
+    bundle.signatures.clear();
+    bundle.sign(&secrets[0]);
+    bundle.sign(&secrets[1]);
+    let mut backwards: Vec<[u8; 65]> = bundle.signers().into_iter().map(|(_, signature)| signature).collect();
+    backwards.reverse();
+    assert!(execute(&mut chain, multisig_execute_input(&bundle.to, bundle.value, &bundle.data, &backwards)).is_err());
+
+    // Its owners change through itself alone, signed by those before.
+    let mut next: Vec<[u8; 20]> = secrets[1..].iter().map(evm_owner).collect();
+    next.sort();
+    let next = EvmStart { owners: next, threshold: 1 };
+    assert!(execute(&mut chain, change_owners_input(&next)).is_err(), "not from outside");
+
+    let mut change = EvmBundle { to: at, value: u256::ZERO, data: change_owners_input(&next), ..bundle.clone() };
+    change.signatures.clear();
+    change.sign(&secrets[0]);
+    change.sign(&secrets[1]);
+    assert!(execute(&mut chain, change.execute_input(&start.owners)).is_ok());
+    assert_eq!(multisig_state(&mut chain, contract), (next.clone(), u256::new(2)));
+
+    // An owner gone signs for nothing; a new one alone now does.
+    let mut pay = EvmBundle { nonce: u256::new(2), ..bundle.clone() };
+    pay.signatures.clear();
+    pay.sign(&secrets[0]);
+    assert!(execute(&mut chain, pay.execute_input(&start.owners)).is_err());
+    pay.signatures.clear();
+    pay.sign(&secrets[3]);
+    assert!(execute(&mut chain, pay.execute_input(&next.owners)).is_ok());
+    assert_eq!(balance(&chain, &Address::Secp256k1(payee)), u256::new(600));
+
+    // It takes NFTs: it says it is ERC-1155's receiver.
+    let asked = call(&chain, &authority(), contract, 0, calldata("supportsInterface(bytes4)", &[[vec![0x4e, 0x23, 0x12, 0xe0], vec![0; 28]].concat()]));
+    assert_eq!(returned(&advance(&mut chain, vec![asked])[0]), word(1));
+}
+
+#[cfg(feature = "secp256k1")]
+#[test]
+fn the_deployment_proxy_is_there_from_genesis_and_puts_a_multisigs_contract_where_it_is_everywhere() {
+    use crate::abi::multisig::{multisig_contract, multisig_deployment};
+    use crate::registry::multisig::EvmStart;
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let proxy = Address::Evm([0x4e, 0x59, 0xb4, 0x48, 0x47, 0xb3, 0x79, 0x57, 0x85, 0x88, 0x92, 0x0c, 0xa7, 0x8f, 0xbf, 0x26, 0xc0, 0xb4, 0x95, 0x6c]);
+    let mut owners: Vec<[u8; 20]> = [[1u8; 32], [2; 32]].iter().map(evm_owner).collect();
+    owners.sort();
+    let (multisig, start) = (Address::Multisig([4; 32]), EvmStart { owners, threshold: 2 });
+    let at = Address::Evm(multisig_contract(&multisig, &start));
+
+    // Anyone sends it the deploy; it lands where CREATE2 through the proxy puts it on any chain.
+    let deploy = call(&chain, &authority(), proxy, 0, multisig_deployment(&multisig, &start));
+    let receipt = advance(&mut chain, vec![deploy]).remove(0);
+
+    assert!(receipt.result.is_ok(), "{receipt:?}");
+    assert_eq!(multisig_state(&mut chain, at), (start, u256::ZERO));
+}
+
+#[cfg(feature = "secp256k1")]
+#[test]
+fn a_contract_made_where_coin_waited_takes_it_over_and_none_is_made_or_lost() {
+    use crate::abi::multisig::{multisig_contract, multisig_deployment};
+    use crate::registry::multisig::EvmStart;
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let proxy = Address::Evm([0x4e, 0x59, 0xb4, 0x48, 0x47, 0xb3, 0x79, 0x57, 0x85, 0x88, 0x92, 0x0c, 0xa7, 0x8f, 0xbf, 0x26, 0xc0, 0xb4, 0x95, 0x6c]);
+    let (multisig, start) = (Address::Multisig([4; 32]), EvmStart { owners: vec![evm_owner(&[1; 32])], threshold: 1 });
+    let bytes = multisig_contract(&multisig, &start);
+    let me = authority().public().address();
+    let before = balance(&chain, &me);
+
+    // Sent through the EVM, as a wallet there would, the coin sits with the bytes' account until
+    // there is code; sent here to the contract's address, under it.
+    let through_evm = call(&chain, &authority(), Address::Secp256k1(bytes), 300, Vec::new());
+    advance(&mut chain, vec![through_evm]);
+    let here = SignedTx::sign(Tx::Transfer { from: me, to: Address::Evm(bytes), amount: Amount::U128(200) }, nonce(&chain, &authority()), FeeOffer::NONE, &authority());
+    advance(&mut chain, vec![here]);
+
+    let deploy = call(&chain, &authority(), proxy, 0, multisig_deployment(&multisig, &start));
+    assert!(advance(&mut chain, vec![deploy])[0].result.is_ok());
+
+    assert_eq!(balance(&chain, &Address::Evm(bytes)), u256::new(500), "both");
+    assert_eq!(balance(&chain, &Address::Secp256k1(bytes)), u256::ZERO, "not twice");
+    assert_eq!(balance(&chain, &me), before - u256::new(500));
+}

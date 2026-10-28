@@ -302,8 +302,8 @@ multi-token id (ERC-721 and ERC-1155 on the EVM), rather than coins or a fungibl
 
 ## From a multisig
 
-A [native multisig](multisig.md) swaps as a party on chainv4 and Bitcoin, its quorum controlling
-what it locks or receives throughout; its EVM side is to come.
+A [native multisig](multisig.md) swaps as a party on chainv4, Bitcoin and EVM chains, its quorum
+controlling what it locks or receives throughout.
 - **On Bitcoin** its branch of the HTLC, refund when it pays and claim when it receives, checks M of
   its members' keys with `OP_CHECKMULTISIG` instead of one key's `OP_CHECKSIG`, each branch then
   ending in its own check. An HTLC of two keys keeps its template byte for byte. The keys are the
@@ -315,6 +315,11 @@ what it locks or receives throughout; its EVM side is to come.
 - **On chainv4** the multisig is the leg's address: its lock is its own transaction, proposed as a
   bundle for its members. A token's lock is two, the approval and then the lock. Claims and
   refunds anyone may send, so they need none of its members.
+- **On an EVM chain** the multisig's party is its contract there, at the same address on every
+  chain, so the terms are written as for any address. Its lock is the contract's calls, the
+  approval of a token and the lock, bundles at its next nonces for its owners to sign
+  (`chainv4 multisig evm … sign`, then `submit`). What it receives, Swap.sol pays to the
+  contract; claims and refunds anyone sends.
 - **Its Bitcoin claim or refund** is a PSBT its members sign, with chainv4 multisig, the offline
   signer or the wallet; the first threshold signatures in the script's key order finish it.
 
@@ -324,10 +329,13 @@ chainv4 swap lock --multisig multisig:0x… --key member.key --out lock.bundle '
 chainv4 swap bitcoin-claim 'UR:…' --multisig multisig:0x… --psbt claim.psbt --funding txid:vout --sats 100000 --to tb1q… --secret 0x…
 chainv4 multisig bitcoin multisig:0x… sign claim.psbt     # each member
 chainv4 swap bitcoin-finish 'UR:…' --psbt claim.psbt --sats 100000 --secret 0x…
+chainv4 swap lock --multisig multisig:0x… --key member-evm.key --eth-rpc … --out lock.evm 'UR:…'   # an EVM leg
+chainv4 multisig --key other-evm.key evm multisig:0x… sign lock.evm
+chainv4 multisig --key other-evm.key evm multisig:0x… submit lock.evm --eth-rpc …
 ```
 
 In the wallet, **Swap as** picks a followed multisig when offering or answering. Its lock goes to
-the Multisig page as a proposal; its Bitcoin claim or refund collects the members' signatures,
+the Multisig page as a proposal, on an EVM leg as its contract's calls, each a bundle in turn; its Bitcoin claim or refund collects the members' signatures,
 these words', the signer's from its code, or a member's pasted, and finishes once the branch
 holds enough. The offline signer signs a multisig's branch as any multisig input, once the HTLC's
 branch holds its key.

@@ -60,6 +60,18 @@ creator's EVM address and nonce, as CREATE gives it, or CREATE2's. A deploy from
 account goes to the address Ethereum would give its alias, at the account's nonce.
 `chainv4 send deploy --evm` prints it before the deploy lands.
 
+**The deterministic deployment proxy is there from genesis**, at `0x4e59…956c` as on other EVM
+chains, since the chain refuses the proxy's own deploy, a legacy transaction without a chain id.
+What is deployed through it, CREATE2 with a salt, lands here where it lands everywhere: Swap.sol,
+and a multisig's MultiSig.sol. It is a chain's genesis state, so adding it changed the genesis of
+every chain running the EVM (see the [todo](todo.md)).
+
+**Coin sent to a contract's address before it exists waits for it.** Sent through the EVM, it sits
+with the secp256k1 account of those 20 bytes, whose key nobody holds; sent here to `evm:0x…`, under
+the contract's address, where the EVM does not see it yet. When the contract is created there it
+takes both over, and that account keeps none, so a counterfactual address, CREATE2's, is safe to
+fund first.
+
 ## Deploying
 
 `Tx::Deploy` carries `Code::Evm`, the init code as `solc --bin` or `forge build` writes it, with

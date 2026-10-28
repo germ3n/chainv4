@@ -484,7 +484,9 @@ Under `authority`, `validators` is empty and `active` lists the signers, each we
 A [multisig](multisig.md): its `members`, each a `key`, its `bitcoin` xpub with its origin as a
 descriptor writes it and its `evm` address in hex, each or `null`, its `threshold`, `testnet`, and
 `bitcoin`: `null`, or its `network`, its `receiving` and `change` descriptors with their checksums
-and its `first_address`; its next `nonce` and `balance`, and the `proposals` open on chain
+and its `first_address`; `evm`: `null`, or its contract on EVM chains, its `contract` address,
+the `start` owners and threshold its address commits to and those its members name `now`, each
+`owners` in hex and a `threshold`; its next `nonce` and `balance`, and the `proposals` open on chain
 for that nonce, each with its `id`, the `tx` as JSON and `encoded` in hex, its `fee` offer and the
 member keys that `approvals` back it. 404 for an address that is not one.
 

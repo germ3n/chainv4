@@ -53,6 +53,12 @@ pub use fees::{FeeConfig, Fees};
 pub use crate::params::{BlockLimits, Reward};
 pub use parallel::Workers;
 use parallel::{Runner, Unfit};
+
+/// The deterministic deployment proxy, which CREATE2s its call's data after a 32-byte salt: where
+/// other EVM chains have it, who deployed it there, and its code.
+const PROXY: [u8; 20] = [0x4e, 0x59, 0xb4, 0x48, 0x47, 0xb3, 0x79, 0x57, 0x85, 0x88, 0x92, 0x0c, 0xa7, 0x8f, 0xbf, 0x26, 0xc0, 0xb4, 0x95, 0x6c];
+const PROXY_DEPLOYER: [u8; 20] = [0x3f, 0xab, 0x18, 0x46, 0x22, 0xdc, 0x19, 0xb6, 0x10, 0x93, 0x49, 0xb9, 0x48, 0x11, 0x49, 0x3b, 0xf2, 0xa4, 0x53, 0x62];
+const PROXY_CODE: &str = "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3";
 #[cfg(feature = "finality-authority")]
 pub use finality::AuthorityConfig;
 #[cfg(feature = "finality-depth")]
@@ -770,6 +776,20 @@ impl Genesis {
 
         if let Some(directory) = &self.directory {
             crate::registry::changes::Changes::new(state).write_directory(directory);
+        }
+
+        // Running the EVM, the chain starts with the deterministic deployment proxy where other EVM
+        // chains have it, so what is deployed through it lands here where it lands there.
+        if self.engines.contains(&Engine::Evm) {
+            let record = crate::registry::contracts::ContractRecord {
+                deployer: Address::Evm(PROXY_DEPLOYER),
+                engine: Engine::Evm,
+                code: crate::structs::hex::from_hex(PROXY_CODE).expect("the proxy's code is hex"),
+                functions: Vec::new(),
+                reentrant: Vec::new(),
+                layout: Default::default(),
+            };
+            state.put_value(Column::Contracts, crate::db::address_key(&Address::Evm(PROXY)), &record);
         }
 
         Ok(())

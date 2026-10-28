@@ -235,6 +235,35 @@ pub struct Multisigs<'a> {
     state: &'a State,
 }
 
+#[document(
+    summary = "The owners and threshold a multisig's EVM contract starts with: its members' EVM addresses, sorted, and its threshold, when they first named them. What the contract's address on every EVM chain commits to, so kept as they were whatever the multisig's members become.",
+    category = "Multisig",
+    see_also = "Multisigs::evm_start, multisig_contract",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct EvmStart {
+    #[document(summary = "The members' EVM addresses as it was made, sorted.")]
+    pub owners: Vec<[u8; 20]>,
+    #[document(summary = "Its threshold as it was made.")]
+    pub threshold: u32,
+}
+
+impl Hashable for EvmStart {}
+
+impl MultisigPolicy {
+    #[document(parent = "MultisigPolicy", summary = "Its members' EVM addresses, sorted, and its threshold: what its EVM contract's owners should be; None when its members name none.")]
+    pub fn evm(&self) -> Option<EvmStart> {
+        let mut owners = self.members.iter().map(|member| member.evm).collect::<Option<Vec<_>>>()?;
+        owners.sort();
+
+        Some(EvmStart { owners, threshold: self.threshold })
+    }
+}
+
+fn evm_start_key(account: &Address) -> Vec<u8> {
+    [b"multisig-evm:".as_slice(), &account.hashable_bytes_with_tag()].concat()
+}
+
 fn policy_key(account: &Address) -> Vec<u8> {
     [b"multisig:".as_slice(), &account.hashable_bytes_with_tag()].concat()
 }
@@ -252,6 +281,11 @@ impl<'a> Multisigs<'a> {
     #[document(parent = "Multisigs", summary = "Where a multisig's policy is kept, in Column::Accounts: what a light client asks a proof of.")]
     pub fn policy_key(account: &Address) -> Vec<u8> {
         policy_key(account)
+    }
+
+    #[document(parent = "Multisigs", summary = "The owners and threshold a multisig's EVM contract starts with: its members' EVM addresses and threshold when they first named them, at its making or a change since; None while they name none.")]
+    pub fn evm_start(&self, account: &Address) -> Result<Option<EvmStart>, DbError> {
+        self.state.get_value(Column::Accounts, &evm_start_key(account))
     }
 
     #[document(parent = "Multisigs", summary = "A multisig's policy, or None for an address that is not one.")]
@@ -273,6 +307,11 @@ impl<'a> Multisigs<'a> {
             return Err(RegistryError::MultisigExists);
         }
 
+        // Its EVM contract's address commits to these, so they are kept as they are now.
+        if let Some(start) = policy.evm() {
+            self.state.put_value(Column::Accounts, evm_start_key(account), &start);
+        }
+
         self.state.put_value(Column::Accounts, policy_key(account), &policy);
 
         Ok(())
@@ -289,6 +328,14 @@ impl<'a> Multisigs<'a> {
         }
 
         self.get(account)?.ok_or(RegistryError::NotMultisig)?;
+
+        // A multisig whose members name EVM addresses for the first time starts its contract here.
+        if let Some(start) = policy.evm()
+            && self.evm_start(account)?.is_none()
+        {
+            self.state.put_value(Column::Accounts, evm_start_key(account), &start);
+        }
+
         self.state.put_value(Column::Accounts, policy_key(account), &policy);
         self.clear(account);
 

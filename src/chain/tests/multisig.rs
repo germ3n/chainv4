@@ -238,3 +238,37 @@ fn a_multisig_pays_its_own_fee() {
     assert_eq!(balance(&chain, &account), before - u256::new(1) - receipts[0].fee, "the multisig paid its fee");
     assert_eq!(balance(&chain, &alice.public().address()), u256::ZERO, "the carrier paid nothing");
 }
+
+#[test]
+fn its_evm_contracts_first_owners_are_kept_whatever_its_members_become() {
+    let mut chain = open(&Arc::new(MemoryDb::default()));
+    let account = two_of_three(&mut chain);
+    let [alice, bob, carol] = members();
+    let named = |keypair: &Keypair, evm: u8| MultisigMember { evm: Some([evm; 20]), ..member(keypair) };
+    let sign = |chain: &Chain, tx: Tx| {
+        let body = MultisigBody { account, tx: tx.clone(), nonce: multisig_nonce(chain, &account), fee: FeeOffer::NONE };
+        let signatures = [&alice, &bob].iter().map(|keypair| MemberSignature::sign(&body, keypair, &chain.genesis())).collect();
+
+        SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, body.nonce, FeeOffer::NONE, &alice)
+    };
+
+    assert_eq!(Multisigs::new(&chain.state()).evm_start(&account).unwrap(), None, "made naming no EVM addresses");
+
+    // The first change that names them starts its contract.
+    let first = Tx::ChangeMultisig { members: vec![named(&alice, 3), named(&bob, 1), named(&carol, 2)], threshold: 2, testnet: false };
+    let sent = sign(&chain, first);
+    advance(&mut chain, vec![sent]);
+    let start = crate::registry::multisig::EvmStart { owners: vec![[1; 20], [2; 20], [3; 20]], threshold: 2 };
+
+    assert_eq!(Multisigs::new(&chain.state()).evm_start(&account).unwrap(), Some(start.clone()), "sorted");
+
+    // Later ones leave it: the contract's address commits to it.
+    let later = Tx::ChangeMultisig { members: vec![named(&alice, 3), named(&bob, 4)], threshold: 1, testnet: false };
+    let sent = sign(&chain, later);
+    advance(&mut chain, vec![sent]);
+    let state = chain.state();
+    let multisigs = Multisigs::new(&state);
+
+    assert_eq!(multisigs.evm_start(&account).unwrap(), Some(start));
+    assert_eq!(multisigs.get(&account).unwrap().unwrap().evm().unwrap().owners, [[3; 20], [4; 20]]);
+}

@@ -259,10 +259,11 @@ pub enum TxArgs {
     /// Makes a new multisig, M of N members' keys, and prints its address. Each --member is its
     /// key here, and for a multisig that reaches Bitcoin and EVM chains its Bitcoin multisig
     /// account xpub with its origin and its EVM address, after commas:
-    /// ed25519:0x…,[73c5da0a/48'/0'/0'/2']xpub…,0x…, every member naming those or none. A tpub
-    /// makes it a multisig on Bitcoin's test networks.
+    /// ed25519:0x…,[73c5da0a/48'/0'/0'/2']xpub…,0x…, every member naming each or none; one on EVM
+    /// chains alone leaves the xpub out, ed25519:0x…,,0x…. A tpub makes it a multisig on
+    /// Bitcoin's test networks.
     CreateMultisig {
-        /// A member: KEY, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS. Repeat for each, 1 to 20.
+        /// A member: KEY, KEY,,EVM_ADDRESS, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS. Repeat for each, 1 to 20.
         #[arg(long = "member", required = true, value_parser = parse_member)]
         members: Vec<Member>,
         /// How many members each of its transactions needs.
@@ -593,21 +594,23 @@ pub fn send(args: SendArgs) -> CliResult<()> {
 #[derive(Clone, Debug)]
 pub struct Member(crate::registry::multisig::MultisigMember, Option<bool>);
 
-/// A multisig member as --member takes it: KEY, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS.
+/// A multisig member as --member takes it: KEY, KEY,,EVM_ADDRESS, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS.
 pub(super) fn parse_member(text: &str) -> Result<Member, String> {
     let parts: Vec<&str> = text.split(',').map(str::trim).collect();
     let key: PublicKey = parts[0].parse().map_err(|_| format!("{} is not a public key", parts[0]))?;
 
+    let evm = |evm: &str| from_hex(evm).and_then(|bytes| <[u8; 20]>::try_from(bytes).ok()).ok_or_else(|| format!("{evm} is not an EVM address, 20 bytes in hex"));
+
     match parts[1..] {
         [] => Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: None, evm: None }, None)),
+        ["", address] => Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: None, evm: Some(evm(address)?) }, None)),
         #[cfg(feature = "bitcoin")]
-        [xpub, evm] => {
+        [xpub, address] => {
             let (bitcoin, network) = crate::crypto::bitcoin::multisig::parse_xpub(xpub)?;
-            let evm = from_hex(evm).and_then(|bytes| <[u8; 20]>::try_from(bytes).ok()).ok_or_else(|| format!("{evm} is not an EVM address, 20 bytes in hex"))?;
 
-            Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: Some(bitcoin), evm: Some(evm) }, Some(network == crate::crypto::bitcoin::tx::Network::Test)))
+            Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: Some(bitcoin), evm: Some(evm(address)?) }, Some(network == crate::crypto::bitcoin::tx::Network::Test)))
         }
-        _ => Err("a member is KEY, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS".to_string()),
+        _ => Err("a member is KEY, KEY,,EVM_ADDRESS, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS".to_string()),
     }
 }
 

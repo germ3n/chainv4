@@ -417,8 +417,28 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   passes or stores it, and every member finds the same.
 - **The regtest tests each take their own port and directory,** so they run side by side; two
   `bitcoind`s on one port hang the second.
-- **Multisig policies live in `Column::Accounts`** beside the accounts, under `multisig:` and
-  `proposals:` prefixes, which no account key starts with; nothing scans the column.
+- **Multisig policies live in `Column::Accounts`** beside the accounts, under `multisig:`,
+  `proposals:` and `multisig-evm:` prefixes, which no account key starts with; nothing scans the
+  column.
+- **A multisig's EVM contract address commits to its first EVM owners.** `Multisigs::evm_start`
+  keeps the owners and threshold from when the members first named EVM addresses, written once at
+  creation or the first change that names them, never after, since `multisig_contract` hashes them
+  into the init code. Owners there move only by `changeOwners` through the contract itself.
+- **MultiSig.bin is built for Paris** (`solc --evm-version paris --optimize`), so it runs on
+  chains without PUSH0; rebuilding it with another solc changes every multisig's address, as its
+  init code is in the hash.
+- **chainv4's EVM has the deployment proxy from genesis.** Its runtime code is written at
+  `0x4e59…956c` when genesis names the `evm` engine, which changed the genesis id of every such
+  chain: an old data directory meets `WrongGenesis`. The todo has revisiting it.
+- **A contract made at a funded address takes the coin over** (`vm::evm::apply`). Before, coin
+  sent through the EVM to a counterfactual address was copied into the contract and left with the
+  secp256k1 account of those bytes too, and coin sent natively to `evm:0x…` was overwritten with
+  the EVM's view at creation; now the contract gets both, and that account keeps none.
+- **An EVM bundle is EIP-712 typed data**, so the offline signer signs it through the MetaMask-style
+  `eth-sign-request` it already reads, with no code of its own, and any other EIP-712 signer can
+  too. `EvmBundle::add` takes a signature from elsewhere, checked to recover with a low s.
+- **The anvil test is ignored** (`a_multisig_s_contract_sits_at_one_address_on_anvil_and_chainv4_and_pays_on_anvil`):
+  run it with `--ignored` where Foundry's `anvil` is installed; it takes port 18965.
 - **Light updates gained a field again.** `LightUpdate::switched` is a plain field, not an
   Unset one, since updates travel inside lists; stored updates from before read back through
   `ErasLightUpdate` and `LegacyLightUpdate`, but a wallet or explorer built before it cannot read a

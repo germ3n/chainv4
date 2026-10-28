@@ -533,7 +533,24 @@ fn apply(state: &State, changes: &EvmState, caller: [u8; 20], sender: &Address) 
         }
 
         let mut stored = accounts.get(&address)?;
-        stored.balance = from_word(account.info.balance);
+
+        // A contract made where coin was sent before it existed takes that coin over: what the EVM
+        // saw sat with the account the bytes stood for until now, which keeps none of it, and what
+        // was sent to the contract's address here the EVM never saw, so it is added.
+        stored.balance = match account.is_created() {
+            true => {
+                let before = account_of(state, bytes)?;
+
+                if before != address {
+                    let mut held = accounts.get(&before)?;
+                    held.balance = u256::ZERO;
+                    accounts.set(&before, &held);
+                }
+
+                from_word(account.info.balance) + stored.balance
+            }
+            false => from_word(account.info.balance),
+        };
 
         if bytes != caller {
             stored.nonce = account.info.nonce;

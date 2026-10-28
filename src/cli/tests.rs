@@ -1624,6 +1624,187 @@ mod send {
 
     #[cfg(all(feature = "swap", feature = "sha256", feature = "ethereum"))]
     #[test]
+    fn a_multisig_s_evm_contract_is_paid_from_synced_and_locks_a_swap_from_the_cli() {
+        use crate::cli::multisig::evm::EvmAction;
+        use crate::cli::multisig::{MultisigAction, MultisigArgs};
+        use crate::cli::swap::rpc::{Rpc, from_key};
+        use crate::cli::swap::{LegAction, SwapAction, SwapArgs, swap};
+        use crate::crypto::keypair::{Keypair, PrivateKey};
+        use crate::structs::hex::to_hex;
+        use crate::swap::{ChainLeg, EvmLeg, Leg, Parties, Terms, evm};
+
+        let running = Running::start(true);
+        let dir = TempDir::new("multisig-evm");
+        let node = format!("http://{}", running.api);
+        let eth_rpc = format!("{node}/rpc");
+        let rpc = Rpc::new(crate::cli::send::agent(&Default::default()).unwrap(), &eth_rpc);
+
+        // Three members, each a key here and an EVM key, whose files sign there and pay gas.
+        let secrets: Vec<[u8; 32]> = (0x61..0x65).map(|seed| [seed; 32]).collect();
+        let member = |at: usize| crate::cli::send::parse_member(&format!("{},,{}", Keypair::from_seed([0x70 + at as u8; 32]).public(), to_hex(&from_key(&secrets[at]).unwrap()))).unwrap();
+        send(running.args(TxArgs::CreateMultisig { members: (0..3).map(member).collect(), threshold: 2 })).unwrap();
+        let creator = DevAuthority::dev_keypair().public().address();
+        let account = crate::structs::address::multisig_address(&creator, 0, crate::structs::hash::HashType::default_chain());
+        let files: Vec<PathBuf> = secrets.iter().enumerate().map(|(at, secret)| {
+            let path = dir.0.join(format!("evm{at}.key"));
+            let keypair = Keypair::from_private(PrivateKey::Secp256k1(*secret));
+            write_key(&path, &keypair).unwrap();
+            send(running.args(TxArgs::Transfer { to: keypair.public().address().into(), amount: u256::from(10u64).pow(20) })).unwrap();
+
+            path
+        }).collect();
+        let multisig = |file: &PathBuf, action: EvmAction| crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(file.clone()), timeout: 10, action: MultisigAction::Evm { account, action } });
+        let side = crate::cli::multisig::evm::evm_side(&crate::cli::send::agent(&Default::default()).unwrap(), &node, &account).unwrap();
+        multisig(&files[0], EvmAction::Address).unwrap();
+
+        // Coin sent to its address before it exists waits there.
+        send(running.args(TxArgs::Transfer { to: Address::Evm(side.contract).into(), amount: u256::new(100_000) })).unwrap();
+        assert!(!rpc.has_code(&side.contract).unwrap());
+
+        // Member 0 proposes a payment; one signature is not enough; member 1 signs, and submitting
+        // deploys the contract through the proxy, then pays.
+        let pay = dir.0.join("pay.evm");
+        let payee = [0x99; 20];
+        multisig(&files[0], EvmAction::Propose { eth_rpc: eth_rpc.clone(), to: to_hex(&payee), value: "300".into(), data: None, nonce: None, out: pay.clone() }).unwrap();
+        let short = multisig(&files[3], EvmAction::Submit { bundle: pay.clone(), eth_rpc: eth_rpc.clone() }).unwrap_err();
+        assert!(short.to_string().contains("1 of the contract's owners signed"), "{short}");
+        multisig(&files[1], EvmAction::Sign { bundle: pay.clone() }).unwrap();
+        multisig(&files[3], EvmAction::Submit { bundle: pay.clone(), eth_rpc: eth_rpc.clone() }).unwrap();
+
+        assert!(rpc.has_code(&side.contract).unwrap());
+        assert_eq!(rpc.balance(&payee).unwrap(), u256::new(300));
+        assert_eq!(rpc.balance(&side.contract).unwrap(), u256::new(99_700), "what waited for it, less what it paid");
+        multisig(&files[3], EvmAction::Status { eth_rpc: eth_rpc.clone() }).unwrap();
+        // Sent again, it ran already.
+        multisig(&files[3], EvmAction::Submit { bundle: pay.clone(), eth_rpc: eth_rpc.clone() }).unwrap();
+        assert_eq!(rpc.balance(&payee).unwrap(), u256::new(300));
+
+        // Member 2 leaves for a fourth here; sync proposes the same there, which the owners before
+        // sign.
+        let change = dir.0.join("change.bundle");
+        let members: Vec<PathBuf> = (0..2).map(|at| {
+            let path = dir.0.join(format!("member{at}.key"));
+            write_key(&path, &Keypair::from_seed([0x70 + at as u8; 32])).unwrap();
+
+            path
+        }).collect();
+        send(running.args(TxArgs::Transfer { to: account.into(), amount: u256::from(10u64).pow(18) })).unwrap();
+        send(SendArgs {
+            key: Some(members[0].clone()),
+            multisig: Some(account),
+            out: Some(change.clone()),
+            ..running.args(TxArgs::ChangeMultisig { members: vec![member(0), member(1), member(3)], threshold: 2 })
+        })
+        .unwrap();
+        crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(members[1].clone()), timeout: 10, action: MultisigAction::Sign { bundle: change, submit: true } }).unwrap();
+
+        let sync = dir.0.join("sync.evm");
+        multisig(&files[0], EvmAction::Sync { eth_rpc: eth_rpc.clone(), out: sync.clone() }).unwrap();
+        multisig(&files[1], EvmAction::Sign { bundle: sync.clone() }).unwrap();
+        multisig(&files[3], EvmAction::Submit { bundle: sync, eth_rpc: eth_rpc.clone() }).unwrap();
+        let [owners, threshold, nonce] = crate::abi::multisig::multisig_reads().map(|input| rpc.call(&side.contract, &input).unwrap());
+        let (now, nonce) = crate::abi::multisig::multisig_read(&owners, &threshold, &nonce).unwrap();
+
+        assert_eq!((Some(now), nonce), (crate::cli::multisig::evm::evm_side(&crate::cli::send::agent(&Default::default()).unwrap(), &node, &account).unwrap().now, u256::new(2)));
+        let synced = dir.0.join("again.evm");
+        multisig(&files[0], EvmAction::Sync { eth_rpc: eth_rpc.clone(), out: synced.clone() }).unwrap();
+        assert!(!synced.exists(), "nothing to sync");
+
+        // It pays 7,000 wei into a swap as the starter: the lock is its contract's call, a bundle
+        // the new member signs too.
+        let swap_sol = rpc.deploy(&evm::init_code(), &secrets[3]).unwrap();
+        let (_, hash) = crate::swap::secret().unwrap();
+        let starter = Parties { chain: Some(account), bitcoin: None, evm: Some(side.contract) };
+        let bob = Parties { chain: Some(Address::Ed25519([0xb; 32])), bitcoin: None, evm: Some([0xb0; 20]) };
+        let pays = Leg::Evm(EvmLeg { item: None, chain_id: rpc.chain_id().unwrap(), contract: swap_sol, token: None, amount: u256::new(7_000), payer: None, receiver: None });
+        let gets = Leg::Chain(ChainLeg { item: None, contract: Address::Contract([0x5a; 32]), token: None, amount: u256::new(5_000), payer: None, receiver: None });
+        let now = now_ms();
+        let terms = Terms::offer(hash, pays, gets, now + crate::swap::FIRST_DEADLINE_MS, now + crate::swap::SECOND_DEADLINE_MS, &starter).unwrap().answer(&bob).unwrap();
+        let lock = dir.0.join("lock.evm");
+        let action = LegAction { terms: terms.to_text(), leg: None, node: node.clone(), eth_rpc: vec![eth_rpc.clone()], tls: Default::default(), key: Some(files[0].clone()), anyway: false, multisig: Some(account), out: Some(lock.clone()) };
+        swap(SwapArgs { action: SwapAction::Lock(action) }).unwrap();
+        multisig(&files[3], EvmAction::Sign { bundle: lock.clone() }).unwrap();
+        multisig(&files[3], EvmAction::Submit { bundle: lock, eth_rpc: eth_rpc.clone() }).unwrap();
+        let locked = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&hash)).unwrap()).unwrap();
+        running.stop();
+
+        assert_eq!(terms.first.stands(&locked, terms.first_deadline), Ok(()));
+    }
+
+    /// Foundry's anvil, a private EVM chain with the deployment proxy, on its own port.
+    #[cfg(all(feature = "swap", feature = "ethereum"))]
+    struct Anvil(std::process::Child);
+
+    #[cfg(all(feature = "swap", feature = "ethereum"))]
+    impl Drop for Anvil {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(all(feature = "swap", feature = "sha256", feature = "ethereum"))]
+    #[test]
+    #[ignore = "runs Foundry's anvil on a private chain"]
+    fn a_multisig_s_contract_sits_at_one_address_on_anvil_and_chainv4_and_pays_on_anvil() {
+        use crate::cli::multisig::evm::EvmAction;
+        use crate::cli::multisig::{MultisigAction, MultisigArgs};
+        use crate::cli::swap::rpc::{Rpc, from_key};
+        use crate::crypto::keypair::{Keypair, PrivateKey};
+        use crate::structs::hex::to_hex;
+        use crate::swap::evm::Call;
+
+        let anvil = Anvil(std::process::Command::new("anvil").args(["--port", "18965", "--silent"]).spawn().expect("is Foundry's anvil installed?"));
+        let anvil_rpc = "http://127.0.0.1:18965".to_string();
+        let on_anvil = Rpc::new(crate::cli::send::agent(&Default::default()).unwrap(), &anvil_rpc);
+        let started = std::time::Instant::now();
+        while on_anvil.chain_id().is_err() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(20), "anvil did not start");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // anvil's first account, funded, from its well-known words.
+        let rich = crate::structs::hex::from_hex("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80").unwrap().try_into().unwrap();
+
+        let running = Running::start(true);
+        let dir = TempDir::new("multisig-anvil");
+        let node = format!("http://{}", running.api);
+        let secrets: Vec<[u8; 32]> = (0x81..0x84).map(|seed| [seed; 32]).collect();
+        let member = |at: usize| crate::cli::send::parse_member(&format!("{},,{}", Keypair::from_seed([0x90 + at as u8; 32]).public(), to_hex(&from_key(&secrets[at]).unwrap()))).unwrap();
+        send(running.args(TxArgs::CreateMultisig { members: (0..3).map(member).collect(), threshold: 2 })).unwrap();
+        let account = crate::structs::address::multisig_address(&DevAuthority::dev_keypair().public().address(), 0, crate::structs::hash::HashType::default_chain());
+        let files: Vec<PathBuf> = secrets.iter().enumerate().map(|(at, secret)| {
+            let path = dir.0.join(format!("evm{at}.key"));
+            let keypair = Keypair::from_private(PrivateKey::Secp256k1(*secret));
+            write_key(&path, &keypair).unwrap();
+            send(running.args(TxArgs::Transfer { to: keypair.public().address().into(), amount: u256::from(10u64).pow(20) })).unwrap();
+            on_anvil.send(&Call { to: from_key(secret).unwrap(), value: u256::from(10u64).pow(18), input: Vec::new(), what: "Fund a member" }, false, &rich).unwrap();
+
+            path
+        }).collect();
+        let multisig = |action: EvmAction| crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(files[0].clone()), timeout: 10, action: MultisigAction::Evm { account, action } });
+        let side = crate::cli::multisig::evm::evm_side(&crate::cli::send::agent(&Default::default()).unwrap(), &node, &account).unwrap();
+
+        // Ether sent to its address on anvil before it exists; a payment from it, signed by two.
+        on_anvil.send(&Call { to: side.contract, value: u256::new(1_000_000), input: Vec::new(), what: "Fund the multisig" }, false, &rich).unwrap();
+        let pay = dir.0.join("pay.evm");
+        multisig(EvmAction::Propose { eth_rpc: anvil_rpc.clone(), to: to_hex(&[0x99; 20]), value: "400000".into(), data: None, nonce: None, out: pay.clone() }).unwrap();
+        crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(files[2].clone()), timeout: 10, action: MultisigAction::Evm { account, action: EvmAction::Sign { bundle: pay.clone() } } }).unwrap();
+        multisig(EvmAction::Submit { bundle: pay, eth_rpc: anvil_rpc.clone() }).unwrap();
+
+        assert_eq!(on_anvil.balance(&[0x99; 20]).unwrap(), u256::new(400_000));
+        assert_eq!(on_anvil.balance(&side.contract).unwrap(), u256::new(600_000));
+
+        // On chainv4's own EVM it lands at the same address.
+        let on_chainv4 = Rpc::new(crate::cli::send::agent(&Default::default()).unwrap(), &format!("{node}/rpc"));
+        multisig(EvmAction::Deploy { eth_rpc: format!("{node}/rpc") }).unwrap();
+
+        assert!(on_anvil.has_code(&side.contract).unwrap() && on_chainv4.has_code(&side.contract).unwrap());
+        running.stop();
+        drop(anvil);
+    }
+
+    #[cfg(all(feature = "swap", feature = "sha256", feature = "ethereum"))]
+    #[test]
     fn a_swap_between_chainv4_and_an_evm_chain_locks_checks_and_claims_both_legs() {
         use crate::cli::swap::rpc::{Rpc, from_key};
         use crate::cli::swap::{LegAction, LegArg, SwapAction, SwapArgs, swap};
@@ -1641,15 +1822,15 @@ mod send {
         send(running.args(TxArgs::Deploy { lua: Some(source), wasm: None, evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
 
         // Bob's Ethereum key, funded, deploys Swap.sol on the node's own EVM through its JSON-RPC:
-        // the EVM chain this swap's second leg is on. The chain has no deployment proxy, so it is
-        // a plain create.
+        // the EVM chain this swap's second leg is on. The chain has the deployment proxy from
+        // genesis, so Swap.sol lands where it does on every chain.
         let bob_key = Keypair::from_private(PrivateKey::Secp256k1([0x42; 32]));
         let bob_file = dir.0.join("bob.key");
         fs::write(&bob_file, bob_key.to_key_file()).unwrap();
         send(running.args(TxArgs::Transfer { to: bob_key.public().address().into(), amount: u256::from(10u64).pow(20) })).unwrap();
         let rpc = Rpc::new(crate::cli::send::agent(&Default::default()).unwrap(), &format!("{node}/rpc"));
         let swap_sol = rpc.deploy(&evm::init_code(), &[0x42; 32]).unwrap();
-        assert_ne!(swap_sol, evm::deployed_address(), "no proxy here");
+        assert_eq!(swap_sol, evm::deployed_address(), "through the proxy");
         assert!(rpc.has_code(&swap_sol).unwrap());
 
         // Alice, the dev key, pays 5,000 on chainv4 and starts; Bob pays 7,000 wei on the EVM.

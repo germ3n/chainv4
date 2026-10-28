@@ -354,6 +354,16 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
                         }
                     }
                 }
+                // A multisig's lock is its contract's calls, approval and lock at nonces one after
+                // the other, as bundles its owners sign.
+                #[cfg(feature = "abi")]
+                Leg::Evm(leg) if let Some(multisig) = action.multisig => {
+                    use super::multisig::evm::{evm_side, propose_calls};
+
+                    let contract = evm_side(&agent(&action.tls)?, action.node.trim_end_matches('/'), &multisig)?;
+                    let calls = leg.lock_calls(&terms.hash, terms.deadline(side))?;
+                    propose_calls(&evm_rpc(&action, leg)?, &multisig, &contract, &calls, &evm_secret(&keypair)?, None, action.out.as_deref())?;
+                }
                 Leg::Evm(leg) => {
                     let (rpc, secret) = (evm_rpc(&action, leg)?, evm_secret(&keypair)?);
 
@@ -562,6 +572,11 @@ impl PartyArgs {
             Ok(wallet) => Some(BitcoinParty::of_multisig(&wallet, self.multisig_index.unwrap_or(crate::swap::multisig_index(hash))).ok_or("a member's key that does not derive")?),
             Err(_) => None,
         };
+        // On an EVM chain, its contract there, which its members' EVM keys control.
+        let evm = match evm {
+            Some(evm) => Some(evm),
+            None => multisig_contract(agent, node, &multisig),
+        };
 
         Ok(Parties { chain: Some(multisig), bitcoin, evm })
     }
@@ -575,12 +590,25 @@ fn evm_party(given: &str) -> CliResult<[u8; 20]> {
     }
 }
 
-/// The key a leg action signs with, and who it is on the swap's chains.
+/// A multisig's contract on EVM chains, if its members name EVM addresses.
+#[cfg(feature = "abi")]
+fn multisig_contract(agent: &ureq::Agent, node: &str, multisig: &Address) -> Option<[u8; 20]> {
+    super::multisig::evm::evm_side(agent, node, multisig).ok().map(|side| side.contract)
+}
+
+#[cfg(not(feature = "abi"))]
+fn multisig_contract(_: &ureq::Agent, _: &str, _: &Address) -> Option<[u8; 20]> {
+    None
+}
+
+/// The key a leg action signs with, and who it is on the swap's chains: acting as a multisig, its
+/// contract on EVM chains.
 fn keyed(action: &LegAction) -> CliResult<(Keypair, Parties)> {
     let keypair = signer(action.key.as_deref())?;
-    let evm = match keypair.private() {
-        PrivateKey::Secp256k1(secret) => Some(rpc::from_key(secret)?),
-        _ => None,
+    let evm = match (action.multisig, keypair.private()) {
+        (Some(multisig), _) => multisig_contract(&agent(&action.tls)?, action.node.trim_end_matches('/'), &multisig),
+        (None, PrivateKey::Secp256k1(secret)) => Some(rpc::from_key(secret)?),
+        (None, _) => None,
     };
 
     // Acting as a multisig, the multisig is who the leg names; the key only signs for it.
