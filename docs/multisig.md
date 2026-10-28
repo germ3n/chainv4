@@ -66,6 +66,11 @@ chainv4 multisig bitcoin multisig:0x… finish pay.psbt --esplora …
 takes the coins largest first and sends change to the next unused change address, unless it would
 be dust. PSBT files are base64, as other wallets pass them.
 
+## Swaps
+
+A multisig swaps as a party on chainv4 and Bitcoin, its quorum in the Bitcoin HTLC's branch
+(see [Swaps](swaps.md#from-a-multisig)).
+
 ## Its transactions
 
 A multisig's own transaction is `Tx::Multisig`: the transaction it sends, the members' signatures

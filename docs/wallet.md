@@ -361,7 +361,7 @@ multisig is shown as its word; nothing signed rests on it. The offline signer re
 Sign and shows it back signed. For a multisig on Bitcoin it shows the descriptor and fresh
 addresses, and with an Esplora API makes, combines and broadcasts its PSBTs; the offline signer
 signs a multisig's Bitcoin input at m/48'/coin'/0'/2', and its Pair page shows each account's member
-line.
+line. The Swaps page swaps as a followed multisig too.
 
 ## Faucet
 

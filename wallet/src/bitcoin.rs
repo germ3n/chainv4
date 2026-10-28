@@ -145,9 +145,9 @@ fn plan(psbt: &Psbt, seed: &Seed) -> Result<(Review, Vec<Signing>), String> {
             true => None,
             false => htlc_input(pairs, &output.script, &key, n)?,
         };
-        let shared = match multisig {
-            true => Some(multisig_input(pairs, &output.script, &key, n)?),
-            false => None,
+        let (shared, shared_swap) = match multisig {
+            true => multisig_input(pairs, &output.script, &key, n).map(|(script, swapped)| (Some(script), swapped))?,
+            false => (None, None),
         };
 
         if swap.is_none() && shared.is_none() && output.script != p2wpkh(&hash160(&key)) {
@@ -163,7 +163,7 @@ fn plan(psbt: &Psbt, seed: &Seed) -> Result<(Review, Vec<Signing>), String> {
         }
 
         networks.push(network);
-        let (code, swapped) = swap.map_or((shared, None), |(code, swapped)| (Some(code), Some(swapped)));
+        let (code, swapped) = swap.map_or((shared, shared_swap), |(code, swapped)| (Some(code), Some(swapped)));
         signing.push(Signing { index, network, chain, number, multisig, key, value: output.value, code });
         inputs.push(Spent { value: output.value, yours: Some(shown), swap: swapped });
     }
@@ -408,12 +408,29 @@ fn htlc_input(pairs: &[Pair], spent: &[u8], key: &[u8; 33], n: usize) -> Result<
     }
 
     let swapped = match *key {
-        key if key == htlc.claim => Swapped::Claim,
-        key if key == htlc.refund => Swapped::Refund { locktime: htlc.locktime },
+        key if htlc.claim == chainv4::swap::BitcoinParty::Key(key) => Swapped::Claim,
+        key if htlc.refund == chainv4::swap::BitcoinParty::Key(key) => Swapped::Refund { locktime: htlc.locktime },
         _ => return Err(format!("input {n}'s key is neither of its swap's keys")),
     };
 
     Ok(Some((script.to_vec(), swapped)))
+}
+
+/// A swap's HTLC whose branch is a multisig's, holding this member's key: which way it takes it.
+#[cfg(feature = "swap")]
+fn shared_htlc(script: &[u8], key: &[u8; 33]) -> Option<Swapped> {
+    let htlc = Htlc::parse(script)?;
+
+    match (htlc.claim.holds(key), htlc.refund.holds(key)) {
+        (true, _) => Some(Swapped::Claim),
+        (_, true) => Some(Swapped::Refund { locktime: htlc.locktime }),
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "swap"))]
+fn shared_htlc(_: &[u8], _: &[u8; 33]) -> Option<Swapped> {
+    None
 }
 
 #[cfg(not(feature = "swap"))]
@@ -441,17 +458,18 @@ fn bip48(path: &[u32]) -> Option<(Network, u32, u32)> {
 }
 
 /// A multisig's coins an input spends with this key: the witness script, which must be an M-of-N
-/// holding the key, and the one its coins are locked to.
-fn multisig_input(pairs: &[Pair], spent: &[u8], key: &[u8; 33], n: usize) -> Result<Vec<u8>, String> {
+/// holding the key, or a swap's HTLC whose multisig branch holds it, and the one its coins are
+/// locked to; and for an HTLC, which way it takes it.
+fn multisig_input(pairs: &[Pair], spent: &[u8], key: &[u8; 33], n: usize) -> Result<(Vec<u8>, Option<Swapped>), String> {
     let script = find(pairs, &[IN_WITNESS_SCRIPT]).ok_or_else(|| format!("input {n} asks for a multisig key's signature and gives no witness script"))?;
-    let (_, keys) = parse_multisig_script(script).ok_or_else(|| format!("input {n}'s witness script is no M-of-N multisig"))?;
-
-    if !keys.contains(key) {
-        return Err(format!("input {n}'s multisig does not hold this wallet's key"));
-    }
+    let swapped = match parse_multisig_script(script) {
+        Some((_, keys)) if keys.contains(key) => None,
+        Some(_) => return Err(format!("input {n}'s multisig does not hold this wallet's key")),
+        None => Some(shared_htlc(script, key).ok_or_else(|| format!("input {n}'s witness script is no M-of-N multisig, nor a swap's HTLC whose multisig holds this wallet's key"))?),
+    };
 
     match spent == p2wsh(script) {
-        true => Ok(script.to_vec()),
+        true => Ok((script.to_vec(), swapped)),
         false => Err(format!("input {n}'s script is not the one its coins are locked to")),
     }
 }

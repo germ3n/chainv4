@@ -300,6 +300,38 @@ multi-token id (ERC-721 and ERC-1155 on the EVM), rather than coins or a fungibl
 - **Swap.sol's address changed with it:** CREATE2 puts the new code at a new address, which new
   offers default to; terms naming the old one still go to it.
 
+## From a multisig
+
+A [native multisig](multisig.md) swaps as a party on chainv4 and Bitcoin, its quorum controlling
+what it locks or receives throughout; its EVM side is to come.
+- **On Bitcoin** its branch of the HTLC, refund when it pays and claim when it receives, checks M of
+  its members' keys with `OP_CHECKMULTISIG` instead of one key's `OP_CHECKSIG`, each branch then
+  ending in its own check. An HTLC of two keys keeps its template byte for byte. The keys are the
+  members' at one of the multisig's receiving addresses, the index `swap::multisig_index` takes
+  from the swap's hash, so every member's wallet finds the same fresh one with nothing to pass
+  round; the terms list them, sorted, with the threshold, so the other side checks the script.
+- **Terms with a multisig** on Bitcoin are written with a 4 first; every other is written as
+  before, a 3 or a 2, so older apps read all they could.
+- **On chainv4** the multisig is the leg's address: its lock is its own transaction, proposed as a
+  bundle for its members. A token's lock is two, the approval and then the lock. Claims and
+  refunds anyone may send, so they need none of its members.
+- **Its Bitcoin claim or refund** is a PSBT its members sign, with chainv4 multisig, the offline
+  signer or the wallet; the first threshold signatures in the script's key order finish it.
+
+```sh
+chainv4 swap offer --multisig multisig:0x… --pay chainv4:5000 --get bitcoin-testnet:100000 --hash 0x…
+chainv4 swap lock --multisig multisig:0x… --key member.key --out lock.bundle 'UR:CHAINV4-SWAP/…'
+chainv4 swap bitcoin-claim 'UR:…' --multisig multisig:0x… --psbt claim.psbt --funding txid:vout --sats 100000 --to tb1q… --secret 0x…
+chainv4 multisig bitcoin multisig:0x… sign claim.psbt     # each member
+chainv4 swap bitcoin-finish 'UR:…' --psbt claim.psbt --sats 100000 --secret 0x…
+```
+
+In the wallet, **Swap as** picks a followed multisig when offering or answering. Its lock goes to
+the Multisig page as a proposal; its Bitcoin claim or refund collects the members' signatures,
+these words', the signer's from its code, or a member's pasted, and finishes once the branch
+holds enough. The offline signer signs a multisig's branch as any multisig input, once the HTLC's
+branch holds its key.
+
 ## In the explorer
 
 The **Swaps** page lists the swap contract's swaps from its events, newest first, each lock with

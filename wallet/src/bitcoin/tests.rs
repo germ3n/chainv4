@@ -353,7 +353,7 @@ fn the_signer_signs_a_swaps_htlc_spend_as_the_swap_tools_do() {
     let ours = public(&keypair.public());
     let theirs = chainv4::crypto::secp256k1::public_key(&[0x22; 32]).unwrap();
     let secret = [0x5e; 32];
-    let htlc = Htlc { hash: chainv4::crypto::bitcoin::sha256(&secret), claim: ours, refund: theirs, locktime: 1_793_000_000 };
+    let htlc = Htlc { hash: chainv4::crypto::bitcoin::sha256(&secret), claim: chainv4::swap::BitcoinParty::Key(ours), refund: chainv4::swap::BitcoinParty::Key(theirs), locktime: 1_793_000_000 };
     let to = p2wpkh(&hash160(&ours));
     let unsigned = htlc.unsigned(Coins { txid: [7; 32], vout: 0, value: 80_000 }, to.clone(), 2, Spend::Claim { secret }).unwrap();
     let path = [84 | HARDENED, 1 | HARDENED, HARDENED, 0, 0];
@@ -373,7 +373,7 @@ fn the_signer_signs_a_swaps_htlc_spend_as_the_swap_tools_do() {
     // A signature for other coins does not finish it, and a key the HTLC does not name is refused.
     assert!(signed.finish_htlc(&htlc, 80_001, Spend::Claim { secret }).unwrap_err().contains("does not hold"));
     assert!(asked.finish_htlc(&htlc, 80_000, Spend::Claim { secret }).unwrap_err().contains("no signature"));
-    let stranger = Htlc { claim: theirs, refund: chainv4::crypto::secp256k1::public_key(&[0x33; 32]).unwrap(), ..htlc };
+    let stranger = Htlc { claim: chainv4::swap::BitcoinParty::Key(theirs), refund: chainv4::swap::BitcoinParty::Key(chainv4::crypto::secp256k1::public_key(&[0x33; 32]).unwrap()), ..htlc.clone() };
     let wrong = Psbt::for_htlc(&stranger.unsigned(Coins { txid: [7; 32], vout: 0, value: 80_000 }, p2wpkh(&hash160(&ours)), 2, Spend::Refund).unwrap(), 80_000, &stranger, ours, seed.bitcoin_account(0).master_fingerprint, &path);
     assert!(wrong.review(&seed).unwrap_err().contains("neither of its swap's keys"));
 }

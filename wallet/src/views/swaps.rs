@@ -79,6 +79,23 @@ pub struct SwapsState {
     /// A spend sent to Bitcoin's peers by the light client, by the number it was sent under.
     #[cfg_attr(not(all(feature = "bitcoin-light", not(target_arch = "wasm32"))), allow(dead_code))]
     relayed: Option<u64>,
+    /// A followed multisig to offer or answer as, rather than the account.
+    as_multisig: Option<String>,
+    /// What the node said of the multisigs swapped as, by address: their Bitcoin side is read
+    /// from their members' xpubs.
+    multisigs: HashMap<String, Value>,
+    /// A multisig's Bitcoin spend of the HTLC, collecting its members' signatures.
+    shared: Option<Box<Shared>>,
+}
+
+/// A multisig's HTLC spend on its way round its members: the PSBT, what it spends, and the
+/// signer's code and a pasted PSBT to take signatures from.
+struct Shared {
+    psbt: chainv4::crypto::bitcoin::psbt::Psbt,
+    spend: Spend,
+    value: u64,
+    scan: Scan,
+    pasted: String,
 }
 
 impl Default for SwapsState {
@@ -102,6 +119,9 @@ impl Default for SwapsState {
             signer: None,
             forgetting: false,
             relayed: None,
+            as_multisig: None,
+            multisigs: HashMap::new(),
+            shared: None,
         }
     }
 }
@@ -233,6 +253,13 @@ enum Looked {
 }
 
 impl SwapsState {
+    /// Keeps what the node said of a multisig.
+    pub fn multisig_answered(&mut self, ask: &Ask, result: &Result<Value, crate::node::Failure>) {
+        if let (Ask::Multisig(address), Ok(value)) = (ask, result) {
+            self.multisigs.insert(address.clone(), value.clone());
+        }
+    }
+
     /// Takes the contract's answer about a swap; false when the answer is for someone else.
     pub fn answered(&mut self, ask: &Ask, result: &Result<Value, crate::node::Failure>) -> bool {
         let Ask::Call(body) = ask else {
@@ -264,7 +291,7 @@ impl SwapsState {
     }
 }
 
-pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendState) {
+pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendState, multisig: &mut super::multisig::MultisigState) {
     let palette = *ctx.palette;
     theme::title(ui, &palette, "Swaps", "Coins or a token on one chain for coins or a token on another, with no one in between: each side locks under one secret's hash.");
 
@@ -276,9 +303,17 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
     if let Some(index) = state.open.filter(|index| *index < ctx.book.swaps.len()) {
         ui.add_space(14.0);
 
-        if let Some(prepared) = detail(ui, ctx, state, index) {
-            send.prepare(prepared);
-            *ctx.page = Page::Send;
+        match detail(ui, ctx, state, index) {
+            // A multisig's step is its own transaction: proposed for its members to sign.
+            Some(prepared) if matches!(prepared.from, Address::Multisig(_)) => {
+                multisig.propose(prepared);
+                *ctx.page = Page::Multisig;
+            }
+            Some(prepared) => {
+                send.prepare(prepared);
+                *ctx.page = Page::Send;
+            }
+            None => {}
         }
 
         if state.evm.pending.is_some() {
@@ -390,12 +425,63 @@ fn parties(ctx: &Ctx, holder: &Holder, testnet: Option<bool>) -> Result<Parties,
 
     Ok(Parties {
         chain: holder.addresses().first().copied(),
-        bitcoin: testnet.map(|testnet| bitcoin_key(ctx, holder, network(testnet))).transpose()?,
+        bitcoin: testnet.map(|testnet| bitcoin_key(ctx, holder, network(testnet))).transpose()?.map(chainv4::swap::BitcoinParty::Key),
         evm: holder.publics.iter().find_map(|public| match public.address() {
             Address::Secp256k1(bytes) => Some(bytes),
             _ => None,
         }),
     })
+}
+
+/// Who a swap is made as: the account, or a followed multisig, its address here and, on a Bitcoin
+/// leg, its members' keys at the swap's own index, from what the node said of it. A multisig
+/// swaps on this chain and Bitcoin; its EVM side is to come.
+fn parties_as(ctx: &Ctx, known: &HashMap<String, Value>, holder: &Holder, multisig: Option<&str>, testnet: Option<bool>, hash: &[u8; 32]) -> Result<Parties, String> {
+    let Some(multisig) = multisig else {
+        return parties(ctx, holder, testnet);
+    };
+    let address: Address = multisig.parse().map_err(|_| "Not a multisig's address.".to_string())?;
+    let value = known.get(multisig).ok_or("Asking the node about the multisig…")?;
+    let bitcoin = match testnet {
+        None => None,
+        Some(testnet) => {
+            let wallet = super::multisig::bitcoin::wallet_of(value).ok_or("The multisig's members name no Bitcoin xpubs: it has no side on Bitcoin.")?;
+
+            if (wallet.network == Network::Test) != testnet {
+                return Err(format!("The multisig is on {}, not this swap's network.", wallet.network.name()));
+            }
+
+            Some(chainv4::swap::BitcoinParty::of_multisig(&wallet, chainv4::swap::multisig_index(hash)).ok_or("A member's key that does not derive.")?)
+        }
+    };
+
+    Ok(Parties { chain: Some(address), bitcoin, evm: None })
+}
+
+/// Picks who to swap as: the account, or one of the multisigs the Multisig page follows.
+fn as_picker(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, salt: &str) {
+    if ctx.settings.multisigs.is_empty() {
+        return;
+    }
+
+    let palette = *ctx.palette;
+    super::row(ui, &palette, "Swap as", |ui| {
+        egui::ComboBox::from_id_salt(salt)
+            .selected_text(state.as_multisig.as_deref().map_or("this account".to_string(), |address| format!("the multisig {}", format::short(address))))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut state.as_multisig, None, "this account");
+
+                for address in ctx.settings.multisigs.clone() {
+                    ui.selectable_value(&mut state.as_multisig, Some(address.clone()), format!("the multisig {}", format::short(&address)));
+                }
+            });
+    });
+
+    if let Some(address) = &state.as_multisig
+        && !state.multisigs.contains_key(address)
+    {
+        ctx.node.ask(Ask::Multisig(address.clone()));
+    }
 }
 
 /// Whether a swap's Bitcoin leg, if it has one, is on a test network.
@@ -444,8 +530,11 @@ fn start(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
         });
         ui.add_space(6.0);
 
+        as_picker(ui, ctx, state, "offer-as");
+        ui.add_space(6.0);
+
         if theme::primary(ui, &palette, "Make the offer", true).clicked() {
-            match offer(ctx, &state.form) {
+            match offer(ctx, state) {
                 Ok(record) => {
                     ctx.book.swaps.push(record);
                     *ctx.changed = true;
@@ -572,7 +661,8 @@ fn leg(ctx: &Ctx, form: &LegForm) -> Result<Leg, String> {
 }
 
 /// An offer from the form, with a new secret kept beside it.
-fn offer(ctx: &Ctx, form: &Form) -> Result<SwapRecord, String> {
+fn offer(ctx: &Ctx, state: &SwapsState) -> Result<SwapRecord, String> {
+    let form = &state.form;
     let holder = ctx.holder().ok_or("pick an account first")?;
     let (first, second) = (leg(ctx, &form.pay)?, leg(ctx, &form.get)?);
     let hours = |text: &str| text.trim().parse::<u64>().map(|hours| hours * 3_600_000).map_err(|_| "deadlines are whole hours".to_string());
@@ -581,12 +671,12 @@ fn offer(ctx: &Ctx, form: &Form) -> Result<SwapRecord, String> {
         Leg::Bitcoin(leg) => Some(leg.testnet),
         _ => None,
     });
-    let me = parties(ctx, holder, bitcoin)?;
     let (secret, hash) = secret()?;
+    let me = parties_as(ctx, &state.multisigs, holder, state.as_multisig.as_deref(), bitcoin, &hash)?;
     let terms = Terms::offer(hash, first, second, ctx.now + first_deadline, ctx.now + second_deadline, &me)?;
     terms.check(ctx.now)?;
 
-    Ok(SwapRecord { terms: terms.to_text(), secret: Some(to_hex(&secret)), account: holder.id(), made: ctx.now, started: true, funding: None })
+    Ok(SwapRecord { terms: terms.to_text(), secret: Some(to_hex(&secret)), account: holder.id(), made: ctx.now, started: true, funding: None, multisig: state.as_multisig.clone() })
 }
 
 fn read(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
@@ -626,9 +716,10 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
 
         ui.add_space(8.0);
         summary(ui, ctx, &terms);
+        as_picker(ui, ctx, state, "answer-as");
         ui.horizontal(|ui| {
-            if theme::primary(ui, &palette, "Answer it with this account", true).clicked() {
-                match answer(ctx, &terms) {
+            if theme::primary(ui, &palette, "Answer it", true).clicked() {
+                match answer(ctx, state, &terms) {
                     Ok(record) => {
                         ctx.book.swaps.push(record);
                         *ctx.changed = true;
@@ -647,12 +738,13 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
 }
 
 /// The answer to an offer: its terms with this account's parts in.
-fn answer(ctx: &Ctx, offered: &Terms) -> Result<SwapRecord, String> {
+fn answer(ctx: &Ctx, state: &SwapsState, offered: &Terms) -> Result<SwapRecord, String> {
     let holder = ctx.holder().ok_or("pick an account first")?;
-    let terms = offered.answer(&parties(ctx, holder, testnet(offered))?)?;
+    let me = parties_as(ctx, &state.multisigs, holder, state.as_multisig.as_deref(), testnet(offered), &offered.hash)?;
+    let terms = offered.answer(&me)?;
     terms.check(ctx.now)?;
 
-    Ok(SwapRecord { terms: terms.to_text(), secret: None, account: holder.id(), made: ctx.now, started: false, funding: None })
+    Ok(SwapRecord { terms: terms.to_text(), secret: None, account: holder.id(), made: ctx.now, started: false, funding: None, multisig: state.as_multisig.clone() })
 }
 
 /// The terms, laid out.
@@ -793,7 +885,13 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
 
             return;
         };
-        let me = match parties(ctx, &ctx.holders[holder], testnet(&terms)) {
+        if let Some(address) = &record.multisig
+            && !state.multisigs.contains_key(address)
+        {
+            ctx.node.ask(Ask::Multisig(address.clone()));
+        }
+
+        let me = match parties_as(ctx, &state.multisigs, &ctx.holders[holder], record.multisig.as_deref(), testnet(&terms), &terms.hash) {
             Ok(me) => me,
             Err(why) => {
                 ui.colored_label(palette.bad, why);
@@ -1193,10 +1291,16 @@ fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Ter
         (state.bitcoin.funding, state.bitcoin.sats) = (coin.outpoint, coin.sats.to_string());
     }
 
-    if state.bitcoin.to.is_empty()
-        && let Ok(key) = bitcoin_key(ctx, &ctx.holders[holder], network)
-    {
-        state.bitcoin.to = bech32::encode_segwit(network.hrp(), &hash160(&key));
+    // A multisig's coins come back to it: its receiving address at the swap's index.
+    let shared_wallet = ctx.book.swaps[index].multisig.as_ref().and_then(|address| state.multisigs.get(address)).and_then(super::multisig::bitcoin::wallet_of);
+
+    if state.bitcoin.to.is_empty() {
+        let back = match (&ctx.book.swaps[index].multisig, &shared_wallet) {
+            (Some(_), Some(wallet)) => chainv4::crypto::bitcoin::multisig::bitcoin_address(wallet.threshold, &wallet.xpubs, network, 0, chainv4::swap::multisig_index(&terms.hash)),
+            (Some(_), None) => None,
+            (None, _) => bitcoin_key(ctx, &ctx.holders[holder], network).ok().map(|key| bech32::encode_segwit(network.hrp(), &hash160(&key))),
+        };
+        state.bitcoin.to = back.unwrap_or_default();
     }
 
     super::row(ui, &palette, "Its coins", |ui| {
@@ -1213,6 +1317,13 @@ fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Ter
 
     if !ctx.settings.esplora.trim().is_empty() && theme::quiet(ui, &palette, "Look its coins up on Esplora").clicked() {
         look_for_funding(ctx, state, &htlc.address(network), &hash);
+    }
+
+    // A multisig's spend, collecting its members' signatures.
+    if state.shared.is_some() {
+        shared_spend(ui, ctx, state, &htlc);
+
+        return;
     }
 
     // The offline signer's answer, when it was asked.
@@ -1250,13 +1361,19 @@ fn bitcoin_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Ter
 
     if theme::primary(ui, &palette, "Sign it", !short && (held.is_none() || state.anyway)).clicked() {
         let account = &ctx.holders[holder];
+        let signed = match (&ctx.book.swaps[index].multisig, &shared_wallet) {
+            (Some(_), Some(wallet)) => for_members(terms, spend, &state.bitcoin, wallet),
+            (Some(_), None) => Err("Asking the node about the multisig…".to_string()),
+            (None, _) => sign(secret_key(ctx, account, network), account.origin(), terms, spend, &state.bitcoin),
+        };
 
-        match sign(secret_key(ctx, account, network), account.origin(), terms, spend, &state.bitcoin) {
+        match signed {
             Ok(Signed::Here(tx)) => {
                 state.bitcoin.signed = Some(to_hex(&tx.encode())[2..].to_string());
                 state.trouble = None;
             }
             Ok(Signed::Signer(awaiting)) => state.signer = Some(awaiting),
+            Ok(Signed::Members(shared)) => state.shared = Some(shared),
             Err(why) => state.trouble = Some(why),
         }
 
@@ -1378,6 +1495,105 @@ fn htlc_secret(_: &Ctx, _: &Terms) -> Option<[u8; 32]> {
 enum Signed {
     Here(Transaction),
     Signer(Box<Awaiting>),
+    Members(Box<Shared>),
+}
+
+/// The coins, value, fee rate and destination a spend's form names.
+fn spend_form(form: &BitcoinForm, network: Network) -> Result<(Coins, u64, Vec<u8>), String> {
+    let (txid, vout) = form.funding.trim().split_once(':').ok_or("its coins are txid:vout")?;
+    let mut txid: [u8; 32] = from_hex(&format!("0x{txid}")).and_then(|bytes| bytes.try_into().ok()).ok_or("a txid is 64 hex digits")?;
+    // Explorers write a txid backwards from how a transaction names it.
+    txid.reverse();
+    let vout: u32 = vout.parse().map_err(|_| "a vout is a number")?;
+    let value: u64 = form.sats.trim().parse().map_err(|_| "what the coins hold, in satoshis")?;
+    let fee_rate: u64 = form.fee_rate.trim().parse().map_err(|_| "a fee rate in sat/vB")?;
+    let to = chainv4::crypto::bitcoin::tx::script_of(form.to.trim(), network)?;
+
+    Ok((Coins { txid, vout, value }, fee_rate, to))
+}
+
+/// A multisig's spend of the HTLC, as a PSBT its members sign: its keys at the swap's index.
+fn for_members(terms: &Terms, spend: Spend, form: &BitcoinForm, wallet: &chainv4::crypto::bitcoin::psbt::MultisigWallet) -> Result<Signed, String> {
+    let htlc = terms.htlc().ok_or("no HTLC yet")?;
+    let index = chainv4::swap::multisig_index(&terms.hash);
+
+    if chainv4::swap::BitcoinParty::of_multisig(wallet, index).as_ref() != Some(htlc.party(spend)) {
+        return Err("that branch is not the multisig's: its keys at this swap's index are not in it".to_string());
+    }
+
+    let (coins, fee_rate, to) = spend_form(form, wallet.network)?;
+    let tx = htlc.unsigned(coins, to, fee_rate, spend)?;
+    let psbt = chainv4::crypto::bitcoin::psbt::Psbt::for_htlc_multisig(&tx, coins.value, &htlc, wallet, index)?;
+
+    Ok(Signed::Members(Box::new(Shared { psbt, spend, value: coins.value, scan: Scan::default(), pasted: String::new() })))
+}
+
+/// A multisig's spend on its way round its members: signed with these words, on the offline
+/// signer, or pasted from a member's wallet, and finished once the branch holds enough.
+fn shared_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, htlc: &chainv4::swap::htlc::Htlc) {
+    let palette = *ctx.palette;
+    let Some(shared) = state.shared.as_mut() else {
+        return;
+    };
+    let (needed, keys) = htlc.party(shared.spend).keys();
+    let held = keys.iter().filter(|key| shared.psbt.inputs[0].iter().any(|pair| pair.key == [&[0x02][..], &key[..]].concat())).count();
+    ui.label(RichText::new(format!("The multisig's members sign it: {held} of the {needed} it takes, so far.")).color(palette.soft));
+    super::code(ui, &palette, &Message::Bitcoin(Box::new(Request { psbt: shared.psbt.clone(), kind: crate::bitcoin::PSBT_TYPE })));
+
+    match shared.scan.show(ui, &palette) {
+        Some(Message::Bitcoin(signed)) => {
+            if let Err(why) = shared.psbt.combine(&signed.psbt) {
+                shared.scan.fail(why);
+            }
+        }
+        Some(other) => shared.scan.refuse(&other, "a member's signed PSBT"),
+        None => {}
+    }
+
+    ui.add(egui::TextEdit::multiline(&mut shared.pasted).hint_text("Paste a member's signed PSBT, in base64").font(egui::TextStyle::Monospace).desired_rows(2).desired_width(f32::INFINITY));
+
+    if !shared.pasted.trim().is_empty() {
+        match chainv4::crypto::bitcoin::psbt::Psbt::from_base64(&shared.pasted).and_then(|theirs| shared.psbt.combine(&theirs)) {
+            Ok(()) => shared.pasted.clear(),
+            Err(why) => {
+                ui.colored_label(palette.bad, why);
+            }
+        }
+    }
+
+    let mut finished = None;
+    ui.horizontal_wrapped(|ui| {
+        if let Some(seed) = crate::keys::seed(ctx.book)
+            && theme::primary(ui, &palette, "Sign with these words", held < needed as usize).clicked()
+        {
+            match crate::bitcoin::Signs::sign(&shared.psbt, &seed) {
+                Ok(signed) => shared.psbt = signed,
+                Err(why) => state.trouble = Some(why),
+            }
+        }
+
+        if theme::quiet(ui, &palette, "Copy as base64").clicked() {
+            ui.ctx().copy_text(shared.psbt.to_base64());
+        }
+
+        if held >= needed as usize && theme::primary(ui, &palette, "Finish", true).clicked() {
+            finished = Some(shared.psbt.finish_htlc(htlc, shared.value, shared.spend));
+        }
+
+        if theme::quiet(ui, &palette, "Put away").clicked() {
+            finished = Some(Err("put away".to_string()));
+        }
+    });
+
+    match finished {
+        Some(Ok(tx)) => {
+            state.bitcoin.signed = Some(to_hex(&tx.encode())[2..].to_string());
+            state.shared = None;
+        }
+        Some(Err(why)) if why == "put away" => state.shared = None,
+        Some(Err(why)) => state.trouble = Some(why),
+        None => {}
+    }
 }
 
 /// Signs a spend: with the account's key, when this wallet holds it, or else as a PSBT for the
@@ -1408,9 +1624,8 @@ fn sign(secret: Option<[u8; 32]>, origin: Option<crate::airgap::Origin>, terms: 
 
     // Watched from the signer: it signs by the account's place under its words.
     let origin = origin.ok_or("this account's keys are on a signer that did not say where: pair it again")?;
-    let key = match spend {
-        Spend::Claim { .. } => htlc.claim,
-        Spend::Refund => htlc.refund,
+    let chainv4::swap::BitcoinParty::Key(key) = *htlc.party(spend) else {
+        return Err("that branch is a multisig's: its members sign it".to_string());
     };
     let tx = htlc.unsigned(Coins { txid, vout, value }, to, fee_rate, spend)?;
     let hardened = 1 << 31;

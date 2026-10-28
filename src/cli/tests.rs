@@ -988,6 +988,78 @@ mod send {
         running.stop();
     }
 
+    #[cfg(all(feature = "swap", feature = "mnemonic"))]
+    #[test]
+    fn a_multisig_swaps_with_its_quorum_in_the_htlc_and_its_members_sign_the_claim() {
+        use crate::cli::multisig::{bitcoin_wallet, sign_file};
+        use crate::cli::swap::{BitcoinSpend, SwapAction, SwapArgs, bitcoin, swap};
+        use crate::crypto::bitcoin::multisig::{bitcoin_address, xpub_text};
+        use crate::crypto::bitcoin::psbt::Psbt;
+        use crate::crypto::bitcoin::tx::Network;
+        use crate::crypto::mnemonic::Phrase;
+        use crate::swap::htlc::Spend;
+        use crate::swap::{BitcoinLeg, BitcoinParty, ChainLeg, Leg, Parties, Terms, multisig_index, secret};
+
+        let running = Running::start(true);
+        let dir = TempDir::new("multisig-swap");
+        let seeds: Vec<_> = [
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+            "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+        ]
+        .iter()
+        .map(|words| Phrase::parse(words).unwrap().seed(""))
+        .collect();
+        let members = seeds.iter().enumerate().map(|(at, seed)| {
+            let key = seed.key(crate::crypto::keypair::KeyType::Ed25519, 0).public();
+
+            crate::cli::send::parse_member(&format!("{key},{},0x{}", xpub_text(&seed.multisig_account(1), Network::Test), format!("{:02x}", 0x41 + at).repeat(20))).unwrap()
+        }).collect();
+        send(running.args(TxArgs::CreateMultisig { members, threshold: 2 })).unwrap();
+        let account = crate::structs::address::multisig_address(&DevAuthority::dev_keypair().public().address(), 0, crate::structs::hash::HashType::default_chain());
+        let node = format!("http://{}", running.api);
+        let wallet = bitcoin_wallet(&crate::cli::send::agent(&Default::default()).unwrap(), &node, &account).unwrap();
+
+        // The multisig offers its coin for Bob's bitcoin: its quorum takes the HTLC's claim.
+        let (secret, hash) = secret().unwrap();
+        let quorum = BitcoinParty::of_multisig(&wallet, multisig_index(&hash)).unwrap();
+        let multisig = Parties { chain: Some(account), bitcoin: Some(quorum.clone()), evm: None };
+        let bob = Parties { chain: Some(Address::Ed25519([0xb; 32])), bitcoin: Some(BitcoinParty::Key(crate::crypto::secp256k1::public_key(&[0x22; 32]).unwrap())), evm: None };
+        let pays = Leg::Chain(ChainLeg { item: None, contract: Address::Contract([0x5a; 32]), token: None, amount: u256::new(5_000), payer: None, receiver: None });
+        let gets = Leg::Bitcoin(BitcoinLeg { testnet: true, sats: 100_000, payer: None, receiver: None });
+        let now = crate::node::now_ms();
+        let terms = Terms::offer(hash, pays, gets, now + crate::swap::FIRST_DEADLINE_MS, now + crate::swap::SECOND_DEADLINE_MS, &multisig).unwrap().answer(&bob).unwrap();
+
+        assert_eq!((terms.to_bytes()[0], terms.htlc().unwrap().claim), (4, quorum));
+
+        // Its claim is a PSBT for the members, written by the CLI from the node's multisig; two
+        // sign, and bitcoin-finish makes the transaction.
+        let psbt = dir.0.join("claim.psbt");
+        let to = bitcoin_address(2, &wallet.xpubs, Network::Test, 0, 0).unwrap();
+        let spend = BitcoinSpend {
+            terms: terms.to_text(),
+            funding: format!("{}:0", "ab".repeat(32)),
+            sats: 100_000,
+            key: None,
+            to,
+            fee_rate: 2,
+            multisig: Some(account),
+            multisig_index: None,
+            psbt: Some(psbt.clone()),
+            node: node.clone(),
+        };
+        let written = bitcoin(&spend, Spend::Claim { secret });
+        running.stop();
+
+        assert!(written.unwrap().contains("PSBT"));
+        sign_file(&psbt, &seeds[0]).unwrap();
+        sign_file(&psbt, &seeds[1]).unwrap();
+        swap(SwapArgs { action: SwapAction::BitcoinFinish { terms: terms.to_text(), psbt: psbt.clone(), sats: 100_000, secret: Some(crate::structs::hex::to_hex(&secret)) } }).unwrap();
+
+        let finished = Psbt::from_base64(&fs::read_to_string(&psbt).unwrap()).unwrap().finish_htlc(&terms.htlc().unwrap(), 100_000, Spend::Claim { secret }).unwrap();
+        assert_eq!(finished.inputs[0].witness.len(), 6);
+    }
+
     #[cfg(all(feature = "swap", feature = "sha256"))]
     #[test]
     fn a_swap_locks_and_claims_on_chainv4_and_signs_bitcoins_side() {
@@ -1015,8 +1087,8 @@ mod send {
             PublicKey::Bitcoin(bytes) => bytes,
             _ => unreachable!(),
         };
-        let alice = Parties { chain: Some(Address::Ed25519([0xa; 32])), bitcoin: Some(bitcoin_key(&alice_bitcoin)), evm: None };
-        let bob = Parties { chain: Some(deployer), bitcoin: Some(bitcoin_key(&bob_bitcoin)), evm: None };
+        let alice = Parties { chain: Some(Address::Ed25519([0xa; 32])), bitcoin: Some(crate::swap::BitcoinParty::Key(bitcoin_key(&alice_bitcoin))), evm: None };
+        let bob = Parties { chain: Some(deployer), bitcoin: Some(crate::swap::BitcoinParty::Key(bitcoin_key(&bob_bitcoin))), evm: None };
         let now = now_ms();
         // A new offer's contract is the one the node names, there being no swap name.
         let agent = crate::cli::send::agent(&Default::default()).unwrap();
@@ -1027,7 +1099,7 @@ mod send {
         let node = format!("http://{}", running.api);
         // The terms name the contract the lock goes into. Bob locks second; the first lock is
         // Bitcoin's, which the CLI cannot see, so he checks it himself.
-        let action = || LegAction { terms: terms.to_text(), leg: None, node: node.clone(), eth_rpc: Vec::new(), tls: Default::default(), key: None, anyway: false };
+        let action = || LegAction { terms: terms.to_text(), leg: None, node: node.clone(), eth_rpc: Vec::new(), tls: Default::default(), key: None, anyway: false, multisig: None, out: None };
 
         let unchecked = swap(SwapArgs { action: SwapAction::Lock(action()) }).unwrap_err();
         assert!(unchecked.to_string().contains("--anyway"), "{unchecked}");
@@ -1057,7 +1129,7 @@ mod send {
         let key = dir.0.join("bob.key");
         fs::write(&key, bob_bitcoin.to_key_file()).unwrap();
         let to = crate::structs::bech32::encode_segwit("tb", &crate::crypto::bitcoin::hash160(&bitcoin_key(&bob_bitcoin)));
-        let spend = BitcoinSpend { terms: terms.to_text(), funding: format!("{}:1", "ab".repeat(32)), sats: 100_000, key, to, fee_rate: 2 };
+        let spend = BitcoinSpend { terms: terms.to_text(), funding: format!("{}:1", "ab".repeat(32)), sats: 100_000, key: Some(key), to, fee_rate: 2, multisig: None, multisig_index: None, psbt: None, node: String::new() };
         let signed = bitcoin(&spend, Spend::Claim { secret }).unwrap();
         let (tx, witnessed) = Transaction::read(&from_hex(&format!("0x{signed}")).unwrap()).unwrap();
 
@@ -1590,7 +1662,7 @@ mod send {
         let gets = Leg::Evm(EvmLeg { item: None, chain_id: rpc.chain_id().unwrap(), contract: swap_sol, token: None, amount: u256::new(7_000), payer: None, receiver: None });
         let terms = Terms::offer(hash, pays, gets, now + crate::swap::FIRST_DEADLINE_MS, now + crate::swap::SECOND_DEADLINE_MS, &alice).unwrap().answer(&bob).unwrap();
         terms.check(now).unwrap();
-        let action = |key: Option<PathBuf>, leg: Option<LegArg>| LegAction { terms: terms.to_text(), leg, node: node.clone(), eth_rpc: vec![format!("{node}/rpc")], tls: Default::default(), key, anyway: false };
+        let action = |key: Option<PathBuf>, leg: Option<LegArg>| LegAction { terms: terms.to_text(), leg, node: node.clone(), eth_rpc: vec![format!("{node}/rpc")], tls: Default::default(), key, anyway: false, multisig: None, out: None };
 
         // Bob cannot lock before Alice: her lock does not stand yet.
         let early = swap(SwapArgs { action: SwapAction::Lock(action(Some(bob_file.clone()), None)) }).unwrap_err();

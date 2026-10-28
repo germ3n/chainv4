@@ -58,6 +58,10 @@ pub struct SwapRecord {
     /// The HTLC's coins on Bitcoin, once known: txid:vout:sats.
     #[serde(default)]
     pub funding: Option<String>,
+    /// The native multisig it swaps as, by address, when not the account itself: its chainv4
+    /// steps go to the Multisig page, and its Bitcoin spends are signed by its members.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multisig: Option<String>,
 }
 
 impl Drop for SwapRecord {

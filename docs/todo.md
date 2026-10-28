@@ -380,8 +380,8 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   quorum, in the CLI, the wallet and the offline signer (see [Multisig](multisig.md)). On Bitcoin,
   done too: members name BIP48 xpubs, wsh(sortedmulti(…)) with fresh addresses and a descriptor
   other wallets import, PSBTs built, signed, combined and finished in the CLI, the wallet and the
-  offline signer, checked against Bitcoin Core on regtest. Left: swaps from a multisig, and the EVM
-  Safe-style contract. The original note: Accounts that need M of N keys to move anything,
+  offline signer, checked against Bitcoin Core on regtest. Swaps from a multisig too, its quorum in
+  the HTLC's branch, in the CLI, the wallet and the signer. Left: the EVM Safe-style contract. The original note: Accounts that need M of N keys to move anything,
   built into the chain rather than a contract: the keys may be any kind the chain takes
   (Ed25519, secp256k1, Bitcoin), and the same signers hold matching multisig on the other
   chains swaps reach, a Bitcoin P2WSH M-of-N and an EVM Safe-style contract, so one quorum

@@ -52,6 +52,9 @@ const LEGS: u8 = 2;
 /// The first byte of terms whose legs may lock NFTs. Terms that lock none are written as LEGS, so
 /// apps from before NFTs read every code they could.
 const ITEMS: u8 = 3;
+/// The first byte of terms with a native multisig on a Bitcoin leg. Terms without one are written
+/// as ITEMS or LEGS, so apps from before read every code they could.
+const MULTISIG: u8 = 4;
 
 #[document(
     summary = "The NFT a leg locks, when it locks one rather than coins or a fungible token: one token of an NFT collection (ERC-721 on an EVM chain), or an amount of one id of a multi-token collection (ERC-1155). The leg's token is the collection, and its amount how many: 1 for an NFT.",
@@ -121,10 +124,94 @@ pub struct BitcoinLeg {
     pub testnet: bool,
     #[document(summary = "The bitcoin locked, in satoshis.")]
     pub sats: u64,
-    #[document(summary = "Whose bitcoin it is: the HTLC's refund key, compressed.")]
-    pub payer: Option<[u8; 33]>,
-    #[document(summary = "Who takes it with the secret: the HTLC's claim key.")]
-    pub receiver: Option<[u8; 33]>,
+    #[document(summary = "Whose bitcoin it is: who the HTLC's refund branch takes.")]
+    pub payer: Option<BitcoinParty>,
+    #[document(summary = "Who takes it with the secret: who the HTLC's claim branch takes.")]
+    pub receiver: Option<BitcoinParty>,
+}
+
+#[document(
+    summary = "Who an HTLC's branch takes on Bitcoin: one compressed key, or a native multisig's M of N, its members' keys at one of its receiving addresses, so its quorum controls the coins through the swap.",
+    category = "Swaps",
+    see_also = "BitcoinLeg, Htlc",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum BitcoinParty {
+    #[document(summary = "One key, compressed.")]
+    #[wincode(tag = 0)]
+    Key([u8; 33]),
+    #[document(summary = "M of these keys, in the order the branch checks them: sorted, as the multisig's addresses are.")]
+    #[wincode(tag = 1)]
+    Multisig { threshold: u32, keys: Vec<[u8; 33]> },
+}
+
+#[document(
+    summary = "Which of a native multisig's receiving addresses' keys a swap's HTLC takes for it: a number from the swap's hash, below 2^31, so every member and tool finds the same fresh one with nothing to pass round, and no two swaps share it but by chance.",
+    category = "Swaps",
+    see_also = "BitcoinParty::of_multisig",
+)]
+pub fn multisig_index(hash: &[u8; 32]) -> u32 {
+    u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]) & 0x7fff_ffff
+}
+
+impl BitcoinParty {
+    #[document(parent = "BitcoinParty", summary = "What the branch ends in: the key and OP_CHECKSIG, or OP_M, the keys, OP_N and OP_CHECKMULTISIG.")]
+    pub fn check(&self) -> Vec<u8> {
+        match self {
+            BitcoinParty::Key(key) => [&[33][..], key, &[0xac]].concat(),
+            BitcoinParty::Multisig { threshold, keys } => crate::crypto::bitcoin::multisig::multisig_script(*threshold, keys),
+        }
+    }
+
+    #[document(parent = "BitcoinParty", summary = "Whether a key is this one, or one of its members'.")]
+    pub fn holds(&self, key: &[u8; 33]) -> bool {
+        match self {
+            BitcoinParty::Key(own) => own == key,
+            BitcoinParty::Multisig { keys, .. } => keys.contains(key),
+        }
+    }
+
+    #[document(parent = "BitcoinParty", summary = "Its keys, and how many of them a spend takes.")]
+    pub fn keys(&self) -> (u32, Vec<[u8; 33]>) {
+        match self {
+            BitcoinParty::Key(key) => (1, vec![*key]),
+            BitcoinParty::Multisig { threshold, keys } => (*threshold, keys.clone()),
+        }
+    }
+
+    #[document(parent = "BitcoinParty", summary = "Why it cannot be one: a key not on the curve, or a multisig of no keys, more than 20, a key twice, keys out of order, or a threshold of 0 or past its keys.")]
+    pub fn problem(&self) -> Option<&'static str> {
+        let (threshold, keys) = self.keys();
+
+        if keys.iter().any(|key| k256::PublicKey::from_sec1_bytes(key).is_err()) {
+            return Some("a Bitcoin key that is not a compressed secp256k1 key");
+        }
+
+        if let BitcoinParty::Multisig { .. } = self {
+            if keys.is_empty() || keys.len() > 20 || threshold == 0 || threshold as usize > keys.len() {
+                return Some("a Bitcoin multisig of 1 to 20 keys, needing at least 1 and at most all");
+            }
+
+            if !keys.windows(2).all(|pair| pair[0] < pair[1]) {
+                return Some("a Bitcoin multisig's keys, each once and sorted");
+            }
+        }
+
+        None
+    }
+
+    #[document(
+        parent = "BitcoinParty",
+        summary = "A native multisig as a swap's party on Bitcoin: its members' keys at its receiving address index, sorted, and its threshold.",
+        params = { index = "Which of its receiving addresses: a fresh one for each swap." },
+    )]
+    pub fn of_multisig(wallet: &crate::crypto::bitcoin::psbt::MultisigWallet, index: u32) -> Option<BitcoinParty> {
+        let mut keys = wallet.xpubs.iter().map(|xpub| crate::crypto::bitcoin::multisig::member_key(xpub, 0, index)).collect::<Option<Vec<_>>>()?;
+        keys.sort();
+
+        Some(BitcoinParty::Multisig { threshold: wallet.threshold, keys })
+    }
 }
 
 #[document(summary = "A swap's leg on an EVM chain, such as Ethereum: a lock in Swap.sol there.", category = "Swaps", see_also = "Leg")]
@@ -166,12 +253,12 @@ pub enum Role {
 }
 
 #[document(summary = "Someone, or a token, on one chain: as a leg names them.", category = "Swaps")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Party {
     #[document(summary = "A chainv4 address.")]
     Chain(Address),
-    #[document(summary = "A compressed Bitcoin key.")]
-    Bitcoin([u8; 33]),
+    #[document(summary = "A compressed Bitcoin key, or a native multisig's keys there.")]
+    Bitcoin(BitcoinParty),
     #[document(summary = "An address on an EVM chain.")]
     Evm([u8; 20]),
 }
@@ -180,10 +267,10 @@ pub enum Party {
     summary = "Who someone is on each kind of chain, to offer or answer with: their chainv4 address, their Bitcoin key on the swap's network, and their address on EVM chains. A swap takes the ones its legs need.",
     category = "Swaps",
 )]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Parties {
     pub chain: Option<Address>,
-    pub bitcoin: Option<[u8; 33]>,
+    pub bitcoin: Option<BitcoinParty>,
     pub evm: Option<[u8; 20]>,
 }
 
@@ -357,8 +444,8 @@ impl Leg {
         match (self, role) {
             (Leg::Chain(leg), Role::Payer) => leg.payer.map(Party::Chain),
             (Leg::Chain(leg), Role::Receiver) => leg.receiver.map(Party::Chain),
-            (Leg::Bitcoin(leg), Role::Payer) => leg.payer.map(Party::Bitcoin),
-            (Leg::Bitcoin(leg), Role::Receiver) => leg.receiver.map(Party::Bitcoin),
+            (Leg::Bitcoin(leg), Role::Payer) => leg.payer.clone().map(Party::Bitcoin),
+            (Leg::Bitcoin(leg), Role::Receiver) => leg.receiver.clone().map(Party::Bitcoin),
             (Leg::Evm(leg), Role::Payer) => leg.payer.map(Party::Evm),
             (Leg::Evm(leg), Role::Receiver) => leg.receiver.map(Party::Evm),
         }
@@ -378,7 +465,7 @@ impl Leg {
                 }
             }
             Leg::Bitcoin(leg) => {
-                let party = Some(parties.bitcoin.ok_or_else(|| missing("Bitcoin key"))?);
+                let party = Some(parties.bitcoin.clone().ok_or_else(|| missing("Bitcoin key"))?);
                 match role {
                     Role::Payer => leg.payer = party,
                     Role::Receiver => leg.receiver = party,
@@ -400,7 +487,7 @@ impl Leg {
     pub fn is(&self, role: Role, parties: &Parties) -> bool {
         match self.party(role) {
             Some(Party::Chain(address)) => parties.chain == Some(address),
-            Some(Party::Bitcoin(key)) => parties.bitcoin == Some(key),
+            Some(Party::Bitcoin(key)) => parties.bitcoin.as_ref() == Some(&key),
             Some(Party::Evm(address)) => parties.evm == Some(address),
             None => false,
         }
@@ -474,7 +561,7 @@ impl Leg {
         }
 
         if lock.token != token || lock.amount != amount {
-            return Err(format!("it locks {} of {}, not what the terms say", lock.amount, lock.token.map_or("the coin".to_string(), |token| format!("{token:?}"))));
+            return Err(format!("it locks {} of {}, not what the terms say", lock.amount, lock.token.as_ref().map_or("the coin".to_string(), |token| format!("{token:?}"))));
         }
 
         if lock.item != item {
@@ -516,9 +603,9 @@ impl Leg {
                     return Err("a Bitcoin deadline Bitcoin cannot write as a time".to_string());
                 }
 
-                match [leg.payer, leg.receiver].into_iter().flatten().all(|key| crate::crypto::secp256k1::valid_key(&key)) {
-                    true => Ok(()),
-                    false => Err("a Bitcoin key that is not a key".to_string()),
+                match [&leg.payer, &leg.receiver].into_iter().flatten().find_map(BitcoinParty::problem) {
+                    None => Ok(()),
+                    Some(problem) => Err(problem.to_string()),
                 }
             }
             Leg::Evm(leg) => {
@@ -645,8 +732,8 @@ impl Terms {
 
         Some(htlc::Htlc {
             hash: self.hash,
-            claim: leg.receiver?,
-            refund: leg.payer?,
+            claim: leg.receiver.clone()?,
+            refund: leg.payer.clone()?,
             locktime: u32::try_from(self.deadline(side) / 1_000).ok()?,
         })
     }
@@ -680,11 +767,15 @@ impl Terms {
         ur::encode(&self.to_bytes(), &ur::Type::Custom(UR_TYPE)).to_ascii_uppercase()
     }
 
-    #[document(parent = "Terms", summary = "Its encoding: a 3, then its fields, for terms that lock an NFT; a 2, then its fields as written before NFTs, for every other.")]
+    #[document(parent = "Terms", summary = "Its encoding: a 4, then its fields, for terms with a multisig on Bitcoin; a 3, then its fields as written before those, for terms that lock an NFT; a 2, then its fields as written before NFTs, for every other.")]
     pub fn to_bytes(&self) -> Vec<u8> {
-        match legacy::write_legs(self) {
-            Some(bytes) => [vec![LEGS], bytes].concat(),
-            None => [vec![ITEMS], wincode::serialize(self).expect("terms always encode")].concat(),
+        if let Some(bytes) = legacy::write_legs(self) {
+            return [vec![LEGS], bytes].concat();
+        }
+
+        match legacy::write_items(self) {
+            Some(bytes) => [vec![ITEMS], bytes].concat(),
+            None => [vec![MULTISIG], wincode::serialize(self).expect("terms always encode")].concat(),
         }
     }
 
@@ -711,7 +802,8 @@ impl Terms {
     )]
     pub fn from_bytes(bytes: &[u8]) -> Result<Terms, String> {
         let terms = match bytes.first() {
-            Some(&ITEMS) => wincode::deserialize::<Terms>(&bytes[1..]).map_err(|_| "terms that do not decode".to_string())?,
+            Some(&MULTISIG) => wincode::deserialize::<Terms>(&bytes[1..]).map_err(|_| "terms that do not decode".to_string())?,
+            Some(&ITEMS) => legacy::read_items(&bytes[1..])?,
             Some(&LEGS) => legacy::read_legs(&bytes[1..])?,
             Some(0 | 1) => return legacy::read(bytes),
             _ => return Err("terms of a kind this build does not read".to_string()),

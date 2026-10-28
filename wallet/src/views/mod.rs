@@ -208,7 +208,7 @@ pub struct States {
     pub dapp: dapp::DappState,
     pub faucet: faucet::FaucetState,
     #[cfg(feature = "swap")]
-    swaps: swaps::SwapsState,
+    pub swaps: swaps::SwapsState,
     #[cfg(feature = "dex")]
     pub trade: trade::TradeState,
     #[cfg(feature = "nft")]
@@ -286,7 +286,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Multisig => multisig::show(ui, ctx, &mut states.multisig, &mut states.send),
         Page::Contracts => contracts::show(ui, ctx, &mut states.contracts, &mut states.send),
         #[cfg(feature = "swap")]
-        Page::Swaps => swaps::show(ui, ctx, &mut states.swaps, &mut states.send),
+        Page::Swaps => swaps::show(ui, ctx, &mut states.swaps, &mut states.send, &mut states.multisig),
         #[cfg(feature = "dex")]
         Page::Trade => trade::show(ui, ctx, &mut states.trade, &mut states.send),
         #[cfg(feature = "nft")]

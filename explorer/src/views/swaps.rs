@@ -178,7 +178,7 @@ fn lookup(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, contract: &str, ha
 
 fn lock_facts(ui: &mut Ui, ctx: &mut Ctx, lock: &Lock, id: &str) {
     let look = ctx.look;
-    let token = lock.token.map(|token| match token {
+    let token = lock.token.as_ref().map(|token| match token {
         chainv4::swap::Party::Chain(address) => address.to_string(),
         other => format!("{other:?}"),
     });

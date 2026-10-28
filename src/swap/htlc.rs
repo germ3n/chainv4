@@ -11,11 +11,23 @@
 //! OP_CHECKSIG
 //! ```
 //!
+//! A side that is a native multisig checks M of its members' keys instead, each branch ending in
+//! its own check, a key's OP_CHECKSIG or the multisig's OP_CHECKMULTISIG:
+//!
+//! ```text
+//! OP_IF
+//!     OP_SIZE 32 OP_EQUALVERIFY OP_SHA256 <hash> OP_EQUALVERIFY <claim check>
+//! OP_ELSE
+//!     <lock time> OP_CHECKLOCKTIMEVERIFY OP_DROP <refund check>
+//! OP_ENDIF
+//! ```
+//!
 //! The secret must be 32 bytes, as on chainv4's side, so a secret one chain takes the other
 //! takes too. The lock time is a Unix time in seconds, which Bitcoin checks against the median
 //! time of the last eleven blocks: a refund confirms an hour or so after it, not at once.
 
 use {
+    super::BitcoinParty,
     crate::crypto::bitcoin::tx::{Network, SIGHASH_ALL, Transaction, TxIn, TxOut, der, p2wsh},
     crate::crypto::bitcoin::{self, sha256},
     crate::structs::bech32,
@@ -45,14 +57,14 @@ pub const LOCKTIME_THRESHOLD: u32 = 500_000_000;
 pub const DUST: u64 = 294;
 
 #[document(summary = "A swap's hash time-locked contract on Bitcoin.", category = "Swaps")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Htlc {
     #[document(summary = "The SHA-256 of the secret.")]
     pub hash: [u8; 32],
-    #[document(summary = "Who takes the coins with the secret: a compressed key.")]
-    pub claim: [u8; 33],
+    #[document(summary = "Who takes the coins with the secret: a key, or a multisig's M of N.")]
+    pub claim: BitcoinParty,
     #[document(summary = "Who takes them back after the lock time.")]
-    pub refund: [u8; 33],
+    pub refund: BitcoinParty,
     #[document(summary = "When the refund opens: a Unix time, in seconds.")]
     pub locktime: u32,
 }
@@ -82,42 +94,55 @@ impl Htlc {
     pub fn script(&self) -> Vec<u8> {
         let mut out = vec![OP_IF, OP_SIZE, 0x01, 0x20, OP_EQUALVERIFY, OP_SHA256, 0x20];
         out.extend(self.hash);
-        out.extend([OP_EQUALVERIFY, 0x21]);
-        out.extend(self.claim);
+        out.push(OP_EQUALVERIFY);
+
+        // Two keys share one OP_CHECKSIG after the branches, as swaps' HTLCs always have.
+        if let (BitcoinParty::Key(claim), BitcoinParty::Key(refund)) = (&self.claim, &self.refund) {
+            out.push(0x21);
+            out.extend(claim);
+            out.push(OP_ELSE);
+            push_number(&mut out, i64::from(self.locktime));
+            out.extend([OP_CHECKLOCKTIMEVERIFY, OP_DROP, 0x21]);
+            out.extend(refund);
+            out.extend([OP_ENDIF, OP_CHECKSIG]);
+
+            return out;
+        }
+
+        out.extend(self.claim.check());
         out.push(OP_ELSE);
         push_number(&mut out, i64::from(self.locktime));
-        out.extend([OP_CHECKLOCKTIMEVERIFY, OP_DROP, 0x21]);
-        out.extend(self.refund);
-        out.extend([OP_ENDIF, OP_CHECKSIG]);
+        out.extend([OP_CHECKLOCKTIMEVERIFY, OP_DROP]);
+        out.extend(self.refund.check());
+        out.push(OP_ENDIF);
 
         out
     }
 
     #[document(
         parent = "Htlc",
-        summary = "Reads one from its witness script: exactly this template, or None.",
+        summary = "Reads one from its witness script: exactly one of these templates, two keys' or one with a multisig's branch, or None.",
     )]
     pub fn parse(script: &[u8]) -> Option<Htlc> {
         let rest = script.strip_prefix(&[OP_IF, OP_SIZE, 0x01, 0x20, OP_EQUALVERIFY, OP_SHA256, 0x20][..])?;
         let (hash, rest) = rest.split_at_checked(32)?;
-        let rest = rest.strip_prefix(&[OP_EQUALVERIFY, 0x21][..])?;
-        let (claim, rest) = rest.split_at_checked(33)?;
+        let rest = rest.strip_prefix(&[OP_EQUALVERIFY][..])?;
+        let (claim, rest) = party(rest)?;
         let rest = rest.strip_prefix(&[OP_ELSE][..])?;
         let (&size, rest) = rest.split_first()?;
-        let (number, rest) = rest.split_at_checked(usize::from(size).clamp(1, 5))?;
-        let rest = rest.strip_prefix(&[OP_CHECKLOCKTIMEVERIFY, OP_DROP, 0x21][..])?;
-        let (refund, rest) = rest.split_at_checked(33)?;
 
-        if rest != [OP_ENDIF, OP_CHECKSIG] || !(1..=5).contains(&size) {
+        if !(1..=5).contains(&size) {
             return None;
         }
 
-        let locktime = u32::try_from(read_number(number)?).ok()?;
+        let (number, rest) = rest.split_at_checked(usize::from(size))?;
+        let rest = rest.strip_prefix(&[OP_CHECKLOCKTIMEVERIFY, OP_DROP][..])?;
+        let (refund, _) = party(rest)?;
         let htlc = Htlc {
             hash: hash.try_into().ok()?,
-            claim: claim.try_into().ok()?,
-            refund: refund.try_into().ok()?,
-            locktime,
+            claim,
+            refund,
+            locktime: u32::try_from(read_number(number)?).ok()?,
         };
 
         // Only the one way of writing it: what this module makes, byte for byte.
@@ -145,16 +170,24 @@ impl Htlc {
         let key = crate::crypto::secp256k1::public_key(secret).ok_or("not a secp256k1 key")?;
 
         match spend {
-            Spend::Claim { .. } if key != self.claim => return Err("a key that is not the swap's claim key".to_string()),
-            Spend::Refund if key != self.refund => return Err("a key that is not the swap's refund key".to_string()),
+            Spend::Claim { .. } if self.claim != BitcoinParty::Key(key) => return Err("a key that is not the swap's claim key".to_string()),
+            Spend::Refund if self.refund != BitcoinParty::Key(key) => return Err("a key that is not the swap's refund key".to_string()),
             _ => {}
         }
 
         let mut tx = self.unsigned(coins, to, fee_rate, spend)?;
         let signature = self.signature(&tx, coins.value, secret);
-        tx.inputs[0].witness = self.witness(&signature, spend);
+        tx.inputs[0].witness = self.witness(&[signature], spend);
 
         Ok(tx)
+    }
+
+    #[document(parent = "Htlc", summary = "Who a spend's branch takes: the claim's party, or the refund's.")]
+    pub fn party(&self, spend: Spend) -> &BitcoinParty {
+        match spend {
+            Spend::Claim { .. } => &self.claim,
+            Spend::Refund => &self.refund,
+        }
     }
 
     #[document(
@@ -182,8 +215,9 @@ impl Htlc {
             lock_time,
         };
 
-        // Weighed with a signature as long as DER makes one, then priced.
-        tx.inputs[0].witness = self.witness(&[0; 73], spend);
+        // Weighed with signatures as long as DER makes them, as many as the branch takes, then priced.
+        let (needed, _) = self.party(spend).keys();
+        tx.inputs[0].witness = self.witness(&vec![vec![0; 73]; needed as usize], spend);
         let fee = fee_rate.checked_mul(tx.vsize()).ok_or("a fee past what there is")?;
         let left = value.checked_sub(fee).filter(|left| *left >= DUST).ok_or_else(|| format!("{value} satoshis less a fee of {fee} leaves less than dust"))?;
         tx.outputs[0].value = left;
@@ -206,13 +240,23 @@ impl Htlc {
 
     #[document(
         parent = "Htlc",
-        summary = "The witness that spends it: the signature, the secret and 1 for the claim's branch, or nothing for the refund's, and the script.",
+        summary = "The witness that spends it: the signatures, a key's one, or a multisig's after the empty push CHECKMULTISIG takes one too many, in its keys' order; the secret and 1 for the claim's branch, or nothing for the refund's; and the script.",
     )]
-    pub fn witness(&self, signature: &[u8], spend: Spend) -> Vec<Vec<u8>> {
+    pub fn witness(&self, signatures: &[Vec<u8>], spend: Spend) -> Vec<Vec<u8>> {
+        let mut witness = match self.party(spend) {
+            BitcoinParty::Key(_) => Vec::new(),
+            BitcoinParty::Multisig { .. } => vec![Vec::new()],
+        };
+        witness.extend(signatures.iter().cloned());
+
         match spend {
-            Spend::Claim { secret } => vec![signature.to_vec(), secret.to_vec(), vec![1], self.script()],
-            Spend::Refund => vec![signature.to_vec(), Vec::new(), self.script()],
+            Spend::Claim { secret } => witness.extend([secret.to_vec(), vec![1]]),
+            Spend::Refund => witness.push(Vec::new()),
         }
+
+        witness.push(self.script());
+
+        witness
     }
 }
 
@@ -222,6 +266,23 @@ impl Htlc {
 )]
 pub fn revealed(tx: &Transaction, hash: &[u8; 32]) -> Option<[u8; 32]> {
     tx.inputs.iter().flat_map(|input| &input.witness).filter_map(|item| <[u8; 32]>::try_from(item.as_slice()).ok()).find(|item| sha256(item) == *hash)
+}
+
+/// A branch's check read back, and what follows: a key and OP_CHECKSIG, a key before the shared
+/// OP_CHECKSIG of two keys' template, or a multisig's.
+fn party(script: &[u8]) -> Option<(BitcoinParty, &[u8])> {
+    if let [0x21, rest @ ..] = script {
+        let (key, rest) = rest.split_at_checked(33)?;
+        let rest = rest.strip_prefix(&[OP_CHECKSIG][..]).unwrap_or(rest);
+
+        return Some((BitcoinParty::Key(key.try_into().ok()?), rest));
+    }
+
+    // A multisig's check ends at its OP_CHECKMULTISIG: the first 0xae its keys' layout reaches.
+    let end = (0..script.len()).find(|at| script[*at] == 0xae && crate::crypto::bitcoin::multisig::parse_multisig_script(&script[..=*at]).is_some())?;
+    let (threshold, keys) = crate::crypto::bitcoin::multisig::parse_multisig_script(&script[..=end])?;
+
+    Some((BitcoinParty::Multisig { threshold, keys }, &script[end + 1..]))
 }
 
 /// A number as a script pushes it: in its fewest little-endian bytes, the top bit the sign.

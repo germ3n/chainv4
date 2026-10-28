@@ -14,7 +14,7 @@ use {
 
 /// What Swap.sol or its chain answered, for the next frame to take.
 pub enum Read {
-    Lock { hash: String, chain_id: u64, lock: Result<Lock, String> },
+    Lock { hash: String, chain_id: u64, lock: Box<Result<Lock, String>> },
     /// The chain's height, and the block its RPC calls finalized, where it names one.
     Heads { chain_id: u64, heads: Result<(u64, Option<u64>), String> },
 }
@@ -27,7 +27,7 @@ pub fn ask_lock(ctx: &Ctx, state: &SwapsState, url: &str, leg: &EvmLeg, hash: &[
     let output = |value: &Value| value.as_str().and_then(from_hex).ok_or_else(|| format!("eth_call answered {value}"));
 
     if leg.item.is_none() {
-        return state.evm.ask(ctx, url, call(1, get_input(hash)), move |answer| Read::Lock { hash: key, chain_id, lock: answer.and_then(|value| output(&value)).and_then(|output| read_lock(&output)) });
+        return state.evm.ask(ctx, url, call(1, get_input(hash)), move |answer| Read::Lock { hash: key, chain_id, lock: Box::new(answer.and_then(|value| output(&value)).and_then(|output| read_lock(&output))) });
     }
 
     let batch = json!([call(1, get_input(hash)), call(2, item_input(hash))]);
@@ -35,7 +35,7 @@ pub fn ask_lock(ctx: &Ctx, state: &SwapsState, url: &str, leg: &EvmLeg, hash: &[
     state.evm.ask_raw(ctx, url, batch, move |answer| Read::Lock {
         hash: key,
         chain_id,
-        lock: answer.and_then(|replies| {
+        lock: Box::new(answer.and_then(|replies| {
             let reply = |id: u64| -> Result<Vec<u8>, String> {
                 let found = replies.as_array().and_then(|replies| replies.iter().find(|reply| reply["id"] == id)).ok_or("a batch without its answer")?;
 
@@ -48,7 +48,7 @@ pub fn ask_lock(ctx: &Ctx, state: &SwapsState, url: &str, leg: &EvmLeg, hash: &[
             lock.item = read_item(&reply(2)?)?;
 
             Ok(lock)
-        }),
+        })),
     });
 }
 
@@ -83,6 +83,8 @@ pub fn take(ctx: &mut Ctx, state: &mut SwapsState) {
             Read::Lock { hash, chain_id, lock } => {
                 // A claim there shows the secret: kept for the other leg's claim, once it is the
                 // swap's, whatever the RPC says.
+                let lock = *lock;
+
                 if let Ok(Lock { secret: Some(secret), .. }) = &lock
                     && to_hex(&chainv4::crypto::bitcoin::sha256(secret)) == hash
                     && let Some(record) = ctx.book.swaps.iter_mut().find(|record| record.secret.is_none() && super::hash_of(record).as_deref() == Some(hash.as_str()))

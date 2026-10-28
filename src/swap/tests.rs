@@ -2,8 +2,8 @@ use {super::*, crate::crypto::secp256k1};
 
 const NOW: u64 = 1_793_000_000_000;
 
-fn bitcoin_key(byte: u8) -> [u8; 33] {
-    secp256k1::public_key(&[byte; 32]).unwrap()
+fn bitcoin_key(byte: u8) -> crate::swap::BitcoinParty {
+    crate::swap::BitcoinParty::Key(secp256k1::public_key(&[byte; 32]).unwrap())
 }
 
 fn alice() -> Parties {
@@ -131,7 +131,7 @@ fn terms_that_do_not_hold_together_are_refused() {
     refused(Terms { second: Leg::Chain(ChainLeg { item: None, amount: u256::ZERO, ..chain(&answered().second) }), ..answered() }, "more than nothing");
     refused(Terms { second_deadline: NOW - 1, ..answered() }, "passed");
     refused(Terms { second_deadline: NOW + FIRST_DEADLINE_MS - 3_600_000, ..answered() }, "at least 4 hours");
-    refused(with_first(&|leg| leg.receiver = Some([0; 33])), "not a key");
+    refused(with_first(&|leg| leg.receiver = Some(BitcoinParty::Key([0; 33]))), "not a compressed secp256k1 key");
     refused(with_first(&|leg| leg.receiver = Some(bitcoin_key(1))), "same party");
     refused(Terms { second: Leg::Chain(ChainLeg { item: None, payer: Some(Address::Ed25519([0xa; 32])), ..chain(&answered().second) }), ..answered() }, "same party");
 
@@ -223,7 +223,7 @@ fn legs_lock_nfts_and_terms_without_any_keep_their_old_encoding() {
     assert_eq!(with_nft.to_bytes()[0], 3);
     assert_eq!(Terms::from_text(&with_nft.to_text()).unwrap(), with_nft);
     assert_eq!(Terms::from_text(&plain.to_text()).unwrap(), plain);
-    let padded = [vec![3], wincode::serialize(&plain).unwrap()].concat();
+    let padded = [vec![3], super::legacy::write_items(&plain).unwrap()].concat();
 
     assert!(Terms::from_bytes(&padded).unwrap_err().contains("more in them"), "one encoding a swap");
     assert!(with_nft.has_items() && !plain.has_items());

@@ -27,7 +27,7 @@ use {
     serde_json::{Value, json},
 };
 
-mod bitcoin;
+pub(crate) mod bitcoin;
 
 /// How often the followed multisig is asked of the node again, in milliseconds.
 const REFRESH: u64 = 10_000;
@@ -59,9 +59,22 @@ pub struct MultisigState {
     trouble: Option<String>,
     /// Its coins on Bitcoin, for one whose members name xpubs.
     bitcoin: bitcoin::BitcoinState,
+    /// A transaction another page asked the multisig to send, waiting for its nonce to price.
+    incoming: Option<(String, Tx)>,
 }
 
 impl MultisigState {
+    /// Takes a transaction another page made for a followed multisig to send, such as a swap's
+    /// lock: it is priced and becomes the bundle for its members to sign, once the node says the
+    /// multisig's nonce.
+    pub fn propose(&mut self, prepared: Prepared) {
+        let account = prepared.from.to_string();
+        self.selected = Some(account.clone());
+        self.asked_at = 0;
+        self.bundle = None;
+        self.incoming = Some((account, prepared.tx));
+    }
+
     /// Takes the node's answer to something this page asked; false when it asked none of it.
     pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>) -> bool {
         match ask {
@@ -132,6 +145,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, send: &mut Se
 
         if let Some((_, value)) = state.shown.as_ref().filter(|(address, _)| *address == selected) {
             let value = value.clone();
+
+            // What another page asked: priced as the multisig's next transaction.
+            if let Some((account, tx)) = state.incoming.take_if(|(account, _)| *account == selected)
+                && let Ok(account) = account.parse::<Address>()
+            {
+                price(ctx, state, account, tx, &value, genesis);
+            }
             details(ui, ctx, state, &value, &mut prepared);
             propose(ui, ctx, state, &selected, &value, genesis);
 
@@ -310,19 +330,23 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, selected: &str
 
             match (to, amount) {
                 (Some(to), Some(amount)) if amount > u256::ZERO => {
-                    let tx = Tx::Transfer { from: account, to, amount: chainv4::structs::amount::Amount::U256(amount) };
-                    let nonce = value["nonce"].as_u64().unwrap_or(0);
-                    let threshold = value["threshold"].as_u64().unwrap_or(1) as usize;
-                    let body = MultisigBody { account, tx, nonce, fee: FeeOffer::NONE };
-                    let ask = Ask::Offer(json!({ "tx": to_hex(&wincode::serialize(&sized(&body, threshold)).expect("a probe always encodes")) }).to_string());
-                    ctx.node.ask(ask.clone());
-                    state.pricing = Some((ask, body, genesis));
-                    state.trouble = None;
+                    price(ctx, state, account, Tx::Transfer { from: account, to, amount: chainv4::structs::amount::Amount::U256(amount) }, value, genesis);
                 }
                 _ => state.trouble = Some("A payment needs an address to pay and an amount above zero.".to_string()),
             }
         }
     });
+}
+
+/// Asks the node to price a transaction as the multisig's next, the bundle made once it answers.
+fn price(ctx: &mut Ctx, state: &mut MultisigState, account: Address, tx: Tx, value: &Value, genesis: chainv4::structs::hash::Hash) {
+    let nonce = value["nonce"].as_u64().unwrap_or(0);
+    let threshold = value["threshold"].as_u64().unwrap_or(1) as usize;
+    let body = MultisigBody { account, tx, nonce, fee: FeeOffer::NONE };
+    let ask = Ask::Offer(json!({ "tx": to_hex(&wincode::serialize(&sized(&body, threshold)).expect("a probe always encodes")) }).to_string());
+    ctx.node.ask(ask.clone());
+    state.pricing = Some((ask, body, genesis));
+    state.trouble = None;
 }
 
 /// A probe of the multisig's transaction, carrying as many signatures as its quorum will, so it

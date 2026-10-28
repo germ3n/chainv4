@@ -19,7 +19,7 @@ use {
     crate::structs::u256::u256,
     crate::swap::evm::{self, parse_address, show_address},
     crate::swap::htlc::{Coins, Spend, revealed},
-    crate::swap::{BitcoinLeg, ChainLeg, EvmLeg, Item, Leg, Lock, LockState, Parties, Role, Settled, Side, Terms, secret},
+    crate::swap::{BitcoinLeg, BitcoinParty, ChainLeg, EvmLeg, Item, Leg, Lock, LockState, Parties, Role, Settled, Side, Terms, secret},
     rpc::Rpc,
     serde_json::json,
     std::path::PathBuf,
@@ -78,6 +78,11 @@ pub enum SwapAction {
         offer: String,
         #[command(flatten)]
         parties: PartyArgs,
+        /// The node to read a --multisig from.
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        node: String,
+        #[command(flatten)]
+        tls: TlsArgs,
     },
     /// Shows a swap's terms: who pays what on which chain and when, and the Bitcoin HTLC to pay.
     Show {
@@ -122,6 +127,21 @@ pub enum SwapAction {
     /// Takes back the bitcoin you locked, once its lock time passed: prints the signed
     /// transaction, which Bitcoin mines once its median time is past the deadline.
     BitcoinRefund(BitcoinSpend),
+    /// Finishes a multisig's claim or refund of the HTLC from its PSBT, once its members signed
+    /// enough: prints the transaction to broadcast.
+    BitcoinFinish {
+        /// The terms' code.
+        terms: String,
+        /// The PSBT, in base64, from --psbt and the members' signing.
+        #[arg(long)]
+        psbt: PathBuf,
+        /// What the HTLC's output holds, in satoshis.
+        #[arg(long)]
+        sats: u64,
+        /// For a claim, the secret: 0x and 64 hex digits; without it, a refund.
+        #[arg(long)]
+        secret: Option<String>,
+    },
     /// The secret a Bitcoin claim of the swap showed, from that transaction's hex.
     Revealed {
         terms: String,
@@ -156,6 +176,15 @@ pub struct PartyArgs {
     /// Your address on EVM chains, for an EVM leg: 0x and 40 hex digits, or a secp256k1 key file.
     #[arg(long)]
     pub evm_address: Option<String>,
+    /// Swap as a native multisig: its address on a chainv4 leg, and on a Bitcoin leg its members'
+    /// keys at --multisig-index, M of N in the HTLC's branch, so its quorum controls the coins
+    /// throughout. Read from the node.
+    #[arg(long, conflicts_with_all = ["address", "bitcoin_key"])]
+    pub multisig: Option<Address>,
+    /// Which of the multisig's receiving addresses' keys its Bitcoin side uses: by default one
+    /// from the swap's hash, which every member's wallet finds the same.
+    #[arg(long, requires = "multisig")]
+    pub multisig_index: Option<u32>,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -187,6 +216,15 @@ pub struct LegAction {
     /// Lock second without the starter's lock checked: when it is on Bitcoin, or out of reach.
     #[arg(long)]
     pub anyway: bool,
+    /// Lock as this native multisig, --key signing as one of its members: the lock goes out as
+    /// the multisig's transaction, at once when that signature is enough, or as a bundle for the
+    /// others to sign and submit, chainv4 multisig sign. A token's lock is two: the approval, then,
+    /// once it ran, the lock; run swap lock again for the second.
+    #[arg(long)]
+    pub multisig: Option<Address>,
+    /// Where to write the bundle under --multisig, rather than printing it.
+    #[arg(long, requires = "multisig")]
+    pub out: Option<PathBuf>,
 }
 
 /// What a Bitcoin spend of the HTLC needs.
@@ -201,9 +239,23 @@ pub struct BitcoinSpend {
     /// What that output holds, in satoshis.
     #[arg(long)]
     pub sats: u64,
-    /// Your bitcoin key file, from keygen --scheme bitcoin.
-    #[arg(long)]
-    pub key: PathBuf,
+    /// Your bitcoin key file, from keygen --scheme bitcoin; or with --multisig, none.
+    #[arg(long, required_unless_present = "multisig")]
+    pub key: Option<PathBuf>,
+    /// The spend's branch is this native multisig's: write it as a PSBT to --psbt for its members
+    /// to sign, chainv4 multisig bitcoin sign, then finish it with swap bitcoin-finish.
+    #[arg(long, requires = "psbt")]
+    pub multisig: Option<Address>,
+    /// Which of its receiving addresses the swap's keys are at, as the swap was offered or
+    /// answered with: by default the one from the swap's hash.
+    #[arg(long, requires = "multisig")]
+    pub multisig_index: Option<u32>,
+    /// Where to write the multisig's PSBT, in base64.
+    #[arg(long, requires = "multisig")]
+    pub psbt: Option<PathBuf>,
+    /// The node to read the multisig from.
+    #[arg(long, default_value = "http://127.0.0.1:8080")]
+    pub node: String,
     /// Where the coins go: a bc1q… or tb1q… address.
     #[arg(long)]
     pub to: String,
@@ -230,12 +282,14 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
             let evm_contract = evm_contract.as_deref().map(parse_address).transpose()?.unwrap_or_else(evm::deployed_address);
             let pay = parse_leg(&pay, &mut chain_contract, evm_contract)?;
             let get = parse_leg(&get, &mut chain_contract, evm_contract)?;
-            let terms = Terms::offer(bytes32(&hash, "--hash")?, pay, get, now + first, now + second, &parties.read()?)?;
+            let hash = bytes32(&hash, "--hash")?;
+            let terms = Terms::offer(hash, pay, get, now + first, now + second, &parties.read(&agent, &node, &hash)?)?;
             terms.check(now)?;
             println!("{}", terms.to_text());
         }
-        SwapAction::Answer { offer, parties } => {
-            let terms = Terms::from_text(&offer)?.answer(&parties.read()?)?;
+        SwapAction::Answer { offer, parties, node, tls } => {
+            let offered = Terms::from_text(&offer)?;
+            let terms = offered.answer(&parties.read(&agent(&tls)?, node.trim_end_matches('/'), &offered.hash)?)?;
             terms.check(now)?;
             println!("{}", terms.to_text());
         }
@@ -265,6 +319,18 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
 
                     match (leg.token, leg.item) {
                         (None, _) => call(&action, leg.contract, "lock", leg.amount, vec![hash, recipient, deadline])?,
+                        (Some(_), Some(_)) if action.multisig.is_some() => {
+                            return Err("a multisig locks an NFT through its own transactions: send --multisig … call the collection's approve, then the swap contract's lock_nft".into());
+                        }
+                        // A multisig's approval and lock are two of its transactions, one after the
+                        // other: the approval first, then, once it ran, the lock.
+                        (Some(token), None) if let Some(multisig) = action.multisig => match allowance(&action, token, multisig, leg.contract)? >= leg.amount {
+                            true => call(&action, leg.contract, "lock_token", u256::ZERO, vec![hash, recipient, deadline, TxCallArgumentType::Address(token), TxCallArgumentType::U256(leg.amount)])?,
+                            false => {
+                                call(&action, token, "approve", u256::ZERO, vec![TxCallArgumentType::Address(leg.contract), TxCallArgumentType::U256(leg.amount)])?;
+                                println!("the approval first: once the multisig's approval ran, run swap lock again for the lock itself");
+                            }
+                        },
                         // An NFT moves as a token does: approved for the contract, then pulled in.
                         (Some(collection), Some(item)) if !item.multi => {
                             call(&action, collection, "approve", u256::ZERO, vec![TxCallArgumentType::Address(leg.contract), TxCallArgumentType::U256(item.id)])?;
@@ -319,6 +385,9 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
                 }
             }
 
+            // Anyone may claim for the receiver: a multisig's claim needs none of its members.
+            let action = LegAction { multisig: None, out: None, ..action };
+
             match terms.leg(side) {
                 Leg::Chain(leg) => call(&action, leg.contract, "claim", u256::ZERO, vec![text(to_hex(&secret))])?,
                 Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.claim_call(&secret), false, &evm_secret(&keypair)?)?,
@@ -328,8 +397,11 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
         SwapAction::Refund(action) => {
             let terms = agreed(&action.terms)?;
             let (keypair, parties) = keyed(&action)?;
+            let side = pick(&terms, &action, &parties, Role::Payer, "refund")?;
+            // Anyone may refund to the payer, a multisig too.
+            let action = LegAction { multisig: None, out: None, ..action };
 
-            match terms.leg(pick(&terms, &action, &parties, Role::Payer, "refund")?) {
+            match terms.leg(side) {
                 Leg::Chain(leg) => call(&action, leg.contract, "refund", u256::ZERO, vec![text(to_hex(&terms.hash))])?,
                 Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.refund_call(&terms.hash), false, &evm_secret(&keypair)?)?,
                 Leg::Bitcoin(_) => unreachable!("pick leaves Bitcoin's legs out"),
@@ -337,7 +409,7 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
         }
         SwapAction::Status { terms, node, eth_rpc, tls } => {
             let terms = Terms::from_text(&terms)?;
-            let action = LegAction { terms: String::new(), leg: None, node, eth_rpc, tls, key: None, anyway: false };
+            let action = LegAction { terms: String::new(), leg: None, node, eth_rpc, tls, key: None, anyway: false, multisig: None, out: None };
 
             for (side, leg) in terms.legs() {
                 let name = match side {
@@ -381,6 +453,17 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
             println!("{}", bitcoin(&spend, Spend::Claim { secret })?);
         }
         SwapAction::BitcoinRefund(spend) => println!("{}", bitcoin(&spend, Spend::Refund)?),
+        SwapAction::BitcoinFinish { terms, psbt, sats, secret } => {
+            let terms = agreed(&terms)?;
+            let htlc = terms.htlc().ok_or("the terms hold no HTLC: no leg is on Bitcoin")?;
+            let how = match secret {
+                Some(secret) => Spend::Claim { secret: bytes32(&secret, "--secret")? },
+                None => Spend::Refund,
+            };
+            let psbt = crate::crypto::bitcoin::psbt::Psbt::from_base64(&std::fs::read_to_string(&psbt)?)?;
+            let tx = psbt.finish_htlc(&htlc, sats, how)?;
+            println!("{}", &to_hex(&tx.encode())[2..]);
+        }
         SwapAction::Revealed { terms, tx } => {
             let terms = Terms::from_text(&terms)?;
             let (tx, _) = Transaction::read(&from_hex(&format!("0x{}", tx.trim().trim_start_matches("0x"))).ok_or("--tx is not hex")?)?;
@@ -468,12 +551,19 @@ fn parse_leg(text: &str, chain_contract: &mut dyn FnMut() -> CliResult<Address>,
 }
 
 impl PartyArgs {
-    fn read(&self) -> CliResult<Parties> {
-        Ok(Parties {
-            chain: self.address,
-            bitcoin: self.bitcoin_key.as_deref().map(bitcoin_public).transpose()?,
-            evm: self.evm_address.as_deref().map(evm_party).transpose()?,
-        })
+    /// Who these say you are; a multisig's Bitcoin keys asked of the node.
+    fn read(&self, agent: &ureq::Agent, node: &str, hash: &[u8; 32]) -> CliResult<Parties> {
+        let evm = self.evm_address.as_deref().map(evm_party).transpose()?;
+
+        let Some(multisig) = self.multisig else {
+            return Ok(Parties { chain: self.address, bitcoin: self.bitcoin_key.as_deref().map(bitcoin_public).transpose()?.map(BitcoinParty::Key), evm });
+        };
+        let bitcoin = match super::multisig::bitcoin_wallet(agent, node, &multisig) {
+            Ok(wallet) => Some(BitcoinParty::of_multisig(&wallet, self.multisig_index.unwrap_or(crate::swap::multisig_index(hash))).ok_or("a member's key that does not derive")?),
+            Err(_) => None,
+        };
+
+        Ok(Parties { chain: Some(multisig), bitcoin, evm })
     }
 }
 
@@ -493,7 +583,8 @@ fn keyed(action: &LegAction) -> CliResult<(Keypair, Parties)> {
         _ => None,
     };
 
-    let parties = Parties { chain: Some(keypair.public().address()), bitcoin: None, evm };
+    // Acting as a multisig, the multisig is who the leg names; the key only signs for it.
+    let parties = Parties { chain: Some(action.multisig.unwrap_or(keypair.public().address())), bitcoin: None, evm };
 
     Ok((keypair, parties))
 }
@@ -658,10 +749,20 @@ fn call(action: &LegAction, to: Address, function: &str, amount: u256, args: Vec
         eip712: false,
         max_price: None,
         tip: None,
-        multisig: None,
-        out: None,
+        multisig: action.multisig,
+        out: action.out.clone(),
         tx: TxArgs::Call { to, function: function.to_string(), amount, args },
     })
+}
+
+/// What a token's owner lets a spender move, as the token says.
+fn allowance(action: &LegAction, token: Address, owner: Address, spender: Address) -> CliResult<u256> {
+    let (agent, node) = (agent(&action.tls)?, action.node.trim_end_matches('/'));
+    let body = json!({ "contract": token.to_string(), "function": "allowance", "args": [{ "type": "address", "value": owner.to_string() }, { "type": "address", "value": spender.to_string() }] });
+    let answer = ok(agent.post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()))?;
+    let value = answer["values"][0]["value"].as_str().map_or_else(|| answer["values"][0]["value"].to_string(), str::to_string);
+
+    Ok(crate::cli::parse_amount(&value).unwrap_or(u256::ZERO))
 }
 
 /// Bitcoin's leg, spent: the signed transaction, as hex to broadcast.
@@ -673,11 +774,29 @@ pub(super) fn bitcoin(spend: &BitcoinSpend, how: Spend) -> CliResult<String> {
     // Explorers write a txid backwards from how a transaction names it.
     txid.reverse();
     let vout: u32 = vout.parse().map_err(|_| "--funding's vout is a number")?;
-    let key = Keypair::from_key_file(&std::fs::read_to_string(&spend.key)?)?;
+    let to = output_script(&spend.to, leg.network())?;
+
+    // A multisig's branch: unsigned, as a PSBT for its members.
+    if let (Some(multisig), Some(out)) = (spend.multisig, &spend.psbt) {
+        let wallet = super::multisig::bitcoin_wallet(&agent(&TlsArgs::default())?, spend.node.trim_end_matches('/'), &multisig)?;
+
+        let index = spend.multisig_index.unwrap_or(crate::swap::multisig_index(&terms.hash));
+
+        if BitcoinParty::of_multisig(&wallet, index).as_ref() != Some(htlc.party(how)) {
+            return Err(format!("the multisig's keys at {index} are not who this spend's branch takes: give the --multisig-index the swap was made with").into());
+        }
+
+        let tx = htlc.unsigned(Coins { txid, vout, value: spend.sats }, to, spend.fee_rate, how)?;
+        let psbt = crate::crypto::bitcoin::psbt::Psbt::for_htlc_multisig(&tx, spend.sats, &htlc, &wallet, index)?;
+        std::fs::write(out, psbt.to_base64() + "\n")?;
+
+        return Ok(format!("a PSBT for the multisig's members in {}: each signs it, chainv4 multisig bitcoin {multisig} sign, then swap bitcoin-finish", out.display()));
+    }
+
+    let key = Keypair::from_key_file(&std::fs::read_to_string(spend.key.as_ref().ok_or("give --key, or --multisig")?)?)?;
     let PrivateKey::Bitcoin(secret) = key.private() else {
         return Err("--key is not a bitcoin key file: make one with keygen --scheme bitcoin".into());
     };
-    let to = output_script(&spend.to, leg.network())?;
     let tx = htlc.spend(Coins { txid, vout, value: spend.sats }, to, spend.fee_rate, how, secret)?;
 
     Ok(to_hex(&tx.encode())[2..].to_string())

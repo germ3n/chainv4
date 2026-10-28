@@ -418,6 +418,8 @@ impl Wallet {
                 (Ask::Named { .. }, _) => self.views.trade.events(&result),
                 (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
                 (Ask::Multisig(_), _) => {
+                    #[cfg(feature = "swap")]
+                    self.views.swaps.multisig_answered(&ask, &result);
                     self.views.multisig.answered(&ask, &result);
                 }
                 (Ask::Offer(_) | Ask::Submit(_), _) if self.views.multisig.answered(&ask, &result) => {}

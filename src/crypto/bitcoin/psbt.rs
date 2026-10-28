@@ -194,30 +194,73 @@ impl Psbt {
         }
     }
 
-    /// The spend, finished with the signer's signature, worth value: the transaction to
-    /// broadcast. Refused: no signature by the key the spend needs, or one that does not hold.
-    pub fn finish_htlc(&self, htlc: &Htlc, value: u64, spend: Spend) -> Result<Transaction, String> {
-        let key = match spend {
-            Spend::Claim { .. } => htlc.claim,
-            Spend::Refund => htlc.refund,
-        };
-        let signature = find(&self.inputs[0], &[&[IN_PARTIAL_SIG][..], &key].concat()).ok_or("the signed PSBT holds no signature by the swap's key")?;
-        let preimage = self.tx.script_preimage(0, &htlc.script(), value);
-        let holds = signature
-            .split_last()
-            .filter(|(kind, _)| u32::from(**kind) == SIGHASH_ALL)
-            .and_then(|(_, der)| crate::crypto::bitcoin::tx::from_der(der))
-            .is_some_and(|signature| crate::crypto::bitcoin::verify(&key, &preimage, &signature));
+    /// A PSBT asking a native multisig's members to sign a swap's HTLC spend, for the branch the
+    /// multisig takes: the spend unsigned, the coins, the HTLC's script, and every member's key at
+    /// the receiving address index the swap's keys are at, with its origin.
+    pub fn for_htlc_multisig(tx: &Transaction, value: u64, htlc: &Htlc, wallet: &MultisigWallet, index: u32) -> Result<Psbt, String> {
+        let mut coins = Vec::new();
+        TxOut { value, script: htlc.output() }.write(&mut coins);
+        let mut pairs = wallet.describe(0, index, IN_WITNESS_SCRIPT, IN_BIP32_DERIVATION).ok_or("a member's key that does not derive")?;
+        pairs[0].value = htlc.script();
+        pairs.insert(0, Pair { key: vec![IN_WITNESS_UTXO], value: coins });
 
-        if !holds {
-            return Err("the signer's signature does not hold for this spend".to_string());
+        Ok(Psbt {
+            global: vec![Pair { key: vec![GLOBAL_UNSIGNED_TX], value: tx.base() }],
+            inputs: vec![pairs],
+            outputs: vec![Vec::new(); tx.outputs.len()],
+            tx: Transaction { inputs: tx.inputs.iter().map(|input| TxIn { witness: Vec::new(), ..input.clone() }).collect(), ..tx.clone() },
+        })
+    }
+
+    /// The spend, finished with the signatures of the branch the spend takes, worth value: one
+    /// key's, or a multisig's threshold of them in its keys' order. The transaction to broadcast.
+    /// Refused: fewer that hold than the branch takes.
+    pub fn finish_htlc(&self, htlc: &Htlc, value: u64, spend: Spend) -> Result<Transaction, String> {
+        let (needed, keys) = htlc.party(spend).keys();
+        let preimage = self.tx.script_preimage(0, &htlc.script(), value);
+        let held: Vec<Vec<u8>> = keys
+            .iter()
+            .filter_map(|key| find(&self.inputs[0], &[&[IN_PARTIAL_SIG][..], key].concat()).map(|signature| (key, signature)))
+            .filter(|(key, signature)| {
+                signature
+                    .split_last()
+                    .filter(|(kind, _)| u32::from(**kind) == SIGHASH_ALL)
+                    .and_then(|(_, der)| crate::crypto::bitcoin::tx::from_der(der))
+                    .is_some_and(|signature| crate::crypto::bitcoin::verify(key, &preimage, &signature))
+            })
+            .map(|(_, signature)| signature.to_vec())
+            .take(needed as usize)
+            .collect();
+
+        let signed = keys.iter().any(|key| find(&self.inputs[0], &[&[IN_PARTIAL_SIG][..], key].concat()).is_some());
+
+        match held.len() as u32 {
+            0 if needed == 1 && !signed => return Err("the signed PSBT holds no signature by the swap's key".to_string()),
+            0 if needed == 1 => return Err("the signer's signature does not hold for this spend".to_string()),
+            count if count < needed => return Err(format!("the PSBT holds {count} of the {needed} signatures the swap's multisig takes")),
+            _ => {}
         }
 
         let mut tx = self.tx.clone();
-        tx.inputs[0].witness = htlc.witness(signature, spend);
+        tx.inputs[0].witness = htlc.witness(&held, spend);
 
         Ok(tx)
     }
+}
+
+/// The keys a script checks that a multisig's members may hold: an M-of-N's, or a swap's HTLC's,
+/// both of its branches.
+fn script_keys(script: &[u8]) -> Option<Vec<[u8; 33]>> {
+    if let Some((_, keys)) = parse_multisig_script(script) {
+        return Some(keys);
+    }
+
+    #[cfg(feature = "swap")]
+    if let Some(htlc) = Htlc::parse(script) {
+        return Some([htlc.claim.keys().1, htlc.refund.keys().1].concat());
+    }
+
+    None
 }
 
 /// Amounts added up, None past all the bitcoin there are.
@@ -392,7 +435,7 @@ impl Psbt {
             let Some(script) = find(pairs, &[IN_WITNESS_SCRIPT]).map(<[u8]>::to_vec) else {
                 continue;
             };
-            let Some((_, keys)) = parse_multisig_script(&script) else {
+            let Some(keys) = script_keys(&script) else {
                 continue;
             };
             let (output, _) = self.spent(index)?.ok_or_else(|| format!("input {n} says nothing of the coins it spends"))?;

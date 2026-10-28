@@ -23,8 +23,8 @@ const NOW: u64 = 1_793_000_000_000;
 fn offered() -> (Terms, Terms, [u8; 32]) {
     let seed = seed();
     let (secret, hash) = secret().unwrap();
-    let alice = Parties { chain: Some(Address::Ed25519([0xa; 32])), bitcoin: Some(bitcoin_key(&seed, Network::Test, 1).1), evm: None };
-    let bob = Parties { chain: Some(Address::Ed25519([0xb; 32])), bitcoin: Some(bitcoin_key(&seed, Network::Test, 0).1), evm: None };
+    let alice = Parties { chain: Some(Address::Ed25519([0xa; 32])), bitcoin: Some(chainv4::swap::BitcoinParty::Key(bitcoin_key(&seed, Network::Test, 1).1)), evm: None };
+    let bob = Parties { chain: Some(Address::Ed25519([0xb; 32])), bitcoin: Some(chainv4::swap::BitcoinParty::Key(bitcoin_key(&seed, Network::Test, 0).1)), evm: None };
     let pays = Leg::Bitcoin(BitcoinLeg { testnet: true, sats: 80_000, payer: None, receiver: None });
     let gets = Leg::Chain(ChainLeg { item: None, contract: Address::Contract([0x5a; 32]), token: None, amount: u256::new(5_000), payer: None, receiver: None });
     let offer = Terms::offer(hash, pays, gets, NOW + FIRST_DEADLINE_MS, NOW + SECOND_DEADLINE_MS, &alice).unwrap();
@@ -192,4 +192,53 @@ fn a_leg_locking_an_nft_names_it_and_its_contract_is_asked_which() {
     assert!(state.answered(&asked("item"), &returned));
     assert!(state.items.contains_key(&hash) && !state.status.contains_key(&hash));
     assert!(!state.answered(&asked("lock"), &returned), "not a read");
+}
+
+#[test]
+fn a_multisig_swaps_with_its_keys_at_the_swap_s_index_and_its_members_sign_the_claim() {
+    use chainv4::crypto::bitcoin::multisig::xpub_text;
+    use chainv4::swap::BitcoinParty;
+
+    let seeds: Vec<_> = [
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+    ]
+    .iter()
+    .map(|words| Phrase::parse(words).unwrap().seed(""))
+    .collect();
+    let members: Vec<Value> = seeds.iter().map(|seed| json!({ "key": "ed25519:0x00", "bitcoin": xpub_text(&seed.multisig_account(1), Network::Test), "evm": "0x11" })).collect();
+    let policy = json!({ "members": members, "threshold": 2, "testnet": true });
+    let wallet = super::super::multisig::bitcoin::wallet_of(&policy).unwrap();
+    let multisig = Address::Multisig([4; 32]);
+    let (secret, hash) = secret().unwrap();
+
+    // Bob, a 2-of-3, answers Alice's bitcoin with its quorum's keys at the swap's index.
+    let quorum = BitcoinParty::of_multisig(&wallet, chainv4::swap::multisig_index(&hash)).unwrap();
+    let alice = Parties { chain: Some(Address::Ed25519([0xa; 32])), bitcoin: Some(BitcoinParty::Key(bitcoin_key(&seeds[0], Network::Test, 1).1)), evm: None };
+    let bob = Parties { chain: Some(multisig), bitcoin: Some(quorum.clone()), evm: None };
+    let pays = Leg::Bitcoin(BitcoinLeg { testnet: true, sats: 80_000, payer: None, receiver: None });
+    let gets = Leg::Chain(ChainLeg { item: None, contract: Address::Contract([0x5a; 32]), token: None, amount: u256::new(5_000), payer: None, receiver: None });
+    let terms = Terms::offer(hash, pays, gets, NOW + FIRST_DEADLINE_MS, NOW + SECOND_DEADLINE_MS, &alice).unwrap().answer(&bob).unwrap();
+
+    assert_eq!(terms.htlc().unwrap().claim, quorum, "the multisig receives the bitcoin, so takes the claim");
+
+    // Its claim is a PSBT for the members; two of them sign with their words, and it finishes.
+    let form = BitcoinForm {
+        funding: format!("{}:0", "ab".repeat(32)),
+        sats: "80000".to_string(),
+        to: chainv4::crypto::bitcoin::multisig::bitcoin_address(2, &wallet.xpubs, Network::Test, 0, 0).unwrap(),
+        fee_rate: "2".to_string(),
+        ..BitcoinForm::default()
+    };
+    let Ok(Signed::Members(shared)) = for_members(&terms, Spend::Claim { secret }, &form, &wallet) else {
+        panic!("a PSBT for the members");
+    };
+    let mut psbt = shared.psbt.sign(&seeds[1]).unwrap();
+    psbt.combine(&shared.psbt.sign(&seeds[2]).unwrap()).unwrap();
+    let htlc = terms.htlc().unwrap();
+    let claim = psbt.finish_htlc(&htlc, 80_000, Spend::Claim { secret }).unwrap();
+
+    assert_eq!(claim.inputs[0].witness.len(), 6);
+    assert!(matches!(for_members(&terms, Spend::Refund, &form, &wallet), Err(why) if why.contains("not the multisig's")), "the refund is Alice's");
 }

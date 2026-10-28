@@ -410,6 +410,13 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   `--ignored` where `bitcoind` is installed) has Bitcoin Core derive our descriptor's address,
   decode our PSBT and take the 2-of-3 spend. BIP32's public derivation, BIP380's checksum and the
   test seed's BIP48 xpub as Sparrow exports it have vectors of their own.
+- **An HTLC has two templates now.** Two keys keep the old one byte for byte, one shared
+  `OP_CHECKSIG` after the branches, so swaps made before still read; with a multisig's branch each
+  branch ends in its own check. `Htlc::parse` takes either and refuses any other writing.
+- **A multisig's swap keys sit at an index from the swap's hash** (`swap::multisig_index`): no one
+  passes or stores it, and every member finds the same.
+- **The regtest tests each take their own port and directory,** so they run side by side; two
+  `bitcoind`s on one port hang the second.
 - **Multisig policies live in `Column::Accounts`** beside the accounts, under `multisig:` and
   `proposals:` prefixes, which no account key starts with; nothing scans the column.
 - **Light updates gained a field again.** `LightUpdate::switched` is a plain field, not an
