@@ -32,6 +32,35 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   - the laptop rejoining with `--cpu`, the apps pointed at it, and new wallet and explorer
     builds.
 
+- [ ] **A real testnet.** The VPS and this laptop are two nodes run by one person. Before
+  calling anything ready, run it as a network: 4 to 6 nodes on separate machines, networks and
+  operators, a couple of independent miners and validators, for weeks, with restarts, partitions,
+  clock skew and nodes joining late from snapshots. Exercise it end to end there:
+  - governance decisions, finality switches and an upgrade at a height, with nodes on both sides;
+  - the apps against nodes they don't run, over Tor and I2P too, and light clients proving all of
+    it;
+  - swaps, the bridges and the relay with people who are not the developers;
+  - pools with outside miners, and the faucet under real use.
+  Write down what broke, and turn each into a scenario test.
+
+- [ ] **A robust upgrade path, proven on the real testnet.** Releases, `--auto-update` and
+  `Change::Upgrade` work in tests and on two nodes, with no release keys made yet. Before others
+  run nodes:
+  - **Release keys for real:** the M-of-N keys made and kept offline, `release/keys.json`
+    filled, a signing ceremony written down, and how keys rotate (`updates`) rehearsed;
+  - **Installing that can't brick a node:** a download that stops, a full disk, a binary that
+    won't start, a wrong target or a downgrade each leave the old one running. Keep the previous
+    binary and roll back to it when the new one fails its first start; the same on Windows,
+    whose running binary moves to `.old`;
+  - **The upgrade height:** nodes stop cleanly before `from`, restart on the new release and carry
+    on from the same database, with no fork, whatever order they update in; a database the new
+    release changes migrates on first start, and an older one refuses it rather than misreads;
+  - **Staged rollouts:** a release reaching some nodes first, the manifest's `least` raised later,
+    and the apps' own update path (wallet and explorer, desktop, Android, iOS) checked the same;
+  - **On the real testnet:** a non-breaking release and a breaking one, each with nodes run by
+    others, some updating by hand, some with `--auto-update`, some late, with the network watched
+    across the height. Write down what broke, and make each a test.
+
 ### Multi-chain treasury
 
 One quorum controlling assets on every chain it reaches: native multisigs already hold the
