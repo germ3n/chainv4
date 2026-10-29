@@ -112,7 +112,13 @@ pub fn touched(signed: &SignedTx, status: &TxStatus, payments: &[Payment]) -> BT
         | Tx::WithdrawApproval { .. }
         | Tx::ApproveChange { .. }
         | Tx::WithdrawChange { .. }
+        | Tx::SetDirectory { .. }
+        | Tx::HandDirectory { to: None }
         | Tx::PrimaryName { .. } => {}
+        // The new admin sees the role handed to it.
+        Tx::HandDirectory { to: Some(to) } => {
+            touched.insert(*to);
+        }
         // A new multisig, or a change of one, shows in its members' histories; an approval in
         // the multisig's.
         Tx::CreateMultisig { members, .. } | Tx::ChangeMultisig { members, .. } => touched.extend(members.iter().map(|member| member.key.address())),

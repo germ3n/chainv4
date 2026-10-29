@@ -51,6 +51,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "federation": genesis.federation.as_ref().map(federation_json),
         "directory": genesis.directory.as_ref().map(directory_json),
         "name": genesis.name,
+        "directory_admin": genesis.directory_admin.map(|admin| admin.to_string()),
     })
 }
 
@@ -209,6 +210,11 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.optional_text("name")?,
         false => None,
     };
+    // And so is who sets the directory without governance.
+    let directory_admin = match root.map.contains_key("directory_admin") {
+        true => root.optional_parse("directory_admin")?,
+        false => None,
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -233,6 +239,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         federation,
         directory,
         name,
+        directory_admin,
     };
     root.done()?;
 

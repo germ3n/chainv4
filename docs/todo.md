@@ -107,13 +107,15 @@ offline; these would make that hold up as a treasury.
 - [ ] **Polish the explorer and the wallet.** A pass over both apps as people use them, on a phone
   first: what each page says and in what order, empty and loading states, what is hard to find
   or to read, and the tools the explorer still lacks (see the queued explorer batch).
-- [ ] **The directory: governance, or an admin key, not genesis.** Genesis may name a `directory`
-  today, which makes little sense: the contracts it names do not exist before the chain does.
-  Drop it from genesis, keep `Change::Directory` for chains with governance, and give a chain
-  without governance an admin key, named in genesis, that sets the directory instead.
-- [ ] **keygen prints the public key.** The federation and multisig members list compressed
-  public keys, and `keygen` prints only the address, so a deploy works them out elsewhere (see
-  [Deploying](deploy.md#1-keys)).
+- [x] **The directory: governance, or an admin key.** A chain with governance sets it by
+  `Change::Directory`; one without may name a `directory_admin` in genesis, which sets it with
+  `Tx::SetDirectory` and hands the role on or renounces it with `Tx::HandDirectory`. Genesis
+  keeps `directory` as where the chain starts, for contracts known ahead.
+- [x] **keygen prints the public key.** `keygen` prints the scheme, the public key (compressed
+  for secp256k1) and the address, with the EVM or testnet one, and `chainv4 key show` prints the
+  same for key files already made, never the secret.
+- [x] **relay-sync copes with a throttling Esplora.** It asks at an even pace, again with
+  backoff on errors and web pages, 25 headers a transaction, keeping what a pass fetched.
 - [ ] **Revisit the deployment proxy at genesis.** A chain running the EVM starts with the
   deterministic deployment proxy at `0x4e59…956c` (`Genesis::write_state`), since the chain
   refuses the proxy's own pre-EIP-155 deploy, so a multisig's MultiSig.sol and Swap.sol land at

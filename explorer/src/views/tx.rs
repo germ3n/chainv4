@@ -219,6 +219,11 @@ fn means(tx: &TxView) -> Option<String> {
             change(&tx.tx["change"]),
             tx.tx["version"].as_u64().map_or_else(|| "?".to_string(), |version| (version + 1).to_string()),
         )),
+        "set_directory" => Some("The directory's admin sets the chain's directory: the contracts the apps use".to_string()),
+        "hand_directory" => Some(match tx.tx["to"].as_str() {
+            Some(to) => format!("The directory's admin hands the role to {}", format::short(to)),
+            None => "The directory's admin renounces the role: nobody sets the directory again".to_string(),
+        }),
         _ => None,
     }
 }
@@ -441,6 +446,22 @@ mod tests {
             means(&approval(json!({ "name": "chainv4 mainnet" }))).as_deref(),
             Some("Approves renaming the chain to chainv4 mainnet, for governance's change 5")
         );
+    }
+
+    #[test]
+    fn the_directory_admin_s_transactions_say_what_they_do() {
+        let of = |tx: Value| -> TxView {
+            serde_json::from_value(json!({
+                "id": "0x01", "sender": "ed25519:0x02", "nonce": 0, "signer": "0x03", "signature": "0x04",
+                "fee": { "gas_limit": 0, "max_price": "0", "tip": "0" },
+                "tx": tx,
+            }))
+            .unwrap()
+        };
+
+        assert!(means(&of(json!({ "type": "set_directory", "directory": {} }))).is_some_and(|said| said.contains("sets the chain's directory")));
+        assert!(means(&of(json!({ "type": "hand_directory", "to": null }))).is_some_and(|said| said.contains("renounces")));
+        assert!(means(&of(json!({ "type": "hand_directory", "to": "ed25519:0x0505050505050505050505050505050505050505050505050505050505050505" }))).is_some_and(|said| said.contains("hands the role to")));
     }
 
     #[test]

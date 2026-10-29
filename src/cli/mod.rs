@@ -154,9 +154,74 @@ fn keygen_reading(args: KeygenArgs, input: &mut dyn std::io::BufRead) -> CliResu
 
     write_key(&args.out, &keypair)?;
     println!("wrote {}", args.out.display());
-    println!("address {}", keypair.public().address());
+
+    for (label, value) in described(&keypair) {
+        println!("{label} {value}");
+    }
 
     Ok(())
+}
+
+#[derive(clap::Args)]
+pub struct KeyArgs {
+    #[command(subcommand)]
+    command: KeyCommand,
+}
+
+#[derive(clap::Subcommand)]
+enum KeyCommand {
+    /// Prints each key file's scheme, public key and address, and its EVM or testnet address where
+    /// it has one: what a federation, a multisig or a genesis names it by. Never the secret.
+    Show {
+        /// The key files.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
+}
+
+/// What a key file holds, shown without its secret.
+pub fn key(args: KeyArgs) -> CliResult<()> {
+    match args.command {
+        KeyCommand::Show { files } => {
+            for (at, path) in files.iter().enumerate() {
+                if files.len() > 1 {
+                    if at > 0 {
+                        println!();
+                    }
+                    println!("{}", path.display());
+                }
+
+                for (label, value) in described(&read_key(path)?) {
+                    println!("{label} {value}");
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
+/// A key as others name it, never its secret, a label and a value a line: its scheme; its public
+/// key, in hex, as a federation or multisig member lists it (secp256k1 and bitcoin keys
+/// compressed); its address here; and a secp256k1 key's address on EVM chains, or a bitcoin key's
+/// on Bitcoin's test networks.
+fn described(keypair: &Keypair) -> Vec<(&'static str, String)> {
+    let public = keypair.public();
+    let address = public.address();
+    let shown = public.to_string();
+    let mut lines = vec![
+        ("scheme", public.key_type().name().to_string()),
+        ("public", shown.rsplit(':').next().unwrap_or(&shown).to_string()),
+        ("address", address.to_string()),
+    ];
+
+    match address {
+        crate::structs::address::Address::Secp256k1(bytes) => lines.push(("evm", crate::structs::hex::to_hex(&bytes))),
+        crate::structs::address::Address::Bitcoin(bytes) => lines.push(("testnet", crate::structs::bech32::encode_segwit("tb", &bytes))),
+        _ => {}
+    }
+
+    lines
 }
 
 /// The key to sign with: a key file, or the development key when there is none.

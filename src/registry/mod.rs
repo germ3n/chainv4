@@ -99,6 +99,8 @@ pub enum RegistryError {
     UnknownSigner,
     #[document(summary = "A change approved or withdrawn by an account governance does not let approve.")]
     NotGoverning,
+    #[document(summary = "A directory set or handed on by an account that is not the directory's admin, or on a chain with none.")]
+    NotDirectoryAdmin,
     #[document(summary = "A change approved or withdrawn for an older version than the consensus decided last; the decided version.")]
     StaleChange(u64),
     #[document(summary = "A change that does not fit the chain, and why: a consensus that needs another finality, or settings no chain could run.")]
@@ -164,6 +166,7 @@ impl fmt::Display for RegistryError {
             RegistryError::NoApproval => write!(f, "no approval of this signer's counts to withdraw"),
             RegistryError::UnknownSigner => write!(f, "not one of the decided signers"),
             RegistryError::NotGoverning => write!(f, "only an account governance lets approve may approve or withdraw a change"),
+            RegistryError::NotDirectoryAdmin => write!(f, "only the directory's admin may set the directory or hand the role on, and this chain may have none"),
             RegistryError::StaleChange(version) => write!(f, "the consensus changed since; the decided version is {version}"),
             RegistryError::BadChange(why) => write!(f, "{why}"),
             RegistryError::SameChange => write!(f, "that change was decided already"),

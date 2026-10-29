@@ -203,7 +203,7 @@ as `btc_gateway`, or `--btc-gateway` before it does:
 ```sh
 chainv4 send deploy --wasm btc_relay.wasm                      # the relay
 chainv4 bridge btc relay-start 0x<relay> 840000 --esplora URL   # its checkpoint
-chainv4 bridge btc relay-sync 0x<relay> --esplora URL           # the headers since; run it often
+chainv4 bridge btc relay-sync 0x<relay> --esplora URL           # the headers since, 25 a tx; run it often
 chainv4 bridge btc deploy 0x<relay> --fee-cap 50000 --grace-hours 168
 chainv4 bridge btc address ed25519:0x… --btc-gateway 0x…       # where to pay, bc1q…
 chainv4 bridge btc deposit <txid> 0 ed25519:0x… --btc-gateway 0x… --esplora URL

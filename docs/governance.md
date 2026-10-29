@@ -187,6 +187,29 @@ chainv4 send --key member.key approve-change --directory '{"gateway":"contract:0
   not name.
 - **It is checked as genesis's is:** contracts here are contract addresses, EVM ones not zero.
 
+### Without governance: the directory's admin
+
+A chain without governance changes its directory through an admin, if its genesis names one in
+`directory_admin`. Each chain has one way at most:
+
+| The chain | Who sets the directory |
+| --- | --- |
+| With governance | Governance, by `Change::Directory`; genesis may name no admin. |
+| Without, with `directory_admin` | The admin, by `Tx::SetDirectory`. |
+| Neither, or the admin renounced | Nobody: genesis's stands for good. |
+
+```sh
+chainv4 send --key admin.key set-directory --directory '{"gateway":"contract:0x…", …}'
+chainv4 send --key admin.key hand-directory --to ed25519:0x…   # another account, or a multisig
+chainv4 send --key admin.key hand-directory --renounce          # nobody, for good; asks for yes
+```
+
+- **The admin is any account that signs,** a native multisig's too (its members send it as the
+  multisig), never a contract.
+- **The directory takes effect at once,** checked as genesis's is, into the same state entry.
+- **The admin is in state too,** `directory:admin` in the validators column, so a light client
+  proves who it is, or that there is none; `GET /status` shows it as `directory_admin`.
+
 ## Collections
 
 A change says what makes a contract a [collection](nft-standard.md#the-collection-registry),

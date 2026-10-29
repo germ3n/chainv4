@@ -370,6 +370,8 @@ pub struct Wallet {
     /// The lock screen's width, and the tallest it has been at it: what places its card, so a
     /// keyboard taking the bottom of the screen does not move the field under a finger.
     lock_room: (f32, f32),
+    /// Whether the unlock screen shows the node and proxy to change.
+    reaching: bool,
     views: views::States,
 }
 
@@ -424,6 +426,7 @@ impl Wallet {
             asked_history: 0.0,
             active: 0.0,
             lock_room: (0.0, 0.0),
+            reaching: false,
             views: views::States::default(),
         }
     }
@@ -771,6 +774,30 @@ impl Wallet {
                     Some(_) => format!("Node {}{through}", self.settings.node),
                 };
                 ui.label(RichText::new(footer).small().color(palette.muted));
+
+                // The node and the way to it, changed before the wallet opens: one that is gone,
+                // or behind Tor, would leave it with nothing to show.
+                if matches!(self.settings.role, Some(role) if role != Role::Signer) {
+                    let shown = if self.reaching { "Done" } else { "Change the node or proxy" };
+
+                    if ui.add(egui::Button::new(RichText::new(shown).small().color(palette.accent)).frame(false)).clicked() {
+                        self.reaching = !self.reaching;
+                    }
+
+                    if self.reaching {
+                        ui.add_space(6.0);
+                        let mut connect = None;
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                            theme::card(ui, &palette, |ui| {
+                                connect = views::reach(ui, &palette, &mut self.settings, &mut self.views);
+                            });
+                        });
+
+                        if let Some(node) = connect {
+                            self.connect(&node);
+                        }
+                    }
+                }
                 ui.add_space(24.0);
             });
         });

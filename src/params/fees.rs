@@ -174,6 +174,8 @@ pub const TX_KINDS: &[&str] = &[
     "approve_multisig",
     "withdraw_multisig",
     "claim",
+    "set_directory",
+    "hand_directory",
 ];
 
 impl FeeConfig {

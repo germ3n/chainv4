@@ -29,10 +29,9 @@ $B keygen --scheme secp256k1 --out ~/.chainv4-pow/evm.key
 $B keygen --scheme secp256k1 --out ~/.chainv4-pow/relay.key
 ```
 
-keygen prints the address, not the compressed public key the federation lists. The public key
-is the secret's multiple of secp256k1's generator, `02` or `03` by y's parity, then x: any
-secp256k1 library gives it, and its keccak address must match what keygen printed. (A `keygen`
-that prints it is in the [todo](todo.md).)
+keygen prints each key's compressed public key, which the federation lists, and its address;
+`$B key show ~/.chainv4-pow/federation/*.key ~/.chainv4-pow/evm.key ~/.chainv4-pow/relay.key`
+prints them again later, never the secrets, as funding them in step 4 wants.
 
 ## 2. Genesis
 
@@ -109,9 +108,9 @@ deploy --eth-rpc $N/rpc`.
 - `dex add` sometimes stopped after its approval, the pool never opened: run it again, the
   approval being there already.
 - Esplora (mempool.space) throttles a burst of header fetches, answering an HTML page or timing
-  out, and `relay-sync` submits only every `--batch` headers (500 by default), so a pass failing
-  midway kept nothing: the relay sat at its checkpoint. With `--batch 25` each pass keeps what it
-  fetched, and the looping service in step 6 catches up.
+  out. `relay-sync` now asks at an even pace, asks again waiting longer each time, submits 25
+  headers a transaction, and keeps what it fetched when Esplora stops answering midway; the
+  looping service in step 6 catches up.
 - A name's `target` once did not take; check `GET /names/LABEL.dev` and send it again.
 
 ## 5. The directory

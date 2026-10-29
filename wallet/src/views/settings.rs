@@ -128,6 +128,40 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
 
 /// What an install that goes online sets: the node, the proxy, the chain it trusts there, and the
 /// light client's saved progress.
+/// Which node the wallet asks, and the proxy it asks through, before it opens: on the unlock
+/// screen, so a wallet whose node is gone, or that needs Tor to reach it, is never stuck there.
+/// The node to connect to afresh, once either changes.
+pub fn reach(ui: &mut Ui, palette: &theme::Palette, settings: &mut crate::app::Settings, state: &mut SettingsState) -> Option<String> {
+    let node = settings.node.clone();
+    let typed = state.node.get_or_insert_with(|| node.clone());
+    let mut connect = None;
+
+    theme::caps(ui, palette, "Node");
+    let other = typed.trim() != node;
+
+    if super::beside(
+        ui,
+        |ui| theme::primary(ui, palette, "Connect", other).clicked(),
+        |ui, width| {
+            ui.add(egui::TextEdit::singleline(typed).font(egui::TextStyle::Monospace).desired_width(width));
+        },
+    ) {
+        connect = Some(typed.trim().to_string());
+    }
+
+    ui.add_space(10.0);
+    theme::caps(ui, palette, "Proxy");
+    let set = settings.proxy.clone();
+    let typed = state.proxy.get_or_insert_with(|| set.clone());
+
+    if let Some(chosen) = chainv4_ui::widgets::proxy(ui, palette, typed, &mut state.proxy_trouble, &set) {
+        settings.proxy = chosen;
+        connect = connect.or(Some(node));
+    }
+
+    connect
+}
+
 fn online(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, node: String) {
     let palette = *ctx.palette;
     let typed = state.node.get_or_insert_with(|| node.clone());
@@ -799,3 +833,27 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
     });
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_unlock_screen_offers_the_node_and_proxy_and_leaves_them_untouched_until_asked() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let palette = theme::DARK;
+        let mut settings = crate::app::Settings::default();
+        settings.node = "http://127.0.0.1:8090".to_string();
+        settings.proxy = "socks5h://127.0.0.1:9050".to_string();
+        let mut state = SettingsState::default();
+        let mut connect = Some(String::new());
+        let mut drawn = ctx.run_ui(egui::RawInput::default(), |ui| connect = reach(ui, &palette, &mut settings, &mut state));
+        drawn.textures_delta.clear();
+
+        assert_eq!(connect, None, "nothing typed, nothing chosen");
+        assert_eq!(state.node.as_deref(), Some("http://127.0.0.1:8090"), "the field starts at the node set");
+        assert_eq!(state.proxy.as_deref(), Some("socks5h://127.0.0.1:9050"));
+        assert_eq!((settings.node.as_str(), settings.proxy.as_str()), ("http://127.0.0.1:8090", "socks5h://127.0.0.1:9050"));
+    }
+}

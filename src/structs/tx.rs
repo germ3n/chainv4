@@ -5,6 +5,7 @@ use {
     crate::crypto::verifiable::VerifyError,
     crate::structs::address::Address,
     crate::structs::amount::Amount,
+    crate::registry::directory::Directory,
     crate::registry::multisig::MultisigMember,
     crate::registry::signers::Signer,
     crate::governance::Change,
@@ -295,6 +296,20 @@ pub enum Tx {
         index: u64,
         path: Vec<Hash>,
     },
+    #[document(
+        summary = "The directory's admin sets the directory, whole, in force at once: on a chain without governance whose genesis names a directory_admin.",
+        params = { directory = "The new directory, checked as genesis's is." },
+        see_also = "Genesis::directory_admin, Tx::HandDirectory, Change::Directory",
+    )]
+    #[wincode(tag = 24)]
+    SetDirectory { directory: Directory },
+    #[document(
+        summary = "The directory's admin hands the role to another address, or with none renounces it, leaving the directory as it is for good.",
+        params = { to = "The new admin, any address a multisig's too, or None to renounce." },
+        see_also = "Genesis::directory_admin, Tx::SetDirectory",
+    )]
+    #[wincode(tag = 25)]
+    HandDirectory { to: Option<Address> },
 }
 
 #[document(
@@ -487,7 +502,8 @@ impl Verifiable for Tx {
             }
             Tx::Unbond { voter } | Tx::Withdraw { voter } => voter.verify(),
             Tx::ApproveSigners { signers, .. } => signers.iter().try_for_each(|signer| signer.key.verify()),
-            Tx::WithdrawApproval { .. } | Tx::WithdrawChange { .. } => Ok(()),
+            Tx::WithdrawApproval { .. } | Tx::WithdrawChange { .. } | Tx::SetDirectory { .. } => Ok(()),
+            Tx::HandDirectory { to } => to.iter().try_for_each(Verifiable::verify),
             // Whether the consensus fits the chain is decided when the transaction runs; an
             // authority's key is checked here.
             Tx::ApproveChange { change: Change::Consensus(consensus), .. } => match consensus {

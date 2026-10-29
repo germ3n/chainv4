@@ -92,6 +92,8 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::WithdrawApproval { .. } => ("withdraw_approval", sender),
         Tx::ApproveChange { .. } => ("approve_change", sender),
         Tx::WithdrawChange { .. } => ("withdraw_change", sender),
+        Tx::SetDirectory { .. } => ("set_directory", sender),
+        Tx::HandDirectory { to } => ("hand_directory", to.unwrap_or(sender)),
         Tx::Name { .. } => ("name", sender),
         Tx::PrimaryName { .. } => ("primary_name", sender),
         Tx::Ethereum { raw } => ("ethereum", crate::crypto::ethereum::decode(raw).ok().and_then(|ethereum| ethereum.to).map_or(sender, Address::Evm)),

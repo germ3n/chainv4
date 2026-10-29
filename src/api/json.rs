@@ -515,6 +515,8 @@ pub fn tx(transaction: &Tx) -> Value {
         Tx::WithdrawApproval { version } => json!({ "type": "withdraw_approval", "version": version }),
         Tx::ApproveChange { version, change } => json!({ "type": "approve_change", "version": version, "change": self::change(change) }),
         Tx::WithdrawChange { version } => json!({ "type": "withdraw_change", "version": version }),
+        Tx::SetDirectory { directory } => json!({ "type": "set_directory", "directory": crate::params::json::directory_json(directory) }),
+        Tx::HandDirectory { to } => json!({ "type": "hand_directory", "to": to.map(|to| to.to_string()) }),
         Tx::Name { name, action } => json!({ "type": "name", "name": name, "action": name_action(action) }),
         Tx::PrimaryName { name } => json!({ "type": "primary_name", "name": name }),
         Tx::Ethereum { raw } => ethereum(raw),

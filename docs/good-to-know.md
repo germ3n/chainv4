@@ -378,6 +378,13 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   change of the rules: a chain that decided anything before moves to it with a new genesis.
   `GET /governance` also shows every setting in force, with the change that set it, and who may
   approve; the apps' Governance pages read it, and the wallet approves and proposes there.
+- **One way to change the directory per chain.** Governance's `Change::Directory`, or without
+  governance the `directory_admin` genesis names, by `send set-directory`; the admin hands the
+  role on, or renounces it for good (`hand-directory --renounce`, which asks for yes). Genesis
+  refuses an admin beside governance; with neither, genesis's directory stands.
+- **Keys show what others name them by.** `keygen` and `chainv4 key show FILE…` print the scheme,
+  the public key (compressed for secp256k1, as a federation lists it), the address, and the EVM
+  or testnet one, never the secret.
 - **One JSON for changes.** `params::json` (the `json` feature, no node needed) reads and writes
   every change, `change_json` and `change_from_json`, and each part of genesis one may replace,
   with the same checks; `chain::json` adds genesis files. The CLI, the API and the apps share it.

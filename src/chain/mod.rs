@@ -263,6 +263,9 @@ pub struct Genesis {
     pub directory: Option<crate::registry::directory::Directory>,    #[document(summary = "The chain's name, such as chainv4 testnet, as the apps show it wherever they name the network: 1 to 40 characters, no control characters, no space at either end. None leaves the apps to call it chainv4. Under governance, Change::Name renames it. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
     #[wincode(with = "crate::structs::unset::UnsetOption<String>")]
     pub name: Option<String>,
+    #[document(summary = "Who sets the directory on a chain without governance: an address that may send Tx::SetDirectory, and hand the role on or renounce it with Tx::HandDirectory. None for none: a chain with governance changes its directory by Change::Directory alone, and one with neither keeps genesis's for good. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<Address>")]
+    pub directory_admin: Option<Address>,
 }
 
 impl Hashable for Genesis {}
@@ -570,6 +573,7 @@ impl Genesis {
             federation: None,
             directory: None,
             name: None,
+            directory_admin: None,
         }
     }
 
@@ -614,6 +618,7 @@ impl Genesis {
             federation: None,
             directory: None,
             name: None,
+            directory_admin: None,
         }
     }
 
@@ -749,6 +754,10 @@ impl Genesis {
             crate::registry::changes::Changes::new(state).write_name(name);
         }
 
+        if self.directory_admin.is_some() {
+            crate::registry::directory::write_directory_admin(state, self.directory_admin);
+        }
+
         // Running the EVM, the chain starts with the deterministic deployment proxy where other EVM
         // chains have it, so what is deployed through it lands here where it lands there.
         if self.engines.contains(&Engine::Evm) {
@@ -850,6 +859,14 @@ impl Genesis {
 
         if let Some(problem) = self.name.as_deref().and_then(crate::governance::chain_name_problem) {
             return Some(problem);
+        }
+
+        if self.directory_admin.is_some() && self.governance.is_some() {
+            return Some("a chain with governance changes its directory by governance: leave directory_admin out");
+        }
+
+        if matches!(self.directory_admin, Some(Address::Contract(_))) {
+            return Some("directory_admin is an account that signs, not a contract");
         }
 
         if self.names.is_some() && !cfg!(feature = "names") {

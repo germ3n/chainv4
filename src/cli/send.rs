@@ -292,6 +292,26 @@ pub enum TxArgs {
         #[arg(long)]
         threshold: u32,
     },
+    /// Sets the chain's directory, as its admin: on a chain without governance whose genesis names
+    /// a directory_admin.
+    SetDirectory {
+        /// The whole directory, as approve-change --directory takes it.
+        #[arg(long)]
+        directory: String,
+    },
+    /// Hands the directory's admin role to another address, or with --renounce gives it up for
+    /// good, leaving the directory as it is.
+    HandDirectory {
+        /// The new admin: any account, a multisig's too.
+        #[arg(long, required_unless_present = "renounce", conflicts_with = "renounce")]
+        to: Option<Address>,
+        /// Nobody sets the directory again. Asks for yes, unless --yes.
+        #[arg(long)]
+        renounce: bool,
+        /// Renounce without asking.
+        #[arg(long, requires = "renounce")]
+        yes: bool,
+    },
     #[cfg(feature = "governance")]
     /// Takes back the sender's approval of a change under governance.
     WithdrawChange {
@@ -803,6 +823,23 @@ pub(super) fn wait(agent: &Agent, node: &str, id: &str, wanted: Wanted, timeout:
     }
 }
 
+/// Asks before the directory's admin role is given up: nobody sets the directory again after.
+pub(super) fn renouncing(yes: bool, input: &mut dyn std::io::BufRead) -> CliResult<()> {
+    if yes {
+        return Ok(());
+    }
+
+    print!("Renouncing leaves the directory as it is for good: nobody may set it again. Type yes to go on: ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+
+    match answer.trim() {
+        "yes" => Ok(()),
+        _ => Err("the role is kept".into()),
+    }
+}
+
 /// Prints where the transaction landed, what it did and what it emitted.
 pub(super) fn report(receipt: &Value) -> CliResult<()> {
     let confirmations = receipt["confirmations"].as_u64().unwrap_or(0);
@@ -1091,6 +1128,22 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             }
 
             Tx::ApproveChange { version, change }
+        }
+        TxArgs::SetDirectory { directory } => {
+            let directory = super::genesis::directory_from_text(&directory).map_err(|why| format!("--directory: {why}"))?;
+            println!("setting the directory, as its admin");
+
+            Tx::SetDirectory { directory }
+        }
+        TxArgs::HandDirectory { to: Some(to), .. } => {
+            println!("handing the directory's admin role to {to}");
+
+            Tx::HandDirectory { to: Some(to) }
+        }
+        TxArgs::HandDirectory { to: None, yes, .. } => {
+            renouncing(yes, &mut std::io::stdin().lock())?;
+
+            Tx::HandDirectory { to: None }
         }
         #[cfg(feature = "governance")]
         TxArgs::WithdrawChange { version } => {

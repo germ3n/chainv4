@@ -63,6 +63,55 @@ fn keygen_writes_the_keys_a_seed_phrase_gives() {
 }
 
 #[test]
+fn a_key_shows_its_public_key_and_addresses_never_its_secret() {
+    let ed = Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap();
+    let shown: std::collections::BTreeMap<_, _> = described(&ed).into_iter().collect();
+    let address = ed.public().address().to_string();
+
+    assert_eq!(shown["scheme"], ed.public().key_type().name());
+    assert_eq!(shown["address"], address);
+    assert!(address.ends_with(&shown["public"]), "an Ed25519 key is its address: {shown:?}");
+
+    for line in described(&ed) {
+        assert!(!line.1.contains(ed.to_key_file().rsplit(':').next().unwrap()), "never the secret");
+    }
+
+    #[cfg(feature = "secp256k1")]
+    {
+        let secp = Keypair::generate(crate::crypto::keypair::KeyType::Secp256k1).unwrap();
+        let shown: std::collections::BTreeMap<_, _> = described(&secp).into_iter().collect();
+
+        assert_eq!(shown["public"].len(), 2 + 66, "compressed, as a federation lists it: {shown:?}");
+        assert!(shown["public"].starts_with("0x02") || shown["public"].starts_with("0x03"));
+        assert_eq!(shown["address"], format!("secp256k1:{}", shown["evm"]), "the same 20 bytes on EVM chains");
+    }
+
+    #[cfg(feature = "bitcoin")]
+    {
+        let btc = Keypair::generate(crate::crypto::keypair::KeyType::Bitcoin).unwrap();
+        let shown: std::collections::BTreeMap<_, _> = described(&btc).into_iter().collect();
+
+        assert!(shown["address"].starts_with("bc1q") && shown["testnet"].starts_with("tb1q"), "{shown:?}");
+        assert_eq!(shown["address"][4..shown["address"].len() - 6].len(), shown["testnet"][4..shown["testnet"].len() - 6].len());
+    }
+
+    let dir = TempDir::new("show");
+    let path = dir.0.join("shown.key");
+    write_key(&path, &ed).unwrap();
+
+    assert!(key(KeyArgs { command: KeyCommand::Show { files: vec![path.clone(), path] } }).is_ok());
+    assert!(key(KeyArgs { command: KeyCommand::Show { files: vec![dir.0.join("missing.key")] } }).is_err());
+}
+
+#[test]
+fn renouncing_the_directory_asks_for_yes_unless_told() {
+    assert!(crate::cli::send::renouncing(true, &mut "".as_bytes()).is_ok(), "--yes asks nothing");
+    assert!(crate::cli::send::renouncing(false, &mut "yes\n".as_bytes()).is_ok());
+    assert!(crate::cli::send::renouncing(false, &mut "y\n".as_bytes()).is_err(), "yes in full");
+    assert!(crate::cli::send::renouncing(false, &mut "".as_bytes()).is_err());
+}
+
+#[test]
 fn key_files_round_trip_and_are_never_overwritten() {
     let dir = TempDir::new("keys");
     let path = dir.0.join("node.key");

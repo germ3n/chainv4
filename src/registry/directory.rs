@@ -1,11 +1,13 @@
 //! The chain's directory (docs/governance.md#directory): the contracts it announces for the apps
 //! and tools to use, the bridges' gateways here and Gateway.sol on each EVM chain, the swap
 //! contract, the DEX and its EVM router, and the NFT factory. Genesis may name them, and
-//! governance replaces them with Change::Directory; GET /status shows them, so the apps never take
-//! one from a name someone else could register first.
+//! governance replaces them with Change::Directory, or on a chain without governance the admin
+//! genesis names, with Tx::SetDirectory; GET /status shows them, so the apps never take one from a
+//! name someone else could register first.
 
 use {
     crate::{crypto::hashable::Hashable, structs::address::Address},
+    crate::db::{Column, DbError, State},
     r#macro::document,
     wincode::{SchemaRead, SchemaWrite},
 };
@@ -16,6 +18,39 @@ use {
     see_also = "Directory, Changes::directory",
 )]
 pub const DIRECTORY_KEY: &[u8] = b"change:directory";
+
+#[document(
+    summary = "Where the directory's admin is kept, in the Validators column, on a chain without governance whose genesis names one: gone once the admin renounces, so a light client proves who it is, or that there is none.",
+    category = "Governance",
+    see_also = "DirectoryAdmin, Tx::SetDirectory",
+)]
+pub const DIRECTORY_ADMIN_KEY: &[u8] = b"directory:admin";
+
+#[document(
+    summary = "Who sets the directory on a chain without governance: the address genesis named, or the one it was handed to. In state while there is one.",
+    category = "Governance",
+    see_also = "Genesis::directory_admin, Tx::SetDirectory, Tx::HandDirectory",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct DirectoryAdmin {
+    #[document(summary = "The admin's address: any kind, a multisig's too.")]
+    pub admin: Address,
+}
+
+impl Hashable for DirectoryAdmin {}
+
+#[document(parent = "DirectoryAdmin", summary = "The directory's admin in a state, or None: on a chain with governance, a genesis that named none, or once renounced.")]
+pub fn directory_admin(state: &State) -> Result<Option<Address>, DbError> {
+    Ok(state.get_value::<DirectoryAdmin>(Column::Validators, DIRECTORY_ADMIN_KEY)?.map(|kept| kept.admin))
+}
+
+#[document(parent = "DirectoryAdmin", summary = "Makes an address the directory's admin, or with None leaves it none.")]
+pub fn write_directory_admin(state: &State, admin: Option<Address>) {
+    match admin {
+        Some(admin) => state.put_value(Column::Validators, DIRECTORY_ADMIN_KEY.to_vec(), &DirectoryAdmin { admin }),
+        None => state.delete(Column::Validators, DIRECTORY_ADMIN_KEY.to_vec()),
+    }
+}
 
 #[document(summary = "The most EVM chains the directory may name a Gateway.sol on.", category = "Governance", see_also = "Directory")]
 pub const MOST_EVM_GATEWAYS: usize = 32;

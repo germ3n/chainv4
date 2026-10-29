@@ -74,7 +74,9 @@ setting that no longer reads as a proxy sends nothing either.
 
 Changing it starts afresh with the node, as **Connect** does; the light client resumes from what
 it saved. The lock screen names the proxy beside the node: `Node http://… · through
-127.0.0.1:9050`.
+127.0.0.1:9050`, and **Change the node or proxy** under it sets either before the wallet opens,
+as Settings does, so a wallet whose node is gone, or that needs Tor to reach it, is never stuck
+at the lock screen.
 
 **In the browser** there is no setting: the browser makes every request, through the proxy set
 in it. To reach a node over Tor, open the wallet in Tor Browser.

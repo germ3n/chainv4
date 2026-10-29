@@ -692,6 +692,23 @@ fn run(
 
             (moved(withdrawn), Contracted::default())
         }
+        // The directory without governance: its admin's, alone.
+        Tx::SetDirectory { directory } => (directed(layer, &sender, |state| match directory.problem() {
+            Some(problem) => Err(RegistryError::BadChange(problem)),
+            None => {
+                crate::registry::changes::Changes::new(state).write_directory(directory);
+
+                Ok(())
+            }
+        }), Contracted::default()),
+        Tx::HandDirectory { to } => (directed(layer, &sender, |state| match to {
+            Some(Address::Contract(_)) => Err(RegistryError::BadChange("the directory's admin is an account that signs, not a contract")),
+            to => {
+                crate::registry::directory::write_directory_admin(state, *to);
+
+                Ok(())
+            }
+        }), Contracted::default()),
         Tx::Claim { height, to, earned, index, path } => match crate::registry::pools::Pools::new(layer, rules.hash).claim(*height, to, *earned, *index, path) {
             Ok(_) => (Ok(Effect::Done), Contracted::default()),
             Err(crate::registry::pools::ClaimError::Db(err)) => (Err(Failure::Registry(RegistryError::Db(err))), Contracted::default()),
@@ -1033,6 +1050,16 @@ fn block_at(rules: &Rules, context: &BlockContext) -> BlockAt {
 /// The fuel one EVM gas burns: gas is the chain's gas one for one.
 fn fuel_per_gas(rules: &Rules) -> u64 {
     rules.fees.as_ref().map_or(1, |fees| fees.schedule().fuel_for(1).max(1))
+}
+
+/// What the directory's admin does, once the sender is it: on a chain with governance, or none
+/// left, nobody is.
+fn directed(layer: &State, sender: &Address, act: impl FnOnce(&State) -> Result<(), RegistryError>) -> Result<Effect, Failure> {
+    match crate::registry::directory::directory_admin(layer) {
+        Ok(Some(admin)) if admin == *sender => moved(act(layer)),
+        Ok(_) => Err(Failure::Registry(RegistryError::NotDirectoryAdmin)),
+        Err(err) => Err(Failure::Registry(RegistryError::Db(err))),
+    }
 }
 
 fn moved(result: Result<(), RegistryError>) -> Result<Effect, Failure> {

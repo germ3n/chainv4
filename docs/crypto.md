@@ -115,7 +115,18 @@ does; its signatures recover to the signer's key.
 
 `chainv4 keygen [--scheme ed25519|edblake|secp256k1|bitcoin] [--out PATH]` writes one line: the
 scheme, a colon, and the 32-byte secret in hex: an Edwards key's seed, or a secp256k1 or bitcoin
-key's scalar.
+key's scalar. It prints what others name the key by, never the secret, and
+`chainv4 key show FILE…` prints the same for key files already made:
+
+```
+scheme secp256k1
+public 0x02b337a4…660a      # compressed: what a federation or a multisig member lists
+address secp256k1:0x0594…53ef
+evm 0x0594…53ef             # the same 20 bytes, on every EVM chain
+```
+
+A bitcoin key adds `testnet`, its `tb1q…` address on Bitcoin's test networks; an Edwards key's
+public key is its address.
 - It is created readable by its owner only, and never overwritten.
 - It is not encrypted, so guard it.
 - `--key`, `--producer-key` and `--validator-key` read this format.

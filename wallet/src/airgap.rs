@@ -371,6 +371,9 @@ pub fn describe(request: &Request) -> Described {
         Tx::PrimaryName { name: Some(name) } => ("Choose a primary name".to_string(), None, Some(name.clone()), None),
         Tx::PrimaryName { name: None } => ("Clear the primary name".to_string(), None, None, None),
         Tx::Claim { to, .. } => ("Claim mining pool earnings".to_string(), None, Some(to.to_string()), None),
+        Tx::SetDirectory { .. } => ("Set the chain's directory".to_string(), None, None, None),
+        Tx::HandDirectory { to: Some(to) } => ("Hand the directory's admin role on".to_string(), None, Some(to.to_string()), None),
+        Tx::HandDirectory { to: None } => ("Renounce the directory's admin role, for good".to_string(), None, None, None),
         other => (format!("{} transaction", variant(other)), None, None, None),
     };
 

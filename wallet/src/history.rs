@@ -219,6 +219,9 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::ApproveChange { change: Change::Name(name), .. }, _) => format!("Approved renaming the chain to {name}"),
         (Tx::ApproveChange { version, change }, _) => format!("Approved a {} change from v{version}", change.name().replace('_', " ")),
         (Tx::WithdrawChange { version }, _) => format!("Withdrew approval of a change from v{version}"),
+        (Tx::SetDirectory { .. }, _) => "Set the chain's directory".to_string(),
+        (Tx::HandDirectory { to: Some(to) }, _) => format!("Handed the directory to {}", format::short(&to.to_string())),
+        (Tx::HandDirectory { to: None }, _) => "Renounced the directory".to_string(),
         (Tx::Name { name, action }, _) => match action {
             NameAction::Register { years } => format!("Registered the name {name} for {years} year{}", if *years == 1 { "" } else { "s" }),
             NameAction::Renew { years } => format!("Renewed {name} for {years} year{}", if *years == 1 { "" } else { "s" }),
@@ -309,6 +312,15 @@ mod tests {
                 final_: true,
             },
         }
+    }
+
+    #[test]
+    fn the_directory_admin_s_transactions_read_as_what_they_did() {
+        let to = Address::Ed25519([5; 32]);
+
+        assert_eq!(action(&Tx::SetDirectory { directory: Default::default() }, &CommittedOutcome::Done), "Set the chain's directory");
+        assert!(action(&Tx::HandDirectory { to: Some(to) }, &CommittedOutcome::Done).starts_with("Handed the directory to"));
+        assert_eq!(action(&Tx::HandDirectory { to: None }, &CommittedOutcome::Done), "Renounced the directory");
     }
 
     #[test]

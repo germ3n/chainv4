@@ -205,6 +205,12 @@ impl Ctx<'_> {
     }
 }
 
+/// The node and the proxy, changed on the unlock screen, as Settings changes them: the node to
+/// connect to afresh, once either changes.
+pub fn reach(ui: &mut Ui, palette: &Palette, settings: &mut Settings, states: &mut States) -> Option<String> {
+    settings::reach(ui, palette, settings, &mut states.settings)
+}
+
 /// What each page keeps between frames.
 #[derive(Default)]
 pub struct States {

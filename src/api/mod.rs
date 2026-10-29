@@ -697,6 +697,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "token_functions": &*api.token_functions,
         "federation": federation_json(&api, &State::new(db.clone()))?,
         "directory": crate::registry::changes::Changes::new(&State::new(db.clone())).directory()?.as_ref().map(crate::cli::genesis::directory_json),
+        "directory_admin": crate::registry::directory::directory_admin(&State::new(db.clone()))?.map(|admin| admin.to_string()),
         "upgrade": crate::registry::changes::Changes::new(&State::new(db.clone())).upgrade()?.map(|upgrade| json!({ "least": upgrade.least.to_string(), "from": upgrade.from })),
         "version": crate::structs::version::Version::ours().to_string(),
         "name": crate::registry::changes::Changes::new(&State::new(db.clone())).name()?,

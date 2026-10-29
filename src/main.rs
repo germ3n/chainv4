@@ -19,8 +19,10 @@ struct Cli {
 #[cfg(feature = "node")]
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Makes a key and writes it to a file.
+    /// Makes a key and writes it to a file, and prints its public key and address.
     Keygen(cli::KeygenArgs),
+    /// Shows a key file's public key and addresses, never its secret.
+    Key(cli::KeyArgs),
     /// Signs a transaction and submits it to a node's HTTP API.
     #[cfg(feature = "client")]
     Send(Box<cli::SendArgs>),
@@ -369,6 +371,7 @@ fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Keygen(args)) => cli::keygen(args),
+        Some(Command::Key(args)) => cli::key(args),
         #[cfg(feature = "client")]
         Some(Command::Send(args)) => cli::send(*args),
         #[cfg(all(feature = "client", feature = "sha256"))]

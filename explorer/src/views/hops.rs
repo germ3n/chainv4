@@ -74,6 +74,8 @@ pub fn of(tx: &TxView, outcome: Option<&Outcome>) -> Vec<Hop> {
         "withdraw_approval" => ("withdraw approval", "(signers)".to_string(), String::new(), "0".to_string()),
         "approve_change" => ("approve", "(governance)".to_string(), String::new(), "0".to_string()),
         "withdraw_change" => ("withdraw approval", "(governance)".to_string(), String::new(), "0".to_string()),
+        "set_directory" => ("set directory", "(directory)".to_string(), String::new(), "0".to_string()),
+        "hand_directory" => ("hand directory", tx.tx.get("to").and_then(Value::as_str).unwrap_or("(renounced)").to_string(), String::new(), "0".to_string()),
         "name" => {
             let action = tx.tx.get("action").and_then(|action| action.get("type")).and_then(Value::as_str).unwrap_or("name");
 

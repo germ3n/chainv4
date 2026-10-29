@@ -553,6 +553,27 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_admin_round_trips_and_a_file_without_one_keeps_its_id() {
+        let admin = crate::consensus::DevAuthority::dev_keypair().public().address();
+        let genesis = Genesis { directory_admin: Some(admin), ..dev(DevChain::Pow) };
+        let value = to_json(&genesis);
+
+        assert_eq!(value["directory_admin"], admin.to_string());
+        assert_eq!(from_json(&value).unwrap(), genesis);
+        assert_ne!(genesis.block().id(), Genesis { directory_admin: None, ..genesis.clone() }.block().id(), "the admin is part of the chain's id");
+
+        let mut without = value.clone();
+        without.as_object_mut().unwrap().remove("directory_admin");
+
+        assert_eq!(from_json(&without).unwrap().block().id(), Genesis { directory_admin: None, ..genesis.clone() }.block().id(), "a file from before names none, and keeps its id");
+
+        let mut bad = value.clone();
+        bad["directory_admin"] = json!("not an address");
+
+        assert!(from_json(&bad).is_err());
+    }
+
+    #[test]
     fn a_name_round_trips_changes_the_chain_lands_in_state_and_a_file_without_one_has_none() {
         let genesis = Genesis { name: Some("chainv4 testnet".to_string()), ..dev(DevChain::Pow) };
         let value = to_json(&genesis);

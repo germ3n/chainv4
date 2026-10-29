@@ -32,11 +32,13 @@ pub enum BtcAction {
         #[arg(long, default_value = "main")]
         network: String,
     },
-    /// Submits to the relay every header Esplora has past the relay's tip.
+    /// Submits to the relay every header Esplora has past the relay's tip, a batch a
+    /// transaction. Esplora is asked at an even pace and asked again, waiting longer each time,
+    /// when it throttles; a batch it stops answering midway still submits what it fetched.
     RelaySync {
         relay: Address,
-        /// Headers a transaction.
-        #[arg(long, default_value_t = 500)]
+        /// Headers a transaction: small, so each keeps what it fetched.
+        #[arg(long, default_value_t = 25)]
         batch: usize,
     },
     /// Deploys the Bitcoin gateway, with wBTC's template, on a relay, printing where.
@@ -121,16 +123,50 @@ fn raw(value: &Value) -> Vec<u8> {
     }
 }
 
+/// How long between two questions to Esplora, so a sync does not burst.
+const ESPLORA_PACE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How many times Esplora is asked before a question fails: waiting 2, 4, 8, 16 and 32 seconds
+/// between, about a minute in all.
+const ESPLORA_TRIES: u32 = 6;
+
+/// An answer, asked again while it fails or is a web page, which is how a throttled Esplora
+/// answers, waiting twice as long each time.
+fn asked_again(tries: u32, mut wait: impl FnMut(std::time::Duration), mut ask: impl FnMut() -> Result<String, String>) -> Result<String, String> {
+    let mut last = String::new();
+
+    for attempt in 0..tries.max(1) {
+        if attempt > 0 {
+            wait(std::time::Duration::from_secs(1 << attempt));
+        }
+
+        match ask() {
+            Ok(answer) if !answer.trim_start().starts_with('<') => return Ok(answer),
+            Ok(_) => last = "Esplora answered a web page, as it does when it throttles".to_string(),
+            Err(err) => last = err,
+        }
+    }
+
+    Err(format!("{last}; asked {} times", tries.max(1)))
+}
+
 fn whole(value: &Value) -> u64 {
     text(value).parse().unwrap_or(0)
 }
 
 impl Bridge {
+    /// Asks Esplora, at an even pace, and again when it throttles: a public one such as
+    /// mempool.space answers a burst with an error or a web page, and a moment later answers again.
     fn esplora(&self, path: &str) -> CliResult<String> {
         let base = self.args.esplora.as_deref().ok_or("give --esplora: an Esplora API, such as https://mempool.space/api")?;
-        let mut answer = self.agent.get(format!("{}{path}", base.trim_end_matches('/'))).call().map_err(|err| format!("Esplora {path}: {err}"))?;
+        let url = format!("{}{path}", base.trim_end_matches('/'));
 
-        Ok(answer.body_mut().read_to_string()?)
+        Ok(asked_again(ESPLORA_TRIES, std::thread::sleep, || {
+            std::thread::sleep(ESPLORA_PACE);
+            let mut answer = self.agent.get(&url).call().map_err(|err| format!("Esplora {path}: {err}"))?;
+
+            answer.body_mut().read_to_string().map_err(|err| format!("Esplora {path}: {err}"))
+        })?)
     }
 
     /// The Bitcoin gateway here: given, or the one the chain announces.
@@ -171,15 +207,34 @@ impl Bridge {
 
                 while height < top {
                     let mut headers = Vec::new();
+                    let mut stopped = None;
 
                     while height < top && headers.len() / 80 < *batch {
-                        height += 1;
-                        let hash = self.esplora(&format!("/block-height/{height}"))?;
-                        headers.extend(from_hex(&format!("0x{}", self.esplora(&format!("/block/{}/header", hash.trim()))?.trim())).ok_or("Esplora gave a header that is not hex")?);
+                        let header = self.esplora(&format!("/block-height/{}", height + 1)).and_then(|hash| {
+                            from_hex(&format!("0x{}", self.esplora(&format!("/block/{}/header", hash.trim()))?.trim())).ok_or_else(|| "Esplora gave a header that is not hex".into())
+                        });
+
+                        match header {
+                            Ok(header) => {
+                                headers.extend(header);
+                                height += 1;
+                            }
+                            Err(err) => {
+                                stopped = Some(err);
+                                break;
+                            }
+                        }
                     }
 
-                    println!("submitting headers to {height}");
-                    self.call(*relay, "submit", u256::ZERO, vec![bytes(headers)])?;
+                    // What came before Esplora stopped answering is kept.
+                    if !headers.is_empty() {
+                        println!("submitting headers to {height}");
+                        self.call(*relay, "submit", u256::ZERO, vec![bytes(headers)])?;
+                    }
+
+                    if let Some(err) = stopped {
+                        return Err(err);
+                    }
                 }
 
                 Ok(())
@@ -377,5 +432,26 @@ impl Bridge {
         println!("broadcast {}", answer.body_mut().read_to_string()?.trim());
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, std::time::Duration};
+
+    #[test]
+    fn a_throttled_esplora_is_asked_again_waiting_longer_each_time() {
+        let mut answers = vec![Err("timeout".to_string()), Ok("<html>slow down</html>".to_string()), Ok("00000000a1".to_string())].into_iter();
+        let mut waited = Vec::new();
+
+        assert_eq!(asked_again(6, |wait| waited.push(wait), || answers.next().unwrap()), Ok("00000000a1".to_string()));
+        assert_eq!(waited, [Duration::from_secs(2), Duration::from_secs(4)], "twice as long each time");
+
+        let mut waited = Vec::new();
+        let failed = asked_again(3, |wait| waited.push(wait), || Ok("  <!doctype html>".to_string())).unwrap_err();
+
+        assert!(failed.contains("web page") && failed.contains("3 times"), "{failed}");
+        assert_eq!(waited.len(), 2);
+        assert_eq!(asked_again(0, |_| {}, || Ok("1".to_string())), Ok("1".to_string()), "asked once at least");
     }
 }

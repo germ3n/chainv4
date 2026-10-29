@@ -2089,3 +2089,79 @@ fn decisions_are_read_down_from_the_newest_and_stop_at_the_first_missing() {
     assert_eq!(stored_decisions(&*db, 4, Some(3), 10).unwrap(), [], "2 is missing");
     assert_eq!(stored_decisions(&*db, 0, None, 10).unwrap(), [], "none decided yet");
 }
+
+#[test]
+fn the_directory_admin_sets_the_directory_hands_the_role_on_and_renounces_it() {
+    use crate::registry::directory::{Directory, directory_admin};
+
+    let (alice, bob) = (stranger(), stranger());
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &Genesis { directory_admin: Some(alice.public().address()), ..genesis() }).unwrap();
+    let directory = |byte: u8| Directory { swap: Some(Address::Contract([byte; 32])), ..Directory::default() };
+    let signed = |tx: Tx, nonce: u64, key: &Keypair| SignedTx::sign(tx, nonce, FeeOffer::NONE, key);
+    let admin = |chain: &Chain| directory_admin(&chain.state()).unwrap();
+    let decided = |chain: &Chain| crate::registry::changes::Changes::new(&chain.state()).directory().unwrap();
+
+    assert_eq!(admin(&chain), Some(alice.public().address()), "genesis's admin, in state");
+
+    let receipts = advance(&mut chain, vec![
+        signed(Tx::SetDirectory { directory: directory(1) }, 0, &alice),
+        signed(Tx::SetDirectory { directory: directory(2) }, 0, &bob),
+        signed(Tx::SetDirectory { directory: Directory { swap: Some(Address::Ed25519([3; 32])), ..Directory::default() } }, 1, &alice),
+    ]);
+
+    assert_eq!(receipts[0].result, Ok(Effect::Done));
+    assert_eq!(receipts[1].result, Err(Failure::Registry(RegistryError::NotDirectoryAdmin)), "only the admin");
+    assert!(matches!(receipts[2].result, Err(Failure::Registry(RegistryError::BadChange(_)))), "checked as genesis's is");
+    assert_eq!(decided(&chain), Some(directory(1)));
+
+    let receipts = advance(&mut chain, vec![
+        signed(Tx::HandDirectory { to: Some(bob.public().address()) }, 2, &alice),
+        signed(Tx::SetDirectory { directory: directory(4) }, 3, &alice),
+        signed(Tx::SetDirectory { directory: directory(5) }, 1, &bob),
+    ]);
+
+    assert_eq!(receipts[0].result, Ok(Effect::Done));
+    assert_eq!(receipts[1].result, Err(Failure::Registry(RegistryError::NotDirectoryAdmin)), "handed on, alice is no longer it");
+    assert_eq!(receipts[2].result, Ok(Effect::Done));
+    assert_eq!((admin(&chain), decided(&chain)), (Some(bob.public().address()), Some(directory(5))));
+
+    let receipts = advance(&mut chain, vec![
+        signed(Tx::HandDirectory { to: Some(Address::Contract([6; 32])) }, 2, &bob),
+        signed(Tx::HandDirectory { to: None }, 3, &bob),
+        signed(Tx::SetDirectory { directory: directory(7) }, 4, &bob),
+    ]);
+
+    assert!(matches!(receipts[0].result, Err(Failure::Registry(RegistryError::BadChange(_)))), "a contract signs nothing");
+    assert_eq!(receipts[1].result, Ok(Effect::Done));
+    assert_eq!(receipts[2].result, Err(Failure::Registry(RegistryError::NotDirectoryAdmin)), "renounced: nobody");
+    assert_eq!((admin(&chain), decided(&chain)), (None, Some(directory(5))), "the directory stays as it was");
+}
+
+#[test]
+fn a_chain_without_an_admin_or_with_governance_lets_nobody_set_the_directory_by_hand() {
+    let someone = stranger();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &genesis()).unwrap();
+    let set = SignedTx::sign(Tx::SetDirectory { directory: crate::registry::directory::Directory::default() }, 0, FeeOffer::NONE, &authority());
+    let hand = SignedTx::sign(Tx::HandDirectory { to: Some(someone.public().address()) }, 1, FeeOffer::NONE, &authority());
+    let receipts = advance(&mut chain, vec![set, hand]);
+
+    assert_eq!(receipts[0].result, Err(Failure::Registry(RegistryError::NotDirectoryAdmin)));
+    assert_eq!(receipts[1].result, Err(Failure::Registry(RegistryError::NotDirectoryAdmin)));
+
+    #[cfg(feature = "governance-council")]
+    {
+        let governed = Genesis {
+            governance: Some(crate::governance::GovernanceConfig::Council { members: vec![authority().public().address()], threshold: 1, approval_epochs: 4 }),
+            directory_admin: Some(someone.public().address()),
+            ..genesis()
+        };
+
+        assert!(governed.problem().is_some_and(|why| why.contains("by governance")), "one way to change it");
+    }
+
+    let contract = Genesis { directory_admin: Some(Address::Contract([1; 32])), ..genesis() };
+
+    assert!(contract.problem().is_some_and(|why| why.contains("signs")));
+}
