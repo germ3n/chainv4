@@ -1,6 +1,6 @@
 # Deploying a fresh test chain
 
-How the VPS's test chain was last started from nothing (2026-10-29, commit `153bc04`), step by
+How the VPS's test chain was last started from nothing (2026-10-29, commit `c2cb33e`), step by
 step, with everything enabled: a runbook for the next one. [Docker](docker.md) explains the
 pieces; this is the order they go in, and what bit along the way.
 
@@ -161,7 +161,7 @@ SHA-256s with the link.
 
 | What | Where |
 | --- | --- |
-| Genesis | `0x7d6f7922b46814f7…`, named `chainv4 testnet`; the directory is governance's change 1 |
+| Genesis | `0xf7d7228a5f984194…`, named `chainv4 testnet`, with the supply in state; the directory is governance's change 1, the directory's version 1 |
 | Swap contract, `swap.dev` | `contract:0xc4ad35b6…68fb7` |
 | Native DEX, `dex.dev` | `contract:0x6c1df38c…90a4` |
 | EVM DEX router | `0xfd9524e58c1a904b439e9a3292a95cf6562aa458` |
@@ -175,4 +175,4 @@ SHA-256s with the link.
 | Examples | `guestbook.dev`, `counter.dev`, Counter.sol `0x058f1d0b…3be5` |
 | Sample multisig | `multisig:0xba8f500e…a699`, 2 of 3, its contract `0xd7fe4c20…843a` |
 | Onion | `73z6qtdihyugsl2kc34zgcydgimojvro4avjledoap33653dqw77wjyd.onion` |
-| Apps | https://gofile.io/d/545eEVCW |
+| Apps | https://gofile.io/d/DjyO2ADU |
