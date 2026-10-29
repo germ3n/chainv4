@@ -360,6 +360,21 @@ There is no coinbase transaction. After a block's transactions run, the chain cr
 A reorg takes the reward back with the rest of the block. A reward can be spent from the next
 block on, with no maturity period.
 
+## Supply
+
+Every coin made and every coin destroyed is counted in state, as `Supply` under `coin:supply` in
+the validators column, so a light client proves the supply as it proves a balance:
+- **Made:** genesis's allocations and its validators' bonds, each block's reward, vote rewards a
+  chain mints, and `Tx::Mint`.
+- **Destroyed:** fees' burned share, where no reward pool takes it, `Tx::Burn`, what names cost,
+  slashing past the reporter's share, and the inactivity leak.
+
+Minted less burned is what every balance and every bond add up to: tests check it after fees,
+rewards, names, minting, slashing, the leak, mining pools, both DEXes and a reorg. The counters
+are written with the block, and nothing is written for nothing made or destroyed. They moved
+every chain's genesis state root, so chains from before start again from a new genesis.
+`GET /supply` serves them; see [HTTP API](api.md#get-supply).
+
 ## Limits
 
 | Limit | Where | What it bounds |

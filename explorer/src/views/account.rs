@@ -80,6 +80,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
         });
     }
 
+    // A multisig's members, threshold and proposals have a page of their own.
+    if address.starts_with("multisig:") && ui.link(RichText::new("Its members, threshold and open proposals ›").color(look.palette.accent)).clicked() {
+        ctx.go(View::Multisig(address.to_string()));
+    }
+
     ui.add_space(10.0);
 
     super::section(ui, look, "Balance", |ui| match store.accounts.get(address) {

@@ -103,6 +103,7 @@ fn a_key_shows_its_public_key_and_addresses_never_its_secret() {
     assert!(key(KeyArgs { command: KeyCommand::Show { files: vec![dir.0.join("missing.key")] } }).is_err());
 }
 
+#[cfg(feature = "client")]
 #[test]
 fn renouncing_the_directory_asks_for_yes_unless_told() {
     assert!(crate::cli::send::renouncing(true, &mut "".as_bytes()).is_ok(), "--yes asks nothing");

@@ -240,6 +240,8 @@ fn a_multisig_pays_its_own_fee() {
     assert!(receipts[0].fee > u256::ZERO);
     assert_eq!(balance(&chain, &account), before - u256::new(1) - receipts[0].fee, "the multisig paid its fee");
     assert_eq!(balance(&chain, &alice.public().address()), u256::ZERO, "the carrier paid nothing");
+
+    assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
 
 #[test]

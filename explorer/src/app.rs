@@ -65,8 +65,9 @@ pub struct Explorer {
     api: Api,
     store: Store,
     view: View,
-    back: Vec<View>,
-    ahead: Vec<View>,
+    /// The pages behind and ahead, each with where it was scrolled to as it was left.
+    back: Vec<(View, f32)>,
+    ahead: Vec<(View, f32)>,
     search: String,
     streaming: Streaming,
     asked: Asked,
@@ -82,6 +83,9 @@ pub struct Explorer {
     faucet: views::faucet::FaucetPage,
     pool: views::pool::PoolPage,
     governance: GovernanceState,
+    tools: views::tools::ToolsState,
+    multisig: views::multisig::MultisigState,
+    names: views::names::NamesState,
     settings_page: SettingsState,
     /// The light client, which checks what the node says about balances.
     light: Light,
@@ -92,8 +96,9 @@ pub struct Explorer {
     /// Something to tell the person, and whether it is bad news.
     notice: Option<(String, bool)>,
     palette: Palette,
-    /// Whether the page changed, so the next one starts at its top.
-    moved: bool,
+    /// Where the page shown is scrolled to, and where it should be: the top of a new page, or
+    /// where one returned to was left.
+    scrolled: chainv4_ui::layout::Scrolled,
     /// The window's title as last set, which follows the chain's name.
     title: String,
 }
@@ -137,6 +142,9 @@ impl Explorer {
             faucet: views::faucet::FaucetPage::default(),
             pool: views::pool::PoolPage::default(),
             governance: GovernanceState::default(),
+            tools: views::tools::ToolsState::default(),
+            multisig: views::multisig::MultisigState::default(),
+            names: views::names::NamesState::default(),
             settings_page: SettingsState::default(),
             light: Light::default(),
             keys: ReleaseKeys::built_in().unwrap_or_else(|why| {
@@ -147,7 +155,7 @@ impl Explorer {
             update: UpdateState::default(),
             notice: None,
             palette,
-            moved: false,
+            scrolled: chainv4_ui::layout::Scrolled::default(),
             title: String::new(),
         };
         explorer.connect(&node);
@@ -171,9 +179,9 @@ impl Explorer {
 
     fn go(&mut self, view: View) {
         if view != self.view {
-            self.back.push(std::mem::replace(&mut self.view, view));
+            self.back.push((std::mem::replace(&mut self.view, view), self.scrolled.offset()));
             self.ahead.clear();
-            self.moved = true;
+            self.scrolled.top();
         }
     }
 
@@ -225,6 +233,14 @@ impl Explorer {
                                 Ask::GovernanceWeight(address) => {
                                     self.store.governance_weights.remove(address);
                                 }
+                                // Not a multisig, or no longer one.
+                                Ask::Multisig(address) if failure.status == 404 => {
+                                    self.store.multisigs.remove(address);
+                                }
+                                // A chain without names, or a node from before these.
+                                Ask::NamesList { after: None } if failure.status == 404 => self.store.name_list = Default::default(),
+                                Ask::Rich if failure.status == 404 => self.store.rich = None,
+                                Ask::Supply if failure.status == 404 => self.store.supply = None,
                                 _ => {}
                             }
 
@@ -405,6 +421,18 @@ impl Explorer {
                     store.governance_weights.insert(address, found);
                 }
             }
+            Ask::Multisig(address) => {
+                if let Some(found) = parse(value) {
+                    store.multisigs.insert(address, found);
+                }
+            }
+            Ask::NamesList { after } => {
+                if let Some(page) = parse(value) {
+                    store.name_list.take(page, after.is_some());
+                }
+            }
+            Ask::Rich => store.rich = parse(value),
+            Ask::Supply => store.supply = parse(value),
             Ask::Offer(_) | Ask::Submit(_) => {}
             // The light client's own, which it took already.
             Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. } => {}
@@ -502,16 +530,29 @@ impl Explorer {
             self.api.ask(Ask::Release);
         }
 
-        // The pool's and governance's pages ask again on their own, so why it failed stands till
-        // then: a node without a pool, or a chain without governance, says so steadily, rather
-        // than between spells of loading.
+        // The pool's, governance's, the multisig's, the names' and the rich list's pages ask again
+        // on their own, so why it failed stands till then: a node without a pool, or a chain
+        // without governance or names, says so steadily, rather than between spells of loading.
         if due(&mut self.asked.failures, RETRY_AFTER) {
             self.store
                 .failures
                 .retain(|ask, _| {
                     matches!(
                         ask,
-                        Ask::Offer(_) | Ask::Submit(_) | Ask::Call { .. } | Ask::Rpc(_) | Ask::Faucet(_) | Ask::Pool | Ask::PoolMiner(_) | Ask::Governance | Ask::Decisions { .. } | Ask::GovernanceWeight(_)
+                        Ask::Offer(_)
+                            | Ask::Submit(_)
+                            | Ask::Call { .. }
+                            | Ask::Rpc(_)
+                            | Ask::Faucet(_)
+                            | Ask::Pool
+                            | Ask::PoolMiner(_)
+                            | Ask::Governance
+                            | Ask::Decisions { .. }
+                            | Ask::GovernanceWeight(_)
+                            | Ask::Multisig(_)
+                            | Ask::NamesList { .. }
+                            | Ask::Rich
+                            | Ask::Supply
                     )
                 });
         }
@@ -536,6 +577,15 @@ impl Explorer {
                 let proofs: Vec<Ask> = self.store.decisions.items.values().filter_map(|decision| light.prove_receipt(&decision.tx, &decision.block, decision.height)).collect();
 
                 [Ask::Governance, Ask::Decisions { before: None }].into_iter().chain(proofs).collect()
+            }
+            View::Multisig(address) if !address.is_empty() => vec![Ask::Multisig(address.clone())],
+            // The first page of the directory, refreshed while it is all that was read.
+            View::Names => vec![Ask::NamesList { after: None }],
+            // The supply, and its proof at the light client's tip once it caught up.
+            View::Rich => {
+                let proof = views::rich::supply_proof(&self.store, &mut self.light);
+
+                [Ask::Rich, Ask::Supply].into_iter().chain(proof).collect()
             }
             _ => Vec::new(),
         };
@@ -564,17 +614,18 @@ impl Explorer {
         }
     }
 
+    /// Back to the page before, scrolled to where it was left.
     fn back(&mut self) {
-        if let Some(view) = self.back.pop() {
-            self.ahead.push(std::mem::replace(&mut self.view, view));
-            self.moved = true;
+        if let Some((view, offset)) = self.back.pop() {
+            self.ahead.push((std::mem::replace(&mut self.view, view), self.scrolled.offset()));
+            self.scrolled.back_to(offset);
         }
     }
 
     fn forward(&mut self) {
-        if let Some(view) = self.ahead.pop() {
-            self.back.push(std::mem::replace(&mut self.view, view));
-            self.moved = true;
+        if let Some((view, offset)) = self.ahead.pop() {
+            self.back.push((std::mem::replace(&mut self.view, view), self.scrolled.offset()));
+            self.scrolled.back_to(offset);
         }
     }
 
@@ -653,7 +704,7 @@ impl Explorer {
             ui.add_space(2.0);
 
             for (view, name) in pages {
-                let selected = self.view == *view;
+                let selected = self.view.marks(view);
                 let text = RichText::new(*name).color(if selected { palette.ink } else { palette.soft });
                 let button = egui::Button::new(text)
                     .fill(if selected { palette.row } else { egui::Color32::TRANSPARENT })
@@ -872,13 +923,9 @@ impl Explorer {
         if self.view == View::Map {
             views::map::show(ui, &mut ctx, &mut self.map);
         } else {
-            let mut scroll = egui::ScrollArea::vertical().id_salt("page").auto_shrink(false);
+            let scroll = egui::ScrollArea::vertical().id_salt("page").auto_shrink(false);
 
-            if std::mem::take(&mut self.moved) {
-                scroll = scroll.vertical_scroll_offset(0.0);
-            }
-
-            scroll.show(ui, |ui| {
+            self.scrolled.show(ui, scroll, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.set_max_width(ui.available_width().min(COLUMN));
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| match &self.view {
@@ -905,6 +952,10 @@ impl Explorer {
                         View::Pool => views::pool::show(ui, &mut ctx, &mut self.pool),
                         View::Settings => views::settings::show(ui, &mut ctx, &mut self.address, &mut self.settings_page, &self.streaming, &mut connect),
                         View::More => views::more::show(ui, &mut ctx),
+                        View::Tools => views::tools::show(ui, &mut ctx, &mut self.tools),
+                        View::Multisig(address) => views::multisig::show(ui, &mut ctx, &mut self.multisig, address),
+                        View::Names => views::names::show(ui, &mut ctx, &mut self.names),
+                        View::Rich => views::rich::show(ui, &mut ctx),
                     });
                     ui.add_space(24.0);
                 });

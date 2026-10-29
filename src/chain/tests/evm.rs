@@ -304,6 +304,8 @@ fn running_out_of_gas_burns_what_it_may_and_keeps_nothing() {
 
     assert_eq!(receipt.result, Err(Failure::Contract(VmError::OutOfFuel)));
     assert_eq!(count(&mut chain, counter), word(3));
+
+    assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
 
 #[test]
@@ -408,6 +410,8 @@ fn under_fees_evm_gas_is_the_chains_gas_one_for_one() {
     assert!(evm_gas > 21_000, "the EVM's own gas, its intrinsic 21,000 included: {evm_gas}");
     assert_eq!(receipt.gas_used, intrinsic + evm_gas);
     assert!(receipt.fee > u256::ZERO);
+
+    assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
 
 /// A string as one ABI argument, for a function taking only it: its offset, length and bytes.

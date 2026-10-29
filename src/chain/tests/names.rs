@@ -66,6 +66,8 @@ fn names_register_resolve_and_burn_their_price() {
     assert!(receipts.iter().all(|receipt| receipt.result == Ok(Effect::Done)), "{receipts:?}");
     assert_eq!(Names::new(&state).primary(&alice.public().address(), now, grace()).unwrap(), Some("alice".to_string()));
     assert_eq!(Names::new(&state).resolve("pay.bob", now, grace()).unwrap(), Some(carol.public().address()));
+
+    assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
 
 #[test]
@@ -116,6 +118,8 @@ fn under_fees_a_name_pays_its_gas_and_burns_its_price() {
     assert_eq!(receipt.gas_used, intrinsic, "nothing runs: a name costs its bytes' gas");
     // The authority produces the block too, so it gets the fee's unburned share back.
     assert!(before - balance(&chain, &authority().public().address()) >= NamesConfig::dev().prices[2]);
+
+    assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
 
 #[test]

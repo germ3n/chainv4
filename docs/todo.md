@@ -104,6 +104,9 @@ offline; these would make that hold up as a treasury.
   leave only the leaf to the pool's word. A pool's node keeps four claim trees in memory, which a
   pool of millions of miners would want on disk. A share chain among the pool's own nodes, as
   P2Pool keeps, would take the split out of one node's hands altogether.
+- [x] **A decoded transaction as the tx page shows one.** The node's JSON for a transaction is
+  `structs::json`, apart from the node, so the explorer's Decode tool writes a decoded one as the
+  node would and shows it with the tx page's own view.
 - [ ] **Polish the explorer and the wallet.** A pass over both apps as people use them, on a phone
   first: what each page says and in what order, empty and loading states, what is hard to find
   or to read, and the tools the explorer still lacks (see the queued explorer batch).

@@ -4,6 +4,8 @@ pub mod account;
 pub mod address;
 pub mod amount;
 pub mod bech32;
+#[cfg(feature = "json")]
+pub mod json;
 pub mod bundle;
 pub mod code;
 pub mod event;

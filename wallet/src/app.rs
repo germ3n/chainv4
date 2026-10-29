@@ -41,7 +41,8 @@ const FALLBACK_NAME: &str = "chainv4";
 /// The pages left, latest last, each once, for the back gesture: a page left again moves to the
 /// end, so going back never loops between two.
 pub(crate) struct Visits {
-    left: Vec<Page>,
+    /// The pages left, each with where it was scrolled to as it was left.
+    left: Vec<(Page, f32)>,
     shown: Page,
 }
 
@@ -50,28 +51,31 @@ impl Visits {
         Visits { left: Vec::new(), shown: first }
     }
 
-    /// Notes the page shown now; the one before is left, if it changed.
-    pub(crate) fn see(&mut self, page: Page) {
+    /// Notes the page shown now; the one before is left, scrolled to offset, if it changed.
+    /// Whether it did: a page come to anew starts at its top.
+    pub(crate) fn see(&mut self, page: Page, offset: f32) -> bool {
         if page == self.shown {
-            return;
+            return false;
         }
 
         let left = self.shown;
-        self.left.retain(|known| *known != left);
-        self.left.push(left);
+        self.left.retain(|(known, _)| *known != left);
+        self.left.push((left, offset));
         self.shown = page;
 
         if self.left.len() > VISITED {
             self.left.remove(0);
         }
+
+        true
     }
 
-    /// The page to go back to, now shown; None at the first.
-    pub(crate) fn back(&mut self) -> Option<Page> {
-        let page = self.left.pop()?;
+    /// The page to go back to, now shown, and where it was scrolled to; None at the first.
+    pub(crate) fn back(&mut self) -> Option<(Page, f32)> {
+        let (page, offset) = self.left.pop()?;
         self.shown = page;
 
-        Some(page)
+        Some((page, offset))
     }
 }
 /// The narrowest a bottom tab gets before the row scrolls, wide enough for "Governance".
@@ -342,6 +346,9 @@ pub struct Wallet {
     page: Page,
     /// The pages left, for the back gesture to return to.
     visits: Visits,
+    /// Where the page shown is scrolled to, and where it should be: the top of a page come to
+    /// anew, or where one gone back to was left.
+    scrolled: chainv4_ui::layout::Scrolled,
     /// The page the bottom tabs last scrolled to, so they bring a newly opened one into view and
     /// otherwise stay where a finger left them.
     tabs_at: Option<Page>,
@@ -406,6 +413,7 @@ impl Wallet {
             page: Page::Overview,
             tabs_at: None,
             visits: Visits::new(Page::Overview),
+            scrolled: chainv4_ui::layout::Scrolled::default(),
             coin: Coin {
                 symbol: "DEV".to_string(),
                 decimals: 18,
@@ -940,13 +948,24 @@ impl Wallet {
     /// page opened closes first, such as a swap, then the page before comes back. With neither, it
     /// is left for the platform, which sends the app to the background.
     fn go_back(&mut self, ui: &mut Ui) {
-        self.visits.see(self.page);
+        // Before the page is drawn, the offset is still the page left's.
+        if self.visits.see(self.page, self.scrolled.offset()) {
+            self.scrolled.top();
+        }
 
         if !ui.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
             return;
         }
 
-        let went = self.views.back(self.page) || self.visits.back().inspect(|page| self.page = *page).is_some();
+        let went = self.views.back(self.page)
+            || self
+                .visits
+                .back()
+                .inspect(|(page, offset)| {
+                    self.page = *page;
+                    self.scrolled.back_to(*offset);
+                })
+                .is_some();
 
         if went {
             ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack));
@@ -1095,7 +1114,9 @@ impl eframe::App for Wallet {
         let current = self.holders.iter().position(|holder| holder.id() == chosen).unwrap_or(0);
         let margin = if narrow { egui::Margin::symmetric(14, 0) } else { egui::Margin::ZERO };
         egui::CentralPanel::default().frame(egui::Frame::new().fill(palette.paper).inner_margin(margin)).show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let scroll = egui::ScrollArea::vertical().id_salt("page").auto_shrink(false);
+
+            self.scrolled.show(ui, scroll, |ui| {
                 ui.vertical_centered(|ui| {
                     // Never wider than there is room for: a centered column widens to its width.
                     ui.set_max_width(ui.available_width().min(760.0));
@@ -1235,16 +1256,18 @@ mod tests {
     #[test]
     fn back_returns_through_the_pages_left_each_once_and_stops_at_the_first() {
         let mut visits = Visits::new(Page::Overview);
-        visits.see(Page::Overview);
-        visits.see(Page::Contracts);
-        visits.see(Page::Send);
-        // Back to Contracts, then on to Send again: Contracts is left once, not twice.
-        assert_eq!(visits.back(), Some(Page::Contracts));
-        visits.see(Page::Contracts);
-        visits.see(Page::Send);
 
-        assert_eq!(visits.back(), Some(Page::Contracts));
-        assert_eq!(visits.back(), Some(Page::Overview));
+        assert!(!visits.see(Page::Overview, 0.0), "no change");
+        assert!(visits.see(Page::Contracts, 10.0), "Overview left at 10");
+        visits.see(Page::Send, 20.0);
+        // Back to Contracts, where it was left, then on to Send again: Contracts is left once,
+        // not twice, and where it was left last.
+        assert_eq!(visits.back(), Some((Page::Contracts, 20.0)));
+        assert!(!visits.see(Page::Contracts, 0.0), "the page gone back to is the one shown");
+        visits.see(Page::Send, 30.0);
+
+        assert_eq!(visits.back(), Some((Page::Contracts, 30.0)));
+        assert_eq!(visits.back(), Some((Page::Overview, 10.0)));
         assert_eq!(visits.back(), None, "the first page: left to the platform");
     }
 

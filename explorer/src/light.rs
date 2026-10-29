@@ -87,6 +87,24 @@ pub struct Light {
     pub receipts: HashMap<String, Checked>,
     /// The lowest height a receipt waits at below the headers held, to take headers down to.
     wanted_below: Option<u64>,
+    /// Proofs a page asked for to check itself, by what they prove: a state entry's column and
+    /// key, or receipts and a transaction id.
+    fetched: HashMap<(String, String), Fetched>,
+}
+
+/// A proof a page asked for: the node's latest answer, at whichever block it was asked.
+#[derive(Clone, Debug, Default)]
+struct Fetched {
+    answer: Option<Result<Value, String>>,
+}
+
+/// What a proof is of: a state entry's column and key, or receipts and a transaction id.
+fn proven_entry(ask: &Ask) -> Option<(String, String)> {
+    match ask {
+        Ask::Proof { column, key, .. } => Some((column.clone(), key.clone())),
+        Ask::ReceiptProof(tx) => Some(("receipts".to_string(), tx.clone())),
+        _ => None,
+    }
 }
 
 impl Light {
@@ -94,6 +112,37 @@ impl Light {
     #[cfg(test)]
     fn lowest(&self) -> Option<u64> {
         self.client.as_ref().map(LightClient::lowest)
+    }
+
+    /// A client following a chain already, as a test builds one.
+    #[cfg(test)]
+    pub fn started_with(client: LightClient) -> Light {
+        Light { client: Some(client), ..Light::default() }
+    }
+
+    /// The client, while it follows without trouble: what a page checks a proof against.
+    pub fn client(&self) -> Option<&LightClient> {
+        self.client.as_ref().filter(|_| self.trouble.is_none())
+    }
+
+    /// The block to ask a proof at: the newest the client followed, which it holds the header of;
+    /// None while it follows nothing.
+    pub fn tip_block(&self) -> Option<String> {
+        self.client().map(|client| client.tip().id().to_string())
+    }
+
+    /// Asks for a proof on a page's behalf, a state entry's or a receipt's, keeping the node's
+    /// answer for the page to check itself. An answer to an earlier ask of the same entry stands
+    /// until the new one comes.
+    pub fn fetch(&mut self, ask: &Ask) {
+        if let Some(entry) = proven_entry(ask) {
+            self.fetched.entry(entry).or_default();
+        }
+    }
+
+    /// The node's latest answer to a proof a page asked for: its JSON, or why it gave none.
+    pub fn fetched(&self, column: &str, key: &str) -> Option<&Result<Value, String>> {
+        self.fetched.get(&(column.to_string(), key.to_string()))?.answer.as_ref()
     }
 
     /// How far it follows: the tip's height and the height up to which blocks are final.
@@ -218,6 +267,17 @@ impl Light {
 
         if !mine {
             return false;
+        }
+
+        // A page's own: kept as it came, for the page to check.
+        if let Some(fetched) = proven_entry(ask).and_then(|entry| self.fetched.get_mut(&entry)) {
+            fetched.answer = Some(result.clone().map_err(|failure| failure.message.clone()));
+
+            if let Ask::Proof { key, .. } = ask
+                && !self.keys.contains_key(key)
+            {
+                return true;
+            }
         }
 
         let value = match (ask, result) {
@@ -389,7 +449,10 @@ impl Light {
                 Ok(())
             }
             Ask::Proof { key, .. } => {
-                let address = self.keys.get(key).cloned().ok_or("a proof nobody asked for")?;
+                // A page's own, asked again after it moved on: nothing to take.
+                let Some(address) = self.keys.get(key).cloned() else {
+                    return Ok(());
+                };
                 let client = self.client.as_ref().ok_or("the light client has not started")?;
                 let block = id(client, value["block"].as_str().unwrap_or_default()).ok_or("a proof at a block id that does not read")?;
                 let raw_key = from_hex(key).ok_or("a key that is not hex")?;

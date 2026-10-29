@@ -118,6 +118,7 @@ impl<'a> Names<'a> {
 
                 let cost = price(prices, name, *years).ok_or_else(|| RegistryError::Name("the price overflows".to_string()))?;
                 Accounts::new(self.state).debit(sender, cost)?;
+                crate::registry::supply::Supply::burn(self.state, cost)?;
                 self.put(name, &NameRecord {
                     owner: *sender,
                     target: Some(*sender),
@@ -149,6 +150,7 @@ impl<'a> Names<'a> {
 
                 let cost = price(prices, name, *years).ok_or_else(|| RegistryError::Name("the price overflows".to_string()))?;
                 Accounts::new(self.state).debit(sender, cost)?;
+                crate::registry::supply::Supply::burn(self.state, cost)?;
                 self.put(name, &NameRecord { expires, ..found.record })?;
 
                 return Ok(cost);

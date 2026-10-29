@@ -445,7 +445,8 @@ mod tests {
 
         // The development authority chain's id from before the field, in the build it was taken
         // from: its hash, key, engines and finality all go into it. Taken again for format 9,
-        // whose headers commit to their payouts too, which moved every block's id.
+        // whose headers commit to their payouts too, which moved every block's id; and again for
+        // the coin's supply, kept in state from genesis on, which moved every state root.
         if cfg!(all(
             feature = "blake3",
             feature = "ed25519",
@@ -455,7 +456,7 @@ mod tests {
             feature = "finality-authority",
             feature = "finality-depth"
         )) {
-            assert_eq!(read.block().id().to_string(), "0x78d5a6025a07a45222126eb9c091768d86b90bbd1b8408e68a3eb35ff7cf8b88");
+            assert_eq!(read.block().id().to_string(), "0xbe84cd245b6321f5206614cd1ee97323dd4cd2d3b87986f2ba501ca3a66c496d");
         }
 
         // Set, it is part of the chain: the dev chains now have their own ids.

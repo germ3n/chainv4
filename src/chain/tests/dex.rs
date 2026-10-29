@@ -144,6 +144,8 @@ fn pools_of_the_coin_a_token_and_an_erc20_trade_and_pay_their_shares_back() {
     refused(&call(&mut chain, dex, "create_pool", 0, vec![at(token), at(token)]), "two different");
     refused(&call(&mut chain, dex, "create_pool", 0, vec![at(token), at(COIN)]), "exists");
     refused(&call(&mut chain, dex, "swap", 0, vec![at(erc20), at(COIN), wide(1_000), wide(0)]), "no pool trades");
+
+    assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
 
 /// Calls an EVM contract as the authority, sending coin: what it returned, or why it reverted.
@@ -236,4 +238,6 @@ fn the_evm_dex_wraps_the_coin_trades_along_paths_and_pays_shares_back() {
     let late = evm_send(&mut chain, router, 0, "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)", &[Uint(256), Uint(256), addresses, Addr, Uint(256)], &[n(1_000), n(0), path(&[&b, &a]), evm_address(&me), n(1)]);
     assert!(late.unwrap_err().contains("deadline passed"));
     assert!(evm_send(&mut chain, router, 5, "", &[], &[]).is_err(), "the router takes the coin from WDEV alone");
+
+    assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }

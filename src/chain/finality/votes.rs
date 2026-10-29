@@ -627,7 +627,11 @@ impl<E: Electorate> Finality for Votes<E> {
                 // of its reward as the pool still holds; minted, each gets it whole.
                 for account in paid {
                     let reward = match self.source {
-                        VoteRewardSource::Mint => params.vote_reward,
+                        VoteRewardSource::Mint => {
+                            crate::registry::supply::Supply::mint(state, params.vote_reward).map_err(ImportError::Db)?;
+
+                            params.vote_reward
+                        }
                         VoteRewardSource::Fees => {
                             let pool = accounts.get(&REWARD_POOL).map_err(ImportError::Db)?.balance;
                             let reward = params.vote_reward.min(pool);

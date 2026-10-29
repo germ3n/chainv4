@@ -449,6 +449,8 @@ fn only_the_authority_mints() {
 
     assert_eq!(receipts[0].result, Ok(Effect::Done));
     assert_eq!(balance(&chain, &bob.public().address()), u256::new(5));
+
+    assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
 
 #[test]
@@ -765,6 +767,8 @@ fn the_heavier_branch_wins_and_state_follows_it() {
     assert_eq!(chain.receipt(&to_bob.id(HashType::default_chain())).unwrap().unwrap().block, a1.id());
     assert_eq!(chain.receipt(&to_carol.id(HashType::default_chain())).unwrap(), None);
     assert_eq!(chain.tip_work(), u256::new(3));
+    // Rewards made on the branch taken off are unmade with it.
+    assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
 
 #[test]
@@ -1097,6 +1101,8 @@ fn a_pool_block_settles_once_finalized_or_past_the_reorg_depth() {
 
     assert_eq!(chain.pool_settled(&block.id(), 1), Ok(PoolSettled::Final(u256::new(100))));
     assert_eq!(chain.pool_settled(&Hash::from_bytes(chain.hash(), &[1; 32]).unwrap(), 1), Ok(PoolSettled::Dropped), "a block never on the main chain");
+
+    assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
 
 #[test]

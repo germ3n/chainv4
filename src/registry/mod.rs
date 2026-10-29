@@ -21,6 +21,7 @@ pub mod multisig;
 pub mod names;
 pub mod pools;
 pub mod signers;
+pub mod supply;
 pub mod tokens;
 pub mod validators;
 #[cfg(feature = "vm")]

@@ -414,6 +414,102 @@ pub struct OwnedNames {
     pub names: Vec<OwnedName>,
 }
 
+/// One name of GET /names/list: the directory, sorted by name.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ListedName {
+    pub name: String,
+    pub display: String,
+    /// active, grace or available.
+    pub status: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub expires: Option<u64>,
+}
+
+/// GET /names/list: a page of the name directory, and the name to pass as after for the next one.
+/// A chain without names answers 404.
+#[derive(Clone, Debug, Deserialize)]
+pub struct NamesPage {
+    pub names: Vec<ListedName>,
+    pub next: Option<String>,
+}
+
+/// One account of GET /rich, and its balance in the smallest unit.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct Holder {
+    pub address: String,
+    pub balance: String,
+}
+
+/// GET /rich: the richest accounts first, at a height, and how many hold anything at all. As the
+/// node reports it: nothing here is proven.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RichList {
+    pub height: u64,
+    /// How many accounts have a balance.
+    pub holders: u64,
+    pub accounts: Vec<Holder>,
+}
+
+/// GET /supply: every coin made and destroyed, what there is, and what of it is bonded or in the
+/// reward pool, at a height. Minted and burned are one state entry, under key in the validators
+/// column, which a light client proves; staked and the reward pool are the node's word alone.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct SupplyView {
+    pub height: u64,
+    pub minted: String,
+    pub burned: String,
+    pub supply: String,
+    pub staked: String,
+    pub reward_pool: String,
+    /// The supply's state key, in hex.
+    pub key: String,
+}
+
+/// GET /multisig/{address}: a multisig's members and threshold, its next nonce and balance, and
+/// the proposals open for that nonce. Anything else answers 404.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MultisigView {
+    pub members: Vec<MultisigMemberView>,
+    pub threshold: u32,
+    #[serde(default)]
+    pub testnet: bool,
+    /// Its descriptors and first address on Bitcoin, when every member names an xpub.
+    #[serde(default)]
+    pub bitcoin: Value,
+    /// Its contract on EVM chains, when every member names an EVM address.
+    #[serde(default)]
+    pub evm: Value,
+    pub nonce: u64,
+    pub balance: String,
+    #[serde(default)]
+    pub proposals: Vec<MultisigProposalView>,
+}
+
+/// A multisig's member: its key here, and its keys on Bitcoin and EVM chains, if it names them.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct MultisigMemberView {
+    pub key: String,
+    #[serde(default)]
+    pub bitcoin: Option<String>,
+    #[serde(default)]
+    pub evm: Option<String>,
+}
+
+/// A transaction proposed for a multisig's next nonce, and the members' keys that approve it.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MultisigProposalView {
+    pub id: String,
+    /// What it does, as transactions' JSON writes it.
+    pub tx: Value,
+    pub fee: Fee,
+    #[serde(default)]
+    pub approvals: Vec<String>,
+}
+
 /// GET /contracts/{address}.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Contract {
@@ -1163,6 +1259,69 @@ mod tests {
         .unwrap();
 
         assert_eq!((worker.payout, worker.shares), (None, 0), "an older node says nothing of shares");
+    }
+
+    #[test]
+    fn the_name_directory_reads_as_get_names_list_writes_it() {
+        let page: NamesPage = serde_json::from_value(json!({
+            "names": [
+                { "name": "alice.dev", "display": "alice.dev", "status": "active", "owner": "ed25519:0x01", "target": "ed25519:0x02", "expires": 1_900_000_000_000_u64 },
+                { "name": "bob.dev", "display": "Bob.dev", "status": "grace", "owner": "ed25519:0x03", "target": null, "expires": 1_000 },
+            ],
+            "next": "bob.dev",
+        }))
+        .unwrap();
+
+        assert_eq!(page.names.len(), 2);
+        assert_eq!((page.names[0].owner.as_deref(), page.names[0].target.as_deref()), (Some("ed25519:0x01"), Some("ed25519:0x02")));
+        assert_eq!((page.names[1].display.as_str(), page.names[1].target.as_deref()), ("Bob.dev", None));
+        assert_eq!(page.next.as_deref(), Some("bob.dev"));
+
+        let last: NamesPage = serde_json::from_value(json!({ "names": [], "next": null })).unwrap();
+        assert_eq!((last.names.len(), last.next), (0, None), "the last page names no next");
+    }
+
+    #[test]
+    fn the_rich_list_and_the_supply_read_as_the_node_writes_them() {
+        let rich: RichList = serde_json::from_value(json!({
+            "height": 120, "holders": 3,
+            "accounts": [{ "address": "ed25519:0x01", "balance": "700" }, { "address": "ed25519:0x02", "balance": "300" }],
+        }))
+        .unwrap();
+
+        assert_eq!((rich.height, rich.holders, rich.accounts.len()), (120, 3, 2));
+        assert_eq!(rich.accounts[0], Holder { address: "ed25519:0x01".to_string(), balance: "700".to_string() });
+
+        let supply: SupplyView = serde_json::from_value(json!({
+            "height": 120, "minted": "1500", "burned": "500", "supply": "1000", "staked": "200", "reward_pool": "50",
+            "key": "0x636f696e3a737570706c79",
+        }))
+        .unwrap();
+
+        assert_eq!((supply.minted.as_str(), supply.burned.as_str(), supply.supply.as_str()), ("1500", "500", "1000"));
+        assert_eq!((supply.staked.as_str(), supply.reward_pool.as_str(), supply.key.as_str()), ("200", "50", "0x636f696e3a737570706c79"));
+    }
+
+    #[test]
+    fn a_multisig_reads_as_get_multisig_writes_it() {
+        let multisig: MultisigView = serde_json::from_value(json!({
+            "address": "multisig:0x01", "threshold": 2, "testnet": false, "bitcoin": null, "evm": null, "nonce": 4, "balance": "900",
+            "members": [
+                { "key": "ed25519:0x02", "bitcoin": null, "evm": null },
+                { "key": "secp256k1:0x03", "bitcoin": "[d34db33f/48'/0'/0'/2']xpub…", "evm": "0x04" },
+            ],
+            "proposals": [{
+                "id": "0x05", "tx": { "type": "transfer", "from": "multisig:0x01", "to": "ed25519:0x06", "amount": "10" },
+                "encoded": "0x00", "fee": { "gas_limit": 21000, "max_price": "1", "tip": "0" }, "approvals": ["ed25519:0x02"],
+            }],
+        }))
+        .unwrap();
+
+        assert_eq!((multisig.threshold, multisig.nonce, multisig.members.len()), (2, 4, 2));
+        assert_eq!(multisig.members[1].evm.as_deref(), Some("0x04"));
+        assert_eq!(multisig.proposals[0].tx["type"], "transfer");
+        assert_eq!((multisig.proposals[0].fee.gas_limit, multisig.proposals[0].approvals.len()), (21000, 1));
+        assert!(multisig.bitcoin.is_null());
     }
 
     #[test]

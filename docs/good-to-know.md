@@ -378,6 +378,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   change of the rules: a chain that decided anything before moves to it with a new genesis.
   `GET /governance` also shows every setting in force, with the change that set it, and who may
   approve; the apps' Governance pages read it, and the wallet approves and proposes there.
+- **The supply is counted in state.** Minted and burned, under `coin:supply`, proven as a balance
+  is; `GET /supply` serves them with what is bonded and pooled, `GET /rich` the richest accounts
+  and `GET /names/list` every name, both the node's word. Counting it moved every genesis state
+  root, so chains from before need a new genesis.
 - **One way to change the directory per chain.** Governance's `Change::Directory`, or without
   governance the `directory_admin` genesis names, by `send set-directory`; the admin hands the
   role on, or renounces it for good (`hand-directory --renounce`, which asks for yes). Genesis

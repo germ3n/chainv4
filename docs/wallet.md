@@ -832,8 +832,9 @@ it shares with the explorer (see [The ui crate](development.md#the-ui-crate)).
   sideways, faded at an edge where more wait, and bringing the page opened into view. A card's
   row puts its label above what it says on a narrow screen, and text wraps everywhere, in rows
   too, so nothing is cut off at the screen's edge. Android's back gesture closes a view the page
-  opened, such as a swap, then returns through the pages left, each once; on the first, the app
-  goes to the background, as Android apps do.
+  opened, such as a swap, then returns through the pages left, each once, scrolled to where it
+  was left; on the first, the app goes to the background, as Android apps do. A page opened anew
+  starts at its top.
 
 ## Building and testing
 

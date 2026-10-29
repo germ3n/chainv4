@@ -52,6 +52,13 @@ fn main() -> eframe::Result {
 
 /// Runs the web app in the page's canvas. It talks to the node in ?node=, or else to the node it
 /// talked to last, or else to the node that served the page.
+/// What the page shows in place of the explorer when it cannot start in the browser.
+#[cfg(target_arch = "wasm32")]
+const UNSTARTED: &str = "<div style=\"font: 15px/1.5 system-ui, sans-serif; color: #c9d1dc; max-width: 34rem; margin: 18vh auto; padding: 0 16px\">\
+<h1 style=\"font-size: 20px; color: #e8edf4\">chainv4 explorer could not start</h1>\
+<p>It draws with WebGL, which this browser has turned off. LibreWolf turns it off by default: set <code>webgl.disabled</code> to <code>false</code> in <code>about:config</code> and reload. Tor Browser turns it off above the Standard security level.</p>\
+<p>Or open this page in another browser. The desktop and phone apps need no WebGL.</p></div>";
+
 #[cfg(target_arch = "wasm32")]
 fn main() {
     use eframe::wasm_bindgen::JsCast;
@@ -72,6 +79,7 @@ fn main() {
             .and_then(|document| document.get_element_by_id("explorer"))
             .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
             .expect("the page has a canvas with the id explorer");
+        let shown = canvas.clone();
         let started = eframe::WebRunner::new()
             .start(
                 canvas,
@@ -80,8 +88,11 @@ fn main() {
             )
             .await;
 
+        // Most often WebGL is off: LibreWolf turns it off, and Tor Browser above Standard. Say
+        // so on the page, where a grey canvas would say nothing.
         if let Err(err) = started {
             log::error!("the explorer could not start: {err:?}");
+            shown.set_outer_html(UNSTARTED);
         }
     });
 }

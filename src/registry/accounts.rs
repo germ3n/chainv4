@@ -8,6 +8,17 @@ use {
 };
 
 #[document(
+    summary = "An account from an entry of the Accounts column, which holds multisigs' policies and proposals too, under keys of their own: the account when the key is an address's, exactly.",
+    category = "Registries",
+    see_also = "Accounts",
+)]
+pub fn account_entry(key: &[u8], value: &[u8]) -> Option<(Address, Account)> {
+    let address = wincode::deserialize::<Address>(key).ok().filter(|address| address_key(address) == key)?;
+
+    wincode::deserialize::<Account>(value).ok().map(|account| (address, account))
+}
+
+#[document(
     summary = "Balances and nonces by address. An address that was never written to reads as the default account, and an account that returns to the default is deleted, so the stored state only holds addresses that matter.",
     category = "Registries",
     see_also = "Account, State",

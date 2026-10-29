@@ -123,6 +123,9 @@ The explorer does not have to take the node's word for balances. It runs the lib
   `GET /proofs/receipts/{tx}` (see [Governance](#governance)). For a decision in a block below the
   lowest header it holds, as after starting at a checkpoint, it first takes the headers down to
   it, which the hash chain proves.
+- **The supply,** on the Rich list & supply page, and **any proof** on the Tools page's Proof tab,
+  are checked against headers it checked itself, step by step. Without it following, each says it
+  is the node's word alone (see [Tools](#tools)).
 
 ## Governance
 
@@ -201,6 +204,10 @@ hour. An older node answers 404, and the explorer shows nothing.
 | Bridges | The [bridges](bridges.md): the federation in force and the chain's [directory](governance.md#directory). Transfers through the gateway, out and in, each with the board's count of signatures and who signed, and a page of its own; the wrapped assets it made, with what each stands for. The Bitcoin gateway: its relay's tip, wBTC minted against the bitcoin held, held outputs, deposits, withdrawals and who asked, and its releases, each with a page of its inputs' signatures and its outputs. |
 | Swaps | Every [atomic swap](swaps.md) in the swap contract, newest first, from its events: what was locked, for whom, until when, and whether it was claimed or refunded, each lock with whether it is final yet. A swap is found by its hash, as the contract holds it, or by its code, `ur:chainv4-swap`, which lays out both legs, the other chain's too. |
 | Mining pool | The pool the node runs, on one started with `--mining … --pool`: its fee, window, miners, escrow balance and all it credited; its producer and escrow; every miner with its part of the window's work, of the next block, and what it earned, claimed and may still claim; the blocks it sealed lately, each waiting to be final, credited, or dropped by a reorganization, with what it shared out among how many miners. A miner's payout address looks up its own books: its workers, and the blocks that paid it and how much. A node without a pool says how to run one. |
+| Multisig | A [multisig](multisig.md) looked up by its `multisig:0x…` address, from `GET /multisig/{address}`: its members, each with the account its key controls and its Bitcoin xpub and EVM address where it names them, the threshold, its nonce and balance, and the proposals open for that nonce, each with its approvals against the threshold. A multisig's account page links here. See [Multisig](#multisig). |
+| Names | The name directory from `GET /names/list`, sorted by name, 50 to a page with **More**: each name's status, owner, what it resolves to and when it expires. A search opens a name's page. See [Names](#names). |
+| Rich list & supply | The richest accounts from `GET /rich`, each with its share of the supply, and the supply from `GET /supply`, its minted and burned proven by the light client. See [Rich list and supply](#rich-list-and-supply). |
+| Tools | Decode, Convert, Hash & verify, and Proof, in tabs. See [Tools](#tools). |
 | Finality | The kind, the epoch, and the justified and finalized checkpoints. Who votes and with what weight, the bonded validators, the signers under authority finality, and any conflicting votes the node caught. |
 | Governance | Who approves changes and what one needs, the changes being approved with their approvals, every setting in force and the change that set it, and every decision, each proven by the light client. See [Governance](#governance). |
 | Send | Signs and sends transfers, contract calls, deploys and burns. |
@@ -210,11 +217,110 @@ hour. An older node answers 404, and the explorer shows nothing.
 **Faucet,** under Tools, on a node that runs a [faucet](faucet.md): coins for an address, an
 Ethereum `0x…` or a name, its proof of work worked out a slice a frame.
 
+## Tools
+
+The Tools page, under Tools in the sidebar and in More on a phone, has four tabs. All but
+Proof's fetch work offline.
+
+**Decode** reads what is pasted:
+- **A raw signed transaction,** `0x…` as the chain encodes it, or the wallet's code for one,
+  `ur:chainv4-signed/…`: its kind, id, with a link to its page, sender, nonce, offer, signer and
+  signature, and whether the signature checks on this chain; an EVM call's calldata read by the
+  ABIs; then every field as the tx page shows it, from the node's own JSON for it, written here.
+- **A swap's code,** `ur:chainv4-swap/…`: the hash, offer or answer, and each leg's chain, what it
+  locks, where, who pays, who claims and when it ends.
+- **A multisig bundle,** `chainv4-multisig:…` or its code, `ur:chainv4-multisig/…`: the chain it is for, this one or another, the
+  multisig, the transaction's id, nonce and offer, and each signature so far, checked over the
+  bundle's chain. An EVM multisig's bundle, `chainv4-multisig-evm:…`, shows its chain, contract,
+  call, digest and who signed.
+- **EVM calldata and logs,** read by chainv4's own contracts' ABIs, built in: ERC-20 (`Token.sol`),
+  ERC-721 (`Collectible`), ERC-1155 (`Items`), `Swap.sol`, the DEX's router, factory and pair,
+  `Gateway.sol` and `MultiSig.sol`. Or by an ABI pasted. A log takes its topics, one to a line, and
+  its data. An ERC-20's and an ERC-721's `Transfer` share a topic: the one whose topics fit is
+  read.
+
+**Convert:**
+- **Units:** the smallest unit to the coin and back, at the chain's decimals from `GET /status`.
+- **Address and EVM alias:** a `secp256k1:0x…` account and its EVM `0x…` address are the same 20
+  bytes, either way, shown with EIP-55's checksum too. Any other account's alias is a hash of its
+  key, one way only.
+- **Public key to address:** under each scheme the key fits. A 32-byte key under ed25519 and
+  edblake, a 33-byte compressed one under secp256k1 and bitcoin, and a key with its scheme in
+  front under that one.
+- **Bech32 and hex:** a version 0 segwit address, `bc1q…`, `tb1q…` or `bcrt1q…`, to its witness
+  program, P2WPKH or P2WSH, and a program back under the network picked.
+
+**Hash & verify:**
+- **Hashes** of text or hex: sha256, blake3, blake2s, blake2b, xxh3 and keccak256, then Bitcoin's
+  sha256d and hash160.
+- **A signature check:** a public key, `scheme:0x…`, a message as text or hex, and a signature of
+  64 bytes. ed25519 and edblake sign the message itself, secp256k1 its keccak256, bitcoin its
+  double SHA-256.
+- **An EVM selector and topic** from a signature such as `transfer(address,uint256)`, hashed as
+  Solidity does: `uint` is `uint256`, and spaces and names go.
+
+**Proof** proves an account, any chain-state entry by its column and key, or a transaction's
+receipt and the transaction. It fetches `GET /proofs/{column}/{key}` at the newest block the
+light client checked, or `GET /proofs/receipts/{tx}`. A proof's JSON can be pasted instead. Each
+is checked step by step:
+- **header:** the block's, one the light client checked itself;
+- **finality:** final, not yet, or a chain without finality;
+- **root:** the root the node names, against the header's: the state root, or the receipts root
+  and tx root;
+- **path:** the hashes from the entry, or the receipt and the transaction, up to that root.
+
+The verdict is **proven**, or proven and final; **does not check**, and why; **waiting**, for a
+block above the light client's tip; or **not checked**. While the light client follows nothing,
+or has stopped, a proof is read and said to be unchecked, never passed off as proven. An account's
+value reads as its balance and nonce, and the supply's as what was minted and burned.
+
+## Multisig
+
+The Multisig page, under Chain, looks a [multisig](multisig.md) up by its `multisig:0x…` address
+with `GET /multisig/{address}`. Anything else answers 404, and the page says it is no multisig.
+- **Members:** each key, the account it controls, and its Bitcoin xpub and EVM address where it
+  names them.
+- **Threshold, nonce and balance.**
+- **Open proposals,** all for the next nonce and void once any of the multisig's transactions
+  runs: each one's kind, id, offer and approvals, counted once a member, against the threshold.
+  What it does opens as JSON.
+- **On other chains:** its Bitcoin multisig's first receiving address and descriptor, and its EVM
+  contract and owners, where every member names keys there.
+
+A multisig's account page links here. As the node says it: nothing on the page is proven.
+
+## Names
+
+The Names page, under Chain, lists every [name](names.md) from `GET /names/list?after=…`, sorted by
+name, 50 to a page, **More** for the next. Each name has its status, owner, what it resolves to,
+and when it expires, and opens its page. A search opens any name's page, by `GET /names/{name}`.
+A chain without names, or an older node, answers 404, and the page says it keeps none. As the node
+says it.
+
+## Rich list and supply
+
+The Rich list & supply page, under Chain:
+- **Supply,** from `GET /supply`: what was minted and burned since genesis, the supply, minted less
+  burned, what is staked and in the reward pool, at a block.
+- **Proven:** minted and burned are one state entry, `chainv4::registry::supply::Supply`, under
+  `coin:supply` in the validators column. Once the light client caught up, the page asks for its
+  proof, `GET /proofs/validators/{key}`, at the newest block the light client checked, under the
+  key the explorer knows rather than the one the node names. It says **proven**, or proven and
+  final, with what the proof holds, when it checks. It says **does not check** for a proof that
+  fails, or one at the node's own block that holds other numbers than the node reports. Until then,
+  and without the light client, it says **reported by the node**.
+- **Staked and the reward pool** are the node's word alone, and the page says so.
+- **Richest accounts,** from `GET /rich`: up to 100, richest first, each with its balance and share
+  of the supply, and how many accounts hold anything at all. The rich list is not proven, and the
+  page says so.
+
+An older node answers either route with 404, and the page says it is from before them.
+
 ## Getting around
 
 **On a wide screen,** a sidebar lists the pages in four groups: Chain (Overview, Block map,
-Mempool, Tokens, NFTs), Markets (DEX, Swaps), Network (Network, Finality, Governance, Mining pool) and Tools (Send,
-Settings). Under them sit the node's address, whether it answers and how, how old its tip is,
+Mempool, Tokens, NFTs, Multisig, Names, Rich list & supply), Markets (DEX, Swaps, Bridges),
+Network (Network, Finality, Governance, Mining pool) and Tools (Tools, Send, Faucet, Settings). Under them sit the node's address, whether it answers and how, how old its tip is,
 and the light client's state.
 Over the page are back and forward, the search box and the chain's height.
 
@@ -228,9 +334,10 @@ version row and its release notices.
 **On a phone,** below 640 points wide, the sidebar gives way to:
 - **a bar on top:** back, once there is somewhere to go back to, the node's state as a dot, and
   the search box. Android's back gesture goes back too, and on the first page sends the app to
-  the background, as Android apps do;
+  the background, as Android apps do. Back and forward return to a page where it was scrolled
+  to, once what it shows has arrived; a page opened anew starts at its top;
 - **tabs along the bottom:** Home, Blocks (the map), Mempool, Tokens and More, which lists the
-  rest, NFTs, DEX and Swaps among them;
+  rest, NFTs, Multisig, Names, Rich list & supply, DEX, Swaps and Tools among them;
 - **pages that stack:** tables become rows of a few lines each, facts sit under their names, and
   charts one above another.
 

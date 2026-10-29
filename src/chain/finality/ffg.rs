@@ -94,6 +94,8 @@ pub(super) fn write_genesis(state: &State, config: &FfgConfig) -> Result<(), DbE
     let mut voters = validators.voters()?;
 
     for validator in &config.validators {
+        // Bonds from genesis are made with the chain, as its allocations are.
+        crate::registry::supply::Supply::mint(state, validator.bond)?;
         validators.register(&validator.voter, ValidatorRecord {
             account: validator.account,
             bond: validator.bond,

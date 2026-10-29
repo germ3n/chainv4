@@ -29,14 +29,18 @@ pub mod hops;
 pub mod map;
 pub mod mempool;
 pub mod more;
+pub mod multisig;
+pub mod names;
 pub mod network;
 pub mod overview;
 pub mod pool;
+pub mod rich;
 pub mod send;
 pub mod name;
 pub mod settings;
 pub mod swaps;
 pub mod tokens;
+pub mod tools;
 pub mod tx;
 pub mod update;
 
@@ -79,15 +83,35 @@ pub enum View {
     Settings,
     /// On a phone, the pages the tabs have no room for.
     More,
+    /// Decoding, converting, hashing and checking proofs, offline or against the light client.
+    Tools,
+    /// A multisig: its members, threshold, nonce and open proposals. Empty for the lookup alone.
+    Multisig(String),
+    /// The name directory.
+    Names,
+    /// The richest accounts, and the coin's supply.
+    Rich,
 }
 
 impl View {
     /// The sidebar's pages, in groups under a heading.
     pub const GROUPS: [(&'static str, &'static [(View, &'static str)]); 4] = [
-        ("Chain", &[(View::Overview, "Overview"), (View::Map, "Block map"), (View::Mempool, "Mempool"), (View::Tokens, "Tokens"), (View::Collections, "NFTs")]),
+        (
+            "Chain",
+            &[
+                (View::Overview, "Overview"),
+                (View::Map, "Block map"),
+                (View::Mempool, "Mempool"),
+                (View::Tokens, "Tokens"),
+                (View::Collections, "NFTs"),
+                (View::Multisig(String::new()), "Multisig"),
+                (View::Names, "Names"),
+                (View::Rich, "Rich list & supply"),
+            ],
+        ),
         ("Markets", &[(View::Dex, "DEX"), (View::Swaps, "Swaps"), (View::Bridges, "Bridges")]),
         ("Network", &[(View::Network, "Network"), (View::Finality, "Finality"), (View::Governance, "Governance"), (View::Pool, "Mining pool")]),
-        ("Tools", &[(View::Send, "Send"), (View::Faucet, "Faucet"), (View::Settings, "Settings")]),
+        ("Tools", &[(View::Tools, "Tools"), (View::Send, "Send"), (View::Faucet, "Faucet"), (View::Settings, "Settings")]),
     ];
 
     /// A phone's tabs, along the bottom.
@@ -100,8 +124,11 @@ impl View {
     ];
 
     /// The pages More lists, with what each is for.
-    pub const MORE: [(View, &'static str, &'static str); 11] = [
+    pub const MORE: [(View, &'static str, &'static str); 15] = [
         (View::Collections, "NFTs", "Collections, their tokens and holders"),
+        (View::Multisig(String::new()), "Multisig", "A multisig's members, threshold and open proposals"),
+        (View::Names, "Names", "Every name, its owner and when it expires"),
+        (View::Rich, "Rich list & supply", "The richest accounts, and the coin's proven supply"),
         (View::Dex, "DEX", "Pools, prices, trades and volume"),
         (View::Swaps, "Swaps", "Atomic swaps and their finality"),
         (View::Bridges, "Bridges", "What crossed to other chains, and wrapped assets"),
@@ -109,10 +136,17 @@ impl View {
         (View::Finality, "Finality", "Checkpoints, voters and caught cheats"),
         (View::Governance, "Governance", "Who approves changes, what is in force, and every decision"),
         (View::Pool, "Mining pool", "The node's pool: miners, shares and payouts"),
+        (View::Tools, "Tools", "Decode, convert, hash, verify, and check proofs"),
         (View::Send, "Send", "Sign and send a transaction"),
         (View::Faucet, "Faucet", "Coins for a dev or test chain"),
         (View::Settings, "Settings", "The node, the theme, the light client"),
     ];
+
+    /// Whether the sidebar's entry for this page is the one to mark: the page itself, or for the
+    /// multisig lookup, any multisig.
+    pub fn marks(&self, entry: &View) -> bool {
+        self == entry || matches!((self, entry), (View::Multisig(_), View::Multisig(_)))
+    }
 
     /// Which tab a page belongs under on a phone: a page of its own, or More for the rest.
     pub fn tab(&self) -> View {
@@ -121,7 +155,25 @@ impl View {
             View::Map => View::Map,
             View::Mempool => View::Mempool,
             View::Tokens => View::Tokens,
-            View::Collections | View::Collection(_) | View::Dex | View::Swaps | View::Bridges | View::Transfer(_) | View::Release(_) | View::Network | View::Finality | View::Governance | View::Pool | View::Send | View::Faucet | View::Settings | View::More => View::More,
+            View::Collections
+            | View::Collection(_)
+            | View::Dex
+            | View::Swaps
+            | View::Bridges
+            | View::Transfer(_)
+            | View::Release(_)
+            | View::Network
+            | View::Finality
+            | View::Governance
+            | View::Pool
+            | View::Send
+            | View::Faucet
+            | View::Settings
+            | View::More
+            | View::Tools
+            | View::Multisig(_)
+            | View::Names
+            | View::Rich => View::More,
         }
     }
 }
@@ -763,4 +815,44 @@ pub fn json_tree(ui: &mut Ui, ctx: &mut Ctx, name: &str, value: &Value) {
             });
         }
     }
+}
+
+/// A page drawn once, headless, at a screen width, for tests: the text it drew, and what it asked
+/// the node.
+#[cfg(test)]
+pub(crate) fn render(store: &Store, light: &mut crate::light::Light, width: f32, mut draw: impl FnMut(&mut Ui, &mut Ctx)) -> (String, Vec<Ask>) {
+    let mut api = Api::new("http://127.0.0.1:1", Err("offline".to_string()), egui::Context::default());
+    let mut settings = Settings::default();
+    let mut go = None;
+    let palette = crate::theme::DARK;
+    let look = Look { palette, roles: crate::theme::Roles::of(&palette), narrow: chainv4_ui::layout::is_narrow(width) };
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 2_000.0))),
+        ..egui::RawInput::default()
+    };
+    let mut output = egui::Context::default().run_ui(input, |ui| {
+        let mut ctx = Ctx { store, light: &mut *light, api: &mut api, go: &mut go, settings: &mut settings, now: 2_000, look };
+        draw(ui, &mut ctx);
+    });
+    output.textures_delta.clear();
+    let mut text = String::new();
+
+    for clipped in &output.shapes {
+        if let egui::epaint::Shape::Text(shape) = &clipped.shape {
+            text.push_str(shape.galley.text());
+            text.push('\n');
+        }
+    }
+
+    // The offline API answers at once: what was asked is in the inbox.
+    let asked = api
+        .replies()
+        .into_iter()
+        .filter_map(|reply| match reply {
+            crate::api::Reply::Answer { ask, .. } => Some(ask),
+            crate::api::Reply::Stream(_) => None,
+        })
+        .collect();
+
+    (text, asked)
 }

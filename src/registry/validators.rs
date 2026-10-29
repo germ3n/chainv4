@@ -273,6 +273,8 @@ impl<'a> Validators<'a> {
         }
 
         let reward = record.bond / u256::from(staking.reporter_divisor.max(1));
+        // The reporter's share goes on; the rest of the bond is gone.
+        crate::registry::supply::Supply::burn(self.state, record.bond - reward)?;
         let until = epoch + staking.activation_delay + 1;
         record.bond = u256::ZERO;
         record.slashed = true;
@@ -468,6 +470,7 @@ impl<'a> Validators<'a> {
         }
 
         if burned > u256::ZERO {
+            crate::registry::supply::Supply::burn(self.state, burned)?;
             self.reweigh_fixed_sets(epoch + 1, epoch + staking.activation_delay)?;
         }
 

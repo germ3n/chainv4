@@ -139,7 +139,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, id: &str, state: &mut hops::HopState) {
 
 /// The transaction's own fields: amounts in the coin, a call's function by name and its
 /// arguments in a row, Luau source as code.
-fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>) {
+pub(crate) fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>) {
     let look = ctx.look;
     // The trace names the function a call ran, which the transaction only names by selector.
     let called = outcome

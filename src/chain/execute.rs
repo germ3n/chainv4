@@ -720,9 +720,15 @@ fn run(
                 return (Err(Failure::NotMinter), Contracted::default());
             }
 
-            (moved(accounts.credit(to, amount.to_u256()).map(|_| ())), Contracted::default())
+            let minted = accounts.credit(to, amount.to_u256()).and_then(|_| crate::registry::supply::Supply::mint(layer, amount.to_u256()).map_err(RegistryError::Db));
+
+            (moved(minted), Contracted::default())
         }
-        Tx::Burn { from, amount } => (moved(accounts.debit(from, amount.to_u256()).map(|_| ())), Contracted::default()),
+        Tx::Burn { from, amount } => {
+            let burned = accounts.debit(from, amount.to_u256()).and_then(|_| crate::registry::supply::Supply::burn(layer, amount.to_u256()).map_err(RegistryError::Db));
+
+            (moved(burned), Contracted::default())
+        }
         Tx::ContractCall { to: Address::Evm(_), .. } => (
             Err(Failure::Contract(VmError::Runtime("an EVM contract is called with an EVM call, with its calldata".to_string()))),
             Contracted::default(),

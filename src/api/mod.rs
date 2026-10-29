@@ -17,7 +17,7 @@ use {
     crate::registry::changes::Changes,
     crate::registry::validators::Validators,
     crate::structs::vote::Checkpoint,
-    crate::db::{Committed, Database, DbError, Read, STATE_COLUMNS, State, StateTree},
+    crate::db::{Column, Committed, Database, DbError, Read, STATE_COLUMNS, State, StateTree},
     crate::vm::{BlockAt, CallContext, Limits, Vm, VmError, selector},
     crate::mempool::MempoolError,
     crate::node::{NodeHandle, NodeReport, SubmitError},
@@ -480,6 +480,8 @@ fn router(api: Api) -> Router {
         .route("/events", get(events))
         .route("/tokens", get(tokens))
         .route("/collections", get(collections))
+        .route("/supply", get(supply))
+        .route("/rich", get(rich))
 
         .route("/node", get(node))
         .route("/mempool", get(mempool))
@@ -495,7 +497,7 @@ fn router(api: Api) -> Router {
     #[cfg(feature = "faucet")]
     let router = router.route("/faucet", get(faucet::about).post(faucet::give));
     #[cfg(feature = "names")]
-    let router = router.route("/names", get(names)).route("/names/{name}", get(name)).route("/accounts/{address}/names", get(account_names));
+    let router = router.route("/names", get(names)).route("/names/list", get(names_list)).route("/names/{name}", get(name)).route("/accounts/{address}/names", get(account_names));
     #[cfg(feature = "stream")]
     let router = router.route("/stream", get(stream));
     #[cfg(feature = "updates")]
@@ -1096,6 +1098,79 @@ fn decided_change(db: &dyn Committed, id: &Hash) -> Result<Option<crate::governa
     }
 }
 
+/// The coin's supply at the tip: what was made and destroyed since genesis, which a light client
+/// proves with the state entry under key, and what is bonded and in the reward pool, which the
+/// node reports.
+async fn supply(Shared(api): Shared<Api>) -> Answer {
+    use crate::registry::supply::{SUPPLY_KEY, Supply};
+
+    let db = api.db.clone();
+    let height = tip(&*db)?.header.height;
+    let state = State::new(db);
+    let counted = Supply::of(&state)?;
+    #[cfg(feature = "staking")]
+    let staked = {
+        let validators = crate::registry::validators::Validators::new(&state);
+        let mut staked = u256::ZERO;
+
+        for voter in validators.voters()? {
+            if let Some(record) = validators.get(&voter).map_err(|err| ApiError::Db(DbError::Corrupt(err.to_string())))? {
+                staked = staked.saturating_add(record.bond);
+            }
+        }
+
+        staked
+    };
+    #[cfg(not(feature = "staking"))]
+    let staked = u256::ZERO;
+
+    Ok(Json(json!({
+        "height": height,
+        "minted": counted.minted.to_string(),
+        "burned": counted.burned.to_string(),
+        "supply": counted.supply().to_string(),
+        "staked": staked.to_string(),
+        "reward_pool": Accounts::new(&state).get(&REWARD_POOL)?.balance.to_string(),
+        "key": to_hex(SUPPLY_KEY),
+    })))
+}
+
+/// The accounts that hold the most coin at the tip, richest first, at most ?limit, and how many
+/// hold any: a scan of every account, which the node reports and nothing proves as a list.
+async fn rich(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE) as usize;
+    let db = api.db.clone();
+    let height = tip(&*db)?.header.height;
+    let mut richest: Vec<(u256, Address)> = Vec::new();
+    let mut holders = 0u64;
+
+    db.scan(Column::Accounts, &[], &[], &mut |key, value| {
+        if let Some((address, account)) = crate::registry::accounts::account_entry(key, value)
+            && account.balance > u256::ZERO
+        {
+            holders += 1;
+            richest.push((account.balance, address));
+
+            // Kept to the page, so a chain of many accounts holds no more than that.
+            if richest.len() > 2 * limit {
+                richest.sort_unstable_by(|a, b| b.cmp(a));
+                richest.truncate(limit);
+            }
+        }
+
+        true
+    })?;
+
+    richest.sort_unstable_by(|a, b| b.cmp(a));
+    richest.truncate(limit);
+
+    Ok(Json(json!({
+        "height": height,
+        "holders": holders,
+        "accounts": richest.iter().map(|(balance, address)| json!({ "address": address.to_string(), "balance": balance.to_string() })).collect::<Vec<_>>(),
+    })))
+}
+
 #[cfg(feature = "governance")]
 /// Governance's decisions, newest first, below the version in ?before: each the version it made,
 /// the approval that decided it, its block, who sent it and the change. A light client proves each
@@ -1605,6 +1680,57 @@ async fn name(Shared(api): Shared<Api>, Path(name): Path<String>) -> Answer {
         "texts": record.map_or_else(serde_json::Map::new, |record| record.texts.iter().map(|text| (text.key.clone(), Value::from(text.value.clone()))).collect()),
         "price_per_year": per_year,
     })))
+}
+
+/// Every name with a record, top-level and subnames, in name order, a page at a time from the one
+/// after ?after: each with its status, owner, target and when it expires.
+#[cfg(feature = "names")]
+async fn names_list(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    use crate::registry::names::{NameStatus, Names, record_key};
+
+    let names = names_config(&api)?;
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE) as usize;
+    let db = api.db.clone();
+    let now = tip(&*db)?.header.timestamp;
+    let prefix = record_key("");
+    // Strictly after the name given: its own key, then the least byte past it.
+    let from = query.get("after").map_or_else(|| prefix.clone(), |after| [record_key(&names.strip(after)), vec![0]].concat());
+    let mut listed = Vec::new();
+    let mut next = None;
+
+    db.scan(Column::Names, &prefix, &from, &mut |key, _| {
+        let name = String::from_utf8_lossy(&key[prefix.len()..]).into_owned();
+
+        if listed.len() == limit {
+            next = listed.last().cloned();
+
+            return false;
+        }
+
+        listed.push(name);
+
+        true
+    })?;
+
+    let state = State::new(db);
+    let registry = Names::new(&state);
+    let mut found = Vec::new();
+
+    for name in &listed {
+        let looked = registry.lookup(name, now, names.grace_ms)?;
+        let record = looked.as_ref().map(|looked| &looked.record);
+
+        found.push(json!({
+            "name": name,
+            "display": names.display(name),
+            "status": looked.as_ref().map_or(NameStatus::Available, |looked| looked.status).name(),
+            "owner": record.map(|record| record.owner.to_string()),
+            "target": record.and_then(|record| record.target).map(|target| target.to_string()),
+            "expires": looked.as_ref().map(|looked| looked.expires),
+        }));
+    }
+
+    Ok(Json(json!({ "names": found, "next": next })))
 }
 
 /// The names an account owns that still stand, in name order, a page at a time: each with its

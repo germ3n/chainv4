@@ -1294,6 +1294,68 @@ fn evm_deploys_and_calls_are_dry_run_at_offer_and_read_as_json() {
     );
 }
 
+#[test]
+fn supply_counts_what_was_made_and_the_rich_list_the_richest_first() {
+    let fixture = serve();
+    let supply = ok(fixture.address, "/supply");
+    let allocated: u256 = free().allocations.iter().fold(u256::ZERO, |sum, allocation| sum + allocation.amount);
+    let minted: u256 = supply["minted"].as_str().unwrap().parse().unwrap();
+
+    assert!(minted > allocated, "the allocations, and the genesis validator's bond: {supply}");
+    assert_eq!(crate::registry::supply::Supply::of(&fixture.chain.state()).unwrap().minted, minted);
+    assert_eq!(crate::registry::supply::adds_up(&fixture.chain.state()).unwrap(), Ok(()), "and that is what is held and bonded");
+    assert_eq!(supply["burned"], "0", "no fees on the free chain");
+    assert_eq!(supply["supply"], supply["minted"]);
+    assert_eq!(supply["key"], to_hex(crate::registry::supply::SUPPLY_KEY));
+    assert_eq!(supply["height"], 2);
+
+    let rich = ok(fixture.address, "/rich?limit=1");
+    let accounts = rich["accounts"].as_array().unwrap();
+    let all = ok(fixture.address, "/rich");
+
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0]["address"], DevAuthority::dev_keypair().public().address().to_string(), "the authority holds the most");
+    assert!(rich["holders"].as_u64().unwrap() >= 2, "bob holds some too: {rich}");
+    assert!(all["accounts"].as_array().unwrap().iter().any(|account| account["address"] == fixture.bob.to_string() && account["balance"] == "100"));
+
+    let balances: Vec<u256> = all["accounts"].as_array().unwrap().iter().map(|account| account["balance"].as_str().unwrap().parse().unwrap()).collect();
+
+    assert!(balances.windows(2).all(|pair| pair[0] >= pair[1]), "richest first: {balances:?}");
+}
+
+#[cfg(feature = "names")]
+#[test]
+fn every_name_lists_in_name_order_a_page_at_a_time() {
+    use crate::registry::names::NameAction;
+
+    let authority = DevAuthority::dev_keypair();
+    let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let txs: Vec<Tx> = ["carol", "alice", "bob"].into_iter().map(|name| Tx::Name { name: name.into(), action: NameAction::Register { years: 1 } }).collect();
+    let now = chain.tip().timestamp + SLOT;
+    let signed: Vec<SignedTx> = txs.into_iter().enumerate().map(|(nonce, tx)| SignedTx::sign(tx, nonce as u64, FeeOffer::NONE, &authority)).collect();
+    let mut block = chain.build(signed, Vec::new(), producer.address(&[]), now).unwrap();
+    block.seal = producer.seal(&block.header).unwrap();
+    chain.import(&block, now).unwrap();
+    let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+
+    let first = ok(address, "/names/list?limit=2");
+    let names = |page: &Value| page["names"].as_array().unwrap().iter().map(|name| name["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+
+    assert_eq!(names(&first), ["alice", "bob"], "in name order");
+    assert_eq!(first["next"], "bob");
+    assert_eq!(first["names"][0]["display"], "alice.dev");
+    assert_eq!(first["names"][0]["status"], "active");
+    assert_eq!(first["names"][0]["owner"], authority.public().address().to_string());
+
+    let second = ok(address, "/names/list?limit=2&after=bob.dev");
+
+    assert_eq!(names(&second), ["carol"]);
+    assert_eq!(second["next"], Value::Null, "the last page");
+    assert_eq!(get(serve().address, "/names/list").0, 200, "a chain with names lists none");
+}
+
 #[cfg(feature = "names")]
 #[test]
 fn names_are_looked_up_by_name_and_accounts_show_their_primary_one() {

@@ -730,6 +730,7 @@ impl Genesis {
             accounts
                 .credit(&allocation.address, allocation.amount)
                 .map_err(|err| ChainError::BadGenesis(err.to_string()))?;
+            crate::registry::supply::Supply::mint(state, allocation.amount)?;
         }
 
         if let Some(config) = &self.finality {
@@ -1634,7 +1635,7 @@ impl Chain {
         // The reward and the proofs change state too, so the root is the one importing reaches.
         // A block whose reward or proofs do not hold is refused for that on import, whatever its
         // root says.
-        match self.settle(layer, &block, params.reward, ran.to_producer) {
+        match self.settle(layer, &block, params.reward, ran.to_producer, ran.burned) {
             Ok(()) => {}
             Err(ImportError::Invalid(err)) => log::warn!("[chain] block {} will be refused: {err}", context.height),
             Err(ImportError::Db(err)) => return Err(err),
@@ -2414,7 +2415,7 @@ impl Chain {
     /// What a block does to state past its transactions: the producer's reward, a mining pool's
     /// share of it and of the fees sent to the pool's escrow with the root of its claims, and what
     /// its finality proofs pay and record.
-    fn settle(&self, layer: &Arc<State>, block: &Block, (reward, from): (Reward, u64), fees: u256) -> Result<(), ImportError> {
+    fn settle(&self, layer: &Arc<State>, block: &Block, (reward, from): (Reward, u64), fees: u256, burned: u256) -> Result<(), ImportError> {
         let reward = reward.since(block.header.height, from);
         let accounts = Accounts::new(layer);
 
@@ -2424,6 +2425,10 @@ impl Chain {
                 _ => ImportError::Invalid(BlockError::Reward),
             })?;
         }
+
+        // The supply: the reward made, and what the block's fees burned for good.
+        crate::registry::supply::Supply::mint(layer, reward)?;
+        crate::registry::supply::Supply::burn(layer, burned)?;
 
         // The producer holds the reward and its fees by now, and sends the pool's share of both
         // to its escrow. It cannot have spent the fees in the block: a pool's node keeps its own
@@ -2485,7 +2490,7 @@ impl Chain {
             }));
         }
 
-        self.settle(&layer, block, params.reward, ran.to_producer)?;
+        self.settle(&layer, block, params.reward, ran.to_producer, ran.burned)?;
 
         let committed: Vec<CommittedReceipt> = receipts.iter().map(CommittedReceipt::of).collect();
 

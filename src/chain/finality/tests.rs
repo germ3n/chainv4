@@ -704,6 +704,7 @@ mod voting {
             assert_eq!(paid[0], owed[0] + fed);
             assert_eq!(&paid[1..], &owed[1..]);
             assert_eq!(supply(&chain), before, "paid from the pool, not minted");
+            assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
         }
     }
 
@@ -949,6 +950,8 @@ mod voting {
         let record = Validators::new(&chain.state()).get(&bob.public()).unwrap().unwrap();
 
         assert!(record.active_until.is_some() == (record.bond < u256::new(100)));
+
+        assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
     }
 
     #[cfg(feature = "finality-ffg")]
@@ -1030,6 +1033,8 @@ mod voting {
             chain.import(&block, now),
             Err(ImportError::Invalid(BlockError::Tx { error: TxError::Invalid(_), .. }))
         ));
+
+        assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
     }
 
     #[cfg(feature = "finality-ffg")]
@@ -1776,6 +1781,8 @@ mod voting {
         // Reopened, the node reads them all again from state.
         let reopened = Chain::open(chain.db().clone(), &Genesis { governance: chain_governance(), ..genesis_with(Some(ffg())) }).unwrap();
         assert_eq!((reopened.fees().is_some(), reopened.max_block_bytes()), (true, limits.max_block_bytes));
+
+        assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
     }
 
     #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]

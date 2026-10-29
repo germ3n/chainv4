@@ -385,6 +385,14 @@ The chain's [names](names.md): their `suffix`, the `prices` a year costs now by 
 strings, the `genesis_prices` governance may have replaced, `grace_ms` and `max_years`. 404 on a
 chain without names.
 
+### `GET /names/list?after=NAME&limit=N`
+
+Every name with a record, top-level names and subnames, in name order: those after `after`, with
+or without the suffix, at most `limit` (20 by default, at most 100). Each has its `name`,
+`display`, `status`, `owner`, `target` and when it `expires`, as `GET /names/{name}` gives them;
+`next` is the name to pass as `after` for the next page, `null` on the last. 404 on a chain
+without names.
+
 ### `GET /names/{name}`
 
 A name at the tip, with or without the suffix, in any case: `name` without the suffix and
@@ -570,6 +578,25 @@ Sets show their `signers`, each with its voting `key` and the `account` that spe
 their `threshold` and `change_threshold`. An `approve_signers` transaction shows the same.
 
 404 under any other kind.
+
+### `GET /supply`
+
+The coin's supply at the tip, in the smallest unit as decimal strings: `minted`, every coin made
+since genesis (its allocations and bonds, block rewards, minted vote rewards and `Tx::Mint`),
+`burned`, every coin destroyed (fees' burned share on a chain without a reward pool, `Tx::Burn`,
+names' prices, slashing and the inactivity leak), and `supply`, the one less the other. `staked`,
+what validators have bonded, and `reward_pool`, its balance, are the node's word.
+
+`minted` and `burned` are one state entry, `Supply`, in the validators column under `key` (hex),
+so a light client proves them with [`GET /proofs/validators/{key}`](#get-proofscolumnkey).
+Supply is what every balance, the reward pool's and contracts' among them, and every bond add up
+to.
+
+### `GET /rich?limit=N`
+
+The accounts holding the most coin at the tip, richest first, at most `limit` (20 by default, at
+most 100), each its `address` and `balance`, and `holders`, how many hold any. A scan of every
+account at the request: the node's word, which nothing proves as a list.
 
 ### `GET /governance`
 

@@ -110,6 +110,8 @@ pub(super) struct Ran {
     pub(super) cut: bool,
     /// What the producer earned of their fees, which the block's payouts split with its reward.
     pub(super) to_producer: u256,
+    /// What their fees burned for good: nothing on a chain whose reward pool takes it.
+    pub(super) burned: u256,
 }
 
 /// What a block's transactions run with: the chain's rules and engines, and its workers.
@@ -393,6 +395,10 @@ impl Runner<'_> {
                             self.pay_producer(layer, context, executed.to_producer, &mut written)?;
                             ran.to_producer = ran.to_producer.saturating_add(executed.to_producer);
                             self.pool_burned(layer, executed.burned, &mut written)?;
+
+                            if !self.rules.pooled_fees {
+                                ran.burned = ran.burned.saturating_add(executed.burned);
+                            }
                             ran.gas_used += executed.receipt.gas_used;
                             ran.kept.push(turn);
                             ran.receipts.push(executed.receipt);

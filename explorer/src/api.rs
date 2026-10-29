@@ -19,6 +19,10 @@ pub const TOKEN_PAGE: u64 = 100;
 pub const TX_PAGE: u64 = 50;
 /// How many of governance's decisions a page holds.
 pub const DECISION_PAGE: u64 = 20;
+/// How many names a page of the directory holds.
+pub const NAME_PAGE: u64 = 50;
+/// How many of the richest accounts the rich list asks for: the node's most.
+pub const RICH_LIST: u64 = 100;
 
 /// Something to ask a node, which also names what came back.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -89,6 +93,14 @@ pub enum Ask {
     /// Main-chain headers below the lowest the light client holds, encoded, to check older
     /// receipts against.
     Ancestors { from: u64, count: u32 },
+    /// A multisig: its members, threshold, nonce and open proposals.
+    Multisig(String),
+    /// A page of the name directory, sorted by name: from the first, or after a name.
+    NamesList { after: Option<String> },
+    /// The richest accounts, as the node reports them.
+    Rich,
+    /// The coin's supply: minted and burned, which the light client proves, and what is staked.
+    Supply,
 }
 
 impl Ask {
@@ -115,6 +127,11 @@ impl Ask {
             Ask::Decisions { before: None } => format!("/governance/history?limit={DECISION_PAGE}"),
             Ask::GovernanceWeight(address) => format!("/governance/weight/{address}"),
             Ask::ReceiptProof(tx) => format!("/proofs/receipts/{tx}"),
+            Ask::Multisig(address) => format!("/multisig/{address}"),
+            Ask::NamesList { after: Some(after) } => format!("/names/list?after={}&limit={NAME_PAGE}", encode(after)),
+            Ask::NamesList { after: None } => format!("/names/list?limit={NAME_PAGE}"),
+            Ask::Rich => format!("/rich?limit={RICH_LIST}"),
+            Ask::Supply => "/supply".to_string(),
             Ask::Contract(address) => format!("/contracts/{address}"),
             Ask::Validators => "/validators".to_string(),
             Ask::Signers => "/signers".to_string(),
@@ -500,6 +517,20 @@ mod tests {
         assert_eq!(Ask::GovernanceWeight("ed25519:0x01".to_string()).path(), "/governance/weight/ed25519:0x01");
         assert_eq!(Ask::ReceiptProof("0xab".to_string()).path(), "/proofs/receipts/0xab");
         assert_eq!(Ask::Ancestors { from: 10, count: 5 }.path(), "/headers?from=10&count=5");
+    }
+
+    #[test]
+    fn the_directory_the_rich_list_the_supply_and_a_multisig_become_paths() {
+        assert_eq!(Ask::NamesList { after: None }.path(), "/names/list?limit=50");
+        assert_eq!(Ask::NamesList { after: Some("bob.dev".to_string()) }.path(), "/names/list?after=bob.dev&limit=50");
+        assert_eq!(Ask::NamesList { after: Some("a b".to_string()) }.path(), "/names/list?after=a%20b&limit=50");
+        assert_eq!(Ask::Rich.path(), "/rich?limit=100");
+        assert_eq!((Ask::Supply.path(), Ask::Supply.body()), ("/supply".to_string(), None));
+        assert_eq!(Ask::Multisig("multisig:0x01".to_string()).path(), "/multisig/multisig:0x01");
+        assert_eq!(
+            Ask::Proof { column: "validators".to_string(), key: "0x01".to_string(), block: None }.path(),
+            "/proofs/validators/0x01"
+        );
     }
 
     #[test]

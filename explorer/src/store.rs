@@ -6,8 +6,8 @@ use {
     crate::api::{Ask, EventQuery, Failure},
     crate::model::{
         Account, BlockDetail, Checkpoint, Contract, Decision, DecisionsPage, Forks, FoundEvent, FoundTx, GovernanceView, GovernanceWeight, IndexPage,
-        Mempool, NodeView, Page, Peer, PeerChange, Placed, Receipt, RegisteredCollection, RegisteredToken, Reorganized, Status, Summary, TokensPage,
-        TxView,
+        ListedName, Mempool, MultisigView, NamesPage, NodeView, Page, Peer, PeerChange, Placed, Receipt, RegisteredCollection, RegisteredToken,
+        Reorganized, RichList, Status, Summary, SupplyView, TokensPage, TxView,
     },
     serde_json::Value,
     std::collections::{BTreeMap, HashMap, VecDeque},
@@ -54,6 +54,37 @@ impl TokenList {
 
         if self.pages <= 1 {
             self.tokens = page.tokens;
+            self.next = page.next;
+            self.pages = 1;
+        }
+    }
+}
+
+/// The name directory read so far, sorted by name, a page at a time.
+#[derive(Clone, Debug, Default)]
+pub struct NameList {
+    pub names: Vec<ListedName>,
+    /// The name to read the next page after, or None at the end.
+    pub next: Option<String>,
+    /// How many pages were read; 0 before the first.
+    pub pages: usize,
+}
+
+impl NameList {
+    /// Takes a page: the first, which stands for the list while that is all that was read, or a
+    /// later one, which goes after what is held, any name already held left out.
+    pub fn take(&mut self, page: NamesPage, later: bool) {
+        if later {
+            let last = self.names.last().map(|name| name.name.clone());
+            self.names.extend(page.names.into_iter().filter(|name| last.as_ref().is_none_or(|last| name.name > *last)));
+            self.next = page.next;
+            self.pages += 1;
+
+            return;
+        }
+
+        if self.pages <= 1 {
+            self.names = page.names;
             self.next = page.next;
             self.pages = 1;
         }
@@ -265,6 +296,14 @@ pub struct Store {
     pub decisions: Decisions,
     /// What accounts' approvals weigh, by the address looked up.
     pub governance_weights: HashMap<String, GovernanceWeight>,
+    /// Multisigs looked up, by address.
+    pub multisigs: HashMap<String, MultisigView>,
+    /// The name directory, as far as it was read.
+    pub name_list: NameList,
+    /// The richest accounts, as the node last reported them.
+    pub rich: Option<RichList>,
+    /// The coin's supply, as the node last reported it.
+    pub supply: Option<SupplyView>,
 }
 
 impl Store {
@@ -698,6 +737,34 @@ pub(crate) mod tests {
 
         assert_eq!(addresses(&list), ["b", "c", "d"], "once more were read, the list stays");
         assert_eq!((list.next, list.refreshed), (None, 40));
+    }
+
+    #[test]
+    fn the_name_directory_refreshes_its_first_page_until_more_are_read() {
+        let name = |name: &str| ListedName {
+            name: name.to_string(),
+            display: name.to_string(),
+            status: "active".to_string(),
+            owner: None,
+            target: None,
+            expires: None,
+        };
+        let page = |names: &[&str], next: Option<&str>| NamesPage {
+            names: names.iter().map(|named| name(named)).collect(),
+            next: next.map(str::to_string),
+        };
+        let names = |list: &NameList| list.names.iter().map(|name| name.name.clone()).collect::<Vec<_>>();
+        let mut list = NameList::default();
+        list.take(page(&["a.dev", "b.dev"], Some("b.dev")), false);
+        list.take(page(&["a.dev", "aa.dev"], Some("aa.dev")), false);
+
+        assert_eq!(names(&list), ["a.dev", "aa.dev"], "a first page alone is the list");
+
+        list.take(page(&["aa.dev", "c.dev"], None), true);
+        list.take(page(&["0.dev"], Some("0.dev")), false);
+
+        assert_eq!(names(&list), ["a.dev", "aa.dev", "c.dev"], "once more were read, the list stays, each name once");
+        assert_eq!((list.next, list.pages), (None, 2));
     }
 
     #[test]
