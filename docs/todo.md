@@ -677,6 +677,20 @@ offline; these would make that hold up as a treasury.
 
 ### Network
 
+- [ ] **A peer heard from one way only forks the chain for good.** Seen 2026-10-29: the laptop's
+  node, restarted for GPU mining while its old connection to the VPS was still open, kept hearing
+  the VPS's blocks and votes, but the VPS heard none of the laptop's again: its per-peer count
+  stopped at 22 blocks over a connection it still listed from before the restart, and nothing it
+  logged at info shows why. With a phone mining alone on the VPS and the laptop's GPU on its own
+  branch, the two chains split at 7,508; the VPS finalized its side, the laptop ran 442 blocks
+  past the 100-block reorg limit and could only be resynced (`chain.db.fork-20261029` kept).
+  Find out where the laptop's gossip stops (two connections to one peer, `num_established` past
+  1 sending no PeerUp and so no Status, gossipsub's mesh or scoring after a reconnect), and make
+  a node notice: a peer whose blocks have not arrived while its own tip races ahead should be
+  asked its status and synced from, or its connection dropped and dialed afresh; a node whose
+  peer's status is long stale should ask again. Test it with a node that restarts while its old
+  connection lingers.
+
 - [x] **An onion service.** With `TOR=1` the Docker stack runs Tor beside the node, its API,
   explorer and wallet at an `.onion`, and with `TOR_MINING=1` its mining port; the apps reach it
   through their SOCKS proxy, the worker through `--proxy`. See [Docker](docker.md#an-onion-service).
