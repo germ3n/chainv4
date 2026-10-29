@@ -116,8 +116,22 @@ const JOB_BYTES: u64 = (11 + 8 + 4) * 4;
 #[cfg(not(target_arch = "wasm32"))]
 fn adapters() -> Vec<wgpu::Adapter> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let mut found: Vec<Option<wgpu::Adapter>> = instance.enumerate_adapters(wgpu::Backends::all()).into_iter().map(Some).collect();
+    let infos: Vec<wgpu::AdapterInfo> = found.iter().flatten().map(wgpu::Adapter::get_info).collect();
+
+    chosen(&infos).into_iter().filter_map(|index| found[index].take()).collect()
+}
+
+/// Which of these adapters to mine on, by their place, in the order to list them: each GPU once,
+/// under its native backend. The same card through several backends sorts its best first and
+/// the rest go; OpenGL reports other vendor and device ids than Vulkan, Metal or DX12 for the same
+/// card, as Android's does, so an OpenGL adapter named as a native one is the same card and goes
+/// too.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn chosen(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
+    let native = |backend: wgpu::Backend| matches!(backend, wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12);
     let rank = |backend: wgpu::Backend| match backend {
-        wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 => 0,
+        _ if native(backend) => 0,
         wgpu::Backend::Gl => 1,
         _ => 2,
     };
@@ -126,24 +140,32 @@ fn adapters() -> Vec<wgpu::Adapter> {
         wgpu::DeviceType::IntegratedGpu => 1,
         _ => 2,
     };
-    let mut found: Vec<wgpu::Adapter> = instance
-        .enumerate_adapters(wgpu::Backends::all())
-        .into_iter()
-        .filter(|adapter| adapter.get_info().device_type != wgpu::DeviceType::Cpu)
-        .collect();
-    found.sort_by_key(|adapter| {
-        let info = adapter.get_info();
+    let mut order: Vec<usize> = (0..infos.len()).filter(|&index| infos[index].device_type != wgpu::DeviceType::Cpu).collect();
+    order.sort_by_key(|&index| {
+        let info = &infos[index];
 
         (kind(info.device_type), info.vendor, info.device, info.name.clone(), rank(info.backend))
     });
     // After sorting, a card's backends sit side by side, its best first.
-    found.dedup_by_key(|adapter| {
-        let info = adapter.get_info();
+    order.dedup_by_key(|index| {
+        let info = &infos[*index];
 
-        (info.vendor, info.device, info.name)
+        (info.vendor, info.device, info.name.clone())
+    });
+    // OpenGL's name for a card is its native name, or that and more, such as "/PCIe/SSE2".
+    let same_card = |gl: &str, native: &str| {
+        let (gl, native) = (gl.trim().to_lowercase(), native.trim().to_lowercase());
+
+        !native.is_empty() && gl.strip_prefix(&native).is_some_and(|rest| rest.chars().next().is_none_or(|next| !next.is_alphanumeric()))
+    };
+    let natives: Vec<String> = order.iter().map(|&index| &infos[index]).filter(|info| native(info.backend)).map(|info| info.name.clone()).collect();
+    order.retain(|&index| {
+        let info = &infos[index];
+
+        info.backend != wgpu::Backend::Gl || !natives.iter().any(|name| same_card(&info.name, name))
     });
 
-    found
+    order
 }
 
 /// The GPUs this machine has, by their place in the list, as [`Gpu::open_all`] takes it: each
@@ -516,6 +538,37 @@ mod tests {
             }
             Err(err) => panic!("{err}"),
         }
+    }
+
+    /// An adapter's info as wgpu gives it, for chosen.
+    fn info(name: &str, backend: wgpu::Backend, vendor: u32, device: u32, device_type: wgpu::DeviceType) -> wgpu::AdapterInfo {
+        wgpu::AdapterInfo { name: name.to_string(), vendor, device, device_type, driver: String::new(), driver_info: String::new(), backend }
+    }
+
+    #[test]
+    fn each_gpu_is_chosen_once_under_its_native_backend_and_not_again_through_opengl() {
+        use wgpu::{Backend, DeviceType};
+
+        // Android: the Mali through Vulkan, and again through OpenGL with ids of its own.
+        let phone = [info("Mali-G715", Backend::Gl, 0, 0, DeviceType::IntegratedGpu), info("Mali-G715", Backend::Vulkan, 0x13b5, 0xa8670000, DeviceType::IntegratedGpu)];
+        assert_eq!(chosen(&phone), vec![1]);
+
+        // A desktop: OpenGL's longer name for the same card, a second card, a software renderer,
+        // and the first card twice under Vulkan and DX12 with the same ids.
+        let desktop = [
+            info("NVIDIA GeForce RTX 3080/PCIe/SSE2", Backend::Gl, 0x10de, 0, DeviceType::DiscreteGpu),
+            info("NVIDIA GeForce RTX 3080", Backend::Vulkan, 0x10de, 0x2206, DeviceType::DiscreteGpu),
+            info("NVIDIA GeForce RTX 3080", Backend::Dx12, 0x10de, 0x2206, DeviceType::DiscreteGpu),
+            info("NVIDIA GeForce RTX 3080 Ti", Backend::Vulkan, 0x10de, 0x2208, DeviceType::DiscreteGpu),
+            info("Intel(R) UHD Graphics 770", Backend::Vulkan, 0x8086, 0x4680, DeviceType::IntegratedGpu),
+            info("llvmpipe (LLVM 17.0.6, 256 bits)", Backend::Vulkan, 0x10005, 0, DeviceType::Cpu),
+        ];
+        let names: Vec<_> = chosen(&desktop).into_iter().map(|index| format!("{} ({:?})", desktop[index].name, desktop[index].backend)).collect();
+        assert_eq!(names, ["NVIDIA GeForce RTX 3080 (Vulkan)", "NVIDIA GeForce RTX 3080 Ti (Vulkan)", "Intel(R) UHD Graphics 770 (Vulkan)"]);
+
+        // OpenGL alone, as on a machine without Vulkan: kept.
+        let only = [info("Mali-G715", Backend::Gl, 0, 0, DeviceType::IntegratedGpu)];
+        assert_eq!(chosen(&only), vec![0]);
     }
 
     #[test]

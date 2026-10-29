@@ -1096,6 +1096,11 @@ voting finality it now goes back to the checkpoint and follows the node from the
   connection from the node itself. Behind nginx, the location needs the WebSocket upgrade headers.
 - **`GET /mining` is not in `GET /status`.** It asks the node's loop, as `GET /node` does, while
   `/status`, which the apps ask most, reads only the database.
+- **A GPU is mined on once, under its native backend.** wgpu lists a card under each backend
+  that reaches it; the same ids sort its best first and drop the rest. OpenGL reports other ids
+  than Vulkan, Metal or DX12 for the same card, as Android's does for its Mali, so an OpenGL
+  adapter named as a native one, or that and more, such as `/PCIe/SSE2`, is dropped too: "every
+  GPU" opened the phone's twice before. A card OpenGL alone reaches stays.
 - **The worker builds without the node.** The `worker` feature is the mining port's protocol, a
   worker's devices and its claims, for the wallet; `gpu-mining` adds GPUs, and the node's `gpu`
   feature brings it. `WorkerStatus` (`chainv4::mining::status`) is what a worker shows of itself,
