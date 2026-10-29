@@ -7,7 +7,7 @@ use {
     crate::chain::{Landed, Proven},
     crate::format,
     chainv4::crypto::hasher::Hasher,
-    chainv4::governance::Change,
+    chainv4::governance::{Change, ChangeKind},
     chainv4::structs::address::Address,
     chainv4::structs::event::Event,
     chainv4::structs::hash::{Hash, HashType},
@@ -63,14 +63,46 @@ pub struct Checked {
     pub vote: Option<Vote>,
 }
 
-/// A governance transaction, as proven.
+/// A governance transaction, as proven. Each kind of change has a ballot and a version of its own;
+/// a record kept before votes named their kind reads as the consensus's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vote {
-    /// An approval of a change, at the version it named: the change's JSON, and the version it
-    /// decided, for the approval that was the last one needed.
-    Approved { version: u64, change: String, decided: Option<u64> },
-    /// An approval withdrawn, at the version it named.
-    Withdrew { version: u64 },
+    /// An approval of a change, at the version of its kind it named: the change's JSON, and for
+    /// the approval that was the last one needed, the decision it was, the chain's count, and the
+    /// version of its kind it made.
+    Approved {
+        version: u64,
+        change: String,
+        decided: Option<u64>,
+        #[serde(default = "consensus", with = "kind_name")]
+        kind: ChangeKind,
+        #[serde(default)]
+        kind_version: Option<u64>,
+    },
+    /// An approval of a change of a kind withdrawn, at the kind's version it named.
+    Withdrew {
+        #[serde(default = "consensus", with = "kind_name")]
+        kind: ChangeKind,
+        version: u64,
+    },
+}
+
+/// What a vote kept before votes named their kind was of.
+fn consensus() -> ChangeKind {
+    ChangeKind::Consensus
+}
+
+/// A kind of change kept by its name, as the API writes it.
+mod kind_name {
+    use {chainv4::governance::ChangeKind, serde::{Deserialize, Deserializer, Serializer}};
+
+    pub fn serialize<S: Serializer>(kind: &ChangeKind, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(kind.name())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ChangeKind, D::Error> {
+        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 impl Vote {
@@ -79,18 +111,29 @@ impl Vote {
     pub fn of(tx: &Tx, outcome: &CommittedOutcome) -> Option<Vote> {
         match tx {
             Tx::Multisig { tx, .. } => Vote::of(tx, outcome),
-            Tx::ApproveChange { version, change } => Some(Vote::Approved {
-                version: *version,
-                change: chainv4::params::json::change_json(change).to_string(),
-                decided: match outcome {
-                    CommittedOutcome::Decided(decided) => Some(*decided),
+            Tx::ApproveChange { version, change } => {
+                let decided = match outcome {
+                    CommittedOutcome::Decided { decision, version, .. } => Some((*decision, *version)),
                     _ => None,
-                },
-            }),
-            Tx::WithdrawChange { version } => Some(Vote::Withdrew { version: *version }),
+                };
+
+                Some(Vote::Approved {
+                    version: *version,
+                    change: chainv4::params::json::change_json(change).to_string(),
+                    decided: decided.map(|(decision, _)| decision),
+                    kind: change.kind(),
+                    kind_version: decided.map(|(_, made)| made),
+                })
+            }
+            Tx::WithdrawChange { kind, version } => Some(Vote::Withdrew { kind: *kind, version: *version }),
             _ => None,
         }
     }
+}
+
+/// A kind of change in words: name prices, not name_prices.
+pub fn kind_words(kind: ChangeKind) -> String {
+    kind.name().replace('_', " ")
 }
 
 impl Checked {
@@ -211,14 +254,17 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::Slash { .. }, _) => "Reported a double vote".to_string(),
         (Tx::ApproveSigners { version, .. }, _) => format!("Approved signers v{version}"),
         (Tx::WithdrawApproval { version }, _) => format!("Withdrew approval of signers v{version}"),
-        // The approval that was the last one needed: its receipt says which version it made.
-        (Tx::ApproveChange { .. }, CommittedOutcome::Decided(version)) => format!("Decided change {version} · {}", action(tx, &CommittedOutcome::Done)),
+        // The approval that was the last one needed: its receipt says which decision it was, and
+        // which version of its kind it made.
+        (Tx::ApproveChange { .. }, CommittedOutcome::Decided { decision, kind, version }) => {
+            format!("Decided change {decision} · {}, making {} v{version}", action(tx, &CommittedOutcome::Done), kind_words(*kind))
+        }
         (Tx::ApproveChange { change: Change::Upgrade(upgrade), .. }, _) => {
             format!("Approved an upgrade: nodes older than {} stop at block {}", upgrade.least, upgrade.from)
         }
         (Tx::ApproveChange { change: Change::Name(name), .. }, _) => format!("Approved renaming the chain to {name}"),
         (Tx::ApproveChange { version, change }, _) => format!("Approved a {} change from v{version}", change.name().replace('_', " ")),
-        (Tx::WithdrawChange { version }, _) => format!("Withdrew approval of a change from v{version}"),
+        (Tx::WithdrawChange { kind, version }, _) => format!("Withdrew approval of a {} change from v{version}", kind_words(*kind)),
         (Tx::SetDirectory { .. }, _) => "Set the chain's directory".to_string(),
         (Tx::HandDirectory { to: Some(to) }, _) => format!("Handed the directory to {}", format::short(&to.to_string())),
         (Tx::HandDirectory { to: None }, _) => "Renounced the directory".to_string(),
@@ -370,23 +416,66 @@ mod tests {
     }
 
     #[test]
-    fn the_approval_that_decided_a_change_says_which_version_it_made() {
+    fn the_approval_that_decided_a_change_says_which_decision_and_version_of_its_kind_it_made() {
         let approve = Tx::ApproveChange { version: 4, change: Change::Name("second".to_string()) };
-        let decided = Checked::of(&landed(approve.clone(), CommittedOutcome::Decided(5), Vec::new()));
+        let made = CommittedOutcome::Decided { decision: 5, kind: ChangeKind::Name, version: 5 };
+        let decided = Checked::of(&landed(approve.clone(), made.clone(), Vec::new()));
 
-        assert_eq!(decided.action, "Decided change 5 · Approved renaming the chain to second");
+        assert_eq!(decided.action, "Decided change 5 · Approved renaming the chain to second, making name v5");
         assert!(decided.done, "a decision did what it asked");
         assert_eq!(Checked::of(&landed(approve.clone(), CommittedOutcome::Done, Vec::new())).action, "Approved renaming the chain to second", "one that only counted");
 
+        // The chain's count of decisions and the kind's version are apart: the ninth decision
+        // made the reward v2.
+        let reward = Tx::ApproveChange { version: 1, change: Change::Reward(chainv4::params::Reward { initial: u256::new(1), halving_interval: None }) };
+        let ninth = Checked::of(&landed(reward, CommittedOutcome::Decided { decision: 9, kind: ChangeKind::Reward, version: 2 }, Vec::new()));
+        assert_eq!(ninth.action, "Decided change 9 · Approved a reward change from v1, making reward v2");
+        assert!(matches!(ninth.vote, Some(Vote::Approved { decided: Some(9), kind: ChangeKind::Reward, kind_version: Some(2), version: 1, .. })));
+
         // A multisig's approval that decided says so too.
         let multisig = Tx::Multisig { account: Address::Contract([6; 32]), tx: Box::new(approve), signatures: Vec::new() };
-        let by_multisig = Checked::of(&landed(multisig, CommittedOutcome::Decided(5), Vec::new()));
+        let by_multisig = Checked::of(&landed(multisig, made, Vec::new()));
 
-        assert!(by_multisig.action.starts_with("Decided change 5 · Approved renaming the chain to second · by the multisig contract:0x0606"));
-        assert_eq!(by_multisig.vote, Some(Vote::Approved { version: 4, change: r#"{"name":"second"}"#.to_string(), decided: Some(5) }), "kept for the Governance page");
+        assert!(by_multisig.action.starts_with("Decided change 5 · Approved renaming the chain to second, making name v5 · by the multisig contract:0x0606"), "{}", by_multisig.action);
+        assert_eq!(
+            by_multisig.vote,
+            Some(Vote::Approved { version: 4, change: r#"{"name":"second"}"#.to_string(), decided: Some(5), kind: ChangeKind::Name, kind_version: Some(5) }),
+            "kept for the Governance page"
+        );
         assert_eq!(decided.vote, by_multisig.vote);
-        assert_eq!(Checked::of(&landed(Tx::WithdrawChange { version: 6 }, CommittedOutcome::Done, Vec::new())).vote, Some(Vote::Withdrew { version: 6 }));
         assert_eq!(Checked::of(&landed(Tx::Burn { from: Address::Ed25519([1; 32]), amount: Amount::U128(1) }, CommittedOutcome::Done, Vec::new())).vote, None);
+    }
+
+    #[test]
+    fn a_withdrawal_names_the_kind_it_took_an_approval_off() {
+        let withdrew = Checked::of(&landed(Tx::WithdrawChange { kind: ChangeKind::NamePrices, version: 6 }, CommittedOutcome::Done, Vec::new()));
+
+        assert_eq!(withdrew.action, "Withdrew approval of a name prices change from v6");
+        assert_eq!(withdrew.vote, Some(Vote::Withdrew { kind: ChangeKind::NamePrices, version: 6 }));
+        assert_eq!(
+            action(&Tx::WithdrawChange { kind: ChangeKind::Consensus, version: 0 }, &CommittedOutcome::Done),
+            "Withdrew approval of a consensus change from v0"
+        );
+    }
+
+    #[test]
+    fn votes_keep_their_kind_and_ones_kept_before_kinds_read_as_the_consensus() {
+        let vote = Vote::Withdrew { kind: ChangeKind::Fees, version: 3 };
+        let kept = serde_json::to_value(&vote).unwrap();
+
+        assert_eq!(kept, serde_json::json!({ "Withdrew": { "kind": "fees", "version": 3 } }), "the kind by its name");
+        assert_eq!(serde_json::from_value::<Vote>(kept).unwrap(), vote);
+
+        let approved = Vote::Approved { version: 2, change: r#"{"name":"x"}"#.to_string(), decided: Some(7), kind: ChangeKind::Name, kind_version: Some(3) };
+        assert_eq!(serde_json::from_value::<Vote>(serde_json::to_value(&approved).unwrap()).unwrap(), approved);
+
+        // As a wallet kept them before each kind had a version of its own.
+        let old_withdrawal: Vote = serde_json::from_value(serde_json::json!({ "Withdrew": { "version": 6 } })).unwrap();
+        let old_approval: Vote = serde_json::from_value(serde_json::json!({ "Approved": { "version": 4, "change": "{}", "decided": 5 } })).unwrap();
+
+        assert_eq!(old_withdrawal, Vote::Withdrew { kind: ChangeKind::Consensus, version: 6 });
+        assert_eq!(old_approval, Vote::Approved { version: 4, change: "{}".to_string(), decided: Some(5), kind: ChangeKind::Consensus, kind_version: None });
+        assert!(serde_json::from_value::<Vote>(serde_json::json!({ "Withdrew": { "kind": "weather", "version": 1 } })).is_err(), "a kind the wallet does not know");
     }
 
     #[test]

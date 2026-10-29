@@ -823,6 +823,20 @@ mod tests {
     }
 
     #[test]
+    fn part_of_a_setting_is_laid_over_what_stands() {
+        let standing = fees_json(&FeeConfig::dev());
+        let merged = over(&standing, &json!({ "burn_permille": 600 }));
+
+        assert_eq!(merged["burn_permille"], 600);
+        assert_eq!(merged["block_gas_limit"], standing["block_gas_limit"], "what is not named stands");
+        assert_eq!(fees_from_text(&merged.to_string()).unwrap().burn_permille, 600, "and the whole is checked as a change is");
+
+        // An object's fields one by one; anything else whole.
+        assert_eq!(over(&json!({ "a": { "b": 1, "c": 2 }, "d": [1, 2] }), &json!({ "a": { "c": 3 }, "d": [9] })), json!({ "a": { "b": 1, "c": 3 }, "d": [9] }));
+        assert_eq!(over(&Value::Null, &json!({ "x": 1 })), json!({ "x": 1 }), "nothing standing: what is given");
+    }
+
+    #[test]
     fn every_change_round_trips_through_its_json_and_bad_ones_are_refused() {
         use crate::governance::Change;
 

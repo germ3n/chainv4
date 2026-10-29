@@ -303,9 +303,14 @@ pub struct Outcome {
     pub payments: Vec<PaymentView>,
     #[serde(default)]
     pub trace: Trace,
-    /// The change a governance approval decided, by its version, for status decided.
+    /// The change a governance approval decided, for status decided: the chain's count of
+    /// decisions, its kind and the kind's version.
     #[serde(default)]
     pub version: Option<u64>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub kind_version: Option<u64>,
 }
 
 /// Coin a contract paid while a transaction ran.
@@ -914,8 +919,11 @@ pub struct GovernanceView {
     pub active: Value,
     #[serde(default)]
     pub decided: Value,
-    /// How many changes were decided so far.
+    /// How many changes were decided so far, of every kind: the chain's gap-free count.
     pub version: u64,
+    /// How many of each kind were decided, by the kind's name: what an approval of one names.
+    #[serde(default)]
+    pub versions: BTreeMap<String, u64>,
     /// How many epochs an approval counts for, from the one it was made in.
     pub approval_epochs: u64,
     /// What a change's approvals must weigh, in all.
@@ -956,6 +964,12 @@ pub struct SwitchView {
 /// A change being approved: the change, what its approvals weigh and need, and who approved.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Proposal {
+    /// The kind of change it is, whose ballot it is on: consensus, bootnodes, name_prices, …
+    #[serde(default)]
+    pub kind: String,
+    /// Its kind's version: how many of that kind were decided before. It would be the next.
+    #[serde(default)]
+    pub version: u64,
     pub weight: String,
     pub needed: String,
     #[serde(default)]
@@ -970,6 +984,23 @@ impl Proposal {
     pub fn change(&self) -> Value {
         Value::Object(self.change.clone())
     }
+
+    /// Its kind's name: as the node lists it, or from the change's field when it does not.
+    pub fn kind_name(&self) -> String {
+        match self.kind.is_empty() {
+            false => self.kind.clone(),
+            true => change_kind(&self.change()).unwrap_or_default(),
+        }
+    }
+}
+
+/// The kind a change is of, as the API names kinds, from the field its JSON names the change by:
+/// finality's tuning and a switch of its kind are the consensus's. A field the library does not
+/// know of is its own kind.
+pub fn change_kind(change: &Value) -> Option<String> {
+    let field = change.as_object()?.keys().next()?;
+
+    Some(field.parse::<chainv4::governance::ChangeKind>().map_or_else(|_| field.clone(), |kind| kind.name().to_string()))
 }
 
 /// One approval of a change, and the epoch it stops counting after.
@@ -1021,15 +1052,31 @@ pub struct Decision {
 }
 
 /// GET /governance/weight/{address}: what an account's approval weighs now, beside what a change
-/// needs, and the change it approved, if any.
+/// needs, and the changes it approved, one a kind at most.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GovernanceWeight {
     pub account: String,
     pub weight: String,
     pub needed: String,
-    pub version: u64,
     #[serde(default)]
-    pub approved: Option<Value>,
+    pub approved: Vec<ApprovedChange>,
+}
+
+/// A change an account approved, on its kind's ballot, at the kind's version.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ApprovedChange {
+    pub kind: String,
+    pub version: u64,
+    /// The change itself: one field, named for what it changes.
+    #[serde(flatten)]
+    pub change: serde_json::Map<String, Value>,
+}
+
+impl ApprovedChange {
+    /// The change, as Tx::ApproveChange's JSON carries it: { kind: value }.
+    pub fn change(&self) -> Value {
+        Value::Object(self.change.clone())
+    }
 }
 
 /// The stream's reorganized event.

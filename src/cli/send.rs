@@ -313,9 +313,14 @@ pub enum TxArgs {
         yes: bool,
     },
     #[cfg(feature = "governance")]
-    /// Takes back the sender's approval of a change under governance.
+    /// Takes back the sender's approval of a change under governance, of one kind.
     WithdrawChange {
-        /// The version of the decision the approval was for. Defaults to the one the node reports.
+        /// The kind of change it approved: consensus, bootnodes, name_prices, collections,
+        /// federation, directory, fees, reward, limits, upgrade or name. Defaults to the one
+        /// kind it has an approval in.
+        #[arg(long)]
+        kind: Option<crate::governance::ChangeKind>,
+        /// The kind's version the approval was for. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
     },
@@ -856,7 +861,7 @@ pub(super) fn report(receipt: &Value) -> CliResult<()> {
         Some("deployed") => println!("deployed {}", receipt["contract"].as_str().unwrap_or("?")),
         Some("upgraded") => println!("upgraded {}", receipt["contract"].as_str().unwrap_or("?")),
         Some("returned") => println!("returned {}", receipt["values"]),
-        Some("decided") => println!("decided governance's change {}", receipt["version"]),
+        Some("decided") => println!("decided governance's change {}, {} version {}", receipt["version"], receipt["kind"].as_str().unwrap_or("?"), receipt["kind_version"]),
         Some("failed") => {}
         _ => println!("done"),
     }
@@ -1025,11 +1030,23 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
         } => {
             use crate::governance::Change;
 
+            // Fees, the reward, limits, finality, the federation and the directory may name only
+            // the fields they change: laid over what stands, at the kind's version named below.
+            let governance = ok(agent.get(format!("{node}/governance")).call())?;
+            let over = |kind: &str, text: Option<&str>| -> String {
+                let text = text.unwrap_or_default();
+
+                match serde_json::from_str::<Value>(text) {
+                    Ok(given) if given.is_object() => crate::params::json::over(&governance["in_force"][kind]["value"], &given).to_string(),
+                    _ => text.to_string(),
+                }
+            };
+
             let change = match (consensus, bootnodes, name_prices, collections, federation, directory) {
-                (_, _, _, _, _, _) if fees.is_some() => Change::Fees(super::genesis::fees_from_text(fees.as_deref().unwrap_or_default()).map_err(|why| format!("--fees: {why}"))?),
-                (_, _, _, _, _, _) if reward.is_some() => Change::Reward(super::genesis::reward_from_text(reward.as_deref().unwrap_or_default()).map_err(|why| format!("--reward: {why}"))?),
-                (_, _, _, _, _, _) if limits.is_some() => Change::Limits(super::genesis::limits_from_text(limits.as_deref().unwrap_or_default()).map_err(|why| format!("--limits: {why}"))?),
-                (_, _, _, _, _, _) if finality.is_some() => Change::Finality(super::genesis::finality_from_text(finality.as_deref().unwrap_or_default()).map_err(|why| format!("--finality: {why}"))?),
+                (_, _, _, _, _, _) if fees.is_some() => Change::Fees(super::genesis::fees_from_text(&over("fees", fees.as_deref())).map_err(|why| format!("--fees: {why}"))?),
+                (_, _, _, _, _, _) if reward.is_some() => Change::Reward(super::genesis::reward_from_text(&over("reward", reward.as_deref())).map_err(|why| format!("--reward: {why}"))?),
+                (_, _, _, _, _, _) if limits.is_some() => Change::Limits(super::genesis::limits_from_text(&over("limits", limits.as_deref())).map_err(|why| format!("--limits: {why}"))?),
+                (_, _, _, _, _, _) if finality.is_some() => Change::Finality(super::genesis::finality_from_text(&over("finality", finality.as_deref())).map_err(|why| format!("--finality: {why}"))?),
                 (_, _, _, _, _, _) if chain_name.is_some() => {
                     let name = chain_name.unwrap_or_default();
 
@@ -1082,19 +1099,18 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                     crate::governance::Change::Collections(functions)
                 }
                 (None, None, None, None, Some(federation), _) => {
-                    crate::governance::Change::Federation(super::genesis::federation_from_text(&federation).map_err(|why| format!("--federation: {why}"))?)
+                    crate::governance::Change::Federation(super::genesis::federation_from_text(&over("federation", Some(&federation))).map_err(|why| format!("--federation: {why}"))?)
                 }
                 (None, None, None, None, None, Some(directory)) => {
-                    crate::governance::Change::Directory(super::genesis::directory_from_text(&directory).map_err(|why| format!("--directory: {why}"))?)
+                    crate::governance::Change::Directory(super::genesis::directory_from_text(&over("directory", Some(&directory))).map_err(|why| format!("--directory: {why}"))?)
                 }
                 (None, None, None, None, None, None) => unreachable!("clap requires one"),
             };
 
+            // The version of the change's kind: each kind's ballot is its own.
             let version = match version {
                 Some(version) => version,
-                None => ok(agent.get(format!("{node}/governance")).call())?["version"]
-                    .as_u64()
-                    .ok_or("the node sent no version")?,
+                None => governance["versions"][change.kind().name()].as_u64().ok_or("the node sent no version for the change's kind")?,
             };
             match &change {
                 crate::governance::Change::Consensus(consensus) => println!("approving a change to {} consensus, from version {version}", consensus.name()),
@@ -1146,16 +1162,30 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             Tx::HandDirectory { to: None }
         }
         #[cfg(feature = "governance")]
-        TxArgs::WithdrawChange { version } => {
+        TxArgs::WithdrawChange { kind, version } => {
+            let kind = match kind {
+                Some(kind) => kind,
+                // The one kind its approval is in, as the node counts it.
+                None => {
+                    let weight = ok(agent.get(format!("{node}/governance/weight/{sender}")).call())?;
+                    let kinds: Vec<&str> = weight["approved"].as_array().map(|approved| approved.iter().filter_map(|approval| approval["kind"].as_str()).collect()).unwrap_or_default();
+
+                    match kinds.as_slice() {
+                        [kind] => kind.parse()?,
+                        [] => return Err("this account has no approval that still counts".into()),
+                        _ => return Err(format!("this account has approvals of {}: name one with --kind", kinds.join(", ")).into()),
+                    }
+                }
+            };
             let version = match version {
                 Some(version) => version,
-                None => ok(agent.get(format!("{node}/governance")).call())?["version"]
+                None => ok(agent.get(format!("{node}/governance")).call())?["versions"][kind.name()]
                     .as_u64()
-                    .ok_or("the node sent no version")?,
+                    .ok_or("the node sent no version for that kind")?,
             };
-            println!("withdrawing this account's approval of a change from version {version}");
+            println!("withdrawing this account's approval of a {} change from version {version}", kind.name());
 
-            Tx::WithdrawChange { version }
+            Tx::WithdrawChange { kind, version }
         }
         TxArgs::CreateMultisig { members, threshold } => {
             let (members, testnet) = members_of(members)?;

@@ -107,9 +107,9 @@ pub enum TxStatus {
     #[document(summary = "The contract at this address runs new code.")]
     #[wincode(tag = 4)]
     Upgraded(Address),
-    #[document(summary = "A governance approval that was the last one needed: its change is decided, as this version.")]
+    #[document(summary = "A governance approval that was the last one needed: its change is decided, as the chain's decision-th and its kind's version-th.")]
     #[wincode(tag = 5)]
-    Decided(u64),
+    Decided { decision: u64, kind: crate::governance::ChangeKind, version: u64 },
 }
 
 impl TxReceipt {
@@ -148,7 +148,7 @@ impl TxStatus {
             Ok(Effect::Deployed(address)) => TxStatus::Deployed(*address),
             Ok(Effect::Returned(values)) => TxStatus::Returned(values.clone()),
             Ok(Effect::Upgraded(address)) => TxStatus::Upgraded(*address),
-            Ok(Effect::Decided(version)) => TxStatus::Decided(*version),
+            Ok(Effect::Decided { decision, kind, version }) => TxStatus::Decided { decision: *decision, kind: *kind, version: *version },
             Err(failure) => TxStatus::Failed(failure.to_string()),
         }
     }
@@ -172,6 +172,6 @@ fn outcome(status: &TxStatus) -> CommittedOutcome {
         TxStatus::Returned(values) => CommittedOutcome::Returned(values.clone()),
         TxStatus::Failed(_) => CommittedOutcome::Failed,
         TxStatus::Upgraded(address) => CommittedOutcome::Upgraded(*address),
-        TxStatus::Decided(version) => CommittedOutcome::Decided(*version),
+        TxStatus::Decided { decision, kind, version } => CommittedOutcome::Decided { decision: *decision, kind: *kind, version: *version },
     }
 }

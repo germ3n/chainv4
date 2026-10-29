@@ -80,9 +80,9 @@ pub enum CommittedOutcome {
     #[document(summary = "The contract at this address runs new code.")]
     #[wincode(tag = 4)]
     Upgraded(Address),
-    #[document(summary = "A governance approval that was the last one needed: its change is decided, as this version. What lets a light client prove a decision from the receipt alone.")]
+    #[document(summary = "A governance approval that was the last one needed: its change is decided, as the chain's decision-th, the count light clients follow without gaps, and its kind's version-th. What lets a light client prove a decision from the receipt alone.")]
     #[wincode(tag = 5)]
-    Decided(u64),
+    Decided { decision: u64, kind: crate::governance::ChangeKind, version: u64 },
 }
 
 impl CommittedReceipt {

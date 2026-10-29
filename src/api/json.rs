@@ -338,7 +338,7 @@ fn outcome(receipt: &TxReceipt) -> Value {
             "values": values.iter().map(argument).collect::<Vec<_>>(),
         }),
         TxStatus::Failed(error) => json!({ "status": "failed", "error": error }),
-        TxStatus::Decided(version) => json!({ "status": "decided", "version": version }),
+        TxStatus::Decided { decision, kind, version } => json!({ "status": "decided", "version": decision, "kind": kind.name(), "kind_version": version }),
     };
     value["fuel_used"] = receipt.fuel_used.into();
     value["gas_used"] = receipt.gas_used.into();

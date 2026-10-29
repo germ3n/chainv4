@@ -217,7 +217,7 @@ fn summary(tx: &Tx) -> String {
         Tx::ApproveSigners { version, .. } => format!("approve signers version {version}"),
         Tx::WithdrawApproval { version } => format!("withdraw approval of signers version {version}"),
         Tx::ApproveChange { version, change } => format!("approve a {} change from version {version}", change.name()),
-        Tx::WithdrawChange { version } => format!("withdraw approval of a change from version {version}"),
+        Tx::WithdrawChange { kind, version } => format!("withdraw approval of a {} change from version {version}", kind.name()),
         Tx::SetDirectory { .. } => "set the directory, as its admin".to_string(),
         Tx::HandDirectory { to: Some(to) } => format!("hand the directory's admin role to {to}"),
         Tx::HandDirectory { to: None } => "renounce the directory's admin role, leaving the directory as it is".to_string(),
@@ -241,7 +241,7 @@ fn outcome(outcome: &CommittedOutcome) -> String {
         CommittedOutcome::Returned(values) => format!("returned {} values", values.len()),
         CommittedOutcome::Failed => "failed".to_string(),
         CommittedOutcome::Upgraded(address) => format!("upgraded {address}"),
-        CommittedOutcome::Decided(version) => format!("decided governance's change {version}"),
+        CommittedOutcome::Decided { decision, kind, version } => format!("decided governance's change {decision}, {} version {version}", kind.name()),
     }
 }
 

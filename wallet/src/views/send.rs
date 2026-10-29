@@ -886,7 +886,7 @@ mod tests {
         use chainv4::structs::address::Address;
 
         let mut state = SendState { from: Some(Address::Ed25519([1; 32])), ..SendState::default() };
-        state.prepare(Prepared { from: Address::Ed25519([2; 32]), tx: Tx::WithdrawChange { version: 3 }, what: "Withdraw an approval".to_string(), about: String::new(), coin: u256::ZERO });
+        state.prepare(Prepared { from: Address::Ed25519([2; 32]), tx: Tx::WithdrawChange { kind: chainv4::governance::ChangeKind::Fees, version: 3 }, what: "Withdraw an approval".to_string(), about: String::new(), coin: u256::ZERO });
 
         assert_eq!(state.from, Some(Address::Ed25519([2; 32])), "not whichever the form had picked");
     }

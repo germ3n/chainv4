@@ -2525,8 +2525,8 @@ impl Chain {
             }
 
             // Which approval decided each change, for GET /governance/history.
-            if let receipt::TxStatus::Decided(version) = record.status {
-                layer.put_value(Column::Decisions, version.to_be_bytes().to_vec(), &tx_id);
+            if let receipt::TxStatus::Decided { decision, .. } = record.status {
+                layer.put_value(Column::Decisions, decision.to_be_bytes().to_vec(), &tx_id);
             }
 
             // Blocks below an index's low end wait for catch_up_index, or were dropped.

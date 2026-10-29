@@ -8,7 +8,7 @@ use {
     crate::registry::directory::Directory,
     crate::registry::multisig::MultisigMember,
     crate::registry::signers::Signer,
-    crate::governance::Change,
+    crate::governance::{Change, ChangeKind},
     crate::registry::names::{NameAction, name_problem},
     crate::structs::code::Code,
     crate::structs::hash::Hash,
@@ -161,7 +161,7 @@ pub enum Tx {
     #[document(
         summary = "Approves a change to what genesis set, under the chain's governance: today, a new consensus. Only an account governance lets approve may send it: a validator's or signer's account under the electorate, a member's under a council. Once the approvals for the same change weigh enough, it is decided, and the next checkpoint fixes it for the epoch activation_delay ahead.",
         params = {
-            version = "The version of the decision this changes: how many changes were decided before, as GET /governance reports.",
+            version = "The version of the change's kind this changes: how many changes of that kind were decided before, as GET /governance reports in versions.",
             change = "The change it approves.",
         },
         see_also = "Changes::approve, GovernanceConfig, Change",
@@ -169,12 +169,15 @@ pub enum Tx {
     #[wincode(tag = 12)]
     ApproveChange { version: u64, change: Change },
     #[document(
-        summary = "Takes back the sender's approval of a change, so it backs none. Only an account governance lets approve may send it, while its approval still counts.",
-        params = { version = "The version of the decision its approval was for." },
+        summary = "Takes back the sender's approval of a change of a kind, so it backs none of that kind. Only an account governance lets approve may send it, while its approval still counts.",
+        params = {
+            kind = "The kind of change its approval was of.",
+            version = "The kind's version its approval was for.",
+        },
         see_also = "Changes::withdraw, Tx::ApproveChange",
     )]
     #[wincode(tag = 13)]
-    WithdrawChange { version: u64 },
+    WithdrawChange { kind: ChangeKind, version: u64 },
     #[document(
         summary = "Calls an EVM contract with raw calldata, as Ethereum does, or sends the coin to any address through the EVM. The sender takes part in the EVM at its 20-byte address: a secp256k1 account as itself, any other under its alias.",
         params = {

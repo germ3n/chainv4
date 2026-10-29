@@ -311,9 +311,9 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   as a CA, which is what `openssl req -x509` makes unless told otherwise; `docker/nginx/tls.sh`
   now makes its self-signed one with `CA:FALSE`, and makes again one an older version made.
 - **Genesis bootnodes are as permanent as the chain.** They are hashed into its id. On a chain
-  with governance, `Change::Bootnodes` replaces them on the live chain, at once, on the same ballot
-  and version as consensus changes, so deciding one moves the version for the other too; without
-  governance, `--bootnode` and `BOOTNODES` add a node's own, which change with no vote.
+  with governance, `Change::Bootnodes` replaces them on the live chain, at once, on a ballot of
+  their own; without governance, `--bootnode` and `BOOTNODES` add a node's own, which change with
+  no vote.
 - **Discovery dials only while short.** A node with `--target-peers` (15) peers or more stops
   dialing bootnodes and Kademlia's peers, but still takes peers that dial in. Kademlia bootstraps
   every 2 minutes either way.
@@ -389,6 +389,11 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **Keys show what others name them by.** `keygen` and `chainv4 key show FILE…` print the scheme,
   the public key (compressed for secp256k1, as a federation lists it), the address, and the EVM
   or testnet one, never the secret.
+- **Each kind of change has its own ballot.** Approvals name their kind's version, so deciding
+  fees leaves a rename's approvals standing; an account backs one change of each kind; withdraw
+  names the kind. Part of fees, the reward, limits, finality, the federation or the directory may
+  be given, laid over what stands. The chain still counts every decision once, gap-free, which
+  the history and light clients follow.
 - **One JSON for changes.** `params::json` (the `json` feature, no node needed) reads and writes
   every change, `change_json` and `change_from_json`, and each part of genesis one may replace,
   with the same checks; `chain::json` adds genesis files. The CLI, the API and the apps share it.

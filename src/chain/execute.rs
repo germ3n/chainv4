@@ -160,8 +160,8 @@ pub enum Effect {
     Upgraded(Address),
     #[document(summary = "A contract call returned these values.")]
     Returned(Vec<TxCallArgumentType>),
-    #[document(summary = "A governance approval decided its change, as this version.")]
-    Decided(u64),
+    #[document(summary = "A governance approval decided its change, as the chain's decision-th and its kind's version-th.")]
+    Decided { decision: u64, kind: crate::governance::ChangeKind, version: u64 },
 }
 
 #[document(
@@ -942,20 +942,20 @@ fn run(
             let approved = Changes::new(layer).approve(&sender, *version, change.clone(), at, governance.approval_epochs, &*governance.governance);
 
             let effect = approved.map(|approved| match approved {
-                ChangeApproved::DecidedChange(version) => Effect::Decided(version),
+                ChangeApproved::DecidedChange { decision, kind, version } => Effect::Decided { decision, kind, version },
                 ChangeApproved::Counted { .. } => Effect::Done,
             });
 
             (effect.map_err(Failure::Registry), Contracted::default())
         }
         #[cfg(feature = "governance")]
-        Tx::WithdrawChange { version } => {
+        Tx::WithdrawChange { kind, version } => {
             let Some(rules) = &rules.governance else {
                 return (Err(Failure::NoGovernance), Contracted::default());
             };
             let epoch = height / rules.checkpoint_interval.max(1);
 
-            (moved(Changes::new(layer).withdraw(&sender, *version, epoch, rules.approval_epochs, &*rules.governance)), Contracted::default())
+            (moved(Changes::new(layer).withdraw(&sender, *kind, *version, epoch, rules.approval_epochs, &*rules.governance)), Contracted::default())
         }
         // A build without governance opens no chain that has it.
         #[cfg(not(feature = "governance"))]

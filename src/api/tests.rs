@@ -698,6 +698,8 @@ fn governance_lists_the_decision_and_the_ballot() {
         listing["proposals"],
         json!([{
             "consensus": consensus(&staked),
+            "kind": "consensus",
+            "version": 0,
             "weight": "1",
             "needed": "2",
             "approvals": [{ "account": dev.public().address().to_string(), "weight": "1", "epoch": 0, "counts_until": 15 }],
@@ -726,7 +728,8 @@ fn governance_lists_its_decisions_what_stands_and_who_may_approve() {
     };
     let bootnodes = vec!["/dns4/boot.example/udp/4001/quic-v1".to_string()];
     let renamed = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Name("second".to_string()) }, 0, FeeOffer::NONE, &dev);
-    let booted = SignedTx::sign(Tx::ApproveChange { version: 1, change: Change::Bootnodes(bootnodes.clone()) }, 1, FeeOffer::NONE, &dev);
+    // Each kind its own version: the bootnodes' first decision, after the name's.
+    let booted = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Bootnodes(bootnodes.clone()) }, 1, FeeOffer::NONE, &dev);
     let mut producer = AuthorityProducer::new(dev.clone(), SLOT);
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
@@ -744,6 +747,7 @@ fn governance_lists_its_decisions_what_stands_and_who_may_approve() {
     let receipt = ok(address, &format!("/txs/{renamed_id}"));
 
     assert_eq!((receipt["status"].clone(), receipt["version"].clone()), (json!("decided"), json!(1)), "the approval that decides says so");
+    assert_eq!((receipt["kind"].clone(), receipt["kind_version"].clone()), (json!("name"), json!(1)), "and of which kind, as which of its versions");
 
     let history = ok(address, "/governance/history");
 
@@ -776,8 +780,11 @@ fn governance_lists_its_decisions_what_stands_and_who_may_approve() {
     let member = ok(address, &format!("/governance/weight/{}", other.public().address()));
     let stranger = Keypair::generate(dev.public().key_type()).unwrap().public().address();
 
-    assert_eq!((member["weight"].clone(), member["needed"].clone(), member["version"].clone()), (json!("1"), json!("1"), json!(2)));
-    assert_eq!(member["approved"], Value::Null);
+    assert_eq!((member["weight"].clone(), member["needed"].clone()), (json!("1"), json!("1")));
+    assert_eq!(member["approved"], json!([]), "no approval of any kind that still counts");
+    assert_eq!(listing["versions"]["name"], 1);
+    assert_eq!(listing["versions"]["bootnodes"], 1);
+    assert_eq!(listing["versions"]["fees"], 0, "each kind its own count");
     assert_eq!(ok(address, &format!("/governance/weight/{stranger}"))["weight"], "0");
 }
 

@@ -207,7 +207,7 @@ impl GovernanceConfig {
 }
 
 #[document(
-    summary = "What a change proposes: a new consensus, which takes effect at an epoch, as a checkpoint fixes it, so blocks either side of the boundary are checked by different rules; new bootnodes, which nodes dial from the block that decides them on; new prices for names, which hold from that block on too; or what makes a collection, which does as well. Every kind shares one ballot and one version.",
+    summary = "What a change proposes: a new consensus, which takes effect at an epoch, as a checkpoint fixes it, so blocks either side of the boundary are checked by different rules; new bootnodes, which nodes dial from the block that decides them on; new prices for names, which hold from that block on too; or what makes a collection, which does as well. Each kind has a ballot and a version of its own, its ChangeKind's: deciding one leaves the others' approvals standing.",
     category = "Governance",
     see_also = "Tx::ApproveChange, Changes",
 )]
@@ -313,7 +313,119 @@ impl Hashable for Change {
     const TAG_LEN: usize = 1;
 }
 
+#[document(
+    summary = "Which ballot and version a change is on: each kind of setting its own, but for the consensus, finality's tuning and a switch of finality's kind, which are checked against each other and so share one. A decision of a kind leaves every other kind's approvals standing.",
+    category = "Governance",
+    see_also = "Change::kind, Changes::approve",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum ChangeKind {
+    #[document(summary = "The consensus, finality's tuning and a switch of finality's kind.")]
+    #[wincode(tag = 0)]
+    Consensus,
+    #[document(summary = "The bootnodes.")]
+    #[wincode(tag = 1)]
+    Bootnodes,
+    #[document(summary = "What names cost.")]
+    #[wincode(tag = 2)]
+    NamePrices,
+    #[document(summary = "What makes a collection.")]
+    #[wincode(tag = 3)]
+    Collections,
+    #[document(summary = "The bridges' federation.")]
+    #[wincode(tag = 4)]
+    Federation,
+    #[document(summary = "The directory.")]
+    #[wincode(tag = 5)]
+    Directory,
+    #[document(summary = "The fees.")]
+    #[wincode(tag = 6)]
+    Fees,
+    #[document(summary = "The block reward.")]
+    #[wincode(tag = 7)]
+    Reward,
+    #[document(summary = "The limits.")]
+    #[wincode(tag = 8)]
+    Limits,
+    #[document(summary = "An upgrade.")]
+    #[wincode(tag = 9)]
+    Upgrade,
+    #[document(summary = "The chain's name.")]
+    #[wincode(tag = 10)]
+    Name,
+}
+
+impl Hashable for ChangeKind {
+    const TAG_LEN: usize = 1;
+}
+
+impl ChangeKind {
+    #[document(parent = "ChangeKind", summary = "Every kind, in tag order.")]
+    pub const ALL: [ChangeKind; 11] = [
+        ChangeKind::Consensus,
+        ChangeKind::Bootnodes,
+        ChangeKind::NamePrices,
+        ChangeKind::Collections,
+        ChangeKind::Federation,
+        ChangeKind::Directory,
+        ChangeKind::Fees,
+        ChangeKind::Reward,
+        ChangeKind::Limits,
+        ChangeKind::Upgrade,
+        ChangeKind::Name,
+    ];
+
+    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits, upgrade or name.")]
+    pub fn name(self) -> &'static str {
+        match self {
+            ChangeKind::Consensus => "consensus",
+            ChangeKind::Bootnodes => "bootnodes",
+            ChangeKind::NamePrices => "name_prices",
+            ChangeKind::Collections => "collections",
+            ChangeKind::Federation => "federation",
+            ChangeKind::Directory => "directory",
+            ChangeKind::Fees => "fees",
+            ChangeKind::Reward => "reward",
+            ChangeKind::Limits => "limits",
+            ChangeKind::Upgrade => "upgrade",
+            ChangeKind::Name => "name",
+        }
+    }
+}
+
+impl std::str::FromStr for ChangeKind {
+    type Err = String;
+
+    /// Its name, or a change's: finality and switch_finality are the consensus's.
+    fn from_str(text: &str) -> Result<ChangeKind, String> {
+        match text {
+            "finality" | "switch_finality" => Ok(ChangeKind::Consensus),
+            text => ChangeKind::ALL.into_iter().find(|kind| kind.name() == text).ok_or_else(|| {
+                format!("{text} is not a kind of change; one of {}", ChangeKind::ALL.map(ChangeKind::name).join(", "))
+            }),
+        }
+    }
+}
+
 impl Change {
+    #[document(parent = "Change", summary = "Which ballot and version it is on.")]
+    pub fn kind(&self) -> ChangeKind {
+        match self {
+            Change::Consensus(_) | Change::Finality(_) | Change::SwitchFinality { .. } => ChangeKind::Consensus,
+            Change::Bootnodes(_) => ChangeKind::Bootnodes,
+            Change::NamePrices(_) => ChangeKind::NamePrices,
+            Change::Collections(_) => ChangeKind::Collections,
+            Change::Federation(_) => ChangeKind::Federation,
+            Change::Directory(_) => ChangeKind::Directory,
+            Change::Fees(_) => ChangeKind::Fees,
+            Change::Reward(_) => ChangeKind::Reward,
+            Change::Limits(_) => ChangeKind::Limits,
+            Change::Upgrade(_) => ChangeKind::Upgrade,
+            Change::Name(_) => ChangeKind::Name,
+        }
+    }
+
     #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade or name.")]
     pub fn name(&self) -> &'static str {
         match self {

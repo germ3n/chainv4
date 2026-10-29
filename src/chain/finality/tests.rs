@@ -101,6 +101,18 @@ fn mine_branch(chain: &mut Chain, from: &Block, count: u64, miner: u8) -> Block 
 #[cfg(any(feature = "finality-ffg", feature = "finality-authority"))]
 mod voting {
     use super::*;
+
+    /// The version an approval of a change names, and what the approval that decides it says, as
+    /// the chain stands: the chain's next decision, and its kind's next version.
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+    fn deciding(chain: &Chain, change: &crate::governance::Change) -> (u64, Effect) {
+        let state = chain.state();
+        let changes = Changes::new(&state);
+        let kind = change.kind();
+        let version = changes.version_of(kind).unwrap();
+
+        (version, Effect::Decided { decision: changes.decided().unwrap().version + 1, kind, version: version + 1 })
+    }
     use crate::chain::finality::votes::{COUNTED, HELD, MAX_HISTORY, stored_votes};
     use crate::structs::tx::Tx;
 
@@ -1539,14 +1551,14 @@ mod voting {
         assert!(matches!(&unfit.result, Err(failure) if failure.to_string().contains("needs finality of type authority")), "{:?}", unfit.result);
         assert_eq!(send_as(&mut chain, &alice, approve(0, to_staked())).result, Ok(Effect::Done));
 
-        let ballot = Changes::new(&chain.state()).ballot().unwrap();
+        let ballot = Changes::new(&chain.state()).ballot(crate::governance::ChangeKind::Consensus).unwrap();
 
         assert_eq!(ballot.approvers(&to_staked()), [alice.public().address()]);
         assert_eq!(Changes::new(&chain.state()).decided().unwrap().version, 0);
 
         // Bob's makes two thirds: decided, version 1. The epochs fixed already keep the
         // authority; the checkpoint after the decision fixes stake for the epoch two ahead.
-        assert_eq!(send_as(&mut chain, &bob, approve(0, to_staked())).result, Ok(Effect::Decided(1)));
+        assert_eq!(send_as(&mut chain, &bob, approve(0, to_staked())).result, Ok(Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Consensus, version: 1 }));
 
         let decided = Changes::new(&chain.state()).decided().unwrap();
         let Change::Consensus(staked) = to_staked() else { unreachable!() };
@@ -1669,16 +1681,16 @@ mod voting {
         });
 
         // Nothing to withdraw yet; one of two approves; moving it leaves the first change empty.
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::WithdrawChange { version: 0 }).result, Err(failure) if failure.to_string().contains("no approval")));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::WithdrawChange { kind: crate::governance::ChangeKind::Consensus, version: 0 }).result, Err(failure) if failure.to_string().contains("no approval")));
         assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: to_staked() }).result, Ok(Effect::Done));
         assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: other.clone() }).result, Ok(Effect::Done));
 
-        let ballot = Changes::new(&chain.state()).ballot().unwrap();
+        let ballot = Changes::new(&chain.state()).ballot(crate::governance::ChangeKind::Consensus).unwrap();
 
         assert!(ballot.approvers(&to_staked()).is_empty());
         assert_eq!(ballot.approvers(&other), [dev().public().address()]);
-        assert_eq!(send_as(&mut chain, &dev(), Tx::WithdrawChange { version: 0 }).result, Ok(Effect::Done));
-        assert!(Changes::new(&chain.state()).ballot().unwrap().approvals.is_empty());
+        assert_eq!(send_as(&mut chain, &dev(), Tx::WithdrawChange { kind: crate::governance::ChangeKind::Consensus, version: 0 }).result, Ok(Effect::Done));
+        assert!(Changes::new(&chain.state()).ballot(crate::governance::ChangeKind::Consensus).unwrap().approvals.is_empty());
 
         // A validator's account is no council member here, and a stale version is refused.
         let [alice, ..] = voters();
@@ -1719,7 +1731,7 @@ mod voting {
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: Change::NamePrices(Vec::new()) }).result, Err(failure) if failure.to_string().contains("at least one price")));
         assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: prices.clone() }).result, Ok(Effect::Done));
         assert_eq!(paid(&mut chain, "bobby"), NamesConfig::dev().prices[2] * u256::from(2u64), "not decided yet");
-        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: prices.clone() }).result, Ok(Effect::Decided(1)));
+        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: prices.clone() }).result, Ok(Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::NamePrices, version: 1 }));
         assert_eq!(Changes::new(&chain.state()).name_prices().unwrap(), Some(vec![u256::from(7u64)]));
 
         // From the next block on, one price for every length, the shortest too.
@@ -1739,8 +1751,10 @@ mod voting {
             approval_epochs: 8,
         };
         let mut chain = governed(council);
-        let decide = |chain: &mut Chain, version: u64, change: Change| {
-            for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided(version + 1))] {
+        let decide = |chain: &mut Chain, _: u64, change: Change| {
+            let (version, decided) = deciding(chain, &change);
+
+            for (member, effect) in [(dev(), Effect::Done), (key(70), decided)] {
                 assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(effect));
             }
         };
@@ -1811,7 +1825,7 @@ mod voting {
         refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { checkpoint_interval: INTERVAL + 1, ..genesis.clone() })), "keeps checkpoint_interval");
         refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { validators: Vec::new(), ..genesis.clone() })), "keeps checkpoint_interval");
 
-        for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided(1))] {
+        for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Consensus, version: 1 })] {
             assert_eq!(send_as(&mut chain, &member, Tx::ApproveChange { version: 0, change: Change::Finality(tuned.clone()) }).result, Ok(effect));
         }
 
@@ -1852,8 +1866,10 @@ mod voting {
             evm_depth: 12,
             bitcoin_depth: 6,
         };
-        let decide = |chain: &mut Chain, version: u64, change: Change| {
-            for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided(version + 1))] {
+        let decide = |chain: &mut Chain, _: u64, change: Change| {
+            let (version, decided) = deciding(chain, &change);
+
+            for (member, effect) in [(dev(), Effect::Done), (key(70), decided)] {
                 assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(effect));
             }
         };
@@ -1895,7 +1911,7 @@ mod voting {
 
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: broken }).result, Err(failure) if failure.to_string().contains("contracts")));
 
-        for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided(1))] {
+        for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Directory, version: 1 })] {
             assert_eq!(send_as(&mut chain, &member, Tx::ApproveChange { version: 0, change: Change::Directory(directory.clone()) }).result, Ok(effect));
         }
 
@@ -1941,7 +1957,7 @@ mod voting {
 
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: twice }).result, Err(failure) if failure.to_string().contains("each function once")));
         assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: standard.clone() }).result, Ok(Effect::Done));
-        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: standard.clone() }).result, Ok(Effect::Decided(1)));
+        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: standard.clone() }).result, Ok(Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Collections, version: 1 }));
         assert_eq!(Changes::new(&chain.state()).collections().unwrap(), Some(CollectionFunctions::standard()));
 
         // Deploys register from then on; what came before waits for its next upgrade or refresh.
@@ -1966,9 +1982,9 @@ mod voting {
     /// Both members approve a change, which decides it.
     #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
     fn council_decides(chain: &mut Chain, change: crate::governance::Change) {
-        let version = crate::registry::changes::Changes::new(&chain.state()).decided().unwrap().version;
+        let (version, decided) = deciding(chain, &change);
 
-        for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided(version + 1))] {
+        for (member, effect) in [(dev(), Effect::Done), (key(70), decided)] {
             assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(effect));
         }
     }

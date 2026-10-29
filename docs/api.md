@@ -114,8 +114,9 @@ Each summary has:
 - its `payments`: the coin its contracts paid, each `from`, `to` and `amount`, as the receipts
   root commits to them (see [Chain](chain.md#receipts));
 - its `status`: `done`, `deployed` with `contract`, `upgraded` with `contract`, `returned` with
-  `values`, `decided` with `version` for the [governance](governance.md#decisions) approval that
-  decided change `version`, or `failed` with `error`;
+  `values`, `decided` for the [governance](governance.md#decisions) approval that decided a
+  change, with `version`, the chain's count it made, its `kind` and `kind_version`, that kind's,
+  or `failed` with `error`;
 - its `trace`: where its contracts went (see below).
 
 **The trace** is `hops`, depth first, and `dropped`, how many hops past the 256 a receipt keeps
@@ -612,9 +613,11 @@ On a chain with [governance](governance.md):
   take effect, with the `epoch` it runs from and its `type`, or `null`;
 - the `proposals` with approvals that still count in the tip's epoch, each its change as one
   field named for what it changes (`consensus`, `bootnodes`, `name`, …, as
-  [governance](governance.md#a-change) lists them), what its approvals `weight` and what they
-  `needed`, and its `approvals`. Each approval has its `account`, what it weighs now, the `epoch`
+  [governance](governance.md#a-change) lists them), its `kind` and that kind's `version`, what
+  its approvals `weight` and what they `needed`, and its `approvals`. Each approval has its `account`, what it weighs now, the `epoch`
   it was made in, and the last epoch it counts in (`counts_until`);
+- `version`, the chain's count of decisions of every kind, and `versions`, each kind's own: what
+  an approval of a change of that kind names;
 - `members`, a council's accounts, or `null` under the electorate, whose voters are finality's;
 - `in_force`, every setting governance may change as it stands at the tip, by kind: `consensus`,
   `name`, `bootnodes`, `name_prices`, `collections`, `federation`, `directory`, `fees`,
@@ -642,8 +645,9 @@ newest is `change:decided` in state, which a [state proof](#get-proofscolumnkey)
 ### `GET /governance/weight/{address}`
 
 What an account's approval weighs in the tip's epoch (`weight`, `0` for one that may not approve),
-what a change `needed`, the `version` an approval names now, and `approved`, the change its
-counting approval is for, or `null`. What the apps ask before offering to approve.
+what a change `needed`, and `approved`, the changes its counting approvals are for, one at most of
+each kind, each with its `kind` and that kind's `version`. What the apps ask before offering to
+approve or withdraw.
 
 ### `GET /evidence`
 

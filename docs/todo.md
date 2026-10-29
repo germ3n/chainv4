@@ -343,13 +343,12 @@ offline; these would make that hold up as a treasury.
   so light clients prove decisions; nodes index them for `GET /governance/history`, and
   `GET /governance` adds every setting in force and who may approve. The explorer shows the
   ballot, what stands and the history; the wallet approves, withdraws and proposes any change.
-- [ ] **A version per kind of setting.** Every approval names governance's one version, and any
-  decision bumps it, so deciding the name voids the approvals counting for a fee change. Give each
-  kind (consensus, fees, name, directory, …) its own version and ballot, so a decision voids only
-  the open changes of its own kind and ballots on different settings run side by side. With it,
-  changes that set single fields (`Change::Fees` with only `burn_permille`), applied over what
-  stands, which a kind's version keeps from undoing another decision. The Decided outcome, the
-  history and the apps follow the kind's version as well as the count of decisions.
+- [x] **A version per kind of setting.** Each `ChangeKind` has its ballot and version (the
+  consensus, finality's tuning and its switch sharing one), so a decision voids only the open
+  changes of its own kind; an account backs one change of each kind; fees, the reward, limits,
+  finality, the federation and the directory may be given in part, laid over what stands; the
+  deciding receipt says `Decided { decision, kind, version }`, the chain's count kept gap-free for
+  light clients.
 - [ ] **Fuel costs measured, not guessed.** `vm::cost` is a table of hand-picked constants
   (a storage write 500, a call 1,000, a hash 20…) compiled into the node. A Rust tool, run at
   build time or as `chainv4 calibrate`, would time each fuel-charged operation on a reference

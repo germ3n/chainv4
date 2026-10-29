@@ -816,3 +816,26 @@ pub fn change_from_json(value: &Value) -> Result<crate::governance::Change, Stri
 
     Ok(change)
 }
+
+/// Part of a setting, laid over the whole of it as it stands: each field given replaces the one
+/// standing, an object's fields one by one, and anything else whole. What makes a change that
+/// names only some fields, such as fees' burn_permille alone, into the whole value a change
+/// carries; the kind's version keeps it from undoing a decision made in between.
+pub fn over(standing: &Value, given: &Value) -> Value {
+    match (standing, given) {
+        (Value::Object(standing), Value::Object(given)) => {
+            let mut merged = standing.clone();
+
+            for (key, value) in given {
+                let laid = match merged.get(key) {
+                    Some(old) => over(old, value),
+                    None => value.clone(),
+                };
+                merged.insert(key.clone(), laid);
+            }
+
+            Value::Object(merged)
+        }
+        (_, given) => given.clone(),
+    }
+}

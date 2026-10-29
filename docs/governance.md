@@ -58,21 +58,35 @@ through finality's light updates; genesis refuses it with depth finality or none
 
 ## A change
 
+Each kind of setting has a ballot and a version of its own, its `ChangeKind`: the consensus
+(with finality's tuning and a switch of finality's kind, which are checked against each other
+and so share one), bootnodes, name prices, collections, the federation, the directory, fees,
+the reward, limits, an upgrade and the name. Deciding a change of one kind leaves every other
+kind's approvals standing.
+
 1. **Proposing and approving** are one transaction: `Tx::ApproveChange` names the `version` of
-   the decision it changes, how many changes of any kind were decided before, and the `change`:
-   `consensus` with a whole new consensus, or any of the others below, each whole. `chainv4 send
+   the change's kind it changes, how many changes of that kind were decided before, and the
+   `change`: `consensus` with a whole new consensus, or any of the others below. `chainv4 send
    --key account.key approve-change --consensus '{"type":"staked","slot_ms":2000,"schedule":"draw"}'`
-   sends one, taking the version from the node. The consensus must fit the chain's finality as genesis's must: `rotating` needs
-   authority finality, `staked` needs FFG; `pow` keeps the chain's window, if genesis set one.
-2. **Counting.** The ballot holds at most one approval per account; an account that approves
-   another change moves its approval there, and `Tx::WithdrawChange` (`send withdraw-change`)
-   takes it back. An approval stops counting `approval_epochs` epochs after the one it was made
-   in. What an approval weighs is counted afresh whenever the ballot is, in the state it is
-   counted in: a validator that unbonded since weighs nothing.
-3. **Deciding.** Once the approvals that still count for the same change weigh what the kind
-   needs, it is decided: the version goes up by one and the ballot empties. Approvals for an
-   older version never count.
-4. **Taking effect.** The checkpoint after the decision, the block it landed in when that is one,
+   sends one, taking the kind's version from the node. The consensus must fit the chain's
+   finality as genesis's must: `rotating` needs authority finality, `staked` needs FFG; `pow`
+   keeps the chain's window, if genesis set one.
+2. **Part of a setting.** Fees, the reward, limits, finality, the federation and the directory
+   may be given in part, such as `--fees '{"burn_permille":600}'`: what is left out keeps what
+   stands, laid over it field by field (`params::json::over`) before the whole is checked and
+   sent. The kind's version makes it safe: had a change of that kind been decided in between,
+   the approval would name an older version, and count for nothing.
+3. **Counting.** Each kind's ballot holds at most one approval per account, so an account backs
+   one change of each kind at once; one that approves another change of the same kind moves its
+   approval there, and `Tx::WithdrawChange` (`send withdraw-change --kind fees`) takes back its
+   approval of that kind. An approval stops counting `approval_epochs` epochs after the one it
+   was made in. What an approval weighs is counted afresh whenever the ballot is, in the state it
+   is counted in: a validator that unbonded since weighs nothing.
+4. **Deciding.** Once the approvals that still count for the same change weigh what the kind
+   needs, it is decided: the kind's version goes up by one and its ballot empties, and the
+   chain's count of decisions, of every kind, goes up by one too. Approvals for an older version
+   of the kind never count.
+5. **Taking effect.** The checkpoint after the decision, the block it landed in when that is one,
    fixes the decided consensus for the epoch `activation_delay` ahead, as it fixes the voters.
    Every epoch's consensus is fixed `activation_delay` epochs before it, so a branch that split
    off after the checkpoint that fixed an epoch's consensus checks that epoch's blocks by the
@@ -86,16 +100,18 @@ approves, withdraws and proposes from there.
 
 ## Decisions
 
-- **The approval that decides a change says so.** Its receipt's outcome is `Decided(version)`,
-  where the others' is `Done`, and the receipts root commits to it, so a light client proves a
-  decision with the receipt alone (`GET /proofs/receipts/{id}`): the transaction, the change it
-  approved, and that it decided it, as which version.
+- **The approval that decides a change says so.** Its receipt's outcome is
+  `Decided { decision, kind, version }`, where the others' is `Done`: the chain's decision-th, of
+  every kind, and its kind's version-th. The receipts root commits to it, so a light client proves
+  a decision with the receipt alone (`GET /proofs/receipts/{id}`): the transaction, the change it
+  approved, and that it decided it, as which.
 - **Nodes index them.** As a block runs, each deciding approval's id goes in the `Decisions`
-  column by the version it made: not chain state, written with the block's receipts and taken
-  back with them in a reorg. `GET /governance/history` lists them, newest first.
-- **None can be left out unseen.** Versions count up one a decision, and the newest is
-  `change:decided` in state (column `validators`), so a gap in a node's list shows. A node that
-  synced from a snapshot lacks the decisions before it, and says from which version it has them.
+  column by the chain's count it made: not chain state, written with the block's receipts and
+  taken back with them in a reorg. `GET /governance/history` lists them, newest first.
+- **None can be left out unseen.** The chain's count goes up one a decision, whatever its kind,
+  and the newest is `change:decided` in state (column `validators`), so a gap in a node's list
+  shows. A node that synced from a snapshot lacks the decisions before it, and says from which it
+  has them.
 - **A change of the rules.** Nodes from before this disagree with newer ones on a deciding
   approval's receipt, so the receipts root of its block: a chain that had decided anything moves
   to it with a new genesis, or from a height an [upgrade](#upgrade) names.
@@ -110,9 +126,8 @@ chainv4 send --key member.key approve-change --bootnodes /ip4/203.0.113.7/udp/40
 chainv4 send --key member.key approve-change --bootnodes none   # the chain has none from then on
 ```
 
-- **The same ballot and version as consensus changes.** An account backs one change at a time,
-  of either kind, and deciding one moves the version, so approvals of the other for the old
-  version stop counting.
+- **A ballot and version of their own.** An account may back new bootnodes and a consensus
+  change at once, and deciding one leaves the other's approvals standing.
 - **It takes effect at once.** Nothing checks blocks by the bootnodes, so no epoch need be fixed
   for them: from the block that decides them, `Chain::bootnodes` gives the new list, every node
   that imports the block tells its network so, and `GET /status` and `GET /governance` show it.
@@ -128,7 +143,7 @@ On a chain with [names](names.md), a change replaces the prices a year of a name
 chainv4 send --key member.key approve-change --name-prices 1000000000000000000000,200000000000000000000,10000000000000000000
 ```
 
-- **The same ballot and version** as the other kinds.
+- **A ballot and version of its own,** as each kind has (see [A change](#a-change)).
 - **It takes effect at once,** from the block that decides it, as bootnodes do: what a name costs
   is read when one is registered or renewed, and checks no block.
 - **The list is checked as genesis's is:** 1 to 61 prices, in the smallest unit, the first for
@@ -146,7 +161,7 @@ last decided:
 chainv4 send --key member.key approve-change --federation '{"signers":["0x02…","0x03…","0x02…"],"threshold":2,"chain_depth":20,"evm_depth":12,"bitcoin_depth":6}'
 ```
 
-- **The same ballot and version** as the other kinds.
+- **A ballot and version of its own,** as each kind has (see [A change](#a-change)).
 - **It takes effect at once,** from the block that decides it: contracts read it as they run.
 - **One state entry,** `change:federation`, holds the one in force, genesis's written there as
   the chain starts, so a light client proves it: the wallet computes Bitcoin deposit addresses
@@ -221,7 +236,7 @@ chainv4 send --key member.key approve-change --collections standard
 chainv4 send --key member.key approve-change --collections '{"nft":["owner_of",…],"multi":["balance_of",…]}'
 ```
 
-- **The same ballot and version** as the other kinds.
+- **A ballot and version of its own,** as each kind has (see [A change](#a-change)).
 - **It takes effect at once,** from the block that decides it: deploys, upgrades and refreshes
   register by it. Contracts deployed before join at their next upgrade or refresh.
 - **The lists are checked as genesis's are:** each function named once in each list.
@@ -236,7 +251,7 @@ in the shape genesis writes it (see [Genesis](genesis.md#fees)):
 chainv4 send --key member.key approve-change --fees '{"block_gas_limit":50000000,"burn_permille":500,"schedule":{"type":"weighted","per_tx":1000,"per_byte":10,"per_code_byte":20,"fuel_per_gas":1},"pricing":{"type":"base_fee","initial":"1000000000","min":"10000000","elasticity":2,"change_denominator":8}}'
 ```
 
-- **The same ballot and version** as the other kinds.
+- **A ballot and version of its own,** as each kind has (see [A change](#a-change)).
 - **It takes effect from the next block:** the block after the one that decides it is checked,
   priced and charged by it. Under `base_fee` pricing, that block's base price follows from its
   parent's by the new rules; `initial` only starts a chain.

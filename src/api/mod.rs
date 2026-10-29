@@ -990,27 +990,38 @@ async fn governance(Shared(api): Shared<Api>) -> Answer {
     let state = State::new(db);
     let changes = Changes::new(&state);
     let decided = changes.decided()?;
-    let ballot = changes.ballot()?.counting(epoch, rules.approval_epochs);
     let needed = rules.governance.needed(&state, epoch)?;
     let mut proposals = Vec::new();
+    let mut versions = serde_json::Map::new();
 
-    for change in ballot.changes() {
-        let approvals: Vec<Value> = ballot
-            .approvals
-            .iter()
-            .filter(|approval| approval.change == change)
-            .map(|approval| json!({
-                "account": approval.account.to_string(),
-                "weight": rules.governance.weight(&state, epoch, &approval.account).ok().flatten().map_or_else(|| "0".to_string(), |weight| weight.to_string()),
-                "epoch": approval.epoch,
-                "counts_until": approval.epoch + rules.approval_epochs - 1,
-            }))
-            .collect();
-        let mut value = json::change(&change);
-        value["weight"] = changes.weight_of(&ballot, &change, epoch, &*rules.governance)?.to_string().into();
-        value["needed"] = needed.to_string().into();
-        value["approvals"] = approvals.into();
-        proposals.push(value);
+    for kind in crate::governance::ChangeKind::ALL {
+        versions.insert(kind.name().to_string(), changes.version_of(kind)?.into());
+    }
+
+    // Each kind's ballot, in kind order: a change's approvals are of its kind, at its version.
+    for (kind, ballot) in changes.ballots()? {
+        let ballot = ballot.counting(epoch, rules.approval_epochs);
+
+        for change in ballot.changes() {
+            let approvals: Vec<Value> = ballot
+                .approvals
+                .iter()
+                .filter(|approval| approval.change == change)
+                .map(|approval| json!({
+                    "account": approval.account.to_string(),
+                    "weight": rules.governance.weight(&state, epoch, &approval.account).ok().flatten().map_or_else(|| "0".to_string(), |weight| weight.to_string()),
+                    "epoch": approval.epoch,
+                    "counts_until": approval.epoch + rules.approval_epochs - 1,
+                }))
+                .collect();
+            let mut value = json::change(&change);
+            value["kind"] = kind.name().into();
+            value["version"] = ballot.version.into();
+            value["weight"] = changes.weight_of(&ballot, &change, epoch, &*rules.governance)?.to_string().into();
+            value["needed"] = needed.to_string().into();
+            value["approvals"] = approvals.into();
+            proposals.push(value);
+        }
     }
 
     Ok(Json(json!({
@@ -1018,6 +1029,7 @@ async fn governance(Shared(api): Shared<Api>) -> Answer {
         "epoch": epoch,
         "active": changes.consensus_for(epoch)?.as_ref().map(|consensus| crate::cli::genesis::consensus_json(consensus, api.light.pow_window)),
         "version": decided.version,
+        "versions": versions,
         "decided": crate::cli::genesis::consensus_json(&decided.consensus, api.light.pow_window),
         "approval_epochs": rules.approval_epochs,
         "needed": needed.to_string(),
@@ -1228,15 +1240,26 @@ async fn governance_weight(Shared(api): Shared<Api>, Path(address): Path<String>
     let db = api.db.clone();
     let epoch = rules.finality.epoch_of(tip(&*db)?.header.height);
     let state = State::new(db);
-    let ballot = Changes::new(&state).ballot()?.counting(epoch, rules.approval_epochs);
-    let approval = ballot.approvals.iter().find(|approval| approval.account == address);
+    let changes = Changes::new(&state);
+    let mut approved = Vec::new();
+
+    // Its approval in each kind's ballot that still counts, one at most a kind.
+    for (kind, ballot) in changes.ballots()? {
+        let ballot = ballot.counting(epoch, rules.approval_epochs);
+
+        if let Some(approval) = ballot.approvals.iter().find(|approval| approval.account == address) {
+            let mut value = json::change(&approval.change);
+            value["kind"] = kind.name().into();
+            value["version"] = ballot.version.into();
+            approved.push(value);
+        }
+    }
 
     Ok(Json(json!({
         "account": address.to_string(),
         "weight": rules.governance.weight(&state, epoch, &address)?.unwrap_or_default().to_string(),
         "needed": rules.governance.needed(&state, epoch)?.to_string(),
-        "version": ballot.version,
-        "approved": approval.map(|approval| json::change(&approval.change)),
+        "approved": approved,
     })))
 }
 

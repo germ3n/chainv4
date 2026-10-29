@@ -1,7 +1,10 @@
 //! Governance: who may approve a change, what one needs and how long an approval counts; the
-//! changes being approved, each in words with its approvals; every setting in force and the change
-//! that last set it; and every decision, newest first, each proven by the light client: its
-//! receipt decided that change, and its transaction approved it.
+//! changes being approved, by kind, each in words with its approvals; every setting in force and
+//! the change that last set it; and every decision, newest first, each proven by the light client:
+//! its receipt decided that change, of its kind, and its transaction approved it.
+//!
+//! Each kind of change has a ballot and a version of its own, which an approval names; the chain
+//! also counts every decision, of any kind, without gaps, and history lists them by that count.
 
 use {
     super::{Ctx, Look, View},
@@ -9,6 +12,7 @@ use {
     crate::format,
     crate::light::{Checked, ProvenReceipt},
     crate::model::{Decision, GovernanceView, Proposal},
+    chainv4::governance::ChangeKind,
     chainv4::structs::receipt::CommittedOutcome,
     chainv4::structs::tx::Tx,
     chainv4_ui::widgets,
@@ -66,12 +70,15 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState) {
         ui,
         look,
         &[
-            ("decided".to_string(), format::thousands(&view.version.to_string()), "changes since genesis".to_string()),
+            ("decided".to_string(), format::thousands(&view.version.to_string()), "changes since genesis, of every kind".to_string()),
             ("needed".to_string(), weight(view, &coin, &view.needed), "for a change to pass".to_string()),
             ("approvals count".to_string(), epochs(view.approval_epochs), "from the epoch each was made in".to_string()),
             ("open".to_string(), format::thousands(&view.proposals.len().to_string()), "changes being approved".to_string()),
         ],
     );
+
+    ui.add(egui::Label::new(RichText::new(format!("By kind: {}", by_kind(view, false))).small().color(look.palette.muted)).wrap());
+    ui.add_space(6.0);
 
     super::section(ui, look, "Who approves", |ui| approvers(ui, ctx, view, state, &coin));
     super::section_with(
@@ -157,7 +164,8 @@ fn approvers(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, state: &mut Gove
 
         facts.text("a change needs", needed_text(view, coin));
         facts.text("approvals count", format!("{} from the epoch each was made in", epochs(view.approval_epochs)));
-        facts.text("version", format!("{} changes decided; approvals now name version {}", format::thousands(&view.version.to_string()), view.version));
+        facts.text("decided", format!("{} changes, of every kind", format::thousands(&view.version.to_string())));
+        facts.text("versions", format!("{}; an approval names its kind's", by_kind(view, true)));
 
         if !view.finality.is_empty() {
             facts.text("finality", &view.finality);
@@ -184,6 +192,32 @@ fn electorate(finality: &str) -> &'static str {
         "authority" => "Finality's signers approve, each weighing one; the decided set's change threshold decides.",
         "depth" => "Depth finality has no voters, so no change can be decided until finality has some.",
         _ => "Finality's voters approve.",
+    }
+}
+
+/// Each kind's version, compactly: name 2 · upgrade 1. Every kind, or only those decided at all.
+pub fn by_kind(view: &GovernanceView, every: bool) -> String {
+    let known = ChangeKind::ALL.into_iter().map(|kind| (kind.name().to_string(), view.versions.get(kind.name()).copied().unwrap_or_default()));
+    let others = view.versions.iter().filter(|(kind, _)| !ChangeKind::ALL.iter().any(|known| known.name() == kind.as_str())).map(|(kind, version)| (kind.clone(), *version));
+    let shown: Vec<String> = known
+        .chain(others)
+        .filter(|(_, version)| every || *version > 0)
+        .map(|(kind, version)| format!("{} {}", kind.replace('_', " "), format::thousands(&version.to_string())))
+        .collect();
+
+    match shown.is_empty() {
+        true => "none decided yet".to_string(),
+        false => shown.join(" · "),
+    }
+}
+
+/// A kind, possessive, for a person: the name's, the consensus's, the bootnodes', the name prices'.
+pub fn kinds(kind: &str) -> String {
+    let spaced = kind.replace('_', " ");
+
+    match spaced.ends_with('s') && spaced != "consensus" {
+        true => format!("the {spaced}'"),
+        false => format!("the {spaced}'s"),
     }
 }
 
@@ -267,14 +301,22 @@ fn lookup(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, state: &mut Governa
                 raw => format!("{} of the {} a change needs", weight(view, coin, raw), weight(view, coin, &found.needed)),
             },
         );
-        facts.text(
-            "approves",
-            match &found.approved {
-                Some(change) => format!("{}, for change {}", describe(change, coin), found.version + 1),
-                None => "nothing now".to_string(),
-            },
-        );
+        match found.approved.is_empty() {
+            true => facts.text("approves", "nothing now"),
+            false => facts.row(&format!("approves · {}", found.approved.len()), |ui| {
+                ui.vertical(|ui| {
+                    for approved in &found.approved {
+                        ui.add(egui::Label::new(approved_text(approved, coin)).wrap());
+                    }
+                });
+            }),
+        }
     });
+}
+
+/// A change an account approved, in words, with the kind's change it would be.
+pub fn approved_text(approved: &crate::model::ApprovedChange, coin: &Coin) -> String {
+    format!("{}, for {} change {}", describe(&approved.change(), coin), kinds(&approved.kind), approved.version + 1)
 }
 
 /// The changes being approved: each in words, how far its approvals got, and who approved.
@@ -282,14 +324,46 @@ fn proposals(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, coin: &Coin) {
     let look = ctx.look;
 
     if view.proposals.is_empty() {
-        super::note(ui, look, format!("Nothing is being approved. An approval names version {}, the change after the {} decided.", view.version, view.version));
+        super::note(ui, look, "Nothing is being approved. An approval names its kind's version: how many changes of that kind were decided.");
 
         return;
     }
 
-    for (index, proposal) in view.proposals.iter().enumerate() {
-        super::list_row(ui, look, |ui| proposal_row(ui, ctx, view, proposal, index, coin));
+    for (kind, version, group) in grouped(view) {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(widgets::strong(label(&kind), 13.0).color(look.palette.soft));
+            ui.label(RichText::new(kind_heading(&kind, version)).small().color(look.palette.muted));
+        });
+
+        for (index, proposal) in group {
+            super::list_row(ui, look, |ui| proposal_row(ui, ctx, view, proposal, index, coin));
+        }
     }
+}
+
+/// A kind's open proposals: the kind, its version, and each proposal with its place in the list.
+type Group<'a> = (String, u64, Vec<(usize, &'a Proposal)>);
+
+/// The open proposals by kind, in the order the node lists them, each kind with its version.
+fn grouped(view: &GovernanceView) -> Vec<Group<'_>> {
+    let mut groups: Vec<Group<'_>> = Vec::new();
+
+    for (index, proposal) in view.proposals.iter().enumerate() {
+        let kind = proposal.kind_name();
+
+        match groups.iter_mut().find(|(known, _, _)| *known == kind) {
+            Some((_, _, group)) => group.push((index, proposal)),
+            None => groups.push((kind, proposal.version, vec![(index, proposal)])),
+        }
+    }
+
+    groups
+}
+
+/// What a kind's open proposals are for: version 2, so its change 3.
+pub fn kind_heading(kind: &str, version: u64) -> String {
+    format!("version {}: approving {} change {}", format::thousands(&version.to_string()), kinds(kind), format::thousands(&(version + 1).to_string()))
 }
 
 fn proposal_row(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, proposal: &Proposal, index: usize, coin: &Coin) {
@@ -434,9 +508,9 @@ fn approved(tx: &Tx) -> Option<(u64, &chainv4::governance::Change)> {
     }
 }
 
-/// Whether what the light client proved is what the node lists: the receipt decided this version,
-/// in the block listed, and its transaction approved this change, from the version before, sent
-/// by whom the node says.
+/// Whether what the light client proved is what the node lists: the receipt decided this change of
+/// the chain's count, of the kind listed, in the block listed, and its transaction approved this
+/// change, of that kind, from the kind's version before, sent by whom the node says.
 fn agrees(decision: &Decision, proven: &ProvenReceipt, hash: chainv4::structs::hash::HashType) -> Result<(), String> {
     let block = proven.assurance.block.to_string();
 
@@ -444,8 +518,19 @@ fn agrees(decision: &Decision, proven: &ProvenReceipt, hash: chainv4::structs::h
         return Err(format!("the node lists it in block {} but proves it in block {block}", format::short(&decision.block)));
     }
 
-    if proven.receipt.outcome != CommittedOutcome::Decided(decision.version) {
+    let CommittedOutcome::Decided { decision: number, kind, version: kind_version } = proven.receipt.outcome else {
         return Err(format!("its receipt does not say it decided change {}", decision.version));
+    };
+
+    if number != decision.version {
+        return Err(format!("its receipt does not say it decided change {}", decision.version));
+    }
+
+    // The node lists a change by its own name, finality's under the consensus's kind.
+    if let Some(listed) = &decision.kind
+        && listed.parse::<ChangeKind>() != Ok(kind)
+    {
+        return Err(format!("the node lists a change of {}, but its receipt decided one of {}", listed.replace('_', " "), kind.name().replace('_', " ")));
     }
 
     if proven.signed.id(hash).to_string() != decision.tx {
@@ -456,8 +541,12 @@ fn agrees(decision: &Decision, proven: &ProvenReceipt, hash: chainv4::structs::h
         return Err("its transaction approves no change".to_string());
     };
 
-    if version + 1 != decision.version {
-        return Err(format!("its transaction approves a change after version {version}, not after {}", decision.version.saturating_sub(1)));
+    if change.kind() != kind {
+        return Err(format!("its transaction approves a change of {}, but its receipt decided one of {}", change.kind().name().replace('_', " "), kind.name().replace('_', " ")));
+    }
+
+    if version + 1 != kind_version {
+        return Err(format!("its transaction approves {} change after version {version}, not after {}", kinds(kind.name()), kind_version.saturating_sub(1)));
     }
 
     let proven_change = chainv4::params::json::change_json(change);
