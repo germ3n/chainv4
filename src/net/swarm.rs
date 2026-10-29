@@ -111,6 +111,8 @@ const MAX_GOSSIP: usize = 8 * 1024 * 1024;
 /// restarts, after this node's network comes back, and while it is not up yet. Discovery runs on
 /// the same tick.
 const REDIAL_EVERY: Duration = Duration::from_secs(15);
+/// How often the node warns that what it publishes reaches none of its connected peers.
+const UNPUBLISHED_EVERY: Duration = Duration::from_secs(60);
 /// How often Kademlia looks for peers near this node, which fills its table with the network's.
 const BOOTSTRAP_EVERY: Duration = Duration::from_secs(120);
 /// How often a bootnode is dialed at most, while the node has fewer peers than it wants.
@@ -265,6 +267,17 @@ struct Net {
     hash: crate::structs::hash::HashType,
     /// The IP each connected peer connects from, for bans that cover IPs.
     ips: HashMap<PeerId, IpAddr>,
+    /// Each connected peer's connections, and whether this node dialed each.
+    links: HashMap<PeerId, Vec<(ConnectionId, bool)>>,
+    /// When it last warned that what it published reached none of its peers.
+    unpublished_said: Option<Instant>,
+}
+
+/// Whether a new connection to a peer, dialed by this node or not, comes the way one standing
+/// already came: a peer that dials twice, or is dialed twice, has lost the first connection and
+/// does not know it yet. Two dialing each other at once make one each way, and both stand.
+fn stale_beside(links: &[(ConnectionId, bool)], dialed: bool) -> bool {
+    links.iter().any(|&(_, standing)| standing == dialed)
 }
 
 /// The IP an address starts with, if it does.
@@ -393,6 +406,8 @@ impl Net {
             seen: Seen::default(),
             hash: config.hash,
             ips: HashMap::new(),
+            links: HashMap::new(),
+            unpublished_said: None,
         })
     }
 
@@ -496,7 +511,7 @@ impl Net {
         loop {
             tokio::select! {
                 _ = redial.tick() => self.redial(),
-                _ = batch.tick() => self.flush(),
+                _ = batch.tick() => self.flush(&events),
                 event = self.swarm.select_next_some() => {
                     if !self.on_swarm(event, &events) {
                         return;
@@ -648,6 +663,22 @@ impl Net {
                     (wanted.dialing, wanted.reached) = (None, Some(peer_id));
                 }
 
+                let links = self.links.entry(peer_id).or_default();
+                let again = stale_beside(links, endpoint.is_dialer());
+                links.push((connection_id, endpoint.is_dialer()));
+
+                // A peer that comes again the way it came before, while that connection stands, has
+                // restarted, or moved behind its NAT, and the old one is dead but not yet timed out.
+                // Gossipsub tells a peer its topics on the first connection alone, so over this one
+                // the peer would never learn what this node subscribes to, and nothing it publishes
+                // would reach it. Both go, and the peer, dialing again, starts afresh.
+                if again {
+                    log::info!("[net] {peer_id} connected again beside a connection it no longer uses: dropping both, for it to come back afresh");
+                    let _ = self.swarm.disconnect_peer_id(peer_id);
+
+                    return true;
+                }
+
                 if num_established.get() != 1 {
                     return true;
                 }
@@ -663,9 +694,19 @@ impl Net {
             }
             SwarmEvent::ConnectionClosed {
                 peer_id,
-                num_established: 0,
+                connection_id,
+                num_established,
                 ..
             } => {
+                if let Some(links) = self.links.get_mut(&peer_id) {
+                    links.retain(|(link, _)| *link != connection_id);
+                }
+
+                if num_established != 0 {
+                    return true;
+                }
+
+                self.links.remove(&peer_id);
                 self.ips.remove(&peer_id);
 
                 NetEvent::PeerDown(peer_id)
@@ -761,7 +802,7 @@ impl Net {
     fn on_command(&mut self, command: NetCommand, events: &mpsc::Sender<NetEvent>) {
         match command {
             NetCommand::Judge { peer, gossip, verdict } => self.judge(peer, gossip, verdict, events),
-            NetCommand::PublishBlock(block) => self.publish(&self.blocks.clone(), &block),
+            NetCommand::PublishBlock(block) => self.publish(&self.blocks.clone(), &block, events),
             NetCommand::PublishTx(tx) => {
                 // Sent once, with the others that come within TX_BATCH_WAIT, or at once when
                 // TX_BATCH. One heard from a peer is marked seen as it came, so taken, it goes on
@@ -775,10 +816,10 @@ impl Net {
                 self.outgoing.push(tx);
 
                 if self.outgoing.len() >= TX_BATCH {
-                    self.flush();
+                    self.flush(events);
                 }
             }
-            NetCommand::PublishVote(vote) => self.publish(&self.votes.clone(), &vote),
+            NetCommand::PublishVote(vote) => self.publish(&self.votes.clone(), &vote, events),
             NetCommand::Request { peer, request } => {
                 log::debug!("[net] asking {peer} for {request:?}");
                 self.swarm.behaviour_mut().sync.send_request(&peer, request);
@@ -824,24 +865,38 @@ impl Net {
     }
 
     /// Gossips the transactions waiting to go, as one batch.
-    fn flush(&mut self) {
+    fn flush(&mut self, events: &mpsc::Sender<NetEvent>) {
         if self.outgoing.is_empty() {
             return;
         }
 
         let batch = std::mem::take(&mut self.outgoing);
-        self.publish(&self.txs.clone(), &batch);
+        self.publish(&self.txs.clone(), &batch, events);
     }
 
-    fn publish<M>(&mut self, topic: &gossipsub::IdentTopic, message: &M)
+    fn publish<M>(&mut self, topic: &gossipsub::IdentTopic, message: &M, events: &mpsc::Sender<NetEvent>)
     where
         M: wincode::SchemaWrite<wincode::config::DefaultConfig, Src = M>,
     {
         let bytes = wincode::serialize(message).expect("blocks and transactions always encode");
 
         if let Err(err) = self.swarm.behaviour_mut().gossipsub.publish(topic.clone(), bytes) {
-            // Mostly no peers yet; gossip is best effort.
-            log::debug!("[net] could not publish: {err}");
+            let peers = self.swarm.connected_peers().count();
+
+            // Without peers, gossip is best effort. With some, none taking what this node
+            // publishes means they never heard what it subscribes to: said, and counted.
+            if peers == 0 {
+                log::debug!("[net] could not publish: {err}");
+
+                return;
+            }
+
+            if self.unpublished_said.is_none_or(|said| said.elapsed() >= UNPUBLISHED_EVERY) {
+                log::warn!("[net] could not publish to any of {peers} connected peers: {err}");
+                self.unpublished_said = Some(Instant::now());
+            }
+
+            let _ = events.send(NetEvent::Unpublished);
         }
     }
 }
@@ -873,6 +928,67 @@ mod tests {
             remembered: Vec::new(),
             bans: crate::net::BanLimits::default(),
             tor: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_connection_that_comes_the_way_a_standing_one_came_finds_that_one_stale() {
+        let (dialed, taken) = (ConnectionId::new_unchecked(1), ConnectionId::new_unchecked(2));
+
+        assert!(!stale_beside(&[], false), "the first connection");
+        assert!(stale_beside(&[(taken, false)], false), "the peer dialed again: it restarted");
+        assert!(stale_beside(&[(dialed, true)], true), "dialed again while the first stood");
+        assert!(!stale_beside(&[(dialed, true)], false), "both dialing at once: one each way");
+    }
+
+    #[test]
+    #[ignore = "opens real sockets on 127.0.0.1"]
+    fn a_peer_that_restarts_while_its_old_connection_lingers_is_heard_again() {
+        let network = format!("again-{}", PeerId::random());
+        let alone = |key: Option<libp2p::identity::Keypair>, peers: Vec<Multiaddr>| NetConfig {
+            mdns: false,
+            key,
+            ..config(&network, BacklogLimits::default(), peers)
+        };
+        let receiver = spawn(alone(None, Vec::new())).unwrap();
+        let address = wait_for(&receiver, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+        // The same key twice: the second is the first restarted, before the first's connection
+        // is gone, as a node restarted behind NAT is.
+        let key = libp2p::identity::Keypair::generate_ed25519();
+        let before = spawn(alone(Some(key.clone()), vec![address.clone()])).unwrap();
+        wait_for(&receiver, |event| match event {
+            NetEvent::PeerUp { .. } => Some(()),
+            _ => None,
+        });
+        let after = spawn(alone(Some(key), vec![address])).unwrap();
+
+        // The receiver drops the peer whole, rather than keep a connection the peer no longer
+        // reads beside one it never told its topics on.
+        wait_for(&receiver, |event| match event {
+            NetEvent::PeerDown(_) => Some(()),
+            _ => None,
+        });
+        drop(before);
+
+        // The peer dials again, and what it publishes then arrives.
+        let authority = DevAuthority::dev_keypair();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut nonce = 0;
+
+        'heard: loop {
+            assert!(Instant::now() < deadline, "nothing the restarted peer published arrived");
+            after.send(NetCommand::PublishTx(SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority)));
+            nonce += 1;
+            let until = Instant::now() + Duration::from_secs(2);
+
+            while let Ok(event) = receiver.events.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                if let NetEvent::Tx { .. } = event {
+                    break 'heard;
+                }
+            }
         }
     }
 

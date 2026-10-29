@@ -71,6 +71,8 @@ pub enum NetEvent {
     Response { peer: PeerId, response: SyncResponse },
     #[document(summary = "A request this node sent got no answer.")]
     RequestFailed { peer: PeerId, error: String },
+    #[document(summary = "Something this node published reached none of its connected peers: none had said it takes that topic.")]
+    Unpublished,
     #[document(summary = "This node's miner found the seal for the block with this id.")]
     Sealed { block: Hash, seal: Seal },
     #[document(summary = "A client of this node submitted a transaction. The node answers on reply with its id, or why the mempool refused it.")]

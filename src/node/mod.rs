@@ -65,6 +65,8 @@ const MEMPOOL_CAPACITY: usize = 50_000;
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// How often the node logs where it stands, in milliseconds.
 const REPORT_EVERY: u64 = 30_000;
+/// How often the node asks every peer how far its chain got, in milliseconds.
+const STATUS_EVERY: u64 = 60_000;
 /// How often a node an upgrade will stop says so, in milliseconds.
 const UPGRADE_WARN_EVERY: u64 = 600_000;
 /// How long a miner works on one template before it is rebuilt with newer transactions and a
@@ -112,6 +114,8 @@ pub struct Node {
     peers: HashMap<PeerId, Peer>,
     sync: SyncState,
     reported: u64,
+    /// When it last asked every peer how far its chain got, in milliseconds.
+    asked_status: u64,
     /// The voting key, on a node that validates.
     validator: Option<Keypair>,
     /// When the loop first ran; 0 before.
@@ -490,6 +494,7 @@ impl Node {
             peers: HashMap::new(),
             sync: SyncState::default(),
             reported: 0,
+            asked_status: 0,
             validator: None,
             started: 0,
             bootnodes_at: None,
@@ -741,6 +746,7 @@ impl Node {
         }
 
         self.report_if_due(now);
+        self.ask_status_if_due(now);
         self.announce_bootnodes()?;
 
         Ok(())
@@ -949,6 +955,7 @@ impl Node {
                 self.send(NetCommand::Respond { id, response });
             }
             NetEvent::Response { peer, response } => self.on_response(peer, response, now)?,
+            NetEvent::Unpublished => self.counters.gossip_unpublished += 1,
             NetEvent::RequestFailed { peer, error } => {
                 log::debug!("[node] request to {peer} failed: {error}");
                 self.counters.requests_failed += 1;
@@ -1334,6 +1341,23 @@ impl Node {
         }
 
         Ok(())
+    }
+
+    /// Asks every peer how far its chain got every STATUS_EVERY. A peer's status comes as it
+    /// connects and when its gossip does not connect; a peer whose gossip stopped reaching this
+    /// node, while it built on a branch of its own, would be taken for where it was until then, and
+    /// a branch heavier than this node's never synced from. Asked again, it is.
+    fn ask_status_if_due(&mut self, now: u64) {
+        if now < self.asked_status.saturating_add(STATUS_EVERY) {
+            return;
+        }
+
+        self.asked_status = now;
+        let peers: Vec<PeerId> = self.peers.keys().copied().collect();
+
+        for peer in peers {
+            self.send(NetCommand::Request { peer, request: SyncRequest::Status });
+        }
     }
 
     /// Logs the height, peers and mempool every REPORT_EVERY, so a quiet node still shows it is alive.

@@ -561,6 +561,24 @@ fn a_block_from_the_future_makes_the_node_ask_its_sender() {
 }
 
 #[test]
+fn every_peer_is_asked_how_far_it_got_once_a_minute() {
+    let (mut node, mut net) = node(false);
+    let peer = PeerId::random();
+    net.events.send(NetEvent::PeerUp { peer, address: Multiaddr::empty() }).unwrap();
+    node.step(STATUS_EVERY).unwrap();
+    let asked = |net: &mut FakeNet| sent(net).iter().filter(|command| matches!(command, NetCommand::Request { peer: to, request: SyncRequest::Status } if *to == peer)).count();
+
+    // As it connected, and once a minute after: its gossip may no longer reach this node.
+    assert_eq!(asked(&mut net), 2, "as it connected, and the minute's");
+
+    node.step(STATUS_EVERY + 1_000).unwrap();
+    assert_eq!(asked(&mut net), 0, "not again within the minute");
+
+    node.step(STATUS_EVERY * 2).unwrap();
+    assert_eq!(asked(&mut net), 1);
+}
+
+#[test]
 fn peers_on_another_chain_are_never_asked_for_blocks() {
     let (mut follower, mut net) = node(false);
     let stranger = PeerId::random();

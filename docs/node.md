@@ -196,6 +196,24 @@ is the same each start, so a peer can be named by it in `--peer` as `/p2p/<id>`,
 when it is. A file that does not read stops the node rather than giving it a new id; move it aside
 for a new one. It signs gossip and connections, nothing on the chain.
 
+**A peer that comes back over a dead connection starts afresh.** gossipsub tells a peer the
+topics this node takes on their first connection alone. A peer that restarts, or moves behind its
+NAT, dials again before this node has timed its old connection out, so the new one is a second,
+and the peer never hears what this node subscribes to: nothing it publishes reaches this node,
+while this node's own gossip still reaches it. So a connection that comes the way a standing one
+came, both dialed by the peer or both by this node, drops the peer whole, and its next dial comes
+up alone, telling both sides' topics. Two nodes dialing each other at once make one each way,
+which both stand.
+
+**Status, once a minute.** A node asks every peer how far its chain got as it connects, when its
+gossip does not connect, and every `STATUS_EVERY`, 60 seconds. A peer whose gossip stopped arriving
+while it built on a branch of its own is seen for what it is within a minute, and synced from when
+its branch is heavier, rather than taken for where it was when its gossip stopped.
+
+**Published to nobody:** a block, batch or vote no connected peer takes, as no peer said it
+subscribes, counts as `gossip_unpublished` in `GET /node` and logs a warning at most once a
+minute; without peers, it is the usual best effort.
+
 ## Over Tor
 
 Tor carries TCP alone, and QUIC is UDP, so a node meets peers over Tor on libp2p's TCP transport,

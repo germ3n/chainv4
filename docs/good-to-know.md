@@ -1096,6 +1096,13 @@ voting finality it now goes back to the checkpoint and follows the node from the
   connection from the node itself. Behind nginx, the location needs the WebSocket upgrade headers.
 - **`GET /mining` is not in `GET /status`.** It asks the node's loop, as `GET /node` does, while
   `/status`, which the apps ask most, reads only the database.
+- **gossipsub tells its topics on a peer's first connection alone.** A peer back from a restart
+  before its old connection timed out arrives as a second connection and would never hear them,
+  publishing into nothing (libp2p-gossipsub 0.50's `on_connection_established` returns early for
+  `other_established > 0`). The net thread keeps each peer's connections and their direction
+  (`links`), and a second the same way as one standing drops the peer whole; it costs the peer one
+  redial. `gossip_unpublished` counts what still reaches nobody, and statuses asked once a minute
+  heal a fork while it is shallower than `max_reorg_depth`.
 - **A GPU is mined on once, under its native backend.** wgpu lists a card under each backend
   that reaches it; the same ids sort its best first and drop the rest. OpenGL reports other ids
   than Vulkan, Metal or DX12 for the same card, as Android's does for its Mali, so an OpenGL

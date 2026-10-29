@@ -127,6 +127,8 @@ pub struct Counters {
     pub gossip_rejected: u64,
     #[document(summary = "Peers banned for their faults.")]
     pub peers_banned: u64,
+    #[document(summary = "Blocks, transactions and votes it published that reached none of its connected peers, as when none had heard what it subscribes to.")]
+    pub gossip_unpublished: u64,
 }
 
 /// A connected peer, as the node keeps it.

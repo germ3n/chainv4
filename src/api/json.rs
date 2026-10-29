@@ -200,6 +200,7 @@ pub fn node(report: &NodeReport) -> Value {
             "requests_failed": counters.requests_failed,
             "connections": counters.connections,
             "gossip_dropped": counters.gossip_dropped,
+            "gossip_unpublished": counters.gossip_unpublished,
             "flooders_disconnected": counters.flooders_disconnected,
             "gossip_rejected": counters.gossip_rejected,
             "peers_banned": counters.peers_banned,
