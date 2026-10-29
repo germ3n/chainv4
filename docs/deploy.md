@@ -1,6 +1,6 @@
 # Deploying a fresh test chain
 
-How the VPS's test chain was last started from nothing (2026-10-28, commit `29934e3`), step by
+How the VPS's test chain was last started from nothing (2026-10-28, commit `767c233`), step by
 step, with everything enabled: a runbook for the next one. [Docker](docker.md) explains the
 pieces; this is the order they go in, and what bit along the way.
 
@@ -162,7 +162,7 @@ SHA-256s with the link.
 
 | What | Where |
 | --- | --- |
-| Genesis | `0x9a7fbd8953b9a3b0…` |
+| Genesis | `0xae6b05f578012606…`, named `chainv4 testnet` |
 | Swap contract, `swap.dev` | `contract:0xc4ad35b6…68fb7` |
 | Native DEX, `dex.dev` | `contract:0x6c1df38c…90a4` |
 | EVM DEX router | `0xfd9524e58c1a904b439e9a3292a95cf6562aa458` |
@@ -171,8 +171,9 @@ SHA-256s with the link.
 | Bitcoin relay, `btcrelay.dev` | `contract:0x717374cf…e9c0` (testnet4 from 157248) |
 | Bitcoin gateway, `btcgateway.dev` | `contract:0xc53df990…04e7` |
 | Swap.sol | `0xb3f77d55ac803f023df8f4d21fd1d103e5be2d50` |
-| Tokens `gold.dev`, `silver.dev`, `tusd.dev`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin; TETH on the EVM DEX |
+| Tokens `gold.dev`, `silver.dev`, `tusd.dev`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin; TETH `0x3c262351…88e8` on the EVM DEX |
 | Collections `pixels.dev`, `items.dev` | 3 NFTs; ids 1 and 2, 100 each |
-| Examples | `guestbook.dev`, `counter.dev`, Counter.sol `0x3ad60afc…b34f` |
-| Sample multisig | `multisig:0xa3a6f185…3fab`, 2 of 3, its contract `0x383057bb…1038` |
-| Apps | https://gofile.io/d/suZUx3EI |
+| Examples | `guestbook.dev`, `counter.dev`, Counter.sol `0x058f1d0b…3be5` |
+| Sample multisig | `multisig:0xba8f500e…a699`, 2 of 3, its contract `0xd7fe4c20…843a` |
+| Onion | `73z6qtdihyugsl2kc34zgcydgimojvro4avjledoap33653dqw77wjyd.onion` |
+| Apps | https://gofile.io/d/545eEVCW |
