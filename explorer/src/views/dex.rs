@@ -91,24 +91,59 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState) {
             return;
         }
 
-        super::table(ui, look, ("dex pools", state.evm), &["pool", "holds", "price", "volume, day", "volume, week", "fees, week"], |ui| {
-            for pool in &pools {
+        // Each pool as its row shows it: its pair, what it holds, its price, and its volumes and fees.
+        let rows: Vec<[String; 6]> = pools
+            .iter()
+            .map(|pool| {
                 let (a, b) = (symbol(ctx, &pool.a, state.evm), symbol(ctx, &pool.b, state.evm));
-                let chosen = state.chosen.as_deref() == Some(pool.share.to_string().as_str());
-
-                if ui.selectable_label(chosen, widgets::strong(format!("{a} / {b}"), 13.5)).clicked() {
-                    state.chosen = Some(pool.share.to_string());
-                }
-
-                ui.label(format!("{} and {}", shown(ctx, &pool.a, pool.reserve_a, state.evm), shown(ctx, &pool.b, pool.reserve_b, state.evm)));
-                ui.monospace(price(ctx, pool, state.evm).map_or("—".to_string(), |price| format!("{price:.6} {b}")));
                 let (day, week, fees) = (volume(&trades, pool, tip, DAY_MS / ms_per_block), volume(&trades, pool, tip, 7 * DAY_MS / ms_per_block), fees(&trades, pool, tip, 7 * DAY_MS / ms_per_block));
-                ui.monospace(shown(ctx, &pool.a, day, state.evm));
-                ui.monospace(shown(ctx, &pool.a, week, state.evm));
-                ui.monospace(shown(ctx, &pool.a, fees, state.evm));
-                ui.end_row();
+
+                [
+                    format!("{a} / {b}"),
+                    format!("{} and {}", shown(ctx, &pool.a, pool.reserve_a, state.evm), shown(ctx, &pool.b, pool.reserve_b, state.evm)),
+                    price(ctx, pool, state.evm).map_or("—".to_string(), |price| format!("{price:.6} {b}")),
+                    shown(ctx, &pool.a, day, state.evm),
+                    shown(ctx, &pool.a, week, state.evm),
+                    shown(ctx, &pool.a, fees, state.evm),
+                ]
+            })
+            .collect();
+        let mut pick = |ui: &mut Ui, pool: &DexPool, pair: &str| {
+            let chosen = state.chosen.as_deref() == Some(pool.share.to_string().as_str());
+
+            if ui.selectable_label(chosen, widgets::strong(pair, 13.5)).clicked() {
+                state.chosen = Some(pool.share.to_string());
             }
-        });
+        };
+
+        match look.narrow {
+            true => {
+                for (pool, [pair, holds, price, day, week, fees]) in pools.iter().zip(&rows) {
+                    super::list_row(ui, look, |ui| {
+                        ui.horizontal(|ui| {
+                            pick(ui, pool, pair);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.monospace(price));
+                        });
+                        ui.label(holds);
+                        ui.label(RichText::new(format!("volume {day} a day, {week} a week · fees {fees} a week")).small().color(look.palette.muted));
+                    });
+                }
+            }
+            false => {
+                super::table(ui, look, ("dex pools", state.evm), &["pool", "holds", "price", "volume, day", "volume, week", "fees, week"], |ui| {
+                    for (pool, [pair, holds, price, day, week, fees]) in pools.iter().zip(&rows) {
+                        pick(ui, pool, pair);
+                        ui.label(holds);
+
+                        for number in [price, day, week, fees] {
+                            ui.monospace(number);
+                        }
+
+                        ui.end_row();
+                    }
+                });
+            }
+        }
         ui.label(
             RichText::new(format!(
                 "Volumes and fees in each pool's first asset, from its last {EVENTS} trades at most, over about a day and a week of blocks at {} each.",
@@ -439,15 +474,36 @@ fn pool_page(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState, pool: &DexPool, n
             return;
         }
 
+        let side = |ctx: &mut Ctx, first: u256, second: u256| match (first == u256::ZERO, second == u256::ZERO) {
+            (true, true) => "—".to_string(),
+            (false, true) => shown(ctx, &pool.a, first, evm),
+            (true, false) => shown(ctx, &pool.b, second, evm),
+            (false, false) => format!("{} and {}", shown(ctx, &pool.a, first, evm), shown(ctx, &pool.b, second, evm)),
+        };
+
+        if look.narrow {
+            for activity in mine {
+                let [in_a, in_b, out_a, out_b] = in_pool(pool, activity).expect("filtered");
+                let (put, took) = (side(ctx, in_a, in_b), side(ctx, out_a, out_b));
+                super::list_row(ui, look, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(widgets::strong(activity.kind, 13.5).color(look.palette.ink));
+                        super::tx(ui, ctx, &activity.tx);
+                    });
+                    ui.label(format!("in {put} · out {took}"));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("block").small().color(look.palette.muted));
+                        super::block_link(ui, ctx, &activity.block, activity.height);
+                    });
+                });
+            }
+
+            return;
+        }
+
         super::table(ui, look, ("dex activity", share.clone()), &["what", "in", "out", "block", "transaction"], |ui| {
             for activity in mine {
                 let [in_a, in_b, out_a, out_b] = in_pool(pool, activity).expect("filtered");
-                let side = |ctx: &mut Ctx, first: u256, second: u256| match (first == u256::ZERO, second == u256::ZERO) {
-                    (true, true) => "—".to_string(),
-                    (false, true) => shown(ctx, &pool.a, first, evm),
-                    (true, false) => shown(ctx, &pool.b, second, evm),
-                    (false, false) => format!("{} and {}", shown(ctx, &pool.a, first, evm), shown(ctx, &pool.b, second, evm)),
-                };
                 ui.label(widgets::strong(activity.kind, 13.0));
                 ui.label(side(ctx, in_a, in_b));
                 ui.label(side(ctx, out_a, out_b));

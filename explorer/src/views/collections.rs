@@ -344,6 +344,34 @@ fn transfers(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection) {
         false => super::address(ui, ctx, text),
     };
 
+    if look.narrow {
+        for moved in &moves {
+            super::list_row(ui, look, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(widgets::strong(format!("#{}", moved.id), 13.5).color(look.palette.ink));
+
+                    if collection.multi() {
+                        ui.label(RichText::new(format!("× {}", moved.amount)).monospace());
+                    }
+
+                    super::tx(ui, ctx, &moved.tx);
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    party(ui, ctx, &moved.from, "minted");
+                    ui.label(RichText::new("→").color(look.palette.muted));
+                    party(ui, ctx, &moved.to, "burned");
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("block").small().color(look.palette.muted));
+                    super::block_link(ui, ctx, &moved.block, moved.height);
+                });
+            });
+        }
+
+        return;
+    }
+
     super::table(ui, look, ("transfers", &collection.address), &["block", "from", "to", "id", "amount", "transaction"], |ui| {
         for moved in &moves {
             super::block_link(ui, ctx, &moved.block, moved.height);

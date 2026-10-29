@@ -500,16 +500,28 @@ fn holdings(ui: &mut Ui, ctx: &mut Ctx, holder: &str) {
         }
 
         for (token, raw) in held {
-            ui.horizontal(|ui| {
-                let amount = match (raw, ctx.token(&token)) {
-                    (Some(raw), Some((decimals, symbol))) => format::amount(&raw, decimals, &symbol),
-                    (Some(raw), None) => format!("{raw} units"),
-                    (None, _) => "…".to_string(),
-                };
-                ui.label(RichText::new(amount).monospace().color(look.palette.ink));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| super::address(ui, ctx, &token));
-            });
-            widgets::rule(ui, &look.palette);
+            let amount = match (raw, ctx.token(&token)) {
+                (Some(raw), Some((decimals, symbol))) => format::amount(&raw, decimals, &symbol),
+                (Some(raw), None) => format!("{raw} units"),
+                (None, _) => "…".to_string(),
+            };
+            let amount = RichText::new(amount).monospace().color(look.palette.ink);
+
+            // On a phone, a long amount and the token beside it would run into each other: the
+            // token goes under it.
+            match look.narrow {
+                true => super::list_row(ui, look, |ui| {
+                    ui.label(amount);
+                    ui.horizontal(|ui| super::address(ui, ctx, &token));
+                }),
+                false => {
+                    ui.horizontal(|ui| {
+                        ui.label(amount);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| super::address(ui, ctx, &token));
+                    });
+                    widgets::rule(ui, &look.palette);
+                }
+            }
         }
     });
 }

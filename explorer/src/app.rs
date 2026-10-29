@@ -798,7 +798,7 @@ impl Explorer {
                     .on_hover_text(&name);
                 }
                 false => {
-                    if ui.add(egui::Button::new(RichText::new("‹").size(18.0)).min_size(egui::vec2(34.0, 30.0))).clicked() {
+                    if ui.add(egui::Button::new(RichText::new("‹").size(18.0)).min_size(egui::vec2(40.0, 30.0))).clicked() {
                         self.back();
                     }
                 }
@@ -931,6 +931,7 @@ impl Explorer {
             let scroll = egui::ScrollArea::vertical().id_salt("page").auto_shrink(false);
 
             self.scrolled.show(ui, scroll, |ui| {
+                layout::keep_focus_in_view(ui);
                 ui.vertical_centered(|ui| {
                     ui.set_max_width(ui.available_width().min(COLUMN));
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| match &self.view {
@@ -1010,10 +1011,20 @@ impl eframe::App for Explorer {
         }
 
         let bar = egui::Frame::new().fill(palette.nav).stroke(egui::Stroke::new(1.0, palette.line));
+        // A finger needs taller buttons and fields than a mouse: on a phone, upright or on its side.
+        let fingers = narrow || layout::touch(ui.ctx());
+        let sized = |ui: &mut Ui| {
+            if fingers {
+                layout::finger_sized(ui);
+            }
+        };
 
         match narrow {
             true => {
-                egui::Panel::top("bar").frame(bar.inner_margin(egui::Margin::symmetric(10, 8))).show(ui, |ui| self.bar(ui));
+                egui::Panel::top("bar").frame(bar.inner_margin(egui::Margin::symmetric(10, 8))).show(ui, |ui| {
+                    layout::finger_row(ui);
+                    self.bar(ui);
+                });
                 egui::Panel::bottom("tabs").frame(bar).show(ui, |ui| self.tabs(ui));
             }
             false => {
@@ -1021,17 +1032,29 @@ impl eframe::App for Explorer {
                     .exact_size(SIDEBAR)
                     .resizable(false)
                     .frame(bar.inner_margin(egui::Margin::symmetric(12, 0)))
-                    .show(ui, |ui| self.sidebar(ui, now));
+                    .show(ui, |ui| {
+                        sized(ui);
+                        self.sidebar(ui, now);
+                    });
                 egui::Panel::top("header")
                     .frame(egui::Frame::new().fill(palette.paper).inner_margin(egui::Margin::symmetric(16, 10)))
-                    .show(ui, |ui| self.header(ui));
+                    .show(ui, |ui| {
+                        if fingers {
+                            layout::finger_row(ui);
+                        }
+
+                        self.header(ui);
+                    });
             }
         }
 
         let margin = if narrow { egui::Margin::symmetric(10, 10) } else { egui::Margin::symmetric(16, 4) };
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(palette.paper).inner_margin(margin))
-            .show(ui, |ui| self.page(ui, now, narrow));
+            .show(ui, |ui| {
+                sized(ui);
+                self.page(ui, now, narrow);
+            });
 
         // The theme follows the setting, wherever it was changed.
         if self.palette.dark == self.settings.light_theme {

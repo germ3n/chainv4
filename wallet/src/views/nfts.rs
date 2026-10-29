@@ -447,7 +447,7 @@ fn opened(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, card: &Card, prepar
     let read = metadata(state, card).cloned();
 
     theme::card(ui, &palette, |ui| {
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             theme::caps(ui, &palette, &name);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::quiet(ui, &palette, "Close").clicked() {

@@ -293,7 +293,7 @@ fn selected_block(ui: &mut Ui, ctx: &mut Ctx, block: &Summary) {
     });
     ui.add_space(4.0);
     super::facts(ui, facts_look, "map_block", |facts| {
-        facts.row("id", |ui| super::copyable(ui, &format::short(&block.id)));
+        facts.row("id", |ui| super::copyable_as(ui, RichText::new(format::short(&block.id)).monospace(), &block.id));
         facts.row("parent", |ui| super::block(ui, ctx, &block.parent, &format::short(&block.parent)));
         facts.text("time", format!("{} UTC", format::utc(block.timestamp)));
         facts.row("producer", |ui| super::address(ui, ctx, &block.producer));

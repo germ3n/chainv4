@@ -309,6 +309,34 @@ fn recent(ui: &mut Ui, ctx: &mut Ctx, contract: &str) {
         return;
     }
 
+    if look.narrow {
+        for (hash, seen) in swaps.iter().rev().take(50) {
+            super::list_row(ui, look, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(widgets::strong(seen.state, 13.5).color(look.palette.ink));
+                    ui.monospace(format::short(hash));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(locked_item(ctx, &seen.token, &seen.amount, seen.item.as_ref().map(|(kind, id)| (kind.as_str(), id.as_str()))));
+                    ui.label(RichText::new("for").color(look.palette.muted));
+                    super::address(ui, ctx, &seen.recipient);
+                });
+                ui.horizontal_wrapped(|ui| {
+                    let muted = |text: String| RichText::new(text).small().color(look.palette.muted);
+                    ui.label(muted(format!("deadline {} · locked in", format::ago(seen.deadline, ctx.now))));
+                    super::block_link(ui, ctx, &seen.block, seen.height);
+                    super::tx(ui, ctx, &seen.locked_in);
+                });
+
+                if seen.state == "locked" {
+                    settled_text(ui, ctx, &finality(ctx, seen.height));
+                }
+            });
+        }
+
+        return;
+    }
+
     super::table(ui, look, ("swaps", contract.to_string()), &["hash", "state", "locks", "for", "deadline", "locked in", "finality"], |ui| {
         for (hash, seen) in swaps.iter().rev().take(50) {
             ui.monospace(format::short(hash));

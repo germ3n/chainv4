@@ -312,6 +312,25 @@ pub fn decided(outcome: &Outcome) -> String {
 fn payments(ui: &mut Ui, ctx: &mut Ctx, payments: &[crate::model::PaymentView]) {
     let look = ctx.look;
 
+    if look.narrow {
+        for (index, payment) in payments.iter().enumerate() {
+            super::list_row(ui, look, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("#{index}")).monospace().color(look.palette.muted));
+                    ui.label(RichText::new(ctx.coins(&payment.amount)).strong());
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    super::address(ui, ctx, &payment.from);
+                    ui.label(RichText::new("→").color(look.palette.muted));
+                    super::address(ui, ctx, &payment.to);
+                });
+            });
+        }
+
+        return;
+    }
+
     super::table(ui, look, "payments", &["#", "from", "to", "amount"], |ui| {
         for (index, payment) in payments.iter().enumerate() {
             ui.monospace(index.to_string());

@@ -440,7 +440,8 @@ fn header(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &Listing
                         }
                     }
                     Some(Ok(_)) => {
-                        ui.label(RichText::new("may not vote").small().color(palette.muted));
+                        // Whole, on the next line when it does not fit: never "may" here and "not vote" there.
+                        ui.add(egui::Label::new(RichText::new("may not vote").small().color(palette.muted)).extend());
                     }
                 }
             });
@@ -1144,9 +1145,10 @@ pub fn describe(change: &Change, coin: &Coin) -> String {
             };
 
             format!(
-                "Fees: {} gas a block, {}‰ of each fee burned, {} gas schedule, {pricing}",
+                "Fees: {} gas a block, {}% of each fee burned, {} gas schedule, {pricing}",
                 format::thousands(&fees.block_gas_limit.to_string()),
-                fees.burn_permille,
+                // In percent, as the explorer shows it: 500‰ is 50%, 25‰ is 2.5%.
+                f64::from(fees.burn_permille) / 10.0,
                 fees.schedule.name()
             )
         }
@@ -1620,7 +1622,7 @@ mod tests {
                     schedule: ScheduleConfig::Weighted(Weighted { per_tx: 1_000, per_byte: 10, per_code_byte: 20, fuel_per_gas: 1 }),
                     pricing: PricingConfig::Bid(Bid { min_price: u256::new(7) }),
                 }),
-                "Fees: 50,000,000 gas a block, 500‰ of each fee burned, weighted gas schedule, bids of at least 0.000000000000000007 DEV a gas",
+                "Fees: 50,000,000 gas a block, 50% of each fee burned, weighted gas schedule, bids of at least 0.000000000000000007 DEV a gas",
             ),
             (
                 Change::Fees(FeeConfig {

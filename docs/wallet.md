@@ -917,7 +917,11 @@ it shares with the explorer (see [The ui crate](development.md#the-ui-crate)).
 - **Layout:** each page is a column of cards beside a sidebar with the account, the pages, and
   the light client's state. In a window too short for them all, the pages scroll, the light
   client's state, Lock and the theme staying at the sidebar's bottom
-  (`chainv4_ui::layout::sidebar`). Below 640 points wide, as on a phone, the sidebar gives way to a bar
+  (`chainv4_ui::layout::sidebar`), and in one too short even for those, as a phone on its side
+  with the keyboard up, the whole sidebar scrolls; in one under 560 points tall, as a phone on its side, the
+  sidebar's heading closes up to leave the pages more room. On a touch screen, buttons and fields
+  are a finger tall, 40 points, and the field being typed in scrolls into sight above the
+  keyboard. Below 640 points wide, as on a phone, the sidebar gives way to a bar
   on top with the account, the light client's dot and Lock, and tabs along the bottom: sharing
   the width when they fit, otherwise each wide enough for its name in a row that scrolls
   sideways, faded at an edge where more wait, and bringing the page opened into view. A card's

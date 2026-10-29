@@ -19,6 +19,15 @@ pub fn short(text: &str) -> String {
     format!("{kind}{head}…{tail}")
 }
 
+/// A peer's address with its peer id cut to its ends, as peer ids show elsewhere:
+/// `/ip4/10.0.0.1/udp/50014/quic-v1/p2p/12D3Ko…n6Xb`. An address naming no peer shows whole.
+pub fn multiaddr(text: &str) -> String {
+    match text.rsplit_once("/p2p/") {
+        Some((at, peer)) => format!("{at}/p2p/{}", short(peer)),
+        None => text.to_string(),
+    }
+}
+
 /// Digits grouped in threes: 1,234,567.
 pub fn thousands(digits: &str) -> String {
     let mut grouped = String::new();
@@ -160,6 +169,15 @@ mod tests {
         assert_eq!(short("ed25519:0x3b6a91aabbccddeeff00f2c0"), "ed25519:0x3b6a91…f2c0");
         assert_eq!(short("0x0011223344556677889900aabbccddeeff"), "0x001122…eeff");
         assert_eq!(short("0x1234"), "0x1234");
+    }
+
+    #[test]
+    fn a_peer_s_address_cuts_its_peer_id_alone() {
+        assert_eq!(
+            multiaddr("/ip4/127.0.0.1/udp/50014/quic-v1/p2p/12D3KooWDDtH1DwHgXqoXE2aMpfwB7xBHu9WKYYGkXdidqBbn6Xb"),
+            "/ip4/127.0.0.1/udp/50014/quic-v1/p2p/12D3Ko…n6Xb"
+        );
+        assert_eq!(multiaddr("/ip4/150.40.117.173/udp/4001/quic-v1"), "/ip4/150.40.117.173/udp/4001/quic-v1");
     }
 
     #[test]

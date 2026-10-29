@@ -98,21 +98,43 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
     let font = ui.style().text_styles.get(&TextStyle::Small).cloned().unwrap_or_else(|| egui::FontId::proportional(11.5));
     let size = font.size;
     // Whole, never a letter a line: in a row that wraps, one that would not fit starts the next line.
-    let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font, color).size().x) + 20.0;
+    let measured = ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font, color).size());
+    let width = measured.x + 20.0;
 
     if ui.layout().main_wrap && ui.available_size_before_wrap().x < width {
         ui.end_row();
     }
 
-    Frame::new()
-        .fill(color.gamma_multiply(0.14))
-        .stroke(Stroke::new(1.0, color.gamma_multiply(0.6)))
-        .corner_radius(99.0)
-        .inner_margin(Margin::symmetric(9, 2))
-        .show(ui, |ui| {
-            ui.add(egui::Label::new(RichText::new(text).size(size).color(color)).extend());
-        })
-        .response
+    // Its own size, however tall the row: in a row beside taller things it would stretch to their
+    // height, a pill grown into a circle.
+    let height = measured.y + 6.0;
+    ui.allocate_ui_with_layout(egui::vec2(width, height), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        Frame::new()
+            .fill(color.gamma_multiply(0.14))
+            .stroke(Stroke::new(1.0, color.gamma_multiply(0.6)))
+            .corner_radius(99.0)
+            .inner_margin(Margin::symmetric(9, 2))
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(text).size(size).color(color)).extend());
+            })
+            .response
+    })
+    .inner
+}
+
+/// In a row that wraps, starts the next line unless buttons with these texts all fit on this one:
+/// a choice of a few moves to the next line whole, rather than one of them left behind.
+pub fn together(ui: &mut Ui, texts: &[&str]) {
+    let font = TextStyle::Button.resolve(ui.style());
+    let (padding, gap) = (ui.spacing().button_padding.x, ui.spacing().item_spacing.x);
+    let width: f32 = texts
+        .iter()
+        .map(|text| ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE).size().x) + 2.0 * padding + gap)
+        .sum();
+
+    if ui.layout().main_wrap && ui.available_size_before_wrap().x < width {
+        ui.end_row();
+    }
 }
 
 /// A small dot in a color, before a status.
@@ -273,5 +295,60 @@ mod tests {
         assert!(rect.height() < 3.0 * line, "one line, not a letter a line: {rect:?}");
         assert!(rect.width() > rect.height(), "wider than tall: {rect:?}");
         assert!(rect.right() <= screen.right() + 1.0, "within the row: {rect:?}");
+    }
+
+    #[test]
+    fn a_pill_beside_taller_things_keeps_its_own_height() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(380.0, 400.0));
+        let (mut pill_rect, mut row) = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                row = ui
+                    .horizontal_wrapped(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label("DEV");
+                            ui.label("the coin");
+                            ui.label("nonce 0");
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            pill_rect = pill(ui, "Proven", Color32::GOLD).rect;
+                            ui.label("0");
+                        });
+                    })
+                    .response
+                    .rect;
+            });
+            output.textures_delta.clear();
+        }
+
+        let line = ctx.fonts_mut(|fonts| fonts.row_height(&egui::FontId::proportional(11.5)));
+
+        assert!(row.height() > 3.0 * line, "the row is tall: {row:?}");
+        assert!(pill_rect.height() < 2.0 * line, "the pill is not: {pill_rect:?}");
+        assert!(pill_rect.width() > pill_rect.height(), "wider than tall: {pill_rect:?}");
+    }
+
+    #[test]
+    fn a_choice_that_does_not_fit_after_its_label_moves_to_the_next_line_whole() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(260.0, 400.0));
+        let (mut label, mut first, mut second) = (egui::Rect::NOTHING, egui::Rect::NOTHING, egui::Rect::NOTHING);
+
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    label = ui.label("Follow its test network:").rect;
+                    together(ui, &["testnet4", "signet"]);
+                    first = ui.selectable_label(true, "testnet4").rect;
+                    second = ui.selectable_label(false, "signet").rect;
+                });
+            });
+            output.textures_delta.clear();
+        }
+
+        assert!(first.top() > label.bottom() - 1.0, "below the label: {first:?} {label:?}");
+        assert!((first.top() - second.top()).abs() < 1.0, "side by side: {first:?} {second:?}");
     }
 }

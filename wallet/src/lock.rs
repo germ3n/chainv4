@@ -346,9 +346,14 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             ui.add_space(6.0);
 
             for (position, answer) in asked.iter().zip(answers.iter_mut()) {
-                ui.horizontal_wrapped(|ui| {
-                    ui.add_sized([72.0, 24.0], egui::Label::new(RichText::new(format!("Word {}", position + 1)).color(palette.muted)));
-                    secret(ui, egui::TextEdit::singleline(&mut **answer).desired_width(f32::INFINITY));
+                // The word's number beside its field, the fields lined up under each other.
+                ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(egui::vec2(72.0, ui.spacing().interact_size.y), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_width(72.0);
+                        ui.label(RichText::new(format!("Word {}", position + 1)).color(palette.muted));
+                    });
+                    let width = ui.available_width();
+                    secret(ui, egui::TextEdit::singleline(&mut **answer).desired_width(width));
                 });
             }
 
@@ -567,14 +572,22 @@ pub fn words_grid(ui: &mut Ui, palette: &Palette, phrase: &Phrase) {
     let columns = if ui.available_width() < 320.0 { 2 } else { 3 };
     let rows = words.len().div_ceil(columns);
 
-    egui::Grid::new("words").num_columns(2 * columns).spacing([10.0, 8.0]).show(ui, |ui| {
+    egui::Grid::new("words").num_columns(2 * columns).spacing([6.0, 8.0]).show(ui, |ui| {
         for row in 0..rows {
             for column in 0..columns {
                 let position = column * rows + row;
 
                 // Never broken across lines: a word is at most 8 letters, and one split reads as two.
+                // A number sits close to its word and further from the word before it, so the
+                // eight-letter ones do not run into the next column's number.
                 if let Some(word) = words.get(position) {
-                    ui.add(egui::Label::new(RichText::new(format!("{:>2}", position + 1)).monospace().color(palette.muted)).extend());
+                    ui.horizontal(|ui| {
+                        if column > 0 {
+                            ui.add_space(WORD_GAP);
+                        }
+
+                        ui.add(egui::Label::new(RichText::new(format!("{:>2}", position + 1)).monospace().color(palette.muted)).extend());
+                    });
                     ui.add(egui::Label::new(RichText::new(*word).monospace().color(palette.ink)).extend());
                 }
             }
@@ -583,6 +596,9 @@ pub fn words_grid(ui: &mut Ui, palette: &Palette, phrase: &Phrase) {
         }
     });
 }
+
+/// The room before each column of words but the first, besides the grid's own spacing.
+const WORD_GAP: f32 = 10.0;
 
 /// Three positions among this many, all different, in order.
 fn three_of(count: usize) -> [usize; 3] {

@@ -353,7 +353,10 @@ version row and its release notices.
 - **tabs along the bottom:** Home, Blocks (the map), Mempool, Tokens and More, which lists the
   rest, NFTs, Multisig, Names, Rich list & supply, DEX, Swaps and Tools among them;
 - **pages that stack:** tables become rows of a few lines each, facts sit under their names, and
-  charts one above another.
+  charts one above another;
+- **buttons and fields a finger tall,** 40 points, as on any touch screen, a phone on its side
+  included, where the sidebar layout shows; the field being typed in scrolls into sight above
+  the keyboard.
 
 **Everywhere:**
 - the search box takes a height, a block or transaction id, an address, or a name such as
@@ -361,7 +364,8 @@ version row and its release notices.
 - every block, transaction and address is a link. Right-clicking one, or holding a finger on it,
   opens a menu to copy it;
 - every other id, such as a hash or a peer, copies when clicked or tapped, and says **Copied**
-  for a moment;
+  for a moment. One shown cut short copies whole, as a peer's address on the Network page, whose
+  peer id shows as `12D3Ko…n6Xb`;
 - a page opened anew starts at its top;
 - a swipe scrolls the page wherever it starts: on a touch screen text is not selectable, and
   nothing inside a page takes a drag for itself but the map.

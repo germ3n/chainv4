@@ -66,7 +66,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
 
     ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             theme::caps(ui, &palette, "Lately");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.link("All activity").clicked() {

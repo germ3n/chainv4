@@ -57,8 +57,18 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
             ui.selectable_value(&mut state.kind, kind, name);
         }
 
-        ui.separator();
         let order = if state.oldest_first { "Oldest first" } else { "Newest first" };
+        // A line between the kinds and the order while they share a row; on a row of its own, as
+        // on a phone, the order needs none.
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(order.to_string(), font, egui::Color32::WHITE).size().x) + 2.0 * ui.spacing().button_padding.x;
+
+        match ui.available_size_before_wrap().x > width + 3.0 * ui.spacing().item_spacing.x {
+            true => {
+                ui.separator();
+            }
+            false => ui.end_row(),
+        }
 
         if ui.selectable_label(false, order).on_hover_text("Turn the order round").clicked() {
             state.oldest_first = !state.oldest_first;

@@ -792,6 +792,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
         ui.checkbox(&mut ctx.settings.bitcoin_main, "Follow Bitcoin");
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut ctx.settings.bitcoin_test, "Follow its test network:");
+            chainv4_ui::widgets::together(ui, &["testnet4", "signet"]);
             ui.selectable_value(&mut ctx.settings.bitcoin_test_network, "testnet4".to_string(), "testnet4");
             ui.selectable_value(&mut ctx.settings.bitcoin_test_network, "signet".to_string(), "signet");
         });

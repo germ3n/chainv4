@@ -416,6 +416,30 @@ fn evm_bridge(ui: &mut Ui, ctx: &mut Ctx, gateway: &str) {
         if !made.is_empty() {
             ui.add_space(8.0);
             widgets::caps(ui, &look.palette, "Wrapped assets");
+            if look.narrow {
+                for asset in &made {
+                    let original = party(&asset.asset);
+                    super::list_row(ui, look, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(widgets::strong(kind_name(asset.kind), 13.5).color(look.palette.ink));
+                            super::address(ui, ctx, &asset.here);
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new("stands for").small().color(look.palette.muted));
+
+                            match original.is_empty() {
+                                true => ui.label(format!("the coin, {}", chainv4::swap::evm::symbol(asset.origin))),
+                                false => ui.monospace(format::short(&original)).on_hover_text(&original),
+                            };
+                            ui.label(RichText::new(format!("on {} · made in", chain(ctx, asset.origin))).small().color(look.palette.muted));
+                            super::tx(ui, ctx, &asset.tx);
+                        });
+                    });
+                }
+
+                return;
+            }
+
             super::table(ui, look, ("bridge wrapped", gateway.to_string()), &["here", "stands for", "kind", "from", "made in"], |ui| {
                 for asset in &made {
                     super::address(ui, ctx, &asset.here);
@@ -439,23 +463,49 @@ fn transfers_table(ui: &mut Ui, ctx: &mut Ctx, gateway: &str, crossings: &[Cross
     let look = ctx.look;
     let threshold = threshold(ctx);
 
+    // Each crossing's way, chain, nonce, and state in its color.
+    let shown = |ctx: &Ctx, crossing: &Crossing| {
+        let (way, chain_id, nonce) = match crossing.way {
+            Way::Out { nonce, target } => ("out", Some(target), Some(nonce)),
+            Way::In { source, nonce } => ("in", Some(source), Some(nonce)),
+            Way::Arriving => ("in", None, None),
+        };
+        let state = crossing.state(threshold);
+        let color = match crossing.way {
+            Way::In { .. } => look.palette.good,
+            _ if state.starts_with("signed") => look.palette.accent,
+            _ => look.palette.warn,
+        };
+
+        (way, chain_id.map_or_else(|| "—".to_string(), |id| chain(ctx, id)), nonce.map_or_else(|| "—".to_string(), |nonce| nonce.to_string()), state, color)
+    };
+
+    if look.narrow {
+        for crossing in crossings.iter().take(50) {
+            let (way, chain, nonce, state, color) = shown(ctx, crossing);
+            super::list_row(ui, look, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(widgets::strong(way, 13.5).color(look.palette.ink));
+                    crossing_link(ui, ctx, &crossing.digest);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.colored_label(color, &state));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("{chain} · nonce {nonce} · in")).small().color(look.palette.muted));
+                    super::tx(ui, ctx, crossing.done_in.as_deref().unwrap_or(&crossing.tx));
+                });
+            });
+        }
+
+        return;
+    }
+
     super::table(ui, look, ("bridge transfers", gateway.to_string()), &["digest", "way", "chain", "nonce", "state", "in"], |ui| {
         for crossing in crossings.iter().take(50) {
             crossing_link(ui, ctx, &crossing.digest);
-            let (way, chain_id, nonce) = match crossing.way {
-                Way::Out { nonce, target } => ("out", Some(target), Some(nonce)),
-                Way::In { source, nonce } => ("in", Some(source), Some(nonce)),
-                Way::Arriving => ("in", None, None),
-            };
+            let (way, chain, nonce, state, color) = shown(ctx, crossing);
             ui.label(way);
-            ui.label(chain_id.map_or_else(|| "—".to_string(), |id| chain(ctx, id)));
-            ui.monospace(nonce.map_or_else(|| "—".to_string(), |nonce| nonce.to_string()));
-            let state = crossing.state(threshold);
-            let color = match crossing.way {
-                Way::In { .. } => look.palette.good,
-                _ if state.starts_with("signed") => look.palette.accent,
-                _ => look.palette.warn,
-            };
+            ui.label(chain);
+            ui.monospace(nonce);
             ui.colored_label(color, state);
             super::tx(ui, ctx, crossing.done_in.as_deref().unwrap_or(&crossing.tx));
             ui.end_row();
@@ -641,7 +691,8 @@ fn relay(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &str) {
                 match tip {
                     Some(tip) => {
                         let hash = tip.first().map(bytes_hex).map(|hash| shown_hash(&hash)).unwrap_or_default();
-                        ui.label(format!("at Bitcoin height {}", format::thousands(&number(tip.get(1)).to_string())));
+                        ui.label(format!("at Bitcoin height {},", format::thousands(&number(tip.get(1)).to_string())));
+                        ui.label(RichText::new("block").color(look.palette.muted));
                         ui.monospace(format::short(&hash)).on_hover_text(hash);
                     }
                     None => {

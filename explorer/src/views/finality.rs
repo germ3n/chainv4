@@ -113,7 +113,8 @@ fn voters(ui: &mut Ui, ctx: &mut Ctx) {
 
         super::table(ui, look, "active", &["voter", "account", "weight"], |ui| {
             for member in &active {
-                super::copyable(ui, &format::short(&text(member, "voter")));
+                let voter = text(member, "voter");
+                super::copyable_as(ui, RichText::new(format::short(&voter)).monospace(), &voter);
                 super::address(ui, ctx, &text(member, "account"));
                 ui.monospace(ctx.coins(&text(member, "weight")));
                 ui.end_row();
@@ -160,7 +161,8 @@ fn voters(ui: &mut Ui, ctx: &mut Ctx) {
 
         super::table(ui, look, "bonded", &["voter", "account", "bond", "active", "slashed"], |ui| {
             for validator in &bonded {
-                super::copyable(ui, &format::short(&text(validator, "voter")));
+                let voter = text(validator, "voter");
+                super::copyable_as(ui, RichText::new(format::short(&voter)).monospace(), &voter);
                 super::address(ui, ctx, &text(validator, "account"));
                 ui.monospace(ctx.coins(&text(validator, "bond")));
                 ui.label(active_text(validator));

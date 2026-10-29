@@ -701,12 +701,12 @@ fn earnings(ui: &mut Ui, ctx: &mut Ctx, from: &Address, claim: Option<&Result<Va
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Earnings");
 
-        // A node with no pool says so at both; the pool's own answer is the plainer.
+        // A node with no pool says so at both: said once, with where to look instead.
         if let Some(Err(failure)) = standing
             && failure.status == NOT_FOUND
         {
-            ui.label(RichText::new("This node runs no mining pool.").color(palette.ink));
-            note(ui, &format!("{}. If your pool runs on another node, set its node below.", capital(&failure.message)));
+            ui.label(RichText::new(format!("{}.", capital(&failure.message))).color(palette.ink));
+            note(ui, "If your pool runs on another node, set its node below.");
 
             return;
         }

@@ -599,9 +599,9 @@ fn start(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
 
         let form = &mut state.form;
         super::row(ui, &palette, "Deadlines", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut form.first).desired_width(40.0));
+            ui.add(egui::TextEdit::singleline(&mut form.first).desired_width(56.0));
             ui.label("h for yours,");
-            ui.add(egui::TextEdit::singleline(&mut form.second).desired_width(40.0));
+            ui.add(egui::TextEdit::singleline(&mut form.second).desired_width(56.0));
             ui.label("h for theirs");
         });
         ui.add_space(6.0);

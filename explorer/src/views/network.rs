@@ -7,7 +7,7 @@ use {
     crate::format,
     crate::model::{Device, MiningView, NodeRelease, NodeView, Peer, UpgradeView},
     chainv4_ui::{Palette, widgets},
-    egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Ui, pos2, vec2},
+    egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Ui, Vec2, vec2},
 };
 
 /// Where the stream stands, for the page to say.
@@ -171,7 +171,7 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
             facts.row("listening", |ui| {
                 ui.vertical(|ui| {
                     for address in &node.listening {
-                        super::copyable(ui, address);
+                        peer_address(ui, address);
                     }
                 });
             });
@@ -194,12 +194,18 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                     }
 
                     for address in bootnodes {
-                        super::copyable(ui, address);
+                        peer_address(ui, address);
                     }
                 });
             });
         });
     });
+}
+
+/// Where a node is reached, with its peer id cut short to keep it a line, as small as a peer's
+/// address in the list; it copies whole.
+fn peer_address(ui: &mut Ui, address: &str) {
+    super::copyable_label(ui, egui::Label::new(RichText::new(format::multiaddr(address)).monospace().small()).wrap(), address);
 }
 
 /// How a line about the node reads: well, as a warning, as trouble, or quietly.
@@ -428,14 +434,30 @@ fn device(ui: &mut Ui, look: Look, device: &Device, fastest: f64) {
     });
 }
 
-/// What the node counted since it started, two to a row.
+/// What the node counted since it started, two to a row; on a phone one, its count on the right,
+/// the stripes across the card.
 fn counters(ui: &mut Ui, look: Look, node: &NodeView) {
     let per_row = if look.narrow { 1 } else { 2 };
+    let gap = 18.0;
+    let grid = egui::Grid::new("counters").num_columns(2 * per_row).striped(true).spacing([gap, 4.0]);
+    let grid = match look.narrow {
+        true => grid.min_col_width(((ui.available_width() - gap) / 2.0).floor()),
+        false => grid,
+    };
 
-    egui::Grid::new("counters").num_columns(2 * per_row).striped(true).spacing([18.0, 4.0]).show(ui, |ui| {
+    grid.show(ui, |ui| {
         for (index, (name, count)) in node.counters.iter().enumerate() {
             ui.label(RichText::new(name.replace('_', " ")).color(look.palette.muted));
-            ui.monospace(format::thousands(&count.to_string()));
+            let count = RichText::new(format::thousands(&count.to_string())).monospace();
+
+            match look.narrow {
+                true => {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(count));
+                }
+                false => {
+                    ui.label(count);
+                }
+            }
 
             if index % per_row == per_row - 1 {
                 ui.end_row();
@@ -444,9 +466,13 @@ fn counters(ui: &mut Ui, look: Look, node: &NodeView) {
     });
 }
 
-/// This node in the middle and its peers around it, joined more thickly the more they gossiped.
+/// This node in the middle and its peers around it, joined more thickly the more they gossiped. On
+/// a phone, a few peers take less height than many.
 fn graph(ui: &mut Ui, look: Look, node: &NodeView, height: u64) {
-    let side = if look.narrow { ui.available_width().min(300.0) } else { 300.0 };
+    let side = match look.narrow {
+        true => ui.available_width().min(graph_height(node.peers.len())),
+        false => 300.0,
+    };
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), side), Sense::hover());
     let painter = ui.painter_at(rect);
     let center = rect.center();
@@ -465,19 +491,36 @@ fn graph(ui: &mut Ui, look: Look, node: &NodeView, height: u64) {
         };
 
         painter.line_segment([center, at], Stroke::new(width, color.gamma_multiply(0.6)));
-        dot(&painter, palette, at, 8.0, color, &format::short(&peer.id));
+        dot(&painter, palette, at, 8.0, color, &format::short(&peer.id), vec2(angle.cos(), angle.sin()));
     }
 
-    dot(&painter, palette, center, 13.0, look.roles.main, "this node");
+    dot(&painter, palette, center, 13.0, look.roles.main, "this node", vec2(0.0, 1.0));
 
     if node.peers.is_empty() {
         painter.text(center + vec2(0.0, 48.0), Align2::CENTER_CENTER, "no peers connected", FontId::proportional(12.0), palette.bad);
     }
 }
 
-fn dot(painter: &egui::Painter, palette: Palette, at: Pos2, radius: f32, color: Color32, label: &str) {
+/// How tall the peers' graph is on a phone, for this many peers: room for their ring and its
+/// labels, and no more.
+fn graph_height(peers: usize) -> f32 {
+    match peers {
+        0..=2 => 170.0,
+        3..=6 => 240.0,
+        _ => 300.0,
+    }
+}
+
+/// A node as a dot, its label beside it on the side away from the middle, off the line that joins
+/// them.
+fn dot(painter: &egui::Painter, palette: Palette, at: Pos2, radius: f32, color: Color32, label: &str, away: Vec2) {
     painter.circle_filled(at, radius, color);
-    painter.text(pos2(at.x, at.y + radius + 8.0), Align2::CENTER_CENTER, label, FontId::monospace(10.0), palette.soft);
+    let side = |part: f32| match part {
+        part if part < -0.3 => egui::Align::Max,
+        part if part > 0.3 => egui::Align::Min,
+        _ => egui::Align::Center,
+    };
+    painter.text(at + away * (radius + 3.0), Align2([side(away.x), side(away.y)]), label, FontId::monospace(10.0), palette.soft);
 }
 
 fn heard(peer: &Peer) -> u64 {
@@ -534,7 +577,7 @@ fn peers(ui: &mut Ui, ctx: &mut Ctx, peers: &[Peer], height: u64) {
 
     super::table(ui, look, "peers", &["peer", "address", "connected", "heard", "their height", "justified"], |ui| {
         for peer in peers {
-            super::copyable(ui, &format::short(&peer.id));
+            super::copyable_as(ui, RichText::new(format::short(&peer.id)).monospace(), &peer.id);
             ui.monospace(&peer.address);
             ui.label(RichText::new(format::ago(peer.since, ctx.now)).color(palette.muted));
             ui.horizontal(|ui| {

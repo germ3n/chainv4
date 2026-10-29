@@ -32,6 +32,8 @@ const MAX_CHECKED: usize = 2_000;
 /// Below this width, in points, as on a phone, the sidebar gives way to a bar on top and tabs at
 /// the bottom.
 const NARROW: f32 = 640.0;
+/// Below this height, in points, as a phone on its side, the sidebar's heading takes less room.
+const SHORT: f32 = 560.0;
 /// How many pages the back gesture remembers.
 const VISITED: usize = 32;
 /// What the titles call the network while no name is known for it: before its node answers, on a
@@ -775,6 +777,7 @@ impl Wallet {
         let mut opened = None;
 
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            chainv4_ui::layout::keep_focus_in_view(ui);
             ui.vertical_centered(|ui| {
                 ui.add_space((tallest * 0.16).max(24.0));
                 ui.set_max_width(ui.available_width().min(380.0));
@@ -884,7 +887,10 @@ impl Wallet {
                 }
             },
             |app, ui| {
-                ui.add_space(26.0);
+                // A short window, as a phone on its side, keeps its room for the pages.
+                let short = ui.ctx().content_rect().height() < SHORT;
+                let gap = |tall: f32| if short { (tall / 3.0).round() } else { tall };
+                ui.add_space(gap(26.0));
                 ui.horizontal(|ui| {
                     ui.add_space(6.0);
                     ui.vertical(|ui| {
@@ -897,12 +903,12 @@ impl Wallet {
                         });
                     });
                 });
-                ui.add_space(24.0);
+                ui.add_space(gap(24.0));
 
                 if !app.holders.is_empty() {
                     theme::caps(ui, &palette, "Account");
                     app.account_picker(ui, ui.available_width());
-                    ui.add_space(18.0);
+                    ui.add_space(gap(18.0));
                 }
 
                 for &(page, name) in views::nav(app.settings.role()) {
@@ -1099,7 +1105,13 @@ impl eframe::App for Wallet {
         if !matches!(self.lock, Lock::Open) {
             egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(palette.paper).inner_margin(egui::Margin::symmetric(14, 0)))
-            .show(ui, |ui| self.lock_screen(ui));
+            .show(ui, |ui| {
+                if chainv4_ui::layout::is_narrow(ui.available_width()) || chainv4_ui::layout::touch(ui.ctx()) {
+                    chainv4_ui::layout::finger_sized(ui);
+                }
+
+                self.lock_screen(ui);
+            });
             self.active = time;
             ui.ctx().request_repaint_after(Duration::from_millis(500));
 
@@ -1124,10 +1136,20 @@ impl eframe::App for Wallet {
         self.go_back(ui);
         let narrow = ui.available_width() < NARROW;
         let bar = egui::Frame::new().fill(palette.nav).stroke(egui::Stroke::new(1.0, palette.line));
+        // A finger needs taller buttons and fields than a mouse: on a phone, upright or on its side.
+        let fingers = narrow || chainv4_ui::layout::touch(ui.ctx());
+        let sized = |ui: &mut Ui| {
+            if fingers {
+                chainv4_ui::layout::finger_sized(ui);
+            }
+        };
 
         match narrow {
             true => {
-                egui::Panel::top("bar").frame(bar.inner_margin(egui::Margin::symmetric(14, 10))).show(ui, |ui| self.top_bar(ui));
+                egui::Panel::top("bar").frame(bar.inner_margin(egui::Margin::symmetric(14, 10))).show(ui, |ui| {
+                    chainv4_ui::layout::finger_row(ui);
+                    self.top_bar(ui);
+                });
                 egui::Panel::bottom("tabs").frame(bar).show(ui, |ui| self.tabs(ui));
             }
             false => {
@@ -1135,7 +1157,10 @@ impl eframe::App for Wallet {
                     .exact_size(236.0)
                     .resizable(false)
                     .frame(bar.inner_margin(egui::Margin::symmetric(16, 0)))
-                    .show(ui, |ui| self.sidebar(ui));
+                    .show(ui, |ui| {
+                        sized(ui);
+                        self.sidebar(ui);
+                    });
             }
         }
 
@@ -1145,11 +1170,16 @@ impl eframe::App for Wallet {
         let mut lock = None;
         let chosen = self.settings.current().to_string();
         let current = self.holders.iter().position(|holder| holder.id() == chosen).unwrap_or(0);
-        let margin = if narrow { egui::Margin::symmetric(14, 0) } else { egui::Margin::ZERO };
+        // Beside the sidebar, the page keeps off its edge and the screen's: a window too narrow for
+        // the whole column, as a phone on its side, would otherwise run the cards into both.
+        let margin = if narrow { egui::Margin::symmetric(14, 0) } else { egui::Margin::symmetric(20, 0) };
         egui::CentralPanel::default().frame(egui::Frame::new().fill(palette.paper).inner_margin(margin)).show(ui, |ui| {
+            sized(ui);
+
             let scroll = egui::ScrollArea::vertical().id_salt("page").auto_shrink(false);
 
             self.scrolled.show(ui, scroll, |ui| {
+                chainv4_ui::layout::keep_focus_in_view(ui);
                 ui.vertical_centered(|ui| {
                     // Never wider than there is room for: a centered column widens to its width.
                     ui.set_max_width(ui.available_width().min(760.0));

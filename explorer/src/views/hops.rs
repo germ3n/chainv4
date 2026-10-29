@@ -193,48 +193,102 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Outcome>, 
 fn tree(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], outcome: Option<&Outcome>, state: &mut HopState) {
     let look = ctx.look;
     chainv4_ui::widgets::caps(ui, &look.palette, "Call tree");
-    egui::ScrollArea::both()
-        .id_salt("hop_tree")
-        .max_height(if look.narrow { 260.0 } else { 420.0 })
-        .scroll_source(super::NO_DRAG)
-        .show(ui, |ui| {
-        for (index, hop) in hops.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.add_space(f32::from(hop.depth) * 18.0);
-                super::dot(ui, color(look, hop));
-                let text = format!(
-                    "#{index} {} -> {}  {}",
-                    format::short(&hop.from),
-                    format::short(&hop.to),
-                    describe(ctx, hop)
-                );
 
-                if ui.selectable_label(state.selected == Some(index), RichText::new(text).monospace()).clicked() {
-                    state.selected = Some(index);
+    // A phone shows every hop in the page, two short lines each: an area that scrolls inside the
+    // page takes no drag there, so a finger could not reach the hops below its first few.
+    if look.narrow {
+        phone_tree(ui, ctx, hops, outcome, state);
+    } else {
+        egui::ScrollArea::both().id_salt("hop_tree").max_height(420.0).scroll_source(super::NO_DRAG).show(ui, |ui| {
+            wide_tree(ui, ctx, hops, outcome, state);
+        });
+    }
+
+    selected(ui, ctx, hops, state);
+}
+
+/// The hops as a phone lists them: what each did, then from whom to whom, indented by depth.
+fn phone_tree(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], outcome: Option<&Outcome>, state: &mut HopState) {
+    let look = ctx.look;
+
+    for (index, hop) in hops.iter().enumerate() {
+        ui.horizontal_top(|ui| {
+            ui.add_space(f32::from(hop.depth.min(6)) * 12.0);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    super::dot(ui, color(look, hop));
+                    let text = RichText::new(format!("#{index} {}", describe(ctx, hop))).monospace();
+
+                    if ui.selectable_label(state.selected == Some(index), text).clicked() {
+                        state.selected = Some(index);
+                    }
+                });
+                let fuel = match hop.fuel_used {
+                    0 => String::new(),
+                    fuel => format!(" · {} fuel", format::thousands(&fuel.to_string())),
+                };
+                ui.label(RichText::new(format!("{} → {}{fuel}", format::short(&hop.from), format::short(&hop.to))).small().color(look.palette.soft));
+
+                if let Some(error) = &hop.error {
+                    ui.colored_label(look.palette.bad, RichText::new(error).small());
                 }
 
-                if hop.fuel_used > 0 {
-                    ui.label(RichText::new(format!("{} fuel", format::thousands(&hop.fuel_used.to_string()))).small().color(look.palette.muted));
+                for event in &hop.events {
+                    if let Some(event) = outcome.and_then(|outcome| outcome.events.get(*event as usize)) {
+                        ui.label(RichText::new(format!("emitted {}", event.name)).small().color(look.palette.muted));
+                    }
                 }
             });
+        });
+        ui.add_space(4.0);
+    }
+}
 
-            if let Some(error) = &hop.error {
+/// The hops as a wide screen lists them, a line each.
+fn wide_tree(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], outcome: Option<&Outcome>, state: &mut HopState) {
+    let look = ctx.look;
+
+    for (index, hop) in hops.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.add_space(f32::from(hop.depth) * 18.0);
+            super::dot(ui, color(look, hop));
+            let text = format!(
+                "#{index} {} -> {}  {}",
+                format::short(&hop.from),
+                format::short(&hop.to),
+                describe(ctx, hop)
+            );
+
+            if ui.selectable_label(state.selected == Some(index), RichText::new(text).monospace()).clicked() {
+                state.selected = Some(index);
+            }
+
+            if hop.fuel_used > 0 {
+                ui.label(RichText::new(format!("{} fuel", format::thousands(&hop.fuel_used.to_string()))).small().color(look.palette.muted));
+            }
+        });
+
+        if let Some(error) = &hop.error {
+            ui.horizontal(|ui| {
+                ui.add_space(f32::from(hop.depth) * 18.0 + 22.0);
+                ui.colored_label(look.palette.bad, RichText::new(error).small());
+            });
+        }
+
+        for event in &hop.events {
+            if let Some(event) = outcome.and_then(|outcome| outcome.events.get(*event as usize)) {
                 ui.horizontal(|ui| {
                     ui.add_space(f32::from(hop.depth) * 18.0 + 22.0);
-                    ui.colored_label(look.palette.bad, RichText::new(error).small());
+                    ui.label(RichText::new(format!("emitted {}", event.name)).small().color(look.palette.muted));
                 });
             }
-
-            for event in &hop.events {
-                if let Some(event) = outcome.and_then(|outcome| outcome.events.get(*event as usize)) {
-                    ui.horizontal(|ui| {
-                        ui.add_space(f32::from(hop.depth) * 18.0 + 22.0);
-                        ui.label(RichText::new(format!("emitted {}", event.name)).small().color(look.palette.muted));
-                    });
-                }
-            }
         }
-    });
+    }
+}
+
+/// The hop picked in the tree, in full.
+fn selected(ui: &mut Ui, ctx: &mut Ctx, hops: &[Hop], state: &HopState) {
+    let look = ctx.look;
 
     if let Some(hop) = state.selected.and_then(|index| hops.get(index)) {
         chainv4_ui::widgets::rule(ui, &look.palette);

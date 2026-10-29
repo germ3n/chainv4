@@ -396,9 +396,11 @@ impl Facts<'_> {
                 self.ui.horizontal_wrapped(value);
                 self.ui.add_space(4.0);
             }
+            // Each cell from the top of its row, the name too: a value of many lines, wrapped
+            // straight into the grid's cell, would start partway down and run over the rows below.
             false => {
-                self.ui.label(label);
-                self.ui.horizontal_wrapped(value);
+                self.ui.vertical(|ui| ui.label(label));
+                self.ui.vertical(|ui| ui.horizontal_wrapped(value));
                 self.ui.end_row();
             }
         }
@@ -484,11 +486,12 @@ pub fn stat(ui: &mut Ui, look: Look, width: f32, label: &str, value: &str, note:
         .corner_radius(ui.visuals().window_corner_radius)
         .inner_margin(margin)
         .show(ui, |ui| {
-            ui.set_width(width - 2.0 * f32::from(margin.left));
+            // The frame's stroke is outside its margin: a row of tiles fills its width, not past it.
+            ui.set_width(width - 2.0 * f32::from(margin.left) - 2.0);
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.vertical(|ui| {
                 widgets::caps(ui, &look.palette, label);
-                widgets::fitted(ui, value, size, 12.0, egui::FontFamily::Monospace, look.palette.ink);
+                widgets::fitted(ui, value, size, 10.0, egui::FontFamily::Monospace, look.palette.ink);
                 ui.add(egui::Label::new(RichText::new(note).small().color(look.palette.muted)).truncate());
             });
         });
@@ -607,9 +610,19 @@ pub fn tx(ui: &mut Ui, ctx: &mut Ctx, id: &str) {
 /// Text in full, in the monospace face, that copies itself when clicked or tapped, and says so. Long
 /// text wraps, so an id fits a phone.
 pub fn copyable(ui: &mut Ui, text: &str) {
-    let label = egui::Label::new(RichText::new(text).monospace()).wrap();
+    copyable_label(ui, egui::Label::new(RichText::new(text).monospace()).wrap(), text);
+}
+
+/// Text cut short, such as a peer id, that copies in full when clicked or tapped, and says so. It
+/// is kept whole on one line, however narrow its table column: never a letter or two a line.
+pub fn copyable_as(ui: &mut Ui, shown: RichText, full: &str) {
+    copyable_label(ui, egui::Label::new(shown).extend(), full);
+}
+
+/// A label that copies some text in full when clicked or tapped, and says so.
+pub fn copyable_label(ui: &mut Ui, label: egui::Label, full: &str) {
     let palette = palette_of(ui);
-    widgets::copy_on_click(ui, &palette, label, text).on_hover_text("Click to copy");
+    widgets::copy_on_click(ui, &palette, label, full).on_hover_text(format!("{full}\nClick to copy"));
 }
 
 /// The palette the explorer is dressed in, read back from egui's style: the copy feedback needs
@@ -855,4 +868,39 @@ pub(crate) fn render(store: &Store, light: &mut crate::light::Light, width: f32,
         .collect();
 
     (text, asked)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fact_of_many_lines_on_a_wide_screen_keeps_the_next_fact_below_it() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(340.0, 1_200.0));
+        let palette = crate::theme::DARK;
+        let look = Look { palette, roles: crate::theme::Roles::of(&palette), narrow: false };
+        let (mut last, mut next) = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+
+        for _ in 0..4 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                facts(ui, look, "test", |facts| {
+                    facts.text("up for", "32m");
+                    facts.row("listening", |ui| {
+                        ui.vertical(|ui| {
+                            for host in 0..8 {
+                                last = ui.add(egui::Label::new(RichText::new(format!("/ip4/127.0.0.{host}/udp/50231/quic-v1/p2p/12D3Ko…n6Xb")).monospace()).wrap()).rect;
+                            }
+                        });
+                    });
+                    facts.row("chain's name", |ui| {
+                        next = ui.label("chainv4 testnet").rect;
+                    });
+                });
+            });
+            output.textures_delta.clear();
+        }
+
+        assert!(next.top() >= last.bottom(), "the next fact under the last line: {next:?} {last:?}");
+    }
 }
