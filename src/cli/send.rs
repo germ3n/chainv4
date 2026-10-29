@@ -819,6 +819,7 @@ pub(super) fn report(receipt: &Value) -> CliResult<()> {
         Some("deployed") => println!("deployed {}", receipt["contract"].as_str().unwrap_or("?")),
         Some("upgraded") => println!("upgraded {}", receipt["contract"].as_str().unwrap_or("?")),
         Some("returned") => println!("returned {}", receipt["values"]),
+        Some("decided") => println!("decided governance's change {}", receipt["version"]),
         Some("failed") => {}
         _ => println!("done"),
     }

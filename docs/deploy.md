@@ -1,6 +1,6 @@
 # Deploying a fresh test chain
 
-How the VPS's test chain was last started from nothing (2026-10-28, commit `767c233`), step by
+How the VPS's test chain was last started from nothing (2026-10-29, commit `153bc04`), step by
 step, with everything enabled: a runbook for the next one. [Docker](docker.md) explains the
 pieces; this is the order they go in, and what bit along the way.
 
@@ -162,7 +162,7 @@ SHA-256s with the link.
 
 | What | Where |
 | --- | --- |
-| Genesis | `0xae6b05f578012606…`, named `chainv4 testnet` |
+| Genesis | `0x7d6f7922b46814f7…`, named `chainv4 testnet`; the directory is governance's change 1 |
 | Swap contract, `swap.dev` | `contract:0xc4ad35b6…68fb7` |
 | Native DEX, `dex.dev` | `contract:0x6c1df38c…90a4` |
 | EVM DEX router | `0xfd9524e58c1a904b439e9a3292a95cf6562aa458` |
