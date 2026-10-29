@@ -24,6 +24,7 @@ pub mod dex;
 pub mod events;
 pub mod faucet;
 pub mod finality;
+pub mod governance;
 pub mod hops;
 pub mod map;
 pub mod mempool;
@@ -70,6 +71,8 @@ pub enum View {
     /// One release of the Bitcoin gateway, by its number.
     Release(u64),
     Finality,
+    /// Governance: who approves, the changes being approved, what is in force, and every decision.
+    Governance,
     Send,
     /// The node's faucet, on a dev or test chain.
     Faucet,
@@ -83,7 +86,7 @@ impl View {
     pub const GROUPS: [(&'static str, &'static [(View, &'static str)]); 4] = [
         ("Chain", &[(View::Overview, "Overview"), (View::Map, "Block map"), (View::Mempool, "Mempool"), (View::Tokens, "Tokens"), (View::Collections, "NFTs")]),
         ("Markets", &[(View::Dex, "DEX"), (View::Swaps, "Swaps"), (View::Bridges, "Bridges")]),
-        ("Network", &[(View::Network, "Network"), (View::Finality, "Finality"), (View::Pool, "Mining pool")]),
+        ("Network", &[(View::Network, "Network"), (View::Finality, "Finality"), (View::Governance, "Governance"), (View::Pool, "Mining pool")]),
         ("Tools", &[(View::Send, "Send"), (View::Faucet, "Faucet"), (View::Settings, "Settings")]),
     ];
 
@@ -97,13 +100,14 @@ impl View {
     ];
 
     /// The pages More lists, with what each is for.
-    pub const MORE: [(View, &'static str, &'static str); 10] = [
+    pub const MORE: [(View, &'static str, &'static str); 11] = [
         (View::Collections, "NFTs", "Collections, their tokens and holders"),
         (View::Dex, "DEX", "Pools, prices, trades and volume"),
         (View::Swaps, "Swaps", "Atomic swaps and their finality"),
         (View::Bridges, "Bridges", "What crossed to other chains, and wrapped assets"),
         (View::Network, "Network", "The node, its peers, and what it heard"),
         (View::Finality, "Finality", "Checkpoints, voters and caught cheats"),
+        (View::Governance, "Governance", "Who approves changes, what is in force, and every decision"),
         (View::Pool, "Mining pool", "The node's pool: miners, shares and payouts"),
         (View::Send, "Send", "Sign and send a transaction"),
         (View::Faucet, "Faucet", "Coins for a dev or test chain"),
@@ -117,7 +121,7 @@ impl View {
             View::Map => View::Map,
             View::Mempool => View::Mempool,
             View::Tokens => View::Tokens,
-            View::Collections | View::Collection(_) | View::Dex | View::Swaps | View::Bridges | View::Transfer(_) | View::Release(_) | View::Network | View::Finality | View::Pool | View::Send | View::Faucet | View::Settings | View::More => View::More,
+            View::Collections | View::Collection(_) | View::Dex | View::Swaps | View::Bridges | View::Transfer(_) | View::Release(_) | View::Network | View::Finality | View::Governance | View::Pool | View::Send | View::Faucet | View::Settings | View::More => View::More,
         }
     }
 }

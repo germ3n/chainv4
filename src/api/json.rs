@@ -349,6 +349,7 @@ fn outcome(receipt: &TxReceipt) -> Value {
             "values": values.iter().map(argument).collect::<Vec<_>>(),
         }),
         TxStatus::Failed(error) => json!({ "status": "failed", "error": error }),
+        TxStatus::Decided(version) => json!({ "status": "decided", "version": version }),
     };
     value["fuel_used"] = receipt.fuel_used.into();
     value["gas_used"] = receipt.gas_used.into();
@@ -604,21 +605,7 @@ pub fn name_action(action: &NameAction) -> Value {
 
 /// A change under governance: what it is of, and the new value.
 pub fn change(change: &Change) -> Value {
-    match change {
-        Change::Consensus(consensus) => json!({ "consensus": crate::cli::genesis::consensus_json(consensus, None) }),
-        Change::Bootnodes(bootnodes) => json!({ "bootnodes": bootnodes }),
-        Change::NamePrices(prices) => json!({ "name_prices": prices.iter().map(u256::to_string).collect::<Vec<_>>() }),
-        Change::Collections(functions) => json!({ "collections": { "nft": functions.nft, "multi": functions.multi } }),
-        Change::Federation(federation) => json!({ "federation": crate::cli::genesis::federation_json(federation) }),
-        Change::Directory(directory) => json!({ "directory": crate::cli::genesis::directory_json(directory) }),
-        Change::Fees(fees) => json!({ "fees": crate::cli::genesis::fees_json(fees) }),
-        Change::Reward(reward) => json!({ "reward": crate::cli::genesis::reward_json(reward) }),
-        Change::Limits(limits) => json!({ "limits": crate::cli::genesis::limits_json(limits) }),
-        Change::Finality(finality) => json!({ "finality": crate::cli::genesis::finality_json(finality) }),
-        Change::SwitchFinality { epoch, config } => json!({ "switch_finality": { "epoch": epoch, "finality": crate::cli::genesis::finality_json(config) } }),
-        Change::Upgrade(upgrade) => json!({ "upgrade": { "least": upgrade.least.to_string(), "from": upgrade.from } }),
-        Change::Name(name) => json!({ "name": name }),
-    }
+    crate::params::json::change_json(change)
 }
 
 /// A set of authority signers, each with its key and account, with its two thresholds.

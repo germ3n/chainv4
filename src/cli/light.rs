@@ -238,6 +238,7 @@ fn outcome(outcome: &CommittedOutcome) -> String {
         CommittedOutcome::Returned(values) => format!("returned {} values", values.len()),
         CommittedOutcome::Failed => "failed".to_string(),
         CommittedOutcome::Upgraded(address) => format!("upgraded {address}"),
+        CommittedOutcome::Decided(version) => format!("decided governance's change {version}"),
     }
 }
 

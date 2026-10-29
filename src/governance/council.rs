@@ -33,4 +33,8 @@ impl Governance for Council {
     fn needed(&self, _state: &State, _epoch: u64) -> Result<u256, DbError> {
         Ok(u256::from(self.threshold))
     }
+
+    fn members(&self) -> Option<&[Address]> {
+        Some(&self.members)
+    }
 }

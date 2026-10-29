@@ -31,7 +31,7 @@ mod schedule;
 mod tests;
 
 pub use crate::params::fees::{BaseFee, Bid, ContractScorer, FeeConfig, PricingConfig, ScheduleConfig, Weighted};
-pub use schedule::TX_KINDS;
+pub use crate::params::fees::TX_KINDS;
 
 impl FeeConfig {
     #[document(
@@ -45,19 +45,6 @@ impl FeeConfig {
             schedule: ScheduleConfig::Weighted(Weighted::dev()),
             pricing: PricingConfig::BaseFee(BaseFee::dev()),
         }
-    }
-
-    /// Settings no chain could charge with.
-    pub fn problem(&self) -> Option<&'static str> {
-        if self.block_gas_limit == 0 {
-            return Some("block_gas_limit must be at least 1");
-        }
-
-        if self.burn_permille > 1000 {
-            return Some("burn_permille must be at most 1000");
-        }
-
-        self.schedule.problem().or_else(|| self.pricing.problem())
     }
 
     #[document(parent = "FeeConfig", summary = "The fees these settings describe.")]

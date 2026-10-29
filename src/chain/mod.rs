@@ -41,6 +41,8 @@ pub mod fees;
 mod finality;
 pub(crate) use finality::switch;
 mod index;
+#[cfg(feature = "json")]
+pub mod json;
 pub mod migrate;
 mod parallel;
 mod receipt;
@@ -50,7 +52,7 @@ pub use events::{EventFilter, IndexedEvent, stored_events};
 pub use index::{IndexKind, IndexWindow, Indexing, KeepFrom, stored_index};
 pub use execute::{BlockContext, Effect, Failure, GovernanceRules, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
-pub use crate::params::{BlockLimits, Reward};
+pub use crate::params::{BlockLimits, MAX_BLOCK_BYTES, MIN_BLOCK_BYTES, Reward, reward_problem};
 pub use parallel::Workers;
 use parallel::{Runner, Unfit};
 
@@ -81,24 +83,6 @@ pub const DEV_TX_LIMITS: Limits = Limits {
 /// The development chains' reorg limit.
 pub const DEV_MAX_REORG_DEPTH: u64 = 100;
 
-impl BlockLimits {
-    #[document(
-        parent = "BlockLimits",
-        summary = "Why they cannot be a chain's: fuel below 100,000 or memory below 1 MiB, which no contract call fits in, or max_block_bytes outside 1 to 6 MiB, as genesis's.",
-    )]
-    pub fn problem(&self) -> Option<&'static str> {
-        if self.tx_limits.fuel < 100_000 || self.tx_limits.memory < 1024 * 1024 {
-            return Some("a transaction needs at least 100,000 fuel and 1 MiB of memory");
-        }
-
-        if self.max_block_bytes.is_some_and(|bytes| !(MIN_BLOCK_BYTES..=MAX_BLOCK_BYTES).contains(&bytes)) {
-            return Some("max_block_bytes must be 1 MiB to 6 MiB, 1048576 to 6291456");
-        }
-
-        None
-    }
-}
-
 #[document(
     summary = "The development proof-of-work chain's difficulty window, 11 blocks: Bitcoin's median-time window, and the blocks difficulty retargets over.",
     category = "Chain",
@@ -112,20 +96,6 @@ pub const DEV_POW_WINDOW: u64 = 11;
     see_also = "Genesis::max_block_bytes",
 )]
 pub const DEV_MAX_BLOCK_BYTES: u64 = 4 * 1024 * 1024;
-
-#[document(
-    summary = "The least max_block_bytes a genesis may set, 1 MiB, so a block still holds the largest transaction there is: a deploy of a 512 KiB WebAssembly module.",
-    category = "Chain",
-    see_also = "Genesis::max_block_bytes",
-)]
-pub const MIN_BLOCK_BYTES: u64 = 1024 * 1024;
-
-#[document(
-    summary = "The most max_block_bytes a genesis may set, 6 MiB, so a full block, with its header and finality proofs, still fits one gossip message of 8 MiB.",
-    category = "Chain",
-    see_also = "Genesis::max_block_bytes",
-)]
-pub const MAX_BLOCK_BYTES: u64 = 6 * 1024 * 1024;
 
 #[document(
     summary = "The layout this node keeps its database in. It goes up whenever a stored record changes shape, so a node never reads a database it would misread.",
@@ -227,15 +197,6 @@ impl RewardSchedule {
             _ => self.genesis.at(height),
         }
     }
-}
-
-#[document(
-    summary = "Why a reward cannot be a chain's: a halving interval of 0.",
-    category = "Chain",
-    see_also = "Reward, Change::Reward",
-)]
-pub fn reward_problem(reward: &Reward) -> Option<&'static str> {
-    (reward.halving_interval == Some(0)).then_some("a reward halves every 1 block or more, or never")
 }
 
 #[document(
@@ -1995,7 +1956,6 @@ impl Chain {
         fees.pricing().price(base, &tx.fee).map(|_| fees.priority(base, &tx.fee))
     }
 
-
     /// What a block's transactions run with.
     /// The headers consensus looks at when checking the block after parent: the parent first,
     /// then its parent, and so on, as many as consensus wants and the chain has.
@@ -2540,6 +2500,11 @@ impl Chain {
             #[cfg(feature = "ethereum")]
             if let crate::structs::tx::Tx::Ethereum { raw } = &tx.tx {
                 layer.put_value(Column::Ethereum, crate::crypto::ethereum::tx_hash(raw).to_vec(), &tx_id);
+            }
+
+            // Which approval decided each change, for GET /governance/history.
+            if let receipt::TxStatus::Decided(version) = record.status {
+                layer.put_value(Column::Decisions, version.to_be_bytes().to_vec(), &tx_id);
             }
 
             // Blocks below an index's low end wait for catch_up_index, or were dropped.
@@ -3128,6 +3093,26 @@ pub fn stored_receipt(db: &dyn Read, tx: &Hash) -> Result<Option<TxReceipt>, DbE
 #[cfg(feature = "ethereum")]
 pub fn stored_ethereum_tx(db: &dyn Read, hash: &[u8; 32]) -> Result<Option<Hash>, DbError> {
     read_value(db, Column::Ethereum, hash)
+}
+
+#[document(
+    summary = "The ids of the approvals that decided governance's changes on the main chain, newest first: each with the version it made, from the one below before (or newest, the version decided last) down, at most limit. It stops at the first it lacks, as a node that synced from a snapshot lacks those decided before it.",
+    category = "Governance",
+    see_also = "TxStatus::Decided, stored_receipt",
+)]
+pub fn stored_decisions(db: &dyn Read, newest: u64, before: Option<u64>, limit: usize) -> Result<Vec<(u64, Hash)>, DbError> {
+    let top = before.map_or(newest, |before| before.saturating_sub(1).min(newest));
+    let mut found = Vec::new();
+
+    // Versions count up one a decision, so each is read by its number.
+    for version in (1..=top).rev().take(limit) {
+        match read_value(db, Column::Decisions, &version.to_be_bytes())? {
+            Some(id) => found.push((version, id)),
+            None => break,
+        }
+    }
+
+    Ok(found)
 }
 
 #[document(

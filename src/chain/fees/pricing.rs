@@ -11,26 +11,11 @@ use {
 };
 
 impl PricingConfig {
-    #[document(parent = "PricingConfig", summary = "The kind's name: base_fee or bid.")]
-    pub fn name(&self) -> &'static str {
-        match self {
-            PricingConfig::BaseFee(_) => "base_fee",
-            PricingConfig::Bid(_) => "bid",
-        }
-    }
-
     #[document(parent = "PricingConfig", summary = "The pricing these settings describe.")]
     pub fn build(&self) -> Box<dyn Pricing> {
         match self {
             PricingConfig::BaseFee(base_fee) => Box::new(*base_fee),
             PricingConfig::Bid(bid) => Box::new(*bid),
-        }
-    }
-
-    pub(super) fn problem(&self) -> Option<&'static str> {
-        match self {
-            PricingConfig::BaseFee(base_fee) => base_fee.problem(),
-            PricingConfig::Bid(_) => None,
         }
     }
 }
@@ -47,22 +32,6 @@ impl BaseFee {
             elasticity: 2,
             change_denominator: 8,
         }
-    }
-
-    fn problem(&self) -> Option<&'static str> {
-        if self.min == u256::ZERO {
-            return Some("the base fee's min must be at least 1, or it could never rise again");
-        }
-
-        if self.initial < self.min {
-            return Some("the base fee's initial price must be at least its min");
-        }
-
-        if self.elasticity == 0 || self.change_denominator == 0 {
-            return Some("the base fee's elasticity and change_denominator must be at least 1");
-        }
-
-        None
     }
 }
 

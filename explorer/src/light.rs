@@ -2,17 +2,22 @@
 //! node, follows the chain from the node's headers and justifications, checking every one, and
 //! proves the balances the account page shows, so a node that lies about them is caught. It starts
 //! at a checkpoint pasted in Settings rather than genesis; and the first time it meets a node, at
-//! the node's own finalized one, trusted as far as the genesis it pins then.
+//! the node's own finalized one, trusted as far as the genesis it pins then. It proves receipts
+//! too, each with its transaction, against the block they landed in: what governance's page checks
+//! each decision by. For a block below the lowest header it holds, it first takes the headers down
+//! to it, which the hash chain proves.
 
 use {
     crate::api::{Ask, Failure},
     chainv4::db::{Column, StateProof, address_key},
-    chainv4::light::{Assurance, CheckpointStart, FinalityStep, LightClient, LightParams, LightRequest},
+    chainv4::light::{Assurance, CheckpointStart, FinalityStep, LightClient, LightError, LightParams, LightRequest, MAX_LIGHT_HEADERS},
     chainv4::structs::account::Account,
     chainv4::structs::address::Address,
     chainv4::structs::block::SealedHeader,
     chainv4::structs::hash::Hash,
     chainv4::structs::hex::{from_hex, to_hex},
+    chainv4::structs::receipt::CommittedReceipt,
+    chainv4::structs::tx::SignedTx,
     serde_json::Value,
     std::collections::HashMap,
 };
@@ -28,6 +33,25 @@ pub struct Proven {
     pub balance: String,
     pub nonce: u64,
     pub assurance: Assurance,
+}
+
+/// A receipt the light client proved, and its transaction, against the block they landed in.
+#[derive(Clone, Debug)]
+pub struct ProvenReceipt {
+    pub signed: SignedTx,
+    pub receipt: CommittedReceipt,
+    pub assurance: Assurance,
+}
+
+/// How proving a transaction's receipt stands.
+#[derive(Clone, Debug)]
+pub enum Checked {
+    Proven(Box<ProvenReceipt>),
+    /// In a block at this height that the light client has yet to reach: above its tip, or below
+    /// its lowest header, while it takes the headers down to it.
+    Waiting(u64),
+    /// It does not check, or the node cannot prove it: why.
+    Refused(String),
 }
 
 /// What the explorer trusts at a node: the genesis pinned there, and a checkpoint pasted.
@@ -59,6 +83,10 @@ pub struct Light {
     pub proven: HashMap<String, Result<Vec<Proven>, String>>,
     /// The address each proven key is for.
     keys: HashMap<String, String>,
+    /// Receipts proven, or on their way, by transaction id.
+    pub receipts: HashMap<String, Checked>,
+    /// The lowest height a receipt waits at below the headers held, to take headers down to.
+    wanted_below: Option<u64>,
 }
 
 impl Light {
@@ -71,6 +99,11 @@ impl Light {
     /// How far it follows: the tip's height and the height up to which blocks are final.
     pub fn following(&self) -> Option<(u64, u64)> {
         self.client.as_ref().map(|client| (client.tip().height, client.final_height()))
+    }
+
+    /// The hash the chain it follows names its blocks and transactions by, once it started.
+    pub fn hash(&self) -> Option<chainv4::structs::hash::HashType> {
+        self.client.as_ref().map(|client| client.params().hash)
     }
 
     /// Whether it has every header and justification the node had when last asked.
@@ -96,10 +129,51 @@ impl Light {
             client.refresh();
         }
 
-        client.next().map(|request| match request {
-            LightRequest::Headers { from, count } => Ask::Headers { from, count },
-            LightRequest::Finality { from } => Ask::Finality(from),
+        if let Some(request) = client.next() {
+            return Some(match request {
+                LightRequest::Headers { from, count } => Ask::Headers { from, count },
+                LightRequest::Finality { from } => Ask::Finality(from),
+            });
+        }
+
+        // Caught up: the headers below it that older receipts need, the nearest stretch first.
+        let lowest = client.lowest();
+        let wanted = self.wanted_below.filter(|wanted| *wanted < lowest)?;
+        let from = wanted.max(lowest.saturating_sub(u64::from(MAX_LIGHT_HEADERS)));
+
+        Some(Ask::Ancestors {
+            from,
+            count: (lowest - from) as u32,
         })
+    }
+
+    /// The proof to ask for a transaction's receipt, which the node says landed in block at
+    /// height, unless it was proven there already, refused, or waits for the light client to reach
+    /// it. A block below the headers held is first reached by taking the headers down to it.
+    pub fn prove_receipt(&mut self, tx: &str, block: &str, height: u64) -> Option<Ask> {
+        let client = self.client.as_ref().filter(|_| self.trouble.is_none())?;
+
+        match self.receipts.get(tx) {
+            // Proven in another block, which a reorganization took off: again.
+            Some(Checked::Proven(proven)) if proven.assurance.block.to_string() != block => {}
+            Some(Checked::Proven(_) | Checked::Refused(_)) => return None,
+            _ => {}
+        }
+
+        if height < client.lowest() {
+            self.wanted_below = Some(self.wanted_below.map_or(height, |wanted| wanted.min(height)));
+            self.receipts.insert(tx.to_string(), Checked::Waiting(height));
+
+            return None;
+        }
+
+        if height > client.tip().height {
+            self.receipts.insert(tx.to_string(), Checked::Waiting(height));
+
+            return None;
+        }
+
+        Some(Ask::ReceiptProof(tx.to_string()))
     }
 
     /// The proofs to ask for an account's balance: at the tip, and at the final block when the
@@ -137,7 +211,10 @@ impl Light {
 
     /// Takes an answer to one of its asks. Returns false for an ask that is not its.
     pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>, trust: Trust, now: u64, time: f64) -> bool {
-        let mine = matches!(ask, Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. });
+        let mine = matches!(
+            ask,
+            Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. }
+        );
 
         if !mine {
             return false;
@@ -151,6 +228,14 @@ impl Light {
 
                 return true;
             }
+            // A transaction the node has no receipt of on its main chain: nothing to prove.
+            (Ask::ReceiptProof(tx), Err(failure)) if failure.status == 404 => {
+                self.receipts.insert(tx.clone(), Checked::Refused(format!("the node cannot prove it: {}", failure.message)));
+
+                return true;
+            }
+            // Asked again with the page's next round.
+            (Ask::ReceiptProof(_), Err(_)) => return true,
             (Ask::Checkpoint(Some(block)), Err(failure)) if failure.status != 0 => {
                 self.trouble = Some(format!("the node cannot start the light client at checkpoint {block}: {}", failure.message));
 
@@ -168,6 +253,9 @@ impl Light {
                 Ask::Proof { key, .. } => {
                     let address = self.keys.get(key).cloned().unwrap_or_default();
                     self.proven.insert(address, Err(why));
+                }
+                Ask::ReceiptProof(tx) => {
+                    self.receipts.insert(tx.clone(), Checked::Refused(why));
                 }
                 _ => self.trouble = Some(why),
             }
@@ -251,6 +339,54 @@ impl Light {
                 let steps: Vec<FinalityStep> = list(&value["steps"])?;
 
                 self.with_client(|client| client.deliver_finality(*from, steps).map(|_| ()).map_err(|err| err.to_string()))
+            }
+            Ask::Ancestors { from, .. } => {
+                let headers: Vec<SealedHeader> = list(&value["headers"])?;
+
+                self.with_client(|client| match client.deliver_ancestors(*from, headers) {
+                    // Asked before an earlier stretch came in: the next ask starts lower.
+                    Ok(_) | Err(LightError::Misplaced) => Ok(()),
+                    Err(err) => Err(format!("the node's older headers do not check: {err}")),
+                })
+            }
+            Ask::ReceiptProof(tx) => {
+                let client = self.client.as_ref().ok_or("the light client has not started")?;
+                let block = id(client, value["block"].as_str().unwrap_or_default()).ok_or("a receipt at a block id that does not read")?;
+                let bytes = |name: &str| from_hex(value[name].as_str().unwrap_or_default()).ok_or(format!("a {name} that is not hex"));
+                let path = |name: &str| value[name].as_array().into_iter().flatten().filter_map(|sibling| id(client, sibling.as_str()?)).collect::<Vec<Hash>>();
+                let index = value["index"].as_u64().ok_or("a receipt proof without its index")? as usize;
+                let count = value["count"].as_u64().ok_or("a receipt proof without its count")? as usize;
+                let (receipt, assurance) = match client.check_receipt(&block, &bytes("receipt")?, index, count, &path("path")) {
+                    Ok(checked) => checked,
+                    Err(LightError::NotOnChain) => {
+                        let height = value["height"].as_u64().ok_or("a receipt proof without its height")?;
+
+                        // Below the headers held, or above the tip: proven once it gets there.
+                        if height < client.lowest() || height > client.tip().height {
+                            if height < client.lowest() {
+                                self.wanted_below = Some(self.wanted_below.map_or(height, |wanted| wanted.min(height)));
+                            }
+
+                            self.receipts.insert(tx.clone(), Checked::Waiting(height));
+
+                            return Ok(());
+                        }
+
+                        return Err(format!("the node proves it in block {block}, which is not on the chain the light client follows"));
+                    }
+                    Err(err) => return Err(format!("the node's proof of its receipt does not check: {err}")),
+                };
+                let (signed, _) = client
+                    .check_tx(&block, &bytes("signed")?, index, count, &path("tx_path"))
+                    .map_err(|err| format!("the node's proof of the transaction does not check: {err}"))?;
+
+                if receipt.tx.to_string() != *tx || signed.id(client.params().hash) != receipt.tx {
+                    return Err("the node proved another transaction".to_string());
+                }
+
+                self.receipts.insert(tx.clone(), Checked::Proven(Box::new(ProvenReceipt { signed, receipt, assurance })));
+
+                Ok(())
             }
             Ask::Proof { key, .. } => {
                 let address = self.keys.get(key).cloned().ok_or("a proof nobody asked for")?;

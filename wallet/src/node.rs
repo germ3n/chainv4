@@ -78,6 +78,14 @@ pub enum Ask {
     /// The collection registry's first page, for the NFTs page to look through.
     #[cfg_attr(not(feature = "nft"), allow(dead_code))]
     Collections,
+    /// Governance as the node says it: its kind, the version an approval names, what a change
+    /// needs, the open proposals with their approvals, and every setting as it stands. What the
+    /// Governance page shows; nothing signed rests on it but the version, which the chain checks.
+    Governance,
+    /// Governance's latest decisions, newest first.
+    GovernanceHistory,
+    /// What an address's approval weighs, and the change it counts for, as the node says.
+    GovernanceWeight(String),
     /// The newest release the node took, as signed, beside where the node's own chainv4 stands:
     /// what the wallet checks its own version against, with the keys built in, as the node only
     /// relays it.
@@ -108,6 +116,9 @@ impl Ask {
             Ask::Pool(address) => format!("/pool/{address}"),
             Ask::Claims { pool, to, height } => format!("/claims/{pool}/{to}?height={height}"),
             Ask::Release => "/release".to_string(),
+            Ask::Governance => "/governance".to_string(),
+            Ask::GovernanceHistory => "/governance/history?limit=8".to_string(),
+            Ask::GovernanceWeight(address) => format!("/governance/weight/{address}"),
             Ask::Call(_) => "/call".to_string(),
             Ask::Read(_) => "/offer".to_string(),
             Ask::Offer(_) => "/offer".to_string(),

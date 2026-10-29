@@ -114,7 +114,8 @@ Each summary has:
 - its `payments`: the coin its contracts paid, each `from`, `to` and `amount`, as the receipts
   root commits to them (see [Chain](chain.md#receipts));
 - its `status`: `done`, `deployed` with `contract`, `upgraded` with `contract`, `returned` with
-  `values`, or `failed` with `error`;
+  `values`, `decided` with `version` for the [governance](governance.md#decisions) approval that
+  decided change `version`, or `failed` with `error`;
 - its `trace`: where its contracts went (see below).
 
 **The trace** is `hops`, depth first, and `dropped`, how many hops past the 256 a receipt keeps
@@ -580,12 +581,40 @@ On a chain with [governance](governance.md):
 - `bootnodes`, the chain's now;
 - `finality`, the kind the tip's epoch runs, and `switch`, a switch of kind decided and still to
   take effect, with the `epoch` it runs from and its `type`, or `null`;
-- the `proposals` with approvals that still count in the tip's epoch, each with its `consensus`,
-  its `bootnodes` or its `name_prices`, what its approvals `weight` and what they `needed`, and its `approvals`. Each approval has its
-  `account`, what it weighs now, the `epoch` it was made in, and the last epoch it counts in
-  (`counts_until`).
+- the `proposals` with approvals that still count in the tip's epoch, each its change as one
+  field named for what it changes (`consensus`, `bootnodes`, `name`, …, as
+  [governance](governance.md#a-change) lists them), what its approvals `weight` and what they
+  `needed`, and its `approvals`. Each approval has its `account`, what it weighs now, the `epoch`
+  it was made in, and the last epoch it counts in (`counts_until`);
+- `members`, a council's accounts, or `null` under the electorate, whose voters are finality's;
+- `in_force`, every setting governance may change as it stands at the tip, by kind: `consensus`,
+  `name`, `bootnodes`, `name_prices`, `collections`, `federation`, `directory`, `fees`,
+  `reward`, `limits`, `finality` and `upgrade`, a kind left out when the chain has none of it.
+  Each has its `value`, as a change writes it, and `decided`, the version of the change that set
+  it last, or `null` while genesis's stands.
 
 404 on a chain without governance.
+
+### `GET /governance/history?before=V&limit=N`
+
+Governance's decisions, newest first: those below version `before`, at most `limit` (20 by
+default, at most 100). Each has the `version` it made, the `tx` that decided it, its `block`,
+`height`, `timestamp`, `confirmations` and whether it is `final`, its `sender`, and the change, as
+its `kind` and in `change`.
+
+Beside them, `version`, the decisions so far, and `from`, the oldest this node can list: 1, unless
+it synced from a snapshot, which lacks the decisions before it.
+
+**A light client checks each** with [`GET /proofs/receipts/{tx}`](#get-proofsreceiptsid): the
+receipt's outcome is `decided` with that version, and the transaction approves the change listed,
+or a multisig approves it. Versions count up one a decision, so one left out shows as a gap; the
+newest is `change:decided` in state, which a [state proof](#get-proofscolumnkey) shows.
+
+### `GET /governance/weight/{address}`
+
+What an account's approval weighs in the tip's epoch (`weight`, `0` for one that may not approve),
+what a change `needed`, the `version` an approval names now, and `approved`, the change its
+counting approval is for, or `null`. What the apps ask before offering to approve.
 
 ### `GET /evidence`
 

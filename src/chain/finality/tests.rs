@@ -1541,7 +1541,7 @@ mod voting {
 
         // Bob's makes two thirds: decided, version 1. The epochs fixed already keep the
         // authority; the checkpoint after the decision fixes stake for the epoch two ahead.
-        assert_eq!(send_as(&mut chain, &bob, approve(0, to_staked())).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &bob, approve(0, to_staked())).result, Ok(Effect::Decided(1)));
 
         let decided = Changes::new(&chain.state()).decided().unwrap();
         let Change::Consensus(staked) = to_staked() else { unreachable!() };
@@ -1714,7 +1714,7 @@ mod voting {
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: Change::NamePrices(Vec::new()) }).result, Err(failure) if failure.to_string().contains("at least one price")));
         assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: prices.clone() }).result, Ok(Effect::Done));
         assert_eq!(paid(&mut chain, "bobby"), NamesConfig::dev().prices[2] * u256::from(2u64), "not decided yet");
-        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: prices.clone() }).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: prices.clone() }).result, Ok(Effect::Decided(1)));
         assert_eq!(Changes::new(&chain.state()).name_prices().unwrap(), Some(vec![u256::from(7u64)]));
 
         // From the next block on, one price for every length, the shortest too.
@@ -1735,8 +1735,8 @@ mod voting {
         };
         let mut chain = governed(council);
         let decide = |chain: &mut Chain, version: u64, change: Change| {
-            for member in [dev(), key(70)] {
-                assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(Effect::Done));
+            for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided(version + 1))] {
+                assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(effect));
             }
         };
         let refused = |chain: &mut Chain, change: Change, why: &str| {
@@ -1804,8 +1804,8 @@ mod voting {
         refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { checkpoint_interval: INTERVAL + 1, ..genesis.clone() })), "keeps checkpoint_interval");
         refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { validators: Vec::new(), ..genesis.clone() })), "keeps checkpoint_interval");
 
-        for member in [dev(), key(70)] {
-            assert_eq!(send_as(&mut chain, &member, Tx::ApproveChange { version: 0, change: Change::Finality(tuned.clone()) }).result, Ok(Effect::Done));
+        for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided(1))] {
+            assert_eq!(send_as(&mut chain, &member, Tx::ApproveChange { version: 0, change: Change::Finality(tuned.clone()) }).result, Ok(effect));
         }
 
         // Decided in this epoch, it stands from activation_delay + 1 epochs on, not before.
@@ -1846,8 +1846,8 @@ mod voting {
             bitcoin_depth: 6,
         };
         let decide = |chain: &mut Chain, version: u64, change: Change| {
-            for member in [dev(), key(70)] {
-                assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(Effect::Done));
+            for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided(version + 1))] {
+                assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(effect));
             }
         };
 
@@ -1888,8 +1888,8 @@ mod voting {
 
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: broken }).result, Err(failure) if failure.to_string().contains("contracts")));
 
-        for member in [dev(), key(70)] {
-            assert_eq!(send_as(&mut chain, &member, Tx::ApproveChange { version: 0, change: Change::Directory(directory.clone()) }).result, Ok(Effect::Done));
+        for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided(1))] {
+            assert_eq!(send_as(&mut chain, &member, Tx::ApproveChange { version: 0, change: Change::Directory(directory.clone()) }).result, Ok(effect));
         }
 
         assert_eq!(Changes::new(&chain.state()).directory().unwrap(), Some(directory.clone()));
@@ -1934,7 +1934,7 @@ mod voting {
 
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: twice }).result, Err(failure) if failure.to_string().contains("each function once")));
         assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: standard.clone() }).result, Ok(Effect::Done));
-        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: standard.clone() }).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: standard.clone() }).result, Ok(Effect::Decided(1)));
         assert_eq!(Changes::new(&chain.state()).collections().unwrap(), Some(CollectionFunctions::standard()));
 
         // Deploys register from then on; what came before waits for its next upgrade or refresh.
@@ -1961,8 +1961,8 @@ mod voting {
     fn council_decides(chain: &mut Chain, change: crate::governance::Change) {
         let version = crate::registry::changes::Changes::new(&chain.state()).decided().unwrap().version;
 
-        for member in [dev(), key(70)] {
-            assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(Effect::Done));
+        for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided(version + 1))] {
+            assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(effect));
         }
     }
 

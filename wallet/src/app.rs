@@ -74,8 +74,8 @@ impl Visits {
         Some(page)
     }
 }
-/// The narrowest a bottom tab gets before the row scrolls, wide enough for "Contracts".
-const TAB_WIDTH: f32 = 72.0;
+/// The narrowest a bottom tab gets before the row scrolls, wide enough for "Governance".
+const TAB_WIDTH: f32 = 76.0;
 /// How wide the fade is at a scrolling row's edge.
 const TAB_FADE: f32 = 24.0;
 
@@ -519,6 +519,7 @@ impl Wallet {
                 (Ask::Named { .. }, _) => self.views.trade.events(&result),
                 (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
                 (Ask::PoolClaim(_) | Ask::Pool(_) | Ask::Claims { .. }, _) => self.views.mining.answered(&ask, &result),
+                (Ask::Governance | Ask::GovernanceHistory | Ask::GovernanceWeight(_), _) => self.views.governance.answered(&ask, &result),
                 (Ask::Release, _) => match chainv4::release::ReleaseKeys::built_in() {
                     Ok(keys) => self.updates.answered(&result, &keys, time),
                     Err(why) => log::warn!("{why}"),
@@ -1184,6 +1185,27 @@ mod tests {
     use {super::*, serde_json::json};
 
     #[test]
+    fn every_pages_name_fits_a_phones_tab() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let mut widest = Vec::new();
+        let mut drawn = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for role in [Role::Online, Role::Signer] {
+                for &(_, name) in views::nav(role) {
+                    let galley = ui.painter().layout_no_wrap(name.to_string(), egui::FontId::new(12.0, egui::FontFamily::Name(theme::SEMIBOLD.into())), egui::Color32::WHITE);
+                    widest.push((name, galley.size().x));
+                }
+            }
+        });
+        drawn.textures_delta.clear();
+
+        // Each tab has two points of padding on either side.
+        for (name, width) in widest {
+            assert!(width + 4.0 <= TAB_WIDTH, "{name} is {width} wide");
+        }
+    }
+
+    #[test]
     fn back_returns_through_the_pages_left_each_once_and_stops_at_the_first() {
         let mut visits = Visits::new(Page::Overview);
         visits.see(Page::Overview);
@@ -1332,3 +1354,4 @@ mod tests {
         assert!(client(&Settings { proxy: "tor".to_string(), ..Settings::default() }).is_err(), "never direct instead");
     }
 }
+

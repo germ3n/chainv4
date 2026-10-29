@@ -712,6 +712,75 @@ fn governance_lists_the_decision_and_the_ballot() {
     assert_eq!(get(serve().address, "/governance").0, 404, "the plain dev chain has none");
 }
 
+#[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+#[test]
+fn governance_lists_its_decisions_what_stands_and_who_may_approve() {
+    use crate::governance::{Change, GovernanceConfig};
+
+    let dev = DevAuthority::dev_keypair();
+    let other = Keypair::generate(dev.public().key_type()).unwrap();
+    let genesis = Genesis {
+        governance: Some(GovernanceConfig::Council { members: vec![dev.public().address(), other.public().address()], threshold: 1, approval_epochs: 16 }),
+        name: Some("first".to_string()),
+        ..free()
+    };
+    let bootnodes = vec!["/dns4/boot.example/udp/4001/quic-v1".to_string()];
+    let renamed = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Name("second".to_string()) }, 0, FeeOffer::NONE, &dev);
+    let booted = SignedTx::sign(Tx::ApproveChange { version: 1, change: Change::Bootnodes(bootnodes.clone()) }, 1, FeeOffer::NONE, &dev);
+    let mut producer = AuthorityProducer::new(dev.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+
+    for txs in [vec![renamed.clone()], vec![booted.clone()], Vec::new()] {
+        let now = chain.tip().timestamp + SLOT;
+        let mut block = chain.build(txs, Vec::new(), producer.address(&[]), now).unwrap();
+        block.seal = producer.seal(&block.header).unwrap();
+        chain.import(&block, now).unwrap();
+    }
+
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let renamed_id = renamed.id(genesis.hash).to_string();
+    let booted_id = booted.id(genesis.hash).to_string();
+    let receipt = ok(address, &format!("/txs/{renamed_id}"));
+
+    assert_eq!((receipt["status"].clone(), receipt["version"].clone()), (json!("decided"), json!(1)), "the approval that decides says so");
+
+    let history = ok(address, "/governance/history");
+
+    assert_eq!((history["version"].clone(), history["from"].clone()), (json!(2), json!(1)));
+    assert_eq!(history["decisions"].as_array().unwrap().len(), 2);
+    assert_eq!(history["decisions"][0]["version"], 2, "newest first");
+    assert_eq!(history["decisions"][0]["tx"], booted_id);
+    assert_eq!(history["decisions"][0]["kind"], "bootnodes");
+    assert_eq!(history["decisions"][0]["height"], 2);
+    assert_eq!(history["decisions"][0]["sender"], dev.public().address().to_string());
+    assert_eq!(history["decisions"][1]["tx"], renamed_id);
+    assert_eq!(history["decisions"][1]["change"], json!({ "name": "second" }));
+
+    let older = ok(address, "/governance/history?before=2");
+
+    assert_eq!(older["decisions"].as_array().unwrap().len(), 1);
+    assert_eq!(older["decisions"][0]["version"], 1);
+
+    let listing = ok(address, "/governance");
+    let in_force = &listing["in_force"];
+
+    assert_eq!(listing["members"], json!([dev.public().address().to_string(), other.public().address().to_string()]));
+    assert_eq!(in_force["name"], json!({ "value": "second", "decided": 1 }));
+    assert_eq!(in_force["bootnodes"], json!({ "value": bootnodes, "decided": 2 }));
+    assert_eq!(in_force["reward"]["decided"], Value::Null, "genesis's stands");
+    assert_eq!(in_force["reward"]["value"], crate::cli::genesis::reward_json(&genesis.reward));
+    assert!(in_force["consensus"]["value"].is_object());
+    assert!(in_force.get("upgrade").is_none(), "no upgrade was ever decided");
+
+    let member = ok(address, &format!("/governance/weight/{}", other.public().address()));
+    let stranger = Keypair::generate(dev.public().key_type()).unwrap().public().address();
+
+    assert_eq!((member["weight"].clone(), member["needed"].clone(), member["version"].clone()), (json!("1"), json!("1"), json!(2)));
+    assert_eq!(member["approved"], Value::Null);
+    assert_eq!(ok(address, &format!("/governance/weight/{stranger}"))["weight"], "0");
+}
+
 #[cfg(feature = "finality-depth")]
 #[test]
 fn depth_chains_finalize_by_depth() {

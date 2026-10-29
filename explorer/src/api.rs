@@ -17,6 +17,8 @@ use {
 pub const TOKEN_PAGE: u64 = 100;
 /// How many of an address's transactions a page holds.
 pub const TX_PAGE: u64 = 50;
+/// How many of governance's decisions a page holds.
+pub const DECISION_PAGE: u64 = 20;
 
 /// Something to ask a node, which also names what came back.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -76,6 +78,17 @@ pub enum Ask {
     PoolMiner(String),
     /// The newest release the node took, as signed, and where the node stands against it.
     Release,
+    /// Governance: who approves, the changes being approved, and every setting in force.
+    Governance,
+    /// A page of governance's decisions, newest first, below a version, or from the newest.
+    Decisions { before: Option<u64> },
+    /// What an account's approval weighs now.
+    GovernanceWeight(String),
+    /// A proof of a transaction's receipt, and of the transaction, against its block.
+    ReceiptProof(String),
+    /// Main-chain headers below the lowest the light client holds, encoded, to check older
+    /// receipts against.
+    Ancestors { from: u64, count: u32 },
 }
 
 impl Ask {
@@ -97,6 +110,11 @@ impl Ask {
             Ask::Pool => "/pool".to_string(),
             Ask::PoolMiner(address) => format!("/pool/{address}"),
             Ask::Release => "/release".to_string(),
+            Ask::Governance => "/governance".to_string(),
+            Ask::Decisions { before: Some(before) } => format!("/governance/history?before={before}&limit={DECISION_PAGE}"),
+            Ask::Decisions { before: None } => format!("/governance/history?limit={DECISION_PAGE}"),
+            Ask::GovernanceWeight(address) => format!("/governance/weight/{address}"),
+            Ask::ReceiptProof(tx) => format!("/proofs/receipts/{tx}"),
             Ask::Contract(address) => format!("/contracts/{address}"),
             Ask::Validators => "/validators".to_string(),
             Ask::Signers => "/signers".to_string(),
@@ -134,7 +152,7 @@ impl Ask {
             }
             Ask::Collections => "/collections?limit=500".to_string(),
             Ask::Light => "/light".to_string(),
-            Ask::Headers { from, count } => format!("/headers?from={from}&count={count}"),
+            Ask::Headers { from, count } | Ask::Ancestors { from, count } => format!("/headers?from={from}&count={count}"),
             Ask::Finality(from) => format!("/light/finality?from={from}"),
             Ask::Checkpoint(Some(block)) => format!("/light/checkpoint/{block}"),
             Ask::Checkpoint(None) => "/light/checkpoint".to_string(),
@@ -472,6 +490,16 @@ mod tests {
     #[test]
     fn a_release_becomes_a_path() {
         assert_eq!((Ask::Release.path(), Ask::Release.body()), ("/release".to_string(), None));
+    }
+
+    #[test]
+    fn governance_s_questions_become_paths() {
+        assert_eq!(Ask::Governance.path(), "/governance");
+        assert_eq!(Ask::Decisions { before: None }.path(), "/governance/history?limit=20");
+        assert_eq!(Ask::Decisions { before: Some(31) }.path(), "/governance/history?before=31&limit=20");
+        assert_eq!(Ask::GovernanceWeight("ed25519:0x01".to_string()).path(), "/governance/weight/ed25519:0x01");
+        assert_eq!(Ask::ReceiptProof("0xab".to_string()).path(), "/proofs/receipts/0xab");
+        assert_eq!(Ask::Ancestors { from: 10, count: 5 }.path(), "/headers?from=10&count=5");
     }
 
     #[test]

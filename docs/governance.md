@@ -79,7 +79,26 @@ through finality's light updates; genesis refuses it with depth finality or none
    same rules as the main chain.
 
 `GET /governance` shows the kind, the consensus the tip's epoch runs and the one decided last,
-and the approvals that still count, each change with what its approvals weigh and need.
+and the approvals that still count, each change with what its approvals weigh and need; who may
+approve; and every setting governance may change as it stands, each with the change that set it
+last, or genesis. The explorer and the wallet show it on their Governance pages, and the wallet
+approves, withdraws and proposes from there.
+
+## Decisions
+
+- **The approval that decides a change says so.** Its receipt's outcome is `Decided(version)`,
+  where the others' is `Done`, and the receipts root commits to it, so a light client proves a
+  decision with the receipt alone (`GET /proofs/receipts/{id}`): the transaction, the change it
+  approved, and that it decided it, as which version.
+- **Nodes index them.** As a block runs, each deciding approval's id goes in the `Decisions`
+  column by the version it made: not chain state, written with the block's receipts and taken
+  back with them in a reorg. `GET /governance/history` lists them, newest first.
+- **None can be left out unseen.** Versions count up one a decision, and the newest is
+  `change:decided` in state (column `validators`), so a gap in a node's list shows. A node that
+  synced from a snapshot lacks the decisions before it, and says from which version it has them.
+- **A change of the rules.** Nodes from before this disagree with newer ones on a deciding
+  approval's receipt, so the receipts root of its block: a chain that had decided anything moves
+  to it with a new genesis, or from a height an [upgrade](#upgrade) names.
 
 ## Bootnodes
 

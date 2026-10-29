@@ -107,6 +107,9 @@ pub enum Column {
     #[document(summary = "Mining pools' claims: the root each pool block committed to, by block id, and how much each miner has claimed from each pool, by pool and miner. Chain state.")]
     #[wincode(tag = 23)]
     Pools,
+    #[document(summary = "Governance's decisions: the id of the approval that decided each change, by the version it made, big-endian so versions sort in order. Not chain state: written as blocks run, as each such approval's receipt says Decided, and taken back with its block.")]
+    #[wincode(tag = 24)]
+    Decisions,
 }
 
 impl Hashable for Column {
@@ -114,7 +117,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 24] = [
+    pub const ALL: [Column; 25] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -139,6 +142,7 @@ impl Column {
         Column::Peers,
         Column::History,
         Column::Pools,
+        Column::Decisions,
     ];
 
     #[document(
@@ -171,6 +175,7 @@ impl Column {
             Column::Peers => "peers",
             Column::History => "history",
             Column::Pools => "pools",
+            Column::Decisions => "decisions",
         }
     }
 }

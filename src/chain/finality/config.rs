@@ -31,16 +31,6 @@ use {
 pub use crate::params::finality::FinalityConfig;
 
 impl FinalityConfig {
-    #[document(parent = "FinalityConfig", summary = "The names of the kinds this build has, as genesis files spell them.")]
-    pub const KINDS: &'static [&'static str] = &[
-        #[cfg(feature = "finality-ffg")]
-        "ffg",
-        #[cfg(feature = "finality-authority")]
-        "authority",
-        #[cfg(feature = "finality-depth")]
-        "depth",
-    ];
-
     #[document(
         parent = "FinalityConfig",
         summary = "The development chains' finality: FFG with the dev key as the one validator, or none in a build without FFG.",

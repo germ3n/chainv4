@@ -363,7 +363,7 @@ fn workers(ui: &mut Ui, look: Look, workers: &[PoolWorker]) {
 }
 
 /// The address typed, as the node writes it, an Ethereum one as Ethereum writes it included.
-fn payout_address(text: &str) -> Result<String, String> {
+pub(super) fn payout_address(text: &str) -> Result<String, String> {
     let text = match text.len() == 42 && text.starts_with("0x") {
         true => format!("secp256k1:{text}"),
         false => text.to_string(),
@@ -373,7 +373,7 @@ fn payout_address(text: &str) -> Result<String, String> {
 }
 
 /// One decimal amount's fraction of another, for a share of work: 0 when the whole is.
-fn fraction(part: &str, whole: &str) -> f64 {
+pub(super) fn fraction(part: &str, whole: &str) -> f64 {
     match (part.parse::<f64>(), whole.parse::<f64>()) {
         (Ok(part), Ok(whole)) if whole > 0.0 => part / whole,
         _ => 0.0,

@@ -57,6 +57,40 @@ pub struct Checked {
     /// heights. Empty for one kept before it was said, until the chain's node mentions it.
     #[serde(default)]
     pub genesis: String,
+    /// What it did in governance, for one that approved a change or withdrew an approval, its own
+    /// or a multisig's: the Governance page lists the account's votes by it.
+    #[serde(default)]
+    pub vote: Option<Vote>,
+}
+
+/// A governance transaction, as proven.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vote {
+    /// An approval of a change, at the version it named: the change's JSON, and the version it
+    /// decided, for the approval that was the last one needed.
+    Approved { version: u64, change: String, decided: Option<u64> },
+    /// An approval withdrawn, at the version it named.
+    Withdrew { version: u64 },
+}
+
+impl Vote {
+    /// The vote a transaction is, the one a multisig sent for it included, with what its receipt
+    /// proved: None for anything else.
+    pub fn of(tx: &Tx, outcome: &CommittedOutcome) -> Option<Vote> {
+        match tx {
+            Tx::Multisig { tx, .. } => Vote::of(tx, outcome),
+            Tx::ApproveChange { version, change } => Some(Vote::Approved {
+                version: *version,
+                change: chainv4::params::json::change_json(change).to_string(),
+                decided: match outcome {
+                    CommittedOutcome::Decided(decided) => Some(*decided),
+                    _ => None,
+                },
+            }),
+            Tx::WithdrawChange { version } => Some(Vote::Withdrew { version: *version }),
+            _ => None,
+        }
+    }
 }
 
 impl Checked {
@@ -102,6 +136,7 @@ impl Checked {
             events: receipt.events.iter().map(describe).collect(),
             sender,
             genesis: String::new(),
+            vote: Vote::of(&signed.tx, &receipt.outcome),
         }
     }
 
@@ -176,6 +211,8 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::Slash { .. }, _) => "Reported a double vote".to_string(),
         (Tx::ApproveSigners { version, .. }, _) => format!("Approved signers v{version}"),
         (Tx::WithdrawApproval { version }, _) => format!("Withdrew approval of signers v{version}"),
+        // The approval that was the last one needed: its receipt says which version it made.
+        (Tx::ApproveChange { .. }, CommittedOutcome::Decided(version)) => format!("Decided change {version} · {}", action(tx, &CommittedOutcome::Done)),
         (Tx::ApproveChange { change: Change::Upgrade(upgrade), .. }, _) => {
             format!("Approved an upgrade: nodes older than {} stop at block {}", upgrade.least, upgrade.from)
         }
@@ -318,6 +355,26 @@ mod tests {
             assert!(matches!(&back.tx, Tx::ApproveChange { change: read, .. } if *read == change));
             assert_eq!(Checked::of(&landed(back.tx, CommittedOutcome::Done, Vec::new())).action, said);
         }
+    }
+
+    #[test]
+    fn the_approval_that_decided_a_change_says_which_version_it_made() {
+        let approve = Tx::ApproveChange { version: 4, change: Change::Name("second".to_string()) };
+        let decided = Checked::of(&landed(approve.clone(), CommittedOutcome::Decided(5), Vec::new()));
+
+        assert_eq!(decided.action, "Decided change 5 · Approved renaming the chain to second");
+        assert!(decided.done, "a decision did what it asked");
+        assert_eq!(Checked::of(&landed(approve.clone(), CommittedOutcome::Done, Vec::new())).action, "Approved renaming the chain to second", "one that only counted");
+
+        // A multisig's approval that decided says so too.
+        let multisig = Tx::Multisig { account: Address::Contract([6; 32]), tx: Box::new(approve), signatures: Vec::new() };
+        let by_multisig = Checked::of(&landed(multisig, CommittedOutcome::Decided(5), Vec::new()));
+
+        assert!(by_multisig.action.starts_with("Decided change 5 · Approved renaming the chain to second · by the multisig contract:0x0606"));
+        assert_eq!(by_multisig.vote, Some(Vote::Approved { version: 4, change: r#"{"name":"second"}"#.to_string(), decided: Some(5) }), "kept for the Governance page");
+        assert_eq!(decided.vote, by_multisig.vote);
+        assert_eq!(Checked::of(&landed(Tx::WithdrawChange { version: 6 }, CommittedOutcome::Done, Vec::new())).vote, Some(Vote::Withdrew { version: 6 }));
+        assert_eq!(Checked::of(&landed(Tx::Burn { from: Address::Ed25519([1; 32]), amount: Amount::U128(1) }, CommittedOutcome::Done, Vec::new())).vote, None);
     }
 
     #[test]

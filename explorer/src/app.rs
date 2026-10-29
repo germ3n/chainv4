@@ -9,7 +9,7 @@ use {
     crate::format,
     crate::light::Light,
     crate::model::{
-        BlockDetail, Called, Checkpoint, CollectionsPage, Contract, EventsPage, Forks, TxsPage, Mempool, NodeView, Page, PeerChange, Receipt, Reorganized,
+        BlockDetail, Called, Checkpoint, CollectionsPage, Contract, DecisionsPage, EventsPage, Forks, TxsPage, Mempool, NodeView, Page, PeerChange, Receipt, Reorganized,
         Status, Summary, TokensPage, TxView,
     },
     crate::store::{PAGE, Store},
@@ -17,7 +17,7 @@ use {
     crate::views::{
         self, Ctx, Look, Settings, View, account::AccountState, hops::HopState, map::MapState, network::Streaming, send::SendState,
         settings::SettingsState, tokens::TokensState, dex::DexState, swaps::SwapsState, bridge::BridgeState, collections::CollectionsState,
-        update::UpdateState,
+        update::UpdateState, governance::GovernanceState,
     },
     chainv4::release::{ReleaseError, ReleaseKeys},
     chainv4_ui::{Palette, layout, widgets},
@@ -81,6 +81,7 @@ pub struct Explorer {
     send: SendState,
     faucet: views::faucet::FaucetPage,
     pool: views::pool::PoolPage,
+    governance: GovernanceState,
     settings_page: SettingsState,
     /// The light client, which checks what the node says about balances.
     light: Light,
@@ -135,6 +136,7 @@ impl Explorer {
             send: SendState::default(),
             faucet: views::faucet::FaucetPage::default(),
             pool: views::pool::PoolPage::default(),
+            governance: GovernanceState::default(),
             settings_page: SettingsState::default(),
             light: Light::default(),
             keys: ReleaseKeys::built_in().unwrap_or_else(|why| {
@@ -215,6 +217,14 @@ impl Explorer {
                                     self.update.found = None;
                                 }
                                 Ask::Release => self.asked.release = time - RELEASE_EVERY + RELEASE_RETRY,
+                                // A chain without governance, or one whose node no longer has it.
+                                Ask::Governance if failure.status == 404 => {
+                                    self.store.governance = None;
+                                    self.store.decisions = Default::default();
+                                }
+                                Ask::GovernanceWeight(address) => {
+                                    self.store.governance_weights.remove(address);
+                                }
                                 _ => {}
                             }
 
@@ -384,9 +394,20 @@ impl Explorer {
                     store.account_txs.entry(address).or_default().take(page, cursor.is_some(), now);
                 }
             }
+            Ask::Governance => store.governance = parse(value),
+            Ask::Decisions { before } => {
+                if let Some(page) = parse::<DecisionsPage>(value) {
+                    store.decisions.take(page, before);
+                }
+            }
+            Ask::GovernanceWeight(address) => {
+                if let Some(found) = parse(value) {
+                    store.governance_weights.insert(address, found);
+                }
+            }
             Ask::Offer(_) | Ask::Submit(_) => {}
             // The light client's own, which it took already.
-            Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. } => {}
+            Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. } => {}
         }
     }
 
@@ -481,12 +502,18 @@ impl Explorer {
             self.api.ask(Ask::Release);
         }
 
-        // The pool's page asks again on its own, so why it failed stands till then: a node without
-        // a pool says so steadily, rather than between spells of loading.
+        // The pool's and governance's pages ask again on their own, so why it failed stands till
+        // then: a node without a pool, or a chain without governance, says so steadily, rather
+        // than between spells of loading.
         if due(&mut self.asked.failures, RETRY_AFTER) {
             self.store
                 .failures
-                .retain(|ask, _| matches!(ask, Ask::Offer(_) | Ask::Submit(_) | Ask::Call { .. } | Ask::Rpc(_) | Ask::Faucet(_) | Ask::Pool | Ask::PoolMiner(_)));
+                .retain(|ask, _| {
+                    matches!(
+                        ask,
+                        Ask::Offer(_) | Ask::Submit(_) | Ask::Call { .. } | Ask::Rpc(_) | Ask::Faucet(_) | Ask::Pool | Ask::PoolMiner(_) | Ask::Governance | Ask::Decisions { .. } | Ask::GovernanceWeight(_)
+                    )
+                });
         }
 
         if matches!(self.view, View::Map | View::Overview) && due(&mut self.asked.forks, FORKS_EVERY) {
@@ -503,6 +530,13 @@ impl Explorer {
             View::Account(address) => [Ask::Account(address.clone()), Ask::AccountNames(address.clone())].into_iter().chain(self.light.prove(address)).collect(),
             View::Name(name) => vec![Ask::Name(name.clone())],
             View::Pool => [Ask::Pool].into_iter().chain(self.pool.miner().map(|miner| Ask::PoolMiner(miner.to_string()))).collect(),
+            // The newest decisions, and the light client's proof of each one read.
+            View::Governance => {
+                let light = &mut self.light;
+                let proofs: Vec<Ask> = self.store.decisions.items.values().filter_map(|decision| light.prove_receipt(&decision.tx, &decision.block, decision.height)).collect();
+
+                [Ask::Governance, Ask::Decisions { before: None }].into_iter().chain(proofs).collect()
+            }
             _ => Vec::new(),
         };
 
@@ -865,6 +899,7 @@ impl Explorer {
                         View::Transfer(digest) => views::bridge::transfer(ui, &mut ctx, &mut self.bridge, digest),
                         View::Release(id) => views::bridge::release(ui, &mut ctx, &mut self.bridge, *id),
                         View::Finality => views::finality::show(ui, &mut ctx),
+                        View::Governance => views::governance::show(ui, &mut ctx, &mut self.governance),
                         View::Send => views::send::show(ui, &mut ctx, &mut self.send),
                         View::Faucet => views::faucet::show(ui, &mut ctx, &mut self.faucet),
                         View::Pool => views::pool::show(ui, &mut ctx, &mut self.pool),

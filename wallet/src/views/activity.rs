@@ -409,6 +409,7 @@ mod tests {
             fee: "0".to_string(),
             events: vec!["Swap contract:0x0000 contract:0x5119".to_string()],
             genesis: "0x9a7f".to_string(),
+            vote: None,
         }
     }
 

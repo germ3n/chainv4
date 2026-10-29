@@ -303,6 +303,9 @@ pub struct Outcome {
     pub payments: Vec<PaymentView>,
     #[serde(default)]
     pub trace: Trace,
+    /// The change a governance approval decided, by its version, for status decided.
+    #[serde(default)]
+    pub version: Option<u64>,
 }
 
 /// Coin a contract paid while a transaction ran.
@@ -801,6 +804,136 @@ pub struct Estimate {
     pub status: String,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// GET /governance: who approves, what a change needs, the changes being approved, and every
+/// setting in force. A chain without governance answers 404.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GovernanceView {
+    /// council or electorate.
+    pub kind: String,
+    pub epoch: u64,
+    /// The consensus the tip's epoch runs, and the one decided last, as genesis files write them.
+    #[serde(default)]
+    pub active: Value,
+    #[serde(default)]
+    pub decided: Value,
+    /// How many changes were decided so far.
+    pub version: u64,
+    /// How many epochs an approval counts for, from the one it was made in.
+    pub approval_epochs: u64,
+    /// What a change's approvals must weigh, in all.
+    pub needed: String,
+    /// The finality the tip's epoch runs: ffg, authority or depth.
+    #[serde(default)]
+    pub finality: String,
+    /// A switch of finality's kind on its way.
+    #[serde(default)]
+    pub switch: Option<SwitchView>,
+    #[serde(default)]
+    pub proposals: Vec<Proposal>,
+    /// The council's accounts; none under an electorate.
+    #[serde(default)]
+    pub members: Option<Vec<String>>,
+    /// Each setting governance may change, by its kind, as it stands; a kind the chain has none of
+    /// is left out.
+    #[serde(default)]
+    pub in_force: BTreeMap<String, InForce>,
+}
+
+impl GovernanceView {
+    /// Whether approvals weigh stake, in the chain's coin: an electorate under FFG. Elsewhere each
+    /// weighs a member or a signer.
+    pub fn weighs_stake(&self) -> bool {
+        self.kind == "electorate" && self.finality == "ffg"
+    }
+}
+
+/// A switch of finality's kind: from an epoch on, to a kind.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct SwitchView {
+    pub epoch: u64,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+/// A change being approved: the change, what its approvals weigh and need, and who approved.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Proposal {
+    pub weight: String,
+    pub needed: String,
+    #[serde(default)]
+    pub approvals: Vec<ChangeApproval>,
+    /// The change itself: one field, named for its kind.
+    #[serde(flatten)]
+    pub change: serde_json::Map<String, Value>,
+}
+
+impl Proposal {
+    /// The change, as Tx::ApproveChange's JSON carries it: { kind: value }.
+    pub fn change(&self) -> Value {
+        Value::Object(self.change.clone())
+    }
+}
+
+/// One approval of a change, and the epoch it stops counting after.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ChangeApproval {
+    pub account: String,
+    pub weight: String,
+    pub epoch: u64,
+    pub counts_until: u64,
+}
+
+/// A setting as it stands, and the change that last set it: None while genesis's stands.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct InForce {
+    pub value: Value,
+    #[serde(default)]
+    pub decided: Option<u64>,
+}
+
+/// GET /governance/history: a page of decisions, newest first.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DecisionsPage {
+    /// The newest decision's version: how many there were.
+    pub version: u64,
+    /// The oldest version the node keeps: 1 unless it synced from a snapshot, version + 1 with
+    /// none.
+    pub from: u64,
+    pub decisions: Vec<Decision>,
+}
+
+/// A decision: the approval that decided a change, where it landed, and the change.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Decision {
+    pub version: u64,
+    pub tx: String,
+    pub block: String,
+    pub height: u64,
+    pub timestamp: u64,
+    pub confirmations: u64,
+    #[serde(rename = "final", default)]
+    pub finalized: bool,
+    #[serde(default)]
+    pub sender: Option<String>,
+    /// What it changed, and to what; none when the node cannot read its transaction.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub change: Option<Value>,
+}
+
+/// GET /governance/weight/{address}: what an account's approval weighs now, beside what a change
+/// needs, and the change it approved, if any.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GovernanceWeight {
+    pub account: String,
+    pub weight: String,
+    pub needed: String,
+    pub version: u64,
+    #[serde(default)]
+    pub approved: Option<Value>,
 }
 
 /// The stream's reorganized event.

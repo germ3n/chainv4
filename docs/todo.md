@@ -305,6 +305,10 @@ offline; these would make that hold up as a treasury.
   from its first block) and `Change::Limits` (`tx_limits` with `max_block_bytes`), on the same
   ballot, each from the block after the deciding one. Every block reads them from its parent's
   state, so reorgs undo them; the mempool, the producer and the API read the tip's.
+- [x] **Governance pages in the apps.** The deciding approval's receipt says `Decided(version)`,
+  so light clients prove decisions; nodes index them for `GET /governance/history`, and
+  `GET /governance` adds every setting in force and who may approve. The explorer shows the
+  ballot, what stands and the history; the wallet approves, withdraws and proposes any change.
 - [ ] **Fuel costs measured, not guessed.** `vm::cost` is a table of hand-picked constants
   (a storage write 500, a call 1,000, a hash 20…) compiled into the node. A Rust tool, run at
   build time or as `chainv4 calibrate`, would time each fuel-charged operation on a reference

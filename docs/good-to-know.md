@@ -372,6 +372,15 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   clients then wait for each epoch's consensus from a light update, on any chain with governance,
   so they follow `activation_delay` epochs behind finality. A chain that switches to a scheme
   nobody produces for stops; have the producers ready first.
+- **A deciding approval's receipt says Decided.** Its outcome is `Decided(version)`, committed in
+  the receipts root, so light clients prove each decision from its receipt; nodes index them by
+  version for `GET /governance/history`, and versions count up one at a time, so a gap shows. A
+  change of the rules: a chain that decided anything before moves to it with a new genesis.
+  `GET /governance` also shows every setting in force, with the change that set it, and who may
+  approve; the apps' Governance pages read it, and the wallet approves and proposes there.
+- **One JSON for changes.** `params::json` (the `json` feature, no node needed) reads and writes
+  every change, `change_json` and `change_from_json`, and each part of genesis one may replace,
+  with the same checks; `chain::json` adds genesis files. The CLI, the API and the apps share it.
 - **Fees, the reward and the limits change from the next block; finality's tunables an epoch
   boundary ahead.** Each block reads them from its parent's state, so a reorg past the decision
   takes it back, and a block is never checked by rules decided after it. A finality change runs

@@ -403,6 +403,53 @@ yet in a root on chain, the pool's fee, and each worker connected for it with it
 - **History** shows a claim as "Claimed mining pool earnings for" the miner: the transaction
   names all the miner earned, not what the claim paid.
 
+## Governance
+
+The **Governance** page (`wallet/src/views/governance.rs`) covers the chain's settings under
+[governance](governance.md): who decides, the changes open and their approvals, approving or
+withdrawing, proposing a change, what is in force and what was decided last. It reads
+[`GET /governance`](api.md#get-governance),
+[`GET /governance/history`](api.md#get-governancehistorybeforevlimitn) and
+[`GET /governance/weight/{address}`](api.md#get-governanceweightaddress), asking again every
+15 seconds while the page is open. On a chain without governance (404) it says so and shows no
+actions.
+
+- **Who decides:** the council's members, or finality's voters for an electorate. The card also
+  shows what a change needs, how many epochs an approval counts for, the epoch, and the version: the
+  number of changes decided so far. Every approval names that version. Under it, each of the
+  wallet's addresses, and each multisig it follows, shows its weight: **may vote** with what it
+  weighs, or **may not vote**. It also shows which change the address's approval counts for, if
+  any. A council member weighs one vote; under an electorate, FFG weighs stake and authority
+  finality weighs signers.
+- **Open changes:** each change in words, with its JSON folded under it. Each has a bar for its
+  approvals' weight against what it needs, and its approvals, each with the epoch it counts until.
+  An address of the account in use, or a followed multisig, that may vote gets **Approve** on each
+  change, or **Withdraw** on the one its approval counts for. An address approves one change at a
+  time, so approving another moves the approval there. The confirm screen says so, and that the
+  approval lapses once another change is decided first and the version moves on. To vote with
+  another account's address, switch to that account.
+- **Propose:** pick a kind. The chain's name, bootnodes (one a line, none for none), an upgrade
+  (least version and the block it starts from, which must be ahead of the light client's tip) and
+  name prices (one a line in the coin, by length from 3 characters, the last for any longer) have
+  fields of their own. Every other kind (consensus, fees, reward, limits, finality,
+  switch_finality, collections, federation, directory) is a JSON editor, filled in with the value
+  in force for that kind, so editing starts from what stands. Whatever the form says goes through
+  chainv4's `change_from_json`, the same checks as the CLI's `approve-change`. Its error shows
+  under the form, and the change in words shows once it reads. **Review** opens the confirm
+  screen with the change in words and its JSON. A change is proposed by approving it.
+- **Sending:** from the confirm screen the transaction, `Tx::ApproveChange { version, change }` or
+  `Tx::WithdrawChange { version }`, goes to Send like any other: priced, signed with the account's
+  key, a hardware wallet or the offline signer, and sent. A followed multisig's goes to the
+  Multisig page as a bundle for its members.
+- **Your votes:** the account's approvals and withdrawals whose receipts the light client proved,
+  each Final or Proven. An approval that was the last one needed shows **Decided change N**: its
+  receipt's committed outcome is `Decided(N)`. History says the same, "Decided change N ·
+  Approved …".
+- **In force:** every setting, in words, each marked "genesis" or "decided in change N".
+- **Recent decisions:** the latest few, newest first, each with its block and who sent it.
+- **Trust:** the page shows what the node says. Nothing signed rests on it but the version, which
+  the chain checks: an approval naming a version that has moved on fails and changes nothing.
+
 ## Faucet
 
 On a node that runs a [faucet](faucet.md), as a dev or test chain's may, the Overview has a

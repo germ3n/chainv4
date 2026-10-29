@@ -17,26 +17,11 @@ use {
 };
 
 impl ScheduleConfig {
-    #[document(parent = "ScheduleConfig", summary = "The kind's name: weighted or contract.")]
-    pub fn name(&self) -> &'static str {
-        match self {
-            ScheduleConfig::Weighted(_) => "weighted",
-            ScheduleConfig::Contract(_) => "contract",
-        }
-    }
-
     #[document(parent = "ScheduleConfig", summary = "The scorer these settings describe.")]
     pub fn build(&self) -> Box<dyn GasSchedule> {
         match self {
             ScheduleConfig::Weighted(weighted) => Box::new(*weighted),
             ScheduleConfig::Contract(scorer) => Box::new(scorer.clone()),
-        }
-    }
-
-    pub(super) fn problem(&self) -> Option<&'static str> {
-        match self {
-            ScheduleConfig::Weighted(weighted) => weighted.problem(),
-            ScheduleConfig::Contract(scorer) => scorer.problem(),
         }
     }
 }
@@ -52,13 +37,6 @@ impl Weighted {
             per_byte: 10,
             per_code_byte: 20,
             fuel_per_gas: 1,
-        }
-    }
-
-    fn problem(&self) -> Option<&'static str> {
-        match self.fuel_per_gas {
-            0 => Some("fuel_per_gas must be at least 1"),
-            _ => None,
         }
     }
 }
@@ -89,61 +67,7 @@ impl GasSchedule for Weighted {
     }
 }
 
-#[document(
-    summary = "Every kind of transaction, as the API and a scorer's kind argument name them.",
-    category = "Fees",
-    see_also = "ContractScorer::kinds",
-)]
-pub const TX_KINDS: &[&str] = &[
-    "transfer",
-    "mint",
-    "burn",
-    "call",
-    "deploy",
-    "upgrade",
-    "bond",
-    "unbond",
-    "withdraw",
-    "slash",
-    "approve_signers",
-    "withdraw_approval",
-    "approve_change",
-    "withdraw_change",
-    "name",
-    "primary_name",
-    "ethereum",
-    "create_multisig",
-    "change_multisig",
-    "approve_multisig",
-    "withdraw_multisig",
-    "claim",
-];
-
 impl ContractScorer {
-    fn problem(&self) -> Option<&'static str> {
-        if !matches!(self.contract, Address::Contract(_)) {
-            return Some("the scorer must be a contract address");
-        }
-
-        if self.fuel == 0 {
-            return Some("the scorer's fuel must be at least 1");
-        }
-
-        if self.kinds.iter().any(|kind| !TX_KINDS.contains(&kind.as_str())) {
-            return Some("the scorer's kinds must be kinds of transaction, such as call or deploy");
-        }
-
-        let mut kinds = self.kinds.clone();
-        kinds.sort();
-        kinds.dedup();
-
-        if kinds.len() != self.kinds.len() {
-            return Some("the scorer's kinds name a kind twice");
-        }
-
-        self.weights.problem()
-    }
-
     #[document(parent = "ContractScorer", summary = "Whether score is called for this kind of transaction.")]
     pub fn scores(&self, kind: &str) -> bool {
         self.kinds.is_empty() || self.kinds.iter().any(|named| named == kind)

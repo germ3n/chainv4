@@ -54,6 +54,14 @@ pub trait Governance: Send + Sync {
         summary = "What the approvals for one change must add up to in a state to decide it: two thirds of the stake, the signers' change_threshold, or the council's threshold.",
     )]
     fn needed(&self, state: &State, epoch: u64) -> Result<u256, DbError>;
+
+    #[document(
+        parent = "Governance",
+        summary = "The accounts that may approve, when the kind names them: a council's members. None for the electorate, whose voters are finality's and change with it.",
+    )]
+    fn members(&self) -> Option<&[Address]> {
+        None
+    }
 }
 
 #[document(

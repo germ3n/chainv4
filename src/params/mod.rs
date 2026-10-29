@@ -12,6 +12,8 @@ use {
 
 pub mod fees;
 pub mod finality;
+#[cfg(feature = "json")]
+pub mod json;
 
 #[document(
     summary = "What one call may use. Running out of either stops the contract.",
@@ -56,3 +58,44 @@ pub struct Reward {
 }
 
 impl Hashable for Reward {}
+
+#[document(
+    summary = "Why a reward cannot be a chain's: a halving interval of 0.",
+    category = "Chain",
+    see_also = "Reward, Change::Reward",
+)]
+pub fn reward_problem(reward: &Reward) -> Option<&'static str> {
+    (reward.halving_interval == Some(0)).then_some("a reward halves every 1 block or more, or never")
+}
+
+impl BlockLimits {
+    #[document(
+        parent = "BlockLimits",
+        summary = "Why they cannot be a chain's: fuel below 100,000 or memory below 1 MiB, which no contract call fits in, or max_block_bytes outside 1 to 6 MiB, as genesis's.",
+    )]
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.tx_limits.fuel < 100_000 || self.tx_limits.memory < 1024 * 1024 {
+            return Some("a transaction needs at least 100,000 fuel and 1 MiB of memory");
+        }
+
+        if self.max_block_bytes.is_some_and(|bytes| !(MIN_BLOCK_BYTES..=MAX_BLOCK_BYTES).contains(&bytes)) {
+            return Some("max_block_bytes must be 1 MiB to 6 MiB, 1048576 to 6291456");
+        }
+
+        None
+    }
+}
+
+#[document(
+    summary = "The least max_block_bytes a genesis may set, 1 MiB, so a block still holds the largest transaction there is: a deploy of a 512 KiB WebAssembly module.",
+    category = "Chain",
+    see_also = "Genesis::max_block_bytes",
+)]
+pub const MIN_BLOCK_BYTES: u64 = 1024 * 1024;
+
+#[document(
+    summary = "The most max_block_bytes a genesis may set, 6 MiB, so a full block, with its header and finality proofs, still fits one gossip message of 8 MiB.",
+    category = "Chain",
+    see_also = "Genesis::max_block_bytes",
+)]
+pub const MAX_BLOCK_BYTES: u64 = 6 * 1024 * 1024;

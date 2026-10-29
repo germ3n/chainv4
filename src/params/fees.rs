@@ -145,3 +145,135 @@ pub struct Bid {
 }
 
 impl Hashable for Bid {}
+
+#[document(
+    summary = "Every kind of transaction, as the API and a scorer's kind argument name them.",
+    category = "Fees",
+    see_also = "ContractScorer::kinds",
+)]
+pub const TX_KINDS: &[&str] = &[
+    "transfer",
+    "mint",
+    "burn",
+    "call",
+    "deploy",
+    "upgrade",
+    "bond",
+    "unbond",
+    "withdraw",
+    "slash",
+    "approve_signers",
+    "withdraw_approval",
+    "approve_change",
+    "withdraw_change",
+    "name",
+    "primary_name",
+    "ethereum",
+    "create_multisig",
+    "change_multisig",
+    "approve_multisig",
+    "withdraw_multisig",
+    "claim",
+];
+
+impl FeeConfig {
+    /// Settings no chain could charge with.
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.block_gas_limit == 0 {
+            return Some("block_gas_limit must be at least 1");
+        }
+
+        if self.burn_permille > 1000 {
+            return Some("burn_permille must be at most 1000");
+        }
+
+        self.schedule.problem().or_else(|| self.pricing.problem())
+    }
+}
+
+impl ScheduleConfig {
+    #[document(parent = "ScheduleConfig", summary = "The kind's name: weighted or contract.")]
+    pub fn name(&self) -> &'static str {
+        match self {
+            ScheduleConfig::Weighted(_) => "weighted",
+            ScheduleConfig::Contract(_) => "contract",
+        }
+    }
+
+    pub fn problem(&self) -> Option<&'static str> {
+        match self {
+            ScheduleConfig::Weighted(weighted) => weighted.problem(),
+            ScheduleConfig::Contract(scorer) => scorer.problem(),
+        }
+    }
+}
+
+impl Weighted {
+    pub fn problem(&self) -> Option<&'static str> {
+        match self.fuel_per_gas {
+            0 => Some("fuel_per_gas must be at least 1"),
+            _ => None,
+        }
+    }
+}
+
+impl ContractScorer {
+    pub fn problem(&self) -> Option<&'static str> {
+        if !matches!(self.contract, Address::Contract(_)) {
+            return Some("the scorer must be a contract address");
+        }
+
+        if self.fuel == 0 {
+            return Some("the scorer's fuel must be at least 1");
+        }
+
+        if self.kinds.iter().any(|kind| !TX_KINDS.contains(&kind.as_str())) {
+            return Some("the scorer's kinds must be kinds of transaction, such as call or deploy");
+        }
+
+        let mut kinds = self.kinds.clone();
+        kinds.sort();
+        kinds.dedup();
+
+        if kinds.len() != self.kinds.len() {
+            return Some("the scorer's kinds name a kind twice");
+        }
+
+        self.weights.problem()
+    }
+}
+
+impl PricingConfig {
+    #[document(parent = "PricingConfig", summary = "The kind's name: base_fee or bid.")]
+    pub fn name(&self) -> &'static str {
+        match self {
+            PricingConfig::BaseFee(_) => "base_fee",
+            PricingConfig::Bid(_) => "bid",
+        }
+    }
+
+    pub fn problem(&self) -> Option<&'static str> {
+        match self {
+            PricingConfig::BaseFee(base_fee) => base_fee.problem(),
+            PricingConfig::Bid(_) => None,
+        }
+    }
+}
+
+impl BaseFee {
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.min == u256::ZERO {
+            return Some("the base fee's min must be at least 1, or it could never rise again");
+        }
+
+        if self.initial < self.min {
+            return Some("the base fee's initial price must be at least its min");
+        }
+
+        if self.elasticity == 0 || self.change_denominator == 0 {
+            return Some("the base fee's elasticity and change_denominator must be at least 1");
+        }
+
+        None
+    }
+}

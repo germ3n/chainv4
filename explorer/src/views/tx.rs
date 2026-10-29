@@ -213,10 +213,11 @@ fn means(tx: &TxView) -> Option<String> {
             tx.tx["to"].as_str().map_or_else(|| "?".to_string(), format::short),
             tx.tx["height"].as_u64().map_or_else(|| "?".to_string(), |height| format::thousands(&height.to_string())),
         )),
+        // An approval names the version it follows: it is for the change after it.
         "approve_change" => Some(format!(
-            "Approves {}, as governance's decision {}",
+            "Approves {}, for governance's change {}",
             change(&tx.tx["change"]),
-            tx.tx["version"].as_u64().map_or_else(|| "?".to_string(), |version| version.to_string()),
+            tx.tx["version"].as_u64().map_or_else(|| "?".to_string(), |version| (version + 1).to_string()),
         )),
         _ => None,
     }
@@ -261,6 +262,13 @@ fn result(facts: &mut Facts, ctx: &mut Ctx, look: Look, outcome: &Outcome) {
                 facts.row("contract", |ui| super::address(ui, ctx, contract));
             }
         }
+        "decided" => {
+            facts.row("decided", |ui| {
+                if ui.link(RichText::new(decided(outcome)).color(look.palette.accent)).on_hover_text("Open governance").clicked() {
+                    ctx.go(super::View::Governance);
+                }
+            });
+        }
         "returned" if !outcome.values.is_empty() => {
             facts.row("returned", |ui| {
                 for value in &outcome.values {
@@ -269,6 +277,14 @@ fn result(facts: &mut Facts, ctx: &mut Ctx, look: Look, outcome: &Outcome) {
             });
         }
         _ => {}
+    }
+}
+
+/// What a governance approval that decided its change says of it: the change's version.
+pub fn decided(outcome: &Outcome) -> String {
+    match outcome.version {
+        Some(version) => format!("change {version} under governance: its approval was the last one needed"),
+        None => "a change under governance".to_string(),
     }
 }
 
@@ -423,7 +439,22 @@ mod tests {
         assert_eq!(change(&json!({ "name": "chainv4 mainnet" })), "renaming the chain to chainv4 mainnet");
         assert_eq!(
             means(&approval(json!({ "name": "chainv4 mainnet" }))).as_deref(),
-            Some("Approves renaming the chain to chainv4 mainnet, as governance's decision 4")
+            Some("Approves renaming the chain to chainv4 mainnet, for governance's change 5")
         );
+    }
+
+    #[test]
+    fn a_receipt_that_decided_a_change_names_its_version() {
+        let receipt: crate::model::Receipt = serde_json::from_value(json!({
+            "id": "0xdd", "block": "0xaa", "height": 3, "index": 0, "confirmations": 2, "final": true,
+            "status": "decided", "version": 5, "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [],
+        }))
+        .unwrap();
+
+        assert_eq!((receipt.outcome.status.as_str(), receipt.outcome.version), ("decided", Some(5)));
+        assert_eq!(decided(&receipt.outcome), "change 5 under governance: its approval was the last one needed");
+
+        let counted: Outcome = serde_json::from_value(json!({ "status": "done", "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [] })).unwrap();
+        assert_eq!(counted.version, None, "an approval that only counted decided nothing");
     }
 }

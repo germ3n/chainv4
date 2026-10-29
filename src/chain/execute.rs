@@ -27,7 +27,7 @@ use {
 #[cfg(any(feature = "governance", feature = "names"))]
 use crate::registry::changes::Changes;
 #[cfg(feature = "governance")]
-use crate::governance::Change;
+use crate::{governance::Change, registry::changes::ChangeApproved};
 #[cfg(feature = "staking")]
 use crate::registry::validators::Validators;
 
@@ -160,6 +160,8 @@ pub enum Effect {
     Upgraded(Address),
     #[document(summary = "A contract call returned these values.")]
     Returned(Vec<TxCallArgumentType>),
+    #[document(summary = "A governance approval decided its change, as this version.")]
+    Decided(u64),
 }
 
 #[document(
@@ -916,7 +918,12 @@ fn run(
             let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: governance.finality.activation_delay() };
             let approved = Changes::new(layer).approve(&sender, *version, change.clone(), at, governance.approval_epochs, &*governance.governance);
 
-            (moved(approved.map(|_| ())), Contracted::default())
+            let effect = approved.map(|approved| match approved {
+                ChangeApproved::DecidedChange(version) => Effect::Decided(version),
+                ChangeApproved::Counted { .. } => Effect::Done,
+            });
+
+            (effect.map_err(Failure::Registry), Contracted::default())
         }
         #[cfg(feature = "governance")]
         Tx::WithdrawChange { version } => {

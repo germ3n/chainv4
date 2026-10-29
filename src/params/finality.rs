@@ -47,6 +47,16 @@ impl Hashable for FinalityConfig {
 }
 
 impl FinalityConfig {
+    #[document(parent = "FinalityConfig", summary = "The names of the kinds this build has, as genesis files spell them.")]
+    pub const KINDS: &'static [&'static str] = &[
+        #[cfg(any(feature = "finality-ffg", not(feature = "node")))]
+        "ffg",
+        #[cfg(any(feature = "finality-authority", not(feature = "node")))]
+        "authority",
+        #[cfg(any(feature = "finality-depth", not(feature = "node")))]
+        "depth",
+    ];
+
     #[document(parent = "FinalityConfig", summary = "The kind's name: ffg, authority or depth.")]
     pub fn name(&self) -> &'static str {
         match *self {

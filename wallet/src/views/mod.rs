@@ -10,6 +10,7 @@ mod faucet;
 pub mod dapp;
 #[cfg(feature = "swap")]
 pub mod evm;
+mod governance;
 mod mining;
 pub(crate) mod multisig;
 mod names;
@@ -52,6 +53,8 @@ pub enum Page {
     Mining,
     /// Native multisigs: making one, and taking their transactions round the members.
     Multisig,
+    /// The chain's settings under governance: what stands, the changes open, and approving them.
+    Governance,
     Contracts,
     /// Atomic swaps between this chain, Bitcoin and EVM chains.
     #[cfg(feature = "swap")]
@@ -87,6 +90,7 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             (Page::Names, "Names"),
             (Page::Mining, "Mining"),
             (Page::Multisig, "Multisig"),
+            (Page::Governance, "Governance"),
             (Page::Contracts, "Contracts"),
             #[cfg(feature = "swap")]
             (Page::Swaps, "Swaps"),
@@ -216,6 +220,7 @@ pub struct States {
     pub dapp: dapp::DappState,
     pub faucet: faucet::FaucetState,
     pub mining: mining::MiningState,
+    pub governance: governance::GovernanceState,
     #[cfg(feature = "swap")]
     pub swaps: swaps::SwapsState,
     #[cfg(feature = "dex")]
@@ -306,6 +311,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Names => names::show(ui, ctx, &mut states.names, &mut states.send),
         Page::Mining => mining::show(ui, ctx, &mut states.mining, &mut states.send),
         Page::Multisig => multisig::show(ui, ctx, &mut states.multisig, &mut states.send),
+        Page::Governance => governance::show(ui, ctx, &mut states.governance, &mut states.send, &mut states.multisig),
         Page::Contracts => contracts::show(ui, ctx, &mut states.contracts, &mut states.send),
         #[cfg(feature = "swap")]
         Page::Swaps => swaps::show(ui, ctx, &mut states.swaps, &mut states.send, &mut states.multisig),

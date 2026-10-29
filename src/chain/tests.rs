@@ -2070,3 +2070,22 @@ fn light_updates_stored_before_eras_or_switched_epochs_read_back() {
         assert_eq!(stored_light_update(&*db, &block).unwrap(), Some(LightUpdate { switched, ..current.clone() }));
     }
 }
+
+#[test]
+fn decisions_are_read_down_from_the_newest_and_stop_at_the_first_missing() {
+    let db = Arc::new(MemoryDb::default());
+    let state = State::new(db.clone());
+    let id = |byte: u8| Hash::from_bytes(HashType::default_chain(), &[byte; 32]).unwrap();
+
+    // As a node that synced from a snapshot keeps them: versions 3 and 4, but not 1 or 2.
+    for version in [3u64, 4] {
+        state.put_value(Column::Decisions, version.to_be_bytes().to_vec(), &id(version as u8));
+    }
+    db.commit(state.take_changes()).unwrap();
+
+    assert_eq!(stored_decisions(&*db, 4, None, 10).unwrap(), [(4, id(4)), (3, id(3))]);
+    assert_eq!(stored_decisions(&*db, 4, Some(4), 10).unwrap(), [(3, id(3))]);
+    assert_eq!(stored_decisions(&*db, 4, None, 1).unwrap(), [(4, id(4))]);
+    assert_eq!(stored_decisions(&*db, 4, Some(3), 10).unwrap(), [], "2 is missing");
+    assert_eq!(stored_decisions(&*db, 0, None, 10).unwrap(), [], "none decided yet");
+}

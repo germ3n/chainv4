@@ -47,6 +47,8 @@ use {
 
 #[cfg(feature = "stream")]
 use axum::response::sse::{Event, KeepAlive, Sse};
+#[cfg(feature = "governance")]
+use crate::chain::stored_decisions;
 
 #[cfg(feature = "faucet")]
 mod faucet;
@@ -139,6 +141,9 @@ struct Api {
     vote_rewards: VoteRewardSource,
     /// Genesis's bootnodes, which stand until governance decides others.
     genesis_bootnodes: Arc<Vec<String>>,
+    /// Genesis itself, for what governance may change to show genesis's while it has not.
+    #[cfg(feature = "governance")]
+    genesis: Arc<Genesis>,
     /// The faucet, on a node that runs one.
     #[cfg(feature = "faucet")]
     faucet: Option<Arc<faucet::Faucet>>,
@@ -365,6 +370,8 @@ pub fn start(
     let federation = genesis.federation.clone().map(Arc::new);
     let (rules, max_block_bytes, reward, vote_rewards) = (Arc::new(genesis.rules()), genesis.max_block_bytes, genesis.reward, genesis.vote_rewards());
     let genesis_bootnodes = Arc::new(genesis.bootnodes.clone());
+    #[cfg(feature = "governance")]
+    let whole = Arc::new(genesis.clone());
     let vm = Arc::new(
         Vm::new(&genesis.engines, genesis.hash)
             .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?
@@ -418,6 +425,8 @@ pub fn start(
                     built_fees: Arc::default(),
                     vote_rewards,
                     genesis_bootnodes,
+                    #[cfg(feature = "governance")]
+                    genesis: whole,
                     #[cfg(feature = "faucet")]
                     faucet: options.faucet.map(|config| Arc::new(faucet::Faucet::new(config))),
                     #[cfg(feature = "swap")]
@@ -477,7 +486,10 @@ fn router(api: Api) -> Router {
         .route("/offer", post(offer))
         .route("/call", post(call));
     #[cfg(feature = "governance")]
-    let router = router.route("/governance", get(governance));
+    let router = router
+        .route("/governance", get(governance))
+        .route("/governance/history", get(governance_history))
+        .route("/governance/weight/{address}", get(governance_weight));
     #[cfg(feature = "ethereum")]
     let router = router.route("/rpc", post(ethereum_rpc));
     #[cfg(feature = "faucet")]
@@ -1010,6 +1022,145 @@ async fn governance(Shared(api): Shared<Api>) -> Answer {
         "finality": changes.finality_in(epoch, &rules.finality)?.name(),
         "switch": changes.switch_ahead(epoch, &rules.finality)?.map(|era| json!({ "epoch": era.from, "type": era.config.name() })),
         "proposals": proposals,
+        "members": rules.governance.members().map(|members| members.iter().map(Address::to_string).collect::<Vec<_>>()),
+        "in_force": in_force(&api, &state, epoch, decided.version)?,
+    })))
+}
+
+#[cfg(feature = "governance")]
+/// Each setting governance may change, as it stands in the tip's state, under its kind: genesis's
+/// while governance never changed it, with decided naming the version that last did, or null.
+fn in_force(api: &Api, state: &State, epoch: u64, newest: u64) -> Result<Value, ApiError> {
+    use crate::governance::Change;
+    let rules = api.rules.governance.as_ref().expect("only a governed chain asks");
+    let changes = Changes::new(state);
+    let genesis = &api.genesis;
+    let limits = crate::chain::BlockLimits { tx_limits: genesis.tx_limits, max_block_bytes: genesis.max_block_bytes };
+    let settings = [
+        // The consensus the tip's epoch runs: fixed for it at a checkpoint, else genesis's.
+        Some(Change::Consensus(changes.consensus_for(epoch)?.unwrap_or_else(|| genesis.consensus.clone()))),
+        changes.name()?.map(Change::Name),
+        Some(Change::Bootnodes(api.bootnodes(state)?)),
+        changes.name_prices()?.or_else(|| genesis.names.as_ref().map(|names| names.prices.clone())).map(Change::NamePrices),
+        api.rules.standards_in(state)?.collections.map(Change::Collections),
+        changes.federation()?.map(|decided| decided.federation).or_else(|| genesis.federation.clone()).map(Change::Federation),
+        changes.directory()?.map(Change::Directory),
+        changes.fees()?.or_else(|| genesis.fees.clone()).map(Change::Fees),
+        Some(Change::Reward(changes.reward()?.map_or(genesis.reward, |decided| decided.reward))),
+        Some(Change::Limits(changes.limits()?.unwrap_or(limits))),
+        Some(Change::Finality(changes.finality_in(epoch, &rules.finality)?)),
+        changes.upgrade()?.map(Change::Upgrade),
+    ];
+    // The version that last changed each kind, from the decisions this node indexed.
+    let mut last = HashMap::new();
+
+    for (version, id) in stored_decisions(&*api.db, newest, None, usize::MAX)? {
+        if let Some(change) = decided_change(&*api.db, &id)? {
+            last.entry(change.name()).or_insert(version);
+        }
+    }
+
+    let mut value = json!({});
+
+    for change in settings.into_iter().flatten() {
+        let kind = change.name();
+        let mut setting = json!({ "value": json::change(&change).as_object().and_then(|change| change.values().next().cloned()).unwrap_or(Value::Null) });
+        // A switch of finality's kind is decided as a change of its own, of the same setting.
+        setting["decided"] = match kind {
+            "finality" => last.get("finality").max(last.get("switch_finality")).copied(),
+            kind => last.get(kind).copied(),
+        }
+        .into();
+        value[kind] = setting;
+    }
+
+    Ok(value)
+}
+
+#[cfg(feature = "governance")]
+/// The change a decision's transaction approved: its own, or the one a multisig approved for it.
+fn decided_change(db: &dyn Committed, id: &Hash) -> Result<Option<crate::governance::Change>, ApiError> {
+    use crate::structs::tx::Tx;
+    let Some(receipt) = stored_receipt(db, id)? else { return Ok(None) };
+    let Some(block) = stored_block(db, &receipt.block)? else { return Ok(None) };
+    let Some(signed) = block.txs.get(receipt.index as usize) else { return Ok(None) };
+    let mut tx = &signed.tx;
+
+    loop {
+        match tx {
+            Tx::ApproveChange { change, .. } => return Ok(Some(change.clone())),
+            Tx::ApproveMultisig { tx: inner, .. } => tx = inner,
+            _ => return Ok(None),
+        }
+    }
+}
+
+#[cfg(feature = "governance")]
+/// Governance's decisions, newest first, below the version in ?before: each the version it made,
+/// the approval that decided it, its block, who sent it and the change. A light client proves each
+/// with GET /proofs/receipts/{tx}, whose outcome is Decided at that version; versions count up
+/// one at a time, so a gap shows. from is the oldest this node keeps, 1 unless it synced from a
+/// snapshot.
+async fn governance_history(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    if api.rules.governance.is_none() {
+        return Err(ApiError::NotFound("this chain has no governance".to_string()));
+    }
+
+    let db = api.db.clone();
+    let tip = tip(&*db)?.header.height;
+    let newest = Changes::new(&State::new(db.clone())).decided()?.version;
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_PAGE).min(MAX_PAGE) as usize;
+    let mut decisions = Vec::new();
+
+    for (version, id) in stored_decisions(&*db, newest, number(&query, "before")?, limit)? {
+        let Some(receipt) = stored_receipt(&*db, &id)? else { continue };
+        let block = stored_block(&*db, &receipt.block)?.ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("block {} is not stored", receipt.block))))?;
+        let sender = block.txs.get(receipt.index as usize).map(|signed| signed.sender().to_string());
+        let mut value = json!({
+            "version": version,
+            "tx": id.to_string(),
+            "block": receipt.block.to_string(),
+            "height": block.header.height,
+            "timestamp": block.header.timestamp,
+            "confirmations": tip.saturating_sub(block.header.height) + 1,
+            "final": block.header.height <= finalized_height(&*db)?,
+            "sender": sender,
+        });
+
+        if let Some(change) = decided_change(&*db, &id)? {
+            value["kind"] = change.name().into();
+            value["change"] = json::change(&change);
+        }
+
+        decisions.push(value);
+    }
+
+    // The oldest of the unbroken run down from the newest: what this node can list at all.
+    let from = stored_decisions(&*db, newest, None, usize::MAX)?.last().map_or(newest + 1, |(version, _)| *version);
+
+    Ok(Json(json!({ "version": newest, "from": from, "decisions": decisions })))
+}
+
+#[cfg(feature = "governance")]
+/// What an account's approval weighs in the tip's epoch, beside what a change needs: zero for an
+/// account that may not approve.
+async fn governance_weight(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
+    let Some(rules) = &api.rules.governance else {
+        return Err(ApiError::NotFound("this chain has no governance".to_string()));
+    };
+    let address = parse_address(&address)?;
+    let db = api.db.clone();
+    let epoch = rules.finality.epoch_of(tip(&*db)?.header.height);
+    let state = State::new(db);
+    let ballot = Changes::new(&state).ballot()?.counting(epoch, rules.approval_epochs);
+    let approval = ballot.approvals.iter().find(|approval| approval.account == address);
+
+    Ok(Json(json!({
+        "account": address.to_string(),
+        "weight": rules.governance.weight(&state, epoch, &address)?.unwrap_or_default().to_string(),
+        "needed": rules.governance.needed(&state, epoch)?.to_string(),
+        "version": ballot.version,
+        "approved": approval.map(|approval| json::change(&approval.change)),
     })))
 }
 

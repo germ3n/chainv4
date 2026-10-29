@@ -115,6 +115,8 @@ enum Step {
 impl SendState {
     /// Sets a transaction another page made to review and send, in place of the form's.
     pub fn prepare(&mut self, prepared: Prepared) {
+        // Signed by the address it was prepared for, not whichever the form had picked.
+        self.from = Some(prepared.from);
         self.prepared = Some(prepared);
         self.step = Step::Edit;
     }
@@ -878,6 +880,16 @@ fn offer(value: &Value) -> Result<(FeeOffer, Option<String>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prepared_transaction_is_signed_by_the_address_it_was_prepared_for() {
+        use chainv4::structs::address::Address;
+
+        let mut state = SendState { from: Some(Address::Ed25519([1; 32])), ..SendState::default() };
+        state.prepare(Prepared { from: Address::Ed25519([2; 32]), tx: Tx::WithdrawChange { version: 3 }, what: "Withdraw an approval".to_string(), about: String::new(), coin: u256::ZERO });
+
+        assert_eq!(state.from, Some(Address::Ed25519([2; 32])), "not whichever the form had picked");
+    }
 
     #[test]
     fn a_name_s_price_is_burned_and_any_other_coin_goes_with_its_call() {

@@ -80,6 +80,9 @@ pub enum CommittedOutcome {
     #[document(summary = "The contract at this address runs new code.")]
     #[wincode(tag = 4)]
     Upgraded(Address),
+    #[document(summary = "A governance approval that was the last one needed: its change is decided, as this version. What lets a light client prove a decision from the receipt alone.")]
+    #[wincode(tag = 5)]
+    Decided(u64),
 }
 
 impl CommittedReceipt {
