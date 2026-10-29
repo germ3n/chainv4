@@ -175,4 +175,5 @@ SHA-256s with the link.
 | Examples | `guestbook.dev`, `counter.dev`, Counter.sol `0x058f1d0b…3be5` |
 | Sample multisig | `multisig:0xba8f500e…a699`, 2 of 3, its contract `0xd7fe4c20…843a` |
 | Onion | `73z6qtdihyugsl2kc34zgcydgimojvro4avjledoap33653dqw77wjyd.onion` |
-| Apps | https://gofile.io/d/DjyO2ADU |
+| Mining | `150.40.117.173:4002`, an open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`), and `/mining/ws` behind nginx; redeployed at `b7081b6` on the same chain |
+| Apps | https://gofile.io/d/pmOuuh3C |
