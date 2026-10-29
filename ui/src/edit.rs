@@ -89,7 +89,7 @@ impl Editing {
     /// and queues what they are asked to do. The Paste button shows while the keyboard is up.
     pub(crate) fn show(&mut self, ctx: &Context, keyboard: bool, clipboard: &mut dyn Clipboard) {
         let (time, lifted) = ctx.input(|input| (input.time, input.pointer.any_released()));
-        let focused = ctx.memory(|memory| memory.focused()).filter(|id| TextEditState::load(ctx, *id).is_some());
+        let focused = focused_field(ctx);
         // A tap on the bar or the Paste button takes the field's focus as it lifts, before either
         // sees the tap: for that frame they act for the field that had it, as they showed it.
         let field = focused.or(self.field.filter(|_| lifted));
@@ -181,6 +181,8 @@ impl Editing {
             .constrain_to(ctx.content_rect())
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    // Near a screen's edge the area is narrow: its labels stay whole, never a letter a line.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     ui.horizontal(|ui| {
                         for action in actions(has_text, selected) {
                             if ui.add(egui::Button::new(action.name()).min_size(vec2(0.0, 38.0))).clicked() {
@@ -243,6 +245,18 @@ impl Editing {
     fn bar_is_up(&self) -> bool {
         self.bar.is_some()
     }
+}
+
+/// The text field with focus, if one has it.
+fn focused_field(ctx: &Context) -> Option<Id> {
+    ctx.memory(|memory| memory.focused()).filter(|id| TextEditState::load(ctx, *id).is_some())
+}
+
+/// Whether a text field has focus: on screen or not, as one scrolled away or under the keyboard
+/// keeps it.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn field_focused(ctx: &Context) -> bool {
+    focused_field(ctx).is_some()
 }
 
 /// Whether some of a field's text is selected.

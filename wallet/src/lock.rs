@@ -572,9 +572,10 @@ pub fn words_grid(ui: &mut Ui, palette: &Palette, phrase: &Phrase) {
             for column in 0..columns {
                 let position = column * rows + row;
 
+                // Never broken across lines: a word is at most 8 letters, and one split reads as two.
                 if let Some(word) = words.get(position) {
-                    ui.label(RichText::new(format!("{:>2}", position + 1)).monospace().color(palette.muted));
-                    ui.label(RichText::new(*word).monospace().color(palette.ink));
+                    ui.add(egui::Label::new(RichText::new(format!("{:>2}", position + 1)).monospace().color(palette.muted)).extend());
+                    ui.add(egui::Label::new(RichText::new(*word).monospace().color(palette.ink)).extend());
                 }
             }
 

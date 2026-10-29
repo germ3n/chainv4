@@ -131,7 +131,12 @@ impl OnAndroid {
     /// Android that only makes the keyboard flicker. So the app takes the IME output from
     /// egui-winit, and keeps the keyboard itself.
     fn keep_keyboard(&mut self, ctx: &egui::Context) {
-        let wanted = ctx.output_mut(|output| output.ime.take()).is_some();
+        // A field asks for the keyboard only while it is in sight, and the keyboard coming up can
+        // cover it: asking alone would put the keyboard away, uncover the field, and bring it back
+        // again, over and over. So a keyboard that is up stays while a field keeps focus, wherever
+        // it is; only an editable field in sight brings one up, never read-only text held to copy.
+        let asked = ctx.output_mut(|output| output.ime.take()).is_some();
+        let wanted = asked || (self.keyboard && crate::edit::field_focused(ctx));
         let (time, tapped) = ctx.input(|input| (input.time, input.pointer.any_pressed()));
 
         if wanted {

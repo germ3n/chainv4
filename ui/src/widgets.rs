@@ -95,7 +95,14 @@ pub fn quiet(ui: &mut Ui, palette: &Palette, text: &str) -> Response {
 
 /// A rounded tag in a color: a status at a glance.
 pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    let size = ui.style().text_styles.get(&TextStyle::Small).map_or(11.5, |font| font.size);
+    let font = ui.style().text_styles.get(&TextStyle::Small).cloned().unwrap_or_else(|| egui::FontId::proportional(11.5));
+    let size = font.size;
+    // Whole, never a letter a line: in a row that wraps, one that would not fit starts the next line.
+    let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font, color).size().x) + 20.0;
+
+    if ui.layout().main_wrap && ui.available_size_before_wrap().x < width {
+        ui.end_row();
+    }
 
     Frame::new()
         .fill(color.gamma_multiply(0.14))
@@ -103,7 +110,7 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
         .corner_radius(99.0)
         .inner_margin(Margin::symmetric(9, 2))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).size(size).color(color));
+            ui.add(egui::Label::new(RichText::new(text).size(size).color(color)).extend());
         })
         .response
 }
@@ -237,4 +244,34 @@ pub fn proxy(ui: &mut Ui, palette: &Palette, typed: &mut String, trouble: &mut O
 
 fn button_size(ui: &Ui) -> f32 {
     ui.style().text_styles.get(&TextStyle::Button).map_or(14.0, |font| font.size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pill_at_the_end_of_a_full_row_moves_to_the_next_line_whole() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(220.0, 400.0));
+        let mut pills = Vec::new();
+
+        // A frame to settle fonts, then the one measured.
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Account 1 · Ed25519 ed25519:0x06b6…318c");
+                    pills.push(pill(ui, "may vote", Color32::GREEN).rect);
+                });
+            });
+            output.textures_delta.clear();
+        }
+
+        let rect = pills.last().copied().unwrap();
+        let line = ctx.fonts_mut(|fonts| fonts.row_height(&egui::FontId::proportional(11.5)));
+
+        assert!(rect.height() < 3.0 * line, "one line, not a letter a line: {rect:?}");
+        assert!(rect.width() > rect.height(), "wider than tall: {rect:?}");
+        assert!(rect.right() <= screen.right() + 1.0, "within the row: {rect:?}");
+    }
 }

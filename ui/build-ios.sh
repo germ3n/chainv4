@@ -118,7 +118,8 @@ if [ -n "$sim" ]; then
         xcrun simctl boot "$device"
     fi
 
-    open -b com.apple.iphonesimulator 2> /dev/null || true
+    # The Simulator's window: its own app, or DeviceHub since Xcode 27.
+    open -b com.apple.iphonesimulator 2> /dev/null || open -b com.apple.dt.Devices 2> /dev/null || true
     # A first boot takes a while: install once it is done.
     xcrun simctl bootstatus "$device" -b > /dev/null
     xcrun simctl install "$device" "$out"

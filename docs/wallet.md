@@ -1057,7 +1057,9 @@ for `--provision`, XcodeGen (`brew install xcodegen`).
   provision and install again after.
 - **Sideloading:** `--ipa` packs an unsigned IPA that AltStore or Sideloadly sign with your Apple
   ID as they install it, and renew.
-- **The Simulator,** for the layout and everything but the camera.
+- **The Simulator,** for the layout and everything but the camera. Since Xcode 27 its window is
+  DeviceHub (`open -a /Applications/Xcode.app/Contents/Applications/DeviceHub.app`), which
+  `--sim` opens.
 
 **The app:** `org.chainv4.wallet`, for iOS 16 and up, its icon sized from
 `wallet/assets/icon.png`, and an Info.plist that says why it wants the camera, Face ID and the
