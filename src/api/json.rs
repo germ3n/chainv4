@@ -235,7 +235,9 @@ fn mining(report: &crate::consensus::MiningReport) -> Value {
             "payout": worker.payout.map(|payout| payout.to_string()),
             "shares": worker.shares,
             "share_difficulty": worker.share_difficulty.to_string(),
+            "solo": worker.solo,
         })).collect::<Vec<_>>(),
+        "solo": report.solo,
         "pool": report.pool.as_ref().map(|pool| json!({
             "fee": pool.fee,
             "window": pool.window,

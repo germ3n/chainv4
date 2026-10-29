@@ -19,7 +19,7 @@ pub mod light;
 pub mod params;
 #[cfg(feature = "node")]
 pub mod mempool;
-#[cfg(feature = "node")]
+#[cfg(any(feature = "node", feature = "worker"))]
 pub mod mining;
 #[cfg(feature = "node")]
 pub mod net;

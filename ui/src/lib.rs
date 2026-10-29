@@ -4,7 +4,8 @@
 //! node, through a proxy when one is set, and running on Android, where an app keeps clear of the
 //! system's bars and keyboard, copies and pastes through Android's clipboard, and picks files
 //! through a Java activity of its own, and on iOS, through UIKit and AVFoundation; and biometrics,
-//! which keep a secret behind a fingerprint, a face, Touch ID, Face ID or a passkey.
+//! which keep a secret behind a fingerprint, a face, Touch ID, Face ID or a passkey; and, on a
+//! phone, whether it is on its charger.
 
 pub mod biometric;
 #[cfg(feature = "camera")]
@@ -12,6 +13,7 @@ pub mod camera;
 pub mod files;
 pub mod layout;
 pub mod net;
+pub mod power;
 pub mod secret;
 pub mod theme;
 pub mod widgets;

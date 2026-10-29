@@ -651,6 +651,10 @@ pub struct MiningView {
     /// The mining pool it runs on its mining port, if it does; none from older nodes.
     #[serde(default)]
     pub pool: Option<PoolSettings>,
+    /// Whether its mining port takes workers mining alone, each paid its own blocks in full;
+    /// false from older nodes.
+    #[serde(default)]
+    pub solo: bool,
 }
 
 /// A node's mining pool, as GET /node sums it up: its full books are GET /pool's.
@@ -690,6 +694,9 @@ pub struct MiningWorker {
     pub shares: u64,
     #[serde(default)]
     pub share_difficulty: String,
+    /// Whether it mines alone, its blocks paying its payout in full.
+    #[serde(default)]
+    pub solo: bool,
 }
 
 /// GET /pool, or GET /pool/{address} for one miner: the pool a node runs, its miners, and the
@@ -1254,6 +1261,17 @@ mod tests {
 
         assert_eq!((mining.rate, mining.devices[0].name.as_str()), (3e8, "Apple M3 Pro (Metal)"));
         assert_eq!((mining.workers[0].found, mining.workers[0].devices[0].rate), (2, 1e8));
+        assert!(!mining.solo && !mining.workers[0].solo, "an older node says nothing of mining alone");
+
+        let alone: MiningView = serde_json::from_value(json!({
+            "rate": 1e6, "devices": [], "listening": "0.0.0.0:4002", "solo": true,
+            "workers": [{ "name": "phone", "address": "127.0.0.1:5000", "since": 1, "rate": 1e6, "devices": [],
+                          "found": 1, "refused": 0, "payout": "ed25519:0x04", "solo": true }]
+        }))
+        .unwrap();
+
+        assert!(alone.solo && alone.workers[0].solo);
+        assert_eq!(alone.workers[0].payout.as_deref(), Some("ed25519:0x04"));
     }
 
     #[test]

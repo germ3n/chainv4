@@ -17,7 +17,7 @@ use {
 };
 
 pub mod dev;
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-mining")]
 pub mod gpu;
 pub mod pow;
 pub mod rates;
@@ -29,7 +29,7 @@ pub use pow::{Miner, PowConfig, ProofOfWork, Rig, meets, work_hash};
 pub use rates::{ClaimTree, DeviceReport, Meter, MinerStanding, MiningReport, PoolBlock, PoolReport, PoolSettled, WorkerReport};
 pub use rotating::{Rotating, RotatingProducer};
 pub use staked::{Schedule, Staked, StakedProducer};
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-mining")]
 pub use gpu::GpuMiner;
 
 /// Separates block seals from anything else a key might sign.
@@ -135,6 +135,25 @@ pub trait Producer: Send {
         returns = "The seal when it is ready at once, or None when it will arrive later through the callback the producer was made with.",
     )]
     fn seal(&mut self, header: &BlockHeader) -> Option<Seal>;
+
+    #[document(
+        parent = "Producer",
+        summary = "The payouts of the workers mining alone for this producer, one for each: the node builds each a template of its own, whose reward goes to it in full. Empty, the default, for a producer that takes none.",
+    )]
+    fn solo(&self) -> Vec<Address> {
+        Vec::new()
+    }
+
+    #[document(
+        parent = "Producer",
+        summary = "Starts sealing a header, and the solo workers' headers beside it, one for each of the payouts solo named: a seal for any of them comes through the callback. The default seals header alone.",
+        returns = "The seal of header when it is ready at once, as seal returns it.",
+    )]
+    fn seal_with_solo(&mut self, header: &BlockHeader, solo: &[BlockHeader]) -> Option<Seal> {
+        let _ = solo;
+
+        self.seal(header)
+    }
 
     #[document(
         parent = "Producer",

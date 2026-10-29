@@ -53,6 +53,7 @@ use crate::chain::stored_decisions;
 #[cfg(feature = "faucet")]
 mod faucet;
 mod json;
+mod mining;
 #[cfg(feature = "ethereum")]
 mod rpc;
 
@@ -160,6 +161,8 @@ struct Api {
     releases: Option<Arc<crate::node::Releases>>,
     /// Requests in flight, by client.
     in_flight: Arc<InFlight>,
+    /// Where workers reach the mining port from outside, as GET /mining says.
+    mining_public: Option<Arc<String>>,
 }
 
 /// Requests in flight, by client, and how many each may have.
@@ -339,6 +342,8 @@ pub struct ApiOptions {
     #[document(summary = "The releases the node fetches, which GET /release serves; None for a node that fetches none.")]
     #[cfg(feature = "updates")]
     pub releases: Option<Arc<crate::node::Releases>>,
+    #[document(summary = "Where workers reach the node's mining port from outside, --mining-public, as GET /mining tells the apps; None for them to take the API's host.")]
+    pub mining_public: Option<String>,
 }
 
 #[document(
@@ -438,6 +443,7 @@ pub fn start(
                     #[cfg(feature = "updates")]
                     releases: options.releases,
                     in_flight: Arc::new(InFlight { per_ip, counts: Default::default() }),
+                    mining_public: options.mining_public.map(Arc::new),
                 })
                 // Who connects, for the faucet's limits by IP.
                 .into_make_service_with_connect_info::<SocketAddr>())
@@ -502,7 +508,7 @@ fn router(api: Api) -> Router {
     let router = router.route("/stream", get(stream));
     #[cfg(feature = "updates")]
     let router = router.route("/release", get(release));
-    let router = router.route("/claims/{pool}/{address}", get(claims));
+    let router = router.route("/claims/{pool}/{address}", get(claims)).route("/mining", get(mining::about)).route(mining::SOCKET_PATH, get(mining::socket));
     #[cfg(feature = "pool")]
     let router = router.route("/pool", get(pool)).route("/pool/{address}", get(pool_miner)).route("/pool/claim/{address}", get(pool_claim));
     let router = router.fallback(apps).layer(DefaultBodyLimit::max(MAX_BODY)).layer(middleware::from_fn_with_state(api.clone(), per_client));

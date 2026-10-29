@@ -241,10 +241,20 @@ struct NodeArgs {
     #[cfg(feature = "pool")]
     #[arg(long, requires = "pool", default_value_t = 1_000)]
     pool_min_share: u128,
-    /// Let anyone join the pool with only a payout address, without the token.
-    #[cfg(feature = "pool")]
-    #[arg(long, requires = "pool", conflicts_with = "mining_token")]
+    /// Let anyone join the pool, or mine alone with --mining-solo, with only a payout address,
+    /// without the token.
+    #[arg(long, requires = "mining", conflicts_with = "mining_token")]
     mining_open: bool,
+    /// Take workers mining alone on the mining port: each is handed a block of its own, whose
+    /// reward and fees go to the --payout it gives, in full. A template is built for each payout,
+    /// up to 16 of them.
+    #[arg(long, requires = "mining")]
+    mining_solo: bool,
+    /// Where workers reach the mining port from outside, such as 203.0.113.7:4002 or
+    /// ADDRESS.onion:4002, as GET /status and GET /pool tell the apps; by default they take the
+    /// API's host and the port --mining listens on.
+    #[arg(long, requires = "mining")]
+    mining_public: Option<String>,
     /// Claim for the pool's miners once their unclaimed earnings reach this, in the coin's
     /// smallest unit, from --pool-push-key, which pays the fees: miners who never claim still get
     /// paid. Up to 64 claims a minute.
@@ -525,17 +535,24 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
     // What this node produces with: a miner's settings, a signing key, or both. The node builds
     // the producer for whatever consensus the chain runs, and again when governance changes it.
-    #[cfg(feature = "pool")]
     let open = args.mining_open;
+
+    #[cfg(feature = "pool")]
+    let pooled = args.pool;
     #[cfg(not(feature = "pool"))]
-    let open = false;
+    let pooled = false;
+
+    if open && !pooled && !args.mining_solo {
+        return Err("--mining-open opens a pool or mining alone to anyone: it needs --pool or --mining-solo".into());
+    }
+
     let port = match (args.mining, &args.mining_token) {
         (Some(listen), token) => Some(MiningPort {
             listen,
             token: match (token, open) {
                 (Some(token), _) => chainv4::mining::read_token(token)?,
                 (None, true) => chainv4::mining::pool::OPEN_TOKEN.to_vec(),
-                (None, false) => return Err("--mining needs --mining-token, or --pool --mining-open for a pool anyone may join".into()),
+                (None, false) => return Err("--mining needs --mining-token, or --mining-open with --pool or --mining-solo for a port anyone may join".into()),
             },
             protocol: args.protocol.clone(),
             #[cfg(feature = "pool")]
@@ -548,6 +565,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             }),
             #[cfg(feature = "updates")]
             releases: Some(releases.clone()),
+            solo: args.mining_solo,
         }),
         _ => None,
     };
@@ -673,6 +691,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             per_ip: args.http_per_ip,
             #[cfg(feature = "updates")]
             releases: Some(releases.clone()),
+            mining_public: args.mining_public.clone(),
         };
         let address = api::start(db, Some(node.handle()), &genesis, address, options)?;
         log::info!("[http] listening on {address}");

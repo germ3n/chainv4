@@ -87,6 +87,8 @@ pub struct WorkerReport {
     pub shares: u64,
     #[document(summary = "The difficulty its shares meet now, as the pool set it for its hashrate; 0 on a node that runs no pool.")]
     pub share_difficulty: u128,
+    #[document(summary = "Whether it mines alone: each block it finds pays its payout in full.")]
+    pub solo: bool,
 }
 
 #[document(summary = "One miner's standing in a pool: its work in the window the next block shares out by, that block's parts it would get, and all it has earned from the pool's blocks so far.", category = "Consensus", see_also = "PoolReport")]
@@ -245,6 +247,12 @@ pub struct MiningReport {
     pub workers: Vec<WorkerReport>,
     #[document(summary = "Its pool, when it runs one.")]
     pub pool: Option<PoolReport>,
+    #[document(summary = "Whether its mining port takes workers mining alone, --mining-solo.")]
+    pub solo: bool,
+    #[document(summary = "Whether its mining port takes anyone, --mining-open, with the open token.")]
+    pub open: bool,
+    #[document(summary = "The protocol name its mining port speaks, as --protocol gave it; empty for a node without one.")]
+    pub protocol: String,
 }
 
 impl MiningReport {
@@ -285,8 +293,10 @@ mod tests {
                 payout: None,
                 shares: 0,
                 share_difficulty: 0,
+                solo: false,
             }],
             pool: None,
+            ..Default::default()
         };
 
         assert_eq!(report.rate(), 155.0);

@@ -685,72 +685,77 @@ impl Explorer {
     fn sidebar(&mut self, ui: &mut Ui, now: u64) {
         let palette = self.palette;
         let name = self.chain_name().to_string();
-        ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            // A long name is cut short, leaving room for the word after it.
-            let room = ui.available_width() - 70.0;
-            ui.scope(|ui| {
-                ui.set_max_width(room);
-                ui.add(egui::Label::new(widgets::strong(&name, 17.0).color(palette.ink)).truncate())
-            })
-            .inner
-            .on_hover_text(&name);
-            widgets::caps(ui, &palette, "explorer");
-        });
-        ui.add_space(14.0);
+        layout::sidebar(
+            ui,
+            self,
+            |app, ui| {
+                ui.add_space(14.0);
+                let (light_color, light_words, light_story) = app.light_state();
+                ui.horizontal(|ui| {
+                    views::dot(ui, light_color);
+                    ui.label(RichText::new(light_words).small().color(palette.soft));
+                })
+                .response
+                .on_hover_text(light_story);
 
-        for (group, pages) in View::GROUPS {
-            widgets::caps(ui, &palette, group);
-            ui.add_space(2.0);
+                let (color, words) = app.health();
+                ui.horizontal(|ui| {
+                    views::dot(ui, color);
+                    ui.label(RichText::new(words).small().color(palette.soft));
 
-            for (view, name) in pages {
-                let selected = self.view.marks(view);
-                let text = RichText::new(*name).color(if selected { palette.ink } else { palette.soft });
-                let button = egui::Button::new(text)
-                    .fill(if selected { palette.row } else { egui::Color32::TRANSPARENT })
-                    .stroke(egui::Stroke::NONE)
-                    .min_size(egui::vec2(ui.available_width(), 28.0));
-                let response = ui.add(button);
+                    if let Some(status) = &app.store.status {
+                        ui.label(RichText::new(format!("· {}", format::ago(status.timestamp, now))).small().color(palette.muted));
+                    }
+                });
+                ui.add(egui::Label::new(RichText::new(app.api.base()).monospace().small().color(palette.muted)).truncate());
+                widgets::caps(ui, &palette, "Node");
+            },
+            |app, ui| {
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    // A long name is cut short, leaving room for the word after it.
+                    let room = ui.available_width() - 70.0;
+                    ui.scope(|ui| {
+                        ui.set_max_width(room);
+                        ui.add(egui::Label::new(widgets::strong(&name, 17.0).color(palette.ink)).truncate())
+                    })
+                    .inner
+                    .on_hover_text(&name);
+                    widgets::caps(ui, &palette, "explorer");
+                });
+                ui.add_space(14.0);
 
-                if selected {
-                    let rect = response.rect;
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 6.0), egui::vec2(3.0, rect.height() - 12.0)),
-                        2.0,
-                        palette.accent,
-                    );
+                for (group, pages) in View::GROUPS {
+                    widgets::caps(ui, &palette, group);
+                    ui.add_space(2.0);
+
+                    for (view, name) in pages {
+                        let selected = app.view.marks(view);
+                        let text = RichText::new(*name).color(if selected { palette.ink } else { palette.soft });
+                        let button = egui::Button::new(text)
+                            .fill(if selected { palette.row } else { egui::Color32::TRANSPARENT })
+                            .stroke(egui::Stroke::NONE)
+                            .min_size(egui::vec2(ui.available_width(), 28.0));
+                        let response = ui.add(button);
+
+                        if selected {
+                            let rect = response.rect;
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 6.0), egui::vec2(3.0, rect.height() - 12.0)),
+                                2.0,
+                                palette.accent,
+                            );
+                        }
+
+                        if response.clicked() {
+                            app.go(view.clone());
+                        }
+                    }
+
+                    ui.add_space(10.0);
                 }
-
-                if response.clicked() {
-                    self.go(view.clone());
-                }
-            }
-
-            ui.add_space(10.0);
-        }
-
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.add_space(14.0);
-            let (light_color, light_words, light_story) = self.light_state();
-            ui.horizontal(|ui| {
-                views::dot(ui, light_color);
-                ui.label(RichText::new(light_words).small().color(palette.soft));
-            })
-            .response
-            .on_hover_text(light_story);
-
-            let (color, words) = self.health();
-            ui.horizontal(|ui| {
-                views::dot(ui, color);
-                ui.label(RichText::new(words).small().color(palette.soft));
-
-                if let Some(status) = &self.store.status {
-                    ui.label(RichText::new(format!("· {}", format::ago(status.timestamp, now))).small().color(palette.muted));
-                }
-            });
-            ui.add(egui::Label::new(RichText::new(self.api.base()).monospace().small().color(palette.muted)).truncate());
-            widgets::caps(ui, &palette, "Node");
-        });
+            },
+        );
     }
 
     /// On a wide screen, over the page: back and forward, the search, and where the chain is.

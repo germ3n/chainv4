@@ -33,10 +33,7 @@ const RANGES: u64 = 1 << 15;
 const MOST_CONNECTIONS: usize = 256;
 /// How long a connection has to finish its handshake.
 const HANDSHAKE: Duration = Duration::from_secs(10);
-/// How long a worker may say nothing before it is taken for gone: it sends its rates more often.
-pub const QUIET: Duration = Duration::from_secs(60);
-/// How often the node writes to a worker with no new work, so the worker knows it is still there.
-pub const PING: Duration = Duration::from_secs(20);
+pub use super::protocol::{PING, QUIET};
 /// The most devices one worker's rates may name.
 const MOST_DEVICES: usize = 64;
 /// How often a pool tells each worker how it stands.
@@ -46,12 +43,7 @@ const STANDING_EVERY: Duration = Duration::from_secs(30);
 /// found as one changes, or sent over Tor, comes a moment late.
 const RECENT_JOBS: usize = 8;
 
-#[document(
-    summary = "The token every worker of an open pool proves it knows, which anyone may: --mining-open's, and a worker's without --token.",
-    category = "Mining",
-    see_also = "MiningPort",
-)]
-pub const OPEN_TOKEN: &[u8] = b"chainv4 open mining pool";
+pub use super::protocol::OPEN_TOKEN;
 
 /// A seal's callback, shared by the pool and the node's own miner.
 pub type Found = Arc<dyn Fn(Hash, Seal) + Send + Sync>;
@@ -75,6 +67,8 @@ pub struct MiningPort {
     #[document(summary = "The releases the node fetches, which it tells each worker of as it connects, so an older worker says so; None tells them nothing.")]
     #[cfg(feature = "updates")]
     pub releases: Option<Arc<crate::node::Releases>>,
+    #[document(summary = "Whether it takes workers mining alone, --mining-solo: each is handed a block of its own, whose reward goes to its payout in full.")]
+    pub solo: bool,
 }
 
 impl std::fmt::Debug for MiningPort {
@@ -97,6 +91,9 @@ struct Job {
     /// The recent jobs, the current one first, each with its block id and difficulty: what shares
     /// are checked against.
     recent: VecDeque<(u64, Hash, u128)>,
+    /// The solo workers' blocks for this job, by payout, each with its id and difficulty; emptied
+    /// with work once any seal is found.
+    solo: BTreeMap<Address, (Hash, u128)>,
 }
 
 /// A pool's books and its view of each worker.
@@ -121,6 +118,9 @@ struct State {
     streams: Mutex<BTreeMap<u64, TcpStream>>,
     /// The workers past their handshake.
     workers: Mutex<BTreeMap<u64, WorkerReport>>,
+    /// Whether it takes workers mining alone, and their payouts, by connection.
+    solo: bool,
+    solos: Mutex<BTreeMap<u64, Address>>,
     #[cfg(feature = "pool")]
     books: Option<Books>,
     /// The releases the node fetches, told to workers as they connect.
@@ -154,6 +154,13 @@ impl State {
     /// pool, counts it as a share when it meets the worker's share difficulty.
     #[cfg_attr(not(feature = "pool"), allow(unused_variables))]
     fn take(&self, number: u64, nonce: u64, worker: u64) -> Verdict {
+        // Only a port that takes solo workers looks for one: a pool's shares come thick and fast.
+        if self.solo
+            && let Some(payout) = Self::lock(&self.solos).get(&worker).copied()
+        {
+            return self.take_solo(number, nonce, payout);
+        }
+
         let mut job = Self::lock(&self.job);
 
         let Some(&(_, id, difficulty)) = job.recent.iter().find(|(recent, _, _)| *recent == number) else {
@@ -165,6 +172,7 @@ impl State {
         if current && meets(work, difficulty) {
             let (height, split, root) = (job.height, std::mem::take(&mut job.split), job.root);
             job.work = None;
+            job.solo.clear();
             drop(job);
             #[cfg(feature = "pool")]
             {
@@ -189,6 +197,26 @@ impl State {
             true => Verdict::Short,
             false => Verdict::Stale,
         }
+    }
+
+    /// Checks a solo worker's nonce against its own block, and makes it the seal when it meets it.
+    fn take_solo(&self, number: u64, nonce: u64, payout: Address) -> Verdict {
+        let mut job = Self::lock(&self.job);
+        let current = if job.number == number && job.work.is_some() { job.solo.get(&payout).copied() } else { None };
+        let Some((id, difficulty)) = current else {
+            return Verdict::Stale;
+        };
+
+        if !meets(work_hash(self.hash, &id, nonce), difficulty) {
+            return Verdict::Short;
+        }
+
+        job.work = None;
+        job.solo.clear();
+        drop(job);
+        (self.found)(id, Seal::Work { nonce });
+
+        Verdict::Took
     }
 
     /// Counts a share, when it meets the share difficulty the worker had for its job.
@@ -237,7 +265,27 @@ impl State {
     /// The work message for a worker, or None while there is nothing to mine. Under a pool, it
     /// carries the worker's share difficulty for the job.
     fn work(&self, range: u64) -> (u64, Option<Value>) {
+        let solo = if self.solo { Self::lock(&self.solos).get(&range).copied() } else { None };
         let job = Self::lock(&self.job);
+
+        // A solo worker's own block, while the job is on, and no share difficulty.
+        if let Some(payout) = solo {
+            let message = job.work.and(job.solo.get(&payout).copied()).map(|(id, difficulty)| {
+                json!({
+                    "type": "work",
+                    "job": job.number,
+                    "chain": id.algorithm().name(),
+                    "id": crate::structs::hex::to_hex(&id.to_bytes()),
+                    "difficulty": difficulty.to_string(),
+                    "hash": self.hash.name(),
+                    "start": FIRST_RANGE + (range % RANGES) * SPAN,
+                    "span": SPAN,
+                })
+            });
+
+            return (job.number, message);
+        }
+
         let message = job.work.map(|(id, difficulty)| {
             #[cfg_attr(not(feature = "pool"), allow(unused_mut))]
             let mut message = json!({
@@ -343,11 +391,13 @@ impl Pool {
             token: port.token,
             protocol: port.protocol,
             found,
-            job: Mutex::new(Job { number: 0, work: None, height: 0, split: Vec::new(), root: None, recent: VecDeque::new() }),
+            job: Mutex::new(Job { number: 0, work: None, height: 0, split: Vec::new(), root: None, recent: VecDeque::new(), solo: BTreeMap::new() }),
             changed: Condvar::new(),
             stopped: AtomicBool::new(false),
             streams: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(BTreeMap::new()),
+            solo: port.solo,
+            solos: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "updates")]
             releases: port.releases,
             #[cfg(feature = "pool")]
@@ -384,7 +434,9 @@ impl Pool {
         move |id, seal| {
             let mut job = State::lock(&state.job);
 
+            // Its own block's seal ends the solo workers' too: theirs build on the same parent.
             if job.work.take_if(|(current, _)| *current == id).is_some() {
+                job.solo.clear();
                 let (height, split, root) = (job.height, std::mem::take(&mut job.split), job.root);
                 drop(job);
                 #[cfg(feature = "pool")]
@@ -427,11 +479,22 @@ impl Producer for Pool {
     }
 
     fn seal(&mut self, header: &BlockHeader) -> Option<Seal> {
+        self.seal_with_solo(header, &[])
+    }
+
+    fn solo(&self) -> Vec<Address> {
+        let payouts: std::collections::BTreeSet<Address> = State::lock(&self.state.solos).values().copied().collect();
+
+        payouts.into_iter().collect()
+    }
+
+    fn seal_with_solo(&mut self, header: &BlockHeader, solo: &[BlockHeader]) -> Option<Seal> {
         {
             let mut job = State::lock(&self.state.job);
             job.number += 1;
             let (number, id) = (job.number, header.id());
             job.work = Some((id, header.difficulty));
+            job.solo = solo.iter().map(|header| (header.producer, (header.id(), header.difficulty))).collect();
             job.height = header.height;
             job.split = std::mem::take(&mut self.split);
             job.root = self.root.take();
@@ -479,6 +542,9 @@ impl Producer for Pool {
             pool: self.state.books.as_ref().map(|books| crate::consensus::PoolReport { producer: Some(self.address), ..State::lock(&books.ledger).report() }),
             #[cfg(not(feature = "pool"))]
             pool: None,
+            solo: self.state.solo,
+            open: self.state.token == OPEN_TOKEN,
+            protocol: self.state.protocol.clone(),
         })
     }
 }
@@ -541,6 +607,7 @@ fn accept(listener: &TcpListener, state: &Arc<State>) {
 
                     State::lock(&state.streams).remove(&number);
                     State::lock(&state.workers).remove(&number);
+                    State::lock(&state.solos).remove(&number);
                     #[cfg(feature = "pool")]
                     if let Some(books) = &state.books {
                         State::lock(&books.workers).remove(&number);
@@ -586,9 +653,40 @@ fn serve(state: &Arc<State>, stream: TcpStream, peer: SocketAddr, number: u64) -
     let (mut sender, mut receiver, hello) = protocol::accept(stream.try_clone().map_err(|err| err.to_string())?, &state.token, &state.protocol)?;
     stream.set_read_timeout(Some(QUIET)).map_err(|err| err.to_string())?;
 
+    // A solo worker is handed a block of its own, paying its payout, on a node that takes them.
+    if hello.solo {
+        let why = match (state.solo, hello.payout) {
+            (false, _) => Some("this node takes no workers mining alone: it was not started with --mining-solo".to_string()),
+            (true, None) => Some("mining alone needs the address to pay, --payout ADDRESS".to_string()),
+            (true, Some(payout)) => {
+                let mut solos = State::lock(&state.solos);
+                let payouts: std::collections::BTreeSet<_> = solos.values().collect();
+
+                match payouts.contains(&payout) || payouts.len() < crate::node::MOST_SOLO {
+                    true => {
+                        solos.insert(number, payout);
+
+                        None
+                    }
+                    false => Some(format!("this node builds blocks for {} payouts mining alone already", crate::node::MOST_SOLO)),
+                }
+            }
+        };
+
+        if let Some(why) = why {
+            let _ = sender.send(&json!({ "type": "refused", "why": why }));
+
+            return Err(format!("worker {}: {why}", hello.name));
+        }
+
+        sender.send(&json!({ "type": "solo" }))?;
+    }
+
     // A pool pays each worker's shares to the address it gave, and takes none without one.
     #[cfg(feature = "pool")]
-    if let Some(books) = &state.books {
+    if !hello.solo
+        && let Some(books) = &state.books
+    {
         let Some(payout) = hello.payout else {
             let why = "this node runs a pool: give the address to pay, --payout ADDRESS";
             let _ = sender.send(&json!({ "type": "refused", "why": why }));
@@ -618,11 +716,12 @@ fn serve(state: &Arc<State>, stream: TcpStream, peer: SocketAddr, number: u64) -
             found: 0,
             refused: 0,
             #[cfg(feature = "pool")]
-            payout: hello.payout.filter(|_| state.books.is_some()),
+            payout: hello.payout.filter(|_| hello.solo || state.books.is_some()),
             #[cfg(not(feature = "pool"))]
-            payout: None,
+            payout: hello.payout.filter(|_| hello.solo),
             shares: 0,
             share_difficulty: 0,
+            solo: hello.solo,
         },
     );
 

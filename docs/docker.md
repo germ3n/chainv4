@@ -67,6 +67,14 @@ claim for miners owed that much. A rig joins with `PAYOUT=ADDRESS docker/pow.sh 
 keeps its claims in `POW_HOME`'s `pool-claims.json`, which `chainv4 claim --saved` claims by from
 any node should the pool's be gone.
 
+**Mining alone:** `MINING_SOLO=1` has the mining port take workers mining alone too, each block one
+finds paying it in full (see [Mining alone](consensus.md#mining-alone)); `MINING_OPEN=1` opens the
+port to anyone with a payout address, beside `POOL=1` or `MINING_SOLO=1`, as `POOL_OPEN=1` does for
+a pool. `MINING_PUBLIC=HOST:PORT` is where the apps are told to reach the port, `GET /mining`, when
+it is not the API's host and port 4002. nginx passes `/mining/ws`, the port over a WebSocket, on
+to the node for the web wallet, which mines through it; the TCP port still needs opening for the
+desktop and phone wallets and for `chainv4 worker`.
+
 **Who reads the secrets:** `docker/pow.sh up` gives the token and `validator.key` to the node's
 user in its container, uid 10001, with `podman unshare` under rootless Podman and as root
 otherwise, readable by nobody else; where it can do neither, it leaves them readable to every user

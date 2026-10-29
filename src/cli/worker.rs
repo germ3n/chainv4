@@ -11,13 +11,17 @@ pub struct WorkerArgs {
     /// The node's mining port, as host:port, such as 203.0.113.7:4002.
     #[arg(long)]
     node: String,
-    /// The file holding the token the node was given with --mining-token; none for an open pool's.
+    /// The file holding the token the node was given with --mining-token; none for an open port's.
     #[arg(long)]
     token: Option<PathBuf>,
-    /// Where a pool pays this worker's shares: an address, which a node running a pool needs.
-    #[cfg(feature = "pool")]
+    /// Where a pool pays this worker's shares, or --solo's blocks pay: an address, which a node
+    /// running a pool needs.
     #[arg(long)]
     payout: Option<crate::structs::address::Address>,
+    /// Mine alone: each block this worker finds pays --payout in full, on a node started with
+    /// --mining-solo.
+    #[arg(long, requires = "payout")]
+    solo: bool,
     /// Where to keep the payout's claims on the pool, as the pool tells of each new one: with
     /// them, chainv4 claim --saved claims from any node, should the pool's be gone.
     #[cfg(feature = "pool")]
@@ -74,14 +78,13 @@ pub fn worker(args: WorkerArgs) -> CliResult<()> {
         protocol: args.protocol,
         devices,
         proxy: args.proxy,
-        #[cfg(feature = "pool")]
         payout: args.payout,
-        #[cfg(not(feature = "pool"))]
-        payout: None,
+        // A solo worker's blocks pay it directly: there is no claim to keep.
         #[cfg(feature = "pool")]
-        claims: Some(args.claims),
+        claims: (!args.solo).then_some(args.claims),
         #[cfg(not(feature = "pool"))]
         claims: None,
+        solo: args.solo,
     })?
     .wait();
 

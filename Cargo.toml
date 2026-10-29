@@ -83,7 +83,13 @@ ethereum = ["evm", "secp256k1", "http"]
 # name, and resolving names from contracts.
 names = []
 # Mining on the GPU, through wgpu: Vulkan, Metal and WebGPU. --mine-gpu picks it over the threads.
-gpu = ["dep:chainv4-gpu", "node"]
+gpu = ["gpu-mining", "node"]
+# A worker's GPUs without the node: Rig::gpu, for an app that mines, such as the wallet.
+gpu-mining = ["dep:chainv4-gpu", "dep:log"]
+# Mining for a node from elsewhere, keeping no chain: the mining port's protocol, a worker on CPU
+# threads (or GPUs with gpu-mining) and the pool claims it keeps. The node brings it; the wallet
+# mines with it alone.
+worker = ["json", "dep:hmac", "dep:sha2", "dep:log"]
 # Running a mining pool on the mining port: workers' shares at easier difficulties, set for each
 # one's hashrate, and every block split among the last window of them (PPLNS) with --pool, an
 # open port with --mining-open, and GET /pool. Without it the port mines for --reward-to alone;
@@ -99,7 +105,7 @@ release = ["json", "sha256"]
 # A node fetching releases with --updates and serving them at GET /release, warning while it is
 # behind and stopping at an upgrade it is too old for; --auto-update, and chainv4 update.
 updates = ["release", "client", "ureq/socks-proxy"]
-node = ["dep:rayon", "dep:signal-hook", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "json", "dep:hmac", "dep:sha2", "lvm", "rocksdb"]
+node = ["dep:rayon", "dep:signal-hook", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "json", "dep:hmac", "dep:sha2", "lvm", "rocksdb", "worker"]
 
 [dependencies]
 rocksdb = { version = "0.25.0", optional = true }
@@ -131,7 +137,7 @@ tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "sync"
 clap = { version = "4.6.7", features = ["derive"], optional = true }
 log = { version = "0.4.34", optional = true }
 env_logger = { version = "0.11.11", optional = true }
-axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"], optional = true }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "ws"], optional = true }
 serde_json = { version = "1.0.154", optional = true }
 tokio-stream = { version = "0.1.19", features = ["sync"], optional = true }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"], optional = true }
@@ -146,6 +152,8 @@ signal-hook = { version = "0.3.18", optional = true }
 wat = "1.262.0"
 # Tests read JSON whatever features the build has.
 serde_json = "1.0.154"
+# A WebSocket client, mining over GET /mining/ws as a browser does.
+tungstenite = { version = "0.29.0", default-features = false, features = ["handshake"] }
 
 [build-dependencies]
 wiki = { path = "wiki" }

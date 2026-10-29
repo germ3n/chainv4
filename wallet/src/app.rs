@@ -176,6 +176,23 @@ pub struct Settings {
     /// The chain's name its node last said, by genesis id: what the titles show before the node
     /// answers, as on the lock screen.
     pub names: HashMap<String, String>,
+    /// How the Mining page's Mine card mines: alone, or in the port's pool.
+    pub mine_solo: bool,
+    /// On the GPU rather than CPU threads: the one at this place in the GPUs listed, or every one
+    /// for None.
+    pub mine_gpu: bool,
+    pub mine_gpus: Option<usize>,
+    /// How many CPU threads, when not on the GPU.
+    pub mine_threads: usize,
+    /// The mining port as host:port, in place of the one GET /mining names: empty to take the
+    /// node's.
+    pub mine_port: String,
+    /// The port's token, as typed, for a port that is not open. It is the port's shared secret,
+    /// which its operator hands its miners, not a key of the wallet's: it proves only that this
+    /// worker may mine there, so it is kept as plainly as the rest of the settings.
+    pub mine_token: String,
+    /// Whether a phone mines on battery too, rather than pausing off its charger.
+    pub mine_on_battery: bool,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -245,6 +262,13 @@ impl Default for Settings {
             pool_node: String::new(),
             pool_claims: HashMap::new(),
             names: HashMap::new(),
+            mine_solo: false,
+            mine_gpu: false,
+            mine_gpus: None,
+            mine_threads: 1,
+            mine_port: String::new(),
+            mine_token: String::new(),
+            mine_on_battery: false,
             vault: None,
             current: String::new(),
         }
@@ -529,7 +553,7 @@ impl Wallet {
                 #[cfg(feature = "dex")]
                 (Ask::Named { .. }, _) => self.views.trade.events(&result),
                 (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
-                (Ask::PoolClaim(_) | Ask::Pool(_) | Ask::Claims { .. }, _) => self.views.mining.answered(&ask, &result),
+                (Ask::PoolClaim(_) | Ask::Pool(_) | Ask::Claims { .. } | Ask::Mining, _) => self.views.mining.answered(&ask, &result),
                 (Ask::Governance | Ask::GovernanceHistory | Ask::GovernanceWeight(_), _) => self.views.governance.answered(&ask, &result),
                 (Ask::Release, _) => match chainv4::release::ReleaseKeys::built_in() {
                     Ok(keys) => self.updates.answered(&result, &keys, time),
@@ -827,77 +851,82 @@ impl Wallet {
 
     fn sidebar(&mut self, ui: &mut Ui) {
         let palette = self.palette;
-        ui.add_space(26.0);
-        ui.horizontal(|ui| {
-            ui.add_space(6.0);
-            ui.vertical(|ui| {
-                let name = self.settings.chain_name(self.name.as_deref());
-                ui.add(egui::Label::new(RichText::new(name).font(egui::FontId::new(26.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink)).wrap());
-                theme::caps(ui, &palette, match (self.settings.role(), self.book.watch) {
-                    (Role::Signer, _) => "Offline signer",
-                    (Role::Online, true) => "Watch-only",
-                    (Role::Online, false) => "Light wallet",
+        chainv4_ui::layout::sidebar(
+            ui,
+            self,
+            |app, ui| {
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    let theme_name = if app.settings.light_theme { "Dark" } else { "Light" };
+
+                    if theme::quiet(ui, &palette, theme_name).clicked() {
+                        app.settings.light_theme = !app.settings.light_theme;
+                    }
+
+                    if theme::quiet(ui, &palette, "Lock").clicked() {
+                        app.lock();
+                    }
                 });
-            });
-        });
-        ui.add_space(24.0);
+                ui.add_space(10.0);
 
-        if !self.holders.is_empty() {
-            theme::caps(ui, &palette, "Account");
-            self.account_picker(ui, ui.available_width());
-            ui.add_space(18.0);
-        }
+                // A signer follows no chain: it says so instead.
+                match app.settings.role() {
+                    Role::Signer => {
+                        ui.label(RichText::new("Never online: what it signs goes by QR code.").small().color(palette.muted));
+                        ui.add_space(4.0);
+                        theme::caps(ui, &palette, "Offline");
+                    }
+                    _ => {
+                        views::light_status(ui, &palette, &app.chain);
+                        ui.add_space(4.0);
+                        theme::caps(ui, &palette, "Light client");
+                    }
+                }
+            },
+            |app, ui| {
+                ui.add_space(26.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        let name = app.settings.chain_name(app.name.as_deref());
+                        ui.add(egui::Label::new(RichText::new(name).font(egui::FontId::new(26.0, egui::FontFamily::Name(theme::SERIF.into()))).color(palette.ink)).wrap());
+                        theme::caps(ui, &palette, match (app.settings.role(), app.book.watch) {
+                            (Role::Signer, _) => "Offline signer",
+                            (Role::Online, true) => "Watch-only",
+                            (Role::Online, false) => "Light wallet",
+                        });
+                    });
+                });
+                ui.add_space(24.0);
 
-        for &(page, name) in views::nav(self.settings.role()) {
-            let selected = self.page == page;
-            let text = theme::strong(name, 14.0).color(if selected { palette.ink } else { palette.soft });
-            let button = egui::Button::new(text)
-                .fill(if selected { palette.row } else { egui::Color32::TRANSPARENT })
-                .stroke(egui::Stroke::NONE)
-                .corner_radius(8.0)
-                .min_size(egui::vec2(ui.available_width(), 34.0));
-            let response = ui.add(button);
-
-            if selected {
-                let rect = response.rect;
-                ui.painter()
-                    .rect_filled(egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 8.0), egui::vec2(3.0, rect.height() - 16.0)), 2.0, palette.accent);
-            }
-
-            if response.clicked() {
-                self.page = page;
-            }
-        }
-
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.add_space(18.0);
-            ui.horizontal(|ui| {
-                let theme_name = if self.settings.light_theme { "Dark" } else { "Light" };
-
-                if theme::quiet(ui, &palette, theme_name).clicked() {
-                    self.settings.light_theme = !self.settings.light_theme;
+                if !app.holders.is_empty() {
+                    theme::caps(ui, &palette, "Account");
+                    app.account_picker(ui, ui.available_width());
+                    ui.add_space(18.0);
                 }
 
-                if theme::quiet(ui, &palette, "Lock").clicked() {
-                    self.lock();
-                }
-            });
-            ui.add_space(10.0);
+                for &(page, name) in views::nav(app.settings.role()) {
+                    let selected = app.page == page;
+                    let text = theme::strong(name, 14.0).color(if selected { palette.ink } else { palette.soft });
+                    let button = egui::Button::new(text)
+                        .fill(if selected { palette.row } else { egui::Color32::TRANSPARENT })
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(8.0)
+                        .min_size(egui::vec2(ui.available_width(), 34.0));
+                    let response = ui.add(button);
 
-            // A signer follows no chain: it says so instead.
-            match self.settings.role() {
-                Role::Signer => {
-                    ui.label(RichText::new("Never online: what it signs goes by QR code.").small().color(palette.muted));
-                    ui.add_space(4.0);
-                    theme::caps(ui, &palette, "Offline");
+                    if selected {
+                        let rect = response.rect;
+                        ui.painter()
+                            .rect_filled(egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 8.0), egui::vec2(3.0, rect.height() - 16.0)), 2.0, palette.accent);
+                    }
+
+                    if response.clicked() {
+                        app.page = page;
+                    }
                 }
-                _ => {
-                    views::light_status(ui, &palette, &self.chain);
-                    ui.add_space(4.0);
-                    theme::caps(ui, &palette, "Light client");
-                }
-            }
-        });
+            },
+        );
     }
 
     /// Which account is in use, to pick from.
@@ -1087,6 +1116,10 @@ impl eframe::App for Wallet {
 
             return;
         }
+
+        // The miner is kept on every page: its payout, a phone's charger and its being in front.
+        let addresses = self.current().map(Holder::addresses).unwrap_or_default();
+        self.views.mining.keep_mining(ui.ctx(), &self.settings, &addresses, now);
 
         self.go_back(ui);
         let narrow = ui.available_width() < NARROW;
@@ -1384,6 +1417,29 @@ mod tests {
         assert_eq!(kept.chain_name(None), "chainv4 testnet", "and kept between runs");
         assert_eq!(serde_json::from_value::<Settings>(json!({ "node": "http://node" })).unwrap().names, HashMap::new(), "settings from before names");
         assert_eq!(Settings { role: Some(Role::Signer), ..settings }.chain_name(None), "chainv4", "a signer follows no chain");
+    }
+
+    #[test]
+    fn settings_from_before_mining_mine_on_a_cpu_thread_in_the_pool_and_choices_are_kept() {
+        let old = serde_json::from_value::<Settings>(json!({ "node": "http://node" })).unwrap();
+
+        assert_eq!((old.mine_solo, old.mine_gpu, old.mine_gpus, old.mine_threads), (false, false, None, 1));
+        assert_eq!((old.mine_port.as_str(), old.mine_token.as_str(), old.mine_on_battery), ("", "", false));
+
+        let set = Settings {
+            mine_solo: true,
+            mine_gpu: true,
+            mine_gpus: Some(1),
+            mine_threads: 6,
+            mine_port: "pool.example:4002".to_string(),
+            mine_token: "the port's secret".to_string(),
+            mine_on_battery: true,
+            ..Settings::default()
+        };
+        let kept = serde_json::from_value::<Settings>(serde_json::to_value(&set).unwrap()).unwrap();
+
+        assert_eq!((kept.mine_solo, kept.mine_gpu, kept.mine_gpus, kept.mine_threads), (true, true, Some(1), 6));
+        assert_eq!((kept.mine_port.as_str(), kept.mine_token.as_str(), kept.mine_on_battery), ("pool.example:4002", "the port's secret", true));
     }
 
     #[test]

@@ -9,9 +9,15 @@
 //!
 //! A machine may have several GPUs: [`list`] names each once, by its place in the list, and
 //! [`Gpu::open_all`] opens those asked for, or every one.
+//!
+//! A browser, where nothing may block, has the GPU through WebGPU alone: [`Gpu::open_async`] opens
+//! it and [`Gpu::search_async`] searches it, each awaited. The blocking calls wait on these same
+//! futures, so both search alike.
 
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 /// How many nonces one dispatch tries: 64 invocations a workgroup, 16,384 workgroups.
 pub const BATCH: u32 = 1 << 20;
@@ -42,6 +48,11 @@ impl WorkHash {
             WorkHash::Blake2b => "blake2b",
             WorkHash::Keccak256 => "keccak256",
         }
+    }
+
+    /// The work hash a genesis names, by its name; None for one the GPU does not mine.
+    pub fn named(name: &str) -> Option<WorkHash> {
+        WorkHash::ALL.into_iter().find(|hash| hash.name() == name)
     }
 
     /// The hash's kernel: the shared search over nonces, and its digest.
@@ -101,7 +112,8 @@ const JOB_BYTES: u64 = (11 + 8 + 4) * 4;
 
 /// Every GPU wgpu can mine on, each once: a card reached through several backends, such as Vulkan
 /// and OpenGL, under its native one. Discrete cards first, then integrated, then any other;
-/// software renderers, which are the CPU, are left out.
+/// software renderers, which are the CPU, are left out. Not in a browser, which shows one alone.
+#[cfg(not(target_arch = "wasm32"))]
 fn adapters() -> Vec<wgpu::Adapter> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let rank = |backend: wgpu::Backend| match backend {
@@ -135,7 +147,8 @@ fn adapters() -> Vec<wgpu::Adapter> {
 }
 
 /// The GPUs this machine has, by their place in the list, as [`Gpu::open_all`] takes it: each
-/// one's name and backend, such as "Apple M3 Pro (Metal)".
+/// one's name and backend, such as "Apple M3 Pro (Metal)". Not in a browser.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn list() -> Vec<String> {
     adapters().iter().map(|adapter| describe(&adapter.get_info())).collect()
 }
@@ -146,18 +159,29 @@ fn describe(info: &wgpu::AdapterInfo) -> String {
 
 impl Gpu {
     /// Opens the most powerful GPU wgpu finds and compiles every kernel on it.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open() -> Result<Gpu, GpuError> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .ok_or(GpuError::NoAdapter)?;
+        pollster::block_on(Gpu::open_async(&WorkHash::ALL))
+    }
 
-        Gpu::on(adapter)
+    /// Opens the most powerful GPU wgpu finds, without blocking: in a browser, the one WebGPU
+    /// gives. Compiles the kernels of these work hashes alone, as a browser compiles slowly; a
+    /// search for another fails.
+    pub async fn open_async(hashes: &[WorkHash]) -> Result<Gpu, GpuError> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            })
+            .await
+            .ok_or(GpuError::NoAdapter)?;
+
+        Gpu::on(adapter, hashes).await
     }
 
     /// Opens the GPUs at these places in [`list`], or every one, compiling every kernel on each.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_all(which: Option<&[usize]>) -> Result<Vec<Gpu>, GpuError> {
         let mut found: Vec<Option<wgpu::Adapter>> = adapters().into_iter().map(Some).collect();
 
@@ -177,23 +201,27 @@ impl Gpu {
                 .ok_or_else(|| GpuError::Device(format!("there is no GPU {index}: this machine has {count}")))?
                 .take()
                 .ok_or_else(|| GpuError::Device(format!("GPU {index} was asked for twice")))?;
-            opened.push(Gpu::on(adapter)?);
+            opened.push(pollster::block_on(Gpu::on(adapter, &WorkHash::ALL))?);
         }
 
         Ok(opened)
     }
 
-    fn on(adapter: wgpu::Adapter) -> Result<Gpu, GpuError> {
+    /// Opens an adapter's device and compiles these hashes' kernels on it. Each kernel compiles in
+    /// an error scope, as a browser reports a kernel's errors only once asked.
+    async fn on(adapter: wgpu::Adapter, hashes: &[WorkHash]) -> Result<Gpu, GpuError> {
         let info = adapter.get_info();
         let name = describe(&info);
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("chainv4 miner"),
-                ..Default::default()
-            },
-            None,
-        ))
-        .map_err(|err| GpuError::Device(err.to_string()))?;
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("chainv4 miner"),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(|err| GpuError::Device(err.to_string()))?;
         let failed = Arc::new(Mutex::new(None));
         let report = failed.clone();
         device.on_uncaptured_error(Box::new(move |err| {
@@ -220,7 +248,12 @@ impl Gpu {
         });
         let mut pipelines = Vec::new();
 
-        for hash in WorkHash::ALL {
+        for &hash in hashes {
+            if pipelines.iter().any(|(compiled, _, _)| *compiled == hash) {
+                continue;
+            }
+
+            device.push_error_scope(wgpu::ErrorFilter::Validation);
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(hash.name()),
                 source: wgpu::ShaderSource::Wgsl(hash.source().into()),
@@ -233,11 +266,6 @@ impl Gpu {
                 compilation_options: Default::default(),
                 cache: None,
             });
-
-            if let Some(why) = failed.lock().expect("the error report is never poisoned").take() {
-                return Err(GpuError::Kernel(format!("{}: {why}", hash.name())));
-            }
-
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(hash.name()),
                 layout: &pipeline.get_bind_group_layout(0),
@@ -252,6 +280,10 @@ impl Gpu {
                     },
                 ],
             });
+
+            if let Some(err) = device.pop_error_scope().await {
+                return Err(GpuError::Kernel(format!("{}: {err}", hash.name())));
+            }
 
             if let Some(why) = failed.lock().expect("the error report is never poisoned").take() {
                 return Err(GpuError::Kernel(format!("{}: {why}", hash.name())));
@@ -283,7 +315,14 @@ impl Gpu {
     ///
     /// - `prefix`: the work message before the nonce, `"chainv4 work"` and the block id.
     /// - `target`: the most the hash may be, as 32 big-endian bytes: `u256::MAX / difficulty`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn search(&self, hash: WorkHash, prefix: &[u8; PREFIX_LEN], target: &[u8; 32], start: u64, count: u32) -> Result<Option<u64>, GpuError> {
+        pollster::block_on(self.search_async(hash, prefix, target, start, count))
+    }
+
+    /// As [`Gpu::search`], without blocking: in a browser, awaiting the GPU lets the page go on
+    /// meanwhile. One search at a time; a search dropped part way gives the GPU back.
+    pub async fn search_async(&self, hash: WorkHash, prefix: &[u8; PREFIX_LEN], target: &[u8; 32], start: u64, count: u32) -> Result<Option<u64>, GpuError> {
         let count = count.min(BATCH);
 
         if count == 0 {
@@ -294,18 +333,19 @@ impl Gpu {
             return Err(GpuError::Device("a search is already running".to_string()));
         }
 
-        let result = self.run(hash, prefix, target, start, count);
-        self.busy.store(false, Ordering::Release);
+        let mut searching = Searching { gpu: self, mapping: false };
 
-        result
+        searching.run(hash, prefix, target, start, count).await
     }
 
-    fn run(&self, hash: WorkHash, prefix: &[u8; PREFIX_LEN], target: &[u8; 32], start: u64, count: u32) -> Result<Option<u64>, GpuError> {
+    /// Writes the job, dispatches the kernel over `count` nonces and copies what it found to the
+    /// readback buffer.
+    fn submit(&self, hash: WorkHash, prefix: &[u8; PREFIX_LEN], target: &[u8; 32], start: u64, count: u32) -> Result<(), GpuError> {
         let (_, pipeline, bind_group) = self
             .pipelines
             .iter()
             .find(|(named, _, _)| *named == hash)
-            .expect("every work hash has a pipeline");
+            .ok_or_else(|| GpuError::Kernel(format!("{}: not compiled on this GPU", hash.name())))?;
         let mut job = Vec::with_capacity(JOB_BYTES as usize);
 
         for word in prefix.chunks(4) {
@@ -338,16 +378,11 @@ impl Gpu {
         encoder.copy_buffer_to_buffer(&self.found, 0, &self.readback, 0, 4);
         self.queue.submit([encoder.finish()]);
 
-        let (sender, receiver) = std::sync::mpsc::channel();
-        self.readback.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        if let wgpu::MaintainResult::SubmissionQueueEmpty = self.device.poll(wgpu::Maintain::Wait) {}
+        Ok(())
+    }
 
-        receiver
-            .recv()
-            .map_err(|_| GpuError::Device("the search never finished".to_string()))?
-            .map_err(|err| GpuError::Device(err.to_string()))?;
+    /// The nonce the mapped readback buffer holds, once read and unmapped: None for none found.
+    fn read(&self, start: u64) -> Result<Option<u64>, GpuError> {
         let index = {
             let view = self.readback.slice(..).get_mapped_range();
 
@@ -363,6 +398,80 @@ impl Gpu {
             u32::MAX => None,
             found => Some(start + u64::from(found - 1)),
         })
+    }
+}
+
+/// A search in flight. Dropped, it frees the GPU for the next: should the search be dropped while
+/// the readback is still being mapped, the mapping is undone, or the next search could not map it.
+struct Searching<'a> {
+    gpu: &'a Gpu,
+    mapping: bool,
+}
+
+impl Searching<'_> {
+    async fn run(&mut self, hash: WorkHash, prefix: &[u8; PREFIX_LEN], target: &[u8; 32], start: u64, count: u32) -> Result<Option<u64>, GpuError> {
+        self.gpu.submit(hash, prefix, target, start, count)?;
+
+        let mapped = Mapped::default();
+        let done = mapped.0.clone();
+        self.mapping = true;
+        self.gpu.readback.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            let mut done = done.lock().expect("the mapping's end is never poisoned");
+            done.result = Some(result);
+
+            if let Some(waker) = done.waker.take() {
+                waker.wake();
+            }
+        });
+        // Natively the mapping ends here, once the GPU is done; a browser ends it by itself, and
+        // the future below waits for it.
+        if let wgpu::MaintainResult::SubmissionQueueEmpty = self.gpu.device.poll(wgpu::Maintain::Wait) {}
+
+        let result = mapped.await;
+        // Mapped, or failing to: either way there is no mapping left to undo.
+        self.mapping = false;
+        result.map_err(|err| GpuError::Device(err.to_string()))?;
+
+        self.gpu.read(start)
+    }
+}
+
+impl Drop for Searching<'_> {
+    fn drop(&mut self) {
+        if self.mapping {
+            self.gpu.readback.unmap();
+        }
+
+        self.gpu.busy.store(false, Ordering::Release);
+    }
+}
+
+/// The end of the readback buffer's mapping, awaited: map_async's callback hands in its result and
+/// wakes whoever waits.
+#[derive(Default)]
+struct Mapped(Arc<Mutex<Mapping>>);
+
+/// How a mapping stands: its result once it ended, and who to wake then.
+#[derive(Default)]
+struct Mapping {
+    result: Option<Result<(), wgpu::BufferAsyncError>>,
+    waker: Option<Waker>,
+}
+
+impl Future for Mapped {
+    type Output = Result<(), wgpu::BufferAsyncError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut done = self.0.lock().expect("the mapping's end is never poisoned");
+
+        match done.result.take() {
+            Some(result) => Poll::Ready(result),
+            None => {
+                done.waker = Some(context.waker().clone());
+
+                Poll::Pending
+            }
+        }
     }
 }
 
@@ -407,6 +516,15 @@ mod tests {
             }
             Err(err) => panic!("{err}"),
         }
+    }
+
+    #[test]
+    fn a_work_hash_is_found_by_the_name_genesis_gives_it() {
+        for hash in WorkHash::ALL {
+            assert_eq!(WorkHash::named(hash.name()), Some(hash));
+        }
+
+        assert_eq!(WorkHash::named("xxh3"), None, "not secure, so no genesis mines it");
     }
 
     #[test]

@@ -334,7 +334,8 @@ An older node answers either route with 404, and the page says it is from before
 **On a wide screen,** a sidebar lists the pages in four groups: Chain (Overview, Block map,
 Mempool, Tokens, NFTs, Multisig, Names, Rich list & supply), Markets (DEX, Swaps, Bridges),
 Network (Network, Finality, Governance, Mining pool) and Tools (Tools, Send, Faucet, Settings). Under them sit the node's address, whether it answers and how, how old its tip is,
-and the light client's state.
+and the light client's state, which keep the sidebar's bottom while the pages above them scroll
+in a window too short for them all (`chainv4_ui::layout::sidebar`, shared with the wallet).
 Over the page are back and forward, the search box and the chain's height.
 
 **The chain's name** heads the sidebar, or the bar on a phone, and titles the window or the

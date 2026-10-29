@@ -282,6 +282,10 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
             }),
         }
 
+        if mining.solo {
+            facts.text("alone", "takes workers mining alone: each block one finds pays it in full");
+        }
+
         if let Some(pool) = &mining.pool {
             facts.row("pool", |ui| {
                 ui.label(format!(
@@ -325,10 +329,12 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
         0 => format!("{} found", worker.found),
         refused => format!("{} found · {refused} refused", worker.found),
     };
-    // A pool's worker: the shares it sent, at the difficulty the pool set it.
-    let shares = |worker: &crate::model::MiningWorker| match worker.share_difficulty.as_str() {
-        "" | "0" => format!("{} shares", format::thousands(&worker.shares.to_string())),
-        difficulty => format!("{} shares at {}", format::thousands(&worker.shares.to_string()), format::thousands(difficulty)),
+    // A pool's worker: the shares it sent, at the difficulty the pool set it. One mining alone
+    // sends none: its blocks pay it.
+    let shares = |worker: &crate::model::MiningWorker| match (worker.solo, worker.share_difficulty.as_str()) {
+        (true, _) => "mining alone".to_string(),
+        (false, "" | "0") => format!("{} shares", format::thousands(&worker.shares.to_string())),
+        (false, difficulty) => format!("{} shares at {}", format::thousands(&worker.shares.to_string()), format::thousands(difficulty)),
     };
     let pooled = mining.pool.is_some() || mining.workers.iter().any(|worker| worker.payout.is_some());
 

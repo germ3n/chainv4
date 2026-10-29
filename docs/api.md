@@ -497,6 +497,21 @@ all it `earned`, what it `claimed` and what is `claimable`, and its leaf's `inde
 pool's blocks can no longer be undone at, as its books know, or `null`: what a miner keeping its
 claims prunes by. 404 for a miner the pool owes nothing yet.
 
+### `GET /mining` and `GET /mining/ws`
+
+On a node that takes workers, `--mining`; 404 otherwise. `GET /mining` tells the apps where to mine
+for it: the mining port's `port`, where it is reached from outside, `public` (`--mining-public`, or
+`null` for the API's own host), the `protocol` it speaks, whether it runs a `pool` (with its `fee`,
+in parts of a billion, and `window`), takes workers mining alone (`solo`, `--mining-solo`) and takes
+anyone (`open`, `--mining-open`, whose workers prove the open token), the `ws` path below and how
+many `workers` are connected.
+
+`GET /mining/ws` is the mining port over a WebSocket, for a browser, which opens no TCP
+connections: each text message is one line of the port's [protocol](consensus.md#mining-with-workers),
+relayed to the port on the node's machine as it is and back, so the handshake proves the token to
+the port itself. A message holding a line end, or anything but text, ends it. The port sees the
+relay as a connection from the node's own machine.
+
 ### `GET /release`
 
 The newest [release](updates.md) the node took, for the apps, workers and `chainv4 update` to check

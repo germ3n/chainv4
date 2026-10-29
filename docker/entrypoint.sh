@@ -22,6 +22,10 @@
 #   POOL             1 runs a mining pool on that port: workers' shares, and every block sends
 #                    their share to the pool's escrow, which they claim from
 #   POOL_OPEN        1 runs an open pool, which anyone joins with a payout address, no token
+#   MINING_SOLO      1 takes workers mining alone on the port too: each block one finds pays it
+#   MINING_OPEN      1 opens the port to anyone with a payout address, no token: with POOL or
+#                    MINING_SOLO, which the node needs beside it
+#   MINING_PUBLIC    where workers reach the port from outside, host:port, as GET /mining says
 #   POOL_FEE         what the pool keeps of each block, in percent: 0 unless set
 #   POOL_WINDOW      how many blocks' worth of shares each block shares out by: 2 unless set
 #   POOL_PUSH        claim for miners owed at least this, in the coin's smallest unit, from
@@ -115,10 +119,15 @@ case "$blocks" in
 
         pool=${POOL:-0}
 
+        port=1
+
         if [ "${POOL_OPEN:-0}" = 1 ]; then
             set -- "$@" --mining 0.0.0.0:4002 --mining-open
             pool=1
             echo "[docker] an open mining pool on TCP 4002: anyone may join with a payout address"
+        elif [ "${MINING_OPEN:-0}" = 1 ]; then
+            set -- "$@" --mining 0.0.0.0:4002 --mining-open
+            echo "[docker] an open mining port on TCP 4002: anyone may mine with a payout address"
         elif [ -n "${MINING_TOKEN:-}" ] && [ ! -r "$MINING_TOKEN" ]; then
             echo "[docker] cannot read $MINING_TOKEN as uid $(id -u): taking no workers. Make it readable (docker/pow.sh up does)" >&2
             pool=0
@@ -127,7 +136,15 @@ case "$blocks" in
             echo "[docker] taking workers on TCP 4002"
         else
             pool=0
+            port=0
         fi
+
+        if [ "$port" = 1 ] && [ "${MINING_SOLO:-0}" = 1 ]; then
+            set -- "$@" --mining-solo
+            echo "[docker] taking workers mining alone, each block one finds paying it in full"
+        fi
+
+        if [ "$port" = 1 ] && [ -n "${MINING_PUBLIC:-}" ]; then set -- "$@" --mining-public "$MINING_PUBLIC"; fi
 
         if [ "$pool" = 1 ]; then
             set -- "$@" --pool --pool-fee "${POOL_FEE:-0}" --pool-window "${POOL_WINDOW:-2}"

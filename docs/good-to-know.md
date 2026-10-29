@@ -1085,7 +1085,22 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **The `pool` feature is the node's side alone.** Without it a node takes workers as before and
   pays only its `--reward-to`; every build checks pool commitments and runs claims.
 - **Open pools take a public token.** `--mining-open` uses `OPEN_TOKEN`, which every worker without
-  `--token` proves, so its messages are still numbered and checked, but anyone may join.
+  `--token` proves, so its messages are still numbered and checked, but anyone may join. It opens
+  mining alone too, and needs `--pool` or `--mining-solo`.
+- **Mining alone costs a block a payout.** A node with `--mining-solo` builds a template for each
+  payout mining alone every time it builds its own, at most 16 (`MOST_SOLO`); the 17th is turned
+  away. Any seal ends every template of the round. A solo worker sends no shares, so its hashrate
+  shows only in what it says, and it hears of nothing until it finds a block.
+- **The WebSocket only relays.** `GET /mining/ws` passes lines to the mining port on the node's own
+  machine, so the port's limit of 256 connections counts them, and its report shows each as a
+  connection from the node itself. Behind nginx, the location needs the WebSocket upgrade headers.
+- **`GET /mining` is not in `GET /status`.** It asks the node's loop, as `GET /node` does, while
+  `/status`, which the apps ask most, reads only the database.
+- **The worker builds without the node.** The `worker` feature is the mining port's protocol, a
+  worker's devices and its claims, for the wallet; `gpu-mining` adds GPUs, and the node's `gpu`
+  feature brings it. `WorkerStatus` (`chainv4::mining::status`) is what a worker shows of itself,
+  and the protocol's handshake and MACs (`hello`, `Joining`, `Sealer`, `Opener`) carry over any
+  transport.
 - **Miners keep their own claims; the pool's node is not needed to claim.** Only the pool holds
   the leaves under its roots, so the pool sends each worker its claim, kept in `--claims`, and the
   wallet keeps those it is given. `chainv4 claim --saved` and the wallet check them against any

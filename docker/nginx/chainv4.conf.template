@@ -50,6 +50,15 @@ server {
         proxy_read_timeout 1h;
     }
 
+    # Mining in a browser: the mining port's protocol over a WebSocket, kept open while it mines.
+    location = /mining/ws {
+        proxy_pass http://chainv4;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+
     location / {
         proxy_pass http://chainv4;
     }

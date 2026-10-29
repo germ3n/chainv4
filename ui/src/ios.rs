@@ -7,8 +7,9 @@
 //! button, so a swipe in from the left edge, iOS's own gesture for going back, comes to the app as
 //! `Key::BrowserBack`, which it takes where Android's back gesture is. Files are picked through
 //! UIKit's document picker (see [`crate::files`]), Face ID or Touch ID checks made through
-//! LocalAuthentication (see [`crate::biometric`]), and the camera run through AVFoundation (see
-//! [`crate::camera`]).
+//! LocalAuthentication (see [`crate::biometric`]), the camera run through AVFoundation (see
+//! [`crate::camera`]), and the charger looked at through UIDevice's battery state (see
+//! [`crate::power`]).
 //!
 //! iOS 27 runs an app only through the scene lifecycle, which winit predates: UIKit asks for a
 //! scene delegate, so the app's Info.plist names `Chainv4SceneDelegate`, registered here before
@@ -19,10 +20,10 @@
 use {
     crate::edit::{Clipboard, Editing},
     objc2::rc::Retained,
-    objc2::{ClassType, MainThreadOnly, Message, define_class},
+    objc2::{ClassType, MainThreadMarker, MainThreadOnly, Message, define_class},
     objc2_foundation::{NSObject, NSObjectProtocol, NSString},
     objc2_core_foundation::{CGPoint, CGRect, CGSize},
-    objc2_ui_kit::{UIColor, UIPasteboard, UIScene, UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIView, UIWindow, UIWindowScene, UIWindowSceneDelegate},
+    objc2_ui_kit::{UIColor, UIDevice, UIDeviceBatteryState, UIPasteboard, UIScene, UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIView, UIWindow, UIWindowScene, UIWindowSceneDelegate},
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
     std::cell::RefCell,
 };
@@ -137,7 +138,7 @@ pub fn run(title: &str, storage_file: &str, make: impl FnOnce(&eframe::CreationC
         Box::new(|creation| {
             keep_window(creation);
 
-            Ok(Box::new(OnIos { inner: make(creation), editing: Editing::default(), swipe: None }))
+            Ok(Box::new(OnIos { inner: make(creation), editing: Editing::default(), swipe: None, power_at: None }))
         }),
     )
 }
@@ -166,6 +167,8 @@ struct OnIos {
     editing: Editing,
     /// Where a touch began at the left edge, for a swipe back, until it lifts or is one.
     swipe: Option<egui::Pos2>,
+    /// When the app last looked whether the phone is on its charger, for an app that asked.
+    power_at: Option<f64>,
 }
 
 impl OnIos {
@@ -188,6 +191,32 @@ impl OnIos {
         for text in copied {
             Pasteboard.set(&text);
         }
+    }
+
+    /// Looks whether the phone is on its charger every few seconds, while the app wants to know:
+    /// UIDevice's battery state, charging or full on one, which it keeps only while battery
+    /// monitoring is on.
+    fn check_power(&mut self, ctx: &egui::Context) {
+        let time = ctx.input(|input| input.time);
+
+        if !crate::power::wanted(ctx, time) || self.power_at.is_some_and(|at| time - at < crate::power::LOOK_EVERY) {
+            return;
+        }
+
+        self.power_at = Some(time);
+        // A frame is drawn on the main thread, where UIKit wants UIDevice used.
+        let Some(main) = MainThreadMarker::new() else {
+            return;
+        };
+        let device = UIDevice::currentDevice(main);
+        device.setBatteryMonitoringEnabled(true);
+        let charging = match device.batteryState() {
+            UIDeviceBatteryState::Charging | UIDeviceBatteryState::Full => Some(true),
+            UIDeviceBatteryState::Unplugged => Some(false),
+            _ => None,
+        };
+
+        crate::power::found(ctx, charging);
     }
 
     /// A touch that starts at the left edge and moves right far enough, more across than down, is
@@ -228,6 +257,7 @@ impl eframe::App for OnIos {
         let keyboard = ctx.egui_wants_keyboard_input();
         self.editing.show(&ctx, keyboard, &mut Pasteboard);
         Self::copy(&ctx);
+        self.check_power(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

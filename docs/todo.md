@@ -99,6 +99,11 @@ offline; these would make that hold up as a treasury.
   as `SavedClaims` keeps them, the wallet keeps those it is given, and `chainv4 claim --saved` and
   the wallet claim by them at any node, checked with `GET /claims/{pool}/{address}`: a pool whose
   node is gone still pays.
+- [x] **Mining from the wallet, alone or in a pool.** `--mining-solo` has the mining port hand
+  each worker mining alone a block of its own, paying its payout in full; `GET /mining` tells the
+  apps the port and what it takes, `GET /mining/ws` carries it over a WebSocket; the wallet's
+  Mining page mines on the GPU or CPU, natively over TCP and in the browser on WebGPU or Web
+  Workers, phones only in the foreground and on the charger. See [Mining alone](consensus.md#mining-alone).
 - [ ] **Mining pools: next.** The wallet's claim figures come from the pool's node; proving what an
   address claimed (the pools column) and the root a block holds, through the light client, would
   leave only the leaf to the pool's word. A pool's node keeps four claim trees in memory, which a

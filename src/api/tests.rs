@@ -137,8 +137,10 @@ fn fake_report(txs: usize) -> NodeReport {
                 payout: None,
                 shares: 0,
                 share_difficulty: 0,
+                solo: false,
             }],
             pool: None,
+            ..Default::default()
         }),
         peers: vec![PeerReport {
             id: libp2p::PeerId::random(),

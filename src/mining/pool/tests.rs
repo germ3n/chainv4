@@ -30,7 +30,7 @@ fn header(height: u64, timestamp: u64, difficulty: u128) -> BlockHeader {
 }
 
 fn port() -> MiningPort {
-    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None }
+    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: false }
 }
 
 /// A pool on a port of its own, its seals coming out of the channel.
@@ -112,6 +112,7 @@ fn a_worker_on_another_thread_seals_blocks_the_rules_accept() {
         proxy: None,
         payout: None,
         claims: None,
+        solo: false,
     })
     .unwrap();
     let parent = header(5, 10_000, 500);
@@ -408,6 +409,7 @@ fn a_worker_mining_for_a_pool_sends_share_after_share_on_one_job() {
         proxy: None,
         payout: Some(payout),
         claims: None,
+        solo: false,
     })
     .unwrap();
     until(&pool, |report| report.workers.len() == 1);
@@ -420,4 +422,69 @@ fn a_worker_mining_for_a_pool_sends_share_after_share_on_one_job() {
     assert_eq!(commitment.parts, crate::structs::block::PAYOUT_PARTS, "no fee: all of it to the escrow");
 
     drop(worker);
+}
+
+/// A solo worker's side of a connection, past the handshake, and the first message after it.
+fn alone(pool: &Pool, payout: Option<Address>) -> (Sender, Receiver, Value) {
+    let stream = TcpStream::connect(pool.listening()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let (sender, mut receiver) = protocol::connect_as(stream, TOKEN, "chainv4", &protocol::Hello { name: "alone".to_string(), payout, solo: true }).unwrap();
+    let first = receiver.receive().unwrap();
+
+    (sender, receiver, first)
+}
+
+#[test]
+fn a_solo_worker_mines_its_own_block_and_its_seal_ends_the_job_for_everyone() {
+    let (sender, seals) = mpsc::channel();
+    let sender = Mutex::new(sender);
+    let found: Found = Arc::new(move |id, seal| {
+        let _ = State::lock(&sender).send((id, seal));
+    });
+    let mut pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { solo: true, ..port() }, found).unwrap();
+    let payout = Address::Ed25519([4; 32]);
+    let (mut solo_sender, mut solo, first) = alone(&pool, Some(payout));
+    let (_, mut other) = raw(&pool, "for the node");
+
+    assert_eq!(first["type"], "solo");
+    until(&pool, |report| report.workers.len() == 2);
+    assert_eq!(pool.solo(), vec![payout], "a template wanted for its payout");
+
+    // The node's block, and the solo worker's, which pays it; difficulty 1, so any nonce meets it.
+    let main = header(1, 1, 1);
+    let mine = BlockHeader { producer: payout, ..header(1, 1, 1) };
+    assert_eq!(pool.seal_with_solo(&main, std::slice::from_ref(&mine)), None);
+    let work = next(&mut solo, "work");
+    let theirs = next(&mut other, "work");
+
+    assert_eq!(work["id"], crate::structs::hex::to_hex(&mine.id().to_bytes()), "its own block");
+    assert_eq!(theirs["id"], crate::structs::hex::to_hex(&main.id().to_bytes()));
+    assert!(work["share"].is_null(), "no shares mining alone");
+
+    solo_sender.send(&json!({ "type": "found", "job": work["job"], "nonce": work["start"] })).unwrap();
+    let verdict = next(&mut solo, "verdict");
+
+    assert_eq!((verdict["took"].as_bool(), verdict["kind"].as_str()), (Some(true), Some("block")));
+    assert_eq!(seals.recv_timeout(Duration::from_secs(10)).unwrap().0, mine.id(), "the solo block sealed");
+
+    // The node's workers are too late now: the job is over.
+    let report = pool.mining().unwrap();
+    assert!(report.solo && report.workers.iter().any(|worker| worker.solo && worker.payout == Some(payout) && worker.found == 1));
+    assert_eq!(State::lock(&pool.state.job).work, None);
+}
+
+#[test]
+fn a_solo_worker_is_turned_away_by_a_port_that_takes_none_or_without_a_payout() {
+    let (pool, _seals) = pool();
+    let (_, _, refused) = alone(&pool, Some(Address::Ed25519([4; 32])));
+
+    assert_eq!(refused["type"], "refused");
+    assert!(refused["why"].as_str().unwrap().contains("--mining-solo"), "{refused}");
+
+    let found: Found = Arc::new(|_, _| {});
+    let solo = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { solo: true, ..port() }, found).unwrap();
+    let (_, _, refused) = alone(&solo, None);
+
+    assert!(refused["why"].as_str().unwrap().contains("--payout"), "{refused}");
+    assert!(solo.solo().is_empty());
 }

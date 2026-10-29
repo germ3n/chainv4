@@ -49,7 +49,7 @@ pub enum Page {
     Receive,
     Activity,
     Names,
-    /// What a mining pool owes the account's addresses, and claiming it.
+    /// Mining from this device, alone or in a pool, and claiming what a pool owes the addresses.
     Mining,
     /// Native multisigs: making one, and taking their transactions round the members.
     Multisig,

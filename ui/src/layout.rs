@@ -87,6 +87,21 @@ impl Scrolled {
     }
 }
 
+/// A sidebar on a wide screen: `foot` keeps its bottom, and `pages` fill what is left above it,
+/// scrolling when the window is too short to show them all. Both are handed `state`, as each
+/// usually needs the app.
+pub fn sidebar<S, R>(ui: &mut egui::Ui, state: &mut S, foot: impl FnOnce(&mut S, &mut egui::Ui), pages: impl FnOnce(&mut S, &mut egui::Ui) -> R) -> R {
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        foot(state, ui);
+        ui.add_space(6.0);
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            egui::ScrollArea::vertical().id_salt("sidebar").auto_shrink(false).show(ui, |ui| pages(state, ui)).inner
+        })
+        .inner
+    })
+    .inner
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +178,41 @@ mod tests {
         frame(&mut scrolled, 5, 4.0);
 
         assert!(scrolled.offset() <= settled, "no longer held");
+    }
+
+    #[test]
+    fn a_sidebar_too_tall_for_its_window_scrolls_its_pages_above_a_foot_kept_at_the_bottom() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 300.0));
+        let frame = |rows: usize| {
+            let (mut foot, mut last, mut clip) = (egui::Rect::NOTHING, egui::Rect::NOTHING, egui::Rect::NOTHING);
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                sidebar(
+                    ui,
+                    &mut (),
+                    |_, ui| foot = ui.label("node").rect,
+                    |_, ui| {
+                        clip = ui.clip_rect();
+
+                        for row in 0..rows {
+                            last = ui.label(format!("page {row}")).rect;
+                        }
+                    },
+                );
+            });
+            output.textures_delta.clear();
+            (foot, last, clip)
+        };
+
+        let (foot, last, clip) = frame(60);
+
+        assert!(foot.bottom() <= screen.bottom() && foot.bottom() > screen.bottom() - 40.0, "the foot at the bottom: {foot:?}");
+        assert!(clip.bottom() <= foot.top(), "the pages stop above the foot");
+        assert!(last.bottom() > clip.bottom(), "the last pages are scrolled to, not drawn over the foot");
+
+        let (short_foot, short_last, _) = frame(3);
+
+        assert_eq!(short_foot, foot, "a few pages leave the foot where it was");
+        assert!(short_last.bottom() < foot.top());
     }
 }

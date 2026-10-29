@@ -71,6 +71,10 @@ pub enum Ask {
     /// A mining pool's standing for an address: its work in the window, its part of the next
     /// block, its workers and the blocks it shared in.
     Pool(String),
+    /// The node's mining port, as GET /mining says it: where it is reached, the protocol it speaks,
+    /// and whether it takes a pool's workers, workers mining alone, and anyone. What the Mining
+    /// page mines by; the node checks every nonce it is sent, so nothing rests on it.
+    Mining,
     /// What an address has claimed from a pool, and the root the pool's block at a height
     /// committed to, as the wallet's own node says: what a claim kept on this device is checked
     /// against before it is sent, the pool's node no matter.
@@ -114,6 +118,7 @@ impl Ask {
             Ask::Multisig(address) => format!("/multisig/{address}"),
             Ask::PoolClaim(address) => format!("/pool/claim/{address}"),
             Ask::Pool(address) => format!("/pool/{address}"),
+            Ask::Mining => "/mining".to_string(),
             Ask::Claims { pool, to, height } => format!("/claims/{pool}/{to}?height={height}"),
             Ask::Release => "/release".to_string(),
             Ask::Governance => "/governance".to_string(),

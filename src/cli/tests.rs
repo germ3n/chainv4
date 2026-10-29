@@ -1057,6 +1057,92 @@ mod send {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn a_browser_mines_alone_over_the_apis_websocket_with_the_ports_own_handshake() {
+        use crate::consensus::{PowConfig, meets, work_hash};
+        use crate::mining::pool::{MiningPort, OPEN_TOKEN};
+        use crate::mining::protocol::{self, Hello};
+        use crate::node::{Mining, Producing};
+        use crate::structs::hash::{Hash, HashType};
+        use tungstenite::Message;
+
+        let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let payout = Address::Ed25519([4; 32]);
+        let pow = |genesis: Genesis| Genesis {
+            consensus: ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::default_chain(), target_block_ms: 1_000, initial_difficulty: 64, min_difficulty: 64 }),
+            ..genesis
+        };
+        let mining = move |node: Node| {
+            node.producing(Producing {
+                mine: Some(Mining {
+                    reward_to: Address::Ed25519([9; 32]),
+                    threads: 0,
+                    gpu: false,
+                    gpus: None,
+                    port: Some(MiningPort { listen, token: OPEN_TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true }),
+                }),
+                sign: None,
+            })
+        };
+        let options = crate::api::ApiOptions { mining_public: Some("miner.example:4002".to_string()), ..Default::default() };
+        let running = Running::launch_genesis(false, false, pow, mining, options);
+        let about: serde_json::Value = serde_json::from_str(&ureq::get(format!("http://{}/mining", running.api)).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
+
+        assert_eq!((about["port"].as_u64(), about["public"].as_str(), about["ws"].as_str()), (Some(u64::from(listen.port())), Some("miner.example:4002"), Some("/mining/ws")));
+        assert_eq!((about["solo"].as_bool(), about["open"].as_bool(), about["pool"].as_bool()), (Some(true), Some(true), Some(false)));
+
+        let (mut socket, _) = tungstenite::connect(format!("ws://{}/mining/ws", running.api)).unwrap();
+        let read = |socket: &mut tungstenite::WebSocket<_>| loop {
+            if let Message::Text(text) = socket.read().unwrap() {
+                break text.to_string();
+            }
+        };
+        let greeting: serde_json::Value = serde_json::from_str(&read(&mut socket)).unwrap();
+        let me = Hello { name: "browser".to_string(), payout: Some(payout), solo: true };
+        let (hello, joining) = protocol::hello(&greeting, OPEN_TOKEN, "chainv4", &me).unwrap();
+        socket.send(Message::Text(hello.to_string().into())).unwrap();
+        let answer: serde_json::Value = serde_json::from_str(&read(&mut socket)).unwrap();
+        let (mut sealer, mut opener) = joining.finish(OPEN_TOKEN, &answer).unwrap();
+        let started = std::time::Instant::now();
+        let mut said_solo = false;
+
+        // Each work message is a block paying the payout: the first nonce found is sent.
+        let block = loop {
+            assert!(started.elapsed() < std::time::Duration::from_secs(30), "no block over the WebSocket");
+            let message = opener.open(&read(&mut socket)).unwrap();
+
+            match message["type"].as_str() {
+                Some("solo") => said_solo = true,
+                Some("work") => {
+                    let id = Hash::from_bytes(HashType::default_chain(), &crate::structs::hex::from_hex(message["id"].as_str().unwrap()).unwrap()).unwrap();
+                    let difficulty: u128 = message["difficulty"].as_str().unwrap().parse().unwrap();
+                    let start = message["start"].as_u64().unwrap();
+                    let nonce = (start..).find(|nonce| meets(work_hash(HashType::default_chain(), &id, *nonce), difficulty)).unwrap();
+                    let found = serde_json::json!({ "type": "found", "job": message["job"], "nonce": nonce });
+                    socket.send(Message::Text(sealer.seal(&found).into())).unwrap();
+                }
+                Some("verdict") if message["took"] == true => break message,
+                _ => {}
+            }
+        };
+
+        assert!(said_solo, "the port said it mines alone first");
+        assert_eq!(block["kind"], "block");
+
+        // The node imports it a moment after the port takes it.
+        let tip: serde_json::Value = loop {
+            assert!(started.elapsed() < std::time::Duration::from_secs(30), "the block never landed");
+
+            match ureq::get(format!("http://{}/blocks/1", running.api)).call() {
+                Ok(mut answer) => break serde_json::from_str(&answer.body_mut().read_to_string().unwrap()).unwrap(),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        };
+
+        assert_eq!(tip["producer"].as_str().or(tip["header"]["producer"].as_str()), Some(payout.to_string().as_str()), "{tip}");
+        running.stop();
+    }
+
     #[cfg(feature = "faucet")]
     #[test]
     fn the_faucet_command_works_out_the_proof_and_the_coins_land() {

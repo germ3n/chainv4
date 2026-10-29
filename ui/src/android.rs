@@ -4,8 +4,9 @@
 //! and goes once none does. egui reaches no clipboard on Android, so what the app copies is put on
 //! Android's here, and pasting is offered by [`crate::edit`]. Files are picked through the Java
 //! activity the APK carries when it was built with one (see [`crate::files`]), biometric
-//! checks made through its Java class for them (see [`crate::biometric`]), and the camera run
-//! through its Camera2 class (see [`crate::camera`]).
+//! checks made through its Java class for them (see [`crate::biometric`]), the camera run
+//! through its Camera2 class (see [`crate::camera`]), and the charger looked at through Android's
+//! battery broadcast (see [`crate::power`]).
 
 use {
     crate::{
@@ -61,6 +62,7 @@ pub fn run(app: AndroidApp, title: &str, log_tag: &str, storage_file: &str, make
                 biometric,
                 checking: None,
                 level_at: 0.0,
+                power_at: None,
                 #[cfg(feature = "camera")]
                 camera,
                 #[cfg(feature = "camera")]
@@ -96,6 +98,8 @@ struct OnAndroid {
     /// When the app last asked whether biometrics can be used: someone may enroll a finger while
     /// it runs.
     level_at: f64,
+    /// When the app last looked whether the phone is on its charger, for an app that asked.
+    power_at: Option<f64>,
     /// The camera's Java class, when the APK carries it.
     #[cfg(feature = "camera")]
     camera: Option<Global<JClass<'static>>>,
@@ -263,6 +267,25 @@ impl OnAndroid {
                 if let Some(done) = self.checking.take() {
                     done(Err(Failure::Failed(format!("could not read what the prompt came to: {err}"))));
                 }
+            }
+        }
+    }
+
+    /// Looks whether the phone is on its charger every few seconds, while the app wants to know.
+    fn check_power(&mut self, ctx: &egui::Context) {
+        let time = ctx.input(|input| input.time);
+
+        if !crate::power::wanted(ctx, time) || self.power_at.is_some_and(|at| time - at < crate::power::LOOK_EVERY) {
+            return;
+        }
+
+        self.power_at = Some(time);
+
+        match plugged(&self.app) {
+            Ok(plugged) => crate::power::found(ctx, plugged),
+            Err(err) => {
+                log::warn!("could not tell whether the phone is charging: {err}");
+                crate::power::found(ctx, None);
             }
         }
     }
@@ -541,6 +564,34 @@ impl OnAndroid {
     }
 }
 
+/// Whether the phone is plugged in, by the sticky ACTION_BATTERY_CHANGED broadcast's
+/// EXTRA_PLUGGED: `registerReceiver(null, new IntentFilter(ACTION_BATTERY_CHANGED))` hands the last
+/// one without registering anything. Charging or full on a charger is plugged; None when Android
+/// kept no such broadcast.
+fn plugged(app: &AndroidApp) -> jni::errors::Result<Option<bool>> {
+    java(app, |env, activity| {
+        let action = env.new_string("android.intent.action.BATTERY_CHANGED")?;
+        let filter = env.new_object(jni_str!("android/content/IntentFilter"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&action)])?;
+        let intent = env
+            .call_method(
+                activity,
+                jni_str!("registerReceiver"),
+                jni_sig!("(Landroid/content/BroadcastReceiver;Landroid/content/IntentFilter;)Landroid/content/Intent;"),
+                &[JValue::Object(&JObject::null()), JValue::Object(&filter)],
+            )?
+            .l()?;
+
+        if intent.is_null() {
+            return Ok(None);
+        }
+
+        let extra = env.new_string("plugged")?;
+        let plugged = env.call_method(&intent, jni_str!("getIntExtra"), jni_sig!("(Ljava/lang/String;I)I"), &[JValue::Object(&extra), JValue::Int(-1)])?.i()?;
+
+        Ok((plugged >= 0).then_some(plugged > 0))
+    })
+}
+
 /// `Biometric.available(activity)`: 2 ready, 1 nothing enrolled, 0 none.
 fn biometric_level(app: &AndroidApp, class: &Global<JClass<'static>>) -> jni::errors::Result<i32> {
     java(app, |env, activity| {
@@ -679,6 +730,7 @@ impl eframe::App for OnAndroid {
         self.copy(&ctx);
         self.pick(&ctx, self.inner.clear_color(&ctx.global_style().visuals));
         self.check_biometrics(&ctx);
+        self.check_power(&ctx);
         #[cfg(feature = "camera")]
         self.film(&ctx);
     }

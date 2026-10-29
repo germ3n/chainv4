@@ -19,6 +19,7 @@ mod keys;
 mod light;
 mod lock;
 mod metamask;
+mod miner;
 mod node;
 mod theme;
 mod updates;

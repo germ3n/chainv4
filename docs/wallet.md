@@ -376,13 +376,86 @@ multisig too, its EVM locks going to the Multisig page as its contract's calls.
 
 ## Mining
 
-The **Mining** page is for an address mining in a [pool](consensus.md#mining-pools). For the
-address picked, it asks the pool's node what the pool owes it (`GET /pool/claim/{address}`): all
-the pool credited it, what it claimed, and what a claim pays now. **Claim** prepares `Tx::Claim`
-from that answer, with its Merkle path, and hands it to Send, where it is reviewed, signed and
-sent like any other transaction, the address paying the fee. Under it, from `GET /pool/{address}`,
-the address's part of the pool's next block, its shares in the window, earnings credited but not
-yet in a root on chain, the pool's fee, and each worker connected for it with its hashrate.
+The **Mining** page mines from the device, alone or in a [pool](consensus.md#mining-pools), and
+claims what a pool owes the account's addresses.
+
+### Mine
+
+The **Mine** card at the top runs a worker of the node's mining port, as `chainv4 worker` does,
+inside the wallet, paying the address picked.
+
+- **Where:** the wallet asks `GET /mining` of the pool's node when **Pool's node** is set, else of
+  its own. The port is at the address the node publishes (`public`), else at the node's own host
+  with the port it names. **Other port** takes a `host:port` in its place, kept in settings as
+  `mine_port`. A port open to anyone needs no token; a private one takes the token its operator
+  hands its miners, typed into **Token** and kept in settings as `mine_token`: it is the port's
+  shared secret, not a key of the wallet's, and proves only that this worker may mine there. The
+  worker connects over TCP, through the wallet's proxy when one is set. That proxy must be a
+  `socks5h://` one: an HTTP proxy does not carry the port's protocol, and the wallet never goes
+  around a proxy set, so with one it does not mine. A node that
+  takes no miners answers 404, and the card says so.
+- **Alone or in the pool:** alone, each block the device finds pays the address in full and
+  nothing comes between blocks; in the pool, the pool pays the address its part of each block the
+  pool finds, by the shares it sent, less the pool's fee, claimed below. Whichever the port does
+  not take (`solo`, `pool` in `GET /mining`) cannot be picked; a port that takes neither mines
+  for its node alone, and the card does not start on it. Kept as `mine_solo`.
+- **On what:** the GPU, one of those listed or every one (`mine_gpu`, `mine_gpus`), or a number of
+  CPU threads up to the device's (`mine_threads`).
+- **Start** and **Stop:** while mining, the card shows whether the worker is connected and, when
+  not, why (it connects again by itself), what it mines for, the hashrate of each device and in
+  all, the jobs it was handed, the blocks found and the nonces refused. In the pool it shows the
+  shares the pool took and their difficulty, and the pool's word on the address's part of its next
+  block and all it credited; alone, the block difficulty and how long a block takes on average at
+  this hashrate (as many hashes as the difficulty).
+- **Payout:** the address picked on the page, the account's first unless another is picked.
+  Choosing another account, or another of its addresses, restarts the worker paying it.
+- **Phones:** Android and iOS mine only while the wallet is in front. Going to the background
+  stops mining, and coming back does not start it again: the person starts it. The worker stops
+  itself once the wallet has drawn nothing for 5 seconds, as a phone stops drawing an app it sends
+  to the background. Off the charger a phone pauses, and starts again by itself once it is on one,
+  looked at every few seconds (Android's battery broadcast, iOS's battery state), unless **Mine on
+  battery** is ticked (`mine_on_battery`). A desktop keeps mining while minimized, on battery or
+  not.
+- **Locking** the wallet, by hand or after `lock_after` minutes without input, stops mining on
+  every platform. The wallet never starts mining by itself as it opens.
+- **In the browser** the wallet reaches no TCP port: it mines over the node's WebSocket,
+  `GET /mining/ws` (`ws://` for a node at `http://`, `wss://` for `https://`), which relays the
+  port's protocol unchanged, so the handshake and the MACs stay between the wallet and the port.
+  **Other port** does not show there. See [Mining in the browser](#mining-in-the-browser).
+
+Whoever mines, the node checks every nonce before it seals a block with it; the wallet signs
+nothing to mine. For a rig, **Mining from other machines** gives the worker's command with the
+port and the address filled in, `chainv4 worker --node HOST:PORT --payout ADDRESS`, with `--solo`
+to mine alone and `--token FILE` for a private port.
+
+### Mining in the browser
+
+The web wallet and the extension mine on the browser's GPU through WebGPU when the browser has it,
+which needs a secure page (https, or localhost). Otherwise, or when CPU is picked, they mine on Web
+Workers, one a thread; GPU picked but missing, or failing, mines on every thread but the page's own
+and says why. Each job's range of nonces is handed out from one cursor, a GPU batch or a worker's
+chunk at a time, so nothing is tried twice; a chunk is sized for about a tenth of a second. A
+nonce the GPU finds is checked on the CPU before it is sent. Mining goes on only while the page,
+or the extension's panel, is open; the wallet sends its hashrates every five seconds and connects
+again five seconds after the connection goes.
+
+trunk builds the worker beside the app, `miner-worker.js` and `miner-worker_bg.wasm`
+(`src/bin/miner-worker.rs`), started by `miner-worker-boot.js`, and the extension build takes them
+too. The GPU's side is `chainv4-gpu`'s non-blocking path: `Gpu::open_async(&[WorkHash])` opens the
+GPU WebGPU gives and compiles the kernels for those hashes alone, and `Gpu::search_async` searches
+a batch and awaits the GPU, so the page runs on between batches. The blocking `open`, `open_all`,
+`search` and `list` are native only and wait on the same futures, so both search alike. On the
+web WebGPU is the only backend: WebGL has no compute shaders.
+
+### Earnings and claims
+
+For the address picked, the page asks the pool's node what the pool owes it
+(`GET /pool/claim/{address}`): all the pool credited it, what it claimed, and what a claim pays
+now. **Claim** prepares `Tx::Claim` from that answer, with its Merkle path, and hands it to Send,
+where it is reviewed, signed and sent like any other transaction, the address paying the fee.
+Under it, from `GET /pool/{address}`, the address's part of the pool's next block, its shares in
+the window, earnings credited but not yet in a root on chain, the pool's fee, and each worker
+connected for it with its hashrate.
 
 - **Which node:** the wallet's own, unless **Pool's node** names another's HTTP API, kept in
   settings as `pool_node`. Only the pool is asked there; the claim goes through the wallet's node,
@@ -393,9 +466,6 @@ yet in a root on chain, the pool's fee, and each worker connected for it with it
 - **Nothing yet:** a node with no pool says so, and so does a pool that owes the address nothing
   yet. A pool credits its miners once its blocks are final, so earnings show a while after the
   blocks are found.
-- **Starting:** the page shows the worker's command with the address filled in,
-  `chainv4 worker --node HOST:PORT --payout ADDRESS`, `HOST:PORT` being the pool's mining port,
-  with `--token FILE` for a private pool.
 - **Kept claims:** each claim the pool's node gives is kept on the device, by chain, in settings as
   `pool_claims` (the newest few, the next to settle, and the newest settled: see
   [Mining pools](consensus.md#mining-pools)). When the pool's node does not answer, **Kept claims**
@@ -845,7 +915,9 @@ it shares with the explorer (see [The ui crate](development.md#the-ui-crate)).
 - **Type:** Manrope for text, JetBrains Mono for addresses and hashes, and Newsreader for titles
   and the big numbers. The fonts and their licences are in `wallet/assets/fonts`.
 - **Layout:** each page is a column of cards beside a sidebar with the account, the pages, and
-  the light client's state. Below 640 points wide, as on a phone, the sidebar gives way to a bar
+  the light client's state. In a window too short for them all, the pages scroll, the light
+  client's state, Lock and the theme staying at the sidebar's bottom
+  (`chainv4_ui::layout::sidebar`). Below 640 points wide, as on a phone, the sidebar gives way to a bar
   on top with the account, the light client's dot and Lock, and tabs along the bottom: sharing
   the width when they fit, otherwise each wide enough for its name in a row that scrolls
   sideways, faded at an edge where more wait, and bringing the page opened into view. A card's

@@ -9,6 +9,9 @@ description = "Proof-of-work mining for chainv4 on the GPU, through wgpu: Vulkan
 # 24, not newer: the node's libp2p pins the wasm crates newer wgpu versions want past.
 # Its defaults: Vulkan always, Metal and DX12 where they are, WebGPU on the web, WGSL kernels.
 wgpu = "24.0.5"
+
+# Waiting on the GPU, natively; a browser awaits it instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4.0"
 
 [dev-dependencies]

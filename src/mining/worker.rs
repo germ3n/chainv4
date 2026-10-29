@@ -4,8 +4,8 @@
 //! few seconds, its devices' hashrates; it reconnects when the connection goes.
 
 use {
-    super::pool::{PING, QUIET},
-    super::protocol::{self, Receiver, Sender},
+    super::protocol::{self, PING, QUIET, Receiver, Sender},
+    super::status::Work,
     crate::consensus::{DeviceReport, Rig},
     crate::structs::address::Address,
     crate::structs::block::Seal,
@@ -63,6 +63,8 @@ pub struct WorkerConfig {
     pub payout: Option<Address>,
     #[document(summary = "The file to keep the payout's claims on the pool in, as the pool tells of each new one, so they can be claimed from any node should the pool's be gone; None to keep none.")]
     pub claims: Option<std::path::PathBuf>,
+    #[document(summary = "Mine alone: each block found pays the payout in full, on a node started with --mining-solo, which refuses it otherwise. Needs a payout.")]
+    pub solo: bool,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -76,9 +78,12 @@ impl std::fmt::Debug for WorkerConfig {
             .field("proxy", &self.proxy)
             .field("payout", &self.payout)
             .field("claims", &self.claims)
+            .field("solo", &self.solo)
             .finish_non_exhaustive()
     }
 }
+
+pub use super::status::{Mode, WorkerStatus};
 
 /// The devices, made for the work hash of the first work, and again should another one come.
 type Mounted = Mutex<Option<(HashType, Rig)>>;
@@ -94,6 +99,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 )]
 pub struct Worker {
     stop: Arc<AtomicBool>,
+    status: Arc<Mutex<WorkerStatus>>,
     /// The connection now, so stopping can close it.
     stream: Arc<Mutex<Option<TcpStream>>>,
     rig: Arc<Mounted>,
@@ -110,17 +116,24 @@ impl Worker {
         let stop = Arc::new(AtomicBool::new(false));
         let stream = Arc::new(Mutex::new(None));
         let rig: Arc<Mounted> = Arc::new(Mutex::new(None));
+        let status = Arc::new(Mutex::new(WorkerStatus::default()));
+
+        if config.solo && config.payout.is_none() {
+            return Err("mining alone needs a payout address, for the blocks found to pay".to_string());
+        }
+
         let thread = {
-            let (stop, stream, rig) = (stop.clone(), stream.clone(), rig.clone());
+            let (stop, stream, rig, status) = (stop.clone(), stream.clone(), rig.clone(), status.clone());
 
             std::thread::Builder::new()
                 .name("worker".to_string())
-                .spawn(move || run(&config, &stop, &stream, &rig))
+                .spawn(move || run(&config, &stop, &stream, &rig, &status))
                 .map_err(|err| format!("the worker's thread did not start: {err}"))?
         };
 
         Ok(Worker {
             stop,
+            status,
             stream,
             rig,
             thread: Some(thread),
@@ -130,6 +143,11 @@ impl Worker {
     #[document(parent = "Worker", summary = "Its devices and their hashrates; none before the first work.")]
     pub fn devices(&self) -> Vec<DeviceReport> {
         lock(&self.rig).as_ref().map(|(_, rig)| rig.devices()).unwrap_or_default()
+    }
+
+    #[document(parent = "Worker", summary = "How it is doing now.")]
+    pub fn status(&self) -> WorkerStatus {
+        lock(&self.status).clone()
     }
 
     #[document(parent = "Worker", summary = "Runs until the process ends: the worker only stops when dropped.")]
@@ -156,7 +174,7 @@ impl Drop for Worker {
 
 /// Connects, mines, and connects again, until stopped. The devices outlive each connection, so a
 /// GPU is opened once.
-fn run(config: &WorkerConfig, stop: &AtomicBool, current: &Mutex<Option<TcpStream>>, rig: &Mounted) {
+fn run(config: &WorkerConfig, stop: &AtomicBool, current: &Mutex<Option<TcpStream>>, rig: &Mounted, status: &Mutex<WorkerStatus>) {
     let (found, mut seals) = mpsc::channel();
 
     while !stop.load(Ordering::SeqCst) {
@@ -168,9 +186,18 @@ fn run(config: &WorkerConfig, stop: &AtomicBool, current: &Mutex<Option<TcpStrea
                 return Ok(());
             }
 
-            session(config, stream, rig, &found, &mut seals, stop)
+            session(config, stream, rig, &found, &mut seals, stop, status)
         });
         *lock(current) = None;
+
+        {
+            let mut status = lock(status);
+            status.connected = false;
+
+            if let Err(why) = &result {
+                status.trouble = Some(why.clone());
+            }
+        }
 
         if let Some((_, rig)) = lock(rig).as_ref() {
             rig.rest();
@@ -288,11 +315,18 @@ fn session(
     found: &mpsc::Sender<(Hash, u64)>,
     seals: &mut mpsc::Receiver<(Hash, u64)>,
     stop: &AtomicBool,
+    status: &Mutex<WorkerStatus>,
 ) -> Result<(), String> {
     stream.set_nodelay(true).map_err(|err| err.to_string())?;
     stream.set_read_timeout(Some(QUIET)).map_err(|err| err.to_string())?;
-    let (sender, mut receiver) = protocol::connect(stream.try_clone().map_err(|err| err.to_string())?, &config.token, &config.protocol, &config.name, config.payout.as_ref())?;
-    log::info!("[worker] mining for {} as {}", config.node, config.name);
+    let me = protocol::Hello { name: config.name.clone(), payout: config.payout, solo: config.solo };
+    let (sender, mut receiver) = protocol::connect_as(stream.try_clone().map_err(|err| err.to_string())?, &config.token, &config.protocol, &me)?;
+    log::info!("[worker] mining for {} as {}{}", config.node, config.name, if config.solo { ", alone" } else { "" });
+
+    {
+        let mut status = lock(status);
+        (status.connected, status.trouble, status.mode) = (true, None, None);
+    }
 
     // Seals found for a job before this connection belong to no job it knows.
     while seals.try_recv().is_ok() {}
@@ -304,7 +338,7 @@ fn session(
         let (job, closed) = (&job, &closed);
         // The receiver moves to the sending thread, borrowed mutably so it is that thread's alone.
         let sending = scope.spawn(move || send(sender, rig, &*seals, job, closed, stop));
-        let result = take_work(config, &mut receiver, rig, found, job);
+        let result = take_work(config, &mut receiver, rig, found, job, status);
 
         closed.store(true, Ordering::SeqCst);
         let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -357,17 +391,29 @@ fn take_work(
     rig: &Mounted,
     found: &mpsc::Sender<(Hash, u64)>,
     job: &Mutex<Option<(u64, Hash)>>,
+    status: &Mutex<WorkerStatus>,
 ) -> Result<(), String> {
     // Under a pool: the shares it took this connection, and the share difficulty now.
     let mut shares: u64 = 0;
     let mut difficulty: Option<u128> = None;
+    // Verdicts come as fast as shares, at an easy share difficulty tens of thousands a second:
+    // counted here, and told to the status every so often rather than one by one.
+    let (mut taken, mut refused, mut told) = (0, 0, Instant::now());
 
     loop {
         let message = match receiver.receive() {
             Ok(message) => message,
-            Err(why) if why == "the connection closed" => return Ok(()),
-            Err(why) => return Err(why),
+            Err(why) => {
+                tell(status, &mut taken, &mut refused);
+
+                return if why == "the connection closed" { Ok(()) } else { Err(why) };
+            }
         };
+
+        if message["type"] != "verdict" || told.elapsed() >= TELL_EVERY {
+            tell(status, &mut taken, &mut refused);
+            told = Instant::now();
+        }
 
         match message["type"].as_str() {
             Some("work") => {
@@ -382,6 +428,14 @@ fn take_work(
 
                 *lock(job) = Some((work.job, work.id));
                 let rig = &mounted.as_ref().expect("mounted above").1;
+
+                {
+                    let mut status = lock(status);
+                    status.jobs += 1;
+                    (status.difficulty, status.share_difficulty) = (Some(work.difficulty), work.share);
+                    // A node that said nothing of a pool or of mining alone mines for itself.
+                    status.mode.get_or_insert(Mode::Node);
+                }
 
                 // A pool's work: every nonce at the share difficulty goes back, the block's among them.
                 match work.share {
@@ -400,15 +454,27 @@ fn take_work(
             }
             Some("verdict") if message["took"] == true && message["kind"] == "share" => {
                 shares += 1;
+                taken += 1;
                 log::debug!("[worker] the pool took share {shares}, for job {}", message["job"]);
             }
-            Some("verdict") if message["took"] == true => log::info!("[worker] the node took the nonce for job {}: a block", message["job"]),
-            Some("verdict") => log::info!("[worker] the node refused the nonce for job {}: {}", message["job"], message["why"].as_str().unwrap_or("")),
-            Some("pool") => log::info!(
-                "[worker] the node runs a pool: a fee of {}%, each block split by the last {} blocks' worth of shares",
-                message["fee"].as_u64().unwrap_or(0) as f64 / 1e7,
-                message["window"].as_u64().unwrap_or(0)
-            ),
+            Some("verdict") if message["took"] == true => {
+                tell(status, &mut taken, &mut refused);
+                lock(status).blocks += 1;
+                log::info!("[worker] the node took the nonce for job {}: a block", message["job"]);
+            }
+            Some("verdict") => {
+                refused += 1;
+                log::debug!("[worker] the node refused the nonce for job {}: {}", message["job"], message["why"].as_str().unwrap_or(""));
+            }
+            Some("pool") => {
+                let (fee, window) = (message["fee"].as_u64().unwrap_or(0), message["window"].as_u64().unwrap_or(0));
+                lock(status).mode = Some(Mode::Pool { fee, window });
+                log::info!("[worker] the node runs a pool: a fee of {}%, each block split by the last {window} blocks' worth of shares", fee as f64 / 1e7);
+            }
+            Some("solo") => {
+                lock(status).mode = Some(Mode::Solo);
+                log::info!("[worker] mining alone: each block found pays {} in full", config.payout.map(|payout| payout.to_string()).unwrap_or_default());
+            }
             Some("refused") => return Err(format!("the node refused this worker: {}", message["why"].as_str().unwrap_or(""))),
             #[cfg(feature = "release")]
             Some("release") => said_release(&message["manifest"]),
@@ -421,10 +487,23 @@ fn take_work(
                     message["payout"].as_str().unwrap_or("")
                 );
                 keep_claim(config, &message);
+                lock(status).standing = Some(message.clone());
             }
             // Pings, and a newer node's messages this worker does not know.
             _ => {}
         }
+    }
+}
+
+/// How often a worker's counts of shares taken and nonces refused reach its status.
+const TELL_EVERY: Duration = Duration::from_millis(200);
+
+/// Adds the shares taken and nonces refused counted since to the status.
+fn tell(status: &Mutex<WorkerStatus>, taken: &mut u64, refused: &mut u64) {
+    if *taken + *refused > 0 {
+        let mut status = lock(status);
+        status.shares += std::mem::take(taken);
+        status.refused += std::mem::take(refused);
     }
 }
 
@@ -474,33 +553,6 @@ fn said_release(manifest: &serde_json::Value) {
     }
 }
 
-/// A work message, read.
-struct Work {
-    job: u64,
-    id: Hash,
-    difficulty: u128,
-    hash: HashType,
-    start: u64,
-    /// A pool's share difficulty for this worker; None from a node that runs no pool.
-    share: Option<u128>,
-}
-
-impl Work {
-    fn read(message: &serde_json::Value) -> Option<Work> {
-        let chain: HashType = message["chain"].as_str()?.parse().ok()?;
-        let id = Hash::from_bytes(chain, &crate::structs::hex::from_hex(message["id"].as_str()?)?)?;
-
-        Some(Work {
-            job: message["job"].as_u64()?,
-            id,
-            difficulty: message["difficulty"].as_str()?.parse().ok()?,
-            hash: message["hash"].as_str()?.parse().ok()?,
-            start: message["start"].as_u64()?,
-            share: message["share"].as_str().and_then(|share| share.parse().ok()),
-        })
-    }
-}
-
 /// Opens the devices for a work hash, each nonce they find going to found.
 fn mount(devices: &Devices, hash: HashType, found: mpsc::Sender<(Hash, u64)>) -> Result<Rig, String> {
     let found = move |id: Hash, seal: Seal| {
@@ -515,9 +567,9 @@ fn mount(devices: &Devices, hash: HashType, found: mpsc::Sender<(Hash, u64)>) ->
 
             Ok(Rig::cpu(hash, *threads, found))
         }
-        #[cfg(feature = "gpu")]
+        #[cfg(feature = "gpu-mining")]
         Devices::Gpu(which) => Rig::gpu(hash, which.as_deref(), found),
-        #[cfg(not(feature = "gpu"))]
+        #[cfg(not(feature = "gpu-mining"))]
         Devices::Gpu(_) => {
             let _ = found;
 

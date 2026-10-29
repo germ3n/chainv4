@@ -15,10 +15,16 @@ crate-type = ["cdylib", "rlib"]
 name = "wallet"
 path = "src/main.rs"
 
+# The browser's Web Worker that mines on the CPU, which trunk builds beside the app: natively it
+# does nothing.
+[[bin]]
+name = "miner-worker"
+path = "src/bin/miner-worker.rs"
+
 [dependencies]
 # Only the parts that build for the browser too: transactions, keys, hashes and the light client,
 # and checking releases against the keys built in.
-chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "mnemonic", "abi", "release"] }
+chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "mnemonic", "abi", "release", "worker"] }
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "persistence"] }
 egui = "0.37.0"
 # The look's widgets, talking to the node through a proxy, and running on Android, shared with the
@@ -62,6 +68,10 @@ bridge = ["swap", "chainv4/bridge"]
 bitcoin-light = ["dep:bip157", "dep:bitcoin"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Mining on this device's GPUs as well as its CPU, natively: wgpu on Vulkan, Metal or DX12.
+chainv4 = { path = "..", default-features = false, features = ["gpu-mining"] }
+# The GPUs there are, by name, for the Mining page to pick from.
+chainv4-gpu = { path = "../gpu" }
 bip157 = { version = "0.8.0", optional = true }
 bitcoin = { version = "0.32.8", default-features = false, features = ["std"], optional = true }
 
@@ -81,9 +91,12 @@ eframe = { version = "0.37.0", default-features = false, features = ["wgpu"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit"] }
+# Mining in the browser on its GPU, through WebGPU.
+chainv4-gpu = { path = "../gpu" }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 wasm-bindgen-futures = "0.4.58"
-web-sys = { version = "0.3.85", features = ["Document", "Element", "HtmlCanvasElement", "Location", "UrlSearchParams", "Window"] }
+# The page, and for mining the node's WebSocket and the Web Workers that hash on the CPU.
+web-sys = { version = "0.3.85", features = ["CloseEvent", "DedicatedWorkerGlobalScope", "Document", "Element", "HtmlCanvasElement", "Location", "MessageEvent", "Navigator", "UrlSearchParams", "WebSocket", "Window", "Worker"] }
 # MetaMask, through the page's window.ethereum: requests made and promises awaited from Rust.
 js-sys = "0.3.106"
 wasm-bindgen = "0.2.129"

@@ -70,6 +70,9 @@ const UPGRADE_WARN_EVERY: u64 = 600_000;
 /// How long a miner works on one template before it is rebuilt with newer transactions and a
 /// newer timestamp, in milliseconds.
 const TEMPLATE_REFRESH: u64 = 2_000;
+/// The most workers' payouts mining alone a node builds templates for: each is a block built every
+/// TEMPLATE_REFRESH.
+pub const MOST_SOLO: usize = 16;
 /// How long a miner just started, with peers connected, waits to hear how far their chains got
 /// before it mines: long enough for their status, short enough not to matter on a chain of its own.
 const LISTEN_FIRST_MS: u64 = 10_000;
@@ -95,6 +98,9 @@ pub struct Node {
     pushed: u64,
     /// The block the producer is sealing, until its seal arrives or the tip moves on.
     template: Option<Block>,
+    /// The templates of the workers mining alone, each paying its own payout, built beside
+    /// template; a seal for any ends them all.
+    solo: Vec<Block>,
     /// What the node asks the network to do.
     commands: async_mpsc::UnboundedSender<NetCommand>,
     /// The way into arrivals for local clients, which handles hand out.
@@ -475,6 +481,7 @@ impl Node {
             #[cfg(feature = "pool")]
             pushed: 0,
             template: None,
+            solo: Vec::new(),
             commands,
             inbox,
             arrivals,
@@ -541,6 +548,7 @@ impl Node {
         self.producer = setup.build(&config, self.chain.hash(), interval, signer_account, found)?;
         self.producer_for = Some(config);
         self.template = None;
+        self.solo.clear();
 
         Ok(())
     }
@@ -1168,6 +1176,7 @@ impl Node {
 
         if self.mining_should_wait(now) {
             self.template = None;
+            self.solo.clear();
 
             return Ok(());
         }
@@ -1177,10 +1186,15 @@ impl Node {
             return Ok(());
         };
         let tip = self.chain.tip().clone();
+        // The solo workers' payouts, at most MOST_SOLO: a template for each is built every time.
+        let mut solo = producer.solo();
+        solo.dedup();
+        solo.truncate(MOST_SOLO);
 
         if let Some(template) = &self.template
             && template.header.parent == tip.id()
             && now < template.header.timestamp + TEMPLATE_REFRESH
+            && self.solo.iter().map(|block| block.header.producer).eq(solo.iter().copied())
         {
             return Ok(());
         }
@@ -1205,17 +1219,29 @@ impl Node {
         let proofs = self.chain.unpaid_proofs()?;
         let deadline = self.max_build_ms.map(|most| Instant::now() + Duration::from_millis(most));
         let declared = producer.difficulty(&tip, &producers);
+        // Each solo worker's block: the same transactions, its reward and fees to its payout, and
+        // no pool's split.
+        let solo = solo
+            .into_iter()
+            .map(|to| self.chain.build_declaring(txs.clone(), proofs.clone(), to, now, deadline, declared, None))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut block = self.chain.build_declaring(txs, proofs, address, now, deadline, declared, pool)?;
+        let headers: Vec<_> = solo.iter().map(|block| block.header.clone()).collect();
 
-        match producer.seal(&block.header) {
+        match producer.seal_with_solo(&block.header, &headers) {
             Some(seal) => {
                 self.template = None;
+                self.solo.clear();
                 block.seal = seal;
                 self.finish(block, now)
             }
             None => {
-                log::debug!("[node] sealing block {} on {} txs", block.header.height, block.txs.len());
+                log::debug!("[node] sealing block {} on {} txs{}", block.header.height, block.txs.len(), match solo.len() {
+                    0 => String::new(),
+                    count => format!(", and {count} for workers mining alone"),
+                });
                 self.template = Some(block);
+                self.solo = solo;
 
                 Ok(())
             }
@@ -1224,11 +1250,24 @@ impl Node {
 
     /// A miner found the seal for a template; if it is still the current one, it becomes a block.
     fn sealed(&mut self, id: Hash, seal: crate::structs::block::Seal, now: u64) -> Result<(), NodeError> {
-        let Some(mut block) = self.template.take_if(|template| template.id() == id) else {
+        let solo = self.solo.iter().position(|template| template.id() == id);
+        let block = match solo {
+            Some(index) => Some(self.solo.swap_remove(index)),
+            None => self.template.take_if(|template| template.id() == id),
+        };
+        let Some(mut block) = block else {
             log::debug!("[node] a seal arrived for a stale template");
 
             return Ok(());
         };
+
+        // One seal ends them all: the others build on the same parent.
+        self.template = None;
+        self.solo.clear();
+
+        if solo.is_some() {
+            log::info!("[node] a worker mining alone sealed block {}, paying {}", block.header.height, block.header.producer);
+        }
 
         block.seal = seal;
         self.finish(block, now)

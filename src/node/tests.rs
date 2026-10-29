@@ -670,12 +670,12 @@ fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
             threads: 0,
             gpu: false,
             gpus: None,
-            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None }),
+            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: false }),
         }),
         sign: None,
     });
     node.step(now_ms()).unwrap();
-    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: None, claims: None }).unwrap();
+    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: None, claims: None, solo: false }).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
     while node.chain().tip().height < 2 {
@@ -692,6 +692,48 @@ fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
     assert!(Accounts::new(&node.chain().state()).get(&Address::Ed25519([9; 32])).unwrap().balance >= u256::new(10));
 }
 
+#[test]
+fn a_worker_mining_alone_is_handed_a_block_of_its_own_whose_reward_pays_it_in_full() {
+    use crate::mining::worker::{Devices, Mode, Worker, WorkerConfig};
+
+    let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let token = b"0123456789abcdef0123456789abcdef".to_vec();
+    let (node_address, solo) = (Address::Ed25519([9; 32]), Address::Ed25519([4; 32]));
+    let (link, _net) = NetLink::pair();
+    let mut node = Node::new(Arc::new(MemoryDb::default()), &easy_pow(), None, link).unwrap().producing(Producing {
+        mine: Some(Mining {
+            reward_to: node_address,
+            threads: 0,
+            gpu: false,
+            gpus: None,
+            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true }),
+        }),
+        sign: None,
+    });
+    node.step(now_ms()).unwrap();
+    let worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "alone".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: Some(solo), claims: None, solo: true }).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
+    while node.chain().tip().height < 2 {
+        assert!(std::time::Instant::now() < deadline, "no block was mined: {:?}", worker.status());
+        node.step(now_ms()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    // Every block the worker sealed names its payout as producer, and pays it.
+    let tip = node.chain().tip().clone();
+    assert_eq!(tip.producer, solo);
+    assert!(Accounts::new(&node.chain().state()).get(&solo).unwrap().balance >= u256::new(10));
+    assert_eq!(Accounts::new(&node.chain().state()).get(&node_address).unwrap().balance, u256::ZERO, "nothing for the node");
+
+    let status = worker.status();
+    assert_eq!(status.mode, Some(Mode::Solo));
+    assert!(status.connected && status.blocks >= 1, "{status:?}");
+    let report = node.report(now_ms(), 0).mining.unwrap();
+    assert!(report.solo && report.workers[0].solo);
+    assert_eq!(report.workers[0].payout, Some(solo));
+}
+
 #[cfg(feature = "pool")]
 #[test]
 fn a_pools_blocks_fund_its_escrow_and_its_node_claims_for_the_miner_once_they_are_final() {
@@ -702,8 +744,11 @@ fn a_pools_blocks_fund_its_escrow_and_its_node_claims_for_the_miner_once_they_ar
     let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     let token = b"0123456789abcdef0123456789abcdef".to_vec();
     let (pool, miner) = (Address::Ed25519([9; 32]), Keypair::from_seed([4; 32]).public().address());
-    // Blocks two deep can no longer be undone, so the pool credits its miner soon.
-    let genesis = Genesis { max_reorg_depth: 2, ..easy_pow() };
+    // Blocks two deep can no longer be undone, so the pool credits its miner soon. Difficulty
+    // stays at a few thousand: shares never come easier than blocks, and at easy_pow's 1 a
+    // worker's thread sends a share every few hashes, a flood no pool sees.
+    let pow = PowConfig { hash: HashType::default_chain(), target_block_ms: 1_000, initial_difficulty: 4_000, min_difficulty: 4_000 };
+    let genesis = Genesis { max_reorg_depth: 2, consensus: ConsensusConfig::ProofOfWork(pow), ..easy_pow() };
     let (link, _net) = NetLink::pair();
     let mut node = Node::new(Arc::new(MemoryDb::default()), &genesis, None, link)
         .unwrap()
@@ -713,7 +758,7 @@ fn a_pools_blocks_fund_its_escrow_and_its_node_claims_for_the_miner_once_they_ar
                 threads: 0,
                 gpu: false,
                 gpus: None,
-                port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), pool: Some(PoolConfig { min_share: 1, ..PoolConfig::default() }), #[cfg(feature = "updates")] releases: None }),
+                port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), pool: Some(PoolConfig { min_share: 1, ..PoolConfig::default() }), #[cfg(feature = "updates")] releases: None, solo: false }),
             }),
             sign: None,
         })
@@ -721,7 +766,7 @@ fn a_pools_blocks_fund_its_escrow_and_its_node_claims_for_the_miner_once_they_ar
     // A clock fifty times faster than the wall's, so a minute between pushes passes in a second.
     let mut clock = now_ms();
     node.step(clock).unwrap();
-    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: Some(miner), claims: None }).unwrap();
+    let _worker = Worker::start(WorkerConfig { node: listen.to_string(), token, name: "rig".to_string(), protocol: "chainv4".to_string(), devices: Devices::Cpu(1), proxy: None, payout: Some(miner), claims: None, solo: false }).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
 
     while Accounts::new(&node.chain().state()).get(&miner).unwrap().balance == u256::ZERO {

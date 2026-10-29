@@ -203,7 +203,9 @@ hashrate, measured by a `Meter` over the last three seconds.
 | `--pool-fee PERCENT` | 0 | What the pool keeps of each block, such as `1.5`, for its `--reward-to`. |
 | `--pool-window N` | 2 | How many blocks' worth of the latest shares each block shares out by, 1 to 1000. |
 | `--pool-min-share D` | 1000 | The easiest share difficulty the pool hands out. |
-| `--mining-open` | off | Let anyone join the pool with a payout address alone, without a token. |
+| `--mining-open` | off | Let anyone join the pool, or mine alone with `--mining-solo`, with a payout address alone, without a token. |
+| `--mining-solo` | off | Take workers mining alone: each is handed a block of its own, paying its payout in full (see [Mining alone](#mining-alone)). |
+| `--mining-public HOST:PORT` | the API's host | Where workers reach the mining port from outside, as `GET /mining` tells the apps. |
 | `--pool-push AMOUNT` | none | Claim for the pool's miners once they are owed this much, in the coin's smallest unit. |
 | `--pool-push-key FILE` | none | The key `--pool-push` claims from, which pays the fees. |
 
@@ -242,7 +244,9 @@ Tor builds a circuit first, so the connection may take some seconds; the message
    gone after 60 seconds of silence, and the worker connects again every 5 seconds until it is
    back.
 
-**The protocol** is lines of JSON over TCP (`src/mining/protocol.rs`):
+**The protocol** is lines of JSON over TCP (`src/mining/protocol.rs`), or over the node's
+WebSocket, `GET /mining/ws`, for a browser, one line a message: the node relays them to its port as
+they are, so the handshake and the MACs are the same either way:
 - **The handshake proves the token without sending it.** The node sends a random challenge; the
   worker answers with its name, a nonce of its own, and an HMAC-SHA256 of both under the token;
   the node answers with its own HMAC, so the worker knows it found the node meant. Both say the
@@ -345,6 +349,40 @@ window and escrow, every miner with its work, part of the next block, earnings a
 claimed, and the blocks the pool found, each waiting, credited or dropped. `GET /pool/{address}`
 is one miner's, with its workers, and `GET /pool/claim/{address}` its claim, ready for
 `Tx::Claim`. The explorer's Pool page and the wallet's Mining page show them.
+
+## Mining alone
+
+A node with `--mining-solo` takes workers that mine **alone** on its mining port: each block one
+finds pays its own payout, the reward and the block's fees in full, as a node mining for itself
+would be paid. A pool's worker shares each block with the window; a solo worker gets all of the
+blocks it finds and nothing of the others'.
+
+```sh
+# A port anyone may mine alone on, and join the pool on too.
+chainv4 --mine --mine-threads 0 --mining 0.0.0.0:4002 --mining-open --mining-solo --pool …
+chainv4 worker --node 203.0.113.7:4002 --solo --payout ed25519:0x… --gpu
+```
+
+**How it goes:**
+1. The worker says `solo` in its hello, with its payout. A node without `--mining-solo` turns it
+   away, and so does one asked for a payout past the 16 it builds blocks for (`MOST_SOLO`); a
+   payout already mining alone there is welcome on any number of workers.
+2. The node builds a **template for each payout** mining alone beside its own, every time it
+   builds one (each new tip, and every two seconds): the same transactions, its producer the
+   payout, and no pool's split. A worker that connects is handed work once the next templates are
+   built, a moment later.
+3. Each solo worker's `work` names its own block, at the block's difficulty and with no share
+   difficulty: it sends only a nonce that seals the block. The node checks it before the block
+   becomes the seal.
+4. Any seal ends every template of the round, the node's and the solo workers', as they all build
+   on the same parent: what the others send for them afterwards is stale.
+
+**What it costs the node:** a block built for each payout every two seconds, so at most 16.
+
+**What a solo miner sees:** `chainv4 worker --solo` logs that it mines alone and each block the
+node took. The wallet's Mining page mines alone from the account picked (see
+[Mining](wallet.md#mining)). On the explorer's Network page a solo worker's payout reads "mining
+alone".
 
 ## Things to keep in mind
 
