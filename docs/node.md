@@ -205,6 +205,13 @@ came, both dialed by the peer or both by this node, drops the peer whole, and it
 up alone, telling both sides' topics. Two nodes dialing each other at once make one each way,
 which both stand.
 
+**A peer that never told its topics starts afresh too.** Nodes restarted seconds apart can each come
+back the other way beside a connection the other has not timed out yet, which looks just like two
+nodes dialing each other. So a peer connected for 30 seconds that has told this node no topics is
+dropped, and its next connection tells both sides'. Left alone, the node that started last reaches
+nobody: its blocks and votes spread only by the once-a-minute sync, the chain forks, and finality
+stops. `gossip_unpublished` in `GET /node` climbing with every block is the sign of it.
+
 **Status, once a minute.** A node asks every peer how far its chain got as it connects, when its
 gossip does not connect, and every `STATUS_EVERY`, 60 seconds. A peer whose gossip stopped arriving
 while it built on a branch of its own is seen for what it is within a minute, and synced from when

@@ -11,7 +11,7 @@ use {
     libp2p::swarm::{ConnectionId, NetworkBehaviour, Swarm, SwarmEvent},
     libp2p::{Multiaddr, PeerId, StreamProtocol, SwarmBuilder, gossipsub, identify, kad, mdns, request_response},
     r#macro::document,
-    std::collections::HashMap,
+    std::collections::{HashMap, HashSet},
     std::fmt,
     std::net::IpAddr,
     std::sync::{Arc, mpsc},
@@ -111,6 +111,9 @@ const MAX_GOSSIP: usize = 8 * 1024 * 1024;
 /// restarts, after this node's network comes back, and while it is not up yet. Discovery runs on
 /// the same tick.
 const REDIAL_EVERY: Duration = Duration::from_secs(15);
+/// How long a peer may stay connected without having told this node its topics. Any peer of this
+/// network tells them as it connects, within a round trip or two, over Tor too.
+const TOPICS_WITHIN: Duration = Duration::from_secs(30);
 /// How often the node warns that what it publishes reaches none of its connected peers.
 const UNPUBLISHED_EVERY: Duration = Duration::from_secs(60);
 /// How often Kademlia looks for peers near this node, which fills its table with the network's.
@@ -269,6 +272,8 @@ struct Net {
     ips: HashMap<PeerId, IpAddr>,
     /// Each connected peer's connections, and whether this node dialed each.
     links: HashMap<PeerId, Vec<(ConnectionId, bool)>>,
+    /// When each connected peer connected, for those that never tell their topics.
+    arrived: HashMap<PeerId, Instant>,
     /// When it last warned that what it published reached none of its peers.
     unpublished_said: Option<Instant>,
 }
@@ -278,6 +283,18 @@ struct Net {
 /// does not know it yet. Two dialing each other at once make one each way, and both stand.
 fn stale_beside(links: &[(ConnectionId, bool)], dialed: bool) -> bool {
     links.iter().any(|&(_, standing)| standing == dialed)
+}
+
+/// The peers connected long enough to have told their topics that have not. Gossipsub tells them on
+/// a peer's first connection alone, and two nodes restarted seconds apart can each come back beside a
+/// connection the other has not timed out yet, the other way, which [`stale_beside`] cannot tell from
+/// the two dialing each other at once. Nothing such a node publishes ever reaches the peer.
+fn untold(arrived: &HashMap<PeerId, Instant>, told: &HashSet<PeerId>, now: Instant) -> Vec<PeerId> {
+    arrived
+        .iter()
+        .filter(|(peer, since)| !told.contains(peer) && now.saturating_duration_since(**since) >= TOPICS_WITHIN)
+        .map(|(peer, _)| *peer)
+        .collect()
 }
 
 /// The IP an address starts with, if it does.
@@ -424,6 +441,7 @@ impl Net {
             hash: config.hash,
             ips: HashMap::new(),
             links: HashMap::new(),
+            arrived: HashMap::new(),
             unpublished_said: None,
         })
     }
@@ -431,6 +449,18 @@ impl Net {
     /// Dials each peer given with --peer that no connection stands to, nor a dial under way; and
     /// while the node has fewer peers than it wants, the bootnodes not dialed in the last minute,
     /// and a few of the peers Kademlia knows.
+    /// Drops the peers that never told their topics: the next connection comes up alone, telling
+    /// both sides'. It costs the peer one dial.
+    fn drop_untold(&mut self, now: Instant) {
+        let told = self.swarm.behaviour().gossipsub.all_peers().filter(|(_, topics)| !topics.is_empty()).map(|(peer, _)| *peer).collect();
+
+        for peer in untold(&self.arrived, &told, now) {
+            log::info!("[net] {peer} never told what it subscribes to: dropping it, for it to come up afresh");
+            self.arrived.remove(&peer);
+            let _ = self.swarm.disconnect_peer_id(peer);
+        }
+    }
+
     fn redial(&mut self) {
         // The node's onion, once tor made it: told to peers as its address from then on.
         if let Some(address) = self.onion_file.as_deref().and_then(super::tor::read_onion) {
@@ -439,8 +469,10 @@ impl Net {
             self.onion_file = None;
         }
 
-        let short = self.swarm.connected_peers().count() < self.target_peers;
         let now = Instant::now();
+        self.drop_untold(now);
+
+        let short = self.swarm.connected_peers().count() < self.target_peers;
         self.bans.sweep(now);
 
         for wanted in &mut self.wanted {
@@ -717,6 +749,7 @@ impl Net {
                     self.ips.insert(peer_id, ip);
                 }
 
+                self.arrived.insert(peer_id, Instant::now());
                 let address = endpoint.get_remote_address().clone();
                 log::debug!("[net] connected to {peer_id} at {address}");
 
@@ -738,6 +771,7 @@ impl Net {
 
                 self.links.remove(&peer_id);
                 self.ips.remove(&peer_id);
+                self.arrived.remove(&peer_id);
 
                 NetEvent::PeerDown(peer_id)
             }
@@ -1025,6 +1059,68 @@ mod tests {
         // The peer dials again, and what it publishes then arrives.
         let authority = DevAuthority::dev_keypair();
         let deadline = Instant::now() + Duration::from_secs(60);
+        let mut nonce = 0;
+
+        'heard: loop {
+            assert!(Instant::now() < deadline, "nothing the restarted peer published arrived");
+            after.send(NetCommand::PublishTx(SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority)));
+            nonce += 1;
+            let until = Instant::now() + Duration::from_secs(2);
+
+            while let Ok(event) = receiver.events.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                if let NetEvent::Tx { .. } = event {
+                    break 'heard;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_peer_is_dropped_only_once_it_has_had_time_to_tell_its_topics_and_has_not() {
+        let (quiet, talker, new) = (PeerId::random(), PeerId::random(), PeerId::random());
+        let now = Instant::now();
+        let long_ago = now - TOPICS_WITHIN;
+        let arrived = HashMap::from([(quiet, long_ago), (talker, long_ago), (new, now - TOPICS_WITHIN / 2)]);
+
+        assert_eq!(untold(&arrived, &HashSet::from([talker]), now), vec![quiet]);
+        assert!(untold(&arrived, &HashSet::from([quiet, talker]), now).is_empty());
+    }
+
+    #[test]
+    #[ignore = "opens real sockets on 127.0.0.1"]
+    fn a_peer_that_restarts_and_comes_back_the_other_way_is_heard_again() {
+        let network = format!("crossing-{}", PeerId::random());
+        let alone = |key: Option<libp2p::identity::Keypair>, peers: Vec<Multiaddr>| NetConfig {
+            mdns: false,
+            key,
+            ..config(&network, BacklogLimits::default(), peers)
+        };
+        // The receiver dials the peer, whose next start then dials the receiver, before the first
+        // connection is gone: two nodes restarted seconds apart, each dialing what it was given.
+        let key = libp2p::identity::Keypair::generate_ed25519();
+        let before = spawn(alone(Some(key.clone()), Vec::new())).unwrap();
+        let at_before = wait_for(&before, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+        let receiver = spawn(alone(None, vec![at_before])).unwrap();
+        let at_receiver = wait_for(&receiver, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+        wait_for(&receiver, |event| match event {
+            NetEvent::PeerUp { .. } => Some(()),
+            _ => None,
+        });
+        let after = spawn(alone(Some(key), vec![at_receiver])).unwrap();
+        wait_for(&after, |event| match event {
+            NetEvent::PeerUp { .. } => Some(()),
+            _ => None,
+        });
+        drop(before);
+
+        let authority = DevAuthority::dev_keypair();
+        let deadline = Instant::now() + Duration::from_secs(120);
         let mut nonce = 0;
 
         'heard: loop {

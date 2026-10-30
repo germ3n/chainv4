@@ -1178,6 +1178,11 @@ voting finality it now goes back to the checkpoint and follows the node from the
   every peer has it. `gossip_unpublished` leaves it out, and libp2p's warning for it is filtered.
 - **A peer's height on the Network page** comes from its status, once a minute, and from each block
   it passes on, so it trails by a block or two at most while its gossip flows.
+- **Restart a network's nodes together and a peer can come back the other way.** Each dials on
+  starting, beside a connection the other has not timed out, which looks like two nodes dialing each
+  other at once, so both stand and topics go untold. A peer connected for 30 seconds with no topics
+  told is dropped and comes up afresh. Before that, the testnet's public node reached nobody for 20
+  minutes after a redeploy (`gossip_unpublished` 575), forking the chain and stalling finality.
 - **gossipsub tells its topics on a peer's first connection alone.** A peer back from a restart
   before its old connection timed out arrives as a second connection and would never hear them,
   publishing into nothing (libp2p-gossipsub 0.50's `on_connection_established` returns early for

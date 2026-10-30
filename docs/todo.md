@@ -756,6 +756,10 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **Nodes restarted seconds apart could stop hearing each other,** as each came back the other way
+  beside a connection not yet timed out. A peer that tells no topics for 30 seconds is dropped now, to
+  come up afresh. See [Node](node.md).
+
 - [x] **The phone's edit bar came up on pages with no field,** on a finger resting on a row whose id a
   field on another page once had, and stayed when its field went with a back gesture. A field now
   has to say it is under the finger, and the bar goes with its field.
