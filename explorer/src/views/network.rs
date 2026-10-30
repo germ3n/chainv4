@@ -238,7 +238,7 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
             facts.row("chain's bootnodes", |ui| {
                 ui.vertical(|ui| {
                     if bootnodes.is_empty() {
-                        ui.label(RichText::new("none: nodes find each other through --peer, --bootnode and mDNS").color(palette.muted));
+                        widgets::flagged_label(ui, "none: nodes find each other through --peer, --bootnode and mDNS", egui::TextStyle::Body, palette.muted);
                     }
 
                     for address in bootnodes {
@@ -341,7 +341,7 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, mining: &MiningView) {
             _ if node.hides("listening") => facts.row("workers on", |ui| hidden(ui, &palette)),
             Some(listening) => facts.row("workers on", |ui| super::copyable(ui, listening)),
             None => facts.row("workers on", |ui| {
-                ui.label(RichText::new("no mining port: start the node with --mining to take workers").color(palette.muted));
+                widgets::flagged_label(ui, "no mining port: start the node with --mining to take workers", egui::TextStyle::Body, palette.muted);
             }),
         }
 
@@ -477,7 +477,7 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, mining: &MiningView) {
                 }
             });
             ui.label(found(worker));
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }
@@ -503,11 +503,11 @@ fn device(ui: &mut Ui, look: Look, device: &Device, fastest: f64) {
 }
 
 /// What the node counted since it started, two to a row; on a phone one, its count on the right,
-/// the stripes across the card.
+/// the lines across the card.
 fn counters(ui: &mut Ui, look: Look, node: &NodeView) {
     let per_row = if look.narrow { 1 } else { 2 };
     let gap = 18.0;
-    let grid = egui::Grid::new("counters").num_columns(2 * per_row).striped(true).spacing([gap, 4.0]);
+    let grid = egui::Grid::new("counters").num_columns(2 * per_row).striped(false).spacing([gap, 4.0]);
     let grid = match look.narrow {
         true => grid.min_col_width(((ui.available_width() - gap) / 2.0).floor()),
         false => grid,
@@ -528,7 +528,7 @@ fn counters(ui: &mut Ui, look: Look, node: &NodeView) {
             }
 
             if index % per_row == per_row - 1 {
-                ui.end_row();
+                super::row_end(ui);
             }
         }
     });
@@ -667,7 +667,7 @@ fn peers(ui: &mut Ui, ctx: &mut Ctx, peers: &[Peer], height: u64) {
                 }
             }
 
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }

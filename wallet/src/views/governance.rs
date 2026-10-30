@@ -915,7 +915,7 @@ fn in_force(ui: &mut Ui, ctx: &mut Ctx, listing: &Listing) {
 
         for setting in &listing.in_force {
             super::row(ui, &palette, label(&setting.kind), |ui| {
-                let words = setting_change(setting).map_or_else(|_| setting.value.to_string(), |change| describe(&change, &coin));
+                let words = setting_change(setting).map_or_else(|_| setting.value.to_string(), |change| standing_words(&change, &coin));
                 ui.label(RichText::new(words).color(palette.ink));
                 ui.label(RichText::new(since(setting.decided)).small().color(palette.muted));
             });
@@ -1288,6 +1288,50 @@ fn weighs(listing: &Listing, raw: &str, coin: &Coin) -> String {
 
 /// A change in words.
 pub fn describe(change: &Change, coin: &Coin) -> String {
+    match change {
+        Change::Name(name) => format!("Rename the chain to {name}"),
+        Change::Bootnodes(bootnodes) if bootnodes.is_empty() => "Leave the chain without bootnodes".to_string(),
+        Change::Bootnodes(bootnodes) => format!("Set {} bootnode{}: {}", bootnodes.len(), plural(bootnodes.len() as u64), bootnodes.join(", ")),
+        Change::NamePrices(_) => format!("Price a year of a name by its length: {}", name_prices(change, coin)),
+        change => stated(change, coin),
+    }
+}
+
+/// A setting as it stands, in words: what is, where [`describe`] says what a change to it would do.
+fn standing_words(change: &Change, coin: &Coin) -> String {
+    match change {
+        Change::Name(name) => name.clone(),
+        Change::Bootnodes(bootnodes) if bootnodes.is_empty() => "None".to_string(),
+        Change::Bootnodes(bootnodes) => format!("{} bootnode{}: {}", bootnodes.len(), plural(bootnodes.len() as u64), bootnodes.join(", ")),
+        Change::NamePrices(_) => format!("A year of a name by its length: {}", name_prices(change, coin)),
+        Change::SwitchFinality { epoch, config } => format!("{} from epoch {epoch}", capitalized(&stated(&Change::Finality(config.clone()), coin).replacen("Finality: ", "", 1))),
+        Change::Directory(_) => stated(change, coin).replacen("Directory: announce ", "Announced: ", 1).replacen("Announced: nothing", "Nothing announced", 1),
+        change => stated(change, coin),
+    }
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+}
+
+/// What each length of name costs a year.
+fn name_prices(change: &Change, coin: &Coin) -> String {
+    let Change::NamePrices(prices) = change else {
+        return String::new();
+    };
+    let each: Vec<String> = prices
+        .iter()
+        .enumerate()
+        .map(|(index, price)| format!("{}{} characters {}", index + 3, if index + 1 == prices.len() { " or more" } else { "" }, format::amount(&price.to_string(), coin.decimals, &coin.symbol)))
+        .collect();
+
+    each.join(", ")
+}
+
+/// What reads the same of a change and of a setting as it stands: a line naming the setting.
+fn stated(change: &Change, coin: &Coin) -> String {
     let amount = |raw: &u256| format::amount(&raw.to_string(), coin.decimals, &coin.symbol);
     let blocks = |count: u64| format!("{} block{}", format::thousands(&count.to_string()), plural(count));
     let finality = |config: &FinalityConfig| match config {
@@ -1307,18 +1351,7 @@ pub fn describe(change: &Change, coin: &Coin) -> String {
     };
 
     match change {
-        Change::Name(name) => format!("Rename the chain to {name}"),
-        Change::Bootnodes(bootnodes) if bootnodes.is_empty() => "Leave the chain without bootnodes".to_string(),
-        Change::Bootnodes(bootnodes) => format!("Set {} bootnode{}: {}", bootnodes.len(), plural(bootnodes.len() as u64), bootnodes.join(", ")),
-        Change::NamePrices(prices) => {
-            let each: Vec<String> = prices
-                .iter()
-                .enumerate()
-                .map(|(index, price)| format!("{}{} characters {}", index + 3, if index + 1 == prices.len() { " or more" } else { "" }, amount(price)))
-                .collect();
-
-            format!("Price a year of a name by its length: {}", each.join(", "))
-        }
+        Change::Name(_) | Change::Bootnodes(_) | Change::NamePrices(_) => describe(change, coin),
         Change::Upgrade(upgrade) => format!("Upgrade: nodes older than {} stop at block {}", upgrade.least, format::thousands(&upgrade.from.to_string())),
         Change::Consensus(consensus) => match consensus {
             ConsensusConfig::Authority { key, slot_ms } => format!("Consensus: one key, {}, makes a block every {}", format::short(&key.to_string()), millis(*slot_ms)),
@@ -1758,6 +1791,32 @@ mod tests {
 
     fn listing_of(value: &Value) -> Listing {
         listing(value).unwrap()
+    }
+
+    #[test]
+    fn what_is_in_force_says_what_stands_and_a_change_what_it_would_do() {
+        let coin = Coin { symbol: "DEV".to_string(), decimals: 18 };
+        let cases = [
+            (Change::Name("chainv4 testnet".to_string()), "chainv4 testnet", "Rename the chain to chainv4 testnet"),
+            (Change::Bootnodes(Vec::new()), "None", "Leave the chain without bootnodes"),
+            (Change::Bootnodes(vec!["/ip4/1.2.3.4".to_string()]), "1 bootnode: /ip4/1.2.3.4", "Set 1 bootnode: /ip4/1.2.3.4"),
+        ];
+
+        for (change, stands, would) in cases {
+            assert_eq!(standing_words(&change, &coin), stands);
+            assert_eq!(describe(&change, &coin), would);
+        }
+
+        let prices = Change::NamePrices(vec![u256::from(1_000u64)]);
+        assert!(standing_words(&prices, &coin).starts_with("A year of a name by its length: "), "{}", standing_words(&prices, &coin));
+        assert!(describe(&prices, &coin).starts_with("Price a year of a name by its length: "));
+
+        // Nothing in force is worded as something to do.
+        for change in [Change::Name("x".to_string()), Change::Bootnodes(Vec::new()), prices] {
+            let words = standing_words(&change, &coin);
+
+            assert!(!["Rename", "Set ", "Leave", "Price", "Switch"].iter().any(|verb| words.starts_with(verb)), "{words}");
+        }
     }
 
     #[test]

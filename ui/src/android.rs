@@ -85,7 +85,7 @@ struct OnAndroid {
     /// Whether the soft keyboard was asked for, and since when no text field has wanted it.
     keyboard: bool,
     unwanted_since: Option<f64>,
-    /// The bar a held finger brings up over a text field, and the Paste button over the keyboard.
+    /// The bar a held finger or a second tap brings up over a text field.
     editing: Editing,
     /// The picker's Java class, when the APK carries it.
     picker: Option<Global<JClass<'static>>>,
@@ -824,7 +824,7 @@ impl eframe::App for OnAndroid {
 
         let ctx = ui.ctx().clone();
         self.back_out(&ctx);
-        self.editing.show(&ctx, self.keyboard, &mut AndroidClipboard(&self.app));
+        self.editing.show(&ctx, &mut AndroidClipboard(&self.app));
         self.keep_keyboard(&ctx);
         self.copy(&ctx);
         self.pick(&ctx, self.inner.clear_color(&ctx.global_style().visuals));

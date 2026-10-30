@@ -113,7 +113,7 @@ fn voters(ui: &mut Ui, ctx: &mut Ctx) {
                 super::copyable_as(ui, RichText::new(format::short(&voter)).monospace(), &voter);
                 super::address(ui, ctx, &text(member, "account"));
                 ui.monospace(ctx.coins(&text(member, "weight")));
-                ui.end_row();
+                super::row_end(ui);
             }
         });
     });
@@ -159,7 +159,7 @@ fn voters(ui: &mut Ui, ctx: &mut Ctx) {
                 ui.monospace(ctx.coins(&text(validator, "bond")));
                 ui.label(active_text(validator));
                 ui.label(slashed(validator));
-                ui.end_row();
+                super::row_end(ui);
             }
         });
     });

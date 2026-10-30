@@ -356,7 +356,7 @@ fn recent(ui: &mut Ui, ctx: &mut Ctx, contract: &str) {
                 }
             }
 
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }

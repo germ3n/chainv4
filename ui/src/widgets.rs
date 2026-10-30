@@ -8,9 +8,31 @@ use {
 
 /// A page's title, in the display face, with a line under it saying what the page is for.
 pub fn title(ui: &mut Ui, palette: &Palette, title: &str, lead: &str) {
-    let size = ui.style().text_styles.get(&TextStyle::Heading).map_or(26.0, |font| font.size) * 1.15;
-    ui.label(RichText::new(title).font(FontId::new(size, FontFamily::Name(DISPLAY.into()))).color(palette.ink));
+    let (text, size) = title_text(ui, palette, title);
+    ui.label(text);
+    title_lead(ui, palette, lead, size);
+}
 
+/// A page's title with pills beside it, which wrap under it where there is no room: what it is,
+/// said at a glance.
+pub fn title_with(ui: &mut Ui, palette: &Palette, title: &str, lead: &str, pills: impl FnOnce(&mut Ui)) {
+    let (text, size) = title_text(ui, palette, title);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(text);
+        pills(ui);
+    });
+    title_lead(ui, palette, lead, size);
+}
+
+/// A title in the display face, somewhat larger than the look's headings, and its size.
+fn title_text(ui: &Ui, palette: &Palette, title: &str) -> (RichText, f32) {
+    let size = ui.style().text_styles.get(&TextStyle::Heading).map_or(26.0, |font| font.size) * 1.15;
+
+    (RichText::new(title).font(FontId::new(size, FontFamily::Name(DISPLAY.into()))).color(palette.ink), size)
+}
+
+/// The line under a title, and the gap before what the page shows.
+fn title_lead(ui: &mut Ui, palette: &Palette, lead: &str, size: f32) {
     if !lead.is_empty() {
         ui.add_space(2.0);
         ui.label(RichText::new(lead).color(palette.muted));
@@ -71,16 +93,118 @@ pub fn card<R>(ui: &mut Ui, palette: &Palette, add: impl FnOnce(&mut Ui) -> R) -
         .inner
 }
 
-/// The one button a step leads to, filled with the accent.
+/// A card of a page, and the one gap every page keeps below its cards, so that no page has a number
+/// of its own for it.
+pub fn page_card<R>(ui: &mut Ui, palette: &Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let inner = card(ui, palette, add);
+    crate::layout::section_gap(ui);
+
+    inner
+}
+
+/// The frame of an app's bars and sidebar: what keeps them apart from the page.
+pub fn bar_frame(palette: &Palette) -> Frame {
+    Frame::new().fill(palette.nav).stroke(Stroke::new(1.0, palette.line))
+}
+
+/// What a sidebar leads with: the chain's name in the display face, wrapping if it is long, and what
+/// the app is in capitals under it.
+pub fn sidebar_name(ui: &mut Ui, palette: &Palette, name: &str, what: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            ui.add(egui::Label::new(RichText::new(name).font(FontId::new(26.0, FontFamily::Name(DISPLAY.into()))).color(palette.ink)).wrap());
+            caps(ui, palette, what);
+        });
+    });
+}
+
+/// What a phone's top bar leads with: the chain's name in the display face, cut short past `room`,
+/// leaving what sits beside it its own.
+pub fn bar_name(ui: &mut Ui, palette: &Palette, name: &str, room: f32) -> Response {
+    ui.scope(|ui| {
+        ui.set_max_width(room);
+        ui.add(egui::Label::new(RichText::new(name).font(FontId::new(21.0, FontFamily::Name(DISPLAY.into()))).color(palette.ink)).truncate())
+    })
+    .inner
+}
+
+/// One page in a sidebar: picked out with a filled row and a bar of the accent at its left, when it
+/// is the one showing.
+pub fn nav_entry(ui: &mut Ui, palette: &Palette, name: &str, selected: bool) -> Response {
+    let text = strong(name, 14.0).color(if selected { palette.ink } else { palette.soft });
+    let button = egui::Button::new(text)
+        .fill(if selected { palette.row } else { Color32::TRANSPARENT })
+        .stroke(Stroke::NONE)
+        .corner_radius(8.0)
+        .min_size(egui::vec2(ui.available_width(), 34.0));
+    let response = ui.add(button);
+
+    if selected {
+        let rect = response.rect;
+        ui.painter().rect_filled(egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 8.0), egui::vec2(3.0, rect.height() - 16.0)), 2.0, palette.accent);
+    }
+
+    response
+}
+
+/// A phone's tabs along the bottom, each as wide as the next, so each keeps its place on every page,
+/// with a bar of the accent on the one marked. The tab tapped, if one was.
+pub fn tabs<'a, T: PartialEq>(ui: &mut Ui, palette: &Palette, tabs: &'a [(T, &str)], marked: &T) -> Option<&'a T> {
+    let width = ui.available_width() / tabs.len().max(1) as f32;
+    let mut tapped = None;
+    ui.spacing_mut().item_spacing.x = 0.0;
+    ui.spacing_mut().button_padding = egui::vec2(2.0, 4.0);
+    ui.horizontal(|ui| {
+        for (tab, name) in tabs {
+            let selected = marked == tab;
+            let text = strong(*name, 12.0).color(if selected { palette.ink } else { palette.muted });
+            let button = egui::Button::new(text).fill(Color32::TRANSPARENT).stroke(Stroke::NONE);
+            let response = ui.add_sized([width, 46.0], button);
+
+            if selected {
+                let rect = response.rect;
+                ui.painter().rect_filled(egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 1.5), egui::vec2(28.0, 3.0)), 2.0, palette.accent);
+            }
+
+            if response.clicked() {
+                tapped = Some(tab);
+            }
+        }
+    });
+
+    tapped
+}
+
+/// A sidebar's foot on one line, for a screen too short to give it more: `start` has what room `end`
+/// leaves it, `end` keeps the line's right end. Put it where the foot goes, last in a sidebar's `foot`.
+pub fn folded_foot(ui: &mut Ui, start: impl FnOnce(&mut Ui), end: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            end(ui);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                start(ui);
+            });
+        });
+    });
+}
+
+/// The one button a step leads to, filled with the accent, its text in its middle however wide it
+/// is and whatever way the row around it runs.
 pub fn primary(ui: &mut Ui, palette: &Palette, text: &str, enabled: bool) -> Response {
-    let (size, height) = (button_size(ui), ui.spacing().interact_size.y);
+    let (size, height, padding) = (button_size(ui), ui.spacing().interact_size.y, ui.spacing().button_padding);
+    let font = FontId::new(size, FontFamily::Name(SEMIBOLD.into()));
+    let wide = ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font, Color32::WHITE).size().x);
     let button = egui::Button::new(strong(text, size).color(if enabled { palette.on_accent } else { palette.muted }))
         .fill(if enabled { palette.accent } else { palette.row })
         .stroke(Stroke::NONE)
-        .corner_radius(ui.visuals().widgets.inactive.corner_radius)
-        .min_size(egui::vec2(height * 4.0, height + 4.0));
+        .corner_radius(ui.visuals().widgets.inactive.corner_radius);
+    // Sized from outside: egui lays a button's text out the way the row around it runs, so one
+    // wider than its text would keep it at the left.
+    let size = egui::vec2((wide + 2.0 * padding.x).max(height * 4.0).min(ui.available_width().max(height * 4.0)), height + 4.0);
 
-    ui.add_enabled(enabled, button)
+    ui.add_enabled_ui(enabled, |ui| ui.add_sized(size, button)).inner
 }
 
 /// The one button a step leads to, as wide as there is: a screen's single thing to do.
@@ -238,6 +362,41 @@ pub fn dot(ui: &mut Ui, color: Color32) -> Response {
     response
 }
 
+/// A status as a dot, where there is no room for words: a tap, or a click, says them, and a tap
+/// anywhere else puts them away. It is bigger than it looks, for a finger. Hollow when what it says
+/// is trouble, so that a person who cannot tell its color from another's tells it all the same.
+pub fn status_dot(ui: &mut Ui, palette: &Palette, color: Color32, hollow: bool, words: &str) -> Response {
+    let response = dot_of(ui, color, hollow);
+
+    egui::Popup::menu(&response).layout(egui::Layout::top_down(egui::Align::Min)).width(STATUS_WIDTH).show(|ui| {
+        ui.add(egui::Label::new(RichText::new(words).color(palette.ink)).wrap());
+    });
+
+    response
+}
+
+/// How wide what a status dot says is, at most.
+const STATUS_WIDTH: f32 = 280.0;
+
+/// How much a finger gets to tap, around a status dot.
+const DOT_TAPPED: f32 = 28.0;
+
+/// The dot itself, and the room around it that takes the tap.
+fn dot_of(ui: &mut Ui, color: Color32, hollow: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(DOT_TAPPED, DOT_TAPPED), egui::Sense::click());
+
+    match hollow {
+        true => {
+            ui.painter().circle_stroke(rect.center(), 4.0, Stroke::new(2.0, color));
+        }
+        false => {
+            ui.painter().circle_filled(rect.center(), 4.5, color);
+        }
+    }
+
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// What went wrong with a request, in a sentence, with a way to ask again: what every page shows of
 /// a request that failed or took too long. While it is being asked again it says so, and the button
 /// waits. Whether Retry was pressed.
@@ -373,6 +532,37 @@ pub fn flagged(ui: &Ui, text: &str, style: TextStyle, color: Color32) -> egui::t
     }
 
     job
+}
+
+/// Says where a light client took up the chain, at this block, written for reading, if it fast-resumed:
+/// on a node's word, so never silently.
+pub fn fast_resumed(at: &str) -> String {
+    format!("Fast-resumed at block {at}, on this node's word")
+}
+
+/// What a client that fast-resumed has checked, and what it has not, after [`fast_resumed`] says
+/// where. The story of a light client's state.
+pub fn fast_resumed_story(said: &str, tip: u64, final_height: u64) -> String {
+    format!("{said}. Every header since, to height {tip}, checked by consensus, and finality to height {final_height} by the voters it proved. Below that block, it rests on this node, which Settings trusts for fast resume.")
+}
+
+/// The switch that trusts a node for fast resume, saying plainly what that gives up: `opening` is
+/// what the app skips by it, and `before` what nothing ties the checkpoint to. Whether it changed.
+pub fn fast_resume_switch(ui: &mut Ui, palette: &Palette, on: &mut bool, opening: &str, before: &str) -> bool {
+    let changed = ui.checkbox(on, "Trust this node for fast resume").changed();
+    let said = format!(
+        "{opening}: it takes up the chain at this node's latest finalized checkpoint, and checks every header and voter's signature from there on, against the genesis it trusts. What you give up: a dishonest node could show a false history from that point, as nothing ties that checkpoint to {before}. Turn it on only for a node you run or trust. Off, it walks every header."
+    );
+    ui.add(egui::Label::new(RichText::new(said).small().color(palette.muted)).wrap());
+
+    changed
+}
+
+/// A label that wraps, with a command's flags in the mono face: see [`flagged`].
+pub fn flagged_label(ui: &mut Ui, text: &str, style: TextStyle, color: Color32) -> Response {
+    let job = flagged(ui, text, style, color);
+
+    ui.add(egui::Label::new(job).wrap())
 }
 
 /// A text cut into runs of plain words and of flags, in order: each flag is a word that starts with
@@ -567,6 +757,156 @@ mod tests {
         }
 
         last.expect("drawn")
+    }
+
+    /// Where the text drawn in a frame sits, by what it says.
+    fn drawn_text(output: &egui::FullOutput, says: &str) -> Option<egui::Rect> {
+        output.shapes.iter().find_map(|clipped| match &clipped.shape {
+            egui::epaint::Shape::Text(shape) if shape.galley.text() == says => Some(shape.galley.rect.translate(shape.pos.to_vec2())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_primary_button_keeps_its_text_in_its_middle_in_a_row_that_runs_from_the_left() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let mut button = egui::Rect::NOTHING;
+        let mut text = None;
+
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    button = primary(ui, &PALETTE, "Get", true).rect;
+                });
+            });
+            output.textures_delta.clear();
+            text = drawn_text(&output, "Get");
+        }
+
+        let text = text.expect("drawn");
+
+        assert!(button.width() > text.width() + 40.0, "wider than its text: {button:?} {text:?}");
+        assert!((button.center().x - text.center().x).abs() < 1.0, "in its middle: {button:?} {text:?}");
+        assert!(button.width() < 200.0, "and it takes no more than a button's own room: {button:?}");
+
+        let tall = measured(300.0, |ui| {
+            crate::layout::finger_sized(ui);
+            primary(ui, &PALETTE, "Get", true).rect
+        });
+
+        assert!(tall.height() >= crate::layout::FINGER - 1.0, "a finger tall on a phone: {tall:?}");
+    }
+
+    #[test]
+    fn a_page_card_keeps_one_gap_below_it_in_either_density() {
+        for density in [crate::Density::COMFORTABLE, crate::Density::COMPACT] {
+            let ctx = egui::Context::default();
+            crate::apply(&ctx, &crate::DARK, &density);
+            let mut drawn = Vec::new();
+
+            for _ in 0..2 {
+                drawn.clear();
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    for _ in 0..3 {
+                        drawn.push(page_card(ui, &crate::DARK, |ui| ui.label("what the card says").rect));
+                    }
+                });
+                output.textures_delta.clear();
+            }
+
+            // From the text in one card to the text in the next: the gap, and a margin and a line each.
+            let around = 2.0 * (f32::from(density.margin) + 1.0);
+
+            assert!(drawn.windows(2).all(|pair| (pair[1].top() - pair[0].bottom() - around - crate::layout::SECTION).abs() < 1.0), "{drawn:?}");
+        }
+    }
+
+    #[test]
+    fn the_tabs_share_the_width_and_say_which_was_tapped() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 200.0));
+        let frame = |events: Vec<egui::Event>| {
+            let mut tapped = None;
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+                tapped = tabs(ui, &PALETTE, &[(1, "One"), (2, "Two"), (3, "Three"), (4, "Four")], &1).copied();
+            });
+            output.textures_delta.clear();
+            tapped
+        };
+        frame(Vec::new());
+        frame(Vec::new());
+        // Three: the third of four, a quarter of the width each.
+        let at = egui::pos2(250.0, 20.0);
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(vec![egui::Event::PointerMoved(at), press(true)]);
+
+        assert_eq!(frame(vec![press(false)]), Some(3));
+    }
+
+    #[test]
+    fn a_status_dot_says_its_words_on_a_tap_and_puts_them_away_on_the_next() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0));
+        let mut dot = egui::Rect::NOTHING;
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+                dot = status_dot(ui, &PALETTE, Color32::RED, true, "the words").rect;
+            });
+            output.textures_delta.clear();
+
+            (dot, drawn_text(&output, "the words").is_some())
+        };
+        let (dot, words) = frame(Vec::new());
+
+        assert!(!words, "nothing said until asked");
+        assert!(dot.width() >= DOT_TAPPED && dot.height() >= DOT_TAPPED, "room for a finger: {dot:?}");
+
+        let at = dot.center();
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(vec![egui::Event::PointerMoved(at), press(true)]);
+        frame(vec![press(false)]);
+
+        assert!(frame(Vec::new()).1, "a tap says them");
+
+        frame(vec![press(true)]);
+        frame(vec![press(false)]);
+
+        assert!(!frame(Vec::new()).1, "a tap again puts them away");
+    }
+
+    #[test]
+    fn a_folded_foot_is_one_line_however_long_what_it_says() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(204.0, 360.0));
+        let (mut foot, mut lock) = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                crate::layout::finger_sized(ui);
+                foot = ui
+                    .scope(|ui| {
+                        folded_foot(
+                            ui,
+                            |ui| {
+                                dot(ui, Color32::GREEN);
+                                ui.label("Catching up · 123,456,789 and a good deal more");
+                            },
+                            |ui| {
+                                lock = quiet(ui, &PALETTE, "Lock").rect;
+                                let _ = quiet(ui, &PALETTE, "Light");
+                            },
+                        );
+                    })
+                    .response
+                    .rect;
+            });
+            output.textures_delta.clear();
+        }
+
+        assert!(foot.height() < 1.4 * crate::layout::FINGER, "one line: {foot:?}");
+        assert!(foot.height() < screen.height() / 6.0, "far short of a third: {foot:?}");
+        assert!(lock.right() <= screen.right() + 0.5, "its buttons on the screen: {lock:?}");
     }
 
     #[test]

@@ -71,7 +71,8 @@ any node should the pool's be gone.
 finds paying it in full (see [Mining alone](consensus.md#mining-alone)); `MINING_OPEN=1` opens the
 port to anyone with a payout address, beside `POOL=1` or `MINING_SOLO=1`, as `POOL_OPEN=1` does for
 a pool. `MINING_PUBLIC=HOST:PORT` is where the apps are told to reach the port, `GET /mining`, when
-it is not the API's host and port 4002. nginx passes `/mining/ws`, the port over a WebSocket, on
+it is not the API's host and port 4002; with `TOR=1` and `TOR_MINING=1`, an app on the onion is told
+the onion's port on `MINING_PORT` instead, as soon as tor has made the onion. nginx passes `/mining/ws`, the port over a WebSocket, on
 to the node for the web wallet, which mines through it; the TCP port still needs opening for the
 desktop and phone wallets and for `chainv4 worker`.
 

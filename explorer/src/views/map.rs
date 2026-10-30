@@ -179,8 +179,6 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
         };
     }
 
-    let ink = if look.palette.dark { Color32::WHITE } else { look.palette.ink };
-
     if state.layout.as_ref().is_none_or(|layout| layout.made != made(store)) {
         state.layout = Some(Layout::of(store));
     }
@@ -219,7 +217,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
                 (false, _) => roles.side,
             };
             let busy = (block.tx_count as f32 / 20.0).min(1.0);
-            painter.rect_filled(rect, 6.0, base.gamma_multiply(0.45 + 0.55 * busy));
+            let fill = base.gamma_multiply(0.45 + 0.55 * busy);
+            let ink = crate::theme::ink_on(fill, &look.palette);
+            painter.rect_filled(rect, 6.0, fill);
 
             let outline = if state.selected.as_ref() == Some(&block.id) {
                 Some(Stroke::new(3.0, look.palette.warn))

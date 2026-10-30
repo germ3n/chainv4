@@ -148,7 +148,7 @@ fn color(look: Look, hop: &Hop) -> Color32 {
     match (hop.error.is_some(), hop.kind.as_str()) {
         (true, _) => look.palette.bad,
         (false, "transfer" | "mint" | "burn" | "bond" | "claim") => look.palette.good,
-        (false, "delegate") => Color32::from_rgb(0xb4, 0x8c, 0xf0),
+        (false, "delegate") => look.roles.delegate,
         _ => look.roles.main,
     }
 }

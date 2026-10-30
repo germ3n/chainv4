@@ -375,10 +375,9 @@ out += [
 # Fonts compiled into the apps, and embedded in the wiki and docs pages the node's repository
 # builds. Each is under the SIL Open Font License; the license text is reproduced once.
 app_fonts = [
-    ("IBM Plex Sans and IBM Plex Mono", "Regular and SemiBold, and Mono Regular. Compiled into the explorer.", "explorer/assets/fonts/ibm-plex-OFL.txt"),
-    ("Manrope", "Regular and SemiBold. Compiled into the wallet, and embedded in the wiki and docs pages.", "wallet/assets/fonts/manrope-OFL.txt"),
-    ("Newsreader", "Regular, and Italic in the wiki. Compiled into the wallet, and embedded in the wiki and docs pages.", "wallet/assets/fonts/newsreader-OFL.txt"),
-    ("JetBrains Mono", "Regular. Compiled into the wallet, and embedded in the wiki and docs pages.", "wallet/assets/fonts/jetbrains-OFL.txt"),
+    ("Manrope", "Regular and SemiBold. Compiled into the wallet and the explorer, and embedded in the wiki and docs pages.", "ui/assets/fonts/manrope-OFL.txt"),
+    ("Newsreader", "Regular, and Italic in the wiki. Compiled into the wallet and the explorer, and embedded in the wiki and docs pages.", "ui/assets/fonts/newsreader-OFL.txt"),
+    ("JetBrains Mono", "Regular. Compiled into the wallet and the explorer, and embedded in the wiki and docs pages.", "ui/assets/fonts/jetbrains-OFL.txt"),
 ]
 ofl_body = None
 font_entries = []
@@ -395,7 +394,7 @@ for path in ("wiki/fonts/manrope-OFL.txt", "wiki/fonts/newsreader-OFL.txt", "wik
 
 out += section("Fonts")
 out += [
-    "Sources: explorer/assets/fonts, wallet/assets/fonts and wiki/fonts",
+    "Sources: ui/assets/fonts and wiki/fonts",
     "Reserved font names are unchanged. The wiki's files are Latin subsets.",
     "License: SIL Open Font License, Version 1.1",
     "",

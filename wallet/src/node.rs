@@ -271,6 +271,12 @@ impl Node {
         }
     }
 
+    /// Why the node does not answer, while it does not: what became of the status asked of it every
+    /// few seconds, rather than of something one page asked.
+    pub fn down(&self) -> Option<&Failure> {
+        self.asks.failure(&Ask::Status).filter(|failure| failure.is_trouble())
+    }
+
     /// What went wrong on the way to the node, for what is still wanted, for a page to say: the
     /// failure that has gone on longest, and everything that failed so, to ask again.
     pub fn trouble(&self) -> Option<(Failure, Vec<Ask>)> {

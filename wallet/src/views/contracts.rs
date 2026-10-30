@@ -252,7 +252,7 @@ fn add(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState) {
         let evm = parse_contract(&state.add_address).is_some_and(|address| matches!(address, Address::Evm(_)));
 
         if evm {
-            ui.add(egui::TextEdit::multiline(&mut state.add_abi).hint_text("its ABI's JSON, as solc --abi or Foundry writes it").desired_rows(4).desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::multiline(&mut state.add_abi).hint_text(chainv4_ui::widgets::flagged(ui, "its ABI's JSON, as solc --abi or Foundry writes it", egui::TextStyle::Body, palette.muted)).desired_rows(4).desired_width(f32::INFINITY));
         }
 
         if theme::primary(ui, &palette, "Keep it", true).clicked() {
@@ -557,7 +557,7 @@ fn deploy(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &Address
                 ui.label(RichText::new(text).color(palette.soft));
             }
             _ => {
-                ui.add(egui::TextEdit::multiline(&mut state.code).hint_text(hint).font(egui::TextStyle::Monospace).desired_rows(4).desired_width(f32::INFINITY));
+                ui.add(egui::TextEdit::multiline(&mut state.code).hint_text(chainv4_ui::widgets::flagged(ui, hint, egui::TextStyle::Body, palette.muted)).font(egui::TextStyle::Monospace).desired_rows(4).desired_width(f32::INFINITY));
             }
         }
 

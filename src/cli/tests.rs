@@ -1084,11 +1084,16 @@ mod send {
                 sign: None,
             })
         };
-        let options = crate::api::ApiOptions { mining_public: Some("miner.example:4002".to_string()), ..Default::default() };
+        let options = crate::api::ApiOptions {
+            mining_public: Some("miner.example:4002".to_string()),
+            mining_onion: Some(crate::api::MiningOnion::At("miner.onion:4100".to_string())),
+            ..Default::default()
+        };
         let running = Running::launch_genesis(false, false, pow, mining, options);
         let about: serde_json::Value = serde_json::from_str(&ureq::get(format!("http://{}/mining", running.api)).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
 
         assert_eq!((about["port"].as_u64(), about["public"].as_str(), about["ws"].as_str()), (Some(u64::from(listen.port())), Some("miner.example:4002"), Some("/mining/ws")));
+        assert_eq!(about["onion"].as_str(), Some("miner.onion:4100"), "and through Tor");
         assert_eq!((about["solo"].as_bool(), about["open"].as_bool(), about["pool"].as_bool()), (Some(true), Some(true), Some(false)));
 
         let (mut socket, _) = tungstenite::connect(format!("ws://{}/mining/ws", running.api)).unwrap();

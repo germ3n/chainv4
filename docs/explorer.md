@@ -123,7 +123,10 @@ The explorer does not have to take the node's word for balances. It runs the lib
 - **What it trusts:** the genesis it saw the first time it met the node, which it pins.
 - **Where it starts:** from genesis; the first time it meets a node, from the node's own
   finalized checkpoint; and from a checkpoint pasted under Settings → Light client, each time. See
-  [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint).
+  [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint). Settings → Light client →
+  **Trust this node for fast resume**, per node and off by default, starts it at the node's finalized
+  checkpoint each launch rather than walk from genesis, and the sidebar and Settings then say
+  **Fast-resumed at block N, on this node's word**. See [In the explorer](light-client.md#in-the-explorer).
 - **What it checks:** every header by consensus, and every justification against voters it proved
   from state. It follows the chain again every few seconds.
 - **The sidebar** says whether it is starting, catching up, following, or stopped, with why on
@@ -372,8 +375,8 @@ sends none, shows as `chainv4`. The software's own name stays `chainv4`, as in t
 version row and its release notices.
 
 **On a phone,** below 640 points wide, the sidebar gives way to:
-- **a bar on top:** back, once there is somewhere to go back to, the node's state as a dot, and
-  the search box. Android's back gesture goes back too, and on the first page sends the app to
+- **a bar on top:** back, once there is somewhere to go back to, the node's state as a dot, which a
+  tap has say it and the light client's in words, and the search box. Android's back gesture goes back too, and on the first page sends the app to
   the background, as Android apps do. Back and forward return to a page where it was scrolled
   to, once what it shows has arrived; a page opened anew starts at its top;
 - **tabs along the bottom:** Home, Blocks (the map), Mempool, Tokens and More, which lists the
@@ -486,20 +489,24 @@ it cannot find; a deploy that lands and fails says where, in the files it came f
 
 ## What it remembers
 
-The node address, the proxy, dark or light, any token decimals set by hand, and the genesis the
-light client pinned and the chain's name last seen for each node. It keeps them where eframe keeps app data: the platform's app-data directory
+The node address, the proxy, dark or light, any token decimals set by hand, the nodes trusted for
+fast resume, and the genesis the light client pinned and the chain's name last seen for each node. It keeps them where eframe keeps app data: the platform's app-data directory
 on the desktop, the page's local storage in the browser, and `explorer.ron` in the app's data
 folder on Android.
 
 ## Look
 
-Its own, for scanning a lot at once, unlike the wallet's quieter one:
-- **Colors:** cool slate, dark or light, picked under Settings. Blue is the main chain, amber side
-  branches, teal what is justified and green what is final, on every page, chart and the map.
-- **Type:** IBM Plex Sans for text, and IBM Plex Mono for ids, addresses and numbers to compare.
-  The fonts and their licence are in `explorer/assets/fonts`.
-- **Density:** tight rows, small corners and narrow margins: the `ui` crate's `COMPACT`, where
-  the wallet is `COMFORTABLE` (see [The ui crate](development.md#the-ui-crate)).
+The wallet's, from the `ui` crate they share, set tighter for scanning a lot at once; its pages,
+tables and charts are its own:
+- **Colors:** the wallet's palette, dark or light, picked under Settings, its gold marking what is
+  picked and what is a link. For the chain's own ideas: blue is the main chain, orange side branches,
+  teal what is justified and green what is final, on every page, chart and the map, told apart under
+  simulated color blindness in both themes.
+- **Type:** Manrope for text, JetBrains Mono for ids, addresses and numbers to compare, and Newsreader
+  for page titles and the chain's name. The fonts and their licences are in `ui/assets/fonts`.
+- **Tables** stay tables, in the same cards, with a hairline under each row, as wide as the card.
+- **Density:** tighter rows and margins than the wallet's, with the same corners: the `ui` crate's
+  `COMPACT`, where the wallet is `COMFORTABLE` (see [The ui crate](development.md#the-ui-crate)).
 - **Charts:** drawn by the explorer itself, a line or bars over block heights with a scale on the
   left. Hovering one says the block under the pointer and its value; they never take a drag.
 
@@ -557,9 +564,9 @@ artifacts named `chainv4-explorer-android-ARCH`, and a `v*` tag attaches them to
   a node on another machine listens on `--http 0.0.0.0:8080`.
 - **Copying** goes to Android's clipboard, through the `ui` crate, and Android shows what was
   copied.
-- **Pasting:** hold a finger on a text field for a bar with **Paste**, **Select all**, **Copy**
-  and **Cut**, or tap the **Paste** button over the keyboard: a key, an address or an id copied
-  from anywhere goes straight into the send page or the search box.
+- **Pasting:** hold a finger on a text field, or tap one already focused, for a bar with **Paste**,
+  **Select all**, **Copy** and **Cut**, which goes as soon as typing starts: a key, an address or an
+  id copied from anywhere goes straight into the send page or the search box.
 - **Files:** keys, WebAssembly modules and Luau files come from Android's document picker, as on
   the desktop.
 - **The bars and the keyboard:** the app keeps out from under the status bar, the navigation bar

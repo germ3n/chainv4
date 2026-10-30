@@ -501,3 +501,25 @@ fn a_governed_chain_shows_its_approvers_proposals_settings_and_decisions_on_any_
         }
     }
 }
+
+#[test]
+fn in_force_on_a_wide_screen_gives_what_a_setting_is_the_room_left_and_says_what_stands() {
+    let mut value = listing();
+    value["in_force"]["fees"] = json!({ "value": { "block_gas_limit": 50_000_000, "burn_permille": 500, "pricing": { "type": "bid", "min_price": "7" } }, "decided": null });
+    let view: GovernanceView = serde_json::from_value(value).unwrap();
+    let mut state = GovernanceState::default();
+    let store = Store::default();
+    // A phone on its side, beside the sidebar: where a grid would have squeezed it to a word a line.
+    let (drawn, _) = crate::views::render_frames(&store, &mut Light::default(), 620.0, 4, |ui, ctx| {
+        ctx.look.narrow = false;
+        in_force(ui, ctx, &view, &mut state, &coin());
+    });
+    let fees = drawn.iter().find(|(text, _)| text.contains("gas a block")).expect("drawn");
+
+    assert!(fees.1.width() > 300.0, "wide enough to read: {fees:?}");
+
+    let name = drawn.iter().find(|(text, _)| text == "second");
+
+    assert!(name.is_some(), "the name as it stands: {drawn:?}");
+    assert!(!drawn.iter().any(|(text, _)| text.starts_with("Rename")), "no change it would make: {drawn:?}");
+}

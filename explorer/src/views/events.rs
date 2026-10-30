@@ -102,7 +102,7 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
 
                     ui.label(widgets::strong(&event.name, 13.0));
                     tx::event_data(ui, ctx, &event.contract, &event.name, &event.data);
-                    ui.end_row();
+                    super::row_end(ui);
                 }
             });
         }

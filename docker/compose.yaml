@@ -34,6 +34,8 @@ services:
       MINING_SOLO: ${MINING_SOLO:-0}
       MINING_OPEN: ${MINING_OPEN:-0}
       MINING_PUBLIC: ${MINING_PUBLIC:-}
+      MINING_PORT: ${MINING_PORT:-4002}
+      TOR_MINING: ${TOR_MINING:-0}
       REPORT: ${REPORT:-}
       HIDE: ${HIDE:-}
       SHOW: ${SHOW:-}

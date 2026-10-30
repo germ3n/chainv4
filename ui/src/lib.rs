@@ -1,7 +1,7 @@
-//! What chainv4's egui apps, the wallet and the explorer, share. Each has a look of its own: its
-//! palette, its typeface and how dense it is. What they share is how a look is applied, the widgets
-//! their pages are built from, which take their sizes from the look, picking files, talking to a
-//! node, through a proxy when one is set, and running on Android, where an app keeps clear of the
+//! What chainv4's egui apps, the wallet and the explorer, share: one look, its palette and fonts,
+//! with each app picking only how dense it is; the widgets their pages and their sidebars, bars and
+//! tabs are built from, which take their sizes from the look; picking files; talking to a node,
+//! through a proxy when one is set; and running on Android, where an app keeps clear of the
 //! system's bars and keyboard, copies and pastes through Android's clipboard, and picks files
 //! through a Java activity of its own, and on iOS, through UIKit and AVFoundation; and biometrics,
 //! which keep a secret behind a fingerprint, a face, Touch ID, Face ID or a passkey; and, on a
@@ -32,4 +32,4 @@ pub mod ios;
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 mod edit;
 
-pub use theme::{DISPLAY, Density, Palette, SEMIBOLD, Typeface, apply, install_fonts};
+pub use theme::{DARK, DISPLAY, Density, LIGHT, Palette, SEMIBOLD, apply, install_fonts};

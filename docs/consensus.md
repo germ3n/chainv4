@@ -206,6 +206,8 @@ hashrate, measured by a `Meter` over the last three seconds.
 | `--mining-open` | off | Let anyone join the pool, or mine alone with `--mining-solo`, with a payout address alone, without a token. |
 | `--mining-solo` | off | Take workers mining alone: each is handed a block of its own, paying its payout in full (see [Mining alone](#mining-alone)). |
 | `--mining-public HOST:PORT` | the API's host | Where workers reach the mining port from outside, as `GET /mining` tells the apps. |
+| `--mining-onion HOST:PORT` | none | Where workers reach it through Tor, `ADDRESS.onion:4002`, as `GET /mining` tells an app on the node's onion. |
+| `--mining-onion-port PORT` | none | The same, the onion read from `--onion-file` once tor has made it, when it is not known at the start. |
 | `--pool-push AMOUNT` | none | Claim for the pool's miners once they are owed this much, in the coin's smallest unit. |
 | `--pool-push-key FILE` | none | The key `--pool-push` claims from, which pays the fees. |
 

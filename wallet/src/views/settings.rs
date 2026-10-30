@@ -337,7 +337,9 @@ fn fast_resume(ui: &mut Ui, ctx: &mut Ctx, node: &str) {
     let palette = *ctx.palette;
     let mut on = ctx.settings.fast_resume.get(node).copied().unwrap_or(false);
 
-    if ui.checkbox(&mut on, "Trust this node for fast resume").changed() {
+    let opening = format!("Opening the wallet skips the headers since it last ran, once it is more than {} epochs behind", chainv4::light::FEW_EPOCHS);
+
+    if chainv4_ui::widgets::fast_resume_switch(ui, &palette, &mut on, &opening, "what the wallet checked before") {
         match on {
             true => {
                 ctx.settings.fast_resume.insert(node.to_string(), true);
@@ -348,18 +350,6 @@ fn fast_resume(ui: &mut Ui, ctx: &mut Ctx, node: &str) {
             }
         }
     }
-
-    ui.add(
-        egui::Label::new(
-            RichText::new(format!(
-                "Opening the wallet skips the headers since it last ran, once it is more than {} epochs behind: it takes up the chain at this node's latest finalized checkpoint, and checks every header and voter's signature from there on, against the genesis it trusts. What you give up: a dishonest node could show a false history from that point, as nothing ties that checkpoint to what the wallet checked before. Turn it on only for a node you run or trust. Off, it walks every header.",
-                crate::chain::FEW_EPOCHS
-            ))
-            .small()
-            .color(palette.muted),
-        )
-        .wrap(),
-    );
 }
 
 /// The upgrade that stops the node: the node's own chainv4 is older than the upgrade's least, so

@@ -8,7 +8,7 @@ use {
     crate::node::{Ask, Failure},
     chainv4::db::{Column, StateProof, address_key},
     chainv4::light::{
-        Assurance, CheckpointStart, FinalityStep, LightClient, LightError, LightFinality, LightParams, LightRequest, LightState, MAX_LIGHT_HEADERS, multi_balance_key,
+        Assurance, CheckpointStart, FinalityStep, LightClient, LightError, LightParams, LightRequest, LightState, MAX_LIGHT_HEADERS, Resume, may_resume, multi_balance_key, resume,
         nft_owner, nft_owner_key, token_balance, token_balance_key,
     },
     chainv4::registry::names::{FoundName, NameRecord, NameStatus, NamesConfig, PrimaryName, lineage, name_problem, primary_key, record_key, standing},
@@ -33,35 +33,6 @@ const FOLLOW_EVERY: f64 = 3.0;
 const PROVE_EVERY: f64 = 4.0;
 /// Seconds before asking again what failed to come.
 const RETRY_AFTER: f64 = 3.0;
-/// How many epochs behind the node's finalized checkpoint a client on a node trusted for fast
-/// resume goes by walking, rather than resume there: as many as a request or two of finality brings
-/// in, so resuming is taken only where it saves something.
-pub const FEW_EPOCHS: u64 = 8;
-
-/// How a client on a node takes up the chain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Resume {
-    /// From where it got to, walking every header since.
-    Walk,
-    /// From the node's latest finalized checkpoint, taken on its word.
-    Checkpoint,
-}
-
-/// How a client takes up the chain: from the node's finalized checkpoint only on a node trusted for
-/// that, on a chain whose voters' signatures it goes on checking from there, while the node names a
-/// checkpoint more than a few epochs ahead of what it saved. Under depth finality there are no
-/// voters to check, and nothing signed says which block is final, and a chain with no finality has
-/// no such block: both walk. So does a node that says of no checkpoint.
-pub fn resume(trusted: bool, finality: Option<LightFinality>, saved_epoch: Option<u64>, node_epoch: Option<u64>) -> Resume {
-    let votes = finality.is_some_and(|finality| finality.fixed_ahead().is_some());
-
-    match (trusted && votes, node_epoch) {
-        (true, Some(node_epoch)) if node_epoch > saved_epoch.unwrap_or(0).saturating_add(FEW_EPOCHS) => Resume::Checkpoint,
-        (true, Some(_)) if saved_epoch.is_none() => Resume::Checkpoint,
-        _ => Resume::Walk,
-    }
-}
-
 /// A value the wallet proved, and how far it trusts it.
 #[derive(Clone, Debug)]
 pub struct Proven<T> {
@@ -695,7 +666,7 @@ impl Chain {
                     .and_then(|bytes| wincode::deserialize::<LightState>(&bytes).ok())
                     .and_then(|state| LightClient::restore(state, genesis).ok());
                 let pasted = trust.checkpoints.get(trust.node).and_then(|text| from_hex(text)).and_then(|bytes| Hash::from_bytes(params.hash, &bytes));
-                let may_resume = trust.fast_resume && params.finality.is_some_and(|finality| finality.fixed_ahead().is_some());
+                let may_resume = may_resume(trust.fast_resume, params.finality);
 
                 // On a node trusted for it, once it says how far it has finalized: what is decided
                 // then, over what it saved, and a checkpoint pasted if it saved nothing. Otherwise
@@ -1113,6 +1084,7 @@ mod tests {
     use {
         chainv4::consensus::ConsensusConfig,
         chainv4::crypto::hashable::Hashable,
+        chainv4::light::{FEW_EPOCHS, LightFinality},
         chainv4::crypto::keypair::Keypair,
         chainv4::structs::block::{BlockHeader, Seal},
         chainv4::structs::hash::HashType,
@@ -1247,32 +1219,30 @@ mod tests {
     }
 
     #[test]
-    fn a_client_resumes_from_the_checkpoint_only_on_a_trusted_node_far_enough_behind_under_voting_finality() {
-        use chainv4::light::LightFinality::{Authority, Depth, Ffg};
+    fn the_dot_says_the_node_is_down_whatever_the_light_client_last_knew_and_its_own_state_otherwise() {
+        let palette = chainv4_ui::DARK;
+        let down = Failure { status: 0, message: "connection refused".to_string() };
+        let mut resumes = Resumes::new(Some(VOTES), true).saved_at(5);
+        resumes.light();
+        resumes.finalized_at(100);
+        resumes.checkpoint_at(100);
 
-        let ffg = Some(Ffg { checkpoint_interval: 8, fixed_ahead: 2 });
-        let authority = Some(Authority { checkpoint_interval: 8, fixed_ahead: 2 });
+        let (color, text, _) = crate::views::following(&palette, &resumes.chain, None);
+        assert_eq!((color, text.as_str()), (palette.warn, "Catching up · 800"), "still walking to the tip");
 
-        assert_eq!(resume(true, ffg, Some(0), Some(100)), Resume::Checkpoint);
-        assert_eq!(resume(true, authority, Some(0), Some(100)), Resume::Checkpoint);
-        assert_eq!(resume(false, ffg, Some(0), Some(100)), Resume::Walk, "the switch off");
+        let (color, text, detail) = crate::views::following(&palette, &resumes.chain, Some(&down));
+        assert_eq!((color, text.as_str()), (palette.bad, "Node not answering"));
+        assert!(detail.contains("connection refused") && detail.contains("800"), "why, and what shows: {detail}");
+        assert!(detail.contains("Fast-resumed at block 800, on this node's word"), "and it still says so: {detail}");
 
-        // How far behind: more than a few epochs.
-        assert_eq!(resume(true, ffg, Some(50), Some(50 + FEW_EPOCHS)), Resume::Walk, "only a few");
-        assert_eq!(resume(true, ffg, Some(50), Some(50 + FEW_EPOCHS + 1)), Resume::Checkpoint);
-        assert_eq!(resume(true, ffg, Some(50), Some(40)), Resume::Walk, "further on than the node");
-        assert_eq!(resume(true, ffg, Some(u64::MAX), Some(u64::MAX)), Resume::Walk);
+        // Stopped by what the node sent is the graver: it stands.
+        resumes.chain.trouble = Some("a header that does not check".to_string());
+        let (color, text, detail) = crate::views::following(&palette, &resumes.chain, Some(&down));
+        assert_eq!((color, text.as_str(), detail.as_str()), (palette.bad, "Stopped", "a header that does not check"));
 
-        // With nothing saved there is nothing to walk on from.
-        assert_eq!(resume(true, ffg, None, Some(3)), Resume::Checkpoint);
-        assert_eq!(resume(false, ffg, None, Some(100)), Resume::Walk);
-
-        // No voters to check from there on.
-        assert_eq!(resume(true, Some(Depth { depth: 10 }), Some(0), Some(100)), Resume::Walk);
-        assert_eq!(resume(true, None, Some(0), Some(100)), Resume::Walk);
-
-        // A node that says of no checkpoint.
-        assert_eq!(resume(true, ffg, Some(0), None), Resume::Walk);
+        // Nothing heard of yet.
+        let (color, text, _) = crate::views::following(&palette, &Chain::default(), None);
+        assert_eq!((color, text.as_str()), (palette.muted, "Starting"));
     }
 
     #[test]

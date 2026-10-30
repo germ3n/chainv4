@@ -143,10 +143,24 @@ other pages explain each part in full; this one is the short list to keep in min
   build compiles a small activity, `ui/android/Picker.java`, into the APK with a JDK and Android's
   build-tools, and signs the APK again with the same key. Without them it builds an app that cannot
   pick files, and leaves its buttons out; pasting needs no Java and always works.
-- **The wallet and the explorer share the `ui` crate, not a look.** `ui/` holds the palette,
-  density and type machinery, the widgets and the Android glue; each app picks its own colors,
-  fonts and density. A change to a shared widget shows in both. See
+- **The wallet and the explorer share one look, in the `ui` crate.** `ui/` holds the palette, the
+  fonts, the widgets, the sidebar, bars and tabs, and the Android glue; each app picks only its
+  density, and keeps its own pages. A change to a shared widget shows in both. The explorer's chart
+  colors (`Roles`) are its own, as the palette's gold accent and amber warning look alike: a test
+  holds them apart under simulated color blindness, in both themes. See
   [The ui crate](development.md#the-ui-crate).
+- **A button lays its text out the way the row around it runs.** egui aligns a button's text by the
+  surrounding layout, so a button wider than its text keeps it at the left in a left-aligned column.
+  `widgets::primary` sizes itself from outside, as `add_sized` centers. The sidebar's entries count
+  on the same behavior to stay left.
+- **A grid's cell keeps the width text first wrapped to,** next to nothing, which is why the
+  explorer's In force table gives what a setting is its width outright rather than wrap in the cell.
+- **The Paste bar comes only when asked for:** a hold, or a tap on a field already focused, never the
+  tap that gives a field focus, and it goes at the first key. The clipboard is read only while the
+  bar is up.
+- **A status dot's words come on a tap,** as a tooltip does not stay on a touch screen, and the
+  wallet's dot goes by `GET /status`, not by whichever page's request failed: the banner speaks for
+  those. It turns hollow as well as red when something is wrong, to read without color.
 - **Docker or Podman, by `CONTAINER_ENGINE`.** `docker/compose.sh` and `docker/pow.sh up` run
   either; rootless Podman needs the unprivileged port bound lowered to 80, or `HTTP_PORT` and
   `HTTPS_PORT` above 1024. See [Podman](docker.md#podman).
@@ -416,8 +430,13 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   what they read, and a search or a page that comes up short reads older pages until it is full or
   none are left (`ballots::wants_older`), saying how much of the history it has been through. A
   page that fails stops that reading until the next asking.
-- **Some text fonts have no arrow.** Manrope and the fonts egui falls back on draw `→` as nothing,
-  so the wallet sets one in the mono face (`widgets::arrowed`).
+- **The text fonts have no arrow.** The bundled faces are Latin subsets, without `→`, `‹` or `›`, and
+  of egui's own only its mono face, Hack, draws `→`. So `install_fonts` adds it to every family's
+  fallbacks, and an arrow never comes out as nothing; `widgets::arrowed` sets one in the mono face
+  anyway, where it should match the numbers around it.
+- **`--mining-onion-port` reads the onion when asked.** In Docker the node starts before tor, and tor
+  waits for the node to be healthy, so nothing at the node's start can know the onion. `GET /mining`
+  reads `--onion-file` on each request, and says no `onion` until it is there.
 - **One way to change the directory per chain.** Governance's `Change::Directory`, or without
   governance the `directory_admin` genesis names, by `send set-directory`; the admin hands the
   role on, or renounces it for good (`hand-directory --renounce`, which asks for yes). Genesis
@@ -1186,6 +1205,10 @@ voting finality it now goes back to the checkpoint and follows the node from the
 
 ## Fast resume
 
+- **In the explorer, it is each launch.** The explorer saves no client, so with the switch on it starts
+  at the node's checkpoint every time it opens, rather than walk from genesis. There is nothing to be
+  a few epochs behind of, so the wallet's 8 epochs do not come into it. The decision is
+  `chainv4::light::may_resume`, and the words `ui`'s, in both.
 - **It is a trade, and off.** The wallet's switch, per node, swaps walking every header since it last
   ran for one request: the node's finalized checkpoint. Headers and voters' signatures are checked
   from there, against the genesis pinned, but nothing ties that checkpoint to what the wallet checked

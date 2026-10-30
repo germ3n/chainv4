@@ -671,6 +671,32 @@ pub fn checkpoint_first_header(from: u64, height: u64, lookback: usize) -> u64 {
 #[document(summary = "The most headers a saved light client keeps: without finality, or with finality stalled, those far below the tip go.", category = "Light client")]
 pub const MAX_KEPT_HEADERS: u64 = 4_096;
 
+#[document(summary = "How many epochs behind the node's finalized checkpoint a client that saved its place, on a node trusted for fast resume, goes by walking rather than resume there: as many as a request or two of finality brings in, so resuming is taken only where it saves something.", category = "Light client")]
+pub const FEW_EPOCHS: u64 = 8;
+
+#[document(summary = "How a client on a node takes up the chain.", category = "Light client")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resume {
+    #[document(summary = "From where it got to, or genesis, walking every header since.")]
+    Walk,
+    #[document(summary = "From the node's latest finalized checkpoint, taken on its word.")]
+    Checkpoint,
+}
+
+#[document(summary = "Whether a client may take up the chain at a node's finalized checkpoint at all: only on a node trusted for that, on a chain whose voters' signatures it goes on checking from there. Under depth finality there are no voters to check, and nothing signed says which block is final, and a chain with no finality has no such block: both walk.", category = "Light client")]
+pub fn may_resume(trusted: bool, finality: Option<LightFinality>) -> bool {
+    trusted && finality.is_some_and(|finality| finality.fixed_ahead().is_some())
+}
+
+#[document(summary = "How a client takes up the chain: from the node's finalized checkpoint where may_resume says it may, while the node names a checkpoint more than a few epochs ahead of what the client saved, or any with nothing saved. Otherwise it walks, as it does on a node that says of no checkpoint.", category = "Light client")]
+pub fn resume(trusted: bool, finality: Option<LightFinality>, saved_epoch: Option<u64>, node_epoch: Option<u64>) -> Resume {
+    match (may_resume(trusted, finality), node_epoch) {
+        (true, Some(node_epoch)) if node_epoch > saved_epoch.unwrap_or(0).saturating_add(FEW_EPOCHS) => Resume::Checkpoint,
+        (true, Some(_)) if saved_epoch.is_none() => Resume::Checkpoint,
+        _ => Resume::Walk,
+    }
+}
+
 #[document(summary = "Something for the light client's driver to fetch next.", category = "Light client", see_also = "LightClient::next")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LightRequest {
@@ -1835,5 +1861,39 @@ impl LightClient {
         let decoded: SignedTx = wincode::deserialize(tx).map_err(|_| LightError::Undecodable)?;
 
         Ok((decoded, assurance))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_client_resumes_from_the_checkpoint_only_on_a_trusted_node_far_enough_behind_under_voting_finality() {
+        use LightFinality::{Authority, Depth, Ffg};
+
+        let ffg = Some(Ffg { checkpoint_interval: 8, fixed_ahead: 2 });
+        let authority = Some(Authority { checkpoint_interval: 8, fixed_ahead: 2 });
+
+        assert_eq!(resume(true, ffg, Some(0), Some(100)), Resume::Checkpoint);
+        assert_eq!(resume(true, authority, Some(0), Some(100)), Resume::Checkpoint);
+        assert_eq!(resume(false, ffg, Some(0), Some(100)), Resume::Walk, "the switch off");
+
+        // How far behind: more than a few epochs.
+        assert_eq!(resume(true, ffg, Some(50), Some(50 + FEW_EPOCHS)), Resume::Walk, "only a few");
+        assert_eq!(resume(true, ffg, Some(50), Some(50 + FEW_EPOCHS + 1)), Resume::Checkpoint);
+        assert_eq!(resume(true, ffg, Some(50), Some(40)), Resume::Walk, "further on than the node");
+        assert_eq!(resume(true, ffg, Some(u64::MAX), Some(u64::MAX)), Resume::Walk);
+
+        // With nothing saved there is nothing to walk on from.
+        assert_eq!(resume(true, ffg, None, Some(3)), Resume::Checkpoint);
+        assert_eq!(resume(false, ffg, None, Some(100)), Resume::Walk);
+
+        // No voters to check from there on.
+        assert_eq!(resume(true, Some(Depth { depth: 10 }), Some(0), Some(100)), Resume::Walk);
+        assert_eq!(resume(true, None, Some(0), Some(100)), Resume::Walk);
+
+        // A node that says of no checkpoint.
+        assert_eq!(resume(true, ffg, Some(0), None), Resume::Walk);
     }
 }

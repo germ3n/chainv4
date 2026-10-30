@@ -21,6 +21,14 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
 
     theme::title(ui, &palette, &name, "What this account holds at each of its addresses, every amount proven by the light client.");
 
+    // Where there is no sidebar to say it, or no room in one.
+    let no_sidebar = chainv4_ui::layout::is_narrow(ui.ctx().content_rect().width()) || chainv4_ui::layout::is_short(ui.ctx());
+
+    if no_sidebar && let Some(said) = super::fast_resumed(ctx.chain) {
+        ui.add(egui::Label::new(RichText::new(said).small().color(palette.warn)).wrap());
+        theme::section_gap(ui);
+    }
+
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &ctx.coin.symbol);
         ui.add_space(4.0);

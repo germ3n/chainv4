@@ -112,8 +112,13 @@ offline; these would make that hold up as a treasury.
 - [x] **A decoded transaction as the tx page shows one.** The node's JSON for a transaction is
   `structs::json`, apart from the node, so the explorer's Decode tool writes a decoded one as the
   node would and shows it with the tx page's own view.
-- [x] **Fast resume on trusted nodes.** A per-node switch in the wallet takes up the chain at the node's
-  finalized checkpoint rather than walking the headers since, off by default, saying what it gives up.
+- [x] **Fast resume on trusted nodes.** A per-node switch in the wallet and the explorer takes up the
+  chain at the node's finalized checkpoint rather than walking the headers, off by default, saying what
+  it gives up.
+- [x] **The explorer in the wallet's look.** One palette, the same fonts, cards, headings, buttons,
+  pills, sidebar, bars and tabs from the `ui` crate; the explorer keeps its own pages, tables and charts.
+- [x] **Mining over Tor.** `--mining-onion`, or `--mining-onion-port` with `--onion-file`, names the
+  onion's mining port in `GET /mining`, which a wallet on the onion dials rather than the public address.
 - [x] **The wallet in the app stores.** A `mining` feature, on by default, and `--store` on the build
   scripts: no miner, no `wgpu` on Android, and the page called Pool earnings.
 - [x] **Better transaction filters.** `GET /accounts/{address}/txs` takes kind, direction, counterparty,
@@ -760,9 +765,9 @@ offline; these would make that hold up as a treasury.
   300 KB of headers and 400 KB of finality steps: about 0.18 s a block on a phone, 118 s for 630
   blocks. Bounding what each request asks for would cut the bytes, and bundling headers and steps
   on the node the round trips. Fast resume goes around it for a node trusted.
-- [ ] **The wallet's status dot stays green while the node is down;** only the Retry banner says so.
-- [ ] **A phone in portrait shows only a dot of the light client's state,** so "fast-resumed at block
-  N, on this node's word" is in Settings and the wide sidebar alone.
+- [x] **The wallet's status dot stays green while the node is down;** it goes by `GET /status` now.
+- [x] **A phone in portrait shows only a dot of the light client's state:** a tap says it in words, and
+  Home carries a line while the client rests on a node's word.
 
 - [x] **Updates: a warning, an updater, and a stop for upgrades.** A manifest a threshold of the
   release keys built in signs names the newest chainv4, wallet and explorer with a binary for each
@@ -884,8 +889,8 @@ offline; these would make that hold up as a treasury.
 - [x] **Picking files on Android.** A Java activity of the `ui` crate's, compiled into the APK
   after xbuild builds it, opens Android's document picker and hands back what it read: key files in
   both apps, and WebAssembly and Luau files in the explorer.
-- [x] **Pasting on Android.** Holding a text field brings a bar with Paste, Select all, Copy and Cut,
-  and a Paste button sits over the keyboard, reading Android's clipboard through JNI.
+- [x] **Pasting on Android.** Holding a text field, or tapping one already focused, brings a bar with
+  Paste, Select all, Copy and Cut, reading Android's clipboard through JNI.
 - [ ] **The APK's Java needs the Android SDK's build-tools.** xbuild cannot add a `classes.dex`, so
   the script repacks and signs again with `d8`, `zipalign` and `apksigner`. An xbuild that took a
   dex, or a pure Rust dexer and signer, would make the APK build need a JDK alone, or nothing.

@@ -9,6 +9,33 @@ pub fn is_narrow(width: f32) -> bool {
     width < NARROW
 }
 
+/// Below this height, as a phone on its side, a sidebar keeps its room for the pages: its foot folds
+/// to one line, and the gaps at its top close up.
+pub const SHORT: f32 = 560.0;
+
+/// Whether a screen is so short: a sidebar's foot folds on it.
+pub fn is_short(ctx: &egui::Context) -> bool {
+    ctx.content_rect().height() < SHORT
+}
+
+/// A gap of this height in a sidebar, closed up on a short screen.
+pub fn sidebar_gap(ctx: &egui::Context, tall: f32) -> f32 {
+    if is_short(ctx) { (tall / 3.0).round() } else { tall }
+}
+
+/// How wide a sidebar is, and what it keeps from its edges inside.
+pub const SIDEBAR_WIDTH: f32 = 236.0;
+pub const SIDEBAR_MARGIN: i8 = 16;
+
+/// What keeps a page off the screen's edges across: on a phone, and beside a sidebar, where a window
+/// too narrow for the whole column, as a phone on its side, would otherwise run the cards into both.
+pub const fn page_margin(narrow: bool) -> i8 {
+    if narrow { 14 } else { 20 }
+}
+
+/// What keeps a phone's top bar off its edges.
+pub const BAR_MARGIN: egui::Margin = egui::Margin::symmetric(14, 10);
+
 /// How tall a button or a field is at least on a phone, or any touch screen: what a finger taps
 /// without missing.
 pub const FINGER: f32 = 40.0;
@@ -227,6 +254,21 @@ mod tests {
         assert_eq!(fit(1000.0, 190.0, 8.0), 5);
         assert_eq!(fit(380.0, 160.0, 8.0), 2);
         assert_eq!(fit(100.0, 160.0, 8.0), 1, "always one");
+    }
+
+    #[test]
+    fn a_screen_on_its_side_is_short_and_one_upright_is_not() {
+        let at = |width: f32, height: f32| {
+            let ctx = egui::Context::default();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |_| {});
+            output.textures_delta.clear();
+
+            (is_short(&ctx), sidebar_gap(&ctx, 24.0))
+        };
+
+        assert_eq!(at(800.0, 360.0), (true, 8.0));
+        assert_eq!(at(1200.0, 800.0), (false, 24.0));
     }
 
     #[test]

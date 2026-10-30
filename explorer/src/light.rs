@@ -2,7 +2,8 @@
 //! node, follows the chain from the node's headers and justifications, checking every one, and
 //! proves the balances the account page shows, so a node that lies about them is caught. It starts
 //! at a checkpoint pasted in Settings rather than genesis; and the first time it meets a node, at
-//! the node's own finalized one, trusted as far as the genesis it pins then. It proves receipts
+//! the node's own finalized one, trusted as far as the genesis it pins then; and on a node trusted
+//! for fast resume, at that node's finalized checkpoint each launch, and says so. It proves receipts
 //! too, each with its transaction, against the block they landed in: what governance's page checks
 //! each decision by. For a block below the lowest header it holds, it first takes the headers down
 //! to it, which the hash chain proves.
@@ -10,7 +11,7 @@
 use {
     crate::api::{Ask, Failure},
     chainv4::db::{Column, StateProof, address_key},
-    chainv4::light::{Assurance, CheckpointStart, FinalityStep, LightClient, LightError, LightParams, LightRequest, MAX_LIGHT_HEADERS},
+    chainv4::light::{Assurance, CheckpointStart, FinalityStep, LightClient, LightError, LightParams, LightRequest, MAX_LIGHT_HEADERS, may_resume},
     chainv4::structs::account::Account,
     chainv4::structs::address::Address,
     chainv4::structs::block::SealedHeader,
@@ -59,14 +60,18 @@ pub struct Trust<'a> {
     pub node: &'a str,
     pub pinned: &'a mut HashMap<String, String>,
     pub checkpoints: &'a HashMap<String, String>,
+    /// Whether this node is trusted to start the client at its own finalized checkpoint.
+    pub fast_resume: bool,
 }
 
 /// A light client about to start at a checkpoint, from what the node said of its chain.
 struct Starting {
     params: LightParams,
     header: SealedHeader,
-    /// The checkpoint pasted; None for the node's own, on first use.
+    /// The checkpoint pasted; None for the node's own, on first use or on a node trusted for it.
     checkpoint: Option<Hash>,
+    /// Whether it starts there by fast resume, for it to say so.
+    resuming: bool,
 }
 
 #[derive(Default)]
@@ -76,6 +81,10 @@ pub struct Light {
     caught_up_once: bool,
     /// Waiting for what starts the client at a checkpoint.
     starting: Option<Starting>,
+    /// The height it fast-resumed at this time, if it did: what the sidebar and Settings say.
+    pub fast_resumed: Option<u64>,
+    /// When it was first asked for anything, for how long catching up took.
+    began: Option<f64>,
     /// What stopped it: a node on another chain than the one trusted, or one that sent something
     /// that does not check.
     pub trouble: Option<String>,
@@ -157,6 +166,11 @@ impl Light {
         self.client.as_ref().map(|client| client.params().hash)
     }
 
+    /// Where it fast-resumed, in words, if it did: never silently, as it rests on the node's word.
+    pub fn fast_resumed_words(&self) -> Option<String> {
+        self.fast_resumed.map(|at| chainv4_ui::widgets::fast_resumed(&crate::format::thousands(&at.to_string())))
+    }
+
     /// Whether it has every header and justification the node had when last asked.
     pub fn caught_up(&self) -> bool {
         self.client.as_ref().is_some_and(|client| client.next().is_none())
@@ -178,6 +192,12 @@ impl Light {
     pub fn ask(&mut self, time: f64) -> Option<Ask> {
         if self.trouble.is_some() || time < self.retry_at {
             return None;
+        }
+
+        let began = *self.began.get_or_insert(time);
+
+        if self.caught_up() && !self.caught_up_once {
+            log::info!("the light client caught up in {:.1} s{}", time - began, if self.fast_resumed.is_some() { ", fast-resumed" } else { "" });
         }
 
         self.caught_up_once |= self.caught_up();
@@ -369,9 +389,13 @@ impl Light {
 
                 let pasted = trust.checkpoints.get(trust.node).and_then(|text| from_hex(text)).and_then(|bytes| Hash::from_bytes(params.hash, &bytes));
 
-                match (pasted, first_use) {
-                    (Some(checkpoint), _) => self.starting = Some(Starting { params, header, checkpoint: Some(checkpoint) }),
-                    (None, true) => self.starting = Some(Starting { params, header, checkpoint: None }),
+                let resuming = may_resume(trust.fast_resume, params.finality);
+
+                // A checkpoint pasted comes first; then the node's own, on first use or on a node
+                // trusted for it, whose voters' signatures are checked from there; else genesis.
+                match (pasted, first_use || resuming) {
+                    (Some(checkpoint), _) => self.starting = Some(Starting { params, header, checkpoint: Some(checkpoint), resuming: false }),
+                    (None, true) => self.starting = Some(Starting { params, header, checkpoint: None, resuming }),
                     (None, false) => {
                         let trusted = header.id();
                         self.client = Some(LightClient::new(params, header, trusted).map_err(|err| err.to_string())?);
@@ -396,7 +420,10 @@ impl Light {
                 let genesis = starting.header.id();
 
                 match LightClient::from_checkpoint(starting.params.clone(), starting.header.clone(), genesis, block, start) {
-                    Ok(client) => self.client = Some(client),
+                    Ok(client) => {
+                        self.fast_resumed = (starting.resuming && client.final_height() > 0).then(|| client.final_height());
+                        self.client = Some(client);
+                    }
                     Err(err) if starting.checkpoint.is_some() => return Err(format!("the checkpoint trusted does not check: {err}")),
                     Err(_) => {
                         self.starting = Some(starting);
@@ -537,12 +564,20 @@ mod tests {
     use {
         super::*,
         crate::api::{Api, Reply},
+        chainv4::consensus::ConsensusConfig,
+        chainv4::crypto::hashable::Hashable,
+        chainv4::crypto::keypair::Keypair,
+        chainv4::light::LightFinality,
+        chainv4::structs::block::{BlockHeader, Seal},
+        chainv4::structs::hash::HashType,
+        chainv4::structs::u256::u256,
+        serde_json::json,
         std::time::{Duration, Instant},
     };
 
     /// Drives the light client against the node until it is caught up or stops on trouble, and
     /// says what it asked.
-    fn follow(light: &mut Light, node: &str, pinned: &mut HashMap<String, String>) -> Vec<Ask> {
+    fn follow(light: &mut Light, node: &str, pinned: &mut HashMap<String, String>, fast_resume: bool) -> Vec<Ask> {
         let mut api = Api::new(node, Ok(chainv4_ui::net::Client::direct()), egui::Context::default());
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut asked = Vec::new();
@@ -567,7 +602,7 @@ mod tests {
 
             for reply in replies {
                 if let Reply::Answer { ask, result } = reply {
-                    let trust = Trust { node, pinned, checkpoints: &HashMap::new() };
+                    let trust = Trust { node, pinned, checkpoints: &HashMap::new(), fast_resume };
                     light.answered(&ask, &result, trust, u64::MAX / 2, 0.0);
                 }
             }
@@ -582,17 +617,203 @@ mod tests {
         let node = std::env::var("CHAINV4_NODE").expect("CHAINV4_NODE names a node");
         let mut pinned = HashMap::new();
         let mut first = Light::default();
-        let asked = follow(&mut first, &node, &mut pinned);
+        let asked = follow(&mut first, &node, &mut pinned, false);
 
         assert_eq!(asked[..2], [Ask::Light, Ask::Checkpoint(None)]);
         assert!(first.lowest().is_some_and(|lowest| lowest > 0), "{:?}", first.trouble);
 
         // The next launch: the genesis pinned, so from it, checking every block.
         let mut again = Light::default();
-        let asked = follow(&mut again, &node, &mut pinned);
+        let asked = follow(&mut again, &node, &mut pinned, false);
 
         assert!(!asked.iter().any(|ask| matches!(ask, Ask::Checkpoint(_))));
         assert_eq!(again.lowest(), Some(0));
         assert_eq!(again.following().map(|(tip, _)| tip >= first.following().unwrap().0), Some(true));
+    }
+
+    #[test]
+    #[ignore = "needs a node with voting finality: CHAINV4_NODE=https://… cargo test --lib a_trusted_node_met_before -- --ignored"]
+    fn a_trusted_node_met_before_starts_the_light_client_at_its_checkpoint_and_says_so() {
+        let node = std::env::var("CHAINV4_NODE").expect("CHAINV4_NODE names a node");
+        let mut pinned = HashMap::new();
+        follow(&mut Light::default(), &node, &mut pinned, false);
+
+        let mut resumed = Light::default();
+        let asked = follow(&mut resumed, &node, &mut pinned, true);
+
+        assert_eq!(asked[..2], [Ask::Light, Ask::Checkpoint(None)]);
+        assert!(resumed.fast_resumed_words().is_some() && resumed.trouble.is_none(), "{:?}", resumed.trouble);
+    }
+
+    /// Answers to a light client of a made-up chain with this finality, a node met before.
+    struct Met {
+        light: Light,
+        finality: Option<LightFinality>,
+        genesis: SealedHeader,
+        pinned: HashMap<String, String>,
+        checkpoints: HashMap<String, String>,
+        trusted: bool,
+    }
+
+    const VOTES: LightFinality = LightFinality::Authority { checkpoint_interval: 8, fixed_ahead: 2 };
+
+    fn params(finality: Option<LightFinality>) -> LightParams {
+        LightParams {
+            hash: HashType::default_chain(),
+            consensus: ConsensusConfig::Authority { key: Keypair::from_seed([7; 32]).public(), slot_ms: 1_000 },
+            finality,
+            pow_window: None,
+            governance: None,
+        }
+    }
+
+    /// A header of a made-up chain, linked to the one below: nothing here checks their seals.
+    fn header(height: u64, parent: Hash) -> SealedHeader {
+        let zero = Hash::zero(HashType::default_chain());
+
+        SealedHeader {
+            header: BlockHeader {
+                parent,
+                height,
+                timestamp: height * 1_000,
+                producer: Address::Ed25519([0; 32]),
+                difficulty: 0,
+                tx_root: zero,
+                proof_root: zero,
+                pool_root: zero,
+                receipts_root: zero,
+                state_root: zero,
+                gas_used: 0,
+                base_price: u256::ZERO,
+            },
+            seal: Seal::None,
+        }
+    }
+
+    fn encoded<T: wincode::SchemaWrite<wincode::config::DefaultConfig, Src = T>>(value: &T) -> String {
+        to_hex(&wincode::serialize(value).unwrap())
+    }
+
+    impl Met {
+        fn new(finality: Option<LightFinality>, trusted: bool) -> Met {
+            let mut genesis = header(0, Hash::zero(HashType::default_chain()));
+            genesis.header.proof_root = params(finality).hash(HashType::default_chain());
+            let pinned = HashMap::from([("http://node".to_string(), genesis.id().to_string())]);
+
+            Met { light: Light::default(), finality, genesis, pinned, checkpoints: HashMap::new(), trusted }
+        }
+
+        fn answer(&mut self, ask: Ask, answer: Result<Value, Failure>) {
+            let trust = Trust { node: "http://node", pinned: &mut self.pinned, checkpoints: &self.checkpoints, fast_resume: self.trusted };
+
+            assert!(self.light.answered(&ask, &answer, trust, u64::MAX / 2, 0.0));
+        }
+
+        /// Asks where to start, and answers.
+        fn light(&mut self) {
+            assert_eq!(self.light.ask(0.0), Some(Ask::Light));
+            let answer = json!({ "params": encoded(&params(self.finality)), "header": encoded(&self.genesis) });
+            self.answer(Ask::Light, Ok(answer));
+        }
+
+        /// What a node starts a client from at the checkpoint opening this epoch.
+        fn checkpoint_at(&mut self, epoch: u64) {
+            assert_eq!(self.light.ask(0.0), Some(Ask::Checkpoint(None)));
+            let height = epoch * 8;
+            let (_, from) = chainv4::light::checkpoint_start(self.finality, height).unwrap();
+            let mut headers = vec![header(from, self.genesis.id())];
+
+            for at in from + 1..=height {
+                let below = headers.last().unwrap().id();
+                headers.push(header(at, below));
+            }
+
+            let block = headers.last().unwrap().id();
+            let start = CheckpointStart { updates: vec![None; ((height - from) / 8 + 1) as usize], headers };
+            self.answer(Ask::Checkpoint(None), Ok(json!({ "checkpoint": { "block": block.to_string() }, "start": encoded(&start) })));
+        }
+    }
+
+    fn failed(status: u16) -> Result<Value, Failure> {
+        Err(Failure { status, message: "no".to_string() })
+    }
+
+    #[test]
+    fn with_the_switch_off_a_node_met_before_is_walked_from_genesis_and_nothing_is_said() {
+        let mut met = Met::new(Some(VOTES), false);
+        met.light();
+
+        assert!(matches!(met.light.ask(0.0), Some(Ask::Headers { from: 1, .. })));
+        assert_eq!(met.light.lowest(), Some(0));
+        assert_eq!(met.light.fast_resumed_words(), None);
+    }
+
+    #[test]
+    fn on_a_trusted_node_it_starts_at_the_nodes_checkpoint_says_so_and_follows_on_from_there() {
+        let mut met = Met::new(Some(VOTES), true);
+        met.light();
+        met.checkpoint_at(100);
+
+        assert_eq!(met.light.following(), Some((800, 800)));
+        assert_eq!(met.light.fast_resumed_words().as_deref(), Some("Fast-resumed at block 800, on this node's word"));
+        assert!(met.light.trouble.is_none(), "{:?}", met.light.trouble);
+        assert!(matches!(met.light.ask(0.0), Some(Ask::Headers { from: 801, .. })), "headers checked from there on");
+    }
+
+    #[test]
+    fn under_depth_finality_or_none_a_trusted_node_is_walked_and_asked_no_checkpoint() {
+        for finality in [Some(LightFinality::Depth { depth: 10 }), None] {
+            let mut met = Met::new(finality, true);
+            met.light();
+
+            assert!(matches!(met.light.ask(0.0), Some(Ask::Headers { from: 1, .. })), "{finality:?}");
+            assert_eq!(met.light.fast_resumed, None);
+        }
+    }
+
+    #[test]
+    fn a_trusted_node_with_no_checkpoint_to_give_is_walked_from_genesis() {
+        let mut met = Met::new(Some(VOTES), true);
+        met.light();
+        assert_eq!(met.light.ask(0.0), Some(Ask::Checkpoint(None)));
+        met.answer(Ask::Checkpoint(None), failed(404));
+
+        assert_eq!(met.light.lowest(), Some(0));
+        assert_eq!(met.light.fast_resumed, None);
+    }
+
+    #[test]
+    fn the_genesis_pinned_still_stops_a_trusted_node_on_another_chain() {
+        let mut met = Met::new(Some(VOTES), true);
+        met.pinned.insert("http://node".to_string(), Hash::zero(HashType::default_chain()).to_string());
+        met.light();
+
+        assert!(met.light.trouble.as_deref().is_some_and(|why| why.contains("not ")), "{:?}", met.light.trouble);
+        assert_eq!(met.light.ask(100.0), None, "and it stops there");
+    }
+
+    #[test]
+    fn a_checkpoint_pasted_comes_first_on_a_trusted_node_and_is_no_fast_resume() {
+        let mut met = Met::new(Some(VOTES), true);
+        let wanted = header(8, met.genesis.id()).id();
+        met.checkpoints.insert("http://node".to_string(), wanted.to_string());
+        met.light();
+
+        assert_eq!(met.light.ask(0.0), Some(Ask::Checkpoint(Some(wanted.to_string()))));
+        assert_eq!(met.light.fast_resumed, None);
+    }
+
+    #[test]
+    fn settings_from_before_fast_resume_trust_no_node_for_it() {
+        let old: crate::views::Settings = serde_json::from_str(r#"{ "node": "http://mine", "light_theme": true }"#).unwrap();
+
+        assert!(old.fast_resume.is_empty());
+
+        let mut set = old;
+        set.fast_resume.insert("http://mine".to_string(), true);
+        let kept: crate::views::Settings = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+
+        assert_eq!(kept.fast_resume.get("http://mine"), Some(&true));
+        assert_eq!(kept.fast_resume.get("http://other"), None, "per node");
     }
 }

@@ -162,7 +162,7 @@ fn miners(ui: &mut Ui, ctx: &mut Ctx, pool: &PoolView) {
             ui.label(ctx.coins(&miner.earned));
             ui.label(RichText::new(ctx.coins(&miner.claimed)).color(palette.muted));
             ui.label(RichText::new(ctx.coins(&miner.claimable)).strong());
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }
@@ -235,7 +235,7 @@ fn blocks_list(ui: &mut Ui, ctx: &mut Ctx, blocks: &[PoolBlock], miner: Option<&
                 }
             }
 
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }
@@ -307,7 +307,7 @@ fn lookup(ui: &mut Ui, ctx: &mut Ctx, page: &mut PoolPage) {
         facts.text("claimed", ctx.coins(&standing.claimed));
         facts.row("claimable", |ui| {
             ui.label(RichText::new(ctx.coins(&standing.claimable)).strong().color(palette.good));
-            ui.label(RichText::new("with chainv4 claim --key FILE, or once the pool pushes it").color(palette.muted));
+            widgets::flagged_label(ui, "with chainv4 claim --key FILE, or once the pool pushes it", egui::TextStyle::Body, palette.muted);
         });
     });
 
@@ -353,7 +353,7 @@ fn workers(ui: &mut Ui, look: Look, workers: &[PoolWorker]) {
             ui.monospace(format::hashrate(worker.rate));
             ui.monospace(format::thousands(&worker.shares.to_string()));
             ui.monospace(format::thousands(&worker.share_difficulty));
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }

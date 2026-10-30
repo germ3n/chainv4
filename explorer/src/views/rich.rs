@@ -275,7 +275,7 @@ fn richest(ui: &mut Ui, ctx: &mut Ctx, rich: &RichList, supply: Option<&SupplyVi
             super::address(ui, ctx, &holder.address);
             ui.label(ctx.coins(&holder.balance)).on_hover_text(format!("{} units", holder.balance));
             ui.monospace(share);
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }

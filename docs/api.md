@@ -543,7 +543,9 @@ does not take.
 
 On a node that takes workers, `--mining`; 404 otherwise. `GET /mining` tells the apps where to mine
 for it: the mining port's `port`, where it is reached from outside, `public` (`--mining-public`, or
-`null` for the API's own host), the `protocol` it speaks, whether it runs a `pool` (with its `fee`,
+`null` for the API's own host), where through Tor, `onion` (`--mining-onion`, or the onion in
+`--onion-file` once tor has made it with `--mining-onion-port`; `null` otherwise), which an app that
+reaches the node at its onion takes over `public`, the `protocol` it speaks, whether it runs a `pool` (with its `fee`,
 in parts of a billion, and `window`), takes workers mining alone (`solo`, `--mining-solo`) and takes
 anyone (`open`, `--mining-open`, whose workers prove the open token), the `ws` path below and how
 many `workers` are connected, or `null` when the node keeps its workers to itself.

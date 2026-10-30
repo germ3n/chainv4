@@ -1,6 +1,7 @@
-//! A look: a palette of colors, a typeface and a density, which each app picks for itself. Applying
-//! one dresses egui in it: its panels and widgets, its text sizes and spacing, and the radius and
-//! margin the widgets here take for cards.
+//! The look both apps share, the wiki's: its palette, dark or light, and its type, Manrope for text,
+//! JetBrains Mono for addresses, hashes and numbers, and Newsreader for page titles and the big
+//! numbers. Each app picks only how dense it is. Applying a look dresses egui in it: its panels and
+//! widgets, its text sizes and spacing, and the radius and margin the widgets here take for cards.
 
 use {
     egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Stroke, TextStyle, Vec2, vec2},
@@ -79,7 +80,8 @@ impl Density {
         margin: 20,
     };
 
-    /// Tight: many things at once, to be scanned, as the explorer shows them.
+    /// Tight: many things at once, to be scanned, as the explorer shows them. Text a little smaller and
+    /// less room between things, in the same cards with the same corners.
     pub const COMPACT: Density = Density {
         spacing: vec2(8.0, 5.0),
         button_padding: vec2(10.0, 4.0),
@@ -88,37 +90,72 @@ impl Density {
         body: 13.5,
         button: 13.0,
         mono: 12.5,
-        heading: 20.0,
-        radius: 6,
-        margin: 12,
+        heading: 22.0,
+        radius: 12,
+        margin: 14,
     };
 }
 
-/// The fonts a look is set in.
-#[derive(Clone, Copy, Debug)]
-pub struct Typeface {
-    pub text: &'static [u8],
-    pub semibold: &'static [u8],
-    pub mono: &'static [u8],
-    /// For titles and big numbers; the semibold face when None.
-    pub display: Option<&'static [u8]>,
-}
+pub const DARK: Palette = Palette {
+    paper: Color32::from_rgb(0x0c, 0x0d, 0x10),
+    nav: Color32::from_rgb(0x0f, 0x10, 0x13),
+    card: Color32::from_rgb(0x14, 0x16, 0x1a),
+    row: Color32::from_rgb(0x1b, 0x1d, 0x22),
+    line: Color32::from_rgb(0x24, 0x26, 0x2b),
+    ink: Color32::from_rgb(0xec, 0xe8, 0xe1),
+    soft: Color32::from_rgb(0xc4, 0xc0, 0xb7),
+    muted: Color32::from_rgb(0x86, 0x83, 0x7c),
+    heading: Color32::from_rgb(0xa7, 0xa3, 0x9a),
+    accent: Color32::from_rgb(0xd6, 0xaa, 0x62),
+    on_accent: Color32::from_rgb(0x15, 0x12, 0x0c),
+    good: Color32::from_rgb(0xa3, 0xc9, 0x9c),
+    warn: Color32::from_rgb(0xe8, 0xb8, 0x72),
+    bad: Color32::from_rgb(0xec, 0x8d, 0x8d),
+    dark: true,
+};
 
-/// Loads a typeface, each face falling back to egui's own fonts for anything it lacks.
-pub fn install_fonts(ctx: &egui::Context, typeface: &Typeface) {
+pub const LIGHT: Palette = Palette {
+    paper: Color32::from_rgb(0xf8, 0xf5, 0xef),
+    nav: Color32::from_rgb(0xf3, 0xef, 0xe7),
+    card: Color32::from_rgb(0xff, 0xfd, 0xf9),
+    row: Color32::from_rgb(0xeb, 0xe5, 0xd8),
+    line: Color32::from_rgb(0xe2, 0xdc, 0xcf),
+    ink: Color32::from_rgb(0x1d, 0x1b, 0x17),
+    soft: Color32::from_rgb(0x46, 0x42, 0x3a),
+    muted: Color32::from_rgb(0x7b, 0x76, 0x6b),
+    heading: Color32::from_rgb(0x6a, 0x65, 0x5b),
+    accent: Color32::from_rgb(0x98, 0x68, 0x1b),
+    on_accent: Color32::from_rgb(0xff, 0xfd, 0xf9),
+    good: Color32::from_rgb(0x3f, 0x7a, 0x3a),
+    warn: Color32::from_rgb(0xa8, 0x63, 0x1a),
+    bad: Color32::from_rgb(0xb2, 0x3b, 0x3b),
+    dark: false,
+};
+
+/// Loads the look's fonts, whose licences are in assets/fonts. These are small Latin subsets: each
+/// family falls back on egui's own fonts for what it lacks, the arrows among them, which only its
+/// mono face has, so that no text draws one as nothing.
+pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     let mut add = |name: &str, bytes: &'static [u8]| {
         fonts.font_data.insert(name.to_string(), Arc::new(FontData::from_static(bytes)));
     };
 
-    add("text", typeface.text);
-    add("semibold", typeface.semibold);
-    add("mono", typeface.mono);
-    add("display", typeface.display.unwrap_or(typeface.semibold));
+    add("text", include_bytes!("../assets/fonts/Manrope-Regular.ttf"));
+    add("semibold", include_bytes!("../assets/fonts/Manrope-Semibold.ttf"));
+    add("mono", include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"));
+    add("display", include_bytes!("../assets/fonts/Newsreader-Regular.ttf"));
 
     let fallback = |fonts: &FontDefinitions, family: FontFamily| fonts.families.get(&family).cloned().unwrap_or_default();
-    let proportional = fallback(&fonts, FontFamily::Proportional);
     let monospace = fallback(&fonts, FontFamily::Monospace);
+    let mut proportional = fallback(&fonts, FontFamily::Proportional);
+
+    for font in &monospace {
+        if !proportional.contains(font) {
+            proportional.push(font.clone());
+        }
+    }
+
     let with = |first: &str, rest: &[String]| [first.to_string()].into_iter().chain(rest.iter().cloned()).collect::<Vec<_>>();
 
     fonts.families.insert(FontFamily::Proportional, with("text", &proportional));
@@ -186,6 +223,35 @@ pub fn apply(ctx: &egui::Context, palette: &Palette, density: &Density) {
 mod tests {
     use super::*;
 
+    /// How far the two are apart in lightness, by the WCAG's measure, 1 to 21.
+    fn contrast(one: Color32, other: Color32) -> f32 {
+        let lightness = |color: Color32| {
+            let [red, green, blue] = [color.r(), color.g(), color.b()].map(|channel| {
+                let channel = f32::from(channel) / 255.0;
+
+                if channel <= 0.04045 { channel / 12.92 } else { ((channel + 0.055) / 1.055).powf(2.4) }
+            });
+
+            0.2126 * red + 0.7152 * green + 0.0722 * blue
+        };
+        let (light, dark) = (lightness(one).max(lightness(other)), lightness(one).min(lightness(other)));
+
+        (light + 0.05) / (dark + 0.05)
+    }
+
+    #[test]
+    fn text_reads_in_both_palettes() {
+        for palette in [DARK, LIGHT] {
+            for ground in [palette.paper, palette.nav, palette.card] {
+                assert!(contrast(palette.ink, ground) >= 7.0, "{palette:?}");
+                assert!(contrast(palette.soft, ground) >= 4.5, "{palette:?}");
+                assert!(contrast(palette.muted, ground) >= 3.0, "{palette:?}");
+            }
+
+            assert!(contrast(palette.on_accent, palette.accent) >= 4.5, "{palette:?}");
+        }
+    }
+
     #[test]
     fn a_look_sets_the_spacing_and_sizes_cards_take() {
         let ctx = egui::Context::default();
@@ -209,8 +275,8 @@ mod tests {
         apply(&ctx, &palette, &Density::COMPACT);
         let style = ctx.style_of(egui::Theme::Dark);
 
-        assert_eq!(style.spacing.window_margin, Margin::same(12));
-        assert_eq!(style.visuals.window_corner_radius, CornerRadius::same(6));
+        assert_eq!(style.spacing.window_margin, Margin::same(Density::COMPACT.margin));
+        assert_eq!(style.visuals.window_corner_radius, CornerRadius::same(Density::COMFORTABLE.radius), "the same corners, however dense");
         assert_eq!(style.visuals.panel_fill, Color32::BLACK);
         assert_eq!(style.text_styles[&TextStyle::Body].size, 13.5);
         assert_eq!(ctx.theme(), egui::Theme::Dark);

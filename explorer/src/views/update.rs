@@ -141,7 +141,7 @@ pub fn notice(ui: &mut Ui, look: Look, state: &mut UpdateState) -> bool {
     egui::Frame::new()
         .fill(palette.accent.gamma_multiply(0.12))
         .stroke(egui::Stroke::new(1.0, palette.accent.gamma_multiply(0.5)))
-        .corner_radius(6.0)
+        .corner_radius(ui.visuals().widgets.inactive.corner_radius)
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

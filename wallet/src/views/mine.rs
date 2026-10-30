@@ -147,15 +147,31 @@ fn pauses(phone: bool, on_battery: bool, charging: Option<bool>) -> bool {
     phone && !on_battery && charging == Some(false)
 }
 
-/// Where the mining port is reached: the address GET /mining says the node publishes it at, else
-/// the node's own host with the port; None for an answer without a port or a URL without a host.
+/// Where the mining port is reached: on a node reached at its onion, the onion's port if GET /mining
+/// names one, as a wallet that came through Tor should not be sent to the node's public address.
+/// Otherwise the address it says the node publishes the port at, else the node's own host with the
+/// port; None for an answer without a port or a URL without a host.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) fn port_address(mining: &Value, node: &str) -> Option<String> {
-    if let Some(public) = mining["public"].as_str().map(str::trim).filter(|public| !public.is_empty()) {
-        return Some(public.to_string());
+    let said = |name: &str| mining[name].as_str().map(str::trim).filter(|said| !said.is_empty()).map(str::to_string);
+    let host = node_host(node);
+
+    if let Some(onion) = said("onion").filter(|_| host.as_deref().is_some_and(|host| host.to_ascii_lowercase().ends_with(".onion"))) {
+        return Some(onion);
+    }
+
+    if let Some(public) = said("public") {
+        return Some(public);
     }
 
     let port = mining["port"].as_u64().filter(|port| (1..=u64::from(u16::MAX)).contains(port))?;
+
+    host.map(|host| format!("{host}:{port}"))
+}
+
+/// The host of a node's URL; None for one without.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn node_host(node: &str) -> Option<String> {
     let rest = node.trim().split_once("://").map_or(node.trim(), |(_, rest)| rest);
     let authority = rest.split(['/', '?', '#']).next()?;
     let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
@@ -165,7 +181,7 @@ pub(super) fn port_address(mining: &Value, node: &str) -> Option<String> {
         None => authority.split(':').next()?.to_string(),
     };
 
-    (!host.is_empty() && host != "[]").then(|| format!("{host}:{port}"))
+    (!host.is_empty() && host != "[]").then_some(host)
 }
 
 /// The WebSocket a browser mines over: the node's URL with http:// made ws:// and https:// made
@@ -548,6 +564,16 @@ mod tests {
         assert_eq!(port_address(&said(Value::Null), "abcdef.onion:8080").as_deref(), Some("abcdef.onion:4002"));
         assert_eq!(port_address(&json!({ "public": null }), "http://node"), None, "no port said");
         assert_eq!(port_address(&said(Value::Null), "http://"), None, "no host");
+
+        // Over Tor: the onion's port on a node reached at its onion, and only there.
+        let both = json!({ "port": 4002, "public": "203.0.113.7:4002", "onion": "abcdef.onion:4100" });
+        assert_eq!(port_address(&both, "http://abcdef.onion").as_deref(), Some("abcdef.onion:4100"));
+        assert_eq!(port_address(&both, "http://ABCDEF.ONION:8080/").as_deref(), Some("abcdef.onion:4100"));
+        assert_eq!(port_address(&both, "https://node.example").as_deref(), Some("203.0.113.7:4002"), "not over Tor");
+        assert_eq!(port_address(&json!({ "port": 4002, "onion": "abcdef.onion:4100" }), "http://203.0.113.7:8080").as_deref(), Some("203.0.113.7:4002"));
+        // An older node says no onion: as before.
+        assert_eq!(port_address(&said(json!("203.0.113.7:4002")), "http://abcdef.onion").as_deref(), Some("203.0.113.7:4002"));
+        assert_eq!(port_address(&json!({ "port": 4002, "public": null, "onion": "" }), "http://abcdef.onion").as_deref(), Some("abcdef.onion:4002"));
     }
 
     #[test]

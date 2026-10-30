@@ -266,7 +266,7 @@ fn latest(ui: &mut Ui, ctx: &mut Ctx, recent: &[&Summary]) {
                 ui.monospace(block.tx_count.to_string());
                 super::address(ui, ctx, &block.producer);
                 ui.label(RichText::new(format::ago(block.timestamp, ctx.now)).color(look.palette.muted));
-                ui.end_row();
+                super::row_end(ui);
             }
         });
     });

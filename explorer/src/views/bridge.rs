@@ -452,7 +452,7 @@ fn evm_bridge(ui: &mut Ui, ctx: &mut Ctx, gateway: &str) {
                     ui.label(kind_name(asset.kind));
                     ui.label(chain(ctx, asset.origin));
                     super::tx(ui, ctx, &asset.tx);
-                    ui.end_row();
+                    super::row_end(ui);
                 }
             });
         }
@@ -508,7 +508,7 @@ fn transfers_table(ui: &mut Ui, ctx: &mut Ctx, gateway: &str, crossings: &[Cross
             ui.monospace(nonce);
             ui.colored_label(color, state);
             super::tx(ui, ctx, crossing.done_in.as_deref().unwrap_or(&crossing.tx));
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }
@@ -766,7 +766,7 @@ fn held_table(ui: &mut Ui, ctx: &mut Ctx, gateway: &str, held: &[Held]) {
 
             ui.monospace(utxo.version.to_string());
             ui.label(&utxo.state);
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }
@@ -792,7 +792,7 @@ fn deposits(ui: &mut Ui, ctx: &mut Ctx, gateway: &str, events: &[FoundEvent]) {
             ui.monospace(btc(&event.data.get(2).map(Argument::text).unwrap_or_default()));
             super::address(ui, ctx, &event.data.get(3).map(Argument::text).unwrap_or_default());
             super::tx(ui, ctx, &event.tx);
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }
@@ -847,7 +847,7 @@ fn withdrawals(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &st
             };
             ui.colored_label(color, standing);
             super::tx(ui, ctx, tx);
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }
@@ -894,7 +894,7 @@ fn releases(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &str) 
                 }
             }
 
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }
@@ -960,7 +960,7 @@ pub fn release(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, id: u64) {
                     }
                 }
 
-                ui.end_row();
+                super::row_end(ui);
             }
         });
     });
@@ -975,7 +975,7 @@ pub fn release(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, id: u64) {
                 ui.monospace(format::short(&to)).on_hover_text(&to);
                 ui.monospace(btc(&output.value.to_string()));
                 ui.label(release.withdrawals.get(index).map_or_else(|| "change, to the federation".to_string(), |withdrawal| format!("withdrawal #{withdrawal}")));
-                ui.end_row();
+                super::row_end(ui);
             }
         });
     });

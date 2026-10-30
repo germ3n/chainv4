@@ -165,6 +165,7 @@ struct Api {
     in_flight: Arc<InFlight>,
     /// Where workers reach the mining port from outside, as GET /mining says.
     mining_public: Option<Arc<String>>,
+    mining_onion: Option<Arc<MiningOnion>>,
     /// What it shares of itself, and the token that shows everything.
     sharing: sharing::Sharing,
     report_token: Option<Arc<Vec<u8>>>,
@@ -320,6 +321,29 @@ impl Api {
     }
 }
 
+#[document(summary = "Where the node's mining port is reached through Tor.", category = "Node", see_also = "ApiOptions")]
+#[derive(Clone, Debug)]
+pub enum MiningOnion {
+    #[document(summary = "At this host:port, as --mining-onion gives it.")]
+    At(String),
+    #[document(summary = "On this port of the onion tor writes into this file, as --onion-file reads it, for a node started before tor made it: --mining-onion-port.")]
+    InFile {
+        file: std::path::PathBuf,
+        port: u16,
+    },
+}
+
+impl MiningOnion {
+    #[document(parent = "MiningOnion", summary = "The host:port as it stands: None while tor has not made the onion yet.")]
+    pub fn address(&self) -> Option<String> {
+        match self {
+            MiningOnion::At(at) => Some(at.clone()),
+            MiningOnion::InFile { file, port } => Some(format!("{}:{port}", crate::net::tor::onion_host(&crate::net::tor::read_onion(file)?)?)),
+        }
+    }
+}
+
+
 #[document(
     summary = "What an API serves besides the chain, and to which web pages.",
     category = "Node",
@@ -354,6 +378,8 @@ pub struct ApiOptions {
     pub releases: Option<Arc<crate::node::Releases>>,
     #[document(summary = "Where workers reach the node's mining port from outside, --mining-public, as GET /mining tells the apps; None for them to take the API's host.")]
     pub mining_public: Option<String>,
+    #[document(summary = "Where workers reach the node's mining port through Tor, as GET /mining tells the apps that reach it at its onion; None for no such port.")]
+    pub mining_onion: Option<MiningOnion>,
     #[document(summary = "What it shares of itself with whoever asks: by default, all but the addresses of its peers, its workers and itself, and its workers' names.")]
     pub sharing: sharing::Sharing,
     #[document(summary = "The token that shows everything to whoever bears it, --report-token; None for nobody off this machine to see it.")]
@@ -458,6 +484,7 @@ pub fn start(
                     releases: options.releases,
                     in_flight: Arc::new(InFlight { per_ip, counts: Default::default() }),
                     mining_public: options.mining_public.map(Arc::new),
+                    mining_onion: options.mining_onion.map(Arc::new),
                     sharing: options.sharing,
                     report_token: options.report_token.map(Arc::new),
                 })

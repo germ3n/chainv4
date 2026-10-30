@@ -163,7 +163,7 @@ impl log::Log for StdErr {
 /// An app on iOS: its clipboard, and the swipe back.
 struct OnIos {
     inner: Box<dyn eframe::App>,
-    /// The bar a held finger brings up over a text field, and the Paste button over the keyboard.
+    /// The bar a held finger or a second tap brings up over a text field.
     editing: Editing,
     /// Where a touch began at the left edge, for a swipe back, until it lifts or is one.
     swipe: Option<egui::Pos2>,
@@ -254,8 +254,7 @@ impl eframe::App for OnIos {
         self.inner.ui(ui, frame);
 
         let ctx = ui.ctx().clone();
-        let keyboard = ctx.egui_wants_keyboard_input();
-        self.editing.show(&ctx, keyboard, &mut Pasteboard);
+        self.editing.show(&ctx, &mut Pasteboard);
         Self::copy(&ctx);
         self.check_power(&ctx);
     }

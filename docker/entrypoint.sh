@@ -26,6 +26,8 @@
 #   MINING_OPEN      1 opens the port to anyone with a payout address, no token: with POOL or
 #                    MINING_SOLO, which the node needs beside it
 #   MINING_PUBLIC    where workers reach the port from outside, host:port, as GET /mining says
+#   TOR_MINING       1, with TOR=1, offers the port at the onion too, on MINING_PORT: GET /mining
+#                    names it as soon as tor has made the onion, for apps that reach the node there
 #   REPORT           what the node shares of itself with whoever asks: public unless set, or
 #                    full or minimal
 #   HIDE, SHOW       fields to keep or share on top of it, separated by commas
@@ -163,6 +165,7 @@ case "$blocks" in
         fi
 
         if [ "$port" = 1 ] && [ -n "${MINING_PUBLIC:-}" ]; then set -- "$@" --mining-public "$MINING_PUBLIC"; fi
+        if [ "$port" = 1 ] && [ "${TOR:-0}" = 1 ] && [ "${TOR_MINING:-0}" = 1 ]; then set -- "$@" --mining-onion-port "${MINING_PORT:-4002}"; fi
 
         if [ "$pool" = 1 ]; then
             set -- "$@" --pool --pool-fee "${POOL_FEE:-0}" --pool-window "${POOL_WINDOW:-2}"

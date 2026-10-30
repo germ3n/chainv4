@@ -200,6 +200,9 @@ pub struct Settings {
     /// The report token of each node that has one, by its address: GET /node shares everything
     /// with its bearer.
     pub report_tokens: HashMap<String, String>,
+    /// The nodes trusted to start the light client at their own finalized checkpoint each launch,
+    /// rather than it walking the chain from genesis.
+    pub fast_resume: HashMap<String, bool>,
     /// The light palette rather than the dark one.
     pub light_theme: bool,
     /// The chain's name as each node last gave it, for the header before the node answers.
@@ -343,16 +346,7 @@ pub fn balance_of(token: &str, holder: &str) -> Ask {
 
 /// A page's heading: its title, pills beside it, and what it is about under it.
 pub fn heading(ui: &mut Ui, look: Look, title: &str, about: &str, pills: impl FnOnce(&mut Ui)) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(widgets::strong(title, if look.narrow { 19.0 } else { 22.0 }).color(look.palette.ink));
-        pills(ui);
-    });
-
-    if !about.is_empty() {
-        ui.label(RichText::new(about).color(look.palette.muted));
-    }
-
-    ui.add_space(10.0);
+    widgets::title_with(ui, &look.palette, title, about, pills);
 }
 
 /// A card with a heading in capitals: one part of a page.
@@ -362,22 +356,19 @@ pub fn section<R>(ui: &mut Ui, look: Look, title: &str, add: impl FnOnce(&mut Ui
 
 /// A section with something on the right of its heading: a link, a filter, a count.
 pub fn section_with<R>(ui: &mut Ui, look: Look, title: &str, right: impl FnOnce(&mut Ui), add: impl FnOnce(&mut Ui) -> R) -> R {
-    let inner = widgets::card(ui, &look.palette, |ui| {
+    widgets::page_card(ui, &look.palette, |ui| {
         ui.horizontal(|ui| {
             widgets::caps(ui, &look.palette, title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), right);
         });
         ui.add_space(4.0);
         add(ui)
-    });
-    ui.add_space(10.0);
-
-    inner
+    })
 }
 
-/// A note in a section, muted.
+/// A note in a section, muted, with a command's flags in the mono face.
 pub fn note(ui: &mut Ui, look: Look, text: impl Into<String>) {
-    ui.add(egui::Label::new(RichText::new(text.into()).color(look.palette.muted)).wrap());
+    widgets::flagged_label(ui, &text.into(), egui::TextStyle::Body, look.palette.muted);
 }
 
 // Facts: a label beside each value on a wide screen, above it on a phone.
@@ -425,6 +416,7 @@ pub fn facts(ui: &mut Ui, look: Look, id: &str, add: impl FnOnce(&mut Facts)) {
         }
         false => {
             egui::Grid::new(id)
+                .striped(false)
                 .num_columns(2)
                 .spacing([18.0, 6.0])
                 .min_col_width(110.0)
@@ -443,17 +435,29 @@ pub const NO_DRAG: egui::containers::scroll_area::ScrollSource = egui::container
     mouse_wheel: true,
 };
 
-/// A table with headings in capitals, striped. For a wide screen; a phone gets rows. One wider than
-/// the page scrolls across by its bar, never by a drag, so a finger dragging over it still scrolls
-/// the page.
+/// Ends a row of a table, with the look's hairline under it, across the card.
+pub fn row_end(ui: &mut Ui) {
+    let (drawn, room) = (ui.min_rect(), ui.max_rect());
+    let y = drawn.bottom() + ui.spacing().item_spacing.y.max(TABLE_ROW_GAP) / 2.0;
+    let color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    ui.painter().hline(drawn.left()..=room.right().max(drawn.right()), y, egui::Stroke::new(1.0, color));
+    ui.end_row();
+}
+
+/// The gap between a table's rows, which their hairlines run down the middle of.
+const TABLE_ROW_GAP: f32 = 8.0;
+
+/// A table with headings in capitals, a hairline under each row. For a wide screen; a phone gets
+/// rows. One wider than the page scrolls across by its bar, never by a drag, so a finger dragging
+/// over it still scrolls the page.
 pub fn table(ui: &mut Ui, look: Look, id: impl std::hash::Hash + std::fmt::Debug, headings: &[&str], rows: impl FnOnce(&mut Ui)) {
     egui::ScrollArea::horizontal().id_salt(("table", ui.scope_id(), &id)).scroll_source(NO_DRAG).show(ui, |ui| {
-        egui::Grid::new(id).striped(true).spacing([14.0, 6.0]).num_columns(headings.len()).show(ui, |ui| {
+        egui::Grid::new(id).striped(false).spacing([14.0, TABLE_ROW_GAP]).num_columns(headings.len()).show(ui, |ui| {
             for heading in headings {
                 widgets::caps(ui, &look.palette, heading);
             }
 
-            ui.end_row();
+            row_end(ui);
             rows(ui);
         });
     });
@@ -732,7 +736,7 @@ pub fn tx_list(ui: &mut Ui, ctx: &mut Ctx, id: &str, lines: &[TxLine]) {
                 }
             }
 
-            ui.end_row();
+            row_end(ui);
         }
     });
 }
@@ -845,7 +849,16 @@ pub fn json_tree(ui: &mut Ui, ctx: &mut Ctx, name: &str, value: &Value) {
 /// A page drawn once, headless, at a screen width, for tests: the text it drew, and what it asked
 /// the node.
 #[cfg(test)]
-pub(crate) fn render(store: &Store, light: &mut crate::light::Light, width: f32, mut draw: impl FnMut(&mut Ui, &mut Ctx)) -> (String, Vec<Ask>) {
+pub(crate) fn render(store: &Store, light: &mut crate::light::Light, width: f32, draw: impl FnMut(&mut Ui, &mut Ctx)) -> (String, Vec<Ask>) {
+    let (shown, asked) = render_frames(store, light, width, 1, draw);
+
+    (shown.into_iter().map(|(text, _)| text + "\n").collect(), asked)
+}
+
+/// A page drawn some frames, headless, at a screen width, as one settles once what it drew last is
+/// known, for tests: each text the last frame drew and where, and what it asked the node.
+#[cfg(test)]
+pub(crate) fn render_frames(store: &Store, light: &mut crate::light::Light, width: f32, frames: usize, mut draw: impl FnMut(&mut Ui, &mut Ctx)) -> (Vec<(String, egui::Rect)>, Vec<Ask>) {
     let mut api = Api::new("http://127.0.0.1:1", Err("offline".to_string()), egui::Context::default());
     let mut settings = Settings::default();
     let mut go = None;
@@ -855,18 +868,23 @@ pub(crate) fn render(store: &Store, light: &mut crate::light::Light, width: f32,
         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 2_000.0))),
         ..egui::RawInput::default()
     };
-    let mut output = egui::Context::default().run_ui(input, |ui| {
-        let mut ctx = Ctx { store, light: &mut *light, api: &mut api, go: &mut go, settings: &mut settings, now: 2_000, look };
-        draw(ui, &mut ctx);
-    });
-    output.textures_delta.clear();
-    let mut text = String::new();
+    let context = egui::Context::default();
+    let mut shown = Vec::new();
 
-    for clipped in &output.shapes {
-        if let egui::epaint::Shape::Text(shape) = &clipped.shape {
-            text.push_str(shape.galley.text());
-            text.push('\n');
-        }
+    for _ in 0..frames {
+        let mut output = context.run_ui(input.clone(), |ui| {
+            let mut ctx = Ctx { store, light: &mut *light, api: &mut api, go: &mut go, settings: &mut settings, now: 2_000, look };
+            draw(ui, &mut ctx);
+        });
+        output.textures_delta.clear();
+        shown = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(shape) => Some((shape.galley.text().to_string(), shape.galley.rect.translate(shape.pos.to_vec2()))),
+                _ => None,
+            })
+            .collect();
     }
 
     // The offline API answers at once: what was asked is in the inbox.
@@ -879,12 +897,57 @@ pub(crate) fn render(store: &Store, light: &mut crate::light::Light, width: f32,
         })
         .collect();
 
-    (text, asked)
+    (shown, asked)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_table_rules_a_hairline_under_each_row_in_its_look() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::theme::DARK);
+        let palette = crate::theme::DARK;
+        let look = Look { palette, roles: crate::theme::Roles::of(&palette), narrow: false };
+        let mut hairlines = 0;
+
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                table(ui, look, "test", &["what", "how much"], |ui| {
+                    for row in 0..3 {
+                        ui.label("a row");
+                        ui.monospace(row.to_string());
+                        row_end(ui);
+                    }
+                });
+            });
+            output.textures_delta.clear();
+            hairlines = output.shapes.iter().filter(|clipped| matches!(&clipped.shape, egui::epaint::Shape::LineSegment { stroke, .. } if stroke.color == palette.line)).count();
+        }
+
+        assert_eq!(hairlines, 4, "one under the headings, and one under each row");
+    }
+
+    #[test]
+    fn notes_set_flags_in_the_mono_face() {
+        let ctx = egui::Context::default();
+        let palette = crate::theme::DARK;
+        let look = Look { palette, roles: crate::theme::Roles::of(&palette), narrow: false };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| note(ui, look, "Start it with --index-events to search."));
+        output.textures_delta.clear();
+        let families: Vec<egui::FontFamily> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(shape) => Some(shape.galley.job.sections.iter().map(|section| section.format.font_id.family.clone()).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        assert_eq!(families, [egui::FontFamily::Proportional, egui::FontFamily::Monospace, egui::FontFamily::Proportional]);
+    }
 
     #[test]
     fn a_fact_of_many_lines_on_a_wide_screen_keeps_the_next_fact_below_it() {

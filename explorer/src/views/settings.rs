@@ -117,6 +117,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
     super::section(ui, look, "Light client", |ui| {
         let (color, words, story) = match (&ctx.light.trouble, ctx.light.following()) {
             (Some(trouble), _) => (palette.bad, "stopped", trouble.clone()),
+            (None, Some((tip, final_height))) if ctx.light.has_followed() && ctx.light.fast_resumed.is_some() => (
+                palette.good,
+                "following",
+                widgets::fast_resumed_story(&ctx.light.fast_resumed_words().unwrap_or_default(), tip, final_height),
+            ),
             (None, Some((tip, final_height))) if ctx.light.has_followed() => (
                 palette.good,
                 "following",
@@ -130,9 +135,29 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
             ui.label(widgets::strong(words, 13.5).color(color));
         });
         super::note(ui, look, story);
+
+        if let Some(said) = ctx.light.fast_resumed_words() {
+            ui.add(egui::Label::new(RichText::new(said).color(palette.warn)).wrap());
+        }
+
         ui.add_space(6.0);
 
         let node = ctx.settings.node.clone();
+        let mut trusted = ctx.settings.fast_resume.get(&node).copied().unwrap_or(false);
+
+        if widgets::fast_resume_switch(ui, &palette, &mut trusted, "Opening the explorer skips the headers from genesis", "the genesis it trusts") {
+            match trusted {
+                true => {
+                    ctx.settings.fast_resume.insert(node.clone(), true);
+                    *connect = Some(node.clone());
+                }
+                false => {
+                    ctx.settings.fast_resume.remove(&node);
+                }
+            }
+        }
+
+        ui.add_space(8.0);
 
         match ctx.settings.pinned.get(&node).cloned() {
             Some(genesis) => {
@@ -162,7 +187,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
             None => super::note(
                 ui,
                 look,
-                "It follows from genesis, or from the node's own finalized checkpoint the first time it meets one. A checkpoint's block id, as someone you trust shows it, starts it there each time instead.",
+                "Unless trusted as above, it follows from genesis, or from the node's own finalized checkpoint the first time it meets one. A checkpoint's block id, as someone you trust shows it, starts it there each time instead.",
             ),
         }
 

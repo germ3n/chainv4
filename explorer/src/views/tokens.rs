@@ -111,7 +111,7 @@ fn list(ui: &mut Ui, ctx: &mut Ctx, symbol: &str) {
                     ui.label(token.name.as_deref().unwrap_or("—"));
                     ui.monospace(token.decimals.map_or("—".to_string(), |decimals| decimals.to_string()));
                     super::address(ui, ctx, &token.address);
-                    ui.end_row();
+                    super::row_end(ui);
                 }
             });
         }

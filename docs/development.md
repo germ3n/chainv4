@@ -55,14 +55,18 @@ which a node serves from `/wallet/` with `--wallet`, and `wallet/build-android.s
 ## The ui crate
 
 `ui/` is what the wallet and the explorer share, a workspace of its own like theirs, which both
-take by path. Each app keeps its own look; the crate holds what dresses it:
-- **`theme`:** a `Palette` of colors, a `Density` for spacing, radii and text sizes, and a
-  `Typeface` of font files. `apply` sets egui's style from them, and `install_fonts` the fonts.
-  The wallet is `COMFORTABLE`, roomy and round; the explorer is `COMPACT`, tight and square.
-- **`widgets`:** the pieces pages are built from, such as cards, pills, buttons and
-  `copy_on_click`, which copies a label's text when it is clicked and says Copied for a moment.
-  They take their corners and margins from the style `apply` set, so each app's density shows.
-- **`layout`:** `NARROW`, the 640 points below which an app lays out for a phone, and
+take by path. They share one look, with the crate holding all of it, so a change here shows in both:
+- **`theme`:** the `DARK` and `LIGHT` palettes, the fonts in `ui/assets/fonts` with their licences
+  (`install_fonts`), and a `Density` for spacing, card margins and text sizes, which is all an app
+  picks: the wallet is `COMFORTABLE`, the explorer `COMPACT`, tighter but with the same corners.
+  `apply` sets egui's style from them.
+- **`widgets`:** the pieces pages are built from: `title` and `title_with`, `card` and `page_card`,
+  which keeps the section gap below it, `caps`, pills, buttons, `flagged_label`, `status_dot` and
+  `copy_on_click`, which copies a label's text when it is clicked and says Copied for a moment; and
+  the frame around them: `bar_frame`, `sidebar_name`, `bar_name`, `nav_entry`, `tabs` and
+  `folded_foot`. `fast_resume_switch` and `fast_resumed` say the same of fast resume in both apps.
+- **`layout`:** `NARROW`, the 640 points below which an app lays out for a phone, `SHORT`, the 560
+  points below which a sidebar's foot folds to a line, the sidebar's and the page's margins, and
   `suit_touch`, which turns off selecting text on a touch screen so a swipe that starts on text
   scrolls.
 - **`net`:** `Client`, how both apps talk to their node. On the desktop and Android it is ureq,

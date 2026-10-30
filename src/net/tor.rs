@@ -47,6 +47,14 @@ pub fn read_onion(file: &std::path::Path) -> Option<Multiaddr> {
     matches!(address.iter().next(), Some(Protocol::Onion3(_))).then_some(address)
 }
 
+#[document(summary = "The host of an onion's multiaddr, NAME.onion: None for an address that is no onion.", category = "Node", see_also = "read_onion")]
+pub fn onion_host(address: &Multiaddr) -> Option<String> {
+    let text = address.to_string();
+    let name = text.strip_prefix("/onion3/")?.split(':').next()?;
+
+    (!name.is_empty()).then(|| format!("{name}.onion"))
+}
+
 /// Where to dial an address through SOCKS5, the name as the proxy resolves it: an onion's, a DNS
 /// name's, or an IP's as text. None for an address that is not TCP, such as QUIC's.
 fn target(address: &Multiaddr, everything: bool) -> Option<(String, u16)> {
@@ -233,6 +241,15 @@ mod tests {
         assert_eq!(read_onion(&file), None);
         std::fs::write(&file, format!("{ONION}\n")).unwrap();
         assert_eq!(read_onion(&file), Some(ONION.parse().unwrap()));
+
+        // What GET /mining says of it: nothing until tor made it, then its host and the port.
+        let at = crate::api::MiningOnion::InFile { file: file.clone(), port: 4100 };
+        let host = onion_host(&ONION.parse().unwrap()).unwrap();
+        assert!(host.ends_with(".onion") && !host.contains(':') && !host.contains('/'), "{host}");
+        assert_eq!(at.address(), Some(format!("{host}:4100")));
+        assert_eq!(onion_host(&"/ip4/127.0.0.1/tcp/4001".parse().unwrap()), None);
+        assert_eq!(crate::api::MiningOnion::InFile { file: file.with_extension("missing"), port: 4100 }.address(), None, "not there yet");
+        assert_eq!(crate::api::MiningOnion::At("x.onion:1".to_string()).address().as_deref(), Some("x.onion:1"));
         std::fs::remove_file(&file).unwrap();
     }
 

@@ -36,7 +36,7 @@ use {
     crate::chain::Chain,
     crate::format,
     crate::keys::{self, Holder},
-    crate::node::Node,
+    crate::node::{Failure, Node},
     crate::theme::{self, Palette},
     crate::vault::{Book, Vault},
     chainv4::light::Assurance,
@@ -381,8 +381,8 @@ pub use chainv4_ui::widgets::beside;
 
 /// The light client's state, in the sidebar: how far it follows, how much of that is final, and
 /// where it took up the chain, if it fast-resumed.
-pub fn light_status(ui: &mut Ui, palette: &Palette, chain: &Chain) {
-    let (color, text, detail) = following(palette, chain);
+pub fn light_status(ui: &mut Ui, palette: &Palette, chain: &Chain, down: Option<&Failure>) {
+    let (color, text, detail) = following(palette, chain, down);
     let response = ui
         .horizontal(|ui| {
             theme::dot(ui, color);
@@ -398,19 +398,31 @@ pub fn light_status(ui: &mut Ui, palette: &Palette, chain: &Chain) {
 
 /// Says where the client took up the chain, if it fast-resumed: on a node's word, so never silently.
 pub fn fast_resumed(chain: &Chain) -> Option<String> {
-    chain.fast_resumed.map(|resumed| format!("Fast-resumed at block {}, on this node's word", format::thousands(&resumed.at.to_string())))
+    chain.fast_resumed.map(|resumed| chainv4_ui::widgets::fast_resumed(&format::thousands(&resumed.at.to_string())))
 }
 
-/// The light client's state as a dot alone, where there is no room for words: they show on a tap.
-pub fn light_dot(ui: &mut Ui, palette: &Palette, chain: &Chain) {
-    let (color, text, detail) = following(palette, chain);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-    ui.painter().circle_filled(rect.center(), 4.5, color);
-    response.on_hover_text(format!("{text}. {detail}"));
+/// The light client's state and the node's as a dot alone, where there is no room for words: they
+/// show on a tap, and it is hollow when something is wrong.
+pub fn light_dot(ui: &mut Ui, palette: &Palette, chain: &Chain, down: Option<&Failure>) {
+    let (color, text, detail) = following(palette, chain, down);
+    chainv4_ui::widgets::status_dot(ui, palette, color, down.is_some() || chain.trouble.is_some(), &format!("{text}. {detail}"));
 }
 
-/// The light client's state: its color, in a word or two, and in full.
-fn following(palette: &Palette, chain: &Chain) -> (egui::Color32, String, String) {
+/// The light client's state in a word or two, as the dot says it.
+pub fn light_word(palette: &Palette, chain: &Chain, down: Option<&Failure>) -> String {
+    following(palette, chain, down).1
+}
+
+/// The light client's state, and the node's once it stops answering, as nothing the client knows
+/// goes on being news then: its color, in a word or two, and in full.
+pub(crate) fn following(palette: &Palette, chain: &Chain, down: Option<&Failure>) -> (egui::Color32, String, String) {
+    if let Some(failure) = down.filter(|_| chain.trouble.is_none()) {
+        let shown = chain.following().map_or_else(String::new, |(tip, _)| format!(" What shows is as it stood at height {}.", format::thousands(&tip.to_string())));
+        let resumed = fast_resumed(chain).map_or_else(String::new, |said| format!(" {said}."));
+
+        return (palette.bad, "Node not answering".to_string(), format!("{}{shown}{resumed}", failure.sentence()));
+    }
+
     let (color, text) = match (&chain.trouble, chain.following(), chain.has_followed()) {
         (Some(_), _, _) => (palette.bad, "Stopped".to_string()),
         (None, None, _) => (palette.muted, "Starting".to_string()),
@@ -419,10 +431,7 @@ fn following(palette: &Palette, chain: &Chain) -> (egui::Color32, String, String
     };
     let detail = match (&chain.trouble, chain.following()) {
         (Some(why), _) => why.clone(),
-        (None, Some((tip, final_height))) if chain.fast_resumed.is_some() => format!(
-            "{}. Every header since, to height {tip}, checked by consensus, and finality to height {final_height} by the voters it proved. Below that block, it rests on this node, which Settings trusts for fast resume.",
-            fast_resumed(chain).unwrap_or_default()
-        ),
+        (None, Some((tip, final_height))) if chain.fast_resumed.is_some() => chainv4_ui::widgets::fast_resumed_story(&fast_resumed(chain).unwrap_or_default(), tip, final_height),
         (None, Some((tip, final_height))) => format!(
             "Every header to height {tip} checked by consensus, and finality to height {final_height} by the voters it proved. Nothing the node says is shown unless it checks against them."
         ),

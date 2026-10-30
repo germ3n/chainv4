@@ -258,7 +258,7 @@ What is hidden keeps its place in the answer, empty, so apps from before still r
 
 **What it does not cover:** what the network itself tells. A node's peers learn its address by
 connecting to it, and Kademlia and identify pass addresses between peers: this is about the API.
-`GET /mining` still gives the mining port, and `--mining-public` if set, which miners need; `GET
+`GET /mining` still gives the mining port, and `--mining-public` and `--mining-onion` if set, which miners need; `GET
 /pool` keeps the books miners check themselves by. A chain's bootnodes are on chain.
 
 ## Over Tor

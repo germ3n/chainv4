@@ -260,11 +260,17 @@ The explorer runs the same client against the node it talks to:
   or stopped, and why it stopped.
 - **An account's page** shows the balance it proved, at the finalized block and at the tip, and
   whether each is final. A proof that does not check is shown in red.
+- **Fast resume** is there too: the same switch per node, off by default, the same decision
+  (`chainv4::light::may_resume`) and the same words. As the explorer saves no client, on a trusted node
+  it starts at the node's finalized checkpoint each launch, rather than walk from genesis: the genesis
+  stays pinned, and headers and voters' signatures are checked from there. A checkpoint pasted comes
+  first; under depth finality or none, or on a node with no checkpoint to give, it walks.
 
 ## What to keep in mind
 
 - **It fetches every header from genesis, the first time.** Headers are small, but there are as
-  many as blocks. The CLI and the explorer follow the chain afresh each time; the wallet saves the
+  many as blocks. The CLI and the explorer follow the chain afresh each time, the explorer from a trusted node's
+  checkpoint if its fast resume is on; the wallet saves the
   client and resumes from the finalized block, walking every header since, or on a node trusted for
   fast resume, from that node's own checkpoint.
 - **Epochs can go unjustified for good,** as when too few voters are up: the next justification

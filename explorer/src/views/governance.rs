@@ -426,7 +426,7 @@ fn proposal_row(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, proposal: &Pr
                     ui.monospace(weight(view, coin, &approval.weight));
                     ui.monospace(format!("epoch {}", approval.epoch));
                     ui.monospace(format!("epoch {}", approval.counts_until));
-                    ui.end_row();
+                    super::row_end(ui);
                 }
             });
         }
@@ -464,6 +464,10 @@ fn in_force(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, state: &mut Gover
         }
     };
 
+    // What each setting is takes what the name and who set it leave: a grid's cell keeps the width it
+    // was first drawn at, which for text that wraps is next to nothing.
+    let words = (ui.available_width() - IN_FORCE_BESIDE).max(IN_FORCE_LEAST);
+
     match look.narrow {
         true => {
             for (kind, setting) in &settings {
@@ -476,15 +480,24 @@ fn in_force(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, state: &mut Gover
         false => {
             super::table(ui, look, "in force", &["setting", "in force", "set by"], |ui| {
                 for (kind, setting) in &settings {
-                    ui.label(widgets::strong(label(kind), 13.0));
-                    ui.add(egui::Label::new(summary(kind, &setting.value, coin)).wrap()).on_hover_text(setting.value.to_string());
-                    set_by(ui, setting.decided);
-                    ui.end_row();
+                    // Each cell from the top of its row, however many lines what the setting is takes.
+                    ui.vertical(|ui| ui.label(widgets::strong(label(kind), 13.0)));
+                    ui.vertical(|ui| {
+                        ui.set_width(words);
+                        ui.add(egui::Label::new(summary(kind, &setting.value, coin)).wrap()).on_hover_text(setting.value.to_string());
+                    });
+                    ui.vertical(|ui| set_by(ui, setting.decided));
+                    super::row_end(ui);
                 }
             });
         }
     }
 }
+
+/// What the In force table's other columns take of its width, gaps included.
+const IN_FORCE_BESIDE: f32 = 240.0;
+/// The narrowest it sets what a setting is: past that, it scrolls across.
+const IN_FORCE_LEAST: f32 = 220.0;
 
 /// The settings in force in the page's order, any kind it does not know of after.
 fn ordered(view: &GovernanceView) -> Vec<(String, crate::model::InForce)> {

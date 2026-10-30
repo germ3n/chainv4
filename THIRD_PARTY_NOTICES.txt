@@ -538,34 +538,29 @@ Copyright 2021 The Android Open Source Project
 Fonts
 --------------------------------------------------------------------------------
 
-Sources: explorer/assets/fonts, wallet/assets/fonts and wiki/fonts
+Sources: ui/assets/fonts and wiki/fonts
 Reserved font names are unchanged. The wiki's files are Latin subsets.
 License: SIL Open Font License, Version 1.1
 
-IBM Plex Sans and IBM Plex Mono
-Regular and SemiBold, and Mono Regular. Compiled into the explorer.
-Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"
-This Font Software is licensed under the SIL Open Font License, Version 1.1.
-This license is copied below, and is also available with a FAQ at: http://scripts.sil.org/OFL
-
 Manrope
-Regular and SemiBold. Compiled into the wallet, and embedded in the wiki and
-docs pages.
+Regular and SemiBold. Compiled into the wallet and the explorer, and embedded in
+the wiki and docs pages.
 Copyright 2018 The Manrope Project Authors (https://github.com/googlefonts/manrope)
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:
 http://scripts.sil.org/OFL
 
 Newsreader
-Regular, and Italic in the wiki. Compiled into the wallet, and embedded in the
-wiki and docs pages.
+Regular, and Italic in the wiki. Compiled into the wallet and the explorer, and
+embedded in the wiki and docs pages.
 Copyright 2020 The Newsreader Project Authors (http://github.com/productiontype/Newsreader)
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:
 http://scripts.sil.org/OFL
 
 JetBrains Mono
-Regular. Compiled into the wallet, and embedded in the wiki and docs pages.
+Regular. Compiled into the wallet and the explorer, and embedded in the wiki and
+docs pages.
 Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

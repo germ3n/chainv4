@@ -136,7 +136,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState) {
                             ui.monospace(number);
                         }
 
-                        ui.end_row();
+                        super::row_end(ui);
                     }
                 });
             }
@@ -506,7 +506,7 @@ fn pool_page(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState, pool: &DexPool, n
                 ui.label(side(ctx, out_a, out_b));
                 super::block_link(ui, ctx, &activity.block, activity.height);
                 super::tx(ui, ctx, &activity.tx);
-                ui.end_row();
+                super::row_end(ui);
             }
         });
     });

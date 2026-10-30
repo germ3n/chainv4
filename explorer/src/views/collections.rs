@@ -117,7 +117,7 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx) {
                         ui.label(none(kind(collection)));
                         ui.label(collection.symbol.as_deref().unwrap_or("—"));
                         super::address(ui, ctx, &collection.address);
-                        ui.end_row();
+                        super::row_end(ui);
                     }
                 });
             }
@@ -275,7 +275,7 @@ fn holdings(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection, holde
                 };
             }
 
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 
@@ -380,7 +380,7 @@ fn transfers(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection) {
             ui.monospace(&moved.id);
             ui.monospace(&moved.amount);
             super::tx(ui, ctx, &moved.tx);
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }

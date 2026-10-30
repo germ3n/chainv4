@@ -82,6 +82,7 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--mining ADDR` | | Take [workers](docs/consensus.md#mining-with-workers) on this TCP address, such as `0.0.0.0:4002`, with `--mining-token FILE`: machines running `chainv4 worker` that mine for this node with no chain of their own. |
 | `--mining-solo` | | Take workers [mining alone](docs/consensus.md#mining-alone) on the mining port, each block one finds paying its `--payout` in full; with `--mining-open`, anyone may. |
 | `--mining-public HOST:PORT` | | Where workers reach the mining port from outside, as `GET /mining` tells the wallet. |
+| `--mining-onion HOST:PORT` | | Where they reach it through Tor, as `GET /mining` tells a wallet on the node's onion; `--mining-onion-port PORT` reads the onion from `--onion-file`. |
 | `--protocol NAME` | `chainv4` | The name every protocol and gossip topic starts with, beside the genesis id: give a chain of your own one, so its nodes never mix with another's. Peers under another name are disconnected. |
 | `--produce` | | Produce blocks (authority). |
 | `--producer-key PATH` | dev key | The authority's key file, for `--produce`. |

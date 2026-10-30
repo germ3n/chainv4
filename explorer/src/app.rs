@@ -28,11 +28,11 @@ use {
     std::time::Duration,
 };
 
-/// How wide the sidebar is, and the widest the page column grows on a big screen.
-const SIDEBAR: f32 = 212.0;
+/// The widest the page column grows on a big screen.
 const COLUMN: f32 = 1400.0;
-/// Below this height, in points, as a phone on its side, the sidebar's foot folds to one line.
-const SHORT: f32 = 560.0;
+
+/// The most of a phone's top bar the chain's name takes, leaving the search its room.
+const BAR_NAME: f32 = 140.0;
 
 /// Seconds between asking the same thing again.
 const STATUS_POLLED: f64 = 1.0;
@@ -240,6 +240,7 @@ impl Explorer {
                         node: &self.settings.node,
                         pinned: &mut self.settings.pinned,
                         checkpoints: &self.settings.checkpoints,
+                        fast_resume: self.settings.fast_resume.get(&self.settings.node).copied().unwrap_or(false),
                     };
 
                     if self.light.answered(&ask, &result, trust, now, time) {
@@ -692,6 +693,9 @@ impl Explorer {
 
         match (&self.light.trouble, self.light.following()) {
             (Some(trouble), _) => (palette.bad, "light client stopped", trouble.clone()),
+            (None, Some((tip, final_height))) if self.light.has_followed() && self.light.fast_resumed.is_some() => {
+                (palette.good, "light client following", widgets::fast_resumed_story(&self.light.fast_resumed_words().unwrap_or_default(), tip, final_height))
+            }
             (None, Some((tip, final_height))) if self.light.has_followed() => (
                 palette.good,
                 "light client following",
@@ -700,6 +704,14 @@ impl Explorer {
             (None, Some((tip, _))) => (palette.warn, "light client catching up", format!("{tip} headers checked so far")),
             (None, None) => (palette.muted, "light client starting", "Fetching the chain's light parameters".to_string()),
         }
+    }
+
+    /// The whole story of the light client and the node, for where only a dot has room.
+    fn story(&self) -> String {
+        let (_, light_words, light_story) = self.light_state();
+        let (_, words) = self.health();
+
+        format!("{light_words}: {light_story}\nThe node at {} is {words}", self.api.base())
     }
 
     /// On a wide screen: the name, the pages in groups, and the node's state at the bottom.
@@ -712,25 +724,32 @@ impl Explorer {
             |app, ui| {
                 // A short window, as a phone on its side, keeps its room for the pages: the state
                 // goes on one line, with the rest on a tap or a hover.
-                if ui.ctx().content_rect().height() < SHORT {
-                    let (light_color, light_words, light_story) = app.light_state();
+                if layout::is_short(ui.ctx()) {
+                    let (light_color, _, _) = app.light_state();
                     let (color, words) = app.health();
-                    let story = format!("{light_words}: {light_story}\nThe node at {} is {words}", app.api.base());
+                    let story = app.story();
 
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        views::dot(ui, light_color);
-                        views::dot(ui, color);
-                        ui.add(egui::Label::new(RichText::new(words).small().color(palette.soft)).truncate());
-                    })
-                    .response
-                    .on_hover_text(story);
+                    ui.add_space(8.0);
+                    widgets::folded_foot(
+                        ui,
+                        |ui| {
+                            widgets::status_dot(ui, &palette, color, color == palette.bad, &story);
+                            views::dot(ui, light_color);
+                            ui.label(RichText::new(words).small().color(palette.soft));
+                        },
+                        |_| {},
+                    );
 
                     return;
                 }
 
-                ui.add_space(14.0);
+                ui.add_space(18.0);
                 let (light_color, light_words, light_story) = app.light_state();
+
+                if let Some(said) = app.light.fast_resumed_words() {
+                    ui.add(egui::Label::new(RichText::new(said).small().color(palette.warn)).wrap());
+                }
+
                 ui.horizontal(|ui| {
                     views::dot(ui, light_color);
                     ui.label(RichText::new(light_words).small().color(palette.soft));
@@ -751,48 +770,22 @@ impl Explorer {
                 widgets::caps(ui, &palette, "Node");
             },
             |app, ui| {
-                ui.add_space(16.0);
-                ui.horizontal(|ui| {
-                    // A long name is cut short, leaving room for the word after it.
-                    let room = ui.available_width() - 70.0;
-                    ui.scope(|ui| {
-                        ui.set_max_width(room);
-                        ui.add(egui::Label::new(widgets::strong(&name, 17.0).color(palette.ink)).truncate())
-                    })
-                    .inner
-                    .on_hover_text(&name);
-                    widgets::caps(ui, &palette, "explorer");
-                });
-                ui.add_space(14.0);
+                // A short window, as a phone on its side, keeps its room for the pages.
+                ui.add_space(layout::sidebar_gap(ui.ctx(), 26.0));
+                widgets::sidebar_name(ui, &palette, &name, "Explorer");
+                ui.add_space(layout::sidebar_gap(ui.ctx(), 24.0));
+                ui.spacing_mut().item_spacing.y = chainv4_ui::Density::COMFORTABLE.spacing.y;
 
                 for (group, pages) in View::GROUPS {
                     widgets::caps(ui, &palette, group);
-                    ui.add_space(2.0);
 
                     for (view, name) in pages {
-                        let selected = app.view.marks(view);
-                        let text = RichText::new(*name).color(if selected { palette.ink } else { palette.soft });
-                        let button = egui::Button::new(text)
-                            .fill(if selected { palette.row } else { egui::Color32::TRANSPARENT })
-                            .stroke(egui::Stroke::NONE)
-                            .min_size(egui::vec2(ui.available_width(), 28.0));
-                        let response = ui.add(button);
-
-                        if selected {
-                            let rect = response.rect;
-                            ui.painter().rect_filled(
-                                egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 6.0), egui::vec2(3.0, rect.height() - 12.0)),
-                                2.0,
-                                palette.accent,
-                            );
-                        }
-
-                        if response.clicked() {
+                        if widgets::nav_entry(ui, &palette, name, app.view.marks(view)).clicked() {
                             app.go(view.clone());
                         }
                     }
 
-                    ui.add_space(10.0);
+                    ui.add_space(layout::sidebar_gap(ui.ctx(), 18.0));
                 }
             },
         );
@@ -802,11 +795,11 @@ impl Explorer {
     fn header(&mut self, ui: &mut Ui) {
         let palette = self.palette;
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.back.is_empty(), egui::Button::new("‹").min_size(egui::vec2(28.0, 26.0))).on_hover_text("Back").clicked() {
+            if ui.add_enabled_ui(!self.back.is_empty(), |ui| widgets::quiet(ui, &palette, "‹")).inner.on_hover_text("Back").clicked() {
                 self.back();
             }
 
-            if ui.add_enabled(!self.ahead.is_empty(), egui::Button::new("›").min_size(egui::vec2(28.0, 26.0))).on_hover_text("Forward").clicked() {
+            if ui.add_enabled_ui(!self.ahead.is_empty(), |ui| widgets::quiet(ui, &palette, "›")).inner.on_hover_text("Forward").clicked() {
                 self.forward();
             }
 
@@ -838,22 +831,18 @@ impl Explorer {
             match self.back.is_empty() {
                 // A long name is cut short, leaving the search its room.
                 true => {
-                    ui.scope(|ui| {
-                        ui.set_max_width(140.0);
-                        ui.add(egui::Label::new(widgets::strong(&name, 16.0).color(palette.ink)).truncate())
-                    })
-                    .inner
-                    .on_hover_text(&name);
+                    widgets::bar_name(ui, &palette, &name, BAR_NAME).on_hover_text(&name);
                 }
                 false => {
-                    if ui.add(egui::Button::new(RichText::new("‹").size(18.0)).min_size(egui::vec2(40.0, 30.0))).clicked() {
+                    if widgets::quiet(ui, &palette, "‹").clicked() {
                         self.back();
                     }
                 }
             }
 
-            let (color, words) = self.health();
-            views::dot(ui, color).on_hover_text(words);
+            let (color, _) = self.health();
+            let story = self.story();
+            widgets::status_dot(ui, &palette, color, color == palette.bad, &story);
 
             // A narrow window a mouse is on has no finger to pull the page down with.
             if !layout::touch(ui.ctx()) {
@@ -885,31 +874,9 @@ impl Explorer {
 
     /// On a phone, the pages, as tabs along the bottom.
     fn tabs(&mut self, ui: &mut Ui) {
-        let palette = self.palette;
-        let width = ui.available_width() / View::TABS.len() as f32;
-        let current = self.view.tab();
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.horizontal(|ui| {
-            for (view, name) in View::TABS {
-                let selected = current == view;
-                let text = widgets::strong(name, 12.0).color(if selected { palette.ink } else { palette.muted });
-                let button = egui::Button::new(text).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
-                let response = ui.add_sized([width, 46.0], button);
-
-                if selected {
-                    let rect = response.rect;
-                    ui.painter().rect_filled(
-                        egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 1.5), egui::vec2(28.0, 3.0)),
-                        2.0,
-                        palette.accent,
-                    );
-                }
-
-                if response.clicked() {
-                    self.go(view);
-                }
-            }
-        });
+        if let Some(view) = widgets::tabs(ui, &self.palette, &View::TABS, &self.view.tab()) {
+            self.go(view.clone());
+        }
     }
 
     /// Something to tell the person, over the page.
@@ -923,7 +890,7 @@ impl Explorer {
         egui::Frame::new()
             .fill(color.gamma_multiply(0.12))
             .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.5)))
-            .corner_radius(6.0)
+            .corner_radius(ui.visuals().widgets.inactive.corner_radius)
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 widgets::end_row(
@@ -1097,7 +1064,7 @@ impl eframe::App for Explorer {
             return;
         }
 
-        let bar = egui::Frame::new().fill(palette.nav).stroke(egui::Stroke::new(1.0, palette.line));
+        let bar = widgets::bar_frame(&palette);
         // A finger needs taller buttons and fields than a mouse: on a phone, upright or on its side.
         let fingers = narrow || layout::touch(ui.ctx());
         let sized = |ui: &mut Ui| {
@@ -1108,7 +1075,7 @@ impl eframe::App for Explorer {
 
         match narrow {
             true => {
-                egui::Panel::top("bar").frame(bar.inner_margin(egui::Margin::symmetric(10, 8))).show(ui, |ui| {
+                egui::Panel::top("bar").frame(bar.inner_margin(layout::BAR_MARGIN)).show(ui, |ui| {
                     layout::finger_row(ui);
                     self.bar(ui);
                 });
@@ -1116,15 +1083,15 @@ impl eframe::App for Explorer {
             }
             false => {
                 egui::Panel::left("nav")
-                    .exact_size(SIDEBAR)
+                    .exact_size(layout::SIDEBAR_WIDTH)
                     .resizable(false)
-                    .frame(bar.inner_margin(egui::Margin::symmetric(12, 0)))
+                    .frame(bar.inner_margin(egui::Margin::symmetric(layout::SIDEBAR_MARGIN, 0)))
                     .show(ui, |ui| {
                         sized(ui);
                         self.sidebar(ui, now);
                     });
                 egui::Panel::top("header")
-                    .frame(egui::Frame::new().fill(palette.paper).inner_margin(egui::Margin::symmetric(16, 10)))
+                    .frame(egui::Frame::new().fill(palette.paper).inner_margin(egui::Margin::symmetric(layout::page_margin(false), 10)))
                     .show(ui, |ui| {
                         if fingers {
                             layout::finger_row(ui);
@@ -1135,7 +1102,7 @@ impl eframe::App for Explorer {
             }
         }
 
-        let margin = if narrow { egui::Margin::symmetric(10, 10) } else { egui::Margin::symmetric(16, 4) };
+        let margin = egui::Margin::symmetric(layout::page_margin(narrow), if narrow { 14 } else { 4 });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(palette.paper).inner_margin(margin))
             .show(ui, |ui| {

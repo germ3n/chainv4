@@ -256,8 +256,8 @@ See [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint).
 epochs behind: it takes up the chain at the node's latest finalized checkpoint, and checks every
 header and voter's signature from there on, against the genesis it pinned. What that gives up: a
 dishonest node could show a false history from that point. Settings says so by the switch, and the
-sidebar and Settings say **Fast-resumed at block N, on this node's word** when it did; on a phone the
-top bar's dot says it on a tap. Under depth finality, or with no checkpoint to be had, it walks, as
+sidebar and Settings say **Fast-resumed at block N, on this node's word** when it did; on a phone, or
+a phone on its side, Home says it in a line, and the dot on a tap. Under depth finality, or with no checkpoint to be had, it walks, as
 with the switch off. See [In the wallet](light-client.md#in-the-wallet).
 
 **What the node is trusted with:** nothing proven. It does say:
@@ -972,20 +972,25 @@ Only the vaults are secret.
 ## Look
 
 It follows the look of the wiki every build writes (see [Documenting code](development.md#documenting-code)), quieter.
-Its palette, fonts and roomy spacing are its own; the widgets they dress come from the `ui` crate
-it shares with the explorer (see [The ui crate](development.md#the-ui-crate)).
+Its palette, fonts and widgets are the `ui` crate's, shared with the explorer; only its roomy spacing
+is its own (see [The ui crate](development.md#the-ui-crate)).
 - **Colors:** the wiki's palette, dark or light.
 - **Type:** Manrope for text, JetBrains Mono for addresses and hashes, and Newsreader for titles
-  and the big numbers. The fonts and their licences are in `wallet/assets/fonts`.
+  and the big numbers. The fonts and their licences are in `ui/assets/fonts`.
+- **The status dot,** on a phone's top bar and a short sidebar's foot, is the light client's state,
+  green following, amber catching up, grey starting, and turns red and hollow, reading **Node not
+  answering**, while the node's status goes unanswered, or **Stopped** when what the node sent does
+  not check. A tap says it in words: why, what shows, and any fast resume.
 - **Layout:** each page is a column of cards beside a sidebar with the account, the pages, and
   the light client's state. In a window too short for them all, the pages scroll, the light
   client's state, Lock and the theme staying at the sidebar's bottom
   (`chainv4_ui::layout::sidebar`), and in one too short even for those, as a phone on its side
   with the keyboard up, the whole sidebar scrolls; in one under 560 points tall, as a phone on its side, the
-  sidebar's heading closes up to leave the pages more room. On a touch screen, buttons and fields
+  sidebar's heading closes up and its foot folds to one line, the light client's dot and word beside
+  the theme and Lock, to leave the pages more room. On a touch screen, buttons and fields
   are a finger tall, 40 points, and the field being typed in scrolls into sight above the
   keyboard. Below 640 points wide, as on a phone, the sidebar gives way to a bar
-  on top with the account, the light client's dot and Lock, and five tabs along the bottom, evenly
+  on top with the account, the status dot and Lock, and five tabs along the bottom, evenly
   spaced and always in the same place: Home, Send, Receive, Activity and More. More lists every
   other page, each with a line on what it is for, and its tab stays marked while one of them shows.
   An offline signer, with five pages in all, has them as its tabs and no More. The sidebar, on a
@@ -1219,10 +1224,9 @@ out when it builds without one, as Android refuses an app that declares code it 
   over JNI: egui reaches no clipboard there. Android shows what was copied.
 - **Pasting:** hold a finger on a text field, half a second, or tap one that already has focus,
   for a bar with **Paste** and **Select all**, and **Copy** and **Cut** once some text is selected;
-  a drag across a field's text brings it too. While the keyboard is up, a **Paste** button sits at
-  the field's right end whenever the clipboard holds text. Both go just above the field, else just
-  below it, kept within what can be seen, clear of the keyboard, the bottom tabs and the system's
-  bars, and in the text's color so that they stand out on any page. The keyboard's own Paste button
+  a drag across a field's text brings it too. It never comes on the tap that gives a field focus,
+  and it goes as soon as typing starts. It goes just above the field, else just below it, kept within what can be seen, clear of the keyboard, the bottom tabs and the system's
+  bars, and in the text's color so that it stands out on any page. The keyboard's own Paste button
   pastes too, and Ctrl+C, X, V and A work from a keyboard that has Ctrl.
 - **Picking files:** **Open key file** opens Android's own document picker, which shows the
   phone's files, Downloads and any cloud drives.

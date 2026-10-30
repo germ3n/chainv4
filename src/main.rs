@@ -277,6 +277,14 @@ struct NodeArgs {
     /// API's host and the port --mining listens on.
     #[arg(long, requires = "mining")]
     mining_public: Option<String>,
+    /// Where workers reach the mining port through Tor, ADDRESS.onion:4002, as GET /mining tells
+    /// the apps that reach the node at its onion: they take this rather than --mining-public.
+    #[arg(long, requires = "mining", conflicts_with = "mining_onion_port")]
+    mining_onion: Option<String>,
+    /// The port the node's onion offers the mining port on, for GET /mining to name it once tor has
+    /// made the onion, as read from --onion-file: for when the onion is not known at the start.
+    #[arg(long, requires = "mining", requires = "onion_file")]
+    mining_onion_port: Option<u16>,
     /// Claim for the pool's miners once their unclaimed earnings reach this, in the coin's
     /// smallest unit, from --pool-push-key, which pays the fees: miners who never claim still get
     /// paid. Up to 64 claims a minute.
@@ -714,6 +722,11 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(feature = "updates")]
             releases: Some(releases.clone()),
             mining_public: args.mining_public.clone(),
+            mining_onion: match (&args.mining_onion, args.mining_onion_port, &args.onion_file) {
+                (Some(at), _, _) => Some(api::MiningOnion::At(at.clone())),
+                (None, Some(port), Some(file)) => Some(api::MiningOnion::InFile { file: file.clone(), port }),
+                _ => None,
+            },
             sharing: api::sharing::Sharing::new(args.report, &args.hide, &args.show)?,
             report_token: args.report_token.as_deref().map(chainv4::mining::read_token).transpose()?,
         };

@@ -174,7 +174,7 @@ fn directory(ui: &mut Ui, ctx: &mut Ctx, names: &[ListedName]) {
             }
 
             ui.label(expires(ctx, name));
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }

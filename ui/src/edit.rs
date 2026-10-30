@@ -1,10 +1,10 @@
 //! Editing text with no keyboard shortcuts, as on Android, where egui reaches no clipboard. Holding
 //! a finger on a text field, or tapping one that already has focus, brings a bar beside it with
-//! Paste, Select all, and Copy and Cut over a selection; and while a field has focus and the keyboard
-//! is up, a Paste button sits beside it too. They send the field the events a keyboard would, so the
-//! field does the rest: it inserts what is pasted, and hands what is copied to the app's copy output,
-//! which the Android glue puts on the clipboard. A keyboard's own Paste button sends Ctrl+V, which
-//! [`ctrl_key`] puts right.
+//! Paste, Select all, and Copy and Cut over a selection. It comes only when asked for, never on the
+//! tap that gives a field focus, and goes as soon as typing starts. It sends the field the events a
+//! keyboard would, so the field does the rest: it inserts what is pasted, and hands what is copied to
+//! the app's copy output, which the Android glue puts on the clipboard. A keyboard's own Paste button
+//! sends Ctrl+V, which [`ctrl_key`] puts right.
 
 use egui::{Context, Event, Id, Key, Modifiers, Order, Pos2, RawInput, Rect, RichText, Vec2, text::CCursorRange, text_edit::TextEditState, vec2};
 
@@ -103,7 +103,7 @@ pub(crate) fn actions(has_text: bool, selected: bool) -> Vec<Action> {
     actions
 }
 
-/// The bar and the Paste button, for an app's frames.
+/// The bar, for an app's frames.
 #[derive(Default)]
 pub(crate) struct Editing {
     /// The bar a held finger brought up: over which field, and where the finger was.
@@ -122,14 +122,14 @@ pub(crate) struct Editing {
 }
 
 impl Editing {
-    /// After the app's frame: brings the bar up or takes it down, draws it and the Paste button,
-    /// and queues what they are asked to do. The Paste button shows while the keyboard is up.
-    pub(crate) fn show(&mut self, ctx: &Context, keyboard: bool, clipboard: &mut dyn Clipboard) {
+    /// After the app's frame: brings the bar up or takes it down, draws it, and queues what it is
+    /// asked to do.
+    pub(crate) fn show(&mut self, ctx: &Context, clipboard: &mut dyn Clipboard) {
         let (time, lifted) = ctx.input(|input| (input.time, input.pointer.any_released()));
         let focused = focused_field(ctx);
         let was_focused = self.field;
-        // A tap on the bar or the Paste button takes the field's focus as it lifts, before either
-        // sees the tap: for that frame they act for the field that had it, as they showed it.
+        // A tap on the bar takes the field's focus as it lifts, before the bar sees the tap: for that
+        // frame it acts for the field that had it, as it showed it.
         let field = focused.or(self.field.filter(|_| lifted));
         self.field = focused;
 
@@ -141,8 +141,8 @@ impl Editing {
             self.kept = Some((id, range));
         }
 
-        // Asked again once a second while a field has focus: something else may have copied.
-        let has_text = match (field, self.clip) {
+        // Asked again once a second while the bar is up: something else may have copied.
+        let has_text = match (field.filter(|_| self.bar.is_some()), self.clip) {
             (None, _) => {
                 self.clip = None;
 
@@ -196,23 +196,6 @@ impl Editing {
             let at = ctx.input(|input| input.pointer.latest_pos()).unwrap_or_else(|| ctx.content_rect().center());
             self.bar = Some((id, at));
             ctx.request_repaint();
-        }
-
-        if let Some(id) = field
-            && keyboard
-            && has_text
-            && self.bar.is_none()
-        {
-            // At the field's right end, away from where its text starts.
-            let area = Id::unique("chainv4-ui paste");
-            let size = drawn_size(ctx, area);
-            let field_rect = ctx.read_response(id).map(|response| response.rect);
-            let x = field_rect.map_or(room.right(), |field| field.right() - size.x / 2.0);
-            let chosen = show_bar(ctx, area, place(size, field_rect, x, room), room, &[Action::Paste]).0;
-
-            if chosen.is_some() {
-                self.act(ctx, id, Action::Paste, clipboard);
-            }
         }
 
         if !ctx.input(|input| input.pointer.any_down()) {
@@ -278,7 +261,7 @@ impl Editing {
         // shortcut is no typing: Select all sends one.
         let (clicked, typed) = ctx.input(|input| {
             let typed = |event: &Event| match event {
-                Event::Text(_) => true,
+                Event::Text(_) | Event::Paste(_) | Event::Ime(_) => true,
                 Event::Key { pressed, modifiers, .. } => *pressed && !modifiers.command,
                 _ => false,
             };
@@ -454,6 +437,7 @@ mod tests {
     }
 
     const FIELD: &str = "field";
+    const BAR: &str = "chainv4-ui edit bar";
 
     impl App {
         fn new(text: &str, clipboard: Option<&str>) -> App {
@@ -466,8 +450,8 @@ mod tests {
             }
         }
 
-        /// One frame, later by some seconds, with these events, the keyboard up or not.
-        fn frame(&mut self, later: f64, mut events: Vec<Event>, keyboard: bool) -> Vec<egui::OutputCommand> {
+        /// One frame, later by some seconds, with these events.
+        fn frame(&mut self, later: f64, mut events: Vec<Event>) -> Vec<egui::OutputCommand> {
             self.time += later;
             let mut raw_input = RawInput {
                 time: Some(self.time),
@@ -479,7 +463,7 @@ mod tests {
             let App { text, editing, clipboard, .. } = self;
             let mut output = self.ctx.run_ui(raw_input, |ui| {
                 ui.add(egui::TextEdit::singleline(text).id(Id::unique(FIELD)));
-                editing.show(ui.ctx(), keyboard, clipboard);
+                editing.show(ui.ctx(), clipboard);
             });
             output.textures_delta.clear();
 
@@ -605,25 +589,25 @@ mod tests {
     #[test]
     fn a_finger_held_on_a_field_brings_the_bar_and_a_tap_elsewhere_takes_it() {
         let mut app = App::new("words", Some("pasted"));
-        app.frame(0.0, Vec::new(), false);
+        app.frame(0.0, Vec::new());
         let on = app.field().center();
-        app.frame(0.1, finger(on, true), false);
-        app.frame(0.3, Vec::new(), false);
+        app.frame(0.1, finger(on, true));
+        app.frame(0.3, Vec::new());
 
         assert!(!app.editing.bar_is_up(), "not yet held long enough");
 
-        app.frame(0.3, Vec::new(), false);
+        app.frame(0.3, Vec::new());
 
         assert!(app.focused(), "holding the field focuses it");
         assert!(app.editing.bar_is_up());
 
-        app.frame(0.1, finger(on, false), false);
+        app.frame(0.1, finger(on, false));
 
         assert!(app.editing.bar_is_up(), "lifting the finger leaves it up");
 
         let elsewhere = pos2(200.0, 500.0);
-        app.frame(0.1, finger(elsewhere, true), false);
-        app.frame(0.1, finger(elsewhere, false), false);
+        app.frame(0.1, finger(elsewhere, true));
+        app.frame(0.1, finger(elsewhere, false));
 
         assert!(!app.editing.bar_is_up(), "a tap elsewhere takes it down");
     }
@@ -631,19 +615,19 @@ mod tests {
     #[test]
     fn paste_on_the_bar_pastes_into_the_field_held() {
         let mut app = App::new("", Some("ed25519:0xab"));
-        app.frame(0.0, Vec::new(), false);
+        app.frame(0.0, Vec::new());
         let on = app.field().center();
-        app.frame(0.1, finger(on, true), false);
-        app.frame(0.5, Vec::new(), false);
-        app.frame(0.5, Vec::new(), false);
-        app.frame(0.1, finger(on, false), false);
-        app.frame(0.1, Vec::new(), false);
-        let bar = app.ctx.memory(|memory| memory.area_rect(Id::unique("chainv4-ui edit bar"))).expect("the bar is up");
+        app.frame(0.1, finger(on, true));
+        app.frame(0.5, Vec::new());
+        app.frame(0.5, Vec::new());
+        app.frame(0.1, finger(on, false));
+        app.frame(0.1, Vec::new());
+        let bar = app.ctx.memory(|memory| memory.area_rect(Id::unique(BAR))).expect("the bar is up");
         // Paste comes first.
         let paste = pos2(bar.left() + 24.0, bar.center().y);
-        app.frame(0.1, finger(paste, true), false);
-        app.frame(0.1, finger(paste, false), false);
-        app.frame(0.1, Vec::new(), false);
+        app.frame(0.1, finger(paste, true));
+        app.frame(0.1, finger(paste, false));
+        app.frame(0.1, Vec::new());
 
         assert_eq!(app.text, "ed25519:0xab");
         assert!(app.focused(), "the field keeps its focus");
@@ -653,30 +637,30 @@ mod tests {
     #[test]
     fn select_all_on_the_bar_leaves_it_up_for_cut() {
         let mut app = App::new("secret words", None);
-        app.frame(0.0, Vec::new(), false);
+        app.frame(0.0, Vec::new());
         let on = app.field().center();
-        app.frame(0.1, finger(on, true), false);
-        app.frame(0.5, Vec::new(), false);
-        app.frame(0.5, Vec::new(), false);
-        app.frame(0.1, finger(on, false), false);
-        app.frame(0.1, Vec::new(), false);
-        let bar = app.ctx.memory(|memory| memory.area_rect(Id::unique("chainv4-ui edit bar"))).expect("the bar is up");
+        app.frame(0.1, finger(on, true));
+        app.frame(0.5, Vec::new());
+        app.frame(0.5, Vec::new());
+        app.frame(0.1, finger(on, false));
+        app.frame(0.1, Vec::new());
+        let bar = app.ctx.memory(|memory| memory.area_rect(Id::unique(BAR))).expect("the bar is up");
         // With nothing to paste, Select all comes first.
         let select_all = pos2(bar.left() + 24.0, bar.center().y);
-        app.frame(0.1, finger(select_all, true), false);
-        app.frame(0.1, finger(select_all, false), false);
-        app.frame(0.1, Vec::new(), false);
-        app.frame(0.1, Vec::new(), false);
+        app.frame(0.1, finger(select_all, true));
+        app.frame(0.1, finger(select_all, false));
+        app.frame(0.1, Vec::new());
+        app.frame(0.1, Vec::new());
 
         assert!(selected(&app.ctx, Id::unique(FIELD)));
         assert!(app.editing.bar_is_up(), "it stays up for Copy and Cut");
 
         // Cut comes last.
-        let bar = app.ctx.memory(|memory| memory.area_rect(Id::unique("chainv4-ui edit bar"))).expect("still up");
+        let bar = app.ctx.memory(|memory| memory.area_rect(Id::unique(BAR))).expect("still up");
         let cut = pos2(bar.right() - 20.0, bar.center().y);
-        app.frame(0.1, finger(cut, true), false);
-        let commands = app.frame(0.1, finger(cut, false), false);
-        let commands = [commands, app.frame(0.1, Vec::new(), false)].concat();
+        app.frame(0.1, finger(cut, true));
+        let commands = app.frame(0.1, finger(cut, false));
+        let commands = [commands, app.frame(0.1, Vec::new())].concat();
 
         assert_eq!(app.text, "");
         assert!(commands.contains(&egui::OutputCommand::CopyText("secret words".to_string())));
@@ -687,60 +671,120 @@ mod tests {
     fn a_drag_that_selects_brings_the_bar() {
         let mut app = App::new("some words to select", None);
         app.ctx.memory_mut(|memory| memory.request_focus(Id::unique(FIELD)));
-        app.frame(0.0, Vec::new(), false);
+        app.frame(0.0, Vec::new());
         let field = app.field();
         let (from, to) = (pos2(field.left() + 6.0, field.center().y), pos2(field.right() - 6.0, field.center().y));
-        app.frame(0.1, finger(from, true), false);
+        app.frame(0.1, finger(from, true));
 
         for step in 1..=4 {
             let at = from + (to - from) * (step as f32 / 4.0);
-            app.frame(0.05, vec![Event::PointerMoved(at)], false);
+            app.frame(0.05, vec![Event::PointerMoved(at)]);
         }
 
-        app.frame(0.05, finger(to, false), false);
+        app.frame(0.05, finger(to, false));
 
         assert!(selected(&app.ctx, Id::unique(FIELD)), "the drag selected");
         assert!(app.editing.bar_is_up(), "and brought the bar for Copy");
     }
 
     #[test]
-    fn the_paste_button_over_the_keyboard_pastes_into_the_field() {
+    fn the_tap_that_gives_a_field_focus_brings_nothing_and_neither_does_typing_after_it() {
         let mut app = App::new("gm ", Some("ed25519:0xab"));
-        app.ctx.memory_mut(|memory| memory.request_focus(Id::unique(FIELD)));
-        app.frame(0.0, Vec::new(), false);
-        app.frame(0.1, Vec::new(), false);
+        app.frame(0.0, Vec::new());
+        let on = app.field().center();
+        app.frame(0.1, finger(on, true));
+        app.frame(0.1, finger(on, false));
 
-        assert!(app.ctx.read_response(Id::unique("chainv4-ui paste")).is_none(), "no button without the keyboard");
+        for _ in 0..3 {
+            app.frame(0.2, Vec::new());
+        }
 
-        // Its first frame only sizes the button; it takes taps from the next.
-        app.frame(0.1, Vec::new(), true);
-        app.frame(0.1, Vec::new(), true);
-        // The button sits beside the field, at its right end.
-        let button = app.ctx.memory(|memory| memory.area_rect(Id::unique("chainv4-ui paste"))).expect("drawn");
-        let field = app.field();
+        assert!(app.focused(), "the tap focused it");
+        assert!(app.ctx.memory(|memory| memory.area_rect(Id::unique(BAR))).is_none(), "and nothing was offered");
 
-        assert!(!button.intersects(field), "not over the field: {button:?} {field:?}");
-        assert!((button.right() - field.right()).abs() < BAR_GAP + 1.0, "at its right end: {button:?} {field:?}");
+        app.frame(0.1, vec![Event::Text("x".to_string())]);
+        app.frame(0.1, Vec::new());
 
-        let button = button.center();
-        app.frame(0.1, finger(button, true), true);
-        app.frame(0.1, finger(button, false), true);
-        app.frame(0.1, Vec::new(), true);
-
-        assert_eq!(app.text, "gm ed25519:0xab");
-        assert!(app.focused(), "the field keeps its focus");
+        assert_eq!(app.text, "gm x");
+        assert!(!app.editing.bar_is_up());
     }
 
     #[test]
-    fn nothing_shows_to_paste_with_an_empty_clipboard() {
-        let mut app = App::new("", None);
-        app.ctx.memory_mut(|memory| memory.request_focus(Id::unique(FIELD)));
-        app.frame(0.0, Vec::new(), true);
-        app.frame(0.1, Vec::new(), true);
+    fn typing_takes_the_bar_down_at_once_and_it_comes_back_when_asked() {
+        for typed in [Event::Text("x".to_string()), Event::Key { key: Key::Backspace, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }] {
+            let mut app = App::new("words", Some("pasted"));
+            app.frame(0.0, Vec::new());
+            let on = app.field().center();
+            app.frame(0.1, finger(on, true));
+            app.frame(0.1, finger(on, false));
+            app.frame(1.0, finger(on, true));
+            app.frame(0.1, finger(on, false));
+            app.frame(0.1, Vec::new());
 
-        assert!(app.ctx.memory(|memory| memory.area_rect(Id::unique("chainv4-ui paste"))).is_none());
+            assert!(app.editing.bar_is_up(), "tapped with focus");
 
-        assert!(app.ctx.memory(|memory| memory.area_rect(Id::unique("chainv4-ui paste"))).is_none(), "nothing appeared: nothing to tap");
+            app.frame(0.1, vec![typed.clone()]);
+
+            assert!(!app.editing.bar_is_up(), "typing starts, and it goes: {typed:?}");
+
+            app.frame(0.1, Vec::new());
+            app.frame(1.0, finger(on, true));
+            app.frame(0.1, finger(on, false));
+            app.frame(0.1, Vec::new());
+
+            assert!(app.editing.bar_is_up(), "another tap brings it back");
+
+            app.frame(1.0, finger(on, true));
+            app.frame(0.1, finger(on, false));
+            app.frame(0.1, Vec::new());
+            assert!(!app.editing.bar_is_up());
+
+            app.frame(1.0, finger(on, true));
+            app.frame(0.6, Vec::new());
+            app.frame(0.1, Vec::new());
+
+            assert!(app.editing.bar_is_up(), "and so does a hold");
+        }
+    }
+
+    #[test]
+    fn nothing_is_asked_of_the_clipboard_until_the_bar_is_up_and_then_it_offers_paste() {
+        /// A clipboard that counts how often it is asked.
+        struct Counted(u32);
+
+        impl Clipboard for Counted {
+            fn has_text(&mut self) -> bool {
+                self.0 += 1;
+
+                true
+            }
+
+            fn text(&mut self) -> Option<String> {
+                None
+            }
+        }
+
+        let ctx = Context::default();
+        let (mut editing, mut text, mut clipboard) = (Editing::default(), String::new(), Counted(0));
+        ctx.memory_mut(|memory| memory.request_focus(Id::unique(FIELD)));
+        let mut frame = |clipboard: &mut Counted, editing: &mut Editing, time: f64| {
+            let mut output = ctx.run_ui(RawInput { time: Some(time), ..Default::default() }, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut text).id(Id::unique(FIELD)));
+                editing.show(ui.ctx(), clipboard);
+            });
+            output.textures_delta.clear();
+        };
+
+        for step in 0..5 {
+            frame(&mut clipboard, &mut editing, f64::from(step));
+        }
+
+        assert_eq!(clipboard.0, 0, "a phone's clipboard is not read for a field alone");
+
+        editing.bar = Some((Id::unique(FIELD), pos2(10.0, 10.0)));
+        frame(&mut clipboard, &mut editing, 6.0);
+
+        assert_eq!(clipboard.0, 1);
     }
 
     /// What winit on Android has egui told of a letter pressed with Ctrl held, as it would of the
@@ -762,10 +806,10 @@ mod tests {
         // The field takes it, where it is.
         let mut app = App::new("gm ", None);
         app.ctx.memory_mut(|memory| memory.request_focus(Id::unique(FIELD)));
-        app.frame(0.0, Vec::new(), true);
+        app.frame(0.0, Vec::new());
         let mut events = letter(Key::V, "v");
         ctrl_key(&mut events, Key::V, &mut || Some("ed25519:0xab".to_string()));
-        app.frame(0.1, events, true);
+        app.frame(0.1, events);
 
         assert_eq!(app.text, "gm ed25519:0xab");
     }
@@ -774,8 +818,8 @@ mod tests {
     fn a_v_typed_stays_a_v() {
         let mut app = App::new("", None);
         app.ctx.memory_mut(|memory| memory.request_focus(Id::unique(FIELD)));
-        app.frame(0.0, Vec::new(), true);
-        app.frame(0.1, letter(Key::V, "v"), true);
+        app.frame(0.0, Vec::new());
+        app.frame(0.1, letter(Key::V, "v"));
 
         assert_eq!(app.text, "v");
     }
@@ -793,23 +837,23 @@ mod tests {
     fn the_other_shortcuts_mean_what_they_do_on_a_desktop() {
         let mut app = App::new("secret words", None);
         app.ctx.memory_mut(|memory| memory.request_focus(Id::unique(FIELD)));
-        app.frame(0.0, Vec::new(), true);
+        app.frame(0.0, Vec::new());
         let mut events = letter(Key::A, "a");
         ctrl_key(&mut events, Key::A, &mut || None);
-        app.frame(0.1, events, true);
+        app.frame(0.1, events);
 
         assert!(selected(&app.ctx, Id::unique(FIELD)), "Ctrl+A selects, and types no a");
         assert_eq!(app.text, "secret words");
 
         let mut events = letter(Key::C, "c");
         ctrl_key(&mut events, Key::C, &mut || None);
-        let commands = app.frame(0.1, events, true);
+        let commands = app.frame(0.1, events);
 
         assert!(commands.contains(&egui::OutputCommand::CopyText("secret words".to_string())));
 
         let mut events = letter(Key::X, "x");
         ctrl_key(&mut events, Key::X, &mut || None);
-        app.frame(0.1, events, true);
+        app.frame(0.1, events);
 
         assert_eq!(app.text, "");
     }
@@ -840,12 +884,12 @@ mod tests {
     #[test]
     fn a_finger_that_rolls_a_little_while_held_still_brings_the_bar() {
         let mut app = App::new("words", Some("pasted"));
-        app.frame(0.0, Vec::new(), false);
+        app.frame(0.0, Vec::new());
         let on = app.field().center();
-        app.frame(0.1, finger(on, true), false);
-        app.frame(0.2, vec![Event::PointerMoved(on + vec2(10.0, 3.0))], false);
-        app.frame(0.2, vec![Event::PointerMoved(on + vec2(12.0, 6.0))], false);
-        app.frame(0.2, Vec::new(), false);
+        app.frame(0.1, finger(on, true));
+        app.frame(0.2, vec![Event::PointerMoved(on + vec2(10.0, 3.0))]);
+        app.frame(0.2, vec![Event::PointerMoved(on + vec2(12.0, 6.0))]);
+        app.frame(0.2, Vec::new());
 
         assert!(app.editing.bar_is_up(), "more than egui's six points, and still a hold");
     }
@@ -853,11 +897,11 @@ mod tests {
     #[test]
     fn a_finger_that_moves_on_is_no_hold() {
         let mut app = App::new("words", Some("pasted"));
-        app.frame(0.0, Vec::new(), false);
+        app.frame(0.0, Vec::new());
         let on = app.field().center();
-        app.frame(0.1, finger(on, true), false);
-        app.frame(0.1, vec![Event::PointerMoved(on + vec2(0.0, 40.0))], false);
-        app.frame(0.6, Vec::new(), false);
+        app.frame(0.1, finger(on, true));
+        app.frame(0.1, vec![Event::PointerMoved(on + vec2(0.0, 40.0))]);
+        app.frame(0.6, Vec::new());
 
         assert!(!app.editing.bar_is_up());
     }
@@ -865,17 +909,17 @@ mod tests {
     #[test]
     fn a_hold_shorter_than_a_click_is_long_still_leaves_the_bar_up_when_lifted() {
         let mut app = App::new("words", Some("pasted"));
-        app.frame(0.0, Vec::new(), false);
+        app.frame(0.0, Vec::new());
         let on = app.field().center();
-        app.frame(0.1, finger(on, true), false);
-        app.frame(0.3, Vec::new(), false);
-        app.frame(0.25, Vec::new(), false);
+        app.frame(0.1, finger(on, true));
+        app.frame(0.3, Vec::new());
+        app.frame(0.25, Vec::new());
 
         assert!(app.editing.bar_is_up());
 
         // Under egui's 0.8 seconds, so egui calls lifting it a click.
-        app.frame(0.05, finger(on, false), false);
-        app.frame(0.1, Vec::new(), false);
+        app.frame(0.05, finger(on, false));
+        app.frame(0.1, Vec::new());
 
         assert!(app.editing.bar_is_up(), "lifting the finger that brought it leaves it");
     }
@@ -883,84 +927,77 @@ mod tests {
     #[test]
     fn a_tap_on_a_field_with_focus_brings_the_bar_and_a_second_takes_it_away() {
         let mut app = App::new("words", Some("pasted"));
-        app.frame(0.0, Vec::new(), true);
+        app.frame(0.0, Vec::new());
         let on = app.field().center();
 
         // The first tap only gives it focus.
-        app.frame(0.1, finger(on, true), true);
-        app.frame(0.1, finger(on, false), true);
-        app.frame(0.1, Vec::new(), true);
+        app.frame(0.1, finger(on, true));
+        app.frame(0.1, finger(on, false));
+        app.frame(0.1, Vec::new());
 
         assert!(app.focused());
         assert!(!app.editing.bar_is_up());
 
-        app.frame(1.0, finger(on, true), true);
-        app.frame(0.1, finger(on, false), true);
-        app.frame(0.1, Vec::new(), true);
+        app.frame(1.0, finger(on, true));
+        app.frame(0.1, finger(on, false));
+        app.frame(0.1, Vec::new());
 
         assert!(app.editing.bar_is_up(), "tapped with focus");
 
-        app.frame(1.0, finger(on, true), true);
-        app.frame(0.1, finger(on, false), true);
-        app.frame(0.1, Vec::new(), true);
+        app.frame(1.0, finger(on, true));
+        app.frame(0.1, finger(on, false));
+        app.frame(0.1, Vec::new());
 
         assert!(!app.editing.bar_is_up(), "tapped again");
     }
 
-    /// One frame of a page with tabs along the bottom, its field as low as the page goes, and the
-    /// bars above the keyboard's top edge, where the screen ends.
-    fn tabbed(ctx: &Context, editing: &mut Editing, text: &mut String, clipboard: &mut Held, time: f64) -> (Rect, Rect) {
-        let (mut tabs, mut field) = (Rect::NOTHING, Rect::NOTHING);
-        let raw_input = RawInput {
-            time: Some(time),
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))),
-            ..Default::default()
-        };
-        let mut output = ctx.run_ui(raw_input, |ui| {
-            tabs = egui::Panel::bottom("tabs").exact_size(46.0).show(ui, |ui| ui.allocate_space(ui.available_size())).response.rect;
-            egui::CentralPanel::default().show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    crate::layout::keep_focus_in_view(ui);
-                    ui.add_space(ui.available_height() - 40.0);
-                    field = ui.add(egui::TextEdit::singleline(text).id(Id::unique(FIELD))).rect;
-                });
-            });
-            editing.show(ui.ctx(), true, clipboard);
-        });
-        output.textures_delta.clear();
-
-        (tabs, field)
-    }
-
     #[test]
-    fn the_paste_button_stays_off_the_tabs_and_beside_the_field() {
+    fn the_bar_stays_off_the_tabs_and_beside_the_field() {
         let ctx = Context::default();
         let (mut editing, mut text, mut clipboard) = (Editing::default(), String::new(), Held(Some("words".to_string())));
         ctx.memory_mut(|memory| memory.request_focus(Id::unique(FIELD)));
-        let mut drawn = (Rect::NOTHING, Rect::NOTHING);
+        editing.bar = Some((Id::unique(FIELD), pos2(200.0, 340.0)));
+        let (mut tabs, mut field) = (Rect::NOTHING, Rect::NOTHING);
 
+        // A page with tabs along the bottom, its field as low as the page goes, and the bar above the
+        // keyboard's top edge, where the screen ends.
         for frame in 0..4 {
-            drawn = tabbed(&ctx, &mut editing, &mut text, &mut clipboard, f64::from(frame));
+            let raw_input = RawInput {
+                time: Some(f64::from(frame)),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw_input, |ui| {
+                tabs = egui::Panel::bottom("tabs").exact_size(46.0).show(ui, |ui| ui.allocate_space(ui.available_size())).response.rect;
+                egui::CentralPanel::default().show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        crate::layout::keep_focus_in_view(ui);
+                        ui.add_space(ui.available_height() - 40.0);
+                        field = ui.add(egui::TextEdit::singleline(&mut text).id(Id::unique(FIELD))).rect;
+                    });
+                });
+                editing.show(ui.ctx(), &mut clipboard);
+            });
+            output.textures_delta.clear();
         }
 
-        let (tabs, field) = drawn;
-        let button = ctx.memory(|memory| memory.area_rect(Id::unique("chainv4-ui paste"))).expect("drawn");
+        let bar = ctx.memory(|memory| memory.area_rect(Id::unique(BAR))).expect("drawn");
 
-        assert!(button.bottom() <= tabs.top(), "above the tabs: {button:?} {tabs:?}");
-        assert!(!button.intersects(field), "not over the field: {button:?} {field:?}");
-        assert!(button.bottom() <= field.top(), "just above it: {button:?} {field:?}");
+        assert!(bar.bottom() <= tabs.top(), "above the tabs: {bar:?} {tabs:?}");
+        assert!(!bar.intersects(field), "not over the field: {bar:?} {field:?}");
+        assert!(bar.bottom() <= field.top(), "just above it: {bar:?} {field:?}");
     }
 
     #[test]
     fn select_all_and_copy_reach_the_field_as_a_keyboard_would() {
         let mut app = App::new("secret words", None);
         app.ctx.memory_mut(|memory| memory.request_focus(Id::unique(FIELD)));
-        app.frame(0.0, Vec::new(), false);
+        app.frame(0.0, Vec::new());
         let ctx = app.ctx.clone();
         app.editing.act(&ctx, Id::unique(FIELD), Action::SelectAll, &mut app.clipboard);
-        app.frame(0.1, Vec::new(), false);
+        app.frame(0.1, Vec::new());
         app.editing.act(&ctx, Id::unique(FIELD), Action::Copy, &mut app.clipboard);
-        let commands = app.frame(0.1, Vec::new(), false);
+        let commands = app.frame(0.1, Vec::new());
 
         assert!(app.focused());
 

@@ -337,7 +337,7 @@ fn payments(ui: &mut Ui, ctx: &mut Ctx, payments: &[crate::model::PaymentView]) 
             super::address(ui, ctx, &payment.from);
             super::address(ui, ctx, &payment.to);
             ui.label(ctx.coins(&payment.amount));
-            ui.end_row();
+            super::row_end(ui);
         }
     });
 }
@@ -364,7 +364,7 @@ pub fn events(ui: &mut Ui, ctx: &mut Ctx, events: &[EventView]) {
                     super::address(ui, ctx, &event.contract);
                     ui.label(widgets::strong(&event.name, 13.0));
                     event_data(ui, ctx, &event.contract, &event.name, &event.data);
-                    ui.end_row();
+                    super::row_end(ui);
                 }
             });
         }
