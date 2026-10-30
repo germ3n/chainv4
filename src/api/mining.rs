@@ -8,10 +8,13 @@
 //! machine.
 
 use {
+    super::sharing::ReportField,
     super::{Answer, Api, ApiError, Shared, report},
     crate::mining::protocol::MOST_LINE,
     axum::Json,
+    axum::extract::ConnectInfo,
     axum::extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    axum::http::HeaderMap,
     axum::response::{IntoResponse, Response},
     libp2p::futures::{SinkExt, StreamExt},
     serde_json::json,
@@ -44,9 +47,11 @@ fn local(listening: SocketAddr) -> SocketAddr {
 
 /// GET /mining: the mining port, where the apps reach it, the protocol it speaks, and what it
 /// takes: a pool's workers, workers mining alone, and anyone, or only those who know the token.
-pub(super) async fn about(Shared(api): Shared<Api>) -> Answer {
+pub(super) async fn about(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Answer {
+    let (sharing, _) = api.shared_with(peer, &headers);
     let (mining, listening) = port(&api).await?;
     let pool = mining.pool.as_ref();
+    let counted = !sharing.hides(ReportField::Workers) && !sharing.hides(ReportField::Mining);
 
     Ok(Json(json!({
         "port": listening.port(),
@@ -58,7 +63,7 @@ pub(super) async fn about(Shared(api): Shared<Api>) -> Answer {
         "fee": pool.map(|pool| pool.fee),
         "window": pool.map(|pool| pool.window),
         "ws": SOCKET_PATH,
-        "workers": mining.workers.len(),
+        "workers": counted.then_some(mining.workers.len()),
     })))
 }
 

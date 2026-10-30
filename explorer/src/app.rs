@@ -117,7 +117,8 @@ impl Explorer {
             .or_else(|| Some(settings.node.clone()).filter(|node| !node.is_empty()))
             .unwrap_or_else(|| fallback.to_string());
         let wake = creation.egui_ctx.clone();
-        let api = Api::new(&node, client(&settings), wake.clone());
+        let mut api = Api::new(&node, client(&settings), wake.clone());
+        api.bear_report_token(settings.report_tokens.get(&node).map(String::as_str));
         let mut explorer = Explorer {
             settings,
             address: node.clone(),
@@ -167,6 +168,7 @@ impl Explorer {
     fn connect(&mut self, node: &str) {
         let node = node.trim().trim_end_matches('/').to_string();
         self.api = Api::new(&node, client(&self.settings), self.wake.clone());
+        self.api.bear_report_token(self.settings.report_tokens.get(&node).map(String::as_str));
         self.store = Store::default();
         self.map = MapState::default();
         self.light = Light::default();

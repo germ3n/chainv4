@@ -34,6 +34,10 @@ services:
       MINING_SOLO: ${MINING_SOLO:-0}
       MINING_OPEN: ${MINING_OPEN:-0}
       MINING_PUBLIC: ${MINING_PUBLIC:-}
+      REPORT: ${REPORT:-}
+      HIDE: ${HIDE:-}
+      SHOW: ${SHOW:-}
+      REPORT_TOKEN: ${REPORT_TOKEN:-}
       POOL_FEE: ${POOL_FEE:-0}
       POOL_WINDOW: ${POOL_WINDOW:-2}
       POOL_PUSH: ${POOL_PUSH:-}

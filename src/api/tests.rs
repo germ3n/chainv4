@@ -1647,6 +1647,138 @@ fn pages_from_allowed_origins_may_call_the_api() {
     assert!(!head.contains("access-control-allow-origin"), "{head}");
 }
 
+/// Who asks from afar, through a proxy on the node's machine, as nginx says.
+const FROM_AFAR: &str = "X-Forwarded-For: 203.0.113.7\r\n";
+const REPORT_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+fn sharing_node(sharing: super::sharing::Sharing) -> SocketAddr {
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let options = ApiOptions { sharing, report_token: Some(REPORT_TOKEN.as_bytes().to_vec()), ..ApiOptions::default() };
+
+    start(db, Some(fake_node()), &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap()
+}
+
+fn node_as(address: SocketAddr, headers: &str) -> Value {
+    let (status, _, body) = raw(address, "GET", "/node", headers);
+    assert_eq!(status, 200);
+
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[test]
+fn a_node_shares_what_its_operator_chose_with_all_but_the_operator() {
+    use super::sharing::{ReportField, ReportPreset, Sharing};
+
+    let address = sharing_node(Sharing::default());
+    let afar = node_as(address, FROM_AFAR);
+
+    // By default, the addresses and the workers' names go; each keeps its place, for older apps.
+    assert_eq!(afar["hidden"], json!(["peer-addresses", "listening", "worker-addresses", "worker-names"]));
+    assert_eq!(afar["listening"], json!([]));
+    assert_eq!(afar["peers"][0]["address"], "");
+    assert_eq!(afar["mining"]["listening"], Value::Null);
+    assert_eq!(afar["mining"]["workers"][0]["address"], "");
+    assert_eq!(afar["mining"]["workers"][0]["name"], "worker 1");
+    // The rest stays.
+    assert_ne!(afar["peers"][0]["id"], "");
+    assert_eq!(afar["peers"][0]["heard"]["blocks"], 3);
+    assert_eq!(afar["mining"]["rate"], 300_001_000.0);
+    assert_eq!(afar["counters"]["blocks_heard"], 3);
+    assert_eq!(afar["uptime_ms"], 60_000);
+    assert_eq!(afar["token_refused"], false);
+    let text = afar.to_string();
+    assert!(!text.contains("10.0.0.3") && !text.contains("4001") && !text.contains("4002") && !text.contains("\"rig\""), "{text}");
+
+    // The operator: on this machine, or from afar with the token.
+    for operator in [node_as(address, ""), node_as(address, &format!("{FROM_AFAR}Authorization: Bearer {REPORT_TOKEN}\r\n"))] {
+        assert_eq!(operator["hidden"], json!([]));
+        assert_eq!(operator["listening"], json!(["/ip4/127.0.0.1/udp/4001/quic-v1"]));
+        assert_eq!(operator["mining"]["listening"], "0.0.0.0:4002");
+        assert_eq!(operator["mining"]["workers"][0]["address"], "10.0.0.3:50000");
+        assert_eq!(operator["mining"]["workers"][0]["name"], "rig");
+        assert_eq!(operator["token_refused"], false);
+    }
+
+    // A token the node does not take shares no more, and says so.
+    let wrong = node_as(address, &format!("{FROM_AFAR}Authorization: Bearer not-the-token\r\n"));
+    assert_eq!((wrong["listening"].clone(), wrong["token_refused"].clone()), (json!([]), json!(true)));
+
+    // Minimal: its own state alone.
+    let minimal = node_as(sharing_node(Sharing::new(ReportPreset::Minimal, &[], &[]).unwrap()), FROM_AFAR);
+    assert_eq!(minimal["peers"], json!([]));
+    assert_eq!(minimal["mining"], Value::Null);
+    assert_eq!(minimal["counters"], json!({}));
+    assert_eq!(minimal["backlog"], Value::Null);
+    assert_eq!((minimal["uptime_ms"].clone(), minimal["producing"].clone(), minimal["mempool"]["count"].clone()), (json!(60_000), json!(true), json!(2)));
+
+    // A preset, tweaked; and full.
+    let tweaked = sharing_node(Sharing::new(ReportPreset::Public, &[ReportField::Uptime, ReportField::Role, ReportField::PeerIds, ReportField::Devices, ReportField::WorkerPayouts], &[ReportField::PeerAddresses]).unwrap());
+    let some = node_as(tweaked, FROM_AFAR);
+    assert_eq!((some["uptime_ms"].clone(), some["started"].clone(), some["producing"].clone()), (json!(0), json!(0), json!(false)));
+    assert_eq!((some["peers"][0]["id"].clone(), some["peers"][0]["address"].clone()), (json!(""), json!("/ip4/10.0.0.2/udp/4001/quic-v1")));
+    assert_eq!((some["mining"]["devices"].clone(), some["mining"]["workers"][0]["devices"].clone()), (json!([]), json!([])));
+    assert_eq!(some["mining"]["workers"][0]["payout"], Value::Null);
+    assert_eq!(node_as(sharing_node(Sharing::new(ReportPreset::Full, &[], &[]).unwrap()), FROM_AFAR)["hidden"], json!([]));
+
+    // GET /mining's count of workers goes with them; its port does not, as miners need it.
+    let quiet = sharing_node(Sharing::new(ReportPreset::Public, &[ReportField::Workers], &[]).unwrap());
+    let (_, _, about) = raw(quiet, "GET", "/mining", FROM_AFAR);
+    let about: Value = serde_json::from_slice(&about).unwrap();
+    assert_eq!((about["workers"].clone(), about["port"].clone()), (Value::Null, json!(4002)));
+    let (_, _, about) = raw(quiet, "GET", "/mining", "");
+    assert_eq!(serde_json::from_slice::<Value>(&about).unwrap()["workers"], 1);
+
+    // A page from elsewhere may send the token.
+    let cors = ApiOptions { cors: vec!["http://app.example".to_string()], ..ApiOptions::default() };
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let elsewhere = start(db, Some(fake_node()), &free(), "127.0.0.1:0".parse().unwrap(), cors).unwrap();
+    let (_, head, _) = raw(elsewhere, "OPTIONS", "/node", "Origin: http://app.example\r\nAccess-Control-Request-Method: GET\r\nAccess-Control-Request-Headers: authorization\r\n");
+    assert!(head.contains("access-control-allow-headers: content-type, authorization"), "{head}");
+}
+
+#[cfg(feature = "pool")]
+#[test]
+fn a_miner_s_workers_are_named_as_the_node_chose() {
+    use super::sharing::{ReportField, ReportPreset, Sharing};
+
+    let miner = Address::Ed25519([4; 32]);
+    let (inbox, events) = std::sync::mpsc::channel();
+    let backlog = Arc::new(Backlog::new(BacklogLimits::default()));
+
+    std::thread::spawn(move || {
+        for event in events {
+            if let NetEvent::Report { txs, reply } = event {
+                let mut report = fake_report(txs);
+                let mining = report.mining.as_mut().unwrap();
+                mining.workers[0].payout = Some(miner);
+                mining.pool = Some(crate::consensus::PoolReport { producer: Some(Address::Ed25519([1; 32])), ..Default::default() });
+                let _ = reply.send(report);
+            }
+        }
+    });
+
+    let serving = |sharing: Sharing| {
+        let db = Arc::new(MemoryDb::default());
+        Chain::open(db.clone(), &free()).unwrap();
+        let handle = NodeHandle::new(inbox.clone(), backlog.clone());
+
+        start(db, Some(handle), &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions { sharing, ..ApiOptions::default() }).unwrap()
+    };
+    let workers = |address, headers: &str| {
+        let (status, _, body) = raw(address, "GET", &format!("/pool/{miner}"), headers);
+        assert_eq!(status, 200);
+
+        serde_json::from_slice::<Value>(&body).unwrap()["workers"].clone()
+    };
+    let public = serving(Sharing::default());
+
+    assert_eq!(workers(public, FROM_AFAR)[0]["name"], "worker 1");
+    assert_eq!(workers(public, "")[0]["name"], "rig", "its operator sees its name");
+    assert_eq!(workers(serving(Sharing::new(ReportPreset::Public, &[ReportField::Workers], &[]).unwrap()), FROM_AFAR), json!([]));
+}
+
 #[test]
 fn the_explorer_and_the_wallet_are_served_beside_the_routes() {
     let dir = std::env::temp_dir().join(format!("chainv4-explorer-{}", std::process::id()));
@@ -1700,6 +1832,58 @@ fn the_explorer_and_the_wallet_are_served_beside_the_routes() {
 
 #[cfg(feature = "stream")]
 #[test]
+fn the_stream_keeps_to_itself_what_the_node_does() {
+    use super::sharing::{ReportPreset, Sharing};
+    use crate::net::NetLink;
+    use crate::node::Node;
+
+    /// What comes of a peer connecting, to one listening from afar.
+    fn heard(sharing: Sharing) -> String {
+        let db = Arc::new(MemoryDb::default());
+        let (link, fake) = NetLink::pair();
+        let mut node = Node::new(db.clone(), &free(), None, link).unwrap().stream(16);
+        let address = start(db, Some(node.handle()), &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions { sharing, ..ApiOptions::default() }).unwrap();
+        let listen = |headers: &str| {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+            write!(stream, "GET /stream HTTP/1.1\r\nHost: localhost\r\n{headers}\r\n").unwrap();
+            let mut seen = String::new();
+            let mut buffer = [0; 4096];
+
+            while !seen.contains("\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                seen.push_str(&String::from_utf8_lossy(&buffer[..read]));
+            }
+
+            stream
+        };
+        let (mut afar, mut here) = (listen(FROM_AFAR), listen(""));
+        fake.events.send(NetEvent::PeerUp { peer: libp2p::PeerId::random(), address: "/ip4/10.0.0.9/udp/1/quic-v1".parse().unwrap() }).unwrap();
+        node.step(SLOT).unwrap();
+        let mut buffer = [0; 4096];
+
+        // This machine hears it first: then the other has had its chance to.
+        let mut seen = String::new();
+        while !seen.contains("event: peer_up") {
+            let read = here.read(&mut buffer).unwrap();
+            seen.push_str(&String::from_utf8_lossy(&buffer[..read]));
+        }
+        assert!(seen.contains("10.0.0.9"), "{seen}");
+
+        afar.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        match afar.read(&mut buffer) {
+            Ok(read) => String::from_utf8_lossy(&buffer[..read]).into_owned(),
+            Err(_) => String::new(),
+        }
+    }
+
+    let public = heard(Sharing::default());
+    assert!(public.contains("event: peer_up") && !public.contains("10.0.0.9"), "{public}");
+    assert!(!heard(Sharing::new(ReportPreset::Minimal, &[], &[]).unwrap()).contains("peer_up"), "no peers, no word of them");
+}
+
+#[cfg(feature = "stream")]
+#[test]
 fn a_streaming_node_pushes_what_it_does() {
     use crate::net::NetLink;
     use crate::node::Node;
@@ -1737,6 +1921,7 @@ fn a_streaming_node_pushes_what_it_does() {
     }
 
     assert!(seen.contains(&peer.to_string()), "{seen}");
+    assert!(seen.contains("/ip4/10.0.0.9/udp/1/quic-v1"), "this machine sees where it connects from: {seen}");
 
     let quiet = start(db, Some(fake_node()), &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
 

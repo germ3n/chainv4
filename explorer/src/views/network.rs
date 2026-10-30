@@ -32,6 +32,22 @@ pub fn updates(palette: &Palette, streaming: &Streaming) -> (Color32, String) {
     }
 }
 
+/// What the explorer says of what the node keeps to itself.
+const HIDDEN: &str = "hidden by the node";
+
+/// Says the node keeps this to itself.
+fn hidden(ui: &mut Ui, palette: &Palette) {
+    ui.label(RichText::new(HIDDEN).color(palette.muted));
+}
+
+/// A value the node may have left empty, as what it keeps to itself is.
+fn or_hidden(value: &str) -> &str {
+    match value.is_empty() {
+        true => "hidden",
+        false => value,
+    }
+}
+
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, streaming: &Streaming) {
     let look = ctx.look;
     super::heading(ui, look, "Network", "The node this explorer reads, and the peers it talks to.", |_| {});
@@ -47,12 +63,18 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, streaming: &Streaming) {
     match look.narrow {
         true => {
             about(ui, ctx, node, streaming);
-            super::section(ui, look, "Peers at a glance", |ui| graph(ui, look, node, height));
+
+            if !node.hides("peers") {
+                super::section(ui, look, "Peers at a glance", |ui| graph(ui, look, node, height));
+            }
         }
         false => {
             ui.columns(2, |columns| {
                 about(&mut columns[0], ctx, node, streaming);
-                super::section(&mut columns[1], look, "Peers at a glance", |ui| graph(ui, look, node, height));
+                super::section(&mut columns[1], look, "Peers at a glance", |ui| match node.hides("peers") {
+                    true => hidden(ui, &look.palette),
+                    false => graph(ui, look, node, height),
+                });
             });
         }
     }
@@ -65,8 +87,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, streaming: &Streaming) {
             |ui| {
                 ui.label(RichText::new(format::hashrate(mining.rate)).monospace().color(look.palette.good));
             },
-            |ui| self::mining(ui, ctx, mining),
+            |ui| self::mining(ui, ctx, node, mining),
         );
+    } else if node.hides("mining") {
+        super::section(ui, look, "Mining", |ui| hidden(ui, &look.palette));
     }
 
     super::section_with(
@@ -74,11 +98,19 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, streaming: &Streaming) {
         look,
         "Peers",
         |ui| {
-            ui.label(RichText::new(node.peers.len().to_string()).monospace().color(look.palette.muted));
+            if !node.hides("peers") {
+                ui.label(RichText::new(node.peers.len().to_string()).monospace().color(look.palette.muted));
+            }
         },
-        |ui| peers(ui, ctx, &node.peers, height),
+        |ui| match node.hides("peers") {
+            true => hidden(ui, &look.palette),
+            false => peers(ui, ctx, &node.peers, height),
+        },
     );
-    super::section(ui, look, "Since it started", |ui| counters(ui, look, node));
+    super::section(ui, look, "Since it started", |ui| match node.hides("counters") {
+        true => hidden(ui, &look.palette),
+        false => counters(ui, look, node),
+    });
 }
 
 fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
@@ -88,8 +120,15 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
     super::section(ui, look, "This node", |ui| {
         super::facts(ui, look, "node", |facts| {
             facts.row("API", |ui| super::copyable(ui, ctx.api.base()));
-            facts.text("up for", format::span(node.uptime_ms));
+            match node.hides("uptime") {
+                true => facts.row("up for", |ui| hidden(ui, &palette)),
+                false => facts.text("up for", format::span(node.uptime_ms)),
+            }
             facts.row("role", |ui| {
+                if node.hides("role") {
+                    return hidden(ui, &palette);
+                }
+
                 widgets::pill(ui, "follows", look.roles.main);
 
                 if node.producing {
@@ -136,8 +175,9 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                 });
             }
             facts.row("syncing", |ui| match &node.syncing {
+                _ if node.hides("syncing") => hidden(ui, &palette),
                 Some(syncing) => {
-                    ui.label(format!("from height {} off {}", syncing.from, format::short(&syncing.peer)));
+                    ui.label(format!("from height {} off {}", syncing.from, format::short(or_hidden(&syncing.peer))));
                 }
                 None => {
                     ui.label(RichText::new("no").color(palette.muted));
@@ -151,6 +191,10 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                     &format!("{} of {}", format::thousands(&node.mempool.count.to_string()), format::thousands(&node.mempool.capacity.to_string())),
                 );
             });
+
+            if node.hides("backlog") {
+                facts.row("backlog", |ui| hidden(ui, &palette));
+            }
 
             if let Some(backlog) = &node.backlog {
                 facts.row("backlog", |ui| {
@@ -170,6 +214,10 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
 
             facts.row("listening", |ui| {
                 ui.vertical(|ui| {
+                    if node.hides("listening") {
+                        hidden(ui, &palette);
+                    }
+
                     for address in &node.listening {
                         peer_address(ui, address);
                     }
@@ -256,7 +304,7 @@ pub fn upgrade(upgrade: &UpgradeView, height: u64) -> String {
 
 /// The node's mining: the hashrate over the last minutes, its own devices, the pool it runs, if
 /// it does, and its workers, with whom a pool's pay.
-fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
+fn mining(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, mining: &MiningView) {
     let look = ctx.look;
     let palette = look.palette;
     let history = &ctx.store.hashrates;
@@ -282,6 +330,7 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
         facts.text("hashrate", format::hashrate(mining.rate));
 
         match &mining.listening {
+            _ if node.hides("listening") => facts.row("workers on", |ui| hidden(ui, &palette)),
             Some(listening) => facts.row("workers on", |ui| super::copyable(ui, listening)),
             None => facts.row("workers on", |ui| {
                 ui.label(RichText::new("no mining port: start the node with --mining to take workers").color(palette.muted));
@@ -310,7 +359,9 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
 
         facts.row("this node", |ui| {
             ui.vertical(|ui| {
-                if mining.devices.is_empty() {
+                if node.hides("devices") {
+                    hidden(ui, &palette);
+                } else if mining.devices.is_empty() {
                     ui.label(RichText::new("no devices of its own: its workers mine").color(palette.muted));
                 }
 
@@ -323,8 +374,14 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
 
     ui.add_space(6.0);
 
+    if node.hides("workers") {
+        super::note(ui, look, "Its workers are hidden by the node.");
+
+        return;
+    }
+
     if mining.workers.is_empty() {
-        if mining.listening.is_some() {
+        if mining.listening.is_some() || node.hides("listening") {
             super::note(ui, look, "No workers connected. Run chainv4 worker --node HOST:PORT --token FILE on a rig to add its GPUs or threads.");
         }
 
@@ -354,7 +411,7 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
                         ui.label(RichText::new(format::ago(worker.since, ctx.now)).small().color(palette.muted));
                     });
                 });
-                ui.label(RichText::new(&worker.address).monospace().small().color(palette.soft));
+                ui.label(RichText::new(or_hidden(&worker.address)).monospace().small().color(palette.soft));
 
                 if let Some(payout) = &worker.payout {
                     ui.horizontal_wrapped(|ui| {
@@ -383,7 +440,7 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, mining: &MiningView) {
     super::table(ui, look, "workers", headings, |ui| {
         for worker in &mining.workers {
             ui.label(RichText::new(&worker.name).strong());
-            ui.monospace(&worker.address);
+            ui.monospace(or_hidden(&worker.address));
 
             if pooled {
                 ui.vertical(|ui| match &worker.payout {
@@ -555,12 +612,12 @@ fn peers(ui: &mut Ui, ctx: &mut Ctx, peers: &[Peer], height: u64) {
         for peer in peers {
             super::list_row(ui, look, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format::short(&peer.id)).monospace().color(palette.ink));
+                    ui.label(RichText::new(format::short(or_hidden(&peer.id))).monospace().color(palette.ink));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(format::ago(peer.since, ctx.now)).small().color(palette.muted));
                     });
                 });
-                ui.add(egui::Label::new(RichText::new(&peer.address).monospace().small().color(palette.soft)).wrap());
+                ui.add(egui::Label::new(RichText::new(or_hidden(&peer.address)).monospace().small().color(palette.soft)).wrap());
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(their_height(peer, height).unwrap_or_else(|| "height not told yet".to_string())).small());
                     ui.label(RichText::new(heard_text(peer)).small().color(palette.muted));
@@ -577,8 +634,8 @@ fn peers(ui: &mut Ui, ctx: &mut Ctx, peers: &[Peer], height: u64) {
 
     super::table(ui, look, "peers", &["peer", "address", "connected", "heard", "their height", "justified"], |ui| {
         for peer in peers {
-            super::copyable_as(ui, RichText::new(format::short(&peer.id)).monospace(), &peer.id);
-            ui.monospace(&peer.address);
+            super::copyable_as(ui, RichText::new(format::short(or_hidden(&peer.id))).monospace(), &peer.id);
+            ui.monospace(or_hidden(&peer.address));
             ui.label(RichText::new(format::ago(peer.since, ctx.now)).color(palette.muted));
             ui.horizontal(|ui| {
                 ui.label(heard_text(peer));

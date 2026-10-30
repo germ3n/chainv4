@@ -10,4 +10,5 @@
 /docker/certs/*.pem
 /docker/config/*.key
 /docker/config/mining.token
+/docker/config/report.token
 /docker/config/genesis.json

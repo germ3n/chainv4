@@ -284,6 +284,24 @@ pub struct Api {
     wake: egui::Context,
     /// Set to end the stream that is open.
     hang_up: Option<Arc<AtomicBool>>,
+    /// The node's report token, shown to GET /node alone, for it to share everything.
+    report_token: Option<String>,
+}
+
+/// Whether a report token may go to this node: only where nobody on the way reads it, over TLS, an
+/// onion or this machine. Its bearer sees where a node's peers and miners are.
+pub fn carries_token(base: &str) -> bool {
+    let Some((scheme, rest)) = base.split_once("://") else {
+        return false;
+    };
+    let host = rest.split('/').next().unwrap_or_default();
+    let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+    let host = match host.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+
+    scheme.eq_ignore_ascii_case("https") || host.ends_with(".onion") || matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 impl Api {
@@ -297,11 +315,17 @@ impl Api {
             asking: HashSet::new(),
             wake,
             hang_up: None,
+            report_token: None,
         }
     }
 
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// The node's report token, sent with each GET /node from here on, where it may go at all.
+    pub fn bear_report_token(&mut self, token: Option<&str>) {
+        self.report_token = token.map(str::trim).filter(|token| !token.is_empty() && carries_token(&self.base)).map(str::to_string);
     }
 
     /// Asks, unless the same question is out already.
@@ -312,6 +336,7 @@ impl Api {
 
         let url = format!("{}{}", self.base, ask.path());
         let body = ask.body().map(String::into_bytes);
+        let token = self.report_token.clone().filter(|_| ask == Ask::Node);
         let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
         let done = move |answer: Result<Answer, String>| {
             let result = match answer {
@@ -324,7 +349,7 @@ impl Api {
         };
 
         match &self.client {
-            Ok(client) => client.fetch(url, body, done),
+            Ok(client) => client.fetch_bearing(url, body, token, done),
             Err(why) => done(Err(unusable(why))),
         }
     }
@@ -449,6 +474,17 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_report_token_goes_only_where_nobody_on_the_way_reads_it() {
+        for base in ["https://node.example", "https://150-40-117-173.sslip.io/", "http://abcdefgh.onion", "http://abcdefgh.onion:8080/", "http://127.0.0.1:8090", "http://localhost:8080", "http://[::1]:8080", "HTTPS://node.example"] {
+            assert!(carries_token(base), "{base}");
+        }
+
+        for base in ["http://node.example", "http://10.0.2.2:8080", "http://203.0.113.7:8080", "http://localhost.evil.example", "http://user@node.example", "node.example"] {
+            assert!(!carries_token(base), "{base}");
+        }
+    }
+
     use super::*;
 
     #[test]

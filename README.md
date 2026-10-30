@@ -88,6 +88,7 @@ Amounts are whole numbers in the smallest unit; coins have 18 decimals, so
 | `--validate` | | Vote on [finality](#finality), on chains whose finality takes votes. |
 | `--validator-key PATH` | dev key | The voting key file a validator bonded with, or a signer's key, for `--validate`. |
 | `--http ADDR` | | Serve the HTTP API, such as `127.0.0.1:8080`. |
+| `--report PRESET` | `public` | What the node [shares of itself](docs/node.md#what-a-node-shares-of-itself) with whoever asks its API: `public` keeps the addresses of its peers, workers and itself and its workers' names, `full` shares everything, `minimal` its own state alone. `--hide` and `--show` change single fields on top, and `--report-token FILE` shows everything to its bearer. |
 | `--stream` | | Push what the node does to API clients as it happens, on `GET /stream`. |
 | `--cors ORIGIN` | | Let web pages from this origin call the API, or `*` for any; repeat for several. |
 | `--explorer DIR` | | Serve the [explorer](docs/explorer.md)'s web app, built into `explorer/dist`, from the API's `/`. |

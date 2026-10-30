@@ -329,6 +329,15 @@ The Rich list & supply page, under Chain:
 
 An older node answers either route with 404, and the page says it is from before them.
 
+## What a node keeps to itself
+
+A node [keeps some of its report to itself](node.md#what-a-node-shares-of-itself): by default where
+its peers, its workers and it itself are, and its workers' names. The Network page and the
+Overview's tiles say "hidden by the node" for each, and Settings says what it shares with this
+explorer. **Report token** in Settings, kept per node, shows you everything of a node that is
+yours: it goes to `GET /node` alone, and only over https, an onion or this machine, and Settings
+says when the node refuses it. An explorer on the node's own machine sees everything without one.
+
 ## Getting around
 
 **On a wide screen,** a sidebar lists the pages in four groups: Chain (Overview, Block map,

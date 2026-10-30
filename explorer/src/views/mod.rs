@@ -197,6 +197,9 @@ pub struct Settings {
     /// A finalized checkpoint's block id to start the light client from at each node, pasted,
     /// rather than genesis.
     pub checkpoints: HashMap<String, String>,
+    /// The report token of each node that has one, by its address: GET /node shares everything
+    /// with its bearer.
+    pub report_tokens: HashMap<String, String>,
     /// The light palette rather than the dark one.
     pub light_theme: bool,
     /// The chain's name as each node last gave it, for the header before the node answers.

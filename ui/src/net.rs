@@ -135,15 +135,20 @@ impl Client {
     /// Sends a GET, or a POST of JSON when there is a body, and calls done with the answer from
     /// another thread, or from the browser's event loop.
     pub fn fetch(&self, url: String, body: Option<Vec<u8>>, done: impl FnOnce(Result<Answer, String>) + Send + 'static) {
+        self.fetch_bearing(url, body, None, done);
+    }
+
+    /// As fetch, bearing a token as Authorization: Bearer, when there is one.
+    pub fn fetch_bearing(&self, url: String, body: Option<Vec<u8>>, token: Option<String>, done: impl FnOnce(Result<Answer, String>) + Send + 'static) {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (agent, proxy) = (self.agent.clone(), self.proxy.clone());
 
-            std::thread::spawn(move || done(native::fetch(&agent, proxy.as_ref(), &url, body)));
+            std::thread::spawn(move || done(native::fetch(&agent, proxy.as_ref(), &url, body, token.as_deref())));
         }
 
         #[cfg(target_arch = "wasm32")]
-        web::fetch(url, body, done);
+        web::fetch(url, body, token, done);
     }
 
     /// Opens a GET whose body keeps coming, such as an event stream, and calls on with each
@@ -191,10 +196,13 @@ mod native {
         }
     }
 
-    pub fn fetch(agent: &ureq::Agent, proxy: Option<&Proxy>, url: &str, body: Option<Vec<u8>>) -> Result<Answer, String> {
-        let sent = match body {
-            Some(body) => agent.post(url).header("content-type", "application/json").send(&body[..]),
-            None => agent.get(url).call(),
+    pub fn fetch(agent: &ureq::Agent, proxy: Option<&Proxy>, url: &str, body: Option<Vec<u8>>, token: Option<&str>) -> Result<Answer, String> {
+        let bearer = token.map(|token| format!("Bearer {token}"));
+        let sent = match (body, &bearer) {
+            (Some(body), Some(bearer)) => agent.post(url).header("content-type", "application/json").header("authorization", bearer).send(&body[..]),
+            (Some(body), None) => agent.post(url).header("content-type", "application/json").send(&body[..]),
+            (None, Some(bearer)) => agent.get(url).header("authorization", bearer).call(),
+            (None, None) => agent.get(url).call(),
         };
         let mut response = sent.map_err(|err| failed(proxy, err))?;
         let status = response.status();
@@ -265,12 +273,16 @@ mod web {
         std::ops::ControlFlow,
     };
 
-    pub fn fetch(url: String, body: Option<Vec<u8>>, done: impl FnOnce(Result<Answer, String>) + Send + 'static) {
+    pub fn fetch(url: String, body: Option<Vec<u8>>, token: Option<String>, done: impl FnOnce(Result<Answer, String>) + Send + 'static) {
         // ehttp's own text/plain, which needs no preflight from a page on another origin.
-        let request = match body {
+        let mut request = match body {
             Some(body) => ehttp::Request::post(url, body),
             None => ehttp::Request::get(url),
         };
+
+        if let Some(token) = token {
+            request.headers.insert("Authorization", format!("Bearer {token}"));
+        }
 
         ehttp::fetch(request, move |response| {
             done(response.map(|response| Answer {

@@ -497,6 +497,15 @@ all it `earned`, what it `claimed` and what is `claimable`, and its leaf's `inde
 pool's blocks can no longer be undone at, as its books know, or `null`: what a miner keeping its
 claims prunes by. 404 for a miner the pool owes nothing yet.
 
+### What a node keeps to itself
+
+`GET /node`, `/stream`, `GET /pool/{address}` and `GET /mining` leave out what the node's
+[`--report`, `--hide` and `--show`](node.md#what-a-node-shares-of-itself) say to keep, unless the
+request comes from the node's own machine or bears its report token, `Authorization: Bearer
+TOKEN`. Each such field stays, empty: `""`, `[]`, `{}`, `0`, `false` or `null`. `GET /node`'s
+`hidden` lists the fields left out of this answer, and `token_refused` says it was sent a token it
+does not take.
+
 ### `GET /mining` and `GET /mining/ws`
 
 On a node that takes workers, `--mining`; 404 otherwise. `GET /mining` tells the apps where to mine
@@ -504,7 +513,7 @@ for it: the mining port's `port`, where it is reached from outside, `public` (`-
 `null` for the API's own host), the `protocol` it speaks, whether it runs a `pool` (with its `fee`,
 in parts of a billion, and `window`), takes workers mining alone (`solo`, `--mining-solo`) and takes
 anyone (`open`, `--mining-open`, whose workers prove the open token), the `ws` path below and how
-many `workers` are connected.
+many `workers` are connected, or `null` when the node keeps its workers to itself.
 
 `GET /mining/ws` is the mining port over a WebSocket, for a browser, which opens no TCP
 connections: each text message is one line of the port's [protocol](consensus.md#mining-with-workers),

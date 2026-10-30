@@ -677,6 +677,11 @@ offline; these would make that hold up as a treasury.
 
 ### Network
 
+- [x] **What a node shares of itself.** `--report full|public|minimal` with `--hide` and `--show`
+  on top decide what `GET /node`, `/stream`, `GET /pool/{address}` and `GET /mining` say, addresses
+  and workers' names hidden by default; this machine and `--report-token` see everything, and the
+  explorer says what is hidden and sends the token from Settings. See
+  [What a node shares of itself](node.md#what-a-node-shares-of-itself).
 - [x] **A peer heard from one way only forks the chain for good.** Seen 2026-10-29: the laptop's
   node, restarted while its old connection to the VPS stood, kept hearing the VPS while the VPS
   heard none of its blocks, and the chains split past the reorg limit. gossipsub tells a peer its

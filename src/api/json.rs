@@ -7,6 +7,7 @@ use {
     crate::db::{Column, StateProof},
     crate::crypto::keypair::PublicKey,
     crate::node::{NodeReport, PeerReport},
+    super::sharing::{ReportField, Sharing},
     crate::registry::validators::ValidatorRecord,
     crate::structs::vote::Justification,
     crate::registry::contracts::ContractRecord,
@@ -170,20 +171,25 @@ pub fn block(block: &Block, receipts: &[Option<TxReceipt>], hash: HashType, rewa
     value
 }
 
-/// How a node is doing, as GET /node answers.
-pub fn node(report: &NodeReport) -> Value {
+/// How a node is doing, as GET /node answers, less what it keeps to itself: each such field stays,
+/// empty, so apps from before still read the answer, and `hidden` names them.
+pub fn node(report: &NodeReport, sharing: Sharing) -> Value {
     let counters = &report.counters;
+    let shown = |field: ReportField| !sharing.hides(field);
+    let uptime = shown(ReportField::Uptime);
+    let role = shown(ReportField::Role);
 
     json!({
-        "started": report.started,
+        "hidden": sharing.hidden_names(),
+        "started": if uptime { report.started } else { 0 },
         "now": report.now,
-        "uptime_ms": report.now.saturating_sub(report.started),
-        "listening": report.listening.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        "producing": report.producing,
-        "validating": report.validating,
+        "uptime_ms": if uptime { report.now.saturating_sub(report.started) } else { 0 },
+        "listening": if shown(ReportField::Listening) { report.listening.iter().map(ToString::to_string).collect::<Vec<_>>() } else { Vec::new() },
+        "producing": role && report.producing,
+        "validating": role && report.validating,
         "mempool": { "count": report.waiting, "capacity": report.capacity },
-        "syncing": report.syncing.map(|(peer, from)| json!({ "peer": peer.to_string(), "from": from })),
-        "counters": {
+        "syncing": report.syncing.filter(|_| shown(ReportField::Syncing)).map(|(peer, from)| json!({ "peer": if shown(ReportField::PeerIds) { peer.to_string() } else { String::new() }, "from": from })),
+        "counters": if !shown(ReportField::Counters) { json!({}) } else { json!({
             "blocks_heard": counters.blocks_heard,
             "blocks_imported": counters.blocks_imported,
             "side_blocks": counters.side_blocks,
@@ -204,36 +210,41 @@ pub fn node(report: &NodeReport) -> Value {
             "flooders_disconnected": counters.flooders_disconnected,
             "gossip_rejected": counters.gossip_rejected,
             "peers_banned": counters.peers_banned,
-        },
-        "backlog": {
+        }) },
+        "backlog": shown(ReportField::Backlog).then(|| json!({
             "waiting": report.backlog.0,
             "total": report.backlog.1.total,
             "per_peer": report.backlog.1.per_peer,
-        },
-        "peers": report.peers.iter().map(peer).collect::<Vec<_>>(),
-        "mining": report.mining.as_ref().map(mining),
+        })),
+        "peers": if shown(ReportField::Peers) { report.peers.iter().map(|one| peer(one, sharing)).collect::<Vec<_>>() } else { Vec::new() },
+        "mining": report.mining.as_ref().filter(|_| shown(ReportField::Mining)).map(|report| mining(report, sharing)),
     })
 }
 
 /// How a node's mining goes: its devices, the workers mining for it, and the total hashrate.
-fn mining(report: &crate::consensus::MiningReport) -> Value {
+fn mining(report: &crate::consensus::MiningReport, sharing: Sharing) -> Value {
+    let shown = |field: ReportField| !sharing.hides(field);
     let devices = |devices: &[crate::consensus::DeviceReport]| -> Vec<Value> {
-        devices.iter().map(|device| json!({ "name": device.name, "rate": device.rate })).collect()
+        match shown(ReportField::Devices) {
+            true => devices.iter().map(|device| json!({ "name": device.name, "rate": device.rate })).collect(),
+            false => Vec::new(),
+        }
     };
+    let workers: &[crate::consensus::WorkerReport] = if shown(ReportField::Workers) { &report.workers } else { &[] };
 
     json!({
         "rate": report.rate(),
         "devices": devices(&report.devices),
-        "listening": report.listening,
-        "workers": report.workers.iter().map(|worker| json!({
-            "name": worker.name,
-            "address": worker.address,
+        "listening": report.listening.as_ref().filter(|_| shown(ReportField::Listening)),
+        "workers": workers.iter().enumerate().map(|(index, worker)| json!({
+            "name": worker_name(&worker.name, index, sharing),
+            "address": if shown(ReportField::WorkerAddresses) { worker.address.as_str() } else { "" },
             "since": worker.since,
             "rate": worker.devices.iter().map(|device| device.rate).sum::<f64>(),
             "devices": devices(&worker.devices),
             "found": worker.found,
             "refused": worker.refused,
-            "payout": worker.payout.map(|payout| payout.to_string()),
+            "payout": worker.payout.filter(|_| shown(ReportField::WorkerPayouts)).map(|payout| payout.to_string()),
             "shares": worker.shares,
             "share_difficulty": worker.share_difficulty.to_string(),
             "solo": worker.solo,
@@ -249,10 +260,18 @@ fn mining(report: &crate::consensus::MiningReport) -> Value {
     })
 }
 
-fn peer(peer: &PeerReport) -> Value {
+/// What a worker goes by: its own name, or by its place when its name is kept to the node.
+pub(super) fn worker_name(name: &str, index: usize, sharing: Sharing) -> String {
+    match sharing.hides(ReportField::WorkerNames) {
+        true => format!("worker {}", index + 1),
+        false => name.to_string(),
+    }
+}
+
+fn peer(peer: &PeerReport, sharing: Sharing) -> Value {
     json!({
-        "id": peer.id.to_string(),
-        "address": peer.address.to_string(),
+        "id": if sharing.hides(ReportField::PeerIds) { String::new() } else { peer.id.to_string() },
+        "address": if sharing.hides(ReportField::PeerAddresses) { String::new() } else { peer.address.to_string() },
         "since": peer.since,
         "heard": { "blocks": peer.heard.blocks, "txs": peer.heard.txs, "votes": peer.heard.votes },
         "dropped": peer.dropped,
@@ -285,7 +304,7 @@ pub fn dry_run(ran: &crate::chain::DryRun) -> Value {
 
 /// What a streaming node did: the event's name, and its data.
 #[cfg(feature = "stream")]
-pub fn node_event(event: &crate::node::NodeEvent, hash: HashType, reward: &crate::chain::RewardSchedule) -> (&'static str, Value) {
+pub fn node_event(event: &crate::node::NodeEvent, hash: HashType, reward: &crate::chain::RewardSchedule, sharing: Sharing) -> (&'static str, Value) {
     use crate::node::NodeEvent;
 
     match event {
@@ -305,8 +324,11 @@ pub fn node_event(event: &crate::node::NodeEvent, hash: HashType, reward: &crate
         NodeEvent::Justified(checkpoint) => ("justified", self::checkpoint(checkpoint)),
         NodeEvent::Finalized(checkpoint) => ("finalized", self::checkpoint(checkpoint)),
         NodeEvent::Queued(tx) => ("queued", signed_tx(tx, hash)),
-        NodeEvent::PeerUp { peer, address } => ("peer_up", json!({ "id": peer.to_string(), "address": address.to_string() })),
-        NodeEvent::PeerDown(peer) => ("peer_down", json!({ "id": peer.to_string() })),
+        NodeEvent::PeerUp { peer, address } => ("peer_up", json!({
+            "id": if sharing.hides(ReportField::PeerIds) { String::new() } else { peer.to_string() },
+            "address": if sharing.hides(ReportField::PeerAddresses) { String::new() } else { address.to_string() },
+        })),
+        NodeEvent::PeerDown(peer) => ("peer_down", json!({ "id": if sharing.hides(ReportField::PeerIds) { String::new() } else { peer.to_string() } })),
     }
 }
 

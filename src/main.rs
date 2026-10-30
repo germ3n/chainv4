@@ -250,6 +250,28 @@ struct NodeArgs {
     /// up to 16 of them.
     #[arg(long, requires = "mining")]
     mining_solo: bool,
+    /// What the node shares of itself with whoever asks its API: public keeps the addresses of its
+    /// peers, workers and itself, and its workers' names; full shares everything; minimal its own
+    /// state alone. Asked from this machine, or with --report-token, it shares everything.
+    #[cfg(feature = "http")]
+    #[arg(long, default_value = "public")]
+    report: chainv4::api::sharing::ReportPreset,
+    /// Keep these fields to the node on top of --report, such as counters,devices: peer-addresses,
+    /// peer-ids, peers, listening, worker-addresses, worker-names, worker-payouts, workers, devices,
+    /// mining, counters, backlog, syncing, uptime, role.
+    #[cfg(feature = "http")]
+    #[arg(long, value_delimiter = ',')]
+    hide: Vec<chainv4::api::sharing::ReportField>,
+    /// Share these fields on top of --report, such as peer-addresses.
+    #[cfg(feature = "http")]
+    #[arg(long, value_delimiter = ',')]
+    show: Vec<chainv4::api::sharing::ReportField>,
+    /// The file holding a token that shows whoever bears it everything, as Authorization: Bearer
+    /// TOKEN: at least 32 characters, such as openssl rand -hex 32 makes. Send it over HTTPS or
+    /// Tor alone.
+    #[cfg(feature = "http")]
+    #[arg(long)]
+    report_token: Option<std::path::PathBuf>,
     /// Where workers reach the mining port from outside, such as 203.0.113.7:4002 or
     /// ADDRESS.onion:4002, as GET /status and GET /pool tell the apps; by default they take the
     /// API's host and the port --mining listens on.
@@ -692,6 +714,8 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(feature = "updates")]
             releases: Some(releases.clone()),
             mining_public: args.mining_public.clone(),
+            sharing: api::sharing::Sharing::new(args.report, &args.hide, &args.show)?,
+            report_token: args.report_token.as_deref().map(chainv4::mining::read_token).transpose()?,
         };
         let address = api::start(db, Some(node.handle()), &genesis, address, options)?;
         log::info!("[http] listening on {address}");

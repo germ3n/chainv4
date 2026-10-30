@@ -24,6 +24,24 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
     let palette = look.palette;
     super::heading(ui, look, "Settings", "The node the explorer reads and the way to it, how it looks, and what it trusts.", |_| {});
 
+    super::section(ui, look, "Node's report token", |ui| {
+        let node = ctx.api.base().to_string();
+        let carries = crate::api::carries_token(&node);
+        super::note(ui, look, "A node you run keeps its peers' and miners' addresses from whoever asks. Its --report-token shows them to you here. It goes only to GET /node, and only over https, an onion or this machine.");
+        ui.add_space(4.0);
+        let token = ctx.settings.report_tokens.entry(node.clone()).or_default();
+        let response = chainv4_ui::secret::secret(ui, egui::TextEdit::singleline(token).hint_text("the token, if this node is yours").desired_width(ui.available_width()));
+
+        if response.changed() {
+            let token = token.clone();
+            ctx.api.bear_report_token(Some(&token));
+        }
+
+        if !carries {
+            super::note(ui, look, "This node is reached over plain http: the token stays here until it is https or an onion.");
+        }
+    });
+
     super::section(ui, look, "Node", |ui| {
         super::note(ui, look, "Its HTTP API. The explorer reads everything from it, and checks what it can with its light client.");
         ui.add_space(4.0);
@@ -55,6 +73,21 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
                 let (color, text) = super::network::updates(&palette, streaming);
                 ui.label(RichText::new(text).color(color));
             });
+
+            // The node's report: what it hides from this explorer, and whether it took the token.
+            if let Some(node) = &ctx.store.node {
+                facts.row("shares", |ui| match (node.token_refused, node.hidden.is_empty()) {
+                    (true, _) => {
+                        widgets::pill(ui, "refused the report token", palette.bad);
+                    }
+                    (false, true) => {
+                        widgets::pill(ui, "everything", palette.good);
+                    }
+                    (false, false) => {
+                        ui.label(RichText::new(format!("all but {}", node.hidden.join(", "))).color(palette.muted));
+                    }
+                });
+            }
 
             if let Some(status) = &status {
                 facts.text("chain", format!("{} · {} · {} hashes · {} decimals", status.chain_name(), status.coin.symbol, status.hash, status.coin.decimals));

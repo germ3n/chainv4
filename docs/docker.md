@@ -75,6 +75,13 @@ it is not the API's host and port 4002. nginx passes `/mining/ws`, the port over
 to the node for the web wallet, which mines through it; the TCP port still needs opening for the
 desktop and phone wallets and for `chainv4 worker`.
 
+**What it shares:** `REPORT` is the node's [`--report`](node.md#what-a-node-shares-of-itself),
+`public` unless set, and `HIDE` and `SHOW` its `--hide` and `--show`, by commas.
+`docker/pow.sh report-token` makes a token (`docker/config/report.token`, or `REPORT_TOKEN` naming
+another file) that shows its bearer everything: `docker/pow.sh status` sends it, and it goes in the
+explorer's Settings. nginx and Tor are other containers, so what comes through them is never taken
+for the node's own machine.
+
 **Who reads the secrets:** `docker/pow.sh up` gives the token and `validator.key` to the node's
 user in its container, uid 10001, with `podman unshare` under rootless Podman and as root
 otherwise, readable by nobody else; where it can do neither, it leaves them readable to every user

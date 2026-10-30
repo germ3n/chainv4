@@ -51,11 +51,14 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         ("Throughput".to_string(), format!("{:.2} tx/s", rates.tps), format!("{} transactions", rates.txs)),
         (
             "Peers".to_string(),
-            ctx.store.node.as_ref().map_or("—".to_string(), |node| node.peers.len().to_string()),
-            ctx.store
-                .node
-                .as_ref()
-                .map_or("no node report".to_string(), |node| format!("up {}", format::span(node.uptime_ms))),
+            ctx.store.node.as_ref().map_or("—".to_string(), |node| match node.hides("peers") {
+                true => "hidden".to_string(),
+                false => node.peers.len().to_string(),
+            }),
+            ctx.store.node.as_ref().map_or("no node report".to_string(), |node| match node.hides("uptime") {
+                true => "uptime hidden by the node".to_string(),
+                false => format!("up {}", format::span(node.uptime_ms)),
+            }),
         ),
         (
             "Mempool".to_string(),

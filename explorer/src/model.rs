@@ -637,6 +637,19 @@ pub struct NodeView {
     /// How its mining goes, when it mines; none from older nodes.
     #[serde(default)]
     pub mining: Option<MiningView>,
+    /// What the node keeps to itself from this asker, by field; none from older nodes.
+    #[serde(default)]
+    pub hidden: Vec<String>,
+    /// Whether it did not take the report token sent; false from older nodes.
+    #[serde(default)]
+    pub token_refused: bool,
+}
+
+impl NodeView {
+    /// Whether the node keeps this field, as its --hide names it, from this asker.
+    pub fn hides(&self, field: &str) -> bool {
+        self.hidden.iter().any(|hidden| hidden == field)
+    }
 }
 
 /// A node's mining: its own devices, the workers mining for it, and their hashrates.
@@ -1262,6 +1275,16 @@ mod tests {
         assert_eq!((mining.rate, mining.devices[0].name.as_str()), (3e8, "Apple M3 Pro (Metal)"));
         assert_eq!((mining.workers[0].found, mining.workers[0].devices[0].rate), (2, 1e8));
         assert!(!mining.solo && !mining.workers[0].solo, "an older node says nothing of mining alone");
+        assert!(node.hidden.is_empty() && !node.token_refused, "nor of what it keeps to itself");
+
+        let private: NodeView = serde_json::from_value(json!({
+            "uptime_ms": 1, "listening": [], "producing": true, "validating": false,
+            "mempool": { "count": 0, "capacity": 1 }, "syncing": null, "counters": {}, "peers": [], "mining": null, "backlog": null,
+            "hidden": ["listening", "peers"], "token_refused": true,
+        }))
+        .unwrap();
+
+        assert!(private.hides("listening") && private.hides("peers") && !private.hides("counters") && private.token_refused);
 
         let alone: MiningView = serde_json::from_value(json!({
             "rate": 1e6, "devices": [], "listening": "0.0.0.0:4002", "solo": true,

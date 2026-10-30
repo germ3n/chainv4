@@ -1096,6 +1096,13 @@ voting finality it now goes back to the checkpoint and follows the node from the
   connection from the node itself. Behind nginx, the location needs the WebSocket upgrade headers.
 - **`GET /mining` is not in `GET /status`.** It asks the node's loop, as `GET /node` does, while
   `/status`, which the apps ask most, reads only the database.
+- **A node's report hides by default.** `Sharing::default()` is the `public` preset, so a
+  `GET /node` from elsewhere no longer lists peers' or workers' addresses, its own, or workers'
+  names; `--report full` is what it was. Apps read empty values as they did, and `hidden` says why.
+  The rule for who sees everything is stricter than the faucet's `asker`: only a loopback TCP peer
+  counts, never a private one, so nothing on the LAN or in Docker's network gets in by writing
+  `X-Forwarded-For`. Its token compares in time that does not say how much of it matched, and is
+  read with `read_token`, as the mining token is.
 - **gossipsub tells its topics on a peer's first connection alone.** A peer back from a restart
   before its old connection timed out arrives as a second connection and would never hear them,
   publishing into nothing (libp2p-gossipsub 0.50's `on_connection_established` returns early for

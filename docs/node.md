@@ -214,6 +214,53 @@ its branch is heavier, rather than taken for where it was when its gossip stoppe
 subscribes, counts as `gossip_unpublished` in `GET /node` and logs a warning at most once a
 minute; without peers, it is the usual best effort.
 
+## What a node shares of itself
+
+`GET /node`, which the explorer's Network page reads, could say where a node's peers and miners
+are, so a node keeps those to itself by default. `--report` picks where it starts, and `--hide` and
+`--show`, comma-separated and repeatable, change single fields on top. An unknown name, or one
+named both to hide and to show, stops the node at start.
+
+| `--report` | What it keeps to itself |
+| --- | --- |
+| `public`, the default | `peer-addresses`, `listening`, `worker-addresses`, `worker-names` |
+| `full` | Nothing. |
+| `minimal` | The above, and `peers`, `mining`, `counters`, `backlog`: only its uptime, role, mempool and whether it syncs remain. |
+
+| Field | What it is |
+| --- | --- |
+| `peer-addresses` | Where each peer connects from: `GET /node`, and `/stream`'s `peer_up`. |
+| `peer-ids` | Each peer's id, and the peer it syncs from. |
+| `peers` | The peers altogether: the list, and `/stream`'s `peer_up` and `peer_down`. |
+| `listening` | Its own addresses, and the address its mining port is bound to. |
+| `worker-addresses` | Where each mining worker connects from. |
+| `worker-names` | What each worker calls itself, by default its machine's host name: `worker 1`, `worker 2` and so on instead. In `GET /pool/{address}` too. |
+| `worker-payouts` | The address each worker's earnings go to. |
+| `workers` | The workers altogether: the lists in `GET /node` and `GET /pool/{address}`, and `GET /mining`'s count. |
+| `devices` | The GPUs and CPUs mining, by name, its own and its workers'. |
+| `mining` | `GET /node`'s mining section altogether. |
+| `counters`, `backlog` | What it counted since it started; the gossip waiting for it, and its limits. |
+| `syncing`, `uptime`, `role` | Whether it syncs; how long it has been up; whether it produces and validates. |
+
+What is hidden keeps its place in the answer, empty, so apps from before still read it, and
+`hidden` lists the names, so an app says "hidden by the node" rather than "none".
+
+**The operator sees everything,** two ways:
+- **From this machine:** a request whose TCP peer is on loopback, with nothing forwarding it. A
+  proxy here says who it forwards for in `X-Forwarded-For`, the last of which it wrote itself, and
+  that is who is asking; nobody elsewhere gets in by writing that header, as only a loopback peer
+  counts. A proxy on this machine that adds no such header, as a Tor service forwarding to
+  `127.0.0.1` does not, passes everyone off as this machine: give it a header, or point it at
+  another address. The Docker stack is safe either way: its Tor and nginx are other containers.
+- **With the token:** `--report-token FILE`, at least 32 characters, shows everything to a request
+  with `Authorization: Bearer TOKEN`, from anywhere. Send it over HTTPS or Tor alone. A token the
+  node does not take shares no more than none, and `GET /node` says `token_refused`.
+
+**What it does not cover:** what the network itself tells. A node's peers learn its address by
+connecting to it, and Kademlia and identify pass addresses between peers: this is about the API.
+`GET /mining` still gives the mining port, and `--mining-public` if set, which miners need; `GET
+/pool` keeps the books miners check themselves by. A chain's bootnodes are on chain.
+
 ## Over Tor
 
 Tor carries TCP alone, and QUIC is UDP, so a node meets peers over Tor on libp2p's TCP transport,

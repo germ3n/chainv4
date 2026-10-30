@@ -21,6 +21,8 @@
 #                                     VPS's onion, it goes through Tor alone, never showing its IP
 #   docker/pow.sh token               here, once: the token workers mine for the VPS with; push
 #                                     takes it there, and up starts taking workers
+#   docker/pow.sh report-token        here, once: the token that shows you all the VPS's node keeps
+#                                     from others, in the explorer's Settings and in status
 #   docker/pow.sh faucet url          here: a faucet for the VPS's chain: a key of its own, funded
 #                  [--fund COINS]      from your key through the node at url (1000 coins unless
 #                                     said), for push to take there and up to run
@@ -327,6 +329,23 @@ token() {
     fi
 }
 
+# The token that shows its bearer all the node keeps from others: made once, kept in POW_HOME for
+# status and the explorer here, and in docker/config for push to take to the VPS.
+report_token() {
+    if [ ! -s "$home/report.token" ]; then
+        mkdir -p "$home"
+        chmod 700 "$home"
+        (umask 077 && od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$home/report.token")
+        [ "$(wc -c < "$home/report.token")" -eq 64 ] || fail "the report token was not made"
+        say "made a report token, $home/report.token: paste it in the explorer's Settings to see all your node keeps from others"
+    fi
+
+    if ! cmp -s "$home/report.token" "$root/docker/config/report.token" 2>/dev/null; then
+        (umask 077 && cp "$home/report.token" "$root/docker/config/report.token")
+        say "copied it to docker/config/report.token, for push to take to the VPS"
+    fi
+}
+
 # A faucet for the VPS's chain: a key of its own, which only ever holds what it is funded with,
 # funded from the owner's key through a node of the chain, and the settings .env passes on.
 faucet() {
@@ -452,7 +471,7 @@ up() {
     [ -s "$root/docker/.env" ] || fail "no docker/.env: run docker/pow.sh init on your machine, then push"
 
     # The node runs as uid 10001 in its container: the voting key and the token become its.
-    for secret in "$root/docker/config/validator.key" "$root/docker/config/mining.token" "$root/docker/config/faucet.key"; do
+    for secret in "$root/docker/config/validator.key" "$root/docker/config/mining.token" "$root/docker/config/report.token" "$root/docker/config/faucet.key"; do
         if [ -s "$secret" ]; then node_owns "$secret"; fi
     done
 
@@ -670,10 +689,20 @@ print("[pow] chain %s, height %s, difficulty %s, %s" % (status.get("genesis"), s
 status() {
     url=${1:-http://${API:-127.0.0.1:8090}}
     curl -fsk "$url/status" | summary
-    curl -fsk "$url/node" | python3 -I -c '
+    # Your own node, from elsewhere, shows you all it keeps from others with its report token.
+    set --
+    case "$url" in
+        https://* | *.onion* | http://127.* | http://localhost*)
+            if [ -s "$home/report.token" ]; then set -- -H "Authorization: Bearer $(cat "$home/report.token")"; fi
+            ;;
+    esac
+    curl -fsk "$@" "$url/node" | python3 -I -c '
 import json, sys
 node = json.load(sys.stdin)
 peers = node.get("peers", [])
+hidden = node.get("hidden", [])
+if hidden:
+    print("[pow] the node keeps to itself: %s" % ", ".join(hidden))
 print("[pow] %d peer%s" % (len(peers), "" if len(peers) == 1 else "s"))
 for peer in peers:
     print("[pow]   %s" % (peer.get("address") or peer.get("id") or peer))
@@ -690,7 +719,7 @@ if mining:
     for device in mining["devices"]:
         print("[pow]   %s: %s" % (device["name"], rate(device["rate"])))
     for worker in mining["workers"]:
-        print("[pow]   worker %s at %s: %s, %d found" % (worker["name"], worker["address"], rate(worker["rate"]), worker["found"]))
+        print("[pow]   worker %s at %s: %s, %d found" % (worker["name"], worker["address"] or "a hidden address", rate(worker["rate"]), worker["found"]))
         for device in worker["devices"]:
             print("[pow]     %s: %s" % (device["name"], rate(device["rate"])))
 '
@@ -707,6 +736,7 @@ case "$command" in
     reset) reset "$@" ;;
     join) join "$@" ;;
     token) token ;;
+    report-token) report_token ;;
     faucet) faucet "$@" ;;
     worker) worker "$@" ;;
     status) status "$@" ;;

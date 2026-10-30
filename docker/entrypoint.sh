@@ -26,6 +26,10 @@
 #   MINING_OPEN      1 opens the port to anyone with a payout address, no token: with POOL or
 #                    MINING_SOLO, which the node needs beside it
 #   MINING_PUBLIC    where workers reach the port from outside, host:port, as GET /mining says
+#   REPORT           what the node shares of itself with whoever asks: public unless set, or
+#                    full or minimal
+#   HIDE, SHOW       fields to keep or share on top of it, separated by commas
+#   REPORT_TOKEN     the token that shows everything: /config/report.token when there is one
 #   POOL_FEE         what the pool keeps of each block, in percent: 0 unless set
 #   POOL_WINDOW      how many blocks' worth of shares each block shares out by: 2 unless set
 #   POOL_PUSH        claim for miners owed at least this, in the coin's smallest unit, from
@@ -98,6 +102,20 @@ set -- --db "$data/chain.db" \
     --index-addresses="${INDEX_ADDRESSES:-genesis}"
 
 if [ -n "${PROTOCOL:-}" ]; then set -- "$@" --protocol "$PROTOCOL"; fi
+
+# What it shares of itself with whoever asks, and the token that shows its bearer everything.
+if [ -z "${REPORT_TOKEN:-}" ] && [ -s "$config/report.token" ]; then REPORT_TOKEN=$config/report.token; fi
+if [ -n "${REPORT:-}" ]; then set -- "$@" --report "$REPORT"; fi
+if [ -n "${HIDE:-}" ]; then set -- "$@" --hide "$HIDE"; fi
+if [ -n "${SHOW:-}" ]; then set -- "$@" --show "$SHOW"; fi
+
+if [ -n "${REPORT_TOKEN:-}" ]; then
+    if [ -r "$REPORT_TOKEN" ]; then
+        set -- "$@" --report-token "$REPORT_TOKEN"
+    else
+        echo "[docker] cannot read $REPORT_TOKEN as uid $(id -u): no report token. Make it readable (docker/pow.sh up does)" >&2
+    fi
+fi
 if [ -n "${UPDATES:-}" ]; then set -- "$@" --updates "$UPDATES"; fi
 
 blocks=${BLOCKS:-auto}

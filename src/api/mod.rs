@@ -31,7 +31,7 @@ use {
     crate::structs::tx::{FeeOffer, SignedTx, Tx},
     crate::structs::u256::u256,
     axum::body::Bytes,
-    axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State as Live},
+    axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query, Request, State as Live},
     axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     axum::middleware::{self, Next},
     axum::response::{IntoResponse, Response},
@@ -54,6 +54,7 @@ use crate::chain::stored_decisions;
 mod faucet;
 mod json;
 mod mining;
+pub mod sharing;
 #[cfg(feature = "ethereum")]
 mod rpc;
 
@@ -163,6 +164,9 @@ struct Api {
     in_flight: Arc<InFlight>,
     /// Where workers reach the mining port from outside, as GET /mining says.
     mining_public: Option<Arc<String>>,
+    /// What it shares of itself, and the token that shows everything.
+    sharing: sharing::Sharing,
+    report_token: Option<Arc<Vec<u8>>>,
 }
 
 /// Requests in flight, by client, and how many each may have.
@@ -304,6 +308,11 @@ impl Api {
         Ok(())
     }
 
+    /// What this asker is shared of the node, and whether it bore a token the node does not take.
+    fn shared_with(&self, peer: SocketAddr, headers: &HeaderMap) -> (sharing::Sharing, bool) {
+        sharing::shared_with(self.sharing, self.report_token.as_deref().map(Vec::as_slice), peer, headers)
+    }
+
     /// The chain's bootnodes now: the ones governance decided last, or genesis's.
     fn bootnodes(&self, state: &State) -> Result<Vec<String>, ApiError> {
         Ok(Changes::new(state).bootnodes()?.unwrap_or_else(|| (*self.genesis_bootnodes).clone()))
@@ -344,6 +353,10 @@ pub struct ApiOptions {
     pub releases: Option<Arc<crate::node::Releases>>,
     #[document(summary = "Where workers reach the node's mining port from outside, --mining-public, as GET /mining tells the apps; None for them to take the API's host.")]
     pub mining_public: Option<String>,
+    #[document(summary = "What it shares of itself with whoever asks: by default, all but the addresses of its peers, its workers and itself, and its workers' names.")]
+    pub sharing: sharing::Sharing,
+    #[document(summary = "The token that shows everything to whoever bears it, --report-token; None for nobody off this machine to see it.")]
+    pub report_token: Option<Vec<u8>>,
 }
 
 #[document(
@@ -444,6 +457,8 @@ pub fn start(
                     releases: options.releases,
                     in_flight: Arc::new(InFlight { per_ip, counts: Default::default() }),
                     mining_public: options.mining_public.map(Arc::new),
+                    sharing: options.sharing,
+                    report_token: options.report_token.map(Arc::new),
                 })
                 // Who connects, for the faucet's limits by IP.
                 .into_make_service_with_connect_info::<SocketAddr>())
@@ -540,7 +555,7 @@ async fn allow_origins(Live(api): Live<Api>, request: Request, next: Next) -> Re
 
         if preflight {
             headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST"));
-            headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("content-type"));
+            headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("content-type, authorization"));
             headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
         }
     }
@@ -1371,12 +1386,14 @@ async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
 /// what it claimed from the escrow.
 #[cfg(feature = "pool")]
 async fn pool(Shared(api): Shared<Api>) -> Answer {
-    pool_for(&api, None).await
+    pool_for(&api, None, api.sharing).await
 }
 
 #[cfg(feature = "pool")]
-async fn pool_miner(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
-    pool_for(&api, Some(parse_address(&address)?)).await
+async fn pool_miner(Shared(api): Shared<Api>, Path(address): Path<String>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Answer {
+    let (sharing, _) = api.shared_with(peer, &headers);
+
+    pool_for(&api, Some(parse_address(&address)?), sharing).await
 }
 
 /// The pool this node runs, from its report, or a 404 for a node that runs none.
@@ -1390,7 +1407,7 @@ async fn pool_report(api: &Api) -> Result<crate::consensus::PoolReport, ApiError
 }
 
 #[cfg(feature = "pool")]
-async fn pool_for(api: &Api, miner: Option<crate::structs::address::Address>) -> Answer {
+async fn pool_for(api: &Api, miner: Option<crate::structs::address::Address>, sharing: sharing::Sharing) -> Answer {
     use crate::registry::pools::{Pools, pool_escrow};
 
     let report = report(api, 0).await?;
@@ -1439,8 +1456,9 @@ async fn pool_for(api: &Api, miner: Option<crate::structs::address::Address>) ->
         .mining
         .iter()
         .flat_map(|mining| &mining.workers)
-        .filter(|worker| miner.is_some_and(|miner| worker.payout == Some(miner)))
-        .map(|worker| json!({ "name": worker.name, "rate": worker.devices.iter().map(|device| device.rate).sum::<f64>(), "shares": worker.shares, "share_difficulty": worker.share_difficulty.to_string() }))
+        .filter(|worker| !sharing.hides(sharing::ReportField::Workers) && miner.is_some_and(|miner| worker.payout == Some(miner)))
+        .enumerate()
+        .map(|(index, worker)| json!({ "name": json::worker_name(&worker.name, index, sharing), "rate": worker.devices.iter().map(|device| device.rate).sum::<f64>(), "shares": worker.shares, "share_difficulty": worker.share_difficulty.to_string() }))
         .collect();
 
     Ok(Json(json!({
@@ -1596,10 +1614,13 @@ async fn events(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
 }
 
 /// How the node behind the API is doing: its peers, what it heard and did, how syncing goes.
-async fn node(Shared(api): Shared<Api>) -> Answer {
+async fn node(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Answer {
+    let (sharing, refused) = api.shared_with(peer, &headers);
     let report = report(&api, 0).await?;
+    let mut answer = json::node(&report, sharing);
+    answer["token_refused"] = refused.into();
 
-    Ok(Json(json::node(&report)))
+    Ok(Json(answer))
 }
 
 /// The transactions waiting in the node's mempool, by sender and nonce.
@@ -2242,6 +2263,8 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
 #[cfg(feature = "stream")]
 async fn stream(
     Live(api): Live<Api>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
     use tokio_stream::{StreamExt, wrappers::BroadcastStream, wrappers::errors::BroadcastStreamRecvError};
 
@@ -2250,14 +2273,17 @@ async fn stream(
         .as_ref()
         .and_then(NodeHandle::subscribe)
         .ok_or_else(|| ApiError::NotFound("this node does not stream; start it with --stream".to_string()))?;
+    let (sharing, _) = api.shared_with(peer, &headers);
     let (hash, reward) = (api.hash, api.reward);
-    let events = BroadcastStream::new(events).map(move |event| {
+    let events = BroadcastStream::new(events).filter_map(move |event| {
         let (name, data) = match event {
-            Ok(event) => json::node_event(&event, hash, &reward),
+            // Peers kept to the node are not told of coming and going either.
+            Ok(crate::node::NodeEvent::PeerUp { .. } | crate::node::NodeEvent::PeerDown(_)) if sharing.hides(sharing::ReportField::Peers) => return None,
+            Ok(event) => json::node_event(&event, hash, &reward, sharing),
             Err(BroadcastStreamRecvError::Lagged(missed)) => ("lagged", json!({ "missed": missed })),
         };
 
-        Ok(Event::default().event(name).data(data.to_string()))
+        Some(Ok(Event::default().event(name).data(data.to_string())))
     });
 
     Ok(Sse::new(events).keep_alive(KeepAlive::default()))
