@@ -2556,6 +2556,113 @@ mod voting {
         }
     }
 
+    /// Finality through epoch 1, then two epochs nobody votes in, then on to epoch 8.
+    fn justified_past_a_gap(chain: &mut Chain) {
+        finalize_through(chain, 1);
+        grow_to(chain, 4 * INTERVAL + 1);
+
+        for keypair in &voters()[..2] {
+            let vote = honest_vote(chain, keypair);
+            chain.add_vote(vote).unwrap();
+        }
+
+        finalize_through(chain, 8);
+    }
+
+    #[test]
+    fn a_node_says_which_epochs_were_skipped_and_ends_where_nothing_is_justified_after() {
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            justified_past_a_gap(&mut chain);
+            let steps = finality_from(&chain, 2);
+            let justified: Vec<_> = steps.iter().map(|step| step.justification.is_some()).collect();
+
+            assert_eq!(justified, [false, false, true, true, true, true, true], "{}", finality.name());
+            assert!(steps[0].update.is_some(), "a skipped checkpoint's update still comes");
+
+            // Epochs past the last justified are where the votes have got to, not a gap.
+            grow_to(&mut chain, 11 * INTERVAL + 1);
+            assert!(finality_from(&chain, 9).is_empty(), "{}", finality.name());
+            assert_eq!(finality_from(&chain, 8).len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_light_client_walks_past_epochs_nobody_justified() {
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            justified_past_a_gap(&mut chain);
+            let mut client = with_headers(&chain, &finality);
+            serve(&chain, &mut client);
+
+            assert_eq!(Some(client.justified()), chain.justified(), "{}", finality.name());
+            assert_eq!(Some(client.finalized()), chain.finalized());
+            assert_eq!(client.tip().height, chain.tip().height);
+            assert_eq!(client.next(), None, "and it rests");
+
+            // Saved and restored past the gap, it goes on.
+            finalize_through(&mut chain, 10);
+            let mut restored = crate::light::LightClient::restore(client.save(), chain.genesis()).unwrap();
+            restored.refresh();
+            serve(&chain, &mut restored);
+            assert_eq!(Some(restored.justified()), chain.justified());
+        }
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
+    #[test]
+    fn a_light_client_of_a_governed_chain_gets_past_a_gap_wider_than_the_rules_it_knows() {
+        use crate::light::{LightClient, LightRequest};
+
+        for finality in kinds() {
+            let (mut chain, genesis) = council_chain(finality.clone());
+            justified_past_a_gap(&mut chain);
+            let header = stored_header_at(&*chain.db, 0).unwrap().unwrap();
+            let mut client = LightClient::new(genesis.light_params(), header, chain.genesis()).unwrap();
+            let mut asked = 0;
+
+            // Its rules run out at the end of epoch 3, before the block epoch 4's votes are for.
+            while let Some(request) = client.next() {
+                asked += 1;
+                assert!(asked < 100, "it goes round and round: {}", finality.name());
+
+                match request {
+                    LightRequest::Headers { from, count } => {
+                        let headers = (from..from + u64::from(count)).map_while(|height| stored_header_at(&*chain.db, height).unwrap()).collect();
+                        client.deliver_headers(from, headers, LATER).unwrap();
+                    }
+                    LightRequest::Finality { from } => {
+                        client.deliver_finality(from, finality_from(&chain, from)).unwrap();
+                    }
+                }
+            }
+
+            assert_eq!(client.tip().height, chain.tip().height, "{}", finality.name());
+            assert_eq!(Some(client.justified()), chain.justified());
+            assert_eq!(Some(client.finalized()), chain.finalized());
+        }
+    }
+
+    #[test]
+    fn voters_across_a_gap_count_only_when_those_trusted_agree() {
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            justified_past_a_gap(&mut chain);
+            let justification = crate::chain::stored_justification(&*chain.db, &stored_header_at(&*chain.db, 4 * INTERVAL).unwrap().unwrap().id()).unwrap().unwrap();
+            let member = |keypair: &Keypair, weight: u64| crate::registry::validators::Member { voter: keypair.public(), account: keypair.public().address(), weight: u256::new(weight.into()) };
+            let trusted = |mut members: Vec<crate::registry::validators::Member>, needed: u64| {
+                members.sort_by_key(|member| member.voter);
+
+                crate::light::Voters { set: crate::registry::validators::ValidatorSet { members }, needed: u256::new(needed.into()) }
+            };
+            let (first, second) = (&voters()[0], &voters()[1]);
+
+            assert!(crate::light::carries(&justification, &trusted(vec![member(first, 1), member(second, 1)], 2)), "both signed it");
+            assert!(!crate::light::carries(&justification, &trusted(vec![member(first, 1), member(&key(90), 2)], 2)), "one of those trusted is not enough");
+            assert!(!crate::light::carries(&justification, &trusted(vec![member(&key(90), 2), member(&key(91), 2)], 2)), "a wholly new set vouches for nothing");
+        }
+    }
+
     #[test]
     fn finality_comes_many_epochs_to_a_request() {
         use crate::light::{LightRequest, MAX_FINALITY_STEPS};

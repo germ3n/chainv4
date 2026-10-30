@@ -1139,6 +1139,10 @@ voting finality it now goes back to the checkpoint and follows the node from the
   counts, never a private one, so nothing on the LAN or in Docker's network gets in by writing
   `X-Forwarded-For`. Its token compares in time that does not say how much of it matched, and is
   read with `read_token`, as the mining token is.
+- **A chain can have epochs nobody justified,** as this testnet does at 2 and 3, where the validators
+  came up at different times. A client walking from genesis used to stop for good just before such a
+  gap and say it had caught up, when its voters and rules ran out; see
+  [Light client](light-client.md#what-to-keep-in-mind). Bringing voters up together avoids making one.
 - **A dial can fail one way for good under containers.** See
   [Docker](docker.md): a stale conntrack entry, kept alive by the dialer's own retries, blocks one
   direction while the other works. Seen as `could not reach … Handshake with the remote timed out`

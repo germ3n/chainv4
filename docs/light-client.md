@@ -267,6 +267,17 @@ The explorer runs the same client against the node it talks to:
   many as blocks. The CLI and the explorer follow the chain afresh each time; the wallet saves the
   client and resumes from the finalized block, walking every header since, or on a node trusted for
   fast resume, from that node's own checkpoint.
+- **Epochs can go unjustified for good,** as when too few voters are up: the next justification
+  then comes from a source below them. A node's `GET /light/finality` says so with a step without a
+  justification, and ends only where nothing justified follows, looking 4,096 epochs ahead. The
+  voters and, under governance, the rules past the gap are in the skipped checkpoints' updates, which
+  no justification covers, so the client takes them tentatively, proven against the headers it
+  followed, follows headers under those rules, and takes the next justification only if the newest
+  voters it already trusts carry what they need too. Then it asks for the same updates again as
+  trusted ones. So crossing a gap rests on those same voters, and voters who changed by more than
+  that across a gap leave a client unable to cross it: start it at a checkpoint past the gap. Until
+  it crosses, what it knows only tentatively is neither justified nor saved. Clients from before stop
+  at the gap, as they did.
 - **Snapshot nodes serve the finality before their pivot** as their own light client checked it:
   each update proven against its block's state root and holding every epoch's voters it should.
   A node that synced from one that lacked them lacks them too.

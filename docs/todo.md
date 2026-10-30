@@ -751,6 +751,19 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **A light client stopped for good at epochs nobody justified.** On the testnet, epochs 2 and 3:
+  it said it had caught up at height 31. Nodes now mark skipped epochs in `GET /light/finality`, and
+  a client crosses on updates it holds tentatively until the voters it trusts agree with the next
+  justification. See [Light client](light-client.md#what-to-keep-in-mind).
+- [ ] **A light client walking is slow.** On a chain with governance it can check only about two
+  epochs past the eras it knows, so each pair of requests advances 16 blocks and downloads about
+  300 KB of headers and 400 KB of finality steps: about 0.18 s a block on a phone, 118 s for 630
+  blocks. Bounding what each request asks for would cut the bytes, and bundling headers and steps
+  on the node the round trips. Fast resume goes around it for a node trusted.
+- [ ] **The wallet's status dot stays green while the node is down;** only the Retry banner says so.
+- [ ] **A phone in portrait shows only a dot of the light client's state,** so "fast-resumed at block
+  N, on this node's word" is in Settings and the wide sidebar alone.
+
 - [x] **Updates: a warning, an updater, and a stop for upgrades.** A manifest a threshold of the
   release keys built in signs names the newest chainv4, wallet and explorer with a binary for each
   target; nodes fetch it with `--updates`, keep the newest in `release.json`, warn while behind,

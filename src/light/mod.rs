@@ -809,6 +809,19 @@ pub struct LightClient {
     /// What it checked of the chain's finality, kept for a node syncing from a snapshot to store
     /// and serve: None for a client that keeps nothing of it, as most do.
     kept: Option<Kept>,
+    /// The epochs whose voters or rules it knows only from updates across a gap in the justified
+    /// checkpoints, until a justification past the gap holds; never saved.
+    tentative: BTreeSet<u64>,
+    tentative_eras: BTreeSet<u64>,
+    /// The last epoch a node said was skipped, unjustified with later ones justified.
+    gap_reached: Option<u64>,
+}
+
+/// Whether a justification's votes, by who cast them, weigh what these voters need.
+pub(crate) fn carries(justification: &Justification, voters: &Voters) -> bool {
+    let weight = justification.votes.iter().filter_map(|vote| voters.set.member(&vote.vote.voter)).fold(u256::ZERO, |weight, member| weight + member.weight);
+
+    weight >= voters.needed
 }
 
 #[document(
@@ -864,6 +877,9 @@ impl LightClient {
             back: None,
             stalled: None,
             kept: None,
+            tentative: BTreeSet::new(),
+            tentative_eras: BTreeSet::new(),
+            gap_reached: None,
             params,
         })
     }
@@ -982,7 +998,7 @@ impl LightClient {
         // The lowest trusted checkpoint whose update it lacks, or else the next justification,
         // once it knows who votes for it: the node sends finality on from there.
         let update = (self.base.div_ceil(interval)..=trusted).find(|epoch| !self.updated.contains(&(epoch * interval)));
-        let next = self.justified().epoch + 1;
+        let next = (self.justified().epoch + 1).max(self.gap_reached.map_or(0, |epoch| epoch + 1));
         let justification = (!self.justifications_done && self.voters.contains_key(&next) && next * interval <= self.tip().height).then_some(next);
 
         update.or(justification).map(|from| LightRequest::Finality { from })
@@ -1233,7 +1249,7 @@ impl LightClient {
             voters: self
                 .voters
                 .iter()
-                .filter(|(epoch, _)| **epoch >= self.finalized.epoch)
+                .filter(|(epoch, _)| **epoch >= self.finalized.epoch && !self.tentative.contains(epoch))
                 .map(|(epoch, voters)| (*epoch, voters.set.clone(), voters.needed.to_le_bytes()))
                 .collect(),
             justified: self
@@ -1251,7 +1267,7 @@ impl LightClient {
             eras: self
                 .eras
                 .iter()
-                .filter(|(epoch, _)| **epoch >= self.finalized.epoch)
+                .filter(|(epoch, _)| **epoch >= self.finalized.epoch && !self.tentative_eras.contains(epoch))
                 .map(|(epoch, config)| (*epoch, config.clone()))
                 .collect(),
         }
@@ -1319,6 +1335,9 @@ impl LightClient {
             back: None,
             stalled: None,
             kept: None,
+            tentative: BTreeSet::new(),
+            tentative_eras: BTreeSet::new(),
+            gap_reached: None,
             params: state.params,
         };
 
@@ -1514,10 +1533,17 @@ impl LightClient {
 
         for (epoch, step) in (from..).zip(steps) {
             if epoch > self.justified().epoch {
+                // A skipped epoch: its update says who votes and by what rules past it, which only
+                // a justification past the gap can make trusted, and which that needs to be checked.
                 let Some(justification) = &step.justification else {
-                    self.justifications_done = true;
+                    if epoch * interval > self.tip().height {
+                        break;
+                    }
 
-                    break;
+                    self.take_across_gap(epoch, epoch * interval, step.update.as_ref())?;
+                    self.gap_reached = Some(epoch);
+
+                    continue;
                 };
 
                 if justification.target.epoch != epoch {
@@ -1542,6 +1568,39 @@ impl LightClient {
         Ok(taken)
     }
 
+    /// Learns from the update of a checkpoint in a gap, proven against the header followed at its
+    /// height, what it does not know yet: tentatively, as no justification covers that header.
+    fn take_across_gap(&mut self, epoch: u64, height: u64, update: Option<&LightUpdate>) -> Result<(), LightError> {
+        let (Some(update), Some(finality), Some(sealed)) = (update, self.params.finality, self.sealed(height)) else {
+            return Ok(());
+        };
+        let (block, root) = (sealed.id(), sealed.header.state_root);
+        let (learned, eras) = update.check(&block, &finality, height, &root)?;
+        debug_assert_eq!(height % finality.checkpoint_interval().unwrap_or(1), 0, "epoch {epoch}'s checkpoint");
+
+        for (epoch, voters) in learned {
+            if let std::collections::btree_map::Entry::Vacant(vacant) = self.voters.entry(epoch) {
+                vacant.insert(voters);
+                self.tentative.insert(epoch);
+            }
+        }
+
+        for (epoch, config) in eras {
+            if !self.eras.contains_key(&epoch) {
+                self.learn_era(epoch, config);
+                self.tentative_eras.insert(epoch);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Whether the newest voters it trusts agree with a justification whose own voters it knows
+    /// only across a gap: voters a block no one justified named count for nothing until they do.
+    fn trusted_voters_agree(&self, justification: &Justification) -> bool {
+        self.voters.range(..justification.target.epoch).rev().find(|(epoch, _)| !self.tentative.contains(epoch)).is_some_and(|(_, trusted)| carries(justification, trusted))
+    }
+
     /// Takes a justification that holds, or says why it waits.
     fn take_justification(&mut self, justification: &Justification) -> Result<Took, LightError> {
         if justification.target.epoch <= self.justified().epoch {
@@ -1561,6 +1620,14 @@ impl LightClient {
             return Ok(Took::Waits);
         }
 
+        // Past a gap, with voters who changed too much to vouch for it, only a checkpoint started
+        // from can carry the client on.
+        if self.tentative.contains(&justification.target.epoch) && !self.trusted_voters_agree(justification) {
+            self.justifications_done = true;
+
+            return Ok(Took::Waits);
+        }
+
         // A justification that holds, for a block other than the one followed at its height: the
         // client followed a branch of a fork the chain left, which may weigh as much as the one it
         // went on with. The voters say which: it goes back to its own justified checkpoint and
@@ -1576,6 +1643,11 @@ impl LightClient {
         self.check_justification(justification)?;
         let (source, target) = (justification.source, justification.target);
         self.justified.insert(target.epoch, target.block);
+        // Every update across the gap came from an ancestor of this block: asked for again now, as
+        // the trusted updates they are.
+        self.tentative.clear();
+        self.tentative_eras.clear();
+        self.gap_reached = None;
 
         if let Some(kept) = &mut self.kept {
             kept.justifications.push(justification.clone());
@@ -1614,6 +1686,17 @@ impl LightClient {
         self.back = None;
         self.headers_done = false;
         self.justifications_done = false;
+
+        // What a branch said across a gap goes with it.
+        for epoch in std::mem::take(&mut self.tentative) {
+            self.voters.remove(&epoch);
+        }
+
+        for epoch in std::mem::take(&mut self.tentative_eras) {
+            self.eras.remove(&epoch);
+        }
+
+        self.gap_reached = None;
     }
 
     fn check_justification(&self, justification: &Justification) -> Result<(), LightError> {

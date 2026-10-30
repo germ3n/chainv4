@@ -2931,12 +2931,11 @@ pub fn stored_light_finality(db: &dyn Read, interval: u64, from: u64, count: u64
             break;
         };
         let block = sealed.id();
+        // An epoch may go unjustified for good, as when too few voted, and later ones be justified
+        // from a source below it: a step without one says it is skipped, so a client gets past it.
         let justification = match epoch {
             0 => None,
-            _ => match stored_justification(db, &block)? {
-                Some(justification) => Some(justification),
-                None => break,
-            },
+            _ => stored_justification(db, &block)?,
         };
 
         steps.push(FinalityStep {
@@ -2945,7 +2944,37 @@ pub fn stored_light_finality(db: &dyn Read, interval: u64, from: u64, count: u64
         });
     }
 
+    // Unjustified epochs with nothing justified after them are where the chain's votes have got to,
+    // not a gap: they end the answer, whatever the answer's size cut it off at.
+    if steps.last().is_some_and(|step: &FinalityStep| step.justification.is_none()) && !justified_within(db, interval, from.saturating_add(count), top)? {
+        while steps.last().is_some_and(|step| step.justification.is_none()) && steps.len() > usize::from(from == 0) {
+            steps.pop();
+        }
+    }
+
     Ok(steps)
+}
+
+/// How many epochs past an answer a node looks for a justification, to tell a gap from the end of
+/// what is justified: a chain with no finality for longer shows light clients its end there.
+const MOST_GAP_EPOCHS: u64 = 4096;
+
+/// Whether any epoch from this one, within MOST_GAP_EPOCHS, has a justification on the main chain.
+fn justified_within(db: &dyn Read, interval: u64, from: u64, top: u64) -> Result<bool, DbError> {
+    for epoch in from..from.saturating_add(MOST_GAP_EPOCHS) {
+        let Some(height) = epoch.checked_mul(interval).filter(|height| *height <= top) else {
+            return Ok(false);
+        };
+        let Some(sealed) = stored_header_at(db, height)? else {
+            return Ok(false);
+        };
+
+        if stored_justification(db, &sealed.id())?.is_some() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 #[document(

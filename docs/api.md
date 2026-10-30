@@ -222,11 +222,12 @@ synced from a snapshot, these are all it has.
 
 What light clients follow finality with, an epoch at a time from epoch `from` on (0, genesis, by
 default), at most `count`, at most 64: `{"steps": ["0x…", …]}`, each a `FinalityStep` encoded:
-- **`justification`:** the justification of the epoch's main-chain checkpoint; none for epoch 0.
+- **`justification`:** the justification of the epoch's main-chain checkpoint; none for epoch 0,
+  or for an epoch nobody justified with a later one justified.
 - **`update`:** the light update the checkpoint block keeps, as `GET /light/updates/{block}` serves
   it; none before a snapshot node's pivot.
 
-It stops before the first checkpoint past genesis it holds no justification for, and at the tip.
+It ends where nothing justified follows, looking 4,096 epochs ahead, and at the tip.
 One answer carries a client across 64 epochs: each update a justification makes trusted names the
 voters of the justifications after it, so the client checks them in order, without asking again.
 404 on a chain whose finality does not vote.
