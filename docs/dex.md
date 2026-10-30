@@ -131,19 +131,24 @@ chainv4 dex --evm swap coin 0x… 5000
 
 ## In the wallet
 
-The **Trade** page, on an online install, with **Native pools** and **EVM pools** when the node
-names both:
+The **Trade** page, on an online install, with **Native** and **EVM** to switch when the node names
+both, and two tabs:
 - **Trade:**
-  - pick what you pay and what you get, and the amount;
-  - the page shows the quote, the route, the price impact (amber past 1%, red past 5%) and the
-    least you take at your slippage (0.5% by default);
-  - **Let the DEX move it** approves a token first, then **Trade**.
+  - what you pay over what you get, each with its asset and balance, and a button between them
+    that swaps them; on a screen wide enough, such as a phone on its side, they sit side by side;
+  - once there is a quote, the rate, the price impact (amber past 1%, red past 5%), the fee, the
+    minimum received at your slippage and the route, through one pool or two;
+  - slippage, 0.1%, 0.5% by default, 1%, or typed;
+  - one button, which says what it waits for until it can trade; **Let the DEX move it** comes
+    above it for a token, which must be approved first.
 - **Pools:**
-  - each pool with what it holds, its price, and what your shares are worth;
-  - a native pool's price chart, from its `Sync` events, on a node with an event index;
+  - each pool with what it holds and a mark on those you have shares in; **Manage** opens one;
+  - its price, what your shares are worth, a native pool's price chart, from its `Sync` events, on
+    a node with an event index;
   - **Add**, at the pool's ratio, and **Take out**, all or some of your shares (on the EVM, the
     router takes them, approved first).
-- **Open a pool:** two assets and the first deposit of each, whose ratio is its opening price.
+- **Open a new pool**, folded under the pools: two assets and the first deposit of each, whose ratio
+  is its opening price.
 
 Every one of these is a call the Send page reviews and signs, on the offline signer too.
 

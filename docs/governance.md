@@ -96,7 +96,10 @@ kind's approvals standing.
 and the approvals that still count, each change with what its approvals weigh and need; who may
 approve; and every setting governance may change as it stands, each with the change that set it
 last, or genesis. The explorer and the wallet show it on their Governance pages, and the wallet
-approves, withdraws and proposes from there.
+approves, withdraws and proposes from there: its form has a field for each setting, shows what
+stands beside it and what is wrong under it, and reviews each field that moves, old to new, before
+an approval goes out (see [Wallet](wallet.md#governance)). Both pages find a change or a decision by
+search, kind and order, and page through the whole history.
 
 ## Decisions
 

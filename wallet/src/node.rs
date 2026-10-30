@@ -86,8 +86,8 @@ pub enum Ask {
     /// needs, the open proposals with their approvals, and every setting as it stands. What the
     /// Governance page shows; nothing signed rests on it but the version, which the chain checks.
     Governance,
-    /// Governance's latest decisions, newest first.
-    GovernanceHistory,
+    /// A page of governance's decisions, newest first: the newest, or those below a version.
+    GovernanceHistory { before: Option<u64> },
     /// What an address's approval weighs, and the change it counts for, as the node says.
     GovernanceWeight(String),
     /// The newest release the node took, as signed, beside where the node's own chainv4 stands:
@@ -122,7 +122,8 @@ impl Ask {
             Ask::Claims { pool, to, height } => format!("/claims/{pool}/{to}?height={height}"),
             Ask::Release => "/release".to_string(),
             Ask::Governance => "/governance".to_string(),
-            Ask::GovernanceHistory => "/governance/history?limit=8".to_string(),
+            Ask::GovernanceHistory { before: Some(before) } => format!("/governance/history?before={before}&limit=20"),
+            Ask::GovernanceHistory { before: None } => "/governance/history?limit=20".to_string(),
             Ask::GovernanceWeight(address) => format!("/governance/weight/{address}"),
             Ask::Call(_) => "/call".to_string(),
             Ask::Read(_) => "/offer".to_string(),

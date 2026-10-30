@@ -148,16 +148,21 @@ page says the chain has none.
   and what it approved, one change a kind at most, each for its kind's next change, such as
   `Rename the chain to third, for the name's change 3`, with
   `GET /governance/weight/{address}`.
-- **Open proposals:** grouped by kind, each kind headed with its version and the change it is
-  approving, such as `version 2: approving the name's change 3`. Each change in words, such as
+- **Open proposals:** a search box over each change's kind, words and JSON and who approved it, an
+  order (newest approval, most support, or closing soonest, by when the last approval stops
+  counting), and a filter by the kinds there are. Each says its kind, its version and the change it
+  is approving, such as `version 2: approving the name's change 3`, and the change in words, such as
   `Rename the chain to chainv4 mainnet` or `Nodes older than 0.2.0 stop at block 150,000`, with its
   JSON to open, a bar of its approvals' weight against what it needs, and each approval: its
   account, weight, the epoch it was made in and the epoch it counts until.
 - **In force:** every setting governance may change, summed up, with `genesis` while genesis's
   stands, or the change that last set it, a link to that decision.
-- **Decisions:** newest first, by the chain's count, 20 to a page, **Older** for more. Each says
-  what it changed, its transaction, block, sender and time, and whether it is final or how many
-  confirmations it has. A link from In force reads older pages until the decision is listed.
+- **Decisions:** a search box over each one's kind, words, JSON, sender, transaction and block, a
+  filter by kind, and newest or oldest first; ten to a page, **Newer page** and **Older page** to
+  move, and older pages of `GET /governance/history` read as a page comes to need them, so a search
+  goes on through all of them and says how far it got. Each says what it changed, its transaction,
+  block, sender and time, and whether it is final or how many confirmations it has. A link from In
+  force reads older pages until the decision is listed, and shows the page it is on.
 
 **Each decision checked:** the light client asks for the proof of its receipt and its
 transaction against the block it landed in, and it is **proven** only when:

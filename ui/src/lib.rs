@@ -5,8 +5,10 @@
 //! system's bars and keyboard, copies and pastes through Android's clipboard, and picks files
 //! through a Java activity of its own, and on iOS, through UIKit and AVFoundation; and biometrics,
 //! which keep a secret behind a fingerprint, a face, Touch ID, Face ID or a passkey; and, on a
-//! phone, whether it is on its charger.
+//! phone, whether it is on its charger. And finding a ballot among many, as both Governance pages
+//! do.
 
+pub mod ballots;
 pub mod biometric;
 #[cfg(feature = "camera")]
 pub mod camera;

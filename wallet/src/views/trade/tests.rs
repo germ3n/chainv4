@@ -84,3 +84,47 @@ fn slippage_is_read_in_percent() {
 
     assert_eq!((at("0.5"), at("1"), at("nope"), at("80")), (50, 100, 50, 50));
 }
+
+#[test]
+fn the_button_under_a_trade_says_what_it_waits_for() {
+    assert_eq!(action(false, false, false), ("Enter an amount", false));
+    assert_eq!(action(true, true, false), ("Pick two different assets", false));
+    assert_eq!(action(false, true, false), ("Pick two different assets", false), "whatever the amount");
+    assert_eq!(action(true, false, false), ("No pool, nor two, trades these", false));
+    assert_eq!(action(true, false, true), ("Trade", true));
+}
+
+#[test]
+fn the_direction_button_swaps_what_is_paid_and_got() {
+    let token = Address::Contract([7; 32]);
+
+    assert_eq!(flipped(COIN, token), (token, COIN));
+    assert_eq!(flipped(token, COIN), (COIN, token));
+}
+
+#[test]
+fn a_rate_and_a_fee_read_from_the_quote() {
+    let dev = 1_000_000_000_000_000_000u128;
+
+    assert_eq!(rate(u256::new(dev), u256::new(2 * dev), 18, 18), Some(2.0));
+    assert_eq!(rate(u256::new(2 * dev), u256::new(1_000_000), 18, 6), Some(0.5), "by each asset's decimals");
+    assert_eq!(rate(u256::ZERO, u256::new(1), 18, 18), None);
+    assert_eq!(rate_words(2_000.5), "2000.50");
+    assert_eq!(rate_words(1.5), "1.5000");
+    assert_eq!(rate_words(0.000123), "0.000123");
+    assert_eq!(fee_of(u256::new(1_000)), u256::new(3), "0.3%");
+    assert_eq!(fee_of(u256::new(dev)), u256::new(3 * dev / 1_000));
+}
+
+#[test]
+fn slippage_offered_or_typed_reads_as_it_did() {
+    let with = |slippage: &str| TradeState { slippage: slippage.to_string(), ..TradeState::default() };
+
+    assert_eq!(super::slippage(&with("0.5")), 50);
+    assert_eq!(super::slippage(&with("1")), 100);
+    assert_eq!(super::slippage(&with("0.1")), 10);
+    assert_eq!(super::slippage(&with("nonsense")), 50, "what does not read holds at 0.5%");
+    assert_eq!(super::slippage(&with("51")), 50);
+    assert!(slippage_reads("50") && slippage_reads(" 0 ") && !slippage_reads("51") && !slippage_reads("x"));
+    assert!(SLIPPAGE_OFFERED.iter().all(|(value, _)| slippage_reads(value)));
+}

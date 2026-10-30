@@ -1,7 +1,8 @@
 //! Governance: who may approve a change, what one needs and how long an approval counts; the
-//! changes being approved, by kind, each in words with its approvals; every setting in force and
-//! the change that last set it; and every decision, newest first, each proven by the light client:
-//! its receipt decided that change, of its kind, and its transaction approved it.
+//! changes being approved, found by search, kind and order, each in words with its approvals; every
+//! setting in force and the change that last set it; and every decision, found likewise, a page at
+//! a time, each proven by the light client: its receipt decided that change, of its kind, and its
+//! transaction approved it.
 //!
 //! Each kind of change has a ballot and a version of its own, which an approval names; the chain
 //! also counts every decision, of any kind, without gaps, and history lists them by that count.
@@ -11,10 +12,11 @@ use {
     crate::api::Ask,
     crate::format,
     crate::light::{Checked, ProvenReceipt},
-    crate::model::{Decision, GovernanceView, Proposal},
+    crate::model::{Decision, GovernanceView, Proposal, change_kind},
     chainv4::governance::ChangeKind,
     chainv4::structs::receipt::CommittedOutcome,
     chainv4::structs::tx::Tx,
+    chainv4_ui::ballots::{self, Finder, Item, PER_PAGE},
     chainv4_ui::widgets,
     egui::{Color32, RichText, Ui},
     serde_json::Value,
@@ -37,6 +39,9 @@ pub struct GovernanceState {
     trouble: Option<String>,
     /// The decision a setting in force links to, to mark and scroll to once it is listed.
     focus: Option<u64>,
+    /// What is asked of the open proposals and of the decisions.
+    open: Finder,
+    past: Finder,
 }
 
 /// The chain's coin: its decimals and symbol, for amounts in changes.
@@ -88,7 +93,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState) {
         |ui| {
             ui.label(RichText::new(view.proposals.len().to_string()).monospace().color(look.palette.muted));
         },
-        |ui| proposals(ui, ctx, view, &coin),
+        |ui| proposals(ui, ctx, view, state, &coin),
     );
     super::section(ui, look, "In force", |ui| in_force(ui, ctx, view, state, &coin));
     super::section_with(
@@ -319,8 +324,9 @@ pub fn approved_text(approved: &crate::model::ApprovedChange, coin: &Coin) -> St
     format!("{}, for {} change {}", describe(&approved.change(), coin), kinds(&approved.kind), approved.version + 1)
 }
 
-/// The changes being approved: each in words, how far its approvals got, and who approved.
-fn proposals(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, coin: &Coin) {
+/// The changes being approved, found by search, kind and order: each in words, how far its approvals
+/// got, and who approved.
+fn proposals(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, state: &mut GovernanceState, coin: &Coin) {
     let look = ctx.look;
 
     if view.proposals.is_empty() {
@@ -329,36 +335,61 @@ fn proposals(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, coin: &Coin) {
         return;
     }
 
-    for (kind, version, group) in grouped(view) {
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(widgets::strong(label(&kind), 13.0).color(look.palette.soft));
-            ui.label(RichText::new(kind_heading(&kind, version)).small().color(look.palette.muted));
-        });
+    let items: Vec<Item> = view.proposals.iter().map(|proposal| open_item(proposal, coin)).collect();
+    ballots::controls(ui, &look.palette, &mut state.open, "Search: kind, address or value", &items, &ballots::OPEN_ORDERS, &label);
 
-        for (index, proposal) in group {
-            super::list_row(ui, look, |ui| proposal_row(ui, ctx, view, proposal, index, coin));
-        }
+    let found = ballots::select(&items, &state.open);
+
+    if found.is_empty() {
+        super::note(ui, look, "No open proposal matches.");
+    }
+
+    for index in found[ballots::window(found.len(), state.open.page, PER_PAGE)].iter().copied() {
+        let proposal = &view.proposals[index];
+        let kind = proposal.kind_name();
+
+        super::list_row(ui, look, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(widgets::strong(label(&kind), 13.0).color(look.palette.soft));
+                ui.label(RichText::new(kind_heading(&kind, proposal.version)).small().color(look.palette.muted));
+            });
+            proposal_row(ui, ctx, view, proposal, index, coin);
+        });
+    }
+
+    if found.len() > PER_PAGE {
+        let said = ballots::summary(found.len(), state.open.page, PER_PAGE, state.open.narrows(), items.len(), items.len());
+        ballots::pager(ui, &look.palette, &mut state.open, found.len(), false, false, &said);
     }
 }
 
-/// A kind's open proposals: the kind, its version, and each proposal with its place in the list.
-type Group<'a> = (String, u64, Vec<(usize, &'a Proposal)>);
+/// What the page's search and kinds know of an open proposal.
+pub fn open_item(proposal: &Proposal, coin: &Coin) -> Item {
+    let kind = proposal.kind_name();
+    let change = proposal.change();
+    let accounts: Vec<&str> = proposal.approvals.iter().map(|approval| approval.account.as_str()).collect();
 
-/// The open proposals by kind, in the order the node lists them, each kind with its version.
-fn grouped(view: &GovernanceView) -> Vec<Group<'_>> {
-    let mut groups: Vec<Group<'_>> = Vec::new();
-
-    for (index, proposal) in view.proposals.iter().enumerate() {
-        let kind = proposal.kind_name();
-
-        match groups.iter_mut().find(|(known, _, _)| *known == kind) {
-            Some((_, _, group)) => group.push((index, proposal)),
-            None => groups.push((kind, proposal.version, vec![(index, proposal)])),
-        }
+    Item {
+        text: format!("{} {} {change} {}", label(&kind), describe(&change, coin), accounts.join(" ")),
+        kind,
+        place: proposal.approvals.iter().map(|approval| approval.epoch).max().unwrap_or_default(),
+        support: ballots::share(&proposal.weight, &proposal.needed),
+        closes: proposal.approvals.iter().map(|approval| approval.counts_until).max(),
     }
+}
 
-    groups
+/// What the page's search and kinds know of a decision.
+pub fn decided_item(decision: &Decision, coin: &Coin) -> Item {
+    let kind = decision.kind.as_deref().and_then(|kind| kind.parse::<ChangeKind>().ok()).map(|kind| kind.name().to_string()).or_else(|| decision.change.as_ref().and_then(change_kind)).unwrap_or_default();
+    let (words, json) = decision.change.as_ref().map_or_else(Default::default, |change| (describe(change, coin), change.to_string()));
+
+    Item {
+        text: format!("{} {words} {json} {} {} block {}", label(&kind), decision.sender.as_deref().unwrap_or_default(), decision.tx, decision.height),
+        kind,
+        place: decision.version,
+        support: 0.0,
+        closes: None,
+    }
 }
 
 /// What a kind's open proposals are for: version 2, so its change 3.
@@ -613,13 +644,18 @@ fn decisions(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, coin: &Coi
         })
         .collect();
 
-    // A setting's link to a decision not read yet reads older pages till it is.
-    if let Some(focus) = state.focus
-        && !listing.items.contains_key(&focus)
-    {
-        match listing.next() {
-            Some(before) if focus < before => ctx.api.ask(Ask::Decisions { before: Some(before) }),
-            _ => state.focus = None,
+    // A setting's link to a decision not read yet reads older pages till it is, whatever was being
+    // searched for: then the page it is on shows.
+    if let Some(focus) = state.focus {
+        state.past = Finder::default();
+
+        if listing.items.contains_key(&focus) {
+            state.past.page = shown.iter().position(|item| item.decision.version == focus).unwrap_or(0) / PER_PAGE;
+        } else {
+            match listing.next() {
+                Some(before) if focus < before => ctx.api.ask(Ask::Decisions { before: Some(before) }),
+                _ => state.focus = None,
+            }
         }
     }
 
@@ -635,7 +671,26 @@ fn decisions(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, coin: &Coi
     super::note(ui, look, format!("{proven} of the {} listed proven by the light client, against blocks it checked.", shown.len()));
     ui.add_space(4.0);
 
-    for item in &shown {
+    let items: Vec<Item> = shown.iter().map(|item| decided_item(&item.decision, coin)).collect();
+    ballots::controls(ui, &look.palette, &mut state.past, "Search: kind, address, value or block", &items, &ballots::DECIDED_ORDERS, &label);
+
+    let found = ballots::select(&items, &state.past);
+    let older = listing.next().map(|before| Ask::Decisions { before: Some(before) });
+    let reading = older.as_ref().is_some_and(|older| ctx.api.asking(older));
+
+    // Reads on as the page shown needs it; a failure waits for someone to ask again.
+    if let Some(older) = older.filter(|older| !store.failures.contains_key(older))
+        && ballots::wants_older(found.len(), &state.past, PER_PAGE, true)
+    {
+        ctx.api.ask(older);
+    }
+
+    if found.is_empty() {
+        super::note(ui, look, if listing.next().is_some() { "None found yet." } else { "No decision matches." });
+    }
+
+    for index in found[ballots::window(found.len(), state.past.page, PER_PAGE)].iter().copied() {
+        let item = &shown[index];
         let focused = state.focus == Some(item.decision.version);
         let frame = egui::Frame::new().fill(if focused { look.palette.row } else { Color32::TRANSPARENT }).corner_radius(4.0);
         let response = frame.show(ui, |ui| super::list_row(ui, look, |ui| decision_row(ui, ctx, item, coin))).response;
@@ -646,22 +701,8 @@ fn decisions(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, coin: &Coi
         }
     }
 
-    if let Some(before) = listing.next() {
-        let older = Ask::Decisions { before: Some(before) };
-
-        ui.add_space(6.0);
-
-        match ctx.api.asking(&older) {
-            true => {
-                ui.spinner();
-            }
-            false => {
-                if widgets::quiet(ui, &look.palette, &format!("Older, below change {before}")).clicked() {
-                    ctx.api.ask(older);
-                }
-            }
-        }
-    }
+    let said = ballots::summary(found.len(), state.past.page, PER_PAGE, state.past.narrows(), shown.len(), listing.kept());
+    ballots::pager(ui, &look.palette, &mut state.past, found.len(), listing.next().is_some(), reading, &said);
 }
 
 /// A run of versions the node did not list, in words.

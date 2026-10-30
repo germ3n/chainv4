@@ -1,5 +1,7 @@
-//! Native multisigs: making one, following those this wallet cares about, and taking their
-//! transactions round the members. A payment is proposed here and priced by the node; the bundle
+//! Native multisigs: making one in plain steps (create.rs), following those this wallet cares about,
+//! changing their members, and taking their transactions round the members. A multisig asks each
+//! member for a key on this chain and nothing else; a Bitcoin account key and an EVM address are for
+//! one that is to hold coins there too. A payment is proposed here and priced by the node; the bundle
 //! it makes carries the members' signatures, added here for a key this wallet holds, or on the
 //! offline signer from a code, or passed as text to members using chainv4 multisig. Approvals go on
 //! chain as any other transaction, through Send, so a hardware or offline account approves too.
@@ -18,8 +20,8 @@ use {
     crate::node::{Ask, Failure},
     crate::theme,
     chainv4::crypto::keypair::{KeyType, Keypair, PublicKey},
-    chainv4::registry::multisig::{MultisigBody, MultisigBundle, MultisigMember},
-    chainv4::structs::address::{Address, multisig_address},
+    chainv4::registry::multisig::{MultisigBody, MultisigBundle},
+    chainv4::structs::address::Address,
     chainv4::structs::hex::{from_hex, to_hex},
     chainv4::structs::tx::{FeeOffer, MemberSignature, Tx},
     chainv4::structs::u256::u256,
@@ -28,6 +30,7 @@ use {
 };
 
 pub(crate) mod bitcoin;
+mod create;
 #[cfg(feature = "swap")]
 pub(crate) mod evm;
 
@@ -36,10 +39,8 @@ const REFRESH: u64 = 10_000;
 
 #[derive(Default)]
 pub struct MultisigState {
-    /// The members to make a multisig of, one a line, its threshold, and its Bitcoin network.
-    members: String,
-    threshold: String,
-    testnet: bool,
+    /// The steps of making a multisig or changing its members, while they are open.
+    wizard: Option<create::Wizard>,
     /// A multisig to follow, as typed.
     adding: String,
     selected: Option<String>,
@@ -138,7 +139,7 @@ impl MultisigState {
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, send: &mut SendState) {
     let palette = *ctx.palette;
-    theme::title(ui, &palette, "Multisig", "Accounts that M of N members' keys control, here and, for those set up for it, on Bitcoin and EVM chains.");
+    theme::title(ui, &palette, "Multisig", "An account several people control together: it sends nothing until enough of them agree.");
 
     let Some(genesis) = ctx.chain.genesis else {
         theme::card(ui, &palette, |ui| {
@@ -148,6 +149,29 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, send: &mut Se
         return;
     };
     let mut prepared = None;
+
+    // The steps take the page while they are open.
+    if let Some(mut wizard) = state.wizard.take() {
+        let listed = wizard.changing.as_ref().and_then(|account| state.shown.as_ref().filter(|(address, _)| address == account)).map(|(_, value)| value.clone());
+
+        match create::show(ui, ctx, &mut wizard, listed.as_ref()) {
+            create::Done::Going => state.wizard = Some(wizard),
+            create::Done::Cancelled => {}
+            create::Done::Make(made) => prepared = Some(made),
+            create::Done::Change(account, tx) => {
+                if let Some(value) = &listed {
+                    price(ctx, state, account, tx, value, genesis);
+                }
+            }
+        }
+
+        if let Some(prepared) = prepared {
+            send.prepare(prepared);
+            *ctx.page = Page::Send;
+        }
+
+        return;
+    }
 
     followed(ui, ctx, state);
 
@@ -181,7 +205,6 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, send: &mut Se
     }
 
     bundle(ui, ctx, state, genesis, &mut prepared);
-    create(ui, ctx, state, &mut prepared);
 
     if let Some(prepared) = prepared {
         send.prepare(prepared);
@@ -189,19 +212,19 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, send: &mut Se
     }
 }
 
-/// The multisigs followed, one picked, and one to add.
+/// What a multisig needs, for someone who has none yet, or the ones followed, one picked; making
+/// one, and following one a member shared.
 fn followed(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState) {
     let palette = *ctx.palette;
 
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, "Multisigs");
-
         if state.selected.as_ref().is_none_or(|selected| !ctx.settings.multisigs.contains(selected)) {
             state.selected = ctx.settings.multisigs.first().cloned();
         }
 
         match &state.selected {
             Some(selected) => {
+                theme::caps(ui, &palette, "Your multisigs");
                 egui::ComboBox::from_id_salt("multisig").selected_text(format::short(selected)).width(ui.available_width()).show_ui(ui, |ui| {
                     for address in ctx.settings.multisigs.clone() {
                         if ui.selectable_label(state.selected.as_deref() == Some(&address), format::short(&address)).clicked() {
@@ -210,28 +233,53 @@ fn followed(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState) {
                         }
                     }
                 });
+                ui.add_space(4.0);
             }
             None => {
-                ui.label(RichText::new("None followed yet: make one below, or add one a member gave you.").color(palette.muted));
+                theme::caps(ui, &palette, "What you need");
+                ui.add(egui::Label::new(RichText::new("One key on this chain from each member, and how many of them must agree.").color(palette.ink)).wrap());
+                ui.add_space(2.0);
+                ui.add(egui::Label::new(RichText::new("You do not need a Bitcoin address, or anything from another chain. Those are optional, for a group that also wants to hold coins on Bitcoin or EVM chains.").small().color(palette.soft)).wrap());
+                ui.add_space(6.0);
             }
         }
 
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut state.adding).hint_text("multisig:0x…").font(egui::TextStyle::Monospace).desired_width(ui.available_width() - 70.0));
+        // The first thing to do until there is one; after that, one thing among others.
+        let make = match state.selected.is_some() {
+            true => theme::quiet(ui, &palette, "Make another multisig"),
+            false => theme::primary(ui, &palette, "Make a multisig", true),
+        };
 
-            if theme::quiet(ui, &palette, "Follow").clicked() {
-                match state.adding.trim().parse::<Address>() {
-                    Ok(address @ Address::Multisig(_)) => {
-                        follow(ctx, &address.to_string());
-                        state.selected = Some(address.to_string());
-                        state.asked_at = 0;
-                        state.adding.clear();
-                    }
-                    _ => state.trouble = Some("A multisig's address is multisig:0x and 64 hex digits.".to_string()),
+        if make.clicked() {
+            state.wizard = Some(create::Wizard::default());
+        }
+
+        ui.add_space(10.0);
+        ui.label(RichText::new("A member made one? Paste its address to follow it.").small().color(palette.soft));
+        let followed = theme::beside(
+            ui,
+            |ui| theme::quiet(ui, &palette, "Follow").clicked(),
+            |ui, width| {
+                ui.add(egui::TextEdit::singleline(&mut state.adding).hint_text("multisig:0x…").font(egui::TextStyle::Monospace).desired_width(width));
+            },
+        );
+
+        if followed {
+            match state.adding.trim().parse::<Address>() {
+                Ok(address @ Address::Multisig(_)) => {
+                    follow(ctx, &address.to_string());
+                    state.selected = Some(address.to_string());
+                    state.asked_at = 0;
+                    state.adding.clear();
+                    state.trouble = None;
                 }
+                _ => state.trouble = Some("A multisig's address is multisig:0x and 64 hex digits.".to_string()),
             }
-        });
+        }
+
+        if state.selected.is_none() {
+            notes(ui, &palette, state);
+        }
     });
 }
 
@@ -261,13 +309,21 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
     let my_key = mine.and_then(|address| ctx.holder().and_then(|holder| holder.public(&address)));
 
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, &format!("{threshold} of {} members, as the node says", members.len()));
+        theme::caps(ui, &palette, &format!("{} members must agree", create::of(threshold as u32, members.len())));
         super::row(ui, &palette, "Balance", |ui| {
             ui.label(ctx.amount(None, value["balance"].as_str().unwrap_or("0")));
         });
-        super::row(ui, &palette, "Next nonce", |ui| {
-            ui.label(nonce.to_string());
+
+        if value["balance"].as_str().unwrap_or("0") == "0" {
+            ui.add(egui::Label::new(RichText::new(format!("It pays its own fees, so it can do nothing until someone sends it some {}.", ctx.coin.symbol)).small().color(palette.warn)).wrap());
+        }
+
+        super::row(ui, &palette, "Its next transaction is", |ui| {
+            ui.label(format!("number {nonce}"));
         });
+
+        ui.add_space(4.0);
+        theme::caps(ui, &palette, "Members");
 
         for member in &members {
             let key = member["key"].as_str().unwrap_or("?");
@@ -279,17 +335,40 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
                     ui.label(RichText::new("this account").small().color(palette.good));
                 }
 
-                if member["bitcoin"].is_string() {
-                    ui.label(RichText::new("Bitcoin · EVM").small().color(palette.muted));
-                }
+                let reach = match (member["bitcoin"].is_string(), member["evm"].is_string()) {
+                    (true, true) => "also Bitcoin and EVM",
+                    (true, false) => "also Bitcoin",
+                    (false, true) => "also EVM",
+                    (false, false) => "",
+                };
+                ui.label(RichText::new(reach).small().color(palette.muted));
             });
+        }
+
+        if mine.is_none() {
+            ui.add(egui::Label::new(RichText::new("This account is not a member: it can watch, but only a member's account can sign or approve.").small().color(palette.muted)).wrap());
         }
 
         let Some(account) = account else {
             return;
         };
 
-        for proposal in value["proposals"].as_array().cloned().unwrap_or_default() {
+        ui.add_space(4.0);
+
+        if theme::quiet(ui, &palette, "Change its members").on_hover_text("Add, remove or rotate keys, or change how many must agree").clicked() {
+            state.wizard = Some(create::Wizard::changing(&account.to_string(), value));
+        }
+
+        let waiting = value["proposals"].as_array().cloned().unwrap_or_default();
+
+        ui.add_space(8.0);
+        theme::caps(ui, &palette, "Waiting for approval");
+
+        if waiting.is_empty() {
+            ui.label(RichText::new("Nothing. Anything proposed below, or by another member, shows here once a member approves it on chain.").small().color(palette.muted));
+        }
+
+        for proposal in waiting {
             let Some(tx) = proposal["encoded"].as_str().and_then(from_hex).and_then(|bytes| wincode::deserialize::<Tx>(&bytes).ok()) else {
                 continue;
             };
@@ -302,14 +381,14 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
             ui.add_space(8.0);
             ui.separator();
             ui.label(RichText::new(describe(ctx, &tx)).color(palette.ink));
-            ui.label(RichText::new(format!("approved by {} of the {threshold} it needs", approvals.len())).small().color(palette.soft));
+            ui.add(egui::Label::new(RichText::new(progress(approvals.len() as u64, threshold, approved, mine.is_some())).small().color(palette.soft)).wrap());
             ui.horizontal_wrapped(|ui| {
                 if let Some(from) = mine {
                     if !approved && theme::quiet(ui, &palette, "Approve").clicked() {
                         *prepared = Some(approval(from, account, nonce, fee, tx.clone()));
                     }
 
-                    if approved && theme::quiet(ui, &palette, "Withdraw").clicked() {
+                    if approved && theme::quiet(ui, &palette, "Take back my approval").clicked() {
                         let id = MultisigBody { account, tx: tx.clone(), nonce, fee }.id(&ctx.chain.genesis.expect("shown only with a genesis"));
                         *prepared = Some(Prepared {
                             from,
@@ -321,13 +400,42 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
                     }
                 }
 
-                if approvals.len() as u64 >= threshold && state.submitting.is_none() && theme::primary(ui, &palette, "Submit", true).clicked() {
+                if approvals.len() as u64 >= threshold && state.submitting.is_none() && theme::primary(ui, &palette, "Send it", true).clicked() {
                     let bundle = MultisigBundle { genesis: ctx.chain.genesis.expect("shown only with a genesis"), body: MultisigBody { account, tx: tx.clone(), nonce, fee }, signatures: Vec::new() };
                     submit(ctx, state, &bundle);
                 }
             });
         }
+
+        notes(ui, &palette, state);
     });
+}
+
+/// Where a proposal stands and what it needs next, in a line.
+fn progress(backed: u64, needed: u64, mine: bool, member: bool) -> String {
+    let more = needed.saturating_sub(backed);
+
+    match (more, mine, member) {
+        (0, _, _) => format!("{backed} of {needed} agree: it has what it needs. Anyone can send it now, and the multisig pays the fee."),
+        (more, true, _) => format!("{backed} of {needed} agree, you among them. It needs {more} more of the other members."),
+        (more, false, true) => format!("{backed} of {needed} agree. It needs {more} more: you have not agreed yet."),
+        (more, false, false) => format!("{backed} of {needed} agree. It needs {more} more of its members."),
+    }
+}
+
+/// What a bundle needs next, in a line: passing it on, or sending it.
+fn next_step(backed: u64, needed: Option<u64>, signed: bool, member: bool) -> String {
+    let Some(needed) = needed else {
+        return "Asking the node about the multisig…".to_string();
+    };
+    let more = needed.saturating_sub(backed);
+
+    match (more, signed, member) {
+        (0, _, _) => format!("{backed} of {needed} agree: it can be sent. The multisig pays the fee."),
+        (more, false, true) => format!("{backed} of {needed} agree. Next, sign it here, then pass it on: it needs {more} more."),
+        (more, true, _) => format!("{backed} of {needed} agree, you among them. Next, pass it on: copy it as text, or show its code, to the other members. It needs {more} more."),
+        (more, false, false) => format!("{backed} of {needed} agree. It needs {more} more, from its members."),
+    }
 }
 
 /// Proposing a payment of the coin from the multisig, priced by the node.
@@ -339,11 +447,12 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, selected: &str
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Propose a payment");
+        ui.add(egui::Label::new(RichText::new("Nothing is sent yet: this makes a bundle for the members to agree to.").small().color(palette.muted)).wrap());
         ui.add(egui::TextEdit::singleline(&mut state.to).hint_text("To: ed25519:0x…, 0x…, bc1q…").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
         ui.add(egui::TextEdit::singleline(&mut state.amount).hint_text(format!("Amount in {}", ctx.coin.symbol)).desired_width(f32::INFINITY));
         let busy = state.pricing.is_some();
 
-        if theme::primary(ui, &palette, if busy { "Pricing…" } else { "Propose" }, !busy).clicked() {
+        if theme::primary(ui, &palette, if busy { "Pricing…" } else { "Make the proposal" }, !busy).clicked() {
             let to = super::send::recipient(state.to.trim());
             let amount = format::parse_units(state.amount.trim(), ctx.coin.decimals).and_then(|raw| u256::from_str_radix(&raw, 10).ok());
 
@@ -384,9 +493,8 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
     let palette = *ctx.palette;
 
     let Some(mut held) = state.bundle.clone() else {
-        theme::card(ui, &palette, |ui| {
-            theme::caps(ui, &palette, "A bundle from another member");
-            ui.label(RichText::new("Read a member's code, or paste the text chainv4 multisig wrote.").color(palette.soft));
+        egui::CollapsingHeader::new(RichText::new("Another member sent you something to sign?").color(palette.soft)).id_salt("multisig-bundle").default_open(!state.pasted.is_empty()).show(ui, |ui| {
+            ui.add(egui::Label::new(RichText::new("Read the code they show you, or paste the text they sent. You see what it does before you sign.").small().color(palette.muted)).wrap());
             ui.add(egui::TextEdit::multiline(&mut state.pasted).hint_text("chainv4-multisig:0x…").font(egui::TextStyle::Monospace).desired_rows(2).desired_width(f32::INFINITY));
 
             if !state.pasted.trim().is_empty() {
@@ -409,6 +517,7 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
 
             notes(ui, &palette, state);
         });
+        theme::section_gap(ui);
 
         return;
     };
@@ -424,11 +533,11 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
     }
 
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, "On its way round the members");
+        theme::caps(ui, &palette, "Waiting for its members");
         ui.label(RichText::new(describe(ctx, &held.body.tx)).color(palette.ink).size(16.0));
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &held.body.account.to_string()));
-        super::row(ui, &palette, "Nonce", |ui| {
-            ui.label(held.body.nonce.to_string());
+        super::row(ui, &palette, "Its transaction", |ui| {
+            ui.label(format!("number {}", held.body.nonce));
         });
         super::row(ui, &palette, "Fee, at most", |ui| {
             ui.label(ctx.amount(None, &(u256::from(held.body.fee.gas_limit) * held.body.fee.max_price).to_string()));
@@ -441,10 +550,9 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
         let approvals = approvals_of(state, &held);
         let backed = held.signatures.len() + approvals.iter().filter(|key| !held.signatures.iter().any(|signed| signed.key.to_string() == **key)).count();
         let needed = threshold.unwrap_or(u64::MAX);
-        ui.label(RichText::new(match threshold {
-            Some(needed) => format!("{backed} of the {needed} it needs back it, signatures and approvals on chain together"),
-            None => "Asking the node about the multisig…".to_string(),
-        }).small().color(palette.soft));
+        let signed = mine.and_then(|from| ctx.holder().and_then(|holder| holder.public(&from))).is_some_and(|key| held.signatures.iter().any(|signed| signed.key == key) || approvals.contains(&key.to_string()));
+        ui.add(egui::Label::new(RichText::new(next_step(backed as u64, threshold, signed, mine.is_some())).color(palette.ink)).wrap());
+        ui.add(egui::Label::new(RichText::new("A member agrees by signing here, which costs nothing and goes round as a code or text, or by approving on chain from their own account, which others see without the bundle and pays a small fee. The two count together.").small().color(palette.muted)).wrap());
         ui.add_space(10.0);
 
         if state.asking_signer {
@@ -489,13 +597,13 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
                 }
             }
 
-            if backed as u64 >= needed && state.submitting.is_none() && theme::primary(ui, &palette, "Submit", true).clicked() {
+            if backed as u64 >= needed && state.submitting.is_none() && theme::primary(ui, &palette, "Send it", true).clicked() {
                 submit(ctx, state, &held);
             }
 
             if theme::quiet(ui, &palette, "Copy as text").clicked() {
                 ui.ctx().copy_text(held.to_text());
-                state.note = Some("Copied: send it to the other members, for chainv4 multisig sign or this page.".to_string());
+                state.note = Some("Copied: send it to the other members, to paste on this page or in chainv4 multisig sign.".to_string());
             }
 
             if theme::quiet(ui, &palette, "Put away").clicked() {
@@ -505,7 +613,7 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
         });
 
         if mine.is_none() && members.is_some() {
-            ui.label(RichText::new("This account is not one of its members: switch to one that is to sign or approve.").small().color(palette.muted));
+            ui.add(egui::Label::new(RichText::new("This account is not one of its members: switch to one that is to sign or approve.").small().color(palette.muted)).wrap());
         }
 
         notes(ui, &palette, state);
@@ -564,40 +672,6 @@ fn approval(from: Address, account: Address, nonce: u64, fee: FeeOffer, tx: Tx) 
     }
 }
 
-/// Making a multisig: its members, one a line, and its threshold.
-fn create(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, prepared: &mut Option<Prepared>) {
-    let palette = *ctx.palette;
-
-    egui::CollapsingHeader::new(RichText::new("Make a multisig").color(palette.soft)).id_salt("make-multisig").show(ui, |ui| {
-        theme::card(ui, &palette, |ui| {
-            ui.label(RichText::new("One member a line: a key here, and for a multisig that reaches Bitcoin and EVM chains its Bitcoin multisig xpub, with its origin, and EVM address, after commas, every member or none.").small().color(palette.muted));
-            ui.add(egui::TextEdit::multiline(&mut state.members).hint_text("ed25519:0x…,[73c5da0a/48h/0h/0h/2h]xpub…,0x…").font(egui::TextStyle::Monospace).desired_rows(3).desired_width(f32::INFINITY));
-            ui.checkbox(&mut state.testnet, "On Bitcoin's test networks, not Bitcoin");
-
-            if theme::quiet(ui, &palette, "Add this account").clicked()
-                && let Some(line) = ctx.holder().and_then(|holder| member_line(holder, crate::keys::seed(ctx.book).as_ref(), state.testnet))
-            {
-                if !state.members.is_empty() && !state.members.ends_with('\n') {
-                    state.members.push('\n');
-                }
-                state.members.push_str(&line);
-            }
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Members needed").color(palette.soft));
-                ui.add(egui::TextEdit::singleline(&mut state.threshold).hint_text("2").desired_width(48.0));
-            });
-
-            if theme::primary(ui, &palette, "Make it", true).clicked() {
-                match made(ctx, state) {
-                    Ok(made) => *prepared = Some(made),
-                    Err(why) => state.trouble = Some(why),
-                }
-            }
-        });
-    });
-}
-
 /// The line Add this account adds: its first key, and, for an account its words make, its Bitcoin
 /// multisig xpub on the network picked and its EVM address.
 pub(super) fn member_line(holder: &crate::keys::Holder, seed: Option<&chainv4::crypto::mnemonic::Seed>, testnet: bool) -> Option<String> {
@@ -624,63 +698,11 @@ fn network(testnet: bool) -> chainv4::crypto::bitcoin::tx::Network {
     }
 }
 
-/// The transaction making the multisig, from the account's first address, and the address it will
-/// be at, which the page follows at once.
-fn made(ctx: &mut Ctx, state: &MultisigState) -> Result<Prepared, String> {
-    let read = state.members.lines().map(str::trim).filter(|line| !line.is_empty()).map(member).collect::<Result<Vec<_>, _>>()?;
-    let threshold: u32 = state.threshold.trim().parse().map_err(|_| "Members needed is a whole number.".to_string())?;
-
-    if read.iter().any(|(_, testnet)| testnet.is_some_and(|testnet| testnet != state.testnet)) {
-        return Err(format!("A member's xpub is for {}: tick the test networks box to match, or take the other xpub.", if state.testnet { "Bitcoin" } else { "Bitcoin's test networks" }));
-    }
-
-    let members = read.into_iter().map(|(member, _)| member).collect();
-    let policy = chainv4::registry::multisig::MultisigPolicy { members, threshold, testnet: state.testnet };
-
-    if let Some(problem) = policy.problem() {
-        return Err(format!("Not a multisig: {problem}."));
-    }
-
-    let from = ctx.holder().and_then(|holder| holder.addresses().into_iter().find(|address| crate::keys::scheme_of(address) != Some(KeyType::Bitcoin))).ok_or("There is no account to make it from.")?;
-    let nonce = ctx.chain.account(&from.to_string()).map(|proven| proven.value.nonce).ok_or("The account is not proven yet: wait for the light client.")?;
-    let genesis = ctx.chain.genesis.ok_or("Waiting for the light client to start.")?;
-    let address = multisig_address(&from, nonce, genesis.algorithm());
-    follow(ctx, &address.to_string());
-
-    Ok(Prepared {
-        from,
-        tx: Tx::CreateMultisig { members: policy.members, threshold, testnet: policy.testnet },
-        what: format!("Make a multisig, {threshold} of {}", state.members.lines().filter(|line| !line.trim().is_empty()).count()),
-        about: format::short(&address.to_string()),
-        coin: u256::ZERO,
-    })
-}
-
-/// A member as a line gives it, KEY, KEY,,EVM_ADDRESS or KEY,[origin]xpub…,EVM_ADDRESS, and whether its xpub is for
-/// Bitcoin's test networks.
-fn member(line: &str) -> Result<(MultisigMember, Option<bool>), String> {
-    let parts: Vec<&str> = line.split(',').map(str::trim).collect();
-    let key: PublicKey = parts[0].parse().map_err(|_| format!("{} is not a key", format::short(parts[0])))?;
-
-    let evm = |evm: &str| from_hex(evm).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{} is not an EVM address", format::short(evm)));
-
-    match parts[1..] {
-        [] => Ok((MultisigMember { key, bitcoin: None, evm: None }, None)),
-        ["", address] => Ok((MultisigMember { key, bitcoin: None, evm: Some(evm(address)?) }, None)),
-        [xpub, address] => {
-            let (bitcoin, network) = chainv4::crypto::bitcoin::multisig::parse_xpub(xpub).map_err(|why| format!("{}: {why}", format::short(xpub)))?;
-
-            Ok((MultisigMember { key, bitcoin: Some(bitcoin), evm: Some(evm(address)?) }, Some(network == chainv4::crypto::bitcoin::tx::Network::Test)))
-        }
-        _ => Err("A member is a key; a key, two commas and an EVM address; or a key, a Bitcoin xpub with its origin and an EVM address, with commas between.".to_string()),
-    }
-}
-
 /// What a multisig's transaction does, in a line.
 fn describe(ctx: &Ctx, tx: &Tx) -> String {
     match tx {
         Tx::Transfer { to, amount, .. } => format!("Pay {} to {}", ctx.amount(None, &amount.to_u256().to_string()), format::short(&to.to_string())),
-        Tx::ChangeMultisig { members, threshold, .. } => format!("Make it {threshold} of {} members", members.len()),
+        Tx::ChangeMultisig { members, threshold, .. } => format!("Change its members: {} must agree", create::of(*threshold, members.len())),
         other => crate::history::action(other, &chainv4::structs::receipt::CommittedOutcome::Done),
     }
 }
@@ -710,21 +732,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn members_read_as_a_line_gives_them_and_bad_ones_say_why() {
-        let key = Keypair::from_seed([3; 32]).public();
-        let seed = chainv4::crypto::mnemonic::Phrase::parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap().seed("");
-        let xpub = chainv4::crypto::bitcoin::multisig::xpub_text(&seed.multisig_account(1), network(true));
-        let evm = format!("0x{}", "22".repeat(20));
+    fn a_proposal_says_where_it_stands_and_what_it_needs_next() {
+        assert_eq!(progress(1, 2, false, true), "1 of 2 agree. It needs 1 more: you have not agreed yet.");
+        assert_eq!(progress(1, 2, true, true), "1 of 2 agree, you among them. It needs 1 more of the other members.");
+        assert_eq!(progress(0, 2, false, false), "0 of 2 agree. It needs 2 more of its members.");
+        assert!(progress(2, 2, true, true).contains("Anyone can send it now"));
+        assert!(progress(3, 2, false, false).contains("it has what it needs"), "more than it needs is enough");
 
-        assert_eq!(member(&key.to_string()), Ok((MultisigMember { key, bitcoin: None, evm: None }, None)));
-        assert_eq!(
-            member(&format!("{key},{xpub},{evm}")).map(|(member, testnet)| (member.bitcoin, member.evm, testnet)),
-            Ok((Some(seed.multisig_account(1)), Some([0x22; 20]), Some(true)))
-        );
-        assert_eq!(member(&format!("{key},,{evm}")), Ok((MultisigMember { key, bitcoin: None, evm: Some([0x22; 20]) }, None)), "on EVM chains alone");
-        assert!(member("not a key").is_err());
-        assert!(member(&format!("{key},{xpub}")).unwrap_err().contains("commas"));
-        assert!(member(&format!("{key},xpub123,{evm}")).is_err(), "an xpub without its origin");
+        assert!(next_step(0, Some(2), false, true).contains("Next, sign it here"));
+        assert!(next_step(1, Some(2), true, true).contains("Next, pass it on"));
+        assert!(next_step(1, Some(2), false, false).contains("from its members"));
+        assert!(next_step(2, Some(2), true, true).contains("it can be sent"));
+        assert!(next_step(1, None, false, true).starts_with("Asking the node"));
     }
 
     #[test]

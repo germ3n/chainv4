@@ -83,6 +83,25 @@ pub fn primary(ui: &mut Ui, palette: &Palette, text: &str, enabled: bool) -> Res
     ui.add_enabled(enabled, button)
 }
 
+/// The one button a step leads to, as wide as there is: a screen's single thing to do.
+pub fn primary_wide(ui: &mut Ui, palette: &Palette, text: &str, enabled: bool) -> Response {
+    let (size, height) = (button_size(ui), ui.spacing().interact_size.y);
+    let button = egui::Button::new(strong(text, size + 1.0).color(if enabled { palette.on_accent } else { palette.muted }))
+        .fill(if enabled { palette.accent } else { palette.row })
+        .stroke(Stroke::NONE)
+        .corner_radius(ui.visuals().widgets.inactive.corner_radius);
+    let size = egui::vec2(ui.available_width(), (height + 4.0).max(crate::layout::FINGER + 4.0));
+
+    ui.add_enabled_ui(enabled, |ui| ui.add_sized(size, button)).inner
+}
+
+/// A quiet button as wide as there is: the step before the one a primary leads to.
+pub fn quiet_wide(ui: &mut Ui, palette: &Palette, text: &str) -> Response {
+    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y.max(crate::layout::FINGER));
+
+    ui.add_sized(size, egui::Button::new(RichText::new(text).color(palette.soft)).fill(Color32::TRANSPARENT).stroke(Stroke::new(1.0, palette.line)).corner_radius(ui.visuals().widgets.inactive.corner_radius))
+}
+
 /// A choice of a few, one of them on, joined in a row: the one on filled with the accent, so it
 /// reads as on at a glance, the others quiet. Whether the choice changed.
 pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, palette: &Palette, current: &mut T, options: &[(T, &str)]) -> bool {
@@ -111,6 +130,50 @@ pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, palette: &Palette, current: &
     });
 
     changed
+}
+
+/// A choice of more than one row may hold: `segmented` on as many rows as the width there is takes,
+/// the options in their order, so none runs off a phone's screen. Whether the choice changed.
+pub fn segmented_rows<T: Copy + PartialEq>(ui: &mut Ui, palette: &Palette, current: &mut T, options: &[(T, &str)]) -> bool {
+    let font = TextStyle::Button.resolve(ui.style());
+    let widths: Vec<f32> = options
+        .iter()
+        .map(|(_, name)| ui.fonts_mut(|fonts| fonts.layout_no_wrap(name.to_string(), font.clone(), Color32::WHITE).size().x) * SEMIBOLD_WIDER + 2.0 * ui.spacing().button_padding.x)
+        .collect();
+    let mut changed = false;
+
+    ui.vertical(|ui| {
+        for row in rows_of(&widths, ui.available_width()) {
+            changed |= segmented(ui, palette, current, &options[row]);
+        }
+    });
+
+    changed
+}
+
+/// How much wider the semibold face is than the text face, at most: the option on takes it.
+const SEMIBOLD_WIDER: f32 = 1.08;
+
+/// Options of these widths, in order, cut into runs that each fit a width: one at least a run,
+/// however wide.
+fn rows_of(widths: &[f32], width: f32) -> Vec<std::ops::Range<usize>> {
+    let mut rows = Vec::new();
+    let (mut start, mut used) = (0, 0.0);
+
+    for (index, each) in widths.iter().enumerate() {
+        if used + each > width && index > start {
+            rows.push(start..index);
+            (start, used) = (index, 0.0);
+        }
+
+        used += each;
+    }
+
+    if start < widths.len() {
+        rows.push(start..widths.len());
+    }
+
+    rows
 }
 
 /// A quiet button, outlined.
@@ -301,6 +364,27 @@ fn flag_parts(text: &str) -> Vec<(&str, bool)> {
 
     parts
 }
+
+/// Text in which each arrow goes in the mono face, as the wallet's text face has no arrow to draw.
+/// Plain text otherwise, in the text style and color given.
+pub fn arrowed(ui: &Ui, text: &str, style: TextStyle, color: Color32) -> egui::text::LayoutJob {
+    let (plain, mono) = (style.resolve(ui.style()), TextStyle::Monospace.resolve(ui.style()));
+    let mono = FontId::new(mono.size.min(plain.size), mono.family);
+    let mut job = egui::text::LayoutJob::default();
+
+    for (index, part) in text.split(ARROW).enumerate() {
+        if index > 0 {
+            job.append(ARROW, 0.0, egui::TextFormat { font_id: mono.clone(), color, ..Default::default() });
+        }
+
+        job.append(part, 0.0, egui::TextFormat { font_id: plain.clone(), color, ..Default::default() });
+    }
+
+    job
+}
+
+/// The arrow between what was and what will be.
+pub const ARROW: &str = "→";
 
 /// One page in a list of pages, as a phone's More lists them: a card, the whole of it what a finger
 /// taps, with what the page is called, what it is for under that, and an arrow.
@@ -528,6 +612,41 @@ mod tests {
         frame(vec![press(false)], &mut oldest, &mut changed);
 
         assert!(oldest && !changed, "a tap on the one on changes nothing");
+    }
+
+    #[test]
+    fn the_wide_buttons_take_the_width_there_is_and_a_finger_s_height() {
+        let (primary, quiet) = measured(300.0, |ui| (primary_wide(ui, &PALETTE, "Trade", true).rect, quiet_wide(ui, &PALETTE, "First").rect));
+
+        assert!(primary.width() > 280.0 && quiet.width() > 280.0, "{primary:?} {quiet:?}");
+        assert!(primary.height() >= crate::layout::FINGER && quiet.height() >= crate::layout::FINGER, "{primary:?} {quiet:?}");
+        assert!(measured(300.0, |ui| primary_wide(ui, &PALETTE, "Enter an amount", false).rect).width() > 280.0, "waiting, as wide");
+    }
+
+    #[test]
+    fn an_arrow_goes_in_mono_and_the_rest_stays_as_it_is() {
+        let job = measured(300.0, |ui| arrowed(ui, "50% → 60%", TextStyle::Body, Color32::WHITE));
+
+        assert_eq!(job.text, "50% → 60%");
+        assert_eq!(job.sections.len(), 3);
+        assert_eq!(job.sections[1].format.font_id.family, FontFamily::Monospace);
+        assert_eq!(job.sections[0].format.font_id.family, FontFamily::Proportional);
+        assert_eq!(measured(300.0, |ui| arrowed(ui, "none", TextStyle::Body, Color32::WHITE)).sections.len(), 1);
+    }
+
+    #[test]
+    fn segmented_rows_keep_their_options_in_order_and_inside_the_width() {
+        assert_eq!(rows_of(&[50.0, 50.0, 50.0], 200.0).first(), Some(&(0..3)), "all on one");
+        assert_eq!(rows_of(&[80.0, 80.0, 80.0, 80.0, 80.0], 200.0), [0..2, 2..4, 4..5]);
+        assert_eq!(rows_of(&[500.0, 10.0], 200.0), [0..1, 1..2], "one too wide takes a row of its own");
+        assert!(rows_of(&[], 200.0).is_empty());
+
+        let names = ["consensus", "bootnodes", "name prices", "collections", "federation", "directory", "fees", "reward", "limits", "upgrade", "name"];
+        let options: Vec<(usize, &str)> = names.iter().copied().enumerate().collect();
+        let drawn = measured(320.0, |ui| ui.scope(|ui| segmented_rows(ui, &PALETTE, &mut 0, &options)).response.rect);
+
+        assert!(drawn.right() <= 320.5, "within a phone's width: {drawn:?}");
+        assert!(drawn.height() > 50.0, "on several rows: {drawn:?}");
     }
 
     #[test]

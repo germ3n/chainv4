@@ -5,7 +5,7 @@
 use {
     crate::api::{Ask, EventQuery, Failure},
     crate::model::{
-        Account, BlockDetail, Checkpoint, Contract, Decision, DecisionsPage, Forks, FoundEvent, FoundTx, GovernanceView, GovernanceWeight, IndexPage,
+        Account, BlockDetail, Checkpoint, Contract, Decision, Forks, FoundEvent, FoundTx, GovernanceView, GovernanceWeight, IndexPage,
         ListedName, Mempool, MultisigView, NamesPage, NodeView, Page, Peer, PeerChange, Placed, Receipt, RegisteredCollection, RegisteredToken,
         Reorganized, RichList, Status, Summary, SupplyView, TokensPage, TxView,
     },
@@ -156,78 +156,12 @@ impl<T: Placed> Listing<T> {
     }
 }
 
-/// Governance's decisions read so far, by version, and how far down the pages read reach. Versions
-/// count up by one a decision, so any missing between the lowest read and the newest is a gap: a
-/// decision the node did not list.
-#[derive(Clone, Debug, Default)]
-pub struct Decisions {
-    pub items: BTreeMap<u64, Decision>,
-    /// The newest version, as the node last said.
-    pub version: u64,
-    /// The oldest version the node keeps: 1 unless it synced from a snapshot.
-    pub from: u64,
-    /// The lowest version the pages read reach: every one from it to the newest was listed, or is
-    /// a gap. None before the first page.
-    pub bottom: Option<u64>,
-}
+/// Governance's decisions read so far, by version, and how far down the pages read reach.
+pub type Decisions = chainv4_ui::ballots::Decided<Decision>;
 
-impl Decisions {
-    /// Takes a page: the newest, with before None, or an older one, below before.
-    pub fn take(&mut self, page: DecisionsPage, before: Option<u64>) {
-        let lowest = page.decisions.iter().map(|decision| decision.version).min();
-        // A page that lists nothing says there is nothing from the oldest kept on.
-        let reaches = lowest.unwrap_or(page.from);
-
-        if before.is_none() {
-            // A reorganization undid decisions: what was above the newest is gone.
-            self.items.retain(|version, _| *version <= page.version);
-
-            // So many came since that the newest page no longer meets what was read: start over.
-            if self.bottom.is_some() && reaches > self.version.min(page.version) + 1 {
-                self.items.clear();
-                self.bottom = None;
-            }
-
-            self.version = page.version;
-        }
-
-        self.from = page.from;
-        self.bottom = Some(self.bottom.map_or(reaches, |bottom| bottom.min(reaches)));
-
-        for decision in page.decisions {
-            self.items.insert(decision.version, decision);
-        }
-    }
-
-    /// Where the next older page starts, while there are older ones the node keeps.
-    pub fn next(&self) -> Option<u64> {
-        self.bottom.filter(|bottom| *bottom > self.from && *bottom > 1)
-    }
-
-    /// The versions missing between the lowest read and the newest, as runs from and to.
-    pub fn gaps(&self) -> Vec<(u64, u64)> {
-        let Some(bottom) = self.bottom else {
-            return Vec::new();
-        };
-        let mut gaps: Vec<(u64, u64)> = Vec::new();
-
-        for version in bottom.max(1)..=self.version {
-            if self.items.contains_key(&version) {
-                continue;
-            }
-
-            match gaps.last_mut() {
-                Some((_, to)) if *to + 1 == version => *to = version,
-                _ => gaps.push((version, version)),
-            }
-        }
-
-        gaps
-    }
-
-    /// The decisions read, newest first.
-    pub fn newest_first(&self) -> impl Iterator<Item = &Decision> {
-        self.items.values().rev()
+impl chainv4_ui::ballots::Counted for Decision {
+    fn version(&self) -> u64 {
+        self.version
     }
 }
 

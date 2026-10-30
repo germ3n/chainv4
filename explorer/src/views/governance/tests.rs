@@ -68,9 +68,18 @@ fn governance_reads_as_get_governance_writes_it() {
     assert_eq!(proposal.change(), json!({ "name": "third" }), "the change is what is left once its kind, version, weight, needed and approvals are read");
     assert_eq!((proposal.kind_name(), proposal.version), ("name".to_string(), 2));
 
-    // By kind, in the order the node lists them, each kind once with its version.
-    let groups: Vec<(String, u64, Vec<usize>)> = grouped(&view).into_iter().map(|(kind, version, group)| (kind, version, group.into_iter().map(|(index, _)| index).collect())).collect();
-    assert_eq!(groups, [("name".to_string(), 2, vec![0, 2]), ("consensus".to_string(), 0, vec![1])]);
+    // Found by kind, address and value, newest first by its latest approval, or by how far it got
+    // and when it closes.
+    let items: Vec<Item> = view.proposals.iter().map(|proposal| open_item(proposal, &coin())).collect();
+    let found = |finder: Finder| ballots::select(&items, &finder);
+
+    assert_eq!(ballots::kinds_among(&items), ["consensus", "name"]);
+    assert_eq!(found(Finder { kind: Some("name".to_string()), ..Finder::default() }), [0, 2]);
+    assert_eq!(found(Finder { search: "fourth".to_string(), ..Finder::default() }), [2]);
+    assert_eq!(found(Finder { search: "ED25519:0x03".to_string(), ..Finder::default() }), [1, 2], "whoever approved it");
+    assert_eq!(found(Finder::default()), [0, 1, 2], "two made in epoch 3, then the one in epoch 2");
+    assert_eq!(found(Finder { order: ballots::Order::ClosingSoonest, ..Finder::default() }), [2, 0, 1], "the one that counts until epoch 17 first");
+    assert_eq!(found(Finder { order: ballots::Order::MostSupport, ..Finder::default() }), [0, 1, 2], "all alike: the node's order");
     assert_eq!(kind_heading("name", 2), "version 2: approving the name's change 3");
     assert_eq!(kind_heading("bootnodes", 0), "version 0: approving the bootnodes' change 1");
 
@@ -132,6 +141,17 @@ fn decision(version: u64) -> Value {
     })
 }
 
+/// Takes a page as the app takes one from the node.
+trait Reads {
+    fn read(&mut self, page: DecisionsPage, before: Option<u64>);
+}
+
+impl Reads for Decisions {
+    fn read(&mut self, page: DecisionsPage, before: Option<u64>) {
+        self.take(page.version, page.from, page.decisions, before);
+    }
+}
+
 fn page(version: u64, from: u64, versions: &[u64]) -> DecisionsPage {
     serde_json::from_value(json!({ "version": version, "from": from, "decisions": versions.iter().map(|version| decision(*version)).collect::<Vec<_>>() })).unwrap()
 }
@@ -144,55 +164,79 @@ fn history_reads_as_get_governance_history_writes_it_and_pages_older() {
     assert_eq!(first.decisions[0].change, Some(json!({ "name": "name 45" })));
 
     let mut listing = Decisions::default();
-    listing.take(first, None);
+    listing.read(first, None);
 
     assert_eq!((listing.bottom, listing.next(), listing.gaps()), (Some(26), Some(26), Vec::new()));
 
-    listing.take(page(45, 1, &(6..=25).rev().collect::<Vec<_>>()), Some(26));
-    listing.take(page(45, 1, &[5, 4, 3, 2, 1]), Some(6));
+    listing.read(page(45, 1, &(6..=25).rev().collect::<Vec<_>>()), Some(26));
+    listing.read(page(45, 1, &[5, 4, 3, 2, 1]), Some(6));
 
     assert_eq!((listing.items.len(), listing.next()), (45, None), "read to the first");
     assert_eq!(listing.newest_first().next().map(|decision| decision.version), Some(45));
 
     // Two more since, on the newest page again: they go in front.
-    listing.take(page(47, 1, &(28..=47).rev().collect::<Vec<_>>()), None);
+    listing.read(page(47, 1, &(28..=47).rev().collect::<Vec<_>>()), None);
     assert_eq!((listing.items.len(), listing.version, listing.gaps()), (47, 47, Vec::new()));
 
     // A reorganization undid the newest.
-    listing.take(page(46, 1, &(27..=46).rev().collect::<Vec<_>>()), None);
+    listing.read(page(46, 1, &(27..=46).rev().collect::<Vec<_>>()), None);
     assert_eq!((listing.items.len(), listing.version), (46, 46));
 
     // So many came since that the newest page does not meet what was read: it starts over.
-    listing.take(page(100, 1, &(81..=100).rev().collect::<Vec<_>>()), None);
+    listing.read(page(100, 1, &(81..=100).rev().collect::<Vec<_>>()), None);
     assert_eq!((listing.items.len(), listing.bottom, listing.next()), (20, Some(81), Some(81)));
+}
+
+#[test]
+fn decisions_are_found_by_kind_address_value_and_block() {
+    let mut listing = Decisions::default();
+    listing.read(page(5, 1, &[5, 4, 3, 2, 1]), None);
+    let read: Vec<Decision> = listing.newest_first().cloned().collect();
+    let items: Vec<Item> = read.iter().map(|decision| decided_item(decision, &coin())).collect();
+    let found = |finder: Finder| ballots::select(&items, &finder).iter().map(|index| read[*index].version).collect::<Vec<_>>();
+
+    assert_eq!(found(Finder::default()), [5, 4, 3, 2, 1]);
+    assert_eq!(found(Finder { order: ballots::Order::Oldest, ..Finder::default() }), [1, 2, 3, 4, 5]);
+    assert_eq!(found(Finder { search: "name 3".to_string(), ..Finder::default() }), [3], "a value");
+    assert_eq!(found(Finder { kind: Some("name".to_string()), ..Finder::default() }).len(), 5);
+    assert_eq!(found(Finder { kind: Some("fees".to_string()), ..Finder::default() }), Vec::<u64>::new());
+    assert_eq!(found(Finder { search: "ed25519:0x02 rename".to_string(), ..Finder::default() }).len(), 5, "who sent it, and its words");
+    assert_eq!(items[0].kind, "name");
+
+    // Finality's tuning is on the consensus's ballot.
+    let finality: Decision = serde_json::from_value(json!({ "version": 1, "tx": "0x01", "block": "0xb1", "height": 1, "timestamp": 1, "confirmations": 1, "kind": "finality", "change": { "finality": { "type": "depth", "depth": 6 } } })).unwrap();
+    assert_eq!(decided_item(&finality, &coin()).kind, "consensus");
+
+    // Five to the node's twenty read: a page short, and older ones to read.
+    assert!(ballots::wants_older(5, &Finder::default(), PER_PAGE, true));
 }
 
 #[test]
 fn versions_the_node_skips_show_as_gaps() {
     let mut listing = Decisions::default();
-    listing.take(page(10, 1, &[10, 9, 7, 6, 3]), None);
+    listing.read(page(10, 1, &[10, 9, 7, 6, 3]), None);
 
     assert_eq!(listing.gaps(), [(4, 5), (8, 8)], "only between the lowest read and the newest");
     assert_eq!(listing.next(), Some(3));
     assert_eq!(gap(8, 8), "Change 8 is missing: the node did not list it, so what it changed is unknown here.");
     assert_eq!(gap(4, 5), "Changes 4 to 5 are missing: the node did not list them, so what they changed is unknown here.");
 
-    listing.take(page(10, 1, &[1]), Some(3));
+    listing.read(page(10, 1, &[1]), Some(3));
     assert_eq!(listing.gaps(), [(2, 2), (4, 5), (8, 8)]);
     assert_eq!(listing.next(), None);
 
     // A page that lists nothing says nothing is kept from its oldest on.
     let mut empty = Decisions::default();
-    empty.take(page(3, 1, &[]), None);
+    empty.read(page(3, 1, &[]), None);
     assert_eq!(empty.gaps(), [(1, 3)]);
 
     // A node that synced from a snapshot keeps the newest alone: no gap below what it keeps.
     let mut snapshot = Decisions::default();
-    snapshot.take(page(12, 11, &[12, 11]), None);
+    snapshot.read(page(12, 11, &[12, 11]), None);
     assert_eq!((snapshot.gaps(), snapshot.next()), (Vec::new(), None));
 
     let mut none = Decisions::default();
-    none.take(page(0, 1, &[]), None);
+    none.read(page(0, 1, &[]), None);
     assert_eq!((none.gaps(), none.next()), (Vec::new(), None), "nothing decided yet");
 }
 
@@ -433,7 +477,7 @@ fn a_chain_without_governance_says_it_has_none() {
 #[test]
 fn a_governed_chain_shows_its_approvers_proposals_settings_and_decisions_on_any_screen() {
     let mut store = Store { governance: Some(serde_json::from_value(listing()).unwrap()), ..Store::default() };
-    store.decisions.take(page(3, 1, &[3, 1]), None);
+    store.decisions.read(page(3, 1, &[3, 1]), None);
 
     for narrow in [false, true] {
         let (text, _) = drawn(&store, narrow);

@@ -42,6 +42,14 @@ enum Venue {
     Evm,
 }
 
+/// What the page shows: the trade, or the pools behind it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Tab {
+    #[default]
+    Trade,
+    Pools,
+}
+
 /// What an EVM read asked, by its JSON-RPC id.
 #[derive(Clone, Debug)]
 enum Read {
@@ -67,6 +75,7 @@ struct EvmDex {
 }
 
 pub struct TradeState {
+    tab: Tab,
     venue: Venue,
     /// The native DEX's pools, by the order they opened in.
     pools: Vec<Option<DexPool>>,
@@ -84,6 +93,8 @@ pub struct TradeState {
     to: Option<Address>,
     amount: String,
     slippage: String,
+    /// Whether slippage is typed, rather than one of those offered.
+    slippage_typed: bool,
     /// The pool picked to add to or take out of, by its share token.
     chosen: Option<Address>,
     add: String,
@@ -102,6 +113,7 @@ pub struct TradeState {
 impl Default for TradeState {
     fn default() -> TradeState {
         TradeState {
+            tab: Tab::default(),
             venue: Venue::Native,
             pools: Vec::new(),
             wanted: None,
@@ -116,6 +128,7 @@ impl Default for TradeState {
             to: None,
             amount: String::new(),
             slippage: "0.5".to_string(),
+            slippage_typed: false,
             chosen: None,
             add: String::new(),
             remove: String::new(),
@@ -430,7 +443,7 @@ fn slippage(state: &TradeState) -> u32 {
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, send: &mut SendState) {
     let palette = *ctx.palette;
-    theme::title(ui, &palette, "Trade", "Tokens for tokens at the pools' price, and pools to add to: the DEX keeps a constant product, and 0.3% of each trade for who provided.");
+    theme::title(ui, &palette, "Trade", "One token for another, at the pools' price.");
 
     let time = ui.input(|input| input.time);
     refresh(ctx, state, time);
@@ -444,21 +457,29 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, send: &mut SendS
         return;
     }
 
-    if native.is_some() && evm.is_some() {
-        ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut state.venue, Venue::Native, "Native pools");
-            ui.selectable_value(&mut state.venue, Venue::Evm, "EVM pools");
-        });
-        theme::section_gap(ui);
-    } else {
+    if !(native.is_some() && evm.is_some()) {
         state.venue = if native.is_some() { Venue::Native } else { Venue::Evm };
     }
 
+    ui.horizontal_top(|ui| {
+        theme::segmented(ui, &palette, &mut state.tab, &[(Tab::Trade, "Trade"), (Tab::Pools, "Pools")]);
+
+        if native.is_some() && evm.is_some() {
+            theme::segmented(ui, &palette, &mut state.venue, &[(Venue::Native, "Native"), (Venue::Evm, "EVM")]);
+        }
+    });
+    theme::section_gap(ui);
+
     let mut prepared = None;
     let pools = state.listed();
-    trade(ui, ctx, state, &pools, &mut prepared);
-    liquidity(ui, ctx, state, &pools, &mut prepared);
-    create(ui, ctx, state, &mut prepared);
+
+    match state.tab {
+        Tab::Trade => trade(ui, ctx, state, &pools, &mut prepared),
+        Tab::Pools => {
+            liquidity(ui, ctx, state, &pools, &mut prepared);
+            create(ui, ctx, state, &mut prepared);
+        }
+    }
 
     if let Some(trouble) = &state.trouble {
         ui.add_space(8.0);
@@ -487,82 +508,313 @@ fn assets(pools: &[DexPool]) -> Vec<Address> {
 }
 
 fn pick(ui: &mut Ui, ctx: &Ctx, salt: &str, chosen: &mut Address, assets: &[Address]) {
-    egui::ComboBox::from_id_salt(("trade", salt)).selected_text(symbol(ctx, chosen)).show_ui(ui, |ui| {
+    egui::ComboBox::from_id_salt(("trade", salt)).selected_text(theme::strong(symbol(ctx, chosen), 15.0)).width(ASSET_WIDTH).show_ui(ui, |ui| {
         for asset in assets {
             ui.selectable_value(chosen, *asset, symbol(ctx, asset));
         }
     });
 }
 
+/// How wide an asset's picker is.
+const ASSET_WIDTH: f32 = 92.0;
+/// The size of the amounts a trade is about.
+const AMOUNT_SIZE: f32 = 24.0;
+/// From this wide, as a phone on its side, what is paid and what is got go side by side.
+const SIDE_BY_SIDE: f32 = 480.0;
+
+/// One side of a trade: what it is, what this account holds of it, its amount and its asset.
+fn side(ui: &mut Ui, palette: &theme::Palette, label: &str, held: Option<String>, amount: impl FnOnce(&mut Ui, f32), asset: impl FnOnce(&mut Ui)) {
+    egui::Frame::new().fill(palette.row).corner_radius(ui.visuals().window_corner_radius).inner_margin(12.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        theme::end_row(
+            ui,
+            |ui| {
+                ui.label(RichText::new(label).small().color(palette.soft));
+            },
+            |ui| {
+                if let Some(held) = held {
+                    ui.label(RichText::new(format!("Balance {held}")).small().color(palette.muted));
+                }
+            },
+        );
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                asset(ui);
+
+                let width = ui.available_width();
+                ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::left_to_right(egui::Align::Center), |ui| amount(ui, width));
+            });
+        });
+    });
+}
+
+/// The button between the two sides: they swap. Two arrows, up and down, or across side by side.
+fn direction(ui: &mut Ui, palette: &theme::Palette, across: bool) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(chainv4_ui::layout::FINGER, chainv4_ui::layout::FINGER), egui::Sense::click());
+    let painter = ui.painter();
+    let stroke = egui::Stroke::new(1.6, palette.accent);
+    painter.circle(rect.center(), rect.width() / 2.0 - 1.0, palette.card, egui::Stroke::new(1.0, palette.line));
+
+    let (forward, sideways) = match across {
+        true => (egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)),
+        false => (egui::vec2(0.0, 1.0), egui::vec2(1.0, 0.0)),
+    };
+
+    for (way, at) in [(1.0, -4.5), (-1.0, 4.5)] {
+        let middle = rect.center() + sideways * at;
+        let (start, tip) = (middle - forward * way * 7.0, middle + forward * way * 7.0);
+        painter.line_segment([start, tip], stroke);
+        painter.line_segment([tip, tip - forward * way * 3.5 + sideways * 3.5], stroke);
+        painter.line_segment([tip, tip - forward * way * 3.5 - sideways * 3.5], stroke);
+    }
+
+    response.on_hover_text("Swap what is paid and what is got").on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// A line of a trade's details: what it is on the left, what it says on the right.
+fn detail(ui: &mut Ui, palette: &theme::Palette, label: &str, add: impl FnOnce(&mut Ui)) {
+    theme::end_row(
+        ui,
+        |ui| {
+            ui.label(RichText::new(label).color(palette.muted));
+        },
+        add,
+    );
+}
+
+/// What this account holds of an asset, in words, once it is proven; EVM tokens are not followed.
+fn held_of(ctx: &Ctx, asset: &Address) -> Option<(u256, String)> {
+    let me = ctx.holder().and_then(|holder| holder.addresses().first().copied())?.to_string();
+    let raw = match *asset == COIN {
+        true => ctx.chain.account(&me).map(|proven| proven.value.balance)?,
+        false => ctx.chain.balance(&asset.to_string(), &me).map(|proven| proven.value)?,
+    };
+
+    Some((raw, format::brief(&raw.to_string(), decimals(ctx, asset), 4)))
+}
+
+/// What the button under a trade says, and whether it goes.
+fn action(amount: bool, same: bool, routed: bool) -> (&'static str, bool) {
+    match (amount, same, routed) {
+        (_, true, _) => ("Pick two different assets", false),
+        (false, _, _) => ("Enter an amount", false),
+        (true, false, false) => ("No pool, nor two, trades these", false),
+        (true, false, true) => ("Trade", true),
+    }
+}
+
+/// The swap the direction button makes: what is got is paid, and what was paid is got.
+fn flipped(from: Address, to: Address) -> (Address, Address) {
+    (to, from)
+}
+
+/// What one of what is paid gets, for what it pays and gets in all.
+fn rate(amount: u256, out: u256, decimals_in: u8, decimals_out: u8) -> Option<f64> {
+    let paid = amount.as_f64() / 10f64.powi(i32::from(decimals_in));
+
+    (paid > 0.0).then(|| out.as_f64() / 10f64.powi(i32::from(decimals_out)) / paid)
+}
+
+/// A rate, to as many places as it takes to say something.
+fn rate_words(rate: f64) -> String {
+    match rate {
+        rate if rate >= 1000.0 => format!("{rate:.2}"),
+        rate if rate >= 1.0 => format!("{rate:.4}"),
+        rate => format!("{rate:.6}"),
+    }
+}
+
+/// The part of what is paid the first pool keeps.
+fn fee_of(amount: u256) -> u256 {
+    amount.checked_mul(u256::from(chainv4::dex::FEE_PER_MILLE)).map_or(u256::ZERO, |all| all / u256::from(1_000u64))
+}
+
+/// Slippage as offered, in percent: what the page offers before someone types their own.
+const SLIPPAGE_OFFERED: [(&str, &str); 3] = [("0.1", "0.1%"), ("0.5", "0.5%"), ("1", "1%")];
+
+/// How much less than the quote a trade takes, as a choice of a few or typed. What does not read
+/// counts as slippage()'s 0.5%, and says so.
+fn slippage_line(ui: &mut Ui, palette: &theme::Palette, state: &mut TradeState) {
+    ui.label(RichText::new("Slippage: how far below the quote it may land").color(palette.muted));
+
+    let offered = SLIPPAGE_OFFERED.iter().position(|(value, _)| *value == state.slippage.trim()).filter(|_| !state.slippage_typed);
+    let mut picked = offered.unwrap_or(SLIPPAGE_OFFERED.len());
+    let options: Vec<(usize, &str)> = SLIPPAGE_OFFERED.iter().enumerate().map(|(index, (_, label))| (index, *label)).chain([(SLIPPAGE_OFFERED.len(), "Other")]).collect();
+
+    if theme::segmented(ui, palette, &mut picked, &options) {
+        state.slippage_typed = picked == SLIPPAGE_OFFERED.len();
+
+        if let Some((value, _)) = SLIPPAGE_OFFERED.get(picked) {
+            state.slippage = (*value).to_string();
+        }
+    }
+
+    if picked == SLIPPAGE_OFFERED.len() {
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut state.slippage).desired_width(70.0));
+            ui.label("%");
+        });
+
+        if !slippage_reads(&state.slippage) {
+            ui.colored_label(palette.warn, "From 0 to 50: until it reads, 0.5% holds.");
+        }
+    }
+}
+
+/// Whether a typed slippage is one slippage() takes.
+fn slippage_reads(typed: &str) -> bool {
+    typed.trim().parse::<f64>().is_ok_and(|percent| (0.0..=50.0).contains(&percent))
+}
+
+/// The trade: what is paid and what is got, then what the quote comes to, then the one thing to do.
 fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prepared: &mut Option<Prepared>) {
     let palette = *ctx.palette;
     let assets = assets(pools);
 
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, "Trade");
-
         if pools.is_empty() {
-            ui.label(RichText::new("No pools yet: open one below with its first deposit.").color(palette.soft));
+            ui.label(RichText::new("No pools yet, so nothing to trade against.").color(palette.soft));
+            ui.add_space(6.0);
+
+            if theme::primary(ui, &palette, "Open one", true).clicked() {
+                state.tab = Tab::Pools;
+            }
+
             return;
         }
 
         let mut to = state.to.filter(|to| assets.contains(to)).unwrap_or_else(|| *assets.iter().find(|asset| **asset != state.from).unwrap_or(&COIN));
-        super::row(ui, &palette, "You pay", |ui| {
-            pick(ui, ctx, "from", &mut state.from, &assets);
-            ui.add(egui::TextEdit::singleline(&mut state.amount).hint_text("0.0").desired_width(140.0));
-        });
-        super::row(ui, &palette, "You get", |ui| pick(ui, ctx, "to", &mut to, &assets));
-        state.to = Some(to);
-        super::row(ui, &palette, "Slippage", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut state.slippage).desired_width(50.0));
-            ui.label("%");
-        });
+        let amount = parse_amount(ctx, &state.from, &state.amount);
+        let same = state.from == to;
+        let route = amount.filter(|_| !same).and_then(|amount| best_route(pools, &state.from, &to, amount));
+        let held = held_of(ctx, &state.from);
+        let wide = ui.available_width() >= SIDE_BY_SIDE;
+        let mut flip = false;
 
-        let Some(amount) = parse_amount(ctx, &state.from, &state.amount) else {
-            return;
+        let pay = |ui: &mut Ui, from: &mut Address, typed: &mut String| {
+            side(
+                ui,
+                &palette,
+                "You pay",
+                held.as_ref().map(|(_, words)| words.clone()),
+                |ui, width| {
+                    let font = egui::FontId::new(AMOUNT_SIZE, egui::FontFamily::Name(theme::SERIF.into()));
+                    ui.add(egui::TextEdit::singleline(typed).hint_text(RichText::new("0").font(font.clone()).color(palette.muted)).frame(egui::Frame::NONE).desired_width(width).font(font));
+                },
+                |ui| pick(ui, ctx, "from", from, &assets),
+            );
+        };
+        let get = |ui: &mut Ui, to: &mut Address| {
+            let (text, color) = match &route {
+                Some(route) => (format::brief(&route.out.to_string(), decimals(ctx, to), 6), palette.ink),
+                None => ("0".to_string(), palette.muted),
+            };
+            side(
+                ui,
+                &palette,
+                "You get, about",
+                held_of(ctx, to).map(|(_, words)| words),
+                |ui, _| {
+                    theme::fitted(ui, &text, AMOUNT_SIZE, 13.0, egui::FontFamily::Name(theme::SERIF.into()), color);
+                },
+                |ui| pick(ui, ctx, "to", to, &assets),
+            );
         };
 
-        if state.from == to {
-            ui.colored_label(palette.warn, "Pick two different assets.");
-            return;
+        match wide {
+            true => {
+                let gap = chainv4_ui::layout::FINGER + 2.0 * ui.spacing().item_spacing.x;
+                let each = (ui.available_width() - gap) / 2.0;
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(egui::vec2(each, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| pay(ui, &mut state.from, &mut state.amount));
+                    ui.vertical(|ui| {
+                        ui.add_space(30.0);
+                        flip = direction(ui, &palette, true);
+                    });
+                    ui.allocate_ui_with_layout(egui::vec2(each, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| get(ui, &mut to));
+                });
+            }
+            false => {
+                pay(ui, &mut state.from, &mut state.amount);
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    flip = ui.vertical_centered(|ui| direction(ui, &palette, false)).inner;
+                });
+                get(ui, &mut to);
+            }
         }
 
-        let Some(route) = best_route(pools, &state.from, &to, amount) else {
-            ui.colored_label(palette.warn, "No pool, nor two, trades these.");
-            return;
-        };
-        let least = least_out(route.out, slippage(state));
-        ui.add_space(6.0);
-        super::row(ui, &palette, "Quote", |ui| {
-            ui.label(RichText::new(shown(ctx, &to, route.out)).strong().color(palette.ink));
-        });
-        super::row(ui, &palette, "Route", |ui| {
-            ui.label(match route.middle {
-                None => format!("{} → {}", symbol(ctx, &state.from), symbol(ctx, &to)),
-                Some(middle) => format!("{} → {} → {}", symbol(ctx, &state.from), symbol(ctx, &middle), symbol(ctx, &to)),
+        if flip {
+            (state.from, to) = flipped(state.from, to);
+        }
+
+        state.to = Some(to);
+        ui.add_space(10.0);
+
+        let from = state.from;
+
+        if let (Some(amount), Some((held, _))) = (amount, &held)
+            && amount > *held
+        {
+            ui.colored_label(palette.warn, "More than this account holds.");
+        }
+
+        if let (Some(amount), Some(route)) = (amount, &route) {
+            let least = least_out(route.out, slippage(state));
+            let (paid, got) = (symbol(ctx, &from), symbol(ctx, &to));
+
+            if let Some(rate) = rate(amount, route.out, decimals(ctx, &from), decimals(ctx, &to)) {
+                detail(ui, &palette, "Rate", |ui| {
+                    ui.label(format!("1 {paid} = {} {got}", rate_words(rate)));
+                });
+            }
+
+            detail(ui, &palette, "Price impact", |ui| {
+                let percent = f64::from(route.impact) / 100.0;
+                ui.colored_label(if route.impact > 500 { palette.bad } else if route.impact > 100 { palette.warn } else { palette.soft }, format!("{percent:.2}%"));
             });
-        });
-        super::row(ui, &palette, "Price impact", |ui| {
-            let percent = f64::from(route.impact) / 100.0;
-            ui.colored_label(if route.impact > 500 { palette.bad } else if route.impact > 100 { palette.warn } else { palette.soft }, format!("{percent:.2}%"));
-        });
-        super::row(ui, &palette, "At least", |ui| {
-            ui.label(shown(ctx, &to, least));
-        });
+            detail(ui, &palette, "Fee", |ui| {
+                ui.label(match route.middle {
+                    None => format!("0.3%, {}", shown(ctx, &from, fee_of(amount))),
+                    Some(_) => "0.3% at each of 2 pools".to_string(),
+                });
+            });
+            detail(ui, &palette, "Minimum received", |ui| {
+                ui.label(RichText::new(shown(ctx, &to, least)).color(palette.ink));
+            });
+            detail(ui, &palette, "Route", |ui| {
+                let route = match route.middle {
+                    None => format!("{paid} → {got}"),
+                    Some(middle) => format!("{paid} → {} → {got}", symbol(ctx, &middle)),
+                };
+                ui.label(theme::arrowed(ui, &route, egui::TextStyle::Body, palette.soft));
+            });
+            ui.add_space(6.0);
+        }
 
-        let Some(me) = ctx.holder().and_then(|holder| holder.addresses().first().copied()) else {
-            return;
-        };
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            if state.from != COIN && theme::quiet(ui, &palette, &format!("1. Let the DEX move {}", symbol(ctx, &state.from))).clicked() {
-                *prepared = approve(ctx, state.venue, me, &state.from, amount);
-            }
+        slippage_line(ui, &palette, state);
+        ui.add_space(10.0);
 
-            if theme::primary(ui, &palette, if state.from == COIN { "Trade" } else { "2. Trade" }, true).clicked() {
-                *prepared = swap(ctx, state, me, amount, to, route.middle, least);
+        let (said, goes) = action(amount.is_some(), same, route.is_some());
+        let me = ctx.holder().and_then(|holder| holder.addresses().first().copied());
+        let token = from != COIN;
+
+        if let (Some(amount), Some(me), Some(_), true) = (amount, me, &route, token) {
+            ui.add(egui::Label::new(RichText::new(format!("The DEX can only move {} once this account lets it: a transaction of its own, then the trade.", symbol(ctx, &from))).small().color(palette.muted)).wrap());
+
+            if chainv4_ui::widgets::quiet_wide(ui, &palette, &format!("1. Let the DEX move {}", symbol(ctx, &from))).clicked() {
+                *prepared = approve(ctx, state.venue, me, &from, amount);
             }
-        });
+        }
+
+        let label = if goes && token { "2. Trade" } else { said };
+
+        if chainv4_ui::widgets::primary_wide(ui, &palette, label, goes && me.is_some()).clicked()
+            && let (Some(amount), Some(me), Some(route)) = (amount, me, &route)
+        {
+            *prepared = swap(ctx, state, me, amount, to, route.middle, least_out(route.out, slippage(state)));
+        }
     });
 }
 
@@ -622,120 +874,138 @@ fn swap(ctx: &Ctx, state: &TradeState, me: Address, amount: u256, to: Address, m
     }
 }
 
+/// The pools, each with what it holds and what is yours: one opens to add to it or take out.
 fn liquidity(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pools: &[DexPool], prepared: &mut Option<Prepared>) {
     let palette = *ctx.palette;
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Pools");
+        ui.add(egui::Label::new(RichText::new("Add to a pool and earn a share of its 0.3% on every trade; take your share out when you like.").small().color(palette.muted)).wrap());
 
         if pools.is_empty() {
-            ui.label(RichText::new("None yet.").color(palette.soft));
+            ui.label(RichText::new("None yet: open the first below.").color(palette.soft));
             return;
         }
 
         for pool in pools {
             let held = state.held.get(&pool.share.to_string()).copied().unwrap_or(u256::ZERO);
-            let line = format!(
-                "{} / {} · {} and {}{}",
-                symbol(ctx, &pool.a),
-                symbol(ctx, &pool.b),
-                shown(ctx, &pool.a, pool.reserve_a),
-                shown(ctx, &pool.b, pool.reserve_b),
-                if held > u256::ZERO { " · yours: some" } else { "" }
-            );
+            let open = state.chosen == Some(pool.share);
 
-            if ui.selectable_label(state.chosen == Some(pool.share), RichText::new(line).color(palette.ink)).clicked() {
-                state.chosen = Some(pool.share);
+            ui.add_space(6.0);
+            ui.separator();
+            let pressed = theme::end_row(
+                ui,
+                |ui| {
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(theme::strong(format!("{} / {}", symbol(ctx, &pool.a), symbol(ctx, &pool.b)), 15.0).color(palette.ink));
+
+                            if held > u256::ZERO {
+                                theme::pill(ui, "yours", palette.accent);
+                            }
+                        });
+                        ui.add(egui::Label::new(RichText::new(format!("{} and {}", shown(ctx, &pool.a, pool.reserve_a), shown(ctx, &pool.b, pool.reserve_b))).small().color(palette.muted)).wrap());
+                    });
+                },
+                |ui| theme::quiet(ui, &palette, if open { "Close" } else { "Manage" }).clicked(),
+            )
+            .inner
+            .1;
+
+            if pressed {
+                state.chosen = if open { None } else { Some(pool.share) };
                 (state.add, state.remove, state.chart) = (String::new(), String::new(), Vec::new());
                 state.charted = f64::NEG_INFINITY;
             }
-        }
 
-        let Some(pool) = state.chosen.and_then(|share| pools.iter().find(|pool| pool.share == share)).cloned() else {
-            return;
-        };
-        let Some(me) = ctx.holder().and_then(|holder| holder.addresses().first().copied()) else {
-            return;
-        };
-        ui.add_space(10.0);
-        theme::caps(ui, &palette, &format!("{} / {}", symbol(ctx, &pool.a), symbol(ctx, &pool.b)));
-
-        if let Some(price) = pool.price(&pool.a, decimals(ctx, &pool.a), decimals(ctx, &pool.b)) {
-            super::row(ui, &palette, "Price", |ui| {
-                ui.label(format!("1 {} = {price:.6} {}", symbol(ctx, &pool.a), symbol(ctx, &pool.b)));
-            });
-        }
-
-        if state.venue == Venue::Native {
-            chart(ui, ctx, state, &pool);
-        }
-
-        let (held, supply) = (state.held.get(&pool.share.to_string()).copied().unwrap_or(u256::ZERO), state.supply.get(&pool.share.to_string()).copied());
-
-        if let Some((a, b)) = supply.and_then(|supply| shares_worth(held, supply, pool.reserve_a, pool.reserve_b)) {
-            super::row(ui, &palette, "Yours", |ui| {
-                ui.label(format!("{} shares: {} and {}", format::units(&held.to_string(), 18), shown(ctx, &pool.a, a), shown(ctx, &pool.b, b)));
-            });
-        }
-
-        // Adding, at the pool's ratio: the other side follows from the first.
-        ui.add_space(6.0);
-        super::row(ui, &palette, &format!("Add {}", symbol(ctx, &pool.a)), |ui| {
-            ui.add(egui::TextEdit::singleline(&mut state.add).hint_text("0.0").desired_width(140.0));
-        });
-
-        if let Some(amount_a) = parse_amount(ctx, &pool.a, &state.add)
-            && let Some(amount_b) = pool.matching(&pool.a, amount_a)
-        {
-            super::row(ui, &palette, "With", |ui| {
-                ui.label(shown(ctx, &pool.b, amount_b));
-            });
-            ui.horizontal_wrapped(|ui| {
-                for (asset, amount) in [(pool.a, amount_a), (pool.b, amount_b)] {
-                    if asset != COIN && theme::quiet(ui, &palette, &format!("Let it move {}", symbol(ctx, &asset))).clicked() {
-                        *prepared = approve(ctx, state.venue, me, &asset, amount);
-                    }
-                }
-
-                if theme::primary(ui, &palette, "Add", true).clicked() {
-                    *prepared = add(ctx, state, me, &pool.a, &pool.b, amount_a, amount_b);
-                }
-            });
-        }
-
-        // Taking shares out.
-        if held > u256::ZERO {
-            ui.add_space(6.0);
-            super::row(ui, &palette, "Take out", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut state.remove).hint_text("shares").desired_width(140.0));
-
-                if ui.small_button("All").clicked() {
-                    state.remove = format::units(&held.to_string(), 18);
-                }
-            });
-
-            if let Some(shares) = format::parse_units(&state.remove, 18).and_then(|digits| u256::from_str_radix(&digits, 10).ok()).filter(|shares| *shares != u256::ZERO && *shares <= held)
-                && let Some((a, b)) = supply.and_then(|supply| shares_worth(shares, supply, pool.reserve_a, pool.reserve_b))
-            {
-                let slip = slippage(state);
-                super::row(ui, &palette, "For", |ui| {
-                    ui.label(format!("{} and {}", shown(ctx, &pool.a, a), shown(ctx, &pool.b, b)));
-                });
-                ui.horizontal_wrapped(|ui| {
-                    if state.venue == Venue::Evm && theme::quiet(ui, &palette, "1. Let the router take the shares").clicked() {
-                        *prepared = router(ctx).and_then(|router| match pool.share {
-                            Address::Evm(pair) => Some(evm_call(me, pair, approve_input(router, shares), u256::ZERO, "Let the router take the shares".to_string())),
-                            _ => None,
-                        });
-                    }
-
-                    if theme::primary(ui, &palette, "Take out", true).clicked() {
-                        *prepared = remove(ctx, state, me, &pool, shares, least_out(a, slip), least_out(b, slip));
-                    }
-                });
+            if open && let Some(me) = ctx.holder().and_then(|holder| holder.addresses().first().copied()) {
+                ui.add_space(6.0);
+                pool_panel(ui, ctx, state, pool, me, prepared);
             }
         }
     });
+}
+
+/// One pool: its price, what is yours of it, adding to it and taking out.
+fn pool_panel(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool, me: Address, prepared: &mut Option<Prepared>) {
+    let palette = *ctx.palette;
+
+    if let Some(price) = pool.price(&pool.a, decimals(ctx, &pool.a), decimals(ctx, &pool.b)) {
+        super::row(ui, &palette, "Price", |ui| {
+            ui.label(format!("1 {} = {price:.6} {}", symbol(ctx, &pool.a), symbol(ctx, &pool.b)));
+        });
+    }
+
+    if state.venue == Venue::Native {
+        chart(ui, ctx, state, pool);
+    }
+
+    let (held, supply) = (state.held.get(&pool.share.to_string()).copied().unwrap_or(u256::ZERO), state.supply.get(&pool.share.to_string()).copied());
+
+    if let Some((a, b)) = supply.and_then(|supply| shares_worth(held, supply, pool.reserve_a, pool.reserve_b)) {
+        super::row(ui, &palette, "Yours", |ui| {
+            ui.label(format!("{} shares: {} and {}", format::units(&held.to_string(), 18), shown(ctx, &pool.a, a), shown(ctx, &pool.b, b)));
+        });
+    }
+
+    // Adding, at the pool's ratio: the other side follows from the first.
+    ui.add_space(6.0);
+    ui.label(RichText::new(format!("Add {}", symbol(ctx, &pool.a))).color(palette.muted));
+    ui.add(egui::TextEdit::singleline(&mut state.add).hint_text("0.0").desired_width(f32::INFINITY));
+
+    if let Some(amount_a) = parse_amount(ctx, &pool.a, &state.add)
+        && let Some(amount_b) = pool.matching(&pool.a, amount_a)
+    {
+        ui.label(format!("With {}, at the pool's ratio", shown(ctx, &pool.b, amount_b)));
+        ui.horizontal_wrapped(|ui| {
+            for (asset, amount) in [(pool.a, amount_a), (pool.b, amount_b)] {
+                if asset != COIN && theme::quiet(ui, &palette, &format!("Let it move {}", symbol(ctx, &asset))).clicked() {
+                    *prepared = approve(ctx, state.venue, me, &asset, amount);
+                }
+            }
+
+            if theme::primary(ui, &palette, "Add", true).clicked() {
+                *prepared = add(ctx, state, me, &pool.a, &pool.b, amount_a, amount_b);
+            }
+        });
+    }
+
+    // Taking shares out.
+    if held > u256::ZERO {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Take out, in shares").color(palette.muted));
+
+        let all = theme::beside(
+            ui,
+            |ui| theme::quiet(ui, &palette, "All").clicked(),
+            |ui, width| {
+                ui.add(egui::TextEdit::singleline(&mut state.remove).hint_text("shares").desired_width(width));
+            },
+        );
+
+        if all {
+            state.remove = format::units(&held.to_string(), 18);
+        }
+
+        if let Some(shares) = format::parse_units(&state.remove, 18).and_then(|digits| u256::from_str_radix(&digits, 10).ok()).filter(|shares| *shares != u256::ZERO && *shares <= held)
+            && let Some((a, b)) = supply.and_then(|supply| shares_worth(shares, supply, pool.reserve_a, pool.reserve_b))
+        {
+            let slip = slippage(state);
+            ui.label(format!("For {} and {}", shown(ctx, &pool.a, a), shown(ctx, &pool.b, b)));
+            ui.horizontal_wrapped(|ui| {
+                if state.venue == Venue::Evm && theme::quiet(ui, &palette, "1. Let the router take the shares").clicked() {
+                    *prepared = router(ctx).and_then(|router| match pool.share {
+                        Address::Evm(pair) => Some(evm_call(me, pair, approve_input(router, shares), u256::ZERO, "Let the router take the shares".to_string())),
+                        _ => None,
+                    });
+                }
+
+                if theme::primary(ui, &palette, "Take out", true).clicked() {
+                    *prepared = remove(ctx, state, me, pool, shares, least_out(a, slip), least_out(b, slip));
+                }
+            });
+        }
+    }
 }
 
 /// Adding to a pair, opening it if it is new: at the slippage allowed below what is offered.
@@ -822,60 +1092,61 @@ fn remove(ctx: &Ctx, state: &TradeState, me: Address, pool: &DexPool, shares: u2
     }
 }
 
-/// Opening a pool: two assets, by address or the coin, and the first deposit, which sets its
-/// price.
+/// Opening a pool, folded away as what few come for: two assets, by address or the coin, and the
+/// first deposit, which sets its price.
 fn create(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, prepared: &mut Option<Prepared>) {
     let palette = *ctx.palette;
 
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, "Open a pool");
-        ui.label(RichText::new(format!("Two assets, each a token's address or empty for {}, and the first deposit of each: their ratio is the price the pool opens at.", ctx.coin.symbol)).color(palette.soft));
-        ui.add_space(6.0);
+        egui::CollapsingHeader::new(RichText::new("Open a new pool").color(palette.soft)).id_salt("trade-open").show(ui, |ui| {
+            ui.add(egui::Label::new(RichText::new(format!("Two assets, each a token's address or empty for {}, and the first deposit of each: their ratio is the price the pool opens at.", ctx.coin.symbol)).small().color(palette.muted)).wrap());
+            ui.add_space(6.0);
 
-        for (label, asset, amount) in [("First", &mut state.new_a, &mut state.new_amount_a), ("Second", &mut state.new_b, &mut state.new_amount_b)] {
-            super::row(ui, &palette, label, |ui| {
-                ui.add(egui::TextEdit::singleline(asset).hint_text(if state.venue == Venue::Evm { "0x… or empty" } else { "contract:0x…, evm:0x… or empty" }).desired_width(260.0));
-                ui.add(egui::TextEdit::singleline(amount).hint_text("0.0").desired_width(100.0));
-            });
-        }
-
-        let asset = |text: &str| -> Option<Address> {
-            match text.trim() {
-                "" => Some(COIN),
-                text if text.len() == 42 && text.starts_with("0x") => from_hex(text).and_then(|bytes| bytes.try_into().ok()).map(Address::Evm),
-                text => text.parse().ok(),
+            for (label, asset, amount) in [("First asset", &mut state.new_a, &mut state.new_amount_a), ("Second asset", &mut state.new_b, &mut state.new_amount_b)] {
+                ui.label(RichText::new(label).color(palette.muted));
+                ui.add(egui::TextEdit::singleline(asset).hint_text(if state.venue == Venue::Evm { "0x… or empty" } else { "contract:0x…, evm:0x… or empty" }).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+                ui.add(egui::TextEdit::singleline(amount).hint_text("First deposit, 0.0").desired_width(f32::INFINITY));
+                ui.add_space(4.0);
             }
-        };
-        let (Some(a), Some(b)) = (asset(&state.new_a), asset(&state.new_b)) else {
-            ui.colored_label(palette.warn, "An asset that is no address.");
-            return;
-        };
-        let (Some(amount_a), Some(amount_b)) = (parse_amount(ctx, &a, &state.new_amount_a), parse_amount(ctx, &b, &state.new_amount_b)) else {
-            return;
-        };
-        let Some(me) = ctx.holder().and_then(|holder| holder.addresses().first().copied()) else {
-            return;
-        };
 
-        if a == b {
-            ui.colored_label(palette.warn, "Two different assets.");
-            return;
-        }
-
-        super::row(ui, &palette, "Opens at", |ui| {
-            let price = amount_b.as_f64() / 10f64.powi(i32::from(decimals(ctx, &b))) / (amount_a.as_f64() / 10f64.powi(i32::from(decimals(ctx, &a))));
-            ui.label(format!("1 {} = {price:.6} {}", symbol(ctx, &a), symbol(ctx, &b)));
-        });
-        ui.horizontal_wrapped(|ui| {
-            for (asset, amount) in [(a, amount_a), (b, amount_b)] {
-                if asset != COIN && theme::quiet(ui, &palette, &format!("Let it move {}", symbol(ctx, &asset))).clicked() {
-                    *prepared = approve(ctx, state.venue, me, &asset, amount);
+            let asset = |text: &str| -> Option<Address> {
+                match text.trim() {
+                    "" => Some(COIN),
+                    text if text.len() == 42 && text.starts_with("0x") => from_hex(text).and_then(|bytes| bytes.try_into().ok()).map(Address::Evm),
+                    text => text.parse().ok(),
                 }
+            };
+            let (Some(a), Some(b)) = (asset(&state.new_a), asset(&state.new_b)) else {
+                ui.colored_label(palette.warn, "An asset that is no address.");
+                return;
+            };
+            let (Some(amount_a), Some(amount_b)) = (parse_amount(ctx, &a, &state.new_amount_a), parse_amount(ctx, &b, &state.new_amount_b)) else {
+                return;
+            };
+            let Some(me) = ctx.holder().and_then(|holder| holder.addresses().first().copied()) else {
+                return;
+            };
+
+            if a == b {
+                ui.colored_label(palette.warn, "Two different assets.");
+                return;
             }
 
-            if theme::primary(ui, &palette, "Open it", true).clicked() {
-                *prepared = add(ctx, state, me, &a, &b, amount_a, amount_b);
-            }
+            super::row(ui, &palette, "Opens at", |ui| {
+                let price = amount_b.as_f64() / 10f64.powi(i32::from(decimals(ctx, &b))) / (amount_a.as_f64() / 10f64.powi(i32::from(decimals(ctx, &a))));
+                ui.label(format!("1 {} = {price:.6} {}", symbol(ctx, &a), symbol(ctx, &b)));
+            });
+            ui.horizontal_wrapped(|ui| {
+                for (asset, amount) in [(a, amount_a), (b, amount_b)] {
+                    if asset != COIN && theme::quiet(ui, &palette, &format!("Let it move {}", symbol(ctx, &asset))).clicked() {
+                        *prepared = approve(ctx, state.venue, me, &asset, amount);
+                    }
+                }
+
+                if theme::primary(ui, &palette, "Open it", true).clicked() {
+                    *prepared = add(ctx, state, me, &a, &b, amount_a, amount_b);
+                }
+            });
         });
     });
 }

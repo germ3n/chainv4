@@ -11,6 +11,10 @@ at one address on every EVM chain (see [On EVM chains](#on-evm-chains)).
 
 ## Making one
 
+**All it takes is a key on this chain from each member, and how many of them must agree.** No
+Bitcoin address is needed, nor anything else from another chain: what a member names for one is
+optional, for a multisig that is to hold coins there too.
+
 ```sh
 chainv4 send --key alice.key create-multisig --threshold 2 \
   --member ed25519:0x…alice --member ed25519:0x…bob --member secp256k1:0x…carol
@@ -180,21 +184,34 @@ chainv4 multisig show multisig:0x…
 
 The **Multisig** page follows multisigs by address: those made there, those whose bundles it read,
 and those added. For the one picked it shows what the node says of it, its members, the account
-among them, its balance and next nonce, and the proposals open on chain with who approves each, to
-approve, withdraw from or submit.
+among them, its balance and next transaction, and the proposals open on chain with who approves
+each, to approve, take back an approval from or send.
 
-- **Make a multisig:** members one a line, **Add this account** adding the account's key, and for
-  an account its words make its Bitcoin multisig xpub, on the network ticked, and EVM address, and
-  the threshold. It goes to Send to sign. On the offline signer, Pair shows the same line for an
+- **Make a multisig** goes through four steps, with Back and Cancel, and the page says up front
+  what it needs:
+  1. **Who are the members?** A key for each, required. **Add this account** adds the account's;
+     a line Pair or `chainv4 multisig` wrote, pasted in, goes to its fields.
+  2. **Should it reach other chains?** Optional: only this chain, unless it is to hold coins on EVM
+     chains, which asks each member's EVM address, or on Bitcoin too, on its network or its test
+     networks, which asks each member's multisig account key as well. This account's fill in by
+     themselves, for an account its words make.
+  3. **How many must agree?** So many of so many, with what that means: one stolen key, or one lost.
+  4. **Review:** who, where, the address it will be at and who pays, then Send to sign.
+- **Change its members** takes the same steps from what the node lists, adding, removing or
+  rotating keys or changing how many must agree; it is the multisig's own `Tx::ChangeMultisig`, so
+  it goes round its members as a bundle. On the offline signer, Pair shows a member's line for an
   account whose keys are there.
-- **Propose a payment:** the node prices it, and the bundle shows: what it does, the nonce, the fee
-  at most, and who signed.
+- **Waiting for approval** says of each proposal how many agree, what it needs and who from, and
+  once it has enough, that anyone can send it.
+- **Propose a payment:** nothing goes out yet: the node prices it, and the bundle shows what it does,
+  its number, the fee at most, who signed, and what comes next.
 - **Sign** with the account's key, or **Ask the signer** for a watch-only account: the bundle as a
   `ur:chainv4-multisig` code, animated, and the signer's code read back. **Approve on chain** goes
   to Send, so a hardware or offline account approves too. **Copy as text** gives what chainv4
-  multisig reads. **Submit** once enough back it, under a key made for the moment: the multisig
+  multisig reads. **Send it** once enough back it, under a key made for the moment: the multisig
   pays.
-- **A bundle from another member:** paste its text, or read its code.
+- **Another member sent you something to sign?** Folded until wanted: paste its text, or read its
+  code.
 
 For a multisig on EVM chains, the page shows its contract's address, and on a chain whose JSON-RPC
 URL Settings names, whether it is deployed, what it holds, its owners and next nonce. **Make the

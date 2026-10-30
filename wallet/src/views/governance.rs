@@ -1,6 +1,7 @@
 //! Governance: the chain's settings that its council, or finality's own voters, change on chain.
-//! What a change needs and who may approve, the changes open and their approvals, approving one or
-//! withdrawing an approval, proposing a change of any kind, what stands and what was decided last.
+//! What a change needs and who may approve, the changes open and their approvals, found by search,
+//! kind and order, approving one or withdrawing an approval, proposing a change of any kind by a
+//! form of its fields (form.rs), what stands, and every decision, a page at a time.
 //!
 //! What the node says of governance is shown as its word: GET /governance, /governance/history and
 //! /governance/weight/{address}. Nothing signed rests on it but the version an approval names, its
@@ -8,9 +9,13 @@
 //! changes nothing. Each kind of change has a ballot and a version of its own, so an account backs
 //! one change of each kind at a time. Each change is read with chainv4's own change_from_json,
 //! which checks it as the CLI's approve-change does, before it is signed; a partial one is laid
-//! over what stands first, with params::json::over, as the CLI does. Approvals are signed and sent on the Send page, as any other
-//! transaction, or proposed to a multisig's members on its page; once in a block, the light client
-//! proves their receipts, whose outcome says which change an approval decided.
+//! over what stands first, with params::json::over, as the CLI does. Approvals are signed and sent
+//! on the Send page, as any other transaction, or proposed to a multisig's members on its page; once
+//! in a block, the light client proves their receipts, whose outcome says which change an approval
+//! decided.
+
+mod form;
+mod schema;
 
 use {
     super::multisig::MultisigState,
@@ -21,11 +26,13 @@ use {
     crate::history::{Vote, kind_words},
     crate::node::{Ask, Failure},
     crate::theme,
+    chainv4_ui::ballots::{self, Counted, Decided, Finder, Item, PER_PAGE},
     chainv4::consensus::ConsensusConfig,
     chainv4::governance::{Change, ChangeKind},
     chainv4::params::fees::PricingConfig,
     chainv4::params::finality::FinalityConfig,
     chainv4::params::json::{change_from_json, change_json, over},
+    form::{Built, Diff, Draft, Env},
     chainv4::structs::address::Address,
     chainv4::structs::tx::Tx,
     chainv4::structs::u256::u256,
@@ -42,6 +49,9 @@ const NOT_FOUND: u16 = 404;
 
 /// The kinds of change, in the order the propose form lists them.
 const KINDS: [&str; 13] = ["name", "bootnodes", "upgrade", "name_prices", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "federation", "directory"];
+
+/// How tall the kinds' list opens: all of them on most phones, without a scroll to find.
+const KIND_LIST_HEIGHT: f32 = 620.0;
 
 /// The kinds the propose form takes in part: a JSON object naming only some fields, laid over what
 /// stands, as the CLI's approve-change takes them.
@@ -102,6 +112,12 @@ pub struct Setting {
     pub kind: String,
     pub value: Value,
     pub decided: Option<u64>,
+}
+
+impl Counted for Decision {
+    fn version(&self) -> u64 {
+        self.version
+    }
 }
 
 impl Listing {
@@ -169,23 +185,20 @@ struct Pending {
     what: String,
     /// The change in words.
     words: String,
+    /// What it moves against what stands, field by field.
+    changes: Vec<Diff>,
     /// The change's JSON, pretty.
     json: Option<String>,
     /// What it does to the address's approval.
     note: String,
 }
 
-/// The propose form's fields.
+/// The propose form: a field for each setting, or, under Advanced, the kind's JSON.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Form {
-    name: String,
-    /// One a line.
-    bootnodes: String,
-    least: String,
-    from: String,
-    /// One price a line, in the coin.
-    prices: String,
-    /// Any other kind's value, as JSON.
+    draft: Draft,
+    /// Whether Advanced is open, and what is typed there.
+    advanced: bool,
     json: String,
 }
 
@@ -194,15 +207,25 @@ pub struct GovernanceState {
     /// The node the answers came from: they go once the wallet talks to another.
     node: String,
     listing: Option<Result<Listing, Failure>>,
-    history: Option<Result<Vec<Decision>, String>>,
+    /// The decisions read so far, what is asked of them and of the open changes, whether a page is on
+    /// its way, and why the last one did not come.
+    decided: Decided<Decision>,
+    past: Finder,
+    open: Finder,
+    reading: bool,
+    past_trouble: Option<String>,
     weights: HashMap<String, Result<Weight, String>>,
     asked: Option<u64>,
-    /// The kind proposed, and the form, filled from what stands for that kind once picked.
+    /// The kind proposed, what stood for it when the form was filled, and the form.
     kind: String,
-    filled: Option<String>,
+    filled: Option<(String, Option<Value>)>,
     form: Form,
     /// The address to propose from.
     proposer: Option<Address>,
+    /// Whether the review open came from the form, and whether the page goes back to the form next
+    /// it shows, rather than to its top: Back from the review it led to.
+    reviewing: bool,
+    back_to_form: bool,
     pending: Option<Pending>,
     trouble: Option<String>,
 }
@@ -214,7 +237,17 @@ impl GovernanceState {
 
         match ask {
             Ask::Governance => self.listing = Some(result.clone().and_then(|value| listing(&value).map_err(unreadable))),
-            Ask::GovernanceHistory => self.history = Some(result.as_ref().map(decisions).map_err(|failure| failure.message.clone())),
+            Ask::GovernanceHistory { before } => {
+                self.reading = false;
+
+                match result {
+                    Ok(value) => {
+                        self.decided.take(value["version"].as_u64().unwrap_or_default(), value["from"].as_u64().unwrap_or(1), decisions(value), *before);
+                        self.past_trouble = None;
+                    }
+                    Err(failure) => self.past_trouble = Some(failure.message.clone()),
+                }
+            }
             Ask::GovernanceWeight(address) => {
                 self.weights.insert(address.clone(), result.as_ref().map_err(|failure| failure.message.clone()).and_then(weight));
             }
@@ -241,7 +274,7 @@ impl GovernanceState {
         }
 
         if due {
-            ctx.node.ask(Ask::GovernanceHistory);
+            ctx.node.ask(Ask::GovernanceHistory { before: None });
         }
 
         for voter in voters {
@@ -290,6 +323,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, send: &mut 
         match confirm(ui, ctx, &pending) {
             Some(true) => {
                 state.pending = None;
+                state.reviewing = false;
                 // What the vote changes shows once back.
                 state.asked = None;
                 let prepared = Prepared { from: pending.from, tx: pending.tx, what: pending.what, about: pending.words, coin: u256::ZERO };
@@ -305,7 +339,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, send: &mut 
                     }
                 }
             }
-            Some(false) => state.pending = None,
+            Some(false) => {
+                state.back_to_form = std::mem::take(&mut state.reviewing);
+                state.pending = None;
+            }
             None => {}
         }
 
@@ -468,12 +505,14 @@ fn header(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &Listing
     });
 }
 
-/// The changes open, each with its approvals, and approving or withdrawing.
-fn proposals(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &Listing, voters: &[Voter], chosen: &mut Option<Pending>) {
+/// The changes open, found by search, kind and order, each with its approvals, and approving or
+/// withdrawing.
+fn proposals(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &Listing, voters: &[Voter], chosen: &mut Option<Pending>) {
     let palette = *ctx.palette;
     let coin = ctx.coin.clone();
     let acting = acting(voters, &state.weights);
     let ours: Vec<String> = voters.iter().map(|voter| voter.address.to_string()).collect();
+    let items: Vec<Item> = listing.proposals.iter().map(|proposal| open_item(proposal, &coin)).collect();
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Open changes");
@@ -482,7 +521,16 @@ fn proposals(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &List
             ui.label(RichText::new("No change has approvals that still count. Propose one below.").color(palette.muted));
         }
 
-        for (index, proposal) in listing.proposals.iter().enumerate() {
+        ballots::controls(ui, &palette, &mut state.open, "Search: kind, address or value", &items, &ballots::OPEN_ORDERS, &kind_name);
+
+        let found = ballots::select(&items, &state.open);
+
+        if found.is_empty() && !items.is_empty() {
+            ui.label(RichText::new("No open change matches.").color(palette.muted));
+        }
+
+        for index in found[ballots::window(found.len(), state.open.page, PER_PAGE)].iter().copied() {
+            let proposal = &listing.proposals[index];
             ui.add_space(6.0);
             ui.separator();
 
@@ -497,10 +545,7 @@ fn proposals(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &List
 
             ui.label(RichText::new(ballot(proposal)).small().color(palette.muted));
 
-            let fraction = match (proposal.weight.parse::<f64>(), proposal.needed.parse::<f64>()) {
-                (Ok(weight), Ok(needed)) if needed > 0.0 => (weight / needed).clamp(0.0, 1.0) as f32,
-                _ => 0.0,
-            };
+            let fraction = ballots::share(&proposal.weight, &proposal.needed).clamp(0.0, 1.0) as f32;
             ui.add(egui::ProgressBar::new(fraction).text(format!("{} of {}", weighs(listing, &proposal.weight, &coin), weighs(listing, &proposal.needed, &coin))));
 
             for approval in &proposal.approvals {
@@ -549,6 +594,11 @@ fn proposals(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &List
             });
         }
 
+        if found.len() > PER_PAGE {
+            let said = ballots::summary(found.len(), state.open.page, PER_PAGE, state.open.narrows(), items.len(), items.len());
+            ballots::pager(ui, &palette, &mut state.open, found.len(), false, false, &said);
+        }
+
         if acting.is_empty() && !listing.proposals.is_empty() {
             ui.add_space(4.0);
             ui.label(RichText::new("None of this account's addresses, nor a multisig it follows, may approve: only the council's members, or finality's voters, do.").small().color(palette.muted));
@@ -556,78 +606,130 @@ fn proposals(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &List
     });
 }
 
-/// Proposing a change: picking its kind, filling it in, and approving it.
+/// What the page's search and kinds know of an open change.
+fn open_item(proposal: &Proposal, coin: &Coin) -> Item {
+    let words = match &proposal.change {
+        Ok(change) => describe(change, coin),
+        Err(why) => why.clone(),
+    };
+    let accounts: Vec<&str> = proposal.approvals.iter().map(|approval| approval.account.as_str()).collect();
+    let kind = kind_of(&proposal.kind, proposal.change.as_ref().ok());
+
+    Item {
+        text: format!("{} {words} {} {}", kind_name(&kind), proposal.json, accounts.join(" ")),
+        kind,
+        place: proposal.approvals.iter().map(|approval| approval.epoch).max().unwrap_or_default(),
+        support: ballots::share(&proposal.weight, &proposal.needed),
+        closes: proposal.approvals.iter().map(|approval| approval.counts_until).max(),
+    }
+}
+
+/// What the page's search and kinds know of a decision.
+fn decided_item(decision: &Decision, coin: &Coin) -> Item {
+    let change = decision.change.as_ref().and_then(|change| change.as_ref().ok());
+    let words = decision_words(decision, coin);
+    let kind = kind_of("", change);
+    let json = change.map_or_else(String::new, |change| change_json(change).to_string());
+
+    Item {
+        text: format!("{} {words} {json} {} {} block {}", kind_name(&kind), decision.sender.as_deref().unwrap_or_default(), decision.tx, decision.height),
+        kind,
+        place: decision.version,
+        support: 0.0,
+        closes: None,
+    }
+}
+
+/// A change's kind, by the name its ballot has: as the node lists it, or from the change.
+fn kind_of(listed: &str, change: Option<&Change>) -> String {
+    match (listed.parse::<ChangeKind>(), change) {
+        (Ok(kind), _) => kind.name().to_string(),
+        (_, Some(change)) => change.kind().name().to_string(),
+        _ => listed.to_string(),
+    }
+}
+
+/// What a kind of ballot is called, in a filter.
+fn kind_name(kind: &str) -> String {
+    match kind.parse::<ChangeKind>() {
+        Ok(ChangeKind::Consensus) => "Consensus".to_string(),
+        Ok(kind) => kind_label(kind).trim_start_matches("The chain's ").to_string(),
+        Err(_) if kind.is_empty() => "Unknown".to_string(),
+        Err(_) => kind.replace('_', " "),
+    }
+}
+
+/// Proposing a change: picking its kind, filling in its fields, and reviewing what moves.
 fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &Listing, voters: &[Voter], chosen: &mut Option<Pending>) {
     let palette = *ctx.palette;
     let coin = ctx.coin.clone();
     let acting = acting(voters, &state.weights);
     let tip = ctx.chain.following().map(|(tip, _)| tip);
+    let env = env_of(listing, &coin, tip);
 
     if state.kind.is_empty() {
         state.kind = KINDS[0].to_string();
     }
 
-    if state.filled.as_deref() != Some(state.kind.as_str()) {
-        fill(&mut state.form, &state.kind, listing, coin.decimals);
-        state.filled = Some(state.kind.clone());
+    let stands = standing_for(listing, &state.kind);
+
+    // Filled once a kind is picked, and again should what stands move while nothing is typed.
+    let stale = match &state.filled {
+        Some((kind, filled)) if *kind == state.kind => *filled != stands && state.form.draft == Draft::of(kind, filled.as_ref(), &env) && !state.form.advanced,
+        _ => true,
+    };
+
+    if stale {
+        state.form = Form { draft: Draft::of(&state.kind, stands.as_ref(), &env), ..Form::default() };
+        state.filled = Some((state.kind.clone(), stands.clone()));
         state.trouble = None;
     }
 
     theme::card(ui, &palette, |ui| {
+        if std::mem::take(&mut state.back_to_form) {
+            ui.scroll_to_cursor(Some(egui::Align::TOP));
+        }
+
         theme::caps(ui, &palette, "Propose a change");
-        ui.label(RichText::new("A change is proposed by approving it: others then approve the same change, and it is decided once its approvals weigh what it needs.").small().color(palette.muted));
+        ui.label(RichText::new("A change is proposed by approving it: others then approve the same change, and it is decided once its approvals weigh what it needs. Change only the fields that should move: the rest keep what stands.").small().color(palette.muted));
         ui.add_space(4.0);
 
-        egui::ComboBox::from_id_salt("governance-kind").selected_text(label(&state.kind)).width(ui.available_width()).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("governance-kind").selected_text(label(&state.kind)).width(ui.available_width()).height(KIND_LIST_HEIGHT).show_ui(ui, |ui| {
             for kind in KINDS {
                 ui.selectable_value(&mut state.kind, kind.to_string(), label(kind));
             }
         });
         ui.add_space(6.0);
 
-        let form = &mut state.form;
-        let line = |ui: &mut Ui, text: &mut String, hint: &str| {
-            ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(f32::INFINITY));
-        };
-        let lines = |ui: &mut Ui, text: &mut String, hint: &str, rows: usize, mono: bool| {
-            let edit = egui::TextEdit::multiline(text).hint_text(hint).desired_rows(rows).desired_width(f32::INFINITY);
-            ui.add(if mono { edit.font(egui::TextStyle::Monospace) } else { edit });
+        let built = match state.form.advanced {
+            false => form::build(&state.kind, &state.form.draft, stands.as_ref(), &env),
+            true => proposed(&state.kind, &state.form.json, stands.as_ref(), &env),
         };
 
-        match state.kind.as_str() {
-            "name" => line(ui, &mut form.name, "the chain's new name, such as chainv4 mainnet"),
-            "bootnodes" => {
-                ui.label(RichText::new("One libp2p address a line, at most 32; none leaves the chain without bootnodes.").small().color(palette.muted));
-                lines(ui, &mut form.bootnodes, "/dns4/boot.example/udp/4001/quic-v1", 4, true);
-            }
-            "upgrade" => {
-                line(ui, &mut form.least, "least version that runs on, such as 0.2.0");
-                line(ui, &mut form.from, "from block, ahead of the tip");
-                ui.label(RichText::new(format!("Nodes older than the version stop before that block and say to update.{}", tip.map(|tip| format!(" The tip is block {}.", format::thousands(&tip.to_string()))).unwrap_or_default())).small().color(palette.muted));
-            }
-            "name_prices" => {
-                ui.label(RichText::new(format!("What a year of a name costs, in {}, one price a line: names of 3 characters first, then 4, and so on; the last line prices every longer name.", coin.symbol)).small().color(palette.muted));
-                lines(ui, &mut form.prices, "100\n20\n5", 5, true);
-            }
-            kind => {
-                let partial = match PARTIAL.contains(&kind) {
-                    true => " Fields left out keep what stands, so an object naming only the fields to change will do.",
-                    false => "",
-                };
-                ui.label(RichText::new(format!("The new {} as JSON, filled in with what stands now: edit what should change.{partial}", label(kind).to_lowercase())).small().color(palette.muted));
-                lines(ui, &mut form.json, "{ … }", 10, true);
-            }
+        if !state.form.advanced {
+            form::draw(ui, &palette, &state.kind, &mut state.form.draft, stands.as_ref(), &env, &built);
         }
 
-        let parsed = proposed(&state.kind, &state.form, coin.decimals, tip, standing(listing, &state.kind));
-
-        if let Err(why) = &parsed {
-            ui.colored_label(palette.bad, why.as_str());
+        for why in form::general(&built, &state.kind, &state.form.draft) {
+            ui.add(egui::Label::new(RichText::new(why).color(palette.bad)).wrap());
         }
 
-        if let Ok(change) = &parsed {
-            ui.label(RichText::new(describe(change, &coin)).color(palette.soft));
-            ui.label(RichText::new(format!("Approves at {} v{}", kind_label(change.kind()).to_lowercase(), listing.version_of(change.kind()))).small().color(palette.muted));
+        if state.kind == "upgrade" && !state.form.advanced && let Some(tip) = tip {
+            ui.label(RichText::new(format!("The tip is block {}.", format::thousands(&tip.to_string()))).small().color(palette.muted));
+        }
+
+        if let Some(change) = &built.change {
+            match built.changes.is_empty() {
+                true => {
+                    ui.label(RichText::new("Nothing differs from what stands yet.").color(palette.muted));
+                }
+                false => {
+                    ui.add_space(4.0);
+                    theme::caps(ui, &palette, &format!("{} to change", built.changes.len()));
+                    changes(ui, &palette, &built.changes);
+                    ui.label(RichText::new(format!("Approves at {} v{}", kind_label(change.kind()).to_lowercase(), listing.version_of(change.kind()))).small().color(palette.muted));
+                }
+            }
         }
 
         ui.add_space(6.0);
@@ -651,40 +753,89 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &Li
             }
         }
 
-        if let (Some(from), Ok(change)) = (state.proposer.filter(|proposer| acting.contains(proposer)), parsed) {
+        if let (Some(from), Some(change)) = (state.proposer.filter(|proposer| acting.contains(proposer)), built.change.clone()) {
             let counted = state.weights.get(&from.to_string()).and_then(|weight| weight.as_ref().ok()).is_some_and(|weight| weight.approved_in(change.kind()).is_some());
 
-            if theme::primary(ui, &palette, "Review", true).clicked() {
+            if theme::primary(ui, &palette, "Review", !built.changes.is_empty()).clicked() {
                 let version = listing.version_of(change.kind());
                 *chosen = Some(approval(from, listing, change, version, counted, &coin));
+                state.reviewing = true;
             }
         }
 
         if let Some(why) = &state.trouble {
             ui.colored_label(palette.bad, why.as_str());
         }
+
+        ui.add_space(6.0);
+        advanced(ui, &palette, state, &built, stands.as_ref());
     });
 }
 
-/// The confirm screen: the change in words and as JSON, and what approving does. Some(true) to go
-/// on, Some(false) to go back.
+/// The switch to the kind's JSON, for what the form does not cover, and the editor while it is on,
+/// filled with what the form says by then, or what stands.
+fn advanced(ui: &mut Ui, palette: &theme::Palette, state: &mut GovernanceState, built: &Built, stands: Option<&Value>) {
+    let was = state.form.advanced;
+    let header = egui::CollapsingHeader::new(RichText::new("Advanced: the change as JSON").small().color(palette.muted)).id_salt(("governance-advanced", &state.kind)).default_open(was).show(ui, |ui| {
+        let partial = match PARTIAL.contains(&state.kind.as_str()) {
+            true => " Fields left out keep what stands, so an object naming only the fields to change will do.",
+            false => "",
+        };
+        ui.add(egui::Label::new(RichText::new(format!("For what the form above does not cover. While this is open, this is what is proposed.{partial}")).small().color(palette.muted)).wrap());
+
+        // The first frame open: from the form.
+        if !state.form.advanced {
+            let start = built.change.as_ref().map_or_else(|| stands.cloned().unwrap_or_else(|| schema::defaults(&state.kind)), |change| change_value(change, &state.kind));
+            state.form.json = pretty(&start);
+        }
+
+        ui.add(egui::TextEdit::multiline(&mut state.form.json).hint_text("{ … }").desired_rows(10).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+    });
+    state.form.advanced = header.body_returned.is_some();
+}
+
+/// A change's value, under its kind's name.
+fn change_value(change: &Change, kind: &str) -> Value {
+    change_json(change)[kind].clone()
+}
+
+/// What moves, field by field: this field, old → new.
+fn changes(ui: &mut Ui, palette: &theme::Palette, changes: &[Diff]) {
+    for change in changes {
+        ui.add(egui::Label::new(RichText::new(&change.label).small().color(palette.soft)).wrap());
+        ui.add(egui::Label::new(theme::arrowed(ui, &format!("{} → {}", change.old, change.new), egui::TextStyle::Body, palette.ink)).wrap());
+        ui.add_space(2.0);
+    }
+}
+
+/// The review: what moves, field by field, the change in words and as JSON, and what approving does.
+/// Some(true) to go on, Some(false) to go back.
 fn confirm(ui: &mut Ui, ctx: &mut Ctx, pending: &Pending) -> Option<bool> {
     let palette = *ctx.palette;
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &pending.what);
         ui.add_space(4.0);
-        ui.label(RichText::new(&pending.words).color(palette.ink).size(17.0));
+        ui.add(egui::Label::new(RichText::new(&pending.words).color(palette.ink).size(17.0)).wrap());
         ui.add_space(6.0);
+
+        if !pending.changes.is_empty() {
+            theme::caps(ui, &palette, "What moves");
+            changes(ui, &palette, &pending.changes);
+            ui.add_space(4.0);
+        }
+
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &pending.from.to_string()));
 
         if let Some(json) = &pending.json {
             ui.add_space(4.0);
-            super::text_block(ui, &palette, json);
+            egui::CollapsingHeader::new(RichText::new("The whole change as JSON").small().color(palette.muted)).id_salt("governance-review-json").show(ui, |ui| {
+                super::text_block(ui, &palette, json);
+            });
         }
 
         ui.add_space(6.0);
-        ui.label(RichText::new(&pending.note).small().color(palette.soft));
+        ui.add(egui::Label::new(RichText::new(&pending.note).small().color(palette.soft)).wrap());
         ui.add_space(10.0);
 
         let next = match pending.from {
@@ -763,51 +914,93 @@ fn in_force(ui: &mut Ui, ctx: &mut Ctx, listing: &Listing) {
     });
 }
 
-/// The latest decisions.
-fn recent(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState) {
+/// Every decision, a page at a time, found by search, kind and order: older pages are read from the
+/// node as a page comes to need them.
+fn recent(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState) {
     let palette = *ctx.palette;
     let coin = ctx.coin.clone();
+    let read: Vec<Decision> = state.decided.newest_first().cloned().collect();
+    let items: Vec<Item> = read.iter().map(|decision| decided_item(decision, &coin)).collect();
 
     theme::card(ui, &palette, |ui| {
-        theme::caps(ui, &palette, "Recent decisions");
+        theme::caps(ui, &palette, "Decisions");
 
-        match &state.history {
-            None => super::waiting(ui, &palette, "Asking the node…"),
-            Some(Err(why)) => {
-                ui.colored_label(palette.bad, format!("The node did not answer: {why}"));
-            }
-            Some(Ok(decisions)) if decisions.is_empty() => {
-                ui.label(RichText::new("Nothing decided yet: every setting is genesis's.").color(palette.muted));
-            }
-            Some(Ok(decisions)) => {
-                for decision in decisions {
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if decision.final_ {
-                            theme::pill(ui, "Final", palette.good);
-                        }
+        if state.decided.bottom.is_none() {
+            match &state.past_trouble {
+                Some(why) => ui.colored_label(palette.bad, format!("The node did not answer: {why}")),
+                None => {
+                    super::waiting(ui, &palette, "Asking the node…");
 
-                        let words = match &decision.change {
-                            Some(Ok(change)) => describe(change, &coin),
-                            Some(Err(why)) => format!("a change this wallet does not read: {why}"),
-                            None => "a change the node did not say".to_string(),
-                        };
-                        ui.label(RichText::new(format!("Change {} · {words}", decision.version)).color(palette.ink)).on_hover_text(format!("Decided by {}", decision.tx));
-                    });
-                    ui.label(
-                        RichText::new(format!(
-                            "Block {} · {}{}",
-                            format::thousands(&decision.height.to_string()),
-                            format::ago(decision.timestamp, ctx.now),
-                            decision.sender.as_deref().map(|sender| format!(" · by {}", format::short(sender))).unwrap_or_default()
-                        ))
-                        .small()
-                        .color(palette.muted),
-                    );
+                    return;
                 }
-            }
+            };
+
+            return;
+        }
+
+        if state.decided.version == 0 {
+            ui.label(RichText::new("Nothing decided yet: every setting is genesis's.").color(palette.muted));
+
+            return;
+        }
+
+        if state.decided.from > 1 {
+            ui.add(egui::Label::new(RichText::new(format!("This node keeps decisions from change {} on: it synced from a snapshot.", state.decided.from)).small().color(palette.muted)).wrap());
+        }
+
+        ballots::controls(ui, &palette, &mut state.past, "Search: kind, address, value or block", &items, &ballots::DECIDED_ORDERS, &kind_name);
+
+        let found = ballots::select(&items, &state.past);
+        let more = state.decided.next();
+
+        // Reads on as a page needs it; a failure waits for the page's next asking.
+        if ballots::wants_older(found.len(), &state.past, PER_PAGE, more.is_some()) && !state.reading && state.past_trouble.is_none() {
+            ctx.node.ask(Ask::GovernanceHistory { before: more });
+            state.reading = true;
+        }
+
+        if found.is_empty() {
+            ui.label(RichText::new(if more.is_some() { "None found yet." } else { "No decision matches." }).color(palette.muted));
+        }
+
+        for index in found[ballots::window(found.len(), state.past.page, PER_PAGE)].iter().copied() {
+            let decision = &read[index];
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if decision.final_ {
+                    theme::pill(ui, "Final", palette.good);
+                }
+
+                ui.label(RichText::new(format!("Change {} · {}", decision.version, decision_words(decision, &coin))).color(palette.ink)).on_hover_text(format!("Decided by {}", decision.tx));
+            });
+            ui.label(
+                RichText::new(format!(
+                    "Block {} · {}{}",
+                    format::thousands(&decision.height.to_string()),
+                    format::ago(decision.timestamp, ctx.now),
+                    decision.sender.as_deref().map(|sender| format!(" · by {}", format::short(sender))).unwrap_or_default()
+                ))
+                .small()
+                .color(palette.muted),
+            );
+        }
+
+        let said = ballots::summary(found.len(), state.past.page, PER_PAGE, state.past.narrows(), read.len(), state.decided.kept());
+        ballots::pager(ui, &palette, &mut state.past, found.len(), more.is_some(), state.reading, &said);
+
+        if let Some(why) = &state.past_trouble {
+            ui.colored_label(palette.bad, format!("The node did not answer: {why}"));
         }
     });
+}
+
+/// What a decision changed, in words.
+fn decision_words(decision: &Decision, coin: &Coin) -> String {
+    match &decision.change {
+        Some(Ok(change)) => describe(change, coin),
+        Some(Err(why)) => format!("a change this wallet does not read: {why}"),
+        None => "a change the node did not say".to_string(),
+    }
 }
 
 /// GET /governance's answer, read.
@@ -944,6 +1137,7 @@ fn approval(from: Address, listing: &Listing, change: Change, version: u64, move
     Pending {
         from,
         words: describe(&change, coin),
+        changes: form::diff(change.name(), standing_for(listing, change.name()).as_ref(), &change_value(&change, change.name()), &env_of(listing, coin, None)),
         json: Some(pretty(&change_json(&change))),
         note: format!(
             "Approves at {kind} version {version}: should another {kind} change be decided first, the version moves on and this approval no longer counts. A decision of another kind leaves it standing.{moving} It counts for {} epoch{}, and decides the change once the approvals weigh {}.",
@@ -965,6 +1159,7 @@ fn withdrawal(from: Address, approved: &Approved, coin: &Coin) -> Pending {
         tx: Tx::WithdrawChange { kind: approved.kind, version: approved.version },
         what: "Withdraw an approval".to_string(),
         words: describe(&approved.change, coin),
+        changes: Vec::new(),
         json: Some(pretty(&change_json(&approved.change))),
         note: format!("Takes this address's approval off this {kind} change; its approvals of other kinds, and the others' approvals, stay. Approving another {kind} change instead would move the approval there."),
     }
@@ -975,76 +1170,56 @@ fn standing<'a>(listing: &'a Listing, kind: &str) -> Option<&'a Value> {
     listing.in_force.iter().find(|setting| setting.kind == kind).map(|setting| &setting.value)
 }
 
-/// The change the propose form asks for, through change_from_json, so it is checked as the CLI's
-/// approve-change checks it. tip is the light client's: an upgrade must start ahead of it. standing
-/// is what stands for the kind: a partial object of a PARTIAL kind is laid over it, so the fields
-/// left out keep what stands.
-fn proposed(kind: &str, form: &Form, decimals: u8, tip: Option<u64>, standing: Option<&Value>) -> Result<Change, String> {
-    let lines = |text: &str| text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect::<Vec<_>>();
-    let value = match kind {
-        "name" => json!({ "name": form.name.trim() }),
-        "bootnodes" => json!({ "bootnodes": lines(&form.bootnodes) }),
-        "upgrade" => {
-            let from: u64 = form.from.trim().replace([',', '_'], "").parse().map_err(|_| "The block it starts from is a whole height.".to_string())?;
+/// What stands for a kind of change, as its fields are laid out: a switch of finality's kind over
+/// the finality decided last.
+fn standing_for(listing: &Listing, kind: &str) -> Option<Value> {
+    match kind {
+        "switch_finality" => standing(listing, "finality").map(|finality| json!({ "epoch": null, "finality": finality })),
+        kind => standing(listing, kind).cloned(),
+    }
+}
 
-            if let Some(tip) = tip.filter(|tip| from <= *tip) {
-                return Err(format!("It must start ahead of the tip, block {tip}."));
-            }
+/// What the form takes from the listing and the wallet, beside what stands.
+fn env_of<'a>(listing: &'a Listing, coin: &'a Coin, tip: Option<u64>) -> Env<'a> {
+    Env {
+        decimals: coin.decimals,
+        symbol: &coin.symbol,
+        epoch: listing.epoch,
+        tip,
+        finality: standing(listing, "finality").and_then(|finality| finality["type"].as_str()).or(listing.finality.as_deref()),
+        consensus: standing(listing, "consensus").and_then(|consensus| consensus["type"].as_str()),
+        switching: listing.switch.is_some(),
+    }
+}
 
-            json!({ "upgrade": { "least": form.least.trim(), "from": from } })
-        }
-        "name_prices" => {
-            let prices = lines(&form.prices)
-                .iter()
-                .enumerate()
-                .map(|(index, line)| format::parse_units(line, decimals).ok_or(format!("Line {}: {line} is not an amount.", index + 1)))
-                .collect::<Result<Vec<_>, _>>()?;
+/// The change Advanced's JSON asks for, through change_from_json, so it is checked as the CLI's
+/// approve-change checks it, with what else the form checks. A partial object of a PARTIAL kind is
+/// laid over what stands, so the fields left out keep it.
+fn proposed(kind: &str, typed: &str, standing: Option<&Value>, env: &Env) -> Built {
+    let mut built = Built::default();
+    let given: Value = match serde_json::from_str(typed) {
+        Ok(given) => given,
+        Err(why) => {
+            built.errors.insert(form::GENERAL.to_string(), format!("Not JSON: {why}"));
 
-            json!({ "name_prices": prices })
-        }
-        kind => {
-            let given: Value = serde_json::from_str(&form.json).map_err(|why| format!("Not JSON: {why}"))?;
-            let value = match standing {
-                Some(standing) if PARTIAL.contains(&kind) && given.is_object() => over(standing, &given),
-                _ => given,
-            };
-
-            json!({ kind: value })
+            return built;
         }
     };
+    let value = match standing {
+        Some(standing) if PARTIAL.contains(&kind) && given.is_object() => over(standing, &given),
+        _ => given,
+    };
 
-    change_from_json(&value)
-}
+    form::judge(kind, &value, env, &mut built);
 
-/// The form filled in with what stands for a kind, so editing starts from it.
-fn fill(form: &mut Form, kind: &str, listing: &Listing, decimals: u8) {
-    let standing = |kind: &str| standing(listing, kind).cloned();
-    let strings = |value: Option<Value>| value.and_then(|value| value.as_array().cloned()).unwrap_or_default().iter().filter_map(|item| item.as_str().map(str::to_string)).collect::<Vec<_>>();
-
-    match kind {
-        "name" => form.name = standing("name").and_then(|name| name.as_str().map(str::to_string)).unwrap_or_default(),
-        "bootnodes" => form.bootnodes = strings(standing("bootnodes")).join("\n"),
-        "upgrade" => {
-            if let Some(upgrade) = standing("upgrade") {
-                form.least = upgrade["least"].as_str().unwrap_or_default().to_string();
-            }
-
-            form.from.clear();
-        }
-        "name_prices" => form.prices = strings(standing("name_prices")).iter().map(|raw| format::units(raw, decimals).replace(',', "")).collect::<Vec<_>>().join("\n"),
-        "switch_finality" => form.json = pretty(&json!({ "epoch": listing.epoch + 2, "finality": standing("finality").unwrap_or(Value::Null) })),
-        kind => form.json = standing(kind).map_or_else(|| template(kind), |value| pretty(&value)),
+    if built.change.is_some() {
+        built.changes = form::diff(kind, standing, &value, env);
     }
-}
 
-/// What a JSON kind starts from on a chain where none stands.
-fn template(kind: &str) -> String {
-    match kind {
-        "collections" => pretty(&json!({ "nft": [], "multi": [] })),
-        "directory" => pretty(&json!({ "gateway": null, "btc_gateway": null, "evm_gateways": [], "swap": null, "dex": null, "dex_router": null, "nft_factory": null })),
-        "federation" => pretty(&json!({ "signers": [], "threshold": 1, "chain_depth": 0, "evm_depth": 0, "bitcoin_depth": 0 })),
-        _ => "{}".to_string(),
-    }
+    // Under Advanced there are no fields to say it under.
+    built.errors = built.errors.into_values().enumerate().map(|(index, why)| (format!("{}{index}", form::GENERAL), why)).collect();
+
+    built
 }
 
 /// Each kind's version, in a line.
@@ -1443,79 +1618,22 @@ mod tests {
         assert!(withdraw.note.contains("off this name change; its approvals of other kinds"), "{}", withdraw.note);
     }
 
-    #[test]
-    fn the_propose_forms_simple_fields_make_their_change_and_refuse_bad_input() {
-        let form = |edit: fn(&mut Form)| {
-            let mut form = Form::default();
-            edit(&mut form);
-            form
-        };
+    /// What Advanced's JSON says, its first error if it says none.
+    fn raw(kind: &str, typed: &str, standing: Option<&Value>) -> Result<Change, String> {
+        let (coin, listing) = (coin(), listing(&council()).unwrap());
+        let built = proposed(kind, typed, standing, &Env { switching: false, ..env_of(&listing, &coin, None) });
 
-        assert_eq!(proposed("name", &form(|form| form.name = " chainv4 mainnet ".to_string()), 18, None, None), Ok(Change::Name("chainv4 mainnet".to_string())));
-        assert!(proposed("name", &form(|form| form.name = String::new()), 18, None, None).is_err());
-        assert!(proposed("name", &form(|form| form.name = "x".repeat(41)), 18, None, None).is_err());
-
-        let two = form(|form| form.bootnodes = "/ip4/203.0.113.7/udp/4001/quic-v1\n\n  /dns4/boot.example/udp/4001/quic-v1 \n".to_string());
-        assert_eq!(
-            proposed("bootnodes", &two, 18, None, None),
-            Ok(Change::Bootnodes(vec!["/ip4/203.0.113.7/udp/4001/quic-v1".to_string(), "/dns4/boot.example/udp/4001/quic-v1".to_string()]))
-        );
-        assert_eq!(proposed("bootnodes", &Form::default(), 18, None, None), Ok(Change::Bootnodes(Vec::new())), "none leaves the chain without");
-        assert!(proposed("bootnodes", &form(|form| form.bootnodes = "not an address".to_string()), 18, None, None).is_err());
-
-        let upgrade = form(|form| {
-            form.least = "0.2.0".to_string();
-            form.from = "150,000".to_string();
-        });
-        assert_eq!(proposed("upgrade", &upgrade, 18, Some(100), None), Ok(Change::Upgrade(Upgrade { least: Version::new(0, 2, 0), from: 150_000 })));
-        assert!(proposed("upgrade", &upgrade, 18, Some(150_000), None).is_err_and(|why| why.contains("ahead of the tip")));
-        assert!(proposed("upgrade", &form(|form| form.from = "soon".to_string()), 18, None, None).is_err());
-        assert!(proposed("upgrade", &form(|form| {
-            form.least = "two".to_string();
-            form.from = "9".to_string();
-        }), 18, None, None)
-        .is_err_and(|why| why.starts_with("upgrade.least")));
-
-        let prices = form(|form| form.prices = "100\n20\n0.5\n".to_string());
-        assert_eq!(
-            proposed("name_prices", &prices, 18, None, None),
-            Ok(Change::NamePrices(vec![u256::new(100_000_000_000_000_000_000), u256::new(20_000_000_000_000_000_000), u256::new(500_000_000_000_000_000)]))
-        );
-        assert!(proposed("name_prices", &form(|form| form.prices = "100\nfree".to_string()), 18, None, None).is_err_and(|why| why.contains("Line 2")));
-        assert!(proposed("name_prices", &Form::default(), 18, None, None).is_err(), "a price for every length");
-
-        // Every other kind is JSON, its errors change_from_json's.
-        assert_eq!(proposed("reward", &form(|form| form.json = r#"{ "initial": "7", "halving_interval": 100 }"#.to_string()), 18, None, None), Ok(Change::Reward(Reward { initial: u256::new(7), halving_interval: Some(100) })));
-        assert!(proposed("reward", &form(|form| form.json = "{ initial".to_string()), 18, None, None).is_err_and(|why| why.starts_with("Not JSON")));
-        assert!(proposed("reward", &form(|form| form.json = r#"{ "initial": "7" }"#.to_string()), 18, None, None).is_err());
+        built.change.ok_or_else(|| built.errors.into_values().next().unwrap_or_default())
     }
 
     #[test]
-    fn the_form_starts_from_what_stands() {
-        let listing = listing(&council()).unwrap();
-        let mut form = Form::default();
-
-        fill(&mut form, "name", &listing, 18);
-        assert_eq!(form.name, "second");
-
-        fill(&mut form, "reward", &listing, 18);
-        assert_eq!(
-            proposed("reward", &form, 18, None, standing(&listing, "reward")),
-            Ok(Change::Reward(Reward { initial: u256::new(5_000_000_000_000_000_000), halving_interval: None })),
-            "unedited, it is what stands, laid over itself or not"
-        );
-        assert_eq!(proposed("reward", &form, 18, None, None), proposed("reward", &form, 18, None, standing(&listing, "reward")));
-
-        fill(&mut form, "consensus", &listing, 18);
-        assert_eq!(proposed("consensus", &form, 18, None, standing(&listing, "consensus")), Ok(Change::Consensus(ConsensusConfig::Rotating { slot_ms: 2000 })));
-
-        let mut priced = council();
-        priced["in_force"]["name_prices"] = json!({ "value": ["100000000000000000000", "1500000000000000000"], "decided": null });
-        fill(&mut form, "name_prices", &listing_of(&priced), 18);
-        assert_eq!(form.prices, "100\n1.5");
-
-        fill(&mut form, "directory", &listing, 18);
-        assert_eq!(proposed("directory", &form, 18, None, None).map(|change| describe(&change, &coin())), Ok("Directory: announce nothing".to_string()), "none stands: a template");
+    fn advanced_json_makes_its_change_and_refuses_bad_input() {
+        assert_eq!(raw("name", r#""chainv4 mainnet""#, None), Ok(Change::Name("chainv4 mainnet".to_string())));
+        assert!(raw("name", r#""""#, None).is_err());
+        assert_eq!(raw("bootnodes", "[]", None), Ok(Change::Bootnodes(Vec::new())), "none leaves the chain without");
+        assert_eq!(raw("reward", r#"{ "initial": "7", "halving_interval": 100 }"#, None), Ok(Change::Reward(Reward { initial: u256::new(7), halving_interval: Some(100) })));
+        assert!(raw("reward", "{ initial", None).is_err_and(|why| why.starts_with("Not JSON")));
+        assert!(raw("reward", r#"{ "initial": "7" }"#, None).is_err());
     }
 
     #[test]
@@ -1529,19 +1647,18 @@ mod tests {
         let mut value = council();
         value["in_force"]["fees"] = json!({ "value": change_json(&Change::Fees(fees.clone()))["fees"], "decided": null });
         let listing = listing_of(&value);
-        let json = |text: &str| Form { json: text.to_string(), ..Form::default() };
 
         // One field of fees: the rest stand.
-        assert_eq!(proposed("fees", &json(r#"{ "burn_permille": 300 }"#), 18, None, standing(&listing, "fees")), Ok(Change::Fees(FeeConfig { burn_permille: 300, ..fees })));
-        assert!(proposed("fees", &json(r#"{ "burn_permille": 300 }"#), 18, None, None).is_err(), "with nothing standing, a part is not a change");
+        assert_eq!(raw("fees", r#"{ "burn_permille": 300 }"#, standing(&listing, "fees")), Ok(Change::Fees(FeeConfig { burn_permille: 300, ..fees })));
+        assert!(raw("fees", r#"{ "burn_permille": 300 }"#, None).is_err(), "with nothing standing, a part is not a change");
 
         // The reward's halving alone, and limits' fuel inside tx_limits, field by field.
         assert_eq!(
-            proposed("reward", &json(r#"{ "halving_interval": 100 }"#), 18, None, standing(&listing, "reward")),
+            raw("reward", r#"{ "halving_interval": 100 }"#, standing(&listing, "reward")),
             Ok(Change::Reward(Reward { initial: u256::new(5_000_000_000_000_000_000), halving_interval: Some(100) }))
         );
         assert_eq!(
-            proposed("limits", &json(r#"{ "tx_limits": { "fuel": 5000000 } }"#), 18, None, standing(&listing, "limits")),
+            raw("limits", r#"{ "tx_limits": { "fuel": 5000000 } }"#, standing(&listing, "limits")),
             Ok(Change::Limits(BlockLimits { tx_limits: Limits { fuel: 5_000_000, memory: 67_108_864 }, max_block_bytes: None }))
         );
 
@@ -1562,17 +1679,62 @@ mod tests {
         value["in_force"]["federation"] = json!({ "value": change_json(&Change::Federation(federation.clone()))["federation"], "decided": null });
         let listing = listing_of(&value);
 
-        assert_eq!(proposed("federation", &json(r#"{ "threshold": 2 }"#), 18, None, standing(&listing, "federation")), Ok(Change::Federation(Federation { threshold: 2, ..federation })));
-        assert_eq!(proposed("finality", &json(r#"{ "depth": 9 }"#), 18, None, standing(&listing, "finality")), Ok(Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 9 }))));
-        assert_eq!(proposed("directory", &json(r#"{ "dex": null }"#), 18, None, standing(&listing, "directory")), Ok(Change::Directory(Directory { dex: None, ..directory })));
+        assert_eq!(raw("federation", r#"{ "threshold": 2 }"#, standing(&listing, "federation")), Ok(Change::Federation(Federation { threshold: 2, ..federation })));
+        assert_eq!(raw("finality", r#"{ "depth": 9 }"#, standing(&listing, "finality")), Ok(Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 9 }))));
+        assert_eq!(raw("directory", r#"{ "dex": null }"#, standing(&listing, "directory")), Ok(Change::Directory(Directory { dex: None, ..directory })));
 
         // An empty object is what stands, whole.
-        assert_eq!(proposed("reward", &json("{}"), 18, None, standing(&listing, "reward")), setting_change(listing.in_force.iter().find(|setting| setting.kind == "reward").unwrap()));
+        assert_eq!(raw("reward", "{}", standing(&listing, "reward")), setting_change(listing.in_force.iter().find(|setting| setting.kind == "reward").unwrap()));
 
         // The consensus is not laid over: a part of it is not one.
-        assert!(proposed("consensus", &json(r#"{ "slot_ms": 1000 }"#), 18, None, standing(&listing, "consensus")).is_err());
+        assert!(raw("consensus", r#"{ "slot_ms": 1000 }"#, standing(&listing, "consensus")).is_err());
         assert_eq!(PARTIAL.map(|kind| kind.parse::<ChangeKind>().is_ok()), [true; 6], "each a kind the form lists");
         assert!(PARTIAL.iter().all(|kind| KINDS.contains(kind)));
+    }
+
+    #[test]
+    fn approving_says_what_moves_field_by_field() {
+        let mut value = council();
+        value["in_force"]["fees"] = json!({ "value": { "block_gas_limit": 50_000_000, "burn_permille": 500, "schedule": { "type": "weighted", "per_tx": 1000, "per_byte": 10, "per_code_byte": 20, "fuel_per_gas": 1 }, "pricing": { "type": "bid", "min_price": "7" } }, "decided": null });
+        let listing = listing_of(&value);
+        let name = approval(member(1), &listing, Change::Name("third".to_string()), 1, false, &coin());
+
+        assert_eq!(name.changes, [Diff { label: "The chain's name".to_string(), old: "second".to_string(), new: "third".to_string() }]);
+
+        let reward = approval(member(1), &listing, Change::Reward(Reward { initial: u256::new(7_000_000_000_000_000_000), halving_interval: None }), 0, false, &coin());
+        assert_eq!(reward.changes, [Diff { label: "What a block mints".to_string(), old: "5 DEV".to_string(), new: "7 DEV".to_string() }], "what stayed is not listed");
+
+        let withdrawn = weight(&json!({ "weight": "1", "approved": [{ "name": "third", "kind": "name", "version": 1 }] })).unwrap();
+        assert!(withdrawal(member(1), &withdrawn.approved[0], &coin()).changes.is_empty(), "a withdrawal moves no setting");
+    }
+
+    #[test]
+    fn open_changes_and_decisions_are_found_by_kind_address_and_value() {
+        let listing = listing_of(&council());
+        let items: Vec<Item> = listing.proposals.iter().map(|proposal| open_item(proposal, &coin())).collect();
+        let find = |search: &str| ballots::select(&items, &Finder { search: search.to_string(), ..Finder::default() });
+
+        assert_eq!(items[0].kind, "bootnodes");
+        assert_eq!((items[0].place, items[0].closes, items[0].support), (3, Some(18), 1.0));
+        assert_eq!(find("boot.example"), [0], "a value");
+        assert_eq!(find(&member(2).to_string()[..24]), [0], "an address, or a part of one");
+        assert_eq!(find("bootnodes"), [0], "a kind");
+        assert_eq!(kind_name("name"), "name");
+        assert_eq!(kind_name("consensus"), "Consensus");
+        assert_eq!(kind_name("name_prices"), "Name prices");
+
+        let history = decisions(&json!({ "decisions": [
+            { "version": 2, "tx": "0x02", "height": 77, "timestamp": 2000, "final": false, "sender": member(1).to_string(), "kind": "bootnodes", "change": { "bootnodes": [] } },
+            { "version": 1, "tx": "0x01", "height": 7, "timestamp": 1000, "final": true, "sender": member(3).to_string(), "kind": "finality", "change": { "finality": { "type": "depth", "depth": 6 } } },
+        ] }));
+        let items: Vec<Item> = history.iter().map(|decision| decided_item(decision, &coin())).collect();
+        let find = |search: &str| ballots::select(&items, &Finder { search: search.to_string(), ..Finder::default() });
+
+        assert_eq!(items[1].kind, "consensus", "finality's tuning is on the consensus's ballot");
+        assert_eq!(find("without bootnodes"), [0], "its words");
+        assert_eq!(find("block 77"), [0]);
+        assert_eq!(find(&member(3).to_string()), [1]);
+        assert_eq!(ballots::select(&items, &Finder { kind: Some("consensus".to_string()), ..Finder::default() }), [1]);
     }
 
     /// A compressed secp256k1 key, as a federation's signers are.
@@ -1707,11 +1869,19 @@ mod tests {
 
         state.answered(&Ask::Governance, &Ok(council()));
         state.answered(&Ask::GovernanceWeight(member(1).to_string()), &Ok(json!({ "weight": "1", "needed": "1", "approved": [] })));
-        state.answered(&Ask::GovernanceHistory, &Ok(json!({ "decisions": [] })));
+        state.answered(&Ask::GovernanceHistory { before: None }, &Ok(json!({ "version": 2, "from": 1, "decisions": [{ "version": 2, "tx": "0x02", "height": 2 }, { "version": 1, "tx": "0x01", "height": 1 }] })));
 
         assert_eq!(state.listing.as_ref().and_then(|listing| listing.as_ref().ok()).map(|listing| listing.version), Some(2));
         assert!(state.weights[&member(1).to_string()].as_ref().is_ok_and(Weight::may_vote));
-        assert_eq!(state.history, Some(Ok(Vec::new())));
+        assert_eq!((state.decided.version, state.decided.next(), state.decided.items.len()), (2, None, 2));
+
+        // An older page goes under what was read, and a failure says why and keeps it.
+        state.answered(&Ask::GovernanceHistory { before: None }, &Ok(json!({ "version": 9, "from": 1, "decisions": [{ "version": 9, "tx": "0x09", "height": 9 }, { "version": 8, "tx": "0x08", "height": 8 }] })));
+        assert_eq!((state.decided.version, state.decided.next()), (9, Some(8)), "so many since that it starts over");
+        state.answered(&Ask::GovernanceHistory { before: Some(8) }, &Ok(json!({ "version": 9, "from": 1, "decisions": [{ "version": 7, "tx": "0x07", "height": 7 }] })));
+        assert_eq!(state.decided.next(), Some(7));
+        state.answered(&Ask::GovernanceHistory { before: Some(7) }, &Err(Failure { status: 0, message: "gone".to_string() }));
+        assert_eq!((state.decided.items.len(), state.past_trouble.as_deref()), (3, Some("gone")));
 
         state.answered(&Ask::Governance, &Ok(json!({ "kind": "council" })));
         assert!(matches!(&state.listing, Some(Err(failure)) if failure.message.starts_with("its answer does not read")));

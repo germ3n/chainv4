@@ -1,0 +1,340 @@
+//! Every field of every kind of change the propose form asks for: where it sits in the change's
+//! JSON, what it is called, what control it takes, and the bounds the node holds it to. Plain data,
+//! so the form draws it, reads it and compares it the same way for every kind, and a test checks
+//! that it leaves no field of a change out.
+
+use serde_json::{Value, json};
+
+/// A choice's options: their values in the JSON, and what the form calls them.
+pub type Options = &'static [(&'static str, &'static str)];
+
+/// What a field of a table holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cell {
+    Whole,
+    Key,
+    Account,
+    Evm,
+    Amount,
+}
+
+/// One column of a table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Column {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub cell: Cell,
+}
+
+/// What one line of a list holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Line {
+    /// A libp2p address.
+    Bootnode,
+    /// A contract's function, by name.
+    Function,
+    /// A kind of transaction, as a fee scorer names it.
+    TxKind,
+    /// A compressed secp256k1 key, 0x and 66 hex digits.
+    Compressed,
+    /// A price in the coin, by its place: names of 3 characters first.
+    Price,
+}
+
+/// The control a field takes, and how what is typed in it is written in the change's JSON.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    /// Text, trimmed.
+    Text,
+    /// A whole number, written as a number.
+    Whole,
+    /// A whole number that fits 32 bits.
+    Small,
+    /// A whole number of any size, written as a string.
+    Digits,
+    /// An amount typed in the coin, written as a string in its smallest unit.
+    Amount,
+    /// Thousandths, typed as they are and shown as a percentage.
+    Permille,
+    /// Milliseconds.
+    Millis,
+    /// A number of bytes, typed as bytes or as so many KiB or MiB.
+    Bytes,
+    /// A key on this chain.
+    Key,
+    /// A contract here.
+    Contract,
+    /// A contract here, or none.
+    MaybeContract,
+    /// An EVM address, or none.
+    MaybeEvm,
+    /// A version, such as 0.2.0.
+    Version,
+    /// One of a few.
+    Choice(Options),
+    /// A whole number, or null: on or off, named, with the number beside on.
+    MaybeWhole { off: &'static str, on: &'static str },
+    /// A number of bytes, or null, likewise.
+    MaybeBytes { off: &'static str, on: &'static str },
+    /// An object or null: on or off, the fields under it shown while on.
+    Switch { off: &'static str, on: &'static str },
+    /// A list, with lines to add and take away.
+    List(Line),
+    /// A list of objects, each with these fields.
+    Table(&'static [Column]),
+}
+
+/// One field of a kind of change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spec {
+    /// Where it sits in the change's value, its keys joined by dots; empty for the value itself.
+    pub path: &'static str,
+    pub label: &'static str,
+    /// What it is for, in a line; empty when its label says it.
+    pub help: &'static str,
+    pub control: Control,
+    /// The heading it goes under, shared with the fields before it.
+    pub group: &'static str,
+    /// Shown only while each of these fields, by path, says this; "on" for a switch.
+    pub when: &'static [(&'static str, &'static str)],
+    /// Shown, never changed: what the chain keeps as it is.
+    pub fixed: bool,
+    /// The least and most the node takes, for a number.
+    pub least: Option<u64>,
+    pub most: Option<u64>,
+}
+
+const fn field(path: &'static str, label: &'static str, help: &'static str, control: Control) -> Spec {
+    Spec { path, label, help, control, group: "", when: &[], fixed: false, least: None, most: None }
+}
+
+impl Spec {
+    const fn under(self, group: &'static str) -> Spec {
+        Spec { group, ..self }
+    }
+
+    const fn when(self, when: &'static [(&'static str, &'static str)]) -> Spec {
+        Spec { when, ..self }
+    }
+
+    const fn fixed(self) -> Spec {
+        Spec { fixed: true, ..self }
+    }
+
+    const fn least(self, least: u64) -> Spec {
+        Spec { least: Some(least), ..self }
+    }
+
+    const fn most(self, most: u64) -> Spec {
+        Spec { most: Some(most), ..self }
+    }
+}
+
+const CONSENSUS_KINDS: Options = &[("pow", "Proof of work"), ("authority", "One key"), ("rotating", "Signers in turn"), ("staked", "Validators by stake")];
+const SECURE_HASHES: Options = &[("blake3", "BLAKE3"), ("sha256", "SHA-256"), ("blake2s", "BLAKE2s"), ("blake2b", "BLAKE2b"), ("keccak256", "Keccak-256")];
+const SCHEDULES: Options = &[("draw", "A weighted draw"), ("priority", "Priority rotation")];
+const GAS_SCHEDULES: Options = &[("weighted", "Weights"), ("contract", "A contract scores")];
+const PRICINGS: Options = &[("base_fee", "A base price"), ("bid", "Bids")];
+const FINALITIES: Options = &[("ffg", "FFG"), ("authority", "Authority"), ("depth", "Depth")];
+const SWITCHES: Options = &[("ffg", "FFG, by stake"), ("authority", "Authority, by signers")];
+
+const VALIDATOR: &[Column] = &[Column { name: "account", label: "Account", cell: Cell::Account }, Column { name: "voter", label: "Voting key", cell: Cell::Key }, Column { name: "bond", label: "Bond", cell: Cell::Amount }];
+const SIGNER: &[Column] = &[Column { name: "key", label: "Voting key", cell: Cell::Key }, Column { name: "account", label: "Account", cell: Cell::Account }];
+const EVM_GATEWAY: &[Column] = &[Column { name: "chain_id", label: "Chain id", cell: Cell::Whole }, Column { name: "gateway", label: "Gateway.sol", cell: Cell::Evm }];
+
+const WHEN_POW: &[(&str, &str)] = &[("type", "pow")];
+const WHEN_AUTHORITY: &[(&str, &str)] = &[("type", "authority")];
+const WHEN_ROTATING: &[(&str, &str)] = &[("type", "rotating")];
+const WHEN_STAKED: &[(&str, &str)] = &[("type", "staked")];
+const WHEN_CONTRACT: &[(&str, &str)] = &[("schedule.type", "contract")];
+const WHEN_BASE_FEE: &[(&str, &str)] = &[("pricing.type", "base_fee")];
+const WHEN_BID: &[(&str, &str)] = &[("pricing.type", "bid")];
+const WHEN_FFG: &[(&str, &str)] = &[("type", "ffg")];
+const WHEN_DEPTH: &[(&str, &str)] = &[("type", "depth")];
+const WHEN_LEAK: &[(&str, &str)] = &[("type", "ffg"), ("leak", "on")];
+const INTO_FFG: &[(&str, &str)] = &[("finality.type", "ffg")];
+const INTO_AUTHORITY: &[(&str, &str)] = &[("finality.type", "authority")];
+const INTO_LEAK: &[(&str, &str)] = &[("finality.type", "ffg"), ("finality.leak", "on")];
+
+/// The least fuel and memory a transaction may have, as BlockLimits::problem says, and the least
+/// and most a block may hold.
+const LEAST_FUEL: u64 = 100_000;
+const MIB: u64 = 1 << 20;
+
+/// Every field of a kind of change, in the order the form lists them, each variant's fields among
+/// them with what shows them.
+pub fn schema(kind: &str) -> Vec<Spec> {
+    match kind {
+        "name" => vec![field("", "The chain's name", "What the apps call the network, from the block that decides it on.", Control::Text)],
+        "bootnodes" => vec![field("", "Bootnodes", "Addresses new nodes dial first, at most 32. None leaves the chain without any.", Control::List(Line::Bootnode))],
+        "upgrade" => vec![
+            field("least", "Least version that runs on", "Nodes older than this stop and say to update.", Control::Version),
+            field("from", "From block", "Must be ahead of the block that decides it.", Control::Whole),
+        ],
+        "name_prices" => vec![field("", "What a year of a name costs", "By its length; the last price holds for every longer name.", Control::List(Line::Price))],
+        "consensus" => vec![
+            field("type", "Who makes blocks", "It must fit the chain's finality: signers in turn need authority, validators by stake need FFG.", Control::Choice(CONSENSUS_KINDS)),
+            field("hash", "Work hash", "", Control::Choice(SECURE_HASHES)).when(WHEN_POW),
+            field("target_block_ms", "Time between blocks, in ms", "Difficulty rises when blocks come faster, and falls when they come slower.", Control::Millis).when(WHEN_POW),
+            field("initial_difficulty", "First block's difficulty", "The hashes expected to find its seal.", Control::Digits).when(WHEN_POW),
+            field("min_difficulty", "Least difficulty", "Difficulty never falls below this.", Control::Digits).when(WHEN_POW),
+            field("key", "The key that makes blocks", "", Control::Key).when(WHEN_AUTHORITY),
+            field("slot_ms", "Time between blocks, in ms", "", Control::Millis).when(WHEN_AUTHORITY),
+            field("slot_ms", "Time between blocks, in ms", "Also from a missed slot to the next in line's.", Control::Millis).when(WHEN_ROTATING),
+            field("slot_ms", "Time between blocks, in ms", "Also from a missed slot to the next in line's.", Control::Millis).when(WHEN_STAKED),
+            field("schedule", "How a slot's maker is picked", "", Control::Choice(SCHEDULES)).when(WHEN_STAKED),
+        ],
+        "fees" => vec![
+            field("block_gas_limit", "Gas a block may use", "", Control::Whole).least(1),
+            field("burn_permille", "Share of each fee burned, in thousandths", "Of a fee's base part: 500 burns half, and the rest goes to the block's maker.", Control::Permille).most(1000),
+            field("schedule.type", "How gas is counted", "", Control::Choice(GAS_SCHEDULES)).under("Gas schedule"),
+            field("schedule.per_tx", "Gas per transaction", "", Control::Whole).under("Gas schedule"),
+            field("schedule.per_byte", "Gas per byte", "", Control::Whole).under("Gas schedule"),
+            field("schedule.per_code_byte", "Gas per byte of code", "", Control::Whole).under("Gas schedule"),
+            field("schedule.fuel_per_gas", "Fuel per gas", "", Control::Whole).under("Gas schedule").least(1),
+            field("schedule.contract", "The scoring contract", "", Control::Contract).under("Gas schedule").when(WHEN_CONTRACT),
+            field("schedule.fuel", "Fuel it may use", "", Control::Whole).under("Gas schedule").when(WHEN_CONTRACT).least(1),
+            field("schedule.kinds", "Kinds of transaction it scores", "None scores every kind.", Control::List(Line::TxKind)).under("Gas schedule").when(WHEN_CONTRACT),
+            field("pricing.type", "How gas is priced", "", Control::Choice(PRICINGS)).under("Pricing"),
+            field("pricing.initial", "Price to start from", "Only a chain turning fees on starts from it; one with fees carries on from its price.", Control::Amount).under("Pricing").when(WHEN_BASE_FEE),
+            field("pricing.min", "Least price", "", Control::Amount).under("Pricing").when(WHEN_BASE_FEE),
+            field("pricing.elasticity", "Elasticity", "The gas limit divided by this is the target a block aims for: 2 aims for half-full blocks.", Control::Whole).under("Pricing").when(WHEN_BASE_FEE).least(1),
+            field("pricing.change_denominator", "Change denominator", "The price moves by at most one over this a block: 8 is an eighth.", Control::Whole).under("Pricing").when(WHEN_BASE_FEE).least(1),
+            field("pricing.min_price", "Least bid", "", Control::Amount).under("Pricing").when(WHEN_BID),
+        ],
+        "reward" => vec![
+            field("initial", "What a block mints", "From the block after the one that decides it.", Control::Amount),
+            field("halving_interval", "Halving", "Counted from there, not from genesis.", Control::MaybeWhole { off: "Never", on: "Every so many blocks" }).least(1),
+        ],
+        "limits" => vec![
+            field("tx_limits.fuel", "Fuel a transaction may use", "", Control::Whole).least(LEAST_FUEL),
+            field("tx_limits.memory", "Memory a transaction may use", "", Control::Bytes).least(MIB),
+            field("max_block_bytes", "Size of a block", "Bound by gas alone, or at most 1 MiB to 6 MiB.", Control::MaybeBytes { off: "Gas alone", on: "At most" }).least(MIB).most(6 * MIB),
+        ],
+        "finality" => vec![
+            field("type", "Kind", "A switch changes it: pick Finality's kind.", Control::Choice(FINALITIES)).fixed(),
+            field("checkpoint_interval", "Blocks per epoch", "Every light client's epoch arithmetic rests on it.", Control::Whole).fixed().when(WHEN_FFG),
+            field("checkpoint_interval", "Blocks per epoch", "Every light client's epoch arithmetic rests on it.", Control::Whole).fixed().when(WHEN_AUTHORITY),
+            field("activation_delay", "Epochs a change waits", "", Control::Whole).fixed().when(WHEN_FFG),
+            field("activation_delay", "Epochs a change waits", "", Control::Whole).fixed().when(WHEN_AUTHORITY),
+            field("vote_depth", "Blocks on a checkpoint before voting", "", Control::Whole).when(WHEN_FFG),
+            field("min_bond", "Smallest bond", "", Control::Amount).when(WHEN_FFG),
+            field("withdrawal_delay", "Epochs a bond stays locked", "After its validator stops voting.", Control::Whole).when(WHEN_FFG),
+            field("reporter_divisor", "Reporter's divisor", "Who reports cheating gets the bond divided by this; the rest burns.", Control::Whole).when(WHEN_FFG).least(1),
+            field("max_validators", "Most validators", "", Control::Small).when(WHEN_FFG),
+            field("vote_reward", "What each voter earns", "For a justification a block carries.", Control::Amount).when(WHEN_FFG),
+            field("max_proofs_per_block", "Most justifications a block carries", "", Control::Small).when(WHEN_FFG),
+            field("validators", "Validators from genesis", "History keeps them.", Control::Table(VALIDATOR)).fixed().when(WHEN_FFG),
+            field("leak", "Inactivity leak", "Takes bonds from validators who stopped voting once nothing was proven for a while.", Control::Switch { off: "None", on: "A leak" }).when(WHEN_FFG),
+            field("leak.after_epochs", "After this many epochs without a proof", "", Control::Whole).when(WHEN_LEAK).least(1),
+            field("leak.permille", "Thousandths of a bond each checkpoint", "", Control::Permille).when(WHEN_LEAK).most(1000),
+            field("vote_depth", "Blocks on a checkpoint before voting", "", Control::Whole).when(WHEN_AUTHORITY),
+            field("max_signers", "Most signers", "", Control::Small).when(WHEN_AUTHORITY),
+            field("signers", "Signers from genesis", "History keeps them; they change by their own approval.", Control::Table(SIGNER)).fixed().when(WHEN_AUTHORITY),
+            field("threshold", "Signers that justify a checkpoint", "They change by their own approval.", Control::Small).fixed().when(WHEN_AUTHORITY),
+            field("change_threshold", "Signers that change the set", "", Control::Small).fixed().when(WHEN_AUTHORITY),
+            field("approval_epochs", "Epochs a signer's approval counts", "", Control::Whole).when(WHEN_AUTHORITY).least(1),
+            field("vote_reward", "What each signer earns", "For a justification a block carries.", Control::Amount).when(WHEN_AUTHORITY),
+            field("max_proofs_per_block", "Most justifications a block carries", "", Control::Small).when(WHEN_AUTHORITY),
+            field("depth", "Blocks on a block before it is final", "", Control::Whole).when(WHEN_DEPTH),
+        ],
+        "switch_finality" => vec![
+            field("epoch", "First epoch the new kind runs", "It runs from here, or from the earliest the chain allows, whichever is later.", Control::Whole),
+            field("finality.type", "Switch to", "Goes between FFG and authority; a chain keeps its epochs.", Control::Choice(SWITCHES)).fixed(),
+            field("finality.checkpoint_interval", "Blocks per epoch", "A switch keeps genesis's.", Control::Whole).fixed(),
+            field("finality.activation_delay", "Epochs a change waits", "A switch keeps genesis's.", Control::Whole).fixed(),
+            field("finality.vote_depth", "Blocks on a checkpoint before voting", "", Control::Whole),
+            field("finality.min_bond", "Smallest bond", "Validators bond from the block that decides the switch: name none here.", Control::Amount).when(INTO_FFG),
+            field("finality.withdrawal_delay", "Epochs a bond stays locked", "After its validator stops voting.", Control::Whole).when(INTO_FFG),
+            field("finality.reporter_divisor", "Reporter's divisor", "Who reports cheating gets the bond divided by this; the rest burns.", Control::Whole).when(INTO_FFG).least(1),
+            field("finality.max_validators", "Most validators", "", Control::Small).when(INTO_FFG),
+            field("finality.leak", "Inactivity leak", "Takes bonds from validators who stopped voting once nothing was proven for a while.", Control::Switch { off: "None", on: "A leak" }).when(INTO_FFG),
+            field("finality.leak.after_epochs", "After this many epochs without a proof", "", Control::Whole).when(INTO_LEAK).least(1),
+            field("finality.leak.permille", "Thousandths of a bond each checkpoint", "", Control::Permille).when(INTO_LEAK).most(1000),
+            field("finality.max_signers", "Most signers", "", Control::Small).when(INTO_AUTHORITY),
+            field("finality.signers", "Signers", "They vote from the switch epoch.", Control::Table(SIGNER)).when(INTO_AUTHORITY),
+            field("finality.threshold", "Signers that justify a checkpoint", "More than half of them.", Control::Small).when(INTO_AUTHORITY),
+            field("finality.change_threshold", "Signers that change the set", "More than half of them.", Control::Small).when(INTO_AUTHORITY),
+            field("finality.approval_epochs", "Epochs a signer's approval counts", "", Control::Whole).when(INTO_AUTHORITY).least(1),
+            field("finality.vote_reward", "What each voter earns", "For a justification a block carries.", Control::Amount),
+            field("finality.max_proofs_per_block", "Most justifications a block carries", "", Control::Small),
+        ],
+        "collections" => vec![
+            field("nft", "Functions an NFT collection exports", "A contract exporting all of them is one.", Control::List(Line::Function)),
+            field("multi", "Functions a multi-token collection exports", "", Control::List(Line::Function)),
+        ],
+        "federation" => vec![
+            field("signers", "Signers", "Who vouches for the bridges: 1 to 20 secp256k1 keys, each once.", Control::List(Line::Compressed)),
+            field("threshold", "Signers that must agree", "", Control::Small).least(1),
+            field("chain_depth", "Blocks to wait here", "", Control::Whole).least(1),
+            field("evm_depth", "Blocks to wait on EVM chains", "Where the chain's RPC names no finalized block.", Control::Whole).least(1),
+            field("bitcoin_depth", "Confirmations to wait on Bitcoin", "", Control::Small).least(1),
+        ],
+        "directory" => vec![
+            field("gateway", "The bridges' gateway", "", Control::MaybeContract),
+            field("btc_gateway", "The Bitcoin gateway", "", Control::MaybeContract),
+            field("evm_gateways", "Gateway.sol on EVM chains", "At most 32, each chain once.", Control::Table(EVM_GATEWAY)),
+            field("swap", "The swap contract", "", Control::MaybeContract),
+            field("dex", "The DEX", "", Control::MaybeContract),
+            field("dex_router", "The EVM DEX's router", "", Control::MaybeEvm),
+            field("nft_factory", "The NFT factory", "", Control::MaybeContract),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// What a field starts from where nothing stands for it: a chain turning a setting on, or a variant
+/// it does not run now.
+pub fn defaults(kind: &str) -> Value {
+    match kind {
+        "bootnodes" | "name_prices" => json!([]),
+        "name" => json!(""),
+        "upgrade" => json!({ "least": "", "from": null }),
+        "consensus" => json!({ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "key": "", "slot_ms": 2000, "schedule": "draw" }),
+        "fees" => json!({
+            "block_gas_limit": 50_000_000,
+            "burn_permille": 500,
+            "schedule": { "type": "weighted", "per_tx": 1000, "per_byte": 10, "per_code_byte": 20, "fuel_per_gas": 1, "contract": "", "fuel": 1_000_000, "kinds": [] },
+            "pricing": { "type": "base_fee", "initial": "1000000000", "min": "10000000", "elasticity": 2, "change_denominator": 8, "min_price": "10000000" },
+        }),
+        "reward" => json!({ "initial": "0", "halving_interval": null }),
+        "limits" => json!({ "tx_limits": { "fuel": 10_000_000, "memory": 64 * MIB }, "max_block_bytes": null }),
+        "finality" => json!({ "depth": 12 }),
+        "switch_finality" => json!({
+            "epoch": null,
+            "finality": {
+                "type": "authority",
+                "checkpoint_interval": null,
+                "activation_delay": null,
+                "vote_depth": 2,
+                "min_bond": "100000000000000000000",
+                "withdrawal_delay": 64,
+                "reporter_divisor": 16,
+                "max_validators": 1000,
+                "leak": null,
+                "max_signers": 100,
+                "signers": [],
+                "threshold": 1,
+                "change_threshold": 1,
+                "approval_epochs": 64,
+                "vote_reward": "0",
+                "max_proofs_per_block": 4,
+            },
+        }),
+        "collections" => json!({ "nft": [], "multi": [] }),
+        "federation" => json!({ "signers": [], "threshold": 1, "chain_depth": 20, "evm_depth": 12, "bitcoin_depth": 6 }),
+        "directory" => json!({ "gateway": null, "btc_gateway": null, "evm_gateways": [], "swap": null, "dex": null, "dex_router": null, "nft_factory": null }),
+        _ => Value::Null,
+    }
+}
+
+/// The objects in a kind whose type picks their fields: where another type replaces the object
+/// whole, as the fields of the one standing mean nothing to it.
+pub fn variants(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "consensus" => &[""],
+        "fees" => &["schedule", "pricing"],
+        "switch_finality" => &["finality"],
+        _ => &[],
+    }
+}

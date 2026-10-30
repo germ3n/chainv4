@@ -417,7 +417,7 @@ impl Explorer {
             Ask::Governance => store.governance = parse(value),
             Ask::Decisions { before } => {
                 if let Some(page) = parse::<DecisionsPage>(value) {
-                    store.decisions.take(page, before);
+                    store.decisions.take(page.version, page.from, page.decisions, before);
                 }
             }
             Ask::GovernanceWeight(address) => {

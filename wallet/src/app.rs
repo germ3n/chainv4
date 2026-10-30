@@ -547,7 +547,7 @@ impl Wallet {
                 (Ask::Named { .. }, _) => self.views.trade.events(&result),
                 (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
                 (Ask::PoolClaim(_) | Ask::Pool(_) | Ask::Claims { .. } | Ask::Mining, _) => self.views.mining.answered(&ask, &result),
-                (Ask::Governance | Ask::GovernanceHistory | Ask::GovernanceWeight(_), _) => self.views.governance.answered(&ask, &result),
+                (Ask::Governance | Ask::GovernanceHistory { .. } | Ask::GovernanceWeight(_), _) => self.views.governance.answered(&ask, &result),
                 (Ask::Release, _) => match chainv4::release::ReleaseKeys::built_in() {
                     Ok(keys) => self.updates.answered(&result, &keys, time),
                     Err(why) => log::warn!("{why}"),

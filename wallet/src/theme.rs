@@ -4,7 +4,7 @@
 //! chainv4-ui's, shared with the explorer.
 
 pub use chainv4_ui::layout::section_gap;
-pub use chainv4_ui::widgets::{caps, dot, end_row, fitted, mono, pill, primary, quiet, rule, segmented, strong, title};
+pub use chainv4_ui::widgets::{arrowed, beside, caps, dot, end_row, fitted, mono, pill, primary, quiet, rule, segmented, segmented_rows, strong, title};
 pub use chainv4_ui::{DISPLAY as SERIF, Palette, SEMIBOLD};
 use {
     chainv4_ui::{Density, Typeface},

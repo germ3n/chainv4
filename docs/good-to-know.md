@@ -400,6 +400,24 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   is; `GET /supply` serves them with what is bonded and pooled, `GET /rich` the richest accounts
   and `GET /names/list` every name, both the node's word. Counting it moved every genesis state
   root, so chains from before need a new genesis.
+- **The wallet's governance form reads the node's own checks.** A field's bounds are in
+  `wallet/src/views/governance/schema.rs` and each error under a field comes from `change_from_json`,
+  matched to the field by its words (`form::blame`); a test holds the bounds to what the node
+  refuses and another that every leaf of every change has a field, so a new setting fails a test
+  until it has one. What only a node can check against the chain, such as a consensus against its
+  finality (`consensus_problem`, `retune_problem`, `switch_problem`, in `chain/`, behind `node`), is
+  mirrored from what `GET /governance` lists: a form can pass and the chain still refuse, the
+  transaction failing as it would from the CLI.
+- **`over` only adds to an object.** It cannot take a field away, so a change of variant, bids for
+  a base price or one consensus for another, would keep the old variant's fields and be refused as
+  unknown ones. The form drops such an object from what stands before laying over it
+  (`schema::variants`); Advanced's JSON gives it whole.
+- **Searching a history is reading it.** `GET /governance/history` has no search, so the apps filter
+  what they read, and a search or a page that comes up short reads older pages until it is full or
+  none are left (`ballots::wants_older`), saying how much of the history it has been through. A
+  page that fails stops that reading until the next asking.
+- **Some text fonts have no arrow.** Manrope and the fonts egui falls back on draw `→` as nothing,
+  so the wallet sets one in the mono face (`widgets::arrowed`).
 - **One way to change the directory per chain.** Governance's `Change::Directory`, or without
   governance the `directory_admin` genesis names, by `send set-directory`; the admin hands the
   role on, or renounces it for good (`hand-directory --renounce`, which asks for yes). Genesis

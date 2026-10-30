@@ -361,7 +361,9 @@ period, and which names each address owns; what each name is, the wallet proves.
 
 ## Multisig
 
-The **Multisig** page makes [multisigs](multisig.md#in-the-wallet), follows them, and takes their
+The **Multisig** page makes [multisigs](multisig.md#in-the-wallet) in plain steps, each member
+needing only a key on this chain, a Bitcoin account key and an EVM address being optional, changes
+their members, follows them, and takes their
 transactions round the members: a payment proposed and priced, signed with the account's key or on
 the offline signer from a `ur:chainv4-multisig` code, approved on chain through Send, and submitted
 once enough back it, under a key made for the moment, the multisig paying. What the node says of a
@@ -477,9 +479,10 @@ connected for it with its hashrate.
 
 ## Governance
 
-The **Governance** page (`wallet/src/views/governance.rs`) covers the chain's settings under
-[governance](governance.md): who decides, the changes open and their approvals, approving or
-withdrawing, proposing a change, what is in force and what was decided last. It reads
+The **Governance** page (`wallet/src/views/governance.rs`, with its form in `governance/form.rs`
+and `governance/schema.rs`) covers the chain's settings under [governance](governance.md): who
+decides, the changes open and their approvals, approving or withdrawing, proposing a change, what
+is in force and every decision. It reads
 [`GET /governance`](api.md#get-governance),
 [`GET /governance/history`](api.md#get-governancehistorybeforevlimitn) and
 [`GET /governance/weight/{address}`](api.md#get-governanceweightaddress), asking again every
@@ -497,8 +500,10 @@ actions.
   the address's approvals that count, one per kind with the kind's version, each with its own
   **Withdraw** for an address this page sends for. A council member weighs one vote; under an
   electorate, FFG weighs stake and authority finality weighs signers.
-- **Open changes:** each change in words, with its kind and that kind's version under it and its
-  JSON folded below. Each has a bar for its approvals' weight against what it needs, and its
+- **Open changes:** a search box over each change's kind, words and JSON and who approved it, an
+  order (newest approval, most support, or closing soonest, by when the last approval stops
+  counting), and a filter by the kinds there are; a list of one has the search box alone. Each
+  change in words, with its kind and that kind's version under it and its JSON folded below. Each has a bar for its approvals' weight against what it needs, and its
   approvals, each with the epoch it counts until. An address of the account in use, or a
   followed multisig, that may vote gets **Approve** on each change, or **Withdraw** on the one its
   approval of that kind counts for. An address backs one change of each kind at a time, so it can
@@ -507,22 +512,30 @@ actions.
   that the approval lapses only once a change of its own kind is decided first and that kind's
   version moves on: a decision of another kind leaves it standing. To vote with another account's
   address, switch to that account.
-- **Propose:** pick a kind. The chain's name, bootnodes (one a line, none for none), an upgrade
-  (least version and the block it starts from, which must be ahead of the light client's tip) and
-  name prices (one a line in the coin, by length from 3 characters, the last for any longer) have
-  fields of their own. Every other kind (consensus, fees, reward, limits, finality,
-  switch_finality, collections, federation, directory) is a JSON editor, filled in with the value
-  in force for that kind, so editing starts from what stands. For fees, reward, limits, finality,
-  federation and directory the editor also takes a partial object, such as
-  `{ "burn_permille": 300 }` for fees: the wallet lays it over the value in force, field by field
-  (an object's fields one by one, anything else whole), with chainv4's `params::json::over`, as
-  the CLI's `approve-change` does. Fields left out keep what stands, and the form says so. The
-  kind's version the approval names guarantees nothing changed in between: should a change of
-  that kind be decided first, the approval fails. Whatever the form says goes through chainv4's
-  `change_from_json`, the same checks as the CLI's `approve-change`. Its error shows under the
-  form, and the change in words shows once it reads, with the kind's version it approves at.
-  **Review** opens the confirm screen with the change in words and its whole JSON. A change is
-  proposed by approving it.
+- **Propose:** pick a kind, and each setting of it has a field of its own, with what stands beside
+  it (`now 50%`), and **Put back** once it differs: numbers, amounts typed in the coin, sizes as
+  `32 MiB`, addresses, on or off with its number (a reward's halving, a block's size, the leak), a
+  choice for what picks other fields (the consensus's type, the gas schedule, the pricing), and
+  lists with **Add** and **Remove** (bootnodes, name prices by length, collections' functions, the
+  federation's signers, the directory's EVM gateways, a switch's signers). What the chain keeps
+  through a change of finality shows as staying as it is: the kind, `checkpoint_interval`,
+  `activation_delay`, the starting validators or signers and the thresholds.
+  - **Only what changed is sent:** the fields that differ are laid over what stands with chainv4's
+    `params::json::over`, as the CLI's `approve-change` does; a variant of another type, such as
+    bids for a base price, replaces its object whole, as its old fields mean nothing to it.
+  - **What is wrong shows under its field, in words,** before anything is sent: the form reads each
+    field, runs the whole through chainv4's `change_from_json`, the same checks as `approve-change`,
+    and puts each error under the field it is about. What a node checks against the chain and
+    only it can read there is asked of the settings it lists: a consensus against the finality, a
+    switch's epoch, kind and signers, a retune's most validators or signers, and that no switch of
+    finality is on its way. The chain has the last word, as the approval's version names what it
+    was laid over: should a change of that kind be decided first, the approval fails.
+  - **Advanced**, folded under the form, is the kind's JSON, filled with what the form says, for
+    what a form does not cover; while it is open it is what is proposed, and it still takes a part
+    of fees, reward, limits, finality, federation or directory.
+  - **Review** opens the confirm screen with each field that moves, `old → new`, the change in
+    words and, folded, its whole JSON. A change is proposed by approving it. Approving someone
+    else's change shows the same list against what stands.
 - **Sending:** from the confirm screen the transaction, `Tx::ApproveChange { version, change }`
   at the version of `change.kind()`, or `Tx::WithdrawChange { kind, version }` at the version
   the approval named (from `approved` in `GET /governance/weight/{address}`), goes to Send like
@@ -536,7 +549,10 @@ actions.
   kind change from vM". Each vote the wallet keeps records its kind; one kept before votes named
   their kind reads as consensus.
 - **In force:** every setting, in words, each marked "genesis" or "decided in change N".
-- **Recent decisions:** the latest few, newest first, each with its block and who sent it.
+- **Decisions:** every one, ten to a page with **Newer page** and **Older page**, each with its
+  block and who sent it; a search box over its kind, words, JSON, sender, transaction and block, a
+  filter by kind, and newest or oldest first. Older pages of `GET /governance/history` are read as
+  a page comes to need them, so a search goes on through all of them, and says how far it got.
 - **Trust:** the page shows what the node says. Nothing signed rests on it but the version, the
   change's kind's, which the chain checks: an approval naming a version that has moved on fails
   and changes nothing.
@@ -698,12 +714,14 @@ its transaction or recovered from its hash, under its request's id.
 ### Trade
 
 The **Trade** page trades on the chain's [DEXes](dex.md), the native one and, when the node names
-its router, the EVM's:
-- **trades:** the best route, through one pool or two, its quote, price impact and the least it
-  takes at the slippage allowed;
-- **pools:** what each holds and its price, a native pool's price chart from its `Sync` events,
-  and adding to it or taking your shares out;
-- **new pools,** opened by their first deposit, at the price its two amounts set.
+its router, the EVM's, switched with **Native** and **EVM** beside the page's two tabs:
+- **Trade:** what you pay over what you get, with the balance of each and a button between them
+  that swaps them; side by side on a phone on its side. Under them the rate, price impact, fee,
+  minimum received and route of the best route, through one pool or two; slippage, offered or
+  typed; and one button, which says what it waits for until it can trade.
+- **Pools:** what each holds, one opening to its price, a native pool's price chart from its `Sync`
+  events, and adding to it or taking your shares out; under them, folded, **Open a new pool**, at
+  the price its first deposit sets.
 
 Approving a token, trading, adding and taking out are calls the Send page reviews and signs.
 
