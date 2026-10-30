@@ -151,10 +151,42 @@ other, 404.
 older page, or `null` after the last.
 
 **Each transaction** is as `GET /blocks/{block}` lists it, with its `receipt`, plus its `block`,
-`height` and `index`, its place in the block. It is the node's word: a light client proves each
-with `GET /proofs/receipts/{id}`.
+`height`, `index`, its place in the block, and `time`, when its block was made. It is the node's
+word: a light client proves each with `GET /proofs/receipts/{id}`.
 
 **Coverage:** `indexed_from` and `catching_up_to`, as for `GET /events`.
+
+**Filters,** any together, all optional; one left empty is one not given. Nothing is stored for
+them, and no format changes: the index is by height, so a height range seeks and stops, and the
+rest are tested against the block and receipt each entry points to.
+
+| Parameter | Keeps |
+| --- | --- |
+| `kind` | The transaction's `type`, such as `transfer`, `contract_call` or `deploy`. A multisig's counts as `multisig` and as what it sent. |
+| `direction` | `out`: the address sent it. `in`: it took part and did not send it, or paid itself. |
+| `counterparty` | An address the transaction touches, by the index's own rules: its parties, the contract called, addresses among a call's arguments, what its contracts paid. |
+| `token` | `coin`: it asks to move the coin, or a contract paid some. A contract's address: it called that contract, or that contract emitted something while it ran. |
+| `from`, `until` | When its block was made, in milliseconds since the Unix epoch, both ends included. |
+| `from_height`, `until_height` | Its block's height, both ends included. |
+
+**A page holds matches,** however many others lie between, and `next` goes on from where it stopped,
+under the same filters. A request looks at no more than 1,000 index entries, so one query cannot tie
+up the node. The answer says so:
+- `scanned`: how many it looked at;
+- `limited`: `true` when it stopped at that bound with its page not full, so more may match from
+  `next` on, and an app asks again with that cursor. A page may then hold fewer than `limit`, or
+  none;
+- `applied`: the filters it went by, `[]` with none. A node from before these has no such field and
+  ignores the parameters, so an answer without it was not filtered, whatever was asked.
+
+A bad value is 400: a `direction` other than those two, an address that does not read, a time or
+height that is not a whole number. A range that holds nothing, or a `kind` no transaction has, is an
+empty list.
+
+```sh
+curl 'localhost:8080/accounts/ed25519:0x…/txs?kind=transfer&direction=in&from=1793318400000'
+# {"txs":[…],"next":null,"indexed_from":0,"catching_up_to":null,"applied":["kind","direction","from"],"scanned":41,"limited":false}
+```
 
 ### `GET /contracts/{address}`
 

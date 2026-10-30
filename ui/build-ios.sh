@@ -11,15 +11,17 @@
 #               ID's (Xcode, Settings, Accounts), building a stub app it signs itself
 #   --install   for an iPhone, signed with that certificate and profile, and installed on the one
 #               connected; a free Apple ID's profile lasts 7 days, then --provision again
+#   --store     what an app store takes: the app's `store` feature alone, for an app that has one; an
+#               app with none, as the explorer, has nothing a store refuses, and builds as ever
 #
-#   ui/build-ios.sh APP [--debug] (--sim | --ipa | --provision TEAM | --install)...
+#   ui/build-ios.sh APP [--debug] [--store] (--sim | --ipa | --provision TEAM | --install)...
 #
 # APP is the app's folder, wallet or explorer; wallet/build-ios.sh and explorer/build-ios.sh call
 # this with their own.
 set -eu
 
 usage() {
-    sed -n '2,18p' "$0" | cut -c3-
+    sed -n '2,20p' "$0" | cut -c3-
 }
 
 if [ $# -eq 0 ] || [ "$1" = -h ] || [ "$1" = --help ]; then
@@ -39,10 +41,12 @@ sim=
 ipa=
 install=
 team=
+features=
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --debug) profile=debug ;;
+        --store) features=store ;;
         --sim) sim=1 ;;
         --ipa) ipa=1 ;;
         --install) install=1 ;;
@@ -61,12 +65,23 @@ fi
 cargo_profile=--release
 [ "$profile" = debug ] && cargo_profile=
 
+# An app store's build: the features the app lists for one, and no others.
+cargo_features=
+
+if [ -n "$features" ]; then
+    if grep -q '^store = ' Cargo.toml; then
+        cargo_features="--no-default-features --features store"
+    else
+        echo "$bin has no store feature: nothing in it needs leaving out, so it builds as ever" >&2
+    fi
+fi
+
 # The .app for a platform: its binary, Info.plist and icons.
 bundle() {
     triple=$1 platform=$2 out=$3
     echo "== building $bin for $triple"
     # shellcheck disable=SC2086
-    cargo build $cargo_profile --target "$triple" --bin "$bin"
+    cargo build $cargo_profile $cargo_features --target "$triple" --bin "$bin"
     rm -rf "$out"
     mkdir -p "$out"
     cp "target/$triple/$profile/$bin" "$out/$bin"

@@ -875,6 +875,10 @@ pub struct FoundTx {
     pub block: String,
     pub height: u64,
     pub index: u32,
+    /// When its block was made, in milliseconds since the Unix epoch; a node from before it said
+    /// leaves it out.
+    #[serde(default)]
+    pub time: Option<u64>,
 }
 
 impl Placed for FoundTx {
@@ -893,6 +897,16 @@ pub struct IndexPage<T> {
     /// The height the node is still moving the index's low end to, if it is.
     #[serde(default)]
     pub catching_up_to: Option<u64>,
+    /// The filters the node went by: a node from before it could filter leaves it out, and sent
+    /// everything.
+    #[serde(default)]
+    pub applied: Option<Vec<String>>,
+    /// How many entries it looked through for this page.
+    #[serde(default)]
+    pub scanned: u64,
+    /// Whether it stopped at its bound with the page not full: more may match from next on.
+    #[serde(default)]
+    pub limited: bool,
 }
 
 pub type EventsPage = IndexPage<FoundEvent>;

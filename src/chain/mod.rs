@@ -47,7 +47,7 @@ pub mod migrate;
 mod parallel;
 mod receipt;
 
-pub use addresses::{IndexedTx, stored_address_txs, touched};
+pub use addresses::{AddressScan, IndexedTx, address_txs_from, scan_address_txs, stored_address_txs, touched};
 pub use events::{EventFilter, IndexedEvent, stored_events};
 pub use index::{IndexKind, IndexWindow, Indexing, KeepFrom, stored_index};
 pub use execute::{BlockContext, Effect, Failure, GovernanceRules, Receipt, Rules, SignerRules, StakingRules, TxError};

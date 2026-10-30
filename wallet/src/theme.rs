@@ -4,7 +4,7 @@
 //! chainv4-ui's, shared with the explorer.
 
 pub use chainv4_ui::layout::section_gap;
-pub use chainv4_ui::widgets::{arrowed, beside, caps, dot, end_row, fitted, mono, pill, primary, quiet, rule, segmented, segmented_rows, strong, title};
+pub use chainv4_ui::widgets::{arrowed, beside, caps, dot, end_row, fitted, mono, pill, primary, quiet, reload, retry, rule, segmented, segmented_rows, strong, title};
 pub use chainv4_ui::{DISPLAY as SERIF, Palette, SEMIBOLD};
 use {
     chainv4_ui::{Density, Typeface},
@@ -65,6 +65,7 @@ const TYPEFACE: Typeface = Typeface {
 };
 
 /// A note in small muted text that wraps, with a command's flags in the mono face.
+#[cfg_attr(not(feature = "mining"), allow(dead_code))]
 pub fn note(ui: &mut Ui, palette: &Palette, text: &str) -> egui::Response {
     let job = chainv4_ui::widgets::flagged(ui, text, egui::TextStyle::Small, palette.muted);
 

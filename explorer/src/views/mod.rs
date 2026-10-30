@@ -3,7 +3,7 @@
 //! view of any JSON.
 
 use {
-    crate::api::{Api, Ask},
+    crate::api::{Api, Ask, Failure},
     crate::format,
     crate::model::{Argument, TxView},
     crate::store::Store,
@@ -538,16 +538,25 @@ pub fn dot(ui: &mut Ui, color: Color32) -> egui::Response {
     widgets::dot(ui, color)
 }
 
-/// What to show while something loads, or why it did not.
-pub fn waiting(ui: &mut Ui, ctx: &Ctx, ask: &Ask) {
+/// What to show while something loads, or why it did not, with a way to ask again.
+pub fn waiting(ui: &mut Ui, ctx: &mut Ctx, ask: &Ask) {
     let palette = ctx.palette();
 
     match ctx.store.failures.get(ask) {
         Some(failure) if failure.status == 404 => {
             ui.label(RichText::new(format!("Not found: {}", failure.message)).color(palette.muted));
         }
+        // The node itself not answering: said at the top of every page, with Retry.
+        Some(failure) if failure.is_trouble() && ctx.store.failures.get(&Ask::Status).is_some_and(Failure::is_trouble) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Waiting for the node to answer…").color(palette.muted));
+            });
+        }
         Some(failure) => {
-            ui.colored_label(palette.bad, &failure.message);
+            if widgets::retry(ui, &palette, &failure.sentence(), ctx.api.asking(ask)) {
+                ctx.api.retry(ask.clone());
+            }
         }
         None => {
             ui.horizontal(|ui| {

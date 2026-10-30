@@ -325,7 +325,7 @@ impl Shared {
 }
 
 /// The work message before its nonce: the domain and the block id, 44 bytes.
-#[cfg_attr(not(feature = "gpu-mining"), allow(dead_code))]
+#[cfg_attr(not(all(feature = "gpu-mining", not(target_arch = "wasm32"))), allow(dead_code))]
 pub(super) fn work_prefix(id: &Hash) -> [u8; 44] {
     let mut prefix = [0; 44];
     prefix[..WORK_DOMAIN.len()].copy_from_slice(WORK_DOMAIN);
@@ -335,7 +335,7 @@ pub(super) fn work_prefix(id: &Hash) -> [u8; 44] {
 }
 
 /// The most a work hash may be at a difficulty, as 32 big-endian bytes.
-#[cfg_attr(not(feature = "gpu-mining"), allow(dead_code))]
+#[cfg_attr(not(all(feature = "gpu-mining", not(target_arch = "wasm32"))), allow(dead_code))]
 pub(super) fn work_target(difficulty: u128) -> [u8; 32] {
     (u256::MAX / u256::from(difficulty.max(1))).to_be_bytes()
 }

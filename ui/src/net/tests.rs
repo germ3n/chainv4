@@ -259,3 +259,72 @@ fn streams_come_through_the_proxy_head_first_then_their_body() {
 
     assert_eq!(body, b"event: block\ndata: 1\n\n");
 }
+
+/// A node, or a proxy, that takes every connection and then says nothing, ever.
+fn silent() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+
+        for stream in listener.incoming().flatten() {
+            held.push(stream);
+        }
+    });
+
+    address
+}
+
+/// What a client with short limits, for a test, answers from an address that never does.
+fn given_up(proxy: Option<Proxy>, url: &str) -> (String, Duration) {
+    let client = Client::limited(proxy, 1, 1).unwrap();
+    let started = std::time::Instant::now();
+    let answer = fetched(&client, url, None).unwrap_err();
+
+    (answer, started.elapsed())
+}
+
+#[test]
+fn a_node_that_never_answers_ends_in_a_failure_that_says_so() {
+    let (why, took) = given_up(None, &format!("http://{}/status", silent()));
+
+    assert_eq!(why, "no answer within 1 seconds");
+    assert!(took < Duration::from_secs(5), "it gave up when it said: {took:?}");
+    assert!(Failure { status: 0, message: why }.sentence().starts_with("The node did not answer in time"));
+}
+
+#[test]
+fn a_socks_proxy_that_never_answers_ends_in_a_failure_too() {
+    let proxy = Proxy::parse(&format!("socks5h://{}", silent())).unwrap();
+    let (why, took) = given_up(Some(proxy), "http://node.onion/status");
+
+    assert!(why.contains("through the proxy at") && why.contains("no answer within"), "{why}");
+    assert!(took < Duration::from_secs(5), "{took:?}");
+}
+
+#[test]
+fn an_http_proxy_that_never_answers_ends_in_a_failure_too() {
+    let proxy = Proxy::parse(&format!("http://{}", silent())).unwrap();
+    let (why, took) = given_up(Some(proxy), "http://node.example/status");
+
+    assert!(why.contains("through the proxy at") && why.contains("no answer within"), "{why}");
+    assert!(took < Duration::from_secs(5), "{took:?}");
+}
+
+#[test]
+fn a_proxy_that_connects_to_a_node_that_never_answers_ends_in_a_failure_too() {
+    let (proxy, _) = socks5(silent());
+    let proxy = Proxy::parse(&format!("socks5h://{proxy}")).unwrap();
+    let (why, took) = given_up(Some(proxy), "http://node.onion/status");
+
+    assert!(why.contains("no answer within"), "{why}");
+    assert!(took < Duration::from_secs(5), "{took:?}");
+}
+
+#[test]
+fn a_request_through_a_proxy_is_given_longer_as_tor_takes_a_while_to_build_a_circuit() {
+    assert!(limit(true) > limit(false));
+    assert_eq!(Client::direct().whole, limit(false));
+    assert_eq!(Client::for_setting(Proxy::ORBOT).unwrap().whole, limit(true));
+}

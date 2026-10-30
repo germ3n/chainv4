@@ -308,11 +308,20 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, send: &mut 
 
             return;
         }
+        // The way to the node in trouble: said at the top of every page, with Retry.
+        Some(Err(failure)) if failure.is_trouble() => {
+            theme::card(ui, &palette, |ui| super::waiting(ui, &palette, "Waiting for the node to answer…"));
+
+            return;
+        }
+        // An answer that says something of what was asked: said here, as nowhere else says it.
         Some(Err(failure)) => {
-            let message = failure.message.clone();
-            theme::card(ui, &palette, |ui| {
-                ui.colored_label(palette.bad, format!("The node did not answer: {message}"));
-            });
+            let sentence = failure.sentence();
+            let asking = ctx.node.asking(&Ask::Governance);
+
+            if theme::retry(ui, &palette, &sentence, asking) {
+                ctx.node.retry(Ask::Governance);
+            }
 
             return;
         }

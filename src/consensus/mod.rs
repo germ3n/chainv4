@@ -17,7 +17,8 @@ use {
 };
 
 pub mod dev;
-#[cfg(feature = "gpu-mining")]
+// On the GPU through this crate natively; in the browser a wallet drives WebGPU itself.
+#[cfg(all(feature = "gpu-mining", not(target_arch = "wasm32")))]
 pub mod gpu;
 pub mod pow;
 pub mod rates;
@@ -29,7 +30,7 @@ pub use pow::{Miner, PowConfig, ProofOfWork, Rig, meets, work_hash};
 pub use rates::{ClaimTree, DeviceReport, Meter, MinerStanding, MiningReport, PoolBlock, PoolReport, PoolSettled, WorkerReport};
 pub use rotating::{Rotating, RotatingProducer};
 pub use staked::{Schedule, Staked, StakedProducer};
-#[cfg(feature = "gpu-mining")]
+#[cfg(all(feature = "gpu-mining", not(target_arch = "wasm32")))]
 pub use gpu::GpuMiner;
 
 /// Separates block seals from anything else a key might sign.

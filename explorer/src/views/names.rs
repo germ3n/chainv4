@@ -95,11 +95,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState) {
                     }
                     false => {
                         if widgets::quiet(ui, &look.palette, "More").clicked() {
-                            ctx.api.ask(ask.clone());
+                            ctx.api.retry(ask.clone());
                         }
 
-                        if let Some(failure) = store.failures.get(&ask) {
-                            ui.colored_label(look.palette.bad, &failure.message);
+                        if let Some(failure) = store.failures.get(&ask)
+                            && widgets::retry(ui, &look.palette, &failure.sentence(), ctx.api.asking(&ask))
+                        {
+                            ctx.api.retry(ask.clone());
                         }
                     }
                 }

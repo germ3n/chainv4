@@ -11,6 +11,8 @@ pub mod dapp;
 #[cfg(feature = "swap")]
 pub mod evm;
 mod governance;
+#[cfg(feature = "mining")]
+mod mine;
 mod mining;
 mod more;
 pub(crate) mod multisig;
@@ -50,7 +52,8 @@ pub enum Page {
     Receive,
     Activity,
     Names,
-    /// Mining from this device, alone or in a pool, and claiming what a pool owes the addresses.
+    /// Claiming what a pool owes the addresses and, in a build that mines, mining from this device,
+    /// alone or in a pool.
     Mining,
     /// Native multisigs: making one, and taking their transactions round the members.
     Multisig,
@@ -79,6 +82,10 @@ pub enum Page {
     More,
 }
 
+/// What the Mining page is called: in a build with no mining in it, as the app stores' are, nothing
+/// suggests any, in a listing or a screenshot.
+pub const MINING_NAME: &str = if cfg!(feature = "mining") { "Mining" } else { "Pool earnings" };
+
 /// The pages the sidebar leads to, in its order. An offline signer follows no chain, so it has
 /// nothing to show of one: its pages are for signing.
 pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
@@ -91,7 +98,7 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             #[cfg(feature = "nft")]
             (Page::Nfts, "NFTs"),
             (Page::Names, "Names"),
-            (Page::Mining, "Mining"),
+            (Page::Mining, MINING_NAME),
             (Page::Multisig, "Multisig"),
             (Page::Governance, "Governance"),
             (Page::Contracts, "Contracts"),
@@ -264,6 +271,15 @@ pub struct States {
 }
 
 impl States {
+    /// For a reload of a page: what it keeps of when it last asked, so it asks again.
+    pub fn reload(&mut self, page: Page) {
+        match page {
+            Page::Activity => self.activity.reload(),
+            Page::Mining => self.mining.reload(),
+            _ => {}
+        }
+    }
+
     /// Closes a view a page opened, such as a swap, for the back gesture: false when the page has
     /// none open.
     pub fn back(&mut self, page: Page) -> bool {
@@ -363,7 +379,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
 
 pub use chainv4_ui::widgets::beside;
 
-/// The light client's state, in the sidebar: how far it follows, and how much of that is final.
+/// The light client's state, in the sidebar: how far it follows, how much of that is final, and
+/// where it took up the chain, if it fast-resumed.
 pub fn light_status(ui: &mut Ui, palette: &Palette, chain: &Chain) {
     let (color, text, detail) = following(palette, chain);
     let response = ui
@@ -373,6 +390,15 @@ pub fn light_status(ui: &mut Ui, palette: &Palette, chain: &Chain) {
         })
         .response;
     response.on_hover_text(detail);
+
+    if let Some(said) = fast_resumed(chain) {
+        ui.add(egui::Label::new(RichText::new(said).small().color(palette.warn)).wrap());
+    }
+}
+
+/// Says where the client took up the chain, if it fast-resumed: on a node's word, so never silently.
+pub fn fast_resumed(chain: &Chain) -> Option<String> {
+    chain.fast_resumed.map(|resumed| format!("Fast-resumed at block {}, on this node's word", format::thousands(&resumed.at.to_string())))
 }
 
 /// The light client's state as a dot alone, where there is no room for words: they show on a tap.
@@ -393,6 +419,10 @@ fn following(palette: &Palette, chain: &Chain) -> (egui::Color32, String, String
     };
     let detail = match (&chain.trouble, chain.following()) {
         (Some(why), _) => why.clone(),
+        (None, Some((tip, final_height))) if chain.fast_resumed.is_some() => format!(
+            "{}. Every header since, to height {tip}, checked by consensus, and finality to height {final_height} by the voters it proved. Below that block, it rests on this node, which Settings trusts for fast resume.",
+            fast_resumed(chain).unwrap_or_default()
+        ),
         (None, Some((tip, final_height))) => format!(
             "Every header to height {tip} checked by consensus, and finality to height {final_height} by the voters it proved. Nothing the node says is shown unless it checks against them."
         ),

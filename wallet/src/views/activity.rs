@@ -1,15 +1,22 @@
 //! What happened to the account, at all its addresses together, newest first: what it sent, from
 //! this wallet's own log until proven, and every transaction the node's address index says touched
 //! one of them, each shown once the light client proved who sent what and what it did. Only the
-//! chain the wallet follows now: a new chain of the same keys has its own heights. Filtered by
-//! kind, searched, and sorted either way.
+//! chain the wallet follows now: a new chain of the same keys has its own heights. Searched, sorted
+//! either way, and filtered: by kind, direction, counterparty, token and date on the node, so all
+//! the history counts and not only what is loaded, each line still proven before it says so. The
+//! node only says where to look, under a filter as without one. An older node ignores filters and
+//! says nothing of them, which is how it is told apart: then what it listed is tested here, once
+//! proven, and the page says only what was read was searched.
 
 use {
     super::Ctx,
     crate::app::Sent,
     crate::format,
     crate::history::Checked,
+    crate::node::Ask,
     crate::theme,
+    chainv4::structs::address::Address,
+    chainv4_ui::filters::{self, Answered, COIN, Facts, Offered, TxFilter},
     egui::{RichText, Ui},
     std::collections::HashSet,
 };
@@ -21,13 +28,18 @@ pub const UNSEEN_AFTER: u64 = 10 * 60 * 1_000;
 /// The widest a line's amount and pill get.
 const AMOUNT_WIDTH: f32 = 150.0;
 
-/// Which lines show.
+/// How often the node is asked again for what passes the filters, in milliseconds: each ask has it
+/// read its index, and what is there changes only as blocks come.
+const FILTERED_EVERY: u64 = 15_000;
+/// How often what it listed is asked to be proven, in milliseconds, and how many at a time.
+const PROVEN_EVERY: u64 = 6_000;
+const PROVEN_AT_ONCE: usize = 40;
+
+/// Which lines show, of what the filters leave.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
     #[default]
     All,
-    Sent,
-    Received,
     /// Not proven yet.
     Waiting,
     Failed,
@@ -38,6 +50,70 @@ pub struct ActivityState {
     kind: Kind,
     search: String,
     oldest_first: bool,
+    filter: TxFilter,
+    /// The filter's query last asked of the node, and when; and when its lines were last asked to
+    /// be proven.
+    asked: Option<(String, u64)>,
+    proved: u64,
+}
+
+impl ActivityState {
+    /// For a reload: asks again for what the filters leave.
+    pub fn reload(&mut self) {
+        self.asked = None;
+        self.proved = 0;
+    }
+}
+
+/// How the node's answers under the filters stand, over all the account's addresses.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Listed {
+    /// Each transaction it listed, with where it landed.
+    mentions: Vec<(String, u64)>,
+    /// Where each address's next page starts.
+    next: Vec<(String, String)>,
+    answered: Answered,
+    /// Whether every address has been answered for.
+    read: bool,
+}
+
+/// What the node said under this query, for these addresses, put together.
+fn listed(chain: &crate::chain::Chain, addresses: &[String], query: &str) -> Listed {
+    let mut listed = Listed { read: true, answered: Answered { filtered: true, ..Answered::default() }, ..Listed::default() };
+
+    for address in addresses {
+        let Some(page) = chain.filtered.get(&(address.clone(), query.to_string())) else {
+            listed.read = false;
+            continue;
+        };
+
+        listed.mentions.extend(page.mentions.iter().map(|mention| (mention.tx.clone(), mention.height)));
+        listed.next.extend(page.next.clone().map(|next| (address.clone(), next)));
+        listed.answered.filtered &= page.answered.filtered;
+        listed.answered.limited |= page.answered.limited;
+        listed.answered.scanned += page.answered.scanned;
+    }
+
+    listed
+}
+
+/// What can be said of a proven transaction, for testing it here against the filters.
+fn facts<'a>(checked: &'a Checked, addresses: &[String]) -> Facts<'a> {
+    let moved = checked.moves.iter();
+
+    Facts {
+        kinds: checked.kinds.iter().map(String::as_str).collect(),
+        sent: addresses.contains(&checked.sender),
+        took_part: checked.for_account(addresses).any(|(incoming, _)| incoming),
+        parties: std::iter::once(checked.sender.as_str()).chain(moved.clone().flat_map(|moved| [moved.from.as_deref(), moved.to.as_deref()]).flatten()).collect(),
+        tokens: moved.map(|moved| moved.token.as_deref().unwrap_or(COIN)).collect(),
+        time: (checked.time > 0).then_some(checked.time),
+    }
+}
+
+/// The tokens the filter offers by name: those the chain lists, as proven.
+fn offered_tokens(ctx: &Ctx) -> Vec<(String, String)> {
+    ctx.chain.listed.iter().filter(|token| ctx.chain.tokens.contains_key(*token)).map(|token| (token.clone(), ctx.token(token).0)).collect()
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
@@ -55,18 +131,29 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
         ui.add_space(10.0);
     }
 
-    ui.horizontal_wrapped(|ui| {
-        for (kind, name) in [(Kind::All, "All"), (Kind::Sent, "Sent"), (Kind::Received, "Received"), (Kind::Waiting, "Waiting"), (Kind::Failed, "Failed")] {
-            ui.selectable_value(&mut state.kind, kind, name);
-        }
-    });
+    let tokens = offered_tokens(ctx);
+    let problem = state.filter.problem(|text| text.parse::<Address>().is_ok());
+    filters::controls(ui, &palette, &mut state.filter, Offered { coin: &ctx.coin.symbol, tokens: &tokens }, problem.as_deref());
+    ui.add_space(2.0);
+    theme::segmented(ui, &palette, &mut state.kind, &[(Kind::All, "All"), (Kind::Waiting, "Waiting"), (Kind::Failed, "Failed")]);
     theme::segmented(ui, &palette, &mut state.oldest_first, &[(false, "Newest first"), (true, "Oldest first")]);
     ui.add(egui::TextEdit::singleline(&mut state.search).hint_text("Search: a transaction, an address, a contract, what it did").desired_width(f32::INFINITY));
     ui.add_space(8.0);
 
     let addresses = ctx.addresses();
-    let mut entries = entries(ctx, &addresses);
-    entries.retain(|entry| entry.is(state.kind, &addresses) && entry.matches(&state.search));
+    // What was typed wrong is said above, and the list stays as it was until it reads.
+    let query = (state.filter.on() > 0 && problem.is_none()).then(|| state.filter.query(ctx.now));
+    let under = query.as_ref().map(|query| listed(ctx.chain, &addresses, query));
+
+    if let Some(query) = &query {
+        ask_filtered(ctx, state, &addresses, query, under.as_ref());
+    }
+
+    let mut entries = match &under {
+        None => entries(ctx, &addresses),
+        Some(listed) => entries_under(ctx, &addresses, listed, &state.filter),
+    };
+    entries.retain(|entry| entry.is(state.kind) && entry.matches(&state.search));
 
     if state.oldest_first {
         entries.reverse();
@@ -74,9 +161,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
 
     theme::card(ui, &palette, |ui| {
         if entries.is_empty() {
-            ui.label(RichText::new(match (state.kind, state.search.trim().is_empty(), ctx.chain.has_followed()) {
-                (Kind::All, true, true) => "Nothing yet.",
-                (Kind::All, true, false) => "Looking once the light client catches up…",
+            let looking = under.as_ref().is_some_and(|listed| !listed.read);
+            ui.label(RichText::new(match (state.kind, state.search.trim().is_empty(), ctx.chain.has_followed(), query.is_some()) {
+                _ if looking => "Asking the node…",
+                (_, _, _, true) => "Nothing matches.",
+                (Kind::All, true, true, _) => "Nothing yet.",
+                (Kind::All, true, false, _) => "Looking once the light client catches up…",
                 _ => "Nothing matches.",
             }).color(palette.muted));
 
@@ -91,6 +181,104 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
             line(ui, ctx, &addresses, entry);
         }
     });
+
+    if let (Some(query), Some(listed)) = (&query, &under) {
+        further(ui, ctx, query, listed, state.filter.on(), entries.len());
+    }
+}
+
+/// Asks the node what passes the filters, and for proof of what it listed: the filter's own page,
+/// so nothing goes on while it is not looked at.
+fn ask_filtered(ctx: &mut Ctx, state: &mut ActivityState, addresses: &[String], query: &str, under: Option<&Listed>) {
+    if state.asked.as_ref().is_none_or(|(asked, at)| asked != query || ctx.now.saturating_sub(*at) >= FILTERED_EVERY) {
+        state.asked = Some((query.to_string(), ctx.now));
+
+        for address in addresses {
+            ctx.node.ask(Ask::Filtered { address: address.clone(), query: query.to_string(), cursor: None });
+        }
+    }
+
+    if !ctx.chain.caught_up() || ctx.now.saturating_sub(state.proved) < PROVEN_EVERY {
+        return;
+    }
+
+    state.proved = ctx.now;
+    let unsettled = under.into_iter().flat_map(|listed| &listed.mentions).filter(|(tx, _)| !ctx.settings.checked.get(tx).is_some_and(|checked| checked.final_));
+
+    for (tx, _) in unsettled.take(PROVEN_AT_ONCE) {
+        ctx.node.ask(Ask::Receipt(tx.clone()));
+    }
+}
+
+/// What the filters leave. On a node that filtered, what it listed, each line waiting for its proof
+/// as any other. On an older one, which listed everything, or one with no index to list from, what
+/// passes the same test here among what is proven: a line not proven yet cannot be said to pass.
+fn entries_under<'a>(ctx: &'a Ctx, addresses: &[String], listed: &Listed, filter: &TxFilter) -> Vec<Entry<'a>> {
+    let mut seen = HashSet::new();
+    let mut found = Vec::new();
+
+    if listed.answered.filtered && ctx.chain.indexes_addresses != Some(false) {
+        for (tx, height) in &listed.mentions {
+            if seen.insert(tx.clone()) {
+                found.push(Entry { tx: tx.clone(), checked: ctx.settings.checked.get(tx), sent: None, height: Some(*height) });
+            }
+        }
+    } else {
+        let genesis = ctx.chain.genesis.map(|genesis| genesis.to_string());
+        let here = |kept: &str| genesis.as_deref().is_none_or(|genesis| kept == genesis);
+
+        for (tx, checked) in ctx.settings.checked.iter().filter(|(_, checked)| here(&checked.genesis)) {
+            let ours = addresses.contains(&checked.sender) || checked.for_account(addresses).next().is_some() || listed.mentions.iter().any(|(listed, _)| listed == tx);
+
+            if ours && filter.passes(&facts(checked, addresses), ctx.now) && seen.insert(tx.clone()) {
+                found.push(Entry { tx: tx.clone(), checked: Some(checked), sent: None, height: None });
+            }
+        }
+    }
+
+    found.sort_by_key(|entry| std::cmp::Reverse(entry.order()));
+
+    found
+}
+
+/// Below a filtered list: what it came to, why the node's word is only where to look, and asking
+/// the node to go on from where it stopped, whether its page was full or it reached its bound.
+fn further(ui: &mut Ui, ctx: &mut Ctx, query: &str, listed: &Listed, on: usize, shown: usize) {
+    let palette = *ctx.palette;
+    let older = !listed.answered.filtered && listed.read;
+    let waiting = listed.mentions.iter().filter(|(tx, _)| !ctx.settings.checked.contains_key(tx)).count();
+    let mut note = filters::said(shown, !listed.next.is_empty(), &listed.answered, on).unwrap_or_default();
+
+    if older && waiting > 0 {
+        note.push_str(&format!(" {waiting} still being proven before they can be tested."));
+    }
+
+    if !older {
+        note.push_str(" The node chooses what it lists: each line is proven before it says so, but a node could leave one out.");
+    }
+
+    ui.add(egui::Label::new(RichText::new(note).small().color(palette.muted)).wrap());
+
+    if !listed.next.is_empty() {
+        let asks: Vec<Ask> = listed.next.iter().map(|(address, next)| Ask::Filtered { address: address.clone(), query: query.to_string(), cursor: Some(next.clone()) }).collect();
+
+        ui.horizontal(|ui| {
+            match asks.iter().any(|ask| ctx.node.asking(ask)) {
+                true => {
+                    ui.spinner();
+                }
+                false => {
+                    if theme::quiet(ui, &palette, "Look further back").clicked() {
+                        for ask in asks {
+                            ctx.node.retry(ask);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    theme::section_gap(ui);
 }
 
 /// One line of the history.
@@ -103,17 +291,13 @@ struct Entry<'a> {
 }
 
 impl Entry<'_> {
-    /// Whether it is of a kind: sent by the account, bringing it something, not proven yet, or
-    /// failed.
-    fn is(&self, kind: Kind, addresses: &[String]) -> bool {
+    /// Whether it is of a kind: not proven yet, or failed.
+    fn is(&self, kind: Kind) -> bool {
         match (kind, self.checked) {
             (Kind::All, _) => true,
-            (Kind::Sent, Some(checked)) => addresses.contains(&checked.sender),
-            (Kind::Sent, None) => self.sent.is_some(),
-            (Kind::Received, Some(checked)) => checked.for_account(addresses).any(|(incoming, _)| incoming),
             (Kind::Waiting, checked) => checked.is_none(),
             (Kind::Failed, Some(checked)) => !checked.done,
-            (Kind::Received | Kind::Failed, None) => false,
+            (Kind::Failed, None) => false,
         }
     }
 
@@ -403,6 +587,7 @@ mod tests {
             sender: sender.to_string(),
             nonce: 0,
             action: "Called swap on contract:0x6c1d".to_string(),
+            kinds: vec!["contract_call".to_string()],
             moves: vec![Move { token: None, from: Some(sender.to_string()), to: Some(to.to_string()), amount: "40".to_string() }],
             fee: "0".to_string(),
             events: vec!["Swap contract:0x0000 contract:0x5119".to_string()],
@@ -413,7 +598,6 @@ mod tests {
 
     #[test]
     fn lines_are_told_apart_by_kind_and_found_by_what_they_say() {
-        let me = vec!["ed25519:0xaa".to_string()];
         let (out, back, failed) = (checked("ed25519:0xaa", "contract:0x6c1d", true), checked("ed25519:0xbb", "ed25519:0xaa", true), checked("ed25519:0xaa", "ed25519:0xcc", false));
         fn line(checked: &Checked) -> Entry<'_> {
             Entry { tx: "0x01ab".to_string(), checked: Some(checked), sent: None, height: Some(7) }
@@ -421,11 +605,9 @@ mod tests {
 
         let waiting = Entry { tx: "0x02cd".to_string(), checked: None, sent: None, height: None };
 
-        assert!(line(&out).is(Kind::Sent, &me) && !line(&out).is(Kind::Received, &me));
-        assert!(line(&back).is(Kind::Received, &me) && !line(&back).is(Kind::Sent, &me));
-        assert!(line(&failed).is(Kind::Failed, &me) && !line(&out).is(Kind::Failed, &me));
-        assert!(waiting.is(Kind::Waiting, &me) && !line(&out).is(Kind::Waiting, &me));
-        assert!([Kind::Sent, Kind::Received, Kind::Waiting, Kind::Failed, Kind::All].iter().any(|kind| line(&out).is(*kind, &me)));
+        assert!(line(&failed).is(Kind::Failed) && !line(&out).is(Kind::Failed));
+        assert!(waiting.is(Kind::Waiting) && !line(&out).is(Kind::Waiting));
+        assert!(line(&out).is(Kind::All) && line(&back).is(Kind::All));
 
         // By its id, a party, what it did, or an event, its case aside.
         for search in ["01AB", "0x6c1d", "called swap", "5119", ""] {
@@ -433,5 +615,72 @@ mod tests {
         }
 
         assert!(!line(&out).matches("0xdead"));
+    }
+
+    #[test]
+    fn what_was_proven_is_tested_against_the_filters_by_what_it_says() {
+        use filters::{Direction, When};
+
+        let me = vec!["ed25519:0xaa".to_string()];
+        let (out, back) = (checked("ed25519:0xaa", "ed25519:0xbb", true), checked("ed25519:0xbb", "ed25519:0xaa", true));
+        let passes = |checked: &Checked, filter: TxFilter| filter.passes(&facts(checked, &me), 0);
+
+        assert!(passes(&out, TxFilter { direction: Some(Direction::Out), ..TxFilter::default() }));
+        assert!(!passes(&back, TxFilter { direction: Some(Direction::Out), ..TxFilter::default() }));
+        assert!(passes(&back, TxFilter { direction: Some(Direction::In), ..TxFilter::default() }));
+        assert!(!passes(&out, TxFilter { direction: Some(Direction::In), ..TxFilter::default() }));
+        assert!(passes(&out, TxFilter { kind: Some("contract_call".to_string()), ..TxFilter::default() }));
+        assert!(!passes(&out, TxFilter { kind: Some("transfer".to_string()), ..TxFilter::default() }));
+        assert!(passes(&out, TxFilter { counterparty: "ed25519:0xbb".to_string(), ..TxFilter::default() }));
+        assert!(!passes(&out, TxFilter { counterparty: "ed25519:0xcc".to_string(), ..TxFilter::default() }));
+        assert!(passes(&out, TxFilter { token: Some(COIN.to_string()), ..TxFilter::default() }));
+        assert!(!passes(&out, TxFilter { token: Some("contract:0x01".to_string()), ..TxFilter::default() }));
+        assert!(passes(&out, TxFilter { when: When::Day, ..TxFilter::default() }), "a time not known passes");
+
+        // Kept from before it said its kind: it passes, as nothing says otherwise.
+        let older = Checked { kinds: Vec::new(), ..out };
+
+        assert!(passes(&older, TxFilter { kind: Some("transfer".to_string()), ..TxFilter::default() }));
+    }
+
+    #[test]
+    fn the_nodes_answers_are_put_together_over_an_accounts_addresses() {
+        use crate::chain::{Chain, FilteredTxs, Mention};
+
+        let (first, second) = ("ed25519:0xaa".to_string(), "secp256k1:0xbb".to_string());
+        let addresses = [first.clone(), second.clone()];
+        let mention = |tx: &str, height: u64| Mention { tx: tx.to_string(), height };
+        let mut chain = Chain::default();
+        let nothing = listed(&chain, &addresses, "kind=transfer");
+
+        assert!(!nothing.read, "nothing yet");
+
+        chain.filtered.insert((first.clone(), "kind=transfer".to_string()), FilteredTxs {
+            mentions: vec![mention("0x01", 9)],
+            next: Some("0xff".to_string()),
+            answered: Answered { filtered: true, scanned: 1_000, limited: true },
+            pages: 1,
+        });
+
+        assert!(!listed(&chain, &addresses, "kind=transfer").read, "one address of two");
+
+        chain.filtered.insert((second.clone(), "kind=transfer".to_string()), FilteredTxs {
+            mentions: vec![mention("0x02", 7)],
+            next: None,
+            answered: Answered { filtered: true, scanned: 4, limited: false },
+            pages: 1,
+        });
+        let both = listed(&chain, &addresses, "kind=transfer");
+
+        assert!(both.read);
+        assert_eq!(both.mentions, [("0x01".to_string(), 9), ("0x02".to_string(), 7)]);
+        assert_eq!(both.next, [(first.clone(), "0xff".to_string())]);
+        assert_eq!(both.answered, Answered { filtered: true, scanned: 1_004, limited: true });
+        assert!(!listed(&chain, &addresses, "kind=deploy").read, "another filter's answers are not these");
+
+        // One of them an answer from an older node: the list is not filtered.
+        chain.filtered.get_mut(&(second, "kind=transfer".to_string())).unwrap().answered.filtered = false;
+
+        assert!(!listed(&chain, &addresses, "kind=transfer").answered.filtered);
     }
 }

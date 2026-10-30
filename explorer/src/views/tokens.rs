@@ -60,7 +60,7 @@ pub fn first_page<'a>(ctx: &'a mut Ctx, symbol: &str) -> Option<&'a TokenList> {
         .get(symbol)
         .is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH);
 
-    if stale && !ctx.store.failures.contains_key(&first) {
+    if stale {
         ctx.api.ask(first);
     }
 

@@ -13,6 +13,8 @@ use {
     crate::vault::{Book, Sealed, StoredAccount, Vault},
     crate::views::{self, Ctx, Page},
     chainv4::structs::address::Address,
+    chainv4_ui::asks::{PageAsks, Reload},
+    chainv4_ui::pull::Pull,
     egui::{RichText, Ui},
     serde::{Deserialize, Serialize},
     std::collections::HashMap,
@@ -120,6 +122,10 @@ pub struct Settings {
     pub checkpoints: HashMap<String, String>,
     /// What the light client checked, by genesis id, encoded, to resume from.
     pub light: HashMap<String, String>,
+    /// The nodes trusted to resume the light client from their own finalized checkpoint, rather
+    /// than have it walk every header since it last ran: off for any node until switched on, as a
+    /// dishonest one could show a false history from that point.
+    pub fast_resume: HashMap<String, bool>,
     /// The wallets on this device, each its accounts sealed with a password of its own.
     pub wallets: Vec<WalletEntry>,
     /// The wallet last opened, by its place among them.
@@ -236,6 +242,7 @@ impl Default for Settings {
             pinned: HashMap::new(),
             checkpoints: HashMap::new(),
             light: HashMap::new(),
+            fast_resume: HashMap::new(),
             wallets: Vec::new(),
             wallet: 0,
             sent: Vec::new(),
@@ -398,6 +405,11 @@ pub struct Wallet {
     /// Whether the unlock screen shows the node and proxy to change.
     reaching: bool,
     views: views::States,
+    /// What each page asked, for a reload to ask again.
+    asked_by_page: PageAsks<Page, Ask>,
+    /// A reload under way, and the finger on the page that may start one.
+    reloading: Reload<Ask>,
+    pull: Pull,
 }
 
 impl Wallet {
@@ -453,6 +465,9 @@ impl Wallet {
             lock_room: (0.0, 0.0),
             reaching: false,
             views: views::States::default(),
+            asked_by_page: PageAsks::default(),
+            reloading: Reload::default(),
+            pull: Pull::default(),
         }
     }
 
@@ -466,7 +481,27 @@ impl Wallet {
         self.name = None;
         self.asked_status = None;
         self.asked_history = 0.0;
+        self.asked_by_page = PageAsks::default();
+        self.reloading = Reload::default();
         self.updates.connected();
+    }
+
+    /// Asks the node again for what the page shows and its status, past whatever failed before:
+    /// what Reload does, and pulling a page down. What shows stays until the answers come.
+    fn reload(&mut self, time: f64) {
+        self.asked_status = None;
+        self.asked_history = f64::NEG_INFINITY;
+        self.chain.reload();
+        self.views.reload(self.page);
+        let mut asks = vec![Ask::Status];
+        asks.extend_from_slice(self.asked_by_page.of(&self.page));
+        asks.extend(self.node.trouble().map(|(_, failed)| failed).unwrap_or_default());
+
+        for ask in &asks {
+            self.node.retry(ask.clone());
+        }
+
+        self.reloading.start(asks, time);
     }
 
     /// Seals the wallet's accounts again after a change.
@@ -518,6 +553,7 @@ impl Wallet {
                 pinned: &mut self.settings.pinned,
                 checkpoints: &self.settings.checkpoints,
                 saved: &self.settings.light,
+                fast_resume: self.settings.fast_resume.get(&node).copied().unwrap_or(false),
             };
 
             if self.chain.take(&ask, &result, trust, now, time) {
@@ -860,6 +896,16 @@ impl Wallet {
                     if theme::quiet(ui, &palette, "Lock").clicked() {
                         app.lock();
                     }
+
+                    // A signer asks nothing of any node, and a finger pulls the page down instead.
+                    if app.settings.role() != Role::Signer && !chainv4_ui::layout::touch(ui.ctx()) {
+                        let node = &app.node;
+                        let working = app.reloading.working(ui.input(|input| input.time), |ask| node.asking(ask));
+
+                        if theme::reload(ui, &palette, working) {
+                            app.reload(ui.input(|input| input.time));
+                        }
+                    }
                 });
                 ui.add_space(10.0);
 
@@ -1080,8 +1126,11 @@ impl eframe::App for Wallet {
         }
 
         // The miner is kept on every page: its payout, a phone's charger and its being in front.
-        let addresses = self.current().map(Holder::addresses).unwrap_or_default();
-        self.views.mining.keep_mining(ui.ctx(), &self.settings, &addresses, now);
+        #[cfg(feature = "mining")]
+        {
+            let addresses = self.current().map(Holder::addresses).unwrap_or_default();
+            self.views.mining.keep_mining(ui.ctx(), &self.settings, &addresses, now);
+        }
 
         self.go_back(ui);
         let narrow = ui.available_width() < NARROW;
@@ -1123,9 +1172,16 @@ impl eframe::App for Wallet {
         // Beside the sidebar, the page keeps off its edge and the screen's: a window too narrow for
         // the whole column, as a phone on its side, would otherwise run the cards into both.
         let margin = if narrow { egui::Margin::symmetric(14, 0) } else { egui::Margin::symmetric(20, 0) };
+        // A signer asks nothing of any node, so there is nothing to reload or retry.
+        let online = self.settings.role() != Role::Signer;
+        let node = &self.node;
+        let working = self.reloading.working(time, |ask| node.asking(ask));
+        let trouble = self.node.trouble().filter(|_| online);
+        let mut reload = false;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(palette.paper).inner_margin(margin)).show(ui, |ui| {
             sized(ui);
 
+            let area = ui.available_rect_before_wrap();
             let scroll = egui::ScrollArea::vertical().id_salt("page").auto_shrink(false);
 
             self.scrolled.show(ui, scroll, |ui| {
@@ -1136,6 +1192,22 @@ impl eframe::App for Wallet {
                     ui.add_space(if narrow { 18.0 } else { 34.0 });
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         self.updates.banner(ui, &palette, &self.settings, &self.wake);
+
+                        // A narrow window a mouse is on has no sidebar to reload from, nor a finger
+                        // to pull with.
+                        if online && narrow && !chainv4_ui::layout::touch(ui.ctx()) {
+                            reload |= theme::reload(ui, &palette, working);
+                        }
+
+                        // What failed or took too long, whichever page asked: said on every page,
+                        // as a wallet's pages all rest on the node.
+                        if let Some((failure, failed)) = &trouble {
+                            let asking = failed.iter().all(|ask| self.node.asking(ask));
+
+                            reload |= theme::retry(ui, &palette, &failure.sentence(), asking);
+                            theme::section_gap(ui);
+                        }
+
                         let mut ctx = Ctx {
                             palette: &palette,
                             chain: &self.chain,
@@ -1165,7 +1237,17 @@ impl eframe::App for Wallet {
                     ui.add_space(40.0);
                 });
             });
+
+            reload |= online && self.pull.show(ui, &palette, area, self.scrolled.offset(), self.scrolled.drag(), working);
         });
+
+        if reload {
+            self.reload(time);
+        }
+
+        // What the page asked, for a reload to ask again.
+        let sent = self.node.sent();
+        self.asked_by_page.note(&self.page, sent.into_iter().filter(Ask::reloads));
 
         // A wallet removed is locked away without sealing it again: its place is another's now.
         if leave {
@@ -1436,6 +1518,41 @@ mod tests {
 
         assert_eq!((kept.mine_solo, kept.mine_gpu, kept.mine_gpus, kept.mine_threads), (true, true, Some(1), 6));
         assert_eq!((kept.mine_port.as_str(), kept.mine_token.as_str(), kept.mine_on_battery), ("pool.example:4002", "the port's secret", true));
+    }
+
+    #[test]
+    fn settings_of_a_build_that_mines_and_one_that_does_not_read_each_other() {
+        // A build's settings are the same whichever features it has: what one that mines keeps
+        // goes through one that does not untouched, and back.
+        let set = Settings { mine_gpu: true, mine_threads: 6, mine_port: "pool.example:4002".to_string(), mine_on_battery: true, pool_node: "http://pool".to_string(), ..Settings::default() };
+        let kept = serde_json::to_value(&set).unwrap();
+
+        for name in ["mine_solo", "mine_gpu", "mine_gpus", "mine_threads", "mine_port", "mine_token", "mine_on_battery", "pool_node", "pool_claims"] {
+            assert!(kept.get(name).is_some(), "{name} is kept in every build");
+        }
+
+        let read = serde_json::from_value::<Settings>(kept.clone()).unwrap();
+
+        assert_eq!((read.mine_gpu, read.mine_threads, read.mine_port.as_str(), read.mine_on_battery), (true, 6, "pool.example:4002", true));
+        assert_eq!(serde_json::to_value(&read).unwrap(), kept, "and written back as they came");
+
+        // From a build with fields this one does not know, as settings that outlive a downgrade.
+        let later = json!({ "node": "http://node", "mine_threads": 3, "something_from_later": { "a": 1 } });
+        assert_eq!(serde_json::from_value::<Settings>(later).unwrap().mine_threads, 3);
+    }
+
+    #[test]
+    fn settings_from_before_fast_resume_trust_no_node_for_it() {
+        let old = serde_json::from_value::<Settings>(json!({ "node": "http://node" })).unwrap();
+
+        assert!(old.fast_resume.is_empty(), "off, for every node");
+
+        let mut set = Settings::default();
+        set.fast_resume.insert("http://mine".to_string(), true);
+        let kept = serde_json::from_value::<Settings>(serde_json::to_value(&set).unwrap()).unwrap();
+
+        assert_eq!(kept.fast_resume.get("http://mine"), Some(&true));
+        assert_eq!(kept.fast_resume.get("http://other"), None, "per node");
     }
 
     #[test]

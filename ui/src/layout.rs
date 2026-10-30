@@ -122,12 +122,20 @@ pub struct Scrolled {
     wanted: Option<(f32, Option<f64>)>,
     /// Where the page is now, as it was last shown.
     now: f32,
+    /// What its scroll area drags by, as it was last shown.
+    drag: Option<egui::Id>,
 }
 
 impl Scrolled {
     /// Where the page shown is scrolled to now: what to keep with it as it is left.
     pub fn offset(&self) -> f32 {
         self.now
+    }
+
+    /// What the page's scroll area takes a drag as, to tell it from a drag something on the page
+    /// took: egui's own name for the part of a scroll area that scrolls by dragging.
+    pub fn drag(&self) -> Option<egui::Id> {
+        self.drag
     }
 
     /// The page shown next is one returned to, scrolled to where it was.
@@ -151,6 +159,7 @@ impl Scrolled {
         // A finger or a wheel on the page is the person's say: it stops there.
         let moved = ui.input(|input| input.pointer.any_down() || input.smooth_scroll_delta.y != 0.0);
         self.now = shown.state.clamped_offset().y;
+        self.drag = Some(shown.id.with("area"));
 
         if let Some((offset, since)) = &mut self.wanted {
             let since = *since.get_or_insert(time);

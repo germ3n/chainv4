@@ -143,6 +143,9 @@ pub fn touched(signed: &SignedTx, status: &TxStatus, payments: &[Payment]) -> BT
     touched
 }
 
+/// How many index entries a scan reads at a time, between looking through what it read.
+const SCAN_CHUNK: usize = 256;
+
 /// Where a transaction sits under an address, newest first: the height and place inverted.
 fn key(address: &Address, height: u64, index: u32) -> Vec<u8> {
     [&address_key(address)[..], &(u64::MAX - height).to_be_bytes(), &(u32::MAX - index).to_be_bytes()].concat()
@@ -192,4 +195,97 @@ pub fn stored_address_txs(db: &dyn Committed, address: &Address, cursor: Option<
         .collect::<Result<_, _>>()?;
 
     Ok((txs, next))
+}
+
+#[document(
+    summary = "What a scan of the address index came to: what it kept, how far it got, and whether it stopped at its bound rather than at a full page or the end.",
+    category = "Chain",
+    see_also = "scan_address_txs",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddressScan {
+    #[document(summary = "The transactions kept, newest first.")]
+    pub found: Vec<IndexedTx>,
+    #[document(summary = "Where to go on from, as a cursor; None once there is nothing further.")]
+    pub next: Option<Vec<u8>>,
+    #[document(summary = "How many entries it looked at.")]
+    pub scanned: usize,
+    #[document(summary = "Whether it stopped at its bound with the page not full: more may match from next on.")]
+    pub limited: bool,
+}
+
+#[document(
+    summary = "The cursor that starts a listing of an address's transactions at a height, the newest of that height first: what a seek to a height is, as the index is by height.",
+    category = "Chain",
+    see_also = "scan_address_txs",
+)]
+pub fn address_txs_from(address: &Address, height: u64) -> Vec<u8> {
+    key(address, height, u32::MAX)
+}
+
+#[document(
+    summary = "A page of the transactions touching an address that pass a test, newest first, read straight from a database, looking at no more than a bound of entries: a page may hold fewer than its limit, with a cursor that goes on from where it stopped.",
+    category = "Chain",
+    params = {
+        db = "The database.",
+        address = "Whose.",
+        start = "Where to start, as a cursor; None for the newest.",
+        lowest = "The lowest height to look at: the scan ends there.",
+        limit = "The most transactions to keep.",
+        bound = "The most entries to look at.",
+        keep = "Whether to keep an entry.",
+    },
+    returns = "What it kept, where to go on from, and how far it looked.",
+    see_also = "stored_address_txs, AddressScan",
+)]
+pub fn scan_address_txs(
+    db: &dyn Committed,
+    address: &Address,
+    start: Option<&[u8]>,
+    lowest: u64,
+    limit: usize,
+    bound: usize,
+    keep: &mut dyn FnMut(&IndexedTx) -> Result<bool, DbError>,
+) -> Result<AddressScan, DbError> {
+    let prefix = address_key(address);
+    let mut at = start.map_or_else(|| prefix.clone(), <[u8]>::to_vec);
+    let mut found = Vec::new();
+    let mut scanned = 0;
+
+    loop {
+        // One more than it looks through, which says whether there is more, and where it is.
+        let wanted = (bound - scanned).min(SCAN_CHUNK) + 1;
+        let mut chunk: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(wanted);
+        db.scan(Column::Addresses, &prefix, &at, &mut |key, value| {
+            chunk.push((key.to_vec(), value.to_vec()));
+
+            chunk.len() < wanted
+        })?;
+        let beyond = (chunk.len() == wanted).then(|| chunk.pop().map(|(key, _)| key)).flatten();
+
+        for (key, value) in chunk {
+            if found.len() == limit {
+                return Ok(AddressScan { found, next: Some(key), scanned, limited: false });
+            }
+
+            let indexed: IndexedTx = wincode::deserialize(&value).map_err(|err| DbError::Corrupt(format!("an indexed transaction would not decode: {err}")))?;
+
+            if indexed.height < lowest {
+                return Ok(AddressScan { found, next: None, scanned, limited: false });
+            }
+
+            scanned += 1;
+
+            if keep(&indexed)? {
+                found.push(indexed);
+            }
+        }
+
+        match beyond {
+            None => return Ok(AddressScan { found, next: None, scanned, limited: false }),
+            Some(key) if found.len() == limit => return Ok(AddressScan { found, next: Some(key), scanned, limited: false }),
+            Some(key) if scanned >= bound => return Ok(AddressScan { found, next: Some(key), scanned, limited: true }),
+            Some(key) => at = key,
+        }
+    }
 }

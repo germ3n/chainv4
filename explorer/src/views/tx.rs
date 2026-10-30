@@ -16,7 +16,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, id: &str, state: &mut hops::HopState) {
     let store = ctx.store;
     let receipt = store.receipts.get(id);
 
-    if receipt.is_none() && !store.failures.contains_key(&Ask::Tx(id.to_string())) {
+    if receipt.is_none() {
         ctx.api.ask(Ask::Tx(id.to_string()));
     }
 

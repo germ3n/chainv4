@@ -309,10 +309,16 @@ fn online(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, node: String) {
             None => super::waiting(ui, &palette, "Starting…"),
         }
 
+        if let Some(said) = super::fast_resumed(ctx.chain) {
+            ui.add(egui::Label::new(RichText::new(said).color(palette.warn)).wrap());
+        }
+
         let saved = ctx.chain.genesis.and_then(|genesis| ctx.settings.light.get(&genesis.to_string())).map_or(0, String::len) / 2;
         super::row(ui, &palette, "Saved", |ui| {
             ui.label(format!("{} KiB, to resume from", format::thousands(&(saved / 1024).to_string())));
         });
+        ui.add_space(6.0);
+        fast_resume(ui, ctx, &node);
         ui.add_space(6.0);
 
         if theme::quiet(ui, &palette, "Start over").on_hover_text("Forget what it checked and follow the chain again from genesis").clicked() {
@@ -323,6 +329,37 @@ fn online(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, node: String) {
             *ctx.connect = Some(node.clone());
         }
     });
+}
+
+/// The switch that trusts this node for fast resume: off until someone turns it on, and saying
+/// plainly what that gives up. Turned on, it takes effect at once, as the wallet connects afresh.
+fn fast_resume(ui: &mut Ui, ctx: &mut Ctx, node: &str) {
+    let palette = *ctx.palette;
+    let mut on = ctx.settings.fast_resume.get(node).copied().unwrap_or(false);
+
+    if ui.checkbox(&mut on, "Trust this node for fast resume").changed() {
+        match on {
+            true => {
+                ctx.settings.fast_resume.insert(node.to_string(), true);
+                *ctx.connect = Some(node.to_string());
+            }
+            false => {
+                ctx.settings.fast_resume.remove(node);
+            }
+        }
+    }
+
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!(
+                "Opening the wallet skips the headers since it last ran, once it is more than {} epochs behind: it takes up the chain at this node's latest finalized checkpoint, and checks every header and voter's signature from there on, against the genesis it trusts. What you give up: a dishonest node could show a false history from that point, as nothing ties that checkpoint to what the wallet checked before. Turn it on only for a node you run or trust. Off, it walks every header.",
+                crate::chain::FEW_EPOCHS
+            ))
+            .small()
+            .color(palette.muted),
+        )
+        .wrap(),
+    );
 }
 
 /// The upgrade that stops the node: the node's own chainv4 is older than the upgrade's least, so

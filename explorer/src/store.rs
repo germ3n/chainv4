@@ -4,6 +4,7 @@
 
 use {
     crate::api::{Ask, EventQuery, Failure},
+    chainv4_ui::filters::Answered,
     crate::model::{
         Account, BlockDetail, Checkpoint, Contract, Decision, Forks, FoundEvent, FoundTx, GovernanceView, GovernanceWeight, IndexPage,
         ListedName, Mempool, MultisigView, NamesPage, NodeView, Page, Peer, PeerChange, Placed, Receipt, RegisteredCollection, RegisteredToken,
@@ -104,6 +105,10 @@ pub struct Listing<T> {
     pub catching_up_to: Option<u64>,
     /// When the newest page last came, in milliseconds since the Unix epoch.
     pub refreshed: u64,
+    /// What the node said of the page read last, under filters.
+    pub answered: Answered,
+    /// How many pages were read.
+    pages: u32,
 }
 
 pub type EventList = Listing<FoundEvent>;
@@ -116,6 +121,8 @@ impl<T> Default for Listing<T> {
             indexed_from: 0,
             catching_up_to: None,
             refreshed: 0,
+            answered: Answered::default(),
+            pages: 0,
         }
     }
 }
@@ -128,6 +135,15 @@ impl<T: Placed> Listing<T> {
         let further_back = !older && self.next.is_none() && page.indexed_from < self.indexed_from;
         self.indexed_from = page.indexed_from;
         self.catching_up_to = page.catching_up_to;
+        let answered = Answered { filtered: page.applied.is_some(), scanned: page.scanned, limited: page.limited };
+
+        // The page that said how far the listing has got: the older one that went on, or the
+        // newest while that is all that was read.
+        if older || self.answered == Answered::default() || self.pages <= 1 {
+            self.answered = answered;
+        }
+
+        self.pages += u32::from(older || self.pages == 0);
 
         if older {
             let last = self.items.last().map(Placed::place);
@@ -210,8 +226,9 @@ pub struct Store {
     pub calls: HashMap<Ask, Value>,
     /// Indexed events, by what was asked.
     pub events: HashMap<EventQuery, EventList>,
-    /// The transactions the address index found touching an address, by the address.
-    pub account_txs: HashMap<String, Listing<FoundTx>>,
+    /// The transactions the address index found touching an address, by the address and the
+    /// filter's query, "" for none.
+    pub account_txs: HashMap<(String, String), Listing<FoundTx>>,
     /// Names looked up, by what was searched for.
     pub names: HashMap<String, crate::model::NameView>,
     /// The names each address owns.
@@ -645,6 +662,9 @@ pub(crate) mod tests {
             next: next.map(str::to_string),
             indexed_from: 1,
             catching_up_to: None,
+            applied: None,
+            scanned: 0,
+            limited: false,
         }
     }
 
@@ -699,6 +719,31 @@ pub(crate) mod tests {
 
         assert_eq!(names(&list), ["a.dev", "aa.dev", "c.dev"], "once more were read, the list stays, each name once");
         assert_eq!((list.next, list.pages), (None, 2));
+    }
+
+    #[test]
+    fn a_listing_says_what_the_node_said_of_how_far_it_got() {
+        let page = |applied: Option<Vec<String>>, limited: bool| EventsPage {
+            applied,
+            limited,
+            scanned: if limited { 1_000 } else { 3 },
+            ..events_page(vec![found(5, 0)], Some("c1"))
+        };
+        let mut list = EventList::default();
+
+        // An older node's answer says nothing of filters: it was not filtered.
+        list.take(page(None, false), false, 10);
+        assert_eq!(list.answered, Answered { filtered: false, scanned: 3, limited: false });
+
+        let mut list = EventList::default();
+        list.take(page(Some(vec!["kind".to_string()]), true), false, 10);
+        assert_eq!(list.answered, Answered { filtered: true, scanned: 1_000, limited: true });
+
+        // The newest page again changes nothing once an older one went on from it.
+        list.take(EventsPage { limited: false, ..page(Some(vec!["kind".to_string()]), false) }, true, 20);
+        assert!(!list.answered.limited);
+        list.take(page(Some(vec!["kind".to_string()]), true), false, 30);
+        assert!(!list.answered.limited);
     }
 
     #[test]

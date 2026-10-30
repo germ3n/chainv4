@@ -4,11 +4,15 @@
 //! wallet shows as proven, the light client checked.
 
 use {
+    chainv4_ui::asks::Asks,
     chainv4_ui::net::{Answer, Client},
     serde_json::Value,
     std::collections::HashSet,
     std::sync::{Arc, Mutex},
+    web_time::Instant,
 };
+
+pub use chainv4_ui::net::Failure;
 
 /// Something to ask the node, which also names what came back.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -22,6 +26,9 @@ pub enum Ask {
     Ancestors { from: u64, count: u32 },
     /// Finality from an epoch on, many epochs to an answer.
     Finality(u64),
+    /// How far the node has finalized, by GET /status: what says whether a client fast-resuming
+    /// from this node is far enough behind to.
+    Finalized,
     /// What the light client starts from at a checkpoint: the one named, or the node's finalized
     /// one, for a node met for the first time.
     Checkpoint(Option<String>),
@@ -34,6 +41,10 @@ pub enum Ask {
     /// The transactions touching an address, newest first, from the node's address index: where
     /// the history looks.
     History(String),
+    /// The transactions touching an address that pass a filter, as the filter's query says, from
+    /// the newest or from where a cursor says: where the history looks once filters are on. An
+    /// older node ignores the filter, and lists everything.
+    Filtered { address: String, query: String, cursor: Option<String> },
     /// Events that mention an address, newest first: where it looks on a node with no address
     /// index but an event index.
     Events(String),
@@ -74,6 +85,7 @@ pub enum Ask {
     /// The node's mining port, as GET /mining says it: where it is reached, the protocol it speaks,
     /// and whether it takes a pool's workers, workers mining alone, and anyone. What the Mining
     /// page mines by; the node checks every nonce it is sent, so nothing rests on it.
+    #[cfg_attr(not(feature = "mining"), allow(dead_code))]
     Mining,
     /// What an address has claimed from a pool, and the root the pool's block at a height
     /// committed to, as the wallet's own node says: what a claim kept on this device is checked
@@ -99,7 +111,7 @@ pub enum Ask {
 impl Ask {
     fn path(&self) -> String {
         match self {
-            Ask::Status => "/status".to_string(),
+            Ask::Status | Ask::Finalized => "/status".to_string(),
             Ask::Light => "/light".to_string(),
             Ask::Headers { from, count } | Ask::Ancestors { from, count } => format!("/headers?from={from}&count={count}"),
             Ask::Finality(from) => format!("/light/finality?from={from}"),
@@ -110,6 +122,11 @@ impl Ask {
             Ask::Tokens => "/tokens?limit=100".to_string(),
             Ask::Collections => "/collections?limit=500".to_string(),
             Ask::History(address) => format!("/accounts/{address}/txs?limit=50"),
+            Ask::Filtered { address, query, cursor } => {
+                let cursor = cursor.as_ref().map_or_else(String::new, |cursor| format!("&cursor={cursor}"));
+
+                format!("/accounts/{address}/txs?limit=50&{query}{cursor}")
+            }
             Ask::Events(address) => format!("/events?address={address}&limit=50"),
             Ask::Named { contract, name } => format!("/events?contract={contract}&name={name}&limit=200"),
             Ask::Names => "/names".to_string(),
@@ -140,14 +157,16 @@ impl Ask {
             _ => None,
         }
     }
-}
 
-/// Why a request got no answer it could use.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Failure {
-    /// The HTTP status, or 0 when the node could not be reached.
-    pub status: u16,
-    pub message: String,
+    /// Whether a reload of the page that asked this asks it again: what a page reads, not what the
+    /// light client follows and proves by, which it asks again itself, nor anything sent.
+    pub fn reloads(&self) -> bool {
+        self.body().is_none()
+            && !matches!(
+                self,
+                Ask::Status | Ask::Light | Ask::Headers { .. } | Ask::Ancestors { .. } | Ask::Finality(_) | Ask::Finalized | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::Receipt(_) | Ask::Release
+            )
+    }
 }
 
 /// Where answers wait for the app, each with what it answers.
@@ -162,7 +181,10 @@ pub struct Node {
     /// sends nothing rather than go direct.
     client: Result<Client, String>,
     inbox: Inbox,
-    asking: HashSet<Ask>,
+    /// What is out, what failed, and when to ask it again.
+    asks: Asks<Ask>,
+    /// What the seconds these go by are counted from.
+    began: Instant,
     wake: egui::Context,
     fetched: Fetched,
     fetching: HashSet<String>,
@@ -174,7 +196,8 @@ impl Node {
             base: base.trim().trim_end_matches('/').to_string(),
             client,
             inbox: Arc::default(),
-            asking: HashSet::new(),
+            asks: Asks::default(),
+            began: Instant::now(),
             wake,
             fetched: Arc::default(),
             fetching: HashSet::new(),
@@ -220,12 +243,55 @@ impl Node {
         fetched
     }
 
-    /// Asks, unless the same question is out already.
-    pub fn ask(&mut self, ask: Ask) {
-        if !self.asking.insert(ask.clone()) {
-            return;
-        }
+    /// The seconds since this node was connected to.
+    fn now(&self) -> f64 {
+        self.began.elapsed().as_secs_f64()
+    }
 
+    /// Asks, unless the same question is out already, or failed a moment ago and has not been held
+    /// back long enough. Something sent, rather than read, goes whenever it is pressed for.
+    pub fn ask(&mut self, ask: Ask) {
+        let now = self.now();
+        let sending = match ask.body() {
+            Some(_) => self.asks.force(&ask),
+            None => self.asks.begin(&ask, now),
+        };
+
+        if sending {
+            self.send(ask);
+        }
+    }
+
+    /// Asks again now, whatever failed before, and lets go of why it did: what Retry and Reload do.
+    pub fn retry(&mut self, ask: Ask) {
+        self.asks.forget(&ask);
+
+        if self.asks.force(&ask) {
+            self.send(ask);
+        }
+    }
+
+    /// What went wrong on the way to the node, for what is still wanted, for a page to say: the
+    /// failure that has gone on longest, and everything that failed so, to ask again.
+    pub fn trouble(&self) -> Option<(Failure, Vec<Ask>)> {
+        // What was sent says for itself on its own page, and is never sent again unasked.
+        let troubles: Vec<_> = self.asks.troubles(self.now()).into_iter().filter(|(ask, _)| ask.body().is_none()).collect();
+        let failure = troubles.first()?.1.clone();
+
+        Some((failure, troubles.into_iter().map(|(ask, _)| ask.clone()).collect()))
+    }
+
+    /// Whether this is out.
+    pub fn asking(&self, ask: &Ask) -> bool {
+        self.asks.asking(ask)
+    }
+
+    /// What went out since last time.
+    pub fn sent(&mut self) -> Vec<Ask> {
+        self.asks.take_sent()
+    }
+
+    fn send(&mut self, ask: Ask) {
         let url = format!("{}{}", self.base, ask.path());
         let body = ask.body().map(|body| body.as_bytes().to_vec());
         let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
@@ -248,9 +314,10 @@ impl Node {
     /// Everything that arrived since last time.
     pub fn answers(&mut self) -> Vec<(Ask, Result<Value, Failure>)> {
         let answers = std::mem::take(&mut *self.inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let now = self.now();
 
-        for (ask, _) in &answers {
-            self.asking.remove(ask);
+        for (ask, result) in &answers {
+            self.asks.ended(ask, result.as_ref().err(), now);
         }
 
         answers
@@ -288,6 +355,66 @@ mod tests {
             status: 0,
             message: "the proxy set does not work: not a port: 0".to_string(),
         }))]);
-        assert!(!node.asking.contains(&Ask::Status), "answered, so asked again later");
+        assert!(!node.asking(&Ask::Status), "answered, so asked again later");
+    }
+
+    /// A node with no way out, whose every request fails at once and says so.
+    fn unreachable() -> Node {
+        Node::new("http://127.0.0.1:1", Err("not a port: 0".to_string()), egui::Context::default())
+    }
+
+    #[test]
+    fn what_failed_is_held_back_for_a_moment_and_retry_clears_it_and_asks_at_once() {
+        let mut node = unreachable();
+
+        node.ask(Ask::Tokens);
+        assert_eq!(node.answers().len(), 1);
+
+        let (failure, failed) = node.trouble().expect("the way to the node is in trouble");
+        assert!(failure.sentence().starts_with("Could not reach the node"));
+        assert_eq!(failed, [Ask::Tokens]);
+
+        // The page goes on asking, as pages do each frame: nothing goes out for now.
+        node.ask(Ask::Tokens);
+        assert_eq!(node.answers().len(), 0, "held back");
+        assert!(!node.asking(&Ask::Tokens));
+        assert_eq!(node.sent(), [Ask::Tokens], "the first ask alone went out");
+
+        // Retry goes past the hold, and clears what failed until it comes back.
+        node.retry(Ask::Tokens);
+        assert_eq!(node.sent(), [Ask::Tokens]);
+        assert_eq!(node.answers().len(), 1);
+        assert!(node.trouble().is_some(), "and failed again");
+    }
+
+    #[test]
+    fn something_sent_goes_whenever_it_is_pressed_for_failed_or_not() {
+        let mut node = unreachable();
+        let submit = Ask::Submit("{}".to_string());
+
+        node.ask(submit.clone());
+        assert_eq!(node.answers().len(), 1);
+        node.ask(submit);
+        assert_eq!(node.answers().len(), 1, "no hold on what someone sends");
+        assert!(node.trouble().is_none(), "nor is it what a page offers to ask again");
+    }
+
+    #[test]
+    fn a_reload_asks_again_what_a_page_reads_and_leaves_the_light_client_its_own() {
+        assert!(Ask::Governance.reloads() && Ask::Pool("a".to_string()).reloads());
+        assert!(Ask::Filtered { address: "a".to_string(), query: "kind=transfer".to_string(), cursor: None }.reloads());
+        assert!(!Ask::Status.reloads(), "always asked again by itself");
+        assert!(!Ask::Headers { from: 0, count: 1 }.reloads());
+        assert!(!Ask::Receipt("0x01".to_string()).reloads());
+        assert!(!Ask::Submit("{}".to_string()).reloads(), "nothing sent is sent again");
+    }
+
+    #[test]
+    fn a_filter_goes_on_the_listing_s_path() {
+        let ask = |cursor: Option<&str>| Ask::Filtered { address: "ed25519:0x01".to_string(), query: "kind=transfer&direction=in".to_string(), cursor: cursor.map(str::to_string) };
+
+        assert_eq!(ask(None).path(), "/accounts/ed25519:0x01/txs?limit=50&kind=transfer&direction=in");
+        assert_eq!(ask(Some("0xff")).path(), "/accounts/ed25519:0x01/txs?limit=50&kind=transfer&direction=in&cursor=0xff");
+        assert_eq!(Ask::Finalized.path(), "/status");
     }
 }

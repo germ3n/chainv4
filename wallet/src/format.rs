@@ -166,6 +166,7 @@ pub fn compact(raw: &str, decimals: u8, places: usize) -> String {
 }
 
 /// A hashrate, in the unit that keeps it short: 950 H/s, 205.8 MH/s, 1.25 TH/s.
+#[cfg_attr(not(feature = "mining"), allow(dead_code))]
 pub fn hashrate(rate: f64) -> String {
     let units = ["H/s", "kH/s", "MH/s", "GH/s", "TH/s", "PH/s", "EH/s"];
     let mut scaled = rate.max(0.0);

@@ -12,7 +12,10 @@ pub const PAGES: &[(Page, &str, &str)] = &[
     #[cfg(feature = "nft")]
     (Page::Nfts, "NFTs", "What this account holds of collections"),
     (Page::Names, "Names", "Register and manage names like alice.dev"),
-    (Page::Mining, "Mining", "Mine here, and claim what a pool owes you"),
+    #[cfg(feature = "mining")]
+    (Page::Mining, super::MINING_NAME, "Mine here, and claim what a pool owes you"),
+    #[cfg(not(feature = "mining"))]
+    (Page::Mining, super::MINING_NAME, "Claim what a pool owes you"),
     (Page::Multisig, "Multisig", "Accounts that take several signatures to spend"),
     (Page::Governance, "Governance", "The chain's settings, and changes to approve"),
     (Page::Contracts, "Contracts", "Keep, call and deploy contracts"),

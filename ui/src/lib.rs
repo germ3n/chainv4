@@ -6,16 +6,20 @@
 //! through a Java activity of its own, and on iOS, through UIKit and AVFoundation; and biometrics,
 //! which keep a secret behind a fingerprint, a face, Touch ID, Face ID or a passkey; and, on a
 //! phone, whether it is on its charger. And finding a ballot among many, as both Governance pages
-//! do.
+//! do; what became of what was asked of a node, and asking it again; pulling a page down to reload
+//! it; and filtering an address's transactions.
 
+pub mod asks;
 pub mod ballots;
 pub mod biometric;
 #[cfg(feature = "camera")]
 pub mod camera;
 pub mod files;
+pub mod filters;
 pub mod layout;
 pub mod net;
 pub mod power;
+pub mod pull;
 pub mod secret;
 pub mod theme;
 pub mod widgets;

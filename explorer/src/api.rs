@@ -1,17 +1,21 @@
 //! Talking to a node's HTTP API, through the proxy set, if one is, and never around it. Every
 //! request runs in the background, on the desktop and in the browser alike; answers wait in an
 //! inbox the app empties each frame, and each one wakes the UI. The same question is never asked
-//! twice at once.
+//! twice at once, and what failed is held back for a moment before it is asked again, unless Retry
+//! or Reload asks for it now.
 
 use {
     crate::sse,
+    chainv4_ui::asks::Asks,
     chainv4_ui::net::{Answer, Client, Piece},
     serde_json::{Value, json},
-    std::collections::HashSet,
     std::ops::ControlFlow,
     std::sync::atomic::{AtomicBool, Ordering},
     std::sync::{Arc, Mutex},
+    web_time::Instant,
 };
+
+pub use chainv4_ui::net::Failure;
 
 /// How many tokens a page of the registry asks for.
 pub const TOKEN_PAGE: u64 = 100;
@@ -45,8 +49,9 @@ pub enum Ask {
     Evidence,
     /// A page of indexed events, from the newest or from where a cursor says.
     Events { query: EventQuery, cursor: Option<String> },
-    /// A page of the transactions touching an address, from the address index.
-    AccountTxs { address: String, cursor: Option<String> },
+    /// A page of the transactions touching an address, from the address index, that pass a filter,
+    /// as its query says, or every one for "". An older node ignores the filter.
+    AccountTxs { address: String, query: String, cursor: Option<String> },
     /// A page of the token registry: tokens whose symbol starts with this, or every one for "".
     Tokens { symbol: String, cursor: Option<String> },
     /// The collection registry, every NFT and multi-token collection, up to the node's most.
@@ -145,8 +150,13 @@ impl Ask {
 
                 path
             }
-            Ask::AccountTxs { address, cursor } => {
+            Ask::AccountTxs { address, query, cursor } => {
                 let mut path = format!("/accounts/{address}/txs?limit={TX_PAGE}");
+
+                if !query.is_empty() {
+                    path.push('&');
+                    path.push_str(query);
+                }
 
                 if let Some(cursor) = cursor {
                     path.push_str(&format!("&cursor={cursor}"));
@@ -191,6 +201,22 @@ impl Ask {
             Ask::Offer(body) | Ask::Submit(body) | Ask::Rpc(body) | Ask::Faucet(body) => Some(body.clone()),
             _ => None,
         }
+    }
+
+    /// Whether this reads, rather than sends: only what reads is asked again unasked.
+    pub fn reads(&self) -> bool {
+        self.body().is_none()
+    }
+
+    /// Whether a reload of the page that asked this asks it again: what a page reads, not what the
+    /// light client follows and proves by, which goes on by itself, nor anything sent, nor what
+    /// goes to another page as it is answered.
+    pub fn reloads(&self) -> bool {
+        self.body().is_none()
+            && !matches!(
+                self,
+                Ask::Status | Ask::Node | Ask::Release | Ask::Lookup(_) | Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. }
+            )
     }
 }
 
@@ -249,14 +275,6 @@ fn encode(text: &str) -> String {
         .collect()
 }
 
-/// Why a request got no answer it could use.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Failure {
-    /// The HTTP status, or 0 when the node could not be reached.
-    pub status: u16,
-    pub message: String,
-}
-
 /// What arrived from the node.
 #[derive(Debug)]
 pub enum Reply {
@@ -280,7 +298,12 @@ pub struct Api {
     /// sends nothing rather than go direct.
     client: Result<Client, String>,
     inbox: Arc<Mutex<Vec<Reply>>>,
-    asking: HashSet<Ask>,
+    /// What is out, what failed, and when to ask it again.
+    asks: Asks<Ask>,
+    /// What Retry or Reload asked again since the app last took it: why each failed goes.
+    retried: Vec<Ask>,
+    /// What the seconds these go by are counted from.
+    began: Instant,
     wake: egui::Context,
     /// Set to end the stream that is open.
     hang_up: Option<Arc<AtomicBool>>,
@@ -312,7 +335,9 @@ impl Api {
             base: base.trim_end_matches('/').to_string(),
             client,
             inbox: Arc::default(),
-            asking: HashSet::new(),
+            asks: Asks::default(),
+            retried: Vec::new(),
+            began: Instant::now(),
             wake,
             hang_up: None,
             report_token: None,
@@ -328,12 +353,46 @@ impl Api {
         self.report_token = token.map(str::trim).filter(|token| !token.is_empty() && carries_token(&self.base)).map(str::to_string);
     }
 
-    /// Asks, unless the same question is out already.
-    pub fn ask(&mut self, ask: Ask) {
-        if !self.asking.insert(ask.clone()) {
-            return;
-        }
+    /// The seconds since this node was connected to.
+    fn now(&self) -> f64 {
+        self.began.elapsed().as_secs_f64()
+    }
 
+    /// Asks, unless the same question is out already, or failed a moment ago and has not been held
+    /// back long enough. Something sent, rather than read, goes whenever it is pressed for.
+    pub fn ask(&mut self, ask: Ask) {
+        let now = self.now();
+        let sending = match ask.body() {
+            Some(_) => self.asks.force(&ask),
+            None => self.asks.begin(&ask, now),
+        };
+
+        if sending {
+            self.send(ask);
+        }
+    }
+
+    /// Asks again now, whatever failed before: what Retry and Reload do. Why it failed goes.
+    pub fn retry(&mut self, ask: Ask) {
+        self.asks.forget(&ask);
+        self.retried.push(ask.clone());
+
+        if self.asks.force(&ask) {
+            self.send(ask);
+        }
+    }
+
+    /// What Retry or Reload asked again since last time.
+    pub fn retried(&mut self) -> Vec<Ask> {
+        std::mem::take(&mut self.retried)
+    }
+
+    /// What went out since last time.
+    pub fn sent(&mut self) -> Vec<Ask> {
+        self.asks.take_sent()
+    }
+
+    fn send(&mut self, ask: Ask) {
         let url = format!("{}{}", self.base, ask.path());
         let body = ask.body().map(String::into_bytes);
         let token = self.report_token.clone().filter(|_| ask == Ask::Node);
@@ -356,16 +415,17 @@ impl Api {
 
     /// Whether this question is out.
     pub fn asking(&self, ask: &Ask) -> bool {
-        self.asking.contains(ask)
+        self.asks.asking(ask)
     }
 
     /// Everything that arrived since last time.
     pub fn replies(&mut self) -> Vec<Reply> {
         let replies = std::mem::take(&mut *lock(&self.inbox));
+        let now = self.now();
 
         for reply in &replies {
-            if let Reply::Answer { ask, .. } = reply {
-                self.asking.remove(ask);
+            if let Reply::Answer { ask, result } = reply {
+                self.asks.ended(ask, result.as_ref().err(), now);
             }
         }
 
@@ -508,17 +568,16 @@ mod tests {
 
     #[test]
     fn an_address_s_transactions_become_paths() {
-        let newest = Ask::AccountTxs {
+        let ask = |query: &str, cursor: Option<&str>| Ask::AccountTxs {
             address: "ed25519:0x01".to_string(),
-            cursor: None,
-        };
-        let older = Ask::AccountTxs {
-            address: "ed25519:0x01".to_string(),
-            cursor: Some("0x00ff".to_string()),
+            query: query.to_string(),
+            cursor: cursor.map(str::to_string),
         };
 
-        assert_eq!(newest.path(), "/accounts/ed25519:0x01/txs?limit=50");
-        assert_eq!(older.path(), "/accounts/ed25519:0x01/txs?limit=50&cursor=0x00ff");
+        assert_eq!(ask("", None).path(), "/accounts/ed25519:0x01/txs?limit=50");
+        assert_eq!(ask("", Some("0x00ff")).path(), "/accounts/ed25519:0x01/txs?limit=50&cursor=0x00ff");
+        assert_eq!(ask("kind=transfer&direction=in", None).path(), "/accounts/ed25519:0x01/txs?limit=50&kind=transfer&direction=in");
+        assert_eq!(ask("kind=transfer", Some("0x00ff")).path(), "/accounts/ed25519:0x01/txs?limit=50&kind=transfer&cursor=0x00ff");
     }
 
     #[test]
@@ -531,6 +590,43 @@ mod tests {
         assert!(matches!(&replies[0], Reply::Answer { ask: Ask::Status, result: Err(Failure { status: 0, message }) } if message == "the proxy set does not work: not a port: 0"));
         assert!(matches!(&replies[1], Reply::Stream(News::Closed { why, unsupported: false }) if why.starts_with("the proxy set does not work")));
         assert!(!api.asking(&Ask::Status), "answered, so asked again later");
+    }
+
+    #[test]
+    fn what_failed_is_held_back_for_a_moment_and_retry_clears_it_and_asks_at_once() {
+        let mut api = Api::new("http://127.0.0.1:1", Err("not a port: 0".to_string()), egui::Context::default());
+
+        api.ask(Ask::Mempool);
+        assert_eq!(api.replies().len(), 1);
+
+        // The page goes on asking, as pages do each frame: nothing goes out for now.
+        api.ask(Ask::Mempool);
+        assert_eq!(api.replies().len(), 0, "held back");
+        assert!(!api.asking(&Ask::Mempool), "never stuck as out");
+
+        // Something sent goes whenever it is pressed for.
+        api.ask(Ask::Submit("{}".to_string()));
+        assert_eq!(api.replies().len(), 1);
+        api.ask(Ask::Submit("{}".to_string()));
+        assert_eq!(api.replies().len(), 1, "no hold on what someone sends");
+        api.sent();
+
+        // Retry goes past the hold, asks at once, and says so for the failure to go.
+        api.retry(Ask::Mempool);
+        assert_eq!(api.sent(), [Ask::Mempool]);
+        assert_eq!(api.retried(), [Ask::Mempool]);
+        assert_eq!(api.retried(), []);
+        assert_eq!(api.replies().len(), 1);
+    }
+
+    #[test]
+    fn a_reload_asks_again_what_a_page_reads_and_nothing_sent() {
+        assert!(Ask::Tx("0x01".to_string()).reloads() && Ask::Governance.reloads());
+        assert!(Ask::AccountTxs { address: "a".to_string(), query: String::new(), cursor: None }.reloads());
+        assert!(!Ask::Status.reloads(), "always asked again by itself");
+        assert!(!Ask::Lookup("0x01".to_string()).reloads(), "it goes to another page");
+        assert!(!Ask::Headers { from: 0, count: 1 }.reloads(), "the light client's");
+        assert!(!Ask::Submit("{}".to_string()).reloads(), "nothing sent is sent again");
     }
 
     #[test]

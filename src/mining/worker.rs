@@ -568,9 +568,9 @@ fn mount(devices: &Devices, hash: HashType, found: mpsc::Sender<(Hash, u64)>) ->
 
             Ok(Rig::cpu(hash, *threads, found))
         }
-        #[cfg(feature = "gpu-mining")]
+        #[cfg(all(feature = "gpu-mining", not(target_arch = "wasm32")))]
         Devices::Gpu(which) => Rig::gpu(hash, which.as_deref(), found),
-        #[cfg(not(feature = "gpu-mining"))]
+        #[cfg(not(all(feature = "gpu-mining", not(target_arch = "wasm32"))))]
         Devices::Gpu(_) => {
             let _ = found;
 

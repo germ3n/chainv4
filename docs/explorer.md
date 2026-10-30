@@ -104,6 +104,18 @@ the stream:
 
 At most 20,000 main-chain blocks are kept; older ones are let go.
 
+**When a request fails:** every request has a time limit, 30 seconds, or 90 through a proxy, so one
+that never answers ends in a failure rather than a page that waits, through a proxy too. A page shows
+what went wrong in a sentence with a **Retry** button, the same widget as the wallet's, and goes on
+showing it until it is answered; while the node itself does not answer, every page says so at its top.
+A page goes on asking by itself, a little less often each time, up to every 30 seconds. Retry goes past
+that; what you sent is never sent again but by you.
+
+**Reload:** on a phone, pull a page down from its very top. With a mouse, **Reload** is in the header,
+or the top bar in a narrow window. Either asks again for what the page asked since it was first shown,
+and for the node's status, spins while it works, and leaves what shows until the answers come. The
+block map's drags pan it, so it has no pull: its header's button does it on a wide screen.
+
 ## The light client
 
 The explorer does not have to take the node's word for balances. It runs the library's
@@ -211,7 +223,7 @@ hour. An older node answers 404, and the explorer shows nothing.
 | Block map | Every loaded block by height. The main chain runs along the middle, with finalized blocks green. Side branches sit in lanes above and below, each block joined to its parent. The tip and the justified checkpoint are outlined. Brighter blocks hold more transactions. |
 | Block | The header, its roots included, seal and finality proofs, and every transaction with its status and fee. For a mining pool's block: what went to the pool's escrow and its percent of the reward and fees, the escrow, what the producer kept as the pool's fee, and the root its miners claim against, over how many miners. |
 | Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, what its contracts paid out, its events, its fields and its signature. A claim says whose mining pool earnings it claims and from which of the pool's blocks, its `earned` being the miner's lifetime total, not what it paid. A governance approval says what it changes, an upgrade as the nodes it stops: `an upgrade: nodes older than 0.2.0 stop at block 150,000`, and a rename as the new name: `Approves renaming the chain to chainv4 mainnet, for the name's change 5`, the change after the version of its kind it names. A withdrawal says the kind it takes its approval back from: `Withdraws its approval of the fees' change 3`. The approval that was the last one needed is `decided`, and names the chain's count and its kind's version, `change 5, the upgrade's version 2`, linking to Governance. |
-| Account | The balance and nonce, and the balance the light client proved, at the finalized block and the tip. For a contract: its deployer, engine, code size and functions, the storage layout its code declares, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, every transaction that touched them, with its type, parties, status and fee, and the events that mention them, token transfers and approvals in the token's units. Transactions need a node started with `--index-addresses`, events one started with `--index-events`. On a chain with names, the name the address goes by and the names it owns. |
+| Account | The balance and nonce, and the balance the light client proved, at the finalized block and the tip. For a contract: its deployer, engine, code size and functions, the storage layout its code declares, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, every transaction that touched them, with its type, parties, status and fee, narrowed by [filters](#an-accounts-transactions), and the events that mention them, token transfers and approvals in the token's units. Transactions need a node started with `--index-addresses`, events one started with `--index-events`. On a chain with names, the name the address goes by and the names it owns. |
 | EVM contract | An [EVM](evm.md) contract's account page: its deployer and code size, and with its ABI pasted, kept on this device per chain, its read functions, run with `eth_call`, and its logs and calls read by name, here and on its transactions' pages. |
 | Name | A [name](names.md), such as `alice.dev`: whether it is active, in its grace period or available, its owner, what it resolves to, when it expires and its grace ends, its text records, what a year of it costs, and for a subname, its name. |
 | Network | The node's roles, uptime, listening addresses and sync state, its chainv4 version and how it stands against the newest release (`chainv4 0.2.0 is out`, or `0.2.0 installed, restarting` once it put one in place), any [upgrade](updates.md) that stops older nodes, decided by governance or announced by a release, with the blocks left to it from the tip, its gossip backlog, and what it counted since it started. The chain's name, or that it gave none, and its bootnodes. When it mines: its hashrate over the last ten minutes, its own GPUs or threads, and a table of its workers, each with its address, when it connected, its hashrate, its devices and the seals it found; a pool's worker also with its payout address and the shares it sent. When it runs a pool: its fee, window and miners, and a link to the Mining pool page. A graph of its peers, and a table of them with what each gossiped, how much of that was dropped, and how far its chain got. |
@@ -428,6 +440,17 @@ contracts are tokens.
   and of any other token met, and lists those it holds some of.
 - **Decimals by hand:** a token's decimals can be set by hand on its page, for one that reports
   them wrongly or not at all. What is set is remembered per chain, by genesis id.
+
+## An account's transactions
+
+The **Filters** button over an account's transactions opens a choice of kind, direction, token,
+counterparty and when, says how many are on, and **Clear** turns them all off. They are the wallet's
+controls and go by the same [filters on the node](api.md#get-accountsaddresstxs), so all the history
+counts, not only what is loaded. **Look further back** asks for the next page, and goes on from where
+the node stopped at its bound of 1,000 entries a request, which it says when it reaches. An older node
+ignores filters, which its answer shows: then what passes the same test here shows, and the page says
+only what was read was searched. Its transactions as its node lists them are the node's word, as on
+any of its pages: their own pages prove them.
 
 ## Sending
 

@@ -237,6 +237,22 @@ every balance, token and transaction it shows, and saves the client between runs
 where it was. It starts at a checkpoint pasted in Settings, and the first time it meets a node
 with no genesis given, at the node's own finalized checkpoint.
 
+**Fast resume** skips the walk on a node you say you trust for it. Settings has a switch per node,
+**Trust this node for fast resume**, off by default. On, and with the saved client more than 8
+epochs behind the node's finalized checkpoint (`GET /status`), the wallet takes up the chain there,
+from `GET /light/checkpoint`, rather than walking the headers since:
+- **What still holds:** the genesis pinned at the node, and `from_checkpoint`'s every check. From
+  the checkpoint on, each header is checked by consensus and each justification by its voters'
+  signatures, as for any client. Older receipts still prove down the hash chain.
+- **What it gives up:** nothing ties that checkpoint to what the client checked before. A dishonest
+  node could show a false history from that point. So it is said wherever the client is: the sidebar
+  and Settings say **Fast-resumed at block N, on this node's word**.
+- **When it does not:** with the switch off; a few epochs behind, where walking costs a request or
+  two; under depth finality, where no voters' signatures check it from there on, and nothing signed
+  says which block is final, and on a chain with no finality; on a node that names no checkpoint or
+  has none to start from, an older one included, which walks on from what was saved; and when the
+  checkpoint is behind what the client proved final, or at odds with a block it proved final.
+
 ## In the explorer
 
 The explorer runs the same client against the node it talks to:
@@ -249,7 +265,8 @@ The explorer runs the same client against the node it talks to:
 
 - **It fetches every header from genesis, the first time.** Headers are small, but there are as
   many as blocks. The CLI and the explorer follow the chain afresh each time; the wallet saves the
-  client and resumes from the finalized block.
+  client and resumes from the finalized block, walking every header since, or on a node trusted for
+  fast resume, from that node's own checkpoint.
 - **Snapshot nodes serve the finality before their pivot** as their own light client checked it:
   each update proven against its block's state root and holding every epoch's voters it should.
   A node that synced from one that lacked them lacks them too.

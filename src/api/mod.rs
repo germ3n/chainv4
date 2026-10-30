@@ -5,7 +5,7 @@
 use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
-        DryRun, Rules, dry_run, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, VoteRewardSource, stored_address_txs, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        DryRun, Rules, dry_run, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, VoteRewardSource, scan_address_txs, address_txs_from, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
         stored_light_finality, stored_light_update, stored_state_at, stored_checkpoint_start, stored_split, StartProblem,
     },
@@ -52,6 +52,7 @@ use crate::chain::stored_decisions;
 
 #[cfg(feature = "faucet")]
 mod faucet;
+mod filters;
 mod json;
 mod mining;
 pub mod sharing;
@@ -1820,7 +1821,9 @@ async fn account_names(Shared(api): Shared<Api>, Path(address): Path<String>, Qu
 }
 
 /// The transactions touching an address, newest first, a page at a time: from the address index,
-/// for a node that keeps one. Each with what it did, as a block lists it.
+/// for a node that keeps one. Each with what it did, as a block lists it. Filters narrow it without
+/// changing what the index holds: each entry is read and tested, no more of them per request than
+/// MAX_TXS_SCANNED, so a page may come back short with a cursor that goes on from where it stopped.
 async fn account_txs(Shared(api): Shared<Api>, Path(address): Path<String>, Query(query): Query<HashMap<String, String>>) -> Answer {
     let db = api.db;
     let Some(index) = stored_index(&*db, IndexKind::Addresses)? else {
@@ -1832,10 +1835,16 @@ async fn account_txs(Shared(api): Shared<Api>, Path(address): Path<String>, Quer
         .get("cursor")
         .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
         .transpose()?;
-    let (found, next) = stored_address_txs(&*db, &address, cursor.as_deref(), limit)?;
-    let mut txs = Vec::with_capacity(found.len());
-
-    for indexed in &found {
+    let filter = filters::TxFilter::parse(&query)?;
+    let (lowest, highest) = filter.heights(&*db)?;
+    // A cursor from an earlier page is further on than where the filter's newest height starts.
+    let seek = highest.map(|height| address_txs_from(&address, height));
+    let start = match (cursor, seek) {
+        (Some(cursor), Some(seek)) => Some(cursor.max(seek)),
+        (cursor, seek) => cursor.or(seek),
+    };
+    let mut txs = Vec::new();
+    let scan = scan_address_txs(&*db, &address, start.as_deref(), lowest, limit, filters::MAX_TXS_SCANNED, &mut |indexed| {
         let block = stored_block(&*db, &indexed.block)?;
         let receipt = stored_receipt(&*db, &indexed.tx)?;
 
@@ -1843,18 +1852,27 @@ async fn account_txs(Shared(api): Shared<Api>, Path(address): Path<String>, Quer
         if let (Some(block), Some(receipt)) = (block, receipt)
             && receipt.block == indexed.block
             && let Some(signed) = block.txs.get(indexed.index as usize)
+            && filter.keeps(&address, signed, &receipt, block.header.timestamp)
         {
-            txs.push(json::indexed_tx(indexed, signed, &receipt, api.hash));
-        }
-    }
+            let mut listed = json::indexed_tx(indexed, signed, &receipt, api.hash);
+            listed["time"] = block.header.timestamp.into();
+            txs.push(listed);
 
+            return Ok(true);
+        }
+
+        Ok(false)
+    })?;
     let tip = tip(&*db)?.header.height;
 
     Ok(Json(json!({
         "txs": txs,
-        "next": next.map(|next| to_hex(&next)),
+        "next": scan.next.map(|next| to_hex(&next)),
         "indexed_from": index.from,
         "catching_up_to": (!index.caught_up(tip)).then(|| index.keep.lowest(tip)),
+        "applied": filter.applied(),
+        "scanned": scan.scanned,
+        "limited": scan.limited,
     })))
 }
 

@@ -251,6 +251,15 @@ pinned one. "Forget it" trusts whatever the node shows next, and starts over.
 
 See [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint).
 
+**Fast resume:** opening the wallet walks every header since it last ran. Settings → Light client →
+**Trust this node for fast resume**, per node and off by default, skips that once it is more than 8
+epochs behind: it takes up the chain at the node's latest finalized checkpoint, and checks every
+header and voter's signature from there on, against the genesis it pinned. What that gives up: a
+dishonest node could show a false history from that point. Settings says so by the switch, and the
+sidebar and Settings say **Fast-resumed at block N, on this node's word** when it did; on a phone the
+top bar's dot says it on a tap. Under depth finality, or with no checkpoint to be had, it walks, as
+with the switch off. See [In the wallet](light-client.md#in-the-wallet).
+
 **What the node is trusted with:** nothing proven. It does say:
 - which tokens exist, from the registry's first page (`GET /tokens`). Each listed token's entry,
   and each balance of it, is then proven;
@@ -280,9 +289,9 @@ holds of the coin and of each token.
 
 **Activity:** for each address of the account in use, the node's address index lists the
 transactions that touched it (`GET /accounts/{address}/txs`), and the page merges them, newest
-first, or oldest with the order turned round. **All**, **Sent**, **Received**, **Waiting** (not
-proven yet) and **Failed** filter it, and the search finds a line by its id, a party, a contract,
-what it did or its events. Only the chain the wallet follows now shows: each transaction kept
+first, or oldest with the order turned round. **All**, **Waiting** (not proven yet) and **Failed**
+narrow what shows, and the search finds a line by its id, a party, a contract, what it did or its
+events. Only the chain the wallet follows now shows: each transaction kept
 records its chain's genesis, as a new chain of the same keys starts its heights again, so one
 from an older chain no longer sits above the newest; those kept from before that are this
 chain's once its node mentions them. The wallet proves each one with
@@ -301,6 +310,20 @@ transaction did instead of an amount.
 
 Each line says Received, Sent, or what the transaction did. The line opens to show the block, the
 sender, the fee, and every event it emitted.
+
+**Filters:** the **Filters** button opens a choice of kind, direction, token, counterparty and when,
+says how many are on, and **Clear** turns them all off.
+- **They run on the node** ([its filters](api.md#get-accountsaddresstxs)), so all the history counts,
+  not only what is loaded. **Look further back** asks for the next page, and for what lay beyond the
+  node's bound of 1,000 entries a request, which it says when it reaches.
+- **Nothing shows as proven unproven.** What the node lists is where to look, as ever: each line
+  stays **Checking** until its receipt and transaction check. The node picks what it lists, so a node
+  could leave one out, and the page says so.
+- **An older node ignores filters,** and its answer says nothing of them. Then what passes the same
+  test here, among what the wallet has proven, shows, and the page says only what was read was
+  searched. A node with no address index is the same, over what the wallet kept.
+- **Counterparty** is what the node's index says a transaction touched, which a call's arguments
+  count for; on an older node, here, what the wallet proved it moved and who sent it.
 
 **Kept once proven.** What was proven is saved, so it shows again at once. What is not final yet
 is proven again until it is.
@@ -379,7 +402,9 @@ multisig too, its EVM locks going to the Multisig page as its contract's calls.
 ## Mining
 
 The **Mining** page mines from the device, alone or in a [pool](consensus.md#mining-pools), and
-claims what a pool owes the account's addresses.
+claims what a pool owes the account's addresses. In a [store build](#app-store-builds), which has no
+mining in it, it is called **Pool earnings**, and holds what is under
+[Earnings and claims](#earnings-and-claims) alone.
 
 ### Mine
 
@@ -466,7 +491,7 @@ connected for it with its hashrate.
   but the fee: the chain checks the path against the root the pool's block committed to, and a
   path that does not hold fails and moves nothing.
 - **Nothing yet:** a node with no pool says so, and so does a pool that owes the address nothing
-  yet. A pool credits its miners once its blocks are final, so earnings show a while after the
+  yet. A pool credits what it owes once its blocks are final, so earnings show a while after the
   blocks are found.
 - **Kept claims:** each claim the pool's node gives is kept on the device, by chain, in settings as
   `pool_claims` (the newest few, the next to settle, and the newest settled: see
@@ -474,8 +499,8 @@ connected for it with its hashrate.
   checks them at the wallet's own node, `GET /claims/{pool}/{address}?height=`, newest first, and
   **Claim** sends the first whose root is still on chain: all the address earned up to it, less
   what it claimed.
-- **History** shows a claim as "Claimed mining pool earnings for" the miner: the transaction
-  names all the miner earned, not what the claim paid.
+- **History** shows a claim as "Claimed pool earnings for" the miner: the transaction names all the
+  miner earned, not what the claim paid.
 
 ## Governance
 
@@ -910,11 +935,31 @@ as none. The wallet's own name stays chainv4 wherever it means the software: com
 `chainv4 multisig`, releases and updates, and what it calls itself to MetaMask and sites.
 **History** shows a governance rename as "Approved renaming the chain to chainv4 mainnet".
 
+## When a request fails
+
+Every request has a time limit: 30 seconds, or 90 through a proxy, as Tor builds a circuit first. A
+node that never answers ends in a failure, not a page that waits, however it fails to answer: the
+node itself, or a SOCKS or HTTP proxy on the way.
+
+**Retry:** what failed or took too long shows at the top of every page, in a sentence, with a
+**Retry** button, the same widget as the explorer's. It stays until what failed is answered, or
+nothing asks for it any more. A page goes on asking by itself too, a little less often each time, up
+to every 30 seconds. Retry goes past that. What you sent, such as a transaction, is never sent again
+but by you.
+
+**Reload:** on a phone, pull a page down from its very top: a circle comes down over it, and letting
+go past the mark reloads. It never fights scrolling: a finger that starts lower down, goes up or
+sideways first, or takes a slider, is not a pull. With a mouse, **Reload** is in the sidebar's foot, or
+at the top of the page in a narrow window. Either asks the node again for what the page shows and for
+its status, spins while it works, and leaves what shows until the answers come. Reloading the light
+client's own is what it does anyway: what it follows and proves is asked again at once.
+
 ## What it remembers
 
 Everything is in app storage under one key, `chainv4-wallet`, saved by eframe every 30 seconds,
 on exit, and when Android sends the app to the background:
 - the node, the proxy, and the genesis pinned at each node;
+- the nodes trusted for [fast resume](#trust);
 - the mining pool's node, for a pool on another node;
 - each wallet: its name, its vault, and the account in use in it;
 - the light client's state, by genesis, to resume from the finalized block, not genesis;
@@ -968,7 +1013,36 @@ trunk build --release
 node --test extension/test.mjs   # the extension's scripts, in a browser of mocks
 ```
 
-**One app, three starts.** The app is a library (`src/lib.rs`), as Android loads it, so the
+### App store builds
+
+Google Play and the App Store take no app that mines, so `mining`, on by default for direct APKs and
+the web, is a feature of its own, and `store` is every other default feature:
+
+```sh
+wallet/build-android.sh --store            # wallet/target/android/chainv4-wallet-arm64-store.apk
+wallet/build-ios.sh --store --ipa          # for an iPhone, or --sim for the Simulator
+
+# What CI and a change to the wallet should check, from wallet/:
+cargo clippy --all-targets --locked --no-default-features --features store -- -D warnings
+cargo test --locked --no-default-features --features store
+cargo tree --locked --no-default-features --features store --target aarch64-linux-android -e normal | grep -E 'wgpu|chainv4-gpu'   # nothing
+```
+
+- **Gone without it:** the Mine card and what drives it (`views/mine.rs`, `src/miner*`, the
+  `miner-worker` bin), the `chainv4-gpu` and `wgpu` dependencies, `chainv4`'s `worker` and `gpu-mining`,
+  and the command for mining from other machines.
+- **Kept:** what a pool owes and claiming it, as claiming is not mining. The page is called **Pool
+  earnings**, and its text and More's say nothing of mining; nor does it list workers or shares.
+- **Settings:** the same in every build. The mining settings are kept in one that does not read them,
+  so settings from either load in the other, and what was chosen comes back.
+- **iOS:** a store build still links `wgpu`, as eframe draws through it there. It draws, and mines
+  nothing; `chainv4-gpu` is gone as everywhere.
+- **The web** stays with mining on: nothing asks for a store build of it. `index.html` builds the
+  `miner-worker` bin, which a build without the feature does not have.
+
+### One app, three starts
+
+The app is a library (`src/lib.rs`), as Android loads it, so the
 package is `chainv4-wallet`. Its binary, `wallet` (`src/main.rs`), starts it on the desktop and in
 the browser. Android starts the library at `android_main`, which hands it to the `ui` crate's
 `android::run`.
@@ -1067,6 +1141,7 @@ which builds the explorer's app the same way (see [Android](explorer.md#android)
 wallet/build-android.sh                    # wallet/target/android/chainv4-wallet-arm64.apk
 wallet/build-android.sh --arch x64         # for x86-64 emulators
 wallet/build-android.sh --debug --install  # a debug build, put on the device adb sees
+wallet/build-android.sh --store            # what an app store takes: see App store builds
 ```
 
 **What it needs:**
@@ -1166,6 +1241,7 @@ wallet/build-ios.sh --sim                  # in the iOS Simulator, installed and
 wallet/build-ios.sh --ipa                  # wallet/target/ios/wallet.ipa, unsigned
 wallet/build-ios.sh --provision TEAMID     # once, with the iPhone connected (see below)
 wallet/build-ios.sh --install              # signed and installed on the iPhone connected
+wallet/build-ios.sh --store --ipa          # what an app store takes: see App store builds
 ```
 
 **What it needs:** Xcode, and Rust's iOS targets (`rustup target add aarch64-apple-ios

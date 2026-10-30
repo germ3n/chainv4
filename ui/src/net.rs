@@ -7,6 +7,24 @@
 
 use std::ops::ControlFlow;
 
+/// How long a request may take in all, and how long to get connected, going direct: long enough for
+/// a slow phone network, short enough that a page says so while someone still waits for it.
+const WHOLE: u64 = 30;
+#[cfg(not(target_arch = "wasm32"))]
+const CONNECT: u64 = 12;
+/// The same through a proxy: Tor builds a circuit first, which can take most of a minute.
+const WHOLE_PROXIED: u64 = 90;
+#[cfg(not(target_arch = "wasm32"))]
+const CONNECT_PROXIED: u64 = 60;
+/// How long a stream may take to answer at all, once it is open: how long it then stays is its own.
+#[cfg(not(target_arch = "wasm32"))]
+const STREAM_ANSWERS: u64 = 60;
+
+/// How long a request may take, in seconds: what a page that waits for one waits at most.
+pub fn limit(proxied: bool) -> u64 {
+    if proxied { WHOLE_PROXIED } else { WHOLE }
+}
+
 /// A proxy every request goes through: SOCKS5 with the proxy resolving names, or HTTP CONNECT.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proxy(String);
@@ -86,6 +104,43 @@ pub enum Piece {
     Chunk(Vec<u8>),
 }
 
+/// Why a request got no answer an app could use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    /// The HTTP status, or 0 when the node could not be reached.
+    pub status: u16,
+    pub message: String,
+}
+
+impl Failure {
+    /// Whether it says something of the way to the node rather than of what was asked: it could not
+    /// be reached, did not answer in time, or could not answer now. Asking again may help; a 404
+    /// says the same each time.
+    pub fn is_trouble(&self) -> bool {
+        matches!(self.status, 0 | 408 | 429 | 500..)
+    }
+
+    /// What went wrong, in a sentence for a page to show.
+    pub fn sentence(&self) -> String {
+        let message = self.message.trim_end_matches('.');
+
+        match self.status {
+            0 if message.contains(TOO_LONG) => format!("The node did not answer in time: {message}."),
+            0 => format!("Could not reach the node: {message}."),
+            408 | 429 => format!("The node asks to wait a moment: {message}."),
+            500.. => format!("The node had trouble answering: {message}."),
+            _ => {
+                let mut letters = message.chars();
+
+                letters.next().map_or_else(|| "The node said no.".to_string(), |first| format!("{}{}.", first.to_uppercase(), letters.as_str()))
+            }
+        }
+    }
+}
+
+/// What a request that took too long fails with.
+const TOO_LONG: &str = "no answer within";
+
 /// How an app talks to its node, with the proxy it was made with. Cheap to clone; clones share
 /// connections.
 #[derive(Clone)]
@@ -93,9 +148,14 @@ pub struct Client {
     proxy: Option<Proxy>,
     #[cfg(not(target_arch = "wasm32"))]
     agent: ureq::Agent,
-    /// Without a time limit, for streams that stay open.
+    /// Without a limit on how long it all takes, for streams that stay open.
     #[cfg(not(target_arch = "wasm32"))]
     lasting: ureq::Agent,
+    /// How long a request may take in all, and to connect, in seconds.
+    #[cfg(not(target_arch = "wasm32"))]
+    whole: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    connect: u64,
 }
 
 impl Client {
@@ -103,16 +163,24 @@ impl Client {
     pub fn new(proxy: Option<Proxy>) -> Result<Client, String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let agent = native::agent(proxy.as_ref(), Some(std::time::Duration::from_secs(30)))?;
-            let lasting = native::agent(proxy.as_ref(), None)?;
+            let (whole, connect) = if proxy.is_some() { (WHOLE_PROXIED, CONNECT_PROXIED) } else { (WHOLE, CONNECT) };
 
-            Ok(Client { proxy, agent, lasting })
+            Client::limited(proxy, whole, connect)
         }
 
         #[cfg(target_arch = "wasm32")]
         {
             Ok(Client { proxy })
         }
+    }
+
+    /// A client whose requests may take this long, in seconds, in all and to connect.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn limited(proxy: Option<Proxy>, whole: u64, connect: u64) -> Result<Client, String> {
+        let agent = native::agent(proxy.as_ref(), Some(whole), connect)?;
+        let lasting = native::agent(proxy.as_ref(), None, connect)?;
+
+        Ok(Client { proxy, agent, lasting, whole, connect })
     }
 
     /// A client that goes direct.
@@ -142,9 +210,9 @@ impl Client {
     pub fn fetch_bearing(&self, url: String, body: Option<Vec<u8>>, token: Option<String>, done: impl FnOnce(Result<Answer, String>) + Send + 'static) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (agent, proxy) = (self.agent.clone(), self.proxy.clone());
+            let (agent, proxy, limits) = (self.agent.clone(), self.proxy.clone(), (self.whole, self.connect));
 
-            std::thread::spawn(move || done(native::fetch(&agent, proxy.as_ref(), &url, body, token.as_deref())));
+            std::thread::spawn(move || done(native::fetch(&agent, proxy.as_ref(), limits, &url, body, token.as_deref())));
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -169,14 +237,26 @@ impl Client {
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use {
-        super::{Answer, Piece, Proxy},
+        super::{Answer, Piece, Proxy, STREAM_ANSWERS, TOO_LONG},
         std::io::Read,
         std::ops::ControlFlow,
         std::time::Duration,
     };
 
-    pub fn agent(proxy: Option<&Proxy>, timeout: Option<Duration>) -> Result<ureq::Agent, String> {
-        let mut config = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(timeout);
+    /// An agent whose requests may take whole seconds in all, or for a stream, whose body goes on
+    /// for as long as it does, until its answer starts. However long is left of that, one that never
+    /// gets connected, whether to the node or through a proxy, or that names no host that resolves,
+    /// fails rather than waits on.
+    pub fn agent(proxy: Option<&Proxy>, whole: Option<u64>, connect: u64) -> Result<ureq::Agent, String> {
+        let mut config = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(whole.map(Duration::from_secs))
+            .timeout_resolve(Some(Duration::from_secs(connect)))
+            .timeout_connect(Some(Duration::from_secs(connect)));
+
+        if whole.is_none() {
+            config = config.timeout_recv_response(Some(Duration::from_secs(STREAM_ANSWERS)));
+        }
 
         // Set, it is the only way out, NO_PROXY or not; unset, ureq's own default, the
         // environment's ALL_PROXY, HTTPS_PROXY or HTTP_PROXY, applies.
@@ -189,14 +269,21 @@ mod native {
     }
 
     /// Says a request failed, and through which proxy, since a stopped proxy is the usual reason.
-    fn failed(proxy: Option<&Proxy>, err: ureq::Error) -> String {
+    /// One that took too long says how long it was given: to connect, or in all.
+    fn failed(proxy: Option<&Proxy>, (whole, connect): (u64, u64), err: ureq::Error) -> String {
+        let what = match err {
+            ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => format!("{TOO_LONG} {connect} seconds"),
+            ureq::Error::Timeout(_) => format!("{TOO_LONG} {whole} seconds"),
+            err => err.to_string(),
+        };
+
         match proxy {
-            Some(proxy) => format!("through the proxy at {}: {err}", proxy.shown()),
-            None => err.to_string(),
+            Some(proxy) => format!("through the proxy at {}: {what}", proxy.shown()),
+            None => what,
         }
     }
 
-    pub fn fetch(agent: &ureq::Agent, proxy: Option<&Proxy>, url: &str, body: Option<Vec<u8>>, token: Option<&str>) -> Result<Answer, String> {
+    pub fn fetch(agent: &ureq::Agent, proxy: Option<&Proxy>, limits: (u64, u64), url: &str, body: Option<Vec<u8>>, token: Option<&str>) -> Result<Answer, String> {
         let bearer = token.map(|token| format!("Bearer {token}"));
         let sent = match (body, &bearer) {
             (Some(body), Some(bearer)) => agent.post(url).header("content-type", "application/json").header("authorization", bearer).send(&body[..]),
@@ -204,14 +291,14 @@ mod native {
             (None, Some(bearer)) => agent.get(url).header("authorization", bearer).call(),
             (None, None) => agent.get(url).call(),
         };
-        let mut response = sent.map_err(|err| failed(proxy, err))?;
+        let mut response = sent.map_err(|err| failed(proxy, limits, err))?;
         let status = response.status();
         let bytes = response
             .body_mut()
             .with_config()
             .limit(256 << 20)
             .read_to_vec()
-            .map_err(|err| failed(proxy, err))?;
+            .map_err(|err| failed(proxy, limits, err))?;
 
         Ok(Answer {
             ok: status.is_success(),
@@ -225,7 +312,7 @@ mod native {
         let response = match agent.get(url).call() {
             Ok(response) => response,
             Err(err) => {
-                let _ = on(Err(failed(proxy, err)));
+                let _ = on(Err(failed(proxy, (STREAM_ANSWERS, STREAM_ANSWERS), err)));
 
                 return;
             }
@@ -269,11 +356,28 @@ mod native {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use {
-        super::{Answer, Piece},
+        super::{Answer, Piece, TOO_LONG, WHOLE},
         std::ops::ControlFlow,
+        std::sync::{Arc, Mutex, PoisonError},
+        wasm_bindgen::{JsCast, closure::Closure},
     };
 
+    /// Sends a request, and calls done once: with the answer, or when none came in time, as the
+    /// browser's own fetch waits as long as the connection stays open.
     pub fn fetch(url: String, body: Option<Vec<u8>>, token: Option<String>, done: impl FnOnce(Result<Answer, String>) + Send + 'static) {
+        let once = Arc::new(Mutex::new(Some(done)));
+        let late = once.clone();
+        let take = |once: &Mutex<Option<_>>| once.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let timer = Closure::once_into_js(move || {
+            if let Some(done) = take(&late) {
+                done(Err(format!("{TOO_LONG} {WHOLE} seconds")));
+            }
+        });
+
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(timer.unchecked_ref(), (WHOLE * 1_000) as i32);
+        }
+
         // ehttp's own text/plain, which needs no preflight from a page on another origin.
         let mut request = match body {
             Some(body) => ehttp::Request::post(url, body),
@@ -285,12 +389,14 @@ mod web {
         }
 
         ehttp::fetch(request, move |response| {
-            done(response.map(|response| Answer {
-                ok: response.ok,
-                status: response.status,
-                status_text: response.status_text,
-                bytes: response.bytes,
-            }))
+            if let Some(done) = take(&once) {
+                done(response.map(|response| Answer {
+                    ok: response.ok,
+                    status: response.status,
+                    status_text: response.status_text,
+                    bytes: response.bytes,
+                }));
+            }
         });
     }
 

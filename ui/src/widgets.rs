@@ -238,6 +238,47 @@ pub fn dot(ui: &mut Ui, color: Color32) -> Response {
     response
 }
 
+/// What went wrong with a request, in a sentence, with a way to ask again: what every page shows of
+/// a request that failed or took too long. While it is being asked again it says so, and the button
+/// waits. Whether Retry was pressed.
+pub fn retry(ui: &mut Ui, palette: &Palette, sentence: &str, asking: bool) -> bool {
+    let color = palette.bad;
+    let mut pressed = false;
+
+    Frame::new()
+        .fill(color.gamma_multiply(0.10))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.45)))
+        .corner_radius(ui.visuals().widgets.inactive.corner_radius)
+        .inner_margin(Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(egui::Label::new(RichText::new(sentence).color(palette.ink)).wrap());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(!asking, |ui| pressed = quiet(ui, palette, "Retry").clicked());
+
+                if asking {
+                    ui.spinner();
+                    ui.label(RichText::new("Asking again…").small().color(palette.muted));
+                }
+            });
+        });
+
+    pressed
+}
+
+/// A button that reloads what a page shows, for where no finger pulls it down: while it works it
+/// says so, and a press does nothing more. Whether it was pressed.
+pub fn reload(ui: &mut Ui, palette: &Palette, working: bool) -> bool {
+    if working {
+        ui.spinner();
+
+        return false;
+    }
+
+    quiet(ui, palette, "Reload").on_hover_text("Ask the node again for what this page shows").clicked()
+}
+
 /// A thin line across, between the parts of a card.
 pub fn rule(ui: &mut Ui, palette: &Palette) {
     let width = ui.available_width();

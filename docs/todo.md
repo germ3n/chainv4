@@ -112,6 +112,14 @@ offline; these would make that hold up as a treasury.
 - [x] **A decoded transaction as the tx page shows one.** The node's JSON for a transaction is
   `structs::json`, apart from the node, so the explorer's Decode tool writes a decoded one as the
   node would and shows it with the tx page's own view.
+- [x] **Fast resume on trusted nodes.** A per-node switch in the wallet takes up the chain at the node's
+  finalized checkpoint rather than walking the headers since, off by default, saying what it gives up.
+- [x] **The wallet in the app stores.** A `mining` feature, on by default, and `--store` on the build
+  scripts: no miner, no `wgpu` on Android, and the page called Pool earnings.
+- [x] **Better transaction filters.** `GET /accounts/{address}/txs` takes kind, direction, counterparty,
+  token and when, read through the index with a bound per request, and both apps offer them.
+- [x] **Retry and pull to refresh.** Every request has a time limit, what failed says so with Retry, a page
+  pulled from its top or Reload asks again, in both apps.
 - [ ] **Polish the explorer and the wallet.** A pass over both apps as people use them, on a phone
   first: what each page says and in what order, empty and loading states, what is hard to find
   or to read, and the tools the explorer still lacks (see the queued explorer batch).

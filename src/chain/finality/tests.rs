@@ -2422,6 +2422,69 @@ mod voting {
     }
 
     #[test]
+    fn a_client_far_behind_takes_up_the_chain_at_a_later_checkpoint_and_checks_voters_from_there() {
+        use crate::light::{LightClient, LightError, LightRequest};
+
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            finalize_through(&mut chain, 4);
+            let params = genesis_with(Some(finality.clone())).light_params();
+            let genesis = stored_header_at(&*chain.db, 0).unwrap().unwrap();
+
+            // Followed so far, then saved: what a wallet resumes from.
+            let mut behind = LightClient::new(params.clone(), genesis.clone(), chain.genesis()).unwrap();
+            serve(&chain, &mut behind);
+            let saved = behind.save();
+            let saved_at = behind.finalized();
+
+            // Far further on, by the time it opens again.
+            finalize_through(&mut chain, 12);
+            let height = 8 * INTERVAL;
+            let checkpoint = stored_header_at(&*chain.db, height).unwrap().unwrap().id();
+            let start = start_at(&chain, &finality, height);
+
+            // The genesis trusted still holds: a node on another chain gets nowhere.
+            assert_eq!(
+                LightClient::from_checkpoint(params.clone(), genesis.clone(), Hash::zero(chain.genesis().algorithm()), checkpoint, start.clone()).err(),
+                Some(LightError::WrongGenesis),
+                "{}",
+                finality.name(),
+            );
+
+            let mut resumed = LightClient::from_checkpoint(params.clone(), genesis.clone(), chain.genesis(), checkpoint, start).unwrap();
+            let restored = LightClient::restore(saved, chain.genesis()).unwrap();
+
+            assert!(resumed.finalized().epoch > restored.finalized().epoch, "{}: further on than what it saved", finality.name());
+            assert_eq!(restored.finalized(), saved_at);
+
+            // It has yet to reach the tip, by headers each checked, and by justifications each
+            // checked against the voters the checkpoint's updates fixed.
+            assert!(matches!(resumed.next(), Some(LightRequest::Headers { .. })));
+            serve(&chain, &mut resumed);
+
+            assert_eq!(resumed.tip().id(), chain.tip().id());
+            assert_eq!(Some(resumed.finalized()), chain.finalized());
+
+            // So the same forged justification a client from genesis refuses, it refuses too.
+            let mut forged = LightClient::from_checkpoint(params, genesis, chain.genesis(), checkpoint, start_at(&chain, &finality, height)).unwrap();
+            let mut followed = forged.next();
+
+            while let Some(LightRequest::Headers { from, count }) = followed {
+                let headers = (from..from + u64::from(count)).map_while(|height| stored_header_at(&*chain.db, height).unwrap()).collect();
+                forged.deliver_headers(from, headers, LATER).unwrap();
+                followed = forged.next();
+            }
+
+            let next_epoch = forged.justified().epoch + 1;
+            let target = stored_header_at(&*chain.db, next_epoch * INTERVAL).unwrap().unwrap().id();
+            let mut justification = stored_justification(&*chain.db, &target).unwrap().expect("the chain justified it");
+            justification.votes.truncate(1);
+
+            assert!(forged.deliver_justifications(&[justification]).is_err() || forged.justified().epoch < next_epoch, "{}: one vote does not justify", finality.name());
+        }
+    }
+
+    #[test]
     fn a_light_client_starts_at_a_checkpoint_it_trusts_and_follows_on_from_there() {
         use crate::light::LightClient;
 

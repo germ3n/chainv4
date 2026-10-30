@@ -33,7 +33,7 @@ pub struct CollectionsState {
 pub fn registry(ctx: &mut Ctx) -> Option<Vec<RegisteredCollection>> {
     let stale = ctx.store.collections.as_ref().is_none_or(|(_, when)| ctx.now.saturating_sub(*when) > REFRESH);
 
-    if stale && !ctx.api.asking(&Ask::Collections) && !ctx.store.failures.contains_key(&Ask::Collections) {
+    if stale {
         ctx.api.ask(Ask::Collections);
     }
 
@@ -316,14 +316,14 @@ fn transfers(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection) {
     let newest = Ask::Events { query: query.clone(), cursor: None };
     let found = ctx.store.events.get(&query);
 
-    if found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH) && !ctx.api.asking(&newest) && !ctx.store.failures.contains_key(&newest) {
+    if found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH) {
         ctx.api.ask(newest.clone());
     }
 
     let Some(events) = ctx.store.events.get(&query).map(|found| found.items.clone()) else {
         match ctx.store.failures.get(&newest) {
-            Some(_) => super::note(ui, look, "The node keeps no event index: start it with --index-events to see what moved."),
-            None => super::waiting(ui, ctx, &newest),
+            Some(failure) if failure.status == 404 => super::note(ui, look, "The node keeps no event index: start it with --index-events to see what moved."),
+            _ => super::waiting(ui, ctx, &newest),
         }
 
         return;

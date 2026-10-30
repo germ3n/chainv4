@@ -48,6 +48,10 @@ pub struct Checked {
     pub nonce: u64,
     /// What it asked for, in a few words: Transfer, Called sign on contract:0x…, Deployed ….
     pub action: String,
+    /// Its kind by the name the API gives it, and what a multisig sent as it. Empty for one kept
+    /// before it was said, which the Activity page's kind filter lets by.
+    #[serde(default)]
+    pub kinds: Vec<String>,
     pub moves: Vec<Move>,
     /// What the sender paid, in whole units of the coin.
     pub fee: String,
@@ -174,6 +178,7 @@ impl Checked {
             done,
             nonce: signed.nonce,
             action: action(&signed.tx, &receipt.outcome),
+            kinds: kinds_of(&signed.tx),
             moves,
             fee: receipt.fee.to_string(),
             events: receipt.events.iter().map(describe).collect(),
@@ -193,6 +198,16 @@ impl Checked {
             // Between two of its addresses, or none: nothing moved, as far as it is concerned.
             _ => None,
         })
+    }
+}
+
+/// A transaction's kind, by the name the API gives it, and what a multisig sent as it.
+fn kinds_of(tx: &Tx) -> Vec<String> {
+    let name = |tx: &Tx| chainv4::structs::json::tx(tx)["type"].as_str().unwrap_or_default().to_string();
+
+    match tx {
+        Tx::Multisig { tx, .. } => vec![name(tx), "multisig".to_string()],
+        tx => vec![name(tx)],
     }
 }
 
@@ -294,7 +309,7 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::WithdrawMultisig { account, .. }, _) => format!("Withdrew an approval of {}'s", format::short(&account.to_string())),
         // What it names is all the miner earned, not what this claim paid: that is less what it
         // claimed before, which the chain knows and the transaction does not say.
-        (Tx::Claim { to, .. }, _) => format!("Claimed mining pool earnings for {}", format::short(&to.to_string())),
+        (Tx::Claim { to, .. }, _) => format!("Claimed pool earnings for {}", format::short(&to.to_string())),
     }
 }
 
@@ -549,7 +564,7 @@ mod tests {
         let claim = Tx::Claim { height: 40, to: miner, earned: u256::new(5_000), index: 2, path: vec![Hash::zero(HashType::default_chain())] };
         let checked = Checked::of(&landed(claim, CommittedOutcome::Done, Vec::new()));
 
-        assert_eq!(checked.action, format!("Claimed mining pool earnings for {}", format::short(&miner.to_string())));
+        assert_eq!(checked.action, format!("Claimed pool earnings for {}", format::short(&miner.to_string())));
         assert!(!checked.action.contains("5000"), "all it earned is not what this claim paid");
     }
 

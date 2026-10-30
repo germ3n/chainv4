@@ -16,15 +16,16 @@ name = "wallet"
 path = "src/main.rs"
 
 # The browser's Web Worker that mines on the CPU, which trunk builds beside the app: natively it
-# does nothing.
+# does nothing, and a build without mining has none.
 [[bin]]
 name = "miner-worker"
 path = "src/bin/miner-worker.rs"
+required-features = ["mining"]
 
 [dependencies]
 # Only the parts that build for the browser too: transactions, keys, hashes and the light client,
 # and checking releases against the keys built in.
-chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "mnemonic", "abi", "release", "worker"] }
+chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "mnemonic", "abi", "release"] }
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "persistence"] }
 egui = "0.37.0"
 # The look's widgets, talking to the node through a proxy, and running on Android, shared with the
@@ -50,7 +51,14 @@ ur = "0.5.2"
 minicbor = { version = "2", default-features = false, features = ["alloc"] }
 
 [features]
-default = ["swap", "dex", "nft", "bridge", "bitcoin-light"]
+default = ["store", "mining"]
+# All an app store takes: every default feature but mining. --store on the build scripts builds with
+# this alone: cargo build --no-default-features --features store.
+store = ["swap", "dex", "nft", "bridge", "bitcoin-light"]
+# Mining from this device, on its GPU or CPU, and in the browser on WebGPU or Web Workers: the Mine
+# card, crate::miner, and what they rest on. Off for the app stores, which take no app that mines;
+# what a pool owes and claiming it stay, as claiming is not mining.
+mining = ["chainv4/worker", "chainv4/gpu-mining", "dep:chainv4-gpu"]
 # Atomic swaps between this chain, Bitcoin and EVM chains: the Swaps page, and the offline signer
 # signing a swap's Bitcoin side.
 swap = ["chainv4/swap"]
@@ -68,10 +76,9 @@ bridge = ["swap", "chainv4/bridge"]
 bitcoin-light = ["dep:bip157", "dep:bitcoin"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# Mining on this device's GPUs as well as its CPU, natively: wgpu on Vulkan, Metal or DX12.
-chainv4 = { path = "..", default-features = false, features = ["gpu-mining"] }
-# The GPUs there are, by name, for the Mining page to pick from.
-chainv4-gpu = { path = "../gpu" }
+# The GPUs there are, by name, for the Mining page to pick from, and mining on them as well as on
+# the CPU: wgpu on Vulkan, Metal or DX12.
+chainv4-gpu = { path = "../gpu", optional = true }
 bip157 = { version = "0.8.0", optional = true }
 bitcoin = { version = "0.32.8", default-features = false, features = ["std"], optional = true }
 
@@ -92,7 +99,7 @@ eframe = { version = "0.37.0", default-features = false, features = ["wgpu"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit"] }
 # Mining in the browser on its GPU, through WebGPU.
-chainv4-gpu = { path = "../gpu" }
+chainv4-gpu = { path = "../gpu", optional = true }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 wasm-bindgen-futures = "0.4.58"
 # The page, and for mining the node's WebSocket and the Web Workers that hash on the CPU.

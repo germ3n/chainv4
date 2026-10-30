@@ -126,11 +126,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     let store = ctx.store;
     super::heading(ui, look, "Rich list & supply", ABOUT, |_| {});
 
-    if store.supply.is_none() && !store.failures.contains_key(&Ask::Supply) {
+    if store.supply.is_none() && store.failures.get(&Ask::Supply).is_none_or(|failure| failure.status != 404) {
         ctx.api.ask(Ask::Supply);
     }
 
-    if store.rich.is_none() && !store.failures.contains_key(&Ask::Rich) {
+    if store.rich.is_none() && store.failures.get(&Ask::Rich).is_none_or(|failure| failure.status != 404) {
         ctx.api.ask(Ask::Rich);
     }
 

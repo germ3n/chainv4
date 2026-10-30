@@ -8,7 +8,9 @@ use {
     super::{Ctx, TxLine, View, events, tokens},
     crate::api::{Ask, EventQuery},
     crate::format,
-    crate::model::{Called, RegisteredToken},
+    crate::model::{Called, FoundTx, RegisteredToken},
+    chainv4::structs::address::Address,
+    chainv4_ui::filters::{self, COIN, Facts, Offered, TxFilter},
     chainv4_ui::widgets,
     egui::{RichText, Ui},
     serde_json::json,
@@ -33,6 +35,8 @@ pub struct AccountState {
     /// An EVM read function's fields, and the read last asked of it, by its signature.
     evm_fields: std::collections::HashMap<String, Vec<String>>,
     evm_asked: std::collections::HashMap<String, Ask>,
+    /// What its transactions are narrowed to.
+    filter: TxFilter,
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState) {
@@ -243,7 +247,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
 
     holdings(ui, ctx, address);
     nfts(ui, ctx, address);
-    super::section(ui, look, "Transactions", |ui| transactions(ui, ctx, address));
+    super::section(ui, look, "Transactions", |ui| transactions(ui, ctx, address, &mut state.filter));
     super::section(ui, look, "Events that mention it", |ui| events::list(ui, ctx, &EventQuery::mentioning(address)));
 }
 
@@ -357,25 +361,61 @@ fn evm(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState) {
     });
 }
 
-/// How long the newest page of transactions stands before it is asked for again, in milliseconds.
+/// How long the newest page of transactions stands before it is asked for again, in milliseconds;
+/// under filters longer, as each ask has the node read through its index.
 const REFRESH: u64 = 3_000;
+const FILTERED_REFRESH: u64 = 15_000;
+
+/// What can be said of a transaction a node listed, to test it here against the filters, on a node
+/// too old to.
+fn facts<'a>(found: &'a FoundTx, address: &str, time: Option<u64>) -> Facts<'a> {
+    let tx = &found.tx;
+    let inner = tx.tx.get("tx").filter(|_| tx.kind() == "multisig").unwrap_or(&tx.tx);
+    let named = |field: &str| inner.get(field).and_then(serde_json::Value::as_str);
+    let outcome = tx.receipt.as_ref();
+    let events = outcome.into_iter().flat_map(|outcome| &outcome.events).map(|event| event.contract.as_str());
+    let payments = outcome.is_some_and(|outcome| !outcome.payments.is_empty());
+    let moves_coin = matches!(inner.get("type").and_then(serde_json::Value::as_str), Some("transfer" | "mint" | "burn" | "claim")) || payments;
+    let called = named("to").filter(|_| matches!(inner.get("type").and_then(serde_json::Value::as_str), Some("contract_call" | "evm_call")));
+
+    Facts {
+        kinds: [Some(tx.kind()), inner.get("type").and_then(serde_json::Value::as_str)].into_iter().flatten().collect(),
+        sent: tx.sender == address,
+        took_part: tx.sender != address,
+        parties: [Some(tx.sender.as_str()), named("to"), named("from"), named("contract"), named("account")].into_iter().flatten().collect(),
+        tokens: moves_coin.then_some(COIN).into_iter().chain(called).chain(events).collect(),
+        time,
+    }
+}
 
 /// The transactions that touched an address, newest first, from the node's address index: those
-/// it sent, those that paid it or named it, a page at a time.
-fn transactions(ui: &mut Ui, ctx: &mut Ctx, address: &str) {
+/// it sent, those that paid it or named it, a page at a time, narrowed as the filters say. The node
+/// does that, so it counts for all the history and not only what was read; an older node ignores
+/// filters, which its answer shows, and what it sent is tested here, as far as was read.
+fn transactions(ui: &mut Ui, ctx: &mut Ctx, address: &str, filter: &mut TxFilter) {
     let store = ctx.store;
+    let look = ctx.look;
+    let tokens: Vec<(String, String)> = store.tokens.values().filter_map(|token| Some((token.address.clone(), token.symbol.clone()?))).collect();
+    let coin = store.status.as_ref().map_or("Coin", |status| status.coin.symbol.as_str());
+    let problem = filter.problem(|text| text.parse::<Address>().is_ok());
+    filters::controls(ui, &look.palette, filter, Offered { coin, tokens: &tokens }, problem.as_deref());
+    ui.add_space(4.0);
+
+    let on = if problem.is_none() { filter.on() } else { 0 };
+    let query = if on > 0 { filter.query(ctx.now) } else { String::new() };
+    let refresh = if on > 0 { FILTERED_REFRESH } else { REFRESH };
     let newest = Ask::AccountTxs {
         address: address.to_string(),
+        query: query.clone(),
         cursor: None,
     };
-    let found = store.account_txs.get(address);
-    let failed = store.failures.get(&newest);
+    let found = store.account_txs.get(&(address.to_string(), query.clone()));
 
-    if failed.is_none() && found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH) {
+    if found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > refresh) {
         ctx.api.ask(newest.clone());
     }
 
-    let look = ctx.look;
+    let failed = store.failures.get(&newest);
     let found = match (found, failed) {
         (_, Some(failure)) if failure.status == 404 => {
             super::note(ui, look, "This node keeps no address index. Start it with --index-addresses to list an address's transactions.");
@@ -389,13 +429,28 @@ fn transactions(ui: &mut Ui, ctx: &mut Ctx, address: &str) {
             return;
         }
     };
+
+    if let Some(failure) = failed
+        && widgets::retry(ui, &look.palette, &failure.sentence(), ctx.api.asking(&newest))
+    {
+        ctx.api.retry(newest.clone());
+    }
+
     let still = found
         .catching_up_to
         .filter(|to| *to < found.indexed_from)
         .map(|to| format!(" It is still indexing older blocks, down to height {}.", format::thousands(&to.to_string())))
         .unwrap_or_default();
+    // A node too old to filter sent everything: what passes is found here, of what was read.
+    let filtered_here = on > 0 && !found.answered.filtered;
+    let shown: Vec<&FoundTx> = found
+        .items
+        .iter()
+        .filter(|found| !filtered_here || filter.passes(&facts(found, address, found.time.or_else(|| store.blocks.get(&found.block).map(|block| block.timestamp))), ctx.now))
+        .collect();
+    let said = filters::said(shown.len(), found.next.is_some(), &found.answered, on);
 
-    if found.items.is_empty() {
+    if shown.is_empty() && said.is_none() {
         super::note(
             ui,
             look,
@@ -405,8 +460,7 @@ fn transactions(ui: &mut Ui, ctx: &mut Ctx, address: &str) {
         return;
     }
 
-    let lines: Vec<TxLine> = found
-        .items
+    let lines: Vec<TxLine> = shown
         .iter()
         .map(|found| TxLine {
             tx: &found.tx,
@@ -414,25 +468,31 @@ fn transactions(ui: &mut Ui, ctx: &mut Ctx, address: &str) {
             block: Some((found.block.as_str(), found.height)),
         })
         .collect();
-    super::tx_list(ui, ctx, &format!("account_txs {address}"), &lines);
+    super::tx_list(ui, ctx, &format!("account_txs {address} {query}"), &lines);
 
     ui.add_space(4.0);
+
+    if let Some(said) = &said {
+        super::note(ui, look, said.clone());
+    }
+
     ui.horizontal_wrapped(|ui| {
         if let Some(next) = &found.next {
             let older = Ask::AccountTxs {
                 address: address.to_string(),
+                query: query.clone(),
                 cursor: Some(next.clone()),
             };
 
             if ctx.api.asking(&older) {
                 ui.spinner();
-            } else if widgets::quiet(ui, &look.palette, "Older transactions").clicked() {
-                ctx.api.ask(older);
+            } else if widgets::quiet(ui, &look.palette, if on > 0 { "Look further back" } else { "Older transactions" }).clicked() {
+                ctx.api.retry(older);
             }
         }
 
         ui.label(
-            RichText::new(format!("{} shown, indexed from height {}.{still}", found.items.len(), format::thousands(&found.indexed_from.to_string())))
+            RichText::new(format!("{} shown, indexed from height {}.{still}", shown.len(), format::thousands(&found.indexed_from.to_string())))
                 .small()
                 .color(look.palette.muted),
         );
@@ -630,5 +690,51 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, contract: &str, functions: &[String], state:
         }
     } else if ctx.api.asking(ask) {
         ui.spinner();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, filters::Direction, serde_json::json};
+
+    /// A transaction as a node lists it.
+    fn listed(tx: serde_json::Value, events: serde_json::Value, payments: serde_json::Value) -> FoundTx {
+        serde_json::from_value(json!({
+            "id": "0x01", "sender": "ed25519:0xaa", "nonce": 0, "signer": "ed25519:0xaa", "signature": "0x", "tx": tx,
+            "fee": { "gas_limit": 1, "max_price": "0", "tip": "0" },
+            "receipt": { "status": "done", "fuel_used": 0, "gas_used": 0, "fee": "0", "events": events, "payments": payments, "trace": { "hops": [], "dropped": 0 } },
+            "block": "0xb1", "height": 7, "index": 0,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn what_an_older_node_sent_unfiltered_is_tested_here() {
+        let transfer = listed(json!({ "type": "transfer", "from": "ed25519:0xaa", "to": "ed25519:0xbb", "amount": "5" }), json!([]), json!([]));
+        let call = listed(
+            json!({ "type": "contract_call", "to": "contract:0xcc", "function": "0x01", "amount": "0", "data": [] }),
+            json!([{ "contract": "contract:0xdd", "name": "Transfer", "data": [] }]),
+            json!([]),
+        );
+        let passes = |found: &FoundTx, filter: TxFilter, address: &str| filter.passes(&facts(found, address, Some(1_000)), 1_000);
+
+        assert!(passes(&transfer, TxFilter { kind: Some("transfer".to_string()), ..TxFilter::default() }, "ed25519:0xaa"));
+        assert!(!passes(&call, TxFilter { kind: Some("transfer".to_string()), ..TxFilter::default() }, "ed25519:0xaa"));
+        assert!(passes(&transfer, TxFilter { direction: Some(Direction::Out), ..TxFilter::default() }, "ed25519:0xaa"));
+        assert!(passes(&transfer, TxFilter { direction: Some(Direction::In), ..TxFilter::default() }, "ed25519:0xbb"));
+        assert!(!passes(&transfer, TxFilter { direction: Some(Direction::In), ..TxFilter::default() }, "ed25519:0xaa"));
+        assert!(passes(&transfer, TxFilter { counterparty: "ed25519:0xbb".to_string(), ..TxFilter::default() }, "ed25519:0xaa"));
+        assert!(passes(&transfer, TxFilter { token: Some(COIN.to_string()), ..TxFilter::default() }, "ed25519:0xaa"));
+        assert!(!passes(&call, TxFilter { token: Some(COIN.to_string()), ..TxFilter::default() }, "ed25519:0xaa"));
+        assert!(passes(&call, TxFilter { token: Some("contract:0xcc".to_string()), ..TxFilter::default() }, "ed25519:0xaa"), "the one it called");
+        assert!(passes(&call, TxFilter { token: Some("contract:0xdd".to_string()), ..TxFilter::default() }, "ed25519:0xaa"), "and one that emitted");
+    }
+
+    #[test]
+    fn a_multisig_counts_as_what_it_sent_and_as_itself() {
+        let sent = listed(json!({ "type": "multisig", "tx": { "type": "transfer", "from": "multisig:0xaa", "to": "ed25519:0xbb", "amount": "5" } }), json!([]), json!([]));
+        let passes = |kind: &str| TxFilter { kind: Some(kind.to_string()), ..TxFilter::default() }.passes(&facts(&sent, "multisig:0xaa", None), 0);
+
+        assert!(passes("multisig") && passes("transfer") && !passes("deploy"));
     }
 }

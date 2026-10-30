@@ -1180,6 +1180,61 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **The pool's books grow with its miners.** `pool.json` keeps each miner's earnings, and the node
   keeps the last four claim trees in memory for paths to the roots blocks committed already.
 
+## Fast resume
+
+- **It is a trade, and off.** The wallet's switch, per node, swaps walking every header since it last
+  ran for one request: the node's finalized checkpoint. Headers and voters' signatures are checked
+  from there, against the genesis pinned, but nothing ties that checkpoint to what the wallet checked
+  before, so a dishonest node could show a false history from it. The sidebar says when it happened.
+- **Only under voting finality, and only far behind.** More than 8 epochs behind. Under depth finality
+  nothing signed says what is final, and there are no voters to check from there on, so it walks.
+- **Below it, older receipts still prove,** down the hash chain, a stretch at a time, as for a client
+  that started at a pasted checkpoint.
+- **The saved state moves on.** Once it resumed at a checkpoint, what it saves is from there. Start over
+  walks from genesis, and with the switch on takes the checkpoint again.
+
+## Filtering an address's transactions
+
+- **Filters are read-time.** The address index stays as it was: nothing new is stored, and the existing
+  chain works as it is. Height is the index's own order, so a range seeks and stops, and times come to
+  heights by halving with some slack, as a chain's timestamps need only pass a median. Everything else
+  reads the block and receipt of each entry, which is why a request looks at no more than 1,000.
+- **A rare match takes more requests,** not a slower one: an answer may hold nothing, with `limited`
+  true and a cursor to go on from.
+- **Tell an older node by `applied`.** It ignores the parameters and answers with everything, without
+  that field. Both apps then test what they have here, and say that only what was read was searched.
+- **The filter is the node's word.** In the wallet each line is proven before it says so, but a node
+  could leave a match out, as it could from any listing.
+- **`token` looks at calls and events,** not balances: the contract called, or one that emitted anything
+  while the transaction ran. `counterparty` is what the index calls touching: a call's arguments count,
+  a token's `Transfer` to someone a contract chose does not.
+
+## Retrying, reloading and time limits
+
+- **Every request ends.** 30 seconds in all and 12 to connect, or 90 and 60 through a proxy; a browser's
+  fetch has none of its own, so the apps race it with a timer. A stream may last, but its answer must
+  start within a minute. So nothing stays in the apps' list of what is out.
+- **Failures stand until answered.** They used to clear after three seconds so a page would ask again,
+  which showed a spinner most of the time and the reason for a moment. Now a page goes on asking, held
+  back 3, 6, 12 … up to 30 seconds by `ui::asks`, and the reason stays, with Retry past the hold.
+- **A 404 is an answer.** It holds 3 seconds and no longer, as a transaction not on the chain yet will
+  be, and it is not called trouble.
+- **Reload re-asks what the page asked,** noted per page as it went out, whether or not the page would
+  ask again, so a block cached for good is asked again too. It clears nothing first: what shows stays.
+  Nothing with a body is ever sent again by Retry or Reload.
+- **The pull is only a pull from the very top.** A finger that lands while the page is scrolled scrolls,
+  even if it reaches the top on the way. Drags something on the page took, such as a slider, are out.
+
+## App store builds
+
+- **`--store` builds `--no-default-features --features store`.** Add a default feature to `store` too,
+  or the store's build goes without it.
+- **Android's store build has no `wgpu`;** iOS's does, as eframe draws through it there, but no
+  `chainv4-gpu`. `cargo tree` says which: see [Building and testing](wallet.md#building-and-testing).
+- **The browser mines through its own WebGPU,** so `chainv4`'s `gpu-mining` builds nothing in wasm.
+- **Settings don't change with features.** The mining settings stay in a store build's settings, unread,
+  so a person moving between builds keeps them.
+
 ## The chain's name
 
 - **The chain's name is not the software's.** Genesis's `name`, or governance's `Change::Name`,

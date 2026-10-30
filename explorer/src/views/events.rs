@@ -25,7 +25,7 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
     let found = store.events.get(query);
     let failed = store.failures.get(&newest);
 
-    if failed.is_none() && found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH) {
+    if found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH) {
         ctx.api.ask(newest.clone());
     }
 

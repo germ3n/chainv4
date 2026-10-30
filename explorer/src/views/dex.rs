@@ -320,7 +320,7 @@ fn events_of(ctx: &mut Ctx, query: EventQuery) -> Vec<FoundEvent> {
     let newest = Ask::Events { query: query.clone(), cursor: None };
     let found = ctx.store.events.get(&query);
 
-    if found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH) && !ctx.api.asking(&newest) && !ctx.store.failures.contains_key(&newest) {
+    if found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH) {
         ctx.api.ask(newest);
     }
 

@@ -2244,6 +2244,134 @@ fn an_address_s_transactions_are_listed_from_the_index() {
     assert_eq!(ok(address, &format!("/accounts/{bob}/txs"))["catching_up_to"], Value::Null);
 }
 
+/// Heights in a listing, in order.
+fn heights(listing: &Value) -> Vec<u64> {
+    listing["txs"].as_array().unwrap().iter().map(|tx| tx["height"].as_u64().unwrap()).collect()
+}
+
+#[test]
+fn a_listing_is_filtered_by_kind_direction_counterparty_token_and_when_and_pages_hold_matches() {
+    let authority = DevAuthority::dev_keypair();
+    let me = authority.public().address();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let bob_key = Keypair::generate(authority.public().key_type()).unwrap();
+    let (bob, carol) = (bob_key.public().address(), Keypair::generate(authority.public().key_type()).unwrap().public().address());
+    let contract = contract_address(&me, 1, HashType::default_chain());
+
+    chain.keep_index(IndexKind::Addresses, None).unwrap();
+    // Height 1: a transfer to bob; 2: one back; 3: a deploy; 4: a call; 5: a transfer to carol.
+    produce(&mut chain, vec![SignedTx::sign(Tx::Transfer { from: me, to: bob, amount: Amount::U128(7) }, 0, FeeOffer::NONE, &authority)]);
+    produce(&mut chain, vec![SignedTx::sign(Tx::Transfer { from: bob, to: me, amount: Amount::U128(3) }, 0, FeeOffer::NONE, &bob_key)]);
+    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 1, FeeOffer::NONE, &authority)]);
+    produce(&mut chain, vec![SignedTx::sign(Tx::ContractCall { to: contract, func: Hash::Xxh3_64(crate::vm::selector("increment")), amount: Amount::U128(0), data: vec![TxCallArgumentType::I64(1)] }, 2, FeeOffer::NONE, &authority)]);
+    let last = produce(&mut chain, vec![SignedTx::sign(Tx::Transfer { from: me, to: carol, amount: Amount::U128(5) }, 3, FeeOffer::NONE, &authority)]);
+    let time = |height: u64| chain.tip().timestamp - (5 - height) * SLOT;
+
+    assert_eq!(last.header.timestamp, time(5));
+
+    let list = |query: &str| ok(address, &format!("/accounts/{me}/txs{query}"));
+    let every = list("");
+
+    assert_eq!(heights(&every), [5, 4, 3, 2, 1]);
+    assert_eq!(every["applied"], json!([]), "a new node says what it went by, an older one says nothing");
+    assert_eq!((every["limited"].clone(), every["scanned"].clone()), (json!(false), json!(5)));
+    assert_eq!(every["txs"][0]["time"], json!(time(5)));
+
+    // By what kind of transaction it is.
+    let kinds = list("?kind=transfer");
+    assert_eq!(heights(&kinds), [5, 2, 1]);
+    assert_eq!(kinds["applied"], json!(["kind"]));
+    assert_eq!(heights(&list("?kind=deploy")), [3]);
+    assert_eq!(heights(&list("?kind=contract_call")), [4]);
+    assert_eq!(heights(&list("?kind=nothing_of_the_sort")), Vec::<u64>::new());
+
+    // Whether it sent it, or only took part.
+    assert_eq!(heights(&list("?direction=out")), [5, 4, 3, 1]);
+    assert_eq!(heights(&list("?direction=in")), [2]);
+
+    // Who else it touched.
+    assert_eq!(heights(&list(&format!("?counterparty={bob}"))), [2, 1]);
+    assert_eq!(heights(&list(&format!("?counterparty={carol}"))), [5]);
+
+    // What it moved: the coin, or a contract called or emitting.
+    assert_eq!(heights(&list("?token=coin")), [5, 2, 1]);
+    assert_eq!(heights(&list(&format!("?token={contract}"))), [4]);
+
+    // When: by height, by time, each end included, and any together.
+    assert_eq!(heights(&list("?from_height=2&until_height=4")), [4, 3, 2]);
+    assert_eq!(heights(&list(&format!("?from={}&until={}", time(2), time(3)))), [3, 2]);
+    assert_eq!(heights(&list(&format!("?until={}", time(1)))), [1]);
+    assert_eq!(heights(&list(&format!("?from={}", time(5) + 1))), Vec::<u64>::new());
+    assert_eq!(heights(&list("?from_height=4&until_height=2")), Vec::<u64>::new(), "an empty range");
+
+    let together = list(&format!("?kind=transfer&direction=out&counterparty={bob}&from_height=1"));
+    assert_eq!(heights(&together), [1]);
+    assert_eq!(together["applied"], json!(["kind", "direction", "counterparty", "from_height"]));
+
+    // A page holds matches, however many others lie between, and its cursor goes on from there.
+    let first = list("?kind=transfer&limit=1");
+    assert_eq!((heights(&first), first["limited"].clone()), (vec![5], json!(false)));
+    let second = list(&format!("?kind=transfer&limit=1&cursor={}", first["next"].as_str().unwrap()));
+    assert_eq!(heights(&second), [2], "the deploy and the call between are skipped");
+    let third = list(&format!("?kind=transfer&limit=1&cursor={}", second["next"].as_str().unwrap()));
+    assert_eq!((heights(&third), third["next"].clone()), (vec![1], Value::Null));
+
+    // A cursor stays good under a filter's own start.
+    let from_top = list("?until_height=4&limit=2");
+    assert_eq!(heights(&from_top), [4, 3]);
+    assert_eq!(heights(&list(&format!("?until_height=4&limit=2&cursor={}", from_top["next"].as_str().unwrap()))), [2, 1]);
+
+    // An empty parameter is one not given, as a form sends it.
+    assert_eq!(heights(&list("?kind=&direction=&counterparty=&token=&from=&until=")), [5, 4, 3, 2, 1]);
+
+    for bad in ["direction=sideways", "counterparty=nope", "token=nope", "from=soon", "until=x", "from_height=-1", "until_height=y"] {
+        assert_eq!(get(address, &format!("/accounts/{me}/txs?{bad}")).0, 400, "{bad}");
+    }
+}
+
+#[test]
+fn a_listing_looks_through_no_more_than_its_bound_and_says_where_to_go_on_from() {
+    let authority = DevAuthority::dev_keypair();
+    let me = authority.public().address();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let bob = Keypair::generate(authority.public().key_type()).unwrap().public().address();
+
+    chain.keep_index(IndexKind::Addresses, None).unwrap();
+    // The deploy first, oldest, under more transfers than one request looks through.
+    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 0, FeeOffer::NONE, &authority)]);
+    let mut nonce = 1;
+
+    while (nonce as usize) <= filters::MAX_TXS_SCANNED + 10 {
+        let txs: Vec<SignedTx> = (nonce..nonce + 256).map(|nonce| SignedTx::sign(Tx::Transfer { from: me, to: bob, amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority)).collect();
+        nonce += txs.len() as u64;
+        produce(&mut chain, txs);
+    }
+
+    let first = ok(address, &format!("/accounts/{me}/txs?kind=deploy"));
+
+    assert_eq!(heights(&first), Vec::<u64>::new());
+    assert_eq!((first["limited"].clone(), first["scanned"].clone()), (json!(true), json!(filters::MAX_TXS_SCANNED)));
+
+    let cursor = first["next"].as_str().expect("it says where to go on from");
+    let mut answer = ok(address, &format!("/accounts/{me}/txs?kind=deploy&cursor={cursor}"));
+
+    while answer["limited"] == json!(true) {
+        answer = ok(address, &format!("/accounts/{me}/txs?kind=deploy&cursor={}", answer["next"].as_str().unwrap()));
+    }
+
+    assert_eq!((heights(&answer), answer["next"].clone()), (vec![1], Value::Null), "found, however far back");
+
+    // Without a filter a page fills long before the bound.
+    let plain = ok(address, &format!("/accounts/{me}/txs?limit=10"));
+
+    assert_eq!((plain["limited"].clone(), plain["scanned"].clone()), (json!(false), json!(10)));
+    assert!(plain["next"].is_string());
+}
+
 #[test]
 fn proofs_check_against_the_roots_in_headers() {
     use crate::db::{Column, StateProof, address_key};

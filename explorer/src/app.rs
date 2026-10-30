@@ -14,6 +14,8 @@ use {
     },
     crate::store::{PAGE, Store},
     crate::theme::{self, DARK, LIGHT, Roles},
+    chainv4_ui::asks::{PageAsks, Reload},
+    chainv4_ui::pull::Pull,
     crate::views::{
         self, Ctx, Look, Settings, View, account::AccountState, hops::HopState, map::MapState, network::Streaming, send::SendState,
         settings::SettingsState, tokens::TokensState, dex::DexState, swaps::SwapsState, bridge::BridgeState, collections::CollectionsState,
@@ -42,8 +44,6 @@ const FORKS_EVERY: f64 = 5.0;
 /// answer.
 const RELEASE_EVERY: f64 = 3600.0;
 const RELEASE_RETRY: f64 = 60.0;
-/// How long a failure stands before what failed is asked again.
-const RETRY_AFTER: f64 = 3.0;
 /// How long after the stream drops it is opened again.
 const STREAM_RETRY: f64 = 10.0;
 
@@ -54,9 +54,15 @@ struct Asked {
     node: f64,
     page: f64,
     forks: f64,
-    failures: f64,
     stream: f64,
     release: f64,
+}
+
+/// Lets go of why these failed, as they are being asked again: the page says so until they answer.
+fn retrying(store: &mut Store, asks: impl IntoIterator<Item = Ask>) {
+    for ask in asks {
+        store.failures.remove(&ask);
+    }
 }
 
 pub struct Explorer {
@@ -103,6 +109,11 @@ pub struct Explorer {
     scrolled: chainv4_ui::layout::Scrolled,
     /// The window's title as last set, which follows the chain's name.
     title: String,
+    /// What each page asked, for a reload to ask again.
+    asked_by_view: PageAsks<View, Ask>,
+    /// A reload under way, and the finger on the page that may start one.
+    reloading: Reload<Ask>,
+    pull: Pull,
 }
 
 impl Explorer {
@@ -160,6 +171,9 @@ impl Explorer {
             palette,
             scrolled: chainv4_ui::layout::Scrolled::default(),
             title: String::new(),
+            asked_by_view: PageAsks::default(),
+            reloading: Reload::default(),
+            pull: Pull::default(),
         };
         explorer.connect(&node);
 
@@ -179,6 +193,30 @@ impl Explorer {
         self.address = node;
         self.streaming = Streaming::Connecting;
         self.api.listen();
+        self.asked_by_view = PageAsks::default();
+        self.reloading = Reload::default();
+    }
+
+    /// Asks the node again for what the page shows and its status, past whatever failed before:
+    /// what Reload does, and pulling a page down. What shows stays until the answers come.
+    fn reload(&mut self, time: f64) {
+        self.asked = Asked { release: self.asked.release, ..Asked::default() };
+        self.light.reload();
+        let failed = self.store.failures.iter().filter(|(ask, failure)| failure.is_trouble() && ask.reads()).map(|(ask, _)| ask.clone());
+        let mut asks = vec![Ask::Status];
+        asks.extend_from_slice(self.asked_by_view.of(&self.view));
+        asks.extend(failed);
+
+        for ask in &asks {
+            self.api.retry(ask.clone());
+        }
+
+        if matches!(self.streaming, Streaming::Lost(_)) {
+            self.streaming = Streaming::Connecting;
+            self.api.listen();
+        }
+
+        self.reloading.start(asks, time);
     }
 
     fn go(&mut self, view: View) {
@@ -189,8 +227,12 @@ impl Explorer {
         }
     }
 
-    /// Takes everything that arrived.
+    /// Takes everything that arrived. Why something failed stands until it is answered, or asked
+    /// again by Retry or Reload: a page says so steadily, rather than between spells of loading,
+    /// while what it goes on asking is held back by the Api.
     fn take(&mut self, now: u64, time: f64) {
+        retrying(&mut self.store, self.api.retried());
+
         for reply in self.api.replies() {
             match reply {
                 Reply::Answer { ask, result } => {
@@ -409,9 +451,11 @@ impl Explorer {
                     store.events.entry(query).or_default().take(page, cursor.is_some(), now);
                 }
             }
-            Ask::AccountTxs { address, cursor } => {
+            Ask::AccountTxs { address, query, cursor } => {
                 if let Some(page) = parse::<TxsPage>(value) {
-                    store.account_txs.entry(address).or_default().take(page, cursor.is_some(), now);
+                    // Only the filter in use: what another one found is asked again if it comes back.
+                    store.account_txs.retain(|(kept, kept_query), _| *kept == address && (kept_query.is_empty() || *kept_query == query));
+                    store.account_txs.entry((address, query)).or_default().take(page, cursor.is_some(), now);
                 }
             }
             Ask::Governance => store.governance = parse(value),
@@ -532,33 +576,6 @@ impl Explorer {
 
         if due(&mut self.asked.release, RELEASE_EVERY) {
             self.api.ask(Ask::Release);
-        }
-
-        // The pool's, governance's, the multisig's, the names' and the rich list's pages ask again
-        // on their own, so why it failed stands till then: a node without a pool, or a chain
-        // without governance or names, says so steadily, rather than between spells of loading.
-        if due(&mut self.asked.failures, RETRY_AFTER) {
-            self.store
-                .failures
-                .retain(|ask, _| {
-                    matches!(
-                        ask,
-                        Ask::Offer(_)
-                            | Ask::Submit(_)
-                            | Ask::Call { .. }
-                            | Ask::Rpc(_)
-                            | Ask::Faucet(_)
-                            | Ask::Pool
-                            | Ask::PoolMiner(_)
-                            | Ask::Governance
-                            | Ask::Decisions { .. }
-                            | Ask::GovernanceWeight(_)
-                            | Ask::Multisig(_)
-                            | Ask::NamesList { .. }
-                            | Ask::Rich
-                            | Ask::Supply
-                    )
-                });
         }
 
         if matches!(self.view, View::Map | View::Overview) && due(&mut self.asked.forks, FORKS_EVERY) {
@@ -793,6 +810,14 @@ impl Explorer {
                 self.forward();
             }
 
+            let time = ui.input(|input| input.time);
+            let api = &self.api;
+            let working = self.reloading.working(time, |ask| api.asking(ask));
+
+            if widgets::reload(ui, &palette, working) {
+                self.reload(time);
+            }
+
             let height = self.store.status.as_ref().map(|status| format!("height {}", format::thousands(&status.height.to_string())));
             let room = ui.available_width() - if height.is_some() { 150.0 } else { 0.0 };
             self.search_field(ui, room.min(640.0));
@@ -829,6 +854,18 @@ impl Explorer {
 
             let (color, words) = self.health();
             views::dot(ui, color).on_hover_text(words);
+
+            // A narrow window a mouse is on has no finger to pull the page down with.
+            if !layout::touch(ui.ctx()) {
+                let time = ui.input(|input| input.time);
+                let api = &self.api;
+                let working = self.reloading.working(time, |ask| api.asking(ask));
+
+                if widgets::reload(ui, &palette, working) {
+                    self.reload(time);
+                }
+            }
+
             let room = ui.available_width();
             self.search_field(ui, room);
         });
@@ -940,6 +977,19 @@ impl Explorer {
         }
 
         self.notice(ui);
+
+        // The node not answering: said on every page, whichever it is, with a way to ask again.
+        if let Some(failure) = self.store.failures.get(&Ask::Status).filter(|failure| failure.is_trouble()).cloned()
+            && widgets::retry(ui, &self.palette, &failure.sentence(), self.api.asking(&Ask::Status))
+        {
+            self.reload(ui.input(|input| input.time));
+        }
+
+        let time = ui.input(|input| input.time);
+        let api = &self.api;
+        let working = self.reloading.working(time, |ask| api.asking(ask));
+        let mut pulled = false;
+        let palette = self.palette;
         let mut ctx = Ctx {
             store: &self.store,
             light: &mut self.light,
@@ -954,6 +1004,7 @@ impl Explorer {
         if self.view == View::Map {
             views::map::show(ui, &mut ctx, &mut self.map);
         } else {
+            let area = ui.available_rect_before_wrap();
             let scroll = egui::ScrollArea::vertical().id_salt("page").auto_shrink(false);
 
             self.scrolled.show(ui, scroll, |ui| {
@@ -992,7 +1043,17 @@ impl Explorer {
                     ui.add_space(24.0);
                 });
             });
+
+            pulled = self.pull.show(ui, &palette, area, self.scrolled.offset(), self.scrolled.drag(), working);
         }
+
+        if pulled {
+            self.reload(time);
+        }
+
+        // What the page asked, for a reload to ask again.
+        let sent = self.api.sent();
+        self.asked_by_view.note(&self.view, sent.into_iter().filter(Ask::reloads));
 
         if let Some(view) = go {
             self.go(view);
@@ -1146,6 +1207,28 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use {super::*, serde_json::json};
+
+    #[test]
+    fn retrying_clears_why_it_failed_and_a_page_says_it_is_loading_again() {
+        let mut store = Store::default();
+        let mut api = Api::new("http://127.0.0.1:1", Err("not a port: 0".to_string()), egui::Context::default());
+
+        api.ask(Ask::Mempool);
+        for reply in api.replies() {
+            if let Reply::Answer { ask, result: Err(failure) } = reply {
+                store.failures.insert(ask, failure);
+            }
+        }
+
+        assert!(store.failures.contains_key(&Ask::Mempool));
+
+        // What Retry does: asked again at once, with why it failed gone by the next frame.
+        api.retry(Ask::Mempool);
+        retrying(&mut store, api.retried());
+
+        assert!(!store.failures.contains_key(&Ask::Mempool));
+        assert_eq!(api.replies().len(), 1, "and it went out");
+    }
 
     #[test]
     fn the_header_names_the_chain_as_the_node_says_else_as_remembered_else_chainv4() {

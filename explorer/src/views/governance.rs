@@ -139,7 +139,7 @@ fn approvers(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, state: &mut Gove
         match &view.members {
             Some(members) => {
                 for member in members.iter().take(MOST_NAMED) {
-                    if !store.accounts.contains_key(member) && !store.failures.contains_key(&Ask::Account(member.clone())) {
+                    if !store.accounts.contains_key(member) {
                         ctx.api.ask(Ask::Account(member.clone()));
                     }
                 }

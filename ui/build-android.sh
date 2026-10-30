@@ -4,9 +4,11 @@
 # debug key, or with a release key: --pem FILE, or X_PEM set to the PEM's text (a certificate and
 # its PKCS#8 RSA key, as docs/wallet.md shows how to make). --install puts it on the device adb sees.
 # With a JDK and Android's build-tools, found through ANDROID_HOME, the app can pick files and use
-# biometrics, its Java in ui/android, unless --no-picker leaves that out.
+# biometrics, its Java in ui/android, unless --no-picker leaves that out. --store builds what an app
+# store takes, as APP/target/android/NAME-ARCH-store.apk: the app's `store` feature alone, for an app
+# that has one; an app with none, as the explorer, has nothing a store refuses, and builds as ever.
 #
-#   ui/build-android.sh APP [--debug] [--arch arm64|x64] [--pem FILE] [--no-picker] [--install]
+#   ui/build-android.sh APP [--debug] [--arch arm64|x64] [--pem FILE] [--no-picker] [--store] [--install]
 #
 # APP is the app's folder, wallet or explorer; wallet/build-android.sh and
 # explorer/build-android.sh call this with their own.
@@ -17,7 +19,7 @@ XBUILD_COMMIT=e67b501cbe0e9ca5436c223aa7ec0fe5e27544d1
 XBUILD_REV=$(printf %.10s "$XBUILD_COMMIT")
 
 usage() {
-    sed -n '2,12p' "$0" | cut -c3-
+    sed -n '2,14p' "$0" | cut -c3-
 }
 
 if [ $# -eq 0 ] || [ "$1" = -h ] || [ "$1" = --help ]; then
@@ -36,6 +38,7 @@ arch=arm64
 pem=
 install=
 no_picker=
+store=
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -43,6 +46,7 @@ while [ $# -gt 0 ]; do
         --arch) arch=$2; shift ;;
         --pem) pem=$2; shift ;;
         --no-picker) no_picker=1 ;;
+        --store) store=1 ;;
         --install) install=1 ;;
         -h | --help) usage; exit 0 ;;
         *) echo "unknown argument $1; see --help" >&2; exit 1 ;;
@@ -132,6 +136,16 @@ fi
 
 set -- build --platform android --arch "$arch" --format apk "$profile"
 
+# An app store's build: the features the app lists for one, and no others.
+if [ -n "$store" ]; then
+    if grep -q '^store = ' Cargo.toml; then
+        set -- "$@" --no-default-features --features store
+    else
+        echo "$package has no store feature: nothing in it needs leaving out, so it builds as ever" >&2
+        store=
+    fi
+fi
+
 if [ -n "$pem" ]; then
     set -- "$@" --pem "$pem"
 fi
@@ -145,6 +159,10 @@ suffix=
 
 if [ "$profile" = --debug ]; then
     suffix=-debug
+fi
+
+if [ -n "$store" ]; then
+    suffix=$suffix-store
 fi
 
 apk="target/android/$package-$arch$suffix.apk"

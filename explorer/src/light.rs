@@ -168,6 +168,12 @@ impl Light {
         self.caught_up_once || self.caught_up()
     }
 
+    /// Asks again at once for what it follows by, whatever it is waiting for: for a reload.
+    pub fn reload(&mut self) {
+        self.retry_at = 0.0;
+        self.followed = f64::NEG_INFINITY;
+    }
+
     /// What to ask next, if anything is due.
     pub fn ask(&mut self, time: f64) -> Option<Ask> {
         if self.trouble.is_some() || time < self.retry_at {
