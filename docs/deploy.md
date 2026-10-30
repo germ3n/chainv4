@@ -12,9 +12,9 @@ which shows as `cannot reach the node: timeout`.
 
 ```sh
 B=~/.chainv4-pow/bin/chainv4
-N=https://150-40-117-173.sslip.io     # the VPS's API, behind nginx
+N=https://66-78-40-224.sslip.io       # the public node's API, behind nginx
 K=~/.chainv4-pow/owner.key
-VPS=root@150.40.117.173; SSH="ssh -i ~/.ssh/id_kyun -o IdentitiesOnly=yes"
+VPS=root@66.78.40.224; SSH="ssh -i ~/.ssh/id_kyun -o IdentitiesOnly=yes"
 ```
 
 ## 0. Fresh machines
@@ -139,12 +139,14 @@ $B bridge --node $N --key $K btc deploy <relay>                           # Bitc
 
 Samples: tokens are `contracts/lua/token.lua` with `NAME` and `SYMBOL` changed (GLD, SLV, TUSD);
 `nft create nft "Test Pixels" PIX --factory …` and `nft create multi "Test Items" ITEM`, then
-`nft mint`; pools with `dex add coin <token> <coin amount> <token amount> --dex …`, and on the EVM
+`nft mint`; names `swap`, `dex`, `gateway`, `btcgateway`, `btcrelay`, `nfts`, `gold`, `silver`, `tusd`,
+`pixels`, `items`, `guestbook` and `counter`; pools with `dex add coin <token> <coin amount> <token amount> --dex …`, and on the EVM
 DEX a `Token.sol` from `evm.key` (`send deploy --evm contracts/evm/Token.bin --constructor
 "(string,string,uint256)" --arg … `) with `dex --evm --router … add`; examples on each engine:
 `guestbook.lua`, `counter.wasm`, `Counter.bin` (`--constructor "(uint256)" --arg 0`); names with
 `send name register LABEL` then `send name target LABEL.dev --to …`; a 2-of-3 multisig with EVM
-members (`create-multisig --member KEY,,0x…`) and its contract, `multisig --key evm.key evm …
+members (`create-multisig --member KEY,,0x…`, the member's public key, `secp256k1:0x02…`, which
+`key show` prints as `public`: its address is refused) and its contract, `multisig --key evm.key evm …
 deploy --eth-rpc $N/rpc`.
 
 **What bit:**
@@ -172,9 +174,9 @@ The apps take the directory first; names such as `swap.dev` and the node's flags
 ## 6. The Bitcoin relay on the VPS
 
 The node's binary copied out of its container (`podman cp chainv4_node_1:/usr/local/bin/chainv4
-/root/chainv4-relay/`), `relay.key` beside it, and `/root/chainv4-relay/relay.sh`: `bridge btc
-relay-sync <relay> --batch 25` against `https://mempool.space/testnet4/api`, then two minutes' sleep, for
-ever, under `/etc/systemd/system/chainv4-relay.service` (`Restart=always`). After a rebuild of the
+/root/chainv4-relay/`), `relay.key` beside it, and `/root/chainv4-relay/relay.sh`: `bridge --node $N --key relay.key --esplora https://mempool.space/testnet4/api btc relay-sync <relay>
+--batch 25`, its node the public `https://` API, as the node's port 8080 is not reachable from the
+host, then two minutes' sleep, for ever, under `/etc/systemd/system/chainv4-relay.service` (`Restart=always`). After a rebuild of the
 image, copy the binary out again and `systemctl restart chainv4-relay`.
 
 ## 6b. The onion
@@ -191,7 +193,7 @@ curl --socks5-hostname 127.0.0.1:9050 http://ADDRESS.onion/status
 ## 7. The laptop and the apps
 
 ```sh
-nohup docker/pow.sh join 150.40.117.173 --cpu > ~/.chainv4-pow/join.log 2>&1 &   # never the GPU
+nohup docker/pow.sh join 66.78.40.224 --cpu > ~/.chainv4-pow/join.log 2>&1 &   # never the GPU
 sh <scratchpad>/apps-build.sh      # trunk web bundles, then arm64 APKs of the explorer and wallet
 ```
 
@@ -204,7 +206,7 @@ SHA-256s with the link.
 
 | What | Where |
 | --- | --- |
-| Genesis | `0xf7d7228a5f984194…`, named `chainv4 testnet`, with the supply in state; the directory is governance's change 1, the directory's version 1 |
+| Genesis | `0xee81738047ca1e17…`, named `chainv4 testnet`, with the supply in state; the directory is governance's change 1, the directory's version 1 |
 | Swap contract, `swap.dev` | `contract:0xc4ad35b6…68fb7` |
 | Native DEX, `dex.dev` | `contract:0x6c1df38c…90a4` |
 | EVM DEX router | `0xfd9524e58c1a904b439e9a3292a95cf6562aa458` |
@@ -216,7 +218,7 @@ SHA-256s with the link.
 | Tokens `gold.dev`, `silver.dev`, `tusd.dev`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin; TETH `0x3c262351…88e8` on the EVM DEX |
 | Collections `pixels.dev`, `items.dev` | 3 NFTs; ids 1 and 2, 100 each |
 | Examples | `guestbook.dev`, `counter.dev`, Counter.sol `0x058f1d0b…3be5` |
-| Sample multisig | `multisig:0xba8f500e…a699`, 2 of 3, its contract `0xd7fe4c20…843a` |
-| Onion | `73z6qtdihyugsl2kc34zgcydgimojvro4avjledoap33653dqw77wjyd.onion` |
-| Mining | `150.40.117.173:4002`, an open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`), and `/mining/ws` behind nginx; redeployed at `b7081b6` on the same chain |
+| Sample multisig | `multisig:0x3955d3dd…4d18`, 2 of 3, its contract `0xa4629353…1f2f` |
+| Onion | `nvudjdqvq6voglt7xdjrpx6jnf2p2wip4ul73wobcqnudgrpf4atrkad.onion` |
+| Mining | `66.78.40.224:4002`, an open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`), and `/mining/ws` behind nginx |
 | Apps | https://gofile.io/d/d31TAFN9 |
