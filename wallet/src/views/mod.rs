@@ -12,6 +12,7 @@ pub mod dapp;
 pub mod evm;
 mod governance;
 mod mining;
+mod more;
 pub(crate) mod multisig;
 mod names;
 #[cfg(feature = "nft")]
@@ -74,6 +75,8 @@ pub enum Page {
     Sign,
     /// An offline signer's: an account's public keys, for a sender to watch.
     Pair,
+    /// On a phone, the pages the tabs have no room for.
+    More,
 }
 
 /// The pages the sidebar leads to, in its order. An offline signer follows no chain, so it has
@@ -109,6 +112,29 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             (Page::Settings, "Settings"),
         ],
     }
+}
+
+/// A phone's tabs, along the bottom, each with what it is called there. An online wallet's are the
+/// four it is mostly opened for, then More for the rest; an offline signer has no more pages than
+/// fit, so it needs no More.
+pub fn tabs(role: Role) -> &'static [(Page, &'static str)] {
+    match role {
+        Role::Online => &[(Page::Overview, "Home"), (Page::Send, "Send"), (Page::Receive, "Receive"), (Page::Activity, "Activity"), (Page::More, "More")],
+        Role::Signer => nav(Role::Signer),
+    }
+}
+
+/// The tab to mark while a page shows: its own, or More for a page under it.
+pub fn tab_of(page: Page, role: Role) -> Page {
+    match tabs(role).iter().any(|(tab, _)| *tab == page) {
+        true => page,
+        false => Page::More,
+    }
+}
+
+/// Whether this install's role has a page.
+fn has_page(role: Role, page: Page) -> bool {
+    tabs(role).iter().chain(nav(role)).any(|(known, _)| *known == page)
 }
 
 /// The page a wallet opens on.
@@ -288,12 +314,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         return;
     }
 
-    if ctx.holders.is_empty() && !matches!(*ctx.page, Page::Accounts | Page::Settings) {
+    if ctx.holders.is_empty() && !matches!(*ctx.page, Page::Accounts | Page::Settings | Page::More) {
         *ctx.page = Page::Accounts;
     }
 
     // A page this install's role has none of, as one left from before the role changed.
-    if !nav(ctx.settings.role()).iter().any(|(page, _)| page == ctx.page) {
+    if !has_page(ctx.settings.role(), *ctx.page) {
         *ctx.page = home(ctx.settings.role());
     }
 
@@ -331,6 +357,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Settings => settings::show(ui, ctx, &mut states.settings),
         Page::Sign => sign::show(ui, ctx, &mut states.sign),
         Page::Pair => pair::show(ui, ctx),
+        Page::More => more::show(ui, ctx),
     }
 }
 
@@ -582,6 +609,43 @@ mod tests {
         let key = chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public();
 
         Message::Pair(Pairing { name: "Main".to_string(), keys: vec![key; keys], origin: None })
+    }
+
+    #[test]
+    fn the_tabs_and_more_lead_to_every_page_each_once() {
+        let mut reached: Vec<Page> = tabs(Role::Online).iter().map(|(page, _)| *page).filter(|page| *page != Page::More).collect();
+        reached.extend(more::PAGES.iter().map(|(page, _, _)| *page));
+        let mut pages: Vec<Page> = nav(Role::Online).iter().map(|(page, _)| *page).collect();
+        let order = |page: &Page| format!("{page:?}");
+        reached.sort_by_key(order);
+        pages.sort_by_key(order);
+
+        assert_eq!(reached, pages, "the sidebar's pages, whatever the features");
+        assert_eq!(tabs(Role::Online).len(), 5);
+    }
+
+    #[test]
+    fn a_page_under_more_marks_more_and_a_tabs_own_page_marks_it() {
+        for (page, _, _) in more::PAGES {
+            assert_eq!(tab_of(*page, Role::Online), Page::More, "{page:?}");
+        }
+
+        for (page, _) in tabs(Role::Online) {
+            assert_eq!(tab_of(*page, Role::Online), *page);
+        }
+
+        assert_eq!(tab_of(Page::Accounts, Role::Online), Page::More);
+        assert_eq!(tab_of(Page::Accounts, Role::Signer), Page::Accounts, "a signer's five are all tabs");
+    }
+
+    #[test]
+    fn a_signer_has_no_more_and_keeps_its_five_pages_as_tabs() {
+        assert_eq!(tabs(Role::Signer), nav(Role::Signer));
+        assert_eq!(tabs(Role::Signer).len(), 5);
+        assert!(!has_page(Role::Signer, Page::More));
+        assert!(!has_page(Role::Signer, Page::Send));
+        assert!(has_page(Role::Online, Page::More));
+        assert!(!has_page(Role::Online, Page::Sign));
     }
 
     #[test]

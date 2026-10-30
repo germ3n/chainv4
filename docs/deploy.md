@@ -1,6 +1,6 @@
 # Deploying a fresh test chain
 
-How the VPS's test chain was last started from nothing (2026-10-29, commit `c2cb33e`), step by
+How the test chain was last started from nothing (2026-10-30, commit `f158f90`), step by
 step, with everything enabled: a runbook for the next one. [Docker](docker.md) explains the
 pieces; this is the order they go in, and what bit along the way.
 
@@ -16,6 +16,22 @@ N=https://150-40-117-173.sslip.io     # the VPS's API, behind nginx
 K=~/.chainv4-pow/owner.key
 VPS=root@150.40.117.173; SSH="ssh -i ~/.ssh/id_kyun -o IdentitiesOnly=yes"
 ```
+
+## 0. Fresh machines
+
+On each new machine, as root (Debian forky here; the node builds in its own Debian image, so the
+host needs no Rust, clang or LLVM):
+
+```sh
+apt-get update
+apt-get install -y --no-install-recommends podman podman-compose rsync curl python3 ca-certificates \
+  uidmap passt netavark aardvark-dns crun nftables iptables conntrack
+```
+
+`nftables` matters: with `--no-install-recommends` it does not come along, and every build then
+stops at its first network step with `netavark: nftables error: unable to execute "nft"`. So does
+`conntrack`, which `up` clears stale UDP entries with (see [Docker](docker.md)). A build takes about
+20 minutes on 4 cores and 8 GB, and fetches the mlua forks from GitHub.
 
 ## 1. Keys
 
@@ -57,6 +73,14 @@ $B --db /tmp/check.db --genesis docker/config/genesis.json --http 127.0.0.1:1877
 curl -s 127.0.0.1:18777/status    # its genesis id and federation; then stop it and rm the db
 ```
 
+**Several validators:** give each machine a voting key of its own and each operator an account,
+kept on this machine (`~/.chainv4-pow/validators/`), and list them in the genesis's
+`finality.validators`, each `{ "account", "voter", "bond" }`, with the machines' addresses in
+`bootnodes` as `/ip4/ADDRESS/udp/4001/quic-v1`. Bonds in genesis are minted, so an account needs only
+a little in `allocations` for its fees. Two of three finalize, so one may be down. This chain has
+three: the public node's voter is `validator.key`, the others `validators/v1-voter.key` and
+`v2-voter.key`, their accounts `validators/*-account.key`.
+
 ## 3. The VPS
 
 In `docker/.env`: `EXTRA_ARGS=--no-mdns --archive` (every height's state kept),
@@ -73,6 +97,25 @@ until curl -s $N/status | grep -q '"genesis":"0x<new id>'; do sleep 20; done    
 
 The node's log says `keeping the state of every height, as an archive` and that both indexes
 hold blocks from height 0.
+
+**More machines:** `push` takes one `docker/.env` and one `validator.key` to wherever it is pointed,
+and the faucet's key too, so with several machines copy the repository with `rsync` as `push` does,
+excluding `/docker/.env` and `/docker/config/*.token` as well, then give each its own: `.env`,
+`config/validator.key`, `config/report.token`, and the faucet's key to the public node alone. Each
+`.env` has that machine's `REWARD_TO`, `SERVER_NAME` and the others' addresses in `PEERS`; the public
+node has `TLS_MODE=letsencrypt`, `--archive`, `POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`,
+`TOR=1`, `TOR_MINING=1` and the faucet's settings, the others `self-signed` and `--no-mdns` alone.
+`docker/compose.sh restart node` alone leaves nginx on the node's old address, answering 502:
+restart nginx with it.
+
+**A worker machine** keeps no chain: the node's binary copied out of the public node's container
+(`podman cp chainv4_node_1:/usr/local/bin/chainv4 …`) to `/opt/chainv4`, under
+`/etc/systemd/system/chainv4-worker.service`, `Restart=always`:
+
+```sh
+/opt/chainv4/chainv4 worker --node PUBLIC:4002 --payout ADDRESS --threads 4 --name cloud-worker \
+  --claims /opt/chainv4/pool-claims.json
+```
 
 ## 4. Contracts
 

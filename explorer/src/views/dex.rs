@@ -120,10 +120,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState) {
             true => {
                 for (pool, [pair, holds, price, day, week, fees]) in pools.iter().zip(&rows) {
                     super::list_row(ui, look, |ui| {
-                        ui.horizontal(|ui| {
-                            pick(ui, pool, pair);
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.monospace(price));
-                        });
+                        widgets::end_row(ui, |ui| pick(ui, pool, pair), |ui| ui.monospace(price));
                         ui.label(holds);
                         ui.label(RichText::new(format!("volume {day} a day, {week} a week · fees {fees} a week")).small().color(look.palette.muted));
                     });

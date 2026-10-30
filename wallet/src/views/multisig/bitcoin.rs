@@ -77,13 +77,17 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BitcoinState, account: &str,
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &format!("On {}, {} of {}", wallet.network.name(), wallet.threshold, wallet.xpubs.len()));
         let receiving = descriptor(wallet.threshold, &wallet.xpubs, wallet.network, 0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Its descriptor, for Sparrow, Nunchuk or Bitcoin Core to watch it").small().color(palette.soft));
-
-            if theme::quiet(ui, &palette, "Copy").clicked() {
-                ui.ctx().copy_text(format!("{receiving}\n{}", descriptor(wallet.threshold, &wallet.xpubs, wallet.network, 1)));
-            }
-        });
+        theme::end_row(
+            ui,
+            |ui| {
+                ui.add(egui::Label::new(RichText::new("Its descriptor, for Sparrow, Nunchuk or Bitcoin Core to watch it").small().color(palette.soft)).wrap());
+            },
+            |ui| {
+                if theme::quiet(ui, &palette, "Copy").clicked() {
+                    ui.ctx().copy_text(format!("{receiving}\n{}", descriptor(wallet.threshold, &wallet.xpubs, wallet.network, 1)));
+                }
+            },
+        );
         ui.add(egui::Label::new(theme::mono(&receiving).color(palette.muted)).wrap());
         ui.add_space(8.0);
 

@@ -504,6 +504,15 @@ up() {
 
     "$compose" exec -T node curl -fs http://127.0.0.1:8080/status | summary
 
+    # Peers' packets that came before the port mapping was up left UDP entries that skip it, which
+    # their retries from the same port keep alive, so they never get through. The node just
+    # started, so nothing is lost by clearing them.
+    if command -v conntrack > /dev/null; then
+        conntrack -D -p udp --orig-port-dst "$p2p_port" > /dev/null 2>&1 || true
+    else
+        say "no conntrack here: a peer that dialed before this node was up may stay unable to dial it. Install conntrack"
+    fi
+
     if command -v ufw > /dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
         say "ufw is on: open the ports with  sudo ufw allow $p2p_port/udp && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp"
     fi

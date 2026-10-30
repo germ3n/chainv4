@@ -325,7 +325,6 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, send: &mut SendSt
         match cards.iter().find(|card| (&card.listed.address, &card.id, &card.holder) == (&collection, &id, &holder)) {
             Some(card) => {
                 opened(ui, ctx, state, card, &mut prepared);
-                ui.add_space(14.0);
             }
             None => state.open = None,
         }
@@ -353,16 +352,21 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, send: &mut SendSt
             ui.add_space(6.0);
         }
 
-        ui.horizontal_wrapped(|ui| {
-            for card in &cards {
-                if tile(ui, ctx, state, card).clicked() {
-                    state.open = Some((card.listed.address.clone(), card.id.clone(), card.holder.clone()));
-                    state.to.clear();
-                    state.amount = "1".to_string();
-                    state.trouble = None;
+        let gap = ui.spacing().item_spacing.x;
+        let (columns, side) = chainv4_ui::layout::tiles(ui.available_width(), SIDE, gap);
+
+        for row in cards.chunks(columns) {
+            ui.horizontal_top(|ui| {
+                for card in row {
+                    if tile(ui, &palette, state, card, side).clicked() {
+                        state.open = Some((card.listed.address.clone(), card.id.clone(), card.holder.clone()));
+                        state.to.clear();
+                        state.amount = "1".to_string();
+                        state.trouble = None;
+                    }
                 }
-            }
-        });
+            });
+        }
     });
 
     if let Some(prepared) = prepared {
@@ -400,40 +404,37 @@ fn title(state: &NftsState, card: &Card) -> String {
     metadata(state, card).and_then(|metadata| metadata.name.clone()).unwrap_or_else(|| format!("{} #{}", card.listed.title(), card.id))
 }
 
-fn tile(ui: &mut Ui, ctx: &Ctx, state: &mut NftsState, card: &Card) -> egui::Response {
-    let palette = *ctx.palette;
+/// One token in the grid: its picture and two lines under it, each cut short, so that every tile of
+/// a row has the same top and the same height, whatever a token is called.
+fn tile(ui: &mut Ui, palette: &theme::Palette, state: &mut NftsState, card: &Card, side: f32) -> egui::Response {
     let texture = picture(ui, state, card);
     let name = title(state, card);
 
-    ui.allocate_ui(egui::vec2(SIDE, SIDE + 46.0), |ui| {
-        ui.vertical(|ui| {
-            let (rect, response) = ui.allocate_exact_size(egui::vec2(SIDE, SIDE), egui::Sense::click());
-            ui.painter().rect_filled(rect, 10.0, palette.row);
+    ui.allocate_ui_with_layout(egui::vec2(side, side), egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.set_width(side);
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+        ui.painter().rect_filled(rect, 10.0, palette.row);
 
-            match texture {
-                Some(texture) => {
-                    let size = texture.size_vec2();
-                    let scale = (SIDE / size.x).min(SIDE / size.y);
-                    let shown = egui::Rect::from_center_size(rect.center(), size * scale);
-                    ui.painter().image(texture.id(), shown, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
-                }
-                None => {
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, format!("#{}", card.id), egui::FontId::proportional(22.0), palette.muted);
-                }
+        match texture {
+            Some(texture) => {
+                let size = texture.size_vec2();
+                let scale = (side / size.x).min(side / size.y);
+                let shown = egui::Rect::from_center_size(rect.center(), size * scale);
+                ui.painter().image(texture.id(), shown, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
             }
+            None => {
+                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, format!("#{}", card.id), egui::FontId::proportional(22.0), palette.muted);
+            }
+        }
 
-            ui.label(RichText::new(&name).strong().color(palette.ink));
-            ui.horizontal_wrapped(|ui| {
-                let held = match card.listed.kind {
-                    CollectionKind::Nft => card.listed.title(),
-                    CollectionKind::Multi => format!("{} × {}", card.amount, card.listed.title()),
-                };
-                ui.label(RichText::new(held).small().color(palette.muted));
-            });
+        ui.add(egui::Label::new(RichText::new(&name).strong().color(palette.ink)).truncate());
+        let held = match card.listed.kind {
+            CollectionKind::Nft => card.listed.title(),
+            CollectionKind::Multi => format!("{} × {}", card.amount, card.listed.title()),
+        };
+        ui.add(egui::Label::new(RichText::new(held).small().color(palette.muted)).truncate());
 
-            response.on_hover_text(format!("{name}\nClick to open"))
-        })
-        .inner
+        response.on_hover_text(format!("{name}\nClick to open"))
     })
     .inner
 }
@@ -447,14 +448,17 @@ fn opened(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, card: &Card, prepar
     let read = metadata(state, card).cloned();
 
     theme::card(ui, &palette, |ui| {
-        ui.horizontal(|ui| {
-            theme::caps(ui, &palette, &name);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        theme::end_row(
+            ui,
+            |ui| {
+                theme::caps(ui, &palette, &name);
+            },
+            |ui| {
                 if theme::quiet(ui, &palette, "Close").clicked() {
                     state.open = None;
                 }
-            });
-        });
+            },
+        );
 
         if let Some(texture) = texture {
             let size = texture.size_vec2();

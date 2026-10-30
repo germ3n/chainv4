@@ -47,6 +47,14 @@ impl SyncState {
         self.peers.get(peer).map(|chain| (chain.height, chain.work, chain.justified))
     }
 
+    /// A block from this peer at this height, which it has at least: its work stays as its status
+    /// said, which is what syncing goes by.
+    pub(super) fn heard_height(&mut self, peer: &PeerId, height: u64) {
+        if let Some(chain) = self.peers.get_mut(peer) {
+            chain.height = chain.height.max(height);
+        }
+    }
+
     /// The peer blocks are being fetched from, and from which height.
     pub(super) fn asking(&self) -> Option<(PeerId, u64)> {
         self.asking

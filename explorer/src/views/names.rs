@@ -109,8 +109,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState) {
 }
 
 /// A name's status as a pill.
-fn status(ui: &mut Ui, ctx: &Ctx, status: &str) {
-    let palette = ctx.look.palette;
+fn status(ui: &mut Ui, palette: &chainv4_ui::Palette, status: &str) {
     let color = match status {
         "active" => palette.good,
         "grace" => palette.warn,
@@ -142,10 +141,7 @@ fn directory(ui: &mut Ui, ctx: &mut Ctx, names: &[ListedName]) {
     if look.narrow {
         for name in names {
             super::list_row(ui, look, |ui| {
-                ui.horizontal(|ui| {
-                    name_link(ui, ctx, name);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| status(ui, ctx, &name.status));
-                });
+                widgets::end_row(ui, |ui| name_link(ui, ctx, name), |ui| status(ui, &look.palette, &name.status));
 
                 if let Some(owner) = &name.owner {
                     ui.horizontal_wrapped(|ui| {
@@ -164,7 +160,7 @@ fn directory(ui: &mut Ui, ctx: &mut Ctx, names: &[ListedName]) {
     super::table(ui, look, "names", &["name", "status", "owner", "resolves to", "expires"], |ui| {
         for name in names {
             name_link(ui, ctx, name);
-            status(ui, ctx, &name.status);
+            status(ui, &look.palette, &name.status);
 
             for party in [&name.owner, &name.target] {
                 match party {

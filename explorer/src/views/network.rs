@@ -218,7 +218,7 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                         hidden(ui, &palette);
                     }
 
-                    for address in &node.listening {
+                    for address in once_each(&node.listening) {
                         peer_address(ui, address);
                     }
                 });
@@ -248,6 +248,14 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
             });
         });
     });
+}
+
+/// Each address once, in the order first said: a node lists one again each time its interface comes
+/// back up.
+fn once_each(addresses: &[String]) -> Vec<&String> {
+    let mut seen = std::collections::HashSet::new();
+
+    addresses.iter().filter(|address| seen.insert(*address)).collect()
 }
 
 /// Where a node is reached, with its peer id cut short to keep it a line, as small as a peer's
@@ -404,13 +412,16 @@ fn mining(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, mining: &MiningView) {
     if look.narrow {
         for worker in &mining.workers {
             super::list_row(ui, look, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&worker.name).strong().color(palette.ink));
-                    ui.label(RichText::new(format::hashrate(worker.rate)).monospace().color(palette.good));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                widgets::end_row(
+                    ui,
+                    |ui| {
+                        ui.label(RichText::new(&worker.name).strong().color(palette.ink));
+                        ui.label(RichText::new(format::hashrate(worker.rate)).monospace().color(palette.good));
+                    },
+                    |ui| {
                         ui.label(RichText::new(format::ago(worker.since, ctx.now)).small().color(palette.muted));
-                    });
-                });
+                    },
+                );
                 ui.label(RichText::new(or_hidden(&worker.address)).monospace().small().color(palette.soft));
 
                 if let Some(payout) = &worker.payout {
@@ -664,6 +675,13 @@ fn peers(ui: &mut Ui, ctx: &mut Ctx, peers: &[Peer], height: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_address_said_twice_shows_once_in_the_order_first_said() {
+        let said = ["/ip4/10.0.0.1/tcp/1", "/ip4/10.0.0.2/tcp/1", "/ip4/10.0.0.1/tcp/1"].map(str::to_string);
+
+        assert_eq!(once_each(&said), [&said[0], &said[1]]);
+    }
 
     #[test]
     fn an_upgrade_says_who_decided_it_and_how_far_off_it_is() {

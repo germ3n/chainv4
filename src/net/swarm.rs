@@ -291,6 +291,23 @@ fn ip_of(address: &Multiaddr) -> Option<IpAddr> {
     }
 }
 
+/// The port an address names, UDP or TCP, if it does.
+fn port_of(address: &Multiaddr) -> Option<u16> {
+    use libp2p::multiaddr::Protocol;
+
+    address.iter().find_map(|part| match part {
+        Protocol::Udp(port) | Protocol::Tcp(port) => Some(port),
+        _ => None,
+    })
+}
+
+/// Whether an address given to dial is a peer that connected from this IP and listens on these
+/// addresses: the IP it came from is the address's, and it listens on the address's port. Behind
+/// a container or NAT it knows only its inner addresses, so the port is what is left to go by.
+fn same_node(given: &Multiaddr, from: IpAddr, listening: &[Multiaddr]) -> bool {
+    ip_of(given) == Some(from) && port_of(given).is_some_and(|port| listening.iter().any(|address| port_of(address) == Some(port)))
+}
+
 /// The peer id an address ends in, /p2p/<id>, if it does.
 fn peer_of(address: &Multiaddr) -> Option<PeerId> {
     match address.iter().last() {
@@ -599,6 +616,19 @@ impl Net {
                     return true;
                 }
 
+                // A peer given by address that reached this node first needs no dial of its own. Under
+                // Docker or Podman such a dial can fail for as long as it is retried: sent before the
+                // peer's port mapping was up, it left a stale UDP entry in the peer's connection
+                // tracking, which each retry from the same port keeps alive.
+                if let Some(&from) = self.ips.get(&peer_id) {
+                    for wanted in self.wanted.iter_mut().filter(|wanted| wanted.reached.is_none()) {
+                        if same_node(&wanted.address, from, &info.listen_addrs) {
+                            log::info!("[net] {peer_id} is {}, which it reached this node from first", wanted.address);
+                            wanted.reached = Some(peer_id);
+                        }
+                    }
+                }
+
                 // A peer's loopback addresses reach it only from its own machine: kept when the
                 // peer sees this node on loopback too, so nodes on one machine still find each
                 // other, and left out otherwise, so the DHT never hands them to anyone else.
@@ -881,6 +911,12 @@ impl Net {
         let bytes = wincode::serialize(message).expect("blocks and transactions always encode");
 
         if let Err(err) = self.swarm.behaviour_mut().gossipsub.publish(topic.clone(), bytes) {
+            // The same bytes went round already, as when two nodes pass on one transaction, each
+            // as a batch of its own: every peer has them.
+            if matches!(err, gossipsub::PublishError::Duplicate) {
+                return;
+            }
+
             let peers = self.swarm.connected_peers().count();
 
             // Without peers, gossip is best effort. With some, none taking what this node
@@ -929,6 +965,19 @@ mod tests {
             bans: crate::net::BanLimits::default(),
             tor: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_peer_that_connected_first_is_known_by_its_ip_and_its_port() {
+        let given: Multiaddr = "/ip4/66.78.40.224/udp/4001/quic-v1".parse().unwrap();
+        let inner: Vec<Multiaddr> = vec!["/ip4/10.89.0.2/udp/4001/quic-v1".parse().unwrap(), "/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap()];
+        let from = "66.78.40.224".parse().unwrap();
+
+        assert!(same_node(&given, from, &inner), "behind a container it knows only its inner addresses");
+        assert!(!same_node(&given, "65.87.7.72".parse().unwrap(), &inner), "another machine");
+        assert!(!same_node(&given, from, &["/ip4/10.89.0.2/udp/4002/quic-v1".parse().unwrap()]), "another node on that machine");
+        assert!(!same_node(&"/dns4/node.example/udp/4001/quic-v1".parse().unwrap(), from, &inner), "a name says nothing of the IP");
+        assert!(same_node(&"/ip4/66.78.40.224/tcp/4001".parse().unwrap(), from, &["/ip4/10.89.0.2/tcp/4001".parse().unwrap()]));
     }
 
     #[test]

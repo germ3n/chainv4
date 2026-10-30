@@ -83,3 +83,40 @@ fn a_contract_is_sent_to_safely_and_a_key_plainly() {
     assert_eq!((to_key.what.as_str(), to_contract.what.as_str()), ("Send NFT #4", "Send 5 of #7"));
     assert_eq!(to_key.coin, u256::ZERO);
 }
+
+#[test]
+fn the_tiles_of_a_row_share_one_top_and_one_height_whatever_they_are_called() {
+    let collection = |name: &str| Listed { address: format!("contract:{name}"), kind: CollectionKind::Nft, name: Some(name.to_string()), symbol: None };
+    let assurance = chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(HashType::default_chain()), height: 1, final_: true };
+    let card = |listed: Listed, id: &str| Card { listed, id: id.to_string(), holder: "ed25519:0x01".to_string(), amount: u256::from(1u64), assurance };
+    let cards = [
+        card(collection("Art"), "1"),
+        card(collection("A collection whose name runs on far longer than any tile has room for on a phone"), "12345678901234567890"),
+    ];
+    let ctx = egui::Context::default();
+    crate::theme::apply(&ctx, &crate::theme::DARK);
+    let mut state = NftsState::default();
+    let mut tiles = Vec::new();
+
+    // A frame to settle fonts, then the one measured.
+    for _ in 0..2 {
+        tiles.clear();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.horizontal_top(|ui| {
+                for card in &cards {
+                    ui.scope(|ui| {
+                        let before = ui.cursor().min;
+                        tile(ui, &crate::theme::DARK, &mut state, card, SIDE);
+                        tiles.push(egui::Rect::from_min_max(before, ui.min_rect().max));
+                    });
+                }
+            });
+        });
+        output.textures_delta.clear();
+    }
+
+    assert_eq!(tiles.len(), 2);
+    assert!((tiles[0].top() - tiles[1].top()).abs() < 0.5, "one top line: {tiles:?}");
+    assert!((tiles[0].height() - tiles[1].height()).abs() < 0.5, "one height: {tiles:?}");
+    assert!((tiles[0].width() - SIDE).abs() < 0.5 && (tiles[1].width() - SIDE).abs() < 0.5, "a long name stays in its tile: {tiles:?}");
+}

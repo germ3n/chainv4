@@ -67,7 +67,6 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     // An offline signer follows no node and no chain.
     if ctx.settings.role() != Role::Signer {
         online(ui, ctx, state, node);
-        ui.add_space(14.0);
         super::dapp::settings(ui, ctx);
         #[cfg(feature = "swap")]
         swaps(ui, ctx);
@@ -77,7 +76,6 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         bitcoin(ui, ctx);
     }
 
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "On this device");
         let role = ctx.settings.role();
@@ -166,7 +164,6 @@ fn online(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, node: String) {
     let palette = *ctx.palette;
     let typed = state.node.get_or_insert_with(|| node.clone());
 
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Node");
         ui.label(RichText::new("Where the wallet asks. It is never trusted: what it sends shows only once it checks.").small().color(palette.muted));
@@ -188,7 +185,6 @@ fn online(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, node: String) {
         }
     });
 
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Proxy");
         let set = ctx.settings.proxy.clone();
@@ -200,7 +196,6 @@ fn online(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, node: String) {
         }
     });
 
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Trusted chain");
         let pinned = ctx.settings.pinned.get(&node).cloned();
@@ -299,7 +294,6 @@ fn online(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, node: String) {
         }
     });
 
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Light client");
 
@@ -511,6 +505,10 @@ fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
     let modal = egui::Modal::new(ui.make_persistent_id("show words"))
         .frame(egui::Frame::new().fill(palette.card).stroke(egui::Stroke::new(1.0, palette.line)).corner_radius(12.0).inner_margin(egui::Margin::same(20)))
         .show(ui.ctx(), |ui| {
+            if chainv4_ui::layout::fingers(ui.ctx()) {
+                chainv4_ui::layout::finger_sized(ui);
+            }
+
             ui.set_max_width(360.0);
             theme::caps(ui, &palette, "Show the words?");
             ui.add_space(4.0);
@@ -718,7 +716,6 @@ fn your_chain(ui: &mut Ui, ctx: &mut Ctx) {
 #[cfg(feature = "swap")]
 fn swaps(ui: &mut Ui, ctx: &mut Ctx) {
     let palette = *ctx.palette;
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Swaps");
         ui.label(RichText::new("The swap contract, empty for the one the node names, and an Esplora API, such as https://mempool.space/api or https://mempool.space/testnet4/api, for the Swaps page to look Bitcoin up at and broadcast through. Empty sends nothing anywhere: you paste what it needs and broadcast yourself.").small().color(palette.muted));
@@ -761,7 +758,6 @@ fn swaps(ui: &mut Ui, ctx: &mut Ctx) {
 #[cfg(feature = "nft")]
 fn nfts(ui: &mut Ui, ctx: &mut Ctx) {
     let palette = *ctx.palette;
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "NFTs");
         ui.label(RichText::new("What an NFT is called and looks like lives where its token URI points: a web server or IPFS, which learn your IP address and which tokens you look at when the wallet fetches from them. Off, the NFTs page shows ids and owners alone, all of it proven; data: URIs, carried on the chain itself, show either way.").small().color(palette.muted));
@@ -784,7 +780,6 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
     use crate::light::Net;
 
     let palette = *ctx.palette;
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Bitcoin");
         ui.label(RichText::new("A light client that asks Bitcoin's own peers for each block's compact filter, and fetches only the blocks that pay or spend your addresses and your swaps' HTLCs: no server learns which are yours. A first sync takes some minutes and a few tens of megabytes; later ones, the blocks since. Through the proxy above when one is set, SOCKS5 alone.").small().color(palette.muted));

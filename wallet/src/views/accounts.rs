@@ -82,7 +82,6 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
             };
             ui.label(RichText::new(text).color(palette.soft));
         });
-        ui.add_space(14.0);
     }
 
     // An account asked to go goes once every card is drawn, so none is drawn past the end.
@@ -393,6 +392,10 @@ fn reveal_question(ui: &mut Ui, ctx: &Ctx, state: &mut AccountsState) {
     let modal = egui::Modal::new(ui.make_persistent_id("reveal key"))
         .frame(egui::Frame::new().fill(palette.card).stroke(egui::Stroke::new(1.0, palette.line)).corner_radius(12.0).inner_margin(egui::Margin::same(20)))
         .show(ui.ctx(), |ui| {
+            if chainv4_ui::layout::fingers(ui.ctx()) {
+                chainv4_ui::layout::finger_sized(ui);
+            }
+
             ui.set_max_width(360.0);
             theme::caps(ui, &palette, "Show the private keys?");
             ui.add_space(4.0);

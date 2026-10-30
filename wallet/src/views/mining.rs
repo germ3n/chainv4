@@ -486,7 +486,7 @@ fn mine(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState, from: &Address, nod
                 });
             }
             Some(Err(failure)) if failure.status == NOT_FOUND => {
-                ui.label(RichText::new("This node takes no miners: it was not started with --mining.").color(palette.ink));
+                ui.add(egui::Label::new(chainv4_ui::widgets::flagged(ui, "This node takes no miners: it was not started with --mining.", egui::TextStyle::Body, palette.ink)).wrap());
             }
             Some(Err(failure)) => {
                 ui.colored_label(palette.bad, format!("The node did not say where it takes miners: {}", failure.message));
@@ -892,11 +892,7 @@ fn how_to_mine(ui: &mut Ui, ctx: &mut Ctx, from: &Address, port: Option<&str>) {
         ui.horizontal_wrapped(|ui| {
             super::copy(ui, &palette, &command);
         });
-        ui.label(
-            RichText::new("Add --solo to mine alone. A private port also wants --token FILE, the token its operator gave you. The pool credits your part of each block it finds once the block is final, so earnings show a while after the blocks; one claim takes everything credited so far.")
-                .small()
-                .color(palette.muted),
-        );
+        theme::note(ui, &palette, "Add --solo to mine alone. A private port also wants --token FILE, the token its operator gave you. The pool credits your part of each block it finds once the block is final, so earnings show a while after the blocks; one claim takes everything credited so far.");
     });
 }
 

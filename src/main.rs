@@ -396,7 +396,7 @@ fn main() -> std::process::ExitCode {
     use clap::Parser;
 
     // libp2p's own info lines are mostly noise for an operator; RUST_LOG still overrides this.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,libp2p=warn"))
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,libp2p=warn,libp2p_gossipsub::behaviour=error"))
         .format_timestamp_millis()
         .init();
 

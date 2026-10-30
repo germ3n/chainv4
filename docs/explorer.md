@@ -362,10 +362,12 @@ version row and its release notices.
 - **tabs along the bottom:** Home, Blocks (the map), Mempool, Tokens and More, which lists the
   rest, NFTs, Multisig, Names, Rich list & supply, DEX, Swaps and Tools among them;
 - **pages that stack:** tables become rows of a few lines each, facts sit under their names, and
-  charts one above another;
+  charts one above another, and a row with a value at its end keeps it there, however long what
+  is beside it;
 - **buttons and fields a finger tall,** 40 points, as on any touch screen, a phone on its side
-  included, where the sidebar layout shows; the field being typed in scrolls into sight above
-  the keyboard.
+  included, where the sidebar layout shows, whose foot folds to one line, the light client's and
+  the node's dots and a word, on a screen under 560 points tall; the field being typed in scrolls
+  into sight above the keyboard.
 
 **Everywhere:**
 - the search box takes a height, a block or transaction id, an address, or a name such as

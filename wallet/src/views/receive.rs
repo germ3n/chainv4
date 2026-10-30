@@ -98,7 +98,6 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
     }
 
     if addresses.len() > 1 {
-        ui.add_space(14.0);
         theme::card(ui, &palette, |ui| {
             theme::caps(ui, &palette, "All its addresses");
             ui.add_space(4.0);
@@ -109,7 +108,6 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
         });
     }
 
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Good to know");
         ui.add_space(4.0);

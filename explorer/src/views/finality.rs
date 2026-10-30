@@ -98,12 +98,8 @@ fn voters(ui: &mut Ui, ctx: &mut Ctx) {
         if look.narrow {
             for member in &active {
                 super::list_row(ui, look, |ui| {
-                    ui.horizontal(|ui| {
-                        super::address(ui, ctx, &text(member, "account"));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(ctx.coins(&text(member, "weight"))).monospace());
-                        });
-                    });
+                    let weight = ctx.coins(&text(member, "weight"));
+                    widgets::end_row(ui, |ui| super::address(ui, ctx, &text(member, "account")), |ui| ui.label(RichText::new(weight).monospace()));
                     ui.label(RichText::new(format!("votes as {}", format::short(&text(member, "voter")))).small().color(look.palette.muted));
                 });
             }
@@ -142,12 +138,8 @@ fn voters(ui: &mut Ui, ctx: &mut Ctx) {
         if look.narrow {
             for validator in &bonded {
                 super::list_row(ui, look, |ui| {
-                    ui.horizontal(|ui| {
-                        super::address(ui, ctx, &text(validator, "account"));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(ctx.coins(&text(validator, "bond"))).monospace());
-                        });
-                    });
+                    let bond = ctx.coins(&text(validator, "bond"));
+                    widgets::end_row(ui, |ui| super::address(ui, ctx, &text(validator, "account")), |ui| ui.label(RichText::new(bond).monospace()));
                     ui.label(
                         RichText::new(format!("{} · {}", active_text(validator), slashed(validator)))
                             .small()

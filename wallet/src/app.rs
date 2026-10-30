@@ -80,11 +80,6 @@ impl Visits {
         Some((page, offset))
     }
 }
-/// The narrowest a bottom tab gets before the row scrolls, wide enough for "Governance".
-const TAB_WIDTH: f32 = 76.0;
-/// How wide the fade is at a scrolling row's edge.
-const TAB_FADE: f32 = 24.0;
-
 /// What this install is, chosen on its first launch. Changing it takes removing its wallets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -375,9 +370,6 @@ pub struct Wallet {
     /// Where the page shown is scrolled to, and where it should be: the top of a page come to
     /// anew, or where one gone back to was left.
     scrolled: chainv4_ui::layout::Scrolled,
-    /// The page the bottom tabs last scrolled to, so they bring a newly opened one into view and
-    /// otherwise stay where a finger left them.
-    tabs_at: Option<Page>,
     coin: Coin,
     /// The chain's name, as the node's status says it, if it says one.
     name: Option<String>,
@@ -437,7 +429,6 @@ impl Wallet {
             book: Book::default(),
             holders: Vec::new(),
             page: Page::Overview,
-            tabs_at: None,
             visits: Visits::new(Page::Overview),
             scrolled: chainv4_ui::layout::Scrolled::default(),
             coin: Coin {
@@ -1007,75 +998,34 @@ impl Wallet {
         }
     }
 
-    /// On a narrow screen, the pages, as tabs along the bottom: sharing the width when they fit,
-    /// each as wide as its name needs, otherwise, in a row that scrolls sideways.
+    /// On a narrow screen, the tabs along the bottom, each as wide as the next: the same place for
+    /// each, on every page.
     fn tabs(&mut self, ui: &mut Ui) {
-        let nav = views::nav(self.settings.role());
-        let shared = ui.available_width() / nav.len() as f32;
+        let palette = self.palette;
+        let role = self.settings.role();
+        let tabs = views::tabs(role);
+        let width = ui.available_width() / tabs.len() as f32;
+        let marked = views::tab_of(self.page, role);
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.spacing_mut().button_padding = egui::vec2(2.0, 4.0);
+        ui.horizontal(|ui| {
+            for &(page, name) in tabs {
+                let selected = marked == page;
+                let text = theme::strong(name, 12.0).color(if selected { palette.ink } else { palette.muted });
+                let button = egui::Button::new(text).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
+                let response = ui.add_sized([width, 46.0], button);
 
-        if shared >= TAB_WIDTH {
-            ui.horizontal(|ui| self.tab_row(ui, nav, shared));
+                if selected {
+                    let rect = response.rect;
+                    ui.painter()
+                        .rect_filled(egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 1.5), egui::vec2(28.0, 3.0)), 2.0, palette.accent);
+                }
 
-            return;
-        }
-
-        egui::ScrollArea::horizontal()
-            .id_salt("tabs")
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| ui.horizontal(|ui| self.tab_row(ui, nav, TAB_WIDTH)));
-    }
-
-    fn tab_row(&mut self, ui: &mut Ui, nav: &[(Page, &'static str)], width: f32) {
-        let palette = self.palette;
-
-        for &(page, name) in nav {
-            let selected = self.page == page;
-            let name = if page == Page::Overview { "Home" } else { name };
-            let text = theme::strong(name, 12.0).color(if selected { palette.ink } else { palette.muted });
-            let button = egui::Button::new(text).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
-            let response = ui.add_sized([width, 46.0], button);
-
-            if selected {
-                let rect = response.rect;
-                ui.painter()
-                    .rect_filled(egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 1.5), egui::vec2(28.0, 3.0)), 2.0, palette.accent);
-
-                // A page opened elsewhere, a link or another page's button, comes into view.
-                if self.tabs_at != Some(page) {
-                    response.scroll_to_me(Some(egui::Align::Center));
-                    self.tabs_at = Some(page);
+                if response.clicked() {
+                    self.page = page;
                 }
             }
-
-            if response.clicked() {
-                self.page = page;
-            }
-        }
-
-        // The edges fade where more tabs wait, so a row that scrolls says so.
-        let shown = ui.clip_rect();
-        let row = ui.min_rect();
-        let fade = |inner: f32, edge: f32| {
-            let clear = egui::Color32::TRANSPARENT;
-            let mut mesh = egui::Mesh::default();
-            mesh.colored_vertex(egui::pos2(inner, shown.top()), clear);
-            mesh.colored_vertex(egui::pos2(edge, shown.top()), palette.nav);
-            mesh.colored_vertex(egui::pos2(edge, shown.bottom()), palette.nav);
-            mesh.colored_vertex(egui::pos2(inner, shown.bottom()), clear);
-            mesh.add_triangle(0, 1, 2);
-            mesh.add_triangle(0, 2, 3);
-            ui.painter().add(mesh);
-        };
-
-        if row.left() < shown.left() - 1.0 {
-            fade(shown.left() + TAB_FADE, shown.left());
-        }
-
-        if row.right() > shown.right() + 1.0 {
-            fade(shown.right() - TAB_FADE, shown.right());
-        }
+        });
     }
 }
 
@@ -1296,24 +1246,40 @@ mod tests {
     use {super::*, serde_json::json};
 
     #[test]
-    fn every_pages_name_fits_a_phones_tab() {
+    fn every_tabs_name_fits_a_phones_share_of_the_bar() {
+        // The narrowest phones in use are 320 points wide.
+        const NARROWEST: f32 = 320.0;
         let ctx = egui::Context::default();
         theme::install_fonts(&ctx);
-        let mut widest = Vec::new();
+        let mut names = Vec::new();
         let mut drawn = ctx.run_ui(egui::RawInput::default(), |ui| {
             for role in [Role::Online, Role::Signer] {
-                for &(_, name) in views::nav(role) {
+                let share = NARROWEST / views::tabs(role).len() as f32;
+
+                for &(_, name) in views::tabs(role) {
                     let galley = ui.painter().layout_no_wrap(name.to_string(), egui::FontId::new(12.0, egui::FontFamily::Name(theme::SEMIBOLD.into())), egui::Color32::WHITE);
-                    widest.push((name, galley.size().x));
+                    names.push((name, galley.size().x, share));
                 }
             }
         });
         drawn.textures_delta.clear();
 
         // Each tab has two points of padding on either side.
-        for (name, width) in widest {
-            assert!(width + 4.0 <= TAB_WIDTH, "{name} is {width} wide");
+        for (name, width, share) in names {
+            assert!(width + 4.0 <= share, "{name} is {width} wide, in {share}");
         }
+    }
+
+    #[test]
+    fn back_goes_to_more_then_home() {
+        let mut visits = Visits::new(Page::Overview);
+
+        visits.see(Page::More, 0.0);
+        visits.see(Page::Names, 120.0);
+
+        assert_eq!(visits.back(), Some((Page::More, 120.0)));
+        assert_eq!(visits.back(), Some((Page::Overview, 0.0)));
+        assert_eq!(visits.back(), None);
     }
 
     #[test]

@@ -658,15 +658,21 @@ pub fn settings(ui: &mut Ui, ctx: &Ctx) {
         theme::caps(ui, &palette, "Connected");
 
         for (origin, site) in &connected {
-            ui.horizontal_wrapped(|ui| {
-                let accounts = site["accounts"].as_array().map_or(0, Vec::len);
-                ui.label(RichText::new(origin).color(palette.ink));
-                ui.label(RichText::new(format!("{accounts} account{}", if accounts == 1 { "" } else { "s" })).small().color(palette.muted));
-
-                if theme::quiet(ui, &palette, "Disconnect").clicked() {
-                    dapp::disconnect(origin);
-                }
-            });
+            let accounts = site["accounts"].as_array().map_or(0, Vec::len);
+            theme::end_row(
+                ui,
+                |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(origin).color(palette.ink));
+                        ui.label(RichText::new(format!("{accounts} account{}", if accounts == 1 { "" } else { "s" })).small().color(palette.muted));
+                    });
+                },
+                |ui| {
+                    if theme::quiet(ui, &palette, "Disconnect").clicked() {
+                        dapp::disconnect(origin);
+                    }
+                },
+            );
         }
     });
 }

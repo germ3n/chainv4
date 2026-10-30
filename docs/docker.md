@@ -75,6 +75,13 @@ it is not the API's host and port 4002. nginx passes `/mining/ws`, the port over
 to the node for the web wallet, which mines through it; the TCP port still needs opening for the
 desktop and phone wallets and for `chainv4 worker`.
 
+**Peers that dial too early:** a peer's QUIC packets that arrive before the node's port mapping is
+up leave a UDP entry in the host's connection tracking that skips the mapping, and its retries,
+always from the same port, keep that entry alive, so the dial times out for as long as it is
+retried, while the node's own dial the other way works. `docker/pow.sh up` clears those entries with
+`conntrack` once the node answers; after restarting a node any other way, run `conntrack -D -p udp
+--orig-port-dst 4001`. A node also stops dialing a `--peer` that has connected to it first.
+
 **What it shares:** `REPORT` is the node's [`--report`](node.md#what-a-node-shares-of-itself),
 `public` unless set, and `HIDE` and `SHOW` its `--hide` and `--show`, by commas.
 `docker/pow.sh report-token` makes a token (`docker/config/report.token`, or `REPORT_TOKEN` naming

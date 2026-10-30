@@ -449,7 +449,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, send: &mut SendS
             ui.selectable_value(&mut state.venue, Venue::Native, "Native pools");
             ui.selectable_value(&mut state.venue, Venue::Evm, "EVM pools");
         });
-        ui.add_space(8.0);
+        theme::section_gap(ui);
     } else {
         state.venue = if native.is_some() { Venue::Native } else { Venue::Evm };
     }
@@ -457,9 +457,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, send: &mut SendS
     let mut prepared = None;
     let pools = state.listed();
     trade(ui, ctx, state, &pools, &mut prepared);
-    ui.add_space(14.0);
     liquidity(ui, ctx, state, &pools, &mut prepared);
-    ui.add_space(14.0);
     create(ui, ctx, state, &mut prepared);
 
     if let Some(trouble) = &state.trouble {

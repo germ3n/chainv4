@@ -3,12 +3,22 @@
 //! numbers, so it reads calmer than the wiki's pages. The widgets every page is built from are
 //! chainv4-ui's, shared with the explorer.
 
-pub use chainv4_ui::widgets::{card, caps, dot, fitted, mono, pill, primary, quiet, rule, strong, title};
+pub use chainv4_ui::layout::section_gap;
+pub use chainv4_ui::widgets::{caps, dot, end_row, fitted, mono, pill, primary, quiet, rule, segmented, strong, title};
 pub use chainv4_ui::{DISPLAY as SERIF, Palette, SEMIBOLD};
 use {
     chainv4_ui::{Density, Typeface},
-    egui::Color32,
+    egui::{Color32, Ui},
 };
+
+/// A card of a page, and the one gap every page keeps below its cards, so that no page has a number
+/// of its own for it.
+pub fn card<R>(ui: &mut Ui, palette: &Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let inner = chainv4_ui::widgets::card(ui, palette, add);
+    section_gap(ui);
+
+    inner
+}
 
 pub const DARK: Palette = Palette {
     paper: Color32::from_rgb(0x0c, 0x0d, 0x10),
@@ -54,6 +64,13 @@ const TYPEFACE: Typeface = Typeface {
     display: Some(include_bytes!("../assets/fonts/Newsreader-Regular.ttf")),
 };
 
+/// A note in small muted text that wraps, with a command's flags in the mono face.
+pub fn note(ui: &mut Ui, palette: &Palette, text: &str) -> egui::Response {
+    let job = chainv4_ui::widgets::flagged(ui, text, egui::TextStyle::Small, palette.muted);
+
+    ui.add(egui::Label::new(job).wrap())
+}
+
 /// Loads the wiki's fonts.
 pub fn install_fonts(ctx: &egui::Context) {
     chainv4_ui::install_fonts(ctx, &TYPEFACE);
@@ -64,4 +81,31 @@ pub fn install_fonts(ctx: &egui::Context) {
 pub fn apply(ctx: &egui::Context, palette: &Palette) {
     chainv4_ui::apply(ctx, palette, &Density::COMFORTABLE);
     ctx.all_styles_mut(|style| style.wrap_mode = Some(egui::TextWrapMode::Wrap));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cards_stand_one_gap_apart() {
+        let ctx = egui::Context::default();
+        apply(&ctx, &DARK);
+        let mut drawn = Vec::new();
+
+        for _ in 0..2 {
+            drawn.clear();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                for _ in 0..3 {
+                    drawn.push(card(ui, &DARK, |ui| ui.label("what the card says").rect));
+                }
+            });
+            output.textures_delta.clear();
+        }
+
+        // From the text in one card to the text in the next: the gap, and a margin and a line each.
+        let around = 2.0 * (f32::from(chainv4_ui::Density::COMFORTABLE.margin) + 1.0);
+
+        assert!(drawn.windows(2).all(|pair| (pair[1].top() - pair[0].bottom() - around - chainv4_ui::layout::SECTION).abs() < 1.0), "{drawn:?}");
+    }
 }

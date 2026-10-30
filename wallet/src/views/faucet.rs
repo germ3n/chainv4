@@ -61,7 +61,6 @@ pub fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut FaucetState) {
     let amount = ctx.amount(None, faucet["amount"].as_str().unwrap_or("0"));
     let every = faucet["every_ms"].as_u64().unwrap_or(0) / 3_600_000;
 
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Faucet");
         ui.label(

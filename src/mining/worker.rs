@@ -365,7 +365,8 @@ fn send(
                 let number = lock(job).filter(|(_, current)| *current == id).map(|(number, _)| number);
 
                 if let Some(number) = number {
-                    log::info!("[worker] found a nonce for job {number}");
+                    // A pool's shares come many a second at first: its verdicts say what became of them.
+                    log::debug!("[worker] found a nonce for job {number}");
                     sender.send(&json!({ "type": "found", "job": number, "nonce": nonce }))?;
                 }
             }

@@ -18,6 +18,9 @@ use {
 /// in milliseconds.
 pub const UNSEEN_AFTER: u64 = 10 * 60 * 1_000;
 
+/// The widest a line's amount and pill get.
+const AMOUNT_WIDTH: f32 = 150.0;
+
 /// Which lines show.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
@@ -48,7 +51,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
     };
 
     if let Some(note) = note {
-        ui.label(RichText::new(note).color(palette.warn));
+        ui.add(egui::Label::new(chainv4_ui::widgets::flagged(ui, note, egui::TextStyle::Body, palette.warn)).wrap());
         ui.add_space(10.0);
     }
 
@@ -56,24 +59,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
         for (kind, name) in [(Kind::All, "All"), (Kind::Sent, "Sent"), (Kind::Received, "Received"), (Kind::Waiting, "Waiting"), (Kind::Failed, "Failed")] {
             ui.selectable_value(&mut state.kind, kind, name);
         }
-
-        let order = if state.oldest_first { "Oldest first" } else { "Newest first" };
-        // A line between the kinds and the order while they share a row; on a row of its own, as
-        // on a phone, the order needs none.
-        let font = egui::TextStyle::Button.resolve(ui.style());
-        let width = ui.fonts_mut(|fonts| fonts.layout_no_wrap(order.to_string(), font, egui::Color32::WHITE).size().x) + 2.0 * ui.spacing().button_padding.x;
-
-        match ui.available_size_before_wrap().x > width + 3.0 * ui.spacing().item_spacing.x {
-            true => {
-                ui.separator();
-            }
-            false => ui.end_row(),
-        }
-
-        if ui.selectable_label(false, order).on_hover_text("Turn the order round").clicked() {
-            state.oldest_first = !state.oldest_first;
-        }
     });
+    theme::segmented(ui, &palette, &mut state.oldest_first, &[(false, "Newest first"), (true, "Oldest first")]);
     ui.add(egui::TextEdit::singleline(&mut state.search).hint_text("Search: a transaction, an address, a contract, what it did").desired_width(f32::INFINITY));
     ui.add_space(8.0);
 
@@ -234,11 +221,11 @@ fn line(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry) {
     let open = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
     let (title, detail, amount, incoming) = summary(ctx, addresses, entry);
     let (status, color) = status(ctx, entry);
-    // The amount and the pill keep their column on the right, however narrow the screen.
-    let words = (ui.available_width() - 150.0).max(120.0);
-
-    let response = ui
-        .horizontal(|ui| {
+    // The amount and the pill keep their column on the right, on the line's first line, however
+    // narrow the screen and however long what it says.
+    let response = theme::end_row(
+        ui,
+        |ui| {
             let mark = match incoming {
                 Some(true) => palette.good,
                 Some(false) => palette.accent,
@@ -246,27 +233,28 @@ fn line(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry) {
             };
             theme::dot(ui, mark);
             ui.vertical(|ui| {
-                ui.set_max_width(words);
                 ui.label(theme::strong(&title, 14.5).color(palette.ink));
                 ui.add(egui::Label::new(RichText::new(&detail).small().color(palette.muted)).wrap());
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                    if let Some((brief, full)) = &amount {
-                        let (sign, color) = match incoming {
-                            Some(true) => ("+", palette.good),
-                            _ => ("−", palette.ink),
-                        };
-                        ui.set_max_width(150.0);
-                        theme::fitted(ui, &format!("{sign}{brief}"), 14.5, 10.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), color).on_hover_text(full);
-                    }
+        },
+        |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                ui.set_max_width(AMOUNT_WIDTH);
 
-                    theme::pill(ui, status, color);
-                });
+                if let Some((brief, full)) = &amount {
+                    let (sign, color) = match incoming {
+                        Some(true) => ("+", palette.good),
+                        _ => ("−", palette.ink),
+                    };
+                    theme::fitted(ui, &format!("{sign}{brief}"), 14.5, 10.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), color).on_hover_text(full);
+                }
+
+                theme::pill(ui, status, color);
             });
-        })
-        .response
-        .interact(egui::Sense::click());
+        },
+    )
+    .response
+    .interact(egui::Sense::click());
 
     if response.clicked() {
         ui.data_mut(|data| data.insert_temp(id, !open));

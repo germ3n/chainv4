@@ -109,19 +109,23 @@ fn primary(ui: &mut Ui, ctx: &mut Ctx, from: &Address, prepared: &mut Option<Pre
 
         match ctx.chain.primary(&address) {
             Some(name) => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(&name).color(palette.ink).size(18.0));
-
-                    if theme::quiet(ui, &palette, "Clear").clicked() {
-                        *prepared = Some(Prepared {
-                            from: *from,
-                            tx: Tx::PrimaryName { name: None },
-                            what: "Clear the primary name".to_string(),
-                            about: name.clone(),
-                            coin: u256::ZERO,
-                        });
-                    }
-                });
+                theme::end_row(
+                    ui,
+                    |ui| {
+                        ui.label(RichText::new(&name).color(palette.ink).size(18.0));
+                    },
+                    |ui| {
+                        if theme::quiet(ui, &palette, "Clear").clicked() {
+                            *prepared = Some(Prepared {
+                                from: *from,
+                                tx: Tx::PrimaryName { name: None },
+                                what: "Clear the primary name".to_string(),
+                                about: name.clone(),
+                                coin: u256::ZERO,
+                            });
+                        }
+                    },
+                );
             }
             None => {
                 ui.label(RichText::new("No name: make one of this address's names its primary name below, and others see it by that name.").color(palette.muted));
@@ -254,16 +258,25 @@ fn owned(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfig
             ui.add_space(6.0);
             ui.separator();
             let open = state.open.as_deref() == Some(name.as_str());
-            ui.horizontal_wrapped(|ui| {
-                super::assurance(ui, &palette, &resolved.assurance);
-                ui.label(RichText::new(&shown).color(palette.ink).size(16.0));
-                ui.label(RichText::new(format!("{} · expires {}", status(found.status), format::utc(found.expires))).small().color(palette.muted));
-
-                if theme::quiet(ui, &palette, if open { "Close" } else { "Manage" }).clicked() {
-                    state.open = (!open).then(|| name.clone());
-                    state.trouble = None;
-                }
-            });
+            let said = format!("{} · expires {}", status(found.status), format::utc(found.expires));
+            theme::end_row(
+                ui,
+                |ui| {
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            super::assurance(ui, &palette, &resolved.assurance);
+                            ui.label(RichText::new(&shown).color(palette.ink).size(16.0));
+                        });
+                        ui.add(egui::Label::new(RichText::new(&said).small().color(palette.muted)).wrap());
+                    });
+                },
+                |ui| {
+                    if theme::quiet(ui, &palette, if open { "Close" } else { "Manage" }).clicked() {
+                        state.open = (!open).then(|| name.clone());
+                        state.trouble = None;
+                    }
+                },
+            );
             super::row(ui, &palette, "Points at", |ui| match found.record.target {
                 Some(target) => super::address(ui, &palette, &target.to_string()),
                 None => {

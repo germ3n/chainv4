@@ -190,6 +190,21 @@ impl OnAndroid {
         }
     }
 
+    /// Puts right the keys [`keys_held`] noted before egui acts on them, reading the clipboard only
+    /// when a text field has focus and something asks to paste.
+    fn take_keys(&self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let focused = crate::edit::field_focused(ctx);
+
+        for key in keys_held() {
+            let mut paste = || if focused { AndroidClipboard(&self.app).text() } else { None };
+
+            match key {
+                Held::Paste => crate::edit::paste_key(&mut raw_input.events, &mut paste),
+                Held::Ctrl(key) => crate::edit::ctrl_key(&mut raw_input.events, key, &mut paste),
+            }
+        }
+    }
+
     /// Starts a pick the app asked for, and hands over what a pick under way read once it is done.
     /// The picker is an activity of its own, so the app goes to the background while it is open,
     /// and finds what was picked when it comes back.
@@ -642,6 +657,90 @@ fn java<T>(app: &AndroidApp, call: impl FnOnce(&mut Env, &JObject) -> jni::error
     })
 }
 
+/// A key egui does not get told the whole of.
+#[derive(Clone, Copy)]
+enum Held {
+    /// KEYCODE_PASTE, which egui-winit answers from its own clipboard, empty on Android.
+    Paste,
+    /// A letter with Ctrl held.
+    Ctrl(egui::Key),
+}
+
+/// The keys [`AKeyEvent_getMetaState`] noted since the frame before: a static, as Android's C API
+/// hands that function nothing else to reach.
+static HELD: std::sync::Mutex<Vec<Held>> = std::sync::Mutex::new(Vec::new());
+
+/// The keys noted since the frame before, the oldest first.
+fn keys_held() -> Vec<Held> {
+    std::mem::take(&mut *HELD.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+/// `KeyEvent.ACTION_DOWN`, and `KeyEvent.META_CTRL_MASK`: Ctrl held, on either side or neither said.
+const ACTION_DOWN: i32 = 0;
+const META_CTRL_MASK: i32 = 0x7000;
+/// `KeyEvent.KEYCODE_A`, and `KeyEvent.KEYCODE_PASTE`.
+const KEYCODE_A: i32 = 29;
+const KEYCODE_PASTE: i32 = 279;
+
+/// What a key that went down is worth noting as: a letter with Ctrl held, or the Paste key.
+fn noted(code: i32, meta: i32) -> Option<Held> {
+    if code == KEYCODE_PASTE {
+        return Some(Held::Paste);
+    }
+
+    let letter = u8::try_from(code - KEYCODE_A).ok().filter(|letter| *letter < 26)?;
+
+    (meta & META_CTRL_MASK != 0).then(|| egui::Key::from_name(&char::from(b'a' + letter).to_string())).flatten().map(Held::Ctrl)
+}
+
+/// Android's own `AKeyEvent_getMetaState`, in its library.
+fn meta_state() -> Option<unsafe extern "C" fn(*const std::ffi::c_void) -> i32> {
+    // `RTLD_NOW`, as bionic numbers it.
+    const NOW: std::ffi::c_int = 2;
+    static FOUND: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+        // SAFETY: both names are C strings, and libandroid.so is loaded already, as this library
+        // needs it, so this only finds it.
+        unsafe {
+            let library = dlopen(c"libandroid.so".as_ptr(), NOW);
+
+            if library.is_null() { 0 } else { dlsym(library, c"AKeyEvent_getMetaState".as_ptr()) as usize }
+        }
+    });
+
+    // SAFETY: what dlsym found under that name is the NDK's function of this signature.
+    (*FOUND != 0).then(|| unsafe { std::mem::transmute::<usize, unsafe extern "C" fn(*const std::ffi::c_void) -> i32>(*FOUND) })
+}
+
+unsafe extern "C" {
+    fn dlopen(name: *const std::ffi::c_char, flags: std::ffi::c_int) -> *mut std::ffi::c_void;
+    fn dlsym(library: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+    fn AKeyEvent_getKeyCode(event: *const std::ffi::c_void) -> i32;
+    fn AKeyEvent_getAction(event: *const std::ffi::c_void) -> i32;
+}
+
+/// Android's `AKeyEvent_getMetaState`, in front of the real one, which it calls: the one place the
+/// app can see what keys are held. winit on Android reads them to look a key's character up, then
+/// drops them: with Ctrl held the look-up finds nothing, so winit falls back on the key's letter,
+/// and tells egui of a plain v being typed. No event egui gets tells the two apart, and winit calls
+/// this for every key it hands on, so this is where they are noted, for the frame to put right.
+///
+/// # Safety
+///
+/// `event` is a key event of Android's input queue, as winit hands it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn AKeyEvent_getMetaState(event: *const std::ffi::c_void) -> i32 {
+    // SAFETY: a key event, as the caller promises, and the functions the NDK has for one.
+    let (meta, code, action) = unsafe { (meta_state().map_or(0, |real| real(event)), AKeyEvent_getKeyCode(event), AKeyEvent_getAction(event)) };
+
+    if action == ACTION_DOWN
+        && let Some(held) = noted(code, meta)
+    {
+        HELD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(held);
+    }
+
+    meta
+}
+
 /// Android's clipboard, through its ClipboardManager.
 struct AndroidClipboard<'a>(&'a AndroidApp);
 
@@ -745,6 +844,7 @@ impl eframe::App for OnAndroid {
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.editing.feed(raw_input);
+        self.take_keys(ctx, raw_input);
 
         // In pixels, and empty until Android has laid the window out.
         let seen = self.app.content_rect();

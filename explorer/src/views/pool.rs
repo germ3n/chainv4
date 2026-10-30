@@ -144,12 +144,8 @@ fn miners(ui: &mut Ui, ctx: &mut Ctx, pool: &PoolView) {
     if look.narrow {
         for miner in &pool.miners {
             super::list_row(ui, look, |ui| {
-                ui.horizontal(|ui| {
-                    super::address(ui, ctx, &miner.to);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(ctx.coins(&miner.claimable)).strong().color(palette.good));
-                    });
-                });
+                let claimable = ctx.coins(&miner.claimable);
+                widgets::end_row(ui, |ui| super::address(ui, ctx, &miner.to), |ui| ui.label(RichText::new(claimable).strong().color(palette.good)));
                 ui.add(egui::Label::new(RichText::new(format!("work {} · next block {}", work(miner), percent(miner.percent))).small().color(palette.soft)).wrap());
                 ui.add(egui::Label::new(RichText::new(format!("earned {} · claimed {}", ctx.coins(&miner.earned), ctx.coins(&miner.claimed))).small().color(palette.muted)).wrap());
             });

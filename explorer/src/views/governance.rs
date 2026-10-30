@@ -437,10 +437,7 @@ fn in_force(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, state: &mut Gover
         true => {
             for (kind, setting) in &settings {
                 super::list_row(ui, look, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(widgets::strong(label(kind), 13.5).color(look.palette.ink));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| set_by(ui, setting.decided));
-                    });
+                    widgets::end_row(ui, |ui| ui.label(widgets::strong(label(kind), 13.5).color(look.palette.ink)), |ui| set_by(ui, setting.decided));
                     ui.add(egui::Label::new(RichText::new(summary(kind, &setting.value, coin)).color(look.palette.soft)).wrap());
                 });
             }

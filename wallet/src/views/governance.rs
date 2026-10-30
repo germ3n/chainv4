@@ -452,13 +452,17 @@ fn header(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &Listing
 
             // Its approvals, one a kind, each withdrawn on its own.
             for approved in &weight.approved {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(format!("Approves, in {} v{}: {}", kind_label(approved.kind).to_lowercase(), approved.version, describe(&approved.change, &coin))).small().color(palette.muted));
-
-                    if voter.here && weight.may_vote() && theme::quiet(ui, &palette, "Withdraw").clicked() {
-                        *chosen = Some(withdrawal(voter.address, approved, &coin));
-                    }
-                });
+                theme::end_row(
+                    ui,
+                    |ui| {
+                        ui.add(egui::Label::new(RichText::new(format!("Approves, in {} v{}: {}", kind_label(approved.kind).to_lowercase(), approved.version, describe(&approved.change, &coin))).small().color(palette.muted)).wrap());
+                    },
+                    |ui| {
+                        if voter.here && weight.may_vote() && theme::quiet(ui, &palette, "Withdraw").clicked() {
+                            *chosen = Some(withdrawal(voter.address, approved, &coin));
+                        }
+                    },
+                );
             }
         }
     });

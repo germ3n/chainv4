@@ -121,6 +121,24 @@ other pages explain each part in full; this one is the short list to keep in min
   no NDK. Without a key they sign with xbuild's debug key, the same for everyone: Android updates
   an app only with one signed by the same key, so pick your own key (`ANDROID_SIGNING_PEM` in CI)
   before anyone installs them. They need Android 7 or newer.
+- **A keyboard's Paste comes as Ctrl+V, and winit drops the Ctrl.** A NativeActivity offers the
+  keyboard no InputConnection, so Gboard's Paste can only send key events, and it sends Ctrl+V. winit
+  on Android tracks no modifiers: it looks the key's character up with the Ctrl held, finds none,
+  falls back on its table of letters, and tells egui of a plain `v` typed, text and all. Nothing
+  egui hears tells that from a real `v`. `ui/src/android.rs` therefore defines
+  `AKeyEvent_getMetaState` itself: the linker takes it over libandroid.so's for winit, it calls the
+  real one through `dlsym`, and notes each letter that went down with Ctrl held, and
+  `KEYCODE_PASTE`, which egui-winit answers from a clipboard of its own, empty on Android. The
+  frame's `raw_input_hook` then swaps the letter for what it meant (`edit::ctrl_key`). If winit ever
+  stops asking for the meta state on each key, Paste goes back to typing `v`: check it after
+  upgrading winit, on a phone or with `adb shell input keycombination KEYCODE_CTRL_LEFT KEYCODE_V`.
+  Desktop and web are untouched: their clipboard shortcuts go through egui-winit and the browser.
+- **The phone's edit bar keeps its own hold.** egui's long touch takes 0.8 seconds and ends if the
+  finger moves 6 points, which a finger does just by rolling, so the bar often did not come. `edit`
+  watches the press itself: half a second, 20 points of slack. A hold under egui's 0.8 seconds counts
+  as a click to egui when it lifts, so the press that brought the bar up is kept from taking it down.
+  The bar goes by the page's own scroll area for where the page ends, as noted by
+  `layout::keep_focus_in_view`, as the screen's bottom would be under the tabs.
 - **Picking files on Android takes Java.** Android hands a picked file only to Java code, so the
   build compiles a small activity, `ui/android/Picker.java`, into the APK with a JDK and Android's
   build-tools, and signs the APK again with the same key. Without them it builds an app that cannot
@@ -1103,6 +1121,16 @@ voting finality it now goes back to the checkpoint and follows the node from the
   counts, never a private one, so nothing on the LAN or in Docker's network gets in by writing
   `X-Forwarded-For`. Its token compares in time that does not say how much of it matched, and is
   read with `read_token`, as the mining token is.
+- **A dial can fail one way for good under containers.** See
+  [Docker](docker.md): a stale conntrack entry, kept alive by the dialer's own retries, blocks one
+  direction while the other works. Seen as `could not reach … Handshake with the remote timed out`
+  every 15 seconds between nodes that are connected. `same_node` stops those retries once the peer
+  connected first, by the IP it came from and its listening port.
+- **`Duplicate` from gossipsub is no failure.** Two nodes passing on one transaction each publish
+  a batch of it alone, the same bytes and so the same message id, and the later one is refused:
+  every peer has it. `gossip_unpublished` leaves it out, and libp2p's warning for it is filtered.
+- **A peer's height on the Network page** comes from its status, once a minute, and from each block
+  it passes on, so it trails by a block or two at most while its gossip flows.
 - **gossipsub tells its topics on a peer's first connection alone.** A peer back from a restart
   before its old connection timed out arrives as a second connection and would never hear them,
   publishing into nothing (libp2p-gossipsub 0.50's `on_connection_established` returns early for

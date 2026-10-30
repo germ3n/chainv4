@@ -57,14 +57,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     });
 
     for address in &addresses {
-        ui.add_space(14.0);
         held_at(ui, ctx, address);
     }
 
     #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
     bitcoin(ui, ctx);
 
-    ui.add_space(14.0);
     theme::card(ui, &palette, |ui| {
         ui.horizontal(|ui| {
             theme::caps(ui, &palette, "Lately");
@@ -195,7 +193,6 @@ fn bitcoin(ui: &mut Ui, ctx: &Ctx) {
         let symbol = if testnet { "tBTC" } else { "BTC" };
         let status = light.status();
 
-        ui.add_space(14.0);
         theme::card(ui, &palette, |ui| {
             theme::caps(ui, &palette, &format!("Bitcoin{}", if testnet { format!(" · {}", light.net.name()) } else { String::new() }));
             ui.add_space(4.0);

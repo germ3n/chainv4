@@ -145,14 +145,17 @@ pub fn notice(ui: &mut Ui, look: Look, state: &mut UpdateState) -> bool {
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Explorer {} is out (this is {})", update.newest(), release::ours())).strong().color(palette.ink));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            widgets::end_row(
+                ui,
+                |ui| {
+                    ui.add(egui::Label::new(RichText::new(format!("Explorer {} is out (this is {})", update.newest(), release::ours())).strong().color(palette.ink)).wrap());
+                },
+                |ui| {
                     if !matches!(installing, Installing::Downloading { .. }) && ui.small_button("Dismiss").clicked() {
                         state.dismissed = Some(update.newest());
                     }
-                });
-            });
+                },
+            );
 
             if !update.notes.is_empty() {
                 super::note(ui, look, &update.notes);

@@ -117,7 +117,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
     super::section(ui, look, "Light client", |ui| {
         let (color, words, story) = match (&ctx.light.trouble, ctx.light.following()) {
             (Some(trouble), _) => (palette.bad, "stopped", trouble.clone()),
-            (None, Some((tip, final_height))) if ctx.light.caught_up() => (
+            (None, Some((tip, final_height))) if ctx.light.has_followed() => (
                 palette.good,
                 "following",
                 format!("Every header to {tip} checked, and finality to {final_height}, trusting only the genesis below."),

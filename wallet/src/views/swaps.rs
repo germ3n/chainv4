@@ -376,7 +376,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
             }
         }
     });
-    ui.add_space(10.0);
+    theme::section_gap(ui);
 
     match state.section {
         Section::Swaps => list(ui, ctx, state),

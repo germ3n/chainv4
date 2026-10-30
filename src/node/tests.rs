@@ -561,6 +561,31 @@ fn a_block_from_the_future_makes_the_node_ask_its_sender() {
 }
 
 #[test]
+fn a_block_a_peer_passes_on_says_how_far_it_got() {
+    let (mut producer, mut producer_net) = node(true);
+    let (mut follower, net) = node(false);
+    let peer = PeerId::random();
+    net.events.send(NetEvent::PeerUp { peer, address: Multiaddr::empty() }).unwrap();
+    net.events
+        .send(NetEvent::Response {
+            peer,
+            response: SyncResponse::Status { genesis: follower.chain().genesis(), tip: follower.chain().tip().id(), height: 0, work: u256::ZERO, justified: 0 },
+        })
+        .unwrap();
+    follower.step(1).unwrap();
+    let height = |node: &Node| node.report(1, 0).peers[0].chain.map(|(height, _, _)| height);
+
+    assert_eq!(height(&follower), Some(0));
+
+    producer.step(SLOT).unwrap();
+    let block = published_block(&mut producer_net);
+    net.events.send(NetEvent::Block { from: peer, block, gossip: None }).unwrap();
+    follower.step(SLOT * 10).unwrap();
+
+    assert_eq!(height(&follower), Some(1), "without waiting for the next status");
+}
+
+#[test]
 fn every_peer_is_asked_how_far_it_got_once_a_minute() {
     let (mut node, mut net) = node(false);
     let peer = PeerId::random();
@@ -1208,6 +1233,8 @@ fn the_report_counts_what_peers_sent_and_shows_what_waits() {
         FeeOffer::NONE,
         &authority,
     );
+    // Said twice, as when its interface comes back up: listed once.
+    net.events.send(NetEvent::Listening("/ip4/127.0.0.1/udp/9/quic-v1".parse().unwrap())).unwrap();
     net.events.send(NetEvent::Listening("/ip4/127.0.0.1/udp/9/quic-v1".parse().unwrap())).unwrap();
     net.events.send(NetEvent::PeerUp { peer, address: address.clone() }).unwrap();
     net.events.send(NetEvent::Tx { from: peer, tx: tx.clone(), gossip: None }).unwrap();

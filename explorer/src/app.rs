@@ -29,6 +29,8 @@ use {
 /// How wide the sidebar is, and the widest the page column grows on a big screen.
 const SIDEBAR: f32 = 212.0;
 const COLUMN: f32 = 1400.0;
+/// Below this height, in points, as a phone on its side, the sidebar's foot folds to one line.
+const SHORT: f32 = 560.0;
 
 /// Seconds between asking the same thing again.
 const STATUS_POLLED: f64 = 1.0;
@@ -673,7 +675,7 @@ impl Explorer {
 
         match (&self.light.trouble, self.light.following()) {
             (Some(trouble), _) => (palette.bad, "light client stopped", trouble.clone()),
-            (None, Some((tip, final_height))) if self.light.caught_up() => (
+            (None, Some((tip, final_height))) if self.light.has_followed() => (
                 palette.good,
                 "light client following",
                 format!("The light client checked every header to {tip}, and finality to {final_height}, trusting only the genesis it first saw at this node"),
@@ -691,6 +693,25 @@ impl Explorer {
             ui,
             self,
             |app, ui| {
+                // A short window, as a phone on its side, keeps its room for the pages: the state
+                // goes on one line, with the rest on a tap or a hover.
+                if ui.ctx().content_rect().height() < SHORT {
+                    let (light_color, light_words, light_story) = app.light_state();
+                    let (color, words) = app.health();
+                    let story = format!("{light_words}: {light_story}\nThe node at {} is {words}", app.api.base());
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        views::dot(ui, light_color);
+                        views::dot(ui, color);
+                        ui.add(egui::Label::new(RichText::new(words).small().color(palette.soft)).truncate());
+                    })
+                    .response
+                    .on_hover_text(story);
+
+                    return;
+                }
+
                 ui.add_space(14.0);
                 let (light_color, light_words, light_story) = app.light_state();
                 ui.horizontal(|ui| {
@@ -868,14 +889,17 @@ impl Explorer {
             .corner_radius(6.0)
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                widgets::end_row(
+                    ui,
+                    |ui| {
+                        ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
+                    },
+                    |ui| {
                         if ui.small_button("Dismiss").clicked() {
                             self.notice = None;
                         }
-                    });
-                });
+                    },
+                );
             });
         ui.add_space(8.0);
     }

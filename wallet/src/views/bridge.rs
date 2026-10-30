@@ -352,13 +352,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, send: &mut Send
     };
 
     overview(ui, ctx, &directory, federation.as_ref());
-    ui.add_space(12.0);
     ui.horizontal_wrapped(|ui| {
         ui.selectable_value(&mut state.way, Way::Out, "To an EVM chain");
         ui.selectable_value(&mut state.way, Way::In, "From an EVM chain");
         ui.selectable_value(&mut state.way, Way::Bitcoin, "Bitcoin");
     });
-    ui.add_space(8.0);
+    theme::section_gap(ui);
 
     let prepared = match state.way {
         Way::Out => out(ui, ctx, state, &directory),
@@ -555,7 +554,6 @@ fn out(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Director
         ui.label(RichText::new("It arrives once the federation signed it, as the chain finalizes it, and someone delivered it there: anyone may, you too, below.").small().color(palette.muted));
     });
 
-    ui.add_space(10.0);
     sent(ui, ctx, state, directory, gateway, me);
 
     prepared
@@ -614,10 +612,10 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
                 state.evm.call(ctx, url, &to, &input, move |answer| Read::Delivered { chain_id, digest, delivered: answer.map(|output| output.last() == Some(&1)) });
             }
 
-            ui.horizontal_wrapped(|ui| {
+            theme::end_row(ui, |ui| {
                 ui.label(theme::mono(format!("#{}", transfer.nonce)).color(palette.muted));
-                ui.label(format!("{} · {} to {}", transfer.symbol, format::units(&transfer.amount.to_string(), transfer.decimals), chain_name(transfer.target)));
-
+                ui.add(egui::Label::new(format!("{} · {} to {}", transfer.symbol, format::units(&transfer.amount.to_string(), transfer.decimals), chain_name(transfer.target))).wrap());
+            }, |ui| {
                 match state.delivered.get(&key) {
                     Some(Ok(true)) => {
                         ui.colored_label(palette.good, "arrived");
@@ -767,10 +765,12 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
 
             for coin in light.coins(&output) {
                 let depth = light.confirmations(coin.height);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(format::amount(&coin.value.to_string(), 8, "BTC"));
-                    ui.label(RichText::new(format!("{depth} confirmations")).color(palette.muted));
-
+                theme::end_row(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(format::amount(&coin.value.to_string(), 8, "BTC"));
+                        ui.label(RichText::new(format!("{depth} confirmations")).color(palette.muted));
+                    });
+                }, |ui| {
                     match &coin.proof {
                         Some(proof) if depth >= federation.federation.bitcoin_depth => {
                             let bytes = |text: &str| from_hex(&format!("0x{text}")).unwrap_or_default();
@@ -822,7 +822,6 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
         });
     });
 
-    ui.add_space(10.0);
     let wbtc = state.read(ctx, &gateway, "wbtc", json!([])).and_then(|answer| answer.ok()?.first().map(text)).and_then(|text| text.parse::<Address>().ok());
 
     theme::card(ui, &palette, |ui| {

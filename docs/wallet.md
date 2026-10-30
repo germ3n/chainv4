@@ -922,14 +922,18 @@ it shares with the explorer (see [The ui crate](development.md#the-ui-crate)).
   sidebar's heading closes up to leave the pages more room. On a touch screen, buttons and fields
   are a finger tall, 40 points, and the field being typed in scrolls into sight above the
   keyboard. Below 640 points wide, as on a phone, the sidebar gives way to a bar
-  on top with the account, the light client's dot and Lock, and tabs along the bottom: sharing
-  the width when they fit, otherwise each wide enough for its name in a row that scrolls
-  sideways, faded at an edge where more wait, and bringing the page opened into view. A card's
-  row puts its label above what it says on a narrow screen, and text wraps everywhere, in rows
-  too, so nothing is cut off at the screen's edge. Android's back gesture closes a view the page
+  on top with the account, the light client's dot and Lock, and five tabs along the bottom, evenly
+  spaced and always in the same place: Home, Send, Receive, Activity and More. More lists every
+  other page, each with a line on what it is for, and its tab stays marked while one of them shows.
+  An offline signer, with five pages in all, has them as its tabs and no More. The sidebar, on a
+  wide screen, lists all the pages. A card's row puts its label above what it says on a narrow
+  screen, and text wraps everywhere, in rows too, so nothing is cut off at the screen's edge. A row
+  with a button or a value at its end keeps that where it is, however long the text beside it
+  (`chainv4_ui::widgets::end_row`). Cards stand one gap apart on every page, `layout::SECTION`,
+  which the wallet's `theme::card` keeps below each. Android's back gesture closes a view the page
   opened, such as a swap, then returns through the pages left, each once, scrolled to where it
-  was left; on the first, the app goes to the background, as Android apps do. A page opened anew
-  starts at its top.
+  was left, so from a page under More to More, then Home; on the first, the app goes to the
+  background, as Android apps do. A page opened anew starts at its top.
 
 ## Building and testing
 
@@ -1120,9 +1124,13 @@ out when it builds without one, as Android refuses an app that declares code it 
 - **Storage:** it saves when the app goes to the background, and every 30 seconds.
 - **Copying** goes to Android's clipboard, through its ClipboardManager, which the `ui` crate calls
   over JNI: egui reaches no clipboard there. Android shows what was copied.
-- **Pasting:** hold a finger on a text field for a bar with **Paste** and **Select all**, and
-  **Copy** and **Cut** once some text is selected; a drag across a field's text brings it too.
-  While the keyboard is up, a **Paste** button sits above it whenever the clipboard holds text.
+- **Pasting:** hold a finger on a text field, half a second, or tap one that already has focus,
+  for a bar with **Paste** and **Select all**, and **Copy** and **Cut** once some text is selected;
+  a drag across a field's text brings it too. While the keyboard is up, a **Paste** button sits at
+  the field's right end whenever the clipboard holds text. Both go just above the field, else just
+  below it, kept within what can be seen, clear of the keyboard, the bottom tabs and the system's
+  bars, and in the text's color so that they stand out on any page. The keyboard's own Paste button
+  pastes too, and Ctrl+C, X, V and A work from a keyboard that has Ctrl.
 - **Picking files:** **Open key file** opens Android's own document picker, which shows the
   phone's files, Downloads and any cloud drives.
 - **Scrolling:** a swipe scrolls the page wherever it starts, text included, as text is not

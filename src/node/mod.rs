@@ -903,6 +903,11 @@ impl Node {
                 let imported = self.chain.import(&block, now);
                 self.judge(from, gossip, block_verdict(&imported));
 
+                // A peer's status is a minute old at worst; a block it passes on says more.
+                if imported.is_ok() {
+                    self.sync.heard_height(&from, height);
+                }
+
                 match imported {
                     Ok(imported) => self.imported(&block, imported, &format!("from {from}"))?,
                     Err(ImportError::Db(err)) => return Err(NodeError::Db(err)),
@@ -984,6 +989,8 @@ impl Node {
                 log::info!("[node] peer {peer} disconnected ({} peers)", self.peers.len());
                 self.peer_failed(peer)?;
             }
+            // Said again when an interface comes back up.
+            NetEvent::Listening(address) if self.listening.contains(&address) => {}
             NetEvent::Listening(address) => self.listening.push(address),
             NetEvent::Report { txs, reply } => {
                 let _ = reply.send(self.report(now, txs));

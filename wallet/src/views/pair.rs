@@ -51,11 +51,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         ui.label(RichText::new("Another account pairs on its own: pick it as the one in use, and read its code too.").small().color(palette.muted));
     });
 
-    ui.add_space(14.0);
     metamask(ui, ctx);
-    ui.add_space(14.0);
     bitcoin(ui, ctx);
-    ui.add_space(14.0);
     member(ui, ctx);
 }
 

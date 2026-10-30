@@ -284,7 +284,6 @@ impl Updates {
             });
             self.outcome(ui, palette, &notice);
         });
-        ui.add_space(14.0);
     }
 
     /// In place of everything, while this wallet is older than the oldest that still works.

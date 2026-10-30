@@ -13,6 +13,15 @@ pub fn is_narrow(width: f32) -> bool {
 /// without missing.
 pub const FINGER: f32 = 40.0;
 
+/// The gap between a page's sections, such as its cards, in points: one number for every page.
+pub const SECTION: f32 = 14.0;
+
+/// Keeps the section gap below what was just drawn, whatever item spacing the look has: put after a
+/// section that is no card, as a card that keeps the gap itself needs none.
+pub fn section_gap(ui: &mut egui::Ui) {
+    ui.add_space((SECTION - ui.spacing().item_spacing.y).max(0.0));
+}
+
 /// Pads the buttons and fields in this ui, and in all it holds, to a finger's height, as a phone
 /// needs. Their text keeps its size, and a line of plain text its own height: only what is tapped
 /// grows.
@@ -29,6 +38,12 @@ pub fn finger_sized(ui: &mut egui::Ui) {
 pub fn finger_row(ui: &mut egui::Ui) {
     finger_sized(ui);
     ui.spacing_mut().interact_size.y = ui.spacing().interact_size.y.max(FINGER);
+}
+
+/// Whether what is tapped wants a finger's size here: on a phone's width, or on any touch screen.
+/// Pages get it from their app; a dialog, drawn apart from the page, asks for itself.
+pub fn fingers(ctx: &egui::Context) -> bool {
+    is_narrow(ctx.content_rect().width()) || touch(ctx)
 }
 
 /// Suits egui to a touch screen once it finds one: a drag that starts on text scrolls the page,
@@ -50,6 +65,14 @@ pub fn touch(ctx: &egui::Context) -> bool {
     cfg!(target_os = "android") || ctx.input(|input| input.has_touch_screen())
 }
 
+/// Where the page's scroll area keeps what it was last shown in, for what is drawn over a page.
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+pub(crate) fn page_clip(ctx: &egui::Context) -> Option<egui::Rect> {
+    ctx.data(|data| data.get_temp(egui::Id::unique(PAGE_CLIP)))
+}
+
+const PAGE_CLIP: &str = "chainv4-ui page clip";
+
 /// Keeps the text field being typed in on screen: once the keyboard comes up and the page shrinks
 /// above it, or the focus moves to another field, the page scrolls as little as brings the field
 /// back into sight. Call it in the page's scroll area, before what the page shows.
@@ -58,6 +81,7 @@ pub fn keep_focus_in_view(ui: &mut egui::Ui) {
     let focused = ctx.memory(|memory| memory.focused());
     let height = ui.clip_rect().height();
     let id = ui.scope_id().with("chainv4-ui focus in view");
+    ctx.data_mut(|data| data.insert_temp(egui::Id::unique(PAGE_CLIP), ui.clip_rect()));
     let (was, was_height, waiting) = ctx.data(|data| data.get_temp::<(Option<egui::Id>, f32, bool)>(id)).unwrap_or((None, height, false));
     let changed = was != focused || height < was_height - 1.0;
     // A change is acted on once it has held for a frame: the keyboard has finished coming up, and
@@ -75,6 +99,14 @@ pub fn keep_focus_in_view(ui: &mut egui::Ui) {
 /// least one.
 pub fn fit(width: f32, each: f32, gap: f32) -> usize {
     (((width + gap) / (each + gap)).floor() as usize).max(1)
+}
+
+/// How many tiles go across a width, each at least this wide with a gap between, and how wide each
+/// then is to fill it: a grid's columns end with the row, with no slack on the right.
+pub fn tiles(width: f32, each: f32, gap: f32) -> (usize, f32) {
+    let columns = fit(width, each, gap);
+
+    (columns, ((width - gap * (columns - 1) as f32) / columns as f32).max(1.0))
 }
 
 /// How long a page is given to grow tall enough to scroll back to where it was: its content may
@@ -186,6 +218,32 @@ mod tests {
         assert_eq!(fit(1000.0, 190.0, 8.0), 5);
         assert_eq!(fit(380.0, 160.0, 8.0), 2);
         assert_eq!(fit(100.0, 160.0, 8.0), 1, "always one");
+    }
+
+    #[test]
+    fn tiles_fill_the_row_they_are_in() {
+        let (columns, each) = tiles(349.0, 148.0, 10.0);
+
+        assert_eq!(columns, 2);
+        assert!((each * 2.0 + 10.0 - 349.0).abs() < 0.01, "no slack on the right: {each}");
+        assert_eq!(tiles(100.0, 148.0, 10.0), (1, 100.0), "one, as wide as there is");
+    }
+
+    #[test]
+    fn the_section_gap_is_the_same_whatever_the_spacing() {
+        for spacing in [5.0, 8.0] {
+            let ctx = egui::Context::default();
+            let (mut above, mut below) = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.spacing_mut().item_spacing.y = spacing;
+                above = ui.label("above").rect;
+                section_gap(ui);
+                below = ui.label("below").rect;
+            });
+            output.textures_delta.clear();
+
+            assert!((below.top() - above.bottom() - SECTION).abs() < 0.5, "{above:?} {below:?}");
+        }
     }
 
     #[test]

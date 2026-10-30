@@ -72,6 +72,8 @@ struct Starting {
 #[derive(Default)]
 pub struct Light {
     client: Option<LightClient>,
+    /// Whether it caught up at least once since it started.
+    caught_up_once: bool,
     /// Waiting for what starts the client at a checkpoint.
     starting: Option<Starting>,
     /// What stopped it: a node on another chain than the one trusted, or one that sent something
@@ -160,11 +162,19 @@ impl Light {
         self.client.as_ref().is_some_and(|client| client.next().is_none())
     }
 
+    /// Whether it caught up at least once since it started: for saying it follows, as it asks after
+    /// new blocks every few seconds, and is not caught up while it waits for the answer.
+    pub fn has_followed(&self) -> bool {
+        self.caught_up_once || self.caught_up()
+    }
+
     /// What to ask next, if anything is due.
     pub fn ask(&mut self, time: f64) -> Option<Ask> {
         if self.trouble.is_some() || time < self.retry_at {
             return None;
         }
+
+        self.caught_up_once |= self.caught_up();
 
         let Some(client) = &mut self.client else {
             return Some(match &self.starting {

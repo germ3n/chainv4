@@ -83,6 +83,36 @@ pub fn primary(ui: &mut Ui, palette: &Palette, text: &str, enabled: bool) -> Res
     ui.add_enabled(enabled, button)
 }
 
+/// A choice of a few, one of them on, joined in a row: the one on filled with the accent, so it
+/// reads as on at a glance, the others quiet. Whether the choice changed.
+pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, palette: &Palette, current: &mut T, options: &[(T, &str)]) -> bool {
+    let radius = ui.visuals().widgets.inactive.corner_radius;
+    let mut changed = false;
+
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        Frame::new().stroke(Stroke::new(1.0, palette.line)).corner_radius(radius).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (value, name) in options {
+                    let on = *current == *value;
+                    let text = match on {
+                        true => strong(*name, button_size(ui)).color(palette.on_accent),
+                        false => RichText::new(*name).color(palette.soft),
+                    };
+                    let button = egui::Button::new(text).fill(if on { palette.accent } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).corner_radius(radius);
+
+                    if ui.add(button).clicked() && !on {
+                        *current = *value;
+                        changed = true;
+                    }
+                }
+            });
+        });
+    });
+
+    changed
+}
+
 /// A quiet button, outlined.
 pub fn quiet(ui: &mut Ui, palette: &Palette, text: &str) -> Response {
     ui.add(
@@ -190,6 +220,116 @@ pub fn beside(ui: &mut Ui, button: impl FnOnce(&mut Ui) -> bool, field: impl FnO
     .inner
 }
 
+/// The most of a row its end takes, leaving the rest for what the row starts with, however long.
+const END_AT_MOST: f32 = 0.6;
+
+/// A row with something kept at its right end, such as a button: `end` is laid out first, at the
+/// width it needs, and `start` has what is left. However long what `start` shows, `end` stays where
+/// it is, at the row's end and on its first line: a line in `start` that does not fit is cut short,
+/// or wraps within its own column if it asks to, and never pushes or runs into `end`. What `start`
+/// adds directly is centered on `end`; several lines, in a `ui.vertical`, start at its top.
+pub fn end_row<S, E>(ui: &mut Ui, start: impl FnOnce(&mut Ui) -> S, end: impl FnOnce(&mut Ui) -> E) -> egui::InnerResponse<(S, E)> {
+    ui.horizontal_top(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            let most = ui.available_width() * END_AT_MOST;
+            let end = ui
+                .scope(|ui| {
+                    ui.set_max_width(most);
+                    end(ui)
+                })
+                .inner;
+            let size = egui::vec2(ui.available_width().max(1.0), ui.min_rect().height());
+            let start = ui
+                .allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.set_min_size(size);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    start(ui)
+                })
+                .inner;
+
+            (start, end)
+        })
+        .inner
+    })
+}
+
+/// Text in which each word starting with `--`, a command's flag, goes in the mono face: in the text
+/// face two dashes read as one long one. Plain text otherwise, in the text style and color given.
+pub fn flagged(ui: &Ui, text: &str, style: TextStyle, color: Color32) -> egui::text::LayoutJob {
+    let (plain, mono) = (style.resolve(ui.style()), TextStyle::Monospace.resolve(ui.style()));
+    let mono = FontId::new(mono.size.min(plain.size), mono.family);
+    let mut job = egui::text::LayoutJob::default();
+
+    for (part, is_flag) in flag_parts(text) {
+        job.append(part, 0.0, egui::TextFormat {
+            font_id: if is_flag { mono.clone() } else { plain.clone() },
+            color,
+            ..Default::default()
+        });
+    }
+
+    job
+}
+
+/// A text cut into runs of plain words and of flags, in order: each flag is a word that starts with
+/// `--` and goes on with a letter, up to where the word ends, a stop or a comma left out of it.
+fn flag_parts(text: &str) -> Vec<(&str, bool)> {
+    let mut parts = Vec::new();
+    let mut plain = 0;
+    let mut at = 0;
+
+    while let Some(found) = text[at..].find("--") {
+        let start = at + found;
+        let word_start = start == 0 || text[..start].ends_with(char::is_whitespace);
+        let end = start + 2 + text[start + 2..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).unwrap_or(text.len() - start - 2);
+
+        if word_start && text[start + 2..].starts_with(|c: char| c.is_ascii_alphabetic()) {
+            if plain < start {
+                parts.push((&text[plain..start], false));
+            }
+
+            parts.push((&text[start..end], true));
+            plain = end;
+        }
+
+        at = end;
+    }
+
+    if plain < text.len() {
+        parts.push((&text[plain..], false));
+    }
+
+    parts
+}
+
+/// One page in a list of pages, as a phone's More lists them: a card, the whole of it what a finger
+/// taps, with what the page is called, what it is for under that, and an arrow.
+pub fn page_link(ui: &mut Ui, palette: &Palette, name: &str, about: &str) -> Response {
+    /// The room kept on the card's right for its arrow.
+    const ARROW: f32 = 24.0;
+
+    let drawn = ui
+        .scope(|ui| {
+            card(ui, palette, |ui| {
+                ui.horizontal(|ui| {
+                    // What the page is for wraps short of the arrow, rather than under it.
+                    let width = ui.available_width() - ARROW;
+                    ui.vertical(|ui| {
+                        ui.set_max_width(width);
+                        ui.label(strong(name, 15.0).color(palette.ink));
+                        ui.add(egui::Label::new(RichText::new(about).color(palette.muted)).wrap());
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new("›").size(20.0).color(palette.muted));
+                    });
+                });
+            });
+        })
+        .response;
+
+    ui.interact(drawn.rect, ui.scope_id().with(("page link", name)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Where a proxy is set, in an app's settings: a field with Use, which takes what is typed, then
 /// Orbot, which takes Orbot's port on the device, I2P, i2pd's, and Off. Gives the setting to keep, empty to go
 /// direct, once one is chosen that reads as a proxy; why one does not waits in trouble. set is the
@@ -271,6 +411,135 @@ fn button_size(ui: &Ui) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PALETTE: Palette = Palette {
+        paper: Color32::BLACK,
+        nav: Color32::BLACK,
+        card: Color32::from_gray(20),
+        row: Color32::from_gray(30),
+        line: Color32::from_gray(40),
+        ink: Color32::WHITE,
+        soft: Color32::LIGHT_GRAY,
+        muted: Color32::GRAY,
+        heading: Color32::GRAY,
+        accent: Color32::LIGHT_BLUE,
+        on_accent: Color32::BLACK,
+        good: Color32::GREEN,
+        warn: Color32::YELLOW,
+        bad: Color32::RED,
+        dark: true,
+    };
+
+    /// Draws once to settle fonts, then again, and hands back what the last frame measured.
+    fn measured<T>(width: f32, mut draw: impl FnMut(&mut Ui) -> T) -> T {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 600.0));
+        let mut last = None;
+
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| last = Some(draw(ui)));
+            output.textures_delta.clear();
+        }
+
+        last.expect("drawn")
+    }
+
+    #[test]
+    fn an_end_row_keeps_its_button_put_however_long_the_text_beside_it() {
+        let long = "registered · expires 2027-10-30 18:52:03 UTC, and a good deal more than a phone has room for on one line";
+        let row = |ui: &mut Ui, text: &str, wrap: bool| {
+            end_row(
+                ui,
+                |ui| {
+                    let label = egui::Label::new(text);
+
+                    ui.add(if wrap { label.wrap() } else { label }).rect
+                },
+                |ui| ui.button("Manage").rect,
+            )
+            .inner
+        };
+        let ((short_text, short_button), (cut_text, cut_button), (wrapped_text, wrapped_button)) = measured(300.0, |ui| {
+            (row(ui, "gm", false), row(ui, long, false), row(ui, long, true))
+        });
+
+        assert!((short_button.right() - cut_button.right()).abs() < 0.5 && (short_button.width() - cut_button.width()).abs() < 0.5, "not pushed: {short_button:?} {cut_button:?}");
+        assert!((short_button.right() - wrapped_button.right()).abs() < 0.5, "not by wrapping either: {wrapped_button:?}");
+        assert!(short_button.right() > 290.0, "at the row's end: {short_button:?}");
+        assert!(cut_text.right() <= cut_button.left(), "a long line is cut short of it: {cut_text:?} {cut_button:?}");
+        assert!(cut_text.height() < 24.0, "on one line: {cut_text:?}");
+        assert!(wrapped_text.right() <= wrapped_button.left(), "wrapped short of it: {wrapped_text:?} {wrapped_button:?}");
+        assert!(wrapped_text.height() > 2.0 * short_text.height(), "on several lines: {wrapped_text:?}");
+        assert!((wrapped_text.top() - wrapped_button.top()).abs() < 1.0, "the button keeps to the first line: {wrapped_text:?} {wrapped_button:?}");
+        assert!((short_text.center().y - short_button.center().y).abs() < 1.0, "a short line centers on it: {short_text:?} {short_button:?}");
+    }
+
+    #[test]
+    fn a_tall_end_row_makes_room_below_it() {
+        let (first, next) = measured(300.0, |ui| {
+            let first = end_row(
+                ui,
+                |ui| {
+                    ui.vertical(|ui| {
+                        for line in 0..6 {
+                            ui.label(format!("line {line}"));
+                        }
+                    });
+                },
+                |ui| {
+                    let _ = ui.button("Close");
+                },
+            )
+            .response
+            .rect;
+
+            (first, ui.label("next").rect)
+        });
+
+        assert!(first.height() > 60.0, "as tall as its lines: {first:?}");
+        assert!(next.top() >= first.bottom(), "what follows starts under them: {next:?} {first:?}");
+    }
+
+    #[test]
+    fn segmented_marks_the_one_on_and_takes_a_tap_on_another() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0));
+        let mut oldest = false;
+        let mut changed = false;
+        let frame = |events: Vec<egui::Event>, oldest: &mut bool, changed: &mut bool| {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+                *changed |= segmented(ui, &PALETTE, oldest, &[(false, "Newest"), (true, "Oldest")]);
+            });
+            output.textures_delta.clear();
+        };
+        frame(Vec::new(), &mut oldest, &mut changed);
+        frame(Vec::new(), &mut oldest, &mut changed);
+        // Oldest, the second: past Newest, whose button is some eighty points wide.
+        let at = egui::pos2(100.0, 15.0);
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(vec![egui::Event::PointerMoved(at), press(true)], &mut oldest, &mut changed);
+        frame(vec![press(false)], &mut oldest, &mut changed);
+
+        assert!(oldest, "the tap took");
+        assert!(changed);
+
+        changed = false;
+        frame(vec![press(true)], &mut oldest, &mut changed);
+        frame(vec![press(false)], &mut oldest, &mut changed);
+
+        assert!(oldest && !changed, "a tap on the one on changes nothing");
+    }
+
+    #[test]
+    fn flags_go_in_mono_and_the_rest_stays_as_it_is() {
+        assert_eq!(flag_parts("no flags here"), [("no flags here", false)]);
+        assert_eq!(flag_parts("Add --solo to mine alone."), [("Add ", false), ("--solo", true), (" to mine alone.", false)]);
+        assert_eq!(flag_parts("with --mining."), [("with ", false), ("--mining", true), (".", false)]);
+        assert_eq!(flag_parts("--token FILE"), [("--token", true), (" FILE", false)]);
+        assert_eq!(flag_parts("start --index-addresses, --mining"), [("start ", false), ("--index-addresses", true), (", ", false), ("--mining", true)]);
+        assert_eq!(flag_parts("a -- dash, 1--2 and -- -- "), [("a -- dash, 1--2 and -- -- ", false)], "no flags");
+        assert_eq!(flag_parts(""), Vec::<(&str, bool)>::new());
+    }
 
     #[test]
     fn a_pill_at_the_end_of_a_full_row_moves_to_the_next_line_whole() {
