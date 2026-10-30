@@ -179,6 +179,7 @@ impl Editing {
             && !bar_was_up
             && !self.press_used
             && self.bar.is_none()
+            && field_under_finger(ctx)
             && ctx.read_response(id).is_some_and(|response| response.clicked())
         {
             let at = ctx.input(|input| input.pointer.interact_pos()).unwrap_or_else(|| ctx.content_rect().center());
@@ -211,7 +212,7 @@ impl Editing {
 
         if pressed {
             let under = ctx.interaction_snapshot(|interaction| interaction.contains_pointer.clone());
-            let field = under.iter().copied().find(|id| TextEditState::load(ctx, *id).is_some());
+            let field = under.iter().copied().find(|id| TextEditState::load(ctx, *id).is_some()).filter(|_| field_under_finger(ctx));
             self.held = field.map(|field| (field, time));
         }
 
@@ -257,8 +258,8 @@ impl Editing {
             return;
         }
 
-        // It goes with a tap anywhere else, typing, or the focus going to another field. A
-        // shortcut is no typing: Select all sends one.
+        // It goes with a tap anywhere else, typing, the focus going to another field, or its field
+        // going, as a back gesture takes a page. A shortcut is no typing: Select all sends one.
         let (clicked, typed) = ctx.input(|input| {
             let typed = |event: &Event| match event {
                 Event::Text(_) | Event::Paste(_) | Event::Ime(_) => true,
@@ -270,7 +271,7 @@ impl Editing {
         });
         let moved = ctx.memory(|memory| memory.focused()).is_some_and(|focused| focused != id);
 
-        if (clicked && !self.press_used && !drawn.response.contains_pointer()) || typed || moved {
+        if (clicked && !self.press_used && !drawn.response.contains_pointer()) || typed || moved || field.is_none() {
             self.bar = None;
         }
     }
@@ -396,6 +397,13 @@ fn focused_field(ctx: &Context) -> Option<Id> {
     ctx.memory(|memory| memory.focused()).filter(|id| TextEditState::load(ctx, *id).is_some())
 }
 
+/// Whether what the finger is on this frame is a text field that can be edited, as that field
+/// itself says. What a field kept says nothing of it: ids go by a widget's place in a page, so a row
+/// on another page can have the id of a field that was, and what it kept lives on under it.
+fn field_under_finger(ctx: &Context) -> bool {
+    ctx.output(|output| output.mutable_text_under_cursor)
+}
+
 /// Whether a text field has focus: on screen or not, as one scrolled away or under the keyboard
 /// keeps it.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -434,6 +442,17 @@ mod tests {
         editing: Editing,
         clipboard: Held,
         time: f64,
+        page: Page,
+    }
+
+    /// What the page shows where the field goes.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Page {
+        Field,
+        /// A row that took the id the field had: ids go by a widget's place in the page, so another
+        /// page's widget has one a field had, and what the field kept is still there under it.
+        Row,
+        Nothing,
     }
 
     const FIELD: &str = "field";
@@ -447,6 +466,7 @@ mod tests {
                 editing: Editing::default(),
                 clipboard: Held(clipboard.map(str::to_string)),
                 time: 0.0,
+                page: Page::Field,
             }
         }
 
@@ -460,9 +480,19 @@ mod tests {
             };
             self.editing.feed(&mut raw_input);
             raw_input.events.append(&mut events);
-            let App { text, editing, clipboard, .. } = self;
+            let App { text, editing, clipboard, page, .. } = self;
             let mut output = self.ctx.run_ui(raw_input, |ui| {
-                ui.add(egui::TextEdit::singleline(text).id(Id::unique(FIELD)));
+                match page {
+                    Page::Field => {
+                        ui.add(egui::TextEdit::singleline(text).id(Id::unique(FIELD)));
+                    }
+                    Page::Row => {
+                        let (rect, _) = ui.allocate_exact_size(vec2(400.0, 40.0), egui::Sense::hover());
+                        ui.interact(rect, Id::unique(FIELD), egui::Sense::click());
+                    }
+                    Page::Nothing => {}
+                }
+
                 editing.show(ui.ctx(), clipboard);
             });
             output.textures_delta.clear();
@@ -584,6 +614,63 @@ mod tests {
     fn the_bar_offers_what_can_be_done() {
         assert_eq!(actions(true, false), [Action::Paste, Action::SelectAll]);
         assert_eq!(actions(false, true), [Action::SelectAll, Action::Copy, Action::Cut]);
+    }
+
+    #[test]
+    fn a_finger_held_on_a_row_that_took_a_fields_id_brings_nothing() {
+        let mut app = App::new("text", Some("copied"));
+        app.frame(0.0, vec![]);
+        app.frame(0.1, vec![]);
+        let at = app.field().center();
+        assert!(TextEditState::load(&app.ctx, Id::unique(FIELD)).is_some(), "the field kept its state");
+
+        app.page = Page::Row;
+        app.frame(0.1, vec![]);
+        app.frame(0.1, finger(at, true));
+        app.frame(HOLD + 0.1, vec![]);
+        app.frame(0.1, vec![]);
+
+        assert!(!app.editing.bar_is_up(), "no field is there to edit");
+        assert!(!app.focused());
+    }
+
+    #[test]
+    fn a_tap_on_a_row_that_took_a_fields_id_brings_nothing() {
+        let mut app = App::new("text", Some("copied"));
+        app.frame(0.0, vec![]);
+        app.frame(0.1, vec![]);
+        let at = app.field().center();
+
+        app.page = Page::Row;
+        app.frame(0.1, vec![]);
+        app.ctx.memory_mut(|memory| memory.request_focus(Id::unique(FIELD)));
+        app.frame(0.1, vec![]);
+        app.frame(0.1, finger(at, true));
+        app.frame(0.05, finger(at, false));
+        app.frame(0.1, vec![]);
+
+        assert!(!app.editing.bar_is_up(), "no field is there to edit");
+    }
+
+    #[test]
+    fn the_bar_goes_when_its_field_does() {
+        let mut app = App::new("text", Some("copied"));
+        app.frame(0.0, vec![]);
+        app.frame(0.1, vec![]);
+        let at = app.field().center();
+
+        app.frame(0.1, finger(at, true));
+        app.frame(HOLD + 0.1, vec![]);
+        app.frame(0.05, finger(at, false));
+        assert!(app.editing.bar_is_up());
+
+        // As the system's back gesture leaves a page: no tap, no typing, and nothing to edit any more.
+        app.page = Page::Nothing;
+        app.frame(0.1, vec![]);
+        app.frame(0.1, vec![]);
+        app.frame(0.1, vec![]);
+
+        assert!(!app.editing.bar_is_up());
     }
 
     #[test]

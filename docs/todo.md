@@ -756,6 +756,10 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **The phone's edit bar came up on pages with no field,** on a finger resting on a row whose id a
+  field on another page once had, and stayed when its field went with a back gesture. A field now
+  has to say it is under the finger, and the bar goes with its field.
+
 - [x] **A light client stopped for good at epochs nobody justified.** On the testnet, epochs 2 and 3:
   it said it had caught up at height 31. Nodes now mark skipped epochs in `GET /light/finality`, and
   a client crosses on updates it holds tentatively until the voters it trusts agree with the next
