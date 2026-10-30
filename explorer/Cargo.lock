@@ -839,6 +839,7 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "security-framework",
+ "serde_json",
  "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",

@@ -687,6 +687,13 @@ impl Wallet {
             return;
         }
 
+        let listening = self.node.listen();
+        self.chain.streamed = listening.open;
+
+        if listening.moved {
+            self.chain.nudge();
+        }
+
         if let Some(ask) = self.chain.next_ask(time) {
             self.node.ask(ask);
         }

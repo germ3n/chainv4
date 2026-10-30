@@ -224,9 +224,9 @@ impl Client {
     pub fn stream(&self, url: String, on: impl FnMut(Result<Piece, String>) -> ControlFlow<()> + Send + 'static) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (agent, proxy) = (self.lasting.clone(), self.proxy.clone());
+            let (agent, proxy, connect) = (self.lasting.clone(), self.proxy.clone(), self.connect);
 
-            std::thread::spawn(move || native::stream(&agent, proxy.as_ref(), &url, on));
+            std::thread::spawn(move || native::stream(&agent, proxy.as_ref(), connect, &url, on));
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -308,11 +308,11 @@ mod native {
         })
     }
 
-    pub fn stream(agent: &ureq::Agent, proxy: Option<&Proxy>, url: &str, mut on: impl FnMut(Result<Piece, String>) -> ControlFlow<()>) {
+    pub fn stream(agent: &ureq::Agent, proxy: Option<&Proxy>, connect: u64, url: &str, mut on: impl FnMut(Result<Piece, String>) -> ControlFlow<()>) {
         let response = match agent.get(url).call() {
             Ok(response) => response,
             Err(err) => {
-                let _ = on(Err(failed(proxy, (STREAM_ANSWERS, STREAM_ANSWERS), err)));
+                let _ = on(Err(failed(proxy, (STREAM_ANSWERS, connect), err)));
 
                 return;
             }

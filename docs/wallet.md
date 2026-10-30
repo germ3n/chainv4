@@ -273,6 +273,10 @@ with the switch off. See [In the wallet](light-client.md#in-the-wallet).
 The [light client](light-client.md) follows the node from the pinned genesis. Every header is
 checked by consensus, and finality by the voters it proved (`wallet/src/chain.rs`).
 
+**New blocks:** where the node streams, the wallet holds `GET /stream` open and asks for headers as
+soon as it says the chain moved, every 20 seconds besides; otherwise it asks every 3 seconds. It takes
+nothing from the stream but that: see [Staying up to date](light-client.md#staying-up-to-date).
+
 **Balances:** every few seconds, for every address of every account, at the tip and at the
 finalized block:
 - **The coin:** the address's entry in `Column::Accounts`, with its nonce.

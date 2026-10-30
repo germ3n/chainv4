@@ -30,6 +30,8 @@ use {
 
 /// Seconds between following the chain again once caught up, and proving balances again.
 const FOLLOW_EVERY: f64 = 3.0;
+/// How often it asks while the node's stream says when there is more: in case an event is missed.
+const FOLLOW_STREAMED: f64 = 20.0;
 const PROVE_EVERY: f64 = 4.0;
 /// Seconds before asking again what failed to come.
 const RETRY_AFTER: f64 = 3.0;
@@ -217,6 +219,8 @@ pub struct Chain {
     pub dirty: bool,
     last_saved: Option<web_time::Instant>,
     followed: f64,
+    /// Whether the node's stream is open, to say when there is more to follow.
+    pub streamed: bool,
     proved: f64,
     retry_at: f64,
     /// Accounts by address text: what was proven at the final block and at the tip.
@@ -298,6 +302,17 @@ impl Chain {
         }
     }
 
+    /// The node's stream says there is more: it asks now rather than at its next turn, proving what
+    /// comes as ever. The stream is trusted for nothing else.
+    pub fn nudge(&mut self) {
+        self.followed = f64::NEG_INFINITY;
+    }
+
+    /// Whether to ask the node for more of the chain now.
+    fn follow_due(&self, time: f64) -> bool {
+        time - self.followed >= if self.streamed { FOLLOW_STREAMED } else { FOLLOW_EVERY }
+    }
+
     /// Asks again for all it follows and proves by, at once, whatever it is waiting for: for a
     /// reload. What it already proved stands until the answers come.
     pub fn reload(&mut self) {
@@ -346,6 +361,8 @@ impl Chain {
             log::info!("the light client caught up in {:.1} s{}", time - began, if self.fast_resumed.is_some() { ", fast-resumed" } else { "" });
         }
 
+        let due = self.follow_due(time);
+
         let Some(client) = &mut self.client else {
             return Some(match (&self.starting, &self.resuming) {
                 (Some(starting), _) => Ask::Checkpoint(starting.checkpoint.map(|block| block.to_string())),
@@ -354,7 +371,7 @@ impl Chain {
             });
         };
 
-        if client.next().is_none() && time - self.followed >= FOLLOW_EVERY {
+        if client.next().is_none() && due {
             self.followed = time;
             client.refresh();
         }
@@ -1164,6 +1181,19 @@ mod tests {
     }
 
     /// A made-up chain the wallet resumes on, as far as its answers go.
+    #[test]
+    fn with_the_nodes_stream_open_it_asks_when_told_and_otherwise_seldom() {
+        let mut chain = Chain { followed: 100.0, ..Chain::default() };
+        assert!(chain.follow_due(100.0 + FOLLOW_EVERY), "with no stream, it asks at its turn");
+
+        chain.streamed = true;
+        assert!(!chain.follow_due(100.0 + FOLLOW_EVERY), "the stream will say");
+        assert!(chain.follow_due(100.0 + FOLLOW_STREAMED), "but in case an event is missed");
+
+        chain.nudge();
+        assert!(chain.follow_due(100.0), "it said");
+    }
+
     struct Resumes {
         chain: Chain,
         finality: Option<LightFinality>,

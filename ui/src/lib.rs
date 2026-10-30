@@ -21,6 +21,7 @@ pub mod net;
 pub mod power;
 pub mod pull;
 pub mod secret;
+pub mod sse;
 pub mod theme;
 pub mod widgets;
 

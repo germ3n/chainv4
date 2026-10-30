@@ -6,13 +6,80 @@
 use {
     chainv4_ui::asks::Asks,
     chainv4_ui::net::{Answer, Client},
+    chainv4_ui::sse::{self, News},
     serde_json::Value,
     std::collections::HashSet,
+    std::sync::atomic::{AtomicBool, Ordering},
     std::sync::{Arc, Mutex},
     web_time::Instant,
 };
 
 pub use chainv4_ui::net::Failure;
+
+/// How long after the stream is lost it is opened again, in seconds.
+const STREAM_RETRY: f64 = 10.0;
+
+/// How the node's stream stands, kept as it arrives. No events pile up here: they only say that the
+/// chain moved, and a phone in the background may not read them for hours.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Listening {
+    pub open: bool,
+    /// Whether the chain moved since this was last read.
+    pub moved: bool,
+    /// When it last said anything, in the node's seconds.
+    heard: f64,
+    /// When it was lost, in the node's seconds.
+    lost_at: Option<f64>,
+    /// The node does not stream at all, so asking again is no use.
+    unsupported: bool,
+}
+
+impl Listening {
+    /// Takes in what the stream said, and says whether it is worth waking the app for.
+    fn hear(&mut self, news: News, now: f64) -> bool {
+        match news {
+            News::Open => {
+                (self.open, self.heard) = (true, now);
+                true
+            }
+            News::Alive => {
+                self.heard = now;
+                false
+            }
+            News::Event { name, .. } => {
+                self.heard = now;
+                self.moved |= sse::chain_moved(&name);
+                sse::chain_moved(&name)
+            }
+            News::Closed { unsupported, .. } => {
+                (self.open, self.unsupported, self.lost_at) = (false, unsupported, Some(now));
+                true
+            }
+        }
+    }
+
+    /// Whether to open the stream now: for the first time, past a wait since it was lost, or at
+    /// once if it fell silent. Not while one is on its way.
+    fn due(&mut self, opened: bool, now: f64) -> bool {
+        let silent = self.open && now - self.heard >= sse::SILENT;
+        let waited = self.lost_at.is_some_and(|lost| now - lost >= STREAM_RETRY);
+        let due = !self.unsupported && (silent || !self.open && (!opened || waited));
+
+        if due {
+            (self.open, self.lost_at) = (false, None);
+        }
+
+        due
+    }
+
+    /// How it stands, once: whether the chain moved is said only the once.
+    fn said(&mut self) -> Listening {
+        let said = *self;
+        self.moved = false;
+
+        said
+    }
+}
 
 /// Something to ask the node, which also names what came back.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -192,6 +259,9 @@ pub struct Node {
     wake: egui::Context,
     fetched: Fetched,
     fetching: HashSet<String>,
+    /// The node's stream: how it stands, and the flag that ends it.
+    listening: Arc<Mutex<Listening>>,
+    hang_up: Option<Arc<AtomicBool>>,
 }
 
 impl Node {
@@ -205,6 +275,8 @@ impl Node {
             wake,
             fetched: Arc::default(),
             fetching: HashSet::new(),
+            listening: Arc::default(),
+            hang_up: None,
         }
     }
 
@@ -322,6 +394,35 @@ impl Node {
     }
 
     /// Everything that arrived since last time.
+    /// Keeps the node's stream open while it serves one, and says how it stands: whether it is
+    /// open, and whether the chain moved since it was last asked.
+    pub fn listen(&mut self) -> Listening {
+        let now = self.now();
+        let (said, due) = {
+            let mut listening = self.listening.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let due = listening.due(self.hang_up.is_some(), now);
+
+            (listening.said(), due)
+        };
+
+        if due {
+            if let Some(hang_up) = self.hang_up.take() {
+                hang_up.store(true, Ordering::Relaxed);
+            }
+
+            let (shared, wake, began) = (self.listening.clone(), self.wake.clone(), self.began);
+            self.hang_up = Some(sse::listen(&self.client, format!("{}/stream", self.base), move |news| {
+                let now = began.elapsed().as_secs_f64();
+
+                if shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).hear(news, now) {
+                    wake.request_repaint();
+                }
+            }));
+        }
+
+        said
+    }
+
     pub fn answers(&mut self) -> Vec<(Ask, Result<Value, Failure>)> {
         let answers = std::mem::take(&mut *self.inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         let now = self.now();
@@ -331,6 +432,14 @@ impl Node {
         }
 
         answers
+    }
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        if let Some(hang_up) = self.hang_up.take() {
+            hang_up.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -354,6 +463,96 @@ fn read(response: &Answer) -> Result<Value, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(name: &str) -> News {
+        News::Event { name: name.to_string(), data: Value::Null }
+    }
+
+    #[test]
+    fn the_stream_opens_once_and_again_only_past_a_wait_when_lost() {
+        let mut listening = Listening::default();
+        assert!(listening.due(false, 0.0), "the first time");
+        assert!(!listening.due(true, 5.0), "on its way");
+
+        let closed = || News::Closed { why: "gone".to_string(), unsupported: false };
+        assert!(listening.hear(closed(), 5.0));
+        assert!(!listening.due(true, 5.0 + STREAM_RETRY - 1.0));
+        assert!(listening.due(true, 5.0 + STREAM_RETRY));
+        assert!(!listening.due(true, 5.0 + STREAM_RETRY), "and it is on its way again");
+
+        assert!(listening.hear(News::Open, 20.0));
+        assert!(listening.open);
+        assert!(!listening.due(true, 21.0));
+    }
+
+    #[test]
+    fn a_node_with_no_stream_is_not_asked_again_but_a_silent_stream_is_reopened_at_once() {
+        let mut listening = Listening::default();
+        listening.hear(News::Closed { why: "404".to_string(), unsupported: true }, 0.0);
+        assert!(!listening.open);
+        assert!(!listening.due(true, 1e9));
+
+        let mut listening = Listening::default();
+        listening.hear(News::Open, 100.0);
+        assert!(!listening.hear(News::Alive, 100.0 + sse::SILENT - 1.0), "a keep-alive wakes nobody");
+        assert!(!listening.due(true, 100.0 + sse::SILENT), "as it has just said something");
+        assert!(listening.due(true, 100.0 + 2.0 * sse::SILENT - 1.0), "gone quiet, with no more ever to come");
+        assert!(!listening.open, "so nothing relies on it meanwhile");
+    }
+
+    #[test]
+    fn only_news_of_the_chain_says_it_moved_and_that_only_once() {
+        let mut listening = Listening::default();
+
+        for name in ["queued", "peer_up", "peer_down"] {
+            assert!(!listening.hear(event(name), 0.0), "{name}");
+        }
+
+        assert!(!listening.said().moved);
+
+        for name in ["block", "reorganized", "justified", "finalized", "lagged"] {
+            assert!(listening.hear(event(name), 0.0), "{name}");
+            assert!(listening.said().moved, "{name}");
+            assert!(!listening.said().moved, "{name}, once");
+        }
+    }
+
+    #[test]
+    fn with_no_way_out_the_stream_is_lost_rather_than_waited_on() {
+        let mut node = unreachable();
+        assert!(!node.listen().open);
+        assert!(node.hang_up.is_some());
+        assert!(node.listening.lock().unwrap().lost_at.is_some());
+    }
+
+    #[test]
+    fn the_nodes_stream_reaches_the_wallet_and_ends_with_it() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut node = Node::new(&format!("http://{}", listener.local_addr().unwrap()), Ok(Client::direct()), egui::Context::default());
+        node.listen();
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        let read = stream.read(&mut request).unwrap();
+        assert!(request[..read].starts_with(b"GET /stream "));
+        stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nevent: block\ndata: {}\n\n").unwrap();
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while !node.listening.lock().unwrap().moved {
+            assert!(Instant::now() < deadline, "never heard");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let said = node.listen();
+        assert!(said.open && said.moved);
+        assert!(!node.listen().moved);
+
+        let hang_up = node.hang_up.clone().unwrap();
+        drop(node);
+        assert!(hang_up.load(Ordering::Relaxed), "a wallet that left this node stops listening to it");
+    }
 
     #[test]
     fn with_a_proxy_that_does_not_work_nothing_is_sent_and_the_answer_says_why() {

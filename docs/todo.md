@@ -763,6 +763,9 @@ offline; these would make that hold up as a treasury.
 - [x] **A light client walking was slow:** about 1 MB and two round trips for every 16 blocks on a
   chain with governance. It now asks only for what it can check, and for it all at once through
   `GET /light/bundle`. See [Light client](light-client.md#what-to-keep-in-mind).
+- [x] **The apps found out about new blocks only by asking** every few seconds. The wallet and the
+  explorer's light client listen to `GET /stream` now, and ask when it says the chain moved. See
+  [Light client](light-client.md#staying-up-to-date).
 - [x] **The wallet's status dot stays green while the node is down;** it goes by `GET /status` now.
 - [x] **A phone in portrait shows only a dot of the light client's state:** a tap says it in words, and
   Home carries a line while the client rests on a node's word.

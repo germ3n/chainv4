@@ -94,6 +94,13 @@ the stream:
 - `/node` every two seconds;
 - whatever the page in view shows.
 
+**The light client** asks for headers every 4 seconds without a stream. With one it asks as soon as an
+event says the chain moved, and every 20 seconds besides, in case one went missing. It takes nothing
+from the event: what it shows, it fetched over HTTP and proved.
+
+**A stream that goes quiet:** a node says something at least every 15 seconds, so one silent for 40 is
+taken for dead and opened again. A connection left behind on another network never ends by itself.
+
 **Keeping the main chain whole:**
 - **New blocks:** when the status names a tip the explorer has not loaded, it fetches the blocks
   since.

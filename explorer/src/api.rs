@@ -5,17 +5,16 @@
 //! or Reload asks for it now.
 
 use {
-    crate::sse,
     chainv4_ui::asks::Asks,
-    chainv4_ui::net::{Answer, Client, Piece},
+    chainv4_ui::net::{Answer, Client},
+    chainv4_ui::sse,
     serde_json::{Value, json},
-    std::ops::ControlFlow,
     std::sync::atomic::{AtomicBool, Ordering},
     std::sync::{Arc, Mutex},
     web_time::Instant,
 };
 
-pub use chainv4_ui::net::Failure;
+pub use {chainv4_ui::net::Failure, chainv4_ui::sse::News};
 
 /// How many tokens a page of the registry asks for.
 pub const TOKEN_PAGE: u64 = 100;
@@ -286,16 +285,6 @@ pub enum Reply {
     Stream(News),
 }
 
-/// What the stream said.
-#[derive(Debug)]
-pub enum News {
-    /// It is open: events follow.
-    Open,
-    Event { name: String, data: Value },
-    /// It ended. Unsupported when the node does not stream at all.
-    Closed { why: String, unsupported: bool },
-}
-
 pub struct Api {
     base: String,
     /// What every request goes out through, or why none can: a proxy set that does not build
@@ -439,61 +428,12 @@ impl Api {
     /// Opens the node's event stream, hanging up any open one.
     pub fn listen(&mut self) {
         self.hang_up();
-        let hang_up = Arc::new(AtomicBool::new(false));
-        self.hang_up = Some(hang_up.clone());
         let url = format!("{}/stream", self.base);
         let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
-        let parser = Mutex::new(sse::Parser::default());
-        let on = move |piece: Result<Piece, String>| {
-            let tell = |news: News| {
-                lock(&inbox).push(Reply::Stream(news));
-                wake.request_repaint();
-            };
-
-            if hang_up.load(Ordering::Relaxed) {
-                return ControlFlow::Break(());
-            }
-
-            match piece {
-                Ok(Piece::Head { ok: true, .. }) => tell(News::Open),
-                Ok(Piece::Head { status, status_text, .. }) => {
-                    tell(News::Closed {
-                        why: format!("{status} {status_text}"),
-                        unsupported: status == 404,
-                    });
-
-                    return ControlFlow::Break(());
-                }
-                Ok(Piece::Chunk(bytes)) if bytes.is_empty() => {
-                    tell(News::Closed {
-                        why: "the node closed the stream".to_string(),
-                        unsupported: false,
-                    });
-
-                    return ControlFlow::Break(());
-                }
-                Ok(Piece::Chunk(bytes)) => {
-                    for event in lock(&parser).feed(&bytes) {
-                        let data = serde_json::from_str(&event.data).unwrap_or(Value::String(event.data));
-                        tell(News::Event { name: event.name, data });
-                    }
-                }
-                Err(why) => {
-                    tell(News::Closed { why, unsupported: false });
-
-                    return ControlFlow::Break(());
-                }
-            }
-
-            ControlFlow::Continue(())
-        };
-
-        match &self.client {
-            Ok(client) => client.stream(url, on),
-            Err(why) => {
-                let _ = on(Err(unusable(why)));
-            }
-        }
+        self.hang_up = Some(sse::listen(&self.client, url, move |news| {
+            lock(&inbox).push(Reply::Stream(news));
+            wake.request_repaint();
+        }));
     }
 
     /// Ends the open stream, if any.

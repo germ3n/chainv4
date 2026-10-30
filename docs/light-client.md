@@ -266,6 +266,25 @@ The explorer runs the same client against the node it talks to:
   stays pinned, and headers and voters' signatures are checked from there. A checkpoint pasted comes
   first; under depth finality or none, or on a node with no checkpoint to give, it walks.
 
+## Staying up to date
+
+The wallet and the explorer learn of new blocks from the node's [`GET /stream`](api.md), where it has
+one, and ask for headers when an event says the chain moved: a block, a reorganization, a justified or
+finalized checkpoint, or `lagged`, for events they missed. They ask for more every 20 seconds besides,
+in case an event went missing. Without a stream, or while it is lost, they ask every 3 seconds in the
+wallet and 4 in the explorer, and try the stream again every 10.
+
+- **The stream is trusted for nothing.** Only an event's name is used. Headers, blocks, transactions
+  and proofs come over HTTP and are checked as ever, so a node that lies on its stream can make a
+  client ask early, or find out late by up to those 20 seconds, and no more.
+- **Walking does not change.** A client behind asks for what it wants next until it catches up, and
+  events make no difference to that.
+- **It tells the node nothing new:** that a client is there, which its requests say anyway. Through a
+  proxy, the stream goes through the proxy too.
+- **Balances keep their own pace.** A client that knows of a new block proves what it shows on its
+  usual round, not at each event.
+- **An offline signer never opens one.** It makes no requests at all.
+
 ## What to keep in mind
 
 - **It asks only for what it can check.** On a chain with governance it knows the rules and voters

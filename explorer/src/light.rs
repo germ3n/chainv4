@@ -10,6 +10,7 @@
 
 use {
     crate::api::{Ask, Failure},
+    chainv4_ui::sse::{self, News},
     chainv4::db::{Column, StateProof, address_key},
     chainv4::light::{Assurance, CheckpointStart, FinalityStep, LightClient, LightError, LightParams, LightRequest, MAX_LIGHT_HEADERS, may_resume},
     chainv4::structs::account::Account,
@@ -25,6 +26,8 @@ use {
 
 /// Seconds between following the chain again once it caught up.
 const FOLLOW_EVERY: f64 = 4.0;
+/// How often it asks while the node's stream says when there is more: in case an event is missed.
+const FOLLOW_STREAMED: f64 = 20.0;
 /// Seconds before asking again what failed to come.
 const RETRY_AFTER: f64 = 3.0;
 
@@ -91,6 +94,9 @@ pub struct Light {
     /// that does not check.
     pub trouble: Option<String>,
     followed: f64,
+    /// Whether the node's stream is open, to say when there is more to follow.
+    pub streamed: bool,
+    heard: f64,
     retry_at: f64,
     /// Balances proven, by address, newest block last; or why a proof did not check.
     pub proven: HashMap<String, Result<Vec<Proven>, String>>,
@@ -178,6 +184,29 @@ impl Light {
         self.client.as_ref().is_some_and(|client| client.next().is_none())
     }
 
+    /// Takes in what the node's stream said. When it says the chain moved, it asks now rather than
+    /// at its next turn, proving what comes as ever: the stream is trusted for nothing else.
+    pub fn hear(&mut self, news: &News, time: f64) {
+        self.streamed = !matches!(news, News::Closed { .. });
+        self.heard = time;
+
+        if let News::Event { name, .. } = news
+            && sse::chain_moved(name)
+        {
+            self.followed = f64::NEG_INFINITY;
+        }
+    }
+
+    /// Whether the node's stream has fallen silent, with no more ever to come.
+    pub fn silent(&self, time: f64) -> bool {
+        self.streamed && time - self.heard >= sse::SILENT
+    }
+
+    /// Whether to ask the node for more of the chain now.
+    fn follow_due(&self, time: f64) -> bool {
+        time - self.followed >= if self.streamed { FOLLOW_STREAMED } else { FOLLOW_EVERY }
+    }
+
     /// Whether it caught up at least once since it started: for saying it follows, as it asks after
     /// new blocks every few seconds, and is not caught up while it waits for the answer.
     pub fn has_followed(&self) -> bool {
@@ -203,6 +232,7 @@ impl Light {
         }
 
         self.caught_up_once |= self.caught_up();
+        let due = self.follow_due(time);
 
         let Some(client) = &mut self.client else {
             return Some(match &self.starting {
@@ -211,7 +241,7 @@ impl Light {
             });
         };
 
-        if client.next().is_none() && time - self.followed >= FOLLOW_EVERY {
+        if client.next().is_none() && due {
             self.followed = time;
             client.refresh();
         }
@@ -755,6 +785,44 @@ mod tests {
             let start = CheckpointStart { updates: vec![None; ((height - from) / 8 + 1) as usize], headers };
             self.answer(Ask::Checkpoint(None), Ok(json!({ "checkpoint": { "block": block.to_string() }, "start": encoded(&start) })));
         }
+    }
+
+    #[test]
+    fn with_the_nodes_stream_open_it_asks_when_told_and_otherwise_seldom() {
+        let event = |name: &str| News::Event { name: name.to_string(), data: Value::Null };
+        let mut light = Light { followed: 100.0, ..Light::default() };
+        assert!(light.follow_due(100.0 + FOLLOW_EVERY), "with no stream, it asks at its turn");
+
+        light.hear(&News::Open, 100.0);
+        assert!(!light.follow_due(100.0 + FOLLOW_EVERY), "the stream will say");
+        assert!(light.follow_due(100.0 + FOLLOW_STREAMED), "but in case an event is missed");
+
+        light.hear(&event("queued"), 101.0);
+        light.hear(&News::Alive, 101.0);
+        assert!(!light.follow_due(101.0), "nothing of the chain");
+
+        for name in ["block", "reorganized", "justified", "finalized", "lagged"] {
+            light.followed = 101.0;
+            light.hear(&event(name), 101.0);
+            assert!(light.follow_due(101.0), "{name}");
+        }
+
+        light.followed = 101.0;
+        light.hear(&News::Closed { why: "gone".to_string(), unsupported: false }, 102.0);
+        assert!(light.follow_due(101.0 + FOLLOW_EVERY), "lost, it goes back to asking");
+    }
+
+    #[test]
+    fn a_stream_that_says_nothing_for_long_enough_is_taken_for_dead() {
+        let mut light = Light::default();
+        assert!(!light.silent(1e9), "none is open");
+
+        light.hear(&News::Open, 100.0);
+        assert!(!light.silent(100.0 + sse::SILENT - 1.0));
+
+        light.hear(&News::Alive, 100.0 + sse::SILENT - 1.0);
+        assert!(!light.silent(100.0 + sse::SILENT));
+        assert!(light.silent(100.0 + 2.0 * sse::SILENT - 1.0));
     }
 
     fn failed(status: u16) -> Result<Value, Failure> {

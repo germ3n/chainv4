@@ -10,7 +10,6 @@ mod light;
 mod model;
 mod proof;
 mod release;
-mod sse;
 mod store;
 mod theme;
 mod views;

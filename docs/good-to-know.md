@@ -86,7 +86,13 @@ other pages explain each part in full; this one is the short list to keep in min
   answers 503, and a peer over its share 10 times in a minute is disconnected. It can come back
   at once: there are no bans yet (see [Node](node.md#the-gossip-backlog)).
 - **A node only streams when asked.** `--stream` turns on `GET /stream`. Without it, clients
-  such as the explorer poll.
+  such as the explorer and the wallet poll.
+- **The apps' stream only says when to ask.** A wallet and the explorer's light client take from it
+  that the chain moved, never what is on it, and ask over HTTP for a header, a block or a
+  transaction as ever, proving what comes. A node that lies on its stream can make them ask early, or
+  late by up to 20 seconds, the slowest they ask with a stream open. Each open app holds one connection to
+  the node, and a phone in the background keeps it until the system ends it. A stream that says
+  nothing for 40 seconds is taken for dead, as the node says something every 15.
 - **Read-only calls hold up the API.** `POST /call` runs a contract under the chain's fuel cap on
   the API's one thread, and every other request waits for it.
 - **Lua contracts can be split across files, put together when deploying.** A `--@include

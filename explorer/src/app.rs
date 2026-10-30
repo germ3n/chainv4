@@ -490,9 +490,11 @@ impl Explorer {
 
     fn news(&mut self, news: News, now: u64, time: f64) {
         let store = &mut self.store;
+        self.light.hear(&news, time);
 
         match news {
             News::Open => self.streaming = Streaming::Live,
+            News::Alive => {}
             News::Closed { why, unsupported } => {
                 self.streaming = match unsupported {
                     true => Streaming::Unsupported,
@@ -623,6 +625,12 @@ impl Explorer {
         }
 
         if matches!(self.streaming, Streaming::Lost(_)) && time - self.asked.stream >= STREAM_RETRY {
+            self.streaming = Streaming::Connecting;
+            self.api.listen();
+        }
+
+        if self.light.silent(time) {
+            self.light.streamed = false;
             self.streaming = Streaming::Connecting;
             self.api.listen();
         }

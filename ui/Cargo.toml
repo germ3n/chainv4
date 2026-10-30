@@ -6,6 +6,8 @@ license = "MIT"
 description = "What chainv4's egui apps share: a palette, type and density each app picks for its own look, the widgets their pages are built from, and running on Android and iOS."
 
 [dependencies]
+# A node's stream carries JSON (sse.rs).
+serde_json = "1.0.154"
 eframe = { version = "0.37.0", default-features = false }
 egui = "0.37.0"
 log = "0.4.34"
