@@ -38,6 +38,9 @@ pub const MAX_LIGHT_HEADERS: u32 = 1_000;
 #[document(summary = "The most epochs of finality a node sends a light client at once.", category = "Light client", see_also = "FinalityStep")]
 pub const MAX_FINALITY_STEPS: u64 = 64;
 
+#[document(summary = "How many epochs of finality, and of headers, GET /light/bundle sends at once: a walk's round trips, not its checks, are what take the time.", category = "Light client", see_also = "LightClient::deliver_bundle")]
+pub const BUNDLE_EPOCHS: u64 = 32;
+
 #[document(
     summary = "Where a token keeps a holder's balance, by the token standard: in Column::Namespaces, the token's balances namespace, by the holder's address text. What a light client proves a token balance by.",
     params = {
@@ -1037,6 +1040,72 @@ impl LightClient {
             from,
             count: (self.tip().height / interval).saturating_sub(from).saturating_add(1).clamp(1, MAX_FINALITY_STEPS),
         })
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "What to ask GET /light/bundle for next: the height headers go on from, and the epoch finality does, whichever next wants; None once caught up, and under finality that does not vote, which has no such route. A node without the route answers 404, and next, a request at a time, does the same work.",
+    )]
+    pub fn next_bundle(&self) -> Option<(u64, u64)> {
+        let interval = self.params.finality.and_then(|finality| finality.checkpoint_interval())?;
+        let wanted = self.next()?;
+        let trusted = self.justified().epoch.min(self.tip().height / interval);
+        let finality = (self.base.div_ceil(interval)..=trusted).find(|epoch| !self.updated.contains(&(epoch * interval))).unwrap_or_else(|| (self.justified().epoch + 1).max(self.gap_reached.map_or(0, |epoch| epoch + 1)));
+
+        Some(match wanted {
+            LightRequest::Headers { from, .. } => (from, finality),
+            LightRequest::Finality { from, .. } => (self.tip().height + 1, from),
+        })
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "Follows what GET /light/bundle sent, as next asks for it: each header and step is checked just as deliver_headers and deliver_finality check it, one stretch at a time, stopping at what next wants that the bundle does not hold. So one answer carries a client as far as many requests did.",
+        params = {
+            headers_from = "The height the headers start at, as asked.",
+            headers = "The headers the node sent.",
+            epoch_from = "The epoch the steps start at, as asked.",
+            steps = "The finality the node sent.",
+            tip = "The node's height: a client past it has all the headers there are.",
+            now = "The time, for headers from the future.",
+        },
+        returns = "Nothing, or the first thing that does not hold, with why.",
+    )]
+    pub fn deliver_bundle(&mut self, headers_from: u64, headers: &[SealedHeader], epoch_from: u64, steps: &[FinalityStep], tip: u64, now: u64) -> Result<(), LightError> {
+        let (headers_end, epoch_end) = (headers_from + headers.len() as u64, epoch_from + steps.len() as u64);
+        let mut last = None;
+
+        while let Some(wanted) = self.next() {
+            // Nothing moved: another request of the same will not either.
+            if last.as_ref() == Some(&wanted) {
+                break;
+            }
+
+            last = Some(wanted.clone());
+
+            match wanted {
+                LightRequest::Headers { from, count } if (headers_from..headers_end).contains(&from) => {
+                    let start = (from - headers_from) as usize;
+                    let end = (start + count as usize).min(headers.len());
+                    self.deliver_headers(from, headers[start..end].to_vec(), now)?;
+                }
+                LightRequest::Headers { from, .. } if from > tip => {
+                    self.deliver_headers(from, Vec::new(), now)?;
+                }
+                LightRequest::Finality { from, count } if (epoch_from..epoch_end).contains(&from) => {
+                    let start = (from - epoch_from) as usize;
+                    let end = (start + count as usize).min(steps.len());
+                    self.deliver_finality(from, steps[start..end].to_vec())?;
+                }
+                // Short of a bundle's worth: the node has nothing justified past these.
+                LightRequest::Finality { from, .. } if from >= epoch_end && (steps.len() as u64) < BUNDLE_EPOCHS => {
+                    self.deliver_finality(from, Vec::new())?;
+                }
+                _ => break,
+            }
+        }
+
+        Ok(())
     }
 
     /// How many headers from this height it can check with what it knows now, at most

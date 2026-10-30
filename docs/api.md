@@ -218,6 +218,15 @@ Main-chain headers with their seals, from height `from` (1 by default), at most 
 1,000: `{"headers": ["0x…", …]}`, each a `SealedHeader` encoded. Below the pivot of a node that
 synced from a snapshot, these are all it has.
 
+### `GET /light/bundle?headers=H&epoch=E`
+
+What a walking light client wants next in one answer, so it spends its time checking rather than
+waiting on round trips: `tip`, the node's height; `headers`, as `GET /headers` encodes them, up to
+32 epochs' worth from height `headers`; and `steps`, as `GET /light/finality` encodes them, up to 32
+epochs from `epoch`. It checks them itself, a stretch at a time (`LightClient::deliver_bundle`). 404
+under finality that does not vote, and from a node from before the route: the client then asks for
+each as it goes.
+
 ### `GET /light/finality?from=E&count=N`
 
 What light clients follow finality with, an epoch at a time from epoch `from` on (0, genesis, by

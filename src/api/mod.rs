@@ -512,6 +512,7 @@ fn router(api: Api) -> Router {
         .route("/light", get(light))
         .route("/light/updates/{block}", get(light_update))
         .route("/light/finality", get(light_finality))
+        .route("/light/bundle", get(light_bundle))
         .route("/light/checkpoint", get(light_checkpoint_final))
         .route("/light/checkpoint/{block}", get(light_checkpoint))
         .route("/headers", get(headers))
@@ -1942,6 +1943,37 @@ async fn headers(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, S
     }
 
     Ok(Json(json!({ "headers": headers })))
+}
+
+/// What a walking light client wants next, in one answer: BUNDLE_EPOCHS' worth of headers from
+/// ?headers= and of finality from ?epoch=, under the kinds of finality that vote; 404 otherwise, for
+/// the client to ask for each as it goes. It checks them itself either way.
+async fn light_bundle(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let interval = api
+        .light
+        .finality
+        .and_then(|finality| finality.checkpoint_interval())
+        .ok_or_else(|| ApiError::NotFound("this chain's finality does not vote".to_string()))?;
+    let from = number(&query, "headers")?.unwrap_or(1);
+    let epoch = number(&query, "epoch")?.unwrap_or(0);
+    let count = crate::light::BUNDLE_EPOCHS.saturating_mul(interval).min(u64::from(MAX_LIGHT_HEADERS));
+    let top = tip(&*api.db)?.header.height;
+    let mut headers = Vec::new();
+
+    for height in from..from.saturating_add(count) {
+        match stored_header_at(&*api.db, height)? {
+            Some(sealed) => headers.push(to_hex(&sealed.hashable_bytes_with_tag())),
+            None => break,
+        }
+    }
+
+    let steps = stored_light_finality(&*api.db, interval, epoch, crate::light::BUNDLE_EPOCHS, top)?;
+
+    Ok(Json(json!({
+        "tip": top,
+        "headers": headers,
+        "steps": steps.iter().map(|step| to_hex(&step.hashable_bytes_with_tag())).collect::<Vec<_>>(),
+    })))
 }
 
 /// The light update a block keeps, encoded: proofs of the voters genesis or a checkpoint fixed.

@@ -79,6 +79,8 @@ pub struct Light {
     client: Option<LightClient>,
     /// Whether it caught up at least once since it started.
     caught_up_once: bool,
+    /// Whether this node answered that it has no GET /light/bundle.
+    no_bundle: bool,
     /// Waiting for what starts the client at a checkpoint.
     starting: Option<Starting>,
     /// The height it fast-resumed at this time, if it did: what the sidebar and Settings say.
@@ -214,6 +216,13 @@ impl Light {
             client.refresh();
         }
 
+        // What it wants next all at once, from a node that can: a walk's time is its round trips.
+        if !self.no_bundle
+            && let Some((headers, epoch)) = client.next_bundle()
+        {
+            return Some(Ask::Bundle { headers, epoch });
+        }
+
         if let Some(request) = client.next() {
             return Some(match request {
                 LightRequest::Headers { from, count } => Ask::Headers { from, count },
@@ -298,7 +307,8 @@ impl Light {
     pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>, trust: Trust, now: u64, time: f64) -> bool {
         let mine = matches!(
             ask,
-            Ask::Light | Ask::Headers { .. } | Ask::Finality { .. } | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. }
+            Ask::Light | Ask::Headers { .. } | Ask::Finality { .. }
+                | Ask::Bundle { .. } | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. }
         );
 
         if !mine {
@@ -332,6 +342,12 @@ impl Light {
             }
             // Asked again with the page's next round.
             (Ask::ReceiptProof(_), Err(_)) => return true,
+            // A node from before the route: a request at a time does the same.
+            (Ask::Bundle { .. }, Err(failure)) if failure.status != 0 => {
+                self.no_bundle = true;
+
+                return true;
+            }
             (Ask::Checkpoint(Some(block)), Err(failure)) if failure.status != 0 => {
                 self.trouble = Some(format!("the node cannot start the light client at checkpoint {block}: {}", failure.message));
 
@@ -432,6 +448,13 @@ impl Light {
                 }
 
                 Ok(())
+            }
+            Ask::Bundle { headers: from, epoch } => {
+                let headers: Vec<SealedHeader> = list(&value["headers"])?;
+                let steps: Vec<FinalityStep> = list(&value["steps"])?;
+                let tip = value["tip"].as_u64().unwrap_or(0);
+
+                self.with_client(|client| client.deliver_bundle(*from, &headers, *epoch, &steps, tip, now).map_err(|err| err.to_string()))
             }
             Ask::Headers { from, .. } => {
                 let headers: Vec<SealedHeader> = list(&value["headers"])?;
@@ -743,7 +766,7 @@ mod tests {
         let mut met = Met::new(Some(VOTES), false);
         met.light();
 
-        assert!(matches!(met.light.ask(0.0), Some(Ask::Headers { from: 1, .. })));
+        assert!(matches!(met.light.ask(0.0), Some(Ask::Bundle { headers: 1, .. })));
         assert_eq!(met.light.lowest(), Some(0));
         assert_eq!(met.light.fast_resumed_words(), None);
     }
@@ -757,7 +780,7 @@ mod tests {
         assert_eq!(met.light.following(), Some((800, 800)));
         assert_eq!(met.light.fast_resumed_words().as_deref(), Some("Fast-resumed at block 800, on this node's word"));
         assert!(met.light.trouble.is_none(), "{:?}", met.light.trouble);
-        assert!(matches!(met.light.ask(0.0), Some(Ask::Headers { from: 801, .. })), "headers checked from there on");
+        assert!(matches!(met.light.ask(0.0), Some(Ask::Bundle { headers: 801, .. })), "headers checked from there on");
     }
 
     #[test]

@@ -271,8 +271,13 @@ The explorer runs the same client against the node it talks to:
 - **It asks only for what it can check.** On a chain with governance it knows the rules and voters
   only about two epochs ahead of what it has proved, so it asks for that many headers and for finality
   only as far as those headers, rather than `MAX_LIGHT_HEADERS` and `MAX_FINALITY_STEPS` it would send
-  back and ask for again. About 12 KB a round rather than 700 KB. It still takes two requests for
-  every 16 blocks on such a chain.
+  back and ask for again. A round of two requests for every 16 blocks costs about 23 KB rather than
+  1 MB.
+- **It asks for it all at once when the node can.** Over a real network a walk's time is round trips:
+  the node answers in about a millisecond and the client spends a few seconds of CPU on thousands of
+  blocks. `GET /light/bundle` carries 32 epochs of headers and finality in one answer, which the client
+  takes through its usual steps as `next` asks for them, checking each as ever. A node without the
+  route answers 404 and the client goes back to a request at a time.
 - **It fetches every header from genesis, the first time.** Headers are small, but there are as
   many as blocks. The CLI and the explorer follow the chain afresh each time, the explorer from a trusted node's
   checkpoint if its fast resume is on; the wallet saves the

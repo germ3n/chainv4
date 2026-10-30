@@ -760,10 +760,9 @@ offline; these would make that hold up as a treasury.
   it said it had caught up at height 31. Nodes now mark skipped epochs in `GET /light/finality`, and
   a client crosses on updates it holds tentatively until the voters it trusts agree with the next
   justification. See [Light client](light-client.md#what-to-keep-in-mind).
-- [ ] **A light client walking is slow.** On a chain with governance it can check only about two
-  epochs past the eras it knows, so each pair of requests advances 16 blocks. It now asks only for
-  what it can use, about 12 KB a round rather than 700 KB, but the two round trips remain: bundling
-  headers and steps on the node would cut those. Fast resume goes around it for a node trusted.
+- [x] **A light client walking was slow:** about 1 MB and two round trips for every 16 blocks on a
+  chain with governance. It now asks only for what it can check, and for it all at once through
+  `GET /light/bundle`. See [Light client](light-client.md#what-to-keep-in-mind).
 - [x] **The wallet's status dot stays green while the node is down;** it goes by `GET /status` now.
 - [x] **A phone in portrait shows only a dot of the light client's state:** a tap says it in words, and
   Home carries a line while the client rests on a node's word.

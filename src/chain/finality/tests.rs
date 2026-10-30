@@ -2609,6 +2609,83 @@ mod voting {
         }
     }
 
+    /// What GET /light/bundle sends: as many epochs of headers and of finality as it holds.
+    fn bundle(chain: &Chain, headers_from: u64, epoch: u64) -> (Vec<SealedHeader>, Vec<crate::light::FinalityStep>) {
+        let epochs = crate::light::BUNDLE_EPOCHS;
+        let headers = (headers_from..headers_from + epochs * INTERVAL).map_while(|height| stored_header_at(&*chain.db, height).unwrap()).collect();
+
+        (headers, crate::chain::stored_light_finality(&*chain.db, INTERVAL, epoch, epochs, chain.tip().height).unwrap())
+    }
+
+    /// Bundles until the client wants nothing more, and how many it took.
+    fn walk_in_bundles(chain: &Chain, client: &mut crate::light::LightClient) -> u64 {
+        let mut asked = 0;
+
+        while let Some((from, epoch)) = client.next_bundle() {
+            asked += 1;
+            assert!(asked < 100, "it goes round and round");
+            let (headers, steps) = bundle(chain, from, epoch);
+            client.deliver_bundle(from, &headers, epoch, &steps, chain.tip().height, LATER).unwrap();
+        }
+
+        asked
+    }
+
+    #[test]
+    fn a_light_client_walks_a_chain_in_a_few_bundles() {
+        use crate::light::LightClient;
+
+        for finality in kinds() {
+            let mut chain = open(&finality);
+            let last = 4 * crate::light::BUNDLE_EPOCHS;
+            finalize_through(&mut chain, last);
+            let genesis = genesis_with(Some(finality.clone()));
+            let mut client = LightClient::new(genesis.light_params(), stored_header_at(&*chain.db, 0).unwrap().unwrap(), chain.genesis()).unwrap();
+            let asked = walk_in_bundles(&chain, &mut client);
+
+            assert!(asked <= 12, "{asked} bundles for {last} epochs: {}", finality.name());
+            assert_eq!(client.tip().height, chain.tip().height, "{}", finality.name());
+            assert_eq!(Some(client.justified()), chain.justified());
+            assert_eq!(Some(client.finalized()), chain.finalized());
+            assert_eq!(client.next(), None, "and it rests");
+
+            // It follows on by the same, a few blocks at a time.
+            finalize_through(&mut chain, last + 2);
+            client.refresh();
+            walk_in_bundles(&chain, &mut client);
+            assert_eq!(Some(client.justified()), chain.justified());
+            assert_eq!(client.tip().height, chain.tip().height);
+
+            // A bundle that does not hold stops it, as a request at a time would.
+            finalize_through(&mut chain, last + 4);
+            client.refresh();
+            let (from, epoch) = client.next_bundle().unwrap();
+            let (headers, mut steps) = bundle(&chain, from, epoch);
+            let justification = steps.iter_mut().find_map(|step| step.justification.as_mut()).unwrap();
+            justification.votes.truncate(1);
+            assert!(client.deliver_bundle(from, &headers, epoch, &steps, chain.tip().height, LATER).is_err());
+        }
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
+    #[test]
+    fn a_light_client_of_a_governed_chain_walks_in_bundles_past_a_gap() {
+        use crate::light::LightClient;
+
+        for finality in kinds() {
+            let (mut chain, genesis) = council_chain(finality.clone());
+            justified_past_a_gap(&mut chain);
+            finalize_through(&mut chain, 2 * crate::light::BUNDLE_EPOCHS);
+            let mut client = LightClient::new(genesis.light_params(), stored_header_at(&*chain.db, 0).unwrap().unwrap(), chain.genesis()).unwrap();
+            let asked = walk_in_bundles(&chain, &mut client);
+
+            assert!(asked <= 8, "{asked} bundles, one for every few epochs at most: {}", finality.name());
+            assert_eq!(client.tip().height, chain.tip().height, "{}", finality.name());
+            assert_eq!(Some(client.justified()), chain.justified());
+            assert_eq!(Some(client.finalized()), chain.finalized());
+        }
+    }
+
     #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
     #[test]
     fn a_light_client_of_a_governed_chain_asks_for_no_more_than_it_can_use() {

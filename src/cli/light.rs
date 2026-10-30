@@ -265,6 +265,25 @@ fn trusted(args: &LightArgs, params: &LightParams) -> CliResult<Hash> {
 
 /// Asks the node for everything the client wants until it is caught up.
 fn follow(agent: &Agent, node: &str, client: &mut LightClient) -> CliResult<()> {
+    // Most of what a walk takes is round trips: what it wants next all at once, from a node that can.
+    while let Some((headers_from, epoch)) = client.next_bundle() {
+        let (status, answer) = super::send::fetch(agent.get(format!("{node}/light/bundle?headers={headers_from}&epoch={epoch}")).call())?;
+
+        if status != 200 {
+            break;
+        }
+
+        let before = (client.tip().height, client.justified());
+        let headers: Vec<SealedHeader> = list(&answer["headers"])?;
+        let steps: Vec<FinalityStep> = list(&answer["steps"])?;
+        client.deliver_bundle(headers_from, &headers, epoch, &steps, answer["tip"].as_u64().unwrap_or(0), now())?;
+
+        // Nothing moved in a whole bundle: a request at a time says why, or stops.
+        if client.next().is_some() && (client.tip().height, client.justified()) == before {
+            break;
+        }
+    }
+
     while let Some(request) = client.next() {
         match request {
             LightRequest::Headers { from, count } => {

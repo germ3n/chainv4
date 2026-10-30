@@ -211,6 +211,8 @@ pub struct Chain {
     caught_up_once: bool,
     /// The genesis the client follows, once it started.
     pub genesis: Option<Hash>,
+    /// Whether this node answered that it has no GET /light/bundle.
+    no_bundle: bool,
     /// Whether what the client checked changed since it was last saved, and when it last was.
     pub dirty: bool,
     last_saved: Option<web_time::Instant>,
@@ -355,6 +357,13 @@ impl Chain {
         if client.next().is_none() && time - self.followed >= FOLLOW_EVERY {
             self.followed = time;
             client.refresh();
+        }
+
+        // What it wants next all at once, from a node that can: a walk's time is its round trips.
+        if !self.no_bundle
+            && let Some((headers, epoch)) = client.next_bundle()
+        {
+            return Some(Ask::Bundle { headers, epoch });
         }
 
         if let Some(request) = client.next() {
@@ -574,6 +583,7 @@ impl Chain {
                 | Ask::Headers { .. }
                 | Ask::Ancestors { .. }
                 | Ask::Finality { .. }
+                | Ask::Bundle { .. }
                 | Ask::Checkpoint(_)
                 | Ask::Proof { .. }
                 | Ask::Receipt(_)
@@ -619,6 +629,12 @@ impl Chain {
             // anything is final, the client follows from genesis.
             (Ask::Checkpoint(None), Err(failure)) if failure.status != 0 => {
                 self.start_from_genesis();
+
+                return true;
+            }
+            // A node from before the route: a request at a time does the same.
+            (Ask::Bundle { .. }, Err(failure)) if failure.status != 0 => {
+                self.no_bundle = true;
 
                 return true;
             }
@@ -748,6 +764,14 @@ impl Chain {
                 self.dirty = true;
 
                 Ok(())
+            }
+            Ask::Bundle { headers: from, epoch } => {
+                let headers: Vec<SealedHeader> = list(&value["headers"])?;
+                let steps: Vec<FinalityStep> = list(&value["steps"])?;
+                let tip = value["tip"].as_u64().unwrap_or(0);
+                self.dirty |= !headers.is_empty() || !steps.is_empty();
+
+                self.with_client(|client| client.deliver_bundle(*from, &headers, *epoch, &steps, tip, now).map_err(|err| err.to_string()))
             }
             Ask::Headers { from, .. } => {
                 let headers: Vec<SealedHeader> = list(&value["headers"])?;
@@ -1214,16 +1238,39 @@ mod tests {
             self.answer(Ask::Checkpoint(None), Ok(answer));
         }
 
+        /// Answers what comes before a client wants the chain's headers.
+        fn walk_to_a_bundle(&mut self) {
+            for _ in 0..4 {
+                match self.chain.next_ask(0.0) {
+                    Some(Ask::Bundle { .. }) | None => return,
+                    Some(Ask::Light) => self.light(),
+                    Some(other) => panic!("{other:?}"),
+                }
+            }
+        }
+
         fn walks_on_from(&mut self, height: u64) {
             assert_eq!(self.chain.following().map(|(tip, _)| tip), Some(height), "it took up the chain where it got to");
             assert_eq!(self.chain.fast_resumed, None);
             assert!(self.chain.trouble.is_none(), "{:?}", self.chain.trouble);
-            assert!(matches!(self.chain.next_ask(0.0), Some(Ask::Headers { from, .. }) if from == height + 1));
+            assert!(matches!(self.chain.next_ask(0.0), Some(Ask::Bundle { headers, .. }) if headers == height + 1));
         }
     }
 
     fn failed(status: u16) -> Result<Value, Failure> {
         Err(Failure { status, message: "no".to_string() })
+    }
+
+    #[test]
+    fn a_node_without_the_bundle_route_is_asked_a_request_at_a_time() {
+        let mut resumes = Resumes::new(Some(VOTES), false).saved_at(5);
+        resumes.walk_to_a_bundle();
+        let ask = resumes.chain.next_ask(0.0).unwrap();
+
+        assert!(matches!(ask, Ask::Bundle { .. }), "{ask:?}");
+        resumes.answer(ask, failed(404));
+        assert!(resumes.chain.trouble.is_none(), "{:?}", resumes.chain.trouble);
+        assert!(matches!(resumes.chain.next_ask(0.0), Some(Ask::Headers { .. } | Ask::Finality { .. })));
     }
 
     #[test]
@@ -1274,7 +1321,7 @@ mod tests {
         assert!(resumes.chain.trouble.is_none(), "{:?}", resumes.chain.trouble);
 
         // On from there as any client, headers first; and it saves, to resume from next time.
-        assert!(matches!(resumes.chain.next_ask(0.0), Some(Ask::Headers { from: 801, .. })));
+        assert!(matches!(resumes.chain.next_ask(0.0), Some(Ask::Bundle { headers: 801, .. })));
 
         let (genesis, kept) = resumes.chain.saved(true).expect("it changed");
         let state: LightState = wincode::deserialize(&from_hex(&kept).unwrap()).unwrap();
