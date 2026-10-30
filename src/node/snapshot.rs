@@ -206,7 +206,7 @@ impl Node {
                     from,
                     count: MAX_SYNC_HEADERS.min(MAX_LIGHT_HEADERS),
                 }),
-                LightRequest::Finality { from } => (Asked::Finality { from }, SyncRequest::Finality { from, count: MAX_SYNC_FINALITY }),
+                LightRequest::Finality { from, .. } => (Asked::Finality { from }, SyncRequest::Finality { from, count: MAX_SYNC_FINALITY }),
             },
             Phase::Block { pivot } => (Asked::Block, SyncRequest::Blocks { from: *pivot, count: 1 }),
             Phase::State { pivot, .. } => {

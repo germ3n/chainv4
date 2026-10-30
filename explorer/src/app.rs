@@ -484,7 +484,7 @@ impl Explorer {
             Ask::Supply => store.supply = parse(value),
             Ask::Offer(_) | Ask::Submit(_) => {}
             // The light client's own, which it took already.
-            Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. } => {}
+            Ask::Light | Ask::Headers { .. } | Ask::Finality { .. } | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. } => {}
         }
     }
 

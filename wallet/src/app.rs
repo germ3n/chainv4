@@ -648,7 +648,7 @@ impl Wallet {
             self.settings.names.insert(genesis, name.clone());
         }
 
-        if let Some((genesis, state)) = self.chain.saved() {
+        if let Some((genesis, state)) = self.chain.saved(false) {
             self.settings.light.insert(genesis, state);
         }
     }
@@ -1284,6 +1284,10 @@ impl eframe::App for Wallet {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if let Some((genesis, state)) = self.chain.saved(true) {
+            self.settings.light.insert(genesis, state);
+        }
+
         eframe::set_value(storage, STORAGE_KEY, &self.settings);
 
         #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]

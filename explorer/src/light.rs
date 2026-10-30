@@ -217,7 +217,7 @@ impl Light {
         if let Some(request) = client.next() {
             return Some(match request {
                 LightRequest::Headers { from, count } => Ask::Headers { from, count },
-                LightRequest::Finality { from } => Ask::Finality(from),
+                LightRequest::Finality { from, count } => Ask::Finality { from, count },
             });
         }
 
@@ -298,7 +298,7 @@ impl Light {
     pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>, trust: Trust, now: u64, time: f64) -> bool {
         let mine = matches!(
             ask,
-            Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. }
+            Ask::Light | Ask::Headers { .. } | Ask::Finality { .. } | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. }
         );
 
         if !mine {
@@ -438,7 +438,7 @@ impl Light {
 
                 self.with_client(|client| client.deliver_headers(*from, headers, now).map(|_| ()).map_err(|err| err.to_string()))
             }
-            Ask::Finality(from) => {
+            Ask::Finality { from, .. } => {
                 let steps: Vec<FinalityStep> = list(&value["steps"])?;
 
                 self.with_client(|client| client.deliver_finality(*from, steps).map(|_| ()).map_err(|err| err.to_string()))

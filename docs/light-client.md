@@ -268,6 +268,11 @@ The explorer runs the same client against the node it talks to:
 
 ## What to keep in mind
 
+- **It asks only for what it can check.** On a chain with governance it knows the rules and voters
+  only about two epochs ahead of what it has proved, so it asks for that many headers and for finality
+  only as far as those headers, rather than `MAX_LIGHT_HEADERS` and `MAX_FINALITY_STEPS` it would send
+  back and ask for again. About 12 KB a round rather than 700 KB. It still takes two requests for
+  every 16 blocks on such a chain.
 - **It fetches every header from genesis, the first time.** Headers are small, but there are as
   many as blocks. The CLI and the explorer follow the chain afresh each time, the explorer from a trusted node's
   checkpoint if its fast resume is on; the wallet saves the

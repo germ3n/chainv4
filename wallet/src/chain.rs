@@ -143,6 +143,10 @@ pub struct Landed {
     pub time: u64,
 }
 
+/// How often a client still walking is written out, for settings to keep: little to lose, as it
+/// goes on from there, and much to gain, as writing it out costs more the further it got.
+const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// What the wallet trusts at a node: the genesis pinned there, a checkpoint pasted to start from,
 /// and what it saved of the chain it followed from each.
 pub struct Trust<'a> {
@@ -207,8 +211,9 @@ pub struct Chain {
     caught_up_once: bool,
     /// The genesis the client follows, once it started.
     pub genesis: Option<Hash>,
-    /// Whether what the client checked changed since it was last saved.
+    /// Whether what the client checked changed since it was last saved, and when it last was.
     pub dirty: bool,
+    last_saved: Option<web_time::Instant>,
     followed: f64,
     proved: f64,
     retry_at: f64,
@@ -355,7 +360,7 @@ impl Chain {
         if let Some(request) = client.next() {
             return Some(match request {
                 LightRequest::Headers { from, count } => Ask::Headers { from, count },
-                LightRequest::Finality { from } => Ask::Finality(from),
+                LightRequest::Finality { from, count } => Ask::Finality { from, count },
             });
         }
 
@@ -568,7 +573,7 @@ impl Chain {
             Ask::Light
                 | Ask::Headers { .. }
                 | Ask::Ancestors { .. }
-                | Ask::Finality(_)
+                | Ask::Finality { .. }
                 | Ask::Checkpoint(_)
                 | Ask::Proof { .. }
                 | Ask::Receipt(_)
@@ -759,7 +764,7 @@ impl Chain {
                     Err(err) => Err(format!("the node's older headers do not check: {err}")),
                 })
             }
-            Ask::Finality(from) => {
+            Ask::Finality { from, .. } => {
                 let steps: Vec<FinalityStep> = list(&value["steps"])?;
                 self.dirty |= !steps.is_empty();
 
@@ -962,14 +967,17 @@ impl Chain {
         }
     }
 
-    /// What the client checked, to save, once it changed.
-    pub fn saved(&mut self) -> Option<(String, String)> {
+    /// What the client checked, to save, once it changed, and at most every SAVE_EVERY unless told
+    /// now: a saved client is thousands of headers, far too much to write out with every answer.
+    pub fn saved(&mut self, now: bool) -> Option<(String, String)> {
         let client = self.client.as_ref()?;
 
-        if !std::mem::take(&mut self.dirty) {
+        if !self.dirty || (!now && self.last_saved.is_some_and(|saved| saved.elapsed() < SAVE_EVERY)) {
             return None;
         }
 
+        self.dirty = false;
+        self.last_saved = Some(web_time::Instant::now());
         let state = wincode::serialize(&client.save()).ok()?;
 
         Some((self.genesis?.to_string(), to_hex(&state)))
@@ -1268,7 +1276,7 @@ mod tests {
         // On from there as any client, headers first; and it saves, to resume from next time.
         assert!(matches!(resumes.chain.next_ask(0.0), Some(Ask::Headers { from: 801, .. })));
 
-        let (genesis, kept) = resumes.chain.saved().expect("it changed");
+        let (genesis, kept) = resumes.chain.saved(true).expect("it changed");
         let state: LightState = wincode::deserialize(&from_hex(&kept).unwrap()).unwrap();
 
         assert_eq!(genesis, resumes.genesis.id().to_string());

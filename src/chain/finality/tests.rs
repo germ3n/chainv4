@@ -1270,10 +1270,10 @@ mod voting {
         let headers_from = |from: u64| -> Vec<SealedHeader> { chain.headers_from(from, 1_000).unwrap() };
 
         // It cannot check block 1 before genesis's update names epoch 0's signers.
-        assert_eq!(client.next(), Some(LightRequest::Headers { from: 1, count: crate::light::MAX_LIGHT_HEADERS }));
-        assert_eq!(client.deliver_headers(1, headers_from(1), LATER).unwrap(), Extended::Waiting);
+        assert_eq!(client.next(), Some(LightRequest::Finality { from: 0, count: 1 }), "so it asks for that first");
+        assert_eq!(client.deliver_headers(1, headers_from(1), LATER).unwrap(), Extended::Waiting, "and headers sent all the same wait");
         assert_eq!(client.tip().height, 0);
-        assert_eq!(client.next(), Some(LightRequest::Finality { from: 0 }));
+        assert!(matches!(client.next(), Some(LightRequest::Finality { from: 0, .. })));
 
         let steps = |from: u64| stored_light_finality(&*chain.db, INTERVAL, from, 64, chain.tip().height).unwrap();
 
@@ -1288,7 +1288,7 @@ mod voting {
 
         // Now through epoch 2, where it waits for checkpoint 1's update: epoch 1's justification
         // makes it trusted, and the rest follows.
-        assert_eq!(client.next(), Some(LightRequest::Headers { from: 1, count: crate::light::MAX_LIGHT_HEADERS }));
+        assert_eq!(client.next(), Some(LightRequest::Headers { from: 1, count: (3 * INTERVAL - 1) as u32 }), "as far as it can check");
         assert_eq!(client.deliver_headers(1, headers_from(1), LATER).unwrap(), Extended::Added((3 * INTERVAL - 1) as usize));
         assert_eq!(client.tip().height, 3 * INTERVAL - 1);
         assert!(matches!(client.next(), Some(LightRequest::Finality { .. })));
@@ -1298,7 +1298,7 @@ mod voting {
                 LightRequest::Headers { from, .. } => {
                     client.deliver_headers(from, headers_from(from), LATER).unwrap();
                 }
-                LightRequest::Finality { from } => {
+                LightRequest::Finality { from, .. } => {
                     client.deliver_finality(from, steps(from)).unwrap();
                 }
             }
@@ -1474,7 +1474,7 @@ mod voting {
         // It cannot check block 1 before genesis's update names epoch 0's validators.
         assert_eq!(client.deliver_headers(1, headers_from(1), LATER).unwrap(), Extended::Waiting);
         assert_eq!(client.tip().height, 0);
-        assert_eq!(client.next(), Some(LightRequest::Finality { from: 0 }));
+        assert!(matches!(client.next(), Some(LightRequest::Finality { from: 0, .. })));
 
         let steps = |from: u64| stored_light_finality(&*chain.db, INTERVAL, from, 64, chain.tip().height).unwrap();
         client.deliver_finality(0, steps(0)).unwrap();
@@ -1487,7 +1487,7 @@ mod voting {
                 LightRequest::Headers { from, .. } => {
                     client.deliver_headers(from, headers_from(from), LATER).unwrap();
                 }
-                LightRequest::Finality { from } => {
+                LightRequest::Finality { from, .. } => {
                     client.deliver_finality(from, steps(from)).unwrap();
                 }
             }
@@ -1632,7 +1632,7 @@ mod voting {
                 LightRequest::Headers { from, .. } => {
                     client.deliver_headers(from, headers_from(from), LATER).unwrap();
                 }
-                LightRequest::Finality { from } => {
+                LightRequest::Finality { from, .. } => {
                     client.deliver_finality(from, steps(from)).unwrap();
                 }
             }
@@ -2390,7 +2390,7 @@ mod voting {
                     let headers = (from..from + u64::from(count)).map_while(|height| stored_header_at(&*chain.db, height).unwrap()).collect();
                     client.deliver_headers(from, headers, LATER).unwrap();
                 }
-                LightRequest::Finality { from } => client.deliver_finality(from, finality_from(chain, from)).map(|_| ()).unwrap(),
+                LightRequest::Finality { from, .. } => client.deliver_finality(from, finality_from(chain, from)).map(|_| ()).unwrap(),
             }
         }
     }
@@ -2611,6 +2611,41 @@ mod voting {
 
     #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
     #[test]
+    fn a_light_client_of_a_governed_chain_asks_for_no_more_than_it_can_use() {
+        use crate::light::{LightClient, LightRequest};
+
+        for finality in kinds() {
+            let (mut chain, genesis) = council_chain(finality.clone());
+            finalize_through(&mut chain, 12);
+            let header = stored_header_at(&*chain.db, 0).unwrap().unwrap();
+            let mut client = LightClient::new(genesis.light_params(), header, chain.genesis()).unwrap();
+            let (mut headers_sent, mut steps_sent) = (0u64, 0u64);
+
+            while let Some(request) = client.next() {
+                match request {
+                    LightRequest::Headers { from, count } => {
+                        let headers: Vec<_> = (from..from + u64::from(count)).map_while(|height| stored_header_at(&*chain.db, height).unwrap()).collect();
+                        headers_sent += headers.len() as u64;
+                        client.deliver_headers(from, headers, LATER).unwrap();
+                    }
+                    LightRequest::Finality { from, count } => {
+                        let steps = crate::chain::stored_light_finality(&*chain.db, INTERVAL, from, count, chain.tip().height).unwrap();
+                        steps_sent += steps.len() as u64;
+                        client.deliver_finality(from, steps).unwrap();
+                    }
+                }
+            }
+
+            let height = chain.tip().height;
+
+            assert_eq!((client.tip().height, Some(client.justified())), (height, chain.justified()), "{}", finality.name());
+            assert_eq!(headers_sent, height, "every header once, none sent twice: {}", finality.name());
+            assert!(steps_sent <= 3 * (height / INTERVAL + 1), "{steps_sent} steps for {height} blocks: {}", finality.name());
+        }
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
+    #[test]
     fn a_light_client_of_a_governed_chain_gets_past_a_gap_wider_than_the_rules_it_knows() {
         use crate::light::{LightClient, LightRequest};
 
@@ -2628,11 +2663,14 @@ mod voting {
 
                 match request {
                     LightRequest::Headers { from, count } => {
+                        assert!(u64::from(count) <= 4 * INTERVAL, "what it can check: {count} headers from {from}");
                         let headers = (from..from + u64::from(count)).map_while(|height| stored_header_at(&*chain.db, height).unwrap()).collect();
                         client.deliver_headers(from, headers, LATER).unwrap();
                     }
-                    LightRequest::Finality { from } => {
-                        client.deliver_finality(from, finality_from(&chain, from)).unwrap();
+                    LightRequest::Finality { from, count } => {
+                        assert!(count <= 8, "what it can use: {count} epochs from {from}");
+                        let steps = crate::chain::stored_light_finality(&*chain.db, INTERVAL, from, count, chain.tip().height).unwrap();
+                        client.deliver_finality(from, steps).unwrap();
                     }
                 }
             }
@@ -2675,7 +2713,7 @@ mod voting {
             let mut asked = 0;
 
             while let Some(request) = client.next() {
-                let LightRequest::Finality { from } = request else {
+                let LightRequest::Finality { from, .. } = request else {
                     panic!("it holds every header already");
                 };
 
@@ -2755,7 +2793,7 @@ mod voting {
                             .collect();
                         client.deliver_headers(from, headers, LATER).unwrap();
                     }
-                    LightRequest::Finality { from } => client.deliver_finality(from, finality_from(&chain, from)).map(|_| ()).unwrap(),
+                    LightRequest::Finality { from, .. } => client.deliver_finality(from, finality_from(&chain, from)).map(|_| ()).unwrap(),
                 }
             }
 

@@ -67,7 +67,7 @@ pub enum Ask {
     /// Main-chain headers from a height on, encoded.
     Headers { from: u64, count: u32 },
     /// Finality from an epoch on, encoded, many epochs to an answer.
-    Finality(u64),
+    Finality { from: u64, count: u64 },
     /// What the light client starts from at a checkpoint: the one named, or the node's finalized
     /// one, for a node met for the first time.
     Checkpoint(Option<String>),
@@ -180,7 +180,7 @@ impl Ask {
             Ask::Collections => "/collections?limit=500".to_string(),
             Ask::Light => "/light".to_string(),
             Ask::Headers { from, count } | Ask::Ancestors { from, count } => format!("/headers?from={from}&count={count}"),
-            Ask::Finality(from) => format!("/light/finality?from={from}"),
+            Ask::Finality { from, count } => format!("/light/finality?from={from}&count={count}"),
             Ask::Checkpoint(Some(block)) => format!("/light/checkpoint/{block}"),
             Ask::Checkpoint(None) => "/light/checkpoint".to_string(),
             Ask::Proof { column, key, block: Some(block) } => format!("/proofs/{column}/{key}?block={block}"),
@@ -215,7 +215,7 @@ impl Ask {
         self.body().is_none()
             && !matches!(
                 self,
-                Ask::Status | Ask::Node | Ask::Release | Ask::Lookup(_) | Ask::Light | Ask::Headers { .. } | Ask::Finality(_) | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. }
+                Ask::Status | Ask::Node | Ask::Release | Ask::Lookup(_) | Ask::Light | Ask::Headers { .. } | Ask::Finality { .. } | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. }
             )
     }
 }

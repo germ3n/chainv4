@@ -702,8 +702,8 @@ pub fn resume(trusted: bool, finality: Option<LightFinality>, saved_epoch: Optio
 pub enum LightRequest {
     #[document(summary = "The node's main-chain headers from a height on, at most count.")]
     Headers { from: u64, count: u32 },
-    #[document(summary = "The node's finality from an epoch on, at most MAX_FINALITY_STEPS epochs: each checkpoint's justification and light update, for LightClient::deliver_finality.")]
-    Finality { from: u64 },
+    #[document(summary = "The node's finality from an epoch on, at most count epochs: each checkpoint's justification and light update, for LightClient::deliver_finality.")]
+    Finality { from: u64, count: u64 },
 }
 
 /// What came of a justification delivered.
@@ -1010,13 +1010,17 @@ impl LightClient {
         if let Some(height) = self.stalled
             && self.producers_for(height).is_some()
         {
-            return Some(LightRequest::Headers { from: height, count: MAX_LIGHT_HEADERS });
+            return Some(LightRequest::Headers { from: height, count: self.checkable_headers(height).max(1) });
         }
 
         if !self.headers_done && self.stalled.is_none() {
             let from = self.back.unwrap_or(self.tip().height + 1);
+            let count = self.checkable_headers(from);
 
-            return Some(LightRequest::Headers { from, count: MAX_LIGHT_HEADERS });
+            // At the end of what it can check, finality comes first: what it learns goes further.
+            if count > 0 {
+                return Some(LightRequest::Headers { from, count });
+            }
         }
 
         let interval = self.params.finality?.checkpoint_interval()?;
@@ -1027,7 +1031,32 @@ impl LightClient {
         let next = (self.justified().epoch + 1).max(self.gap_reached.map_or(0, |epoch| epoch + 1));
         let justification = (!self.justifications_done && self.voters.contains_key(&next) && next * interval <= self.tip().height).then_some(next);
 
-        update.or(justification).map(|from| LightRequest::Finality { from })
+        // Only as far as the headers it followed: it can check nothing past them yet, and a chain
+        // whose rules it learns as it goes would send it far more than it can use, again each time.
+        update.or(justification).map(|from| LightRequest::Finality {
+            from,
+            count: (self.tip().height / interval).saturating_sub(from).saturating_add(1).clamp(1, MAX_FINALITY_STEPS),
+        })
+    }
+
+    /// How many headers from this height it can check with what it knows now, at most
+    /// MAX_LIGHT_HEADERS: up to the first whose rules or producers it has yet to learn.
+    fn checkable_headers(&self, from: u64) -> u32 {
+        let Some(interval) = self.params.finality.and_then(|finality| finality.checkpoint_interval()) else {
+            return MAX_LIGHT_HEADERS;
+        };
+        let last = from.saturating_add(u64::from(MAX_LIGHT_HEADERS));
+        let mut height = from;
+
+        while height < last {
+            if self.producers_for(height).is_none() {
+                return (height - from) as u32;
+            }
+
+            height = (height / interval + 1) * interval;
+        }
+
+        MAX_LIGHT_HEADERS
     }
 
     #[document(parent = "LightClient", summary = "Asks for what came since: headers, and justifications, again.")]

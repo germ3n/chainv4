@@ -2483,8 +2483,8 @@ fn followed(address: SocketAddr, genesis: Hash) -> crate::light::LightClient {
                 let headers: Vec<SealedHeader> = answer["headers"].as_array().unwrap().iter().map(|header| wincode::deserialize(&decode(header)).unwrap()).collect();
                 client.deliver_headers(from, headers, u64::MAX / 2).unwrap();
             }
-            LightRequest::Finality { from } => {
-                let answer = ok(address, &format!("/light/finality?from={from}"));
+            LightRequest::Finality { from, count } => {
+                let answer = ok(address, &format!("/light/finality?from={from}&count={count}"));
                 let steps: Vec<FinalityStep> = answer["steps"].as_array().unwrap().iter().map(|step| wincode::deserialize(&decode(step)).unwrap()).collect();
                 client.deliver_finality(from, steps).unwrap();
             }

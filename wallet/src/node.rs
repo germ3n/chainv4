@@ -25,7 +25,7 @@ pub enum Ask {
     /// Headers below the lowest the light client holds, for it to prove by their hash chain.
     Ancestors { from: u64, count: u32 },
     /// Finality from an epoch on, many epochs to an answer.
-    Finality(u64),
+    Finality { from: u64, count: u64 },
     /// How far the node has finalized, by GET /status: what says whether a client fast-resuming
     /// from this node is far enough behind to.
     Finalized,
@@ -114,7 +114,7 @@ impl Ask {
             Ask::Status | Ask::Finalized => "/status".to_string(),
             Ask::Light => "/light".to_string(),
             Ask::Headers { from, count } | Ask::Ancestors { from, count } => format!("/headers?from={from}&count={count}"),
-            Ask::Finality(from) => format!("/light/finality?from={from}"),
+            Ask::Finality { from, count } => format!("/light/finality?from={from}&count={count}"),
             Ask::Checkpoint(Some(block)) => format!("/light/checkpoint/{block}"),
             Ask::Checkpoint(None) => "/light/checkpoint".to_string(),
             Ask::Proof { column, key, block } => format!("/proofs/{column}/{key}?block={block}"),
@@ -164,7 +164,7 @@ impl Ask {
         self.body().is_none()
             && !matches!(
                 self,
-                Ask::Status | Ask::Light | Ask::Headers { .. } | Ask::Ancestors { .. } | Ask::Finality(_) | Ask::Finalized | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::Receipt(_) | Ask::Release
+                Ask::Status | Ask::Light | Ask::Headers { .. } | Ask::Ancestors { .. } | Ask::Finality { .. } | Ask::Finalized | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::Receipt(_) | Ask::Release
             )
     }
 }

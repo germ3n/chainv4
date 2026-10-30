@@ -272,8 +272,8 @@ fn follow(agent: &Agent, node: &str, client: &mut LightClient) -> CliResult<()> 
                 let headers = list(&answer["headers"])?;
                 client.deliver_headers(from, headers, now())?;
             }
-            LightRequest::Finality { from } => {
-                let answer = ok(agent.get(format!("{node}/light/finality?from={from}")).call())?;
+            LightRequest::Finality { from, count } => {
+                let answer = ok(agent.get(format!("{node}/light/finality?from={from}&count={count}")).call())?;
                 let steps: Vec<FinalityStep> = list(&answer["steps"])?;
                 client.deliver_finality(from, steps)?;
             }

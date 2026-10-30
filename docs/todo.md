@@ -761,10 +761,9 @@ offline; these would make that hold up as a treasury.
   a client crosses on updates it holds tentatively until the voters it trusts agree with the next
   justification. See [Light client](light-client.md#what-to-keep-in-mind).
 - [ ] **A light client walking is slow.** On a chain with governance it can check only about two
-  epochs past the eras it knows, so each pair of requests advances 16 blocks and downloads about
-  300 KB of headers and 400 KB of finality steps: about 0.18 s a block on a phone, 118 s for 630
-  blocks. Bounding what each request asks for would cut the bytes, and bundling headers and steps
-  on the node the round trips. Fast resume goes around it for a node trusted.
+  epochs past the eras it knows, so each pair of requests advances 16 blocks. It now asks only for
+  what it can use, about 12 KB a round rather than 700 KB, but the two round trips remain: bundling
+  headers and steps on the node would cut those. Fast resume goes around it for a node trusted.
 - [x] **The wallet's status dot stays green while the node is down;** it goes by `GET /status` now.
 - [x] **A phone in portrait shows only a dot of the light client's state:** a tap says it in words, and
   Home carries a line while the client rests on a node's word.
