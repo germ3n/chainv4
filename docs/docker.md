@@ -103,6 +103,29 @@ the node failing.
 `INDEX_ADDRESSES` (`genesis`, a height, `latest-N` or `off`), and `EXTRA_ARGS` for anything else
 `chainv4` takes. `docker/entrypoint.sh` has them all.
 
+### Firewall
+
+With `ufw` on, rootful Podman's containers stop working until it is told about them: they get no DNS,
+cannot reach out, and no published port answers, as they all go through forwarding, which `ufw` denies
+by default. `ufw allow PORT` does not help: it rules what comes to the machine itself. As root, on
+Podman's default subnets:
+
+```sh
+ufw default deny incoming && ufw default allow outgoing
+ufw allow 22/tcp
+ufw allow from 10.88.0.0/13 to any port 53                 # containers' DNS, on this machine
+ufw route allow from 10.88.0.0/13                          # their way out: builds need it
+ufw route allow proto udp to 10.88.0.0/13 port 4001        # peers
+ufw route allow proto tcp to 10.88.0.0/13 port 80          # a public node only, as the next two
+ufw route allow proto tcp to 10.88.0.0/13 port 443
+ufw route allow proto tcp to 10.88.0.0/13 port 4002        # mining
+ufw --force enable
+```
+
+- **The port is the one inside the container:** a route rule is checked after the port is mapped.
+- **A node that is not public** keeps 80, 443 and 4002 shut this way, and is reached over `ssh`.
+- **Check from outside,** with `nc -z HOST PORT`: `ufw status` says what was asked for, not what answers.
+
 ## HTTPS
 
 `TLS_MODE` picks where the certificate comes from, for `SERVER_NAME`:
@@ -236,7 +259,8 @@ docker/pow.sh logs                # on the VPS: follow the node's log
 3. **`up`** runs `docker/compose.sh up -d --build --force-recreate`, on Docker or Podman, so an
    update restarts on the new image (podman-compose keeps the old one otherwise), warns when the machine has under 4 GiB of memory
    and swap for the first build, waits for the node, and says which ports to open: **UDP 4001**
-   for peers, TCP 80 and 443 for the explorer and wallet, in `ufw` and in the provider's firewall.
+   for peers, TCP 80 and 443 for the explorer and wallet, in the provider's firewall and in
+   [`ufw`](#firewall), whose ordinary `allow` opens nothing for them.
 4. **`join`** mines on the CPU, or on the GPU with `--gpu` (`GPU=1`), and asks which in a
    terminal when neither is given; the GPU build has the `gpu` feature, in `target/gpu` of its
    own, so switching rebuilds neither. It builds the node here, keeps a copy of it in `POW_HOME`, looks the VPS's name up,
@@ -312,6 +336,12 @@ Unset, they take Docker if it is installed, else Podman. The files are the same 
 the bound, `sudo sysctl net.ipv4.ip_unprivileged_port_start=80` and the same in `/etc/sysctl.d`,
 or set `HTTP_PORT=8080` and `HTTPS_PORT=8443`; `compose.sh` says so when it would fail. The
 node's UDP port, 4001, is above it.
+
+**Rootless Podman hides who is connecting.** With compose's bridge network, every connection reaches
+a container from the network's gateway, `10.89.x.x`, so faucet limits, IP bans, the pool's view of
+its workers and [what a node shares](node.md#what-a-node-shares-of-itself) go by that one address. So
+a public node runs rootful, with the [firewall](#firewall) above; rootless suits a node that takes
+no public traffic.
 
 **Restarting after a reboot:** `restart: unless-stopped` brings containers back only once
 Podman's restart service runs: `systemctl --user enable podman-restart.service`, with

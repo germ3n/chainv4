@@ -1,6 +1,6 @@
 # Deploying a fresh test chain
 
-How the test chain was last started from nothing (2026-10-30, commit `f158f90`), step by
+How the test chain was last started from nothing (2026-10-31, commit `41f42a2`), step by
 step, with everything enabled: a runbook for the next one. [Docker](docker.md) explains the
 pieces; this is the order they go in, and what bit along the way.
 
@@ -12,9 +12,9 @@ which shows as `cannot reach the node: timeout`.
 
 ```sh
 B=~/.chainv4-pow/bin/chainv4
-N=https://66-78-40-224.sslip.io       # the public node's API, behind nginx
+N=https://66-78-40-94.sslip.io       # the public node's API, behind nginx
 K=~/.chainv4-pow/owner.key
-VPS=root@66.78.40.224; SSH="ssh -i ~/.ssh/id_kyun -o IdentitiesOnly=yes"
+VPS=root@66.78.40.94; SSH="ssh -i ~/.ssh/id_kyun -o IdentitiesOnly=yes"
 ```
 
 ## 0. Fresh machines
@@ -31,7 +31,16 @@ apt-get install -y --no-install-recommends podman podman-compose rsync curl pyth
 `nftables` matters: with `--no-install-recommends` it does not come along, and every build then
 stops at its first network step with `netavark: nftables error: unable to execute "nft"`. So does
 `conntrack`, which `up` clears stale UDP entries with (see [Docker](docker.md)). A build takes about
-20 minutes on 4 cores and 8 GB, and fetches the mlua forks from GitHub.
+20 minutes on 4 cores and 8 GB, and 40 on 2 cores and 4 GB with 4 GB of swap, and fetches the mlua forks
+from GitHub. Add the swap first on a small machine:
+
+```sh
+fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
+
+Then the [firewall](docker.md#firewall), which rootful Podman's containers do not work behind until
+it has its route rules.
 
 ## 1. Keys
 
@@ -78,8 +87,10 @@ kept on this machine (`~/.chainv4-pow/validators/`), and list them in the genesi
 `finality.validators`, each `{ "account", "voter", "bond" }`, with the machines' addresses in
 `bootnodes` as `/ip4/ADDRESS/udp/4001/quic-v1`. Bonds in genesis are minted, so an account needs only
 a little in `allocations` for its fees. Two of three finalize, so one may be down. This chain has
-three: the public node's voter is `validator.key`, the others `validators/v1-voter.key` and
-`v2-voter.key`, their accounts `validators/*-account.key`.
+three: the public node's voter is `validator.key` and its account the owner, the others
+`validators/devnet-2-voter.key` and `devnet-3-voter.key`, their accounts `devnet-2-account.key` and
+`devnet-3-account.key`, whose seed phrases are in `validator-mnemonics.txt` at the repository's root,
+which git, images and pushes all leave out. `consensus.target_block_ms` is 5000 here.
 
 ## 3. The VPS
 
@@ -174,7 +185,8 @@ The apps take the directory first; names such as `swap.dev` and the node's flags
 ## 6. The Bitcoin relay on the VPS
 
 The node's binary copied out of its container (`podman cp chainv4_node_1:/usr/local/bin/chainv4
-/root/chainv4-relay/`), `relay.key` beside it, and `/root/chainv4-relay/relay.sh`: `bridge --node $N --key relay.key --esplora https://mempool.space/testnet4/api btc relay-sync <relay>
+/root/chainv4-relay/`), a key made there with `chainv4 keygen --scheme secp256k1 --out relay.key` beside it,
+paid for from `~/.chainv4-pow/relay.key` so that key stays on this machine, and `/root/chainv4-relay/relay.sh`: `bridge --node $N --key relay.key --esplora https://mempool.space/testnet4/api btc relay-sync <relay>
 --batch 25`, its node the public `https://` API, as the node's port 8080 is not reachable from the
 host, then two minutes' sleep, for ever, under `/etc/systemd/system/chainv4-relay.service` (`Restart=always`). After a rebuild of the
 image, copy the binary out again and `systemctl restart chainv4-relay`.
@@ -193,7 +205,7 @@ curl --socks5-hostname 127.0.0.1:9050 http://ADDRESS.onion/status
 ## 7. The laptop and the apps
 
 ```sh
-nohup docker/pow.sh join 66.78.40.224 --cpu > ~/.chainv4-pow/join.log 2>&1 &   # never the GPU
+nohup docker/pow.sh join 66.78.40.94 --cpu > ~/.chainv4-pow/join.log 2>&1 &   # never the GPU
 sh <scratchpad>/apps-build.sh      # trunk web bundles, then arm64 APKs of the explorer and wallet
 ```
 
@@ -206,19 +218,20 @@ SHA-256s with the link.
 
 | What | Where |
 | --- | --- |
-| Genesis | `0xee81738047ca1e17…`, named `chainv4 testnet`, with the supply in state; the directory is governance's change 1, the directory's version 1 |
+| Genesis | `0xc4da642e5f5b6637…`, named `chainv4 testnet`, 5 s blocks; FFG with three validators, the council the owner alone; the directory is governance's change |
+| Machines | Public node `66.78.40.94`, others `66.78.40.57` and `65.87.7.168`: 2 cores, 4 GB and 50 GB each, with 4 GB of swap and the [firewall](docker.md#firewall) |
 | Swap contract, `swap.dev` | `contract:0xc4ad35b6…68fb7` |
 | Native DEX, `dex.dev` | `contract:0x6c1df38c…90a4` |
 | EVM DEX router | `0xfd9524e58c1a904b439e9a3292a95cf6562aa458` |
 | NFT factory, `nfts.dev` | `contract:0x5c352729…4297` |
 | Gateway, `gateway.dev` | `contract:0xe6912df3…55dc` |
-| Bitcoin relay, `btcrelay.dev` | `contract:0x717374cf…e9c0` (testnet4 from 157248) |
+| Bitcoin relay, `btcrelay.dev` | `contract:0x717374cf…e9c0` (testnet4 from 157248), paid by `secp256k1:0xb0c23ea9…1ff0`, a key on the public node |
 | Bitcoin gateway, `btcgateway.dev` | `contract:0xc53df990…04e7` |
 | Swap.sol | `0xb3f77d55ac803f023df8f4d21fd1d103e5be2d50` |
-| Tokens `gold.dev`, `silver.dev`, `tusd.dev`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin; TETH `0x3c262351…88e8` on the EVM DEX |
-| Collections `pixels.dev`, `items.dev` | 3 NFTs; ids 1 and 2, 100 each |
-| Examples | `guestbook.dev`, `counter.dev`, Counter.sol `0x058f1d0b…3be5` |
-| Sample multisig | `multisig:0x3955d3dd…4d18`, 2 of 3, its contract `0xa4629353…1f2f` |
-| Onion | `nvudjdqvq6voglt7xdjrpx6jnf2p2wip4ul73wobcqnudgrpf4atrkad.onion` |
-| Mining | `66.78.40.224:4002`, an open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`), and `/mining/ws` behind nginx |
+| Tokens `gold.dev`, `silver.dev`, `tusd.dev`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin, 1,000 DEV to 10,000; TETH `0x2625baf4…c4c9`, 100 DEV to 400 on the EVM DEX |
+| Collections `pixels.dev`, `items.dev` | `contract:0x48ae529c…73cd`, 3 NFTs; `contract:0xf915ac76…2406`, ids 1 and 2, 100 each |
+| Examples | `guestbook.dev`, `counter.dev`, Counter.sol `0x3c262351…88e8` |
+| Sample multisig | `multisig:0xa4ab52e9…1531`, 2 of 3, its contract `0xf790c606…89d2` |
+| Onion | `njo4fijntpqch73yv4477hhn2vcngnpcxtw2vb4qwjasqdwbdeektuqd.onion` |
+| Mining | `66.78.40.94:4002`, an open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`), and `/mining/ws` behind nginx |
 | Apps | https://gofile.io/d/o6woVRVR |

@@ -514,7 +514,9 @@ up() {
     fi
 
     if command -v ufw > /dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
-        say "ufw is on: open the ports with  sudo ufw allow $p2p_port/udp && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp"
+        # Published ports reach a rootful container by forwarding, so ufw allow, which rules what comes
+        # to this machine itself, opens nothing for them. Its default forward policy stops them all.
+        say "ufw is on: published ports need its route rules, not ufw allow: see Firewall in docs/docker.md"
     fi
 
     if [ -s "$root/docker/config/mining.token" ]; then
