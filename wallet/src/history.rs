@@ -120,6 +120,32 @@ pub struct Checked {
     /// they were.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<KeptLog>,
+    /// What each step did, for a batch; none for anything else, or one kept before batches were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<CheckedStep>,
+}
+
+/// One step of a proven batch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckedStep {
+    /// What it asked for, in a few words, as a whole transaction's says it.
+    pub action: String,
+    pub result: StepResult,
+    /// The EVM call it made, if short enough to keep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<KeptCall>,
+}
+
+/// What came of one step of a batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepResult {
+    Done,
+    /// It ran, then a later step failed, which undid it.
+    Undone,
+    /// It stopped the batch.
+    Failed,
+    /// One before it stopped the batch.
+    NotRun,
 }
 
 /// A governance transaction, as proven. Each kind of change has a ballot and a version of its own;
@@ -198,27 +224,24 @@ pub fn kind_words(kind: ChangeKind) -> String {
 impl Checked {
     pub fn of(proven: &Proven<Landed>) -> Checked {
         let Landed { signed, receipt, time } = &proven.value;
-        let done = receipt.outcome != CommittedOutcome::Failed;
+        let done = !receipt.outcome.failed();
         let sender = signed.sender().to_string();
         let mut moves = Vec::new();
 
         if done {
             let coin = |from: Option<String>, to: Option<String>, amount: String| Move { token: None, from, to, amount, id: None, standard: None };
 
-            // A multisig's own transaction moves what it does.
-            let tx = match &signed.tx {
-                Tx::Multisig { tx, .. } => tx,
-                tx => tx,
-            };
-
-            match tx {
-                Tx::Transfer { from, to, amount } => moves.push(coin(Some(from.to_string()), Some(to.to_string()), amount.to_u256().to_string())),
-                Tx::Mint { to, amount } => moves.push(coin(None, Some(to.to_string()), amount.to_u256().to_string())),
-                Tx::Burn { from, amount } => moves.push(coin(Some(from.to_string()), None, amount.to_u256().to_string())),
-                Tx::ContractCall { to, amount, .. } if amount.to_u256() != u256::ZERO => {
-                    moves.push(coin(Some(sender.clone()), Some(to.to_string()), amount.to_u256().to_string()));
+            // A multisig's own transaction moves what it does, and a batch what its steps do.
+            for tx in signed.tx.what_it_runs() {
+                match tx {
+                    Tx::Transfer { from, to, amount } => moves.push(coin(Some(from.to_string()), Some(to.to_string()), amount.to_u256().to_string())),
+                    Tx::Mint { to, amount } => moves.push(coin(None, Some(to.to_string()), amount.to_u256().to_string())),
+                    Tx::Burn { from, amount } => moves.push(coin(Some(from.to_string()), None, amount.to_u256().to_string())),
+                    Tx::ContractCall { to, amount, .. } if amount.to_u256() != u256::ZERO => {
+                        moves.push(coin(Some(sender.clone()), Some(to.to_string()), amount.to_u256().to_string()));
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
 
             // What contracts paid out, proven with the receipt, then tokens by their events.
@@ -243,6 +266,7 @@ impl Checked {
             vote: Vote::of(&signed.tx, &receipt.outcome),
             call: kept_call(&signed.tx),
             logs: kept_logs(&receipt.events),
+            steps: checked_steps(&signed.tx, &receipt.outcome),
         }
     }
 
@@ -264,9 +288,58 @@ fn kinds_of(tx: &Tx) -> Vec<String> {
     let name = |tx: &Tx| chainv4::structs::json::tx(tx)["type"].as_str().unwrap_or_default().to_string();
 
     match tx {
-        Tx::Multisig { tx, .. } => vec![name(tx), "multisig".to_string()],
+        Tx::Multisig { tx, .. } => [kinds_of(tx), vec!["multisig".to_string()]].concat(),
+        // For being a batch, and for what any of its steps is.
+        Tx::Batch { steps } => {
+            let mut kinds = vec![name(tx)];
+
+            for step in steps {
+                let kind = name(step);
+
+                if !kinds.contains(&kind) {
+                    kinds.push(kind);
+                }
+            }
+
+            kinds
+        }
         tx => vec![name(tx)],
     }
+}
+
+/// What each step of a batch did, by what its receipt proved: the steps before the one that failed
+/// ran and were undone, and those after it never ran. EVM calls are kept as far as MAX_KEPT goes
+/// for all of them together, as for one transaction.
+fn checked_steps(tx: &Tx, outcome: &CommittedOutcome) -> Vec<CheckedStep> {
+    let steps = match tx {
+        Tx::Batch { steps } => steps.as_slice(),
+        Tx::Multisig { tx, .. } => return checked_steps(tx, outcome),
+        _ => return Vec::new(),
+    };
+    let mut left = MAX_KEPT;
+
+    steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let (said, result) = match outcome {
+                CommittedOutcome::Batch(outcomes) => (outcomes.get(index).map_or(CommittedOutcome::Done, |outcome| outcome.effect.outcome()), StepResult::Done),
+                CommittedOutcome::BatchFailed { step: stopped } => (
+                    CommittedOutcome::Failed,
+                    match (index as u32).cmp(stopped) {
+                        std::cmp::Ordering::Less => StepResult::Undone,
+                        std::cmp::Ordering::Equal => StepResult::Failed,
+                        std::cmp::Ordering::Greater => StepResult::NotRun,
+                    },
+                ),
+                _ => (CommittedOutcome::Failed, StepResult::Undone),
+            };
+            let call = kept_call(step).filter(|call| call.input.len() <= left);
+            left -= call.as_ref().map_or(0, |call| call.input.len());
+
+            CheckedStep { action: action(step, &said), result, call }
+        })
+        .collect()
 }
 
 /// A token moving, by the standard's Transfer event: from, to and an amount. A mint comes from the
@@ -441,11 +514,13 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         // What it names is all the miner earned, not what this claim paid: that is less what it
         // claimed before, which the chain knows and the transaction does not say.
         (Tx::Claim { to, .. }, _) => format!("Claimed pool earnings for {}", format::short(&to.to_string())),
+        (Tx::Batch { steps }, CommittedOutcome::BatchFailed { step }) => format!("A batch of {} step{}, which step {} stopped", steps.len(), if steps.len() == 1 { "" } else { "s" }, step + 1),
+        (Tx::Batch { steps }, _) => format!("A batch of {} step{}", steps.len(), if steps.len() == 1 { "" } else { "s" }),
     }
 }
 
 /// The name a call's selector stands for, among those the history knows.
-fn function(func: &Hash) -> Option<&'static str> {
+pub(crate) fn function(func: &Hash) -> Option<&'static str> {
     KNOWN.into_iter().find(|name| Hasher::digest(HashType::Xxh3_64, name.as_bytes()) == *func)
 }
 
@@ -844,3 +919,93 @@ mod tests {
         assert_eq!(describe(&named_log), "log 3 bytes");
     }
 }
+
+#[cfg(test)]
+mod batch_tests {
+    use {
+        super::*,
+        chainv4::crypto::keypair::Keypair,
+        chainv4::light::Assurance,
+        chainv4::structs::amount::Amount,
+        chainv4::structs::receipt::{CommittedReceipt, StepEffect, StepOutcome},
+        chainv4::structs::tx::{FeeOffer, SignedTx},
+    };
+
+    fn checked(tx: Tx, outcome: CommittedOutcome) -> Checked {
+        let key = Keypair::from_seed([7; 32]);
+        let signed = SignedTx::sign(tx, 0, FeeOffer::NONE, &key);
+        let id = signed.id(HashType::default_chain());
+        let receipt = CommittedReceipt::new(id, 0, 0, u256::ZERO, outcome, Vec::new(), Vec::new());
+
+        Checked::of(&Proven {
+            value: Landed { signed, receipt, time: 0 },
+            assurance: Assurance { block: id, height: 3, final_: true },
+        })
+    }
+
+    fn me() -> Address {
+        Keypair::from_seed([7; 32]).public().address()
+    }
+
+    fn steps() -> Vec<Tx> {
+        let to = Keypair::from_seed([8; 32]).public().address();
+
+        vec![
+            Tx::Transfer { from: me(), to, amount: Amount::U128(5) },
+            Tx::EvmCall { to: Address::Evm([1; 20]), value: Amount::U128(0), input: vec![1, 2, 3, 4] },
+            Tx::Deploy { code: chainv4::structs::code::Code::Lua("return {}".to_string()) },
+        ]
+    }
+
+    #[test]
+    fn a_proven_batch_says_each_step_and_what_it_did() {
+        let made = Address::Contract([9; 32]);
+        let done = |effect| StepOutcome { effect, events: 0, payments: 0 };
+        let kept = checked(Tx::Batch { steps: steps() }, CommittedOutcome::Batch(vec![done(StepEffect::Done), done(StepEffect::Returned(Vec::new())), done(StepEffect::Deployed(made))]));
+
+        assert!(kept.done);
+        assert_eq!(kept.action, "A batch of 3 steps");
+        assert_eq!(kept.kinds, ["batch", "transfer", "evm_call", "deploy"]);
+        assert_eq!(kept.steps.iter().map(|step| step.result).collect::<Vec<_>>(), [StepResult::Done; 3]);
+        assert_eq!(kept.steps[0].action, "Transfer");
+        assert!(kept.steps[2].action.starts_with("Deployed "), "{}", kept.steps[2].action);
+        assert_eq!(kept.steps[1].call.as_ref().map(|call| call.input.as_str()), Some("0x01020304"));
+        assert_eq!(kept.moves.len(), 1, "the coin its transfer moved");
+    }
+
+    #[test]
+    fn a_failed_batch_moved_nothing_and_says_which_step_stopped_it() {
+        let kept = checked(Tx::Batch { steps: steps() }, CommittedOutcome::BatchFailed { step: 1 });
+
+        assert!(!kept.done);
+        assert!(kept.moves.is_empty(), "what the first step moved went back");
+        assert_eq!(kept.action, "A batch of 3 steps, which step 2 stopped");
+        assert_eq!(kept.steps.iter().map(|step| step.result).collect::<Vec<_>>(), [StepResult::Undone, StepResult::Failed, StepResult::NotRun]);
+    }
+
+    #[test]
+    fn a_multisigs_batch_says_the_same_and_counts_as_a_multisigs() {
+        let account = Address::Multisig([6; 32]);
+        let carried = Tx::Multisig { account, tx: Box::new(Tx::Batch { steps: vec![Tx::Burn { from: account, amount: Amount::U128(1) }] }), signatures: Vec::new() };
+        let kept = checked(carried, CommittedOutcome::Batch(vec![StepOutcome { effect: StepEffect::Done, events: 0, payments: 0 }]));
+
+        assert_eq!(kept.kinds, ["batch", "burn", "multisig"]);
+        assert_eq!(kept.steps.len(), 1);
+        assert!(kept.action.starts_with("A batch of 1 step · by the multisig"), "{}", kept.action);
+        assert_eq!(kept.moves.len(), 1);
+    }
+
+    #[test]
+    fn what_older_wallets_kept_reads_back_with_no_steps_and_a_batch_reads_back_whole() {
+        let old = checked(Tx::Burn { from: me(), amount: Amount::U128(1) }, CommittedOutcome::Done);
+        let written = serde_json::to_string(&old).unwrap();
+
+        assert!(!written.contains("steps"), "nothing new in what any other transaction keeps");
+        assert_eq!(serde_json::from_str::<Checked>(&written).unwrap(), old);
+
+        let batch = checked(Tx::Batch { steps: steps() }, CommittedOutcome::BatchFailed { step: 0 });
+
+        assert_eq!(serde_json::from_str::<Checked>(&serde_json::to_string(&batch).unwrap()).unwrap(), batch);
+    }
+}
+

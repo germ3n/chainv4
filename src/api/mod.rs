@@ -2243,8 +2243,10 @@ async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     let base = api.fees.as_ref().map_or(u256::ZERO, |fees| fees.pricing().next_price(header.base_price, header.gas_used, fees.block_gas_limit()));
     let open = api.fees.as_ref().map_or(0, |fees| fees.offer(base, api.tx_fuel, &probe, OfferChoice::default()).gas_limit);
     // What runs code, or names, is tried first: what it would use, and whether it would fail.
-    let ran = match probe.tx {
-        Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Ethereum { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Name { .. } | Tx::PrimaryName { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
+    let ran = match &probe.tx {
+        Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Ethereum { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Name { .. } | Tx::PrimaryName { .. } | Tx::Batch { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
+        // A multisig's batch is tried as its members will send it.
+        Tx::Multisig { tx, .. } if matches!(**tx, Tx::Batch { .. }) => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
         _ => None,
     };
     let offer = match &api.fees {

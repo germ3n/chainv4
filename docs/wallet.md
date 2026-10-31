@@ -434,6 +434,31 @@ A token transfer is the standard's `transfer(to, amount)`, sending no coin.
 **Dropped transactions:** one no block holds after 10 minutes shows as Not seen, and stops
 holding its nonce, so the next transaction takes that nonce again.
 
+### A batch
+
+The Batch page, in the sidebar and under More on a phone, builds a [batch](chain.md#batches): several
+steps under one signature and one fee, all of which go through or none do, such as an approval and the
+swap that spends it, or several people paid at once. Add any step a batch may hold, move each up or
+down, take any out, up to 32; it shows the count, what they send in all, and where each deploy will
+land, for the steps after it to call. **Review** goes to Send, as anything prepared does, so a
+watch-only account goes on to the offline signer. Pick a multisig this wallet follows under Send as,
+and it goes to the Multisig page as a bundle for its members instead.
+
+Every screen that signs one, Send's review, the offline signer, a multisig's bundle and its proposals,
+puts the count and all they send in the coin first, then every step, numbered, in a frame of its own,
+above the button. Nothing folds and nothing scrolls away apart from an EVM call's read, in its frame:
+each read says what read it, and that a built-in ABI's is "A match, not proof". What a step says is
+cut short and has anything that could lay out or hide text written as an escape, and fills the fields
+of its own frame, so it cannot draw a step or a row of its own. Whatever contracts do past what the
+steps say, a note says, and names' prices too: only the chain knows those.
+
+**MetaMask cannot sign a batch.** It would show one opaque hash for all the steps, so the wallet says
+so instead of asking, and the chain refuses one anyway: send it from an account this wallet or the
+offline signer holds.
+
+Activity lists a batch once, opened to each step and what came of it: done, or undone, failed and not
+run. Which step failed is proven; why is the node's word, which the [explorer](explorer.md#pages) shows.
+
 ## Names
 
 On a chain with [names](names.md), the wallet proves every name it shows or pays
@@ -783,6 +808,11 @@ nor this one any of those: update the signer and the sender together.
 
 **Keep the signer offline:** airplane mode, Wi-Fi and Bluetooth off. The live camera keeps
 nothing: each frame is searched in memory and dropped.
+
+A batch's request carries the transaction as any other's does, so the signer shows every step as
+Send's review does, but it knows no chain's tokens or hash: a token's amount shows in the whole units
+signed, and it does not say where a deploy lands. A batch the chain would refuse says so as soon as it
+is read. A signer older than batches says "a code that does not decode", and signs nothing.
 
 ### MetaMask's QR hardware wallet
 

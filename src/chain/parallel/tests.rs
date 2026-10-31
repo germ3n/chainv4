@@ -215,6 +215,107 @@ fn running_side_by_side_gives_what_running_one_by_one_does() {
     assert!(expected.starts_with("14: nonce 0"), "{expected}");
 }
 
+/// Batches that conflict with each other and with what is beside them: a contract and a recipient
+/// shared, a batch whose later step needs what one before it in the block paid, one that fails, and
+/// two deploys in one.
+fn tangled_batches() -> Vec<SignedTx> {
+    let hash = HashType::default_chain();
+    let counter = contract_address(&key(6).public().address(), 0, hash);
+    let fee = FeeOffer { gas_limit: 2_000_000, max_price: u256::from(2_000_000_000u64), tip: u256::from(3u64) };
+    let pay = |from: u8, to: Address, amount: u128| Tx::Transfer { from: key(from).public().address(), to, amount: Amount::U128(amount) };
+    let call = |function: &str| Tx::ContractCall { to: counter, func: Hash::Xxh3_64(selector(function)), amount: Amount::U128(0), data: Vec::new() };
+    let deploy = || Tx::Deploy { code: Code::Lua(COUNTER.to_string()) };
+    let fresh = |seed: u8| key(seed).public().address();
+    let batch = |steps: Vec<Tx>, nonce: u64, keypair: &Keypair| SignedTx::sign(Tx::Batch { steps }, nonce, fee, keypair);
+    // More than a sender holds until the batch before it in the block pays it.
+    let plenty = 2 * 10u128.pow(18);
+
+    vec![
+        batch(vec![deploy(), call("increment")], 0, &key(6)),
+        batch(vec![call("increment"), pay(7, fresh(101), 5), call("increment")], 0, &key(7)),
+        batch(vec![pay(1, key(2).public().address(), 10u128.pow(18) / 2), pay(1, fresh(102), 1)], 0, &key(1)),
+        batch(vec![pay(2, fresh(103), 10u128.pow(18) + 1), call("increment")], 0, &key(2)),
+        // Nothing in common with any of them.
+        SignedTx::sign(pay(3, fresh(104), 1), 0, fee, &key(3)),
+        // Fails at its second step, and its first does not stand.
+        batch(vec![call("increment"), pay(8, fresh(105), plenty)], 0, &key(8)),
+        batch(vec![call("increment"), deploy(), deploy()], 0, &key(9)),
+        batch(vec![pay(4, producer().public().address(), 5), pay(4, key(5).public().address(), 6)], 0, &key(4)),
+        batch(vec![pay(5, fresh(106), 7)], 0, &key(5)),
+    ]
+}
+
+#[test]
+fn batches_run_side_by_side_as_they_would_one_by_one() {
+    let rules = rules();
+    let vm = Arc::new(Vm::new(&[Engine::Lua], rules.hash).unwrap());
+    let workers = Workers::new();
+    let runner = Runner { rules: &rules, vm: &vm, workers: &workers };
+    let db = funded();
+    let txs = tangled_batches();
+    let reference = Arc::new(State::new(db.clone()));
+    let expected = one_by_one(&rules, &vm, &reference, &txs, &context(), Unfit::Skip).unwrap();
+    let expected_state = reference.take_changes();
+
+    assert_eq!(expected.kept.len(), txs.len());
+    assert!(expected.receipts[3].result.is_ok(), "paid by the batch before it: {:?}", expected.receipts[3].result);
+    assert!(matches!(&expected.receipts[5].result, Err(crate::chain::Failure::Step { step: 1, .. })), "{:?}", expected.receipts[5].result);
+    assert!(expected.receipts[6].result.is_ok(), "{:?}", expected.receipts[6].result);
+
+    for _ in 0..5 {
+        let layer = Arc::new(State::new(db.clone()));
+        let ran = runner.run(&layer, &txs, &context(), Unfit::Skip, None).unwrap();
+
+        assert!(ran.again.is_empty(), "every dependency here is one a step names: {:?} ran again", ran.again);
+        assert_eq!(ran.kept, expected.kept);
+        assert_eq!(ran.receipts, expected.receipts);
+        assert_eq!(ran.gas_used, expected.gas_used);
+        assert_eq!(layer.take_changes(), expected_state);
+    }
+}
+
+#[test]
+fn a_batch_touches_what_all_its_steps_touch_each_once() {
+    let hash = HashType::default_chain();
+    let me = key(1).public().address();
+    let (a, b, contract) = (key(2).public().address(), key(3).public().address(), Address::Contract([4; 32]));
+    let steps = vec![
+        Tx::Transfer { from: me, to: a, amount: Amount::U128(1) },
+        Tx::Transfer { from: me, to: a, amount: Amount::U128(1) },
+        Tx::ContractCall { to: contract, func: Hash::Xxh3_64(selector("x")), amount: Amount::U128(0), data: Vec::new() },
+        Tx::Claim { height: 1, to: b, earned: u256::ONE, index: 0, path: Vec::new() },
+        Tx::Name { name: "alice".to_string(), action: crate::registry::names::NameAction::Renew { years: 1 } },
+        Tx::Deploy { code: Code::Lua(COUNTER.to_string()) },
+        Tx::Deploy { code: Code::Lua(COUNTER.to_string()) },
+        #[cfg(feature = "evm")]
+        Tx::Deploy { code: Code::Evm(vec![0]) },
+    ];
+    let touched = touches_of(&Tx::Batch { steps: steps.clone() }, me, 7, hash);
+    let of = |address: Address| Touch::Address(address);
+    let mut wanted = vec![
+        of(me),
+        of(a),
+        of(contract),
+        of(b),
+        Touch::Pools,
+        Touch::Names,
+        Touch::Governance,
+        of(contract_address(&me, 7, hash)),
+        of(contract_address(&me, batch_deploy_nonce(7, 1), hash)),
+    ];
+
+    #[cfg(feature = "evm")]
+    wanted.push(of(crate::vm::evm::create_address(&me, batch_deploy_nonce(7, 2))));
+
+    assert_eq!(touched, wanted);
+
+    // As a multisig's, as the multisig.
+    let multisig = Address::Multisig([6; 32]);
+    let carried = Tx::Multisig { account: multisig, tx: Box::new(Tx::Batch { steps: vec![Tx::Burn { from: multisig, amount: Amount::U128(1) }, Tx::Transfer { from: multisig, to: a, amount: Amount::U128(1) }] }), signatures: Vec::new() };
+
+    assert_eq!(touches_of(&carried, multisig, 0, hash), [of(multisig), of(a)]);
+}
+
 /// Pays whoever it is told, from what it was sent: an account no transaction calling it names.
 const PAYER: &str = r#"
 local M = {}

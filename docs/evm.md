@@ -131,6 +131,26 @@ Every call is dry run before it is sent, as contract calls are: one that would r
 with its reason unless `--anyway` is given, and its gas limit is what the dry run used and a
 quarter more.
 
+## In a batch
+
+Each EVM step of a [batch](chain.md#batches) is a fresh EVM transaction on the layer the steps before
+it wrote:
+
+- It starts its gas from what those steps left, never a full allowance, with its own intrinsic 21,000.
+- Whatever Ethereum keeps for one transaction starts afresh: transient storage (EIP-1153), what is
+  warm, gas refunds, and what `SELFDESTRUCT` counts as created in the same transaction (EIP-6780), so
+  a contract deployed in one step and destroyed in the next keeps its code.
+- It sees everything earlier steps wrote, natively or in the EVM, and a contract's nonce goes on from
+  step to step, so its `CREATE` in step 2 does not land on step 1's address.
+- The sender's nonce is the batch's own in every step; only a deploy has one of its own, by
+  `batch_deploy_nonce`.
+- If a later step fails, every step's writes, payments, and native calls it crossed into go with it.
+
+Its logs join the receipt in order, so `eth_getLogs` lists them under the batch's chainv4 id, numbered
+with the block's others. `eth_getTransactionByHash` and `eth_getTransactionReceipt` find only what
+Ethereum signed, so they answer null for a batch, as for any EVM call sent the chainv4 way: a batch is
+never shown as one call with one `to` and one `input`.
+
 ## Gas
 
 EVM gas is chainv4 gas, one for one. revm counts what a call uses, the EVM's own 21,000 base and

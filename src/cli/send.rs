@@ -366,6 +366,17 @@ pub enum TxArgs {
         /// hex for bytes, text for strings, and JSON for arrays and tuples, such as [1, 2].
         args: Vec<String>,
     },
+    /// Several steps under one signature, one nonce and one fee, all or nothing: any step failing
+    /// undoes every step. Each step is JSON with a type, transfer, burn, call, evm_call, deploy,
+    /// upgrade, name, primary_name or claim, and that command's fields: see docs/chain.md.
+    Batch {
+        /// A JSON file holding a list of steps, run first.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// A step as JSON, such as '{"type":"transfer","to":"ed25519:0x…","amount":"5"}'. Repeat for each.
+        #[arg(long = "step")]
+        steps: Vec<String>,
+    },
 }
 
 /// What a name transaction does. Names may be given with the chain's suffix or without it.
@@ -527,6 +538,11 @@ fn evm_address(text: &str) -> Result<Address, String> {
     text.parse().map_err(|err| format!("{text}: {err}"))
 }
 
+/// An address as a batch's evm_call step takes it: as --to does.
+pub(super) fn evm_to(text: &str) -> Result<Address, String> {
+    evm_address(text)
+}
+
 /// Signs a transaction with the signer's next nonce, submits it, and unless told not to, waits
 /// until enough blocks hold it and prints what it did. A transaction that ran but failed is an
 /// error, so scripts can tell.
@@ -553,6 +569,11 @@ pub fn send(args: SendArgs) -> CliResult<()> {
         return super::multisig::propose(args, account);
     }
 
+    // Typed data would show its signer one opaque hash for all the steps: the chain takes none.
+    if args.eip712 && matches!(args.tx, TxArgs::Batch { .. }) {
+        return Err("a batch cannot be signed as EIP-712 typed data: its signer would see an opaque hash, not its steps".into());
+    }
+
     let keypair = signer(args.key.as_deref())?;
     let sender = keypair.public().address();
     let node = args.node.trim_end_matches('/');
@@ -564,6 +585,10 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     let tx = transaction(args.tx, sender, &agent, node)?;
     let deploys = matches!(tx, Tx::Deploy { .. });
     let deploys_evm = matches!(tx, Tx::Deploy { code: Code::Evm(_) });
+    let steps = match &tx {
+        Tx::Batch { steps } => steps.clone(),
+        _ => Vec::new(),
+    };
     let chosen = OfferChoice {
         gas_limit: args.gas_limit,
         max_price: args.max_price,
@@ -616,6 +641,15 @@ pub fn send(args: SendArgs) -> CliResult<()> {
         println!("contract {}", deployed_at(&sender, nonce, hash));
     }
 
+    // Each deploy in a batch, where it lands: known before it does, for what the steps after it call.
+    if steps.iter().any(|step| matches!(step, Tx::Deploy { .. })) {
+        let hash: HashType = status["hash"].as_str().ok_or("the node did not say its chain's hash")?.parse()?;
+
+        for (place, address) in batch_deploys(&steps, &sender, nonce, hash) {
+            println!("step {} contract {address}", place + 1);
+        }
+    }
+
     if args.no_wait {
         return Ok(());
     }
@@ -626,6 +660,27 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     };
     let receipt = wait(&agent, node, id, wanted, Duration::from_secs(args.timeout))?;
     report(&receipt)
+}
+
+/// Where a batch's deploys land, each with its place among the steps.
+pub(super) fn batch_deploys(steps: &[Tx], sender: &Address, nonce: u64, hash: HashType) -> Vec<(usize, Address)> {
+    let mut before = 0;
+    let mut lands = Vec::new();
+
+    for (place, step) in steps.iter().enumerate() {
+        if let Tx::Deploy { code } = step {
+            let at = crate::structs::tx::batch_deploy_nonce(nonce, before);
+            let address = match code {
+                #[cfg(feature = "evm")]
+                Code::Evm(_) => crate::vm::evm::create_address(sender, at),
+                _ => deployed_at(sender, at, hash),
+            };
+            before += 1;
+            lands.push((place, address));
+        }
+    }
+
+    lands
 }
 
 /// A multisig member as --member takes it, and whether its xpub is for Bitcoin's test networks.
@@ -862,6 +917,16 @@ pub(super) fn report(receipt: &Value) -> CliResult<()> {
         Some("upgraded") => println!("upgraded {}", receipt["contract"].as_str().unwrap_or("?")),
         Some("returned") => println!("returned {}", receipt["values"]),
         Some("decided") => println!("decided governance's change {}, {} version {}", receipt["version"], receipt["kind"].as_str().unwrap_or("?"), receipt["kind_version"]),
+        Some("batch") => {
+            for (place, step) in receipt["steps"].as_array().into_iter().flatten().enumerate() {
+                match step["status"].as_str() {
+                    Some("deployed") => println!("step {}: deployed {}", place + 1, step["contract"].as_str().unwrap_or("?")),
+                    Some("upgraded") => println!("step {}: upgraded {}", place + 1, step["contract"].as_str().unwrap_or("?")),
+                    Some("returned") => println!("step {}: returned {}", place + 1, step["values"]),
+                    _ => println!("step {}: done", place + 1),
+                }
+            }
+        }
         Some("failed") => {}
         _ => println!("done"),
     }
@@ -891,6 +956,7 @@ pub(super) fn report(receipt: &Value) -> CliResult<()> {
 
 pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str) -> CliResult<Tx> {
     let tx = match tx {
+        TxArgs::Batch { file, steps } => super::batch::batch(&steps, file.as_deref(), sender, agent, node)?,
         TxArgs::Transfer { to, amount: value } => Tx::Transfer {
             to: match to {
                 Recipient::Address(address) => address,

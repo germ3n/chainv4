@@ -48,12 +48,21 @@ impl GasSchedule for Weighted {
 
     fn intrinsic(&self, tx: &SignedTx) -> u64 {
         let bytes = tx.hashable_bytes_with_tag().len() as u64;
-        let code = match &tx.tx {
+        let of_code = |tx: &Tx| match tx {
             Tx::Deploy { code } | Tx::Upgrade { code, .. } => code.bytes().len() as u64,
             _ => 0,
         };
+        // A batch does the work of as many transactions as it has steps, and all the bytes it
+        // carries are in its size. A member's approval only stores what it would do, so it counts
+        // as one, as a multisig's own deploy always has.
+        let (count, code) = match &tx.tx {
+            Tx::Batch { steps } => (steps.len() as u64, steps.iter().map(of_code).sum()),
+            Tx::Multisig { tx: inner, .. } if matches!(**inner, Tx::Batch { .. }) => (inner.what_it_runs().len() as u64, inner.what_it_runs().iter().map(of_code).sum()),
+            tx => (1, of_code(tx)),
+        };
 
         self.per_tx
+            .saturating_mul(count)
             .saturating_add(self.per_byte.saturating_mul(bytes))
             .saturating_add(self.per_code_byte.saturating_mul(code))
     }
@@ -104,6 +113,7 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::ApproveMultisig { account, .. } => ("approve_multisig", *account),
         Tx::WithdrawMultisig { account, .. } => ("withdraw_multisig", *account),
         Tx::Claim { to, .. } => ("claim", *to),
+        Tx::Batch { .. } => ("batch", sender),
     }
 }
 
@@ -139,7 +149,13 @@ impl GasSchedule for ContractScorer {
     fn charge(&self, scoring: &Scoring) -> u64 {
         let (kind, target) = describe(&scoring.tx.tx, scoring.sender);
 
-        if !self.scores(kind) {
+        // A scorer that weighs a kind weighs a batch holding one, so a batch is no way around it.
+        let scored = match kind {
+            "batch" => self.scores(kind) || scoring.tx.tx.what_it_runs().iter().any(|step| self.scores(describe(step, scoring.sender).0)),
+            kind => self.scores(kind),
+        };
+
+        if !scored {
             return scoring.gas;
         }
 

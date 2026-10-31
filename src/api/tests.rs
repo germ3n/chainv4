@@ -2811,3 +2811,216 @@ fn accounts_and_calls_read_at_an_older_block() {
     assert_eq!(call(json!(2)).2["values"], json!([{ "type": "i64", "value": "3" }]));
     assert_eq!(call(Value::Null).2["values"], json!([{ "type": "i64", "value": "3" }]));
 }
+
+/// A chain with a contract that emits, and a batch of three steps and a failed one on it, indexed
+/// by address: the node's view of each.
+struct Batches {
+    address: SocketAddr,
+    good: SignedTx,
+    bad: SignedTx,
+    contract: Address,
+    bob: Address,
+    chain: Chain,
+}
+
+fn batches() -> Batches {
+    let authority = DevAuthority::dev_keypair();
+    let me = authority.public().address();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let hash = HashType::default_chain();
+    let contract = contract_address(&me, 0, hash);
+    let bob = Keypair::from_seed([40; 32]).public().address();
+    let carol = Keypair::from_seed([41; 32]).public().address();
+    let call = Tx::ContractCall { to: contract, func: Hash::Xxh3_64(crate::vm::selector("increment")), amount: Amount::U128(0), data: vec![TxCallArgumentType::I64(1)] };
+    let pay = |to: Address, amount: u128| Tx::Transfer { from: me, to, amount: Amount::U128(amount) };
+    let good = SignedTx::sign(Tx::Batch { steps: vec![Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, call.clone(), pay(bob, 7)] }, 0, FeeOffer::NONE, &authority);
+    let bad = SignedTx::sign(Tx::Batch { steps: vec![pay(carol, 1), Tx::Transfer { from: me, to: carol, amount: Amount::U256(u256::MAX) }] }, 1, FeeOffer::NONE, &authority);
+
+    chain.keep_index(IndexKind::Addresses, None).unwrap();
+    produce(&mut chain, vec![good.clone()]);
+    produce(&mut chain, vec![bad.clone()]);
+
+    let address = start(db, Some(fake_node()), &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+
+    Batches { address, good, bad, contract, bob, chain }
+}
+
+#[test]
+fn a_batch_s_transaction_and_receipt_say_each_step_and_its_result_or_which_failed_and_why() {
+    let Batches { address, good, bad, contract, .. } = batches();
+    let hash = HashType::default_chain();
+    let view = ok(address, &format!("/txs/{}", good.id(hash)));
+
+    assert_eq!(view["status"], "batch", "{view}");
+    assert_eq!(view["steps"][0]["status"], "deployed");
+    assert_eq!(view["steps"][0]["contract"], contract.to_string());
+    assert_eq!(view["steps"][1]["status"], "returned");
+    assert_eq!(view["steps"][2]["status"], "done");
+    assert_eq!(view["steps"][2]["events"], 0);
+
+    let failed = ok(address, &format!("/txs/{}", bad.id(hash)));
+
+    assert_eq!(failed["status"], "failed", "what reads no further sees that: {failed}");
+    assert_eq!(failed["failed_step"], 1);
+    assert!(failed["error"].as_str().unwrap().contains("step 2 failed, undoing every step: insufficient balance"), "{failed}");
+
+    let tx = crate::structs::json::signed_tx(&good, hash);
+
+    assert_eq!(tx["tx"]["type"], "batch");
+    assert_eq!(tx["tx"]["steps"].as_array().unwrap().iter().map(|step| step["type"].as_str().unwrap()).collect::<Vec<_>>(), ["deploy", "contract_call", "transfer"]);
+}
+
+#[test]
+fn a_batch_is_listed_under_everyone_its_steps_touch_and_found_by_what_they_are() {
+    let Batches { address, good, contract, bob, .. } = batches();
+    let id = good.id(HashType::default_chain()).to_string();
+    let me = DevAuthority::dev_keypair().public().address();
+
+    for who in [me, bob, contract] {
+        let listing = ok(address, &format!("/accounts/{who}/txs"));
+
+        assert!(listing["txs"].as_array().unwrap().iter().any(|tx| tx["id"] == id), "{who}: {listing}");
+    }
+
+    let carol = Keypair::from_seed([41; 32]).public().address();
+
+    assert_eq!(ok(address, &format!("/accounts/{carol}/txs"))["txs"].as_array().unwrap().len(), 1, "a failed batch shows too, as a failed transfer does");
+
+    // As a batch, as what any of its steps is, and for coin one moved.
+    for kind in ["batch", "transfer", "deploy", "contract_call"] {
+        let found = ok(address, &format!("/accounts/{bob}/txs?kind={kind}"));
+
+        assert_eq!(found["txs"].as_array().unwrap().len(), 1, "{kind}: {found}");
+    }
+
+    assert_eq!(ok(address, &format!("/accounts/{bob}/txs?kind=burn"))["txs"], json!([]));
+    assert_eq!(ok(address, &format!("/accounts/{bob}/txs?direction=in"))["txs"].as_array().unwrap().len(), 1);
+    assert_eq!(ok(address, &format!("/accounts/{bob}/txs?token=coin"))["txs"].as_array().unwrap().len(), 1);
+    assert_eq!(ok(address, &format!("/accounts/{bob}/txs?token={contract}"))["txs"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_light_client_proves_a_batch_and_which_of_its_steps_failed() {
+    use crate::structs::receipt::{CommittedOutcome, StepEffect};
+
+    let Batches { address, good, bad, chain, contract, .. } = batches();
+    let hash = HashType::default_chain();
+    let client = followed(address, chain.genesis());
+    let decode = |value: &Value| from_hex(value.as_str().unwrap()).unwrap();
+    let hashes = |value: &Value| value.as_array().unwrap().iter().map(|one| Hash::from_bytes(hash, &decode(one)).unwrap()).collect::<Vec<_>>();
+    let proven = |tx: &SignedTx| {
+        let proof = ok(address, &format!("/proofs/receipts/{}", tx.id(hash)));
+        let (block, count) = (Hash::from_bytes(hash, &decode(&proof["block"])).unwrap(), proof["count"].as_u64().unwrap() as usize);
+        let (signed, _) = client.check_tx(&block, &decode(&proof["signed"]), 0, count, &hashes(&proof["tx_path"])).unwrap();
+        let (receipt, _) = client.check_receipt(&block, &decode(&proof["receipt"]), 0, count, &hashes(&proof["path"])).unwrap();
+
+        (signed, receipt)
+    };
+
+    let (signed, receipt) = proven(&good);
+
+    assert_eq!(signed, good, "every step proven with it");
+    assert_eq!(receipt.tx, good.id(hash));
+
+    let CommittedOutcome::Batch(steps) = &receipt.outcome else {
+        panic!("{:?}", receipt.outcome);
+    };
+
+    assert_eq!(steps[0].effect, StepEffect::Deployed(contract));
+    assert_eq!(steps[2].effect, StepEffect::Done);
+
+    let (signed, receipt) = proven(&bad);
+
+    assert_eq!(signed, bad);
+    assert_eq!(receipt.outcome, CommittedOutcome::BatchFailed { step: 1 });
+    assert!(receipt.outcome.failed());
+}
+
+#[test]
+fn a_dry_run_and_an_offer_price_a_batch_whole_and_say_what_would_fail() {
+    let authority = DevAuthority::dev_keypair();
+    let me = authority.public().address();
+    let genesis = Genesis::dev_authority(authority.public());
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &genesis).unwrap();
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let fees = genesis.fees.clone().unwrap().build();
+    let bob = Keypair::from_seed([40; 32]).public().address();
+    let pay = |amount: u128| Tx::Transfer { from: me, to: bob, amount: Amount::U128(amount) };
+    let body = |tx: Tx| {
+        let probe = SignedTx::sign(tx, 0, FeeOffer::NONE, &authority);
+
+        (json!({ "tx": to_hex(&wincode::serialize(&probe).unwrap()) }).to_string(), probe)
+    };
+    let (asked, probe) = body(Tx::Batch { steps: vec![pay(1), pay(2)] });
+    let (status, _, offered) = request(address, "POST", "/offer", &asked);
+
+    assert_eq!(status, 200, "{offered}");
+    assert_eq!(offered["gas_limit"], fees.schedule().intrinsic(&probe), "moving coin runs nothing, so its intrinsic cost is all");
+    assert_eq!(offered["estimate"]["status"], "ok", "{offered}");
+    assert_eq!(offered["estimate"]["steps"].as_array().unwrap().len(), 2);
+
+    let (asked, _) = body(Tx::Batch { steps: vec![pay(1), Tx::Transfer { from: me, to: bob, amount: Amount::U256(u256::MAX) }] });
+    let (_, _, failing) = request(address, "POST", "/offer", &asked);
+
+    assert_eq!(failing["estimate"]["status"], "failed");
+    assert!(failing["estimate"]["error"].as_str().unwrap().contains("step 2 failed"), "{failing}");
+
+    // Ones that could never land say so as a dry run, not as a run.
+    let (asked, _) = body(Tx::Batch { steps: vec![Tx::Mint { to: bob, amount: Amount::U128(1) }] });
+    let (_, _, refused) = request(address, "POST", "/offer", &asked);
+
+    assert!(refused["estimate"]["error"].as_str().unwrap().contains("a batch holds only"), "{refused}");
+}
+
+#[cfg(feature = "evm")]
+#[test]
+fn ethereum_tools_see_a_batch_s_logs_in_order_and_never_as_one_call() {
+    use crate::vm::evm::create_address;
+
+    let authority = DevAuthority::dev_keypair();
+    let me = authority.public().address();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let word = |value: u64| crate::structs::u256::u256::from(value).to_be_bytes().to_vec();
+    let selector = |signature: &str| crate::crypto::secp256k1::keccak(signature.as_bytes())[..4].to_vec();
+    let init = [from_hex(include_str!("../../contracts/evm/Counter.bin").trim()).unwrap(), word(5)].concat();
+    let counter = create_address(&me, 0);
+    let Address::Evm(counter_bytes) = counter else { unreachable!() };
+    let bump = |by: u64| Tx::EvmCall { to: counter, value: Amount::U128(0), input: [selector("bump(uint256)"), word(by)].concat() };
+    let batch = SignedTx::sign(Tx::Batch { steps: vec![Tx::Deploy { code: Code::Evm(init) }, bump(1), bump(2)] }, 0, FeeOffer::NONE, &authority);
+    let failed = SignedTx::sign(Tx::Batch { steps: vec![bump(4), Tx::Transfer { from: me, to: counter, amount: Amount::U256(u256::MAX) }] }, 1, FeeOffer::NONE, &authority);
+    let single = SignedTx::sign(bump(8), 2, FeeOffer::NONE, &authority);
+    let hash = HashType::default_chain();
+    produce(&mut chain, vec![batch.clone()]);
+    produce(&mut chain, vec![failed.clone(), single.clone()]);
+
+    let address = start(db, Some(fake_node()), &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let rpc = |method: &str, params: Value| {
+        let (status, _, answer) = request(address, "POST", "/rpc", &json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params }).to_string());
+        assert_eq!((status, answer["id"].clone()), (200, json!(7)), "{answer}");
+
+        answer["result"].clone()
+    };
+    let logs = rpc("eth_getLogs", json!([{ "fromBlock": "0x0", "toBlock": "latest", "address": to_hex(&counter_bytes) }]));
+    let logs = logs.as_array().unwrap();
+
+    // The batch's two bumps and the single one after the failed batch, whose own log is gone.
+    assert_eq!(logs.iter().map(|log| log["data"].as_str().unwrap().to_string()).collect::<Vec<_>>(), [to_hex(&word(6)), to_hex(&word(8)), to_hex(&word(16))]);
+    assert_eq!(logs[0]["transactionHash"], to_hex(&batch.id(hash).to_bytes()), "a batch's logs are its own");
+    assert_eq!(logs[1]["transactionHash"], logs[0]["transactionHash"]);
+    assert_eq!((logs[0]["logIndex"].clone(), logs[1]["logIndex"].clone()), (json!("0x0"), json!("0x1")), "the block's logs, numbered in order");
+    assert_eq!(logs[2]["transactionHash"], to_hex(&single.id(hash).to_bytes()));
+
+    // By its id it is no Ethereum transaction, so it is never shown as one call with one to and one
+    // input; no block lists it among them either.
+    for tx in [&batch, &failed] {
+        assert_eq!(rpc("eth_getTransactionByHash", json!([to_hex(&tx.id(hash).to_bytes())])), Value::Null);
+        assert_eq!(rpc("eth_getTransactionReceipt", json!([to_hex(&tx.id(hash).to_bytes())])), Value::Null);
+    }
+
+    assert_eq!(rpc("eth_getBlockByNumber", json!(["0x1", false]))["transactions"], json!([]));
+    assert_eq!(rpc("eth_getTransactionCount", json!([to_hex(&crate::vm::evm::evm_alias(&me)), "latest"])), "0x3", "one nonce a batch");
+}
+

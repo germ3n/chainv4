@@ -406,15 +406,20 @@ fn facts<'a>(found: &'a FoundTx, address: &str, time: Option<u64>) -> Facts<'a> 
     let outcome = tx.receipt.as_ref();
     let events = outcome.into_iter().flat_map(|outcome| &outcome.events).map(|event| event.contract.as_str());
     let payments = outcome.is_some_and(|outcome| !outcome.payments.is_empty());
-    let moves_coin = matches!(inner.get("type").and_then(serde_json::Value::as_str), Some("transfer" | "mint" | "burn" | "claim")) || payments;
+    // A batch passes for what any of its steps does, as a node's own filter takes it.
+    let steps = tx.steps().filter(|_| tx.kind() != "approve_multisig").unwrap_or_default();
+    let kind_of = |step: &'a serde_json::Value| step.get("type").and_then(serde_json::Value::as_str);
+    let moves_coin = matches!(inner.get("type").and_then(serde_json::Value::as_str), Some("transfer" | "mint" | "burn" | "claim")) || payments || steps.iter().any(|step| matches!(kind_of(step), Some("transfer" | "burn" | "claim")));
     let called = named("to").filter(|_| matches!(inner.get("type").and_then(serde_json::Value::as_str), Some("contract_call" | "evm_call")));
+    let called_in_steps = steps.iter().filter(|step| matches!(kind_of(step), Some("contract_call" | "evm_call"))).filter_map(|step| step.get("to").and_then(serde_json::Value::as_str));
+    let named_in_steps = steps.iter().flat_map(|step| ["to", "from", "contract"].map(|field| step.get(field).and_then(serde_json::Value::as_str))).flatten();
 
     Facts {
-        kinds: [Some(tx.kind()), inner.get("type").and_then(serde_json::Value::as_str)].into_iter().flatten().collect(),
+        kinds: [Some(tx.kind()), inner.get("type").and_then(serde_json::Value::as_str)].into_iter().flatten().chain(steps.iter().filter_map(kind_of)).collect(),
         sent: tx.sender == address,
         took_part: tx.sender != address,
-        parties: [Some(tx.sender.as_str()), named("to"), named("from"), named("contract"), named("account")].into_iter().flatten().collect(),
-        tokens: moves_coin.then_some(COIN).into_iter().chain(called).chain(events).collect(),
+        parties: [Some(tx.sender.as_str()), named("to"), named("from"), named("contract"), named("account")].into_iter().flatten().chain(named_in_steps).collect(),
+        tokens: moves_coin.then_some(COIN).into_iter().chain(called).chain(called_in_steps).chain(events).collect(),
         time,
     }
 }

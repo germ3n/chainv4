@@ -756,14 +756,18 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **`Tx::Batch`: several steps under one signature, nonce and fee, all or nothing.** Transfers,
+  contract and EVM calls, deploys, upgrades, names, burns and claims, 1 to 32, sharing one fuel limit, the
+  receipt saying each step's result or which failed. Multisigs may send one. The CLI's `chainv4 send batch`,
+  the wallet's Batch page, every signing screen and the explorer list each step. It needs every node at once.
+- [x] **Bytes nesting a transaction without end crashed whoever decoded them.** A multisig holding a
+  multisig holding a multisig, a few megabytes of it, ran the decoder out of stack and aborted the node.
+  Decoding stops two levels down now, the deepest a valid transaction goes.
 - [x] **An offline signer forgot what it had signed.** It keeps a history now, sealed with its keys, that Settings turns off and clears.
 - [ ] **Pentest the chain with malicious contracts and calls,** in Lua, Wasm and the EVM: resource exhaustion
   (memory, fuel, stack, nesting, huge returns and logs), reentry across engines, escaping the sandbox, state left
   behind by reverts, and hostile calldata. On a chain of its own, never the public one. The ABI decoder's blow-up
   was found by reading: this looks for the rest on purpose.
-- [ ] **A batch transaction, `Tx::Batch`:** one signature and one nonce running several inner transactions,
-  all reverting together, for approve-then-swap or paying many at once. A consensus change, with each inner
-  step shown before signing in the wallet and on the offline signer, whose QR format needs to carry it.
 - [x] **The wallet's Activity names unlisted tokens** by what they say of themselves, labelled, like `1.5 "USDC" (unverified)`. Still only a claim: never on signing screens, and never in balances.
 - [x] **Small things seen on the emulator:** an error from a failed import stayed on Accounts after a later success, and an offline signer's accounts said "not proven yet" for good.
 - [ ] **A setting for the wallet and the explorer to take everything from the blocks they fetched,** history

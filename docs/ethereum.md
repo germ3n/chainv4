@@ -78,6 +78,8 @@ JSON-RPC does: an error is in the answer.
 - **Blocks list Ethereum-signed transactions alone.** chainv4's own, a Lua call or a bond, change
   balances and nonces but are not listed, so a tool never meets one it cannot read. Logs from EVM
   calls sent the chainv4 way are in `eth_getLogs`, under their chainv4 id.
+  A [batch](chain.md#batches) is one of those: every step's logs, in order, under one id, and it
+  never shows as one call with one `to`.
 - **Blocks' Ethereum fields** that chainv4 has none of are zero: `nonce`, `mixHash`, `logsBloom`
   and the uncles. A block hash is the chainv4 block id. Gas is chainv4's.
 - **A transaction waiting in the mempool** is found by hash, with no block, by looking through the

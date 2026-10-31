@@ -132,6 +132,18 @@ were only counted. Each hop has:
 A transaction that runs no contract has no hops. Receipts in `/blocks/{block}` carry the trace
 too.
 
+A [batch](chain.md#batches) writes its `tx` as `{"type":"batch","steps":[…]}`, each step as that kind
+of transaction is written. Its receipt's `status` is `batch`, with `steps` in order, each with what
+that kind's status says, and `events` and `payments`, how many of the receipt's lists are that step's:
+
+```json
+{"status":"batch","steps":[{"status":"deployed","contract":"contract:0x…","events":0,"payments":0},{"status":"returned","values":[…],"events":2,"payments":1},{"status":"done","events":0,"payments":0}]}
+```
+
+One that failed has `status` `failed`, as any failure, so what reads no further sees that, with
+`failed_step`, counted from 0, and `error`, which says the step counted from 1 and why:
+`step 2 failed, undoing every step: insufficient balance`.
+
 ### `GET /accounts/{address}`
 
 `address`, `nonce` and `balance`, and the `height` read at. An address never written to reads as
@@ -187,6 +199,9 @@ empty list.
 curl 'localhost:8080/accounts/ed25519:0x…/txs?kind=transfer&direction=in&from=1793318400000'
 # {"txs":[…],"next":null,"indexed_from":0,"catching_up_to":null,"applied":["kind","direction","from"],"scanned":41,"limited":false}
 ```
+
+A batch is listed under everyone any step names, and everyone contracts paid. `kind` passes it for
+being a `batch` and for what any of its steps is; `token` and `direction` go by all its steps.
 
 ### `GET /contracts/{address}`
 
@@ -346,6 +361,10 @@ the values a call returned, and `deployed`, the address a deploy made, each `nul
 `null` for anything else. An EVM call returns one `bytes` value, its return data, so
 `estimate.returned` is how `chainv4 send evm-call --read` reads, as `eth_call` does. Clients that cannot run the chain's fee code, such as the
 [explorer](explorer.md) in a browser, use it, and warn before sending what would fail.
+
+A batch is always dry-run, whatever it holds; its `estimate` says `steps` when it went through and
+names the step in `error` when not. The gas limit it offers is its intrinsic cost, a transaction's for
+each step, and if any step runs code, one allowance of fuel for all of them.
 
 ### `POST /call`
 

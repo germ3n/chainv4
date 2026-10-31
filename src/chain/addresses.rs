@@ -5,8 +5,9 @@
 //!
 //! A transaction touches its sender; the parties of a transfer, mint or burn; the contract it
 //! calls or upgrades, and every address among the call's arguments, as transfer(to, amount) names
-//! its recipient; and the contract it deploys. Each address keeps its own record of it, newest
-//! first, so a listing reads forward from where the last page stopped.
+//! its recipient; and the contract it deploys. A batch touches what all its steps touch. Each address
+//! keeps its own record of it, newest first, so a listing reads forward from where the last page
+//! stopped.
 //!
 //! A node keeps it only when started with --index-addresses, and once on it stays on until
 //! --index-addresses=off drops it. How it holds blocks, and catches up, is what every index
@@ -60,15 +61,27 @@ pub fn touched(signed: &SignedTx, status: &TxStatus, payments: &[Payment]) -> BT
     let mut touched = BTreeSet::from([signed.sender()]);
 
     // A multisig's own transaction is listed as what it does, and under the members who signed it.
-    let tx = match &signed.tx {
-        Tx::Multisig { tx, signatures, .. } => {
-            touched.extend(signatures.iter().map(|signed| signed.key.address()));
+    if let Tx::Multisig { signatures, .. } = &signed.tx {
+        touched.extend(signatures.iter().map(|signed| signed.key.address()));
+    }
 
-            tx
-        }
-        tx => tx,
-    };
+    // A batch is listed under everyone any of its steps names, failed or not, as any transaction
+    // is under whom it asked to pay.
+    for tx in signed.tx.what_it_runs() {
+        named(tx, &mut touched);
+    }
 
+    // Where it deployed, one contract or each a batch's steps made.
+    touched.extend(status.deployed());
+
+    // What a contract paid shows in the history of whom it paid, and its own.
+    touched.extend(payments.iter().flat_map(|payment| [payment.from, payment.to]));
+
+    touched
+}
+
+/// Everyone one transaction names, to list it under.
+fn named(tx: &Tx, touched: &mut BTreeSet<Address>) {
     match tx {
         Tx::Transfer { from, to, .. } => touched.extend([*from, *to]),
         Tx::Mint { to, .. } => {
@@ -129,18 +142,9 @@ pub fn touched(signed: &SignedTx, status: &TxStatus, payments: &[Payment]) -> BT
         Tx::Claim { to, .. } => {
             touched.insert(*to);
         }
-        // Read past above: never what a multisig sends.
-        Tx::Multisig { .. } => {}
+        // Read past above: what_it_runs gives what these do, never one of these.
+        Tx::Multisig { .. } | Tx::Batch { .. } => {}
     }
-
-    if let TxStatus::Deployed(contract) = status {
-        touched.insert(*contract);
-    }
-
-    // What a contract paid shows in the history of whom it paid, and its own.
-    touched.extend(payments.iter().flat_map(|payment| [payment.from, payment.to]));
-
-    touched
 }
 
 /// How many index entries a scan reads at a time, between looking through what it read.

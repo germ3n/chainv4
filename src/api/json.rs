@@ -299,6 +299,10 @@ pub fn dry_run(ran: &crate::chain::DryRun) -> Value {
             Some(crate::chain::Effect::Deployed(address)) => address.to_string().into(),
             _ => Value::Null,
         },
+        "steps": match &ran.effect {
+            Some(crate::chain::Effect::Batch(steps)) => steps.iter().map(step_outcome).collect::<Vec<_>>().into(),
+            _ => Value::Null,
+        },
     })
 }
 
@@ -364,6 +368,9 @@ fn outcome(receipt: &TxReceipt) -> Value {
         }),
         TxStatus::Failed(error) => json!({ "status": "failed", "error": error }),
         TxStatus::Decided { decision, kind, version } => json!({ "status": "decided", "version": decision, "kind": kind.name(), "kind_version": version }),
+        TxStatus::Batch(steps) => json!({ "status": "batch", "steps": steps.iter().map(step_outcome).collect::<Vec<_>>() }),
+        // Failed as any failure says it, so what reads no further sees that; which step is extra.
+        TxStatus::BatchFailed { step, why } => json!({ "status": "failed", "failed_step": step, "error": format!("step {} failed, undoing every step: {why}", step + 1) }),
     };
     value["fuel_used"] = receipt.fuel_used.into();
     value["gas_used"] = receipt.gas_used.into();
@@ -371,6 +378,23 @@ fn outcome(receipt: &TxReceipt) -> Value {
     value["events"] = receipt.events.iter().map(event).collect();
     value["payments"] = receipt.payments.iter().map(payment).collect();
     value["trace"] = trace(&receipt.trace);
+
+    value
+}
+
+/// What a batch's step did, as a whole transaction says it, and how many of the receipt's events and
+/// payments are its.
+fn step_outcome(step: &crate::structs::receipt::StepOutcome) -> Value {
+    use crate::structs::receipt::StepEffect;
+
+    let mut value = match &step.effect {
+        StepEffect::Done => json!({ "status": "done" }),
+        StepEffect::Deployed(address) => json!({ "status": "deployed", "contract": address.to_string() }),
+        StepEffect::Upgraded(address) => json!({ "status": "upgraded", "contract": address.to_string() }),
+        StepEffect::Returned(values) => json!({ "status": "returned", "values": values.iter().map(argument).collect::<Vec<_>>() }),
+    };
+    value["events"] = step.events.into();
+    value["payments"] = step.payments.into();
 
     value
 }

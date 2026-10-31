@@ -175,6 +175,83 @@ The outcome is an `Effect` on success or a `Failure`.
 not the transaction's. It stops the import instead of being recorded as a failure, even when a
 contract caught the error.
 
+## Batches
+
+`Tx::Batch` is several steps under one signature, one nonce and one fee offer, all or nothing: any
+step failing undoes every step, and the fee is charged as for any failed transaction. The nonce is
+used and the fee paid either way.
+
+**What it may hold:** a transfer, contract call, EVM call, deploy, upgrade, name, primary name, burn
+or claim. Anything else makes the whole transaction invalid before it runs, in the mempool and in a
+block alike: validators' and governance's transactions, a multisig's administration, a mint, an
+Ethereum-signed transaction, which has a signature and a nonce of its own, a multisig's own
+transaction, and another batch. So does a batch with no steps or more than 32, and a transfer or burn
+taking from anyone but the batch's sender. A multisig may send a batch through `Tx::Multisig`, never
+the reverse (see [Multisig](multisig.md#a-batch)).
+
+**How it runs.** All the steps run in order on one layer, kept only if all of them go through, so
+each sees everything those before it did, across engines: an approval, then the swap that spends it.
+
+- **Fuel is shared.** Each step is given what those before it left of the transaction's limit, never
+  an allowance of its own, and EVM gas is drawn from the same fuel. The limit is `tx_limits.fuel`,
+  and the gas limit's room above the intrinsic cost as for any transaction. A step that runs out has
+  used all the batch was allowed.
+- **Memory is the same limit at every moment.** What a step's engine held is gone before the next
+  starts, so no moment holds more than `tx_limits.memory`.
+- **Events and hops are shared too.** The steps emit at most 256 events together, as one call may, and
+  a trace keeps its 256 hops. Past those the step that went over fails the batch.
+- **Each step is its own transaction to the EVM.** Transient storage, what is warm, gas refunds and
+  what `SELFDESTRUCT` counts as new all start afresh with each step: a contract deployed in one step
+  and destroyed in the next stays (see [EVM](evm.md#in-a-batch)).
+
+**Fees.** Its intrinsic gas is `per_tx` for each step, `per_byte` for its whole encoding, and
+`per_code_byte` for each deploy's and upgrade's code, as those steps would cost sent apart or more,
+so a batch never saves what a block is limited by. Against a block's gas and byte limits it counts
+whole. A contract scorer sees it as the kind `batch`, whenever it names `batch` or the kind of any
+step, so naming `transfer` still weighs a batch holding one.
+
+**Deploys.** A deploy's address comes from its deployer and a nonce, and a batch has one nonce, so
+each deploy in it is made at its own: `batch_deploy_nonce(nonce, before)`, by how many deploys of
+either engine came before it in the batch. The first's is the batch's own nonce, so one deploy lands
+where it would alone. Each later one's has the top bit set, then the batch's nonce, then the count, a
+number no account's nonce reaches, so it never meets a later transaction's. The address follows as
+from any nonce, `contract_address` or `create_address`, so anyone can work it out before signing, and
+the steps after a deploy can call it. `chainv4 send batch` prints each, and the wallet shows each on
+its step. A contract's own `CREATE` goes on from its own nonce, step to step.
+
+**What the receipt says.** A batch that went through has status `batch`, with what each step did and
+how many of the receipt's events and payments are its; those lists stay flat and in order, so the
+event index and everything reading them work as they do for anything else. One that failed says which
+step stopped it, counted from 0, and why. Which step is committed to the receipts root
+(`CommittedOutcome::Batch`, `BatchFailed`), so a light client proves it; why is not, as no failure's
+message is. As with any failure, it keeps no events or payments, and keeps its trace.
+
+**From the command line,** `chainv4 send batch` takes `--file` with a JSON list of steps, then any
+number of `--step`, each an object with a `type` and that send command's fields, under the usual
+`--key`, `--gas-limit` and so on, and `--multisig`:
+
+```bash
+chainv4 send batch \
+  --step '{"type":"transfer","to":"ed25519:0x…","amount":"5"}' \
+  --step '{"type":"call","to":"contract:0x…","function":"approve","args":["address:ed25519:0x…","u256:9"]}' \
+  --step '{"type":"evm_call","to":"0x…","function":"swap(uint256)","args":["9"],"value":"0"}' \
+  --step '{"type":"deploy","lua":"token.lua"}' \
+  --step '{"type":"upgrade","contract":"contract:0x…","wasm":"new.wasm"}' \
+  --step '{"type":"burn","amount":"1"}' \
+  --step '{"type":"name","action":"register","name":"alice","years":1}' \
+  --step '{"type":"primary_name","name":"alice"}' \
+  --step '{"type":"claim","height":9,"to":"ed25519:0x…","earned":"100","index":2,"path":["0x…"]}'
+```
+
+A `deploy` takes `lua`, `wasm`, or `evm` with `constructor` and `args`. An `evm_call` takes `function`
+and `args`, or `data`. A name's `action` is `register`, `renew`, `transfer`, `target`, `text` or
+`subname`, with that command's fields. A field nothing asks for is an error, not a default. `--eip712`
+is refused: see below.
+
+**EIP-712.** A batch is never signed as typed data: MetaMask or a hardware wallet would show one
+opaque hash for all its steps. `SignedTx::verify_on` refuses one, or a multisig's, or an approval of
+one, under `Signature::Secp256k1Eip712`; the same key signs it the chain's own way.
+
 ## Running transactions side by side
 
 A block's transactions run on every core (`src/chain/parallel.rs`), with exactly the result

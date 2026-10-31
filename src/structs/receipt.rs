@@ -83,6 +83,68 @@ pub enum CommittedOutcome {
     #[document(summary = "A governance approval that was the last one needed: its change is decided, as the chain's decision-th, the count light clients follow without gaps, and its kind's version-th. What lets a light client prove a decision from the receipt alone.")]
     #[wincode(tag = 5)]
     Decided { decision: u64, kind: crate::governance::ChangeKind, version: u64 },
+    #[document(summary = "A batch that went through: what each step did, in order.")]
+    #[wincode(tag = 6)]
+    Batch(Vec<StepOutcome>),
+    #[document(summary = "A batch that failed, undone whole: which step stopped it, counted from 0. Why is not committed to, as no failure's message is.")]
+    #[wincode(tag = 7)]
+    BatchFailed { step: u32 },
+}
+
+#[document(
+    summary = "What one step of a batch that went through did, and how much of the receipt's events and payments are its: each step's come after those of the steps before it, so the counts say where each starts.",
+    category = "Chain",
+    see_also = "CommittedOutcome, Tx::Batch",
+)]
+#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+pub struct StepOutcome {
+    #[document(summary = "What it did.")]
+    pub effect: StepEffect,
+    #[document(summary = "How many of the receipt's events it emitted.")]
+    pub events: u32,
+    #[document(summary = "How many of the receipt's payments its contracts made.")]
+    pub payments: u32,
+}
+
+#[document(
+    summary = "What a batch's step did: what a transaction a batch may hold can do.",
+    category = "Chain",
+    see_also = "StepOutcome",
+)]
+#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum StepEffect {
+    #[document(summary = "A transfer, burn, name or claim went through.")]
+    #[wincode(tag = 0)]
+    Done,
+    #[document(summary = "A contract was deployed at this address.")]
+    #[wincode(tag = 1)]
+    Deployed(Address),
+    #[document(summary = "A contract call returned these values.")]
+    #[wincode(tag = 2)]
+    Returned(Vec<TxCallArgumentType>),
+    #[document(summary = "The contract at this address runs new code.")]
+    #[wincode(tag = 3)]
+    Upgraded(Address),
+}
+
+impl StepEffect {
+    #[document(parent = "StepEffect", summary = "The same thing as a whole transaction's outcome, for what describes one either way.")]
+    pub fn outcome(&self) -> CommittedOutcome {
+        match self {
+            StepEffect::Done => CommittedOutcome::Done,
+            StepEffect::Deployed(address) => CommittedOutcome::Deployed(*address),
+            StepEffect::Returned(values) => CommittedOutcome::Returned(values.clone()),
+            StepEffect::Upgraded(address) => CommittedOutcome::Upgraded(*address),
+        }
+    }
+}
+
+impl CommittedOutcome {
+    #[document(parent = "CommittedOutcome", summary = "Whether the transaction failed: it undid all it did, and paid its fee.")]
+    pub fn failed(&self) -> bool {
+        matches!(self, CommittedOutcome::Failed | CommittedOutcome::BatchFailed { .. })
+    }
 }
 
 impl CommittedReceipt {

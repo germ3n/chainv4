@@ -22,6 +22,7 @@ mod metamask;
 #[cfg(feature = "mining")]
 mod miner;
 mod node;
+mod steps;
 mod theme;
 mod updates;
 mod vault;

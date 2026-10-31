@@ -53,6 +53,23 @@ pub fn of(tx: &TxView, outcome: Option<&Outcome>) -> Vec<Hop> {
         return outcome.trace.hops.clone();
     }
 
+    // A batch with no contract to trace: a hop for each step, and its error on the one it stopped at.
+    if let Some(steps) = tx.steps().filter(|_| tx.kind() != "approve_multisig") {
+        return steps
+            .iter()
+            .enumerate()
+            .flat_map(|(index, step)| {
+                let mut hops = of(&TxView { tx: step.clone(), receipt: None, ..tx.clone() }, None);
+
+                if let Some(hop) = hops.first_mut().filter(|_| outcome.is_some_and(|outcome| outcome.failed_step == Some(index as u32))) {
+                    hop.error = outcome.and_then(|outcome| outcome.error.clone());
+                }
+
+                hops
+            })
+            .collect();
+    }
+
     let field = |name: &str| tx.tx.get(name).and_then(Value::as_str).unwrap_or_default().to_string();
     let error = outcome.and_then(|outcome| outcome.error.clone());
     let (kind, to, function, value) = match tx.kind() {

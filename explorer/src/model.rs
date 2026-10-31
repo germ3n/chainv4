@@ -275,6 +275,36 @@ impl TxView {
     pub fn target(&self) -> Option<&str> {
         ["to", "contract", "voter"].iter().find_map(|field| self.tx.get(field).and_then(Value::as_str))
     }
+
+    /// A batch's steps, its own or the one a multisig sends or a member approves: None for
+    /// anything else.
+    pub fn steps(&self) -> Option<&[Value]> {
+        steps_of(&self.tx)
+    }
+}
+
+/// The steps of a transaction's batch, as the node writes one.
+pub fn steps_of(tx: &Value) -> Option<&[Value]> {
+    match tx.get("type").and_then(Value::as_str)? {
+        "batch" => tx.get("steps")?.as_array().map(Vec::as_slice),
+        "multisig" | "approve_multisig" => steps_of(tx.get("tx")?),
+        _ => None,
+    }
+}
+
+/// What one step of a batch that went through did: as a whole transaction's outcome says it, and
+/// how many of the receipt's events and payments are its.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct StepView {
+    pub status: String,
+    #[serde(default)]
+    pub contract: Option<String>,
+    #[serde(default)]
+    pub values: Vec<Argument>,
+    #[serde(default)]
+    pub events: u32,
+    #[serde(default)]
+    pub payments: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -311,6 +341,28 @@ pub struct Outcome {
     pub kind: Option<String>,
     #[serde(default)]
     pub kind_version: Option<u64>,
+    /// What each step did, for a batch that went through.
+    #[serde(default)]
+    pub steps: Vec<StepView>,
+    /// Which step stopped a batch that failed, counted from 0.
+    #[serde(default)]
+    pub failed_step: Option<u32>,
+}
+
+impl Outcome {
+    /// What came of a batch's step, in a word, and what it did if it stands. What a later step
+    /// undid or never reached says so.
+    pub fn of_step(&self, index: usize) -> (&str, Option<&StepView>) {
+        match self.failed_step.map(|failed| (index as u32).cmp(&failed)) {
+            Some(std::cmp::Ordering::Less) => ("undone", None),
+            Some(std::cmp::Ordering::Equal) => ("failed", None),
+            Some(std::cmp::Ordering::Greater) => ("not run", None),
+            None => match self.steps.get(index) {
+                Some(step) => (step.status.as_str(), Some(step)),
+                None => ("?", None),
+            },
+        }
+    }
 }
 
 /// Coin a contract paid while a transaction ran.

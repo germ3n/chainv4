@@ -313,6 +313,16 @@ pub enum Tx {
     )]
     #[wincode(tag = 25)]
     HandDirectory { to: Option<Address> },
+    #[document(
+        summary = "Several steps under one signature, one nonce and one fee offer, all or nothing: any step failing undoes every step, and the fee is charged as for any failed transaction. The steps share one fuel limit, each drawing on what those before it left. It holds what a user does, a transfer, contract call, EVM call, deploy, upgrade, name, primary name, burn or claim, each sent by the batch's sender. A multisig may send one, through Tx::Multisig.",
+        params = { steps = "What it does, in order: 1 to MAX_BATCH_STEPS of them." },
+        see_also = "MAX_BATCH_STEPS, batch_deploy_nonce, StepOutcome, Tx::Multisig",
+    )]
+    #[wincode(tag = 26)]
+    Batch {
+        #[wincode(with = "BatchSteps")]
+        steps: Vec<Tx>,
+    },
 }
 
 #[document(
@@ -321,6 +331,62 @@ pub enum Tx {
     see_also = "Tx::Claim",
 )]
 pub const MAX_CLAIM_PATH: usize = 64;
+
+#[document(
+    summary = "The most steps a batch may hold, 32. More does not decode, and a transaction holding more never verifies.",
+    category = "Transactions",
+    see_also = "Tx::Batch",
+)]
+pub const MAX_BATCH_STEPS: usize = 32;
+
+#[document(
+    summary = "The nonce a deploy in a batch is made at, which is what its address is worked out from: the batch's own for its first deploy, so one deploy lands where it would alone, and for each later one a number no account's nonce ever reaches, with the top bit set, then the batch's nonce, then how many deploys came before it. Every engine's address comes from it as from any nonce: contract_address for a native contract, create_address for an EVM one.",
+    params = {
+        nonce = "The batch's nonce.",
+        before = "How many of the batch's steps before this one are deploys, of either engine.",
+    },
+    category = "Transactions",
+    see_also = "Tx::Batch, contract_address, create_address",
+)]
+pub const fn batch_deploy_nonce(nonce: u64, before: u32) -> u64 {
+    match before {
+        0 => nonce,
+        before => (1 << 63) | (nonce << 5) | (before as u64 & 31),
+    }
+}
+
+// How deep the transactions being decoded on this thread are: bytes choose how deep they nest, and
+// each level is a stack frame, so it is the decoder that must stop them.
+thread_local! {
+    static NESTING: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// The deepest a transaction nests when it decodes: a multisig's batch's steps, two below the
+/// outermost. The deepest any valid one goes, and what verifying refuses of them it refuses with
+/// the transaction in hand, its depth bounded.
+const MAX_NESTING: u8 = 2;
+
+/// One level of nesting being decoded, given back however decoding it ends.
+struct Nesting;
+
+impl Nesting {
+    fn enter() -> wincode::ReadResult<Nesting> {
+        NESTING.with(|depth| match depth.get() < MAX_NESTING {
+            true => {
+                depth.set(depth.get() + 1);
+
+                Ok(Nesting)
+            }
+            false => Err(wincode::error::ReadError::Custom("a transaction nested too deep")),
+        })
+    }
+}
+
+impl Drop for Nesting {
+    fn drop(&mut self) {
+        NESTING.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
 
 /// Encodes a transaction inside another, as a multisig's: its own encoding, with no size known
 /// ahead, which a type holding itself could not tell without asking itself.
@@ -344,7 +410,62 @@ unsafe impl<'de, C: wincode::config::Config> SchemaRead<'de, C> for Nested {
     type Dst = Box<Tx>;
 
     fn read(reader: impl wincode::io::Reader<'de>, dst: &mut std::mem::MaybeUninit<Box<Tx>>) -> wincode::ReadResult<()> {
+        let _nesting = Nesting::enter()?;
+
         dst.write(Box::new(<Tx as SchemaRead<'de, C>>::get(reader)?));
+
+        Ok(())
+    }
+}
+
+/// Encodes a batch's steps as a list of transactions, each as Nested does one. A list longer than
+/// a batch holds does not decode, whatever its length says, and nothing is set aside for it first.
+pub struct BatchSteps;
+
+// SAFETY: size_of is exactly what write writes: the list's length, then each step's own encoding.
+unsafe impl<C: wincode::config::Config> SchemaWrite<C> for BatchSteps {
+    type Src = Vec<Tx>;
+
+    fn size_of(src: &Vec<Tx>) -> wincode::WriteResult<usize> {
+        let mut size = <C::LengthEncoding as wincode::len::SeqLen<C>>::write_bytes_needed(src.len())?;
+
+        for step in src {
+            size += <Tx as SchemaWrite<C>>::size_of(step)?;
+        }
+
+        Ok(size)
+    }
+
+    fn write(mut writer: impl wincode::io::Writer, src: &Vec<Tx>) -> wincode::WriteResult<()> {
+        <C::LengthEncoding as wincode::len::SeqLen<C>>::write(writer.by_ref(), src.len())?;
+
+        for step in src {
+            <Tx as SchemaWrite<C>>::write(writer.by_ref(), step)?;
+        }
+
+        Ok(())
+    }
+}
+
+// SAFETY: read initializes dst before it returns Ok, from the steps' own encodings.
+unsafe impl<'de, C: wincode::config::Config> SchemaRead<'de, C> for BatchSteps {
+    type Dst = Vec<Tx>;
+
+    fn read(mut reader: impl wincode::io::Reader<'de>, dst: &mut std::mem::MaybeUninit<Vec<Tx>>) -> wincode::ReadResult<()> {
+        let _nesting = Nesting::enter()?;
+        let count = <C::LengthEncoding as wincode::len::SeqLen<C>>::read(reader.by_ref())?;
+
+        if count > MAX_BATCH_STEPS {
+            return Err(wincode::error::ReadError::Custom("a batch of more steps than one holds"));
+        }
+
+        let mut steps = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            steps.push(<Tx as SchemaRead<'de, C>>::get(reader.by_ref())?);
+        }
+
+        dst.write(steps);
 
         Ok(())
     }
@@ -435,7 +556,7 @@ pub enum TxCallArgumentType {
 impl Verifiable for Tx {
     #[document(
         parent = "Tx",
-        summary = "Checks every address and argument inside, that a transfer, mint or burn moves more than zero, that a contract call names its function by XXH3-64, and that a name transaction's name and what it sets could be a name's. A contract call may send zero.",
+        summary = "Checks every address and argument inside, that a transfer, mint or burn moves more than zero, that a contract call names its function by XXH3-64, that a name transaction's name and what it sets could be a name's, and that a batch holds 1 to MAX_BATCH_STEPS steps, each of a kind a batch may hold and each checked likewise. A contract call may send zero.",
         see_also = "VerifyError, Hasher::digest",
     )]
     fn verify(&self) -> Result<(), VerifyError> {
@@ -538,6 +659,17 @@ impl Verifiable for Tx {
                     false => Err(VerifyError::BadClaim),
                 }
             }
+            Tx::Batch { steps } => {
+                if steps.is_empty() || steps.len() > MAX_BATCH_STEPS {
+                    return Err(VerifyError::BatchSize);
+                }
+
+                if !steps.iter().all(Tx::fits_a_batch) {
+                    return Err(VerifyError::BatchStep);
+                }
+
+                steps.iter().try_for_each(Verifiable::verify)
+            }
             // The signatures are checked when it runs, against the chain's genesis id.
             Tx::Slash { first, second } => {
                 if !first.vote.conflicts(&second.vote) {
@@ -551,13 +683,27 @@ impl Verifiable for Tx {
 }
 
 /// A multisig's transaction comes from a multisig, and does what a key's account could: nothing
-/// another multisig's, no approval of one, nothing one key signs for Ethereum.
+/// another multisig's, no approval of one, nothing one key signs for Ethereum. A batch of its own
+/// takes from nobody else, whether it is sent or only approved.
 fn multisig_inner(account: &Address, tx: &Tx) -> Result<(), VerifyError> {
     if !matches!(account, Address::Multisig(_)) || matches!(tx, Tx::Multisig { .. } | Tx::ApproveMultisig { .. } | Tx::WithdrawMultisig { .. } | Tx::Ethereum { .. }) {
         return Err(VerifyError::BadMultisig);
     }
 
-    tx.verify()
+    tx.verify()?;
+
+    match tx {
+        Tx::Batch { steps } => steps_from(steps, account),
+        _ => Ok(()),
+    }
+}
+
+/// Whether every step that says whom it takes from takes from this sender.
+fn steps_from(steps: &[Tx], sender: &Address) -> Result<(), VerifyError> {
+    match steps.iter().all(|step| !matches!(step, Tx::Transfer { from, .. } | Tx::Burn { from, .. } if from != sender)) {
+        true => Ok(()),
+        false => Err(VerifyError::NotSender),
+    }
 }
 
 fn nonzero(amount: &Amount) -> Result<(), VerifyError> {
@@ -610,6 +756,67 @@ impl Verifiable for TxCallArgumentType {
 
 impl Hashable for Tx {
     const TAG_LEN: usize = 1;
+}
+
+impl Tx {
+    /// Whether a batch may hold this kind: what a user does, and nothing with a signature or a
+    /// nonce of its own, nothing that changes who validates or governs, and no batch. Every kind is
+    /// listed, so a new one has to decide.
+    fn fits_a_batch(&self) -> bool {
+        match self {
+            Tx::Transfer { .. }
+            | Tx::ContractCall { .. }
+            | Tx::EvmCall { .. }
+            | Tx::Deploy { .. }
+            | Tx::Upgrade { .. }
+            | Tx::Name { .. }
+            | Tx::PrimaryName { .. }
+            | Tx::Burn { .. }
+            | Tx::Claim { .. } => true,
+            Tx::Mint { .. }
+            | Tx::Bond { .. }
+            | Tx::Unbond { .. }
+            | Tx::Withdraw { .. }
+            | Tx::Slash { .. }
+            | Tx::ApproveSigners { .. }
+            | Tx::WithdrawApproval { .. }
+            | Tx::ApproveChange { .. }
+            | Tx::WithdrawChange { .. }
+            | Tx::Ethereum { .. }
+            | Tx::Multisig { .. }
+            | Tx::CreateMultisig { .. }
+            | Tx::ChangeMultisig { .. }
+            | Tx::ApproveMultisig { .. }
+            | Tx::WithdrawMultisig { .. }
+            | Tx::SetDirectory { .. }
+            | Tx::HandDirectory { .. }
+            | Tx::Batch { .. } => false,
+        }
+    }
+
+    #[document(
+        parent = "Tx",
+        summary = "The steps of the batch this runs or asks to run: its own, a multisig's it carries, or one a member's approval names. None for anything else.",
+    )]
+    pub fn batch_steps(&self) -> Option<&[Tx]> {
+        match self {
+            Tx::Batch { steps } => Some(steps),
+            Tx::Multisig { tx, .. } | Tx::ApproveMultisig { tx, .. } => tx.batch_steps(),
+            _ => None,
+        }
+    }
+
+    #[document(
+        parent = "Tx",
+        summary = "What it does, one transaction at a time: a batch's steps, a multisig's transaction's, or the transaction itself.",
+    )]
+    pub fn what_it_runs(&self) -> &[Tx] {
+        match self {
+            Tx::Batch { steps } => steps,
+            Tx::Multisig { tx, .. } => tx.what_it_runs(),
+            tx => std::slice::from_ref(tx),
+        }
+    }
 }
 
 impl TxCallArgumentType {
@@ -791,7 +998,7 @@ fn signing_bytes(tx: &Tx, nonce: u64, fee: &FeeOffer, signer: &PublicKey) -> Vec
 impl Verifiable for SignedTx {
     #[document(
         parent = "SignedTx",
-        summary = "Checks the transaction itself, the signer's key, the signature, and that a transfer or burn only takes from the sender. Whether the nonce is the next one depends on chain state, so the executor checks that.",
+        summary = "Checks the transaction itself, the signer's key, the signature, and that a transfer or burn, or any batch's step that is one, only takes from the sender. Whether the nonce is the next one depends on chain state, so the executor checks that.",
         see_also = "Tx::verify, VerifyError::NotSender",
     )]
     fn verify(&self) -> Result<(), VerifyError> {
@@ -814,7 +1021,7 @@ impl Verifiable for SignedTx {
 impl SignedTx {
     #[document(
         parent = "SignedTx",
-        summary = "Checks it as verify does, on a chain: chainv4's own signatures as verify checks them, and an EIP-712 one over the transaction's typed hash under this chain's domain (crypto::eip712), so one signed for another chain does not hold here. Every node's check of a transaction is this one.",
+        summary = "Checks it as verify does, on a chain: chainv4's own signatures as verify checks them, and an EIP-712 one over the transaction's typed hash under this chain's domain (crypto::eip712), so one signed for another chain does not hold here; nothing that holds a batch holds under EIP-712, which would show its signer an opaque hash. Every node's check of a transaction is this one.",
         params = { genesis = "The chain's genesis id, which an EIP-712 signature is bound to." },
     )]
     pub fn verify_on(&self, genesis: &crate::structs::hash::Hash) -> Result<(), VerifyError> {
@@ -833,6 +1040,10 @@ impl SignedTx {
 
         #[cfg(feature = "secp256k1")]
         if let Signature::Secp256k1Eip712(signature) = &self.signature {
+            if self.tx.batch_steps().is_some() {
+                return Err(VerifyError::BatchNotTyped);
+            }
+
             self.tx.verify()?;
             self.signer.verify()?;
             let key = match &self.signer {
@@ -864,10 +1075,14 @@ impl SignedTx {
             keypair = "The sender's keys: secp256k1, Ethereum's, alone sign typed data.",
             genesis = "The chain's genesis id, which the signature is bound to.",
         },
-        returns = "The signed transaction, or None for a key of another scheme.",
+        returns = "The signed transaction, or None for a key of another scheme, or for a batch, which holds under chainv4's own signature alone.",
     )]
     #[cfg(feature = "secp256k1")]
     pub fn sign_eip712(tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair, genesis: &crate::structs::hash::Hash) -> Option<SignedTx> {
+        if tx.batch_steps().is_some() {
+            return None;
+        }
+
         let secret = match keypair.private() {
             crate::crypto::keypair::PrivateKey::Secp256k1(secret) => secret,
             #[allow(unreachable_patterns)]
@@ -908,7 +1123,7 @@ impl SignedTx {
         })
     }
 
-    /// Whether a transfer or burn takes from its sender alone.
+    /// Whether a transfer or burn takes from its sender alone, a batch's steps as much as any.
     fn check_sender(&self) -> Result<(), VerifyError> {
         let tx = match &self.tx {
             Tx::Multisig { tx, .. } => tx,
@@ -917,10 +1132,28 @@ impl SignedTx {
 
         match tx {
             Tx::Transfer { from, .. } | Tx::Burn { from, .. } if *from != self.sender() => Err(VerifyError::NotSender),
+            Tx::Batch { steps } => steps_from(steps, &self.sender()),
             _ => Ok(()),
         }
+    }
+
+    #[document(
+        parent = "SignedTx",
+        summary = "Why a batch, its own or the one a multisig's transaction carries, could not run as its sender's: what verify refuses of it, signature aside, for what checks one before any is made, as a dry run and a signer do.",
+        returns = "The rule it breaks; None for one that breaks none, or for anything but a batch.",
+    )]
+    pub fn batch_problem(&self) -> Option<VerifyError> {
+        let batch = match &self.tx {
+            Tx::Batch { .. } => &self.tx,
+            Tx::Multisig { tx, .. } if matches!(**tx, Tx::Batch { .. }) => tx,
+            _ => return None,
+        };
+
+        batch.verify().err().or_else(|| self.check_sender().err())
     }
 }
 
 impl Hashable for SignedTx {}
 
+#[cfg(test)]
+mod tests;

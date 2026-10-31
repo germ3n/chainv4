@@ -346,6 +346,8 @@ pub struct Described {
     pub nonce: u64,
     /// Everything the transaction holds, for any kind the page lays out no better.
     pub everything: String,
+    /// Each step, for a batch, or a member's approval of one.
+    pub steps: Option<crate::steps::Steps>,
 }
 
 /// Lays a request out for the signer to read.
@@ -374,6 +376,12 @@ pub fn describe(request: &Request) -> Described {
         Tx::SetDirectory { .. } => ("Set the chain's directory".to_string(), None, None, None),
         Tx::HandDirectory { to: Some(to) } => ("Hand the directory's admin role on".to_string(), None, Some(to.to_string()), None),
         Tx::HandDirectory { to: None } => ("Renounce the directory's admin role, for good".to_string(), None, None, None),
+        // A token the sender could only name for one: in a batch, its whole units as signed.
+        Tx::Batch { steps } => {
+            let laid = crate::steps::of(steps, coin, &|_| None, None);
+
+            (format!("A batch of {} step{}", steps.len(), if steps.len() == 1 { "" } else { "s" }), Some(laid.total), None, None)
+        }
         other => (format!("{} transaction", variant(other)), None, None, None),
     };
 
@@ -387,11 +395,24 @@ pub fn describe(request: &Request) -> Described {
         gas: format!("{} gas at up to {} per gas", request.fee.gas_limit, format::amount(&request.fee.max_price.to_string(), coin.decimals, &coin.symbol)),
         nonce: request.nonce,
         everything: format!("{:#?}", request.tx),
+        steps: request.tx.batch_steps().map(|steps| crate::steps::of(steps, coin, &|_| None, None)),
     }
 }
 
+/// Why the chain would refuse a batch a request or a bundle holds, if it would: said as soon as it
+/// is read, as a batch that could never land is no one's to sign. What it is sent as is checked with
+/// it, for the steps that say whom they take from.
+pub fn refused(request: &Request) -> Option<String> {
+    request.tx.batch_steps()?;
+
+    let signed = probe(request.tx.clone(), request.nonce, request.signer);
+    let held = signed.batch_problem().or_else(|| signed.tx.verify().err());
+
+    held.map(|why| format!("The chain would refuse this batch: {why}."))
+}
+
 /// What a name transaction does, in a few words.
-fn name_kind(action: &NameAction) -> String {
+pub(crate) fn name_kind(action: &NameAction) -> String {
     match action {
         NameAction::Register { .. } => "Register a name",
         NameAction::Renew { .. } => "Renew a name",
@@ -405,7 +426,7 @@ fn name_kind(action: &NameAction) -> String {
 
 /// The name, without the chain's suffix, and what the action sets of it: the signer cannot know
 /// the price a registration burns, which the chain charges as it runs.
-fn name_detail(name: &str, action: &NameAction) -> String {
+pub(crate) fn name_detail(name: &str, action: &NameAction) -> String {
     match action {
         NameAction::Register { years } | NameAction::Renew { years } => format!("{name}, for {years} year{}", if *years == 1 { "" } else { "s" }),
         NameAction::Transfer { to } => format!("{name}, to {to}"),
@@ -425,7 +446,7 @@ fn is_token_transfer(func: &chainv4::structs::hash::Hash, value: u256, data: &[T
 }
 
 /// A transaction's kind, as its type names it: Bond, Deploy, and so on.
-fn variant(tx: &Tx) -> String {
+pub(crate) fn variant(tx: &Tx) -> String {
     let debug = format!("{tx:?}");
 
     debug.split([' ', '{', '(']).next().unwrap_or("A").to_string()

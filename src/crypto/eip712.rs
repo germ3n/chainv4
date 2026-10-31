@@ -9,6 +9,9 @@
 //! - **`TokenTransfer`:** token, to, amount, nonce and fee, for the token standard's transfer call.
 //! - **`Transaction`:** its kind and encoded bytes, nonce and fee, for every other.
 //!
+//! A batch has no typed form anyone may sign: as `Transaction` it would show one opaque hash for all
+//! its steps, so a signature over one never holds (SignedTx::verify_on), and the apps do not ask.
+//!
 //! Each form maps back to one transaction alone: a transfer whose amount could be narrower, read
 //! as Transfer, would sign the same as the narrow one under another id, so it goes as Transaction.
 //! Addresses are their text, `ed25519:0x…`, as EIP-712's own address type holds Ethereum's alone.

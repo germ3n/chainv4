@@ -257,6 +257,10 @@ hour. An older node answers 404, and the explorer shows nothing.
 **Faucet,** under Tools, on a node that runs a [faucet](faucet.md): coins for an address, an
 Ethereum `0x…` or a name, its proof of work worked out a slice a frame.
 
+A transaction that is a [batch](chain.md#batches) lists every step under What it asked, numbered, with
+what came of it: what it returned or deployed and how many events and payments are its, or undone,
+failed with why, or not run. Its hops are its trace, or a step each with no contract to trace.
+
 ## Tools
 
 The Tools page, under Tools in the sidebar and in More on a phone, has four tabs. All but
@@ -348,6 +352,8 @@ with `GET /multisig/{address}`. Anything else answers 404, and the page says it 
   contract and owners, where every member names keys there.
 
 A multisig's account page links here. As the node says it: nothing on the page is proven.
+
+A multisig's [batch](multisig.md#a-batch), proposed or sent, shows its steps as any batch does.
 
 ## Names
 

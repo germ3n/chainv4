@@ -9,6 +9,7 @@ use {
 /// The pages More lists, with what each is for. The sidebar lists these too: a test keeps the two
 /// the same.
 pub const PAGES: &[(Page, &str, &str)] = &[
+    (Page::Batch, "Batch", "Several steps as one transaction, all or nothing"),
     #[cfg(feature = "nft")]
     (Page::Nfts, "NFTs", "What this account holds of collections"),
     (Page::Names, "Names", "Register and manage names like alice.dev"),

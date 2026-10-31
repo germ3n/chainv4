@@ -38,6 +38,7 @@ mod claim;
 pub(crate) mod multisig;
 #[cfg(feature = "client")]
 mod send;
+mod batch;
 #[cfg(all(feature = "client", feature = "swap"))]
 mod swap;
 #[cfg(feature = "updates")]

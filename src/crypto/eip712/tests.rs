@@ -169,3 +169,41 @@ fn a_transaction_signed_as_typed_data_holds_on_its_chain_and_nowhere_else() {
 
     assert!(SignedTx::sign_eip712(theirs_from, 0, fee, &key, &ours).unwrap().verify_on(&ours).is_err());
 }
+
+#[test]
+fn a_batch_never_holds_under_a_typed_signature_which_would_show_an_opaque_hash() {
+    use crate::crypto::keypair::Signature;
+    use crate::crypto::verifiable::VerifyError;
+    use crate::structs::tx::SignedTx;
+
+    let key = Keypair::generate(KeyType::Secp256k1).unwrap();
+    let me = key.public().address();
+    let genesis = Hash::zero(HashType::default_chain());
+    let batch = Tx::Batch { steps: vec![Tx::Transfer { from: me, to: Address::Ed25519([1; 32]), amount: Amount::U128(1) }] };
+
+    assert_eq!(SignedTx::sign_eip712(batch.clone(), 0, FeeOffer::NONE, &key, &genesis), None, "nothing to sign it with");
+
+    // Whoever made the digest and signed it some other way: the chain still refuses it.
+    let secret = match key.private() {
+        crate::crypto::keypair::PrivateKey::Secp256k1(secret) => secret,
+        #[allow(unreachable_patterns)]
+        _ => unreachable!(),
+    };
+    let forged = |tx: Tx| {
+        let digest = transaction_digest(&tx, 0, &FeeOffer::NONE, &genesis);
+
+        SignedTx { tx, nonce: 0, fee: FeeOffer::NONE, signer: key.public(), signature: Signature::Secp256k1Eip712(secp256k1::sign_hash(secret, &digest)) }
+    };
+
+    assert_eq!(forged(batch.clone()).verify_on(&genesis), Err(VerifyError::BatchNotTyped));
+
+    // A multisig's, carried or approved, the same.
+    let account = Address::Multisig([6; 32]);
+    let its = Tx::Batch { steps: vec![Tx::Burn { from: account, amount: Amount::U128(1) }] };
+
+    assert_eq!(forged(Tx::Multisig { account, tx: Box::new(its.clone()), signatures: Vec::new() }).verify_on(&genesis), Err(VerifyError::BatchNotTyped));
+    assert_eq!(forged(Tx::ApproveMultisig { account, nonce: 0, fee: FeeOffer::NONE, tx: Box::new(its) }).verify_on(&genesis), Err(VerifyError::BatchNotTyped));
+
+    // Under chainv4's own signature, the same key sends it.
+    assert_eq!(SignedTx::sign(batch, 0, FeeOffer::NONE, &key).verify_on(&genesis), Ok(()));
+}

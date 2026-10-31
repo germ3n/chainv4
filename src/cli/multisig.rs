@@ -171,6 +171,7 @@ pub fn multisig(args: MultisigArgs) -> CliResult<()> {
         MultisigAction::Show { account } => show(&agent, &node, &account),
         MultisigAction::Sign { bundle: path, submit } => {
             let mut bundle = read(&path)?;
+            list_steps(&bundle.body.tx);
             bundle.sign(&keypair);
             write(&path, &bundle)?;
             println!("signed as {}: {} signature{} now", keypair.public(), bundle.signatures.len(), plural(bundle.signatures.len()));
@@ -183,6 +184,7 @@ pub fn multisig(args: MultisigArgs) -> CliResult<()> {
         MultisigAction::Approve { bundle: path } => {
             let bundle = read(&path)?;
             let body = &bundle.body;
+            list_steps(&body.tx);
             let approval = Tx::ApproveMultisig { account: body.account, nonce: body.nonce, fee: body.fee, tx: Box::new(body.tx.clone()) };
             println!("approving {} of {} on chain", body.id(&bundle.genesis), body.account);
             send_own(&agent, &node, &keypair, approval, timeout)?;
@@ -223,6 +225,7 @@ pub(super) fn propose(args: SendArgs, account: Address) -> CliResult<()> {
     let nonce = multisig["nonce"].as_u64().ok_or("the node sent no nonce")?;
     let threshold = multisig["threshold"].as_u64().ok_or("the node sent no threshold")? as usize;
     let tx = transaction(args.tx, account, &agent, node)?;
+    list_steps(&tx);
 
     // The probe carries as many signatures as the quorum will, so it costs what the real one will.
     let mut sized = MultisigBundle { genesis, body: MultisigBody { account, tx: tx.clone(), nonce, fee: FeeOffer::NONE }, signatures: Vec::new() };
@@ -344,6 +347,19 @@ fn show(agent: &Agent, node: &str, account: &Address) -> CliResult<()> {
     }
 
     Ok(())
+}
+
+/// A batch's steps, each as the API writes it, before a member's key goes on them: what it agrees to.
+fn list_steps(tx: &Tx) {
+    let Some(steps) = tx.batch_steps() else {
+        return;
+    };
+
+    println!("a batch of {} steps, all or nothing:", steps.len());
+
+    for (place, step) in steps.iter().enumerate() {
+        println!("  step {}: {}", place + 1, crate::structs::json::tx(step));
+    }
 }
 
 /// The genesis id GET /status names, which members sign over.

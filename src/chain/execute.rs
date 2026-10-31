@@ -12,13 +12,13 @@ use {
     crate::structs::address::Address,
     crate::structs::code::Engine,
     crate::structs::event::Event,
-    crate::structs::receipt::Payment,
+    crate::structs::receipt::{Payment, StepEffect, StepOutcome},
     crate::structs::trace::Trace,
     crate::structs::hash::Hash,
     crate::chain::fees::{Charged, Fees, Scoring},
-    crate::structs::tx::{SignedTx, Tx, TxCallArgumentType},
+    crate::structs::tx::{SignedTx, Tx, TxCallArgumentType, batch_deploy_nonce},
     crate::structs::u256::u256,
-    crate::vm::{BlockAt, CallContext, Limits, Outcome, Vm, VmError},
+    crate::vm::{BlockAt, CallContext, Limits, MAX_EVENTS, Outcome, Vm, VmError},
     r#macro::document,
     std::fmt,
     std::sync::Arc,
@@ -162,6 +162,8 @@ pub enum Effect {
     Returned(Vec<TxCallArgumentType>),
     #[document(summary = "A governance approval decided its change, as the chain's decision-th and its kind's version-th.")]
     Decided { decision: u64, kind: crate::governance::ChangeKind, version: u64 },
+    #[document(summary = "A batch went through: what each step did, in order.")]
+    Batch(Vec<StepOutcome>),
 }
 
 #[document(
@@ -193,6 +195,18 @@ pub enum Failure {
     BondingClosed,
     #[document(summary = "A claim on a mining pool that pays nothing: see ClaimError.")]
     Claim(String),
+    #[document(summary = "A batch's step failed, which undid every step: which one, counted from 0, and why.")]
+    Step { step: u32, failure: Box<Failure> },
+}
+
+impl Failure {
+    /// What a batch's step failed of, or the failure itself: what the rules about failures go by.
+    fn cause(&self) -> &Failure {
+        match self {
+            Failure::Step { failure, .. } => failure.cause(),
+            failure => failure,
+        }
+    }
 }
 
 impl fmt::Display for Failure {
@@ -209,6 +223,7 @@ impl fmt::Display for Failure {
             Failure::NoNames => write!(f, "this chain has no names"),
             Failure::BondingClosed => write!(f, "validators bond only under FFG finality, or before a switch into it"),
             Failure::Claim(why) => write!(f, "{why}"),
+            Failure::Step { step, failure } => write!(f, "step {} failed, undoing every step: {failure}", step + 1),
         }
     }
 }
@@ -412,6 +427,11 @@ pub(crate) fn execute_authorized(
     vm: &Arc<Vm>,
     context: &BlockContext,
 ) -> Result<Executed, ExecuteError> {
+    // Refused long before here for a block, whose transactions verified; a dry run's did not.
+    if let Some(problem) = tx.batch_problem() {
+        return Err(ExecuteError::Invalid(TxError::Invalid(problem)));
+    }
+
     let sender = tx.sender();
     let accounts = Accounts::new(block);
     let expected = accounts.get(&sender)?.nonce;
@@ -452,7 +472,7 @@ pub(crate) fn execute_authorized(
     }
 
     let layer = Arc::new(State::new(block.clone()));
-    let (result, contracted) = run(&layer, tx, sender, rules, limits, vm, context);
+    let (result, contracted) = run(&layer, &tx.tx, tx.nonce, sender, rules, limits, vm, context);
     let Contracted {
         fuel_used,
         mut events,
@@ -461,7 +481,7 @@ pub(crate) fn execute_authorized(
     } = contracted;
 
     // A failing database is the node's fault, never the transaction's.
-    match &result {
+    match result.as_ref().map_err(Failure::cause) {
         Err(Failure::Registry(RegistryError::Db(err)))
         | Err(Failure::Contract(VmError::Storage(err)))
         | Err(Failure::Registry(RegistryError::Vm(VmError::Storage(err)))) => return Err(ExecuteError::Db(err.clone())),
@@ -469,8 +489,9 @@ pub(crate) fn execute_authorized(
         Err(_) => {}
     }
 
-    // Running out of fuel uses all it was allowed, whatever the engine counted at the stop.
-    let burned = match &result {
+    // Running out of fuel uses all it was allowed, whatever the engine counted at the stop. A
+    // batch's step that does has used all the batch was: the steps share one limit.
+    let burned = match result.as_ref().map_err(Failure::cause) {
         Err(Failure::Contract(VmError::OutOfFuel)) | Err(Failure::Registry(RegistryError::Vm(VmError::OutOfFuel))) => limits.fuel,
         _ => fuel_used,
     };
@@ -642,9 +663,68 @@ fn refreshed(
     (Ok(Effect::Returned(returned)), contracted)
 }
 
+/// Runs a batch's steps in order on one layer, which the caller keeps only if all of them went
+/// through: so each sees what those before it did, and any failing undoes them all. They share one
+/// budget: each is given what the steps before it left of the transaction's fuel, never its own,
+/// and what they emit together keeps to what one call may. Their memory limit needs no sharing:
+/// what a step's engine held is gone before the next starts, so no moment holds more than the
+/// limit.
+#[allow(clippy::too_many_arguments)]
+fn batch(
+    layer: &Arc<State>,
+    steps: &[Tx],
+    nonce: u64,
+    sender: Address,
+    rules: &Rules,
+    limits: Limits,
+    vm: &Arc<Vm>,
+    context: &BlockContext,
+) -> (Result<Effect, Failure>, Contracted) {
+    let mut all = Contracted::default();
+    let mut outcomes = Vec::with_capacity(steps.len());
+    let mut deploys = 0;
+
+    for (index, step) in steps.iter().enumerate() {
+        let failed = |failure| Failure::Step { step: index as u32, failure: Box::new(failure) };
+        let at = match step {
+            Tx::Deploy { .. } => batch_deploy_nonce(nonce, deploys),
+            _ => nonce,
+        };
+        deploys += u32::from(matches!(step, Tx::Deploy { .. }));
+        let left = Limits { fuel: limits.fuel.saturating_sub(all.fuel_used), ..limits };
+        let (result, contracted) = run(layer, step, at, sender, rules, left, vm, context);
+        let (events, payments) = (contracted.events.len() as u32, contracted.payments.len() as u32);
+
+        all.fuel_used = all.fuel_used.saturating_add(contracted.fuel_used);
+        all.events.extend(contracted.events);
+        all.payments.extend(contracted.payments);
+        all.trace.append(contracted.trace);
+
+        let effect = match result {
+            Ok(Effect::Done) => StepEffect::Done,
+            Ok(Effect::Deployed(address)) => StepEffect::Deployed(address),
+            Ok(Effect::Returned(values)) => StepEffect::Returned(values),
+            Ok(Effect::Upgraded(address)) => StepEffect::Upgraded(address),
+            // Nothing a batch holds comes to these: if one ever did, the batch stops, not the chain.
+            Ok(Effect::Decided { .. } | Effect::Batch(_)) => return (Err(failed(Failure::Contract(VmError::Runtime("a step did what no step may".to_string())))), all),
+            Err(failure) => return (Err(failed(failure)), all),
+        };
+
+        if all.events.len() > MAX_EVENTS {
+            return (Err(failed(Failure::Contract(VmError::Runtime(format!("a batch's steps emit at most {MAX_EVENTS} events together"))))), all);
+        }
+
+        outcomes.push(StepOutcome { effect, events, payments });
+    }
+
+    (Ok(Effect::Batch(outcomes)), all)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run(
     layer: &Arc<State>,
-    signed: &SignedTx,
+    tx: &Tx,
+    nonce: u64,
     sender: Address,
     rules: &Rules,
     limits: Limits,
@@ -663,11 +743,12 @@ fn run(
         (moved(run(&Validators::new(layer), finality, epoch)), Contracted::default())
     };
 
-    match &signed.tx {
+    match tx {
         // A multisig's own transaction runs as the multisig, its backing checked before.
-        Tx::Multisig { tx, .. } => run(layer, &SignedTx { tx: (**tx).clone(), ..signed.clone() }, sender, rules, limits, vm, context),
+        Tx::Multisig { tx, .. } => run(layer, tx, nonce, sender, rules, limits, vm, context),
+        Tx::Batch { steps } => batch(layer, steps, nonce, sender, rules, limits, vm, context),
         Tx::CreateMultisig { members, threshold, testnet } => {
-            let address = crate::structs::address::multisig_address(&sender, signed.nonce, rules.hash);
+            let address = crate::structs::address::multisig_address(&sender, nonce, rules.hash);
             let policy = MultisigPolicy { members: members.clone(), threshold: *threshold, testnet: *testnet };
 
             match Multisigs::new(layer).create(&address, policy) {
@@ -759,13 +840,13 @@ fn run(
         }
         #[cfg(feature = "evm")]
         Tx::Deploy { code: crate::structs::code::Code::Evm(init) } if vm.runs_evm() => {
-            evm(layer, vm, signed, sender, rules, limits, context, crate::vm::evm::EvmAction::Create { init: init.clone(), value: u256::ZERO }, &[])
+            evm(layer, vm, nonce, sender, rules, limits, context, crate::vm::evm::EvmAction::Create { init: init.clone(), value: u256::ZERO }, &[])
         }
         #[cfg(feature = "evm")]
         Tx::EvmCall { to, value, input } if vm.runs_evm() => evm(
             layer,
             vm,
-            signed,
+            nonce,
             sender,
             rules,
             limits,
@@ -785,7 +866,7 @@ fn run(
                 Some(to) => crate::vm::evm::EvmAction::Call { to: Address::Evm(to), value: ethereum.value, input: ethereum.input },
             };
 
-            evm(layer, vm, signed, sender, rules, limits, context, action, &ethereum.access_list)
+            evm(layer, vm, nonce, sender, rules, limits, context, action, &ethereum.access_list)
         }
         Tx::EvmCall { .. } | Tx::Ethereum { .. } => (Err(Failure::EngineNotAllowed(Engine::Evm)), Contracted::default()),
         Tx::Upgrade { code, .. } | Tx::Deploy { code } if code.engine() == Engine::Evm && !vm.runs_evm() => {
@@ -805,7 +886,7 @@ fn run(
                 Err(err) => return (Err(Failure::Registry(RegistryError::Db(err))), Contracted::default()),
             };
 
-            match Contracts::new(layer).deploy(vm, &sender, signed.nonce, code, limits, &standards, block_at(rules, context)) {
+            match Contracts::new(layer).deploy(vm, &sender, nonce, code, limits, &standards, block_at(rules, context)) {
                 Ok((address, hooked)) => (Ok(Effect::Deployed(address)), hooked.into()),
                 Err(failed) => failed_hooks(failed),
             }
@@ -996,7 +1077,7 @@ fn run(
 fn evm(
     layer: &Arc<State>,
     vm: &Arc<Vm>,
-    signed: &SignedTx,
+    nonce: u64,
     sender: Address,
     rules: &Rules,
     limits: Limits,
@@ -1022,7 +1103,7 @@ fn evm(
         stack: Vec::new(),
     };
 
-    match evm::run(layer, &sender, signed.nonce, action, access_list, limits.fuel / fuel_per_gas, limits.memory as u64, block, Some(&bridge)) {
+    match evm::run(layer, &sender, nonce, action, access_list, limits.fuel / fuel_per_gas, limits.memory as u64, block, Some(&bridge)) {
         Ok(ran) => {
             let contracted = Contracted {
                 fuel_used: ran.gas_used.saturating_mul(fuel_per_gas),

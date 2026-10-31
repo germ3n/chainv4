@@ -231,6 +231,11 @@ fn summary(tx: &Tx) -> String {
         Tx::ApproveMultisig { account, nonce, tx, .. } => format!("approve the multisig {account}'s transaction {nonce}: {}", summary(tx)),
         Tx::WithdrawMultisig { account, proposal } => format!("withdraw approval of {proposal} from the multisig {account}"),
         Tx::Claim { to, earned, height, .. } => format!("claim {to}'s earnings from the mining pool of block {height}, {earned} in all"),
+        Tx::Batch { steps } => {
+            let listed: Vec<String> = steps.iter().enumerate().map(|(index, step)| format!("{}. {}", index + 1, summary(step))).collect();
+
+            format!("a batch of {} steps, all or nothing: {}", steps.len(), listed.join("; "))
+        }
     }
 }
 
@@ -242,6 +247,12 @@ fn outcome(outcome: &CommittedOutcome) -> String {
         CommittedOutcome::Failed => "failed".to_string(),
         CommittedOutcome::Upgraded(address) => format!("upgraded {address}"),
         CommittedOutcome::Decided { decision, kind, version } => format!("decided governance's change {decision}, {} version {version}", kind.name()),
+        CommittedOutcome::Batch(steps) => {
+            let listed: Vec<String> = steps.iter().enumerate().map(|(index, step)| format!("{}. {}", index + 1, self::outcome(&step.effect.outcome()))).collect();
+
+            format!("{} steps done: {}", steps.len(), listed.join("; "))
+        }
+        CommittedOutcome::BatchFailed { step } => format!("step {} failed, undoing every step", step + 1),
     }
 }
 

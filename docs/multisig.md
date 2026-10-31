@@ -154,6 +154,19 @@ bonds, governance approvals, swaps, which are calls, and its own `Tx::ChangeMult
 multisig's transaction, an approval of one, or an Ethereum-signed transaction, which one key signs.
 A transfer or burn it sends moves its own coin only.
 
+## A batch
+
+A multisig may send a [batch](chain.md#batches): `Tx::Multisig { tx: Batch }`. Members approve one
+bundle, on chain or off, and all the steps run as the multisig, at its one nonce, its fee from its
+balance, all or nothing. Every step must take from the multisig, or the bundle is invalid, sent or
+approved. Never the reverse: a batch holds no multisig's transaction, and no multisig's administration
+(`CreateMultisig`, `ChangeMultisig`, `ApproveMultisig`, `WithdrawMultisig`).
+
+Build one with the wallet's Batch page by picking the multisig under Send as, or
+`chainv4 send batch --multisig multisig:0x…`. Everything that signs one lists every step first: the
+wallet's bundle, its proposals, the offline signer, and `chainv4 multisig sign` and `approve`, which
+print each before the member's key goes on it.
+
 ## Changing members
 
 `Tx::ChangeMultisig` replaces the members and threshold, checked as at creation. Only a multisig

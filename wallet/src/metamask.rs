@@ -24,6 +24,9 @@ use {
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub const CONNECT: &str = "Connect this account to the chainv4 wallet. This signs nothing that moves funds.";
 
+/// What the wallet says for a batch from an account MetaMask holds: it never asks for that signature.
+pub const NO_BATCH: &str = "MetaMask would show a batch as one opaque hash, not its steps, and the chain takes no batch signed that way. Send it from an account this wallet or the offline signer holds.";
+
 /// EIP-191's hash of a message, as MetaMask's personal_sign signs it, and the wallet's own for sites.
 pub fn personal_digest(message: &[u8]) -> [u8; 32] {
     let mut bytes = format!("\x19Ethereum Signed Message:\n{}", message.len()).into_bytes();

@@ -596,6 +596,8 @@ fn summary(ctx: &Ctx, addresses: &[String], entry: &Entry, said: Said) -> (Strin
     };
 
     match (entry.checked, entry.sent) {
+        // Its steps, each with its own amount and party, show when it is opened.
+        (Some(checked), _) if !checked.steps.is_empty() => (checked.action.clone(), when(checked), None, None),
         (Some(checked), _) => match checked.for_account(addresses).next() {
             Some((true, moved)) => {
                 let from = moved.from.as_deref().map_or_else(|| "minted".to_string(), |from| format!("from {}", format::short(from)));
@@ -696,6 +698,8 @@ fn details(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry, said: Sa
             decoded::raw(ui, &palette, "call", &call.input);
         }
 
+        super::steps::ran(ui, ctx, checked);
+
         for (incoming, moved) in checked.for_account(addresses) {
             let other = match incoming {
                 true => moved.from.as_deref().map_or_else(|| "minted".to_string(), |from| format!("from {}", format::short(from))),
@@ -771,6 +775,7 @@ mod tests {
             vote: None,
             call: None,
             logs: Vec::new(),
+            steps: Vec::new(),
         }
     }
 

@@ -3,6 +3,26 @@
 The things that surprise people, and the rules that keep every node on a chain in step. The
 other pages explain each part in full; this one is the short list to keep in mind.
 
+## Batches
+
+- **A failed batch undoes every step and still pays.** It uses its nonce and pays for the fuel its
+  steps burned, the ones undone too. Which step failed is proven with its receipt; why is not. See
+  [Batches](chain.md#batches).
+- **A batch's steps share one fuel limit.** Step 2 gets what step 1 left, across engines. A contract
+  that is expensive only at the end fails all of it, at a whole gas limit's cost when it runs out.
+- **Its deploys have their own nonces.** Only the first lands where a lone deploy at that nonce would;
+  work out the rest with `batch_deploy_nonce`, or read them from the wallet or the CLI before signing.
+- **Each EVM step is its own transaction to the EVM.** Transient storage does not survive from step to
+  step, nothing stays warm, and a contract made in step 1 is not new to `SELFDESTRUCT` in step 2.
+- **MetaMask cannot sign one.** EIP-712 would show an opaque hash, so the chain refuses that signature.
+- **A batch costs a transaction's `per_tx` for each step.** Batching saves signatures and nonces, not
+  gas.
+- **Old nodes fork on it.** A node older than batches cannot read a block holding one, so every node of
+  a chain upgrades together before anyone sends one. Old apps show it as "Does not check", or a signer
+  refuses the code; none of them misreads it.
+- **Bytes can nest a transaction only so far.** A transaction decodes at most two levels below the
+  outermost, a multisig's batch's steps. Past that, decoding stops: it used to run out of stack.
+
 ## Running a chain
 
 - **Old `chain.db` files are migrated from format 8 on.** A node moves an older database up to its

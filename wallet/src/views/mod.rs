@@ -3,6 +3,7 @@
 
 mod accounts;
 mod activity;
+mod batch;
 #[cfg(feature = "bridge")]
 pub mod bridge;
 mod contracts;
@@ -25,6 +26,7 @@ mod pair;
 mod receive;
 pub mod scan;
 pub mod send;
+mod steps;
 mod settings;
 mod sign;
 #[cfg(feature = "swap")]
@@ -50,6 +52,8 @@ use {
 pub enum Page {
     Overview,
     Send,
+    /// Several steps sent as one transaction, all or nothing.
+    Batch,
     Receive,
     Activity,
     Names,
@@ -94,6 +98,7 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
         Role::Online => &[
             (Page::Overview, "Overview"),
             (Page::Send, "Send"),
+            (Page::Batch, "Batch"),
             (Page::Receive, "Receive"),
             (Page::Activity, "Activity"),
             #[cfg(feature = "nft")]
@@ -251,6 +256,7 @@ pub fn reach(ui: &mut Ui, palette: &Palette, settings: &mut Settings, states: &m
 #[derive(Default)]
 pub struct States {
     pub send: send::SendState,
+    batch: batch::BatchState,
     activity: activity::ActivityState,
     names: names::NamesState,
     pub multisig: multisig::MultisigState,
@@ -328,7 +334,7 @@ impl States {
 
     /// The names the pages want proven: one typed to send to, and one searched for.
     pub fn wanted_names(&self) -> Vec<String> {
-        self.send.wanted_name().into_iter().chain(self.names.wanted()).collect()
+        self.send.wanted_name().into_iter().chain(self.batch.wanted_name()).chain(self.names.wanted()).collect()
     }
 }
 
@@ -363,6 +369,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
             faucet::card(ui, ctx, &mut states.faucet);
         }
         Page::Send => send::show(ui, ctx, &mut states.send),
+        Page::Batch => batch::show(ui, ctx, &mut states.batch, &mut states.send, &mut states.multisig),
         Page::Receive => receive::show(ui, ctx, &mut states.receive),
         Page::Activity => activity::show(ui, ctx, &mut states.activity),
         Page::Names => names::show(ui, ctx, &mut states.names, &mut states.send),
@@ -662,9 +669,14 @@ pub(crate) mod drawn {
         (width, changed)
     }
 
+    /// Draws a page as page does, and says too each text the last frame drew and where.
+    pub fn page_shown(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> (f32, bool, Vec<(String, egui::Rect)>) {
+        frames(book, holders, size, 2, |_, _| Vec::new(), draw)
+    }
+
     /// As `page`: what it said, in the order it drew it.
     pub fn said(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> String {
-        frames(book, holders, size, 2, |_, _| Vec::new(), draw).2
+        said_of(frames(book, holders, size, 2, |_, _| Vec::new(), draw).2)
     }
 
     /// As `page`, with a finger tapping this text on the way: what it said once it took the tap.
@@ -689,7 +701,12 @@ pub(crate) mod drawn {
             }
         };
 
-        frames(book, holders, size, 5, tap, draw).2
+        said_of(frames(book, holders, size, 5, tap, draw).2)
+    }
+
+    /// What a frame drew, in order, a line each.
+    fn said_of(shown: Vec<(String, egui::Rect)>) -> String {
+        shown.into_iter().map(|(text, _)| format!("{text}\n")).collect()
     }
 
     /// Draws a page this many times, each frame's input from what the one before it drew: how wide it
@@ -701,7 +718,7 @@ pub(crate) mod drawn {
         count: usize,
         events: impl Fn(usize, &[egui::epaint::ClippedShape]) -> Vec<egui::Event>,
         mut draw: impl FnMut(&mut Ui, &mut Ctx),
-    ) -> (f32, bool, String) {
+    ) -> (f32, bool, Vec<(String, egui::Rect)>) {
         let egui = egui::Context::default();
         crate::theme::install_fonts(&egui);
         let palette = crate::theme::DARK;
@@ -763,12 +780,12 @@ pub(crate) mod drawn {
             shapes = output.shapes;
         }
 
-        let said = shapes.iter().filter_map(|clipped| match &clipped.shape {
-            egui::epaint::Shape::Text(shape) => Some(format!("{}\n", shape.galley.text())),
+        let shown = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::epaint::Shape::Text(shape) => Some((shape.galley.text().to_string(), shape.galley.rect.translate(shape.pos.to_vec2()))),
             _ => None,
         });
 
-        (width, changed, said.collect())
+        (width, changed, shown.collect())
     }
 
     /// A phone upright, a phone on its side, and a desktop.

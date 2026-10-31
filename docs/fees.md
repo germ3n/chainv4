@@ -44,6 +44,16 @@ Of what it paid:
   [Finality](finality.md#rewards));
 - whatever it paid **above the base price** goes to the producer whole.
 
+## A batch
+
+A [batch](chain.md#batches) has one fee offer for all its steps. Its intrinsic gas is `per_tx` once for
+each step, `per_byte` for its whole encoding, and `per_code_byte` for the code of each of its deploys
+and upgrades, a multisig's batch's too; its steps then draw on the one allowance of fuel its gas limit
+leaves. So a batch of 32 transfers costs more than one transfer of its size: it does 32's work. A
+contract scorer is asked of a batch, as the kind `batch`, when it names that kind or any step's: one
+naming `transfer` weighs a batch holding a transfer. It may not understand the kind: a scorer that
+fails is charged as weighed, as ever.
+
 ## Scorers
 
 A scorer is a `GasSchedule`:

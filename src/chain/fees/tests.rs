@@ -524,3 +524,127 @@ fn fee_settings_that_cannot_work_are_refused() {
         }
     }
 }
+
+#[test]
+fn a_batch_pays_for_every_step_as_much_as_they_would_alone_for_the_work_and_the_bytes() {
+    let chain = open(FeeConfig::dev());
+    let schedule = chain.fees().unwrap().schedule();
+    let alice_key = alice();
+    let me = alice_key.public().address();
+    let pay = transfer(&dev(), 1);
+    let pay = match pay {
+        Tx::Transfer { to, amount, .. } => Tx::Transfer { from: me, to, amount },
+        other => other,
+    };
+    let sign = |tx: Tx| SignedTx::sign(tx, 0, FeeOffer::NONE, &alice_key);
+    let weights = Weighted::dev();
+    let one = schedule.intrinsic(&sign(pay.clone()));
+    let batched = sign(Tx::Batch { steps: vec![pay.clone(); 4] });
+    let bytes = batched.hashable_bytes_with_tag().len() as u64;
+
+    assert_eq!(schedule.intrinsic(&batched), weights.per_tx * 4 + weights.per_byte * bytes, "a transaction's cost for each step, and its bytes");
+    assert!(schedule.intrinsic(&sign(Tx::Batch { steps: vec![pay.clone()] })) > one, "wrapping one in a batch never saves anything");
+
+    // Code is weighed wherever it is: alone, in a batch, or in a multisig's batch.
+    let code = "return {}".repeat(100);
+    let deploy = || Tx::Deploy { code: Code::Lua(code.clone()) };
+    let weighed = |signed: &SignedTx| schedule.intrinsic(signed) - weights.per_byte * signed.hashable_bytes_with_tag().len() as u64;
+    let multisig = crate::structs::address::Address::Multisig([6; 32]);
+
+    assert_eq!(weighed(&sign(deploy())), weights.per_tx + weights.per_code_byte * code.len() as u64);
+    assert_eq!(weighed(&sign(Tx::Batch { steps: vec![deploy(), deploy()] })), weights.per_tx * 2 + weights.per_code_byte * 2 * code.len() as u64);
+    assert_eq!(
+        weighed(&sign(Tx::Multisig { account: multisig, tx: Box::new(Tx::Batch { steps: vec![deploy(), pay] }), signatures: Vec::new() })),
+        weights.per_tx * 2 + weights.per_code_byte * code.len() as u64
+    );
+
+    // What an offer sets aside: the fuel's worth once, for a batch that runs anything; none for one
+    // that only moves coin.
+    let fees = chain.fees().unwrap();
+    let moves_only = sign(Tx::Batch { steps: vec![transfer_from(&alice_key, &dev(), 1); 2] });
+    let runs = sign(Tx::Batch { steps: vec![transfer_from(&alice_key, &dev(), 1), deploy(), deploy()] });
+    let free = OfferChoice::default();
+
+    assert_eq!(fees.offer(u256::ZERO, 1_000, &moves_only, free).gas_limit, schedule.intrinsic(&moves_only));
+    assert_eq!(fees.offer(u256::ZERO, 1_000, &runs, free).gas_limit, schedule.intrinsic(&runs) + schedule.for_fuel(1_000), "one allowance, however many steps run");
+}
+
+#[test]
+fn a_batch_counts_whole_against_the_block_gas_and_byte_limits() {
+    let mut chain = open(FeeConfig::dev());
+    let alice_key = alice();
+    let limit = chain.fees().unwrap().block_gas_limit();
+    let steps = vec![transfer_from(&alice_key, &dev(), 1); 2];
+    let over = SignedTx::sign(Tx::Batch { steps: steps.clone() }, nonce(&chain, &alice_key), offer(&chain, limit + 1), &alice_key);
+
+    assert!(forced(&mut chain, vec![over], |_| {}).is_err(), "more gas than a block holds");
+
+    let bytes = crate::chain::tx_bytes(&SignedTx::sign(Tx::Batch { steps: steps.clone() }, 0, FeeOffer::NONE, &alice_key));
+    let one = crate::chain::tx_bytes(&SignedTx::sign(transfer_from(&alice_key, &dev(), 1), 0, FeeOffer::NONE, &alice_key));
+    let step = wincode::serialized_size(&transfer_from(&alice_key, &dev(), 1)).unwrap();
+
+    assert_eq!(bytes, one + step + 9, "both steps' bytes, its tag and its length");
+}
+
+#[test]
+fn a_scorer_that_weighs_a_kind_weighs_a_batch_holding_one() {
+    // Charges next to nothing for a batch: which shows whether it was asked.
+    const BATCH_SCORER: &str = r#"
+local M = {}
+
+function M.score(sender, kind, target, bytes, fuel, gas, failed)
+    if kind == "batch" then
+        return 1
+    end
+    return gas
+end
+
+return M
+"#;
+    let alice = alice();
+    let me = alice.public().address();
+    let scorer = contract_address(&me, 0, HashType::default_chain());
+    let fees = FeeConfig {
+        schedule: ScheduleConfig::Contract(ContractScorer { weights: Weighted::dev(), contract: scorer, fuel: 100_000, kinds: vec!["transfer".to_string()] }),
+        ..FeeConfig::dev()
+    };
+    let mut chain = open(fees);
+    let deploy = Tx::Deploy { code: Code::Lua(BATCH_SCORER.to_string()) };
+    let txs = signed(&chain, &alice, vec![deploy], offer(&chain, 1_000_000));
+    assert_eq!(advance(&mut chain, txs).1[0].result, Ok(Effect::Deployed(scorer)));
+
+    let burn = Tx::Burn { from: me, amount: Amount::U128(1) };
+    let holding = Tx::Batch { steps: vec![burn.clone(), transfer_from(&alice, &key(22), 1)] };
+    let not_holding = Tx::Batch { steps: vec![burn.clone(), burn] };
+    let txs = signed(&chain, &alice, vec![holding, not_holding], offer(&chain, 100_000));
+    let (block, receipts) = advance(&mut chain, txs);
+    let charged = |receipt: &Receipt| receipt.fee / block.header.base_price;
+
+    assert_eq!(charged(&receipts[0]), u256::ONE, "it names transfer, and this holds one");
+    assert_eq!(charged(&receipts[1]), u256::from(receipts[1].gas_used), "it holds nothing the scorer names");
+}
+
+#[test]
+fn a_step_left_with_no_fuel_at_all_runs_nothing() {
+    let alice = alice();
+    let mut chain = open(FeeConfig::dev());
+    let contract = contract_address(&alice.public().address(), 0, HashType::default_chain());
+    let deploy = Tx::Deploy { code: Code::Lua(SPINNER.to_string()) };
+    let txs = signed(&chain, &alice, vec![deploy], offer(&chain, 1_000_000));
+    assert!(advance(&mut chain, txs).1[0].result.is_ok());
+
+    let spin = Tx::ContractCall { to: contract, func: Hash::Xxh3_64(selector("spin")), amount: Amount::U128(0), data: vec![TxCallArgumentType::Number(1.0)] };
+    let evm = Tx::EvmCall { to: crate::structs::address::Address::Evm([9; 20]), value: Amount::U128(0), input: Vec::new() };
+
+    for steps in [vec![spin.clone()], vec![spin, evm.clone()], vec![evm]] {
+        let next = nonce(&chain, &alice);
+        let sized = SignedTx::sign(Tx::Batch { steps: steps.clone() }, next, offer(&chain, 1_000_000), &alice);
+        let exact = chain.fees().unwrap().schedule().intrinsic(&sized);
+        let signed = SignedTx::sign(Tx::Batch { steps }, next, offer(&chain, exact), &alice);
+        let (_, receipts) = advance(&mut chain, vec![signed]);
+
+        assert!(matches!(&receipts[0].result, Err(Failure::Step { step: 0, .. })), "with its gas limit all spoken for: {:?}", receipts[0].result);
+        assert_eq!(receipts[0].gas_used, exact);
+    }
+}
+

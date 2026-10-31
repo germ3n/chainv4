@@ -285,6 +285,13 @@ wallet and 4 in the explorer, and try the stream again every 10.
   usual round, not at each event.
 - **An offline signer never opens one.** It makes no requests at all.
 
+## Batches
+
+A [batch](chain.md#batches)'s receipt proves as any other's does: what each step did, and how many of
+its events and payments are that step's, or which step stopped it. Why it failed is not committed to,
+as no failure's message is. A client older than batches cannot read one: its proof of that transaction
+fails, visibly, and it follows the chain's headers as before.
+
 ## What to keep in mind
 
 - **It asks only for what it can check.** On a chain with governance it knows the rules and voters

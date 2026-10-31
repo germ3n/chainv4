@@ -1,10 +1,10 @@
 use {
-    super::{Effect, Receipt},
+    super::{Effect, Failure, Receipt},
     crate::crypto::hashable::Hashable,
     crate::structs::address::Address,
     crate::structs::event::Event,
     crate::structs::hash::Hash,
-    crate::structs::receipt::{CommittedOutcome, CommittedReceipt, Payment},
+    crate::structs::receipt::{CommittedOutcome, CommittedReceipt, Payment, StepEffect, StepOutcome},
     crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::{U256Le, u256},
@@ -110,6 +110,12 @@ pub enum TxStatus {
     #[document(summary = "A governance approval that was the last one needed: its change is decided, as the chain's decision-th and its kind's version-th.")]
     #[wincode(tag = 5)]
     Decided { decision: u64, kind: crate::governance::ChangeKind, version: u64 },
+    #[document(summary = "A batch that went through: what each step did, in order.")]
+    #[wincode(tag = 6)]
+    Batch(Vec<StepOutcome>),
+    #[document(summary = "A batch that failed, undone whole: which step stopped it, counted from 0, and why. It still used up its nonce.")]
+    #[wincode(tag = 7)]
+    BatchFailed { step: u32, why: String },
 }
 
 impl TxReceipt {
@@ -141,6 +147,26 @@ impl TxReceipt {
 }
 
 impl TxStatus {
+    #[document(parent = "TxStatus", summary = "Whether the transaction failed: it undid all it did, and paid its fee.")]
+    pub fn failed(&self) -> bool {
+        matches!(self, TxStatus::Failed(_) | TxStatus::BatchFailed { .. })
+    }
+
+    #[document(parent = "TxStatus", summary = "Every contract it deployed: one, or each a batch's steps did.")]
+    pub fn deployed(&self) -> Vec<Address> {
+        match self {
+            TxStatus::Deployed(address) => vec![*address],
+            TxStatus::Batch(steps) => steps
+                .iter()
+                .filter_map(|step| match step.effect {
+                    StepEffect::Deployed(address) => Some(address),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// The stored form of what running a transaction did.
     fn of(receipt: &Receipt) -> TxStatus {
         match &receipt.result {
@@ -149,6 +175,8 @@ impl TxStatus {
             Ok(Effect::Returned(values)) => TxStatus::Returned(values.clone()),
             Ok(Effect::Upgraded(address)) => TxStatus::Upgraded(*address),
             Ok(Effect::Decided { decision, kind, version }) => TxStatus::Decided { decision: *decision, kind: *kind, version: *version },
+            Ok(Effect::Batch(steps)) => TxStatus::Batch(steps.clone()),
+            Err(Failure::Step { step, failure }) => TxStatus::BatchFailed { step: *step, why: failure.to_string() },
             Err(failure) => TxStatus::Failed(failure.to_string()),
         }
     }
@@ -173,5 +201,7 @@ fn outcome(status: &TxStatus) -> CommittedOutcome {
         TxStatus::Failed(_) => CommittedOutcome::Failed,
         TxStatus::Upgraded(address) => CommittedOutcome::Upgraded(*address),
         TxStatus::Decided { decision, kind, version } => CommittedOutcome::Decided { decision: *decision, kind: *kind, version: *version },
+        TxStatus::Batch(steps) => CommittedOutcome::Batch(steps.clone()),
+        TxStatus::BatchFailed { step, .. } => CommittedOutcome::BatchFailed { step: *step },
     }
 }

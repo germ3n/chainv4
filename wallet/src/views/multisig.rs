@@ -381,6 +381,12 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
             ui.add_space(8.0);
             ui.separator();
             ui.label(RichText::new(describe(ctx, &tx)).color(palette.ink));
+
+            // What it is members approve, whole, before anyone can.
+            if let Some(steps) = super::steps::of_tx(ctx, &tx, None) {
+                ui.push_id(("proposal steps", approvals.len(), nonce), |ui| super::steps::listed(ui, ctx, &steps));
+            }
+
             ui.add(egui::Label::new(RichText::new(progress(approvals.len() as u64, threshold, approved, mine.is_some())).small().color(palette.soft)).wrap());
             ui.horizontal_wrapped(|ui| {
                 if let Some(from) = mine {
@@ -535,6 +541,14 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Waiting for its members");
         ui.label(RichText::new(describe(ctx, &held.body.tx)).color(palette.ink).size(16.0));
+
+        // The count and total first, then the rest of the bundle, then every step to sign.
+        let steps = super::steps::of_tx(ctx, &held.body.tx, None);
+
+        if let Some(steps) = &steps {
+            super::steps::heading(ui, ctx, steps);
+        }
+
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &held.body.account.to_string()));
         super::row(ui, &palette, "Its transaction", |ui| {
             ui.label(format!("number {}", held.body.nonce));
@@ -546,6 +560,11 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
             let keys: Vec<String> = held.signatures.iter().map(|signed| format::short(&signed.key.to_string())).collect();
             ui.label(if keys.is_empty() { "nobody yet".to_string() } else { keys.join(", ") });
         });
+
+        if let Some(steps) = &steps {
+            ui.add_space(6.0);
+            super::steps::each(ui, ctx, steps);
+        }
 
         let approvals = approvals_of(state, &held);
         let backed = held.signatures.len() + approvals.iter().filter(|key| !held.signatures.iter().any(|signed| signed.key.to_string() == **key)).count();
@@ -730,6 +749,52 @@ fn fee_of(value: &Value) -> Result<(FeeOffer, Option<String>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bundle_lists_every_step_of_its_batch_for_its_members_on_any_screen() {
+        use chainv4::structs::hash::{Hash, HashType};
+
+        let account = Address::Multisig([6; 32]);
+        let pay = Tx::Transfer { from: account, to: Address::Ed25519([9; 32]), amount: chainv4::structs::amount::Amount::U128(1_000_000_000_000_000_000) };
+        let genesis = Hash::zero(HashType::default_chain());
+        let body = MultisigBody { account, tx: Tx::Batch { steps: vec![pay; 3] }, nonce: 1, fee: FeeOffer::NONE };
+
+        for (width, _) in crate::views::drawn::SCREENS {
+            let mut book = crate::views::drawn::two_phrases();
+            let mut holders = crate::keys::open(&book).unwrap();
+            let mut state = MultisigState { bundle: Some(MultisigBundle { genesis, body: body.clone(), signatures: Vec::new() }), selected: Some(account.to_string()), ..MultisigState::default() };
+            let (drawn, _, shown) = crate::views::drawn::page_shown(&mut book, &mut holders, (width, 20_000.0), |ui, ctx| {
+                let mut prepared = None;
+
+                bundle(ui, ctx, &mut state, genesis, &mut prepared);
+            });
+            let top = |said: &str| shown.iter().find(|(text, _)| text.contains(said)).map_or_else(|| panic!("{said} in {shown:?}"), |(_, rect)| rect.top());
+
+            assert!(drawn <= width + 1.0, "{drawn} on {width}");
+            assert!(top("A batch of 3 steps") < top("Sends 3 DEV in all"));
+            assert!(top("Sends 3 DEV in all") < top("Step 1 of 3"));
+            assert!(top("Step 1 of 3") < top("Step 2 of 3") && top("Step 2 of 3") < top("Step 3 of 3"));
+            assert!(top("Step 3 of 3") < top("Copy as text"), "every step above what passes it on");
+        }
+    }
+
+    #[test]
+    fn a_proposed_batch_lines_up_as_the_multisigs_next_transaction_with_each_step_its_own() {
+        let account = Address::Multisig([4; 32]);
+        let tx = Tx::Batch { steps: vec![Tx::Burn { from: account, amount: chainv4::structs::amount::Amount::U128(5) }] };
+        let body = MultisigBody { account, tx, nonce: 7, fee: FeeOffer::NONE };
+        let probe = sized(&body, 2);
+
+        assert_eq!((probe.sender(), probe.nonce), (account, 7));
+        assert_eq!(probe.batch_problem(), None, "a batch the chain takes from it");
+        assert!(matches!(&probe.tx, Tx::Multisig { tx, signatures, .. } if matches!(**tx, Tx::Batch { .. }) && signatures.len() == 2));
+
+        let mut state = MultisigState::default();
+        state.propose(Prepared { from: account, tx: body.tx.clone(), what: String::new(), about: String::new(), coin: u256::ZERO });
+
+        assert_eq!(state.selected, Some(account.to_string()));
+        assert!(state.incoming.is_some());
+    }
 
     #[test]
     fn a_member_line_takes_its_xpub_from_the_accounts_own_words() {

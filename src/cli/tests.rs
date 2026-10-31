@@ -627,6 +627,48 @@ mod send {
     }
 
     #[test]
+    fn a_multisig_sends_a_batch_from_one_bundle_its_members_sign() {
+        use crate::cli::multisig::{MultisigAction, MultisigArgs};
+        let running = Running::start(true);
+        let dir = TempDir::new("multisig-batch");
+        let members: Vec<Keypair> = (41..43).map(|seed| Keypair::from_seed([seed; 32])).collect();
+        let files: Vec<PathBuf> = members.iter().enumerate().map(|(index, keypair)| {
+            let path = dir.0.join(format!("member{index}.key"));
+            write_key(&path, keypair).unwrap();
+
+            path
+        }).collect();
+        let api = format!("http://{}", running.api);
+        let multisig = |key: &PathBuf, action: MultisigAction| crate::cli::multisig(MultisigArgs { node: api.clone(), tls: Default::default(), key: Some(key.clone()), timeout: 10, action });
+        let members_given = members.iter().map(|keypair| crate::cli::send::parse_member(&keypair.public().to_string()).unwrap()).collect();
+        send(running.args(TxArgs::CreateMultisig { members: members_given, threshold: 2 })).unwrap();
+        let creator = DevAuthority::dev_keypair().public().address();
+        let account = crate::structs::address::multisig_address(&creator, 0, crate::structs::hash::HashType::default_chain());
+
+        for to in [account].into_iter().chain(members.iter().map(|keypair| keypair.public().address())) {
+            send(running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(10u128.pow(18)) })).unwrap();
+        }
+
+        let (bob, carol) = (Address::Ed25519([9; 32]), Keypair::from_seed([44; 32]).public().address());
+        let bundle = dir.0.join("batch.bundle");
+        let step = |to: &Address, amount: &str| serde_json::json!({ "type": "transfer", "to": to.to_string(), "amount": amount }).to_string();
+
+        send(SendArgs {
+            key: Some(files[0].clone()),
+            multisig: Some(account),
+            out: Some(bundle.clone()),
+            ..running.args(TxArgs::Batch { file: None, steps: vec![step(&bob, "10"), step(&carol, "20")] })
+        })
+        .unwrap();
+        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true }).unwrap();
+        let node = running.stop();
+        let held = |address: &Address| crate::registry::Accounts::new(&node.chain().state()).get(address).unwrap();
+
+        assert_eq!((held(&bob).balance, held(&carol).balance), (u256::new(10), u256::new(20)));
+        assert_eq!(held(&account).nonce, 1, "the multisig's one nonce");
+    }
+
+    #[test]
     fn a_multisig_is_created_proposed_signed_approved_and_submitted() {
         use crate::cli::multisig::{MultisigAction, MultisigArgs};
         let running = Running::start(true);
@@ -814,6 +856,96 @@ mod send {
         assert!(calls[0].fee.gas_limit < cap(&calls[0]) / 10, "the bump's limit is what it used and a quarter, not the cap: {}", calls[0].fee.gas_limit);
         assert!(calls[0].fee.gas_limit > fees.schedule().intrinsic(&calls[0]));
         assert_eq!(calls[1].fee.gas_limit, cap(&calls[1]), "a call that would fail keeps the cap, things may change");
+    }
+
+    #[test]
+    fn a_batch_goes_out_from_a_file_of_steps_all_or_nothing_and_says_what_each_did() {
+        use crate::structs::tx::{Tx, batch_deploy_nonce};
+
+        let dir = TempDir::new("batch");
+        let source = dir.0.join("counter.lua");
+        fs::write(&source, "local M = {}\n\nfunction M.bump(by)\n    local count = tonumber(storage.get(\"count\") or \"0\") + by\n    storage.set(\"count\", tostring(count))\n    return count\nend\n\nreturn M\n").unwrap();
+        let running = Running::start(true);
+        let me = DevAuthority::dev_keypair().public().address();
+        let hash = crate::structs::hash::HashType::default_chain();
+        let (first, second) = (deployed_at(&me, 0, hash), deployed_at(&me, batch_deploy_nonce(0, 1), hash));
+        let bob = Address::Ed25519([9; 32]);
+        let file = dir.0.join("steps.json");
+        let steps = serde_json::json!([
+            { "type": "deploy", "lua": source.display().to_string() },
+            { "type": "call", "to": first.to_string(), "function": "bump", "args": ["i64:2"] },
+            { "type": "deploy", "lua": source.display().to_string() },
+            { "type": "transfer", "to": bob.to_string(), "amount": "5" },
+        ]);
+        fs::write(&file, steps.to_string()).unwrap();
+        send(running.args(TxArgs::Batch { file: Some(file), steps: Vec::new() })).unwrap();
+
+        // One that a dry run says would fail goes out only when told to, and undoes itself then.
+        let step = |text: &str| TxArgs::Batch { file: None, steps: vec![serde_json::json!({ "type": "transfer", "to": bob.to_string(), "amount": "1" }).to_string(), text.to_string()] };
+        let failing = r#"{"type":"burn","amount":"115792089237316195423570985008687907853269984665640564039457584007913129639935"}"#;
+        let refused = send(running.args(step(failing)));
+        let anyway = send(SendArgs { anyway: true, ..running.args(step(failing)) });
+
+        // A step no batch holds, one misspelled, none at all, and a typed signature, named at once.
+        let not_held = send(running.args(step(r#"{"type":"mint","to":"x","amount":"1"}"#)));
+        let misspelled = send(running.args(step(r#"{"type":"burn","amount":"1","amout":"2"}"#)));
+        let empty = send(running.args(TxArgs::Batch { file: None, steps: Vec::new() }));
+        let typed = send(SendArgs { eip712: true, ..running.args(step(r#"{"type":"burn","amount":"1"}"#)) });
+        let node = running.stop();
+
+        assert!(refused.unwrap_err().to_string().contains("step 2 failed, undoing every step"));
+        assert!(anyway.unwrap_err().to_string().contains("the transaction failed: step 2 failed"));
+        assert!(not_held.unwrap_err().to_string().contains("not mint"));
+        assert!(misspelled.unwrap_err().to_string().contains("no amout"));
+        assert!(empty.unwrap_err().to_string().contains("needs a step"));
+        assert!(typed.unwrap_err().to_string().contains("EIP-712"));
+
+        let batches: Vec<crate::structs::tx::SignedTx> = (1..=node.chain().tip().height).flat_map(|height| node.chain().block_at(height).unwrap().unwrap().txs).filter(|tx| matches!(tx.tx, Tx::Batch { .. })).collect();
+
+        assert_eq!(batches.len(), 2, "the batch, and the one sent anyway");
+        assert!(matches!(&batches[0].tx, Tx::Batch { steps } if steps.len() == 4));
+
+        let state = node.chain().state();
+        let accounts = crate::registry::Accounts::new(&state);
+
+        assert_eq!(accounts.get(&bob).unwrap().balance, u256::new(5), "the first batch's, and nothing of the second");
+        assert!(crate::registry::Contracts::new(&std::sync::Arc::new(node.chain().state())).get(&second).unwrap().is_some());
+        assert!(crate::registry::Contracts::new(&std::sync::Arc::new(node.chain().state())).get(&first).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_step_reads_as_its_send_command_would_and_names_what_is_wrong() {
+        use crate::structs::tx::Tx;
+
+        let me = crate::crypto::keypair::Keypair::from_seed([1; 32]).public().address();
+        let agent = ureq::Agent::new_with_defaults();
+        let made = |steps: &[&str]| {
+            let steps: Vec<String> = steps.iter().map(|step| step.to_string()).collect();
+
+            super::batch::batch(&steps, None, me, &agent, "http://127.0.0.1:1")
+        };
+        let to = crate::crypto::keypair::Keypair::from_seed([2; 32]).public().address().to_string();
+        let evm = format!("0x{}", "cd".repeat(20));
+        let path = format!("0x{}", "00".repeat(32));
+        let tx = made(&[
+            &format!(r#"{{"type":"transfer","to":"{to}","amount":"5"}}"#),
+            r#"{"type":"burn","amount":7}"#,
+            &format!(r#"{{"type":"evm_call","to":"{evm}","data":"0x01020304","value":"3"}}"#),
+            &format!(r#"{{"type":"claim","height":9,"to":"{to}","earned":"100","index":2,"path":["{path}"]}}"#),
+        ])
+        .unwrap();
+        let Tx::Batch { steps } = tx else { panic!("{tx:?}") };
+
+        assert!(matches!(&steps[0], Tx::Transfer { from, amount, .. } if *from == me && amount.to_u256() == u256::new(5)), "every step from the sender");
+        assert!(matches!(&steps[1], Tx::Burn { from, .. } if *from == me));
+        assert!(matches!(&steps[2], Tx::EvmCall { to: Address::Evm(_), input, .. } if input.len() == 4));
+        assert!(matches!(&steps[3], Tx::Claim { height: 9, index: 2, path, .. } if path.len() == 1));
+
+        assert!(made(&[r#"{"type":"transfer","amount":"5"}"#]).unwrap_err().to_string().starts_with("step 1: a transfer step needs to"));
+        assert!(made(&["not json"]).unwrap_err().to_string().contains("not JSON"));
+        assert!(made(&[r#"{"amount":"5"}"#]).unwrap_err().to_string().contains("needs a type"));
+        assert!(made(&[r#"{"type":"burn","amount":"0"}"#]).unwrap_err().to_string().contains("greater than zero"), "as the chain would say it");
+        assert!(made(&vec![r#"{"type":"burn","amount":"1"}"#; 33]).unwrap_err().to_string().contains("at most 32"));
     }
 
     #[cfg(feature = "evm")]

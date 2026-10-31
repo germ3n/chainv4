@@ -745,7 +745,7 @@ impl Found {
             "gasUsed": quantity(u256::from(receipt.gas_used)),
             "cumulativeGasUsed": quantity(u256::from(cumulative + receipt.gas_used)),
             "effectiveGasPrice": quantity(price),
-            "status": quantity(u256::from(u64::from(!matches!(receipt.status, TxStatus::Failed(_))))),
+            "status": quantity(u256::from(u64::from(!receipt.status.failed()))),
             "type": quantity(u256::from(ethereum.kind.number())),
             "logs": logs,
             "logsBloom": to_hex(&[0; 256]),

@@ -1644,3 +1644,5 @@ fn a_contract_made_where_coin_waited_takes_it_over_and_none_is_made_or_lost() {
     assert_eq!(balance(&chain, &Address::Secp256k1(bytes)), u256::ZERO, "not twice");
     assert_eq!(balance(&chain, &me), before - u256::new(500));
 }
+
+mod batch;

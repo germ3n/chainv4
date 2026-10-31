@@ -26,7 +26,7 @@ use {
     crate::registry::{Accounts, RegistryError},
     crate::structs::address::Address,
     crate::structs::hash::HashType,
-    crate::structs::tx::{SignedTx, Tx},
+    crate::structs::tx::{SignedTx, Tx, batch_deploy_nonce},
     crate::structs::u256::u256,
     crate::vm::Vm,
     r#macro::document,
@@ -152,6 +152,25 @@ fn touches_of(tx: &Tx, sender: Address, nonce: u64, hash: HashType) -> Vec<Touch
     match tx {
         // A multisig's own transaction touches what it does, as the multisig.
         Tx::Multisig { tx, .. } => return touches_of(tx, sender, nonce, hash),
+        // A batch touches what all its steps do, each deploy at the address it lands at. Each once:
+        // a transaction naming something twice would wait for itself.
+        Tx::Batch { steps } => {
+            let mut deploys = 0;
+
+            for step in steps {
+                let at = match step {
+                    Tx::Deploy { .. } => batch_deploy_nonce(nonce, deploys),
+                    _ => nonce,
+                };
+                deploys += u32::from(matches!(step, Tx::Deploy { .. }));
+
+                for touch in touches_of(step, sender, at, hash) {
+                    if !touched.contains(&touch) {
+                        touched.push(touch);
+                    }
+                }
+            }
+        }
         Tx::CreateMultisig { .. } => touched.push(Touch::Address(crate::structs::address::multisig_address(&sender, nonce, hash))),
         Tx::ChangeMultisig { .. } => {}
         Tx::ApproveMultisig { account, .. } | Tx::WithdrawMultisig { account, .. } => touched.push(Touch::Address(*account)),

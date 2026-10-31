@@ -61,6 +61,8 @@ pub struct SendState {
     /// the last one failed.
     confirming: Option<Check>,
     confirm_trouble: Option<String>,
+    /// Whether what the node just took was a batch the Batch page built, so that page starts afresh.
+    batch_sent: bool,
 }
 
 /// A transaction another page made, such as registering a name: sent from one of the account's
@@ -113,6 +115,11 @@ enum Step {
 }
 
 impl SendState {
+    /// Whether a batch went out since last asked.
+    pub fn take_batch_sent(&mut self) -> bool {
+        std::mem::take(&mut self.batch_sent)
+    }
+
     /// Sets a transaction another page made to review and send, in place of the form's.
     pub fn prepare(&mut self, prepared: Prepared) {
         // Signed by the address it was prepared for, not whichever the form had picked.
@@ -142,6 +149,7 @@ impl SendState {
             }
             (Step::Sending { draft, ask: asked }, Ok(value)) if asked == ask => {
                 let id = value["id"].as_str().unwrap_or_default().to_string();
+                let draft_tx = Some(draft.tx.clone());
                 let sent = Sent {
                     id: id.clone(),
                     from: draft.from.to_string(),
@@ -153,6 +161,7 @@ impl SendState {
                 };
                 self.step = Step::Sent { id };
                 self.amount.clear();
+                self.batch_sent = matches!(draft_tx, Some(Tx::Batch { .. }));
                 self.prepared = None;
 
                 Some(sent)
@@ -375,14 +384,25 @@ fn prepared(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, busy: bool) {
         theme::fitted(ui, &prepared.what, 26.0, 14.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
         ui.add_space(8.0);
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &prepared.from.to_string()));
-        super::row(ui, &palette, "For", |ui| {
-            ui.label(RichText::new(&prepared.about).color(palette.ink));
-        });
 
-        if prepared.coin != u256::ZERO {
-            super::row(ui, &palette, coin_label(&prepared.tx), |ui| {
-                ui.label(ctx.amount(None, &prepared.coin.to_string()));
-            });
+        // A batch's are its steps: the count, the total, and each of them.
+        match super::steps::of_tx(ctx, &prepared.tx, None) {
+            Some(steps) if matches!(prepared.tx, Tx::Batch { .. }) => super::steps::listed(ui, ctx, &steps),
+            laid => {
+                super::row(ui, &palette, "For", |ui| {
+                    ui.label(RichText::new(&prepared.about).color(palette.ink));
+                });
+
+                if let Some(steps) = laid {
+                    super::steps::listed(ui, ctx, &steps);
+                }
+
+                if prepared.coin != u256::ZERO {
+                    super::row(ui, &palette, coin_label(&prepared.tx), |ui| {
+                        ui.label(ctx.amount(None, &prepared.coin.to_string()));
+                    });
+                }
+            }
         }
 
         ui.add_space(12.0);
@@ -406,9 +426,13 @@ fn prepared(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, busy: bool) {
             }
 
             if theme::quiet(ui, &palette, "Cancel").clicked() {
+                // A batch goes back to its steps, still there to change.
+                *ctx.page = match prepared.tx {
+                    Tx::Batch { .. } => Page::Batch,
+                    _ => Page::Names,
+                };
                 state.prepared = None;
                 state.step = Step::Edit;
-                *ctx.page = Page::Names;
             }
 
             if busy {
@@ -419,7 +443,7 @@ fn prepared(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, busy: bool) {
 }
 
 /// Whom the To field names.
-enum Destination {
+pub(super) enum Destination {
     Blank,
     Address(Address),
     /// A name, as shown with the suffix, and what was proven of it so far.
@@ -427,7 +451,7 @@ enum Destination {
     Bad,
 }
 
-fn destination(ctx: &Ctx, text: &str) -> Destination {
+pub(super) fn destination(ctx: &Ctx, text: &str) -> Destination {
     let text = text.trim();
 
     if text.is_empty() {
@@ -584,13 +608,26 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
         }
     }
 
+    let landing = super::steps::landing_of(ctx, &draft.tx, draft.from, draft.nonce);
+    let steps = super::steps::of_tx(ctx, &draft.tx, landing.as_ref());
+    // A batch's own review: an approval of one still says whom it approves for.
+    let whole_batch = matches!(draft.tx, Tx::Batch { .. });
+
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Review");
         ui.add_space(4.0);
         theme::fitted(ui, &draft.what, 34.0, 16.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
         ui.add_space(8.0);
+
+        if let Some(steps) = &steps {
+            super::steps::heading(ui, ctx, steps);
+        }
+
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &draft.from.to_string()));
-        super::row(ui, &palette, "To", |ui| super::address(ui, &palette, &draft.to));
+
+        if !whole_batch {
+            super::row(ui, &palette, "To", |ui| super::address(ui, &palette, &draft.to));
+        }
 
         // A contract's EVM call, by name, under who it goes to, as well as how much data it is.
         if let Tx::EvmCall { to, input, .. } = &draft.tx
@@ -637,10 +674,24 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
             ui.label(RichText::new("Sent anyway, it uses its nonce and pays its fee, unless things change before it lands.").small().color(palette.muted));
         }
 
+        // Every step, before the button that signs them.
+        if let Some(steps) = &steps {
+            ui.add_space(8.0);
+            super::steps::each(ui, ctx, steps);
+        }
+
+        let key = ctx.holders.iter().find_map(|holder| holder.key(&draft.from));
+        let by_metamask = ctx.holders.iter().any(|holder| holder.by_metamask() && holder.addresses().contains(&draft.from));
+        // It would have to sign one opaque hash for all the steps, which the chain refuses anyway.
+        let metamask_refuses = key.is_none() && by_metamask && steps.is_some();
+
+        if metamask_refuses {
+            ui.add_space(6.0);
+            ui.colored_label(palette.bad, crate::metamask::NO_BATCH);
+        }
+
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
-            let key = ctx.holders.iter().find_map(|holder| holder.key(&draft.from));
-            let by_metamask = ctx.holders.iter().any(|holder| holder.by_metamask() && holder.addresses().contains(&draft.from));
             let send = match (key.is_some(), by_metamask, warning.is_some()) {
                 (true, _, false) => "Sign and send",
                 (true, _, true) => "Send anyway",
@@ -650,7 +701,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
                 (false, false, true) => "Sign on the signer anyway",
             };
 
-            if theme::primary(ui, &palette, send, !short && state.confirming.is_none()).clicked() || confirmed {
+            if theme::primary(ui, &palette, send, !short && !metamask_refuses && state.confirming.is_none()).clicked() || confirmed {
                 match key {
                     None if by_metamask => match ctx.chain.genesis {
                         Some(genesis) => {
@@ -725,7 +776,11 @@ fn offline(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Sign it on the signer");
-        ui.label(RichText::new(format!("{} to {}: on the offline signer, open Sign and read this code.", draft.what, format::short(&draft.to))).color(palette.soft));
+        let said = match draft.tx {
+            Tx::Batch { .. } => format!("{}: on the offline signer, open Sign and read this code. It shows every step before it signs.", draft.what),
+            _ => format!("{} to {}: on the offline signer, open Sign and read this code.", draft.what, format::short(&draft.to)),
+        };
+        ui.label(RichText::new(said).color(palette.soft));
         ui.add_space(10.0);
         super::code(ui, &palette, message);
         ui.add_space(14.0);
@@ -900,6 +955,76 @@ fn offer(value: &Value) -> Result<(FeeOffer, Option<String>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Send page on a screen this wide, reviewing a batch from the first address of an account,
+    /// and what it drew.
+    fn reviewed(book: &mut crate::vault::Book, width: f32, steps: impl Fn(Address) -> Vec<Tx>) -> Vec<(String, egui::Rect)> {
+        let mut holders = crate::keys::open(book).unwrap();
+        let from = holders[0].addresses()[0];
+        let signer = holders[0].public(&from).unwrap();
+        let tx = Tx::Batch { steps: steps(from) };
+        let draft = Draft { from, signer, to: "its steps".to_string(), tx, nonce: 2, token: None, what: "A batch of 2 steps".to_string(), coin: u256::ZERO };
+        let fee = FeeOffer { gas_limit: 50_000, max_price: u256::new(2_000_000_000), tip: u256::ZERO };
+        let mut state = SendState { step: Step::Review { draft, fee, warning: None }, ..SendState::default() };
+        let (drawn, _, shown) = crate::views::drawn::page_shown(book, &mut holders, (width, 20_000.0), |ui, ctx| show(ui, ctx, &mut state));
+
+        assert!(drawn <= width + 1.0, "{drawn} on {width}");
+
+        shown
+    }
+
+    fn some_steps(from: Address) -> Vec<Tx> {
+        let pay = |amount: u128| Tx::Transfer { from, to: Address::Ed25519([9; 32]), amount: Amount::U128(amount) };
+
+        vec![pay(1_000_000_000_000_000_000), pay(2_000_000_000_000_000_000)]
+    }
+
+    #[test]
+    fn the_review_shows_a_batchs_count_and_total_first_and_every_step_above_the_button_that_signs() {
+        for (width, _) in crate::views::drawn::SCREENS {
+            let shown = reviewed(&mut crate::views::drawn::two_phrases(), width, some_steps);
+            let top = |said: &str| shown.iter().find(|(text, _)| text.contains(said)).map_or_else(|| panic!("{said} in {shown:?}"), |(_, rect)| rect.top());
+
+            assert!(top("2 STEPS") < top("Sends 3 DEV in all"));
+            assert!(top("Sends 3 DEV in all") < top("Fee, at most"), "the total before anything else");
+            assert!(top("Fee, at most") < top("Step 1 of 2"));
+            assert!(top("Step 1 of 2") < top("Step 2 of 2"));
+            assert!(top("Step 2 of 2") < top("Sign and send"));
+        }
+    }
+
+    #[test]
+    fn an_account_metamask_holds_is_told_it_cannot_sign_a_batch_and_is_not_asked_to() {
+        use crate::vault::{Book, Source, StoredAccount};
+
+        let key = chainv4::crypto::keypair::Keypair::generate(chainv4::crypto::keypair::KeyType::Secp256k1).unwrap().public();
+        let mut book = Book { accounts: vec![StoredAccount { name: "MetaMask".to_string(), source: Source::MetaMask { key: key.to_string() } }], ..Book::default() };
+        let shown = reviewed(&mut book, 360.0, some_steps);
+
+        assert!(shown.iter().any(|(text, _)| text.contains("MetaMask would show a batch as one opaque hash")), "{shown:?}");
+        assert!(shown.iter().any(|(text, _)| text == "Sign with MetaMask"));
+    }
+
+    #[test]
+    fn a_prepared_batch_goes_back_to_its_steps_and_starts_the_batch_page_afresh_once_sent() {
+        let mut state = SendState::default();
+
+        assert!(!state.take_batch_sent());
+
+        let from = Address::Ed25519([2; 32]);
+        let draft = Draft { from, signer: chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public(), to: "its steps".to_string(), tx: Tx::Batch { steps: Vec::new() }, nonce: 2, token: None, what: "A batch".to_string(), coin: u256::ZERO };
+        let ask = Ask::Submit("{}".to_string());
+        state.step = Step::Sending { draft: draft.clone(), ask: ask.clone() };
+
+        assert!(state.answered(&ask, &Ok(json!({ "id": "0x01" })), 5).is_some());
+        assert!(state.take_batch_sent());
+        assert!(!state.take_batch_sent(), "once");
+
+        state.step = Step::Sending { draft: Draft { tx: Tx::PrimaryName { name: None }, ..draft }, ask: ask.clone() };
+        state.answered(&ask, &Ok(json!({ "id": "0x02" })), 5);
+
+        assert!(!state.take_batch_sent());
+    }
 
     #[test]
     fn a_prepared_transaction_is_signed_by_the_address_it_was_prepared_for() {

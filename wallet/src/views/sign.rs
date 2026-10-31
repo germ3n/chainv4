@@ -18,6 +18,7 @@ use {
     crate::hardware::{self, Asked, SignRequest},
     crate::biometrics::{self, Check},
     crate::theme,
+    chainv4::structs::tx::Tx,
     chainv4_ui::biometric::Failure,
     egui::{RichText, Ui},
 };
@@ -119,7 +120,12 @@ fn note(ctx: &mut Ctx, kind: &str, what: &str, signer: &str) {
 
 /// How a native transaction reads in the history: its kind, and what it does.
 fn native_line(described: &airgap::Described) -> (String, String) {
-    let what = described.what.as_ref().map_or(String::new(), |(shown, _)| shown.clone());
+    // A batch's steps are too many for a line, and the page that signed it laid each out.
+    let what = match &described.steps {
+        Some(steps) if steps.count == 1 => format!("1 step, {} in all", steps.total.0),
+        Some(steps) => format!("{} steps, {} in all", steps.count, steps.total.0),
+        None => described.what.as_ref().map_or(String::new(), |(shown, _)| shown.clone()),
+    };
     let to = described.to.as_deref().map_or(String::new(), |to| format!(" to {}", format::short(to)));
 
     (described.kind.clone(), format!("{what}{to}").trim().to_string())
@@ -193,6 +199,8 @@ fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     Some(_) => None,
                     None => Some(format!("No account in this wallet signs for {}: pair the sender with this wallet's accounts.", request.signer.address())),
                 };
+                // A batch the chain would refuse is nothing to look over and sign.
+                let trouble = airgap::refused(&request).or(trouble);
                 state.step = Step::Review { request: Box::new(request), trouble };
             }
             Some(Message::Bitcoin(request)) => {
@@ -209,6 +217,17 @@ fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             Some(Message::Multisig(bundle)) => {
                 let key = ctx.holders.iter().flat_map(|holder| holder.keys.iter()).map(|key| key.public()).find(|key| !matches!(key, chainv4::crypto::keypair::PublicKey::Bitcoin(_)));
                 let trouble = key.is_none().then(|| "This wallet holds no keys to sign with, only public ones.".to_string());
+                // Checked as the multisig's own: its steps take from it alone.
+                let held = Tx::Multisig { account: bundle.body.account, tx: Box::new(bundle.body.tx.clone()), signatures: Vec::new() };
+                let refused = airgap::refused(&airgap::Request {
+                    tx: held,
+                    nonce: bundle.body.nonce,
+                    fee: bundle.body.fee,
+                    signer: chainv4::crypto::keypair::PublicKey::Ed25519([0; 32]),
+                    coin: airgap::Shown { symbol: String::new(), decimals: 0 },
+                    token: None,
+                });
+                let trouble = refused.or(trouble);
                 state.step = Step::Multisig { bundle, key, trouble };
             }
             Some(other) => state.scan.refuse(&other, "a request to sign, this wallet's, MetaMask's or a Bitcoin wallet's"),
@@ -247,10 +266,16 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         theme::caps(ui, &palette, &described.kind);
         ui.add_space(4.0);
 
-        if let Some((shown, raw)) = &described.what {
-            theme::fitted(ui, shown, 34.0, 16.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
-            ui.label(RichText::new(format!("{raw} units, signed as such")).small().color(palette.muted));
-            ui.add_space(8.0);
+        // A batch's count and total say what the steps come to, before any of them.
+        match &described.steps {
+            Some(steps) => super::steps::heading(ui, ctx, steps),
+            None => {
+                if let Some((shown, raw)) = &described.what {
+                    theme::fitted(ui, shown, 34.0, 16.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
+                    ui.label(RichText::new(format!("{raw} units, signed as such")).small().color(palette.muted));
+                    ui.add_space(8.0);
+                }
+            }
         }
 
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &described.from));
@@ -269,6 +294,13 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         super::row(ui, &palette, "Nonce", |ui| {
             ui.label(described.nonce.to_string());
         });
+
+        // Every step, before the button that signs them.
+        if let Some(steps) = &described.steps {
+            ui.add_space(6.0);
+            super::steps::each(ui, ctx, steps);
+        }
+
         ui.add_space(6.0);
         ui.label(
             RichText::new("Check each against what you meant to send: the chain runs what is signed here. Names and decimals are the sender's word; the units and addresses are what is signed.")
@@ -358,13 +390,18 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &format!("A multisig's transaction: {}", described.kind));
+
+        if let Some(steps) = &described.steps {
+            super::steps::heading(ui, ctx, steps);
+        }
+
         super::row(ui, &palette, "Multisig", |ui| super::address(ui, &palette, &bundle.body.account.to_string()));
 
         if let Some(to) = &described.to {
             super::row(ui, &palette, "To", |ui| super::address(ui, &palette, to));
         }
 
-        if let Some((_, raw)) = &described.what {
+        if let (Some((_, raw)), None) = (&described.what, &described.steps) {
             super::row(ui, &palette, "Amount", |ui| {
                 ui.label(format!("{raw} units"));
             });
@@ -376,6 +413,12 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         super::row(ui, &palette, "Signed by", |ui| {
             ui.label(format!("{} member{} so far", bundle.signatures.len(), if bundle.signatures.len() == 1 { "" } else { "s" }));
         });
+
+        // Every step, as the multisig will run it, before a member's key goes on them.
+        if let Some(steps) = &described.steps {
+            ui.add_space(6.0);
+            super::steps::each(ui, ctx, steps);
+        }
 
         let keys: Vec<chainv4::crypto::keypair::PublicKey> = ctx.holders.iter().flat_map(|holder| holder.keys.iter()).map(|key| key.public()).filter(|key| !matches!(key, chainv4::crypto::keypair::PublicKey::Bitcoin(_))).collect();
 
@@ -787,6 +830,7 @@ mod signed_history {
             gas: String::new(),
             nonce: 3,
             everything: "the words of a message".to_string(),
+            steps: None,
         };
         let (kind, what) = native_line(&described);
 
@@ -809,3 +853,104 @@ mod signed_history {
         assert!(!said.contains("1.5 CV4"), "folded until asked for: {said}");
     }
 }
+
+#[cfg(test)]
+mod batch_tests {
+    use {
+        super::*,
+        crate::keys,
+        crate::views::drawn,
+        chainv4::registry::multisig::{MultisigBody, MultisigBundle},
+        chainv4::structs::address::Address,
+        chainv4::structs::amount::Amount,
+        chainv4::structs::hash::{Hash, HashType},
+        chainv4::structs::tx::FeeOffer,
+        chainv4::structs::u256::u256,
+    };
+
+    fn fee() -> FeeOffer {
+        FeeOffer { gas_limit: 50_000, max_price: u256::new(2_000_000_000), tip: u256::ZERO }
+    }
+
+    /// The signer's page, on a screen this wide, showing this step, and what it drew.
+    fn drawn_sign(width: f32, step: impl Fn(&[Address]) -> Step) -> Vec<(String, egui::Rect)> {
+        let mut book = drawn::two_phrases();
+        let mut holders = keys::open(&book).unwrap();
+        let from = holders[0].addresses();
+        let mut state = SignState { step: step(&from), ..SignState::default() };
+        let (drawn_width, _, shown) = drawn::page_shown(&mut book, &mut holders, (width, 20_000.0), |ui, ctx| show(ui, ctx, &mut state));
+
+        assert!(drawn_width <= width + 1.0, "{drawn_width} on {width}");
+
+        shown
+    }
+
+    fn top(shown: &[(String, egui::Rect)], said: &str) -> f32 {
+        shown.iter().find(|(text, _)| text.contains(said)).map_or_else(|| panic!("{said} in {shown:?}"), |(_, rect)| rect.top())
+    }
+
+    #[test]
+    fn the_offline_signer_shows_every_step_above_its_sign_button_and_the_count_and_total_above_them() {
+        for (width, _) in drawn::SCREENS {
+            let shown = drawn_sign(width, |from| {
+                let pay = Tx::Transfer { from: from[0], to: Address::Ed25519([9; 32]), amount: Amount::U128(1_000_000_000_000_000_000) };
+                let key = chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public();
+
+                Step::Review {
+                    request: Box::new(Request { tx: Tx::Batch { steps: vec![pay; 3] }, nonce: 4, fee: fee(), signer: key, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None }),
+                    trouble: None,
+                }
+            });
+
+            assert!(top(&shown, "3 STEPS") < top(&shown, "Sends 3 DEV in all"));
+            assert!(top(&shown, "Sends 3 DEV in all") < top(&shown, "Step 1 of 3"));
+
+            let (first, last) = (top(&shown, "Step 1 of 3"), top(&shown, "Step 3 of 3"));
+            let sign = shown.iter().rfind(|(text, _)| text == "Sign").unwrap().1.top();
+
+            assert!(first < top(&shown, "Step 2 of 3") && last > first && last < sign, "every step above the button");
+        }
+    }
+
+    #[test]
+    fn a_multisigs_bundle_lists_every_step_on_the_offline_signer_too() {
+        let account = Address::Multisig([6; 32]);
+
+        for (width, _) in drawn::SCREENS {
+            let shown = drawn_sign(width, |_| {
+                let pay = Tx::Transfer { from: account, to: Address::Ed25519([9; 32]), amount: Amount::U128(5) };
+                let bundle = MultisigBundle { genesis: Hash::zero(HashType::default_chain()), body: MultisigBody { account, tx: Tx::Batch { steps: vec![pay; 2] }, nonce: 1, fee: fee() }, signatures: Vec::new() };
+
+                Step::Multisig { bundle: Box::new(bundle), key: Some(chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public()), trouble: None }
+            });
+            let sign = shown.iter().rfind(|(text, _)| text == "Sign").unwrap().1.top();
+
+            assert!(top(&shown, "2 STEPS") < top(&shown, "Step 1 of 2"));
+            assert!(top(&shown, "Step 2 of 2") < sign);
+            assert!(shown.iter().any(|(text, _)| text == "Sends 10 units in all"), "{shown:?}");
+        }
+    }
+
+    #[test]
+    fn a_request_the_chain_would_refuse_says_so_and_a_signature_is_not_offered() {
+        let shown = drawn_sign(360.0, |_| {
+            let refused = Request {
+                tx: Tx::Batch { steps: vec![Tx::Mint { to: Address::Ed25519([9; 32]), amount: Amount::U128(1) }] },
+                nonce: 0,
+                fee: fee(),
+                signer: chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public(),
+                coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 },
+                token: None,
+            };
+            let trouble = airgap::refused(&refused);
+
+            assert!(trouble.is_some());
+
+            Step::Review { request: Box::new(refused), trouble }
+        });
+
+        assert!(shown.iter().any(|(text, _)| text.contains("Not allowed in a batch: Mint")));
+        assert!(shown.iter().any(|(text, _)| text.contains("The chain would refuse this batch")));
+    }
+}
+

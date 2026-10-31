@@ -154,7 +154,11 @@ pub(crate) fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Ou
             facts.text("means", means);
         }
 
-        for (name, value) in tx.tx.as_object().into_iter().flatten().filter(|(name, _)| *name != "type") {
+        // A batch's steps have rows of their own, below.
+        let steps = tx.steps();
+        let listed_below = |name: &str| steps.is_some() && matches!((tx.kind(), name), ("batch", "steps") | ("multisig" | "approve_multisig", "tx"));
+
+        for (name, value) in tx.tx.as_object().into_iter().flatten().filter(|(name, _)| *name != "type" && !listed_below(name)) {
             facts.row(name, |ui| match (name.as_str(), value) {
                 ("amount", Value::String(raw)) => {
                     ui.label(ctx.coins(raw)).on_hover_text(format!("{raw} units"));
@@ -202,6 +206,65 @@ pub(crate) fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Ou
         {
             facts.row("calls", |ui| decoded::call(ui, ctx, Some(to), &read));
         }
+    });
+
+    if let Some(steps) = tx.steps() {
+        ui.add_space(8.0);
+        ui.label(RichText::new(format!("{} step{}, all or nothing", steps.len(), if steps.len() == 1 { "" } else { "s" })).color(look.palette.soft));
+
+        for (index, step) in steps.iter().enumerate() {
+            ui.push_id(("step", index), |ui| one_step(ui, ctx, tx, step, index, steps.len(), outcome));
+        }
+    }
+}
+
+/// One step of a batch: its number, what came of it, and its own fields as any transaction's show.
+fn one_step(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, step: &Value, index: usize, count: usize, outcome: Option<&Outcome>) {
+    let look = ctx.look;
+    let view = TxView { tx: step.clone(), receipt: None, ..tx.clone() };
+
+    super::list_row(ui, look, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(format!("{} of {count}", index + 1)).monospace().color(look.palette.muted));
+
+            if let Some(outcome) = outcome {
+                let (word, _) = outcome.of_step(index);
+                let color = match word {
+                    "failed" => look.palette.bad,
+                    "undone" => look.palette.warn,
+                    "not run" => look.palette.muted,
+                    _ => look.palette.good,
+                };
+                widgets::pill(ui, word, color);
+            }
+        });
+
+        if let Some((_, Some(done))) = outcome.map(|outcome| outcome.of_step(index)) {
+            super::facts(ui, look, "step result", |facts| {
+                if let Some(contract) = &done.contract {
+                    facts.row("contract", |ui| super::address(ui, ctx, contract));
+                }
+
+                if !done.values.is_empty() {
+                    facts.row("returned", |ui| {
+                        for value in &done.values {
+                            super::argument(ui, ctx, value);
+                        }
+                    });
+                }
+
+                if done.events + done.payments > 0 {
+                    facts.text("emitted", format!("{} events, {} payments, in the lists above in order", done.events, done.payments));
+                }
+            });
+        }
+
+        // Why it failed is on the whole transaction's error, and stays beside the step it names.
+        if let Some(error) = outcome.filter(|outcome| outcome.failed_step == Some(index as u32)).and_then(|outcome| outcome.error.as_deref()) {
+            ui.add(egui::Label::new(RichText::new(error).color(look.palette.bad)).wrap());
+        }
+
+        asked(ui, ctx, &view, None);
     });
 }
 
@@ -269,10 +332,15 @@ pub fn change(change: &Value) -> String {
 fn result(facts: &mut Facts, ctx: &mut Ctx, look: Look, outcome: &Outcome) {
     match outcome.status.as_str() {
         "failed" => {
+            if let Some(step) = outcome.failed_step {
+                facts.text("failed at", format!("step {}, and every step was undone", step + 1));
+            }
+
             facts.row("error", |ui| {
                 ui.colored_label(look.palette.bad, outcome.error.as_deref().unwrap_or("?"));
             });
         }
+        "batch" => facts.text("did", format!("all {} steps", outcome.steps.len())),
         "deployed" | "upgraded" => {
             if let Some(contract) = &outcome.contract {
                 facts.row("contract", |ui| super::address(ui, ctx, contract));
@@ -472,6 +540,81 @@ mod tests {
         let (text, _) = crate::views::render(&crate::store::Store::default(), &mut crate::light::Light::default(), 1_200.0, |ui, ctx| asked(ui, ctx, &unread, None));
 
         assert!(text.contains("0xdeadbeef") && !text.contains("calls"), "{text}");
+    }
+
+    /// A batch as the node writes it, with its outcome, and what the tx page's lists draw of it.
+    fn batch_view(status: Value) -> (TxView, Outcome) {
+        let pay = |to: &str| json!({ "type": "transfer", "from": "ed25519:0x02", "to": to, "amount": "5" });
+        let tx: TxView = serde_json::from_value(json!({
+            "id": "0x01", "sender": "ed25519:0x02", "nonce": 0, "signer": "0x03", "signature": "0x04",
+            "fee": { "gas_limit": 0, "max_price": "0", "tip": "0" },
+            "tx": { "type": "batch", "steps": [pay("ed25519:0x0a"), { "type": "contract_call", "to": "contract:0x0b", "func": "0x01", "amount": "0", "data": [] }, pay("ed25519:0x0c")] },
+        }))
+        .unwrap();
+        let outcome: Outcome = serde_json::from_value(status).unwrap();
+
+        (tx, outcome)
+    }
+
+    #[test]
+    fn a_batch_shows_each_step_and_what_came_of_it_on_any_screen() {
+        let (tx, outcome) = batch_view(json!({
+            "status": "batch", "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [], "payments": [],
+            "steps": [
+                { "status": "done", "events": 0, "payments": 0 },
+                { "status": "returned", "values": [{ "type": "u64", "value": "7" }], "events": 2, "payments": 1 },
+                { "status": "deployed", "contract": "contract:0x0d", "events": 0, "payments": 0 },
+            ],
+        }));
+
+        for width in [360.0, 740.0, 1_200.0] {
+            let (text, _) = crate::views::render(&crate::store::Store::default(), &mut crate::light::Light::default(), width, |ui, ctx| asked(ui, ctx, &tx, Some(&outcome)));
+
+            for said in ["3 steps, all or nothing", "1 of 3", "2 of 3", "3 of 3", "done", "returned", "deployed", "2 events, 1 payments", "transfer", "contract_call"] {
+                assert!(text.contains(said), "{said} in {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_batch_says_which_step_stopped_it_why_and_that_the_rest_went() {
+        let (tx, outcome) = batch_view(json!({
+            "status": "failed", "failed_step": 1, "error": "step 2 failed, undoing every step: out of fuel", "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [],
+        }));
+        let (text, _) = crate::views::render(&crate::store::Store::default(), &mut crate::light::Light::default(), 360.0, |ui, ctx| asked(ui, ctx, &tx, Some(&outcome)));
+
+        for said in ["undone", "failed", "not run", "step 2 failed, undoing every step: out of fuel"] {
+            assert!(text.contains(said), "{said} in {text}");
+        }
+
+        assert_eq!((outcome.of_step(0).0, outcome.of_step(1).0, outcome.of_step(2).0), ("undone", "failed", "not run"));
+    }
+
+    #[test]
+    fn a_multisigs_batch_and_an_approval_of_one_show_their_steps_and_hops_too() {
+        let (batch, _) = batch_view(json!({ "status": "batch", "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [] }));
+        let carried = |kind: &str| TxView { tx: json!({ "type": kind, "account": "multisig:0x06", "tx": batch.tx.clone(), "signatures": [] }), ..batch.clone() };
+
+        for kind in ["multisig", "approve_multisig"] {
+            let tx = carried(kind);
+
+            assert_eq!(tx.steps().map(<[Value]>::len), Some(3));
+
+            let (text, _) = crate::views::render(&crate::store::Store::default(), &mut crate::light::Light::default(), 1_200.0, |ui, ctx| asked(ui, ctx, &tx, None));
+
+            assert!(text.contains("3 steps, all or nothing") && text.contains("2 of 3"), "{text}");
+        }
+
+        // With no contract to trace, a step's hop each, in order.
+        let hops = hops::of(&batch, None);
+
+        assert_eq!(hops.iter().map(|hop| hop.kind.as_str()).collect::<Vec<_>>(), ["transfer", "call", "transfer"]);
+        assert_eq!(hops::of(&carried("multisig"), None).len(), 3);
+
+        let failed: Outcome = serde_json::from_value(json!({ "status": "failed", "failed_step": 2, "error": "no", "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [] })).unwrap();
+        let hops = hops::of(&batch, Some(&failed));
+
+        assert_eq!(hops.iter().map(|hop| hop.error.is_some()).collect::<Vec<_>>(), [false, false, true]);
     }
 
     #[test]

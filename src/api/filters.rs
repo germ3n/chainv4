@@ -123,13 +123,15 @@ impl TxFilter {
             Tx::Multisig { tx, .. } => tx,
             tx => tx,
         };
+        // A batch passes for what any of its steps does, and for being a batch.
+        let steps = signed.tx.what_it_runs();
 
         self.from.is_none_or(|from| time >= from)
             && self.until.is_none_or(|until| time <= until)
-            && self.kind.as_ref().is_none_or(|kind| kind_of(&signed.tx) == *kind || kind_of(inner) == *kind)
-            && self.direction.is_none_or(|direction| goes(direction, address, signed, inner))
+            && self.kind.as_ref().is_none_or(|kind| kind_of(&signed.tx) == *kind || kind_of(inner) == *kind || steps.iter().any(|step| kind_of(step) == *kind))
+            && self.direction.is_none_or(|direction| goes(direction, address, signed, steps))
             && self.counterparty.is_none_or(|party| touched(signed, &receipt.status, &receipt.payments).contains(&party))
-            && self.token.as_ref().is_none_or(|token| moves(token, inner, receipt))
+            && self.token.as_ref().is_none_or(|token| moves(token, steps, receipt))
     }
 }
 
@@ -140,9 +142,9 @@ fn kind_of(tx: &Tx) -> String {
 
 /// Whether a transaction goes that way for an address: out when it sent it, in otherwise, and both
 /// for coin it paid itself.
-fn goes(direction: Direction, address: &Address, signed: &SignedTx, inner: &Tx) -> bool {
+fn goes(direction: Direction, address: &Address, signed: &SignedTx, steps: &[Tx]) -> bool {
     let sent = signed.sender() == *address;
-    let to_itself = matches!(inner, Tx::Transfer { from, to, .. } if from == to);
+    let to_itself = steps.iter().any(|step| matches!(step, Tx::Transfer { from, to, .. } if from == to));
 
     match direction {
         Direction::Out => sent,
@@ -151,22 +153,22 @@ fn goes(direction: Direction, address: &Address, signed: &SignedTx, inner: &Tx) 
 }
 
 /// Whether a transaction moved the coin, or called a token or had it emit something.
-fn moves(token: &Moved, inner: &Tx, receipt: &TxReceipt) -> bool {
+fn moves(token: &Moved, steps: &[Tx], receipt: &TxReceipt) -> bool {
     match token {
         Moved::Coin => {
             !receipt.payments.is_empty()
-                || match inner {
+                || steps.iter().any(|step| match step {
                     Tx::Transfer { .. } | Tx::Mint { .. } | Tx::Burn { .. } | Tx::Claim { .. } => true,
                     Tx::ContractCall { amount, .. } => amount.to_u256() != u256::ZERO,
                     Tx::EvmCall { value, .. } => value.to_u256() != u256::ZERO,
                     _ => false,
-                }
+                })
         }
         Moved::Token(token) => {
-            let called = match inner {
+            let called = steps.iter().any(|step| match step {
                 Tx::ContractCall { to, .. } | Tx::EvmCall { to, .. } => to == token,
                 _ => false,
-            };
+            });
 
             called || receipt.events.iter().any(|event| event.contract == *token)
         }

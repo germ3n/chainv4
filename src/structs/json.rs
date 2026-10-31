@@ -144,6 +144,7 @@ pub fn tx(transaction: &Tx) -> Value {
             "index": index,
             "path": path.iter().map(ToString::to_string).collect::<Vec<_>>(),
         }),
+        Tx::Batch { steps } => json!({ "type": "batch", "steps": steps.iter().map(tx).collect::<Vec<_>>() }),
     }
 }
 
