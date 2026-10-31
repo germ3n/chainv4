@@ -157,7 +157,7 @@ pub struct Ctx<'a> {
     pub holders: &'a mut Vec<Holder>,
     /// The account in use, by its place among the holders.
     pub current: usize,
-    /// What the wallet's vault holds besides its accounts: the seed phrase.
+    /// What the wallet's vault holds besides its accounts: its seed phrases.
     pub book: &'a mut Book,
     pub coin: &'a Coin,
     pub settings: &'a mut Settings,
@@ -620,6 +620,95 @@ pub fn text_block(ui: &mut Ui, palette: &Palette, text: &str) {
         ui.set_width(ui.available_width());
         ui.add(egui::Label::new(theme::mono(text).color(palette.ink)).wrap());
     });
+}
+
+/// A wallet of two phrases drawn with no window, to see what a page does with what it holds.
+#[cfg(test)]
+pub(crate) mod drawn {
+    use {
+        super::*,
+        crate::vault::{Book, Source, StoredAccount, Vault, Words},
+    };
+
+    /// A book of the test words, with an account, and the abandon words, named, with one.
+    pub fn two_phrases() -> Book {
+        let mut book = Book {
+            phrases: vec![Words::new("test test test test test test test test test test test junk".to_string(), String::new())],
+            accounts: vec![StoredAccount { name: "Main".to_string(), source: Source::Phrase { account: 0, extra: Vec::new(), from: None } }],
+            ..Book::default()
+        };
+        let mut words = Words::new("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string(), String::new());
+        words.set_name("Savings");
+        let from = book.add_phrase(words).unwrap();
+        book.accounts.push(StoredAccount { name: "Saved".to_string(), source: Source::Phrase { account: 0, extra: Vec::new(), from } });
+
+        book
+    }
+
+    /// Draws a page twice, as a screen this wide and tall shows it, with this book, on a wallet
+    /// sealed with no password. How wide it came out, and whether anything was marked to be sealed.
+    pub fn page(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), mut draw: impl FnMut(&mut Ui, &mut Ctx)) -> (f32, bool) {
+        let egui = egui::Context::default();
+        crate::theme::install_fonts(&egui);
+        let palette = crate::theme::DARK;
+        let (chain, coin) = (Chain::default(), Coin { symbol: "DEV".to_string(), decimals: 18 });
+        let mut node = Node::new("http://127.0.0.1:1", Err("no client in a test".to_string()), egui.clone());
+        let vault = Vault::create("").unwrap();
+        let mut settings = Settings::default();
+        settings.wallets = vec![crate::app::WalletEntry {
+            name: "Mine".to_string(),
+            vault: vault.seal(&Book::default()).unwrap(),
+            current: holders.first().map(Holder::id).unwrap_or_default(),
+            biometric: None,
+            unprotected: true,
+        }];
+        let mut vault = Some(vault);
+        let (mut page, mut connect, mut changed, mut leave, mut lock) = (Page::Accounts, None, false, false, None);
+        #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+        let mut lights = crate::light::Lights::default();
+        let mut width = 0.0_f32;
+
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0, size.1))),
+                ..egui::RawInput::default()
+            };
+            let mut output = egui.run_ui(input, |ui| {
+                let mut ctx = Ctx {
+                    palette: &palette,
+                    chain: &chain,
+                    node: &mut node,
+                    holders: &mut *holders,
+                    current: 0,
+                    book: &mut *book,
+                    coin: &coin,
+                    settings: &mut settings,
+                    now: 0,
+                    page: &mut page,
+                    connect: &mut connect,
+                    changed: &mut changed,
+                    vault: &mut vault,
+                    leave: &mut leave,
+                    lock: &mut lock,
+                    wake: &egui,
+                    faucet: None,
+                    swap_contract: None,
+                    dex: (None, None),
+                    node_stops: None,
+                    #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+                    lights: &mut lights,
+                };
+                draw(ui, &mut ctx);
+                width = ui.min_rect().width();
+            });
+            output.textures_delta.clear();
+        }
+
+        (width, changed)
+    }
+
+    /// A phone upright, a phone on its side, and a desktop.
+    pub const SCREENS: [(f32, f32); 3] = [(360.0, 740.0), (740.0, 360.0), (1200.0, 800.0)];
 }
 
 #[cfg(test)]

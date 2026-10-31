@@ -13,7 +13,7 @@ use {
     crate::theme::{self, Palette},
     crate::vault::{Book, Source, StoredAccount, Vault, Words},
     crate::views::scan::Scan,
-    chainv4::crypto::mnemonic::Phrase,
+    chainv4::crypto::mnemonic::{MnemonicError, Phrase},
     egui::{RichText, Ui},
 };
 
@@ -29,10 +29,8 @@ pub enum Lock {
     /// Making a wallet: from new words, or from words written down before.
     Choose,
     New(Making),
-    /// New words, to write down.
-    Words(Made),
-    /// Three of them, asked back.
-    Confirm { made: Made, asked: [usize; 3], answers: [Typed; 3], error: Option<String> },
+    /// New words, to write down, and three of them asked back.
+    Words { made: Made, writing: Writing },
     Restore { making: Making, words: Typed },
     /// A watch-only wallet from an offline signer's account: read, then named and sealed.
     Pair { making: Making, scan: Box<Scan>, paired: Option<Pairing> },
@@ -63,14 +61,12 @@ pub struct Opened {
     pub book: Book,
 }
 
-/// Where a step leads that takes what the screen holds along with it.
-enum Step {
-    /// From the words to asking three of them back.
-    Check,
-    /// From asking back to the words again.
-    Reread,
-    /// The words asked back were right: the wallet is kept, and opens.
-    Keep,
+/// How far new words are from being written down: shown, or three of them asked back.
+#[derive(Default)]
+pub enum Writing {
+    #[default]
+    Shown,
+    Asked { asked: [usize; 3], answers: [Typed; 3], error: Option<String> },
 }
 
 impl Lock {
@@ -99,7 +95,7 @@ impl Lock {
 pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut Lock) -> Option<Opened> {
     let mut opened = None;
     let mut next = None;
-    let mut step = None;
+    let mut confirmed = false;
 
     theme::card(ui, palette, |ui| match lock {
         Lock::Role => {
@@ -225,7 +221,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
 
             match role {
                 Role::Online => ui.label(RichText::new("From 12 words: new ones, or ones you wrote down. Or watch-only: an offline signer's account, read off its Pair page.").color(palette.soft)),
-                Role::Signer => ui.label(RichText::new("Its accounts all come from 12 words. Make new ones, or bring a wallet back from words you wrote down.").color(palette.soft)),
+                Role::Signer => ui.label(RichText::new("Its accounts come from 12 words, and from more once it is open. Make new ones, or bring a wallet back from words you wrote down.").color(palette.soft)),
             };
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
@@ -316,7 +312,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             ui.horizontal_wrapped(|ui| {
                 if theme::primary(ui, palette, "Make the words", true).clicked() {
                     match made(making, settings.wallets.len()) {
-                        Ok(made) => next = Some(Lock::Words(made)),
+                        Ok(made) => next = Some(Lock::Words { made, writing: Writing::default() }),
                         Err(why) => making.error = Some(why),
                     }
                 }
@@ -326,21 +322,70 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                 }
             });
         }
-        Lock::Words(made) => {
+        Lock::Words { made, writing } => confirmed = write_down(ui, palette, &made.phrase, writing, "Open the wallet"),
+        Lock::Restore { making, words } => {
+            theme::caps(ui, palette, "Restore from words");
+            ui.label(RichText::new("The 12 or 24 words, in order, with spaces between.").small().color(palette.muted));
+            secret(ui, egui::TextEdit::multiline(&mut **words).desired_rows(3).desired_width(f32::INFINITY).hint_text("word word word …"));
+            ui.add_space(6.0);
+            making_fields(ui, palette, making, settings.wallets.len(), true);
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                if theme::primary(ui, palette, "Restore", true).clicked() {
+                    let restored = read_words(words).and_then(|phrase| Ok((phrase, Vault::create(&password(making)?)?)));
+
+                    match restored {
+                        Ok((phrase, vault)) => opened = Some(keep(settings, name(making, settings.wallets.len()), vault, &phrase, making.passphrase.to_string())),
+                        Err(why) => making.error = Some(why),
+                    }
+                }
+
+                if theme::quiet(ui, palette, "Back").clicked() {
+                    next = Some(Lock::Choose);
+                }
+            });
+        }
+        Lock::Open => {}
+    });
+
+    if let Some(next) = next {
+        *lock = next;
+    }
+
+    // The words asked back were right: the wallet is kept, and opens.
+    if confirmed && let Lock::Words { made, .. } = std::mem::replace(lock, Lock::Open) {
+        opened = Some(keep(settings, made.name, made.vault, &made.phrase, made.passphrase.to_string()));
+    }
+
+    opened
+}
+
+/// New words to write down: shown, then three of them asked back, as a new wallet's are and as a
+/// further phrase's are. Whether they were right, with done on the button that says so.
+pub fn write_down(ui: &mut Ui, palette: &Palette, phrase: &Phrase, writing: &mut Writing, done: &str) -> bool {
+    let mut confirmed = false;
+    let mut next = None;
+
+    match writing {
+        Writing::Shown => {
             theme::caps(ui, palette, "Your words");
             ui.label(
-                RichText::new("Write these down, in order, and keep them where only you can read them. They are every account's keys: anyone with them has it all, and without them a lost device is a lost wallet.")
+                RichText::new("Write these down, in order, and keep them where only you can read them. They are the keys of every account made from them: anyone with them has those accounts, and without them a lost device loses them.")
                     .color(palette.soft),
             );
             ui.add_space(10.0);
-            words_grid(ui, palette, &made.phrase);
+            words_grid(ui, palette, phrase);
             ui.add_space(10.0);
 
             if theme::primary(ui, palette, "I wrote them down", true).clicked() {
-                step = Some(Step::Check);
+                next = Some(Writing::Asked {
+                    asked: three_of(phrase.words().len()),
+                    answers: Default::default(),
+                    error: None,
+                });
             }
         }
-        Lock::Confirm { made, asked, answers, error } => {
+        Writing::Asked { asked, answers, error } => {
             theme::caps(ui, palette, "Check them");
             ui.label(RichText::new("To be sure they are written down right: these words, from your list.").color(palette.soft));
             ui.add_space(6.0);
@@ -363,69 +408,46 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
 
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                if theme::primary(ui, palette, "Open the wallet", true).clicked() {
-                    match right(&made.phrase, asked, answers) {
-                        true => step = Some(Step::Keep),
+                if theme::primary(ui, palette, done, true).clicked() {
+                    match right(phrase, asked, answers) {
+                        true => confirmed = true,
                         false => *error = Some("not the words listed: look again".to_string()),
                     }
                 }
 
                 if theme::quiet(ui, palette, "Show them again").clicked() {
-                    step = Some(Step::Reread);
+                    next = Some(Writing::Shown);
                 }
             });
         }
-        Lock::Restore { making, words } => {
-            theme::caps(ui, palette, "Restore from words");
-            ui.label(RichText::new("The 12 or 24 words, in order, with spaces between.").small().color(palette.muted));
-            secret(ui, egui::TextEdit::multiline(&mut **words).desired_rows(3).desired_width(f32::INFINITY).hint_text("word word word …"));
-            ui.add_space(6.0);
-            making_fields(ui, palette, making, settings.wallets.len(), true);
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                if theme::primary(ui, palette, "Restore", true).clicked() {
-                    let restored = Phrase::parse(words)
-                        .map_err(|err| err.to_string())
-                        .and_then(|phrase| Ok((phrase, Vault::create(&password(making)?)?)));
-
-                    match restored {
-                        Ok((phrase, vault)) => opened = Some(keep(settings, name(making, settings.wallets.len()), vault, &phrase, making.passphrase.to_string())),
-                        Err(why) => making.error = Some(why),
-                    }
-                }
-
-                if theme::quiet(ui, palette, "Back").clicked() {
-                    next = Some(Lock::Choose);
-                }
-            });
-        }
-        Lock::Open => {}
-    });
+    }
 
     if let Some(next) = next {
-        *lock = next;
+        *writing = next;
     }
 
-    // The steps that take the wallet made along.
-    if let Some(step) = step {
-        *lock = match (step, std::mem::replace(lock, Lock::Open)) {
-            (Step::Check, Lock::Words(made)) => Lock::Confirm {
-                asked: three_of(made.phrase.words().len()),
-                made,
-                answers: Default::default(),
-                error: None,
-            },
-            (Step::Reread, Lock::Confirm { made, .. }) => Lock::Words(made),
-            (Step::Keep, Lock::Confirm { made, .. }) => {
-                opened = Some(keep(settings, made.name, made.vault, &made.phrase, made.passphrase.to_string()));
+    confirmed
+}
 
-                Lock::Open
-            }
-            (_, unchanged) => unchanged,
-        };
-    }
+/// Reads words as someone typed them, saying what is wrong without repeating any of them: a typo
+/// of a real word is most of one, and errors end up in places words should not.
+pub fn read_words(typed: &str) -> Result<Phrase, String> {
+    Phrase::parse(typed).map_err(|why| match why {
+        MnemonicError::UnknownWord(_) => "one of them is not a word of the list: check each one's spelling".to_string(),
+        other => other.to_string(),
+    })
+}
 
-    opened
+/// BIP39's optional passphrase, put away under Advanced.
+pub fn passphrase_field(ui: &mut Ui, palette: &Palette, passphrase: &mut Typed) {
+    egui::CollapsingHeader::new(RichText::new("Advanced").color(palette.soft)).id_salt("passphrase").show(ui, |ui| {
+        ui.label(
+            RichText::new("A BIP39 passphrase, kept with the words: the same words with another passphrase are another wallet. Lose it, and the words alone bring back nothing.")
+                .small()
+                .color(palette.warn),
+        );
+        secret(ui, egui::TextEdit::singleline(&mut **passphrase).password(true).hint_text("passphrase, or none").desired_width(f32::INFINITY));
+    });
 }
 
 /// A name, a password twice, and, put away, BIP39's passphrase, for a wallet with words.
@@ -453,14 +475,7 @@ fn making_fields(ui: &mut Ui, palette: &Palette, making: &mut Making, wallets: u
         return;
     }
 
-    egui::CollapsingHeader::new(RichText::new("Advanced").color(palette.soft)).id_salt("passphrase").show(ui, |ui| {
-        ui.label(
-            RichText::new("A BIP39 passphrase, kept with the words: the same words with another passphrase are another wallet. Lose it, and the words alone bring back nothing.")
-                .small()
-                .color(palette.warn),
-        );
-        secret(ui, egui::TextEdit::singleline(&mut *making.passphrase).password(true).hint_text("passphrase, or none").desired_width(f32::INFINITY));
-    });
+    passphrase_field(ui, palette, &mut making.passphrase);
 
     if let Some(error) = &making.error {
         ui.colored_label(palette.bad, error.as_str());
@@ -507,13 +522,10 @@ fn right(phrase: &Phrase, asked: &[usize; 3], answers: &[Typed; 3]) -> bool {
 /// in use.
 fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, passphrase: String) -> Opened {
     let book = Book {
-        phrase: Some(Words {
-            words: phrase.to_string(),
-            passphrase,
-        }),
+        phrases: vec![Words::new(phrase.to_string(), passphrase)],
         accounts: vec![StoredAccount {
             name: "Account 1".to_string(),
-            source: Source::Phrase { account: 0, extra: Vec::new() },
+            source: Source::Phrase { account: 0, extra: Vec::new(), from: None },
         }],
         watch: false,
         swaps: Vec::new(),
@@ -540,7 +552,7 @@ fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, pa
 /// use.
 fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &Pairing) -> Opened {
     let book = Book {
-        phrase: None,
+        phrases: Vec::new(),
         accounts: vec![StoredAccount {
             name: pairing.name.clone(),
             source: Source::Watch { keys: pairing.keys.iter().map(ToString::to_string).collect(), origin: pairing.origin },
@@ -572,7 +584,8 @@ pub fn words_grid(ui: &mut Ui, palette: &Palette, phrase: &Phrase) {
     let columns = if ui.available_width() < 320.0 { 2 } else { 3 };
     let rows = words.len().div_ceil(columns);
 
-    egui::Grid::new("words").num_columns(2 * columns).spacing([6.0, 8.0]).show(ui, |ui| {
+    // Its id is its place's, so a grid on one page never shares a layout with one on another.
+    egui::Grid::new(ui.scope_id().with("words")).num_columns(2 * columns).spacing([6.0, 8.0]).show(ui, |ui| {
         for row in 0..rows {
             for column in 0..columns {
                 let position = column * rows + row;
@@ -641,13 +654,23 @@ mod tests {
     }
 
     #[test]
+    fn what_is_wrong_with_words_typed_never_repeats_them() {
+        let typed = "test test test test test test test test test test test jnuk";
+        let why = read_words(typed).unwrap_err();
+
+        assert!(!why.contains("jnuk") && !why.contains("test"), "{why}");
+        assert_eq!(read_words("test test").unwrap_err(), "2 words: a phrase is 12, 15, 18, 21 or 24");
+        assert!(read_words("test test test test test test test test test test test junk").is_ok());
+    }
+
+    #[test]
     fn a_kept_wallet_starts_with_the_phrases_first_account() {
         let mut settings = Settings::default();
         let phrase = Phrase::generate(12).unwrap();
         let opened = keep(&mut settings, "Mine".to_string(), Vault::create("correct horse").unwrap(), &phrase, String::new());
 
         assert_eq!((settings.wallets.len(), settings.wallet, settings.wallets[0].name.as_str()), (1, 0, "Mine"));
-        assert_eq!(opened.book.accounts[0].source, Source::Phrase { account: 0, extra: Vec::new() });
+        assert_eq!(opened.book.accounts[0].source, Source::Phrase { account: 0, extra: Vec::new(), from: None });
         assert_eq!(Vault::open(&settings.wallets[0].vault, "correct horse").unwrap().1, opened.book);
 
         assert!(!settings.wallets[0].unprotected);
@@ -696,11 +719,11 @@ mod tests {
         let (_, mine) = Vault::open(&settings.wallets[0].vault, "correct horse").unwrap();
         let (_, cold) = Vault::open(&settings.wallets[1].vault, "battery staple").unwrap();
 
-        assert!(!mine.watch && mine.phrase.is_some());
+        assert!(!mine.watch && !mine.phrases.is_empty());
         assert_eq!(cold, watched.book);
-        assert!(cold.watch && cold.phrase.is_none());
+        assert!(cold.watch && cold.phrases.is_empty());
 
-        let holders = crate::keys::open(&cold);
+        let holders = crate::keys::open(&cold).unwrap();
 
         assert!(holders[0].keys.is_empty(), "nothing to sign with");
         assert_eq!(holders[0].addresses(), signer.iter().map(|key| key.public().address()).collect::<Vec<_>>());

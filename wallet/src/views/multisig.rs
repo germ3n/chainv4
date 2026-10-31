@@ -732,6 +732,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_member_line_takes_its_xpub_from_the_accounts_own_words() {
+        use crate::vault::{Book, Source, StoredAccount, Words};
+
+        let abandon = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let mut book = Book {
+            phrases: vec![Words::new("test test test test test test test test test test test junk".to_string(), String::new())],
+            ..Book::default()
+        };
+        let from = book.add_phrase(Words::new(abandon.to_string(), String::new())).unwrap();
+        book.accounts = vec![
+            StoredAccount { name: "First".to_string(), source: Source::Phrase { account: 0, extra: Vec::new(), from: None } },
+            StoredAccount { name: "Other".to_string(), source: Source::Phrase { account: 0, extra: Vec::new(), from } },
+        ];
+        let holders = crate::keys::open(&book).unwrap();
+        let line = |holder: &crate::keys::Holder| member_line(holder, crate::keys::seed_of(&book, holder), false).unwrap();
+        let xpub = |words: &Words| chainv4::crypto::bitcoin::multisig::xpub_text(&words.seed().unwrap().multisig_account(0), network(false));
+
+        assert!(line(&holders[1]).contains(&xpub(&book.phrases[1])), "the other words' xpub, for their account");
+        assert!(!line(&holders[1]).contains(&xpub(&book.phrases[0])));
+        assert!(line(&holders[0]).contains(&xpub(&book.phrases[0])));
+        assert_ne!(line(&holders[0]), line(&holders[1]));
+    }
+
+    #[test]
     fn a_proposal_says_where_it_stands_and_what_it_needs_next() {
         assert_eq!(progress(1, 2, false, true), "1 of 2 agree. It needs 1 more: you have not agreed yet.");
         assert_eq!(progress(1, 2, true, true), "1 of 2 agree, you among them. It needs 1 more of the other members.");

@@ -756,6 +756,16 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **Several seed phrases in one wallet.** Accounts adds another, read or made new and written
+  down, with its own account 0, on a signer or an online wallet, under the wallet's one password;
+  each counts its accounts apart and matches a restore of it alone. Settings lists, names, shows
+  and, after a preview, a typed yes and the password, removes them, all but the first. MetaMask
+  requests pick their seed by fingerprint or address and refuse to guess, PSBTs sign with every
+  seed they name. One phrase stays byte for byte as it was; two are a form older builds refuse.
+  See [Wallet](wallet.md#wallets-and-words).
+- [x] **A wallet could lose an account this build could not read,** left out as it opened and so
+  gone with the next save. It refuses to open now, and says which, with nothing written.
+
 - [x] **Nothing stopped one address flooding the API.** nginx limits each address now, contract calls harder, and the onion goes through it too.
 
 - [x] **`gen_notices.py` stopped at hex_lit,** which names MITNFA and ships no text of it. Its standard

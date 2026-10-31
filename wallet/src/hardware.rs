@@ -265,6 +265,9 @@ pub struct SignRequest {
     pub origin: Option<String>,
 }
 
+/// Why a request is not signed when nothing in it says which of several seeds it means.
+const AMBIGUOUS: &str = "A request that says neither which words it is for nor which address, in a wallet with several sets of words: pair MetaMask again from Pair, so it says.";
+
 impl SignRequest {
     /// Reads one from its CBOR.
     pub fn from_cbor(bytes: &[u8]) -> Result<SignRequest, String> {
@@ -515,6 +518,47 @@ impl SignRequest {
                 _ => self.chain_id,
             },
             _ => self.chain_id,
+        }
+    }
+
+    /// Which of the wallet's seeds it asks to sign with: the one its fingerprint names, and failing
+    /// that the one whose key at its path has the address it names. A request naming neither is
+    /// refused where there is more than one seed to guess between; with one, it is that seed's, and
+    /// sign checks the address as it signs. A fingerprint is 32 bits, so with several seeds a
+    /// matching one is checked against the address too, if the request names one.
+    pub fn choose<'a>(&self, seeds: &[&'a Seed]) -> Result<&'a Seed, String> {
+        let another = || "A request for another wallet's keys: pair MetaMask with this one on Pair.".to_string();
+        let holds = |seed: &Seed, address: [u8; 20]| -> Result<bool, String> {
+            Ok(seed.key(KeyType::Secp256k1, self.account()?).public().address() == chainv4::structs::address::Address::Secp256k1(address))
+        };
+
+        match (self.path.fingerprint, self.address, seeds) {
+            (Some(asked), _, [seed]) if asked != seed.ethereum_account().master_fingerprint => Err(another()),
+            (_, _, [seed]) => Ok(*seed),
+            (Some(asked), address, several) => {
+                let seed = *several.iter().find(|seed| seed.ethereum_account().master_fingerprint == asked).ok_or_else(another)?;
+
+                match address {
+                    Some(address) if !holds(seed, address)? => Err(format!("A request to sign as {}, which is not the account at its path in the words it names.", to_hex(&address))),
+                    _ => Ok(seed),
+                }
+            }
+            (None, Some(address), several) => {
+                let mut holding = Vec::new();
+
+                for seed in several {
+                    if holds(seed, address)? {
+                        holding.push(*seed);
+                    }
+                }
+
+                match holding.as_slice() {
+                    [seed] => Ok(*seed),
+                    [] => Err(another()),
+                    _ => Err(AMBIGUOUS.to_string()),
+                }
+            }
+            (None, None, _) => Err(AMBIGUOUS.to_string()),
         }
     }
 

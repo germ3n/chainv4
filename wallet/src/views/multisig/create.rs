@@ -406,7 +406,7 @@ fn members(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, errors: &Errors) {
     ui.horizontal_wrapped(|ui| {
         if !mine.iter().any(|key| wizard.rows.iter().any(|row| row.key.trim() == key.as_str()))
             && theme::primary(ui, &palette, "Add this account", true).clicked()
-            && let Some(line) = ctx.holder().and_then(|holder| member_line(holder, crate::keys::seed(ctx.book).as_ref(), wizard.testnet))
+            && let Some(line) = ctx.holder().and_then(|holder| member_line(holder, crate::keys::seed_of(ctx.book, holder), wizard.testnet))
         {
             wizard.rows.push(Row::from_line(&line));
         }
@@ -453,7 +453,7 @@ fn reach(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, errors: &Errors) {
 
         // This account's own key follows the network; others' are their own to give.
         if was != wizard.testnet
-            && let Some(line) = ctx.holder().and_then(|holder| member_line(holder, crate::keys::seed(ctx.book).as_ref(), wizard.testnet))
+            && let Some(line) = ctx.holder().and_then(|holder| member_line(holder, crate::keys::seed_of(ctx.book, holder), wizard.testnet))
         {
             let mine = Row::from_line(&line);
 

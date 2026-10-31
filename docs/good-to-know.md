@@ -392,6 +392,27 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   `chainv4_ui::secret::secret` drops egui's undo history of the field each frame; the vault's JSON
   is counted first and written into room of exactly its size. Use both for any new secret field,
   in the wallet or the explorer, whose pasted key and key file are wiped the same way.
+- **A vault's `phrase` is null, an object or a list, and the list is a fence.** One phrase is
+  written as it always was, its `name` left out, so older builds read it byte for byte. Two or more
+  are a list, always, even with no account from the second: an older build's `Option<Words>` reads
+  a list by position, wants a string first, finds an object, and says the vault is damaged and
+  writes nothing. It would otherwise ignore the new data, derive an account of the second phrase
+  from the first, and save the rest away. `vault::tests::older` holds a copy of the old structs to
+  prove it: keep it as it is.
+- **An account of a further phrase names it by fingerprint, `Source::Phrase::from`.** Absent means
+  the first phrase, which is why the first can never be removed by itself, and why `from` is never
+  written for it. `Book::check` runs on every open and seal: an account whose phrase is not there,
+  or of any kind this build cannot read, a key damaged or in a scheme it was built without, fails
+  both. `keys::open` returns an error rather than a shorter list, because `Wallet::store` rebuilds
+  the book's accounts from the holders, so one left out goes for good. Add a kind of account, and
+  add it to `check`.
+- **A `Book`'s `Debug` holds no secret.** `Words`, `Source::Key` and a swap's secret print as
+  hidden, and `Stored` has no `Debug`. Keep it so for any new secret field: `assert_eq!` on a book
+  prints it when a test fails.
+- **`Holder::number` alone says nothing across phrases.** Every phrase has its own 0, and its own
+  shared paths, so count with `keys::unused` and `keys::next_index` by `Holder::from`, and derive
+  with `keys::seed_of`. `Words` keeps its seed once stretched, wiped with it: `words.seed()` costs
+  nothing per frame, and its fields are private so that seed cannot go stale.
 - **`GET /node` has `mining`,** null for a node that does not mine: the total `rate`, the node's
   `devices`, `listening` for workers, and `workers`, each with its devices, `found` and `refused`.
 - **A rotating authority's producers are its finality signers, and a staked chain's its FFG

@@ -102,70 +102,79 @@ pub fn receiving(seed: &Seed, network: Network, index: u32) -> String {
     bech32::encode_segwit(network.hrp(), &hash160(&public(&seed.bitcoin_key(network.coin(), 0, index).public())))
 }
 
-/// Everything to check before signing, and what this seed signs: each input it holds the key
-/// of. Refused: an input whose coins it does not know, one of this seed's that is not native
+/// Everything to check before signing, and what each of a wallet's seeds signs: each input it
+/// holds the key of. An input of none of them is another's, and a seed with no input here simply
+/// signs none. Refused: an input whose coins it does not know, one of a seed's that is not native
 /// segwit or not at BIP84's path, or asks for less than all of the transaction signed, outputs
-/// worth more than the inputs, nothing for this seed to sign, and both networks at once.
-fn plan(psbt: &Psbt, seed: &Seed) -> Result<(Review, Vec<Signing>), String> {
-    let fingerprint = seed.bitcoin_account(0).master_fingerprint;
-    let (mut inputs, mut signing, mut networks, mut unproven) = (Vec::new(), Vec::new(), Vec::new(), false);
+/// worth more than the inputs, nothing for any seed to sign, and both networks at once.
+fn plan(psbt: &Psbt, seeds: &[&Seed]) -> Result<(Review, Vec<Vec<Signing>>), String> {
+    let seeds: Vec<([u8; 4], &Seed)> = seeds.iter().map(|seed| (seed.bitcoin_account(0).master_fingerprint, *seed)).collect();
+    let mut signing: Vec<Vec<Signing>> = seeds.iter().map(|_| Vec::new()).collect();
+    let (mut inputs, mut signed_inputs, mut networks, mut unproven, mut multisigs) = (Vec::new(), 0, Vec::new(), false, false);
 
     for (index, pairs) in psbt.inputs.iter().enumerate() {
         let n = index + 1;
         let (output, proven) = psbt.spent(index)?.ok_or_else(|| format!("input {n} says nothing of the coins it spends: the fee cannot be known"))?;
         let finished = pairs.iter().any(|pair| pair.key == [IN_FINAL_SCRIPTSIG] || pair.key == [IN_FINAL_SCRIPTWITNESS]);
-        let ours = derivations(pairs, IN_BIP32_DERIVATION)?.into_iter().filter(|derived| derived.fingerprint == fingerprint).collect::<Vec<_>>();
+        let derived = derivations(pairs, IN_BIP32_DERIVATION)?;
         unproven |= !proven;
+        let mut spent = Spent { value: output.value, yours: None, swap: None };
 
-        let (key, path) = match (finished, ours.as_slice()) {
-            (true, _) | (_, []) => {
-                inputs.push(Spent { value: output.value, yours: None, swap: None });
+        for (which, (fingerprint, seed)) in seeds.iter().enumerate() {
+            let ours = derived.iter().filter(|derived| derived.fingerprint == *fingerprint).collect::<Vec<_>>();
 
-                continue;
+            let (key, path) = match (finished, ours.as_slice()) {
+                (true, _) | (_, []) => continue,
+                (false, [derived]) => (derived.key, derived.path.clone()),
+                (false, _) => return Err(format!("input {n} names more than one of this wallet's keys")),
+            };
+            let shown = path_text(&path);
+            let (network, chain, number, multisig) = match (bip84(&path), bip48(&path)) {
+                (Some((network, chain, number)), _) => (network, chain, number, false),
+                (None, Some((network, chain, number))) => (network, chain, number, true),
+                _ => return Err(format!("input {n} asks for a key at {shown}, where this signer holds none: it signs at m/84'/0'/0' and m/84'/1'/0', and multisigs' at m/48'/0'/0'/2' and m/48'/1'/0'/2'")),
+            };
+            let held = match multisig {
+                true => seed.multisig_key(network.coin(), chain, number),
+                false => seed.bitcoin_key(network.coin(), chain, number),
+            };
+
+            if public(&held.public()) != key {
+                return Err(format!("input {n} asks for a key at {shown} that is not this wallet's: a PSBT for another seed"));
             }
-            (false, [derived]) => (derived.key, derived.path.clone()),
-            (false, _) => return Err(format!("input {n} names more than one of this wallet's keys")),
-        };
-        let shown = path_text(&path);
-        let (network, chain, number, multisig) = match (bip84(&path), bip48(&path)) {
-            (Some((network, chain, number)), _) => (network, chain, number, false),
-            (None, Some((network, chain, number))) => (network, chain, number, true),
-            _ => return Err(format!("input {n} asks for a key at {shown}, where this signer holds none: it signs at m/84'/0'/0' and m/84'/1'/0', and multisigs' at m/48'/0'/0'/2' and m/48'/1'/0'/2'")),
-        };
-        let held = match multisig {
-            true => seed.multisig_key(network.coin(), chain, number),
-            false => seed.bitcoin_key(network.coin(), chain, number),
-        };
 
-        if public(&held.public()) != key {
-            return Err(format!("input {n} asks for a key at {shown} that is not this wallet's: a PSBT for another seed"));
+            let swap = match multisig {
+                true => None,
+                false => htlc_input(pairs, &output.script, &key, n)?,
+            };
+            let (shared, shared_swap) = match multisig {
+                true => multisig_input(pairs, &output.script, &key, n).map(|(script, swapped)| (Some(script), swapped))?,
+                false => (None, None),
+            };
+
+            if swap.is_none() && shared.is_none() && output.script != p2wpkh(&hash160(&key)) {
+                return Err(match kind(&output.script) {
+                    Some("native segwit") => format!("input {n} spends coins of another key than the one at {shown}"),
+                    Some(kind) => format!("input {n} spends a {kind} output, which this signer does not sign: it signs native segwit, bc1q, alone"),
+                    None => format!("input {n} spends an output of a script this signer does not sign: it signs native segwit, bc1q, alone"),
+                });
+            }
+
+            if find(pairs, &[IN_SIGHASH_TYPE]).is_some_and(|kind| kind != SIGHASH_ALL.to_le_bytes()) {
+                return Err(format!("input {n} asks for a signature that leaves the rest open to change: this signer signs all of a transaction, SIGHASH_ALL, alone"));
+            }
+
+            networks.push(network);
+            multisigs |= multisig;
+            let (code, swapped) = swap.map_or((shared, shared_swap), |(code, swapped)| (Some(code), Some(swapped)));
+            signing[which].push(Signing { index, network, chain, number, multisig, key, value: output.value, code });
+            // Two of a wallet's seeds may both be a multisig's members: the review names the first.
+            spent.swap = spent.swap.or(swapped);
+            spent.yours.get_or_insert(shown);
         }
 
-        let swap = match multisig {
-            true => None,
-            false => htlc_input(pairs, &output.script, &key, n)?,
-        };
-        let (shared, shared_swap) = match multisig {
-            true => multisig_input(pairs, &output.script, &key, n).map(|(script, swapped)| (Some(script), swapped))?,
-            false => (None, None),
-        };
-
-        if swap.is_none() && shared.is_none() && output.script != p2wpkh(&hash160(&key)) {
-            return Err(match kind(&output.script) {
-                Some("native segwit") => format!("input {n} spends coins of another key than the one at {shown}"),
-                Some(kind) => format!("input {n} spends a {kind} output, which this signer does not sign: it signs native segwit, bc1q, alone"),
-                None => format!("input {n} spends an output of a script this signer does not sign: it signs native segwit, bc1q, alone"),
-            });
-        }
-
-        if find(pairs, &[IN_SIGHASH_TYPE]).is_some_and(|kind| kind != SIGHASH_ALL.to_le_bytes()) {
-            return Err(format!("input {n} asks for a signature that leaves the rest open to change: this signer signs all of a transaction, SIGHASH_ALL, alone"));
-        }
-
-        networks.push(network);
-        let (code, swapped) = swap.map_or((shared, shared_swap), |(code, swapped)| (Some(code), Some(swapped)));
-        signing.push(Signing { index, network, chain, number, multisig, key, value: output.value, code });
-        inputs.push(Spent { value: output.value, yours: Some(shown), swap: swapped });
+        signed_inputs += usize::from(spent.yours.is_some());
+        inputs.push(spent);
     }
 
     let Some(network) = networks.first().copied() else {
@@ -177,26 +186,29 @@ fn plan(psbt: &Psbt, seed: &Seed) -> Result<(Review, Vec<Signing>), String> {
         let mut yours = None;
 
         for Derived { key, fingerprint: from, path } in derivations(pairs, OUT_BIP32_DERIVATION)? {
-            // Change back to a multisig this seed is a member of: its script, holding this key.
-            if let Some((at, chain, number)) = bip48(&path).filter(|_| from == fingerprint) {
-                networks.push(at);
-                let script = find(pairs, &[OUT_WITNESS_SCRIPT]).unwrap_or_default();
-                let holds = parse_multisig_script(script).is_some_and(|(_, keys)| keys.contains(&key));
+            // Change back to any of the wallet's seeds, whichever of them signs the inputs.
+            for (fingerprint, seed) in &seeds {
+                // Change back to a multisig this seed is a member of: its script, holding this key.
+                if let Some((at, chain, number)) = bip48(&path).filter(|_| from == *fingerprint) {
+                    networks.push(at);
+                    let script = find(pairs, &[OUT_WITNESS_SCRIPT]).unwrap_or_default();
+                    let holds = parse_multisig_script(script).is_some_and(|(_, keys)| keys.contains(&key));
 
-                if public(&seed.multisig_key(at.coin(), chain, number).public()) == key && holds && output.script == p2wsh(script) {
-                    yours = Some(format!("{}, the multisig's", path_text(&path)));
+                    if public(&seed.multisig_key(at.coin(), chain, number).public()) == key && holds && output.script == p2wsh(script) {
+                        yours = Some(format!("{}, the multisig's", path_text(&path)));
+                    }
+
+                    continue;
                 }
 
-                continue;
-            }
+                let Some((at, chain, number)) = bip84(&path).filter(|_| from == *fingerprint) else {
+                    continue;
+                };
+                networks.push(at);
 
-            let Some((at, chain, number)) = bip84(&path).filter(|_| from == fingerprint) else {
-                continue;
-            };
-            networks.push(at);
-
-            if public(&seed.bitcoin_key(at.coin(), chain, number).public()) == key && output.script == p2wpkh(&hash160(&key)) {
-                yours = Some(path_text(&path));
+                if public(&seed.bitcoin_key(at.coin(), chain, number).public()) == key && output.script == p2wpkh(&hash160(&key)) {
+                    yours = Some(path_text(&path));
+                }
             }
         }
 
@@ -217,7 +229,7 @@ fn plan(psbt: &Psbt, seed: &Seed) -> Result<(Review, Vec<Signing>), String> {
     // Signed, each input's witness is two pushes: a signature, at most 73 bytes and mostly 72,
     // and its key. Others' inputs, of any kind, cannot be weighed.
     // A multisig's inputs take its members' signatures and its script: weighed by none of this.
-    let vsize = (signing.len() == psbt.tx.inputs.len() && !signing.iter().any(|input| input.multisig)).then(|| (4 * psbt.tx.base().len() as u64 + 2 + 108 * signing.len() as u64).div_ceil(4));
+    let vsize = (signed_inputs == psbt.tx.inputs.len() && !multisigs).then(|| (4 * psbt.tx.base().len() as u64 + 2 + 108 * signed_inputs as u64).div_ceil(4));
 
     let review = Review {
         network,
@@ -236,28 +248,46 @@ fn plan(psbt: &Psbt, seed: &Seed) -> Result<(Review, Vec<Signing>), String> {
 /// What the offline signer does with a PSBT a Bitcoin wallet asks it to sign.
 pub trait Signs {
     /// What it spends and pays, laid out to check before signing; why it cannot be signed, if it
-    /// cannot.
+    /// cannot. The wallet itself asks with all its seeds, by review_all.
+    #[cfg(test)]
     fn review(&self, seed: &Seed) -> Result<Review, String>;
 
     /// The PSBT with this seed's signatures added, one for each input it holds the key of, in
-    /// place of any it held for those keys. Refused as review refuses it.
+    /// place of any it held for those keys. Refused as review refuses it. The wallet itself signs
+    /// with all its seeds, by sign_all.
+    #[cfg(test)]
     fn sign(&self, seed: &Seed) -> Result<Psbt, String>;
+
+    /// As review, for a wallet with these seeds: an input of any of them is the wallet's, and so
+    /// is change back to any of them. A seed with nothing here is passed over; only nothing here
+    /// for any of them is refused.
+    fn review_all(&self, seeds: &[&Seed]) -> Result<Review, String>;
+
+    /// As sign, for a wallet with these seeds: each signs the inputs it holds the key of, under
+    /// the same refusals as review_all.
+    fn sign_all(&self, seeds: &[&Seed]) -> Result<Psbt, String>;
 }
 
 impl Signs for Psbt {
-    /// What it spends and pays, laid out to check before signing; why it cannot be signed, if it
-    /// cannot.
+    #[cfg(test)]
     fn review(&self, seed: &Seed) -> Result<Review, String> {
-        plan(self, seed).map(|(review, _)| review)
+        self.review_all(&[seed])
     }
 
-    /// The PSBT with this seed's signatures added, one for each input it holds the key of, in
-    /// place of any it held for those keys. Refused as review refuses it.
+    #[cfg(test)]
     fn sign(&self, seed: &Seed) -> Result<Psbt, String> {
-        let (_, signing) = plan(self, seed)?;
+        self.sign_all(&[seed])
+    }
+
+    fn review_all(&self, seeds: &[&Seed]) -> Result<Review, String> {
+        plan(self, seeds).map(|(review, _)| review)
+    }
+
+    fn sign_all(&self, seeds: &[&Seed]) -> Result<Psbt, String> {
+        let (_, signing) = plan(self, seeds)?;
         let mut signed = self.clone();
 
-        for input in signing {
+        for (seed, input) in seeds.iter().zip(signing).flat_map(|(seed, inputs)| inputs.into_iter().map(move |input| (*seed, input))) {
             let keypair = match input.multisig {
                 true => seed.multisig_key(input.network.coin(), input.chain, input.number),
                 false => seed.bitcoin_key(input.network.coin(), input.chain, input.number),

@@ -476,7 +476,7 @@ fn bitcoin_key(ctx: &Ctx, holder: &Holder, network: Network) -> Result<[u8; 33],
             PublicKey::Bitcoin(bytes) => Some(*bytes),
             _ => None,
         }),
-        Network::Test => match (crate::keys::seed(ctx.book), holder.number()) {
+        Network::Test => match (crate::keys::seed_of(ctx.book, holder), holder.number()) {
             (Some(seed), Some(number)) => match seed.bitcoin_key(network.coin(), 0, number).public() {
                 PublicKey::Bitcoin(bytes) => Some(bytes),
                 _ => None,
@@ -573,7 +573,7 @@ fn secret_key(ctx: &Ctx, holder: &Holder, network: Network) -> Option<[u8; 32]> 
             _ => None,
         }),
         Network::Test => {
-            let (seed, number) = (crate::keys::seed(ctx.book)?, holder.number()?);
+            let (seed, number) = (crate::keys::seed_of(ctx.book, holder)?, holder.number()?);
             let key = seed.bitcoin_key(network.coin(), 0, number);
 
             match key.private() {
@@ -1758,10 +1758,12 @@ fn shared_spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, htlc: &chain
 
     let mut finished = None;
     ui.horizontal_wrapped(|ui| {
-        if let Some(seed) = crate::keys::seed(ctx.book)
+        let seeds = crate::keys::seeds(ctx.book);
+
+        if !seeds.is_empty()
             && theme::primary(ui, &palette, "Sign with these words", held < needed as usize).clicked()
         {
-            match crate::bitcoin::Signs::sign(&shared.psbt, &seed) {
+            match crate::bitcoin::Signs::sign_all(&shared.psbt, &seeds) {
                 Ok(signed) => shared.psbt = signed,
                 Err(why) => state.trouble = Some(why),
             }

@@ -882,16 +882,29 @@ impl Wallet {
         });
 
         if let Some(Opened { vault, book }) = opened {
-            self.holders = keys::open(&book);
-            self.book = book;
-            self.vault = Some(vault);
-            self.lock = Lock::Open;
-            self.page = views::home(self.settings.role());
+            // Opening checked the book already. Should it still not read, it stays locked with
+            // nothing written: opened without an account, the next save would delete that account.
+            match keys::open(&book) {
+                Ok(holders) => {
+                    self.holders = holders;
+                    self.book = book;
+                    self.vault = Some(vault);
+                    self.lock = Lock::Open;
+                    self.page = views::home(self.settings.role());
 
-            if let Some(first) = self.holders.first().map(Holder::id)
-                && !self.holders.iter().any(|holder| holder.id() == self.settings.current())
-            {
-                self.settings.set_current(first);
+                    if let Some(first) = self.holders.first().map(Holder::id)
+                        && !self.holders.iter().any(|holder| holder.id() == self.settings.current())
+                    {
+                        self.settings.set_current(first);
+                    }
+                }
+                Err(why) => {
+                    self.lock = Lock::locked();
+
+                    if let Lock::Locked { error, .. } = &mut self.lock {
+                        *error = Some(why);
+                    }
+                }
             }
         }
     }

@@ -6,6 +6,27 @@ use {
     bitcoin::{Amount, OutPoint, Sequence, TxIn, TxOut, Txid, Witness},
 };
 
+#[test]
+fn an_accounts_testnet_script_comes_from_its_own_words() {
+    use crate::vault::{Book, Source, StoredAccount, Words};
+    use chainv4::crypto::bitcoin::{hash160, tx::p2wpkh};
+    use chainv4::crypto::keypair::PublicKey;
+
+    let mut book = Book {
+        phrases: vec![Words::new("test test test test test test test test test test test junk".to_string(), String::new())],
+        ..Book::default()
+    };
+    let from = book.add_phrase(Words::new("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string(), String::new())).unwrap();
+    book.accounts = vec![StoredAccount { name: "Other".to_string(), source: Source::Phrase { account: 2, extra: Vec::new(), from } }];
+    let holders = crate::keys::open(&book).unwrap();
+    let script = |words: &Words| match words.seed().unwrap().bitcoin_key(1, 0, 2).public() {
+        PublicKey::Bitcoin(key) => p2wpkh(&hash160(&key)),
+        other => panic!("{other:?}"),
+    };
+
+    assert_eq!(account_scripts(&holders, &book, true), [script(&book.phrases[1])].into(), "the other words', and not the first's at that number");
+}
+
 fn tx(inputs: Vec<(Txid, u32, Vec<Vec<u8>>)>, outputs: Vec<(Vec<u8>, u64)>) -> Transaction {
     Transaction {
         version: Version::TWO,

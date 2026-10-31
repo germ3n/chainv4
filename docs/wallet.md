@@ -94,8 +94,8 @@ and the node to `http://<that address>.onion`.
 
 ## Wallets and words
 
-**A wallet** is a seed phrase, the accounts made from it, and a password that seals them. The lock
-screen (`wallet/src/lock.rs`) makes the first, and holds them all:
+**A wallet** is a seed phrase, or several, the accounts made from them, and one password that seals
+it all. The lock screen (`wallet/src/lock.rs`) makes the first wallet, and holds them all:
 - **New wallet:** a name, a password twice, or none, and under Advanced an optional BIP39
   passphrase. The
   wallet makes 12 words and shows them once, to write down, then asks for three of them back
@@ -132,6 +132,31 @@ gains them when paired again, though sites reach its first Ethereum key alone.
 **Settings** shows the words, once the wallet's password is typed again, renames the wallet, and
 removes it, also after the password. A wallet from before seed phrases has none: Settings makes
 new words for it or takes words you have, and from then on new accounts come from them.
+
+**Several seed phrases in one wallet.** Accounts, under **More words**, adds another, on an offline
+signer and an online wallet alike; a watch-only wallet holds no words, so it has no such option:
+- **Adding:** words you have, with their passphrase if they had one, or new ones, written down and
+  three of them asked back as a new wallet's are. The same words twice are refused, by their
+  fingerprint; the same words with another passphrase are another seed, and welcome. It comes with
+  its account 0 and an optional name for each. It does not scan for accounts already used: **New
+  account** brings the next one.
+- **Counting:** each phrase counts its accounts and further keys on its own, so a phrase's first
+  account is number 0 and has the addresses a restore of those words alone gives it. With several,
+  **New account** asks which phrase, and each account says which it comes from. With one, the page
+  is as it always was.
+- **Settings** lists them, each with its name, its fingerprint and how many accounts it has. It
+  shows one at a time, after the password. A phrase's name can be changed once there are several:
+  a wallet of one keeps no name, to stay in the form older builds read.
+- **Removing** an account leaves its words in the vault, even with none left. Removing a phrase is
+  a step of its own in Settings: a preview of the accounts that go with it, a typed `yes`, and the
+  password. The first phrase cannot go this way, only with the wallet.
+- **Which words sign:** a MetaMask request by the fingerprint it names, or if it names none by the
+  address at its path, and if it names neither it is refused rather than guessed at; with one
+  phrase in the wallet, as it always was. A Bitcoin PSBT is signed by every phrase holding one of
+  its inputs, and a chainv4 request by the account with its key. Pair's MetaMask and Bitcoin codes
+  are those of the account in use's words, so pick an account from other words to pair those.
+- **Backups:** write down every phrase. No phrase brings back another's accounts, and restoring a
+  wallet from one set of words brings back that set alone.
 
 ## Keys
 
@@ -175,8 +200,9 @@ such as a keyboard's own buffer, and memory the system swaps to disk, are out of
 off.
 
 **Accounts** (`wallet/src/views/accounts.rs`, `wallet/src/keys.rs`):
-- **New account:** the words' next account, the lowest number the wallet does not hold, with its
-  four addresses. A wallet without words makes one random key instead, in the scheme picked.
+- **New account:** the words' next account, the lowest number the wallet does not hold of those
+  words, with its four addresses. With several phrases it asks which. A wallet without words makes
+  one random key instead, in the scheme picked.
 - **Open key file / paste a key:** a key file as `chainv4 keygen` writes it, `ed25519:0x…`,
   `edblake:0x…`, `secp256k1:0x…` or `bitcoin:0x…`, picked or pasted. An account brought in has that one key, and
   one address, named after the file when no name is typed.
@@ -189,6 +215,17 @@ off.
 
 **From before seed phrases:** a vault the wallet sealed before it had words opens as a wallet
 named Wallet 1, its accounts keys brought in.
+
+**Going back to an older build.** A wallet of one phrase is stored byte for byte as it always was,
+so an older build keeps reading it. Once it has a second, an older build says it is damaged and
+writes nothing, rather than open half of it and save the rest away, and it stays that way until
+this build removes the further phrases.
+
+**An account this build cannot read.** A vault with an account naming words it does not hold, or a
+key damaged or in a scheme this build was made without, stays shut: the lock screen says which
+account, and nothing is written. The wallet saves only the accounts it opened, so opening without
+one would delete it with the next save. Open it with a build that reads it, or bring the accounts
+back from their words.
 
 **Changing the password:** the current one, then the new one twice, or nothing to have none. The
 accounts are sealed again under a new salt. Biometrics kept the key the old password stretched to,
@@ -734,7 +771,8 @@ screen, shows what it signs, and shows the signature back.
 It signs for any chain MetaMask is set to, and refuses a request for another seed's keys (its
 fingerprint), a path below another account level than m/44'/60'/0', an address that is not the
 key's, a transaction for another chain than the request names, and bytes that do not read back
-as exactly what they say.
+as exactly what they say. With several phrases in the wallet, a request naming neither a
+fingerprint nor an address is refused too, as nothing says which of them it means.
 
 **Tested against MetaMask's own libraries:** `wallet/src/hardware/metamask/` makes requests with
 Keystone's `@keystonehq/bc-ur-registry-eth` and ethereumjs, as MetaMask's QR keyring does, into
@@ -872,12 +910,13 @@ it off the screen, lays out what leaves, signs, and shows the PSBT back for the 
 4. **Back:** **Sign** shows the PSBT with the signatures added, animated; read it in the Bitcoin
    wallet, which finishes the transaction and sends it.
 
-It signs the inputs of its own seed's keys at m/84'/0'/0'/{0,1}/n or m/84'/1'/0'/{0,1}/n that
+It signs the inputs of its own seeds' keys at m/84'/0'/0'/{0,1}/n or m/84'/1'/0'/{0,1}/n that
 spend native segwit (P2WPKH) coins, or a [swap](swaps.md)'s HTLC whose script the PSBT gives
 (claim or refund, named on the review), with BIP143's hash of all of the transaction, SIGHASH_ALL,
-and gives back every pair the PSBT held. It refuses:
+and gives back every pair the PSBT held. With several phrases in the wallet, each signs the inputs
+it holds, and change back to any of them shows as change. It refuses:
 
-- a PSBT with nothing of this seed's to sign, as from a wallet paired with another;
+- a PSBT with nothing of any of its seeds' to sign, as from a wallet paired with another;
 - an input of this seed's at another path, of another kind (legacy, wrapped or Taproot), whose
   key is not the one at its path, or asking for another sighash than ALL;
 - an input whose coins it is not told, as the fee could not be known;
@@ -1295,9 +1334,10 @@ local network. App storage is `wallet.ron` under its Application Support folder.
 
 ## What to keep in mind
 
-- **Keep the words.** They bring every account back, on any device. Without them, a lost device
-  or a forgotten password loses the wallet: nothing opens a vault without its password, and
-  biometrics keep only what the password opens, so they are no way back from a forgotten one.
+- **Keep the words.** They bring every account made from them back, on any device; with several
+  phrases in a wallet, keep every one. Without them, a lost device or a forgotten password loses
+  the wallet: nothing opens a vault without its password, and biometrics keep only what the
+  password opens, so they are no way back from a forgotten one.
 - **A passphrase is part of the wallet.** The same words with another passphrase, or none, make
   other accounts, all empty.
 - **The Ethereum address is not on Ethereum.** It is the address Ethereum's wallets show for the

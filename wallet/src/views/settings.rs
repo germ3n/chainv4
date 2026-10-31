@@ -35,12 +35,17 @@ pub struct SettingsState {
     changed: Option<Result<String, String>>,
     /// The wallet's name, being typed.
     name: Option<String>,
-    /// Asking for the password before the words show, and whether they show.
-    asking_words: Option<(Typed, Option<String>)>,
-    showing_words: bool,
+    /// Asking for the password before a phrase's words show, by its place, and which one shows:
+    /// one at a time.
+    asking_words: Option<(usize, Typed, Option<String>)>,
+    showing_words: Option<usize>,
     /// Words typed for a wallet that has none.
     words: Typed,
     words_error: Option<String>,
+    /// A phrase being renamed, by its place, with its name as typed.
+    naming_words: Option<(usize, String)>,
+    /// A phrase being removed, once its preview is read.
+    removing_words: Option<RemovingWords>,
     /// Asking for the password before the wallet is removed.
     removing: Option<(Typed, Option<String>)>,
     /// Biometrics being turned on, and what came of turning them on or off.
@@ -48,11 +53,21 @@ pub struct SettingsState {
     biometric_said: Option<Result<String, String>>,
 }
 
+/// Removing a further phrase: which, by its place, what is typed to confirm it, and the password.
+#[derive(Default)]
+struct RemovingWords {
+    index: usize,
+    confirm: String,
+    password: Typed,
+    error: Option<String>,
+}
+
 impl SettingsState {
-    /// Puts away the words, if shown, and the password asked for them.
+    /// Puts away the words, if shown, the password asked for them, and a phrase's removal half asked.
     pub fn hide(&mut self) {
-        self.showing_words = false;
+        self.showing_words = None;
         self.asking_words = None;
+        self.removing_words = None;
     }
 }
 
@@ -407,40 +422,16 @@ fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         ui.add_space(10.0);
         theme::caps(ui, &palette, "Its words");
 
-        match (ctx.book.watch, ctx.book.phrase.clone()) {
+        match (ctx.book.watch, ctx.book.phrases.len()) {
             (true, _) => {
                 ui.label(RichText::new("None here: a watch-only wallet holds public keys alone. The words are the signer's, and stay with it.").small().color(palette.muted));
             }
-            (false, Some(words)) => {
+            (false, 1) => {
                 ui.label(RichText::new("Every account made from them comes back from them, on any device, with any wallet that follows BIP39.").small().color(palette.muted));
-
-                match state.showing_words {
-                    true => {
-                        ui.add_space(6.0);
-
-                        if let Ok(phrase) = Phrase::parse(&words.words) {
-                            lock::words_grid(ui, &palette, &phrase);
-                        }
-
-                        if !words.passphrase.is_empty() {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new(format!("With the passphrase: {}", words.passphrase)).monospace().color(palette.warn));
-                        }
-
-                        ui.add_space(6.0);
-
-                        if theme::quiet(ui, &palette, "Hide them").clicked() {
-                            state.showing_words = false;
-                        }
-                    }
-                    false => {
-                        if theme::quiet(ui, &palette, "Show the words").clicked() {
-                            state.asking_words = Some((Typed::default(), None));
-                        }
-                    }
-                }
+                show_words(ui, ctx, state, 0);
             }
-            (false, None) => {
+            (false, count) if count > 1 => several_words(ui, ctx, state),
+            (false, _) => {
                 ui.label(
                     RichText::new("This wallet has none: its accounts are keys brought in. Give it words, and new accounts come from them; the keys brought in stay as they are, with their own copies to keep.")
                         .small()
@@ -450,23 +441,20 @@ fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
                 ui.horizontal_wrapped(|ui| {
                     if theme::quiet(ui, &palette, if state.words.trim().is_empty() { "Make new words" } else { "Use these words" }).clicked() {
                         let phrase = match state.words.trim() {
-                            "" => Phrase::generate(12),
-                            typed => Phrase::parse(typed),
+                            "" => Phrase::generate(12).map_err(|why| why.to_string()),
+                            typed => lock::read_words(typed),
                         };
 
                         match phrase {
                             Ok(phrase) => {
-                                ctx.book.phrase = Some(Words {
-                                    words: phrase.to_string(),
-                                    passphrase: String::new(),
-                                });
+                                ctx.book.phrases.push(Words::new(phrase.to_string(), String::new()));
                                 *ctx.changed = true;
                                 // New ones are to be written down now; typed ones are known.
-                                state.showing_words = state.words.trim().is_empty();
+                                state.showing_words = state.words.trim().is_empty().then_some(0);
                                 state.words.clear();
                                 state.words_error = None;
                             }
-                            Err(why) => state.words_error = Some(why.to_string()),
+                            Err(why) => state.words_error = Some(why),
                         }
                     }
                 });
@@ -521,11 +509,185 @@ fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     });
 }
 
-/// Asks, in a box over the page, for the password before the words show.
-fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
-    let Some((password, error)) = &mut state.asking_words else {
+/// A phrase's words, once the password was typed, or the button that asks for it.
+fn show_words(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState, index: usize) {
+    let palette = *ctx.palette;
+
+    if state.showing_words != Some(index) {
+        if theme::quiet(ui, &palette, "Show the words").clicked() {
+            state.asking_words = Some((index, Typed::default(), None));
+        }
+
+        return;
+    }
+
+    let Some(words) = ctx.book.phrases.get(index) else {
+        state.showing_words = None;
+
         return;
     };
+    ui.add_space(6.0);
+
+    if let Ok(phrase) = Phrase::parse(words.words()) {
+        lock::words_grid(ui, &palette, &phrase);
+    }
+
+    if !words.passphrase().is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new(format!("With the passphrase: {}", words.passphrase())).monospace().color(palette.warn));
+    }
+
+    ui.add_space(6.0);
+
+    if theme::quiet(ui, &palette, "Hide them").clicked() {
+        state.showing_words = None;
+    }
+}
+
+/// A wallet's phrases, when it has several: each one's name, fingerprint and accounts, to show one
+/// at a time, rename, or remove. The first stays.
+fn several_words(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
+    let palette = *ctx.palette;
+    ui.label(RichText::new("Each brings back the accounts made from it, on any device, with any wallet that follows BIP39. Write down every one: none brings back another's.").small().color(palette.muted));
+
+    for index in 0..ctx.book.phrases.len() {
+        ui.add_space(8.0);
+        let from = ctx.book.phrases[index].fingerprint().filter(|_| index > 0);
+        let fingerprint = ctx.book.phrases[index].fingerprint().map(|fingerprint| to_hex(&fingerprint).trim_start_matches("0x").to_string()).unwrap_or_default();
+        let accounts = ctx.holders.iter().filter(|holder| holder.is_of(from)).count();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(theme::strong(ctx.book.name_of(index), 14.5).color(palette.ink));
+            ui.label(theme::mono(fingerprint).small().color(palette.muted));
+            ui.label(RichText::new(if accounts == 1 { "1 account".to_string() } else { format!("{accounts} accounts") }).small().color(palette.muted));
+        });
+
+        if let Some((_, name)) = state.naming_words.as_mut().filter(|(naming, _)| *naming == index) {
+            let done = super::beside(
+                ui,
+                |ui| theme::quiet(ui, &palette, "Done").clicked(),
+                |ui, width| {
+                    ui.add(egui::TextEdit::singleline(name).desired_width(width));
+                },
+            );
+
+            if done {
+                if !name.trim().is_empty() {
+                    ctx.book.phrases[index].set_name(name);
+                    *ctx.changed = true;
+                }
+
+                state.naming_words = None;
+            }
+        }
+
+        show_words(ui, ctx, state, index);
+        ui.horizontal_wrapped(|ui| {
+            if theme::quiet(ui, &palette, "Rename").clicked() {
+                state.naming_words = Some((index, ctx.book.name_of(index)));
+            }
+
+            // The first is what an account naming none comes from: only removing the wallet takes it.
+            if index > 0 && theme::quiet(ui, &palette, "Remove these words").clicked() {
+                state.removing_words = Some(RemovingWords { index, ..RemovingWords::default() });
+            }
+        });
+
+        if state.removing_words.as_ref().is_some_and(|removing| removing.index == index) {
+            let before = ctx.book.phrases.len();
+            remove_words(ui, ctx, state, index);
+
+            // Gone: the places after it are other phrases' now, so the rest are drawn next frame.
+            if ctx.book.phrases.len() != before {
+                break;
+            }
+        }
+    }
+}
+
+/// What removing a phrase takes, shown first; then a typed yes and the password before it goes.
+fn remove_words(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, index: usize) {
+    let palette = *ctx.palette;
+    let Some(removing) = &mut state.removing_words else {
+        return;
+    };
+    let preview = match crate::keys::removal(ctx.book, ctx.holders, index) {
+        Ok(preview) => preview,
+        Err(why) => {
+            ui.colored_label(palette.bad, why);
+
+            return;
+        }
+    };
+
+    ui.add_space(6.0);
+    ui.label(RichText::new("These words leave this device, with every account made from them. Without the words written down, what those accounts hold is out of reach for good.").color(palette.bad));
+
+    match preview.accounts.is_empty() {
+        true => {
+            ui.label(RichText::new("No account in this wallet comes from them now.").small().color(palette.soft));
+        }
+        false => {
+            for (name, id) in &preview.accounts {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(name).color(palette.ink));
+                    ui.label(theme::mono(format::short(id)).small().color(palette.muted));
+                });
+            }
+        }
+    }
+
+    if preview.swaps > 0 {
+        ui.colored_label(palette.warn, format!("{} swap{} kept with those accounts stay listed, but nothing here can spend for them any more.", preview.swaps, if preview.swaps == 1 { "" } else { "s" }));
+    }
+
+    ui.add(egui::TextEdit::singleline(&mut removing.confirm).hint_text("type yes").desired_width(f32::INFINITY));
+    crate::lock::secret(ui, egui::TextEdit::singleline(&mut *removing.password).password(true).hint_text("the wallet's password").desired_width(f32::INFINITY));
+
+    if let Some(error) = &removing.error {
+        ui.colored_label(palette.bad, error.as_str());
+    }
+
+    let (mut go, mut keep) = (false, false);
+    let ready = confirmed(&removing.confirm) && (!removing.password.is_empty() || unprotected(ctx));
+    ui.horizontal_wrapped(|ui| {
+        go = theme::primary(ui, &palette, "Remove them", ready).clicked();
+        keep = theme::quiet(ui, &palette, "Keep them").clicked();
+    });
+
+    if go && ready {
+        match opens(ctx, &removing.password) {
+            true => match crate::keys::remove_phrase(ctx.book, ctx.holders, index) {
+                Ok(()) => {
+                    // The one in use moves to the first left if it went.
+                    if !ctx.holders.iter().any(|holder| holder.id() == ctx.settings.current()) {
+                        ctx.settings.set_current(ctx.holders.first().map(crate::keys::Holder::id).unwrap_or_default());
+                    }
+
+                    *ctx.changed = true;
+                    state.showing_words = None;
+                    state.naming_words = None;
+                    state.removing_words = None;
+                }
+                Err(why) => removing.error = Some(why),
+            },
+            false => removing.error = Some("not the wallet's password".to_string()),
+        }
+    } else if keep {
+        state.removing_words = None;
+    }
+}
+
+/// Whether what was typed confirms a removal: yes, however it is written, and nothing else.
+fn confirmed(typed: &str) -> bool {
+    typed.trim().eq_ignore_ascii_case("yes")
+}
+
+/// Asks, in a box over the page, for the password before the words show.
+fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
+    let Some((index, password, error)) = &mut state.asking_words else {
+        return;
+    };
+    let index = *index;
     let palette = *ctx.palette;
     let mut answer = None;
 
@@ -539,7 +701,7 @@ fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
             ui.set_max_width(360.0);
             theme::caps(ui, &palette, "Show the words?");
             ui.add_space(4.0);
-            ui.label(RichText::new("Anyone who sees them can take everything every account holds, now and later.").color(palette.ink));
+            ui.label(RichText::new("Anyone who sees them can take everything every account made from them holds, now and later.").color(palette.ink));
             ui.label(RichText::new("Show them only to write them down, with no one watching your screen and nothing recording it.").small().color(palette.muted));
             ui.add_space(8.0);
             let field = crate::lock::secret(ui, egui::TextEdit::singleline(&mut **password).password(true).hint_text("the wallet's password").desired_width(f32::INFINITY));
@@ -564,7 +726,7 @@ fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
     match answer {
         Some(true) => match opens(ctx, password) {
             true => {
-                state.showing_words = true;
+                state.showing_words = Some(index);
                 state.asking_words = None;
             }
             false => *error = Some("not the wallet's password".to_string()),
@@ -859,7 +1021,63 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {super::*, crate::vault::Book};
+
+    #[test]
+    fn only_a_typed_yes_removes_a_phrase() {
+        assert!(confirmed("yes") && confirmed(" YES "));
+
+        for typed in ["", "y", "yes please", "no", "ye s"] {
+            assert!(!confirmed(typed), "{typed}");
+        }
+    }
+
+    #[test]
+    fn several_phrases_draw_on_every_screen_and_nothing_goes_unasked() {
+        for size in crate::views::drawn::SCREENS {
+            for (showing, naming, removing) in [(None, None, None), (Some(1), None, None), (None, Some((1, "Savings".to_string())), None), (None, None, Some(1)), (Some(0), None, Some(1))] {
+                let mut book = crate::views::drawn::two_phrases();
+                let mut holders = crate::keys::open(&book).unwrap();
+                let before = book.clone();
+                let mut state = SettingsState {
+                    showing_words: showing,
+                    naming_words: naming,
+                    removing_words: removing.map(|index| RemovingWords { index, confirm: "yes".to_string(), ..RemovingWords::default() }),
+                    ..SettingsState::default()
+                };
+                let (width, changed) = crate::views::drawn::page(&mut book, &mut holders, size, |ui, ctx| wallet(ui, ctx, &mut state));
+
+                assert!(width <= size.0 + 0.5, "{width} on a screen {} wide", size.0);
+                assert!(!changed, "a typed yes alone, with no tap, removes nothing");
+                assert_eq!((&book, holders.len()), (&before, 2));
+                assert_eq!(state.showing_words, showing, "shown until hidden");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wallet_of_one_phrase_shows_as_it_did_and_stale_places_ask_nothing() {
+        let mut one = Book {
+            phrases: vec![Words::new("test test test test test test test test test test test junk".to_string(), String::new())],
+            ..Book::default()
+        };
+        let mut holders = Vec::new();
+        // A place past the end, from words since removed, shows nothing and breaks nothing.
+        let mut state = SettingsState { showing_words: Some(4), ..SettingsState::default() };
+
+        crate::views::drawn::page(&mut one, &mut holders, (360.0, 740.0), |ui, ctx| wallet(ui, ctx, &mut state));
+
+        assert_eq!(one.phrases.len(), 1);
+
+        state.showing_words = Some(0);
+        crate::views::drawn::page(&mut one, &mut holders, (360.0, 740.0), |ui, ctx| wallet(ui, ctx, &mut state));
+
+        assert_eq!(state.showing_words, Some(0));
+
+        state.hide();
+
+        assert_eq!((state.showing_words, state.asking_words.is_none(), state.removing_words.is_none()), (None, true, true), "out of sight as the page goes");
+    }
 
     #[test]
     fn the_unlock_screen_offers_the_node_and_proxy_and_leaves_them_untouched_until_asked() {

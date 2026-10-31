@@ -418,3 +418,123 @@ fn the_signer_signs_its_part_of_a_multisig_spend_and_sees_its_change_come_back()
 
     assert!(forged.review(&ours).unwrap_err().contains("does not hold"));
 }
+
+/// The words of a second seed in the wallet.
+fn second() -> Seed {
+    Phrase::parse("test test test test test test test test test test test junk").unwrap().seed("")
+}
+
+/// The fixture's mainnet PSBT with its second input moved to the second seed's receiving key 3: its
+/// coins that key's, and its path named under that seed's fingerprint, as a wallet paired with it
+/// would have written it.
+fn across_two_seeds() -> Psbt {
+    changed(|psbt| {
+        let seed = second();
+        let key = public(&seed.bitcoin_key(0, 0, 3).public());
+        let input = &mut psbt.inputs[1];
+        let amount = pair_mut(input, &[IN_WITNESS_UTXO]).value[..8].to_vec();
+        let script = p2wpkh(&hash160(&key));
+        let witness = [amount, vec![script.len() as u8], script].concat();
+        let path = [84 | HARDENED, HARDENED, HARDENED, 0, 3];
+        let derivation = [seed.bitcoin_account(0).master_fingerprint.to_vec(), path.iter().flat_map(|step: &u32| step.to_le_bytes()).collect()].concat();
+
+        input.retain(|pair| pair.key[0] != IN_BIP32_DERIVATION && pair.key != [IN_WITNESS_UTXO] && pair.key != [IN_NON_WITNESS_UTXO]);
+        input.push(Pair { key: vec![IN_WITNESS_UTXO], value: witness });
+        input.push(Pair { key: [&[IN_BIP32_DERIVATION][..], &key].concat(), value: derivation });
+    })
+}
+
+#[test]
+fn a_wallet_of_two_seeds_reviews_and_signs_what_each_owns() {
+    let (first, other) = (seed(), second());
+    let asked = across_two_seeds();
+    let inputs = asked.inputs.len();
+
+    assert!(inputs >= 2, "the fixture's PSBT spends at least two");
+
+    // Each alone calls the other's input another's, and cannot weigh the whole.
+    let alone = asked.review(&first).unwrap();
+
+    assert!(alone.inputs[0].yours.is_some() && alone.inputs[1].yours.is_none());
+    assert_eq!(alone.vsize, None);
+    assert!(asked.review(&other).unwrap().inputs[1].yours.is_some());
+
+    // Together they own every input it names of theirs, whichever is asked first, and the same fee.
+    let both = asked.review_all(&[&first, &other]).unwrap();
+
+    assert!(both.inputs.iter().all(|spent| spent.yours.is_some()), "{both:?}");
+    assert_eq!(both, asked.review_all(&[&other, &first]).unwrap());
+    assert_eq!(both.fee, alone.fee);
+    assert!(both.vsize.is_some(), "this signer signs every input now");
+
+    // Each signs its own input with the signature it makes alone, and nothing else changes.
+    let signed = asked.sign_all(&[&first, &other]).unwrap();
+    let (by_first, by_other) = (asked.sign(&first).unwrap(), asked.sign(&other).unwrap());
+
+    assert_eq!(signed.signatures(0), by_first.signatures(0));
+    assert_eq!(signed.signatures(1), by_other.signatures(1));
+    assert_eq!(signed.signatures(1)[0].0, public(&other.bitcoin_key(0, 0, 3).public()));
+    assert!(by_first.signatures(1).is_empty() && by_other.signatures(0).is_empty());
+}
+
+#[test]
+fn a_seed_with_nothing_here_is_passed_over_and_nothing_for_any_is_refused() {
+    let (first, other) = (seed(), second());
+    let spare = Phrase::parse("legal winner thank year wave sausage worth useful legal winner thank yellow").unwrap().seed("");
+    let asked = psbt(made(Network::Main)["psbt"].as_str().unwrap());
+
+    assert!(other_is_nothing(&asked, &other));
+    assert_eq!(asked.review_all(&[&other, &first]).unwrap(), asked.review(&first).unwrap(), "the same review as without it");
+    assert_eq!(asked.sign_all(&[&other, &first]).unwrap(), asked.sign(&first).unwrap(), "the same signatures, and none of its own");
+    assert!(asked.review_all(&[&other, &spare]).unwrap_err().starts_with("nothing here for this wallet to sign"));
+    assert!(asked.sign_all(&[&other, &spare]).unwrap_err().starts_with("nothing here for this wallet to sign"));
+    assert!(asked.review_all(&[]).unwrap_err().starts_with("nothing here for this wallet to sign"));
+
+    // What one seed refuses is still refused with another beside it.
+    let wrong = changed(|psbt| {
+        let derivation = psbt.inputs[0].iter_mut().find(|pair| pair.key[0] == IN_BIP32_DERIVATION).unwrap();
+        derivation.value.truncate(4);
+        derivation.value.extend([84 | HARDENED, HARDENED, HARDENED, 0, 5u32].iter().flat_map(|step| step.to_le_bytes()));
+    });
+
+    assert!(wrong.review_all(&[&other, &first]).unwrap_err().contains("not this wallet's"));
+    assert!(wrong.sign_all(&[&other, &first]).unwrap_err().contains("not this wallet's"));
+}
+
+fn other_is_nothing(asked: &Psbt, seed: &Seed) -> bool {
+    asked.review(seed).is_err_and(|why| why.starts_with("nothing here for this wallet to sign"))
+}
+
+#[test]
+fn change_back_to_another_of_the_wallets_seeds_is_shown_as_change() {
+    let (first, other) = (seed(), second());
+    let key = public(&other.bitcoin_key(0, 1, 7).public());
+    let asked = changed(|psbt| {
+        let at = psbt.outputs.iter().position(|pairs| pairs.iter().any(|pair| pair.key[0] == OUT_BIP32_DERIVATION)).unwrap();
+        let path = [84 | HARDENED, HARDENED, HARDENED, 1, 7];
+        let derivation = [other.bitcoin_account(0).master_fingerprint.to_vec(), path.iter().flat_map(|step: &u32| step.to_le_bytes()).collect()].concat();
+
+        psbt.outputs[at].retain(|pair| pair.key[0] != OUT_BIP32_DERIVATION);
+        psbt.outputs[at].push(Pair { key: [&[OUT_BIP32_DERIVATION][..], &key].concat(), value: derivation });
+        psbt.tx.outputs[at].script = p2wpkh(&hash160(&key));
+        psbt.global[0].value = psbt.tx.base();
+    });
+    let at = asked.outputs.iter().position(|pairs| pairs.iter().any(|pair| pair.key[0] == OUT_BIP32_DERIVATION)).unwrap();
+
+    assert_eq!(asked.review(&first).unwrap().outputs[at].yours, None, "to the first seed alone, it leaves");
+    assert_eq!(asked.review_all(&[&first, &other]).unwrap().outputs[at].yours.as_deref(), Some("m/84'/0'/0'/1/7"), "to the wallet, it comes back");
+
+    // A key at that path that is not the seed's is not change, whatever it claims.
+    let forged = changed(|psbt| {
+        let path = [84 | HARDENED, HARDENED, HARDENED, 1, 8];
+        let derivation = [other.bitcoin_account(0).master_fingerprint.to_vec(), path.iter().flat_map(|step: &u32| step.to_le_bytes()).collect()].concat();
+        let at = psbt.outputs.iter().position(|pairs| pairs.iter().any(|pair| pair.key[0] == OUT_BIP32_DERIVATION)).unwrap();
+
+        psbt.outputs[at].retain(|pair| pair.key[0] != OUT_BIP32_DERIVATION);
+        psbt.outputs[at].push(Pair { key: [&[OUT_BIP32_DERIVATION][..], &key].concat(), value: derivation });
+        psbt.tx.outputs[at].script = p2wpkh(&hash160(&key));
+        psbt.global[0].value = psbt.tx.base();
+    });
+
+    assert_eq!(forged.review_all(&[&first, &other]).unwrap().outputs[at].yours, None);
+}

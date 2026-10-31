@@ -7,11 +7,25 @@
 
 use {
     super::Ctx,
-    crate::airgap::{Message, Origin, Pairing},
+    crate::airgap::{Message, Pairing},
     crate::bitcoin::Network,
     crate::theme,
+    chainv4::crypto::mnemonic::Seed,
     egui::{RichText, Ui},
 };
+
+/// The words the cards below pair with: those of the account in use, or of the first for an
+/// account from none. With several in the wallet, it says which, and how to reach the others.
+fn words_in_use<'a>(ui: &mut Ui, ctx: &'a Ctx) -> Option<&'a Seed> {
+    let palette = *ctx.palette;
+    let (from, seed) = crate::keys::words_in_use(ctx.book, ctx.holder()?)?;
+
+    if ctx.book.phrases.len() > 1 {
+        ui.label(RichText::new(format!("For {}, as the account in use is. Pick an account from other words as the one in use to pair those.", ctx.book.name_from(from))).small().color(palette.soft));
+    }
+
+    Some(seed)
+}
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     let palette = *ctx.palette;
@@ -21,7 +35,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         return;
     };
     // Where the words derive it, for a site's requests to name its Ethereum key by.
-    let origin = holder.number().zip(crate::keys::seed(ctx.book)).map(|(account, seed)| Origin { account, fingerprint: seed.ethereum_account().master_fingerprint });
+    let origin = crate::keys::origin(ctx.book, holder);
     let pairing = Pairing {
         name: holder.name.clone(),
         keys: holder.publics.clone(),
@@ -69,7 +83,7 @@ fn member(ui: &mut Ui, ctx: &mut Ctx) {
         ui.checkbox(&mut testnet, "For a multisig on Bitcoin's test networks");
         ui.data_mut(|data| data.insert_temp(network_id, testnet));
 
-        let Some(line) = ctx.holder().and_then(|holder| super::multisig::member_line(holder, crate::keys::seed(ctx.book).as_ref(), testnet)) else {
+        let Some(line) = ctx.holder().and_then(|holder| super::multisig::member_line(holder, crate::keys::seed_of(ctx.book, holder), testnet)) else {
             return;
         };
         let side = ui.available_width().clamp(200.0, 360.0);
@@ -93,7 +107,7 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx) {
         );
         ui.add_space(8.0);
 
-        let Some(seed) = crate::keys::seed(ctx.book) else {
+        let Some(seed) = words_in_use(ui, ctx) else {
             ui.label(RichText::new("This wallet holds no words, only keys brought in: MetaMask pairs with the accounts words make.").small().color(palette.muted));
 
             return;
@@ -109,7 +123,7 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx) {
             return;
         }
 
-        match crate::hardware::pairing(&seed) {
+        match crate::hardware::pairing(seed) {
             Ok(code) => {
                 let side = ui.available_width().clamp(200.0, 420.0);
                 ui.vertical_centered(|ui| super::receive::qr(ui, &code, side));
@@ -152,7 +166,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
         );
         ui.add_space(8.0);
 
-        let Some(seed) = crate::keys::seed(ctx.book) else {
+        let Some(seed) = words_in_use(ui, ctx) else {
             ui.label(RichText::new("This wallet holds no words, only keys brought in: a Bitcoin wallet pairs with the account words make.").small().color(palette.muted));
 
             return;
@@ -182,7 +196,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
             ui.colored_label(palette.warn, "For testnet, signet and regtest: pair a wallet set to a test network, as their keys are others.");
         }
 
-        match crate::bitcoin::pairing(&seed, network) {
+        match crate::bitcoin::pairing(seed, network) {
             Ok(code) => {
                 let side = ui.available_width().clamp(200.0, 420.0);
                 ui.vertical_centered(|ui| super::receive::qr(ui, &code, side));
@@ -198,7 +212,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
                 "{}, fingerprint {}: native segwit. Its first address should read {}.",
                 network.path(),
                 chainv4::structs::hex::to_hex(&seed.bitcoin_account(network.coin()).master_fingerprint).trim_start_matches("0x"),
-                crate::bitcoin::receiving(&seed, network, 0),
+                crate::bitcoin::receiving(seed, network, 0),
             ))
             .small()
             .color(palette.muted),

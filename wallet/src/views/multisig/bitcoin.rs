@@ -304,12 +304,13 @@ fn spend(ui: &mut Ui, ctx: &mut Ctx, state: &mut BitcoinState, wallet: &Multisig
         }
 
         ui.horizontal_wrapped(|ui| {
-            match crate::keys::seed(ctx.book) {
-                Some(seed) if theme::primary(ui, &palette, "Sign with these words", !done).clicked() => match psbt.sign(&seed) {
+            let seeds = crate::keys::seeds(ctx.book);
+
+            if !seeds.is_empty() && theme::primary(ui, &palette, "Sign with these words", !done).clicked() {
+                match psbt.sign_all(&seeds) {
                     Ok(signed) => psbt = signed,
                     Err(why) => state.trouble = Some(why),
-                },
-                _ => {}
+                }
             }
 
             if !state.asking_signer && theme::quiet(ui, &palette, "Ask the signer").clicked() {

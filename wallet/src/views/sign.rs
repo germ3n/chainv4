@@ -38,8 +38,9 @@ enum Step {
     Review { request: Box<Request>, trouble: Option<String> },
     /// Signed: the code for the sender.
     Signed { message: Box<Message> },
-    /// MetaMask's request, read, to check before signing; why it cannot be signed, if it cannot.
-    MetaMask { request: Box<SignRequest>, trouble: Option<String> },
+    /// MetaMask's request, read, to check before signing; the seed it was matched to, by its
+    /// fingerprint, as the wallet may hold several; why it cannot be signed, if it cannot.
+    MetaMask { request: Box<SignRequest>, seed: Option<crate::vault::Fingerprint>, trouble: Option<String> },
     /// Signed for MetaMask: the code it reads back.
     MetaMaskSigned { text: String },
     /// A Bitcoin wallet's PSBT, read, laid out to check; why it cannot be signed, if it cannot.
@@ -116,14 +117,15 @@ fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 
         match state.scan.show(ui, &palette) {
             Some(Message::MetaMask(request)) => {
-                let trouble = match crate::keys::seed(ctx.book) {
-                    None => Some("This wallet holds no words, only keys brought in: MetaMask signs with accounts words make.".to_string()),
-                    Some(seed) if request.path.fingerprint.is_some_and(|asked| asked != seed.ethereum_account().master_fingerprint) => {
-                        Some("A request for another wallet's keys: pair MetaMask with this one on Pair.".to_string())
-                    }
-                    Some(_) => request.account().and_then(|_| request.asked()).err(),
+                let seeds = crate::keys::seeds(ctx.book);
+                let (seed, trouble) = match seeds.as_slice() {
+                    [] => (None, Some("This wallet holds no words, only keys brought in: MetaMask signs with accounts words make.".to_string())),
+                    seeds => match request.choose(seeds) {
+                        Ok(seed) => (Some(seed.ethereum_account().master_fingerprint), request.account().and_then(|_| request.asked()).err()),
+                        Err(why) => (None, Some(why)),
+                    },
                 };
-                state.step = Step::MetaMask { request, trouble };
+                state.step = Step::MetaMask { request, seed, trouble };
             }
             Some(Message::Sign(request)) => {
                 let trouble = match ctx.holders.iter().find(|holder| holder.publics.contains(&request.signer)) {
@@ -134,9 +136,10 @@ fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                 state.step = Step::Review { request: Box::new(request), trouble };
             }
             Some(Message::Bitcoin(request)) => {
-                let read = match crate::keys::seed(ctx.book) {
-                    None => Err("This wallet holds no words, only keys brought in: a Bitcoin wallet signs with the account words make.".to_string()),
-                    Some(seed) => request.psbt.review(&seed),
+                let seeds = crate::keys::seeds(ctx.book);
+                let read = match seeds.is_empty() {
+                    true => Err("This wallet holds no words, only keys brought in: a Bitcoin wallet signs with the account words make.".to_string()),
+                    false => request.psbt.review_all(&seeds),
                 };
                 state.step = match read {
                     Ok(review) => Step::Bitcoin { request, review: Some(Box::new(review)), trouble: None },
@@ -363,9 +366,13 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 /// MetaMask's request laid out: the chain, large; the account; and what it signs.
 fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
     let palette = *ctx.palette;
-    let Step::MetaMask { request, trouble } = &mut state.step else {
+    let Step::MetaMask { request, seed, trouble } = &mut state.step else {
         return;
     };
+    // The words it was matched to when read, and if those have gone since, none: never others.
+    let chosen = *seed;
+    let words = chosen.and_then(|fingerprint| ctx.book.holding(fingerprint));
+    let seed = words.and_then(crate::vault::Words::seed);
     let mut next = None;
     let mut confirmed = false;
 
@@ -385,7 +392,6 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 
     let yours = ctx.settings.signer_chain;
     let chain = request.chain();
-    let seed = crate::keys::seed(ctx.book);
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &request.asker());
@@ -413,12 +419,17 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 
         ui.add_space(8.0);
 
-        if let (Ok(account), Some(seed)) = (request.account(), &seed) {
+        if let (Ok(account), Some(seed)) = (request.account(), seed) {
             let address = seed.key(chainv4::crypto::keypair::KeyType::Secp256k1, account).public().address();
             super::row(ui, &palette, "Account", |ui| {
                 ui.vertical(|ui| {
                     super::address(ui, &palette, &address.to_string());
                     ui.label(RichText::new(format!("m/{}", request.path.text())).small().color(palette.muted));
+
+                    // With several sets of words, which of them signs.
+                    if let Some(index) = ctx.book.phrases.iter().position(|held| chosen.is_some() && held.fingerprint() == chosen).filter(|_| ctx.book.phrases.len() > 1) {
+                        ui.label(RichText::new(format!("from {}", ctx.book.name_of(index))).small().color(palette.soft));
+                    }
                 });
             });
         }
@@ -500,7 +511,6 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                 state.confirming = Some(Check::start(ctx.wake, &enrolled, "Sign what MetaMask asks"));
             } else if tapped || confirmed {
                 let signed = seed
-                    .as_ref()
                     .ok_or_else(|| "the words are gone from this wallet".to_string())
                     .and_then(|seed| request.sign(seed))
                     .and_then(|signature| signature.to_cbor());
@@ -646,7 +656,11 @@ fn bitcoin_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             if tapped && !confirmed && let Some((enrolled, _)) = biometric {
                 state.confirming = Some(Check::start(ctx.wake, &enrolled, "Sign what the Bitcoin wallet asks"));
             } else if tapped || confirmed {
-                let signed = crate::keys::seed(ctx.book).ok_or_else(|| "the words are gone from this wallet".to_string()).and_then(|seed| request.psbt.sign(&seed));
+                let seeds = crate::keys::seeds(ctx.book);
+                let signed = match seeds.is_empty() {
+                    true => Err("the words are gone from this wallet".to_string()),
+                    false => request.psbt.sign_all(&seeds),
+                };
 
                 match signed {
                     Ok(psbt) => next = Some(Step::BitcoinSigned { message: Box::new(Message::Bitcoin(Box::new(bitcoin::Request { psbt, kind: request.kind }))) }),

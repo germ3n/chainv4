@@ -371,3 +371,82 @@ fn the_signer_signs_a_multisig_s_evm_call_as_typed_data_and_the_bundle_counts_it
 
     assert_eq!(bundle.add(whole), Ok(owner));
 }
+
+/// The fingerprint a seed goes by, to tell which was chosen: seeds cannot be compared, or printed.
+fn print(seed: &Seed) -> [u8; 4] {
+    seed.ethereum_account().master_fingerprint
+}
+
+fn evm_address(seed: &Seed, account: u32) -> [u8; 20] {
+    match seed.key(KeyType::Secp256k1, account).public().address() {
+        chainv4::structs::address::Address::Secp256k1(bytes) => bytes,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn among_several_seeds_a_request_signs_with_the_one_it_names_and_nothing_is_guessed() {
+    let (first, other) = (seed(), Phrase::parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap().seed(""));
+    let seeds = [&first, &other];
+    let data = tx_data(&transaction(EthereumKind::DynamicFee));
+    let named = |fingerprint: Option<[u8; 4]>, address: Option<[u8; 20]>| {
+        let mut asked = request(DataKind::TypedTransaction, data.clone(), 1);
+        asked.path.fingerprint = fingerprint;
+        asked.address = address;
+
+        asked
+    };
+    let chose = |asked: &SignRequest| asked.choose(&seeds).map(print);
+
+    // By its fingerprint, whichever it is.
+    assert_eq!(chose(&named(Some(print(&first)), None)), Ok(print(&first)));
+    assert_eq!(chose(&named(Some(print(&other)), None)), Ok(print(&other)));
+    assert!(chose(&named(Some([1, 2, 3, 4]), None)).unwrap_err().contains("another wallet"));
+
+    // A fingerprint is 32 bits, so a matching one is checked against the address it names.
+    assert_eq!(chose(&named(Some(print(&other)), Some(evm_address(&other, 1)))), Ok(print(&other)));
+    assert!(chose(&named(Some(print(&other)), Some(evm_address(&first, 1)))).is_err());
+
+    // With none, by its address at its path.
+    assert_eq!(chose(&named(None, Some(evm_address(&other, 1)))), Ok(print(&other)));
+    assert_eq!(chose(&named(None, Some(evm_address(&first, 1)))), Ok(print(&first)));
+    assert!(chose(&named(None, Some(evm_address(&other, 2)))).unwrap_err().contains("another wallet"), "another account's address");
+    assert!(chose(&named(None, Some([7; 20]))).is_err());
+
+    // With neither, it refuses rather than guess.
+    assert!(chose(&named(None, None)).unwrap_err().contains("several sets of words"));
+
+    // What is chosen signs: as that seed's key, and the other refuses it.
+    let asked = named(None, Some(evm_address(&other, 1)));
+
+    assert!(asked.choose(&seeds).unwrap().ethereum_account() == other.ethereum_account());
+    assert!(asked.sign(asked.choose(&seeds).unwrap()).is_ok());
+    assert!(asked.sign(&first).is_err());
+}
+
+#[test]
+fn with_one_seed_a_request_is_chosen_as_it_always_was() {
+    let first = seed();
+    let data = tx_data(&transaction(EthereumKind::DynamicFee));
+    let one = [&first];
+    let mut asked = request(DataKind::TypedTransaction, data, 1);
+
+    assert_eq!(asked.choose(&one).map(print), Ok(print(&first)));
+
+    // It names no seed: it passes, as it always did, and the address is checked as it signs.
+    asked.path.fingerprint = None;
+
+    assert_eq!(asked.choose(&one).map(print), Ok(print(&first)));
+    assert!(asked.sign(&first).is_ok());
+
+    asked.address = Some([7; 20]);
+
+    assert_eq!(asked.choose(&one).map(print), Ok(print(&first)));
+    assert!(asked.sign(&first).is_err());
+
+    // Another seed's, by the same words as before.
+    asked.address = None;
+    asked.path.fingerprint = Some([1, 2, 3, 4]);
+
+    assert_eq!(asked.choose(&one).map(print).unwrap_err(), "A request for another wallet's keys: pair MetaMask with this one on Pair.");
+}

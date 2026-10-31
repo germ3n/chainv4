@@ -367,7 +367,7 @@ pub fn account_scripts(holders: &[crate::keys::Holder], book: &crate::vault::Boo
                 _ => None,
             })),
             true => {
-                if let (Some(seed), Some(number)) = (crate::keys::seed(book), holder.number())
+                if let (Some(seed), Some(number)) = (crate::keys::seed_of(book, holder), holder.number())
                     && let PublicKey::Bitcoin(key) = seed.bitcoin_key(network.coin(), 0, number).public()
                 {
                     scripts.insert(p2wpkh(&hash160(&key)));
