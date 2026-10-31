@@ -42,3 +42,4 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Docker](docker.md) | A node in a container behind nginx, with HTTPS from your certificate, Let's Encrypt, or a self-signed one. |
 | [Development](development.md) | Building, features, tests, CI, the ui crate the apps share, the wiki, and the conventions the code follows. |
 | [Todo](todo.md) | What is done, what is next, and known gaps. |
+| [Queue](queue.md) | Briefs for the review and CI, the testnet exercises and the pentest. |
