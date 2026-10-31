@@ -1006,6 +1006,55 @@ fn a_node_that_mined_alone_moves_to_the_branch_its_validators_justified() {
     assert!(alone.chain().on_main_chain(&voter.chain().justified().unwrap().block).unwrap(), "the justified branch is the chain now");
 }
 
+/// A node that justified a checkpoint on a branch that then lost cannot follow the heavier branch by
+/// work, which never leaves a justified checkpoint. Having all that branch's blocks, it asks for its
+/// justifications, heavier peer or not, and they move it.
+#[cfg(feature = "finality-ffg")]
+#[test]
+fn a_node_on_a_branch_it_justified_that_lost_moves_to_the_one_justified_after() {
+    let genesis = easy_pow();
+    let open = || {
+        let (link, fake) = NetLink::pair();
+        let node = Node::new(Arc::new(MemoryDb::default()), &genesis, None, link).unwrap();
+
+        (node.validate(DevAuthority::dev_keypair()), fake)
+    };
+    let (mut main, mut main_net) = open();
+    let (mut lost, mut lost_net) = open();
+    let mine = |node: &mut Node, net: &FakeNet, count: u64, miner: u8| {
+        let mut parent = node.chain().tip().clone();
+
+        for _ in 0..count {
+            let block = mine_on(node, &parent, miner);
+            parent = block.header.clone();
+            net.events.send(NetEvent::Block { from: PeerId::random(), block, gossip: None }).unwrap();
+            node.step(LATER).unwrap();
+        }
+    };
+
+    mine(&mut main, &main_net, 30, 1);
+    mine(&mut lost, &lost_net, 12, 2);
+    sent(&mut main_net);
+    sent(&mut lost_net);
+
+    let (its_own, justified) = (lost.chain().justified().unwrap(), main.chain().justified().unwrap());
+    assert_eq!(its_own.epoch, 1, "on its own branch, with nothing finalized there");
+    assert!(justified.epoch > its_own.epoch && justified.block != its_own.block);
+    assert!(main.chain().tip_work() > lost.chain().tip_work());
+
+    let (main_peer, lost_peer) = (PeerId::random(), PeerId::random());
+    lost_net.events.send(NetEvent::PeerUp { peer: main_peer, address: Multiaddr::empty() }).unwrap();
+    lost.step(LATER).unwrap();
+    relay(
+        Side { node: &mut lost, net: &mut lost_net, peer: lost_peer },
+        Side { node: &mut main, net: &mut main_net, peer: main_peer },
+        LATER,
+    );
+
+    assert_eq!(lost.chain().justified(), Some(justified));
+    assert_eq!(lost.chain().tip().id(), main.chain().tip().id(), "it follows the main branch now");
+}
+
 // Finality. The dev chains run FFG with the dev key as their one validator, epochs of 8 blocks, and
 // votes two blocks behind the tip; the authority dev settings time votes the same way.
 #[cfg(any(feature = "finality-ffg", feature = "finality-authority", feature = "finality-depth"))]

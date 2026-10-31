@@ -131,6 +131,11 @@ no peer holds more work (see [Node and network](node.md)). It checks each one be
 - every vote is valid and by a voter;
 - together they are enough.
 
+A node can justify a checkpoint on a branch that then loses, as votes split between two branches
+while gossip is down. Work never moves it off that checkpoint, however heavy the other branch. So
+once it holds all of a heavier peer's blocks, it asks that peer for every justification past the
+finalized checkpoint, and the newer ones move it.
+
 A justified checkpoint on another branch moves the main chain to the best known block through
 it, never past the finalized checkpoint.
 

@@ -241,10 +241,20 @@ impl Node {
         };
 
         let Some((peer, chain)) = heaviest.or_else(ahead) else {
-            self.sync_proofs();
+            self.sync_proofs(false);
 
             return Ok(());
         };
+
+        // All its blocks are here and the chain still does not follow them: they leave a checkpoint
+        // this node justified, on a branch that lost, and work alone never leaves one. Only a newer
+        // justification moves the chain, so that is what to ask for, heavier peer or not.
+        if chain.next.is_some_and(|next| next > chain.height) {
+            self.sync_proofs(true);
+
+            return Ok(());
+        }
+
         let from = chain.next.unwrap_or(tip.min(chain.height) + 1).clamp(1, chain.height);
         let count = (chain.height - from + 1).min(u64::from(MAX_SYNC_BLOCKS)) as u32;
         let peer = *peer;
@@ -259,8 +269,10 @@ impl Node {
         Ok(())
     }
 
-    /// Asks the peer furthest ahead on justification for the justifications this node lacks.
-    fn sync_proofs(&mut self) {
+    /// Asks the peer furthest ahead on justification for the justifications this node lacks: those
+    /// past its own, or, on a branch that lost, all those past the finalized checkpoint, as what
+    /// comes next on the peer's branch may build on one of the peer's own below this node's.
+    fn sync_proofs(&mut self, lost: bool) {
         if self.sync.asking_proofs.is_some() || !self.chain.takes_votes() {
             return;
         }
@@ -277,12 +289,13 @@ impl Node {
             .map(|(id, _)| *id);
 
         if let Some(peer) = ahead {
-            log::debug!("[node] asking {peer} for justifications from epoch {}", ours + 1);
+            let from = if lost { self.chain.finalized().map_or(0, |finalized| finalized.epoch) } else { ours } + 1;
+            log::debug!("[node] asking {peer} for justifications from epoch {from}");
             self.sync.asking_proofs = Some(peer);
             self.send(NetCommand::Request {
                 peer,
                 request: SyncRequest::Justifications {
-                    from: ours + 1,
+                    from,
                     count: MAX_SYNC_JUSTIFICATIONS,
                 },
             });
