@@ -164,6 +164,22 @@ DNS name pointing at the host, and port 80 reachable from the internet.
 | `MINING_PORT` (4002, TCP) | Workers, when `docker/config/mining.token` is there; nothing listens otherwise. |
 | An onion, with `TOR=1` | The API, the explorer and the wallet over Tor, and with `TOR_MINING=1` the mining port (see [An onion service](#an-onion-service)). Nothing is published for it: Tor reaches out. |
 
+**nginx limits what each address may ask.** Past a limit it answers 429 with a JSON `error`, which the
+apps show and retry after, and a `Retry-After` of a second:
+
+| What | A second | Burst | Who shares it |
+| --- | --- | --- | --- |
+| The API, the explorer and the wallet (`RATE_API`) | 30 | 180 | Each address |
+| Contract calls, `POST /call` and `/rpc` (`RATE_CALLS`), on top | 5 | 20 | Each address |
+| Everything over the onion | 90 | 360 | Everyone on it, as all come from tor |
+| Connections | 64 at once, 8 for `/stream` and `/mining/ws` | | Each address |
+
+- **Set in `.env`:** `RATE_API` and `RATE_CALLS`, the bursts and the onion's following them, and
+  `RATE_LIMIT=off` for none. A restart of nginx takes them up.
+- **What is not limited here:** peers and the mining port, which do not pass through nginx. Over the
+  onion, contract calls have only the onion's limit, so someone there can still hold up the API's thread.
+- **Behind a shared address,** as a campus or a mobile carrier's, everyone shares a limit: raise `RATE_API` if they meet it.
+
 **The API is never published itself.** Port 8080 is only on compose's own network, for nginx.
 
 **Workers authenticate with the token.** Every message on the mining port carries an HMAC under

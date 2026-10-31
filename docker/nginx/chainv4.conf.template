@@ -1,6 +1,25 @@
 # A chainv4 node behind nginx: HTTPS for its API, its explorer at / and its wallet at /wallet/.
 # tls.sh renders this into conf.d at start, filling in the ${...} below.
 
+# Who a limit counts: each client by its address over HTTPS, and everyone on the onion together, as
+# they all come from tor. Empty keys count nothing, which is also what RATE_LIMIT=off makes them.
+map $server_port $rate_client {
+    8081 "";
+    default ${RATE_KEY};
+}
+
+map $server_port $rate_onion {
+    8081 ${RATE_ONION_KEY};
+    default "";
+}
+
+limit_req_zone $rate_client zone=api:10m rate=${RATE_API}r/s;
+limit_req_zone $rate_client zone=calls:10m rate=${RATE_CALLS}r/s;
+limit_req_zone $rate_onion zone=onion:1m rate=${RATE_ONION}r/s;
+limit_conn_zone $rate_client zone=conns:10m;
+limit_req_status 429;
+limit_conn_status 429;
+
 upstream chainv4 {
     server ${NODE_UPSTREAM};
     keepalive 16;
@@ -42,24 +61,20 @@ server {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto https;
 
-    # What the node does, as it happens: passed on at once, and kept open.
-    location = /stream {
-        proxy_pass http://chainv4;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 1h;
-    }
+    include /etc/nginx/chainv4-locations.conf;
+}
 
-    # Mining in a browser: the mining port's protocol over a WebSocket, kept open while it mines.
-    location = /mining/ws {
-        proxy_pass http://chainv4;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_buffering off;
-        proxy_read_timeout 1h;
-    }
+# The onion's way in, for tor alone: this port is only on compose's own network.
+server {
+    listen 8081;
+    server_name _;
+    client_max_body_size 4m;
 
-    location / {
-        proxy_pass http://chainv4;
-    }
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto http;
+
+    include /etc/nginx/chainv4-locations.conf;
 }

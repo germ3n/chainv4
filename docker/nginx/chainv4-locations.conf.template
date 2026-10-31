@@ -1,0 +1,54 @@
+# What both the HTTPS server and the onion's serve, under the same limits: each client's by its
+# address, and the onion's shared, as everyone on it comes from tor. A limit whose key is empty on a
+# server does nothing there, so each line below counts only where it is meant to.
+limit_req zone=api burst=${BURST_API} nodelay;
+limit_req zone=onion burst=${BURST_ONION} nodelay;
+limit_conn conns 64;
+error_page 429 @too_many;
+
+# Past a limit: what the apps read, as they read the API's own errors. The node's own 429s, as the
+# faucet's, come through as they are.
+location @too_many {
+    default_type application/json;
+    add_header Retry-After 1 always;
+    return 429 '{"error":"too many requests from this address: slow down and try again"}';
+}
+
+# Contract calls run on the API's one thread, and every other request waits for them.
+location = /call {
+    limit_req zone=api burst=${BURST_API} nodelay;
+    limit_req zone=onion burst=${BURST_ONION} nodelay;
+    limit_req zone=calls burst=${BURST_CALLS} nodelay;
+    proxy_pass http://chainv4;
+}
+
+location = /rpc {
+    limit_req zone=api burst=${BURST_API} nodelay;
+    limit_req zone=onion burst=${BURST_ONION} nodelay;
+    limit_req zone=calls burst=${BURST_CALLS} nodelay;
+    proxy_pass http://chainv4;
+}
+
+# What the node does, as it happens: passed on at once, and kept open. Each open one is a connection
+# for as long as it lasts, so a few to an address.
+location = /stream {
+    limit_conn conns 8;
+    proxy_pass http://chainv4;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1h;
+}
+
+# Mining in a browser: the mining port's protocol over a WebSocket, kept open while it mines.
+location = /mining/ws {
+    limit_conn conns 8;
+    proxy_pass http://chainv4;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+}
+
+location / {
+    proxy_pass http://chainv4;
+}

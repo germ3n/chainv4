@@ -1,5 +1,6 @@
 #!/bin/sh
-# Writes tor's configuration and runs it: one onion service, the node's HTTP API on its port 80,
+# Writes tor's configuration and runs it: one onion service, the node's HTTP API on its port 80 by way
+# of nginx, for its limits,
 # its peer-to-peer over TCP on P2P_PORT, and with TOR_MINING=1 its mining port, offered on the
 # number its workers use. The SOCKS port takes compose's network alone, for the node to dial onion
 # peers through. The onion's address is printed once tor made it, and written for the node as a
@@ -22,7 +23,7 @@ chmod 700 "$data" "$service"
     echo "SocksPolicy reject *"
     echo "HiddenServiceDir $service"
     echo "HiddenServiceVersion 3"
-    echo "HiddenServicePort 80 node:8080"
+    echo "HiddenServicePort 80 nginx:8081"
     echo "HiddenServicePort $p2p_port node:$p2p_port"
 
     if [ "${TOR_MINING:-0}" = 1 ]; then

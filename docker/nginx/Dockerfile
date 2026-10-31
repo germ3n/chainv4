@@ -2,5 +2,5 @@
 # certificate you give it, one from Let's Encrypt, or one it makes itself (see tls.sh).
 FROM docker.io/library/nginx:1.28-alpine
 RUN apk add --no-cache openssl
-COPY chainv4.conf.template /etc/nginx/chainv4.conf.template
+COPY chainv4.conf.template chainv4-locations.conf.template /etc/nginx/
 COPY --chmod=0755 tls.sh /docker-entrypoint.d/40-chainv4-tls.sh

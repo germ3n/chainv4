@@ -756,6 +756,8 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **Nothing stopped one address flooding the API.** nginx limits each address now, contract calls harder, and the onion goes through it too.
+
 - [x] **`gen_notices.py` stopped at hex_lit,** which names MITNFA and ships no text of it. Its standard
   text is in `notices/`, and the notices are generated again in full.
 - [x] **A phone's status bar icons were pale on the light theme.** The app sets them from its theme now.

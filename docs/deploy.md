@@ -1,6 +1,6 @@
 # Deploying a fresh test chain
 
-How the test chain was last started from nothing (2026-10-31, commit `41f42a2`), step by
+How the test chain was last started from nothing (2026-10-31, commit `74be29d`), step by
 step, with everything enabled: a runbook for the next one. [Docker](docker.md) explains the
 pieces; this is the order they go in, and what bit along the way.
 
@@ -90,7 +90,7 @@ a little in `allocations` for its fees. Two of three finalize, so one may be dow
 three: the public node's voter is `validator.key` and its account the owner, the others
 `validators/devnet-2-voter.key` and `devnet-3-voter.key`, their accounts `devnet-2-account.key` and
 `devnet-3-account.key`, whose seed phrases are in `validator-mnemonics.txt` at the repository's root,
-which git, images and pushes all leave out. `consensus.target_block_ms` is 5000 here.
+which git, images and pushes all leave out. `consensus.target_block_ms` is 5000 here. `SYMBOL=CV4 docker/pow.sh regenesis --yes` names the coin, and names under its lower case unless `NAMES` says otherwise; `reward` and `finality.vote_reward` are in the file to set by hand.
 
 ## 3. The VPS
 
@@ -155,7 +155,7 @@ Samples: tokens are `contracts/lua/token.lua` with `NAME` and `SYMBOL` changed (
 DEX a `Token.sol` from `evm.key` (`send deploy --evm contracts/evm/Token.bin --constructor
 "(string,string,uint256)" --arg … `) with `dex --evm --router … add`; examples on each engine:
 `guestbook.lua`, `counter.wasm`, `Counter.bin` (`--constructor "(uint256)" --arg 0`); names with
-`send name register LABEL` then `send name target LABEL.dev --to …`; a 2-of-3 multisig with EVM
+`send name register LABEL.cv4` then `send name target LABEL.cv4 --to …`; a 2-of-3 multisig with EVM
 members (`create-multisig --member KEY,,0x…`, the member's public key, `secp256k1:0x02…`, which
 `key show` prints as `public`: its address is refused) and its contract, `multisig --key evm.key evm …
 deploy --eth-rpc $N/rpc`.
@@ -167,7 +167,7 @@ deploy --eth-rpc $N/rpc`.
   out. `relay-sync` now asks at an even pace, asks again waiting longer each time, submits 25
   headers a transaction, and keeps what it fetched when Esplora stops answering midway; the
   looping service in step 6 catches up.
-- A name's `target` once did not take; check `GET /names/LABEL.dev` and send it again.
+- A name's `target` once did not take; check `GET /names/LABEL.cv4` and send it again.
 
 ## 5. The directory
 
@@ -218,19 +218,19 @@ SHA-256s with the link.
 
 | What | Where |
 | --- | --- |
-| Genesis | `0xc4da642e5f5b6637…`, named `chainv4 testnet`, 5 s blocks; FFG with three validators, the council the owner alone; the directory is governance's change |
+| Genesis | `0x366bfdddf940c06e…`, named `chainv4 devnet` by governance, coin CV4, 5 s blocks; the owner 500,000, each of three validators bonded 50,000, FFG, the council the owner alone; a block mints 10, halving every 2,000,000 blocks, about 116 days, and a vote 0.01; names under `cv4` |
 | Machines | Public node `66.78.40.94`, others `66.78.40.57` and `65.87.7.168`: 2 cores, 4 GB and 50 GB each, with 4 GB of swap and the [firewall](docker.md#firewall) |
-| Swap contract, `swap.dev` | `contract:0xc4ad35b6…68fb7` |
-| Native DEX, `dex.dev` | `contract:0x6c1df38c…90a4` |
+| Swap contract, `swap.cv4` | `contract:0xc4ad35b6…68fb7` |
+| Native DEX, `dex.cv4` | `contract:0x6c1df38c…90a4` |
 | EVM DEX router | `0xfd9524e58c1a904b439e9a3292a95cf6562aa458` |
-| NFT factory, `nfts.dev` | `contract:0x5c352729…4297` |
-| Gateway, `gateway.dev` | `contract:0xe6912df3…55dc` |
-| Bitcoin relay, `btcrelay.dev` | `contract:0x717374cf…e9c0` (testnet4 from 157248), paid by `secp256k1:0xb0c23ea9…1ff0`, a key on the public node |
-| Bitcoin gateway, `btcgateway.dev` | `contract:0xc53df990…04e7` |
+| NFT factory, `nfts.cv4` | `contract:0x5c352729…4297` |
+| Gateway, `gateway.cv4` | `contract:0xe6912df3…55dc` |
+| Bitcoin relay, `btcrelay.cv4` | `contract:0x717374cf…e9c0` (testnet4 from 157248), paid by `secp256k1:0xb0c23ea9…1ff0`, a key on the public node |
+| Bitcoin gateway, `btcgateway.cv4` | `contract:0xc53df990…04e7` |
 | Swap.sol | `0xb3f77d55ac803f023df8f4d21fd1d103e5be2d50` |
-| Tokens `gold.dev`, `silver.dev`, `tusd.dev`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin, 1,000 DEV to 10,000; TETH `0x2625baf4…c4c9`, 100 DEV to 400 on the EVM DEX |
-| Collections `pixels.dev`, `items.dev` | `contract:0x48ae529c…73cd`, 3 NFTs; `contract:0xf915ac76…2406`, ids 1 and 2, 100 each |
-| Examples | `guestbook.dev`, `counter.dev`, Counter.sol `0x3c262351…88e8` |
+| Tokens `gold.cv4`, `silver.cv4`, `tusd.cv4`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin, 1,000 CV4 to 10,000; TETH `0x2625baf4…c4c9`, 100 CV4 to 400 on the EVM DEX |
+| Collections `pixels.cv4`, `items.cv4` | `contract:0x48ae529c…73cd`, 3 NFTs; `contract:0xf915ac76…2406`, ids 1 and 2, 100 each |
+| Examples | `guestbook.cv4`, `counter.cv4`, Counter.sol `0x3c262351…88e8` |
 | Sample multisig | `multisig:0xa4ab52e9…1531`, 2 of 3, its contract `0xf790c606…89d2` |
 | Onion | `njo4fijntpqch73yv4477hhn2vcngnpcxtw2vb4qwjasqdwbdeektuqd.onion` |
 | Mining | `66.78.40.94:4002`, an open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`), and `/mining/ws` behind nginx |

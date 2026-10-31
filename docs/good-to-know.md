@@ -94,7 +94,8 @@ other pages explain each part in full; this one is the short list to keep in min
   the node, and a phone in the background keeps it until the system ends it. A stream that says
   nothing for 40 seconds is taken for dead, as the node says something every 15.
 - **Read-only calls hold up the API.** `POST /call` runs a contract under the chain's fuel cap on
-  the API's one thread, and every other request waits for it.
+  the API's one thread, and every other request waits for it. Behind nginx, an address gets 5 a second; see
+  [Docker](docker.md#what-is-exposed).
 - **Lua contracts can be split across files, put together when deploying.** A `--@include
   "lib.lua"` line is replaced by that file, sharing the includer's scope, before the transaction
   is signed: the chain holds one source, and the 128 KiB limit is the whole one's. `send` checks
