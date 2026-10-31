@@ -143,7 +143,7 @@ secure hash, or they fail to build.
 **Builds without some features:** a build without a kind of finality, or an engine, makes
 different dev chains, which puts it on a different network.
 
-**CI** (`.github/workflows/test.yml`):
+**CI** (`.github/workflows/test.yml`), started by hand from the Actions tab or `gh workflow run`, as nothing runs by itself for now, to spare runner minutes:
 - it runs clippy and the tests on the workspace;
 - it runs clippy on the contracts and the SDK's tests;
 - it runs clippy and the tests on the explorer and the wallet, and clippy on their web builds;
@@ -152,10 +152,10 @@ different dev chains, which puts it on a different network.
   ring's C;
 - it runs clippy and the tests on a matrix of feature subsets.
 
-**Builds** (`.github/workflows/build.yml`, `android.yml`, `extension.yml`), on every push to master and on tags:
+**Builds** (`.github/workflows/build.yml`, `android.yml`, `extension.yml`), started by hand as well:
 the node's release binaries with the wiki, the example contracts, the wallet's and the
-explorer's APKs, and the wallet's Chrome and Firefox extensions, which a `v*` tag also attaches to
-its release.
+explorer's APKs, and the wallet's Chrome and Firefox extensions, which a run started on a `v*` tag
+also attaches to its release.
 
 The matrix:
 - covers each hash and key scheme on its own;

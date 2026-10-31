@@ -6,9 +6,6 @@ name: extension
 # them to its release.
 
 on:
-  push:
-    branches: [main, master]
-    tags: ["v*"]
   workflow_dispatch:
 
 concurrency:

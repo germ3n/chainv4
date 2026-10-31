@@ -589,7 +589,8 @@ explorer/build-android.sh --debug --install  # a debug build, put on the device 
 - `explorer/assets/icon.png` for its icon.
 
 **CI:** `.github/workflows/android.yml` builds its APKs beside the wallet's, keeps them as
-artifacts named `chainv4-explorer-android-ARCH`, and a `v*` tag attaches them to its release.
+artifacts named `chainv4-explorer-android-ARCH`, and a run started on a `v*` tag attaches them to its
+release.
 
 **On the phone:**
 - **The node:** `http://10.0.2.2:8080` at first, which is the machine running the emulator, as the

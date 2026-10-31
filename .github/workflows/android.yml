@@ -7,9 +7,6 @@ name: android
 # keeps them as artifacts; a v* tag attaches all four to its release. The runner's JDK and Android
 # build-tools (ANDROID_HOME) compile in the file picker, ui/android/Picker.java.
 on:
-  push:
-    branches: [main, master]
-    tags: ["v*"]
   workflow_dispatch:
 
 concurrency:

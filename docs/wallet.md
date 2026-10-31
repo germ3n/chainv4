@@ -1266,8 +1266,8 @@ no biometrics and the password stays; Chrome's may allow them. A browser that re
 else gets the same plain message rather than its own.
 
 **CI:** `.github/workflows/extension.yml` runs the extension's script tests
-(`node --test wallet/extension/test.mjs`), builds both on every push to master, keeps the zips as
-artifacts, and attaches them to a `v*` tag's release.
+(`node --test wallet/extension/test.mjs`), builds both when started by hand, keeps the zips as
+artifacts, and attaches them to a `v*` tag's release when started on that tag.
 
 ### Sites
 
@@ -1361,9 +1361,9 @@ wallet talks to nodes from Rust over sockets of its own.
   ```
 
 **CI:** `.github/workflows/android.yml` builds both of the wallet's APKs, and both of the
-explorer's, on every push to master and on `workflow_dispatch`, and keeps them as artifacts. It
+explorer's, when started by hand (`workflow_dispatch`), and keeps them as artifacts. It
 signs with the `ANDROID_SIGNING_PEM` secret, holding `signing.pem`'s text, when there is one, and
-with the debug key otherwise. A `v*` tag attaches all four to its release.
+with the debug key otherwise. Started on a `v*` tag, it attaches all four to its release.
 
 ### Biometrics on Android
 

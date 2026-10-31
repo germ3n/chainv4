@@ -226,8 +226,8 @@ wallet/build-extension.sh             # Chrome and Firefox extensions, in wallet
 
 Balances of the coin and every listed token at each address, sending with a reviewed fee from the
 address picked, receiving with a QR code, several accounts and several wallets, and a history from
-the node's address index. CI builds the APKs and the extensions on every push, and attaches them to
-`v*` releases.
+the node's address index. CI, started by hand, builds the APKs and the extensions, and attaches them to
+`v*` releases when started on that tag.
 See [Wallet](docs/wallet.md).
 
 ### The explorer
