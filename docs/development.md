@@ -143,6 +143,11 @@ secure hash, or they fail to build.
 **Builds without some features:** a build without a kind of finality, or an engine, makes
 different dev chains, which puts it on a different network.
 
+**On this machine:** `scripts/ci.sh` runs all of it without spending runner minutes, and adds the wallet's
+store build and the iOS checks. `--list` names its steps, `--from N` picks up at one, and `CI_MATRIX_ONLY=1` and
+`CI_NO_MATRIX=1` narrow it. It never runs a GPU kernel: `chainv4-gpu` stays out of the workspace's tests, and the
+matrix's `gpu` row is linted and compiled but not run, as its tests skip only where there is no GPU.
+
 **CI** (`.github/workflows/test.yml`), started by hand from the Actions tab or `gh workflow run`, as nothing runs by itself for now, to spare runner minutes:
 - it runs clippy and the tests on the workspace;
 - it runs clippy on the contracts and the SDK's tests;

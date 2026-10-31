@@ -756,6 +756,9 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **The whole of CI on this machine.** `scripts/ci.sh` runs what `test.yml` does with no runner minutes and no
+  GPU kernel. Its first run found node builds without `client` that no longer compiled, and tests assuming the
+  default hash, scheme or finality.
 - [ ] **Reading from checked blocks: the explorer walks every header on each launch.** It saves no light client,
   so with the setting on each start goes from the beginning. Fine today, slow as the chain grows, and to fix
   before this gets real use. Save the client as the wallet does.
@@ -766,9 +769,6 @@ offline; these would make that hold up as a treasury.
   be told nobody holds a name.
 - [ ] **Reading from checked blocks: the explorer's update download goes around its request gate.** It goes straight
   to the release host, only on the desktop and only when pressed.
-- [ ] **The nginx limit for `GET /blocks/range` has never run on real nginx.** It has only been rendered and
-  syntax-checked, and a bad config would stop a node's web and API. On the redeploy that brings it, do
-  `66.78.40.57` first and check it before the others.
 - [x] **A setting for the wallet and the explorer to take everything from the blocks they fetched,** history
   among it, rather than look things up from the node: what they show then rests on blocks they checked, and
   the node learns less of what they look at. Off by default, as reading blocks costs far more than asking.

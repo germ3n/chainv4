@@ -243,12 +243,16 @@ mod tests {
         assert_eq!(read_onion(&file), Some(ONION.parse().unwrap()));
 
         // What GET /mining says of it: nothing until tor made it, then its host and the port.
+        #[cfg(feature = "http")]
         let at = crate::api::MiningOnion::InFile { file: file.clone(), port: 4100 };
         let host = onion_host(&ONION.parse().unwrap()).unwrap();
         assert!(host.ends_with(".onion") && !host.contains(':') && !host.contains('/'), "{host}");
+        #[cfg(feature = "http")]
         assert_eq!(at.address(), Some(format!("{host}:4100")));
         assert_eq!(onion_host(&"/ip4/127.0.0.1/tcp/4001".parse().unwrap()), None);
+        #[cfg(feature = "http")]
         assert_eq!(crate::api::MiningOnion::InFile { file: file.with_extension("missing"), port: 4100 }.address(), None, "not there yet");
+        #[cfg(feature = "http")]
         assert_eq!(crate::api::MiningOnion::At("x.onion:1".to_string()).address().as_deref(), Some("x.onion:1"));
         std::fs::remove_file(&file).unwrap();
     }

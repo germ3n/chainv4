@@ -2229,7 +2229,8 @@ fn a_chain_without_an_admin_or_with_governance_lets_nobody_set_the_directory_by_
     assert_eq!(receipts[0].result, Err(Failure::Registry(RegistryError::NotDirectoryAdmin)));
     assert_eq!(receipts[1].result, Err(Failure::Registry(RegistryError::NotDirectoryAdmin)));
 
-    #[cfg(feature = "governance-council")]
+    // Governance needs finality that votes, which genesis() has only with FFG.
+    #[cfg(all(feature = "governance-council", feature = "finality-ffg"))]
     {
         let governed = Genesis {
             governance: Some(crate::governance::GovernanceConfig::Council { members: vec![authority().public().address()], threshold: 1, approval_epochs: 4 }),
@@ -2237,7 +2238,9 @@ fn a_chain_without_an_admin_or_with_governance_lets_nobody_set_the_directory_by_
             ..genesis()
         };
 
-        assert!(governed.problem().is_some_and(|why| why.contains("by governance")), "one way to change it");
+        let why = governed.problem();
+
+        assert!(why.is_some_and(|why| why.contains("by governance")), "one way to change it: {why:?}");
     }
 
     let contract = Genesis { directory_admin: Some(Address::Contract([1; 32])), ..genesis() };

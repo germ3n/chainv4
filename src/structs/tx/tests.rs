@@ -3,10 +3,18 @@
 
 use {
     super::*,
+};
+
+#[cfg(any(feature = "node", all(feature = "blake3", feature = "ed25519", feature = "xxh3")))]
+use crate::structs::hash::HashType;
+#[cfg(all(feature = "blake3", feature = "ed25519", feature = "xxh3"))]
+use crate::structs::hex::{from_hex, to_hex};
+#[cfg(all(feature = "node", feature = "blake3", feature = "ed25519"))]
+use crate::structs::receipt::Payment;
+#[cfg(feature = "node")]
+use {
     crate::chain::{TxReceipt, TxStatus},
-    crate::structs::hash::HashType,
-    crate::structs::hex::{from_hex, to_hex},
-    crate::structs::receipt::{CommittedOutcome, Payment, StepEffect, StepOutcome},
+    crate::structs::receipt::{CommittedOutcome, StepEffect, StepOutcome},
 };
 
 const TO: Address = Address::Ed25519([9; 32]);
@@ -21,7 +29,9 @@ fn fee() -> FeeOffer {
 }
 
 /// Transactions of old kinds, with the encoding and id each had before a batch existed: taken from
-/// the code as it stood then, so a change to any existing kind's tag or fields shows here.
+/// the code as it stood then, so a change to any existing kind's tag or fields shows here. They hold
+/// for the scheme and hash they were pinned under, the defaults.
+#[cfg(all(feature = "blake3", feature = "ed25519", feature = "xxh3"))]
 fn old() -> Vec<(Tx, &'static str, &'static str)> {
     let me = key().public().address();
 
@@ -68,6 +78,7 @@ fn old() -> Vec<(Tx, &'static str, &'static str)> {
     ]
 }
 
+#[cfg(all(feature = "blake3", feature = "ed25519", feature = "xxh3"))]
 #[test]
 fn every_old_transaction_keeps_its_exact_bytes_and_id() {
     for (tx, bytes, id) in old() {
@@ -80,6 +91,7 @@ fn every_old_transaction_keeps_its_exact_bytes_and_id() {
     }
 }
 
+#[cfg(all(feature = "node", feature = "blake3", feature = "ed25519"))]
 #[test]
 fn every_old_receipt_keeps_its_exact_bytes_and_leaf() {
     let block = Hash::zero(HashType::default_chain());
@@ -240,6 +252,7 @@ fn random_bytes_after_the_batch_tag_never_panic() {
     }
 }
 
+#[cfg(feature = "node")]
 #[test]
 fn a_batchs_receipts_read_back_and_its_tags_follow_the_old_ones() {
     let block = Hash::zero(HashType::default_chain());

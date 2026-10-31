@@ -39,6 +39,8 @@ says so, each time. A list of findings stops there too: fixing them waits until 
 - **Tests:** every change adds tests, updates those it changes the truth of, and removes those with nothing
   left to prove. Tests are named as sentences, such as
   `a_relay_left_on_a_branch_bitcoin_dropped_syncs_onto_the_one_it_took`. Never weaken a test just to make it pass.
+  A test that fails in a build without some feature gets a gate on only the lines that need it, so the rest still
+  runs in that build. Gating a whole test is for when all of it needs the feature.
 - **Docs:** every change is written up as it lands: the guides in `docs/`, `docs/good-to-know.md` for what would
   surprise someone, and a `[x]` entry in `docs/todo.md`.
 - **Checks before reporting an item,** in each crate touched (root, `ui`, `wallet`, `explorer`): `cargo clippy
@@ -93,17 +95,25 @@ private chain.
 ### The CI
 
 Workflows run only when started by hand, to save the owner's runner credits, so do not add triggers
-back. The local script that ran these checks was lost: **write it again as `scripts/ci.sh`**, following
-`.github/workflows/test.yml`, so it can run without spending any.
+back. Run **`scripts/ci.sh`**, which covers what `.github/workflows/test.yml` does without spending any, and
+never runs a GPU kernel. Its first run was on 2026-10-31: see `git log`. Do not run it in parallel with
+other builds, as they share `target/`.
 
-- It covers root, `contracts`, `ui`, `explorer` and `wallet`: clippy with `-D warnings`, tests, the
-  web builds, the wallet with no default features and with `--features store`, and the feature matrix at the end
-  of `test.yml`, whose reasons are in [Development](development.md).
-- `test.yml` runs `cargo test --workspace`. Check whether that takes in `chainv4-gpu`, and whether the same
-  command should exclude it there too. The script must exclude it.
-- It says which step failed, keeps going to the end, and can resume from a step, as the matrix is long.
-- Add `cargo check` for `aarch64-apple-ios` and `aarch64-apple-ios-sim` in `wallet` and `ui`. Android's C
-  dependencies need `wallet/build-android.sh` rather than a plain check.
+- `test.yml` runs `cargo test --workspace`. Check whether that takes in `chainv4-gpu`, and whether it should
+  exclude it as the script does.
+- A new feature belongs in the matrix, in `test.yml` and the script's list alike.
+- **Narrow the gates that first run added,** as they were put on whole tests to get the matrix passing, and each
+  loses coverage in the builds it skips. Say what each covers afterwards:
+  - `a_step_reads_as_its_send_command_would_and_names_what_is_wrong` in `src/cli/tests.rs` is gated on `evm` for one
+    `evm_call` step. Its transfer, burn and claim steps and its error messages need no EVM, so gate that step and
+    its assertion alone, and renumber what follows.
+  - `a_chain_without_an_admin_or_with_governance_lets_nobody_set_the_directory_by_hand` in `src/chain/tests.rs` only
+    checks a council's genesis with `finality-ffg`. Give it finality that votes in an authority build too, so the
+    check runs there.
+  - `every_old_transaction_keeps_its_exact_bytes_and_id` and `every_old_receipt_keeps_its_exact_bytes_and_leaf` in
+    `src/structs/tx/tests.rs` run only under the default hash and scheme, as their bytes are pinned to those. See
+    whether what they guard can also be checked in other builds, such as each kind's tag, without the pinned hex.
+- Android's C dependencies need `wallet/build-android.sh` rather than a plain check.
 
 Fix what fails if the fix is plainly right, and report it. Report anything that touches consensus before
 fixing it.

@@ -292,6 +292,7 @@ fn a_batch_touches_what_all_its_steps_touch_each_once() {
     ];
     let touched = touches_of(&Tx::Batch { steps: steps.clone() }, me, 7, hash);
     let of = |address: Address| Touch::Address(address);
+    #[cfg_attr(not(feature = "evm"), allow(unused_mut))]
     let mut wanted = vec![
         of(me),
         of(a),

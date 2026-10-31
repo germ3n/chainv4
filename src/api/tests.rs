@@ -1310,7 +1310,10 @@ fn supply_counts_what_was_made_and_the_rich_list_the_richest_first() {
     let allocated: u256 = free().allocations.iter().fold(u256::ZERO, |sum, allocation| sum + allocation.amount);
     let minted: u256 = supply["minted"].as_str().unwrap().parse().unwrap();
 
+    #[cfg(feature = "finality-ffg")]
     assert!(minted > allocated, "the allocations, and the genesis validator's bond: {supply}");
+    #[cfg(not(feature = "finality-ffg"))]
+    assert_eq!(minted, allocated, "the allocations, with no bond to make: {supply}");
     assert_eq!(crate::registry::supply::Supply::of(&fixture.chain.state()).unwrap().minted, minted);
     assert_eq!(crate::registry::supply::adds_up(&fixture.chain.state()).unwrap(), Ok(()), "and that is what is held and bonded");
     assert_eq!(supply["burned"], "0", "no fees on the free chain");

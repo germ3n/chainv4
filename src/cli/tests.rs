@@ -70,6 +70,8 @@ fn a_key_shows_its_public_key_and_addresses_never_its_secret() {
 
     assert_eq!(shown["scheme"], ed.public().key_type().name());
     assert_eq!(shown["address"], address);
+    // Only with a scheme whose address is its key: a build with secp256k1 alone has neither.
+    #[cfg(any(feature = "ed25519", feature = "edblake"))]
     assert!(address.ends_with(&shown["public"]), "an Ed25519 key is its address: {shown:?}");
 
     for line in described(&ed) {
@@ -913,6 +915,7 @@ mod send {
         assert!(crate::registry::Contracts::new(&std::sync::Arc::new(node.chain().state())).get(&first).unwrap().is_some());
     }
 
+    #[cfg(feature = "evm")]
     #[test]
     fn a_step_reads_as_its_send_command_would_and_names_what_is_wrong() {
         use crate::structs::tx::Tx;
