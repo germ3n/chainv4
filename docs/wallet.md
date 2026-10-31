@@ -1244,8 +1244,10 @@ cargo tree --locked --no-default-features --features store --target aarch64-linu
   so settings from either load in the other, and what was chosen comes back.
 - **iOS:** a store build still links `wgpu`, as eframe draws through it there. It draws, and mines
   nothing; `chainv4-gpu` is gone as everywhere.
-- **The web** stays with mining on: nothing asks for a store build of it. `index.html` builds the
+- **The web** the nodes serve stays with mining on: no store is involved. `index.html` builds the
   `miner-worker` bin, which a build without the feature does not have.
+- **The browser extension** has a store build too, as the Chrome Web Store and Firefox Add-ons ban
+  miners: see [Browser extension](#browser-extension).
 
 ### One app, three starts
 
@@ -1264,7 +1266,13 @@ It needs trunk, python3 and zip; `--browser chrome` or `--browser firefox` build
 wallet/build-extension.sh
 # Chrome: chrome://extensions, Developer mode, Load unpacked, wallet/target/extension/chrome
 # Firefox: about:debugging, This Firefox, Load Temporary Add-on, wallet/target/extension/firefox/manifest.json
+wallet/build-extension.sh --store   # for the stores: chainv4-wallet-chrome-store.zip and -firefox-store.zip
 ```
+
+**For the stores, use `--store`.** Both ban extensions with a miner, and a plain build has one. This
+builds with the `store` feature alone and without the `miner-worker` page entry, and it fails if
+anything of a miner's reaches the output. Each store signs what it publishes, so no key of your own is
+needed. Mozilla also wants the source and build instructions for the wasm.
 
 **What it is:** trunk's web build, as a node serves from `/wallet/`, with the extension's own files
 from `wallet/extension/`:
@@ -1291,7 +1299,7 @@ no biometrics and the password stays; Chrome's may allow them. A browser that re
 else gets the same plain message rather than its own.
 
 **CI:** `.github/workflows/extension.yml` runs the extension's script tests
-(`node --test wallet/extension/test.mjs`), builds both when started by hand, keeps the zips as
+(`node --test wallet/extension/test.mjs`), builds both, plain and for the stores, when started by hand, keeps the zips as
 artifacts, and attaches them to a `v*` tag's release when started on that tag.
 
 ### Sites

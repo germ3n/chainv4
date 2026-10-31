@@ -756,6 +756,8 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **The browser extension could not go to a store, as it held a miner.** `wallet/build-extension.sh --store`
+  leaves it out, and fails if any reaches the output.
 - [x] **A kill during a save could lose every wallet on a device.** eframe empties its file and then
   writes it. Off the web, each wallet and the settings now have a file and a copy of their own, each
   flushed, read back and renamed into place; what will not read is set aside, not written over.

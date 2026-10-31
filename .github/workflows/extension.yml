@@ -1,9 +1,9 @@
 name: extension
 
 # The wallet as a browser extension, for Chrome and for Firefox, built with
-# wallet/build-extension.sh on every push to master and on workflow_dispatch: both zips are kept as
-# artifacts, ready for chrome://extensions, about:debugging or the stores, and a v* tag attaches
-# them to its release.
+# wallet/build-extension.sh when started by hand: the zips are kept as artifacts, those named -store
+# for the stores, which take no miner, the others for chrome://extensions and about:debugging. A run
+# started on a v* tag attaches them to its release.
 
 on:
   workflow_dispatch:
@@ -35,6 +35,8 @@ jobs:
         run: node --test wallet/extension/test.mjs
       - name: build
         run: wallet/build-extension.sh
+      - name: build for the stores
+        run: wallet/build-extension.sh --store
       - uses: actions/upload-artifact@v7
         with:
           name: chainv4-wallet-extensions

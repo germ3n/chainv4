@@ -484,6 +484,8 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   key damaged or in a scheme it was built without, and `keys::stored`, which every save rebuilds the
   book's accounts with, puts `Book::unread` back after the holders. Build the accounts any other way
   and those go for good. Add a kind of account, and add it to `StoredAccount::readable`.
+- **An extension for a store is built with `--store`.** A plain `wallet/build-extension.sh` has the
+  miner, as the page the nodes serve does, and the Chrome Web Store and Firefox Add-ons refuse that.
 - **Off the web, wallets are not in eframe's storage.** eframe empties its file and then writes it, so
   a kill between loses all of it, and a torn file reads as empty. `wallet/src/store.rs` keeps a file
   and a copy per wallet, and for settings, each flushed, read back and renamed into place. The copy
