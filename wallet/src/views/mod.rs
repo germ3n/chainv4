@@ -320,6 +320,12 @@ impl States {
         self.contracts.answered(ask, result, kept);
     }
 
+    /// Takes the node's answer to what Activity asked a contract the registry does not list: false
+    /// for an answer to anyone else. Activity alone keeps what it says.
+    pub fn unlisted_answered(&mut self, body: &str, result: &Result<serde_json::Value, crate::node::Failure>, now: u64) -> bool {
+        self.activity.answered(body, result, now)
+    }
+
     /// The names the pages want proven: one typed to send to, and one searched for.
     pub fn wanted_names(&self) -> Vec<String> {
         self.send.wanted_name().into_iter().chain(self.names.wanted()).collect()
@@ -650,7 +656,52 @@ pub(crate) mod drawn {
 
     /// Draws a page twice, as a screen this wide and tall shows it, with this book, on a wallet
     /// sealed with no password. How wide it came out, and whether anything was marked to be sealed.
-    pub fn page(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), mut draw: impl FnMut(&mut Ui, &mut Ctx)) -> (f32, bool) {
+    pub fn page(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> (f32, bool) {
+        let (width, changed, _) = frames(book, holders, size, 2, |_, _| Vec::new(), draw);
+
+        (width, changed)
+    }
+
+    /// As `page`: what it said, in the order it drew it.
+    pub fn said(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> String {
+        frames(book, holders, size, 2, |_, _| Vec::new(), draw).2
+    }
+
+    /// As `page`, with a finger tapping this text on the way: what it said once it took the tap.
+    pub fn tap(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), text: &str, draw: impl FnMut(&mut Ui, &mut Ctx)) -> String {
+        let at = std::cell::Cell::new(egui::Pos2::ZERO);
+        let tap = |frame: usize, shapes: &[egui::epaint::ClippedShape]| {
+            let button = |pressed: bool| egui::Event::PointerButton { pos: at.get(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+
+            match frame {
+                1 => {
+                    let drawn = shapes.iter().find_map(|clipped| match &clipped.shape {
+                        egui::epaint::Shape::Text(shape) if shape.galley.text() == text => Some(shape.galley.rect.translate(shape.pos.to_vec2()).center()),
+                        _ => None,
+                    });
+                    at.set(drawn.unwrap_or_else(|| panic!("no {text} to tap")));
+
+                    vec![egui::Event::PointerMoved(at.get())]
+                }
+                2 => vec![button(true)],
+                3 => vec![button(false)],
+                _ => Vec::new(),
+            }
+        };
+
+        frames(book, holders, size, 5, tap, draw).2
+    }
+
+    /// Draws a page this many times, each frame's input from what the one before it drew: how wide it
+    /// came out, whether anything was marked to be sealed, and what the last frame said.
+    fn frames(
+        book: &mut Book,
+        holders: &mut Vec<Holder>,
+        size: (f32, f32),
+        count: usize,
+        events: impl Fn(usize, &[egui::epaint::ClippedShape]) -> Vec<egui::Event>,
+        mut draw: impl FnMut(&mut Ui, &mut Ctx),
+    ) -> (f32, bool, String) {
         let egui = egui::Context::default();
         crate::theme::install_fonts(&egui);
         let palette = crate::theme::DARK;
@@ -671,10 +722,12 @@ pub(crate) mod drawn {
         let mut lights = crate::light::Lights::default();
         let reader = chainv4::abi::known::AbiReader::default();
         let mut width = 0.0_f32;
+        let mut shapes = Vec::new();
 
-        for _ in 0..2 {
+        for frame in 0..count {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0, size.1))),
+                events: events(frame, &shapes),
                 ..egui::RawInput::default()
             };
             let mut output = egui.run_ui(input, |ui| {
@@ -707,9 +760,15 @@ pub(crate) mod drawn {
                 width = ui.min_rect().width();
             });
             output.textures_delta.clear();
+            shapes = output.shapes;
         }
 
-        (width, changed)
+        let said = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::epaint::Shape::Text(shape) => Some(format!("{}\n", shape.galley.text())),
+            _ => None,
+        });
+
+        (width, changed, said.collect())
     }
 
     /// A phone upright, a phone on its side, and a desktop.

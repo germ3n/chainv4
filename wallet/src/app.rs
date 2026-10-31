@@ -589,6 +589,7 @@ impl Wallet {
                     }
                 }
                 (Ask::Contract(_) | Ask::Call(_) | Ask::Read(_), _) => self.views.answered(&ask, &result, &self.settings.contracts),
+                (Ask::Rpc(body), _) if self.views.unlisted_answered(body, &result, now) => {}
                 #[cfg(feature = "dex")]
                 (Ask::Rpc(body), _) if self.views.trade.answered_rpc(body, &result) => {}
                 (Ask::Rpc(body), _) => self.views.dapp.answered(body, &result),

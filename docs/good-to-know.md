@@ -71,6 +71,16 @@ other pages explain each part in full; this one is the short list to keep in min
     out as letters and digits alone.
   - **A log's token move is a claim:** unless the registry lists the contract it never says it
     happened, and nothing adds moves to a balance.
+  - **What an unlisted contract says of itself stays on the Activity page:** `views/activity/unlisted.rs`
+    is private to it, which is what keeps it from signing screens, balances and the Overview, so do
+    not hand it to `Ctx`. It is not stored either, as settings that fail to decode lose everything.
+    Go through `Said::amount`, which always writes the quotes and `(unverified)`. The amount's column
+    wraps that text, because `theme::fitted` truncates past its smallest size, and what it would cut
+    is the label.
+  - **Paced by the page, not by `Node`:** `Ask::Rpc` has a body, so `Node::ask` sends it whenever it
+    is asked, and frames come often. `Unlisted::next` sends one question at most every 400 ms, and a
+    429 from nginx only delays them. Anything new that polls `/rpc` needs its own pace too: the limit
+    is 5 a second per address, shared with the Trade page and sites.
   - **Decode for people with a budget:** `decode_values` lets dynamic values share bytes, so a small
     `bytes[]` of offsets at one long value decodes to a thousand times its size. `known` spends a
     budget; contracts, whose path is consensus, decode as they always have.

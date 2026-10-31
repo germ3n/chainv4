@@ -8,6 +8,7 @@ use {
     super::Ctx,
     super::scan::Scan,
     crate::airgap::Message,
+    crate::app::Role,
     crate::format,
     crate::keys::{self, Holder},
     crate::lock::{self, Writing},
@@ -233,6 +234,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
 
             // On Android, only when the APK carries the picker.
             if files::can_pick(ui.ctx()) && theme::quiet(ui, &palette, "Open key file…").clicked() {
+                state.error = None;
                 pick(ctx.wake, state.picked.clone());
             }
 
@@ -240,6 +242,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
             if crate::metamask::available()
                 && theme::quiet(ui, &palette, "Connect MetaMask").on_hover_text("Its account, signed for by MetaMask, or a hardware wallet through it").clicked()
             {
+                state.error = None;
                 let (inbox, wake) = (state.connecting.clone(), ctx.wake.clone());
                 crate::metamask::connect(move |connected| {
                     *inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected);
@@ -302,12 +305,15 @@ fn more_words(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
             ui.label(RichText::new("This wallet can hold accounts from another seed phrase too, each counted on its own, as a restore of those words elsewhere counts them. All of them are sealed with this wallet's password.").small().color(palette.muted));
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
+                // What an earlier try said of another way in says nothing of this one.
                 if theme::quiet(ui, &palette, "Add words you have").clicked() {
                     state.more = Some(MoreWords::default());
+                    state.error = None;
                 }
 
                 if theme::quiet(ui, &palette, "Make new words").clicked() {
                     state.more = Some(MoreWords { stage: Stage::Making, ..MoreWords::default() });
+                    state.error = None;
                 }
             });
 
@@ -351,6 +357,10 @@ fn more_words(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
             ui.colored_label(palette.bad, error);
         }
 
+        if go {
+            state.error = None;
+        }
+
         // What the tap on go comes to: new words to write down, or words to add.
         let phrase = match (&mut more.stage, go) {
             (Stage::Making, true) => match Phrase::generate(12) {
@@ -380,6 +390,7 @@ fn more_words(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
                 Ok(id) => {
                     ctx.settings.set_current(id);
                     *ctx.changed = true;
+                    state.error = None;
                     leave = true;
                 }
                 Err(why) => more.error = Some(why),
@@ -456,19 +467,22 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
                 theme::pill(ui, "In use", palette.accent);
             }
 
-            // The coin at all its addresses, once each is proven.
-            let proven: Vec<_> = addresses.iter().filter_map(|address| ctx.chain.account(&address.to_string())).collect();
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match proven.len() == addresses.len() {
-                true => {
-                    let raw = proven.iter().fold(u256::ZERO, |sum, proven| sum.saturating_add(proven.value.balance)).to_string();
-                    let shown = format!("{} {}", format::compact(&raw, ctx.coin.decimals, 4), ctx.coin.symbol);
-                    theme::fitted(ui, &shown, 14.5, 10.0, egui::FontFamily::Proportional, palette.soft)
-                        .on_hover_text(format::amount(&raw, ctx.coin.decimals, &ctx.coin.symbol));
-                }
-                false => {
-                    ui.label(RichText::new("not proven yet").small().color(palette.muted));
-                }
-            });
+            // The coin at all its addresses, once each is proven. An offline signer follows no chain,
+            // so nothing is ever proven on one: it does not say it waits for what never comes.
+            if ctx.settings.role() != Role::Signer {
+                let proven: Vec<_> = addresses.iter().filter_map(|address| ctx.chain.account(&address.to_string())).collect();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match proven.len() == addresses.len() {
+                    true => {
+                        let raw = proven.iter().fold(u256::ZERO, |sum, proven| sum.saturating_add(proven.value.balance)).to_string();
+                        let shown = format!("{} {}", format::compact(&raw, ctx.coin.decimals, 4), ctx.coin.symbol);
+                        theme::fitted(ui, &shown, 14.5, 10.0, egui::FontFamily::Proportional, palette.soft)
+                            .on_hover_text(format::amount(&raw, ctx.coin.decimals, &ctx.coin.symbol));
+                    }
+                    false => {
+                        ui.label(RichText::new("not proven yet").small().color(palette.muted));
+                    }
+                });
+            }
         });
 
         let watched = ctx.holders[index].keys.is_empty();
@@ -680,6 +694,8 @@ fn brought_in(key: Keypair) -> Holder {
 
 /// Adds an account with the name typed, unless the wallet has one of its addresses already.
 fn add(ctx: &mut Ctx, state: &mut AccountsState, made: Result<Holder, String>) {
+    state.error = None;
+
     let mut made = match made {
         Ok(made) => made,
         Err(why) => {
@@ -704,7 +720,6 @@ fn add(ctx: &mut Ctx, state: &mut AccountsState, made: Result<Holder, String>) {
     *ctx.changed = true;
     state.name.clear();
     state.pasted.clear();
-    state.error = None;
 }
 
 /// On a watch-only sender: an account read off the offline signer's Pair page.
@@ -998,6 +1013,124 @@ mod tests {
         state.hide();
 
         assert!(state.more.is_none(), "words being added go as the page does");
+    }
+
+    /// A screen with room for the whole page, as what is tapped must be on it.
+    const TALL: (f32, f32) = (1_200.0, 3_000.0);
+
+    #[test]
+    fn what_a_failed_import_said_goes_once_words_are_added() {
+        let (mut book, mut holders) = wallet();
+        let mut state = AccountsState { seen: holders.len(), ..AccountsState::default() };
+        state.pasted.push_str("not a key");
+
+        let said = crate::views::drawn::tap(&mut book, &mut holders, TALL, "Import", |ui, ctx| show(ui, ctx, &mut state));
+        let why = state.error.clone().expect("it says why it could not");
+
+        assert!(said.contains(&why), "{said}");
+
+        // It goes as soon as words are asked for, before anything is added.
+        crate::views::drawn::tap(&mut book, &mut holders, TALL, "Add words you have", |ui, ctx| show(ui, ctx, &mut state));
+
+        assert!(state.more.is_some());
+        assert_eq!(state.error, None);
+
+        // And should it be back by then, a success leaves nothing of it.
+        state.error = Some(why.clone());
+        state.more.as_mut().unwrap().words.push_str(ABANDON);
+
+        let said = crate::views::drawn::tap(&mut book, &mut holders, TALL, "Add them", |ui, ctx| show(ui, ctx, &mut state));
+
+        assert_eq!(holders.len(), 2, "the words came in");
+        assert!(state.more.is_none());
+        assert_eq!(state.error, None);
+        assert!(!said.contains(&why), "{said}");
+    }
+
+    #[test]
+    fn words_that_do_not_read_say_so_where_they_were_typed_and_a_key_added_clears_what_it_said() {
+        let (mut book, mut holders) = wallet();
+        let mut state = AccountsState { seen: holders.len(), more: Some(MoreWords::default()), error: Some("not a key file".to_string()), ..AccountsState::default() };
+        state.more.as_mut().unwrap().words.push_str("not words");
+
+        crate::views::drawn::tap(&mut book, &mut holders, TALL, "Add them", |ui, ctx| show(ui, ctx, &mut state));
+
+        assert_eq!(state.error, None, "an add started, so what the last one said is past");
+        assert!(state.more.as_ref().unwrap().error.is_some(), "and this one's says why, by its own fields");
+
+        // A failure says its own, in place of what came before, and a success nothing.
+        state.more = None;
+        state.error = Some("not a key file".to_string());
+        state.pasted.push_str(&Keypair::development().to_key_file());
+
+        crate::views::drawn::tap(&mut book, &mut holders, TALL, "Import", |ui, ctx| show(ui, ctx, &mut state));
+
+        assert_eq!((holders.len(), state.error.clone()), (2, None));
+
+        state.pasted.push_str(&Keypair::development().to_key_file());
+        crate::views::drawn::tap(&mut book, &mut holders, TALL, "Import", |ui, ctx| show(ui, ctx, &mut state));
+
+        assert!(state.error.as_deref().is_some_and(|why| why.contains("in this wallet already")), "{:?}", state.error);
+    }
+
+    /// What the Accounts page says, of a wallet whose accounts nothing has proven, as this role.
+    fn page_as(book: &mut Book, holders: &mut Vec<Holder>, role: Role) -> String {
+        let mut state = AccountsState { seen: holders.len(), ..AccountsState::default() };
+
+        crate::views::drawn::said(book, holders, (360.0, 740.0), |ui, ctx| {
+            ctx.settings.role = Some(role);
+            show(ui, ctx, &mut state);
+        })
+    }
+
+    #[test]
+    fn a_signer_does_not_say_its_accounts_wait_for_a_proof_that_never_comes() {
+        let (mut book, mut holders) = wallet();
+
+        assert!(!page_as(&mut book, &mut holders, Role::Signer).contains("not proven yet"));
+        assert!(page_as(&mut book, &mut holders, Role::Online).contains("not proven yet"), "an online wallet is waiting");
+
+        // A watch-only wallet is online, whoever holds its keys.
+        let key = Keypair::from_seed([7; 32]).public();
+        let (mut watching, mut watched) = (Book { watch: true, ..Book::default() }, vec![Holder::watched("Watched".to_string(), vec![key], None)]);
+
+        assert!(page_as(&mut watching, &mut watched, Role::Online).contains("not proven yet"));
+    }
+
+    #[test]
+    fn no_page_of_a_signer_waits_on_a_chain_or_asks_a_node_anything() {
+        use crate::views::{Page, States, nav};
+
+        for size in crate::views::drawn::SCREENS {
+            for (page, name) in nav(Role::Signer) {
+                let (mut book, mut holders) = wallet();
+                let mut states = States::default();
+                let mut sent = Vec::new();
+                let said = crate::views::drawn::said(&mut book, &mut holders, size, |ui, ctx| {
+                    ctx.settings.role = Some(Role::Signer);
+                    *ctx.page = *page;
+                    crate::views::show(ui, ctx, &mut states);
+                    assert_eq!(*ctx.page, *page, "{name} stays");
+                    sent.extend(ctx.node.sent());
+                });
+
+                assert!(sent.is_empty(), "{name} asked {sent:?}");
+
+                for word in ["proven", "Catching up", "catches up", "Light client", "Starting", "Following", "Asking the node", "Waiting for a block"] {
+                    assert!(!said.contains(word), "{name} says {word}: {said}");
+                }
+            }
+        }
+
+        // The page it might be left on from before its role changed takes it home.
+        let (mut book, mut holders) = wallet();
+        let mut states = States::default();
+        crate::views::drawn::said(&mut book, &mut holders, (360.0, 740.0), |ui, ctx| {
+            ctx.settings.role = Some(Role::Signer);
+            *ctx.page = Page::Activity;
+            crate::views::show(ui, ctx, &mut states);
+            assert_eq!(*ctx.page, Page::Sign);
+        });
     }
 
     #[test]

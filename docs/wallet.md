@@ -337,9 +337,30 @@ ERC-1155's transfer counts as a token's does: the node's event index finds those
 account in their topics, which its address index cannot, and the light client proves them as any
 other. An account's EVM address is its own 20 bytes for secp256k1 and an alias for anything else.
 **A move from a contract the registry does not list is only shown as what its log claims,** as
-"Says you received", in a plain whole number. No move is ever added to a balance: those are what the
+"Says you received", with no plus sign. No move is ever added to a balance: those are what the
 light client proves. With a filter on, the list is what the address index finds, so a token's
 transfer naming the account only in a topic is not in it.
+
+**What an unlisted token calls itself.** For such a claim's amount, the Activity page asks the node
+for the contract's `symbol()` and `decimals()` by `eth_call`, and shows the answer labelled:
+`1.5 "USDC" (unverified)`. A contract can say anything and nothing proves it, so this is for reading a
+line and nothing else:
+
+- **Only on the Activity page.** No signing screen, no balance, nothing sent or decided, and not the
+  Overview's recent lines: what came back is private to the page. It adds no plus sign, and a move
+  stays "Says you received" whatever it is called.
+- **Hostile by default.** The symbol is cut to 16 characters and escaped, so it cannot break a line
+  or run backwards, and it always sits in its quotes before `(unverified)`, on as many lines as it
+  takes. One calling itself the chain's coin or a listed token looks like any other. Decimals above
+  36, a symbol with nothing to see of it, or a failed or malformed answer leave the plain whole
+  number. An NFT's and a multi-token's lines stay as they were, and a token the registry lists keeps
+  its proven name.
+- **Quiet and paced.** It asks only about lines on screen, the symbol first, one question every 400 ms,
+  which leaves room under the 5 contract calls a second that nginx allows an address on `/rpc`. An
+  answer is held per chain and contract until the wallet locks or closes, and never stored. What did
+  not read is asked again after 5 minutes. A 429 waits 30 seconds and is no failure; a node that
+  cannot answer, or has no `/rpc`, is left alone for 5 minutes. None of it shows on a page.
+- **Never on a signer,** which has no such page and nothing to send a request by.
 
 **Activity:** for each address of the account in use, the node's address index lists the
 transactions that touched it (`GET /accounts/{address}/txs`), and the page merges them, newest
