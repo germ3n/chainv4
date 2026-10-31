@@ -529,6 +529,7 @@ fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, pa
         }],
         watch: false,
         swaps: Vec::new(),
+        ..Book::default()
     };
 
     match vault.seal(&book) {
@@ -559,6 +560,7 @@ fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &P
         }],
         watch: true,
         swaps: Vec::new(),
+        ..Book::default()
     };
 
     match vault.seal(&book) {

@@ -779,6 +779,8 @@ them, in any order, and never waits a full round for one it missed; it says how 
 **From before:** the codes used to be `CV4:1:` and base45. A wallet from before reads none of these,
 nor this one any of those: update the signer and the sender together.
 
+**What it signed stays in a history,** on the Sign page under **Signed here**, folded until asked for: what each thing did, its kind, who signed it and when, by this device's clock. It is sealed in the wallet's vault with its keys, so it opens with what opens them, and only with a password if the wallet has one. It keeps the last 200, and holds no key or signature, nor what a message or typed data said. Settings turns it off, which keeps what is there until cleared, and clears it, asking first. It records what this signer signed, not whether it landed: the sender is who proves that.
+
 **Keep the signer offline:** airplane mode, Wi-Fi and Bluetooth off. The live camera keeps
 nothing: each frame is searched in memory and dropped.
 

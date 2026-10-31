@@ -55,9 +55,53 @@ pub struct Book {
     /// Its atomic swaps, with the secrets of those it started: sealed with the rest, as whoever
     /// learns a secret early can take the other side's coins.
     pub swaps: Vec<SwapRecord>,
+    /// What this wallet signed on an offline signer, oldest first. Written only when there is any,
+    /// so a wallet without any stays as it was; an older build ignores it, and loses only this.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub signed: Vec<SignedLine>,
+    /// Whether a signer keeps no such history.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub signed_off: bool,
 }
 
+/// One thing a signer signed, as it read then: for looking back, never to act on. It holds no key
+/// or signature, and what a request said is cut short, as a request may say anything.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedLine {
+    /// When, in milliseconds since 1970, by this device's clock.
+    pub at: u64,
+    /// What kind of thing it was.
+    pub kind: String,
+    /// What it did.
+    pub what: String,
+    /// Who it was signed as.
+    pub signer: String,
+}
+
+/// How many lines a signer keeps: past these, the oldest go.
+pub const SIGNED_KEPT: usize = 200;
+/// How long a line's text may be.
+const SIGNED_TEXT: usize = 200;
+
 impl Book {
+    /// Notes something just signed, unless history is off. Whether it noted it.
+    pub fn note_signed(&mut self, at: u64, kind: &str, what: &str, signer: &str) -> bool {
+        if self.signed_off {
+            return false;
+        }
+
+        // Nor anything that breaks a line, or turns or hides text so a line reads as what it is not.
+        let hides = |one: char| matches!(one, '\u{ad}' | '\u{61c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}');
+        let cut = |text: &str| text.chars().filter(|one| !one.is_control() && !hides(*one)).take(SIGNED_TEXT).collect::<String>();
+        self.signed.push(SignedLine { at, kind: cut(kind), what: cut(what), signer: cut(signer) });
+
+        if self.signed.len() > SIGNED_KEPT {
+            self.signed.drain(..self.signed.len() - SIGNED_KEPT);
+        }
+
+        true
+    }
+
     /// The phrase an account's reference names: the first when it names none, and otherwise the
     /// one with that fingerprint, or none at all: never another in its place.
     pub fn phrase_of(&self, from: Option<Fingerprint>) -> Option<&Words> {
@@ -625,6 +669,56 @@ mod tests {
     use {super::*, chainv4::crypto::keypair::Keypair};
 
     #[test]
+    fn a_signer_notes_what_it_signed_oldest_going_past_what_it_keeps_and_nothing_when_off() {
+        let mut book = Book::default();
+        assert!(book.note_signed(1, "Send", "1 CV4 to bob", "ed25519:0x01"));
+        assert_eq!(book.signed[0], SignedLine { at: 1, kind: "Send".to_string(), what: "1 CV4 to bob".to_string(), signer: "ed25519:0x01".to_string() });
+
+        for at in 2..=(SIGNED_KEPT as u64 + 5) {
+            book.note_signed(at, "Send", "again", "ed25519:0x01");
+        }
+
+        assert_eq!(book.signed.len(), SIGNED_KEPT);
+        assert_eq!(book.signed[0].at, 6, "the oldest went");
+        assert_eq!(book.signed.last().unwrap().at, SIGNED_KEPT as u64 + 5);
+
+        // Off, nothing more is noted, and what is there stays until cleared.
+        book.signed_off = true;
+        assert!(!book.note_signed(999, "Send", "not this", "ed25519:0x01"));
+        assert_eq!(book.signed.len(), SIGNED_KEPT);
+        assert!(book.signed.iter().all(|line| line.what != "not this"));
+    }
+
+    #[test]
+    fn what_a_request_says_is_cut_short_and_holds_no_line_breaks_to_fake_a_row() {
+        let mut book = Book::default();
+        book.note_signed(1, "Send\nReally", &"x".repeat(5_000), "a\u{202e}b");
+
+        assert_eq!(book.signed[0].kind, "SendReally");
+        assert_eq!(book.signed[0].what.chars().count(), SIGNED_TEXT);
+        assert_eq!(book.signed[0].signer, "ab", "nor what turns text around");
+    }
+
+    #[test]
+    fn a_history_seals_opens_and_clears_and_a_wallet_with_none_is_written_as_before() {
+        let vault = Vault::create("pw").unwrap();
+        let mut book = Book::default();
+        let before = serde_json::to_string(&book).unwrap();
+        assert!(!before.contains("signed"), "nothing new on disk until there is something: {before}");
+
+        book.note_signed(7, "Send", "1 CV4 to bob", "ed25519:0x01");
+        book.signed_off = true;
+        let (_, opened) = Vault::open(&vault.seal(&book).unwrap(), "pw").unwrap();
+        assert_eq!((opened.signed.len(), opened.signed[0].at, opened.signed_off), (1, 7, true));
+        assert!(Vault::open(&vault.seal(&book).unwrap(), "not it").is_err(), "sealed with the rest");
+
+        book.signed.clear();
+        book.signed_off = false;
+        assert_eq!(serde_json::to_string(&book).unwrap(), before, "cleared and on again, as it was");
+    }
+
+
+    #[test]
     fn what_is_sealed_is_written_into_room_made_for_it() {
         let book = Book {
             phrases: vec![Words::new(TEST.to_string(), "and a passphrase".to_string())],
@@ -652,6 +746,7 @@ mod tests {
             ],
             watch: false,
             swaps: Vec::new(),
+            ..Book::default()
         };
         let vault = Vault::create("correct horse").unwrap();
         let sealed = vault.seal(&book).unwrap();

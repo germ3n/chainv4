@@ -756,6 +756,19 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **An offline signer forgot what it had signed.** It keeps a history now, sealed with its keys, that Settings turns off and clears.
+- [ ] **Pentest the chain with malicious contracts and calls,** in Lua, Wasm and the EVM: resource exhaustion
+  (memory, fuel, stack, nesting, huge returns and logs), reentry across engines, escaping the sandbox, state left
+  behind by reverts, and hostile calldata. On a chain of its own, never the public one. The ABI decoder's blow-up
+  was found by reading: this looks for the rest on purpose.
+- [ ] **A batch transaction, `Tx::Batch`:** one signature and one nonce running several inner transactions,
+  all reverting together, for approve-then-swap or paying many at once. A consensus change, with each inner
+  step shown before signing in the wallet and on the offline signer, whose QR format needs to carry it.
+- [x] **The wallet's Activity names unlisted tokens** by what they say of themselves, labelled, like `1.5 "USDC" (unverified)`. Still only a claim: never on signing screens, and never in balances.
+- [x] **Small things seen on the emulator:** an error from a failed import stayed on Accounts after a later success, and an offline signer's accounts said "not proven yet" for good.
+- [ ] **A setting for the wallet and the explorer to take everything from the blocks they fetched,** history
+  among it, rather than look things up from the node: what they show then rests on blocks they checked, and
+  the node learns less of what they look at. Off by default, as reading blocks costs far more than asking.
 - [x] **A small call could make every node allocate far more than it paid for.** `evm.decode` and its kin
   copied out one long value for every offset pointing at it, for a fee on the input alone. What decoding may
   make is limited by what it was given now. It needs every node at once.

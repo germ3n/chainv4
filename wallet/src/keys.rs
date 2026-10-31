@@ -322,6 +322,7 @@ mod tests {
             ],
             watch: false,
             swaps: Vec::new(),
+            ..Book::default()
         };
         let holders = open(&book).unwrap();
         let kinds = |holder: &Holder| holder.addresses().iter().map(|address| address.kind()).collect::<Vec<_>>();
@@ -349,6 +350,7 @@ mod tests {
             }],
             watch: false,
             swaps: Vec::new(),
+            ..Book::default()
         })
         .unwrap();
         let origin = Origin { account: 0, fingerprint: [1, 2, 3, 4] };
@@ -361,6 +363,7 @@ mod tests {
             }],
             watch: true,
             swaps: Vec::new(),
+            ..Book::default()
         };
         let reopened = open(&serde_json::from_value(serde_json::to_value(&book).unwrap()).unwrap()).unwrap();
         let ethereum = signer[0].addresses()[2];
@@ -385,6 +388,7 @@ mod tests {
             }],
             watch: true,
             swaps: Vec::new(),
+            ..Book::default()
         };
 
         assert!(open(&broken).err().unwrap().contains("cannot read the account Broken"), "one whose keys do not read is never left out: the wallet stays shut");

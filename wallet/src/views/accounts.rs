@@ -831,6 +831,7 @@ mod tests {
             accounts: Vec::new(),
             watch: false,
             swaps: Vec::new(),
+            ..Book::default()
         };
         let first = new_account(&words, &[], KeyType::Ed25519, None).unwrap();
         let second = new_account(&words, std::slice::from_ref(&first), KeyType::Ed25519, None).unwrap();

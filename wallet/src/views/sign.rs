@@ -56,7 +56,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
     theme::title(ui, &palette, "Sign", "A request from the watch-only sender: read it, check it, sign it, and show it back.");
 
     match &state.step {
-        Step::Reading => reading(ui, ctx, state),
+        Step::Reading => {
+            reading(ui, ctx, state);
+            history(ui, ctx);
+        }
         Step::Review { .. } => review(ui, ctx, state),
         Step::MetaMask { .. } => metamask(ui, ctx, state),
         Step::Bitcoin { .. } => bitcoin_review(ui, ctx, state),
@@ -105,6 +108,63 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             });
         }
     }
+}
+
+/// Notes what was just signed in the wallet's sealed history, unless that is off.
+fn note(ctx: &mut Ctx, kind: &str, what: &str, signer: &str) {
+    if ctx.book.note_signed(ctx.now, kind, what, signer) {
+        *ctx.changed = true;
+    }
+}
+
+/// How a native transaction reads in the history: its kind, and what it does.
+fn native_line(described: &airgap::Described) -> (String, String) {
+    let what = described.what.as_ref().map_or(String::new(), |(shown, _)| shown.clone());
+    let to = described.to.as_deref().map_or(String::new(), |to| format!(" to {}", format::short(to)));
+
+    (described.kind.clone(), format!("{what}{to}").trim().to_string())
+}
+
+/// How MetaMask's request reads in the history: only what kind it was and where, as a message or
+/// typed data may hold anything, and a transaction's own words are on the page that signed it.
+fn metamask_line(request: &SignRequest) -> String {
+    let kind = match request.asked() {
+        Ok(Asked::Transaction(_)) => "A transaction",
+        Ok(Asked::TypedData(..)) => "Typed data",
+        Ok(Asked::Message(_)) => "A message",
+        Err(_) => "A request",
+    };
+
+    match request.chain() {
+        Some(chain) => format!("{kind} on chain {chain}"),
+        None => format!("{kind}, naming no chain"),
+    }
+}
+
+/// How a PSBT reads in the history: what left the wallet, and the fee.
+fn bitcoin_line(review: &Review) -> String {
+    format!("{} sats sent, {} sats fee", format::thousands(&review.sent().to_string()), format::thousands(&review.fee.to_string()))
+}
+
+/// What this signer signed, newest first, folded until asked for: anyone holding it unlocked would
+/// otherwise see it on the page they sign from.
+fn history(ui: &mut Ui, ctx: &Ctx) {
+    let palette = *ctx.palette;
+
+    if ctx.book.signed.is_empty() {
+        return;
+    }
+
+    ui.add_space(chainv4_ui::layout::SECTION);
+    theme::card(ui, &palette, |ui| {
+        egui::CollapsingHeader::new(RichText::new(format!("Signed here ({})", ctx.book.signed.len())).color(palette.soft)).id_salt("signed-here").show(ui, |ui| {
+            for line in ctx.book.signed.iter().rev() {
+                ui.add(egui::Label::new(RichText::new(if line.what.is_empty() { &line.kind } else { &line.what }).color(palette.ink)).wrap());
+                ui.add(egui::Label::new(RichText::new(format!("{} · {} · {}", line.kind, format::short(&line.signer), format::utc(line.at))).small().color(palette.muted)).wrap());
+                ui.add_space(6.0);
+            }
+        });
+    });
 }
 
 fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
@@ -240,7 +300,11 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     .and_then(|key| airgap::sign(request, key));
 
                 match signed {
-                    Ok(signed) => next = Some(Step::Signed { message: Box::new(Message::Signed(signed)) }),
+                    Ok(signed) => {
+                        let (kind, what) = native_line(&described);
+                        note(ctx, &kind, &what, &described.from);
+                        next = Some(Step::Signed { message: Box::new(Message::Signed(signed)) });
+                    }
                     Err(why) => *trouble = Some(why),
                 }
             }
@@ -345,6 +409,9 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     Some(keypair) => {
                         let mut signed = (**bundle).clone();
                         signed.sign(keypair);
+                        let (kind, what) = native_line(&described);
+                        let member = keypair.public().address().to_string();
+                        note(ctx, &format!("Multisig {} · {kind}", format::short(&bundle.body.account.to_string())), &what, &member);
                         next = Some(Step::Signed { message: Box::new(Message::Multisig(Box::new(signed))) });
                     }
                     None => *trouble = Some("the key is gone from this wallet".to_string()),
@@ -373,6 +440,7 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
     let chosen = *seed;
     let words = chosen.and_then(|fingerprint| ctx.book.holding(fingerprint));
     let seed = words.and_then(crate::vault::Words::seed);
+    let mut noted = None;
     let mut next = None;
     let mut confirmed = false;
 
@@ -525,7 +593,11 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     .and_then(|signature| signature.to_cbor());
 
                 match signed {
-                    Ok(cbor) => next = Some(Step::MetaMaskSigned { text: hardware::ur(hardware::SIGNATURE_TYPE, &cbor) }),
+                    Ok(cbor) => {
+                        let account = request.address.map_or_else(|| format!("m/{}", request.path.text()), |address| chainv4::structs::hex::to_hex(&address));
+                        noted = Some((request.asker(), metamask_line(request), account));
+                        next = Some(Step::MetaMaskSigned { text: hardware::ur(hardware::SIGNATURE_TYPE, &cbor) });
+                    }
                     Err(why) => *trouble = Some(why),
                 }
             }
@@ -536,6 +608,10 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             }
         });
     });
+
+    if let Some((kind, what, signer)) = noted {
+        note(ctx, &kind, &what, &signer);
+    }
 
     if let Some(next) = next {
         state.step = next;
@@ -672,7 +748,10 @@ fn bitcoin_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                 };
 
                 match signed {
-                    Ok(psbt) => next = Some(Step::BitcoinSigned { message: Box::new(Message::Bitcoin(Box::new(bitcoin::Request { psbt, kind: request.kind }))) }),
+                    Ok(psbt) => {
+                        note(ctx, "Bitcoin", &review.as_deref().map_or_else(|| "a transaction".to_string(), bitcoin_line), "this wallet's words");
+                        next = Some(Step::BitcoinSigned { message: Box::new(Message::Bitcoin(Box::new(bitcoin::Request { psbt, kind: request.kind }))) });
+                    }
                     Err(why) => *trouble = Some(why),
                 }
             }
@@ -686,5 +765,47 @@ fn bitcoin_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 
     if let Some(next) = next {
         state.step = next;
+    }
+}
+
+#[cfg(test)]
+mod signed_history {
+    use {
+        super::{super::drawn, *},
+        crate::vault::Book,
+    };
+
+    #[test]
+    fn what_a_transaction_did_reads_in_a_line_and_what_a_request_merely_says_stays_out() {
+        let described = airgap::Described {
+            kind: "Send the coin".to_string(),
+            what: Some(("1.5 CV4".to_string(), "1500000000000000000".to_string())),
+            from: "ed25519:0x01".to_string(),
+            to: Some("ed25519:0x02020202020202020202".to_string()),
+            token: None,
+            fee: String::new(),
+            gas: String::new(),
+            nonce: 3,
+            everything: "the words of a message".to_string(),
+        };
+        let (kind, what) = native_line(&described);
+
+        assert_eq!(kind, "Send the coin");
+        assert!(what.starts_with("1.5 CV4 to "), "{what}");
+        assert!(!what.contains("words of a message"));
+    }
+
+    #[test]
+    fn the_sign_page_folds_what_was_signed_and_says_nothing_with_none() {
+        let mut empty = Book::default();
+        let mut holders = Vec::new();
+        let said = drawn::said(&mut empty, &mut holders, (360.0, 740.0), |ui, ctx| history(ui, ctx));
+        assert!(!said.contains("Signed here"), "{said}");
+
+        let mut book = Book::default();
+        book.note_signed(1_793_000_000_000, "Send the coin", "1.5 CV4 to bob", "ed25519:0x0101010101");
+        let said = drawn::said(&mut book, &mut holders, (360.0, 740.0), |ui, ctx| history(ui, ctx));
+        assert!(said.contains("Signed here (1)"), "{said}");
+        assert!(!said.contains("1.5 CV4"), "folded until asked for: {said}");
     }
 }

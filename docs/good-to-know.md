@@ -399,6 +399,7 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   your account as `minter`; genesis allows only the development key there since minting became a
   development-chain faucet, so such a chain no longer opens. `init` now writes none: make the
   chain again.
+- **An offline signer keeps a history of what it signed, sealed with its keys.** On by default, the last 200, in `Book.signed`, written only when there is any so a wallet without one stays as it was. An older build ignores it and loses it on its next save, and nothing else. It is a record of what was signed, not that it landed.
 - **Wallet biometrics keep the vault's key, not the password.** Each platform wraps the key the
   password stretched to: the Android Keystore, a passkey's PRF output, or the macOS Keychain after
   Touch ID. Changing the password turns them off, and so does a change in the fingers or faces

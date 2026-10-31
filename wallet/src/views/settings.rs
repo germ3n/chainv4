@@ -46,11 +46,62 @@ pub struct SettingsState {
     naming_words: Option<(usize, String)>,
     /// A phrase being removed, once its preview is read.
     removing_words: Option<RemovingWords>,
+    /// Clearing what the signer signed, once asked whether it means to.
+    clearing_signed: bool,
     /// Asking for the password before the wallet is removed.
     removing: Option<(Typed, Option<String>)>,
     /// Biometrics being turned on, and what came of turning them on or off.
     enrolling: Option<Enrolling>,
     biometric_said: Option<Result<String, String>>,
+}
+
+/// A signer's history of what it signed: whether to keep one, and clearing it, asked twice. It is
+/// sealed in the wallet with the keys, so it opens with what opens them.
+fn signed_history(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
+    let palette = *ctx.palette;
+    ui.add_space(10.0);
+    theme::caps(ui, &palette, "History of what it signs");
+    let mut keep = !ctx.book.signed_off;
+
+    if ui.checkbox(&mut keep, "Keep a history on this signer").changed() {
+        ctx.book.signed_off = !keep;
+        *ctx.changed = true;
+    }
+
+    let held = ctx.book.signed.len();
+    let told = match (keep, held) {
+        (true, _) => "Each thing signed is noted on the Sign page, sealed in this wallet with its keys: the last 200, no key or signature, and what a message said left out.",
+        (false, 0) => "Nothing is noted.",
+        (false, _) => "Nothing more is noted. What is there stays until cleared.",
+    };
+    ui.label(RichText::new(told).small().color(palette.muted));
+
+    if held == 0 {
+        state.clearing_signed = false;
+
+        return;
+    }
+
+    if !state.clearing_signed {
+        if theme::quiet(ui, &palette, &format!("Clear the history ({held})")).clicked() {
+            state.clearing_signed = true;
+        }
+
+        return;
+    }
+
+    ui.colored_label(palette.warn, format!("All {held} go from this device, for good."));
+    ui.horizontal_wrapped(|ui| {
+        if theme::quiet(ui, &palette, "Clear it").clicked() {
+            ctx.book.signed.clear();
+            *ctx.changed = true;
+            state.clearing_signed = false;
+        }
+
+        if theme::quiet(ui, &palette, "Keep it").clicked() {
+            state.clearing_signed = false;
+        }
+    });
 }
 
 /// Removing a further phrase: which, by its place, what is typed to confirm it, and the password.
@@ -68,6 +119,7 @@ impl SettingsState {
         self.showing_words = None;
         self.asking_words = None;
         self.removing_words = None;
+        self.clearing_signed = false;
     }
 }
 
@@ -114,6 +166,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
 
         if role == Role::Signer {
             your_chain(ui, ctx);
+            signed_history(ui, ctx, state);
         }
 
         ui.add_space(10.0);
@@ -1022,6 +1075,32 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx) {
 #[cfg(test)]
 mod tests {
     use {super::*, crate::vault::Book};
+
+    #[test]
+    fn a_signers_history_turns_off_and_clears_only_when_asked_twice() {
+        use crate::views::drawn;
+
+        let mut book = Book::default();
+        book.note_signed(1, "Send", "1 CV4", "ed25519:0x01");
+        let mut holders = Vec::new();
+        let mut state = SettingsState::default();
+
+        // The first tap only asks: nothing has gone yet.
+        drawn::tap(&mut book, &mut holders, (360.0, 740.0), "Clear the history (1)", |ui, ctx| signed_history(ui, ctx, &mut state));
+        assert!(state.clearing_signed);
+        assert_eq!(book.signed.len(), 1);
+
+        let said = drawn::said(&mut book, &mut holders, (360.0, 740.0), |ui, ctx| signed_history(ui, ctx, &mut state));
+        assert!(said.contains("for good"), "{said}");
+
+        drawn::tap(&mut book, &mut holders, (360.0, 740.0), "Clear it", |ui, ctx| signed_history(ui, ctx, &mut state));
+        assert!(book.signed.is_empty());
+        assert!(!state.clearing_signed);
+
+        drawn::tap(&mut book, &mut holders, (360.0, 740.0), "Keep a history on this signer", |ui, ctx| signed_history(ui, ctx, &mut state));
+        assert!(book.signed_off, "off");
+        assert!(!book.note_signed(2, "Send", "not this", "ed25519:0x01"));
+    }
 
     #[test]
     fn only_a_typed_yes_removes_a_phrase() {
