@@ -20,14 +20,9 @@ pub fn explorer(creation: &eframe::CreationContext, node: Option<String>, fallba
     Box::new(app::Explorer::new(creation, node, fallback))
 }
 
-/// The node an Android explorer talks to until told otherwise: the machine running the emulator,
-/// as the emulator sees it. On a phone, Settings names the node.
-#[cfg(target_os = "android")]
-const ANDROID_NODE: &str = "http://10.0.2.2:8080";
-
 /// Where Android starts the app, in the NativeActivity's own thread.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: chainv4_ui::android::AndroidApp) {
-    chainv4_ui::android::run(app, "chainv4 explorer", "chainv4-explorer", "explorer.ron", |creation| explorer(creation, None, ANDROID_NODE));
+    chainv4_ui::android::run(app, "chainv4 explorer", "chainv4-explorer", "explorer.ron", |creation| explorer(creation, None, chainv4_ui::PUBLIC_NODE));
 }

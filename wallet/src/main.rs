@@ -3,13 +3,13 @@
 
 /// The node the desktop app, and the browser extension, talk to unless told otherwise.
 #[cfg(not(target_os = "android"))]
-const LOCAL_NODE: &str = "http://127.0.0.1:8080";
+const DEFAULT_NODE: &str = chainv4_ui::PUBLIC_NODE;
 
 /// Runs the app on iOS, from its own main as UIKit wants: it talks to the node it talked to last,
-/// or to one on this machine, which the Simulator reaches; on a phone, Settings names the node.
+/// or to the public one; Settings names another.
 #[cfg(target_os = "ios")]
 fn main() -> eframe::Result {
-    chainv4_ui::ios::run("chainv4 wallet", "wallet.ron", |creation| chainv4_wallet::wallet(creation, None, LOCAL_NODE))
+    chainv4_ui::ios::run("chainv4 wallet", "wallet.ron", |creation| chainv4_wallet::wallet(creation, None, DEFAULT_NODE))
 }
 
 /// Runs the desktop app: `wallet --node http://host:port`, or CHAINV4_NODE, or the node it talked
@@ -25,7 +25,7 @@ fn main() -> eframe::Result {
         match arg.as_str() {
             "--node" => node = args.next(),
             "--help" | "-h" => {
-                println!("wallet [--node URL]: a light wallet for a chainv4 node's HTTP API, by default {LOCAL_NODE}");
+                println!("wallet [--node URL]: a light wallet for a chainv4 node's HTTP API, by default {DEFAULT_NODE}");
 
                 return Ok(());
             }
@@ -44,7 +44,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "chainv4 wallet",
         options,
-        Box::new(move |creation| Ok(chainv4_wallet::wallet(creation, node, LOCAL_NODE))),
+        Box::new(move |creation| Ok(chainv4_wallet::wallet(creation, node, DEFAULT_NODE))),
     )
 }
 
@@ -70,7 +70,7 @@ fn main() {
         let origin = location.origin().unwrap_or_default();
         let served = location.protocol().unwrap_or_default();
         let fallback = match served.as_str() {
-            "chrome-extension:" | "moz-extension:" => LOCAL_NODE.to_string(),
+            "chrome-extension:" | "moz-extension:" => DEFAULT_NODE.to_string(),
             _ => origin,
         };
         let node = location

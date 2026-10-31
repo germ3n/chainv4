@@ -27,7 +27,7 @@ Where it looks for the node:
 - `--node`;
 - else `CHAINV4_NODE`;
 - else the node it talked to last;
-- else `http://127.0.0.1:8080`.
+- else the public devnet, `https://66-78-40-94.sslip.io` (`chainv4_ui::PUBLIC_NODE`).
 
 The node can be changed under Settings.
 
@@ -1143,7 +1143,7 @@ from `wallet/extension/`:
   every `http` and `https` host as optional; the wallet says which node it talks to
   (`window.chainv4Node`), and `access.js` shows a bar above it, **Let the wallet reach its node**,
   whose **Allow** asks the browser for that one host. Until then the node's answers are blocked.
-- **Its default node** is `http://127.0.0.1:8080`, as no node serves the extension's page; name
+- **Its default node** is the public devnet's, `https://66-78-40-94.sslip.io`, as no node serves the extension's page; name
   another under Settings.
 - **Storage** is the extension's own `localStorage`, apart from the web app's at any node: wallets
   made in one are not in the other, and removing the extension deletes its wallets. Keep the words.

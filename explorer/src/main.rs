@@ -5,13 +5,13 @@ use chainv4_explorer::explorer;
 
 /// The node the desktop app talks to unless told otherwise.
 #[cfg(not(target_arch = "wasm32"))]
-const LOCAL_NODE: &str = "http://127.0.0.1:8080";
+const DEFAULT_NODE: &str = chainv4_ui::PUBLIC_NODE;
 
 /// Runs the app on iOS, from its own main as UIKit wants: it talks to the node it talked to last,
-/// or to one on this machine, which the Simulator reaches; on a phone, Settings names the node.
+/// or to the public one; Settings names another.
 #[cfg(target_os = "ios")]
 fn main() -> eframe::Result {
-    chainv4_ui::ios::run("chainv4 explorer", "explorer.ron", |creation| explorer(creation, None, LOCAL_NODE))
+    chainv4_ui::ios::run("chainv4 explorer", "explorer.ron", |creation| explorer(creation, None, DEFAULT_NODE))
 }
 
 /// Runs the desktop app: `explorer --node http://host:port`, or CHAINV4_NODE, or the node it
@@ -27,7 +27,7 @@ fn main() -> eframe::Result {
         match arg.as_str() {
             "--node" => node = args.next(),
             "--help" | "-h" => {
-                println!("explorer [--node URL]: explores a chainv4 node's HTTP API, by default {LOCAL_NODE}");
+                println!("explorer [--node URL]: explores a chainv4 node's HTTP API, by default {DEFAULT_NODE}");
 
                 return Ok(());
             }
@@ -46,7 +46,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "chainv4 explorer",
         options,
-        Box::new(move |creation| Ok(explorer(creation, node, LOCAL_NODE))),
+        Box::new(move |creation| Ok(explorer(creation, node, DEFAULT_NODE))),
     )
 }
 

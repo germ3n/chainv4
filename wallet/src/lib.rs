@@ -33,15 +33,10 @@ pub fn wallet(creation: &eframe::CreationContext, node: Option<String>, fallback
     Box::new(app::Wallet::new(creation, node, fallback))
 }
 
-/// The node an Android wallet talks to until told otherwise: the machine running the emulator, as
-/// the emulator sees it. On a phone, Settings names the node.
-#[cfg(target_os = "android")]
-const ANDROID_NODE: &str = "http://10.0.2.2:8080";
-
 /// Where Android starts the app, in the NativeActivity's own thread. App storage, the vault in it,
 /// is a file in the app's private data folder.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: chainv4_ui::android::AndroidApp) {
-    chainv4_ui::android::run(app, "chainv4 wallet", "chainv4-wallet", "wallet.ron", |creation| wallet(creation, None, ANDROID_NODE));
+    chainv4_ui::android::run(app, "chainv4 wallet", "chainv4-wallet", "wallet.ron", |creation| wallet(creation, None, chainv4_ui::PUBLIC_NODE));
 }

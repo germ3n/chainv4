@@ -33,4 +33,8 @@ pub mod ios;
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 mod edit;
 
+/// The node an app talks to until told otherwise: the public devnet's. A page a node serves talks to
+/// that node instead, and a node asked for by flag, environment or Settings comes first.
+pub const PUBLIC_NODE: &str = "https://66-78-40-94.sslip.io";
+
 pub use theme::{DARK, DISPLAY, Density, LIGHT, Palette, SEMIBOLD, apply, install_fonts};
