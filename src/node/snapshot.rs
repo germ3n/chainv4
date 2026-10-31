@@ -303,7 +303,7 @@ impl Node {
                 };
                 let expected = snapshot.light().sealed_at(pivot).expect("a checked header").clone();
 
-                match blocks.into_iter().next().filter(|block| fits(block, &expected, self.chain.hash())) {
+                match blocks.into_iter().next().filter(|block| block.fits(&expected, self.chain.hash())) {
                     Some(block) => self.install(block, pivot)?,
                     None => {
                         log::warn!("[node] {peer} sent a block that is not the pivot; asking others");
@@ -447,11 +447,4 @@ impl Node {
 /// A light client that could not start on this node's own chain: the chain's fault, never a peer's.
 fn bad_snapshot(err: LightError) -> NodeError {
     NodeError::Chain(crate::chain::ChainError::BadSnapshot(format!("a light client of this chain cannot start: {err}")))
-}
-
-/// Whether a block is the one a checked header names, its body included.
-fn fits(block: &Block, header: &SealedHeader, hash: crate::structs::hash::HashType) -> bool {
-    block.sealed_header() == *header
-        && Block::tx_root(hash, &block.txs) == header.header.tx_root
-        && Block::proof_root(hash, &block.proofs) == header.header.proof_root
 }

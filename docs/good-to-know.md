@@ -337,6 +337,23 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 
 ## How the chain behaves
 
+- **`GET /blocks/range` proves what it gives, not that it gave everything.** Each block recomputes
+  its header's roots and each state entry it lists is proven against `state_root`, but nothing commits
+  to which entries a block changed: that list is the node's word. A node can leave one out, or claim
+  it has none, and every check passes. Receipts cannot be left out so. A client that rests on a range
+  must say so to its user, and treat a block with no proofs as unknown, not unchanged.
+- **What a block changed is history's list, not a column of its own.** The list `GET /blocks/range`
+  proves from is the one history prunes by, so it writes nothing new, lives as long as the state it
+  is proven against, follows reorgs, and a node has it for all it ran before upgrading. The lowest
+  height the window reaches can be read but has no list. Genesis has none either, so its allocations
+  are not in a range.
+- **A list may hold entries that are not there.** A block that writes a key and takes it out again,
+  or leaves an account at nothing, lists it, and proves it absent. It is not a sign the key ever held
+  anything.
+- **A range's cost is bounded in time as well as work.** 4,096 proofs take about 70 ms with state in
+  cache, but each is some 34 reads, so a cold disk would pass that many times over: the second's limit
+  is what bounds those, and where an answer stops then depends on the machine. Go by the cursor.
+
 - **Failed transactions stay in their block.** They use up their nonce and pay their fee. Only a
   transaction that cannot run at all makes a block invalid: a wrong nonce, a bad signature, or an
   offer that cannot pay.

@@ -5,7 +5,7 @@
 use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
-        DryRun, Rules, dry_run, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, VoteRewardSource, scan_address_txs, address_txs_from, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        DryRun, RangeLimits, RangeProblem, Rules, dry_run, stored_block_range, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, VoteRewardSource, scan_address_txs, address_txs_from, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
         stored_light_finality, stored_light_update, stored_state_at, stored_checkpoint_start, stored_split, StartProblem,
     },
@@ -88,6 +88,10 @@ const DEFAULT_MEMPOOL: u64 = 100;
 const MAX_MEMPOOL: u64 = 1_000;
 /// The largest request body: room for the largest deploy, hex-encoded.
 const MAX_BODY: usize = 2 * 1024 * 1024;
+/// How many block ranges one client may have under way at once: a scan asks for one at a time.
+const RANGE_PER_IP: usize = 2;
+/// How long a block range waits its turn before the node says it is too busy.
+const RANGE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[document(
     summary = "How many requests one client may have in flight at once unless --http-per-ip says otherwise: past it, 429. A client is its IP, or behind a proxy on the node's own network, the one the proxy says it forwards for.",
@@ -163,6 +167,8 @@ struct Api {
     releases: Option<Arc<crate::node::Releases>>,
     /// Requests in flight, by client.
     in_flight: Arc<InFlight>,
+    /// Whose turn it is to have a block range built.
+    ranges: RangeGate,
     /// Where workers reach the mining port from outside, as GET /mining says.
     mining_public: Option<Arc<String>>,
     mining_onion: Option<Arc<MiningOnion>>,
@@ -242,6 +248,46 @@ async fn per_client(Live(api): Live<Api>, axum::extract::ConnectInfo(peer): axum
     match InFlight::enter(&api.in_flight, asker(peer, request.headers())) {
         Some(_counted) => next.run(request).await,
         None => (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": "too many requests at once from you: wait for some to answer" }))).into_response(),
+    }
+}
+
+/// Who may have a block range built now. They work out proofs as they are asked, so a client has few
+/// under way, and only so many are built at once by anyone, leaving the machine's other cores to the
+/// node and the rest of the API, however many ask.
+#[derive(Clone)]
+struct RangeGate {
+    asks: Arc<InFlight>,
+    builders: Arc<tokio::sync::Semaphore>,
+    wait: std::time::Duration,
+}
+
+/// A client's turn to have a range built: given back as it drops.
+struct RangeTurn {
+    _asking: Counted,
+    _building: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl RangeGate {
+    fn new(builders: usize, wait: std::time::Duration) -> RangeGate {
+        RangeGate {
+            asks: Arc::new(InFlight { per_ip: RANGE_PER_IP, counts: Default::default() }),
+            builders: Arc::new(tokio::sync::Semaphore::new(builders)),
+            wait,
+        }
+    }
+
+    /// Waits for a turn, which costs nothing and goes in order, so a few clients at once simply take
+    /// a little longer. A client with too many under way is turned away at once, and anyone is once
+    /// the wait runs out.
+    async fn enter(&self, ip: IpAddr) -> Result<RangeTurn, ApiError> {
+        let Some(asking) = InFlight::enter(&self.asks, ip) else {
+            return Err(ApiError::TooMany("too many block ranges at once from you: ask for one at a time".to_string()));
+        };
+        let Ok(Ok(building)) = tokio::time::timeout(self.wait, self.builders.clone().acquire_owned()).await else {
+            return Err(ApiError::Unavailable("the node is busy working out proofs: try again shortly".to_string()));
+        };
+
+        Ok(RangeTurn { _asking: asking, _building: building })
     }
 }
 
@@ -397,7 +443,7 @@ pub struct ApiOptions {
         options = "Who else it answers, and what it serves besides the chain.",
     },
     returns = "The address it listens on, which tells you the port when address asked for port 0.",
-    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /collections, the NFT and multi-token collections by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream; GET /faucet and POST /faucet, on a node run with --faucet-key. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 429 for a faucet asked again too soon, 500, or 503 when the node cannot take transactions.",
+    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /blocks/range?from=height&entry=n&count=n, blocks with what checks them and proofs of the state entries they changed, in binary, a BlockRange; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /collections, the NFT and multi-token collections by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream; GET /faucet and POST /faucet, on a node run with --faucet-key. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 429 for a faucet asked again too soon, 500, or 503 when the node cannot take transactions.",
     see_also = "Node, Address, NodeHandle",
 )]
 pub fn start(
@@ -483,6 +529,7 @@ pub fn start(
                     #[cfg(feature = "updates")]
                     releases: options.releases,
                     in_flight: Arc::new(InFlight { per_ip, counts: Default::default() }),
+                    ranges: RangeGate::new((threads / 2).max(1), RANGE_WAIT),
                     mining_public: options.mining_public.map(Arc::new),
                     mining_onion: options.mining_onion.map(Arc::new),
                     sharing: options.sharing,
@@ -505,6 +552,7 @@ fn router(api: Api) -> Router {
     let router = Router::new()
         .route("/status", get(status))
         .route("/blocks", get(blocks))
+        .route("/blocks/range", get(blocks_range))
         .route("/blocks/{block}", get(block))
         .route("/accounts/{address}", get(account))
         .route("/accounts/{address}/txs", get(account_txs))
@@ -1363,6 +1411,44 @@ async fn blocks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
         "blocks": summaries,
         "next": (first > 0).then_some(first),
     })))
+}
+
+/// Blocks from ?from= on, at most ?count=, each with what recomputes its header's roots and proofs
+/// of the state entries it changed, a BlockRange, encoded; ?entry= goes on through a block's entries
+/// as the answer before said to. Each is built in its turn, on the blocking pool, where it holds up
+/// no other request, and within RangeLimits::SERVED.
+async fn blocks_range(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(query): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
+    let from = number(&query, "from")?.ok_or_else(|| ApiError::BadRequest("from is the height to start at".to_string()))?;
+    let entry = u32::try_from(number(&query, "entry")?.unwrap_or(0)).map_err(|_| ApiError::BadRequest("entry is too big".to_string()))?;
+    let count = number(&query, "count")?.unwrap_or(RangeLimits::SERVED.blocks);
+    let turn = match api.ranges.enter(asker(peer, &headers)).await {
+        Ok(turn) => turn,
+        // As nginx's own 429 does, it says when to come back.
+        Err(busy) => {
+            let mut response = busy.into_response();
+            response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+
+            return Ok(response);
+        }
+    };
+    let (db, hash) = (api.db, api.hash);
+    // Held by the work, not this request: a client that hangs up does not stop what it started.
+    let range = tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+
+        Ok::<_, DbError>(match stored_block_range(db, hash, from, entry, count, &RangeLimits::SERVED)? {
+            Ok(range) => Ok(wincode::serialize(&range).map_err(|err| DbError::Corrupt(format!("a block range: {err}")))?),
+            Err(problem) => Err(problem),
+        })
+    })
+    .await
+    .map_err(|err| ApiError::Db(DbError::Corrupt(format!("a block range stopped: {err}"))))??;
+
+    match range {
+        Ok(bytes) => Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response()),
+        Err(problem @ RangeProblem::NotHeld) => Err(ApiError::NotFound(format!("height {from}: {problem}"))),
+        Err(problem @ RangeProblem::NoSuchEntry) => Err(ApiError::BadRequest(format!("height {from}: {problem}"))),
+    }
 }
 
 async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {

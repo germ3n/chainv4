@@ -29,6 +29,16 @@ location = /rpc {
     proxy_pass http://chainv4;
 }
 
+# Blocks with proofs of what they changed: each answer works out up to thousands of proofs, and may
+# run to megabytes, so an address gets fewer of these than of anything else. A scan asks for a hundred
+# blocks at a time, so this still lets it take hundreds of blocks a second.
+location = /blocks/range {
+    limit_req zone=api burst=${BURST_API} nodelay;
+    limit_req zone=onion burst=${BURST_ONION} nodelay;
+    limit_req zone=ranges burst=${BURST_RANGE} nodelay;
+    proxy_pass http://chainv4;
+}
+
 # What the node does, as it happens: passed on at once, and kept open. Each open one is a connection
 # for as long as it lasts, so a few to an address.
 location = /stream {

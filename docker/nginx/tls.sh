@@ -87,14 +87,14 @@ esac
 
 # Requests a second, by address: the apps' own bursts fit well inside these, a flood does not. The
 # onion's is shared by everyone on it. RATE_LIMIT=off turns them all off.
-RATE_API=${RATE_API:-30} RATE_CALLS=${RATE_CALLS:-5}
+RATE_API=${RATE_API:-30} RATE_CALLS=${RATE_CALLS:-5} RATE_RANGE=${RATE_RANGE:-5}
 
-case "$RATE_API$RATE_CALLS" in
-    *[!0-9]*) echo "RATE_API and RATE_CALLS are whole requests a second" >&2; exit 1 ;;
+case "$RATE_API$RATE_CALLS$RATE_RANGE" in
+    *[!0-9]*) echo "RATE_API, RATE_CALLS and RATE_RANGE are whole requests a second" >&2; exit 1 ;;
 esac
 
-[ "$RATE_API" -gt 0 ] && [ "$RATE_CALLS" -gt 0 ] || { echo "RATE_API and RATE_CALLS are above 0; RATE_LIMIT=off turns limits off" >&2; exit 1; }
-RATE_ONION=$((RATE_API * 3)) BURST_API=$((RATE_API * 6)) BURST_CALLS=$((RATE_CALLS * 4)) BURST_ONION=$((RATE_API * 12))
+[ "$RATE_API" -gt 0 ] && [ "$RATE_CALLS" -gt 0 ] && [ "$RATE_RANGE" -gt 0 ] || { echo "RATE_API, RATE_CALLS and RATE_RANGE are above 0; RATE_LIMIT=off turns limits off" >&2; exit 1; }
+RATE_ONION=$((RATE_API * 3)) BURST_API=$((RATE_API * 6)) BURST_CALLS=$((RATE_CALLS * 4)) BURST_RANGE=$((RATE_RANGE * 4)) BURST_ONION=$((RATE_API * 12))
 
 case "${RATE_LIMIT:-on}" in
     off) RATE_KEY='""' RATE_ONION_KEY='""' ;;
@@ -103,10 +103,10 @@ case "${RATE_LIMIT:-on}" in
 esac
 
 export SERVER_NAME="$name" NODE_UPSTREAM="${NODE_UPSTREAM:-node:8080}" HSTS HTTPS_PORT_SUFFIX
-export RATE_API RATE_CALLS RATE_ONION BURST_API BURST_CALLS BURST_ONION RATE_KEY RATE_ONION_KEY
+export RATE_API RATE_CALLS RATE_RANGE RATE_ONION BURST_API BURST_CALLS BURST_RANGE BURST_ONION RATE_KEY RATE_ONION_KEY
 # shellcheck disable=SC2016
-envsubst '${SERVER_NAME} ${NODE_UPSTREAM} ${HSTS} ${HTTPS_PORT_SUFFIX} ${RATE_API} ${RATE_CALLS} ${RATE_ONION} ${RATE_KEY} ${RATE_ONION_KEY}' \
+envsubst '${SERVER_NAME} ${NODE_UPSTREAM} ${HSTS} ${HTTPS_PORT_SUFFIX} ${RATE_API} ${RATE_CALLS} ${RATE_RANGE} ${RATE_ONION} ${RATE_KEY} ${RATE_ONION_KEY}' \
     < /etc/nginx/chainv4.conf.template > /etc/nginx/conf.d/default.conf
 # shellcheck disable=SC2016
-envsubst '${BURST_API} ${BURST_CALLS} ${BURST_ONION}' \
+envsubst '${BURST_API} ${BURST_CALLS} ${BURST_RANGE} ${BURST_ONION}' \
     < /etc/nginx/chainv4-locations.conf.template > /etc/nginx/chainv4-locations.conf

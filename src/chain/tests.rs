@@ -1998,6 +1998,7 @@ mod evm;
 mod names;
 mod multisig;
 mod batch;
+mod range;
 
 /// The state at a main-chain height, through history.
 fn state_at(db: &Arc<MemoryDb>, chain: &Chain, height: u64) -> Option<Arc<State>> {

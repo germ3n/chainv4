@@ -756,6 +756,12 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **Blocks a client can check whole, without asking for what it wants.** `GET /blocks/range` sends
+  blocks in binary with what recomputes every root, their receipts, and a proof against `state_root`
+  of each state entry they changed, deletions too, within bounds on blocks, bytes, proofs and time,
+  saying where to go on from, even inside a block. `check_range_item`, in the light build and wasm,
+  checks each. It reads the list history keeps, so nodes write nothing new and serve what they already
+  ran. No list or pruned state is said per block. A list that leaves an entry out cannot be told.
 - [x] **The browser extension could not go to a store, as it held a miner.** `wallet/build-extension.sh --store`
   leaves it out, and fails if any reaches the output.
 - [x] **A kill during a save could lose every wallet on a device.** eframe empties its file and then

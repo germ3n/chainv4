@@ -7,6 +7,7 @@ use crate::structs::hash::{Hash, HashType};
 use crate::structs::block::{BlockHeader, Seal};
 use crate::crypto::keypair::Keypair;
 use crate::db::MemoryDb;
+use crate::light::{NoProofs, RangeBody, RangeChanges};
 use crate::net::FakeNet;
 use crate::registry::Accounts;
 use crate::structs::amount::Amount;
@@ -1360,6 +1361,31 @@ fn a_new_node_syncs_from_a_snapshot_and_runs_only_the_blocks_after_it() {
     assert!(late.chain().block_at(pivot - 1).unwrap().is_none());
     assert!(late.chain().block_at(pivot).unwrap().is_some());
     assert_eq!(late.chain().headers_from(1, 1_000).unwrap().len() as u64, blocks);
+
+    // As a range it says so of each, and all it does hold checks. Below the pivot, a header alone
+    // and no state; at the pivot, a body it never ran, so no receipts and no list; then all of it.
+    let (hash, limits) = (late.chain().hash(), crate::chain::RangeLimits { blocks: 1, ..crate::chain::RangeLimits::SERVED });
+    let item_at = |height: u64| {
+        let db = late.chain().db().snapshot();
+        let range = crate::chain::stored_block_range(db, hash, height, 0, 1, &limits).unwrap().unwrap();
+        let header = producer.chain().headers_from(height, 1).unwrap().pop().unwrap();
+
+        crate::light::check_range_item(hash, &header, range.items.into_iter().next().unwrap()).unwrap()
+    };
+    let below = item_at(pivot - 1);
+
+    assert_eq!(below.body, RangeBody::HeaderOnly);
+    assert_eq!(below.changes, RangeChanges::None(NoProofs::StatePruned { kept_from: pivot }));
+
+    let at = item_at(pivot);
+
+    assert!(matches!(&at.body, RangeBody::Whole { txs, receipts: None, .. } if txs.len() == 1), "block {pivot} holds a transfer, which never ran here");
+    assert_eq!(at.changes, RangeChanges::None(NoProofs::NoList));
+
+    let above = item_at(pivot + 2);
+
+    assert!(matches!(&above.body, RangeBody::Whole { txs, receipts: Some(receipts), .. } if txs.len() == 1 && receipts.len() == 1));
+    assert!(!above.entries().is_empty());
 }
 
 // The dev chain's FFG finality makes height 40 a checkpoint that opens an epoch; without it,
@@ -1414,6 +1440,12 @@ fn a_node_starting_at_a_checkpoint_fetches_nothing_below_it_and_holds_it_final()
     assert!(late.chain().headers_from(31, 1).unwrap().is_empty());
     assert_eq!(late.chain().headers_from(32, 1_000).unwrap().len() as u64, blocks - 32 + 1);
     assert!(late.chain().block_at(pivot - 1).unwrap().is_none());
+
+    // Asked for a block range below all it holds, it says so; from the lowest header on, it serves.
+    let range_from = |height: u64| crate::chain::stored_block_range(late.chain().db().snapshot(), late.chain().hash(), height, 0, 1, &crate::chain::RangeLimits::SERVED).unwrap();
+
+    assert_eq!(range_from(31), Err(crate::chain::RangeProblem::NotHeld));
+    assert_eq!(range_from(32).unwrap().items[0].body, RangeBody::HeaderOnly);
 
     let below = producer.chain().block_at(39).unwrap().unwrap();
 

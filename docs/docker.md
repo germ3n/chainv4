@@ -171,13 +171,16 @@ apps show and retry after, and a `Retry-After` of a second:
 | --- | --- | --- | --- |
 | The API, the explorer and the wallet (`RATE_API`) | 30 | 180 | Each address |
 | Contract calls, `POST /call` and `/rpc` (`RATE_CALLS`), on top | 5 | 20 | Each address |
+| Blocks with proofs, `GET /blocks/range` (`RATE_RANGE`), on top | 5 | 20 | Each address |
 | Everything over the onion | 90 | 360 | Everyone on it, as all come from tor |
 | Connections | 64 at once, 8 for `/stream` and `/mining/ws` | | Each address |
 
-- **Set in `.env`:** `RATE_API` and `RATE_CALLS`, the bursts and the onion's following them, and
+- **Set in `.env`:** `RATE_API`, `RATE_CALLS` and `RATE_RANGE`, the bursts and the onion's following them, and
   `RATE_LIMIT=off` for none. A restart of nginx takes them up.
 - **What is not limited here:** peers and the mining port, which do not pass through nginx. Over the
-  onion, contract calls have only the onion's limit, so someone there can still hold up the API's thread.
+  onion, contract calls and block ranges have only the onion's limit, so someone there can still hold up the API's thread.
+  The node's own bound on [block ranges](api.md#get-blocksrangefromhcountnentrye) counts everyone on the onion
+  as one client, so two are under way there at a time, and the rest are told to come back.
 - **Behind a shared address,** as a campus or a mobile carrier's, everyone shares a limit: raise `RATE_API` if they meet it.
 
 **The API is never published itself.** Port 8080 is only on compose's own network, for nginx.

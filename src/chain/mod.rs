@@ -45,11 +45,13 @@ mod index;
 pub mod json;
 pub mod migrate;
 mod parallel;
+mod range;
 mod receipt;
 
 pub use addresses::{AddressScan, IndexedTx, address_txs_from, scan_address_txs, stored_address_txs, touched};
 pub use events::{EventFilter, IndexedEvent, stored_events};
 pub use index::{IndexKind, IndexWindow, Indexing, KeepFrom, stored_index};
+pub use range::{RangeLimits, RangeProblem, stored_block_range};
 pub use execute::{BlockContext, Effect, Failure, GovernanceRules, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
 pub use crate::params::{BlockLimits, MAX_BLOCK_BYTES, MIN_BLOCK_BYTES, Reward, reward_problem};

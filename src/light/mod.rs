@@ -32,6 +32,10 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
+mod range;
+
+pub use range::{BlockRange, CheckedItem, MAX_RANGE_DECODE, NoProofs, ProvenEntry, RangeBody, RangeChanges, RangeCursor, RangeError, RangeItem, check_range_item, decode_block_range};
+
 #[document(summary = "The most headers a light client asks for at once.", category = "Light client")]
 pub const MAX_LIGHT_HEADERS: u32 = 1_000;
 
@@ -756,6 +760,8 @@ pub enum LightError {
     Undecodable,
     #[document(summary = "What a node sent to start from a checkpoint does not end at it, or does not reach far enough back.")]
     WrongCheckpoint,
+    #[document(summary = "A block of a range does not check, and what failed.")]
+    Range(RangeError),
 }
 
 impl fmt::Display for LightError {
@@ -772,6 +778,7 @@ impl fmt::Display for LightError {
             LightError::UnknownVoters(epoch) => write!(f, "epoch {epoch}'s voters are not known yet"),
             LightError::BadJustification(why) => write!(f, "a justification that does not check: {why}"),
             LightError::Undecodable => write!(f, "something that does not decode"),
+            LightError::Range(err) => write!(f, "{err}"),
             LightError::WrongCheckpoint => write!(f, "headers that do not lead to the checkpoint trusted, or not from far enough back"),
         }
     }
@@ -1959,6 +1966,21 @@ impl LightClient {
         let decoded: SignedTx = wincode::deserialize(tx).map_err(|_| LightError::Undecodable)?;
 
         Ok((decoded, assurance))
+    }
+
+    #[document(
+        parent = "LightClient",
+        summary = "Checks one block of a range a node sent against the header the client followed at its height: every root, its receipts, and each entry's proof. See check_range_item for what that cannot tell, and for a client that keeps its checked headers elsewhere.",
+        params = { item = "What the node sent, from decode_block_range." },
+        returns = "What checked, and how far to trust it; NotOnChain for a height the client has not followed, or Range naming what failed.",
+        see_also = "check_range_item, CheckedItem, BlockRange",
+    )]
+    pub fn check_range_item(&self, item: RangeItem) -> Result<(CheckedItem, Assurance), LightError> {
+        let sealed = self.sealed(item.sealed.header.height).ok_or(LightError::NotOnChain)?;
+        let checked = check_range_item(self.params.hash, sealed, item).map_err(LightError::Range)?;
+        let (assurance, _) = self.assurance(&checked.block)?;
+
+        Ok((checked, assurance))
     }
 }
 

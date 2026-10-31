@@ -2533,6 +2533,99 @@ fn a_light_client_follows_the_chain_from_the_api_alone() {
     assert_eq!(status, 404, "a block it cannot prove at");
 }
 
+/// Asks for a block range and reads the answer as a client does.
+fn block_range(address: SocketAddr, query: &str) -> crate::light::BlockRange {
+    let (status, head, body) = raw(address, "GET", &format!("/blocks/range?{query}"), "");
+
+    assert_eq!(status, 200, "{query}: {}", String::from_utf8_lossy(&body));
+    assert!(head.contains("content-type: application/octet-stream"), "{head}");
+
+    crate::light::decode_block_range(&body).unwrap()
+}
+
+#[test]
+fn a_light_client_checks_every_block_of_a_range_from_the_route_alone() {
+    use crate::light::{LightError, RangeBody, RangeChanges, RangeCursor, RangeError};
+
+    let fixture = serve();
+    let client = followed(fixture.address, fixture.chain.genesis());
+    let range = block_range(fixture.address, "from=1");
+
+    range.check_shape(1, 0).unwrap();
+    assert_eq!((range.tip, range.next, range.items.len()), (2, None, 2));
+
+    let mut seen = Vec::new();
+
+    for item in range.items.clone() {
+        let (checked, assurance) = client.check_range_item(item).unwrap();
+
+        assert_eq!((assurance.block, assurance.height), (checked.block, checked.height()));
+        assert!(matches!(&checked.body, RangeBody::Whole { txs, receipts: Some(receipts), .. } if txs.len() == 1 && receipts.len() == 1));
+        seen.extend(checked.entries().iter().map(|entry| entry.key.clone()));
+    }
+
+    assert!(seen.contains(&crate::db::address_key(&fixture.bob)), "the block that paid bob proves his account");
+
+    // A client asks on from where it was told, and past the tip gets nothing and no cursor.
+    let page = block_range(fixture.address, "from=1&count=1");
+    assert_eq!((page.items.len(), page.next), (1, Some(RangeCursor { height: 2, entry: 0 })));
+    assert_eq!(block_range(fixture.address, "from=2&count=1").items[0], range.items[1]);
+    let past = block_range(fixture.address, "from=3");
+    assert_eq!((past.tip, past.items.len(), past.next), (2, 0, None));
+    past.check_shape(3, 0).unwrap();
+
+    // The route's bytes, changed, are refused by name; a height it has not followed is told apart.
+    let mut bent = range.items[0].clone();
+    let RangeChanges::Proven { entries, .. } = &mut bent.changes else { panic!("proven") };
+    let column = entries[0].column;
+    entries[0].key.push(0);
+    assert_eq!(client.check_range_item(bent).err(), Some(LightError::Range(RangeError::BadEntry { index: 0, column })));
+    let mut far = range.items[0].clone();
+    far.sealed.header.height = 99;
+    assert_eq!(client.check_range_item(far).err(), Some(LightError::NotOnChain));
+}
+
+#[test]
+fn a_range_asked_for_wrongly_is_told_why_in_json_as_every_error_is() {
+    let fixture = serve();
+    let asked = |query: &str| get(fixture.address, &format!("/blocks/range{query}"));
+
+    assert_eq!(asked("").0, 400, "from is needed");
+    assert_eq!(asked("?from=x").0, 400);
+    assert_eq!(asked("?from=1&entry=99999999999").0, 400, "past what entries can be");
+    let (status, _, body) = asked("?from=1&entry=1000");
+    assert_eq!(status, 400, "past the block's list");
+    assert!(body["error"].as_str().unwrap().contains("no entry"), "{body}");
+
+    // The word range is the route's, and other words are still refused as blocks.
+    assert_eq!(get(fixture.address, "/blocks/ranges").0, 400);
+}
+
+#[tokio::test]
+async fn a_client_waits_its_turn_for_a_range_or_is_told_to_come_back() {
+    let wait = std::time::Duration::from_millis(50);
+    let gate = RangeGate::new(1, wait);
+    let (one, other): (IpAddr, IpAddr) = ("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap());
+    let turn = gate.enter(one).await.ok().expect("nobody else is building");
+
+    // The builders are all busy, so the wait runs out, for anyone.
+    assert!(matches!(gate.enter(other).await, Err(ApiError::Unavailable(_))));
+
+    // Its own: one waiting, and a third at once refused. It may only have so many under way.
+    let waiting = tokio::spawn({
+        let gate = gate.clone();
+
+        async move { gate.enter(one).await.is_ok() }
+    });
+    tokio::task::yield_now().await;
+    assert!(matches!(gate.enter(one).await, Err(ApiError::TooMany(_))), "the client has {RANGE_PER_IP} under way");
+
+    // A turn given back goes to who waits.
+    drop(turn);
+    assert!(waiting.await.unwrap(), "the waiting one took the turn");
+    assert!(gate.enter(other).await.is_ok(), "and all is free again");
+}
+
 /// A light client that trusts this genesis, caught up with the node behind the API.
 fn followed(address: SocketAddr, genesis: Hash) -> crate::light::LightClient {
     use crate::light::{FinalityStep, LightClient, LightParams, LightRequest};

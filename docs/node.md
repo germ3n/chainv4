@@ -437,6 +437,18 @@ A node catches up from its peers on its own (`src/node/sync.rs`).
 
 Kinds of finality that take no votes never ask for justifications.
 
+## Serving blocks with proofs
+
+[`GET /blocks/range`](api.md#get-blocksrangefromhcountnentrye) serves blocks with a proof of each state
+entry they changed, for clients that rest on blocks they checked themselves. Every node serves it, for
+the blocks of its `--state-history` window, or all it ran with `--archive`, with no flag: it reads
+each height's list of changed keys, which [history](storage.md#history) keeps already, so it adds
+nothing to what a node writes, and a node serves the blocks it ran before it was upgraded. Older
+blocks come without proofs, and say why; a snapshot node gives only headers below its pivot, and for
+the pivot itself, a body with no receipts, as it never ran it.
+
+Nothing is backfilled, and nothing needs to be: the lists exist as far back as the state does.
+
 ## Syncing from a snapshot
 
 `--snapshot` makes a node with a fresh database take the chain's state from its peers rather

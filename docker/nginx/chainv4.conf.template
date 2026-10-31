@@ -15,6 +15,7 @@ map $server_port $rate_onion {
 
 limit_req_zone $rate_client zone=api:10m rate=${RATE_API}r/s;
 limit_req_zone $rate_client zone=calls:10m rate=${RATE_CALLS}r/s;
+limit_req_zone $rate_client zone=ranges:10m rate=${RATE_RANGE}r/s;
 limit_req_zone $rate_onion zone=onion:1m rate=${RATE_ONION}r/s;
 limit_conn_zone $rate_client zone=conns:10m;
 limit_req_status 429;

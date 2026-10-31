@@ -176,6 +176,21 @@ impl Hashable for PoolCommitment {}
 impl Hashable for Block {}
 
 #[document(
+    summary = "A root a header commits to that a block's body is checked against, which Block::body_mismatch names when one is wrong.",
+    category = "Chain",
+    see_also = "Block::body_mismatch, Block::fits",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyRoot {
+    #[document(summary = "tx_root, over the transactions.")]
+    Tx,
+    #[document(summary = "proof_root, over the finality proofs.")]
+    Proof,
+    #[document(summary = "pool_root, over the mining pool's commitment.")]
+    Pool,
+}
+
+#[document(
     summary = "A header and its seal: all a light client, or a node syncing headers first, needs to check a block by consensus, without its transactions.",
     category = "Chain",
     see_also = "BlockHeader, Seal, Consensus::check",
@@ -254,5 +269,47 @@ impl Block {
     )]
     pub fn pool_root(hash: HashType, pool: Option<&PoolCommitment>) -> Hash {
         pool.map_or_else(|| Hash::zero(hash), |pool| pool.hash(hash))
+    }
+
+    #[document(
+        parent = "Block",
+        summary = "Which of a header's roots these parts of a body do not fit, if any: what a whole body is checked by, on a node taking a snapshot's block and on a client reading a range. Not for genesis, whose tx_root and proof_root commit to its configuration. A block's receipts are not in its body: receipts_root checks those.",
+        params = {
+            hash = "The chain's hash.",
+            header = "The header.",
+            txs = "The transactions, in order.",
+            proofs = "The finality proofs, in order.",
+            pool = "The mining pool's commitment, if any.",
+        },
+        returns = "The first root that does not fit, or None when all do.",
+        see_also = "Block::fits, BodyRoot",
+    )]
+    pub fn body_mismatch(hash: HashType, header: &BlockHeader, txs: &[SignedTx], proofs: &[Justification], pool: Option<&PoolCommitment>) -> Option<BodyRoot> {
+        if Block::tx_root(hash, txs) != header.tx_root {
+            return Some(BodyRoot::Tx);
+        }
+
+        if Block::proof_root(hash, proofs) != header.proof_root {
+            return Some(BodyRoot::Proof);
+        }
+
+        if Block::pool_root(hash, pool) != header.pool_root {
+            return Some(BodyRoot::Pool);
+        }
+
+        None
+    }
+
+    #[document(
+        parent = "Block",
+        summary = "Whether this is the block a checked header names, its body included.",
+        params = {
+            header = "The header and seal, checked already.",
+            hash = "The chain's hash.",
+        },
+        see_also = "Block::body_mismatch",
+    )]
+    pub fn fits(&self, header: &SealedHeader, hash: HashType) -> bool {
+        self.sealed_header() == *header && Block::body_mismatch(hash, &header.header, &self.txs, &self.proofs, self.pool.as_ref()).is_none()
     }
 }

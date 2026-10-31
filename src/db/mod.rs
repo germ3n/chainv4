@@ -101,7 +101,7 @@ pub enum Column {
     #[document(summary = "Peers this node met, by peer id: the addresses each said it listens on and when it was last seen, at most node::MAX_REMEMBERED of them, dialed at the next start. Not chain state.")]
     #[wincode(tag = 21)]
     Peers,
-    #[document(summary = "Recent state as it was: for each key a main-chain block changed in the state columns or the state tree, the value it held just before, by key and height; and each height's list of the keys, for pruning. Kept for the node's --state-history window, or every height with --archive. Not chain state: what a node can answer about past heights.")]
+    #[document(summary = "Recent state as it was: for each key a main-chain block changed in the state columns or the state tree, the value it held just before, by key and height; and each height's list of the keys, for pruning, and for GET /blocks/range to prove what the block changed. Kept for the node's --state-history window, or every height with --archive. Not chain state: what a node can answer about past heights.")]
     #[wincode(tag = 22)]
     History,
     #[document(summary = "Mining pools' claims: the root each pool block committed to, by block id, and how much each miner has claimed from each pool, by pool and miner. Chain state.")]

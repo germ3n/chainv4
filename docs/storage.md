@@ -290,6 +290,13 @@ The `history` column keeps recent state as it was, to read and prove at a past b
   blocks of 13,812 transfers, M3 Pro) importing a block took 12% longer in memory and 16% longer
   on RocksDB, and the bytes written per block doubled, about 19 MB more for a full one, most of it
   tree nodes. A window of full blocks is that times its length; most blocks are far from full.
+- **What a block changed:** each height's list is also what
+  [`GET /blocks/range`](api.md#get-blocksrangefromhcountnentrye) proves, its state columns' keys and
+  not the tree's nodes. It lives exactly as long as the state it can be proven against, so a separate
+  list would hold nothing more: nothing is kept for that route, and no flag turns it on or off. Below
+  the window a block is served without proofs, and says why. The list of the lowest height the window
+  reaches is gone with the height below it, though its state can still be read, so that one says it
+  has no list.
 
 ## Snapshots: reading one commit
 

@@ -103,6 +103,76 @@ Each summary has:
 - `claim`, a miner's claim on a mining pool: the `height` of a block of the pool's, the miner
   `to`, all it `earned`, decimal, and its leaf's `index` and Merkle `path`.
 
+### `GET /blocks/range?from=H&count=N&entry=E`
+
+Blocks from height `from` on, in binary, each with what a client needs to check it itself: what
+recomputes every root in its header, its receipts, and a proof against its `state_root` of each
+state entry it changed. A wallet scanning a range picks out its own accounts' entries, and the node
+never learns which it wanted. `/blocks/{block}` cannot do this: its JSON has no encoded
+transactions and shows proofs as voters, so `proof_root` cannot be recomputed from it.
+
+**The body** is `application/octet-stream`, a `light::BlockRange` encoded with wincode. Errors are
+JSON, as everywhere. `light::decode_block_range` reads it, safely on any bytes:
+
+| `BlockRange` | |
+| --- | --- |
+| `tip` | The node's tip as it answered |
+| `items` | The blocks, in height order; none when asked from past the tip |
+| `next` | Where to go on from, as `{height, entry}`, which are the next `from` and `entry`; `None` once it reached the tip |
+
+| `RangeItem` | |
+| --- | --- |
+| `sealed` | The header and seal |
+| `body` | `Whole {txs, proofs, pool, receipts}`; or `HeaderOnly`, below where a snapshot node took state; or `Continued`, when going on through the block's entries |
+| `changes` | `Proven {from, listed, entries}`, or `None(NoProofs)`, which says why not |
+
+Each `ProvenEntry` is a `column`, a `key`, the `value` once the block had run, `None` for an entry
+it deleted, and a `StateProof` of that value or of its absence. `receipts` is `None` where the node
+has none: the block a snapshot node took state at, which it never ran.
+
+**Why an item has no proofs,** always with the block all the same:
+
+| `NoProofs` | |
+| --- | --- |
+| `NoList` | No list of what it changed: genesis, the block a snapshot node took state at, the lowest block the node's history reaches, or a list lost |
+| `StatePruned {kept_from}` | State is kept only from that height: past `--state-history`, or below a snapshot node's pivot |
+
+**Bounds:** an answer stops at the first of `count` and 100 blocks, 8 MiB, 4,096 proofs and a second
+of work (`RangeLimits::SERVED`), and says where to go on from. That may be inside a block: then
+`next.entry` is above 0, the next answer leaves the body out, as `Continued`, and carries on through
+its entries, so the largest block's proofs arrive within the bounds too. The one thing that may pass
+them is the first block's body and receipts, which cannot be split, with one of its entries.
+
+**Busy:** proofs are worked out as they are asked for, so a client may have 2 of these under way
+(429 past that), half the API's threads build them, and the rest wait their turn for up to 2 seconds
+(503 past that). Both answers say `Retry-After: 1`. Each is built on the blocking pool, so it holds
+up no other request. A client asks for one at a time.
+
+**Refused:** 400 with no `from`, or an `entry` past the block's list, as after a reorg; 404 for a
+height the node holds nothing of, not even a header: it started at a checkpoint above it.
+
+**Checking it:** see [Checking a range](light-client.md#checking-a-range). The list of what a block
+changed is the node's word, as nothing in a header commits to it: **every entry given is proven, but
+a list that leaves one out cannot be told.** Nor can a node that says it holds no proofs be caught
+out.
+
+**What it costs,** per block, on RocksDB holding the state in cache, 60,000 accounts (M3 Pro):
+
+| Block | Block alone | Item without proofs | With proofs | Entries | Building it | Checking it |
+| --- | --- | --- | --- | --- | --- | --- |
+| Empty, paying a reward | 386 B | 398 B | 2.0 KB | 2 | 34 µs | 53 µs |
+| A deploy | 711 B | 854 B | 3.4 KB | 3 | 59 µs | 23 µs |
+| 100 transfers to new accounts | 27 KB | 36 KB | 110 KB | 103 | 3.6 ms | 2.4 ms |
+| 2,000 transfers | 524 KB | 720 KB | 2.2 MB | 2,002 | 63 ms | 20 ms |
+| 10,000 transfers | 2.6 MB | 3.6 MB | 10.9 MB | 10,002 | 182 ms | 58 ms |
+| 100 contract calls, each writing a key | 32 KB | 43 KB | 120 KB | 103 | 1.5 ms | 0.6 ms |
+| 1,000 contract calls | 320 KB | 426 KB | 1.2 MB | 1,003 | 19 ms | 6 ms |
+
+So a proof takes about 730 bytes, more by 33 each time the state doubles, 15 to 30 µs to build and
+6 to 20 µs to check. A cold disk adds what some 34 reads take to each. The figures are one block in
+one answer; as served, the block of 10,000 transfers takes 3 answers of at most 6.6 MB. To run them
+again: `what_a_block_costs_with_its_proofs`, in `src/chain/tests/range.rs`.
+
 ### `GET /txs/{id}`
 
 **Before it lands:** 404 until the transaction is on the main chain.
@@ -786,6 +856,7 @@ the explorer.
 - **Reads are not snapshot-consistent.** A request that reads several keys can see two tips.
   Proofs are the exception: each is checked against its root before it is sent.
 - **Past state reaches back `--state-history` blocks,** 10,000 by default, or every height on an
-  archive node: reads, calls and proofs at an older block answer 404.
+  archive node: reads, calls and proofs at an older block answer 404. `GET /blocks/range` gives the
+  block and says the state is pruned.
 - **A snapshot node's history is headers only** before its pivot: `GET /blocks` and
   `GET /blocks/{block}` show those blocks marked `"pruned": true`, without transactions.

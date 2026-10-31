@@ -156,6 +156,33 @@ an error where the node justified no further, at one past the headers, or at vot
 know yet. The same chain takes 23 requests: 8 for headers and 14 for finality. A forged update or
 justification is refused as before.
 
+## Checking a range
+
+[`GET /blocks/range`](api.md#get-blocksrangefromhcountnentrye) sends blocks with proofs of the state
+entries each changed, so a client takes what it wants from blocks it checked, and the node does not
+learn what it looked at. All of this is in the light build and in wasm:
+
+- **`decode_block_range(bytes)`** reads a response, safely on any bytes, up to `MAX_RANGE_DECODE`.
+- **`BlockRange::check_shape(from, entry)`** checks the answer is the one asked for: consecutive
+  heights, no block left unfinished before another, and a cursor that moves on.
+- **`check_range_item(hash, header, item)`** checks one item against a header already checked: that
+  it is that header, that its body recomputes `tx_root`, `proof_root` and `pool_root`, that its
+  receipts recompute `receipts_root`, each for the transaction at its place, and that each entry's
+  proof holds against `state_root`. `LightClient::check_range_item(item)` does the same with the
+  header the client followed at that height, and says how far to trust it.
+
+It takes the item and gives back a `CheckedItem`, so only what checked is left to read; or a
+`RangeError` that names what failed, and never quotes the bytes.
+
+**What this does not tell you:**
+- **Whether an entry was left out.** A header commits to the state, not to which entries a block
+  changed, so a node can leave an entry out of its list, or claim `NoList`, and every check passes.
+  Everything a client is given is true of the chain; that it was given everything is the node's word.
+  A receipt cannot be left out so: `receipts_root` covers them all.
+- **Blocks with no proofs** are said so per block, in `RangeChanges::None`: a client must treat what
+  they changed as unknown, not unchanged.
+- **Genesis** has no list, so what it allocated is not in a range.
+
 ## Checking values
 
 - **State:** `check_state` checks a chain-state entry, and its proof from
