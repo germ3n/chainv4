@@ -279,7 +279,12 @@ fn plan(settings: &Settings, mining: Option<&Value>, payout: Address, gpus: usiz
 
     let devices = match settings.mine_gpu {
         true if gpus == 0 => return Err("this device has no GPU to mine on".to_string()),
-        true => Devices::Gpu(settings.mine_gpus.filter(|which| *which < gpus).map(|which| vec![which])),
+        true => match settings.gpus_picked() {
+            Some(picked) if picked.is_empty() => return Err("tick a GPU to mine on".to_string()),
+            // Those gone since they were picked go; with all of them gone, every one there is.
+            Some(picked) => Devices::Gpu(Some(picked.into_iter().filter(|which| *which < gpus).collect::<Vec<_>>()).filter(|known| !known.is_empty())),
+            None => Devices::Gpu(None),
+        },
         false => Devices::Cpu(settings.mine_threads.clamp(1, miner::cpus())),
     };
 
@@ -292,6 +297,37 @@ fn plan(settings: &Settings, mining: Option<&Value>, payout: Address, gpus: usiz
         solo: settings.mine_solo,
         devices,
     })
+}
+
+/// A tick for each GPU listed, all of them ticked until one is not. A GPU a machine gains later is
+/// mined on too, unless some were picked by hand.
+fn gpu_list(ui: &mut Ui, settings: &mut Settings, gpus: &[String]) {
+    let picked = settings.gpus_picked();
+
+    for (which, name) in gpus.iter().enumerate() {
+        let mut ticked = picked.as_ref().is_none_or(|picked| picked.contains(&which));
+
+        if ui.checkbox(&mut ticked, name).changed() {
+            settings.mine_gpu_list = toggled(picked.as_deref(), which, gpus.len());
+            settings.mine_gpus = None;
+        }
+    }
+}
+
+/// What is picked once this GPU is ticked or unticked: None again once every one is.
+fn toggled(picked: Option<&[usize]>, which: usize, count: usize) -> Option<Vec<usize>> {
+    let mut now: Vec<usize> = (0..count).filter(|place| picked.is_none_or(|picked| picked.contains(place))).collect();
+
+    match now.iter().position(|place| *place == which) {
+        Some(at) => {
+            now.remove(at);
+        }
+        None => now.push(which),
+    }
+
+    now.sort_unstable();
+
+    (now.len() < count).then_some(now)
 }
 
 /// The Mine card: where the mining port is, alone or in its pool, on what, and starting and
@@ -379,17 +415,13 @@ pub(super) fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut Rig, from: &Address, 
             });
 
             if ctx.settings.mine_gpu && !gpus.is_empty() {
-                let chosen = ctx.settings.mine_gpus.and_then(|which| gpus.get(which)).map_or("Every GPU", String::as_str).to_string();
-
-                super::row(ui, &palette, "GPU", |ui| {
-                    egui::ComboBox::from_id_salt("mine-gpu").selected_text(chosen).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut ctx.settings.mine_gpus, None, "Every GPU");
-
-                        for (which, name) in gpus.iter().enumerate() {
-                            ui.selectable_value(&mut ctx.settings.mine_gpus, Some(which), name);
-                        }
-                    });
+                super::row(ui, &palette, "GPUs", |ui| {
+                    ui.vertical(|ui| gpu_list(ui, ctx.settings, &gpus));
                 });
+
+                if ctx.settings.gpus_picked().is_some_and(|picked| picked.is_empty()) {
+                    note(ui, "Tick at least one GPU to mine on.");
+                }
             } else {
                 let cpus = miner::cpus();
                 ctx.settings.mine_threads = ctx.settings.mine_threads.clamp(1, cpus);
@@ -577,6 +609,53 @@ mod tests {
     }
 
     #[test]
+    fn gpus_are_ticked_one_by_one_and_every_one_ticked_means_every_one() {
+        assert_eq!(toggled(None, 1, 3), Some(vec![0, 2]), "all ticked until one is not");
+        assert_eq!(toggled(Some(&[0, 2]), 2, 3), Some(vec![0]));
+        assert_eq!(toggled(Some(&[0]), 0, 3), Some(Vec::new()), "none is a choice, and starts nothing");
+        assert_eq!(toggled(Some(&[]), 2, 3), Some(vec![2]));
+        assert_eq!(toggled(Some(&[2]), 0, 3), Some(vec![0, 2]), "in the list's order");
+        assert_eq!(toggled(Some(&[0, 2]), 1, 3), None, "the last ticked: every one, a later GPU too");
+        assert_eq!(toggled(Some(&[0, 9]), 1, 2), None, "one gone since it was picked counts for nothing");
+    }
+
+    #[test]
+    fn a_gpu_list_ticks_each_by_name_and_a_tap_replaces_the_one_a_build_before_picked() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let gpus = ["Mali-G715 (Vulkan)".to_string(), "Mali-G715 (Gl)".to_string()];
+        let mut settings = Settings::default();
+        settings.mine_gpus = Some(0);
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut spot = egui::Rect::NOTHING;
+            let raw = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut output = ctx.run_ui(raw, |ui| {
+                gpu_list(ui, &mut settings, &gpus);
+                spot = ui.min_rect();
+            });
+            output.textures_delta.clear();
+
+            (spot, output)
+        };
+        let (_, _) = frame(Vec::new());
+        let (spot, output) = frame(Vec::new());
+        let says: Vec<String> = output.shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+            _ => None,
+        }).collect();
+        assert_eq!(says, gpus);
+
+        // The second row, tapped: it was not picked, so now both are, which is every one.
+        let second = egui::pos2(spot.left() + 8.0, spot.bottom() - 8.0);
+        let press = |pressed| egui::Event::PointerButton { pos: second, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(vec![egui::Event::PointerMoved(second)]);
+        frame(vec![press(true)]);
+        frame(vec![press(false)]);
+        frame(Vec::new());
+        assert_eq!((settings.gpus_picked(), settings.mine_gpus), (None, None));
+    }
+
+    #[test]
     fn a_browser_mines_over_the_nodes_websocket_secure_as_its_api() {
         assert_eq!(socket_url("http://127.0.0.1:8080/", "/mining/ws").as_deref(), Some("ws://127.0.0.1:8080/mining/ws"));
         assert_eq!(socket_url("https://node.example/api", "mining/ws").as_deref(), Some("wss://node.example/api/mining/ws"));
@@ -625,6 +704,8 @@ mod tests {
         assert!(plan(&with(&settings, &|settings| settings.mine_gpu = true), Some(&open), payout, 0).is_err_and(|why| why.contains("no GPU")));
         assert_eq!(plan(&with(&settings, &|settings| (settings.mine_gpu, settings.mine_gpus) = (true, Some(1))), Some(&open), payout, 2).unwrap().devices, Devices::Gpu(Some(vec![1])));
         assert_eq!(plan(&with(&settings, &|settings| (settings.mine_gpu, settings.mine_gpus) = (true, Some(5))), Some(&open), payout, 2).unwrap().devices, Devices::Gpu(None), "one gone: every one");
+        assert_eq!(plan(&with(&settings, &|settings| (settings.mine_gpu, settings.mine_gpu_list) = (true, Some(vec![0, 2, 9]))), Some(&open), payout, 3).unwrap().devices, Devices::Gpu(Some(vec![0, 2])), "several, less any gone");
+        assert!(plan(&with(&settings, &|settings| (settings.mine_gpu, settings.mine_gpu_list) = (true, Some(Vec::new()))), Some(&open), payout, 3).is_err_and(|why| why.contains("tick a GPU")), "none ticked starts nothing");
 
         let private = json!({ "port": 4002, "public": "pool.example:4002", "protocol": "chainv4", "pool": false, "solo": true, "open": false });
         let solo = with(&settings, &|settings| (settings.mine_solo, settings.proxy) = (true, String::new()));

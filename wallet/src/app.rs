@@ -179,10 +179,13 @@ pub struct Settings {
     pub names: HashMap<String, String>,
     /// How the Mining page's Mine card mines: alone, or in the port's pool.
     pub mine_solo: bool,
-    /// On the GPU rather than CPU threads: the one at this place in the GPUs listed, or every one
-    /// for None.
+    /// On the GPU rather than CPU threads.
     pub mine_gpu: bool,
+    /// The one GPU picked, by its place in the GPUs listed, by a build from before several could be:
+    /// read until a tick replaces it, as settings of another shape would not load at all.
     pub mine_gpus: Option<usize>,
+    /// The GPUs picked, by their places in the GPUs listed, or every one for None.
+    pub mine_gpu_list: Option<Vec<usize>>,
     /// How many CPU threads, when not on the GPU.
     pub mine_threads: usize,
     /// The mining port as host:port, in place of the one GET /mining names: empty to take the
@@ -231,6 +234,14 @@ pub struct WalletEntry {
     pub unprotected: bool,
 }
 
+impl Settings {
+    /// The GPUs picked to mine on, by their places in the GPUs listed, or every one for None.
+    #[cfg_attr(not(feature = "mining"), allow(dead_code))]
+    pub fn gpus_picked(&self) -> Option<Vec<usize>> {
+        self.mine_gpu_list.clone().or_else(|| self.mine_gpus.map(|which| vec![which]))
+    }
+}
+
 impl Default for Settings {
     fn default() -> Settings {
         Settings {
@@ -267,6 +278,7 @@ impl Default for Settings {
             mine_solo: false,
             mine_gpu: false,
             mine_gpus: None,
+            mine_gpu_list: None,
             mine_threads: 1,
             mine_port: String::new(),
             mine_token: String::new(),
@@ -1531,6 +1543,8 @@ mod tests {
         let kept = serde_json::from_value::<Settings>(serde_json::to_value(&set).unwrap()).unwrap();
 
         assert_eq!((kept.mine_solo, kept.mine_gpu, kept.mine_gpus, kept.mine_threads), (true, true, Some(1), 6));
+        assert_eq!(kept.gpus_picked(), Some(vec![1]), "the one a build before several could be picked");
+        assert_eq!(Settings { mine_gpu_list: Some(vec![0, 2]), ..kept.clone() }.gpus_picked(), Some(vec![0, 2]), "a list once there is one");
         assert_eq!((kept.mine_port.as_str(), kept.mine_token.as_str(), kept.mine_on_battery), ("pool.example:4002", "the port's secret", true));
     }
 

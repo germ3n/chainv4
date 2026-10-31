@@ -1190,11 +1190,15 @@ voting finality it now goes back to the checkpoint and follows the node from the
   (`links`), and a second the same way as one standing drops the peer whole; it costs the peer one
   redial. `gossip_unpublished` counts what still reaches nobody, and statuses asked once a minute
   heal a fork while it is shallower than `max_reorg_depth`.
-- **A GPU is mined on once, under its native backend.** wgpu lists a card under each backend
-  that reaches it; the same ids sort its best first and drop the rest. OpenGL reports other ids
-  than Vulkan, Metal or DX12 for the same card, as Android's does for its Mali, so an OpenGL
-  adapter named as a native one, or that and more, such as `/PCIe/SSE2`, is dropped too: "every
-  GPU" opened the phone's twice before. A card OpenGL alone reaches stays.
+- **A GPU can be mined on through two contexts.** wgpu lists a card under each backend that reaches it.
+  Vulkan, Metal and DX12 count as one, the same ids sorting side by side, but OpenGL is listed as well:
+  on a phone, the Mali's two contexts together hash faster than either. By default both run, each
+  taking its own share of the nonces, and any can be left unticked. A phone runs hotter for it. Two
+  cards alike look identical to wgpu, so all a backend lists stay, and only a second native backend
+  showing the same ones goes.
+- **The wallet's GPU pick has a field of its own, `mine_gpu_list`.** Settings in app storage do not load
+  at all if a field changes shape, losing every setting, so `mine_gpus`, the one from before, is still
+  read until a tick replaces it.
 - **The worker builds without the node.** The `worker` feature is the mining port's protocol, a
   worker's devices and its claims, for the wallet; `gpu-mining` adds GPUs, and the node's `gpu`
   feature brings it. `WorkerStatus` (`chainv4::mining::status`) is what a worker shows of itself,

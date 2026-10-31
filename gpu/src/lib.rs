@@ -110,9 +110,10 @@ pub struct Gpu {
 /// The job as the kernels read it: 11 prefix words, 8 target words, the first nonce, the count.
 const JOB_BYTES: u64 = (11 + 8 + 4) * 4;
 
-/// Every GPU wgpu can mine on, each once: a card reached through several backends, such as Vulkan
-/// and OpenGL, under its native one. Discrete cards first, then integrated, then any other;
-/// software renderers, which are the CPU, are left out. Not in a browser, which shows one alone.
+/// Every GPU wgpu can mine on: a card through its native backend, once, and through OpenGL as well
+/// when it offers that, as the two contexts together hash faster than either. Discrete cards first,
+/// then integrated, then any other, native before OpenGL; software renderers, which are the CPU, are
+/// left out. Not in a browser, which shows one alone.
 #[cfg(not(target_arch = "wasm32"))]
 fn adapters() -> Vec<wgpu::Adapter> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
@@ -122,16 +123,15 @@ fn adapters() -> Vec<wgpu::Adapter> {
     chosen(&infos).into_iter().filter_map(|index| found[index].take()).collect()
 }
 
-/// Which of these adapters to mine on, by their place, in the order to list them: each GPU once,
-/// under its native backend. The same card through several backends sorts its best first and
-/// the rest go; OpenGL reports other vendor and device ids than Vulkan, Metal or DX12 for the same
-/// card, as Android's does, so an OpenGL adapter named as a native one is the same card and goes
-/// too.
+/// Which of these adapters to mine on, by their place, in the order to list them. A card through
+/// Vulkan, Metal or DX12 counts once, those being one way to reach it, and through OpenGL once more:
+/// "every GPU" opens both, which together hash faster, and each is listed to be picked alone. Two
+/// cards alike look the same in every way, so all a backend lists stay: only a second native backend
+/// showing the same ones goes.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn chosen(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
-    let native = |backend: wgpu::Backend| matches!(backend, wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12);
     let rank = |backend: wgpu::Backend| match backend {
-        _ if native(backend) => 0,
+        wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 => 0,
         wgpu::Backend::Gl => 1,
         _ => 2,
     };
@@ -144,25 +144,13 @@ fn chosen(infos: &[wgpu::AdapterInfo]) -> Vec<usize> {
     order.sort_by_key(|&index| {
         let info = &infos[index];
 
-        (kind(info.device_type), info.vendor, info.device, info.name.clone(), rank(info.backend))
+        (kind(info.device_type), rank(info.backend), info.vendor, info.device, info.name.clone(), info.backend as u8)
     });
-    // After sorting, a card's backends sit side by side, its best first.
-    order.dedup_by_key(|index| {
-        let info = &infos[*index];
-
-        (info.vendor, info.device, info.name.clone())
-    });
-    // OpenGL's name for a card is its native name, or that and more, such as "/PCIe/SSE2".
-    let same_card = |gl: &str, native: &str| {
-        let (gl, native) = (gl.trim().to_lowercase(), native.trim().to_lowercase());
-
-        !native.is_empty() && gl.strip_prefix(&native).is_some_and(|rest| rest.chars().next().is_none_or(|next| !next.is_alphanumeric()))
-    };
-    let natives: Vec<String> = order.iter().map(|&index| &infos[index]).filter(|info| native(info.backend)).map(|info| info.name.clone()).collect();
+    let mut first = std::collections::HashMap::new();
     order.retain(|&index| {
         let info = &infos[index];
 
-        info.backend != wgpu::Backend::Gl || !natives.iter().any(|name| same_card(&info.name, name))
+        *first.entry((rank(info.backend), info.vendor, info.device, info.name.clone())).or_insert(info.backend) == info.backend
     });
 
     order
@@ -546,15 +534,18 @@ mod tests {
     }
 
     #[test]
-    fn each_gpu_is_chosen_once_under_its_native_backend_and_not_again_through_opengl() {
+    fn a_gpu_is_chosen_once_natively_and_once_through_opengl() {
         use wgpu::{Backend, DeviceType};
 
-        // Android: the Mali through Vulkan, and again through OpenGL with ids of its own.
-        let phone = [info("Mali-G715", Backend::Gl, 0, 0, DeviceType::IntegratedGpu), info("Mali-G715", Backend::Vulkan, 0x13b5, 0xa8670000, DeviceType::IntegratedGpu)];
-        assert_eq!(chosen(&phone), vec![1]);
+        let named = |infos: &[wgpu::AdapterInfo]| -> Vec<String> { chosen(infos).into_iter().map(|index| describe(&infos[index])).collect() };
+
+        // Android: the Mali through Vulkan, and again through OpenGL with ids of its own. Native
+        // first, so a saved pick of the first stays the one it was.
+        let phone = [info("Mali-G715", Backend::Gl, 0, 0, DeviceType::IntegratedGpu), info("Mali-G715", Backend::Vulkan, 0x13b5, 0x0e20, DeviceType::IntegratedGpu)];
+        assert_eq!(named(&phone), ["Mali-G715 (Vulkan)", "Mali-G715 (Gl)"]);
 
         // A desktop: OpenGL's longer name for the same card, a second card, a software renderer,
-        // and the first card twice under Vulkan and DX12 with the same ids.
+        // and the first card twice under Vulkan and DX12 with the same ids, which count once.
         let desktop = [
             info("NVIDIA GeForce RTX 3080/PCIe/SSE2", Backend::Gl, 0x10de, 0, DeviceType::DiscreteGpu),
             info("NVIDIA GeForce RTX 3080", Backend::Vulkan, 0x10de, 0x2206, DeviceType::DiscreteGpu),
@@ -563,8 +554,21 @@ mod tests {
             info("Intel(R) UHD Graphics 770", Backend::Vulkan, 0x8086, 0x4680, DeviceType::IntegratedGpu),
             info("llvmpipe (LLVM 17.0.6, 256 bits)", Backend::Vulkan, 0x10005, 0, DeviceType::Cpu),
         ];
-        let names: Vec<_> = chosen(&desktop).into_iter().map(|index| format!("{} ({:?})", desktop[index].name, desktop[index].backend)).collect();
-        assert_eq!(names, ["NVIDIA GeForce RTX 3080 (Vulkan)", "NVIDIA GeForce RTX 3080 Ti (Vulkan)", "Intel(R) UHD Graphics 770 (Vulkan)"]);
+        assert_eq!(named(&desktop), [
+            "NVIDIA GeForce RTX 3080 (Vulkan)",
+            "NVIDIA GeForce RTX 3080 Ti (Vulkan)",
+            "NVIDIA GeForce RTX 3080/PCIe/SSE2 (Gl)",
+            "Intel(R) UHD Graphics 770 (Vulkan)",
+        ]);
+
+        // A rig of two cards alike, each through Vulkan and DX12: both, once each.
+        let rig = [
+            info("NVIDIA GeForce RTX 3080", Backend::Dx12, 0x10de, 0x2206, DeviceType::DiscreteGpu),
+            info("NVIDIA GeForce RTX 3080", Backend::Dx12, 0x10de, 0x2206, DeviceType::DiscreteGpu),
+            info("NVIDIA GeForce RTX 3080", Backend::Vulkan, 0x10de, 0x2206, DeviceType::DiscreteGpu),
+            info("NVIDIA GeForce RTX 3080", Backend::Vulkan, 0x10de, 0x2206, DeviceType::DiscreteGpu),
+        ];
+        assert_eq!(named(&rig), ["NVIDIA GeForce RTX 3080 (Vulkan)", "NVIDIA GeForce RTX 3080 (Vulkan)"]);
 
         // OpenGL alone, as on a machine without Vulkan: kept.
         let only = [info("Mali-G715", Backend::Gl, 0, 0, DeviceType::IntegratedGpu)];

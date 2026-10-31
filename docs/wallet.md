@@ -430,8 +430,10 @@ inside the wallet, paying the address picked.
   pool finds, by the shares it sent, less the pool's fee, claimed below. Whichever the port does
   not take (`solo`, `pool` in `GET /mining`) cannot be picked; a port that takes neither mines
   for its node alone, and the card does not start on it. Kept as `mine_solo`.
-- **On what:** the GPU, one of those listed or every one (`mine_gpu`, `mine_gpus`), or a number of
-  CPU threads up to the device's (`mine_threads`).
+- **On what:** the GPUs ticked, every one until one is unticked (`mine_gpu`, `mine_gpu_list`), or a
+  number of CPU threads up to the device's (`mine_threads`). A GPU that OpenGL reaches too is listed
+  twice, as `Mali-G715 (Vulkan)` and `Mali-G715 (Gl)`: ticking both mines on both, which together hash
+  faster. With every one ticked, a GPU the machine gains later is mined on too; with none, Start says so.
 - **Start** and **Stop:** while mining, the card shows whether the worker is connected and, when
   not, why (it connects again by itself), what it mines for, the hashrate of each device and in
   all, the jobs it was handed, the blocks found and the nonces refused. In the pool it shows the
