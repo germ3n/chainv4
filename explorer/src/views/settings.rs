@@ -12,6 +12,7 @@ use {
 /// The proxy being typed, and why the one chosen would not do; and a checkpoint to start from.
 #[derive(Default)]
 pub struct SettingsState {
+    reading: super::reading::ReadingState,
     proxy: Option<String>,
     proxy_trouble: Option<String>,
     checkpoint: String,
@@ -22,28 +23,35 @@ pub struct SettingsState {
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut SettingsState, streaming: &Streaming, connect: &mut Option<String>) {
     let look = ctx.look;
     let palette = look.palette;
+    let reading = ctx.settings.read_blocks;
     super::heading(ui, look, "Settings", "The node the explorer reads and the way to it, how it looks, and what it trusts.", |_| {});
+    super::reading::card(ui, ctx, &mut state.reading, connect);
 
-    super::section(ui, look, "Node's report token", |ui| {
-        let node = ctx.api.base().to_string();
-        let carries = crate::api::carries_token(&node);
-        super::note(ui, look, "A node you run keeps its peers' and miners' addresses from whoever asks. Its --report-token shows them to you here. It goes only to GET /node, and only over https, an onion or this machine.");
-        ui.add_space(4.0);
-        let token = ctx.settings.report_tokens.entry(node.clone()).or_default();
-        let response = chainv4_ui::secret::secret(ui, egui::TextEdit::singleline(token).hint_text("the token, if this node is yours").desired_width(ui.available_width()));
+    if !reading {
+        super::section(ui, look, "Node's report token", |ui| {
+            let node = ctx.api.base().to_string();
+            let carries = crate::api::carries_token(&node);
+            super::note(ui, look, "A node you run keeps its peers' and miners' addresses from whoever asks. Its --report-token shows them to you here. It goes only to GET /node, and only over https, an onion or this machine.");
+            ui.add_space(4.0);
+            let token = ctx.settings.report_tokens.entry(node.clone()).or_default();
+            let response = chainv4_ui::secret::secret(ui, egui::TextEdit::singleline(token).hint_text("the token, if this node is yours").desired_width(ui.available_width()));
 
-        if response.changed() {
-            let token = token.clone();
-            ctx.api.bear_report_token(Some(&token));
-        }
+            if response.changed() {
+                let token = token.clone();
+                ctx.api.bear_report_token(Some(&token));
+            }
 
-        if !carries {
-            super::note(ui, look, "This node is reached over plain http: the token stays here until it is https or an onion.");
-        }
-    });
+            if !carries {
+                super::note(ui, look, "This node is reached over plain http: the token stays here until it is https or an onion.");
+            }
+        });
+    }
 
     super::section(ui, look, "Node", |ui| {
-        super::note(ui, look, "Its HTTP API. The explorer reads everything from it, and checks what it can with its light client.");
+        super::note(ui, look, match reading {
+            true => "Its HTTP API, which the explorer reads headers and final blocks from, and sends transactions through.",
+            false => "Its HTTP API. The explorer reads everything from it, and checks what it can with its light client.",
+        });
         ui.add_space(4.0);
         let pressed = widgets::beside(
             ui,
@@ -58,7 +66,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
         }
 
         ui.add_space(6.0);
-        let answers = ctx.store.status.is_some() && !ctx.store.failures.contains_key(&Ask::Status);
+        let answers = match reading {
+            true => ctx.api.down().is_none(),
+            false => ctx.store.status.is_some() && !ctx.store.failures.contains_key(&Ask::Status),
+        };
         let status = ctx.store.status.clone();
         super::facts(ui, look, "settings_node", |facts| {
             facts.row("answers", |ui| match answers {
@@ -145,7 +156,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
         let node = ctx.settings.node.clone();
         let mut trusted = ctx.settings.fast_resume.get(&node).copied().unwrap_or(false);
 
-        if widgets::fast_resume_switch(ui, &palette, &mut trusted, "Opening the explorer skips the headers from genesis", "the genesis it trusts") {
+        if reading {
+            super::note(ui, look, "Fast resume is off while Read from checked blocks is on: the light client walks every header.");
+        } else if widgets::fast_resume_switch(ui, &palette, &mut trusted, "Opening the explorer skips the headers from genesis", "the genesis it trusts") {
             match trusted {
                 true => {
                     ctx.settings.fast_resume.insert(node.clone(), true);

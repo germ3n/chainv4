@@ -65,6 +65,9 @@ pub struct Trust<'a> {
     pub checkpoints: &'a HashMap<String, String>,
     /// Whether this node is trusted to start the client at its own finalized checkpoint.
     pub fast_resume: bool,
+    /// Whether to walk every header, even from a node met for the first time, unless a checkpoint was
+    /// pasted: Read from checked blocks is on, and what it shows should rest on no node's word.
+    pub walks: bool,
 }
 
 /// A light client about to start at a checkpoint, from what the node said of its chain.
@@ -137,6 +140,12 @@ impl Light {
     #[cfg(test)]
     pub fn started_with(client: LightClient) -> Light {
         Light { client: Some(client), ..Light::default() }
+    }
+
+    /// The same, having caught up.
+    #[cfg(test)]
+    pub fn following_with(client: LightClient) -> Light {
+        Light { client: Some(client), caught_up_once: true, ..Light::default() }
     }
 
     /// The client, while it follows without trouble: what a page checks a proof against.
@@ -439,7 +448,7 @@ impl Light {
 
                 // A checkpoint pasted comes first; then the node's own, on first use or on a node
                 // trusted for it, whose voters' signatures are checked from there; else genesis.
-                match (pasted, first_use || resuming) {
+                match (pasted, (first_use && !trust.walks) || resuming) {
                     (Some(checkpoint), _) => self.starting = Some(Starting { params, header, checkpoint: Some(checkpoint), resuming: false }),
                     (None, true) => self.starting = Some(Starting { params, header, checkpoint: None, resuming }),
                     (None, false) => {
@@ -655,7 +664,7 @@ mod tests {
 
             for reply in replies {
                 if let Reply::Answer { ask, result } = reply {
-                    let trust = Trust { node, pinned, checkpoints: &HashMap::new(), fast_resume };
+                    let trust = Trust { node, pinned, checkpoints: &HashMap::new(), fast_resume, walks: false };
                     light.answered(&ask, &result, trust, u64::MAX / 2, 0.0);
                 }
             }
@@ -706,6 +715,7 @@ mod tests {
         pinned: HashMap<String, String>,
         checkpoints: HashMap<String, String>,
         trusted: bool,
+        walks: bool,
     }
 
     const VOTES: LightFinality = LightFinality::Authority { checkpoint_interval: 8, fixed_ahead: 2 };
@@ -753,11 +763,11 @@ mod tests {
             genesis.header.proof_root = params(finality).hash(HashType::default_chain());
             let pinned = HashMap::from([("http://node".to_string(), genesis.id().to_string())]);
 
-            Met { light: Light::default(), finality, genesis, pinned, checkpoints: HashMap::new(), trusted }
+            Met { light: Light::default(), finality, genesis, pinned, checkpoints: HashMap::new(), trusted, walks: false }
         }
 
         fn answer(&mut self, ask: Ask, answer: Result<Value, Failure>) {
-            let trust = Trust { node: "http://node", pinned: &mut self.pinned, checkpoints: &self.checkpoints, fast_resume: self.trusted };
+            let trust = Trust { node: "http://node", pinned: &mut self.pinned, checkpoints: &self.checkpoints, fast_resume: self.trusted, walks: self.walks };
 
             assert!(self.light.answered(&ask, &answer, trust, u64::MAX / 2, 0.0));
         }
@@ -860,6 +870,17 @@ mod tests {
             assert!(matches!(met.light.ask(0.0), Some(Ask::Headers { from: 1, .. })), "{finality:?}");
             assert_eq!(met.light.fast_resumed, None);
         }
+    }
+
+    #[test]
+    fn with_read_from_checked_blocks_on_a_node_met_first_is_walked_and_asked_no_checkpoint() {
+        let mut met = Met::new(Some(VOTES), false);
+        met.walks = true;
+        met.pinned.clear();
+        met.light();
+
+        assert!(matches!(met.light.ask(0.0), Some(Ask::Bundle { headers: 1, .. })));
+        assert_eq!(met.light.lowest(), Some(0));
     }
 
     #[test]

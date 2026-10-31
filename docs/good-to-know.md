@@ -1349,6 +1349,50 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **The pool's books grow with its miners.** `pool.json` keeps each miner's earnings, and the node
   keeps the last four claim trees in memory for paths to the roots blocks committed already.
 
+## Reading checked blocks
+
+- **A block with no proofs is unknown, not unchanged.** The wallet does not show a value older than
+  the newest such block until one direct proof catches it up. Nodes keep proofs for 10,000 blocks by
+  default, so on anything but an `--archive` node old blocks come with receipts and no state.
+- **A proven balance can still be stale.** Nothing commits to which entries a block changed, so a node
+  can leave one out. Only a direct proof finds that, which is Check now, and the node sees the account.
+- **It reads downward for old blocks.** A light client holds few headers below the finalized block it
+  saved, and a phone has no room for one per block for months. So older blocks are proven by their hash
+  links up to a block it did check, a stretch of up to 100 at a time, and nothing is kept until the
+  stretch links up. So balances are right from the first proof, and history fills in going back.
+- **Answers are checked before anything is taken.** All of an answer, or a whole stretch going down;
+  an answer that fails leaves the index and its place as they were, and the reading stops until told.
+- **A token seen while reading down takes a proof.** The blocks above it were passed over before it was
+  being looked for, so what its older block says is no use for now.
+- **`check_shape` will not let a cursor stand still.** A block whose list claims more, given with no
+  entries and a cursor where it was asked from, is refused there. The scanner's own refusal stays.
+- **The explorer's pages do not know whether a node or the index answered.** `Ask::route` sends what was
+  read to `Reading::answer`, which writes the node's JSON, so pages keep one path, and a page's `Ask` that
+  was forgotten is refused at `Api`, not in the page. What differs is the 451 of what is off and the 404
+  words of what was not read.
+- **The explorer keeps no state from blocks.** It has no accounts to follow, so a gap or a left-out entry
+  cannot leave it stale, and it drops entries and their proofs: most of a block's 2 KB. A balance is a
+  press, a proof at the final block, with its block shown.
+- **What the explorer keeps is rechecked on opening.** It is kept in `GET /blocks/range`'s own encoding, minus
+  entries, so it reads with `decode_block_range` and `check_range_item`. It is not sealed, so this is what
+  stands against a damaged or changed file. The top must also match the light client's header, if held.
+- **Its head is written last.** A kill between leaves a head saying less than the buckets hold, so blocks above
+  it are ignored and read again. One saying more finds a block missing, sets that bucket aside, and knows from
+  above it.
+- **The index goes a bucket at a time.** Going up past the cap, the oldest 1,024 heights go, so the file goes
+  whole and nothing is rewritten. Going down past it, the same drops what was just read once, stops, and from then
+  on `further_back` says Full: anything older would only go the same way.
+- **The explorer walks every header on each launch with it on.** It saves no client, and a node's checkpoint is
+  the node's word. Pasting a checkpoint is the way round. Saving the client as the wallet does would help.
+- **The Api's refusals go through `Asks` too.** A page polling something off is told once in 3 seconds, as the
+  wallet's is, and what the index answers waits in `for_index` until it is open.
+- **`Ask::needs_asking` has no catch-all.** A new request does not build until someone decides whether
+  it may leave with this on. The refusal is in `Node`, not the pages.
+- **The index's key is not the vault's.** It is derived from it, so sealing either never reuses a nonce
+  across both, and a password changed seals the index anew at its next save.
+- **What the Activity page shows from blocks is not in the settings file.** `Checked::came` says how each
+  came to be known, and `kept_only` writes only the old kind. Pages read one map; only the file differs.
+
 ## Fast resume
 
 - **In the explorer, it is each launch.** The explorer saves no client, so with the switch on it starts

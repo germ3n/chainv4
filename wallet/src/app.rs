@@ -4,10 +4,11 @@
 
 use {
     crate::chain::{Chain, Trust},
-    crate::history::Checked,
+    crate::history::{Checked, Origin},
     crate::keys::{self, Holder},
     crate::lock::{self, Lock, Opened},
     crate::node::{Ask, Node},
+    crate::reading::{Reading, Wanted},
     crate::theme::{self, DARK, LIGHT, Palette},
     crate::updates::Updates,
     crate::vault::{Book, Sealed, Vault},
@@ -124,6 +125,26 @@ pub struct Settings {
     /// than have it walk every header since it last ran: off for any node until switched on, as a
     /// dishonest one could show a false history from that point.
     pub fast_resume: HashMap<String, bool>,
+    /// Whether to take everything from final blocks fetched and checked, rather than ask nodes: see
+    /// crate::reading. For the install rather than for a node, as fast resume is, so that changing
+    /// the node never quietly starts asking it about everything, nor for one wallet alone. Off by
+    /// default, as reading blocks costs far more than asking. Written only when on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub read_blocks: bool,
+    /// The coin's symbol and decimals its node last said, by genesis id: what amounts are read by while
+    /// no node is asked, as nothing the light client checks says them.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub coins: HashMap<String, (String, u8)>,
+    /// A wallet made just now, to note the height it was made at. Never kept.
+    #[serde(skip)]
+    pub just_made: bool,
+    /// Whether to forget what the wallet open has read, once the page is drawn. Never kept.
+    #[serde(skip)]
+    pub forget_reading: bool,
+    /// Wallets just removed, by the name of their files, whose indexes are to go too: on a device the
+    /// store takes those with the wallet's files, and in a browser this does. Never kept.
+    #[serde(skip)]
+    pub forget_indexes: Vec<String>,
     /// The wallets on this device, each its accounts sealed by what opens it (see crate::guard).
     pub wallets: Vec<WalletEntry>,
     /// Records of biometrics no wallet uses any more, whose keys are not yet forgotten: those are
@@ -139,7 +160,9 @@ pub struct Settings {
     pub wallet: usize,
     /// Transactions this wallet sent that are not final yet, oldest first.
     pub sent: Vec<Sent>,
-    /// Transactions the light client proved, by id.
+    /// Transactions the light client proved, by id. What a wallet read from blocks is shown from here
+    /// too, and written only to that wallet's sealed index.
+    #[serde(serialize_with = "crate::history::kept_only")]
     pub checked: HashMap<String, Checked>,
     /// Minutes without input before the wallet locks itself; 0 for never.
     pub lock_after: u32,
@@ -245,6 +268,11 @@ pub struct WalletEntry {
     /// anyone who reads app storage could. Never true of one that needs hardware.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unprotected: bool,
+    /// The height the chain had reached when this wallet was made here, as a new wallet has nothing
+    /// before it to read: u64::MAX for one made before the chain was followed, read from wherever the
+    /// reading starts. None for one restored or brought in, whose history could reach back any way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub born: Option<u64>,
 }
 
 impl Settings {
@@ -265,6 +293,11 @@ impl Default for Settings {
             checkpoints: HashMap::new(),
             light: HashMap::new(),
             fast_resume: HashMap::new(),
+            read_blocks: false,
+            coins: HashMap::new(),
+            just_made: false,
+            forget_reading: false,
+            forget_indexes: Vec::new(),
             wallets: Vec::new(),
             retired: Vec::new(),
             persist_now: false,
@@ -334,6 +367,7 @@ impl Settings {
                 current: std::mem::take(&mut self.current),
                 biometric: None,
                 unprotected: false,
+                born: None,
             });
             self.wallet = 0;
         }
@@ -439,6 +473,10 @@ pub struct Wallet {
     /// Whether the unlock screen shows the node and proxy to change.
     reaching: bool,
     views: views::States,
+    /// What it reads from checked blocks, with that setting on.
+    reading: Reading,
+    /// Whether the node just said what the coin is, for keeping with its chain once that is known.
+    status_coin: bool,
     /// What each page asked, for a reload to ask again.
     asked_by_page: PageAsks<Page, Ask>,
     /// A reload under way, and the finger on the page that may start one.
@@ -497,9 +535,15 @@ impl Wallet {
         theme::install_fonts(&creation.egui_ctx);
         theme::apply(&creation.egui_ctx, &palette);
         let lock = Lock::start(&settings);
+        #[cfg(not(target_arch = "wasm32"))]
+        let reading = crate::reading::on_this_device(store.as_ref().map(crate::store::Store::folder));
+        #[cfg(target_arch = "wasm32")]
+        let reading = crate::reading::on_this_device();
 
         Wallet {
-            node: Node::new(&settings.node, client(&settings), creation.egui_ctx.clone()),
+            node: Node::new(&settings.node, client(&settings), creation.egui_ctx.clone()).reading_blocks(settings.read_blocks),
+            reading,
+            status_coin: false,
             settings,
             palette,
             chain: Chain::default(),
@@ -549,8 +593,17 @@ impl Wallet {
     fn connect(&mut self, node: &str) {
         self.settings.node = node.trim().trim_end_matches('/').to_string();
         announce(&self.settings.node);
-        self.node = Node::new(&self.settings.node, client(&self.settings), self.wake.clone());
+        self.node = Node::new(&self.settings.node, client(&self.settings), self.wake.clone()).reading_blocks(self.settings.read_blocks);
+        self.reading.close(&mut self.chain, &mut self.settings.checked, self.active);
         self.chain = Chain::default();
+
+        // What the node said of itself is no use once it is not being asked.
+        if self.settings.read_blocks {
+            self.faucet = None;
+            self.swap_contract = None;
+            self.dex = (None, None);
+        }
+
         self.name = None;
         self.asked_status = None;
         self.asked_history = 0.0;
@@ -564,6 +617,7 @@ impl Wallet {
     fn reload(&mut self, time: f64) {
         self.asked_status = None;
         self.asked_history = f64::NEG_INFINITY;
+        self.reading.retry();
         self.chain.reload();
         self.views.reload(self.page);
         let mut asks = vec![Ask::Status];
@@ -634,8 +688,10 @@ impl Wallet {
         self.holders.iter().find(|holder| holder.id() == chosen).or_else(|| self.holders.first())
     }
 
-    /// Drops the keys, and asks for what opens it again.
+    /// Drops the keys, and asks for what opens it again. What it read of the chain goes first, sealed
+    /// with those keys, as nothing of it is to be seen or read on while it is locked.
     fn lock(&mut self) {
+        self.reading.close(&mut self.chain, &mut self.settings.checked, self.active);
         self.vault = None;
         self.book = Book::default();
         self.holders.clear();
@@ -659,8 +715,19 @@ impl Wallet {
                 pinned: &mut self.settings.pinned,
                 checkpoints: &self.settings.checkpoints,
                 saved: &self.settings.light,
-                fast_resume: self.settings.fast_resume.get(&node).copied().unwrap_or(false),
+                // Taking up the chain on a node's word is the opposite of what that setting is for.
+                fast_resume: !self.settings.read_blocks && self.settings.fast_resume.get(&node).copied().unwrap_or(false),
             };
+
+            if let Some(client) = &self.chain.client
+                && self.reading.proof(&ask, &result, client, time)
+            {
+                continue;
+            }
+
+            if matches!(ask, Ask::ScanProof { .. }) {
+                continue;
+            }
 
             if self.chain.take(&ask, &result, trust, now, time) {
                 continue;
@@ -679,6 +746,7 @@ impl Wallet {
                             symbol: symbol.to_string(),
                             decimals: u8::try_from(decimals).unwrap_or(18),
                         };
+                        self.status_coin = true;
                     }
                 }
                 (Ask::Contract(_) | Ask::Call(_) | Ask::Read(_), _) => self.views.answered(&ask, &result, &self.settings.contracts),
@@ -724,7 +792,26 @@ impl Wallet {
         let genesis = self.chain.genesis.map(|genesis| genesis.to_string()).unwrap_or_default();
 
         for (tx, proven) in std::mem::take(&mut self.chain.receipts) {
+            // Its own sent transaction, looked up while reading blocks, stands until the reading
+            // reaches it and takes over: included, whatever the block's finality, and not final.
+            if self.settings.read_blocks {
+                if self.settings.checked.get(&tx).is_none_or(|known| known.came != Origin::Read) {
+                    self.settings.checked.insert(tx, Checked { genesis: genesis.clone(), final_: false, came: Origin::Looked, ..Checked::of(&proven) });
+                }
+
+                continue;
+            }
+
             self.settings.checked.insert(tx, Checked { genesis: genesis.clone(), ..Checked::of(&proven) });
+        }
+
+        // No node says what the coin is called while none is asked: what one last said for this chain,
+        // or else plain units, as a wrong number of decimals would misstate every amount.
+        if self.settings.read_blocks {
+            self.coin = self.settings.coins.get(&genesis).map_or(Coin { symbol: "units".to_string(), decimals: 0 }, |(symbol, decimals)| Coin { symbol: symbol.clone(), decimals: *decimals });
+        } else if !genesis.is_empty() && self.status_coin {
+            self.settings.coins.insert(genesis.clone(), (self.coin.symbol.clone(), self.coin.decimals));
+            self.status_coin = false;
         }
 
         // One kept before the chain was said is this chain's once its node mentions it.
@@ -736,8 +823,9 @@ impl Wallet {
             }
         }
 
-        // Too many kept: another chain's go first, then this one's oldest.
-        if self.settings.checked.len() > MAX_CHECKED {
+        // Too many kept: another chain's go first, then this one's oldest. What a wallet read from
+        // blocks has its own bound, in its index.
+        if !self.settings.read_blocks && self.settings.checked.len() > MAX_CHECKED {
             let rank = |checked: &Checked| (checked.genesis == genesis, checked.height);
             let mut ranks: Vec<(bool, u64)> = self.settings.checked.values().map(rank).collect();
             ranks.sort_unstable();
@@ -805,6 +893,16 @@ impl Wallet {
 
         if let Some(ask) = self.chain.next_ask(time) {
             self.node.ask(ask);
+        }
+
+        if self.settings.read_blocks {
+            if self.updates.due(time) {
+                self.node.ask(Ask::Release);
+            }
+
+            self.read_blocks(time);
+
+            return;
         }
 
         if self.asked_status.is_none_or(|asked| time - asked >= STATUS_EVERY) {
@@ -876,6 +974,65 @@ impl Wallet {
         }
     }
 
+    /// With Read from checked blocks on: takes what came of the blocks asked for, asks for more, and
+    /// the one lookup left, this wallet's own sent transactions. Only while it is unlocked, and only
+    /// once the light client has something to check them against. A chain with no finality has no
+    /// final blocks to read, which the setting's card says.
+    fn read_blocks(&mut self, time: f64) {
+        let wallet = self.settings.wallets.get(self.settings.wallet);
+        let (Some(client), Some(genesis), Some(vault), Some(wallet)) = (&self.chain.client, self.chain.genesis, &self.vault, wallet) else {
+            return;
+        };
+
+        if !matches!(self.lock, Lock::Open) || client.params().finality.is_none() || !self.chain.has_followed() {
+            return;
+        }
+
+        if wallet.id.is_empty() {
+            match crate::vault::fresh_name() {
+                Ok(id) => {
+                    if let Some(entry) = self.settings.wallets.get_mut(self.settings.wallet) {
+                        entry.id = id;
+                    }
+
+                    self.settings.persist_now = true;
+                }
+                Err(why) => log::warn!("{why}"),
+            }
+
+            return;
+        }
+
+        let addresses: Vec<Address> = self.holders.iter().flat_map(Holder::addresses).collect();
+        let wanted = Wanted { wallet: &wallet.id, genesis: &genesis.to_string(), vault_key: vault.key(), addresses, born: wallet.born };
+
+        for (asked, came) in self.node.ranges() {
+            self.reading.came(asked, came, client, time);
+        }
+
+        let go = self.reading.go(wanted, client, time);
+
+        for ask in go.proofs {
+            self.node.ask(ask);
+        }
+
+        if let Some(asked) = go.range {
+            self.node.read_range(asked);
+        }
+
+        let hash = client.params().hash;
+        self.reading.show(hash, &mut self.chain, &mut self.settings.checked);
+
+        if time - self.asked_history >= HISTORY_EVERY {
+            self.asked_history = time;
+            let unknown: Vec<String> = self.settings.sent.iter().filter(|sent| !self.settings.checked.contains_key(&sent.id)).map(|sent| sent.id.clone()).take(40).collect();
+
+            for tx in unknown {
+                self.node.ask(Ask::SentReceipt(tx));
+            }
+        }
+    }
+
     /// Tells the browser extension what the wallet is, for the sites it answers, and takes what
     /// they ask, once the wallet is open. Nothing outside the extension.
     fn sites(&mut self) {
@@ -888,7 +1045,15 @@ impl Wallet {
         let chain = self.chain.genesis.map(|genesis| chainv4::crypto::ethereum::chain_id(&genesis));
         crate::dapp::report(&crate::dapp::state(&self.settings.node, chain, &accounts, unlocked));
 
-        if unlocked {
+        // What a site asks of the chain goes through the node, which is not asked with this on: each
+        // is answered so at once, for the site to say.
+        if unlocked && self.settings.read_blocks {
+            for request in crate::dapp::pending() {
+                if let Some(id) = request["id"].as_u64() {
+                    crate::dapp::answer(id, Err((4200, format!("the wallet says {}", crate::node::NEEDS_ASKING))));
+                }
+            }
+        } else if unlocked {
             self.views.dapp.take(crate::dapp::pending());
         }
     }
@@ -989,6 +1154,13 @@ impl Wallet {
             // nothing written: opened without an account, the next save would delete that account.
             match keys::open(&book) {
                 Ok(holders) => {
+                    // A wallet made here has nothing before now to read.
+                    if std::mem::take(&mut self.settings.just_made)
+                        && let Some(entry) = self.settings.wallets.get_mut(self.settings.wallet)
+                    {
+                        entry.born = Some(self.chain.following().map_or(u64::MAX, |(tip, _)| tip));
+                    }
+
                     self.holders = holders;
                     self.book = book;
                     self.vault = Some(vault);
@@ -1284,6 +1456,20 @@ impl eframe::App for Wallet {
             self.views.mining.keep_mining(ui.ctx(), &self.settings, &addresses, now);
         }
 
+        if std::mem::take(&mut self.settings.forget_reading) {
+            self.reading.forget(&mut self.chain, &mut self.settings.checked);
+        }
+
+        for id in std::mem::take(&mut self.settings.forget_indexes).into_iter().filter(|id| !id.is_empty()) {
+            self.reading.forget_wallet(&id);
+        }
+
+        if let Some(why) = self.reading.keeping_trouble().filter(|why| !self.storage_trouble.contains(why)) {
+            self.storage_trouble.push(why);
+        }
+
+        self.storage_trouble.extend(std::mem::take(&mut self.reading.said));
+
         self.go_back(ui);
         let narrow = ui.available_width() < NARROW;
         let bar = chainv4_ui::widgets::bar_frame(&palette);
@@ -1368,6 +1554,7 @@ impl eframe::App for Wallet {
                             book: &mut self.book,
                             coin: &self.coin,
                             settings: &mut self.settings,
+                            reading: &mut self.reading,
                             now,
                             page: &mut self.page,
                             connect: &mut connect,
@@ -1435,6 +1622,8 @@ impl eframe::App for Wallet {
         if let Some((genesis, state)) = self.chain.saved(true) {
             self.settings.light.insert(genesis, state);
         }
+
+        self.reading.save(self.active);
 
         #[cfg(not(target_arch = "wasm32"))]
         match &mut self.store {
@@ -1570,6 +1759,7 @@ mod tests {
             current: "ed25519:0x01".to_string(),
             biometric: None,
             unprotected: false,
+            born: None,
         }]);
         assert_eq!((settings.wallet, settings.current(), settings.lock_after), (0, "ed25519:0x01", 5));
 
@@ -1592,6 +1782,7 @@ mod tests {
             current: String::new(),
             biometric: None,
             unprotected: false,
+            born: None,
         };
 
         assert!(serde_json::to_value(&entry).unwrap().get("biometric").is_none(), "an entry from before reads the same");

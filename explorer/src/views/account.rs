@@ -51,6 +51,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
 
     let look = ctx.look;
     let store = ctx.store;
+    let reading = ctx.settings.read_blocks;
+
+    if reading {
+        reading_page(ui, ctx, address, state);
+
+        return;
+    }
 
     if !store.accounts.contains_key(address) {
         ctx.api.ask(Ask::Account(address.to_string()));
@@ -282,6 +289,56 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
     super::section(ui, look, "Events that mention it", |ui| events::list(ui, ctx, &EventQuery::mentioning(address)));
 }
 
+/// With Read from checked blocks on: nothing is asked of a node by opening an address. What touched it
+/// comes from what was read, its balance and nonce from a direct proof someone pressed for, with the
+/// block it was proven at, and what only a node can say is off and says so.
+fn reading_page(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState) {
+    let look = ctx.look;
+    let kind = address.split(':').next().unwrap_or_default();
+
+    super::heading(ui, look, "Account", "", |ui| {
+        widgets::pill(ui, kind, look.palette.soft);
+    });
+    super::copyable(ui, address);
+    ui.add_space(10.0);
+
+    super::section(ui, look, "Balance", |ui| {
+        let Ok(parsed) = address.parse::<Address>() else {
+            ui.colored_label(look.palette.bad, format!("{address} is not an address"));
+
+            return;
+        };
+        let key = chainv4::db::address_key(&parsed);
+        let Some(proven) = super::reading::direct_proof(ui, ctx, "this account", chainv4::db::Column::Accounts, &key) else {
+            return;
+        };
+        let account: Option<chainv4::structs::account::Account> = match &proven.value {
+            Some(bytes) => wincode::deserialize(bytes).ok(),
+            None => Some(chainv4::structs::account::Account::default()),
+        };
+
+        match account {
+            Some(account) => {
+                widgets::fitted(ui, &ctx.coins(&account.balance.to_string()), 24.0, 14.0, egui::FontFamily::Monospace, look.palette.ink).on_hover_text(format!("{} units", account.balance));
+                ui.label(RichText::new(format!("nonce {}: transactions sent so far, and the nonce the next one takes", account.nonce)).small().color(look.palette.muted));
+                super::reading::proven_at(ui, ctx, &proven);
+            }
+            None => {
+                ui.colored_label(look.palette.bad, "An account that does not read");
+            }
+        }
+    });
+
+    super::section(ui, look, "Transactions", |ui| transactions(ui, ctx, address, &mut state.filter));
+    super::section(ui, look, "Events that mention it", |ui| events::list(ui, ctx, &EventQuery::mentioning(address)));
+
+    if address.starts_with("contract:") || address.starts_with("evm:") {
+        super::section(ui, look, "Its events", |ui| events::list(ui, ctx, &EventQuery::contract(address, None)));
+    }
+
+    super::reading::turned_off_card(ui, ctx, "A contract's code and functions, what an account holds of tokens and NFTs, and its names come from the node");
+}
+
 /// An EVM contract's ABI, kept here once pasted, and its read functions, run with eth_call: what
 /// they return, read by the ABI.
 fn evm(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState) {
@@ -490,7 +547,10 @@ fn transactions(ui: &mut Ui, ctx: &mut Ctx, address: &str, filter: &mut TxFilter
         super::note(
             ui,
             look,
-            format!("None since height {}, where this node's index starts.{still}", format::thousands(&found.indexed_from.to_string())),
+            match ctx.settings.read_blocks {
+                true => format!("None in the blocks read, which go back to height {}.{still} Read further back in Settings to look at older ones.", format::thousands(&found.indexed_from.to_string())),
+                false => format!("None since height {}, where this node's index starts.{still}", format::thousands(&found.indexed_from.to_string())),
+            },
         );
 
         return;

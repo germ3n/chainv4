@@ -18,7 +18,7 @@ use {
     super::{Ctx, decoded},
     crate::app::{Role, Sent},
     crate::format,
-    crate::history::{Checked, KeptCall, KeptLog, Move, with_evm_forms},
+    crate::history::{Checked, KeptCall, KeptLog, Move, Origin, with_evm_forms},
     crate::node::Ask,
     crate::theme,
     chainv4::structs::address::Address,
@@ -137,7 +137,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
     let palette = *ctx.palette;
     theme::title(ui, &palette, "Activity", "Everything this account sent, and everything that touched its addresses, as the light client proved it.");
 
+    let reading = ctx.settings.read_blocks;
     let note = match (ctx.chain.indexes_addresses, ctx.chain.indexes_events) {
+        // Nothing asks a node's indexes, with this on: what shows came from the blocks read.
+        _ if reading => None,
         (Some(false), Some(false)) => Some("This node keeps no address index, nor an event index: only what this wallet sent shows. Start it with --index-addresses."),
         (Some(false), _) => Some("This node keeps no address index, so coins sent here show in the balance but not below. Start it with --index-addresses."),
         _ => None,
@@ -145,6 +148,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
 
     if let Some(note) = note {
         ui.add(egui::Label::new(chainv4_ui::widgets::flagged(ui, note, egui::TextStyle::Body, palette.warn)).wrap());
+        ui.add_space(10.0);
+    }
+
+    if reading {
+        let known = ctx.reading.standing().map_or_else(|| "Reading checked blocks has not started yet: nothing shows until it has.".to_string(), |standing| format!("From checked blocks only: this wallet knows from block {}, and shows nothing older. Settings reads further back.", format::thousands(&standing.known_from.to_string())));
+
+        ui.add(egui::Label::new(RichText::new(known).small().color(palette.soft)).wrap());
         ui.add_space(10.0);
     }
 
@@ -165,7 +175,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
     let query = (state.filter.on() > 0 && problem.is_none()).then(|| state.filter.query(ctx.now));
     let under = query.as_ref().map(|query| listed(ctx.chain, &addresses, query));
 
-    if let Some(query) = &query {
+    if let Some(query) = query.as_ref().filter(|_| !reading) {
         ask_filtered(ctx, state, &addresses, query, under.as_ref());
     }
 
@@ -174,6 +184,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
         Some(listed) => entries_under(ctx, &parties, listed, &state.filter),
     };
     entries.retain(|entry| entry.is(state.kind) && (entry.matches(&state.search) || reads_as(ctx, entry, &state.search)));
+
+    // Reading blocks, what was proven before is older than what it knows, or was asked of a node: it
+    // shows no history but what it read, and what this wallet sent and looked up.
+    if reading {
+        entries.retain(|entry| entry.sent.is_some() || entry.checked.is_some_and(|checked| checked.came != Origin::Proven));
+    }
 
     if state.oldest_first {
         entries.reverse();
@@ -186,7 +202,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
 
     theme::card(ui, &palette, |ui| {
         if entries.is_empty() {
-            let looking = under.as_ref().is_some_and(|listed| !listed.read);
+            let looking = !reading && under.as_ref().is_some_and(|listed| !listed.read);
             ui.label(RichText::new(match (state.kind, state.search.trim().is_empty(), ctx.chain.has_followed(), query.is_some()) {
                 _ if looking => "Asking the node…",
                 (_, _, _, true) => "Nothing matches.",
@@ -210,13 +226,16 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
     // Only what these lines show is asked about, and only by an online wallet that knows its chain:
     // an offline signer has no such page, and nothing to send a question by if it had.
     if ctx.settings.role == Some(Role::Online)
+        && !reading
         && let Some(genesis) = &genesis
         && let Some(ask) = state.unlisted.next(genesis, &wanted, ctx.now)
     {
         ctx.node.ask(ask);
     }
 
-    if let (Some(query), Some(listed)) = (&query, &under) {
+    if let (Some(query), Some(listed)) = (&query, &under)
+        && !reading
+    {
         further(ui, ctx, query, listed, state.filter.on(), shown);
     }
 }
@@ -251,7 +270,7 @@ fn entries_under<'a>(ctx: &'a Ctx, addresses: &[String], listed: &Listed, filter
     let mut seen = HashSet::new();
     let mut found = Vec::new();
 
-    if listed.answered.filtered && ctx.chain.indexes_addresses != Some(false) {
+    if !ctx.settings.read_blocks && listed.answered.filtered && ctx.chain.indexes_addresses != Some(false) {
         for (tx, height) in &listed.mentions {
             if seen.insert(tx.clone()) {
                 found.push(Entry { tx: tx.clone(), checked: ctx.settings.checked.get(tx), sent: None, height: Some(*height) });
@@ -657,6 +676,7 @@ fn status(ctx: &Ctx, entry: &Entry) -> (&'static str, egui::Color32) {
     match (entry.checked, entry.sent) {
         (Some(checked), _) if !checked.done => ("Failed", palette.bad),
         (Some(checked), _) if checked.final_ => ("Final", palette.good),
+        (Some(checked), _) if checked.came == Origin::Looked => ("Included, not final", palette.accent),
         (Some(_), _) => ("Proven", palette.accent),
         (None, _) if ctx.chain.refused.contains_key(&entry.tx) => ("Does not check", palette.bad),
         (None, Some(sent)) if ctx.now.saturating_sub(sent.at) > UNSEEN_AFTER => ("Not seen", palette.warn),
@@ -776,6 +796,7 @@ mod tests {
             call: None,
             logs: Vec::new(),
             steps: Vec::new(),
+            came: Default::default(),
         }
     }
 
@@ -807,7 +828,9 @@ mod tests {
         settings.contracts = contracts;
 
         let palette = theme::DARK;
+        let mut reading = crate::reading::Reading::default();
         let mut ctx = Ctx {
+            reading: &mut reading,
             palette: &palette,
             chain,
             reader: &reader,

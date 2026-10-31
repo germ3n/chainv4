@@ -59,6 +59,12 @@ enum Step {
     Idle,
     /// Asked for the sender's nonce.
     Nonce { tx: Tx },
+    /// With Read from checked blocks on: pressed to send, so a direct proof of the sender's account
+    /// was asked for, for its nonce.
+    Proving { tx: Tx },
+    /// With Read from checked blocks on: priced from checked blocks, to be seen before it goes, as
+    /// nothing tries it first. Whether a block showed the gas, and the block the nonce is as of.
+    Review { tx: Tx, nonce: u64, fee: FeeOffer, seen: bool, at: u64 },
     /// Asked the node for an offer.
     Offer { tx: Tx, nonce: u64, ask: Ask },
     /// Priced, but a dry run on the node says it would fail: sent only if asked again.
@@ -95,6 +101,9 @@ pub struct SendState {
     max_price: String,
     tip: String,
     step: Step,
+    /// The next nonce after what was sent from here, by sender: what a proof at a final block has not
+    /// reached yet.
+    sent_nonce: Option<(String, u64)>,
 }
 
 impl Default for SendState {
@@ -118,6 +127,7 @@ impl Default for SendState {
             max_price: String::new(),
             tip: String::new(),
             step: Step::Idle,
+            sent_nonce: None,
         }
     }
 }
@@ -137,6 +147,18 @@ impl SendState {
             return;
         };
         let sender = key.public().address().to_string();
+
+        // What a nonce sent from here goes on from, for a final block to catch up with.
+        if let (Step::Submit { ask: asked }, Ok(_), Ask::Submit(body)) = (&self.step, result, ask)
+            && asked == ask
+        {
+            let sent = serde_json::from_str::<Value>(body).ok().and_then(|body| from_hex(body["tx"].as_str()?)).and_then(|bytes| wincode::deserialize::<SignedTx>(&bytes).ok());
+
+            if let Some(sent) = sent {
+                self.sent_nonce = Some((sender.clone(), sent.nonce + 1));
+            }
+        }
+
         let step = std::mem::replace(&mut self.step, Step::Idle);
 
         self.step = match (step, ask, result) {
@@ -204,6 +226,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     let palette = look.palette;
     take_picked(state);
     super::heading(ui, look, "Send", "Sign a transaction here and send it to the node: the key never leaves this app.", |_| {});
+    let reading = ctx.settings.read_blocks;
+
+    if reading {
+        priced(ctx, state);
+    }
+
     super::section(ui, look, "Signing key", |ui| key(ui, ctx, state));
 
     let Some(key) = state.key.clone() else {
@@ -215,7 +243,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     super::section(ui, look, "Transaction", |ui| {
         ui.horizontal_wrapped(|ui| {
             for (kind, name) in [(Kind::Transfer, "Transfer"), (Kind::Call, "Call"), (Kind::Deploy, "Deploy"), (Kind::Burn, "Burn")] {
-                ui.selectable_value(&mut state.kind, kind, name);
+                // What a deploy uses cannot be known without trying it on the node.
+                if kind != Kind::Deploy || !reading {
+                    ui.selectable_value(&mut state.kind, kind, name);
+                }
             }
         });
         ui.add_space(6.0);
@@ -247,7 +278,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         }
 
         ui.add_space(4.0);
-        egui::CollapsingHeader::new(RichText::new("Fee: worked out by the node unless set").color(palette.soft)).show(ui, |ui| {
+        let fee_heading = match reading {
+            true => "Fee: suggested from checked blocks unless set",
+            false => "Fee: worked out by the node unless set",
+        };
+
+        egui::CollapsingHeader::new(RichText::new(fee_heading).color(palette.soft)).show(ui, |ui| {
             super::facts(ui, look, "fee", |facts| {
                 for (name, value, hint) in [
                     ("gas limit", &mut state.gas_limit, "auto"),
@@ -262,7 +298,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         });
 
         ui.add_space(8.0);
-        let busy = matches!(state.step, Step::Nonce { .. } | Step::Offer { .. } | Step::Submit { .. });
+        let busy = matches!(state.step, Step::Nonce { .. } | Step::Proving { .. } | Step::Offer { .. } | Step::Submit { .. });
 
         if widgets::primary(ui, &palette, "Sign and send", !busy).clicked() {
             state.bundle = match (state.kind, &state.wasm) {
@@ -270,18 +306,114 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
                 _ => None,
             };
 
-            match build(state, &key, decimals) {
-                Ok(tx) => {
+            match (build(state, &key, decimals), reading) {
+                (Ok(tx), true) => state.step = prove_nonce(ctx, &key, tx),
+                (Ok(tx), false) => {
                     ctx.api.ask(Ask::Account(key.public().address().to_string()));
                     state.step = Step::Nonce { tx };
                 }
-                Err(err) => state.step = Step::Failed(err),
+                (Err(err), _) => state.step = Step::Failed(err),
             }
         }
 
         ui.add_space(4.0);
         confirm(ui, ctx, state, &key);
+        review(ui, ctx, state, &key);
         outcome(ui, ctx, state);
+    });
+}
+
+/// Asks for a direct proof of the sender's account at the final block, for its nonce: what Read from
+/// checked blocks does in place of asking the node, and says so before it goes.
+fn prove_nonce(ctx: &mut Ctx, key: &Keypair, tx: Tx) -> Step {
+    let account = chainv4::db::address_key(&key.public().address());
+
+    match ctx.light.client().and_then(|client| ctx.reading.prove(chainv4::db::Column::Accounts, &account, client)) {
+        Some(ask) => {
+            ctx.api.retry(ask);
+
+            Step::Proving { tx }
+        }
+        None => Step::Failed("The light client has not reached a final block yet, so the nonce cannot be proven.".to_string()),
+    }
+}
+
+/// Moves on once the nonce is proven: the fee as checked blocks suggest it, unless set, for review.
+fn priced(ctx: &mut Ctx, state: &mut SendState) {
+    let (Step::Proving { .. }, Some(key)) = (&state.step, &state.key) else {
+        return;
+    };
+    let sender = key.public().address();
+    let account = chainv4::db::address_key(&sender);
+
+    if ctx.reading.proving(chainv4::db::Column::Accounts, &account) {
+        return;
+    }
+
+    let Step::Proving { tx } = std::mem::replace(&mut state.step, Step::Idle) else {
+        return;
+    };
+
+    state.step = match ctx.reading.proven(chainv4::db::Column::Accounts, &account).cloned() {
+        Some(Ok(proven)) => {
+            let held: Option<chainv4::structs::account::Account> = match &proven.value {
+                Some(bytes) => wincode::deserialize(bytes).ok(),
+                None => Some(chainv4::structs::account::Account::default()),
+            };
+
+            match (held, ctx.light.client()) {
+                (Some(held), Some(client)) => {
+                    let sent = state.sent_nonce.as_ref().filter(|(from, _)| *from == sender.to_string()).map_or(0, |(_, nonce)| *nonce);
+                    let tip = typed_units(&state.tip).unwrap_or(u256::ZERO);
+                    let (fee, seen) = ctx.reading.suggest(&tx, client.tip().base_price, tip);
+                    let fee = FeeOffer {
+                        gas_limit: state.gas_limit.trim().parse().unwrap_or(fee.gas_limit),
+                        max_price: typed_units(&state.max_price).unwrap_or(fee.max_price),
+                        tip: fee.tip,
+                    };
+
+                    Step::Review { tx, nonce: held.nonce.max(sent), fee, seen, at: proven.height }
+                }
+                _ => Step::Failed("An account that does not read.".to_string()),
+            }
+        }
+        Some(Err(why)) => Step::Failed(why),
+        None => Step::Failed("The node gave no proof of the sender's account.".to_string()),
+    };
+}
+
+/// Units typed for a fee, as written, if they read.
+fn typed_units(text: &str) -> Option<u256> {
+    u256::from_str_radix(&text.trim().replace(',', ""), 10).ok().filter(|_| !text.trim().is_empty())
+}
+
+/// What goes out with Read from checked blocks on, to be seen first, as no node tries it.
+fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, key: &Keypair) {
+    let palette = ctx.look.palette;
+    let Step::Review { nonce, fee, seen, at, .. } = &state.step else {
+        return;
+    };
+    let gas = match seen {
+        true => "what the same kind of transaction used lately in checked blocks, a quarter more",
+        false => "a round guess, as no checked block shows what this kind of transaction uses",
+    };
+
+    ui.add(egui::Label::new(RichText::new(format!(
+        "Nonce {nonce}, proven at final block {}: the node saw this account, and a transaction since that block is not counted unless sent from here. Up to {} gas, {gas}, at up to {} units. Nothing tries it first, so a call that would fail still costs its fee.",
+        format::thousands(&at.to_string()),
+        format::thousands(&fee.gas_limit.to_string()),
+        format::thousands(&fee.max_price.to_string()),
+    )).color(palette.soft)).wrap());
+    ui.horizontal_wrapped(|ui| {
+        if widgets::primary(ui, &palette, "Send", true).clicked()
+            && let Step::Review { tx, nonce, fee, .. } = std::mem::replace(&mut state.step, Step::Idle)
+        {
+            state.step = submit(ctx.api, key, tx, nonce, fee);
+        }
+
+        if widgets::quiet(ui, &palette, "Cancel").clicked() {
+            state.step = Step::Idle;
+        }
     });
 }
 
@@ -321,15 +453,19 @@ fn outcome(ui: &mut Ui, ctx: &mut Ctx, state: &SendState) {
     let palette = ctx.look.palette;
 
     match &state.step {
-        Step::Idle | Step::Confirm { .. } => {}
+        Step::Idle | Step::Confirm { .. } | Step::Review { .. } => {}
         Step::Nonce { .. } => progress(ui, "Asking for the sender's nonce…"),
+        Step::Proving { .. } => progress(ui, "Proving the sender's account at the final block: the node sees which…"),
         Step::Offer { .. } => progress(ui, "Asking the node for a fee offer…"),
         Step::Submit { .. } => progress(ui, "Submitting…"),
         Step::Waiting { id } => {
             let id = id.clone();
             ui.horizontal_wrapped(|ui| {
                 ui.spinner();
-                ui.label("Taken by the node, waiting for a block:");
+                ui.label(match ctx.settings.read_blocks {
+                    true => "Taken by the node, waiting for a final block read here:",
+                    false => "Taken by the node, waiting for a block:",
+                });
                 super::tx(ui, ctx, &id);
             });
         }
@@ -410,6 +546,7 @@ fn key(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
             });
 
             match ctx.store.accounts.get(&address) {
+                _ if ctx.settings.read_blocks => super::note(ui, look, "Sending takes a direct proof of this account, for its nonce: the node sees which. Nothing is asked until you send."),
                 Some(account) => super::note(ui, look, format!("Holding {}, next nonce {}.", ctx.coins(&account.balance), account.nonce)),
                 None => ctx.api.ask(Ask::Account(address.clone())),
             }
@@ -734,7 +871,84 @@ fn take_picked(state: &mut SendState) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        crate::light::Light,
+        crate::reading::{ProvenValue, Reading},
+        crate::reading::tests::{SCREENS, drawn_in},
+        crate::store::Store,
+        chainv4::db::{Column, address_key},
+    };
+
+    /// A state with a key, about to send a transfer, as Sign and send left it with the proof asked for.
+    fn proving(key: &Keypair) -> SendState {
+        let tx = Tx::Transfer { from: key.public().address(), to: key.public().address(), amount: Amount::U128(5) };
+
+        SendState { key: Some(key.clone()), key_name: "a key".to_string(), step: Step::Proving { tx }, ..SendState::default() }
+    }
+
+    fn proven_nonce(reading: &mut Reading, key: &Keypair, nonce: u64) {
+        let account = chainv4::structs::account::Account { nonce, balance: u256::from(900u64) };
+
+        reading.has_proven(Column::Accounts, &address_key(&key.public().address()), ProvenValue { value: Some(wincode::serialize(&account).unwrap()), height: 40, block: "0x40".to_string() });
+    }
+
+    #[test]
+    fn with_the_setting_on_it_goes_on_a_proven_nonce_and_a_fee_from_blocks_says_so_and_fits_a_phone_either_way() {
+        let key = Keypair::from_seed([4; 32]);
+
+        for size in SCREENS {
+            let mut reading = Reading::default();
+            let client = crate::app::tests::following_client();
+            let genesis = client.sealed_at(0).unwrap().id().to_string();
+
+            assert!(reading.open(&genesis, client.params().hash, &client, 0.0));
+            proven_nonce(&mut reading, &key, 3);
+
+            let mut state = proving(&key);
+            let mut light = Light::following_with(client);
+            let (width, _, _) = drawn_in(&Store::default(), &mut reading, &mut light, size, true, |ui, ctx| show(ui, ctx, &mut state));
+            let (_, said, asked) = drawn_in(&Store::default(), &mut reading, &mut light, (size.0, 8_000.0), true, |ui, ctx| show(ui, ctx, &mut state));
+
+            assert!(width <= size.0, "{width} wide, on {size:?}");
+            assert!(said.contains("Nonce 3, proven at final block 40") && said.contains("the node saw this account") && said.contains("Nothing tries it first") && said.contains("still costs its fee"), "{said}");
+            assert!(matches!(state.step, Step::Review { nonce: 3, at: 40, .. }));
+            assert!(!asked.iter().any(|ask| matches!(ask, Ask::Account(_) | Ask::Offer(_))), "no node is asked: {asked:?}");
+        }
+    }
+
+    #[test]
+    fn a_nonce_sent_from_here_is_counted_though_no_final_block_shows_it_yet() {
+        let key = Keypair::from_seed([4; 32]);
+        let mut reading = Reading::default();
+        let client = crate::app::tests::following_client();
+        let genesis = client.sealed_at(0).unwrap().id().to_string();
+
+        assert!(reading.open(&genesis, client.params().hash, &client, 0.0));
+        proven_nonce(&mut reading, &key, 3);
+
+        let mut state = proving(&key);
+        state.sent_nonce = Some((key.public().address().to_string(), 7));
+        let mut light = Light::following_with(client);
+        drawn_in(&Store::default(), &mut reading, &mut light, (1200.0, 800.0), true, |ui, ctx| show(ui, ctx, &mut state));
+
+        assert!(matches!(state.step, Step::Review { nonce: 7, .. }));
+    }
+
+    #[test]
+    fn with_the_setting_on_a_deploy_is_not_offered_as_it_needs_a_dry_run() {
+        let key = Keypair::from_seed([4; 32]);
+        let mut state = SendState { key: Some(key), ..SendState::default() };
+        let (_, said, _) = drawn_in(&Store::default(), &mut Reading::default(), &mut Light::default(), (1200.0, 800.0), true, |ui, ctx| show(ui, ctx, &mut state));
+
+        assert!(!said.contains("Deploy") && said.contains("suggested from checked blocks"), "{said}");
+
+        let mut state = SendState { key: Some(Keypair::from_seed([4; 32])), ..SendState::default() };
+        let (_, said, asked) = drawn_in(&Store::default(), &mut Reading::default(), &mut Light::default(), (1200.0, 800.0), false, |ui, ctx| show(ui, ctx, &mut state));
+
+        assert!(said.contains("Deploy") && said.contains("worked out by the node"), "{said}");
+        assert!(asked.iter().any(|ask| matches!(ask, Ask::Account(_))), "with it off, as it always did: {asked:?}");
+    }
 
     #[test]
     fn forms_become_the_transactions_they_describe() {

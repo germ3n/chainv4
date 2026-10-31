@@ -95,6 +95,9 @@ pub struct Answer {
     pub status: u16,
     pub status_text: String,
     pub bytes: Vec<u8>,
+    /// How many seconds it says to wait before asking again, in Retry-After: a browser hides this
+    /// from a page on another origin unless the node exposes it, so it may well be missing.
+    pub retry_after: Option<u64>,
 }
 
 /// A part of a stream: its head first, then its body as it comes, an empty chunk when it ends.
@@ -103,6 +106,12 @@ pub enum Piece {
     Head { ok: bool, status: u16, status_text: String },
     Chunk(Vec<u8>),
 }
+
+/// What a request kept in by Read from checked blocks is answered with. The status is what no node
+/// sends for any other reason, and no trouble on the way, so nothing offers to ask again.
+pub const NEEDS_ASKING_STATUS: u16 = 451;
+/// What it says: the words every page turned off by that setting goes by.
+pub const NEEDS_ASKING: &str = "this needs asking the node, and Read from checked blocks is on";
 
 /// Why a request got no answer an app could use.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -293,6 +302,7 @@ mod native {
         };
         let mut response = sent.map_err(|err| failed(proxy, limits, err))?;
         let status = response.status();
+        let retry_after = response.headers().get("retry-after").and_then(|value| value.to_str().ok()).and_then(|value| value.trim().parse().ok());
         let bytes = response
             .body_mut()
             .with_config()
@@ -305,6 +315,7 @@ mod native {
             status: status.as_u16(),
             status_text: status.canonical_reason().unwrap_or_default().to_string(),
             bytes,
+            retry_after,
         })
     }
 
@@ -393,6 +404,7 @@ mod web {
                 done(response.map(|response| Answer {
                     ok: response.ok,
                     status: response.status,
+                    retry_after: response.headers.get("retry-after").and_then(|value| value.trim().parse().ok()),
                     status_text: response.status_text,
                     bytes: response.bytes,
                 }));

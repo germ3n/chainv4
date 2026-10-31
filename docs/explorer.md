@@ -123,6 +123,115 @@ or the top bar in a narrow window. Either asks again for what the page asked sin
 and for the node's status, spins while it works, and leaves what shows until the answers come. The
 block map's drags pan it, so it has no pull: its header's button does it on a wide screen.
 
+## Read from checked blocks
+
+Settings → **Read from checked blocks** has the explorer take what it shows from final blocks it
+fetched and checked itself, rather than ask the node, so what it shows rests on those blocks and the
+node learns less of what you look at. It is off by default, as reading blocks costs far more than
+asking, and with it off nothing here happens at all. It is for the install rather than for a node:
+changing the node never quietly starts asking it about everything. It works alike on the desktop, on
+phones and in the browser. The [wallet's](wallet.md#read-from-checked-blocks) is the same setting, on the
+same code.
+
+It is strict: **what cannot be proven this way is turned off and says why**, rather than shown with a
+label. The refusal is in the one way out to the node, `Api`, with every request named in `Ask::route`,
+so a request from a path nobody thought of does not leave, and a new one does not build until someone
+decides.
+
+**What it does:**
+- **It reads final blocks only,** from [`GET /blocks/range`](api.md#get-blocksrangefromhcountnentrye),
+  each against what the light client checked, so nothing it read can be undone. So the newest few
+  blocks do not show, nor side branches.
+- **It starts at the final block,** and reads on from there, which keeps nothing older and pays for
+  nothing older. Settings reads further back to a height you give, at any time: what it read stands, and
+  it shows from what block it knows. Newest comes first, and older blocks are checked by their hash links
+  up to one the light client checked.
+- **Pages read what it read:** the Overview, the block map and pages of blocks, a block, a transaction,
+  an address's transactions, events, and search, with the filters on an address's transactions. They ask
+  as ever, and the index answers in the node's place, in the node's form. What was not read says so,
+  with the way to read further back.
+- **A block by itself.** A block's page for a height outside what was read can fetch that block alone,
+  which says that the node sees which. It is checked against the light client's header, shown for now
+  and not counted as read. With no header at that height, it says to read further back instead.
+- **A direct proof, when pressed for.** An account's balance and nonce, a name's record, a token's record
+  and the coin's supply each have a press that asks for a proof at the final block, saying the node sees
+  what it is of, and each shows the block it was proven at. Nothing is asked by opening a page, and a
+  search for an address goes nowhere near a node.
+- **Sending** proves the sender's account at the final block for its nonce, and counts what it sent
+  itself since; `POST /offer` is off, so the fee is suggested as the wallet suggests one, from what the same
+  kind of transaction used lately in checked blocks, a quarter more, or a round guess that says it is one,
+  and twice the newest checked header's base price, or what was seen paid if more. Both can be changed.
+  Nothing tries it first, so it shows them before it goes, and a call that would fail still costs its fee.
+  A deploy is not offered, as it needs a dry run. What was sent shows as landed once a final block read
+  here holds it.
+- **The stream only wakes it.** `/stream` says when to follow the chain; nothing it says of a block or a
+  transaction is taken.
+
+**What each page is, with it on:**
+
+| Page | With it on |
+| --- | --- |
+| Overview, Block map | From what was read, up to the newest final block read, with where the reading stands. No peers, mempool or live feed |
+| Block | From what was read, or that one block fetched by itself. No reward, which no header says |
+| Transaction, Hops | From what was read: what it did, its events and payments. Not why it failed, nor its hops, which no block commits to |
+| Account | Transactions and events from what was read; balance and nonce by a direct proof. No contract's code, holdings or names |
+| Events, Decoded | From what was read, read by the ABIs that ship with the app, and any pasted; what a contract would say of itself through a call is off |
+| Finality | What the light client checked. Voters, signers and evidence are off |
+| Names, Name | One name's record by a direct proof. The directory, prices and what a name resolves to once expired are off |
+| Tokens | One token's record by a direct proof. The registry's list is off |
+| Rich list & supply | Minted and burned by a direct proof. The rich list and what is staked are off |
+| Send | As above |
+| Tools | Decode, Find events (from what was read), Convert, Hash & verify, and a pasted proof work. Fetching a proof is off |
+| Update, Settings | As ever: a release is checked against the keys built in |
+| Mempool, Network, NFTs, DEX, Swaps, Bridges, Multisig, Governance, Mining pool, Faucet | Off, each saying why |
+
+**The index.** It keeps each block but for its state entries and their proofs, which are most of what a
+block weighs and which nothing here reads: its header and seal, its transactions and receipts, with their
+events and payments, and its finality proofs. An empty block costs about 2 KB to download and about 400
+bytes to keep. So what it keeps is what the common pages need, and all that
+recomputes a block's roots, so what is read back from a device is checked again just as a node's answer
+is.
+
+- **It is bounded:** 128 MB on a desktop, about 18 days of the devnet's empty blocks, and 32 MB on a phone or in
+  a browser, about 4. Transactions weigh what they weigh, a deploy's code among them. Past the cap the
+  oldest blocks go, 1,024 heights at a time, and the height it knows from moves up to say so. It is all
+  in memory while the app is open. With no room left, reading further back says so.
+- **It is on the device, private to the app,** in `explorer-index` in the app's folder, written a bucket of
+  1,024 heights at a time as those change, and in IndexedDB in a browser, as localStorage holds about 5 MB.
+  **It is not sealed,** as the explorer has no vault: it holds no secrets, and the setting says so.
+  It lists blocks, not what was looked at: searches, pressed proofs and blocks fetched by themselves
+  are kept nowhere, though what height it reads from shows.
+- **Losing it costs a rescan.** A part that does not read or check is set aside as
+  `….unreadable-…`, what is older goes, and it knows from what is left; with nothing left it starts again.
+  The app says so.
+
+**What it costs:** about 2 KB an empty block, so 34 MB a day on the devnet at 17,280 blocks a day, only
+while the app is open, plus catching up on what was missed. The light client walks every header each time
+the app opens, as fast resume and a node's own checkpoint are off, unless a checkpoint was pasted. Settings
+shows what was downloaded and kept, and how far it has read.
+
+**What it cannot do, in plain words:**
+- **A gap.** A block that comes without proofs counts as unknown, not unchanged. As nothing here follows
+  the state from them, that leaves nothing out of date: what shows of the state is a direct proof,
+  with its block. A direct proof of a block nodes have pruned fails, and only the final block is asked.
+- **Something left out.** A node can leave a state entry out of a block's list without being caught, and
+  nothing here reads those lists. Receipts cannot be left out: they recompute `receipts_root`.
+- **A block without its receipts,** or with its header alone, as a snapshot node has, is shown as what it is,
+  and counted in Settings.
+- **The coin's name.** Nothing the light client checks says it. It shows as a node last said on this
+  device, kept for each chain, or else amounts show as plain units, not guessed at.
+- **Privacy.** Reading ranges hides interest in transactions and state changes. A direct proof does not,
+  nor does a block fetched by itself, nor who is asking, for which the [proxy](#through-a-proxy) remains.
+  Sending goes through a node by nature.
+- **Node-served pages.** A page that came from a server can be replaced by that server: if the page comes
+  from the node, the node could serve code faking these checks, and the setting says so there. The desktop
+  and phone apps do not have this hole.
+- **A chain with no finality** has no final blocks to read, and says so.
+
+**A node without the route.** An older node answers 400 for `/blocks/range`. The explorer says so, stops
+reading, and asks nothing else. An answer that does not check stops the reading the same way, keeps nothing
+of itself, and says what was wrong. 429 and 503 are waited out, as long as `Retry-After` says.
+
 ## The light client
 
 The explorer does not have to take the node's word for balances. It runs the library's
@@ -523,7 +632,9 @@ it cannot find; a deploy that lands and fails says where, in the files it came f
 ## What it remembers
 
 The node address, the proxy, dark or light, any token decimals set by hand, the nodes trusted for
-fast resume, and the genesis the light client pinned and the chain's name last seen for each node. It keeps them where eframe keeps app data: the platform's app-data directory
+fast resume, whether to read from checked blocks, the coin's name each chain's node last gave, and the
+genesis the light client pinned and the chain's name last seen for each node. What it read from
+checked blocks it keeps apart (see [Read from checked blocks](#read-from-checked-blocks)). It keeps them where eframe keeps app data: the platform's app-data directory
 on the desktop, the page's local storage in the browser, and `explorer.ron` in the app's data
 folder on Android.
 

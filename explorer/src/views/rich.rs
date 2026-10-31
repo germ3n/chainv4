@@ -126,6 +126,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     let store = ctx.store;
     super::heading(ui, look, "Rich list & supply", ABOUT, |_| {});
 
+    if ctx.settings.read_blocks {
+        reading_supply(ui, ctx);
+        super::reading::turned_off_card(ui, ctx, "Who holds the most, and what is staked, are listed by the node");
+
+        return;
+    }
+
     if store.supply.is_none() && store.failures.get(&Ask::Supply).is_none_or(|failure| failure.status != 404) {
         ctx.api.ask(Ask::Supply);
     }
@@ -172,6 +179,31 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
             },
         },
     );
+}
+
+/// With Read from checked blocks on: the supply by a direct proof someone pressed for, minted and
+/// burned being one state entry.
+fn reading_supply(ui: &mut Ui, ctx: &mut Ctx) {
+    let look = ctx.look;
+
+    super::section(ui, look, "Supply", |ui| {
+        let Some(proven) = super::reading::direct_proof(ui, ctx, "the coin's supply", Column::Validators, SUPPLY_KEY) else {
+            return;
+        };
+
+        super::reading::proven_at(ui, ctx, &proven);
+
+        match supply_of(proven.value.as_deref()) {
+            Ok(supply) => super::facts(ui, look, "supply", |facts| {
+                facts.text("minted", ctx.coins(&supply.minted.to_string()));
+                facts.text("burned", ctx.coins(&supply.burned.to_string()));
+                facts.text("supply", ctx.coins(&supply.minted.saturating_sub(supply.burned).to_string()));
+            }),
+            Err(why) => {
+                ui.colored_label(look.palette.bad, why);
+            }
+        }
+    });
 }
 
 /// The supply: what the node reports, and whether the light client proved it.

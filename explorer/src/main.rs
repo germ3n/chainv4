@@ -11,7 +11,8 @@ const DEFAULT_NODE: &str = chainv4_ui::PUBLIC_NODE;
 /// or to the public one; Settings names another.
 #[cfg(target_os = "ios")]
 fn main() -> eframe::Result {
-    chainv4_ui::ios::run("chainv4 explorer", "explorer.ron", |creation| explorer(creation, None, DEFAULT_NODE))
+    let folder = std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Library/Application Support"));
+    chainv4_ui::ios::run("chainv4 explorer", "explorer.ron", move |creation| explorer(creation, None, DEFAULT_NODE, folder))
 }
 
 /// Runs the desktop app: `explorer --node http://host:port`, or CHAINV4_NODE, or the node it
@@ -46,7 +47,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "chainv4 explorer",
         options,
-        Box::new(move |creation| Ok(explorer(creation, node, DEFAULT_NODE))),
+        Box::new(move |creation| Ok(explorer(creation, node, DEFAULT_NODE, eframe::storage_dir("chainv4 explorer")))),
     )
 }
 
@@ -84,7 +85,7 @@ fn main() {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(move |creation| Ok(explorer(creation, node, &origin))),
+                Box::new(move |creation| Ok(explorer(creation, node, &origin, None))),
             )
             .await;
 

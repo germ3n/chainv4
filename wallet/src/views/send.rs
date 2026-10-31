@@ -63,6 +63,9 @@ pub struct SendState {
     confirm_trouble: Option<String>,
     /// Whether what the node just took was a batch the Batch page built, so that page starts afresh.
     batch_sent: bool,
+    /// The gas limit and most per gas, in the coin's smallest units, as typed: what a transaction
+    /// offers with no node to ask, starting from what checked blocks suggest.
+    fee_typed: Option<(String, String, FeeOffer, bool)>,
 }
 
 /// A transaction another page made, such as registering a name: sent from one of the account's
@@ -181,7 +184,10 @@ impl SendState {
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     let palette = *ctx.palette;
-    theme::title(ui, &palette, "Send", "The wallet signs it from what it proved; the node only prices it and passes it on.");
+    theme::title(ui, &palette, "Send", match ctx.settings.read_blocks {
+        true => "The wallet signs it from what it read from checked blocks, and prices it from them; the node only passes it on.",
+        false => "The wallet signs it from what it proved; the node only prices it and passes it on.",
+    });
 
     if let Step::Review { draft, fee, warning } = &state.step {
         let (draft, fee, warning) = (draft.clone(), *fee, warning.clone());
@@ -294,6 +300,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
             Destination::Named { shown, resolved: None } => {
                 ui.label(RichText::new(format!("Proving what {shown} resolves to…")).small().color(palette.muted));
             }
+            Destination::NeedsAsking => {
+                ui.colored_label(palette.bad, format!("Not an address. Paying to a name: {}, so give the address.", crate::node::NEEDS_ASKING));
+            }
             Destination::Bad => {
                 ui.colored_label(palette.bad, "Not an address or a name: an address starts with its kind, such as ed25519:0x and 32 bytes of hex, or is Ethereum's, 0x and 20 bytes; a name is such as alice.dev.");
             }
@@ -315,7 +324,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
         ui.add_space(10.0);
         egui::CollapsingHeader::new(RichText::new("Fee").color(palette.soft)).id_salt("fee").show(ui, |ui| {
-            ui.label(RichText::new("The node offers a fee sure to cover it now. A tip per gas, in the coin, asks producers to take it sooner.").small().color(palette.muted));
+            ui.label(RichText::new(match ctx.settings.read_blocks {
+                true => "The next step suggests a fee from checked blocks. A tip per gas, in the coin, asks producers to take it sooner.",
+                false => "The node offers a fee sure to cover it now. A tip per gas, in the coin, asks producers to take it sooner.",
+            }).small().color(palette.muted));
             ui.add(egui::TextEdit::singleline(&mut state.tip).hint_text("tip per gas, such as 0.000000001").desired_width(f32::INFINITY));
         });
 
@@ -328,15 +340,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
         ui.horizontal_wrapped(|ui| {
             if theme::primary(ui, &palette, "Review", !busy).clicked() {
-                state.step = match draft(ctx, state) {
-                    Ok((draft, body)) => {
-                        let ask = Ask::Offer(body);
-                        ctx.node.ask(ask.clone());
-
-                        Step::Pricing { draft, ask }
-                    }
-                    Err(why) => Step::Failed(why),
-                };
+                state.step = priced(ctx, state);
             }
 
             if busy {
@@ -345,6 +349,54 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
             }
         });
     });
+}
+
+/// What the Review button comes to: asking the node to price it, or, with Read from checked blocks on,
+/// what those blocks suggest, to change on the review, as no node is asked.
+fn priced(ctx: &mut Ctx, state: &mut SendState) -> Step {
+    let (draft, body) = match draft(ctx, state) {
+        Ok(drafted) => drafted,
+        Err(why) => return Step::Failed(why),
+    };
+
+    if ctx.settings.read_blocks {
+        return match offered_from_blocks(ctx, state, &draft) {
+            Ok(fee) => Step::Review { draft, fee, warning: None },
+            Err(why) => Step::Failed(why),
+        };
+    }
+
+    let ask = Ask::Offer(body);
+    ctx.node.ask(ask.clone());
+
+    Step::Pricing { draft, ask }
+}
+
+/// A fee offer with no node to ask, and notes it for the review to change: only for what can be
+/// priced from what blocks show. What the Name, Multisig or EVM pages prepare needs a node's dry run,
+/// which is what setting its gas limit takes.
+fn offered_from_blocks(ctx: &Ctx, state: &mut SendState, draft: &Draft) -> Result<FeeOffer, String> {
+    if !matches!(draft.tx, Tx::Transfer { .. } | Tx::ContractCall { .. }) {
+        return Err(format!("Pricing a transaction of this kind: {}.", crate::node::NEEDS_ASKING));
+    }
+
+    let client = ctx.chain.client.as_ref().ok_or("the light client has not started")?;
+    let tip = match state.tip.trim() {
+        "" => u256::ZERO,
+        typed => u256::from_str_radix(&format::parse_units(typed, ctx.coin.decimals).ok_or("the tip does not read as an amount of the coin")?, 10).map_err(|_| "the tip is too large".to_string())?,
+    };
+    let (fee, seen) = ctx.reading.suggest(&draft.tx, client.tip().base_price, tip);
+
+    state.fee_typed = Some((fee.gas_limit.to_string(), fee.max_price.to_string(), fee, seen));
+
+    Ok(fee)
+}
+
+/// The offer as typed on the review, or what was suggested until it reads.
+fn typed_offer(state: &SendState, fee: FeeOffer) -> Option<FeeOffer> {
+    let (gas, price, _, _) = state.fee_typed.as_ref()?;
+
+    Some(FeeOffer { gas_limit: gas.trim().parse().ok()?, max_price: u256::from_str_radix(price.trim(), 10).ok()?, tip: fee.tip })
 }
 
 /// An address to pay from, as the picker shows it: its scheme, cut short, and its coin.
@@ -414,15 +466,7 @@ fn prepared(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, busy: bool) {
 
         ui.horizontal_wrapped(|ui| {
             if theme::primary(ui, &palette, "Review", !busy).clicked() {
-                state.step = match draft(ctx, state) {
-                    Ok((draft, body)) => {
-                        let ask = Ask::Offer(body);
-                        ctx.node.ask(ask.clone());
-
-                        Step::Pricing { draft, ask }
-                    }
-                    Err(why) => Step::Failed(why),
-                };
+                state.step = priced(ctx, state);
             }
 
             if theme::quiet(ui, &palette, "Cancel").clicked() {
@@ -448,6 +492,8 @@ pub(super) enum Destination {
     Address(Address),
     /// A name, as shown with the suffix, and what was proven of it so far.
     Named { shown: String, resolved: Option<crate::chain::Resolved> },
+    /// What may be a name, with Read from checked blocks on: what it resolves to is asked of a node.
+    NeedsAsking,
     Bad,
 }
 
@@ -467,6 +513,7 @@ pub(super) fn destination(ctx: &Ctx, text: &str) -> Destination {
             shown: names.display(&names.strip(text)),
             resolved: ctx.chain.resolve(text),
         },
+        _ if ctx.settings.read_blocks && !text.contains(':') => Destination::NeedsAsking,
         _ => Destination::Bad,
     }
 }
@@ -518,7 +565,7 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
             (target, format!("{shown} · {target}"))
         }
         Destination::Named { shown, resolved: None } => return Err(format!("{shown} is not proven yet: wait a moment")),
-        Destination::Blank | Destination::Bad => return Err("the address to send to does not read".to_string()),
+        Destination::Blank | Destination::Bad | Destination::NeedsAsking => return Err("the address to send to does not read".to_string()),
     };
     let (balance, decimals, symbol) = available(ctx, state.token.as_deref(), &address);
     let units = format::parse_units(&state.amount, decimals).ok_or(format!("the amount does not read as {symbol}, with at most {decimals} decimals"))?;
@@ -586,7 +633,9 @@ fn finish(ctx: &Ctx, state: &SendState, from: Address, signer: PublicKey, tx: Tx
 /// What the transaction costs at most, and the button that signs and sends it.
 fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: FeeOffer, warning: Option<String>) {
     let palette = *ctx.palette;
-    let most = u256::from(fee.gas_limit) * fee.max_price;
+    // What Read from checked blocks suggested may be changed here, and the offer is what was typed.
+    let fee = if ctx.settings.read_blocks { typed_offer(state, fee).unwrap_or(fee) } else { fee };
+    let most = u256::from(fee.gas_limit).saturating_mul(fee.max_price);
     let balance = ctx.chain.account(&draft.from.to_string()).map(|proven| proven.value.balance);
     let short = balance.is_some_and(|balance| balance < draft.coin.saturating_add(most));
 
@@ -656,6 +705,10 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
             super::row(ui, &palette, "Tip per gas", |ui| {
                 ui.label(ctx.amount(None, &fee.tip.to_string()));
             });
+        }
+
+        if ctx.settings.read_blocks {
+            fee_fields(ui, ctx, state);
         }
 
         super::row(ui, &palette, "Nonce", |ui| {
@@ -874,6 +927,35 @@ fn ethereum(address: &Address) -> String {
     }
 }
 
+/// The fee's fields, with no node to ask: what checked blocks suggest, to change, and what that rests
+/// on. Nothing tries the transaction first.
+fn fee_fields(ui: &mut Ui, ctx: &Ctx, state: &mut SendState) {
+    let palette = *ctx.palette;
+    let Some((gas, price, suggested, seen)) = &mut state.fee_typed else {
+        return;
+    };
+
+    ui.add_space(6.0);
+    theme::caps(ui, &palette, "Gas limit");
+    ui.add(egui::TextEdit::singleline(gas).desired_width(f32::INFINITY));
+    theme::caps(ui, &palette, "Most per gas, in the coin's smallest units");
+    ui.add(egui::TextEdit::singleline(price).desired_width(f32::INFINITY));
+
+    let reads = gas.trim().parse::<u64>().is_ok() && u256::from_str_radix(price.trim(), 10).is_ok();
+
+    if !reads {
+        ui.colored_label(palette.bad, format!("Those do not read as whole numbers: offering what was suggested, {} gas at {}.", suggested.gas_limit, suggested.max_price));
+    }
+
+    let said = match seen {
+        true => "Suggested from checked blocks: what the same kind of transaction used lately and a quarter more, and twice the newest checked base price. What it does not use is refunded.",
+        false => "No checked block read so far shows what this kind of transaction uses, so the gas limit is a round guess, on the high side. What it does not use is refunded.",
+    };
+
+    ui.add(egui::Label::new(RichText::new(said).small().color(palette.muted)).wrap());
+    ui.add(egui::Label::new(RichText::new("Read from checked blocks is on, so no node tries this first: a call that would fail still uses its nonce and pays its fee.").small().color(palette.warn)).wrap());
+}
+
 /// What became of a transaction just sent.
 fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, id: &str) {
     let palette = *ctx.palette;
@@ -884,6 +966,7 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, id: &str) {
         let (text, color) = match ctx.settings.checked.get(id) {
             Some(checked) if !checked.done => ("It landed, and failed: it used its nonce and paid its fee.".to_string(), palette.bad),
             Some(checked) if checked.final_ => (format!("Final at block {}.", checked.height), palette.good),
+            Some(checked) if ctx.settings.read_blocks => (format!("Included in block {}, not final: the reading has not reached it yet.", checked.height), palette.accent),
             Some(checked) => (format!("Proven in block {}, not final yet.", checked.height), palette.accent),
             None => ("The node took it. Waiting for a block to hold it…".to_string(), palette.warn),
         };
@@ -990,6 +1073,57 @@ mod tests {
             assert!(top("Step 1 of 2") < top("Step 2 of 2"));
             assert!(top("Step 2 of 2") < top("Sign and send"));
         }
+    }
+
+    /// The review of a plain transfer, in a world with this setting, and what it said.
+    fn reviewing_a_transfer(reading: bool, size: (f32, f32)) -> (f32, String) {
+        use crate::views::drawn::{World, page_in, said_in, two_phrases};
+
+        let mut book = two_phrases();
+        let mut holders = crate::keys::open(&book).unwrap();
+        let from = holders[0].addresses()[0];
+        let signer = holders[0].public(&from).unwrap();
+        let tx = Tx::Transfer { from, to: from, amount: Amount::U128(1) };
+        let draft = Draft { from, signer, to: "to someone".to_string(), tx, nonce: 2, token: None, what: "1 DEV".to_string(), coin: u256::ONE };
+        let fee = FeeOffer { gas_limit: 26_250, max_price: u256::new(2_000), tip: u256::ZERO };
+        let world = || {
+            let mut world = World::default();
+            world.settings.read_blocks = reading;
+
+            world
+        };
+        let state = || SendState { fee_typed: reading.then(|| ("26250".to_string(), "2000".to_string(), fee, true)), ..SendState::default() };
+        let (mut one, mut other) = (state(), state());
+        let (width, _) = page_in(&mut world(), &mut book, &mut holders, size, |ui, ctx| review(ui, ctx, &mut one, draft.clone(), fee, None));
+        let said = said_in(&mut world(), &mut book, &mut holders, size, |ui, ctx| review(ui, ctx, &mut other, draft.clone(), fee, None));
+
+        (width, said)
+    }
+
+    #[test]
+    fn reading_blocks_the_review_offers_what_they_suggest_to_change_and_says_nothing_tried_it() {
+        for size in crate::views::drawn::SCREENS {
+            let (width, said) = reviewing_a_transfer(true, size);
+
+            assert!(width <= size.0, "{width} wide, on {size:?}");
+            assert!(said.contains("GAS LIMIT") && said.contains("MOST PER GAS"), "{said}");
+            assert!(said.contains("Suggested from checked blocks"), "{said}");
+            assert!(said.contains("no node tries this first"), "{said}");
+        }
+
+        let (_, off) = reviewing_a_transfer(false, (1200.0, 800.0));
+        assert!(!off.contains("GAS LIMIT") && !off.contains("checked blocks"), "with it off, as it always was: {off}");
+    }
+
+    #[test]
+    fn what_is_typed_for_a_fee_is_the_offer_and_what_does_not_read_is_not() {
+        let fee = FeeOffer { gas_limit: 100, max_price: u256::new(7), tip: u256::new(1) };
+        let state = |gas: &str, price: &str| SendState { fee_typed: Some((gas.to_string(), price.to_string(), fee, true)), ..SendState::default() };
+
+        assert_eq!(typed_offer(&state(" 500 ", "9"), fee), Some(FeeOffer { gas_limit: 500, max_price: u256::new(9), tip: u256::new(1) }));
+        assert_eq!(typed_offer(&state("lots", "9"), fee), None);
+        assert_eq!(typed_offer(&state("500", "-1"), fee), None);
+        assert_eq!(typed_offer(&SendState::default(), fee), None);
     }
 
     #[test]

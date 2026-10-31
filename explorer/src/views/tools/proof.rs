@@ -152,7 +152,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ProofState) {
             },
         );
 
-        if pressed {
+        // With Read from checked blocks on, nothing is fetched from here: a pasted proof still checks.
+        if pressed && ctx.settings.read_blocks {
+            state.trouble = Some(format!("Turned off: {}. A proof pasted here is still checked.", crate::api::NEEDS_ASKING));
+        } else if pressed {
             match ask_for(state.pick, &state.typed, &state.column, ctx.light.tip_block()) {
                 Ok(ask) => {
                     state.asked = entry_of(&ask);

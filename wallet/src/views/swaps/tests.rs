@@ -264,7 +264,7 @@ fn a_wallet_that_needs_biometrics_starts_no_swap_as_its_words_would_not_bring_th
     let mut holders = crate::keys::open(&book).unwrap();
     let secret = fresh_secret().unwrap();
     let vault = Vault::keyed(&secret).unwrap();
-    let entry = crate::app::WalletEntry { id: String::new(), name: "Mine".to_string(), vault: vault.seal(&Book::default()).unwrap(), current: String::new(), biometric: tagged(Guard::Biometric, &fake::keep(&secret)), unprotected: false };
+    let entry = crate::app::WalletEntry { id: String::new(), name: "Mine".to_string(), vault: vault.seal(&Book::default()).unwrap(), current: String::new(), biometric: tagged(Guard::Biometric, &fake::keep(&secret)), unprotected: false, born: None };
     let mut world = crate::views::drawn::World { settings: crate::app::Settings::with_wallets(vec![entry]), vault: Some(vault), ..crate::views::drawn::World::default() };
     let state = SwapsState::default();
     let mut said = None;

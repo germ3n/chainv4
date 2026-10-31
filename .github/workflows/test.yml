@@ -58,11 +58,11 @@ jobs:
       - name: system libraries
         run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
       - name: clippy
-        run: cargo clippy --manifest-path ui/Cargo.toml --all-targets --locked -- -D warnings
+        run: cargo clippy --manifest-path ui/Cargo.toml --all-targets --features blocks --locked -- -D warnings
       - name: test
-        run: cargo test --manifest-path ui/Cargo.toml --features camera --locked
+        run: cargo test --manifest-path ui/Cargo.toml --features camera,blocks --locked
       - name: clippy (web)
-        run: cargo clippy --manifest-path ui/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
+        run: cargo clippy --manifest-path ui/Cargo.toml --target wasm32-unknown-unknown --features blocks --locked -- -D warnings
       - name: clippy (android)
         run: cargo clippy --manifest-path ui/Cargo.toml --target aarch64-linux-android --no-default-features --features camera --locked -- -D warnings
 

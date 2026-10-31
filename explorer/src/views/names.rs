@@ -52,6 +52,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState) {
         }
     });
 
+    if ctx.settings.read_blocks {
+        super::reading::turned_off_card(ui, ctx, "The directory of names comes from the node. One name's record can be proven on its page");
+
+        return;
+    }
+
     let listing = &store.name_list;
 
     if listing.pages == 0 {

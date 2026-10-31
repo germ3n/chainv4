@@ -478,6 +478,96 @@ restart, is in no header it holds. So it fetches the headers between, a stretch 
 a time, and proves each by its link to the one above (see
 [Light client](light-client.md#saving-and-resuming)). Then the transaction checks, and is final.
 
+## Read from checked blocks
+
+Settings → **Read from checked blocks** has the wallet take what it shows from final blocks it
+fetched and checked itself, rather than ask the node, so what it shows rests on those blocks and the
+node learns less of what you look at. It is off by default, as reading blocks costs far more than
+asking, and with it off nothing here happens at all. It is for the install rather than for a node or
+a wallet: changing the node never quietly starts asking it about everything. It works alike on phones,
+the desktop, in the browser and in the extension.
+
+It is strict: **what cannot be proven this way is turned off and says why**, rather than shown with a
+label. Every such page says the same thing: this needs asking the node, and Read from checked blocks
+is on. The refusal is also in the wallet's one way out to the node, so a request from a path nobody
+thought of still does not leave.
+
+**What it does:**
+- **It reads final blocks only,** from [`GET /blocks/range`](api.md#get-blocksrangefromhcountnentrye),
+  each against what the light client checked, so nothing it read can be undone.
+- **It starts at a height you pick.** A wallet made here starts where the chain stood when it was
+  made. One restored or brought in asks. Read further back at any time: what it read stands, and it
+  goes on from there. The Overview and Settings say from what block it knows, and Activity shows
+  nothing older.
+- **What is newest comes first.** A balance shows after its first proof, and history fills in going
+  back. Older blocks are checked by their hash links up to a block the light client checked, a stretch
+  at a time, and nothing of a stretch is kept until it has come whole and links up.
+- **Balances and other state come from the proofs bundled with blocks.** One direct proof per account,
+  at the final block it started at, sets where it starts from; what later blocks list updates it.
+- **History comes from the blocks' receipts:** everything that names your addresses, a token's
+  transfer in an EVM log's topics too. Filters and search on Activity work on what was read.
+- **Your own sent transaction keeps one lookup,** its receipt proof, shown as *Included, not final*
+  until the reading reaches it, when what the reading found takes over. It is checked, and the node
+  already has that transaction.
+- **It reads only while the wallet is unlocked and the app is open.** Its index is sealed with a key
+  made from that wallet's vault key, so addresses and history in it are private. It is kept apart from
+  the wallet's file, in the same private `wallet-store` folder on a device, written whole, and in
+  IndexedDB in a browser, as localStorage holds about 5 MB. Losing it costs a rescan, never a wallet. One
+  that will not open or read is set aside as `….unreadable-…` and read again, and the app says so. A
+  password changed seals it anew with its next save.
+
+**What it costs:** about 2 KB an empty block, so 34 MB a day on the devnet at 17,280 blocks a day.
+Settings shows what has been downloaded and what it is up to.
+
+**What it cannot do, in plain words:**
+- **A gap.** A block that comes without proofs, because the node has none (`NoList`, `StatePruned`) or
+  has only its header (`HeaderOnly`), counts as **unknown, not unchanged**. A value older than that
+  block is not shown until one direct proof catches it up, which the wallet says, because the node sees
+  that account; at most once in 5 minutes for each, so a node with no proofs at all is not told of it
+  with every block. Nodes prune proofs after 10,000 blocks by default, about 14 hours on the devnet, and
+  only `--archive` nodes prove older ones. Read far back on any other node and you get the old blocks
+  and receipts, so history, but balances still rest on the proof at the top. A block without its
+  receipts cannot speak for them either, and the count of those is shown.
+- **Something left out.** A node can leave an entry out of a block's list, and nothing can tell: the
+  balance stays proven but out of date. **Check now** proves each value directly, saying that the node
+  sees each account, and if a proof shows the blocks left a change out, it says that too. Receipts
+  cannot be left out this way.
+- **Genesis.** What genesis allocated is in no block, so a start at height 0 takes its first proofs as
+  any other does.
+- **Tokens and names.** A token shows once a transaction moving it to or from this wallet has been
+  read, so one held since before the height it reads from does not show. Its record, for its symbol and
+  decimals, takes one direct proof, and so does its balance if it was first seen in a block older than
+  the reading had reached. An ERC-20 shows in Activity as a log's claim, and as no balance: an EVM
+  contract's storage is not one an entry can be looked up in. Names show once this wallet has been seen
+  using them, as far as proven. Finding, pricing and registering one need asking, and so does paying one.
+- **Fees.** `POST /offer` is off, so the review suggests a gas limit from what the same kind of
+  transaction used lately in checked blocks, a quarter more, or a round guess that says it is one; and
+  twice the newest checked header's base price, or what was seen paid if more. Both can be changed.
+  Nothing tries it first, so a call that would fail still costs its fee. The coin and token transfers can
+  be priced this way; what needs a dry run is turned off.
+- **The coin's name.** Nothing the light client checks says it. It shows as a node last said on this
+  device, kept for each chain, or else amounts show as plain units, not guessed at.
+- **Privacy.** Reading ranges hides interest in transactions and state changes. The start and gap
+  proofs do not, nor does who is asking, for which the [proxy and Tor](#through-a-proxy) settings
+  remain. Sending goes through a node by nature. The settings keep what was sent until final and the
+  account last used, unsealed, as they always did.
+- **Node-served pages.** A page that came from a server can be replaced by that server: if the page
+  comes from the node, the node could serve code faking these checks, and the setting says so there. The
+  desktop and phone apps and the extension do not have this hole.
+
+**A node without the route.** An older node answers 400 for `/blocks/range`. The wallet says so, stops
+reading, and asks nothing else: it never falls back on asking. An answer that does not check stops the
+reading the same way, keeps nothing of itself, and says what was wrong. 429 and 503 are waited out, as
+long as `Retry-After` says, up to a minute, longer each time they go on: a node takes 2 ranges from one
+client, and over an onion everyone counts as one.
+
+**Fast resume is off** while this is on, as it rests on the node's word. A chain with no finality has no
+final blocks to read, and the setting says so.
+
+| Off, saying why | Works from blocks or proofs |
+| --- | --- |
+| Contracts, Batch, Swaps, Trade, Multisig, Mining and pool earnings, Governance, NFTs, Bridge, the faucet, what sites ask | Overview, Send (coin and tokens), Receive, Activity, Accounts, names seen |
+
 ## Sending
 
 The Send page (`wallet/src/views/send.rs`):
@@ -1154,6 +1244,7 @@ localStorage under one key, `chainv4-wallet`. Either way it holds:
 - the light client's state, by genesis, to resume from the finalized block, not genesis;
 - the chain's name its node last said, by genesis, for the titles before the node answers;
 - what it sent that is not final yet, and what it proved, the newest 2,000;
+- what the coin is called on each chain, as a node last said, for [reading checked blocks](#read-from-checked-blocks);
 - the wallet last opened, the lock time, and the theme.
 
 **A kill never loses a wallet.** Each file is written beside itself, flushed, read back, and only
@@ -1169,7 +1260,9 @@ all, and takes the wallets out of that file only once their own are written. An 
 afterwards finds no wallets and leaves them alone; any wallet it makes is added to the list when the
 newer build starts again.
 
-Only the vaults are secret.
+Only the vaults are secret. What the wallet read from checked blocks is kept apart from all this, in
+an index of its own sealed with its wallet's key: see [Read from checked blocks](#read-from-checked-blocks).
+Removing a wallet removes its indexes.
 
 ## Look
 

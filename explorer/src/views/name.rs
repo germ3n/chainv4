@@ -10,9 +10,60 @@ use {
     egui::{RichText, Ui},
 };
 
+/// A name as its record is kept: without the chain's ending, as alice for alice.dev. A chain says what
+/// its ending is, and only a node says that.
+pub fn record_name(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(kept, _)| kept)
+}
+
+/// With Read from checked blocks on: a name's record by a direct proof someone pressed for. What a year
+/// costs and what it comes to on a name that expired are worked out by the node.
+fn reading(ui: &mut Ui, ctx: &mut Ctx, name: &str) {
+    let look = ctx.look;
+    let key = chainv4::registry::names::record_key(record_name(name));
+
+    super::heading(ui, look, name, "", |_| {});
+    super::section(ui, look, "Name", |ui| {
+        let Some(proven) = super::reading::direct_proof(ui, ctx, "this name's record", chainv4::db::Column::Names, &key) else {
+            return;
+        };
+
+        super::reading::proven_at(ui, ctx, &proven);
+
+        match proven.value.as_deref().map(wincode::deserialize::<chainv4::registry::names::NameRecord>) {
+            None => super::note(ui, look, "Nobody holds it."),
+            Some(Err(_)) => {
+                ui.colored_label(look.palette.bad, "A record that does not read");
+            }
+            Some(Ok(record)) => super::facts(ui, look, "name", |facts| {
+                facts.row("owner", |ui| super::address(ui, ctx, &record.owner.to_string()));
+
+                match record.target {
+                    Some(target) => facts.row("points at", |ui| super::address(ui, ctx, &target.to_string())),
+                    None => facts.text("points at", "nothing"),
+                }
+
+                if record.expires > 0 {
+                    facts.text("expires", format!("{} UTC, {}", format::utc(record.expires), format::ago(record.expires, ctx.now)));
+                }
+
+                for text in &record.texts {
+                    facts.text(&text.key, text.value.clone());
+                }
+            }),
+        }
+    });
+}
+
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, name: &str) {
     let look = ctx.look;
     let store = ctx.store;
+
+    if ctx.settings.read_blocks {
+        reading(ui, ctx, name);
+
+        return;
+    }
 
     if !store.names.contains_key(name) {
         ctx.api.ask(Ask::Name(name.to_string()));

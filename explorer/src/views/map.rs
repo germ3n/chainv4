@@ -135,6 +135,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MapState) {
         ),
         |_| {},
     );
+    if let Some(standing) = ctx.reading.standing().filter(|_| ctx.settings.read_blocks) {
+        super::note(ui, look, format!("Final blocks only, read here, from block {}. Side branches are the node's to know, and show nothing here. Read further back in Settings.", format::thousands(&standing.known_from.to_string())));
+    }
+
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut state.follow, "Follow the tip");
 

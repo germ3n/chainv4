@@ -19,6 +19,44 @@ use {
     egui::{RichText, Ui},
 };
 
+/// With Read from checked blocks on: the names this wallet was seen using, each as proven. What a name
+/// costs, and finding one, is asked of a node, and so is what any other name resolves to.
+fn read_names(ui: &mut Ui, ctx: &mut Ctx) {
+    let palette = *ctx.palette;
+    let mut proven: Vec<_> = ctx.chain.records.iter().filter_map(|(name, proven)| Some((name.clone(), proven.value.as_ref()?.clone(), proven.assurance))).collect();
+    proven.sort_by(|one, other| one.0.cmp(&other.0));
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Names seen in what this wallet sent");
+
+        if proven.is_empty() {
+            ui.label(RichText::new("None in the blocks read so far.").color(palette.muted));
+        }
+
+        for (name, record, assurance) in &proven {
+            theme::rule(ui, &palette);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(name).color(palette.ink));
+                super::assurance(ui, &palette, assurance);
+            });
+            super::row(ui, &palette, "Owner", |ui| super::address(ui, &palette, &record.owner.to_string()));
+
+            if let Some(target) = record.target {
+                super::row(ui, &palette, "Points at", |ui| super::address(ui, &palette, &target.to_string()));
+            }
+
+            super::row(ui, &palette, "Expires", |ui| {
+                ui.label(format::utc(record.expires));
+            });
+        }
+    });
+    theme::section_gap(ui);
+
+    if chainv4_ui::widgets::needs_asking(ui, &palette, &format!("Finding, registering and renewing names, and their prices: {}.", crate::node::NEEDS_ASKING)) {
+        *ctx.page = Page::Settings;
+    }
+}
+
 #[derive(Default)]
 pub struct NamesState {
     /// The address whose names show: one of the account's, the first until another is picked.
@@ -50,6 +88,12 @@ impl NamesState {
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, send: &mut SendState) {
     let palette = *ctx.palette;
     theme::title(ui, &palette, "Names", "Names such as alice.dev point at an address. Each is proven before it shows.");
+
+    if ctx.settings.read_blocks {
+        read_names(ui, ctx);
+
+        return;
+    }
 
     let Some(names) = ctx.chain.names.clone() else {
         theme::card(ui, &palette, |ui| {

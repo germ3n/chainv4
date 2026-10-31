@@ -7,20 +7,27 @@
 //! which keep a secret behind a fingerprint, a face, Touch ID, Face ID or a passkey; and, on a
 //! phone, whether it is on its charger. And finding a ballot among many, as both Governance pages
 //! do; what became of what was asked of a node, and asking it again; pulling a page down to reload
-//! it; and filtering an address's transactions.
+//! it; and filtering an address's transactions. And reading blocks a node sends, each checked, and
+//! keeping what an app makes of them where it can be rebuilt from.
 
 pub mod asks;
 pub mod ballots;
 pub mod biometric;
+#[cfg(feature = "blocks")]
+pub mod blocks;
 #[cfg(feature = "camera")]
 pub mod camera;
 pub mod files;
 pub mod filters;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod kept;
 pub mod layout;
 pub mod net;
 pub mod power;
 pub mod pull;
 pub mod secret;
+#[cfg(feature = "blocks")]
+pub mod shelf;
 pub mod sse;
 pub mod theme;
 pub mod widgets;

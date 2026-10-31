@@ -82,6 +82,14 @@ impl Rig {
             return;
         };
 
+        // Mining goes through a node's port, naming the address it pays.
+        if settings.read_blocks {
+            self.mine = None;
+            self.mine_note = Some("Stopped, as Read from checked blocks is on: mining goes through a node, which sees the address it pays.".to_string());
+
+            return;
+        }
+
         // Not drawn for a while: the wallet was in the background, and stays stopped until the
         // person starts it again.
         if PHONE && since > UNSEEN {

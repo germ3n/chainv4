@@ -291,6 +291,7 @@ mod tests {
             call: None,
             logs: Vec::new(),
             steps: vec![step("Transfer", StepResult::Undone), step("Burn", StepResult::Failed), step("Deploy", StepResult::NotRun)],
+            came: Default::default(),
         };
 
         for (width, _) in drawn::SCREENS {

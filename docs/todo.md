@@ -756,6 +756,24 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [ ] **Reading from checked blocks: the explorer walks every header on each launch.** It saves no light client,
+  so with the setting on each start goes from the beginning. Fine today, slow as the chain grows, and to fix
+  before this gets real use. Save the client as the wallet does.
+- [ ] **Reading from checked blocks: the explorer holds its whole index in memory.** How much that takes has not
+  been measured, and 128 MB encoded could be noticeably more.
+- [ ] **Reading from checked blocks: the explorer takes a name's ending to be its last label.** `alice.dev` is looked
+  up as `alice`, as only a node says what the suffix is. A chain with a differently shaped suffix could wrongly
+  be told nobody holds a name.
+- [ ] **Reading from checked blocks: the explorer's update download goes around its request gate.** It goes straight
+  to the release host, only on the desktop and only when pressed.
+- [ ] **The nginx limit for `GET /blocks/range` has never run on real nginx.** It has only been rendered and
+  syntax-checked, and a bad config would stop a node's web and API. On the redeploy that brings it, do
+  `66.78.40.57` first and check it before the others.
+- [x] **A setting for the wallet and the explorer to take everything from the blocks they fetched,** history
+  among it, rather than look things up from the node: what they show then rests on blocks they checked, and
+  the node learns less of what they look at. Off by default, as reading blocks costs far more than asking.
+  What cannot be proven is turned off and says why. See [the wallet's](wallet.md#read-from-checked-blocks) and
+  [the explorer's](explorer.md#read-from-checked-blocks) guides.
 - [x] **Blocks a client can check whole, without asking for what it wants.** `GET /blocks/range` sends
   blocks in binary with what recomputes every root, their receipts, and a proof against `state_root`
   of each state entry they changed, deletions too, within bounds on blocks, bytes, proofs and time,
@@ -793,9 +811,6 @@ offline; these would make that hold up as a treasury.
   was found by reading: this looks for the rest on purpose.
 - [x] **The wallet's Activity names unlisted tokens** by what they say of themselves, labelled, like `1.5 "USDC" (unverified)`. Still only a claim: never on signing screens, and never in balances.
 - [x] **Small things seen on the emulator:** an error from a failed import stayed on Accounts after a later success, and an offline signer's accounts said "not proven yet" for good.
-- [ ] **A setting for the wallet and the explorer to take everything from the blocks they fetched,** history
-  among it, rather than look things up from the node: what they show then rests on blocks they checked, and
-  the node learns less of what they look at. Off by default, as reading blocks costs far more than asking.
 - [x] **A small call could make every node allocate far more than it paid for.** `evm.decode` and its kin
   copied out one long value for every offset pointing at it, for a fee on the input alone. What decoding may
   make is limited by what it was given now. It needs every node at once.

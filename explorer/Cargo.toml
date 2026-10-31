@@ -26,7 +26,7 @@ egui = "0.37.0"
 zeroize = "1.9.1"
 # The look's widgets, talking to the node through a proxy, and running on Android, shared with the
 # wallet.
-chainv4-ui = { path = "../ui" }
+chainv4-ui = { path = "../ui", features = ["blocks"] }
 log = "0.4.34"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

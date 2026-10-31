@@ -23,6 +23,7 @@ mod metamask;
 #[cfg(feature = "mining")]
 mod miner;
 mod node;
+mod reading;
 mod steps;
 #[cfg(not(target_arch = "wasm32"))]
 mod store;

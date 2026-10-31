@@ -34,6 +34,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, id: &str, state: &mut hops::HopState) {
         ui.add_space(8.0);
 
         match store.failures.get(&Ask::Tx(id.to_string())) {
+            Some(failure) if failure.status == 404 && ctx.settings.read_blocks => {
+                let why = failure.message.clone();
+
+                super::reading::outside(ui, ctx, &why, None);
+            }
             Some(failure) if failure.status == 404 => {
                 super::note(ui, look, "Not on the main chain, at least not yet, and not in the mempool as last listed.");
 
@@ -103,7 +108,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, id: &str, state: &mut hops::HopState) {
         });
     });
 
-    super::section(ui, look, "Hops", |ui| hops::show(ui, ctx, tx, outcome, state));
+    // A block commits to what a transaction did, not to where its contracts went on the way.
+    match ctx.settings.read_blocks {
+        true => super::section(ui, look, "Hops", |ui| super::note(ui, look, "A block does not commit to the hops a transaction's contracts made, so they are not shown while this reads from checked blocks.")),
+        false => super::section(ui, look, "Hops", |ui| hops::show(ui, ctx, tx, outcome, state)),
+    }
 
     if let Some(outcome) = outcome
         && !outcome.payments.is_empty()

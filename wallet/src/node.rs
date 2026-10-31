@@ -5,19 +5,23 @@
 
 use {
     chainv4_ui::asks::Asks,
+    chainv4_ui::blocks::{Asked, Came, RangeLine},
     chainv4_ui::net::{Answer, Client},
     chainv4_ui::sse::{self, News},
     serde_json::Value,
-    std::collections::{HashSet, VecDeque},
+    std::collections::{HashMap, HashSet, VecDeque},
     std::sync::atomic::{AtomicBool, Ordering},
     std::sync::{Arc, Mutex},
     web_time::Instant,
 };
 
-pub use chainv4_ui::net::Failure;
+pub use chainv4_ui::net::{Failure, NEEDS_ASKING, NEEDS_ASKING_STATUS};
 
 /// How long after the stream is lost it is opened again, in seconds.
 const STREAM_RETRY: f64 = 10.0;
+/// How often a page that goes on asking for what Read from checked blocks keeps in is told again, in
+/// seconds.
+const TOLD_AGAIN: f64 = 3.0;
 
 /// How the node's stream stands, kept as it arrives. No events pile up here: they only say that the
 /// chain moved, and a phone in the background may not read them for hours.
@@ -109,8 +113,16 @@ pub enum Ask {
     Checkpoint(Option<String>),
     /// A chain-state entry with its proof, at a block.
     Proof { column: &'static str, key: String, block: String },
+    /// A proof a wallet reading checked blocks asks for all the same: an account's or token's value
+    /// where reading started or past a gap, or what someone pressed Check now for. It tells the node
+    /// which, so nothing else asks for it: see crate::reading.
+    ScanProof { column: &'static str, key: String, block: String },
     /// A transaction and its receipt, each with its Merkle path.
     Receipt(String),
+    /// The same of a transaction this wallet sent, while it reads checked blocks: the one lookup left
+    /// to it, shown as included but not final until the reading reaches it. The node has that
+    /// transaction already, as the wallet sent it there.
+    SentReceipt(String),
     /// The token registry's first page, to know which tokens to prove.
     Tokens,
     /// The transactions touching an address, newest first, from the node's address index: where
@@ -193,8 +205,8 @@ impl Ask {
             Ask::Bundle { headers, epoch } => format!("/light/bundle?headers={headers}&epoch={epoch}"),
             Ask::Checkpoint(Some(block)) => format!("/light/checkpoint/{block}"),
             Ask::Checkpoint(None) => "/light/checkpoint".to_string(),
-            Ask::Proof { column, key, block } => format!("/proofs/{column}/{key}?block={block}"),
-            Ask::Receipt(id) => format!("/proofs/receipts/{id}"),
+            Ask::Proof { column, key, block } | Ask::ScanProof { column, key, block } => format!("/proofs/{column}/{key}?block={block}"),
+            Ask::Receipt(id) | Ask::SentReceipt(id) => format!("/proofs/receipts/{id}"),
             Ask::Tokens => "/tokens?limit=100".to_string(),
             Ask::Collections => "/collections?limit=500".to_string(),
             Ask::History(address) => format!("/accounts/{address}/txs?limit=50"),
@@ -240,8 +252,49 @@ impl Ask {
         self.body().is_none()
             && !matches!(
                 self,
-                Ask::Status | Ask::Light | Ask::Headers { .. } | Ask::Ancestors { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Finalized | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::Receipt(_) | Ask::Release
+                Ask::Status | Ask::Light | Ask::Headers { .. } | Ask::Ancestors { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Finalized | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ScanProof { .. } | Ask::Receipt(_) | Ask::SentReceipt(_) | Ask::Release
             )
+    }
+
+    /// Whether it takes a place among the proofs out at once: see PROOFS_AT_ONCE.
+    fn is_a_proof(&self) -> bool {
+        matches!(self, Ask::Proof { .. } | Ask::ScanProof { .. })
+    }
+
+    /// Whether this asks the node for what Read from checked blocks does without. Named one by one,
+    /// with no catch-all, so a new request has to be decided here before it builds: what stays is
+    /// what follows the chain, the few proofs that setting says it takes, sending, and a release,
+    /// which is checked against the keys built in.
+    pub fn needs_asking(&self) -> bool {
+        match self {
+            Ask::Light | Ask::Headers { .. } | Ask::Ancestors { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Checkpoint(_) | Ask::ScanProof { .. } | Ask::SentReceipt(_) | Ask::Submit(_) | Ask::Release => false,
+            Ask::Status
+            | Ask::Finalized
+            | Ask::Proof { .. }
+            | Ask::Receipt(_)
+            | Ask::Tokens
+            | Ask::History(_)
+            | Ask::Filtered { .. }
+            | Ask::Events(_)
+            | Ask::Names
+            | Ask::OwnedNames(_)
+            | Ask::Contract(_)
+            | Ask::Call(_)
+            | Ask::Read(_)
+            | Ask::Offer(_)
+            | Ask::Faucet(_)
+            | Ask::Named { .. }
+            | Ask::Rpc(_)
+            | Ask::Multisig(_)
+            | Ask::PoolClaim(_)
+            | Ask::Pool(_)
+            | Ask::Mining
+            | Ask::Claims { .. }
+            | Ask::Collections
+            | Ask::Governance
+            | Ask::GovernanceHistory { .. }
+            | Ask::GovernanceWeight(_) => true,
+        }
     }
 }
 
@@ -270,11 +323,23 @@ pub struct Node {
     /// The node's stream: how it stands, and the flag that ends it.
     listening: Arc<Mutex<Listening>>,
     hang_up: Option<Arc<AtomicBool>>,
+    /// Whether what needs asking is kept in, with Read from checked blocks on: here, at the only way
+    /// out, so that a page or code path that forgot about it still sends nothing.
+    reading: bool,
+    /// What was kept in, and when the page was last told.
+    told: HashMap<Ask, f64>,
+    /// The way a reading's requests for blocks go.
+    line: RangeLine,
 }
 
 impl Node {
     pub fn new(base: &str, client: Result<Client, String>, wake: egui::Context) -> Node {
+        let woken = wake.clone();
+
         Node {
+            line: RangeLine::new(base, client.clone(), Arc::new(move || woken.request_repaint())),
+            reading: false,
+            told: HashMap::new(),
             base: base.trim().trim_end_matches('/').to_string(),
             proofs_out: 0,
             proofs_held: VecDeque::new(),
@@ -290,11 +355,35 @@ impl Node {
         }
     }
 
+    /// A node that keeps in what needs asking, with Read from checked blocks on, or lets it out.
+    pub fn reading_blocks(mut self, on: bool) -> Node {
+        self.reading = on;
+
+        self
+    }
+
+    /// Asks for blocks: what a reading goes by. What comes of it is in `ranges`.
+    pub fn read_range(&self, asked: Asked) {
+        self.line.ask(asked);
+    }
+
+    /// What came of the blocks asked for, since last time.
+    pub fn ranges(&self) -> Vec<(Asked, Came)> {
+        self.line.came()
+    }
+
     /// Fetches a URL that is not the node's, as an NFT's metadata or picture, through the same
     /// proxy, unless it is out already. At most `most` bytes are kept: more fails.
     #[cfg_attr(not(feature = "nft"), allow(dead_code))]
     pub fn fetch(&mut self, url: &str, most: usize) {
         if !self.fetching.insert(url.to_string()) {
+            return;
+        }
+
+        // What a page fetches from elsewhere tells whoever serves it what is looked at.
+        if self.reading {
+            self.fetched.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((url.to_string(), Err(NEEDS_ASKING.to_string())));
+
             return;
         }
 
@@ -338,6 +427,11 @@ impl Node {
     /// back long enough. Something sent, rather than read, goes whenever it is pressed for.
     pub fn ask(&mut self, ask: Ask) {
         let now = self.now();
+
+        if self.kept_in(&ask, now) {
+            return;
+        }
+
         let sending = match ask.body() {
             Some(_) => self.asks.force(&ask),
             None => self.asks.begin(&ask, now),
@@ -350,6 +444,10 @@ impl Node {
 
     /// Asks again now, whatever failed before, and lets go of why it did: what Retry and Reload do.
     pub fn retry(&mut self, ask: Ask) {
+        if self.kept_in(&ask, self.now()) {
+            return;
+        }
+
         self.asks.forget(&ask);
 
         if self.asks.force(&ask) {
@@ -357,9 +455,30 @@ impl Node {
         }
     }
 
+    /// Whether this is kept in, with Read from checked blocks on: it goes no further, and whoever
+    /// asked is told why, as it would be of anything else that came to nothing.
+    fn kept_in(&mut self, ask: &Ask, now: f64) -> bool {
+        if !self.reading || !ask.needs_asking() {
+            return false;
+        }
+
+        if self.told.get(ask).is_none_or(|told| now - told >= TOLD_AGAIN) {
+            self.told.insert(ask.clone(), now);
+            self.inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((ask.clone(), Err(Failure { status: NEEDS_ASKING_STATUS, message: NEEDS_ASKING.to_string() })));
+            self.wake.request_repaint();
+        }
+
+        true
+    }
+
     /// Why the node does not answer, while it does not: what became of the status asked of it every
-    /// few seconds, rather than of something one page asked.
+    /// few seconds, rather than of something one page asked. With no status asked, as with Read from
+    /// checked blocks on, what became of what follows the chain.
     pub fn down(&self) -> Option<&Failure> {
+        if self.reading {
+            return self.asks.troubles(self.now()).into_iter().map(|(_, failure)| failure).next();
+        }
+
         self.asks.failure(&Ask::Status).filter(|failure| failure.is_trouble())
     }
 
@@ -384,7 +503,7 @@ impl Node {
     }
 
     fn send(&mut self, ask: Ask) {
-        if matches!(ask, Ask::Proof { .. }) {
+        if ask.is_a_proof() {
             if self.proofs_out >= PROOFS_AT_ONCE {
                 self.proofs_held.push_back(ask);
 
@@ -403,6 +522,7 @@ impl Node {
     }
 
     fn send_now(&mut self, ask: Ask) {
+        debug_assert!(!(self.reading && ask.needs_asking()), "kept in before it got here");
         let url = format!("{}{}", self.base, ask.path());
         let body = ask.body().map(|body| body.as_bytes().to_vec());
         let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
@@ -459,7 +579,7 @@ impl Node {
         for (ask, result) in &answers {
             self.asks.ended(ask, result.as_ref().err(), now);
 
-            if matches!(ask, Ask::Proof { .. }) {
+            if ask.is_a_proof() {
                 self.proofs_out = self.proofs_out.saturating_sub(1);
             }
         }
@@ -710,6 +830,138 @@ mod tests {
         assert!(!Ask::Headers { from: 0, count: 1 }.reloads());
         assert!(!Ask::Receipt("0x01".to_string()).reloads());
         assert!(!Ask::Submit("{}".to_string()).reloads(), "nothing sent is sent again");
+    }
+
+    /// Every request there is, one of each.
+    fn every_ask() -> Vec<Ask> {
+        let text = || "a".to_string();
+
+        vec![
+            Ask::Status,
+            Ask::Light,
+            Ask::Headers { from: 0, count: 1 },
+            Ask::Ancestors { from: 0, count: 1 },
+            Ask::Finality { from: 0, count: 1 },
+            Ask::Bundle { headers: 0, epoch: 0 },
+            Ask::Finalized,
+            Ask::Checkpoint(None),
+            Ask::Proof { column: "accounts", key: "0x00".to_string(), block: "0x01".to_string() },
+            Ask::ScanProof { column: "accounts", key: "0x00".to_string(), block: "0x01".to_string() },
+            Ask::Receipt(text()),
+            Ask::SentReceipt(text()),
+            Ask::Tokens,
+            Ask::History(text()),
+            Ask::Filtered { address: text(), query: text(), cursor: None },
+            Ask::Events(text()),
+            Ask::Names,
+            Ask::OwnedNames(text()),
+            Ask::Contract(text()),
+            Ask::Call(text()),
+            Ask::Read(text()),
+            Ask::Offer(text()),
+            Ask::Submit(text()),
+            Ask::Faucet(text()),
+            Ask::Named { contract: text(), name: text() },
+            Ask::Rpc(text()),
+            Ask::Multisig(text()),
+            Ask::PoolClaim(text()),
+            Ask::Pool(text()),
+            Ask::Mining,
+            Ask::Claims { pool: text(), to: text(), height: 0 },
+            Ask::Collections,
+            Ask::Governance,
+            Ask::GovernanceHistory { before: None },
+            Ask::GovernanceWeight(text()),
+            Ask::Release,
+        ]
+    }
+
+    /// What reaches a node from asking each of these, by the first line of each request a listener
+    /// takes, each once.
+    fn reached(reading: bool, asks: &[Ask]) -> Vec<String> {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut node = Node::new(&format!("http://{}", listener.local_addr().unwrap()), Ok(Client::direct()), egui::Context::default()).reading_blocks(reading);
+
+        for ask in asks {
+            node.ask(ask.clone());
+        }
+
+        let mut lines = Vec::new();
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+
+        // Long enough for all that went out to arrive: anything sent connects within this.
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    let mut request = [0; 2048];
+                    let read = stream.read(&mut request).unwrap_or(0);
+                    let text = String::from_utf8_lossy(&request[..read]).into_owned();
+                    lines.push(text.lines().next().unwrap_or_default().split(' ').take(2).collect::<Vec<_>>().join(" "));
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}");
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+
+        lines.sort();
+        lines.dedup();
+
+        lines
+    }
+
+    #[test]
+    fn with_reading_on_only_what_it_says_it_takes_ever_reaches_the_node() {
+        let lines = reached(true, &every_ask());
+
+        assert_eq!(lines, [
+            "GET /headers?from=0&count=1",
+            "GET /light",
+            "GET /light/bundle?headers=0&epoch=0",
+            "GET /light/checkpoint",
+            "GET /light/finality?from=0&count=1",
+            "GET /proofs/accounts/0x00?block=0x01",
+            "GET /proofs/receipts/a",
+            "GET /release",
+            "POST /txs",
+        ]);
+    }
+
+    #[test]
+    fn with_reading_off_every_request_goes_out_as_it_always_did() {
+        let asks = every_ask();
+        let lines = reached(false, &asks);
+        let mut paths: Vec<String> = asks.iter().map(|ask| format!("{} {}", if ask.body().is_some() { "POST" } else { "GET" }, ask.path())).collect();
+        paths.sort();
+        paths.dedup();
+
+        assert_eq!(lines, paths);
+    }
+
+    #[test]
+    fn what_is_kept_in_is_answered_at_once_saying_why_and_is_no_trouble_on_the_way() {
+        let mut node = Node::new("http://127.0.0.1:1", Ok(Client::direct()), egui::Context::default()).reading_blocks(true);
+
+        for ask in every_ask().into_iter().filter(Ask::needs_asking) {
+            node.ask(ask.clone());
+            node.ask(ask.clone());
+            node.retry(ask.clone());
+
+            let answers = node.answers();
+            assert_eq!(answers.len(), 1, "{ask:?}, told once however often it is asked");
+            assert_eq!(answers[0].1, Err(Failure { status: NEEDS_ASKING_STATUS, message: NEEDS_ASKING.to_string() }));
+            assert!(!node.asking(&ask), "{ask:?} is not out");
+        }
+
+        assert_eq!(node.sent(), Vec::<Ask>::new(), "nothing went out");
+        assert!(node.trouble().is_none(), "and no page offers to ask it again");
+        assert!(node.down().is_none());
+
+        node.fetch("https://elsewhere/picture.png", 1024);
+        assert_eq!(node.fetched(), [("https://elsewhere/picture.png".to_string(), Err(NEEDS_ASKING.to_string()))], "nor anything fetched from elsewhere");
     }
 
     #[test]

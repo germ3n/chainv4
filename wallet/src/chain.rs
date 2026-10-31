@@ -632,6 +632,7 @@ impl Chain {
                 | Ask::Checkpoint(_)
                 | Ask::Proof { .. }
                 | Ask::Receipt(_)
+                | Ask::SentReceipt(_)
                 | Ask::Tokens
                 | Ask::History(_)
                 | Ask::Filtered { .. }
@@ -647,8 +648,11 @@ impl Chain {
 
         let value = match (ask, result) {
             (_, Ok(value)) => value,
+            // Kept in, with Read from checked blocks on: nothing is wrong with the way to the node,
+            // and the light client has no cause to wait.
+            (_, Err(failure)) if failure.status == crate::node::NEEDS_ASKING_STATUS => return true,
             // Not on the chain yet, or a node without the index asked of: nothing to show yet.
-            (Ask::Receipt(_) | Ask::Proof { .. }, Err(failure)) if failure.status == 404 => return true,
+            (Ask::Receipt(_) | Ask::SentReceipt(_) | Ask::Proof { .. }, Err(failure)) if failure.status == 404 => return true,
             (Ask::History(_) | Ask::Filtered { .. }, Err(failure)) if failure.status == 404 => {
                 self.indexes_addresses = Some(false);
 
@@ -705,7 +709,7 @@ impl Chain {
                 Ask::Proof { key, .. } => {
                     self.refused.insert(key.clone(), why);
                 }
-                Ask::Receipt(tx) => {
+                Ask::Receipt(tx) | Ask::SentReceipt(tx) => {
                     self.refused.insert(tx.clone(), why);
                 }
                 Ask::Tokens | Ask::History(_) | Ask::Filtered { .. } | Ask::Events(_) | Ask::Names | Ask::OwnedNames(_) => {}
@@ -986,7 +990,7 @@ impl Chain {
 
                 Ok(())
             }
-            Ask::Receipt(tx) => {
+            Ask::Receipt(tx) | Ask::SentReceipt(tx) => {
                 let client = self.client.as_ref().ok_or("the light client has not started")?;
                 let block = id(client, value["block"].as_str().unwrap_or_default()).ok_or("a receipt at a block id that does not read")?;
                 let bytes = |name: &str| from_hex(value[name].as_str().unwrap_or_default()).ok_or(format!("a {name} that is not hex"));

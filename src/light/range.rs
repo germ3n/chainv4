@@ -299,6 +299,12 @@ impl BlockRange {
             }
         }
 
+        // A block given with none of what it says is left, and told to be asked from where it was
+        // asked, would be asked for ever.
+        if self.next == Some(RangeCursor { height: from, entry }) {
+            return Err(RangeError::OutOfPlace);
+        }
+
         let height = last.sealed.header.height;
         let expected = match last.unfinished() {
             Some(entry) => Some(RangeCursor { height, entry }),
@@ -532,6 +538,21 @@ mod tests {
         assert_eq!(shape(vec![part(3, RangeBody::Continued, 3, 4, 1)], at(4, 0), 9, 3, 2), Err(RangeError::OutOfPlace), "not from where asked");
         assert_eq!(shape(vec![part(3, empty_body(), 2, 4, 2)], at(4, 0), 9, 3, 2), Err(RangeError::OutOfPlace), "a body where going on");
         assert_eq!(shape(vec![part(3, RangeBody::Continued, 0, 4, 2)], at(3, 2), 9, 3, 0), Err(RangeError::OutOfPlace), "no body where it should be");
+    }
+
+    #[test]
+    fn a_cursor_that_stands_where_it_was_asked_from_is_refused_whatever_else_lines_up() {
+        let part = |height, body, from, total| item(height, body, proven(from, total, Vec::new()));
+        let shape = |items, next, from, entry| BlockRange { tip: 9, items, next }.check_shape(from, entry);
+        let at = |height, entry| Some(RangeCursor { height, entry });
+
+        // A block that goes on, with none of what it says is left: asked again, it comes round for ever.
+        assert_eq!(shape(vec![part(3, RangeBody::Continued, 2, 4)], at(3, 2), 3, 2), Err(RangeError::OutOfPlace));
+        // A block's first answer with none of its entries is the same.
+        assert_eq!(shape(vec![part(3, empty_body(), 0, 4)], at(3, 0), 3, 0), Err(RangeError::OutOfPlace));
+        // Going on, with any given, moves.
+        let some = item(3, RangeBody::Continued, proven(2, 4, vec![absent(b"a")]));
+        assert_eq!(shape(vec![some], at(3, 3), 3, 2), Ok(()));
     }
 
     #[test]

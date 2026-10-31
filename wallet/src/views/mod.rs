@@ -23,6 +23,7 @@ mod names;
 mod nfts;
 mod overview;
 mod pair;
+mod reading;
 mod receive;
 pub mod scan;
 pub mod send;
@@ -169,6 +170,8 @@ pub struct Ctx<'a> {
     pub book: &'a mut Book,
     pub coin: &'a Coin,
     pub settings: &'a mut Settings,
+    /// What it reads from checked blocks, with that setting on.
+    pub reading: &'a mut crate::reading::Reading,
     /// Milliseconds since the Unix epoch.
     pub now: u64,
     pub page: &'a mut Page,
@@ -255,6 +258,7 @@ pub fn reach(ui: &mut Ui, palette: &Palette, settings: &mut Settings, states: &m
 /// What each page keeps between frames.
 #[derive(Default)]
 pub struct States {
+    reading: reading::ReadingState,
     pub send: send::SendState,
     batch: batch::BatchState,
     activity: activity::ActivityState,
@@ -363,8 +367,16 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         states.settings.hide();
     }
 
+    // What cannot be done without asking the node says so, rather than ask it.
+    if ctx.settings.read_blocks && let Some(what) = reading::turned_off(*ctx.page) {
+        reading::needs_asking(ui, ctx, what);
+
+        return;
+    }
+
     match *ctx.page {
         Page::Overview => {
+            reading::note(ui, ctx, &mut states.reading);
             overview::show(ui, ctx);
             faucet::card(ui, ctx, &mut states.faucet);
         }
@@ -669,6 +681,7 @@ pub(crate) mod drawn {
         pub vault: Option<Vault>,
         pub lock: Option<String>,
         pub leave: bool,
+        pub reading: crate::reading::Reading,
     }
 
     /// A world of one wallet sealed with no password.
@@ -682,6 +695,7 @@ pub(crate) mod drawn {
             current: holders.first().map(Holder::id).unwrap_or_default(),
             biometric: None,
             unprotected: true,
+            born: None,
         }];
 
         World { settings, vault: Some(vault), ..World::default() }
@@ -852,6 +866,7 @@ pub(crate) mod drawn {
                 book: &mut *book,
                 coin: &coin,
                 settings: &mut world.settings,
+                reading: &mut world.reading,
                 now: 0,
                 page: &mut page,
                 connect: &mut connect,

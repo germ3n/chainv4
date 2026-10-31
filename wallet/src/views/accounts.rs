@@ -1252,7 +1252,7 @@ mod tests {
         fake::fresh();
         let secret = fresh_secret().unwrap();
         let vault = Vault::keyed(&secret).unwrap();
-        let entry = crate::app::WalletEntry { id: String::new(), name: "Mine".to_string(), vault: vault.seal(book).unwrap(), current: String::new(), biometric: tagged(Guard::Biometric, &fake::keep(&secret)), unprotected: false };
+        let entry = crate::app::WalletEntry { id: String::new(), name: "Mine".to_string(), vault: vault.seal(book).unwrap(), current: String::new(), biometric: tagged(Guard::Biometric, &fake::keep(&secret)), unprotected: false, born: None };
 
         crate::views::drawn::World { settings: crate::app::Settings::with_wallets(vec![entry]), vault: Some(vault), ..crate::views::drawn::World::default() }
     }
@@ -1319,6 +1319,7 @@ mod tests {
             current: String::new(),
             biometric,
             unprotected: false,
+            born: None,
         }];
 
         crate::views::drawn::World { settings, vault: Some(vault), ..Default::default() }

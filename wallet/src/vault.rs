@@ -557,6 +557,14 @@ pub fn fresh_secret() -> Result<Zeroizing<[u8; 32]>, String> {
     Ok(secret)
 }
 
+/// A name for a wallet's files and indexes, which says nothing of it, and no wallet's will be like.
+pub fn fresh_name() -> Result<String, String> {
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).map_err(|err| format!("no randomness for a file's name: {err}"))?;
+
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// An open vault: the key that seals it, kept while the wallet is unlocked, so it seals again after
 /// a change without asking for what opens it. Wiped as it drops.
 pub struct Vault {

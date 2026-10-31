@@ -183,6 +183,14 @@ It takes the item and gives back a `CheckedItem`, so only what checked is left t
   they changed as unknown, not unchanged.
 - **Genesis** has no list, so what it allocated is not in a range.
 
+**Reading older blocks than it holds.** A light client holds few headers below the finalized block it
+saved, and fetching one for every block down to a height months back is more than a phone keeps. A
+header's id is named by the one above, so `chainv4_ui::blocks` reads older blocks by stretches from the
+top down: each item is checked by the header it came with, and nothing of a stretch is used until the
+whole of it links up to a block already checked, whose parent the next stretch then ends at. Newer
+blocks go up from there, each against the header the client followed at its height. The wallet's
+[Read from checked blocks](wallet.md#read-from-checked-blocks) is built on it.
+
 ## Checking values
 
 - **State:** `check_state` checks a chain-state entry, and its proof from

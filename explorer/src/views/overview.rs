@@ -19,6 +19,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     let look = ctx.look;
     let Some(status) = ctx.store.status.clone() else {
         super::heading(ui, look, "Overview", "", |_| {});
+
+        if ctx.settings.read_blocks {
+            super::reading::note(ui, ctx);
+        }
+
         super::waiting(ui, ctx, &crate::api::Ask::Status);
 
         return;
@@ -29,6 +34,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     let rates = Rates::of(&recent);
     let (finalized, justified) = ctx.store.finality_heights();
 
+    let reading = ctx.settings.read_blocks;
+
     super::heading(
         ui,
         look,
@@ -36,6 +43,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         &format!("{} · {} · {} hashes · genesis {}", status.chain_name(), status.coin.symbol, status.hash, format::short(&status.genesis)),
         |_| {},
     );
+
+    if reading {
+        super::reading::note(ui, ctx);
+    }
 
     let mut tiles = vec![
         (
@@ -66,6 +77,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
             "transactions waiting".to_string(),
         ),
     ];
+
+    // What only a node can say: its peers, and what waits for a block.
+    if reading {
+        tiles.retain(|(name, _, _)| name != "Peers" && name != "Mempool");
+    }
 
     if let Some(finality) = &status.finality {
         tiles.push((
@@ -112,6 +128,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     }
 
     match look.narrow {
+        // Nothing streamed is taken: the stream only says when there is more to read.
+        _ if reading => latest(ui, ctx, &recent),
         true => {
             latest(ui, ctx, &recent);
             feed(ui, ctx);

@@ -3,9 +3,12 @@
 //!
 //! What the node pushes over its stream lands at once. Without a stream, or besides it, the
 //! explorer polls: the status every second or so, and whatever the page in view shows.
+//!
+//! With Read from checked blocks on, none of that: the stream only says when to look, what a page asks
+//! is answered from what was read or refused at the Api, and blocks are read as they are final.
 
 use {
-    crate::api::{Api, Ask, News, Reply},
+    crate::api::{Api, Ask, Failure, News, Reply},
     crate::format,
     crate::light::Light,
     crate::model::{
@@ -99,6 +102,8 @@ pub struct Explorer {
     settings_page: SettingsState,
     /// The light client, which checks what the node says about balances.
     light: Light,
+    /// What was read from checked blocks, while that is on.
+    reading: crate::reading::Reading,
     /// The release keys built in, which the release a node relays must be signed by.
     keys: ReleaseKeys,
     /// A newer explorer, if one is out, and putting it in place.
@@ -120,7 +125,7 @@ pub struct Explorer {
 
 impl Explorer {
     /// The explorer, talking to node when given, or else to the node it talked to last.
-    pub fn new(creation: &eframe::CreationContext, node: Option<String>, fallback: &str) -> Explorer {
+    pub fn new(creation: &eframe::CreationContext, node: Option<String>, fallback: &str, folder: Option<std::path::PathBuf>) -> Explorer {
         let settings: Settings = creation
             .storage
             .and_then(|storage| eframe::get_value(storage, eframe::APP_KEY))
@@ -132,8 +137,16 @@ impl Explorer {
             .or_else(|| Some(settings.node.clone()).filter(|node| !node.is_empty()))
             .unwrap_or_else(|| fallback.to_string());
         let wake = creation.egui_ctx.clone();
-        let mut api = Api::new(&node, client(&settings), wake.clone());
+        let mut api = Api::new(&node, client(&settings), wake.clone()).reading_blocks(settings.read_blocks);
         api.bear_report_token(settings.report_tokens.get(&node).map(String::as_str));
+        #[cfg(not(target_arch = "wasm32"))]
+        let reading = crate::reading::on_this_device(folder.as_deref());
+        #[cfg(target_arch = "wasm32")]
+        let reading = {
+            let _ = folder;
+
+            crate::reading::on_this_device()
+        };
         let mut explorer = Explorer {
             settings,
             address: node.clone(),
@@ -164,6 +177,7 @@ impl Explorer {
             names: views::names::NamesState::default(),
             settings_page: SettingsState::default(),
             light: Light::default(),
+            reading,
             keys: ReleaseKeys::built_in().unwrap_or_else(|why| {
                 log::warn!("{why}: no update notices");
 
@@ -186,9 +200,17 @@ impl Explorer {
     /// Starts afresh with another node, or the same one through another proxy.
     fn connect(&mut self, node: &str) {
         let node = node.trim().trim_end_matches('/').to_string();
-        self.api = Api::new(&node, client(&self.settings), self.wake.clone());
+        self.api = Api::new(&node, client(&self.settings), self.wake.clone()).reading_blocks(self.settings.read_blocks);
         self.api.bear_report_token(self.settings.report_tokens.get(&node).map(String::as_str));
         self.store = Store::default();
+        // What the setting holds goes as it does, and what it read stays for next time. The answers to
+        // what was out, by the way that was, are not coming.
+        self.reading.line_changed();
+
+        if !self.settings.read_blocks {
+            self.reading.close(0.0);
+        }
+
         self.map = MapState::default();
         self.light = Light::default();
         self.asked = Asked::default();
@@ -205,6 +227,7 @@ impl Explorer {
     fn reload(&mut self, time: f64) {
         self.asked = Asked { release: self.asked.release, ..Asked::default() };
         self.light.reload();
+        self.reading.retry();
         let failed = self.store.failures.iter().filter(|(ask, failure)| failure.is_trouble() && ask.reads()).map(|(ask, _)| ask.clone());
         let mut asks = vec![Ask::Status];
         asks.extend_from_slice(self.asked_by_view.of(&self.view));
@@ -239,11 +262,17 @@ impl Explorer {
         for reply in self.api.replies() {
             match reply {
                 Reply::Answer { ask, result } => {
+                    if self.reading.take_proof(&ask, &result, self.light.client()) {
+                        continue;
+                    }
+
+                    let reading = self.settings.read_blocks;
                     let trust = crate::light::Trust {
                         node: &self.settings.node,
                         pinned: &mut self.settings.pinned,
                         checkpoints: &self.settings.checkpoints,
-                        fast_resume: self.settings.fast_resume.get(&self.settings.node).copied().unwrap_or(false),
+                        fast_resume: !reading && self.settings.fast_resume.get(&self.settings.node).copied().unwrap_or(false),
+                        walks: reading,
                     };
 
                     if self.light.answered(&ask, &result, trust, now, time) {
@@ -320,6 +349,13 @@ impl Explorer {
                         Some(name) => self.settings.names.insert(self.settings.node.clone(), name.to_string()),
                         None => self.settings.names.remove(&self.settings.node),
                     };
+
+                    // No node says what the coin is called with Read from checked blocks on: what one
+                    // last said is what shows then.
+                    if !self.settings.read_blocks {
+                        self.settings.coins.insert(status.genesis.clone(), (status.coin.symbol.clone(), status.coin.decimals));
+                    }
+
                     store.status = Some(status);
                 }
             }
@@ -487,7 +523,7 @@ impl Explorer {
             Ask::Supply => store.supply = parse(value),
             Ask::Offer(_) | Ask::Submit(_) => {}
             // The light client's own, which it took already.
-            Ask::Light | Ask::Headers { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. } => {}
+            Ask::Light | Ask::Headers { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::DirectProof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. } => {}
         }
     }
 
@@ -505,6 +541,9 @@ impl Explorer {
                 };
                 self.asked.stream = time;
             }
+            // With Read from checked blocks on, the stream is a wake-up and nothing else: the light
+            // client above heard the chain moved, and nothing the node says of it is taken.
+            News::Event { .. } if self.settings.read_blocks => {}
             News::Event { name, data } => match name.as_str() {
                 "block" => {
                     if let Some(block) = parse::<Summary>(data) {
@@ -555,8 +594,92 @@ impl Explorer {
         }
     }
 
+    /// With Read from checked blocks on: what follows the chain, the blocks due, and what waits for
+    /// the index to answer. A page's own asks are turned off or answered here as they come, and nothing
+    /// else is polled. A chain with no finality has no final blocks to read, which the pages say.
+    fn poll_reading(&mut self, time: f64) {
+        if let Some(ask) = self.light.ask(time) {
+            self.api.ask(ask);
+        }
+
+        if time - self.asked.release >= RELEASE_EVERY || self.asked.release == 0.0 {
+            self.asked.release = time;
+            self.api.ask(Ask::Release);
+        }
+
+        if let Some(client) = self.light.client()
+            && let Some(genesis) = self.settings.pinned.get(&self.settings.node).cloned()
+            && self.reading.open(&genesis, client.params().hash, client, time)
+        {
+            for (asked, came) in self.api.ranges() {
+                self.reading.came(asked, came, client, time);
+            }
+
+            if client.params().finality.is_some()
+                && self.light.has_followed()
+                && let Some(asked) = self.reading.go(client, time)
+            {
+                self.api.read_range(asked);
+            }
+
+            let (coin, name) = (self.settings.coins.get(&genesis), self.settings.names.get(&self.settings.node).map(String::as_str));
+            let status = || self.reading.status(&genesis, client, coin, name);
+
+            if time - self.asked.status >= STATUS_STREAMED || self.asked.status == 0.0 {
+                self.asked.status = time;
+
+                if let Some(status) = status() {
+                    self.api.answered_here(Ask::Status, Ok(status));
+                }
+            }
+
+            for ask in self.api.for_index() {
+                let result = match &ask {
+                    Ask::Status => status().ok_or_else(|| Failure { status: 425, message: "nothing read yet".to_string() }),
+                    other => self.reading.answer(other, client.final_height()).unwrap_or_else(|| Err(Failure { status: 425, message: "nothing read yet".to_string() })),
+                };
+
+                self.api.answered_here(ask, result);
+            }
+        }
+
+        for said in std::mem::take(&mut self.reading.said) {
+            self.notice = Some((said, true));
+        }
+
+        if let Some(missing) = self.store.missing() {
+            self.api.ask(missing);
+        }
+
+        if let Some(id) = self.send.waiting_for() {
+            self.api.ask(Ask::Tx(id.to_string()));
+        }
+
+        self.keep_listening(time);
+    }
+
+    /// Opens the node's stream again once it was lost, or fell silent.
+    fn keep_listening(&mut self, time: f64) {
+        if matches!(self.streaming, Streaming::Lost(_)) && time - self.asked.stream >= STREAM_RETRY {
+            self.streaming = Streaming::Connecting;
+            self.api.listen();
+        }
+
+        if self.light.silent(time) {
+            self.light.streamed = false;
+            self.streaming = Streaming::Connecting;
+            self.api.listen();
+        }
+    }
+
     /// Asks for whatever is due.
     fn poll(&mut self, time: f64) {
+        if self.settings.read_blocks {
+            self.poll_reading(time);
+
+            return;
+        }
+
         let live = self.streaming == Streaming::Live;
         let due = |last: &mut f64, every: f64| {
             let due = time - *last >= every || *last == 0.0;
@@ -627,16 +750,7 @@ impl Explorer {
             self.api.ask(Ask::Tx(id.to_string()));
         }
 
-        if matches!(self.streaming, Streaming::Lost(_)) && time - self.asked.stream >= STREAM_RETRY {
-            self.streaming = Streaming::Connecting;
-            self.api.listen();
-        }
-
-        if self.light.silent(time) {
-            self.light.streamed = false;
-            self.streaming = Streaming::Connecting;
-            self.api.listen();
-        }
+        self.keep_listening(time);
     }
 
     fn look(&self, narrow: bool) -> Look {
@@ -665,7 +779,10 @@ impl Explorer {
     /// Whether the node answers, and the stream and the light client's state, as a color and words.
     fn health(&self) -> (egui::Color32, String) {
         let palette = self.palette;
-        let up = self.store.status.is_some() && !self.store.failures.contains_key(&Ask::Status);
+        let up = match self.settings.read_blocks {
+            true => self.api.down().is_none(),
+            false => self.store.status.is_some() && !self.store.failures.contains_key(&Ask::Status),
+        };
 
         match (up, &self.streaming) {
             (false, _) => (palette.bad, "not answering".to_string()),
@@ -968,7 +1085,12 @@ impl Explorer {
         self.notice(ui);
 
         // The node not answering: said on every page, whichever it is, with a way to ask again.
-        if let Some(failure) = self.store.failures.get(&Ask::Status).filter(|failure| failure.is_trouble()).cloned()
+        let down = match self.settings.read_blocks {
+            true => self.api.down(),
+            false => self.store.failures.get(&Ask::Status).filter(|failure| failure.is_trouble()).cloned(),
+        };
+
+        if let Some(failure) = down
             && widgets::retry(ui, &self.palette, &failure.sentence(), self.api.asking(&Ask::Status))
         {
             self.reload(ui.input(|input| input.time));
@@ -979,10 +1101,12 @@ impl Explorer {
         let working = self.reloading.working(time, |ask| api.asking(ask));
         let mut pulled = false;
         let palette = self.palette;
+        let off = self.settings.read_blocks.then(|| views::reading::turned_off(&self.view)).flatten();
         let mut ctx = Ctx {
             store: &self.store,
             reader: &self.reader,
             light: &mut self.light,
+            reading: &mut self.reading,
             api: &mut self.api,
             go: &mut go,
             settings: &mut self.settings,
@@ -1002,6 +1126,11 @@ impl Explorer {
                 ui.vertical_centered(|ui| {
                     ui.set_max_width(ui.available_width().min(COLUMN));
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| match &self.view {
+                        _ if off.is_some() => {
+                            if let Some((title, why)) = off {
+                                views::reading::needs_asking(ui, &mut ctx, title, why);
+                            }
+                        }
                         View::Overview => views::overview::show(ui, &mut ctx),
                         View::Map => {}
                         View::Block(block) => views::block::show(ui, &mut ctx, block),
@@ -1145,6 +1274,10 @@ impl eframe::App for Explorer {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, &self.settings);
+
+        if self.settings.read_blocks {
+            self.reading.save(0.0);
+        }
     }
 
     /// The paper's color, behind everything: what shows under a phone's status bar.
@@ -1195,8 +1328,373 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use {super::*, serde_json::json};
+pub(crate) mod tests {
+    use {
+        super::*,
+        chainv4::consensus::ConsensusConfig,
+        chainv4::crypto::hashable::Hashable,
+        chainv4::crypto::keypair::Keypair,
+        chainv4::light::{BlockRange, LightClient, LightFinality, LightParams, NoProofs, RangeBody, RangeChanges, RangeItem},
+        chainv4::structs::address::Address,
+        chainv4::structs::block::{Block, BlockHeader, Seal, SealedHeader},
+        chainv4::structs::hash::{Hash, HashType},
+        chainv4::structs::receipt::receipts_root,
+        chainv4::structs::u256::u256,
+        crate::api::Route,
+        serde_json::json,
+        std::sync::{Arc, Mutex},
+    };
+
+    fn params() -> LightParams {
+        LightParams {
+            hash: HashType::default_chain(),
+            consensus: ConsensusConfig::Authority { key: Keypair::from_seed([7; 32]).public(), slot_ms: 1_000 },
+            finality: Some(LightFinality::Authority { checkpoint_interval: 8, fixed_ahead: 2 }),
+            pow_window: None,
+            governance: None,
+        }
+    }
+
+    /// A genesis header, committing to these parameters as a chain's does.
+    fn genesis() -> SealedHeader {
+        let hash = HashType::default_chain();
+        let zero = Hash::zero(hash);
+
+        SealedHeader {
+            header: BlockHeader {
+                parent: zero,
+                height: 0,
+                timestamp: 0,
+                producer: Address::Ed25519([0; 32]),
+                difficulty: 0,
+                tx_root: Block::tx_root(hash, &[]),
+                proof_root: params().hash(hash),
+                pool_root: Block::pool_root(hash, None),
+                receipts_root: receipts_root(hash, &[]),
+                state_root: zero,
+                gas_used: 0,
+                base_price: u256::ZERO,
+            },
+            seal: Seal::None,
+        }
+    }
+
+    /// A light client at genesis of a chain under voting finality.
+    pub fn following_client() -> LightClient {
+        let genesis = genesis();
+        let trusted = genesis.id();
+
+        LightClient::new(params(), genesis, trusted).unwrap()
+    }
+
+    /// A node on a real socket that has a genesis block to give and nothing else to say, and notes
+    /// the first line of every request it gets. It answers everything, as what is checked is what
+    /// reached it.
+    fn a_node() -> (String, Arc<Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let heard: Arc<Mutex<Vec<String>>> = Arc::default();
+        let noted = heard.clone();
+        let genesis_range = {
+            let item = RangeItem { sealed: genesis(), body: RangeBody::Whole { txs: Vec::new(), proofs: Vec::new(), pool: None, receipts: Some(Vec::new()) }, changes: RangeChanges::None(NoProofs::NoList) };
+
+            wincode::serialize(&BlockRange { tip: 0, items: vec![item], next: None }).unwrap()
+        };
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    break;
+                };
+                let (noted, genesis_range) = (noted.clone(), genesis_range.clone());
+
+                std::thread::spawn(move || {
+                    let mut got = Vec::new();
+                    let mut buffer = [0; 4096];
+
+                    while !got.windows(4).any(|end| end == b"\r\n\r\n") {
+                        match stream.read(&mut buffer) {
+                            Ok(read) if read > 0 => got.extend_from_slice(&buffer[..read]),
+                            _ => break,
+                        }
+                    }
+
+                    let line = String::from_utf8_lossy(&got).lines().next().unwrap_or_default().trim_end_matches(" HTTP/1.1").to_string();
+                    let body: Vec<u8> = match line.as_str() {
+                        line if line.contains("/blocks/range") => genesis_range,
+                        line if line.contains("/light/bundle") => json!({ "headers": [], "steps": [], "tip": 0 }).to_string().into_bytes(),
+                        line if line.contains("/headers") => json!({ "headers": [] }).to_string().into_bytes(),
+                        line if line.contains("/light/finality") => json!({ "steps": [] }).to_string().into_bytes(),
+                        // A stream that stays open and says nothing.
+                        line if line.contains("/stream") => {
+                            stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n").ok();
+                            noted.lock().unwrap().push(line.to_string());
+                            std::thread::sleep(std::time::Duration::from_secs(120));
+
+                            return;
+                        }
+                        _ => b"{}".to_vec(),
+                    };
+
+                    noted.lock().unwrap().push(line);
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).as_bytes()).ok();
+                    stream.write_all(&body).ok();
+                });
+            }
+        });
+
+        (base, heard)
+    }
+
+    /// An explorer on that node, with the setting as asked, following a chain already.
+    fn an_explorer(node: &str, reading: bool) -> Explorer {
+        let creation = eframe::CreationContext::_new_kittest(egui::Context::default());
+        let mut explorer = Explorer::new(&creation, Some(node.to_string()), node, None);
+        let client = following_client();
+
+        explorer.settings.read_blocks = reading;
+        explorer.settings.pinned.insert(node.to_string(), client.sealed_at(0).unwrap().id().to_string());
+        explorer.connect(node);
+        explorer.light = Light::following_with(client);
+
+        explorer
+    }
+
+    /// Runs its frames for a moment: what arrives is taken, what is due is asked, the page drawn.
+    fn run_for(explorer: &mut Explorer, seconds: f64, time: &mut f64, size: (f32, f32)) {
+        let context = egui::Context::default();
+        let started = web_time::Instant::now();
+
+        while started.elapsed().as_secs_f64() < seconds {
+            *time += 1.0;
+            let now = now_ms();
+            explorer.take(now, *time);
+            explorer.poll(*time);
+
+            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0, size.1))), ..egui::RawInput::default() };
+            let mut output = context.run_ui(input, |ui| explorer.page(ui, now, layout::is_narrow(size.0)));
+
+            output.textures_delta.clear();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Every page there is.
+    fn every_view() -> Vec<View> {
+        let groups = View::GROUPS.iter().flat_map(|(_, pages)| pages.iter().map(|(view, _)| view.clone()));
+        let open = [
+            View::Block("0".to_string()),
+            View::Block("5".to_string()),
+            View::Tx("0x01".to_string()),
+            View::Account("ed25519:0x0101010101010101010101010101010101010101010101010101010101010101".to_string()),
+            View::Name("alice.dev".to_string()),
+            View::Collection("contract:0x01".to_string()),
+            View::Transfer("0x01".to_string()),
+            View::Release(1),
+            View::Multisig("multisig:0x01".to_string()),
+            View::More,
+        ];
+
+        groups.chain(open).collect()
+    }
+
+    #[test]
+    fn with_the_setting_on_opening_every_page_and_searching_sends_only_what_may_leave_and_the_chain_shows_from_blocks() {
+        let (node, heard) = a_node();
+        let mut explorer = an_explorer(&node, true);
+        let mut time = 0.0;
+
+        for size in [(360.0, 740.0), (740.0, 360.0), (1200.0, 800.0)] {
+            for view in every_view() {
+                explorer.view = view;
+                run_for(&mut explorer, 0.03, &mut time, size);
+            }
+        }
+
+        // A search for an address, a height, an id and a name tells the node nothing.
+        for search in ["ed25519:0x0202020202020202020202020202020202020202020202020202020202020202", "7", "0x0303030303030303030303030303030303030303030303030303030303030303", "bob.dev"] {
+            explorer.search = search.to_string();
+            explorer.find();
+            run_for(&mut explorer, 0.05, &mut time, (1200.0, 800.0));
+        }
+
+        run_for(&mut explorer, 0.2, &mut time, (1200.0, 800.0));
+
+        let lines = heard.lock().unwrap().clone();
+        let may_leave = |line: &str| line.contains("/light") || line.contains("/headers") || line.contains("/blocks/range") || line.contains("/stream") || line.ends_with("/release");
+
+        assert!(lines.iter().any(|line| line.contains("/blocks/range")), "it reads: {lines:?}");
+        assert!(lines.iter().all(|line| may_leave(line)), "{:?}", lines.iter().filter(|line| !may_leave(line)).collect::<Vec<_>>());
+        assert_eq!(explorer.store.status.as_ref().map(|status| status.height), Some(0), "what it shows comes from what it read");
+        assert_eq!(explorer.store.status.as_ref().map(|status| status.coin.symbol.clone()), Some("units".to_string()), "no coin was ever said here");
+        assert_eq!(explorer.store.top(), Some(0), "the feed comes from the index");
+        assert!(explorer.reading.is_open());
+    }
+
+    /// The whole app against a node on a private chain under voting finality, keeping what it reads in
+    /// a real folder: it walks, reads from the final block on, shows blocks from what it read, puts them
+    /// away and goes on from there. Started by hand, as it needs a node.
+    #[test]
+    #[ignore = "needs a node with voting finality: CHAINV4_NODE=http://127.0.0.1:8099 cargo test --lib the_whole_app -- --ignored --nocapture"]
+    fn the_whole_app_reads_a_real_node_from_its_final_block_and_goes_on_from_there_when_opened_again() {
+        let node = std::env::var("CHAINV4_NODE").expect("CHAINV4_NODE names a node");
+        let folder = std::env::temp_dir().join(format!("chainv4-explorer-reading-{}", std::process::id()));
+        std::fs::remove_dir_all(&folder).ok();
+        let open = |folder: &std::path::Path| {
+            let creation = eframe::CreationContext::_new_kittest(egui::Context::default());
+            let mut explorer = Explorer::new(&creation, Some(node.clone()), &node, Some(folder.to_path_buf()));
+
+            explorer.settings.read_blocks = true;
+            explorer.connect(&node);
+
+            explorer
+        };
+        let settle = |explorer: &mut Explorer, time: &mut f64, done: &dyn Fn(&Explorer) -> bool| {
+            let deadline = web_time::Instant::now() + Duration::from_secs(60);
+
+            while !done(explorer) {
+                assert!(web_time::Instant::now() < deadline, "{:?} {:?} {:?}", explorer.light.trouble, explorer.reading.standing(), explorer.store.status.as_ref().map(|status| status.height));
+                run_for(explorer, 0.02, time, (1200.0, 800.0));
+            }
+        };
+        let mut time = 0.0;
+        let mut explorer = open(&folder);
+
+        settle(&mut explorer, &mut time, &|explorer| explorer.reading.standing().is_some_and(|standing| standing.read >= 3) && explorer.store.top().is_some_and(|top| top > 0));
+
+        let first = explorer.reading.standing().unwrap();
+        let top = explorer.store.top().unwrap();
+
+        assert_eq!(explorer.store.status.as_ref().map(|status| status.coin.symbol.clone()), Some("units".to_string()));
+        assert!(explorer.store.bottom().unwrap() >= first.known_from, "nothing older than it knows");
+        assert!(explorer.light.fast_resumed.is_none());
+        println!("read to {} from {}, {} bytes down, {} kept", first.high, first.known_from, first.downloaded, first.bytes);
+
+        // A search for what it read finds it, and for what it did not says so.
+        explorer.view = View::Block(top.to_string());
+        settle(&mut explorer, &mut time, &|explorer| explorer.store.detail_for(&top.to_string()).is_some());
+        assert_eq!(explorer.store.detail_for(&top.to_string()).unwrap().summary.height, top);
+
+        let older = first.known_from.saturating_sub(1).to_string();
+        explorer.view = View::Block(older.clone());
+        settle(&mut explorer, &mut time, &|explorer| explorer.store.failures.get(&Ask::Block(older.clone())).is_some_and(|failure| failure.status == 404));
+
+        // Put away, it comes back from the device, checks, and goes on from where it got to.
+        explorer.reading.close(time);
+        std::thread::sleep(Duration::from_millis(300));
+        let mut again = open(&folder);
+        let mut time_again = 0.0;
+
+        settle(&mut again, &mut time_again, &|explorer| explorer.reading.standing().is_some_and(|standing| standing.read > first.read));
+
+        let standing = again.reading.standing().unwrap();
+
+        assert_eq!(standing.known_from, first.known_from, "it knows from where it did");
+        assert!(standing.downloaded > first.downloaded && standing.high > first.high);
+        assert!(again.reading.said.is_empty() && again.notice.is_none(), "{:?} {:?}", again.reading.said, again.notice);
+        println!("came back at {}, read to {}", first.high, standing.high);
+        again.reading.close(time_again);
+        std::thread::sleep(Duration::from_millis(300));
+
+        let files: Vec<String> = std::fs::read_dir(folder.join("explorer-index")).unwrap().flatten().map(|file| file.file_name().to_string_lossy().into_owned()).collect();
+
+        assert!(files.iter().any(|name| name.ends_with("-head.index")) && files.iter().any(|name| name.contains("-b0-.index")), "{files:?}");
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn with_the_setting_on_the_stream_only_wakes_it_and_nothing_it_says_is_taken() {
+        let (node, _) = a_node();
+        let mut explorer = an_explorer(&node, true);
+        let summary = json!({ "id": "0xforged", "height": 99, "parent": "0x00", "timestamp": 1, "producer": "ed25519:0x01", "difficulty": "0", "tx_root": "0x00", "gas_used": 0, "base_price": "0", "tx_count": 0, "proof_count": 0, "main": true });
+
+        explorer.news(News::Event { name: "block".to_string(), data: summary.clone() }, 1, 1.0);
+        explorer.news(News::Event { name: "queued".to_string(), data: json!({}) }, 1, 1.0);
+
+        assert_eq!(explorer.store.top(), None, "not taken");
+        assert!(explorer.store.feed.is_empty());
+
+        // With it off, the same is taken as it always was.
+        let (node, _) = a_node();
+        let mut explorer = an_explorer(&node, false);
+
+        explorer.news(News::Event { name: "block".to_string(), data: summary }, 1, 1.0);
+        assert_eq!(explorer.store.top(), Some(99));
+        assert_eq!(explorer.store.feed.len(), 1);
+    }
+
+    #[test]
+    fn with_the_setting_off_the_explorer_asks_the_node_and_shows_the_tip_as_it_always_did() {
+        let (node, heard) = a_node();
+        let mut explorer = an_explorer(&node, false);
+        let mut time = 0.0;
+
+        explorer.view = View::Account("ed25519:0x0101010101010101010101010101010101010101010101010101010101010101".to_string());
+        run_for(&mut explorer, 0.3, &mut time, (1200.0, 800.0));
+
+        let lines = heard.lock().unwrap().clone();
+
+        for route in ["/status", "/node", "/release", "/accounts/ed25519:0x0101010101010101010101010101010101010101010101010101010101010101"] {
+            assert!(lines.iter().any(|line| line.contains(route)), "{route} in {lines:?}");
+        }
+
+        assert!(!lines.iter().any(|line| line.contains("/blocks/range")), "{lines:?}");
+        assert!(!explorer.reading.is_open(), "nothing here happens at all");
+    }
+
+    #[test]
+    fn a_coin_a_node_said_is_kept_for_the_chain_with_the_setting_off_and_shown_with_it_on() {
+        let (node, _) = a_node();
+        let mut explorer = an_explorer(&node, false);
+        let status = json!({
+            "genesis": "0xchain", "tip": "t", "height": 1, "timestamp": 0, "difficulty": "0", "work": "1",
+            "hash": "blake3", "coin": { "symbol": "DEV", "decimals": 18 }, "finality": null, "fees": null,
+        });
+
+        explorer.answered(Ask::Status, status.clone(), 0);
+        assert_eq!(explorer.settings.coins.get("0xchain"), Some(&("DEV".to_string(), 18)));
+
+        // A status answered with the setting on keeps nothing of it: nobody said so.
+        explorer.settings.coins.clear();
+        explorer.settings.read_blocks = true;
+        explorer.answered(Ask::Status, status, 0);
+        assert!(explorer.settings.coins.is_empty());
+    }
+
+    #[test]
+    fn with_the_setting_on_fast_resume_is_off_even_on_a_node_trusted_for_it() {
+        let (node, _) = a_node();
+        let mut explorer = an_explorer(&node, true);
+
+        explorer.settings.fast_resume.insert(node.clone(), true);
+        explorer.light = Light::default();
+        // What starting from the node says: no checkpoint is asked for, as it walks.
+        let params = wincode::serialize(&params()).unwrap();
+        let header = wincode::serialize(&genesis()).unwrap();
+        let light = json!({ "params": chainv4::structs::hex::to_hex(&params), "header": chainv4::structs::hex::to_hex(&header) });
+
+        explorer.api.answered_here(Ask::Light, Ok(light));
+        explorer.take(now_ms(), 1.0);
+
+        assert!(explorer.light.client().is_some(), "{:?}", explorer.light.trouble);
+        assert_eq!(explorer.light.fast_resumed, None);
+    }
+
+    #[test]
+    fn every_route_an_explorer_has_is_decided_with_the_setting_on() {
+        // What is decided by Ask::route's naming every request: this states the table the guide gives.
+        let goes = |ask: &Ask| ask.route() == Route::Goes;
+
+        assert!(goes(&Ask::Light) && goes(&Ask::Submit("{}".to_string())) && goes(&Ask::Bundle { headers: 0, epoch: 0 }) && goes(&Ask::Release));
+        assert_eq!(Ask::Status.route(), Route::Index);
+        assert_eq!(Ask::Blocks { before: None, limit: 1 }.route(), Route::Index);
+        assert_eq!(Ask::Tx("0x01".to_string()).route(), Route::Index);
+        assert_eq!(Ask::Proof { column: "accounts".to_string(), key: "0x01".to_string(), block: None }.route(), Route::Off, "only one pressed for goes");
+        assert_eq!(Ask::ReceiptProof("0x01".to_string()).route(), Route::Off);
+        assert_eq!(Ask::Rpc("{}".to_string()).route(), Route::Off);
+    }
 
     #[test]
     fn retrying_clears_why_it_failed_and_a_page_says_it_is_loading_again() {

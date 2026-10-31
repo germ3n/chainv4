@@ -581,6 +581,83 @@ pub fn fast_resume_switch(ui: &mut Ui, palette: &Palette, on: &mut bool, opening
     changed
 }
 
+/// The switch that has an app take everything from final blocks it fetched and checked, saying what
+/// it gives and what it costs: `app` is what to call the app. Whether it changed.
+pub fn read_blocks_switch(ui: &mut Ui, palette: &Palette, on: &mut bool, app: &str) -> bool {
+    let changed = ui.checkbox(on, "Read from checked blocks").changed();
+    let said = format!(
+        "This {app} takes what it shows from final blocks it fetched and checked itself, rather than ask the node, so what it shows rests on those blocks and the node learns less of what you look at. Anything that cannot be proven this way is turned off and says why, rather than shown with a label. Off by default, as reading blocks costs far more than asking."
+    );
+    ui.add(egui::Label::new(RichText::new(said).small().color(palette.muted)).wrap());
+
+    changed
+}
+
+/// What reading checked blocks cannot do, and what it costs, in any app that does it. What only one
+/// app does about them, it says itself.
+pub const READ_BLOCKS_LIMITS: &[&str] = &[
+    "Gaps: a block that comes without its proofs counts as unknown, not unchanged. Nodes keep proofs for their last 10,000 blocks by default, about 14 hours on the devnet, and only --archive nodes prove older ones. A block without its receipts cannot speak for them either, and the app says so.",
+    "Left out: a node can leave a state entry out of a block's list without being caught, which only a direct proof finds, and the node sees what it is of. Receipts cannot be left out this way.",
+    "Genesis: what genesis allocated is in no block, so reading from height 0 does not show it. A direct proof does.",
+    "Cost: about 2 KB an empty block, 34 MB a day on the devnet at 17,280 blocks a day. It shows what it has downloaded and how far it has read. It reads only while the app is open.",
+    "Privacy: reading blocks hides which transactions and state changes you care about. A direct proof does not, and neither does who is asking: for that, the proxy and Tor settings still apply.",
+];
+
+/// What a page says of the page itself, in a browser: the page is code some server sent, so nothing
+/// it checks is stronger than that server. `what` is what to call the app, and `elsewhere` where the
+/// checks hold, as an extension's do for an app that has one. None for code that was installed, or on
+/// a device.
+pub fn page_warning(origin: Option<&str>, node: &str, what: &str, elsewhere: &str) -> Option<String> {
+    let origin = origin?;
+
+    if origin.starts_with("chrome-extension:") || origin.starts_with("moz-extension:") {
+        return None;
+    }
+
+    Some(match origin.trim_end_matches('/') == node.trim_end_matches('/') {
+        true => format!("This page itself comes from that node, {node}, so the node could serve code that fakes these checks. The checks hold against a node only when the {what} does not come from it: {elsewhere}."),
+        false => format!("This page itself comes from {origin}, so whoever serves it could serve code that fakes these checks. The checks hold against that server only in {elsewhere}."),
+    })
+}
+
+/// Where this page comes from, in a browser.
+pub fn page_origin() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window().and_then(|window| window.location().origin().ok())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
+/// How many bytes, for a person.
+pub fn bytes_said(count: u64) -> String {
+    match count {
+        0..=9_999 => format!("{count} B"),
+        10_000..=9_999_999 => format!("{} KB", count / 1_000),
+        _ => format!("{:.1} MB", count as f64 / 1_000_000.0),
+    }
+}
+
+/// What a page says that cannot work without asking a node, with the setting on: the reason in plain
+/// words, and the way to the setting. Whether that was pressed.
+pub fn needs_asking(ui: &mut Ui, palette: &Palette, why: &str) -> bool {
+    let mut settings = false;
+
+    card(ui, palette, |ui| {
+        caps(ui, palette, "Turned off");
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(RichText::new(why).color(palette.soft)).wrap());
+        ui.add_space(8.0);
+        settings = ui.button("Settings").clicked();
+    });
+
+    settings
+}
+
 /// A label that wraps, with a command's flags in the mono face: see [`flagged`].
 pub fn flagged_label(ui: &mut Ui, text: &str, style: TextStyle, color: Color32) -> Response {
     let job = flagged(ui, text, style, color);

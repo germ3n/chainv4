@@ -15,6 +15,10 @@ log = "0.4.34"
 getrandom = "0.4"
 # Wiping the secrets biometrics keep from memory once they are done with.
 zeroize = "1.9.1"
+# Checking blocks a node sends, and what a reading keeps of where it got to.
+chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "abi"], optional = true }
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+wincode = { version = "0.6.3", optional = true }
 
 # Talking to a node: ureq on the desktop and Android, where a proxy set in an app is the only way
 # out, SOCKS5 included; the browser's fetch in the browser, where its own proxy settings apply.
@@ -26,6 +30,11 @@ default = ["tls"]
 # Nodes at https://, through rustls, whose ring is C: the ui workflow lints Android without it, as
 # it has no Android sysroot, and the apps, built with one, always have it.
 tls = ["ureq/rustls"]
+# Reading blocks a node sends, each checked against the headers a light client followed, and keeping
+# an index on a shelf, in files or in IndexedDB (src/blocks.rs, src/shelf.rs): what the wallet and the
+# explorer read a chain by when told to rest on nothing else. Off by default, as chainv4 is C by way of
+# blake3 on Android, which the ui workflow has no sysroot for.
+blocks = ["dep:chainv4", "dep:serde", "dep:wincode", "web-sys/IdbFactory", "web-sys/IdbDatabase", "web-sys/IdbOpenDbRequest", "web-sys/IdbRequest", "web-sys/IdbObjectStore", "web-sys/IdbTransaction", "web-sys/IdbTransactionMode", "web-sys/DomException", "web-sys/DomStringList", "web-sys/Event", "web-sys/EventTarget"]
 # A live camera, for reading QR codes as they are shown (src/camera.rs): nokhwa on the desktop,
 # getUserMedia in the browser, the APK's Camera2 class on Android. The wallet has it; the explorer
 # reads no codes.

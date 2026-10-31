@@ -202,6 +202,7 @@ pub fn remove_wallet(settings: &mut Settings, index: usize) {
     }
 
     let entry = settings.wallets.remove(index);
+    settings.forget_indexes.push(entry.id.clone());
     settings.retired.extend(entry.biometric);
     settings.wallet = 0;
     settings.persist_now = true;
@@ -371,6 +372,7 @@ mod tests {
             current: String::new(),
             biometric: biometric.map(str::to_string),
             unprotected,
+            born: None,
         }
     }
 
@@ -660,7 +662,7 @@ mod tests {
         let secret = fresh_secret().unwrap();
         let (_, biometric) = sealed_anew(&Factors::Biometric(&secret), book).unwrap();
         let (_, both) = sealed_anew(&Factors::Both("correct horse", &secret), book).unwrap();
-        let entry = |vault: Sealed, guard: Guard| WalletEntry { id: String::new(), name: "Mine".to_string(), vault, current: "ed25519:0x01".to_string(), biometric: tagged(guard, &enrolled), unprotected: false };
+        let entry = |vault: Sealed, guard: Guard| WalletEntry { id: String::new(), name: "Mine".to_string(), vault, current: "ed25519:0x01".to_string(), biometric: tagged(guard, &enrolled), unprotected: false, born: None };
 
         vec![(Guard::Biometric, entry(biometric, Guard::Biometric), secret.clone()), (Guard::Both, entry(both, Guard::Both), secret)]
     }
@@ -760,7 +762,7 @@ mod tests {
         let book = book();
         let old_secret = fresh_secret().unwrap();
         let (_, old_sealed) = sealed_anew(&Factors::Both("correct horse", &old_secret), &book).unwrap();
-        let old = WalletEntry { id: String::new(), name: "Mine".to_string(), vault: old_sealed, current: String::new(), biometric: Some("both-v1:fake:old".to_string()), unprotected: false };
+        let old = WalletEntry { id: String::new(), name: "Mine".to_string(), vault: old_sealed, current: String::new(), biometric: Some("both-v1:fake:old".to_string()), unprotected: false, born: None };
         let mut settings = Settings::with_wallets(vec![old.clone()]);
         let disk = |settings: &Settings| {
             let mut storage = Storage::default();

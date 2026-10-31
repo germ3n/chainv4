@@ -14,9 +14,25 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, block: &str) {
     let look = ctx.look;
     let store = ctx.store;
     let Some(detail) = store.detail_for(block) else {
-        ctx.api.ask(Ask::Block(block.to_string()));
+        let ask = Ask::Block(block.to_string());
+        let height = block.parse::<u64>().ok();
+
+        // Fetched by itself since it was last asked: past the hold on what was not found.
+        if ctx.settings.read_blocks && height.is_some_and(|height| ctx.reading.holds_fetched(height)) && store.failures.contains_key(&ask) {
+            ctx.api.retry(ask.clone());
+        }
+
+        ctx.api.ask(ask.clone());
         super::heading(ui, look, "Block", block, |_| {});
-        super::waiting(ui, ctx, &Ask::Block(block.to_string()));
+
+        match store.failures.get(&ask).filter(|failure| failure.status == 404 && ctx.settings.read_blocks) {
+            Some(failure) => {
+                let why = failure.message.clone();
+
+                super::reading::outside(ui, ctx, &why, height);
+            }
+            None => super::waiting(ui, ctx, &ask),
+        }
 
         return;
     };
@@ -59,6 +75,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, block: &str) {
 
             if summary.pruned {
                 facts.row("body", |ui| super::note(ui, look, "not kept: this node synced from a snapshot after this block, and holds its header alone"));
+            }
+
+            if ctx.settings.read_blocks {
+                facts.row("rests on", |ui| {
+                    widgets::pill(ui, "final, checked here", look.roles.final_);
+                });
             }
 
             if summary.difficulty != "0" {

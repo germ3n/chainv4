@@ -151,7 +151,10 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx, query: &EventQuery) {
         super::note(
             ui,
             look,
-            format!("None since height {}, where this node's index starts.{still}", format::thousands(&found.indexed_from.to_string())),
+            match ctx.settings.read_blocks {
+                true => format!("None in the blocks read, which go back to height {}.{still} Read further back in Settings to look at older ones.", format::thousands(&found.indexed_from.to_string())),
+                false => format!("None since height {}, where this node's index starts.{still}", format::thousands(&found.indexed_from.to_string())),
+            },
         );
 
         return;

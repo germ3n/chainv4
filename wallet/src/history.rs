@@ -123,6 +123,29 @@ pub struct Checked {
     /// What each step did, for a batch; none for anything else, or one kept before batches were.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<CheckedStep>,
+    /// How it came to be known. Never written: it says which ones are private to a wallet's index, and
+    /// so stay out of the settings file.
+    #[serde(skip)]
+    pub came: Origin,
+}
+
+/// Transactions as the settings file keeps them: without those private to a wallet's index, or not
+/// meant to last.
+pub fn kept_only<S: serde::Serializer>(checked: &std::collections::HashMap<String, Checked>, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_map(checked.iter().filter(|(_, checked)| checked.came == Origin::Proven))
+}
+
+/// How a transaction shown came to be known.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// Proven against a receipt a node sent, as ever: kept with the settings.
+    #[default]
+    Proven,
+    /// Looked up by the wallet that sent it, reading checked blocks: the block's in, and it counts as
+    /// not final until the reading reaches it. Kept nowhere.
+    Looked,
+    /// Read from a checked block: kept in the wallet's sealed index alone.
+    Read,
 }
 
 /// One step of a proven batch.
@@ -267,6 +290,7 @@ impl Checked {
             call: kept_call(&signed.tx),
             logs: kept_logs(&receipt.events),
             steps: checked_steps(&signed.tx, &receipt.outcome),
+            came: Origin::default(),
         }
     }
 

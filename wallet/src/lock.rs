@@ -452,6 +452,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
     // The words asked back were right: the wallet is kept, and opens.
     if confirmed && let Lock::Words { made, .. } = std::mem::replace(lock, Lock::Open) {
         opened = Some(keep(settings, made.name, made.vault, &made.phrase, made.passphrase.to_string()));
+        settings.just_made = true;
     }
 
     opened
@@ -638,6 +639,7 @@ fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, pa
                 current: String::new(),
                 biometric: None,
                 unprotected: vault.bare(),
+                born: None,
             });
             settings.wallet = settings.wallets.len() - 1;
         }
@@ -670,6 +672,7 @@ fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &P
                 current: String::new(),
                 biometric: None,
                 unprotected: vault.bare(),
+                born: None,
             });
             settings.wallet = settings.wallets.len() - 1;
         }
@@ -842,7 +845,7 @@ mod tests {
             _ => Vault::keyed(&secret).unwrap(),
         };
         let sealed = vault.seal(&book).unwrap();
-        let entry = WalletEntry { id: String::new(), name: "Mine".to_string(), vault: sealed, current: String::new(), biometric: guard::tagged(guard, &fake::keep(&secret)), unprotected: false };
+        let entry = WalletEntry { id: String::new(), name: "Mine".to_string(), vault: sealed, current: String::new(), biometric: guard::tagged(guard, &fake::keep(&secret)), unprotected: false, born: None };
 
         (Settings::with_wallets(vec![entry]), book)
     }

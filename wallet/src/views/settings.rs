@@ -22,6 +22,7 @@ use {
 
 #[derive(Default)]
 pub struct SettingsState {
+    reading: super::reading::ReadingState,
     /// The node being typed, and a genesis id to trust instead.
     node: Option<String>,
     genesis: String,
@@ -142,6 +143,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     // An offline signer follows no node and no chain.
     if ctx.settings.role() != Role::Signer {
         online(ui, ctx, state, node);
+        super::reading::card(ui, ctx, &mut state.reading);
         super::dapp::settings(ui, ctx);
         #[cfg(feature = "swap")]
         swaps(ui, ctx);
@@ -426,6 +428,12 @@ fn fast_resume(ui: &mut Ui, ctx: &mut Ctx, node: &str) {
     let mut on = ctx.settings.fast_resume.get(node).copied().unwrap_or(false);
 
     let opening = format!("Opening the wallet skips the headers since it last ran, once it is more than {} epochs behind", chainv4::light::FEW_EPOCHS);
+
+    if ctx.settings.read_blocks {
+        ui.label(RichText::new("Fast resume is off while Read from checked blocks is on: that rests on what the node says, and this on nothing it says.").small().color(palette.muted));
+
+        return;
+    }
 
     if chainv4_ui::widgets::fast_resume_switch(ui, &palette, &mut on, &opening, "what the wallet checked before") {
         match on {
@@ -1168,7 +1176,7 @@ mod tests {
         const PHONE: (f32, f32) = (360.0, 740.0);
 
         fn entry(vault: Sealed, biometric: Option<String>) -> WalletEntry {
-            WalletEntry { id: String::new(), name: "Mine".to_string(), vault, current: String::new(), biometric, unprotected: false }
+            WalletEntry { id: String::new(), name: "Mine".to_string(), vault, current: String::new(), biometric, unprotected: false, born: None }
         }
 
         /// A wallet of this guard, open, with two phrases.

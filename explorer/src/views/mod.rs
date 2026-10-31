@@ -35,6 +35,7 @@ pub mod names;
 pub mod network;
 pub mod overview;
 pub mod pool;
+pub mod reading;
 pub mod rich;
 pub mod send;
 pub mod name;
@@ -216,6 +217,13 @@ pub struct Settings {
     pub names: HashMap<String, String>,
     /// The sidebar's groups folded, by name.
     pub folded: HashSet<String>,
+    /// Whether to take everything from final blocks fetched and checked here, rather than ask a node.
+    /// For the install, rather than for a node: changing the node never quietly starts asking it about
+    /// everything. Off by default, as reading blocks costs far more than asking.
+    pub read_blocks: bool,
+    /// The coin's symbol and decimals as a node last said them, by chain (its genesis id): what shows
+    /// with Read from checked blocks on, when no node is asked and nothing checked says them.
+    pub coins: HashMap<String, (String, u8)>,
 }
 
 /// The look a page is drawn in: its colors, and whether the screen is a phone's.
@@ -233,6 +241,8 @@ pub struct Ctx<'a> {
     pub reader: &'a chainv4::abi::known::AbiReader,
     /// The light client, and the balances it proved.
     pub light: &'a mut crate::light::Light,
+    /// What was read from checked blocks, while that is on.
+    pub reading: &'a mut crate::reading::Reading,
     pub api: &'a mut Api,
     /// Where to go next, when a page says.
     pub go: &'a mut Option<View>,
@@ -251,12 +261,15 @@ impl Ctx<'_> {
         self.look.palette
     }
 
-    /// The chain's coin: its decimals and symbol, 18 and nothing before the status comes.
+    /// The chain's coin: its decimals and symbol, 18 and nothing before the status comes. With Read
+    /// from checked blocks on, plain units until then, as a wrong number of decimals misstates a proof.
     pub fn coin(&self) -> (u8, String) {
-        self.store
-            .status
-            .as_ref()
-            .map_or((18, String::new()), |status| (status.coin.decimals, status.coin.symbol.clone()))
+        let unknown = match self.settings.read_blocks {
+            true => (0, "units".to_string()),
+            false => (18, String::new()),
+        };
+
+        self.store.status.as_ref().map_or(unknown, |status| (status.coin.decimals, status.coin.symbol.clone()))
     }
 
     /// An amount of the chain's coin.
@@ -556,6 +569,23 @@ pub fn waiting(ui: &mut Ui, ctx: &mut Ctx, ask: &Ask) {
     let palette = ctx.palette();
 
     match ctx.store.failures.get(ask) {
+        Some(failure) if failure.status == crate::api::NEEDS_ASKING_STATUS => {
+            if widgets::needs_asking(ui, &palette, &failure.sentence()) {
+                ctx.go(View::Settings);
+            }
+        }
+        // What was asked of what was read before there was anything to answer it.
+        Some(failure) if failure.status == 425 => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Loading…").color(palette.muted));
+            });
+        }
+        Some(failure) if failure.status == 404 && ctx.settings.read_blocks => {
+            let why = failure.message.clone();
+
+            reading::outside(ui, ctx, &why, None);
+        }
         Some(failure) if failure.status == 404 => {
             ui.label(RichText::new(format!("Not found: {}", failure.message)).color(palette.muted));
         }
@@ -871,6 +901,7 @@ pub(crate) fn render_frames(store: &Store, light: &mut crate::light::Light, widt
     let mut api = Api::new("http://127.0.0.1:1", Err("offline".to_string()), egui::Context::default());
     let mut settings = Settings::default();
     let mut go = None;
+    let mut reading = crate::reading::Reading::default();
     let palette = crate::theme::DARK;
     let look = Look { palette, roles: crate::theme::Roles::of(&palette), narrow: chainv4_ui::layout::is_narrow(width) };
     let input = egui::RawInput {
@@ -883,7 +914,7 @@ pub(crate) fn render_frames(store: &Store, light: &mut crate::light::Light, widt
 
     for _ in 0..frames {
         let mut output = context.run_ui(input.clone(), |ui| {
-            let mut ctx = Ctx { store, reader: &reader, light: &mut *light, api: &mut api, go: &mut go, settings: &mut settings, now: 2_000, look };
+            let mut ctx = Ctx { store, reader: &reader, light: &mut *light, reading: &mut reading, api: &mut api, go: &mut go, settings: &mut settings, now: 2_000, look };
             draw(ui, &mut ctx);
         });
         output.textures_delta.clear();

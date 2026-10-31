@@ -18,9 +18,23 @@ pub struct TokensState {
     typing: String,
 }
 
+#[cfg(test)]
+impl TokensState {
+    /// As it is with this typed.
+    pub fn with_typed(typed: &str) -> TokensState {
+        TokensState { typing: typed.to_string() }
+    }
+}
+
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut TokensState) {
     let look = ctx.look;
     super::heading(ui, look, "Tokens", "The chain's token registry, by symbol.", |_| {});
+
+    if ctx.settings.read_blocks {
+        reading(ui, ctx, state);
+
+        return;
+    }
 
     match ctx.store.status.as_ref().map(|status| status.token_functions.clone()) {
         Some(functions) if functions.is_empty() => {
@@ -45,6 +59,40 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut TokensState) {
     ui.add(egui::TextEdit::singleline(&mut state.typing).hint_text("Symbol starts with…").desired_width(if look.narrow { f32::INFINITY } else { 260.0 }));
     ui.add_space(8.0);
     super::section(ui, look, "Registered", |ui| list(ui, ctx, state.typing.trim()));
+}
+
+/// With Read from checked blocks on: the list is the node's, and one token's record can be proven by
+/// its address, as someone presses for.
+fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut TokensState) {
+    let look = ctx.look;
+
+    super::section(ui, look, "A token's record", |ui| {
+        ui.add(egui::TextEdit::singleline(&mut state.typing).hint_text("A token contract's address").desired_width(if look.narrow { f32::INFINITY } else { 460.0 }));
+        ui.add_space(4.0);
+
+        let Ok(address) = state.typing.trim().parse::<chainv4::structs::address::Address>() else {
+            return;
+        };
+        let key = chainv4::registry::tokens::token_key(&address);
+        let Some(proven) = super::reading::direct_proof(ui, ctx, "this token's record", chainv4::db::Column::Tokens, &key) else {
+            return;
+        };
+
+        super::reading::proven_at(ui, ctx, &proven);
+
+        match proven.value.as_deref().map(wincode::deserialize::<chainv4::registry::tokens::Token>) {
+            None => super::note(ui, look, "The registry holds no such token."),
+            Some(Err(_)) => {
+                ui.colored_label(look.palette.bad, "A record that does not read");
+            }
+            Some(Ok(token)) => super::facts(ui, look, "token record", |facts| {
+                facts.text("name", token.name.as_deref().unwrap_or("not given"));
+                facts.text("symbol", token.symbol.as_deref().unwrap_or("not given"));
+                facts.text("decimals", token.decimals.map_or("not given".to_string(), |decimals| decimals.to_string()));
+            }),
+        }
+    });
+    super::reading::turned_off_card(ui, ctx, "The registry's list, and search by symbol, come from the node");
 }
 
 /// The first page of tokens whose symbol starts with this, or of every token for "", asking

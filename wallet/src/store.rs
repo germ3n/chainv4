@@ -17,11 +17,12 @@
 
 use {
     crate::app::{Settings, WalletEntry},
+    crate::vault::fresh_name,
+    chainv4_ui::kept::{WRITING, flush_folder, private_folder, written_whole},
     serde::{Deserialize, Serialize, de::DeserializeOwned},
     std::{
         collections::{HashMap, HashSet},
         fs,
-        io::Write,
         path::{Path, PathBuf},
         thread::JoinHandle,
     },
@@ -31,9 +32,6 @@ use {
 const FOLDER: &str = "wallet-store";
 /// What settings go by. No wallet's name can be it: those are hex.
 const SETTINGS: &str = "settings";
-/// What a file being written goes by until it is whole.
-const WRITING: &str = "writing";
-
 /// Settings on disk, with the wallets' files in the order the list has them.
 #[derive(Serialize, Deserialize)]
 struct SettingsFile<S> {
@@ -93,6 +91,11 @@ impl Store {
             saving: None,
             failed: None,
         })
+    }
+
+    /// The folder its files are in, where a wallet's index goes beside them.
+    pub fn folder(&self) -> &Path {
+        &self.dir
     }
 
     /// Reads all there is, setting aside what will not read. It writes nothing else.
@@ -338,85 +341,32 @@ fn run(dir: &Path, job: Job) -> Result<Done, String> {
             }
         }
 
+        // What it read of the chain goes with it: indexes are named after their wallet, and however
+        // sealed, they are no use to anyone once it is gone.
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let file = entry.file_name().to_string_lossy().into_owned();
+
+            if file.starts_with(&format!("{name}-")) && file.contains(".index") {
+                fs::remove_file(entry.path()).ok();
+            }
+        }
+
         flush_folder(dir);
     }
 
     for (name, text) in &job.wallets {
-        written_whole(&first(name), text)?;
-        written_whole(&copy(name), text)?;
+        written_whole(&first(name), text.as_bytes())?;
+        written_whole(&copy(name), text.as_bytes())?;
     }
 
     if let Some(text) = &job.settings {
-        written_whole(&first(SETTINGS), text)?;
-        written_whole(&copy(SETTINGS), text)?;
+        written_whole(&first(SETTINGS), text.as_bytes())?;
+        written_whole(&copy(SETTINGS), text.as_bytes())?;
     }
 
     Ok(Done { gone: job.gone, wallets: job.wallets, settings: job.settings })
 }
 
-/// Puts this text at this path whole, or leaves what is there: written beside it, flushed, read
-/// back, and only then renamed over it.
-fn written_whole(path: &Path, text: &str) -> Result<(), String> {
-    let beside = path.with_extension(format!("ron.{WRITING}"));
-    let fail = |why: std::io::Error| format!("could not write {}: {why}", path.display());
-    let result = (|| {
-        let mut file = create_private(&beside).map_err(fail)?;
-        file.write_all(text.as_bytes()).map_err(fail)?;
-        file.sync_all().map_err(fail)?;
-        drop(file);
-
-        if fs::read_to_string(&beside).map_err(fail)? != text {
-            return Err(format!("{} did not read back as written", path.display()));
-        }
-
-        fs::rename(&beside, path).map_err(fail)
-    })();
-
-    if result.is_err() {
-        fs::remove_file(&beside).ok();
-    } else if let Some(folder) = path.parent() {
-        flush_folder(folder);
-    }
-
-    result
-}
-
-/// A new file only this user can read, where that can be asked for. Sealed vaults are in here.
-fn create_private(path: &Path) -> std::io::Result<fs::File> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-
-    options.open(path)
-}
-
-#[cfg(unix)]
-fn private_folder(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).ok();
-}
-
-#[cfg(not(unix))]
-fn private_folder(_: &Path) {}
-
-/// Makes a rename last through losing power, where a folder can be flushed.
-fn flush_folder(dir: &Path) {
-    #[cfg(unix)]
-    if let Ok(folder) = fs::File::open(dir) {
-        folder.sync_all().ok();
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
-}
-
-fn fresh_name() -> Result<String, String> {
-    let mut bytes = [0; 16];
-    getrandom::fill(&mut bytes).map_err(|err| format!("no randomness for a file's name: {err}"))?;
-
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
 
 /// What a start works from, given what the folder held and what eframe's file held, which is where
 /// every wallet was before this, and where an older build run since will have put any it made: a
@@ -500,7 +450,7 @@ mod tests {
     fn wallet(name: &str) -> WalletEntry {
         let vault = Vault::create("").unwrap();
 
-        WalletEntry { id: String::new(), name: name.to_string(), vault: vault.seal(&Book::default()).unwrap(), current: String::new(), biometric: None, unprotected: true }
+        WalletEntry { id: String::new(), name: name.to_string(), vault: vault.seal(&Book::default()).unwrap(), current: String::new(), biometric: None, unprotected: true, born: None }
     }
 
     fn settings(names: &[&str]) -> Settings {
@@ -720,6 +670,30 @@ mod tests {
         saved(&mut store, &mut again);
 
         assert!(folder.store().load().trouble.is_empty(), "settings no longer name it");
+    }
+
+    #[test]
+    fn a_wallet_removed_takes_its_indexes_and_what_was_set_aside_and_no_one_elses() {
+        let folder = Folder::new("indexes");
+        let mut kept = settings(&["Mine", "Gone"]);
+        let mut store = folder.store();
+        saved(&mut store, &mut kept);
+        let (mine, gone) = (id_of(&kept, "Mine"), id_of(&kept, "Gone"));
+        let files = [format!("{gone}-0xaa.index"), format!("{gone}-0xaa.index.unreadable-1"), format!("{mine}-0xaa.index")];
+
+        for file in &files {
+            fs::write(folder.path(file), "sealed").unwrap();
+        }
+
+        kept.wallets.remove(1);
+        saved(&mut store, &mut kept);
+
+        assert!(!folder.path(&files[0]).exists() && !folder.path(&files[1]).exists());
+        assert!(folder.path(&files[2]).exists());
+
+        let loaded = folder.store().load();
+        assert_eq!(listed(&loaded), ["Mine"], "and an index is never read as a wallet");
+        assert!(loaded.trouble.is_empty());
     }
 
     #[test]

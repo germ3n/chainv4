@@ -9,20 +9,23 @@ mod format;
 mod light;
 mod model;
 mod proof;
+mod reading;
 mod release;
 mod store;
 mod theme;
 mod views;
 
 /// The explorer, for eframe to run. It talks to this node, or else to the one it talked to last,
-/// or else to the fallback.
-pub fn explorer(creation: &eframe::CreationContext, node: Option<String>, fallback: &str) -> Box<dyn eframe::App> {
-    Box::new(app::Explorer::new(creation, node, fallback))
+/// or else to the fallback. What it reads of a chain, when told to, is kept under this folder of the
+/// app's, or, in a browser, which has none, in IndexedDB.
+pub fn explorer(creation: &eframe::CreationContext, node: Option<String>, fallback: &str, folder: Option<std::path::PathBuf>) -> Box<dyn eframe::App> {
+    Box::new(app::Explorer::new(creation, node, fallback, folder))
 }
 
 /// Where Android starts the app, in the NativeActivity's own thread.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: chainv4_ui::android::AndroidApp) {
-    chainv4_ui::android::run(app, "chainv4 explorer", "chainv4-explorer", "explorer.ron", |creation| explorer(creation, None, chainv4_ui::PUBLIC_NODE));
+    let folder = app.internal_data_path();
+    chainv4_ui::android::run(app, "chainv4 explorer", "chainv4-explorer", "explorer.ron", move |creation| explorer(creation, None, chainv4_ui::PUBLIC_NODE, folder));
 }

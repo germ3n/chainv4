@@ -6,15 +6,20 @@
 
 use {
     chainv4_ui::asks::Asks,
+    chainv4_ui::blocks::{Asked, Came, RangeLine},
     chainv4_ui::net::{Answer, Client},
     chainv4_ui::sse,
     serde_json::{Value, json},
+    std::collections::HashMap,
     std::sync::atomic::{AtomicBool, Ordering},
     std::sync::{Arc, Mutex},
     web_time::Instant,
 };
 
-pub use {chainv4_ui::net::Failure, chainv4_ui::sse::News};
+pub use {
+    chainv4_ui::net::{Failure, NEEDS_ASKING, NEEDS_ASKING_STATUS},
+    chainv4_ui::sse::News,
+};
 
 /// How many tokens a page of the registry asks for.
 pub const TOKEN_PAGE: u64 = 100;
@@ -26,6 +31,20 @@ pub const DECISION_PAGE: u64 = 20;
 pub const NAME_PAGE: u64 = 50;
 /// How many of the richest accounts the rich list asks for: the node's most.
 pub const RICH_LIST: u64 = 100;
+/// How often a page that goes on asking for what Read from checked blocks keeps in is told again, in
+/// seconds.
+const TOLD_AGAIN: f64 = 3.0;
+
+/// Where a request goes with Read from checked blocks on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// To the node, as ever.
+    Goes,
+    /// To what was read, which answers in the node's place: no request leaves.
+    Index,
+    /// Nowhere: it needs asking the node, and whoever asked is told so.
+    Off,
+}
 
 /// Something to ask a node, which also names what came back.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -108,6 +127,9 @@ pub enum Ask {
     Rich,
     /// The coin's supply: minted and burned, which the light client proves, and what is staked.
     Supply,
+    /// A proof of a chain-state entry at a final block, which someone pressed for with Read from
+    /// checked blocks on: the page says that the node sees what it is of.
+    DirectProof { column: String, key: String, block: String },
 }
 
 impl Ask {
@@ -188,6 +210,7 @@ impl Ask {
             Ask::Checkpoint(None) => "/light/checkpoint".to_string(),
             Ask::Proof { column, key, block: Some(block) } => format!("/proofs/{column}/{key}?block={block}"),
             Ask::Proof { column, key, block: None } => format!("/proofs/{column}/{key}"),
+            Ask::DirectProof { column, key, block } => format!("/proofs/{column}/{key}?block={block}"),
             Ask::Call { .. } => "/call".to_string(),
             Ask::Offer(_) => "/offer".to_string(),
             Ask::Submit(_) => "/txs".to_string(),
@@ -218,8 +241,45 @@ impl Ask {
         self.body().is_none()
             && !matches!(
                 self,
-                Ask::Status | Ask::Node | Ask::Release | Ask::Lookup(_) | Ask::Light | Ask::Headers { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. }
+                Ask::Status | Ask::Node | Ask::Release | Ask::Lookup(_) | Ask::Light | Ask::Headers { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::DirectProof { .. } | Ask::ReceiptProof(_) | Ask::Ancestors { .. }
             )
+    }
+
+    /// Where this goes with Read from checked blocks on. Named one by one, with no catch-all, so a new
+    /// request has to be decided here before it builds. What goes is what follows the chain, sending,
+    /// a release, which is checked against the keys built in, and a proof someone pressed for.
+    pub fn route(&self) -> Route {
+        match self {
+            Ask::Light | Ask::Headers { .. } | Ask::Ancestors { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Checkpoint(_) | Ask::Submit(_) | Ask::Release | Ask::DirectProof { .. } => Route::Goes,
+            Ask::Status | Ask::Blocks { .. } | Ask::Block(_) | Ask::Tx(_) | Ask::Lookup(_) | Ask::AccountTxs { .. } | Ask::Events { .. } => Route::Index,
+            Ask::Node
+            | Ask::Mempool
+            | Ask::Forks
+            | Ask::Account(_)
+            | Ask::Contract(_)
+            | Ask::Validators
+            | Ask::Signers
+            | Ask::Evidence
+            | Ask::Tokens { .. }
+            | Ask::Collections
+            | Ask::Call { .. }
+            | Ask::Offer(_)
+            | Ask::Proof { .. }
+            | Ask::Name(_)
+            | Ask::AccountNames(_)
+            | Ask::Rpc(_)
+            | Ask::Faucet(_)
+            | Ask::Pool
+            | Ask::PoolMiner(_)
+            | Ask::Governance
+            | Ask::Decisions { .. }
+            | Ask::GovernanceWeight(_)
+            | Ask::ReceiptProof(_)
+            | Ask::Multisig(_)
+            | Ask::NamesList { .. }
+            | Ask::Rich
+            | Ask::Supply => Route::Off,
+        }
     }
 }
 
@@ -317,6 +377,15 @@ pub struct Api {
     hang_up: Option<Arc<AtomicBool>>,
     /// The node's report token, shown to GET /node alone, for it to share everything.
     report_token: Option<String>,
+    /// Whether what needs asking is kept in, with Read from checked blocks on: here, at the only way
+    /// out, so that a page or code path that forgot about it still sends nothing.
+    reading: bool,
+    /// What was kept in, and when the page was last told.
+    told: HashMap<Ask, f64>,
+    /// What waits for the index to answer.
+    for_index: Vec<Ask>,
+    /// The way a reading's requests for blocks go.
+    line: RangeLine,
 }
 
 /// Whether a report token may go to this node: only where nobody on the way reads it, over TLS, an
@@ -339,7 +408,13 @@ impl Api {
     /// An API at base, such as http://127.0.0.1:8080, reached through client, that wakes the UI
     /// when answers come.
     pub fn new(base: &str, client: Result<Client, String>, wake: egui::Context) -> Api {
+        let woken = wake.clone();
+
         Api {
+            line: RangeLine::new(base, client.clone(), Arc::new(move || woken.request_repaint())),
+            reading: false,
+            told: HashMap::new(),
+            for_index: Vec::new(),
             base: base.trim_end_matches('/').to_string(),
             client,
             inbox: Arc::default(),
@@ -352,8 +427,42 @@ impl Api {
         }
     }
 
+    /// An API that keeps in what needs asking, with Read from checked blocks on, or lets it out.
+    pub fn reading_blocks(mut self, on: bool) -> Api {
+        self.reading = on;
+
+        self
+    }
+
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// Asks for blocks: what a reading goes by. What comes of it is in `ranges`.
+    pub fn read_range(&self, asked: Asked) {
+        self.line.ask(asked);
+    }
+
+    /// What came of the blocks asked for, since last time.
+    pub fn ranges(&self) -> Vec<(Asked, Came)> {
+        self.line.came()
+    }
+
+    /// What waits for the index to answer, since last time.
+    pub fn for_index(&mut self) -> Vec<Ask> {
+        std::mem::take(&mut self.for_index)
+    }
+
+    /// Hands back what the index answered, as a node's answer comes.
+    pub fn answered_here(&mut self, ask: Ask, result: Result<Value, Failure>) {
+        lock(&self.inbox).push(Reply::Answer { ask, result });
+        self.wake.request_repaint();
+    }
+
+    /// Why the node does not answer, while it does not, with no status asked of it: what became of
+    /// what follows the chain.
+    pub fn down(&self) -> Option<Failure> {
+        self.asks.troubles(self.now()).into_iter().map(|(_, failure)| failure.clone()).next()
     }
 
     /// The node's report token, sent with each GET /node from here on, where it may go at all.
@@ -370,6 +479,11 @@ impl Api {
     /// back long enough. Something sent, rather than read, goes whenever it is pressed for.
     pub fn ask(&mut self, ask: Ask) {
         let now = self.now();
+
+        if self.kept_in(&ask, now, false) {
+            return;
+        }
+
         let sending = match ask.body() {
             Some(_) => self.asks.force(&ask),
             None => self.asks.begin(&ask, now),
@@ -385,8 +499,39 @@ impl Api {
         self.asks.forget(&ask);
         self.retried.push(ask.clone());
 
+        if self.kept_in(&ask, self.now(), true) {
+            return;
+        }
+
         if self.asks.force(&ask) {
             self.send(ask);
+        }
+    }
+
+    /// Whether this leaves no way out, with Read from checked blocks on: the index answers it, or it
+    /// goes no further, and whoever asked is told why, as of anything else that came to nothing.
+    fn kept_in(&mut self, ask: &Ask, now: f64, retried: bool) -> bool {
+        if !self.reading {
+            return false;
+        }
+
+        match ask.route() {
+            Route::Goes => false,
+            Route::Index => {
+                if if retried { self.asks.force(ask) } else { self.asks.begin(ask, now) } {
+                    self.for_index.push(ask.clone());
+                }
+
+                true
+            }
+            Route::Off => {
+                if retried || self.told.get(ask).is_none_or(|told| now - told >= TOLD_AGAIN) {
+                    self.told.insert(ask.clone(), now);
+                    self.answered_here(ask.clone(), Err(Failure { status: NEEDS_ASKING_STATUS, message: NEEDS_ASKING.to_string() }));
+                }
+
+                true
+            }
         }
     }
 
@@ -506,6 +651,189 @@ mod tests {
 
     use super::*;
 
+    /// One of each request there is.
+    pub(crate) fn every_ask() -> Vec<Ask> {
+        let text = || "0x01".to_string();
+
+        vec![
+            Ask::Status,
+            Ask::Node,
+            Ask::Mempool,
+            Ask::Forks,
+            Ask::Blocks { before: None, limit: 1 },
+            Ask::Block(text()),
+            Ask::Tx(text()),
+            Ask::Lookup(text()),
+            Ask::Account(text()),
+            Ask::Contract(text()),
+            Ask::Validators,
+            Ask::Signers,
+            Ask::Evidence,
+            Ask::Events { query: EventQuery::mentioning("ed25519:0x01"), cursor: None },
+            Ask::AccountTxs { address: text(), query: String::new(), cursor: None },
+            Ask::Tokens { symbol: String::new(), cursor: None },
+            Ask::Collections,
+            Ask::Call { contract: text(), function: "f".to_string(), args: "[]".to_string() },
+            Ask::Offer("{}".to_string()),
+            Ask::Submit("{}".to_string()),
+            Ask::Light,
+            Ask::Headers { from: 0, count: 1 },
+            Ask::Finality { from: 0, count: 1 },
+            Ask::Bundle { headers: 0, epoch: 0 },
+            Ask::Checkpoint(None),
+            Ask::Proof { column: "accounts".to_string(), key: text(), block: None },
+            Ask::Name("alice.dev".to_string()),
+            Ask::AccountNames(text()),
+            Ask::Rpc("{}".to_string()),
+            Ask::Faucet("{}".to_string()),
+            Ask::Pool,
+            Ask::PoolMiner(text()),
+            Ask::Release,
+            Ask::Governance,
+            Ask::Decisions { before: None },
+            Ask::GovernanceWeight(text()),
+            Ask::ReceiptProof(text()),
+            Ask::Ancestors { from: 0, count: 1 },
+            Ask::Multisig(text()),
+            Ask::NamesList { after: None },
+            Ask::Rich,
+            Ask::Supply,
+            Ask::DirectProof { column: "accounts".to_string(), key: text(), block: text() },
+        ]
+    }
+
+    /// A listener that answers everything with an empty object, and says the first line of each
+    /// request it got: a real socket, so that what reaches it is what really left.
+    fn listener() -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (heard, hears) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let (mut stream, heard) = (stream.unwrap(), heard.clone());
+
+                std::thread::spawn(move || {
+                    let mut got = Vec::new();
+                    let mut buffer = [0; 4096];
+
+                    while !got.windows(4).any(|end| end == b"\r\n\r\n") {
+                        match stream.read(&mut buffer) {
+                            Ok(read) if read > 0 => got.extend_from_slice(&buffer[..read]),
+                            _ => break,
+                        }
+                    }
+
+                    let first = String::from_utf8_lossy(&got).lines().next().unwrap_or_default().to_string();
+
+                    heard.send(first).ok();
+                    stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").ok();
+                });
+            }
+        });
+
+        (base, hears)
+    }
+
+    /// What reached the listener, by the method and path, waiting until it has all come.
+    fn reached(hears: &std::sync::mpsc::Receiver<String>, expected: usize) -> Vec<String> {
+        let mut heard = Vec::new();
+
+        while let Ok(line) = hears.recv_timeout(std::time::Duration::from_millis(if heard.len() < expected { 5_000 } else { 200 })) {
+            heard.push(line.trim_end_matches(" HTTP/1.1").to_string());
+        }
+
+        heard.sort();
+
+        heard
+    }
+
+    fn line_of(ask: &Ask) -> String {
+        format!("{} {}", if ask.body().is_some() { "POST" } else { "GET" }, ask.path())
+    }
+
+    #[test]
+    fn with_the_setting_on_only_what_follows_the_chain_a_release_sending_and_a_pressed_proof_reach_the_socket() {
+        let (base, hears) = listener();
+        let mut api = Api::new(&base, Ok(Client::direct()), egui::Context::default()).reading_blocks(true);
+        let asks = every_ask();
+        let mut left: Vec<String> = asks.iter().filter(|ask| ask.route() == Route::Goes).map(line_of).collect();
+
+        left.sort();
+        left.dedup();
+
+        for ask in &asks {
+            api.ask(ask.clone());
+        }
+
+        for ask in &asks {
+            api.retry(ask.clone());
+        }
+
+        let heard = reached(&hears, left.len());
+        let mut once = heard.clone();
+        once.dedup();
+
+        assert_eq!(once, left, "nothing else reached the socket");
+        assert!(left.iter().any(|line| line.contains("/light")) && left.iter().any(|line| line.contains("/txs")));
+        assert!(!heard.iter().any(|line| line.contains("GET /accounts") || line.contains("/status") || line.contains("GET /blocks")), "{heard:?}");
+    }
+
+    #[test]
+    fn with_the_setting_on_a_block_range_reaches_the_socket_through_the_same_way_out() {
+        let (base, hears) = listener();
+        let api = Api::new(&base, Ok(Client::direct()), egui::Context::default()).reading_blocks(true);
+
+        api.read_range(Asked { from: 7, entry: 0, count: 1 });
+
+        assert_eq!(reached(&hears, 1), ["GET /blocks/range?from=7&count=1"]);
+    }
+
+    #[test]
+    fn with_the_setting_off_every_request_goes_out_as_it_always_did() {
+        let (base, hears) = listener();
+        let mut api = Api::new(&base, Ok(Client::direct()), egui::Context::default());
+        let asks = every_ask();
+        let mut all: Vec<String> = asks.iter().map(line_of).collect();
+
+        all.sort();
+        all.dedup();
+
+        for ask in &asks {
+            api.ask(ask.clone());
+        }
+
+        let mut heard = reached(&hears, all.len());
+        heard.dedup();
+
+        assert_eq!(heard, all);
+        assert_eq!(api.for_index(), [], "nothing waits for an index");
+    }
+
+    #[test]
+    fn with_the_setting_on_what_is_turned_off_is_told_why_and_what_the_index_answers_waits_for_it() {
+        let mut api = Api::new("http://127.0.0.1:1", Err("offline".to_string()), egui::Context::default()).reading_blocks(true);
+
+        api.ask(Ask::Mempool);
+        api.ask(Ask::Mempool);
+        let replies = api.replies();
+
+        assert_eq!(replies.len(), 1, "told once for now, however often a page asks");
+        assert!(matches!(&replies[0], Reply::Answer { ask: Ask::Mempool, result: Err(Failure { status: NEEDS_ASKING_STATUS, message }) } if message == NEEDS_ASKING));
+        assert!(!Failure { status: NEEDS_ASKING_STATUS, message: NEEDS_ASKING.to_string() }.is_trouble(), "nothing offers to ask again");
+
+        api.ask(Ask::Tx("0x01".to_string()));
+        api.ask(Ask::Tx("0x01".to_string()));
+        assert!(api.asking(&Ask::Tx("0x01".to_string())));
+        assert_eq!(api.for_index(), [Ask::Tx("0x01".to_string())], "one answer waited for");
+
+        api.answered_here(Ask::Tx("0x01".to_string()), Ok(json!({})));
+        assert_eq!(api.replies().len(), 1);
+        assert!(!api.asking(&Ask::Tx("0x01".to_string())));
+    }
+
     #[test]
     fn event_queries_become_paths() {
         let named = Ask::Events {
@@ -620,6 +948,7 @@ mod tests {
         assert_eq!(Ask::Rich.path(), "/rich?limit=100");
         assert_eq!((Ask::Supply.path(), Ask::Supply.body()), ("/supply".to_string(), None));
         assert_eq!(Ask::Multisig("multisig:0x01".to_string()).path(), "/multisig/multisig:0x01");
+        assert_eq!(Ask::DirectProof { column: "accounts".to_string(), key: "0x01".to_string(), block: "0x02".to_string() }.path(), "/proofs/accounts/0x01?block=0x02");
         assert_eq!(
             Ask::Proof { column: "validators".to_string(), key: "0x01".to_string(), block: None }.path(),
             "/proofs/validators/0x01"

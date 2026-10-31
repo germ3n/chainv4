@@ -392,7 +392,7 @@ mod tests {
     }
 
     fn entry(vault: Sealed, biometric: Option<String>, unprotected: bool) -> WalletEntry {
-        WalletEntry { id: String::new(), name: "Mine".to_string(), vault, current: String::new(), biometric, unprotected }
+        WalletEntry { id: String::new(), name: "Mine".to_string(), vault, current: String::new(), biometric, unprotected, born: None }
     }
 
     /// A world with one wallet of this guard, open, on a fresh fake device.

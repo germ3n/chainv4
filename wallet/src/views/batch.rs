@@ -535,7 +535,7 @@ fn add_form(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, from: &Address) 
                 Destination::Address(address) => Ok(address),
                 Destination::Named { shown, resolved: Some(resolved) } => resolved.target().ok_or_else(|| format!("{shown} resolves to nothing")),
                 Destination::Named { shown, resolved: None } => Err(format!("{shown} is not proven yet: wait a moment")),
-                Destination::Blank | Destination::Bad => Err("the address to send to does not read".to_string()),
+                Destination::Blank | Destination::Bad | Destination::NeedsAsking => Err("the address to send to does not read".to_string()),
             };
             let bare_name = |text: &str| ctx.chain.names.as_ref().map_or_else(|| text.trim().to_string(), |names| names.strip(text.trim()));
             let reading = Reading { from: *from, decimals: ctx.coin.decimals, token_decimals: &token_decimals, recipient: &recipient, bare_name: &bare_name };

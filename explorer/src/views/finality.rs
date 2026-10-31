@@ -56,6 +56,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         });
     });
 
+    // What the light client checked is above: who votes, and who was caught, the node lists.
+    if ctx.settings.read_blocks {
+        super::reading::turned_off_card(ui, ctx, "Who votes, the signers and any cheating caught are listed by the node");
+
+        return;
+    }
+
     match finality.kind.as_str() {
         "ffg" | "authority" => voters(ui, ctx),
         _ => super::section(ui, look, "Voters", |ui| {
