@@ -234,4 +234,4 @@ SHA-256s with the link.
 | Sample multisig | `multisig:0xa4ab52e9…1531`, 2 of 3, its contract `0xf790c606…89d2` |
 | Onion | `njo4fijntpqch73yv4477hhn2vcngnpcxtw2vb4qwjasqdwbdeektuqd.onion` |
 | Mining | `66.78.40.94:4002`, an open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`), and `/mining/ws` behind nginx |
-| Apps | https://gofile.io/d/LB3uLDVV |
+| Apps | https://gofile.io/d/kC1Xfr2A |
