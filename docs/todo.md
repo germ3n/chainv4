@@ -762,6 +762,9 @@ offline; these would make that hold up as a treasury.
   saying where to go on from, even inside a block. `check_range_item`, in the light build and wasm,
   checks each. It reads the list history keeps, so nodes write nothing new and serve what they already
   ran. No list or pruned state is said per block. A list that leaves an entry out cannot be told.
+- [x] **A wallet could run into the node's rate limits by itself.** Hundreds of proofs went out at once and
+  every 4 seconds. Now 8 go at a time, none is asked again at a block it holds, rounds are spaced by their
+  size, and a brief 429 waits rather than shows.
 - [x] **The browser extension could not go to a store, as it held a miner.** `wallet/build-extension.sh --store`
   leaves it out, and fails if any reaches the output.
 - [x] **A kill during a save could lose every wallet on a device.** eframe empties its file and then

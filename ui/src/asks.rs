@@ -18,6 +18,9 @@ const HOLD_MOST: f64 = 30.0;
 /// Seconds a failure counts after nothing asked for it any more: what asked for it has gone, as a
 /// proof at a tip since passed.
 const WANTED_FOR: f64 = 20.0;
+/// How many times in a row the node may ask to wait before a page says so. Being asked to wait is what
+/// a rate limit does on a busy moment: the hold above already waits and asks again.
+const WAITS_UNSAID: u32 = 3;
 
 /// One ask that last failed.
 #[derive(Clone, Debug)]
@@ -111,7 +114,7 @@ impl<A: Clone + Eq + Hash> Asks<A> {
     /// What failed for trouble on the way and is still wanted: what a page says is wrong, each with
     /// why, the one that failed most times first. Nothing once a page stopped asking for it.
     pub fn troubles(&self, now: f64) -> Vec<(&A, &Failure)> {
-        let mut troubles: Vec<_> = self.failed.iter().filter(|(_, failed)| failed.failure.is_trouble() && now - failed.wanted <= WANTED_FOR).collect();
+        let mut troubles: Vec<_> = self.failed.iter().filter(|(_, failed)| failed.failure.is_trouble() && (failed.failure.status != 429 || failed.tries > WAITS_UNSAID) && now - failed.wanted <= WANTED_FOR).collect();
         troubles.sort_by_key(|(_, failed)| std::cmp::Reverse(failed.tries));
 
         troubles.into_iter().map(|(ask, failed)| (ask, &failed.failure)).collect()
@@ -226,6 +229,23 @@ mod tests {
 
     fn missing() -> Failure {
         Failure { status: 404, message: "no such block".to_string() }
+    }
+
+    #[test]
+    fn being_asked_to_wait_goes_unsaid_until_it_goes_on() {
+        let limited = Failure { status: 429, message: "too many requests from this address".to_string() };
+        let mut asks = Asks::default();
+
+        for tries in 1..=WAITS_UNSAID {
+            asks.force(&1);
+            asks.ended(&1, Some(&limited), 0.0);
+            assert!(asks.troubles(1.0).is_empty(), "{tries} in a row");
+            assert!(asks.failure(&1).is_some(), "and it is still held back and asked again");
+        }
+
+        asks.force(&1);
+        asks.ended(&1, Some(&limited), 0.0);
+        assert_eq!(asks.troubles(1.0).len(), 1);
     }
 
     #[test]

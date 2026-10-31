@@ -8,7 +8,7 @@ use {
     chainv4_ui::net::{Answer, Client},
     chainv4_ui::sse::{self, News},
     serde_json::Value,
-    std::collections::HashSet,
+    std::collections::{HashSet, VecDeque},
     std::sync::atomic::{AtomicBool, Ordering},
     std::sync::{Arc, Mutex},
     web_time::Instant,
@@ -82,6 +82,11 @@ impl Listening {
 }
 
 /// Something to ask the node, which also names what came back.
+/// Proofs it has out at a time. A wallet's accounts, each with an address in every scheme, times every
+/// listed token, come to hundreds of them at once, and nginx lets an address have 64 requests under
+/// way, this app's and any other's on the same connection together.
+const PROOFS_AT_ONCE: usize = 8;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Ask {
     /// The coin's symbol and decimals, for showing amounts: nothing proven rests on it.
@@ -248,6 +253,9 @@ type Fetched = Arc<Mutex<Vec<(String, Result<Vec<u8>, String>)>>>;
 
 pub struct Node {
     base: String,
+    /// Proofs out, and those waiting for room: see PROOFS_AT_ONCE.
+    proofs_out: usize,
+    proofs_held: VecDeque<Ask>,
     /// What every request goes out through, or why none can: a proxy set that does not build
     /// sends nothing rather than go direct.
     client: Result<Client, String>,
@@ -268,6 +276,8 @@ impl Node {
     pub fn new(base: &str, client: Result<Client, String>, wake: egui::Context) -> Node {
         Node {
             base: base.trim().trim_end_matches('/').to_string(),
+            proofs_out: 0,
+            proofs_held: VecDeque::new(),
             client,
             inbox: Arc::default(),
             asks: Asks::default(),
@@ -374,6 +384,25 @@ impl Node {
     }
 
     fn send(&mut self, ask: Ask) {
+        if matches!(ask, Ask::Proof { .. }) {
+            if self.proofs_out >= PROOFS_AT_ONCE {
+                self.proofs_held.push_back(ask);
+
+                return;
+            }
+
+            self.proofs_out += 1;
+        }
+
+        self.send_now(ask);
+    }
+
+    /// Whether proofs wait for room to go out.
+    pub fn proofs_waiting(&self) -> bool {
+        !self.proofs_held.is_empty()
+    }
+
+    fn send_now(&mut self, ask: Ask) {
         let url = format!("{}{}", self.base, ask.path());
         let body = ask.body().map(|body| body.as_bytes().to_vec());
         let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
@@ -429,6 +458,17 @@ impl Node {
 
         for (ask, result) in &answers {
             self.asks.ended(ask, result.as_ref().err(), now);
+
+            if matches!(ask, Ask::Proof { .. }) {
+                self.proofs_out = self.proofs_out.saturating_sub(1);
+            }
+        }
+
+        while self.proofs_out < PROOFS_AT_ONCE
+            && let Some(ask) = self.proofs_held.pop_front()
+        {
+            self.proofs_out += 1;
+            self.send_now(ask);
         }
 
         answers
@@ -606,6 +646,60 @@ mod tests {
         node.ask(submit);
         assert_eq!(node.answers().len(), 1, "no hold on what someone sends");
         assert!(node.trouble().is_none(), "nor is it what a page offers to ask again");
+    }
+
+    fn proof(key: usize) -> Ask {
+        Ask::Proof { column: "accounts", key: format!("{key}"), block: "0x01".to_string() }
+    }
+
+    #[test]
+    fn only_so_many_proofs_go_out_at_once_and_each_answer_lets_the_next_go() {
+        let mut node = unreachable();
+        let many = PROOFS_AT_ONCE * 3 + 1;
+
+        for key in 0..many {
+            node.ask(proof(key));
+        }
+
+        assert!(node.proofs_waiting());
+
+        let mut told = 0;
+
+        for _ in 0..3 {
+            let answers = node.answers();
+            assert_eq!(answers.len(), PROOFS_AT_ONCE, "no more than that at a time");
+            told += answers.len();
+        }
+
+        let answers = node.answers();
+        assert_eq!(told + answers.len(), many);
+        assert!(!node.proofs_waiting(), "and every one went in the end");
+    }
+
+    #[test]
+    fn a_proof_waiting_counts_as_asked_and_is_not_queued_twice() {
+        let mut node = unreachable();
+
+        for key in 0..PROOFS_AT_ONCE + 1 {
+            node.ask(proof(key));
+        }
+
+        node.ask(proof(PROOFS_AT_ONCE));
+        assert!(node.asking(&proof(PROOFS_AT_ONCE)));
+        assert_eq!(node.proofs_held.len(), 1);
+    }
+
+    #[test]
+    fn what_is_not_a_proof_never_waits_behind_them() {
+        let mut node = unreachable();
+
+        for key in 0..PROOFS_AT_ONCE * 2 {
+            node.ask(proof(key));
+        }
+
+        node.ask(Ask::Status);
+
+        assert_eq!(node.answers().len(), PROOFS_AT_ONCE + 1);
     }
 
     #[test]

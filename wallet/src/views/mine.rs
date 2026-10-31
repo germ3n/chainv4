@@ -299,6 +299,12 @@ fn plan(settings: &Settings, mining: Option<&Value>, payout: Address, gpus: usiz
     })
 }
 
+/// Why GPU cannot be picked. A browser mines only through WebGPU, whatever GPU the machine has.
+#[cfg(target_arch = "wasm32")]
+const NO_GPU: &str = "This browser does not offer WebGPU, so it cannot mine on the GPU. Another browser or the desktop app can.";
+#[cfg(not(target_arch = "wasm32"))]
+const NO_GPU: &str = "No GPU found on this device";
+
 /// A tick for each GPU listed, all of them ticked until one is not. A GPU a machine gains later is
 /// mined on too, unless some were picked by hand.
 fn gpu_list(ui: &mut Ui, settings: &mut Settings, gpus: &[String]) {
@@ -411,7 +417,7 @@ pub(super) fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut Rig, from: &Address, 
                 ui.selectable_value(&mut ctx.settings.mine_gpu, false, "CPU");
                 ui.add_enabled_ui(!gpus.is_empty(), |ui| ui.selectable_value(&mut ctx.settings.mine_gpu, true, "GPU"))
                     .response
-                    .on_disabled_hover_text("No GPU found on this device");
+                    .on_disabled_hover_text(NO_GPU);
             });
 
             if ctx.settings.mine_gpu && !gpus.is_empty() {

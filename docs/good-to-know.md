@@ -501,6 +501,10 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   key damaged or in a scheme it was built without, and `keys::stored`, which every save rebuilds the
   book's accounts with, puts `Book::unread` back after the holders. Build the accounts any other way
   and those go for good. Add a kind of account, and add it to `StoredAccount::readable`.
+- **A wallet's proofs are held to what nginx allows.** Accounts times addresses times listed tokens
+  comes to hundreds of proofs. It has 8 out at a time (`PROOFS_AT_ONCE`), asks nothing again at a block
+  it holds a proof at, as a block's state never changes, and spaces its rounds at 15 a second over the
+  round (`PROOFS_A_SECOND`). A 429 is only shown once it comes 4 times running: it waits and asks again.
 - **An extension for a store is built with `--store`.** A plain `wallet/build-extension.sh` has the
   miner, as the page the nodes serve does, and the Chrome Web Store and Firefox Add-ons refuse that.
 - **Off the web, wallets are not in eframe's storage.** eframe empties its file and then writes it, so

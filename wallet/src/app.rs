@@ -818,8 +818,11 @@ impl Wallet {
 
         let addresses: Vec<Address> = self.holders.iter().flat_map(Holder::addresses).collect();
 
-        for ask in self.chain.proofs_due(&addresses, time) {
-            self.node.ask(ask);
+        // A slow way to the node, as Tor, leaves a round waiting: a new one on top would only grow.
+        if !self.node.proofs_waiting() {
+            for ask in self.chain.proofs_due(&addresses, time) {
+                self.node.ask(ask);
+            }
         }
 
         let wanted = self.views.wanted_names();

@@ -33,6 +33,9 @@ const FOLLOW_EVERY: f64 = 3.0;
 /// How often it asks while the node's stream says when there is more: in case an event is missed.
 const FOLLOW_STREAMED: f64 = 20.0;
 const PROVE_EVERY: f64 = 4.0;
+/// Proofs a second it goes on asking for, over a wallet's whole round of them: nginx lets an address
+/// have 30 requests a second, and this leaves room for all else the apps ask.
+const PROOFS_A_SECOND: f64 = 15.0;
 /// Seconds before asking again what failed to come.
 const RETRY_AFTER: f64 = 3.0;
 /// A value the wallet proved, and how far it trusts it.
@@ -222,6 +225,11 @@ pub struct Chain {
     /// Whether the node's stream is open, to say when there is more to follow.
     pub streamed: bool,
     proved: f64,
+    /// Seconds until the next round of proofs, from the size of the last.
+    prove_gap: f64,
+    /// What is proven already at the tip and the final block, by key and block: a block's state does
+    /// not change, so neither does its proof.
+    proven_at: std::collections::HashSet<(String, String)>,
     retry_at: f64,
     /// Accounts by address text: what was proven at the final block and at the tip.
     pub accounts: HashMap<String, Vec<Proven<Account>>>,
@@ -407,7 +415,7 @@ impl Chain {
     /// The proofs due for these holders: each account, every listed token's entry, and each
     /// holder's balance of it, at the tip and at the final block.
     pub fn proofs_due(&mut self, holders: &[Address], time: f64) -> Vec<Ask> {
-        if !self.caught_up() || time - self.proved < PROVE_EVERY {
+        if !self.caught_up() || time - self.proved < PROVE_EVERY.max(self.prove_gap) {
             return Vec::new();
         }
 
@@ -459,20 +467,37 @@ impl Chain {
         targets.push((Column::Validators, DIRECTORY_KEY.to_vec(), Target::Directory, vec![tip]));
         targets.push((Column::Validators, FEDERATION_KEY.to_vec(), Target::Federation, vec![tip]));
 
+        wanted.extend(self.not_proven_yet(&blocks, targets));
+        self.prove_gap = wanted.len() as f64 / PROOFS_A_SECOND;
+
+        wanted
+    }
+
+    /// The proofs these targets still need at the blocks they name, of those current: what is proven
+    /// at a block already stays so, and what was proven at any other is let go of.
+    fn not_proven_yet(&mut self, current: &[Hash], targets: Vec<(Column, Vec<u8>, Target, Vec<Hash>)>) -> Vec<Ask> {
+        let current: Vec<String> = current.iter().map(ToString::to_string).collect();
+        self.proven_at.retain(|(_, block)| current.contains(block));
+        let mut asks = Vec::new();
+
         for (column, key, target, blocks) in targets {
             let key = to_hex(&key);
             self.targets.insert(key.clone(), target);
 
             for block in blocks {
-                wanted.push(Ask::Proof {
-                    column: column.name(),
-                    key: key.clone(),
-                    block: block.to_string(),
-                });
+                let block = block.to_string();
+
+                if !self.proven_at.contains(&(key.clone(), block.clone())) {
+                    asks.push(Ask::Proof {
+                        column: column.name(),
+                        key: key.clone(),
+                        block,
+                    });
+                }
             }
         }
 
-        wanted
+        asks
     }
 
     /// The proofs of names asked for, as the pages want them: each name's records, and every one
@@ -670,8 +695,13 @@ impl Chain {
             }
         };
 
-        if let Err(why) = self.take_value(ask, value, trust, now) {
-            match ask {
+        match self.take_value(ask, value, trust, now) {
+            Ok(()) => {
+                if let Ask::Proof { key, block, .. } = ask {
+                    self.proven_at.insert((key.clone(), block.clone()));
+                }
+            }
+            Err(why) => match ask {
                 Ask::Proof { key, .. } => {
                     self.refused.insert(key.clone(), why);
                 }
@@ -680,7 +710,7 @@ impl Chain {
                 }
                 Ask::Tokens | Ask::History(_) | Ask::Filtered { .. } | Ask::Events(_) | Ask::Names | Ask::OwnedNames(_) => {}
                 _ => self.trouble = Some(why),
-            }
+            },
         }
 
         true
@@ -1197,6 +1227,32 @@ mod tests {
     }
 
     /// A made-up chain the wallet resumes on, as far as its answers go.
+    #[test]
+    fn nothing_is_proven_twice_at_one_block_and_a_new_tip_asks_only_for_itself() {
+        let block = |byte: u8| Hash::from_bytes(HashType::default_chain(), &[byte; 32]).unwrap();
+        let (last_final, tip, next) = (block(1), block(2), block(3));
+        let targets = |blocks: &[Hash]| vec![(Column::Accounts, vec![9], Target::Account("a".to_string()), blocks.to_vec())];
+        let mut chain = Chain::default();
+
+        let asks = chain.not_proven_yet(&[last_final, tip], targets(&[last_final, tip]));
+        assert_eq!(asks.len(), 2, "at the final block and the tip");
+
+        // Asked again before it was proven, as a failed one would be.
+        assert_eq!(chain.not_proven_yet(&[last_final, tip], targets(&[last_final, tip])).len(), 2);
+
+        for ask in &asks {
+            let Ask::Proof { key, block, .. } = ask else { unreachable!() };
+            chain.proven_at.insert((key.clone(), block.clone()));
+        }
+
+        assert!(chain.not_proven_yet(&[last_final, tip], targets(&[last_final, tip])).is_empty(), "both held");
+
+        let asks = chain.not_proven_yet(&[last_final, next], targets(&[last_final, next]));
+        assert_eq!(asks.len(), 1, "the new tip alone: the final block has not moved");
+        assert!(matches!(&asks[0], Ask::Proof { block, .. } if *block == next.to_string()));
+        assert_eq!(chain.proven_at.len(), 1, "what the old tip held is let go of");
+    }
+
     #[test]
     fn with_the_nodes_stream_open_it_asks_when_told_and_otherwise_seldom() {
         let mut chain = Chain { followed: 100.0, ..Chain::default() };
