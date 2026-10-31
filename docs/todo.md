@@ -756,6 +756,9 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **A Bitcoin reorganization stopped the relay for good:** `relay-sync` sent the headers from just
+  past the relay's tip, which built on nothing it held. It goes back to where the two agree now.
+
 - [x] **A node that justified a checkpoint on a branch that lost stayed there for good,** as it asked for
   justifications only with no peer heavier, and a heavier peer is what it could not follow. It asks
   once it holds all that peer's blocks. See [Finality](finality.md).

@@ -227,6 +227,9 @@ chainv4 bridge btc sweep --fee 1000 --btc-gateway 0x… --esplora URL
 - **The federation is trusted:** a threshold of its signers could mint wrapped assets for nothing
   from EVM chains. Bitcoin deposits are proven to the relay instead, but what the gateway holds is
   still theirs to spend: a threshold could pay it anywhere on Bitcoin, as with Liquid or WBTC.
+- **Bitcoin reorganizing does not stop `relay-sync`.** It goes back to the newest block the relay and
+  Esplora agree on and submits from there, so a relay left on a branch that lost moves to the one
+  Bitcoin took. Testnet4 does this often.
 - **The relay follows the most work it has been shown.** Until someone submits the real chain's
   headers, a branch mined in secret with more work than what was submitted could prove a deposit
   that never was: keep it synced, and keep `bitcoin_depth` above what an attacker could mine.

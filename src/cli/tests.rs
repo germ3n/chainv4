@@ -1589,6 +1589,70 @@ mod send {
         }
     }
 
+    /// Bitcoin reorganizes under the relay: the headers from just past its tip build on nothing it
+    /// holds, so a sync goes back to where the two last agreed.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn a_relay_left_on_a_branch_bitcoin_dropped_syncs_onto_the_one_it_took() {
+        use crate::cli::bridge::{BridgeAction, BridgeArgs, bridge};
+        use crate::cli::bridge::btc::BtcAction;
+
+        let me = DevAuthority::dev_keypair().public().address();
+        let running = Running::launch_genesis(true, false, |genesis| genesis, |node| node, Default::default());
+        let node = format!("http://{}", running.api);
+        let mut bitcoin = FakeBitcoin::start();
+        let dir = TempDir::new("btc-reorg");
+        let wasm = dir.0.join("btc_relay.wasm");
+        fs::write(&wasm, crate::vm::tests::example("btc_relay")).unwrap();
+        let relay = deployed_at(&me, 0, crate::structs::hash::HashType::default_chain());
+        send(running.args(TxArgs::Deploy { lua: None, wasm: Some(wasm), evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
+        let esplora = bitcoin.esplora.url.clone();
+        let run = |action: BtcAction| {
+            bridge(BridgeArgs {
+                action: BridgeAction::Btc { action },
+                node: node.clone(),
+                tls: Default::default(),
+                key: None,
+                gateway: None,
+                eth_rpc: Vec::new(),
+                evm_key: None,
+                btc_gateway: None,
+                esplora: Some(esplora.clone()),
+            })
+        };
+        let tip = || -> (String, u64) {
+            let body = serde_json::json!({ "contract": relay.to_string(), "function": "tip", "args": [] });
+            let answer: serde_json::Value = serde_json::from_str(&ureq::post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap();
+            let hash = crate::structs::hex::from_hex(answer["values"][0]["value"].as_str().unwrap()).unwrap();
+
+            (FakeBitcoin::display(&hash), answer["values"][1]["value"].as_str().unwrap().parse().unwrap())
+        };
+
+        run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }).unwrap();
+        bitcoin.block(&[], false);
+        let (shared, shared_height) = (bitcoin.tip, bitcoin.height);
+        bitcoin.block(&[], false);
+        bitcoin.block(&[], false);
+        run(BtcAction::RelaySync { relay, batch: 10 }).unwrap();
+        assert_eq!(tip(), (FakeBitcoin::display(&bitcoin.tip), 3));
+
+        // Bitcoin leaves the last two behind, for a longer branch from the block before.
+        (bitcoin.tip, bitcoin.height) = (shared, shared_height);
+
+        for _ in 0..3 {
+            bitcoin.block(&[], false);
+        }
+
+        run(BtcAction::RelaySync { relay, batch: 10 }).unwrap();
+        assert_eq!(tip(), (FakeBitcoin::display(&bitcoin.tip), 4), "on the branch Bitcoin took");
+
+        // In step again, it only takes what is new.
+        bitcoin.block(&[], false);
+        run(BtcAction::RelaySync { relay, batch: 10 }).unwrap();
+        assert_eq!(tip(), (FakeBitcoin::display(&bitcoin.tip), 5));
+        running.stop();
+    }
+
     #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
     #[test]
     fn bitcoin_is_deposited_as_wbtc_and_withdrawn_through_a_release_the_federation_signs() {

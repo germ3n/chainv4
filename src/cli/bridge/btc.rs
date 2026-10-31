@@ -155,6 +155,23 @@ fn whole(value: &Value) -> u64 {
 }
 
 impl Bridge {
+    /// The newest block at or below a height that the relay's main chain and Esplora agree on. Bitcoin
+    /// reorganizing leaves the relay's tip on a branch that lost, and headers from just past its height
+    /// build on nothing it holds, so a sync starts from where the two last agreed.
+    fn last_shared(&self, relay: &Address, mut height: u64) -> CliResult<u64> {
+        loop {
+            let held = self.read(relay, "block_at", json!([{ "type": "u64", "value": height.to_string() }]))?;
+            let held = held.first().map(raw).filter(|hash| !hash.is_empty()).ok_or("the relay and Esplora share no block: start a relay from a newer checkpoint")?;
+
+            if shown(&held) == self.esplora(&format!("/block-height/{height}"))?.trim() {
+                return Ok(height);
+            }
+
+            log::info!("the relay's block at {height} is not Esplora's: looking further back");
+            height = height.checked_sub(1).ok_or("the relay and Esplora share no block: start a relay from a newer checkpoint")?;
+        }
+    }
+
     /// Asks Esplora, at an even pace, and again when it throttles: a public one such as
     /// mempool.space answers a burst with an error or a web page, and a moment later answers again.
     fn esplora(&self, path: &str) -> CliResult<String> {
@@ -202,7 +219,7 @@ impl Bridge {
             }
             BtcAction::RelaySync { relay, batch } => {
                 let tip = self.read(relay, "tip", json!([]))?;
-                let mut height = tip.get(1).map_or(0, whole);
+                let mut height = self.last_shared(relay, tip.get(1).map_or(0, whole))?;
                 let top: u64 = self.esplora("/blocks/tip/height")?.trim().parse().map_err(|_| "Esplora gave a height that is not a number")?;
 
                 while height < top {
