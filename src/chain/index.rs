@@ -1,7 +1,8 @@
 //! What the chain's indexes share. A node may keep two, each its own choice: the event index,
-//! every event findable by its contract, its name and the addresses in its data; and the address
-//! index, every transaction findable by the addresses it touches. Neither is part of the chain's
-//! state: each is what a node reads out of the blocks and receipts it keeps, for its API to list.
+//! every event findable by its contract, its name, the addresses in its data and an EVM log's
+//! topics; and the address index, every transaction findable by the addresses it touches. Neither
+//! is part of the chain's state: each is what a node reads out of the blocks and receipts it keeps,
+//! for its API to list.
 //!
 //! An index holds every main-chain block from its low end to the tip, and once on stays on until
 //! dropped. New blocks' entries go into the same commit as their receipts, so a reorg takes them
@@ -29,6 +30,53 @@ use {
 /// The most blocks, and transactions, one step of catching up reads before it commits.
 const STEP_BLOCKS: u64 = 500;
 const STEP_TXS: usize = 2_000;
+
+/// What an event index's entries hold, in Meta: an index from before this was kept has no EVM log's
+/// topics in it, and starts over the first time a node opens it.
+const EVENTS_SCHEMA_KEY: &[u8] = b"events_schema";
+const EVENTS_SCHEMA: u8 = 2;
+
+#[derive(Clone, Copy, Debug, SchemaWrite, SchemaRead)]
+struct EventsSchema {
+    version: u8,
+}
+
+impl Hashable for EventsSchema {}
+
+/// Marks an event index, in this change, as holding what this build's entries hold.
+pub(super) fn mark_events_schema(state: &State) {
+    state.put_value(Column::Meta, EVENTS_SCHEMA_KEY.to_vec(), &EventsSchema { version: EVENTS_SCHEMA });
+}
+
+/// Forgets what an event index's entries hold, in this change, as dropping it does.
+pub(super) fn forget_events_schema(state: &State) {
+    state.delete(Column::Meta, EVENTS_SCHEMA_KEY.to_vec());
+}
+
+/// The event index a database holds, brought up to what this build's entries hold. One from before
+/// EVM logs' topics were indexed would never find its older logs by them, and the catching up that
+/// fills an index only ever looks below its low end, so it starts over: emptied in one atomic write,
+/// keeping the same blocks, and read back from their receipts, newest first, in the background, as
+/// a new one is. Nothing here touches the chain's state.
+pub(super) fn events_up_to_date(db: &Arc<dyn Database>, window: Option<IndexWindow>, tip: u64) -> Result<Option<IndexWindow>, DbError> {
+    let Some(window) = window else {
+        return Ok(None);
+    };
+
+    if read_value::<EventsSchema>(&**db, Column::Meta, EVENTS_SCHEMA_KEY)?.is_some_and(|schema| schema.version >= EVENTS_SCHEMA) {
+        return Ok(Some(window));
+    }
+
+    let window = IndexWindow { from: tip + 1, ..window };
+    let state = State::new(db.clone());
+    state.put_value(Column::Meta, IndexKind::Events.low_end_key().to_vec(), &IndexedFrom { height: window.from });
+    state.put_value(Column::Meta, IndexKind::Events.keep_key().to_vec(), &window.keep);
+    mark_events_schema(&state);
+    db.clear(Column::Events, state.take_changes())?;
+    log::info!("[chain] the event index starts over, to hold EVM logs' topics: it reads {} back in the background", window.keep);
+
+    Ok(Some(window))
+}
 
 #[document(
     summary = "Which of a node's indexes: of events, or of the transactions touching each address.",

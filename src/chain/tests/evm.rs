@@ -12,6 +12,7 @@ use {
 };
 
 const COUNTER_BIN: &str = include_str!("../../../contracts/evm/Counter.bin");
+const TOKEN_BIN: &str = include_str!("../../../contracts/evm/Token.bin");
 
 /// The first four bytes of a function's keccak256: what Solidity dispatches on.
 fn selector(signature: &str) -> Vec<u8> {
@@ -74,6 +75,211 @@ fn count(chain: &mut Chain, counter: Address) -> Vec<u8> {
     let read = call(chain, &authority(), counter, 0, calldata("count()", &[]));
 
     returned(&advance(chain, vec![read])[0])
+}
+
+/// Deploys the ERC-20, its whole supply to the authority, whose Transfer from nowhere is its first
+/// log.
+fn deploy_token(chain: &mut Chain) -> Address {
+    use crate::abi::{AbiType, AbiValue, encode_values};
+
+    let deployer = authority();
+    let args = encode_values(&[AbiType::String, AbiType::String, AbiType::Uint(256)], &[AbiValue::String("Token".to_string()), AbiValue::String("TKN".to_string()), AbiValue::Uint(u256::new(1_000))]).unwrap();
+    let init = [crate::structs::hex::from_hex(TOKEN_BIN.trim()).unwrap(), args].concat();
+    let token = evm::create_address(&deployer.public().address(), nonce(chain, &deployer));
+    let deploy = sign(chain, &deployer, Tx::Deploy { code: Code::Evm(init) });
+
+    assert_eq!(advance(chain, vec![deploy])[0].result, Ok(Effect::Deployed(token)));
+
+    token
+}
+
+fn send_token(chain: &Chain, token: Address, to: &Address, value: u128) -> SignedTx {
+    call(chain, &authority(), token, 0, calldata("transfer(address,uint256)", &[address_word(to), word(value)]))
+}
+
+fn found(db: &MemoryDb, filter: EventFilter) -> Vec<Event> {
+    stored_events(db, &filter, None, 100).unwrap().0.into_iter().map(|found| found.event).collect()
+}
+
+#[test]
+fn an_erc20_s_logs_are_found_by_their_name_their_topic_and_the_addresses_in_them() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    chain.keep_index(IndexKind::Events, None).unwrap();
+
+    let me = authority().public().address();
+    let (alice, secp) = (stranger().public().address(), Address::Secp256k1([7; 20]));
+    let token = deploy_token(&mut chain);
+    let sent = send_token(&chain, token, &alice, 5);
+    advance(&mut chain, vec![sent]);
+    let sent = send_token(&chain, token, &secp, 6);
+    advance(&mut chain, vec![sent]);
+    let approved = call(&chain, &authority(), token, 0, calldata("approve(address,uint256)", &[address_word(&alice), word(9)]));
+    advance(&mut chain, vec![approved]);
+
+    let transfer: [u8; 32] = keccak256(b"Transfer(address,address,uint256)").0;
+
+    // By its name, spelled as the EVM names logs, and no other way: names match by bytes.
+    assert_eq!(found(&db, EventFilter::Named(token, "log".to_string())).len(), 4, "the mint, two transfers and an approval");
+    assert!(found(&db, EventFilter::Named(token, "LOG".to_string())).is_empty());
+
+    // By its signature, from any contract or from one.
+    assert_eq!(found(&db, EventFilter::Topic(transfer)).len(), 3);
+    assert_eq!(found(&db, EventFilter::ContractTopic(token, transfer)).len(), 3);
+    assert!(found(&db, EventFilter::ContractTopic(Address::Evm([9; 20]), transfer)).is_empty());
+
+    // By who it names: a secp256k1 account by its own 20 bytes, an Ed25519 one by its alias.
+    let to_secp = found(&db, EventFilter::Mentions(secp));
+    let (topics, data) = to_secp[0].evm_log().unwrap();
+
+    assert_eq!(to_secp.len(), 1);
+    assert_eq!((topics[2].to_vec(), data.to_vec()), (address_word(&secp), word(6)));
+    assert_eq!(found(&db, EventFilter::Mentions(alice)).len(), 2, "its transfer in, and what it was let spend");
+    assert_eq!(found(&db, EventFilter::Mentions(me)).len(), 4);
+
+    // A topic that is an address is found as one, in any place.
+    let alice_topic: [u8; 32] = address_word(&alice).try_into().unwrap();
+    assert_eq!(found(&db, EventFilter::Topic(alice_topic)).len(), 2);
+
+    // Read as what they fit.
+    let (topics, data) = to_secp[0].evm_log().unwrap();
+    let known = crate::abi::known::known_abis();
+    let read = crate::abi::known::read_log(None, &known, &topics, data).unwrap();
+
+    assert_eq!((read.name.as_str(), read.by.label().as_str(), read.moves[0].amount), ("Transfer", "read as ERC-20", u256::new(6)));
+
+    // A page at a time across both places an address can be.
+    let (first, next) = stored_events(&*db, &EventFilter::Mentions(me), None, 3).unwrap();
+    let (rest, after) = stored_events(&*db, &EventFilter::Mentions(me), next.as_deref(), 3).unwrap();
+
+    assert_eq!((first.len(), rest.len(), after), (3, 1, None));
+    assert!(first.iter().map(|found| found.height).is_sorted_by(|newer, older| newer >= older));
+    assert!(first.last().unwrap().height > rest[0].height);
+
+    // Only an EVM contract's logs are logs, whatever a contract calls its event.
+    let named_log = Event { contract: Address::Contract([1; 32]), name: LOG.to_string(), data: vec![TxCallArgumentType::Bytes(vec![1; 32]), TxCallArgumentType::Bytes(Vec::new())] };
+
+    assert_eq!(named_log.evm_log(), None);
+    assert_eq!(Event { contract: token, name: LOG.to_string(), data: Vec::new() }.evm_log(), None);
+}
+
+#[test]
+fn a_log_s_topics_leave_the_index_with_its_block() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    chain.keep_index(IndexKind::Events, None).unwrap();
+
+    let token = deploy_token(&mut chain);
+    let alice = stranger().public().address();
+    let sent = send_token(&chain, token, &alice, 5);
+    advance(&mut chain, vec![sent]);
+    let transfer: [u8; 32] = keccak256(b"Transfer(address,address,uint256)").0;
+
+    assert_eq!(found(&db, EventFilter::Topic(transfer)).len(), 2);
+
+    // Only the latest block kept: the mint's entries go, its pointers included, with nothing left
+    // pointing at nothing.
+    chain.keep_index(IndexKind::Events, Some(KeepFrom::Latest(1))).unwrap();
+    while chain.catch_up_index(IndexKind::Events).unwrap() {}
+
+    assert_eq!(found(&db, EventFilter::Topic(transfer)).len(), 1);
+    assert_eq!(found(&db, EventFilter::ContractTopic(token, transfer)).len(), 1);
+    assert_eq!(found(&db, EventFilter::Mentions(alice)).len(), 1);
+}
+
+#[test]
+fn an_index_from_before_topics_starts_over_keeping_what_it_kept_and_reads_them_back() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    chain.keep_index(IndexKind::Events, Some(KeepFrom::Height(1))).unwrap();
+
+    let token = deploy_token(&mut chain);
+    let alice = stranger().public().address();
+    let sent = send_token(&chain, token, &alice, 5);
+    advance(&mut chain, vec![sent]);
+    while chain.catch_up_index(IndexKind::Events).unwrap() {}
+    let transfer: [u8; 32] = keccak256(b"Transfer(address,address,uint256)").0;
+    let tip = chain.tip().height;
+
+    assert_eq!(found(&db, EventFilter::Topic(transfer)).len(), 2);
+
+    // As a node left it before topics: no pointers by them, and nothing to say what its entries
+    // hold.
+    let old = State::new(db.clone());
+    let mut keys = Vec::new();
+
+    db.scan(Column::Events, &[], &[], &mut |key, _| {
+        if matches!(key[0], b't' | b'k') {
+            keys.push(key.to_vec());
+        }
+
+        true
+    })
+    .unwrap();
+
+    assert!(!keys.is_empty());
+
+    for key in keys {
+        old.delete(Column::Events, key);
+    }
+
+    old.delete(Column::Meta, b"events_schema".to_vec());
+    db.commit(old.take_changes()).unwrap();
+    assert!(found(&db, EventFilter::Topic(transfer)).is_empty(), "which is what would stay wrong");
+    drop(chain);
+
+    // Opening it starts it over: nothing below the next block, keeping the same blocks.
+    let mut chain = open(&db);
+    let window = chain.index_window(IndexKind::Events).unwrap();
+
+    assert_eq!((window.from, window.keep), (tip + 1, KeepFrom::Height(1)));
+    assert_eq!(stored_index(&*db, IndexKind::Events).unwrap(), Some(window), "and writes that down");
+    assert!(found(&db, EventFilter::Contract(token)).is_empty(), "every entry went, in one write");
+
+    // A new block's log is indexed right away, and the rest catch up from their receipts.
+    let sent = send_token(&chain, token, &alice, 1);
+    advance(&mut chain, vec![sent]);
+    assert_eq!(found(&db, EventFilter::Topic(transfer)).len(), 1);
+
+    while chain.catch_up_index(IndexKind::Events).unwrap() {}
+
+    assert_eq!(found(&db, EventFilter::Topic(transfer)).len(), 3);
+    assert_eq!(found(&db, EventFilter::Named(token, LOG.to_string())).len(), 3);
+    assert_eq!(chain.index_window(IndexKind::Events).unwrap().from, 1);
+
+    // It only starts over the once.
+    drop(chain);
+    let chain = open(&db);
+
+    assert_eq!(chain.index_window(IndexKind::Events).unwrap().from, 1);
+    assert_eq!(found(&db, EventFilter::Topic(transfer)).len(), 3);
+}
+
+#[test]
+fn indexing_logs_topics_touches_neither_blocks_nor_state() {
+    let (indexed_db, plain_db) = (Arc::new(MemoryDb::default()), Arc::new(MemoryDb::default()));
+    let (mut indexed, mut plain) = (open(&indexed_db), open(&plain_db));
+    indexed.keep_index(IndexKind::Events, None).unwrap();
+
+    let init = [crate::structs::hex::from_hex(COUNTER_BIN.trim()).unwrap(), word(5)].concat();
+    let counter = evm::create_address(&authority().public().address(), 0);
+    let deploy = sign(&indexed, &authority(), Tx::Deploy { code: Code::Evm(init) });
+    let mut blocks = vec![deploy];
+
+    blocks.push(next_nonce(call(&indexed, &authority(), counter, 0, calldata("bump(uint256)", &[word(3)])), &authority()));
+
+    for tx in blocks {
+        let (block, now) = next_block(&indexed, vec![tx]);
+
+        extended(indexed.import(&block, now));
+        // The same block, with every root its header commits to, is good for a node with no index.
+        extended(plain.import(&block, now));
+        assert_eq!(indexed.tip(), plain.tip());
+    }
+
+    assert_eq!(found(&indexed_db, EventFilter::Named(counter, LOG.to_string())).len(), 1);
+    assert!(stored_index(&*plain_db, IndexKind::Events).unwrap().is_none());
+    assert_eq!(indexed.state().read(Column::Accounts, &crate::db::address_key(&authority().public().address())).unwrap(), plain.state().read(Column::Accounts, &crate::db::address_key(&authority().public().address())).unwrap());
 }
 
 #[cfg(feature = "bitcoin")]

@@ -591,6 +591,26 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
         ui.add_space(8.0);
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &draft.from.to_string()));
         super::row(ui, &palette, "To", |ui| super::address(ui, &palette, &draft.to));
+
+        // A contract's EVM call, by name, under who it goes to, as well as how much data it is.
+        if let Tx::EvmCall { to, input, .. } = &draft.tx
+            && !input.is_empty()
+        {
+            let contract = to.to_string();
+
+            super::row(ui, &palette, "Data", |ui| {
+                ui.label(theme::mono(format!("{} · {} bytes", to_hex(&input[..input.len().min(4)]), input.len())));
+            });
+
+            if let Some(read) = ctx.reader.call(super::decoded::kept(&ctx.settings.contracts, &contract), input) {
+                let token = ctx.chain.tokens.get(&contract).and_then(|token| Some((token.value.symbol.as_deref()?, token.value.decimals?)));
+
+                super::decoded::signing(ui, &palette, token, &read);
+            }
+
+            super::decoded::raw(ui, &palette, "contract's data", &to_hex(input));
+        }
+
         super::row(ui, &palette, "Fee, at most", |ui| {
             ui.label(ctx.amount(None, &most.to_string()))
                 .on_hover_text(format!("{} gas at up to {} per gas; what it does not use is refunded", fee.gas_limit, ctx.amount(None, &fee.max_price.to_string())));

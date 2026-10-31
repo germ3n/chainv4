@@ -1403,6 +1403,77 @@ fn indexed_events_are_found_by_contract_name_and_address_and_leave_with_their_bl
     assert!(stored_events(&*db, &EventFilter::Mentions(bob), None, 100).unwrap().0.is_empty());
 }
 
+#[cfg(feature = "abi")]
+#[test]
+fn an_address_is_paged_through_across_native_events_and_evm_logs_in_order() {
+    use crate::structs::event::{EVM_LOG, Event};
+
+    let db = Arc::new(MemoryDb::default());
+    let alice = Address::Secp256k1([7; 20]);
+    let tx = Hash::zero(HashType::default_chain());
+    let native = Event { contract: Address::Contract([1; 32]), name: "Paid".to_string(), data: vec![TxCallArgumentType::Address(alice)] };
+    let log = Event {
+        contract: Address::Evm([2; 20]),
+        name: EVM_LOG.to_string(),
+        data: vec![TxCallArgumentType::Bytes([vec![0; 12], vec![7; 20]].concat()), TxCallArgumentType::Bytes([vec![0; 12], vec![7; 20]].concat()), TxCallArgumentType::Bytes(Vec::new())],
+    };
+    let layer = crate::db::State::new(db.clone());
+
+    // By height: native, a log, native, a log. The same topic twice is one entry.
+    for height in 1..=4u64 {
+        let event = if height.is_multiple_of(2) { log.clone() } else { native.clone() };
+
+        events::index(&layer, tx, height, tx, 0, std::slice::from_ref(&event));
+    }
+
+    db.commit(layer.take_changes()).unwrap();
+
+    let filter = EventFilter::Mentions(alice);
+    let (mut cursor, mut heights) = (None, Vec::new());
+
+    loop {
+        let (page, next) = stored_events(&*db, &filter, cursor.as_deref(), 1).unwrap();
+        heights.extend(page.iter().map(|found| found.height));
+        cursor = next;
+
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(heights, [4, 3, 2, 1]);
+
+    let (page, next) = stored_events(&*db, &filter, None, 3).unwrap();
+    let last = stored_events(&*db, &filter, next.as_deref(), 3).unwrap();
+
+    assert_eq!((page.len(), last.0.len(), last.1), (3, 1, None));
+
+    // A cursor from before a page's cursor was only where it stopped, the whole of a key, works.
+    let whole_key = [vec![b'a'; 9], next.unwrap()].concat();
+    assert_eq!(stored_events(&*db, &filter, Some(&whole_key), 3).unwrap().0.len(), 1);
+
+    // And they all go, every pointer, when their blocks do.
+    let layer = crate::db::State::new(db.clone());
+
+    for height in 1..=4u64 {
+        let event = if height.is_multiple_of(2) { log.clone() } else { native.clone() };
+
+        events::unindex(&layer, height, 0, std::slice::from_ref(&event));
+    }
+
+    db.commit(layer.take_changes()).unwrap();
+
+    let mut left = 0;
+    db.scan(Column::Events, &[], &[], &mut |_, _| {
+        left += 1;
+
+        true
+    })
+    .unwrap();
+
+    assert_eq!(left, 0);
+}
+
 #[test]
 fn the_event_index_catches_up_on_older_blocks_and_keeps_its_window() {
     // The same blocks go to a chain that indexes them as they come, and to one that catches up.

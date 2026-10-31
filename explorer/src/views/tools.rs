@@ -1,5 +1,6 @@
-//! Tools, in four tabs. **Decode** reads a raw signed transaction, the wallet's swap codes and
+//! Tools, in five tabs. **Decode** reads a raw signed transaction, the wallet's swap codes and
 //! multisig bundles, and EVM calldata and logs by chainv4's own contracts' ABIs or one pasted.
+//! **Find events** lists what the node's event index holds by a signature, a topic or an address.
 //! **Convert** turns amounts between the smallest unit and the coin, an address into its EVM
 //! alias and back, a public key into its address under each scheme, and bech32 into hex and back.
 //! **Hash & verify** hashes text or hex with every hash the build has, checks a signature, and
@@ -14,32 +15,35 @@ use {
 
 pub mod convert;
 pub mod decode;
+pub mod find;
 pub mod hash;
 pub mod proof;
 
 #[cfg(test)]
 mod tests;
 
-const ABOUT: &str = "Decode what the chain and the wallet write, convert between their forms, hash and check signatures, and check the node's proofs against the light client.";
+const ABOUT: &str = "Decode what the chain and the wallet write, find events by their signature or an address, convert between their forms, hash and check signatures, and check the node's proofs against the light client.";
 
 /// The tabs, in order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab {
     #[default]
     Decode,
+    Events,
     Convert,
     Hash,
     Proof,
 }
 
 impl Tab {
-    pub const ALL: [(Tab, &'static str); 4] = [(Tab::Decode, "Decode"), (Tab::Convert, "Convert"), (Tab::Hash, "Hash & verify"), (Tab::Proof, "Proof")];
+    pub const ALL: [(Tab, &'static str); 5] = [(Tab::Decode, "Decode"), (Tab::Events, "Find events"), (Tab::Convert, "Convert"), (Tab::Hash, "Hash & verify"), (Tab::Proof, "Proof")];
 }
 
 #[derive(Default)]
 pub struct ToolsState {
     pub tab: Tab,
     pub decode: decode::DecodeState,
+    pub events: find::FindState,
     pub convert: convert::ConvertState,
     pub hash: hash::HashState,
     pub proof: proof::ProofState,
@@ -58,6 +62,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ToolsState) {
 
     match state.tab {
         Tab::Decode => decode::show(ui, ctx, &mut state.decode),
+        Tab::Events => find::show(ui, ctx, &mut state.events),
         Tab::Convert => convert::show(ui, ctx, &mut state.convert),
         Tab::Hash => hash::show(ui, ctx, &mut state.hash),
         Tab::Proof => proof::show(ui, ctx, &mut state.proof),

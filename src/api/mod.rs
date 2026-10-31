@@ -1609,20 +1609,28 @@ async fn forks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, Str
     })))
 }
 
-/// Indexed events, newest first: a contract's, a contract's of one name, or those that mention an
-/// address, a page at a time.
+/// Indexed events, newest first: a contract's, a contract's of one name, those that mention an
+/// address, or EVM logs with a topic, of a contract or of any, a page at a time. Anything else is
+/// refused rather than half answered. The answer says it knows topics: an older node ignores what
+/// it does not know, so a client asking one for a contract's logs of a topic gets all of them.
 async fn events(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
     let db = api.db;
     let Some(index) = stored_index(&*db, IndexKind::Events)? else {
         return Err(ApiError::NotFound("this node keeps no event index; start it with --index-events".to_string()));
     };
-    let filter = match (query.get("contract"), query.get("name"), query.get("address")) {
-        (Some(contract), None, None) => EventFilter::Contract(parse_address(contract)?),
-        (Some(contract), Some(name), None) => EventFilter::Named(parse_address(contract)?, name.clone()),
-        (None, None, Some(address)) => EventFilter::Mentions(parse_address(address)?),
+    let topic = query
+        .get("topic")
+        .map(|topic| from_hex(topic).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()).ok_or_else(|| ApiError::BadRequest("a topic is 0x and 64 hex digits".to_string())))
+        .transpose()?;
+    let filter = match (query.get("contract"), query.get("name"), query.get("address"), topic) {
+        (Some(contract), None, None, None) => EventFilter::Contract(parse_address(contract)?),
+        (Some(contract), Some(name), None, None) => EventFilter::Named(parse_address(contract)?, name.clone()),
+        (None, None, Some(address), None) => EventFilter::Mentions(parse_address(address)?),
+        (Some(contract), None, None, Some(topic)) => EventFilter::ContractTopic(parse_address(contract)?, topic),
+        (None, None, None, Some(topic)) => EventFilter::Topic(topic),
         _ => {
             return Err(ApiError::BadRequest(
-                "ask for a contract's events, with or without a name, or an address's".to_string(),
+                "ask for a contract's events, with or without a name or a topic; an address's; or a topic's".to_string(),
             ));
         }
     };
@@ -1639,6 +1647,7 @@ async fn events(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
         "next": next.map(|next| to_hex(&next)),
         "indexed_from": index.from,
         "catching_up_to": (!index.caught_up(tip)).then(|| index.keep.lowest(tip)),
+        "topics": true,
     })))
 }
 

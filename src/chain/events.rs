@@ -1,7 +1,11 @@
 //! The event index: every event on the main chain, findable by its contract, by its contract and
-//! name, and by any address in its data. Each event is stored once, under its contract; the other
-//! two keys only point at it. Keys sort newest first, so a listing reads forward from where the
-//! last page stopped.
+//! name, by any address in its data, and for an EVM log, by any of its topics, alone or with its
+//! contract. Each event is stored once, under its contract; the other keys only point at it. Keys
+//! sort newest first, so a listing reads forward from where the last page stopped.
+//!
+//! An EVM log holds everything as bytes, so the addresses it names are never Address values: those
+//! a contract indexes are topics, as an ERC-20's Transfer carries its parties. An address is found
+//! in them by its EVM address, padded as a topic is, so what mentions an address takes in both.
 //!
 //! A node keeps it only when started with --index-events, and once on it stays on until
 //! --index-events=off drops it. How it holds blocks, and catches up, is what every index shares,
@@ -19,10 +23,16 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
-/// Key kinds: the event itself by contract, and pointers to it by name and by address.
+/// Key kinds: the event itself by contract, and pointers to it by name, by address, and by topic,
+/// on its own or under the contract.
 const BY_CONTRACT: u8 = b'c';
 const BY_NAME: u8 = b'n';
 const BY_ADDRESS: u8 = b'a';
+const BY_TOPIC: u8 = b't';
+const BY_CONTRACT_TOPIC: u8 = b'k';
+
+/// How long where an event sits is, which ends every key.
+const PLACE: usize = 16;
 
 #[document(
     summary = "An event, with where it happened: what the event index keeps, and GET /events lists.",
@@ -58,18 +68,46 @@ pub enum EventFilter {
     Contract(Address),
     #[document(summary = "A contract's events of one name, such as Transfer.")]
     Named(Address, String),
-    #[document(summary = "Every event with this address in its data, from any contract.")]
+    #[document(summary = "Every event with this address in its data, from any contract, and every EVM log with its EVM address in a topic.")]
     Mentions(Address),
+    #[document(summary = "Every EVM log with this topic, in any place, from any contract: the first is its event's signature.")]
+    Topic([u8; 32]),
+    #[document(summary = "A contract's EVM logs with this topic, in any place.")]
+    ContractTopic(Address, [u8; 32]),
 }
 
 impl EventFilter {
-    fn prefix(&self) -> Vec<u8> {
+    /// Where its keys are: one place, but for an address, which may be in an event's values or a
+    /// log's topics.
+    fn prefixes(&self) -> Vec<Vec<u8>> {
         match self {
-            EventFilter::Contract(contract) => [&[BY_CONTRACT][..], &address_key(contract)].concat(),
-            EventFilter::Named(contract, name) => named_prefix(contract, name),
-            EventFilter::Mentions(address) => [&[BY_ADDRESS][..], &address_key(address)].concat(),
+            EventFilter::Contract(contract) => vec![[&[BY_CONTRACT][..], &address_key(contract)].concat()],
+            EventFilter::Named(contract, name) => vec![named_prefix(contract, name)],
+            EventFilter::Mentions(address) => {
+                #[cfg_attr(not(feature = "abi"), allow(unused_mut))]
+                let mut prefixes = vec![[&[BY_ADDRESS][..], &address_key(address)].concat()];
+
+                #[cfg(feature = "abi")]
+                {
+                    let mut topic = [0; 32];
+                    topic[12..].copy_from_slice(&crate::abi::evm_address(address));
+                    prefixes.push(topic_prefix(&topic));
+                }
+
+                prefixes
+            }
+            EventFilter::Topic(topic) => vec![topic_prefix(topic)],
+            EventFilter::ContractTopic(contract, topic) => vec![contract_topic_prefix(contract, topic)],
         }
     }
+}
+
+fn topic_prefix(topic: &[u8; 32]) -> Vec<u8> {
+    [&[BY_TOPIC][..], topic].concat()
+}
+
+fn contract_topic_prefix(contract: &Address, topic: &[u8; 32]) -> Vec<u8> {
+    [&[BY_CONTRACT_TOPIC][..], &address_key(contract), topic].concat()
 }
 
 fn named_prefix(contract: &Address, name: &str) -> Vec<u8> {
@@ -102,6 +140,13 @@ fn keys(event: &Event, place: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
         .collect();
     let mut pointers = vec![[named_prefix(&event.contract, &event.name), place.to_vec()].concat()];
     pointers.extend(mentioned.iter().map(|address| [&[BY_ADDRESS][..], &address_key(address), place].concat()));
+
+    if let Some((topics, _)) = event.evm_log() {
+        for topic in topics.iter().collect::<BTreeSet<_>>() {
+            pointers.push([topic_prefix(topic), place.to_vec()].concat());
+            pointers.push([contract_topic_prefix(&event.contract, topic), place.to_vec()].concat());
+        }
+    }
 
     (primary, pointers)
 }
@@ -157,21 +202,37 @@ pub fn stored_events(
     cursor: Option<&[u8]>,
     limit: usize,
 ) -> Result<(Vec<IndexedEvent>, Option<Vec<u8>>), DbError> {
-    let prefix = filter.prefix();
+    // Where the last page stopped, which every prefix shares: a cursor is where an event sits, and
+    // one from before cursors were only that is a whole key, which ends with it.
+    let from = cursor.map(|cursor| &cursor[cursor.len().saturating_sub(PLACE)..]);
     let mut found: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    db.scan(Column::Events, &prefix, cursor.unwrap_or(&prefix), &mut |key, value| {
-        found.push((key.to_vec(), value.to_vec()));
 
-        found.len() <= limit
-    })?;
-    let next = (found.len() > limit).then(|| found.remove(limit).0);
+    for prefix in filter.prefixes() {
+        let start = [prefix.as_slice(), from.unwrap_or_default()].concat();
+        let mut read = 0;
+
+        db.scan(Column::Events, &prefix, &start, &mut |key, value| {
+            found.push((key[key.len().saturating_sub(PLACE)..].to_vec(), value.to_vec()));
+            read += 1;
+
+            read <= limit
+        })?;
+    }
+
+    // Newest first across the prefixes, each event once.
+    found.sort_by(|first, second| first.0.cmp(&second.0));
+    found.dedup_by(|later, earlier| later.0 == earlier.0);
+
+    let next = (found.len() > limit).then(|| found.swap_remove(limit).0);
+    found.truncate(limit);
+
     let mut events = Vec::with_capacity(found.len());
 
     for (_, value) in found {
         let record = match filter {
             EventFilter::Contract(_) => value,
             // The others point at the event, under its contract.
-            EventFilter::Named(..) | EventFilter::Mentions(_) => db
+            EventFilter::Named(..) | EventFilter::Mentions(_) | EventFilter::Topic(_) | EventFilter::ContractTopic(..) => db
                 .read(Column::Events, &value)?
                 .ok_or_else(|| DbError::Corrupt("an event index entry points at nothing".to_string()))?,
         };

@@ -7,12 +7,14 @@
 //! node only says where to look, under a filter as without one. An older node ignores filters and
 //! says nothing of them, which is how it is told apart: then what it listed is tested here, once
 //! proven, and the page says only what was read was searched.
+//! An EVM call and its logs read by name, and an ERC-20's or an NFT's transfer counts as a token's
+//! does, though from a contract the registry does not list, it is only shown as what the log claims.
 
 use {
-    super::Ctx,
+    super::{Ctx, decoded},
     crate::app::Sent,
     crate::format,
-    crate::history::Checked,
+    crate::history::{Checked, KeptCall, KeptLog, Move, with_evm_forms},
     crate::node::Ask,
     crate::theme,
     chainv4::structs::address::Address,
@@ -141,6 +143,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
     ui.add_space(8.0);
 
     let addresses = ctx.addresses();
+    // An EVM move names its parties by the 20 bytes each goes by there. What the node is asked stays
+    // about the addresses themselves, which are all it can look up.
+    let parties = with_evm_forms(&addresses);
     // What was typed wrong is said above, and the list stays as it was until it reads.
     let query = (state.filter.on() > 0 && problem.is_none()).then(|| state.filter.query(ctx.now));
     let under = query.as_ref().map(|query| listed(ctx.chain, &addresses, query));
@@ -150,10 +155,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
     }
 
     let mut entries = match &under {
-        None => entries(ctx, &addresses),
-        Some(listed) => entries_under(ctx, &addresses, listed, &state.filter),
+        None => entries(ctx, &parties),
+        Some(listed) => entries_under(ctx, &parties, listed, &state.filter),
     };
-    entries.retain(|entry| entry.is(state.kind) && entry.matches(&state.search));
+    entries.retain(|entry| entry.is(state.kind) && (entry.matches(&state.search) || reads_as(ctx, entry, &state.search)));
 
     if state.oldest_first {
         entries.reverse();
@@ -178,7 +183,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
                 theme::rule(ui, &palette);
             }
 
-            line(ui, ctx, &addresses, entry);
+            line(ui, ctx, &parties, entry);
         }
     });
 
@@ -281,6 +286,68 @@ fn further(ui: &mut Ui, ctx: &mut Ctx, query: &str, listed: &Listed, on: usize, 
     theme::section_gap(ui);
 }
 
+/// A kept call, read by the ABI saved for its contract, or one built in.
+fn read_call(ctx: &Ctx, call: &KeptCall) -> Option<std::rc::Rc<chainv4::abi::known::ReadCall>> {
+    ctx.reader.call_hex(decoded::kept(&ctx.settings.contracts, &call.to), &call.input)
+}
+
+/// A kept log, read by the ABI saved for its contract, or one built in.
+fn read_log(ctx: &Ctx, log: &KeptLog) -> Option<std::rc::Rc<chainv4::abi::known::ReadLog>> {
+    let topics: Vec<&str> = log.topics.iter().map(String::as_str).collect();
+
+    ctx.reader.log(decoded::kept(&ctx.settings.contracts, &log.contract), &topics, &log.data)
+}
+
+/// A listed token's symbol and decimals, for its amounts: only if the registry gives both.
+fn units<'a>(ctx: &'a Ctx, token: &str) -> decoded::TokenUnits<'a> {
+    let proven = ctx.chain.tokens.get(token)?;
+
+    Some((proven.value.symbol.as_deref()?, proven.value.decimals?))
+}
+
+/// Whether what its EVM call and logs read as holds the search, as what is kept of them is bytes.
+fn reads_as(ctx: &Ctx, entry: &Entry, search: &str) -> bool {
+    let search = search.trim().to_lowercase();
+    let Some(checked) = entry.checked else {
+        return false;
+    };
+
+    checked.call.as_ref().and_then(|call| read_call(ctx, call)).is_some_and(|read| read.shown().to_lowercase().contains(&search))
+        || checked.logs.iter().filter_map(|log| read_log(ctx, log)).any(|read| read.shown().to_lowercase().contains(&search))
+}
+
+/// What a transaction did, in a few words, by what its call reads as, and which ABI read it.
+fn did(ctx: &Ctx, checked: &Checked) -> (String, Option<String>) {
+    match checked.call.as_ref().and_then(|call| read_call(ctx, call).map(|read| (call, read))) {
+        Some((call, read)) => (format!("Called {} on {}", read.name, format::short(&call.to)), Some(read.by.label())),
+        None => (checked.action.clone(), None),
+    }
+}
+
+/// An amount moved, cut short and in full: an NFT's is which one it was.
+fn moved_amount(ctx: &Ctx, moved: &Move) -> (String, String) {
+    let token = moved.token.as_deref();
+
+    match (&moved.id, moved.amount.as_str()) {
+        (Some(id), "1") => {
+            let (symbol, _) = ctx.token(token.unwrap_or_default());
+
+            (format!("{symbol} {}", format::short(id)), format!("token {id} of {symbol}"))
+        }
+        (Some(id), amount) => {
+            let (symbol, _) = ctx.token(token.unwrap_or_default());
+
+            (format!("{amount} {symbol} {}", format::short(id)), format!("{amount} of token {id} of {symbol}"))
+        }
+        (None, _) => (ctx.brief(token, &moved.amount), ctx.amount(token, &moved.amount)),
+    }
+}
+
+/// Whether a move is only what a contract's log claims: the registry does not list the contract.
+fn claimed(ctx: &Ctx, moved: &Move) -> bool {
+    moved.claimed(moved.token.as_ref().is_some_and(|token| ctx.chain.tokens.contains_key(token)))
+}
+
 /// One line of the history.
 struct Entry<'a> {
     tx: String,
@@ -316,6 +383,8 @@ impl Entry<'_> {
             said.extend([checked.sender.clone(), checked.action.clone()]);
             said.extend(checked.moves.iter().flat_map(|moved| [moved.from.clone(), moved.to.clone(), moved.token.clone()]).flatten());
             said.extend(checked.events.iter().cloned());
+            said.extend(checked.logs.iter().flat_map(|log| log.topics.iter().cloned().chain([log.contract.clone()])));
+            said.extend(checked.call.iter().map(|call| call.to.clone()));
         }
 
         if let Some(sent) = self.sent {
@@ -338,7 +407,7 @@ impl Entry<'_> {
 /// The account's history, at most this many lines.
 pub fn list(ui: &mut Ui, ctx: &Ctx, limit: usize) {
     let palette = *ctx.palette;
-    let addresses = ctx.addresses();
+    let addresses = with_evm_forms(&ctx.addresses());
     let entries = entries(ctx, &addresses);
 
     if entries.is_empty() {
@@ -428,7 +497,9 @@ fn line(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry) {
                 if let Some((brief, full)) = &amount {
                     let (sign, color) = match incoming {
                         Some(true) => ("+", palette.good),
-                        _ => ("−", palette.ink),
+                        Some(false) => ("−", palette.ink),
+                        // Only claimed: it is not said to have added to anything.
+                        None => ("", palette.soft),
                     };
                     theme::fitted(ui, &format!("{sign}{brief}"), 14.5, 10.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), color).on_hover_text(full);
                 }
@@ -464,26 +535,26 @@ fn summary(ctx: &Ctx, addresses: &[String], entry: &Entry) -> (String, String, O
     match (entry.checked, entry.sent) {
         (Some(checked), _) => match checked.for_account(addresses).next() {
             Some((true, moved)) => {
-                let token = moved.token.as_deref();
                 let from = moved.from.as_deref().map_or_else(|| "minted".to_string(), |from| format!("from {}", format::short(from)));
-                let amount = (ctx.brief(token, &moved.amount), ctx.amount(token, &moved.amount));
+                let (title, sign) = moved_title(ctx, moved, "Received", "Says you received", true);
 
-                ("Received".to_string(), format!("{from} · {}", when(checked)), Some(amount), Some(true))
+                (title, format!("{from} · {}{}", when(checked), read_as(moved)), Some(moved_amount(ctx, moved)), sign)
             }
             Some((false, moved)) => {
-                let token = moved.token.as_deref();
                 let to = moved.to.as_deref().map_or_else(|| "burned".to_string(), |to| format!("to {}", format::short(to)));
-                let amount = (ctx.brief(token, &moved.amount), ctx.amount(token, &moved.amount));
+                let (title, sign) = moved_title(ctx, moved, "Sent", "Says you sent", false);
 
-                ("Sent".to_string(), format!("{to} · {}", when(checked)), Some(amount), Some(false))
+                (title, format!("{to} · {}{}", when(checked), read_as(moved)), Some(moved_amount(ctx, moved)), sign)
             }
             None => {
                 let by = match addresses.contains(&checked.sender) {
                     true => String::new(),
                     false => format!("by {} · ", format::short(&checked.sender)),
                 };
+                let (title, read_by) = did(ctx, checked);
+                let read_by = read_by.map_or_else(String::new, |read_by| format!(" · {read_by}"));
 
-                (checked.action.clone(), format!("{by}{}", when(checked)), None, None)
+                (title, format!("{by}{}{read_by}", when(checked)), None, None)
             }
         },
         (None, Some(sent)) => (
@@ -499,6 +570,20 @@ fn summary(ctx: &Ctx, addresses: &[String], entry: &Entry) -> (String, String, O
             None,
         ),
     }
+}
+
+/// What a line says of a move, and which way it went: a claim's says neither that it happened nor
+/// that it added to anything.
+fn moved_title(ctx: &Ctx, moved: &Move, real: &str, claim: &str, incoming: bool) -> (String, Option<bool>) {
+    match claimed(ctx, moved) {
+        true => (claim.to_string(), None),
+        false => (real.to_string(), Some(incoming)),
+    }
+}
+
+/// Which standard's shape a move's log fit, after a separator: nothing for a native one.
+fn read_as(moved: &Move) -> String {
+    moved.standard.as_deref().map_or_else(String::new, |standard| format!(" · read as {standard}"))
 }
 
 fn status(ctx: &Ctx, entry: &Entry) -> (&'static str, egui::Color32) {
@@ -539,14 +624,28 @@ fn details(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry) {
             ui.label(&checked.action);
         });
 
+        // What its calldata reads as, under what is sure of it, and its bytes.
+        if let Some(call) = &checked.call {
+            if let Some(read) = read_call(ctx, call) {
+                decoded::call(ui, &palette, units(ctx, &call.to), &read);
+            }
+
+            decoded::raw(ui, &palette, "call", &call.input);
+        }
+
         for (incoming, moved) in checked.for_account(addresses) {
             let other = match incoming {
                 true => moved.from.as_deref().map_or_else(|| "minted".to_string(), |from| format!("from {}", format::short(from))),
                 false => moved.to.as_deref().map_or_else(|| "burned".to_string(), |to| format!("to {}", format::short(to))),
             };
-            super::row(ui, &palette, if incoming { "Received" } else { "Sent" }, |ui| {
-                ui.label(format!("{} {other}", ctx.amount(moved.token.as_deref(), &moved.amount)));
+            let (title, _) = moved_title(ctx, moved, if incoming { "Received" } else { "Sent" }, if incoming { "Says you received" } else { "Says you sent" }, incoming);
+            super::row(ui, &palette, &title, |ui| {
+                ui.label(format!("{} {other}{}", moved_amount(ctx, moved).1, read_as(moved)));
             });
+
+            if claimed(ctx, moved) {
+                ui.label(RichText::new("Only what a contract's log claims: the registry does not list that contract, and no balance counts it.").small().color(palette.muted));
+            }
         }
 
         if addresses.contains(&checked.sender) {
@@ -555,10 +654,19 @@ fn details(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry) {
             });
         }
 
-        for event in &checked.events {
-            super::row(ui, &palette, "Event", |ui| {
-                ui.label(theme::mono(event).color(palette.soft));
-            });
+        for (position, event) in checked.events.iter().enumerate() {
+            let log = checked.logs.iter().find(|log| log.position as usize == position);
+
+            match log.and_then(|log| read_log(ctx, log).map(|read| (log, read))) {
+                Some((log, read)) => decoded::log(ui, &palette, units(ctx, &log.contract), &read),
+                None => super::row(ui, &palette, "Event", |ui| {
+                    ui.label(theme::mono(event).color(palette.soft));
+                }),
+            }
+
+            if let Some(log) = log {
+                decoded::raw(ui, &palette, &format!("log {position}"), &[log.topics.join("\n"), log.data.clone()].join("\n"));
+            }
         }
     } else if let Some(sent) = entry.sent {
         super::row(ui, &palette, "Nonce", |ui| {
@@ -576,7 +684,7 @@ fn details(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry) {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, crate::history::Move};
+    use super::*;
 
     fn checked(sender: &str, to: &str, done: bool) -> Checked {
         Checked {
@@ -588,12 +696,189 @@ mod tests {
             nonce: 0,
             action: "Called swap on contract:0x6c1d".to_string(),
             kinds: vec!["contract_call".to_string()],
-            moves: vec![Move { token: None, from: Some(sender.to_string()), to: Some(to.to_string()), amount: "40".to_string() }],
+            moves: vec![Move { token: None, from: Some(sender.to_string()), to: Some(to.to_string()), amount: "40".to_string(), id: None, standard: None }],
             fee: "0".to_string(),
             events: vec!["Swap contract:0x0000 contract:0x5119".to_string()],
             genesis: "0x9a7f".to_string(),
             vote: None,
+            call: None,
+            logs: Vec::new(),
         }
+    }
+
+    /// Runs something with a page's context, on a chain that holds these tokens, drawing it headless:
+    /// what it returned, and the text it drew.
+    fn with_ctx<R>(chain: &crate::chain::Chain, contracts: Vec<crate::app::SavedContract>, draw: impl FnOnce(&mut Ui, &Ctx) -> R) -> (R, String) {
+        let wake = egui::Context::default();
+        let reader = chainv4::abi::known::AbiReader::default();
+        let mut node = crate::node::Node::new("http://127.0.0.1:1", Err("offline".to_string()), wake.clone());
+        let (mut holders, mut book, mut settings, mut page) = (Vec::new(), crate::vault::Book::default(), crate::app::Settings::default(), super::super::Page::Activity);
+        let (mut connect, mut changed, mut vault, mut leave, mut lock) = (None, false, None, false, None);
+        let coin = crate::app::Coin { symbol: "DEV".to_string(), decimals: 18 };
+        #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+        let mut lights = crate::light::Lights::default();
+
+        settings.contracts = contracts;
+
+        let palette = theme::DARK;
+        let ctx = Ctx {
+            palette: &palette,
+            chain,
+            reader: &reader,
+            node: &mut node,
+            holders: &mut holders,
+            current: 0,
+            book: &mut book,
+            coin: &coin,
+            settings: &mut settings,
+            now: 2_000,
+            page: &mut page,
+            connect: &mut connect,
+            changed: &mut changed,
+            vault: &mut vault,
+            leave: &mut leave,
+            lock: &mut lock,
+            wake: &wake,
+            faucet: None,
+            swap_contract: None,
+            dex: (None, None),
+            node_stops: None,
+            #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+            lights: &mut lights,
+        };
+        let mut returned = None;
+        let mut draw = Some(draw);
+        let mut output = wake.run_ui(egui::RawInput::default(), |ui| {
+            returned = draw.take().map(|draw| draw(ui, &ctx));
+        });
+        output.textures_delta.clear();
+
+        let text = output.shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::epaint::Shape::Text(shape) => Some(format!("{}\n", shape.galley.text())),
+            _ => None,
+        });
+
+        (returned.expect("drawn once"), text.collect())
+    }
+
+    const TOKEN: &str = "evm:0x0505050505050505050505050505050505050505";
+
+    /// A transaction whose log says a token moved from them to me, or how an NFT did.
+    fn token_moved(me: &str, id: Option<&str>, amount: &str, standard: &str) -> Checked {
+        Checked {
+            moves: vec![Move {
+                token: Some(TOKEN.to_string()),
+                from: Some("0xbb".to_string()),
+                to: Some(me.to_string()),
+                amount: amount.to_string(),
+                id: id.map(str::to_string),
+                standard: Some(standard.to_string()),
+            }],
+            ..checked("ed25519:0xbb", "ed25519:0xcc", true)
+        }
+    }
+
+    fn entry(checked: &Checked) -> Entry<'_> {
+        Entry { tx: "0x01ab".to_string(), checked: Some(checked), sent: None, height: Some(7) }
+    }
+
+    fn listed_token() -> crate::chain::Proven<chainv4::registry::tokens::Token> {
+        crate::chain::Proven {
+            value: chainv4::registry::tokens::Token { address: TOKEN.parse().unwrap(), name: None, symbol: Some("TKN".to_string()), decimals: Some(2) },
+            assurance: chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()), height: 1, final_: true },
+        }
+    }
+
+    #[test]
+    fn an_evm_transfer_from_a_contract_nothing_lists_is_only_shown_as_what_it_claims() {
+        let me = vec!["0xaa".to_string()];
+        let moved = token_moved("0xaa", None, "1500", "ERC-20");
+        let ((title, detail, amount, incoming), _) = with_ctx(&crate::chain::Chain::default(), Vec::new(), |_, ctx| summary(ctx, &me, &entry(&moved)));
+
+        assert_eq!(title, "Says you received");
+        assert!(detail.contains("read as ERC-20"), "{detail}");
+        assert_eq!(incoming, None, "so it gets no plus, and nothing says it came in");
+        assert!(amount.unwrap().1.starts_with("1,500 "), "a plain whole number, in no decimals");
+
+        let (_, text) = with_ctx(&crate::chain::Chain::default(), Vec::new(), |ui, ctx| details(ui, ctx, &me, &entry(&moved)));
+
+        assert!(text.contains("no balance counts it"), "{text}");
+    }
+
+    #[test]
+    fn an_evm_transfer_of_a_listed_token_counts_as_any_token_s_does() {
+        let me = vec!["0xaa".to_string()];
+        let moved = token_moved("0xaa", None, "1500", "ERC-20");
+        let mut chain = crate::chain::Chain::default();
+        chain.tokens.insert(TOKEN.to_string(), listed_token());
+        let ((title, detail, amount, incoming), _) = with_ctx(&chain, Vec::new(), |_, ctx| summary(ctx, &me, &entry(&moved)));
+
+        assert_eq!((title.as_str(), incoming), ("Received", Some(true)));
+        assert!(detail.contains("read as ERC-20"), "still says what read it: {detail}");
+        assert_eq!(amount.unwrap().1, "15 TKN", "in its decimals");
+    }
+
+    #[test]
+    fn an_nft_moving_says_which_token_rather_than_an_amount() {
+        let me = vec!["0xaa".to_string()];
+        let nft = token_moved("0xaa", Some("9"), "1", "ERC-721");
+        let ((_, _, amount, _), _) = with_ctx(&crate::chain::Chain::default(), Vec::new(), |_, ctx| summary(ctx, &me, &entry(&nft)));
+
+        assert!(amount.unwrap().1.starts_with("token 9 of "));
+
+        let multi = token_moved("0xaa", Some("4"), "50", "ERC-1155");
+        let ((_, _, amount, _), _) = with_ctx(&crate::chain::Chain::default(), Vec::new(), |_, ctx| summary(ctx, &me, &entry(&multi)));
+
+        assert!(amount.unwrap().1.starts_with("50 of token 4 of "));
+    }
+
+    #[test]
+    fn a_call_and_a_log_read_by_name_say_which_abi_read_them_and_keep_their_bytes() {
+        use chainv4::structs::hex::to_hex;
+
+        let me = vec!["ed25519:0xaa".to_string()];
+        let (selector, types) = chainv4::abi::parse_signature("transfer(address,uint256)").unwrap();
+        let args = chainv4::abi::encode_values(&types, &[chainv4::abi::AbiValue::Address([0xab; 20]), chainv4::abi::AbiValue::Uint(chainv4::structs::u256::u256::new(5))]).unwrap();
+        let input = to_hex(&[selector.unwrap().to_vec(), args].concat());
+        let topic = |address: u8| to_hex(&[[0u8; 12].as_slice(), &[address; 20]].concat());
+        let transfer = to_hex(&chainv4::abi::signature_topic("Transfer(address,address,uint256)").unwrap());
+        let called = Checked {
+            moves: Vec::new(),
+            call: Some(KeptCall { to: TOKEN.to_string(), input: input.clone() }),
+            events: vec!["log 0xddf2…b3ef · 3 topics, 32 bytes".to_string()],
+            logs: vec![KeptLog {
+                position: 0,
+                contract: TOKEN.to_string(),
+                topics: vec![transfer, topic(1), topic(2)],
+                data: to_hex(&chainv4::structs::u256::u256::new(7).to_be_bytes()),
+            }],
+            ..checked("ed25519:0xaa", "ed25519:0xcc", true)
+        };
+        let ((title, detail, _, _), _) = with_ctx(&crate::chain::Chain::default(), Vec::new(), |_, ctx| summary(ctx, &me, &entry(&called)));
+
+        assert!(title.starts_with("Called transfer on evm:0x0505"), "{title}");
+        assert!(detail.ends_with("read as ERC-20"), "{detail}");
+
+        let (_, text) = with_ctx(&crate::chain::Chain::default(), Vec::new(), |ui, ctx| details(ui, ctx, &me, &entry(&called)));
+
+        for said in ["Did", "transfer", "value =", "Transfer", "read as ERC-20", "Raw data"] {
+            assert!(text.contains(said), "{said} in {text}");
+        }
+
+        // An ABI saved for the contract goes first, and says so differently.
+        let saved = crate::app::SavedContract {
+            address: TOKEN.to_string(),
+            name: "mine".to_string(),
+            abi: r#"[{"type": "function", "name": "transfer", "inputs": [{"name": "payee", "type": "address"}, {"name": "cents", "type": "uint256"}]}]"#.to_string(),
+        };
+        let ((_, detail, _, _), _) = with_ctx(&crate::chain::Chain::default(), vec![saved], |_, ctx| summary(ctx, &me, &entry(&called)));
+
+        assert!(detail.ends_with("read by the ABI kept for this contract"), "{detail}");
+
+        // The search finds what it reads as, though only its bytes are kept.
+        let ((found, missed), _) = with_ctx(&crate::chain::Chain::default(), Vec::new(), |_, ctx| (reads_as(ctx, &entry(&called), "Transfer(from"), reads_as(ctx, &entry(&called), "swapExact")));
+
+        assert!(found && !missed);
     }
 
     #[test]

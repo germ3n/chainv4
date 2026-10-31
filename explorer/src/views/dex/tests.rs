@@ -42,13 +42,23 @@ fn the_native_dexs_events_read_as_trades_adds_and_removals_in_the_pools_order() 
 }
 
 #[test]
+fn an_evm_pair_s_logs_are_asked_for_by_the_name_the_node_keeps_them_under() {
+    // The node's index compares names by bytes, and calls every EVM log "log": spelled any other
+    // way, a pair's trades and prices come back empty. The chain's own tests check the node's side.
+    let path = crate::api::Ask::Events { query: pair_logs(&pool()), cursor: None }.path();
+
+    assert!(path.contains("&name=log&"), "{path}");
+    assert_eq!(chainv4::structs::event::EVM_LOG, "log");
+}
+
+#[test]
 fn an_evm_pairs_logs_read_as_trades() {
     let words = |values: [u64; 4]| to_hex(&values.map(word).concat());
     let topic = to_hex(&keccak(b"Swap(address,uint256,uint256,uint256,uint256,address)"));
-    let log = event("LOG", vec![topic, "0x00".into(), "0x00".into(), words([0, 5_000, 1_200, 0])], 7);
+    let log = event("log", vec![topic, "0x00".into(), "0x00".into(), words([0, 5_000, 1_200, 0])], 7);
     let trade = evm_activity(&pool(), &log).unwrap();
 
     assert_eq!((trade.kind, in_pool(&pool(), &trade)), ("trade", Some([u256::ZERO, u256::new(5_000), u256::new(1_200), u256::ZERO])));
-    let other = event("LOG", vec![to_hex(&keccak(b"Approval(address,address,uint256)")), words([1, 2, 3, 4])], 7);
+    let other = event("log", vec![to_hex(&keccak(b"Approval(address,address,uint256)")), words([1, 2, 3, 4])], 7);
     assert!(evm_activity(&pool(), &other).is_none());
 }

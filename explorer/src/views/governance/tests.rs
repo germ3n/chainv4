@@ -441,8 +441,9 @@ fn drawn(store: &Store, narrow: bool) -> (String, bool) {
     let mut state = GovernanceState::default();
     let palette = crate::theme::DARK;
     let look = Look { palette, roles: crate::theme::Roles::of(&palette), narrow };
+    let reader = chainv4::abi::known::AbiReader::default();
     let mut output = egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
-        let mut ctx = Ctx { store, light: &mut light, api: &mut api, go: &mut go, settings: &mut settings, now: 2_000, look };
+        let mut ctx = Ctx { store, reader: &reader, light: &mut light, api: &mut api, go: &mut go, settings: &mut settings, now: 2_000, look };
         show(ui, &mut ctx, &mut state);
     });
     output.textures_delta.clear();

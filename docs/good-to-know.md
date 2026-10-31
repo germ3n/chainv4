@@ -59,12 +59,34 @@ other pages explain each part in full; this one is the short list to keep in min
   - **Symbols are not unique:** trust an address, not a symbol.
   - **A token that changes its name asks for a refresh:** `tokens.refresh()` in Lua,
     `refresh_token()` in Rust. Without one, the registry keeps the old answers.
+- **A decoded call is a match, not proof.** The ABIs built in (`src/abi/known.rs`) only say the
+  bytes fit a signature: any contract can have a `transfer(address,uint256)`, or emit a `Transfer`.
+  So:
+  - **Say what read it:** `read as ERC-20`, or `read by the ABI kept for this contract`, which always
+    goes first. `approve` and `transferFrom` fit both standards, and say both.
+  - **Never instead of the facts:** a signing screen keeps To, the value and the data's selector and
+    size as they were, and shows what was read below them, in a frame of its own.
+  - **It is untrusted text:** go through `ReadArg::pieces` and `clean_text`, which cut it short and
+    escape line breaks, direction overrides and invisible characters. Names from a pasted ABI come
+    out as letters and digits alone.
+  - **A log's token move is a claim:** unless the registry lists the contract it never says it
+    happened, and nothing adds moves to a balance.
+  - **Decode for people with a budget:** `decode_values` lets dynamic values share bytes, so a small
+    `bytes[]` of offsets at one long value decodes to a thousand times its size. `known` spends a
+    budget; contracts, whose path is consensus, decode as they always have.
 - **Rust exports take typed parameters.** `#[export] fn transfer(to: Address, amount: U256) ->
   bool` reads the call's arguments into its parameters and refuses a call whose arguments do not
   fit, naming the parameter. A function that takes and returns nothing still reads `input()`
   itself.
 - **Events are searchable on nodes that index them.** `--index-events` indexes every event by its
-  contract, its name and the addresses in it, for `GET /events`.
+  contract, its name, the addresses in it and an EVM log's topics, for `GET /events`.
+  - **An EVM log is called `log`,** in those letters, and holds its topics and data as bytes: the
+    index compares names by bytes, so asking for `LOG` finds nothing and says nothing. An address
+    in a log is found by its topic alone, and an unindexed one in its data not at all.
+  - **Topics came later:** a node opening an older index empties it once and reads it back in the
+    background, so older events are missing until `catching_up_to` clears. It is no consensus
+    change. An older node ignores `topic=` beside `contract=` and lists everything: check that the
+    answer has `topics: true`.
   - **Which blocks:** `--index-events` alone keeps every block's events. `=5000` keeps them from a
     height, and `=latest-100000` keeps a window that moves with the tip.
   - **Older blocks:** the node reads them back from their receipts in the background, newest

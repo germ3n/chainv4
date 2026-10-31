@@ -907,6 +907,9 @@ pub struct IndexPage<T> {
     /// Whether it stopped at its bound with the page not full: more may match from next on.
     #[serde(default)]
     pub limited: bool,
+    /// Whether the node's event index knows EVM logs' topics, as an older node's does not.
+    #[serde(default)]
+    pub topics: bool,
 }
 
 pub type EventsPage = IndexPage<FoundEvent>;

@@ -452,6 +452,15 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     super::row(ui, &palette, "Data", |ui| {
                         ui.label(theme::mono(format!("{} · {} bytes", chainv4::structs::hex::to_hex(&tx.input[..tx.input.len().min(4)]), tx.input.len())));
                     });
+
+                    // This page talks to no node: what reads it is an ABI built in or saved here.
+                    let kept = tx.to.as_ref().and_then(|to| super::decoded::kept_for(ctx.settings, to));
+
+                    if let Some(read) = ctx.reader.call(kept, &tx.input) {
+                        super::decoded::signing(ui, &palette, None, &read);
+                    }
+
+                    super::decoded::raw(ui, &palette, "signed data", &chainv4::structs::hex::to_hex(&tx.input));
                 }
 
                 let most = chainv4::structs::u256::u256::from(tx.gas_limit) * tx.max_price;

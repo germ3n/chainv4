@@ -562,6 +562,9 @@ cores runs blocks slower, and links slower than a laptop's loopback carry fewer 
   it on. `=off` deletes one at startup, in one atomic write however big it is, and leaves the
   other. `GET /events` and `GET /accounts/{address}/txs` answer 404 on nodes without the index
   they need.
+- **An event index from before EVM logs' topics starts over** the first time the node opens it,
+  and reads its blocks back as below. It is the node's own: blocks, state and consensus do not
+  change, so nodes upgrade one at a time. See [Storage](storage.md#the-indexes).
 - **Catching up on a long chain takes a while.** Every older block and its receipts are read
   back. The node keeps syncing and producing meanwhile, and logs how far it got every 30
   seconds.

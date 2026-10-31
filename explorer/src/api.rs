@@ -111,7 +111,7 @@ pub enum Ask {
 }
 
 impl Ask {
-    fn path(&self) -> String {
+    pub(crate) fn path(&self) -> String {
         match self {
             Ask::Status => "/status".to_string(),
             Ask::Node => "/node".to_string(),
@@ -229,6 +229,8 @@ pub struct EventQuery {
     pub contract: Option<String>,
     pub name: Option<String>,
     pub address: Option<String>,
+    /// An EVM log's topic, on its own or with a contract: what an older node ignores.
+    pub topic: Option<String>,
     /// How many to a page: the node's default unless set.
     pub limit: Option<u32>,
 }
@@ -239,6 +241,18 @@ impl EventQuery {
             contract: Some(contract.to_string()),
             name: name.filter(|name| !name.is_empty()).map(str::to_string),
             address: None,
+            topic: None,
+            limit: None,
+        }
+    }
+
+    /// EVM logs with a topic, of a contract or of any.
+    pub fn topic(topic: &str, contract: Option<&str>) -> EventQuery {
+        EventQuery {
+            contract: contract.map(str::to_string),
+            name: None,
+            address: None,
+            topic: Some(topic.to_string()),
             limit: None,
         }
     }
@@ -253,6 +267,7 @@ impl EventQuery {
             contract: None,
             name: None,
             address: Some(address.to_string()),
+            topic: None,
             limit: None,
         }
     }
@@ -260,7 +275,7 @@ impl EventQuery {
     fn params(&self) -> String {
         let limit = self.limit.map(|limit| limit.to_string());
 
-        [("contract", &self.contract), ("name", &self.name), ("address", &self.address), ("limit", &limit)]
+        [("contract", &self.contract), ("name", &self.name), ("address", &self.address), ("topic", &self.topic), ("limit", &limit)]
             .iter()
             .filter_map(|(key, value)| value.as_ref().map(|value| format!("{key}={}", encode(value))))
             .collect::<Vec<_>>()
@@ -508,6 +523,8 @@ mod tests {
             Ask::Events { query: EventQuery::mentioning("ed25519:0x01"), cursor: None }.path(),
             "/events?address=ed25519:0x01"
         );
+        assert_eq!(Ask::Events { query: EventQuery::topic("0xddf2", None), cursor: None }.path(), "/events?topic=0xddf2");
+        assert_eq!(Ask::Events { query: EventQuery::topic("0xddf2", Some("evm:0x05")), cursor: Some("0x00ff".to_string()) }.path(), "/events?contract=evm:0x05&topic=0xddf2&cursor=0x00ff");
     }
 
     #[test]

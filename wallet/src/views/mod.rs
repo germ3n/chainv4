@@ -6,6 +6,7 @@ mod activity;
 #[cfg(feature = "bridge")]
 pub mod bridge;
 mod contracts;
+mod decoded;
 mod faucet;
 pub mod dapp;
 #[cfg(feature = "swap")]
@@ -153,6 +154,8 @@ pub fn home(role: Role) -> Page {
 pub struct Ctx<'a> {
     pub palette: &'a Palette,
     pub chain: &'a Chain,
+    /// What reads EVM calls and logs, each once, however many frames show them.
+    pub reader: &'a chainv4::abi::known::AbiReader,
     pub node: &'a mut Node,
     pub holders: &'a mut Vec<Holder>,
     /// The account in use, by its place among the holders.
@@ -666,6 +669,7 @@ pub(crate) mod drawn {
         let (mut page, mut connect, mut changed, mut leave, mut lock) = (Page::Accounts, None, false, false, None);
         #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
         let mut lights = crate::light::Lights::default();
+        let reader = chainv4::abi::known::AbiReader::default();
         let mut width = 0.0_f32;
 
         for _ in 0..2 {
@@ -676,6 +680,7 @@ pub(crate) mod drawn {
             let mut output = egui.run_ui(input, |ui| {
                 let mut ctx = Ctx {
                     palette: &palette,
+                    reader: &reader,
                     chain: &chain,
                     node: &mut node,
                     holders: &mut *holders,

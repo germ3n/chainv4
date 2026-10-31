@@ -20,6 +20,7 @@ pub mod block;
 pub mod bridge;
 pub mod chart;
 pub mod collections;
+pub mod decoded;
 pub mod dex;
 pub mod events;
 pub mod faucet;
@@ -228,6 +229,8 @@ pub struct Look {
 /// What a page works with.
 pub struct Ctx<'a> {
     pub store: &'a Store,
+    /// What reads EVM calls and logs, each once, however many rows and frames show them.
+    pub reader: &'a chainv4::abi::known::AbiReader,
     /// The light client, and the balances it proved.
     pub light: &'a mut crate::light::Light,
     pub api: &'a mut Api,
@@ -270,18 +273,16 @@ impl Ctx<'_> {
         self.settings.decimals.get(genesis)?.get(contract).copied()
     }
 
-    /// The ABI kept for an EVM contract on this chain, read.
-    pub fn abi(&self, contract: &str) -> Option<chainv4::abi::Abi> {
-        let genesis = &self.store.status.as_ref()?.genesis;
-
-        chainv4::abi::Abi::parse(self.settings.abis.get(genesis)?.get(contract)?).ok()
+    /// The ABI kept for an EVM contract on this chain, read once.
+    pub fn abi(&self, contract: &str) -> Option<std::rc::Rc<chainv4::abi::Abi>> {
+        self.reader.abi(self.abi_text(contract)?)
     }
 
     /// The ABI kept for an EVM contract, as pasted.
-    pub fn abi_text(&self, contract: &str) -> Option<String> {
+    pub fn abi_text(&self, contract: &str) -> Option<&str> {
         let genesis = &self.store.status.as_ref()?.genesis;
 
-        self.settings.abis.get(genesis)?.get(contract).cloned()
+        self.settings.abis.get(genesis)?.get(contract).map(String::as_str)
     }
 
     /// Keeps, or with None forgets, an EVM contract's ABI on this chain.
@@ -878,10 +879,11 @@ pub(crate) fn render_frames(store: &Store, light: &mut crate::light::Light, widt
     };
     let context = egui::Context::default();
     let mut shown = Vec::new();
+    let reader = chainv4::abi::known::AbiReader::default();
 
     for _ in 0..frames {
         let mut output = context.run_ui(input.clone(), |ui| {
-            let mut ctx = Ctx { store, light: &mut *light, api: &mut api, go: &mut go, settings: &mut settings, now: 2_000, look };
+            let mut ctx = Ctx { store, reader: &reader, light: &mut *light, api: &mut api, go: &mut go, settings: &mut settings, now: 2_000, look };
             draw(ui, &mut ctx);
         });
         output.textures_delta.clear();

@@ -67,6 +67,36 @@ fn drawn(store: &Store, light: &mut Light, width: f32, state: &mut ToolsState) -
     crate::views::render(store, light, width, |ui, ctx| show(ui, ctx, state)).0
 }
 
+// Find events.
+
+#[test]
+fn the_find_events_tab_asks_for_what_it_is_given_on_any_screen() {
+    for width in [WIDE, PHONE] {
+        let mut state = ToolsState { tab: Tab::Events, ..ToolsState::default() };
+        let text = drawn(&Store::default(), &mut Light::default(), width, &mut state);
+
+        assert!(text.contains("Find events"), "{text}");
+    }
+
+    let query = |state: &find::FindState| state.query();
+    let mut state = find::FindState::default();
+
+    state.topic.topic = Some("0xdd".to_string());
+    assert_eq!(query(&state), Some(crate::api::EventQuery::topic("0xdd", None)));
+
+    state.contract = " evm:0x05 ".to_string();
+    assert_eq!(query(&state), Some(crate::api::EventQuery::topic("0xdd", Some("evm:0x05"))));
+
+    state.topic.topic = None;
+    assert_eq!(query(&state), Some(crate::api::EventQuery::contract("evm:0x05", None)));
+
+    state.contract.clear();
+    assert_eq!(query(&state), None, "nothing to find");
+
+    state.address = "secp256k1:0x05".to_string();
+    assert_eq!(query(&state), Some(crate::api::EventQuery::mentioning("secp256k1:0x05")));
+}
+
 // Decode.
 
 #[test]
@@ -135,20 +165,17 @@ fn swap_codes_and_multisig_bundles_decode_as_the_wallet_writes_them() {
 
 #[test]
 fn calldata_and_logs_read_by_the_built_in_abis() {
-    let abis = decode::built_in();
-
-    assert_eq!(abis.len(), 9, "every built-in ABI reads");
-
-    let (_, token) = abis.iter().find(|(name, _)| name.starts_with("ERC-20")).unwrap();
-    let transfer = token.functions.iter().find(|function| function.name == "transfer").unwrap();
+    let known = chainv4::abi::known::known_abis();
+    let token = known.iter().find(|abi| abi.name.starts_with("ERC-20")).unwrap();
+    let transfer = token.abi.functions.iter().find(|function| function.name == "transfer").unwrap();
     let input = transfer.encode_call(&[AbiValue::Address([0xab; 20]), AbiValue::Uint(u256::new(5))]).unwrap();
-    let read = decode::decode_call(&abis, &input).unwrap();
+    let read = decode::decode_call(None, &known, &input).unwrap();
 
     assert_eq!(read.signature, "transfer(address,uint256)");
     assert_eq!(read.shown, format!("transfer(to = {}, value = 5)", to_hex(&[0xab; 20])));
-    assert!(read.contract.starts_with("ERC-20"), "{}", read.contract);
-    assert!(decode::decode_call(&abis, &[0xde, 0xad, 0xbe, 0xef]).unwrap_err().contains("0xdeadbeef"));
-    assert!(decode::decode_call(&abis, &[1]).is_err());
+    assert_eq!(read.contract, "read as ERC-20");
+    assert!(decode::decode_call(None, &known, &[0xde, 0xad, 0xbe, 0xef]).unwrap_err().contains("0xdeadbeef"));
+    assert!(decode::decode_call(None, &known, &[1]).is_err());
 
     // An ERC-20 Transfer: two addresses in topics, the value in the data.
     let pad = |bytes: [u8; 20]| -> [u8; 32] {
@@ -160,7 +187,7 @@ fn calldata_and_logs_read_by_the_built_in_abis() {
     let topics = decode::topics(&format!("{topic}\n{}, {}", to_hex(&pad([1; 20])), to_hex(&pad([2; 20])))).unwrap();
     let mut data = [0u8; 32];
     data[31] = 7;
-    let log = decode::decode_log(&abis, &topics, &data).unwrap();
+    let log = decode::decode_log(None, &known, &topics, &data).unwrap();
 
     assert_eq!(log.signature, "Transfer(address,address,uint256)");
     assert_eq!(log.shown, format!("Transfer(from = {}, to = {}, value = 7)", to_hex(&[1; 20]), to_hex(&[2; 20])));
@@ -169,8 +196,16 @@ fn calldata_and_logs_read_by_the_built_in_abis() {
     // An ERC-721 Transfer shares the topic, its id a topic too.
     let mut nft = topics.clone();
     nft.push(data);
-    let read = decode::decode_log(&abis, &nft, &[]).unwrap();
-    assert!(read.contract.starts_with("ERC-721") && read.shown.ends_with("= 7)"), "{read:?}");
+    let read = decode::decode_log(None, &known, &nft, &[]).unwrap();
+    assert!(read.contract == "read as ERC-721" && read.shown.ends_with("= 7)"), "{read:?}");
+
+    // One pasted reads alone, and says so.
+    let pasted = chainv4::abi::Abi::parse(r#"[{"type": "function", "name": "transfer", "inputs": [{"name": "payee", "type": "address"}, {"name": "cents", "type": "uint256"}]}]"#).unwrap();
+    let read = decode::decode_call(Some(&pasted), &[], &input).unwrap();
+
+    assert_eq!(read.contract, "read by the ABI kept for this contract");
+    assert!(read.shown.contains("cents = 5"), "{read:?}");
+    assert!(decode::decode_log(Some(&pasted), &[], &topics, &data).is_err(), "it has no such event, and nothing else is asked");
 }
 
 #[test]

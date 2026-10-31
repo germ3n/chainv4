@@ -420,6 +420,8 @@ pub struct Wallet {
     /// A reload under way, and the finger on the page that may start one.
     reloading: Reload<Ask>,
     pull: Pull,
+    /// What reads EVM calls and logs, each once.
+    reader: chainv4::abi::known::AbiReader,
 }
 
 impl Wallet {
@@ -478,6 +480,7 @@ impl Wallet {
             asked_by_page: PageAsks::default(),
             reloading: Reload::default(),
             pull: Pull::default(),
+            reader: chainv4::abi::known::AbiReader::default(),
         }
     }
 
@@ -750,12 +753,15 @@ impl Wallet {
         self.asked_history = time;
 
         // The address index lists everything that touched an address; without one, the event index
-        // lists at least what mentions it.
+        // lists at least what mentions it. With both, both: a token's transfer to an address names
+        // it only in an EVM log's topics, which the event index knows and the address index does not.
         for address in &current {
-            match (self.chain.indexes_addresses, self.chain.indexes_events) {
-                (Some(false), Some(false)) => {}
-                (Some(false), _) => self.node.ask(Ask::Events(address.clone())),
-                _ => self.node.ask(Ask::History(address.clone())),
+            if self.chain.indexes_addresses != Some(false) {
+                self.node.ask(Ask::History(address.clone()));
+            }
+
+            if self.chain.indexes_events != Some(false) {
+                self.node.ask(Ask::Events(address.clone()));
             }
         }
 
@@ -1246,6 +1252,7 @@ impl eframe::App for Wallet {
                         let mut ctx = Ctx {
                             palette: &palette,
                             chain: &self.chain,
+                            reader: &self.reader,
                             node: &mut self.node,
                             holders: &mut self.holders,
                             current,

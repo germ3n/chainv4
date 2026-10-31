@@ -60,7 +60,7 @@ use {
 };
 
 /// What an EVM log is called as an event.
-pub const LOG: &str = "log";
+pub const LOG: &str = crate::structs::event::EVM_LOG;
 
 /// Where an alias is written down, in the storage column: a prefix no address key starts with.
 const ALIAS: &[u8] = b"evm alias";

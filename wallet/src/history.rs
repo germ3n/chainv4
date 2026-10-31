@@ -2,6 +2,10 @@
 //! what the light client proved of it. Each is kept once proven, so it shows again without asking:
 //! a light client restored from storage keeps headers only from the finalized block on, and could
 //! not prove an older one again.
+//!
+//! What it says of EVM calls and logs is read when it shows, as an ABI may be saved afterwards, so
+//! their bytes are kept, as far as they are short. Everything added to what is kept here must read
+//! back from what older wallets wrote: settings that do not decode lose everything in them.
 
 use {
     crate::chain::{Landed, Proven},
@@ -9,8 +13,10 @@ use {
     chainv4::crypto::hasher::Hasher,
     chainv4::governance::{Change, ChangeKind},
     chainv4::structs::address::Address,
+    chainv4::abi::known::token_moves,
     chainv4::structs::event::Event,
     chainv4::structs::hash::{Hash, HashType},
+    chainv4::structs::hex::to_hex,
     chainv4::structs::receipt::CommittedOutcome,
     chainv4::registry::names::NameAction,
     chainv4::structs::tx::{Tx, TxCallArgumentType},
@@ -21,6 +27,11 @@ use {
 /// Functions a call may name, so the history says which one ran; a call to any other says only
 /// whom it called.
 const KNOWN: [&str; 10] = ["transfer", "transfer_from", "approve", "mint", "burn", "sign", "tip", "ping", "greet", "upgrade"];
+
+/// The most of a transaction's calldata, and of all its logs, that is kept, in hex digits. A log
+/// takes a few hundred at most in anything common. Past this, what is kept says how long it was; a
+/// node serving a block's worth of one log must not fill the wallet's settings with it.
+const MAX_KEPT: usize = 16 * 1024;
 
 /// Value that moved: the chain's coin, or a token by the standard's Transfer event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +44,43 @@ pub struct Move {
     pub to: Option<String>,
     /// Whole units, as decimal digits.
     pub amount: String,
+    /// Which token of its collection, for an NFT or a multi-token's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Which standard's shape its EVM log fit: an EVM move's parties are 20 bytes, 0x…, and any
+    /// contract can emit one of these, so what the move says is only a claim, until the registry
+    /// lists the contract. It never goes into a balance: those are what the light client proves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard: Option<String>,
+}
+
+impl Move {
+    /// Whether this is only what a contract's log claims, by whether the registry lists it.
+    pub fn claimed(&self, listed: bool) -> bool {
+        self.standard.is_some() && !listed
+    }
+}
+
+/// An EVM call's bytes, with whom it called: what Activity reads, by the ABIs it holds by then.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptCall {
+    /// The contract, as the chain writes it: evm:0x….
+    pub to: String,
+    /// The calldata, in hex.
+    pub input: String,
+}
+
+/// An EVM log's bytes, with which contract emitted it: what the events list holds in a few words
+/// is all that shows of one too long to keep.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptLog {
+    /// Its place among the transaction's events.
+    pub position: u32,
+    /// Its contract, as the chain writes it: evm:0x….
+    pub contract: String,
+    /// Its topics and its data, in hex.
+    pub topics: Vec<String>,
+    pub data: String,
 }
 
 /// A transaction, as proven: enough to show it without proving it again.
@@ -65,6 +113,13 @@ pub struct Checked {
     /// or a multisig's: the Governance page lists the account's votes by it.
     #[serde(default)]
     pub vote: Option<Vote>,
+    /// The EVM call it made, if short enough to keep; none for one kept before they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<KeptCall>,
+    /// The EVM logs it emitted, as far as they are short enough to keep; none for one kept before
+    /// they were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<KeptLog>,
 }
 
 /// A governance transaction, as proven. Each kind of change has a ballot and a version of its own;
@@ -148,7 +203,7 @@ impl Checked {
         let mut moves = Vec::new();
 
         if done {
-            let coin = |from: Option<String>, to: Option<String>, amount: String| Move { token: None, from, to, amount };
+            let coin = |from: Option<String>, to: Option<String>, amount: String| Move { token: None, from, to, amount, id: None, standard: None };
 
             // A multisig's own transaction moves what it does.
             let tx = match &signed.tx {
@@ -169,6 +224,7 @@ impl Checked {
             // What contracts paid out, proven with the receipt, then tokens by their events.
             moves.extend(receipt.payments.iter().map(|paid| coin(Some(paid.from.to_string()), Some(paid.to.to_string()), paid.amount.to_string())));
             moves.extend(receipt.events.iter().filter_map(token_move));
+            moves.extend(receipt.events.iter().flat_map(evm_token_moves));
         }
 
         Checked {
@@ -185,6 +241,8 @@ impl Checked {
             sender,
             genesis: String::new(),
             vote: Vote::of(&signed.tx, &receipt.outcome),
+            call: kept_call(&signed.tx),
+            logs: kept_logs(&receipt.events),
         }
     }
 
@@ -229,7 +287,80 @@ fn token_move(event: &Event) -> Option<Move> {
         from: party(from),
         to: party(to),
         amount: whole(amount)?,
+        id: None,
+        standard: None,
     })
+}
+
+/// The tokens an EVM log says moved, an NFT's and a multi-token's as well as an ERC-20's: shown as
+/// native ones are, once they are said to be only a claim.
+fn evm_token_moves(event: &Event) -> Vec<Move> {
+    let Some((topics, data)) = event.evm_log() else {
+        return Vec::new();
+    };
+
+    token_moves(&topics, data)
+        .into_iter()
+        .map(|moved| Move {
+            token: Some(event.contract.to_string()),
+            from: moved.from.map(|from| to_hex(&from)),
+            to: moved.to.map(|to| to_hex(&to)),
+            amount: moved.amount.to_string(),
+            id: moved.id.map(|id| id.to_string()),
+            standard: Some(moved.standard.to_string()),
+        })
+        .collect()
+}
+
+/// The EVM call a transaction made, a multisig's or an Ethereum wallet's too, if short enough.
+fn kept_call(tx: &Tx) -> Option<KeptCall> {
+    let (to, input) = match tx {
+        Tx::Multisig { tx, .. } => return kept_call(tx),
+        Tx::EvmCall { to, input, .. } => (*to, input.clone()),
+        Tx::Ethereum { raw } => {
+            let ethereum = chainv4::crypto::ethereum::decode(raw).ok()?;
+
+            (Address::Evm(ethereum.to?), ethereum.input)
+        }
+        _ => return None,
+    };
+
+    (!input.is_empty() && input.len() * 2 <= MAX_KEPT).then(|| KeptCall { to: to.to_string(), input: to_hex(&input) })
+}
+
+/// A transaction's EVM logs, in hex, in order, until they would come to more than is kept.
+fn kept_logs(events: &[Event]) -> Vec<KeptLog> {
+    let mut left = MAX_KEPT;
+    let mut logs = Vec::new();
+
+    for (position, event) in events.iter().enumerate() {
+        let Some((topics, data)) = event.evm_log() else {
+            continue;
+        };
+        let size = data.len() * 2 + topics.len() * 66;
+
+        if size > left {
+            break;
+        }
+
+        left -= size;
+        logs.push(KeptLog {
+            position: position as u32,
+            contract: event.contract.to_string(),
+            topics: topics.iter().map(|topic| to_hex(topic)).collect(),
+            data: to_hex(data),
+        });
+    }
+
+    logs
+}
+
+/// An account's addresses with the 20 bytes each goes by in the EVM added, in the form an EVM move
+/// names its parties: what says which of those are this account's.
+pub fn with_evm_forms(addresses: &[String]) -> Vec<String> {
+    let forms = addresses.iter().filter_map(|address| address.parse::<Address>().ok()).map(|address| to_hex(&chainv4::abi::evm_address(&address)));
+
+    addresses.iter().cloned().chain(forms).collect()
 }
 
 /// A whole amount from whatever type a contract emitted it as.
@@ -318,8 +449,16 @@ fn function(func: &Hash) -> Option<&'static str> {
     KNOWN.into_iter().find(|name| Hasher::digest(HashType::Xxh3_64, name.as_bytes()) == *func)
 }
 
-/// An event in a line: its name and what it carries, addresses cut short.
+/// An event in a line: its name and what it carries, addresses cut short. An EVM log, all bytes,
+/// says what its first topic is, for when its bytes are too long to keep.
 pub fn describe(event: &Event) -> String {
+    if let Some((topics, data)) = event.evm_log() {
+        return match topics.first() {
+            Some(first) => format!("{} {} · {} topics, {} bytes", event.name, format::short(&to_hex(first)), topics.len(), data.len()),
+            None => format!("{} · {} bytes", event.name, data.len()),
+        };
+    }
+
     let data: Vec<String> = event
         .data
         .iter()
@@ -568,6 +707,128 @@ mod tests {
         assert!(!checked.action.contains("5000"), "all it earned is not what this claim paid");
     }
 
+    /// An EVM log, as the chain holds one.
+    fn log(contract: [u8; 20], topics: Vec<[u8; 32]>, data: Vec<u8>) -> Event {
+        Event {
+            contract: Address::Evm(contract),
+            name: chainv4::structs::event::EVM_LOG.to_string(),
+            data: topics.iter().map(|topic| TxCallArgumentType::Bytes(topic.to_vec())).chain([TxCallArgumentType::Bytes(data)]).collect(),
+        }
+    }
+
+    fn pad(address: [u8; 20]) -> [u8; 32] {
+        let mut topic = [0; 32];
+        topic[12..].copy_from_slice(&address);
+
+        topic
+    }
+
+    fn transfer() -> [u8; 32] {
+        chainv4::abi::signature_topic("Transfer(address,address,uint256)").unwrap()
+    }
+
+    fn evm_call(input: Vec<u8>) -> Tx {
+        Tx::EvmCall { to: Address::Evm([5; 20]), value: Amount::U128(0), input }
+    }
+
+    #[test]
+    fn an_erc20_s_and_an_nft_s_logs_are_token_moves_for_whoever_their_topics_name() {
+        let (me, them) = ([1; 20], [2; 20]);
+        let events = vec![
+            log([5; 20], vec![transfer(), pad(me), pad(them)], u256::new(200).to_be_bytes().to_vec()),
+            log([6; 20], vec![transfer(), pad(them), pad(me), u256::new(9).to_be_bytes()], Vec::new()),
+            log([5; 20], vec![transfer(), [0; 32], pad(me)], u256::new(7).to_be_bytes().to_vec()),
+            log([5; 20], vec![[9; 32]], Vec::new()),
+        ];
+        let checked = Checked::of(&landed(evm_call(vec![1, 2, 3, 4]), CommittedOutcome::Returned(Vec::new()), events));
+        let mine = [to_hex(&me)];
+        let moved: Vec<(bool, &Move)> = checked.for_account(&mine).collect();
+
+        assert_eq!(moved.len(), 3, "the unknown log moved nothing");
+        assert_eq!((moved[0].0, moved[0].1.token.as_deref(), moved[0].1.amount.as_str(), moved[0].1.id.as_deref()), (false, Some("evm:0x0505050505050505050505050505050505050505"), "200", None));
+        assert_eq!((moved[1].0, moved[1].1.amount.as_str(), moved[1].1.id.as_deref(), moved[1].1.standard.as_deref()), (true, "1", Some("9"), Some("ERC-721")));
+        assert_eq!((moved[2].0, moved[2].1.from.clone()), (true, None), "a mint comes from no one");
+
+        // A failure moved nothing, whatever it logged.
+        let failed = Checked::of(&landed(evm_call(vec![1, 2, 3, 4]), CommittedOutcome::Failed, vec![log([5; 20], vec![transfer(), pad(me), pad(them)], u256::new(1).to_be_bytes().to_vec())]));
+        assert!(failed.moves.is_empty());
+    }
+
+    #[test]
+    fn an_account_s_evm_forms_say_which_parties_are_its_own() {
+        let (secp, ed) = (Address::Secp256k1([3; 20]), Address::Ed25519([4; 32]));
+        let forms = with_evm_forms(&[secp.to_string(), ed.to_string(), "not an address".to_string()]);
+
+        assert_eq!(&forms[..3], [secp.to_string(), ed.to_string(), "not an address".to_string()], "what it had, first");
+        assert_eq!(forms[3], to_hex(&[3; 20]), "a secp256k1 account's own 20 bytes");
+        assert_eq!(forms[4], to_hex(&chainv4::abi::evm_address(&ed)), "any other's alias");
+        assert_eq!(forms.len(), 5);
+
+        let checked = Checked::of(&landed(evm_call(vec![1, 2, 3, 4]), CommittedOutcome::Returned(Vec::new()), vec![log([5; 20], vec![transfer(), pad([9; 20]), pad(chainv4::abi::evm_address(&ed))], u256::new(1).to_be_bytes().to_vec())]));
+
+        assert_eq!(checked.for_account(&with_evm_forms(&[ed.to_string()])).count(), 1, "the alias a token paid is this account");
+        assert_eq!(checked.for_account(&[ed.to_string()]).count(), 0, "as its own address alone says nothing");
+    }
+
+    #[test]
+    fn a_move_from_a_contract_nothing_lists_is_only_a_claim() {
+        let moved = Checked::of(&landed(evm_call(vec![1, 2, 3, 4]), CommittedOutcome::Returned(Vec::new()), vec![log([5; 20], vec![transfer(), pad([1; 20]), pad([2; 20])], u256::new(1).to_be_bytes().to_vec())])).moves.remove(0);
+        let native = Move { token: Some("contract:0x05".to_string()), from: None, to: None, amount: "1".to_string(), id: None, standard: None };
+
+        assert!(moved.claimed(false));
+        assert!(!moved.claimed(true), "the registry lists it");
+        assert!(!native.claimed(false), "native moves are as they were");
+    }
+
+    #[test]
+    fn a_log_s_bytes_and_a_call_s_survive_being_kept() {
+        let input = vec![0xa9, 0x05, 0x9c, 0xbb, 1];
+        let checked = Checked::of(&landed(evm_call(input.clone()), CommittedOutcome::Returned(Vec::new()), vec![
+            Event { contract: Address::Contract([1; 32]), name: "Native".to_string(), data: Vec::new() },
+            log([5; 20], vec![transfer(), pad([1; 20]), pad([2; 20])], u256::new(7).to_be_bytes().to_vec()),
+        ]));
+        let back: Checked = serde_json::from_value(serde_json::to_value(&checked).unwrap()).unwrap();
+
+        assert_eq!(back, checked, "whole, through what settings are kept as");
+        assert_eq!(back.call, Some(KeptCall { to: "evm:0x0505050505050505050505050505050505050505".to_string(), input: to_hex(&input) }));
+        assert_eq!(back.logs[0].position, 1, "after the native event");
+        assert_eq!(back.logs[0].topics[0], to_hex(&transfer()));
+        assert_eq!(back.logs[0].data, to_hex(&u256::new(7).to_be_bytes()));
+        assert!(back.events[1].starts_with("log 0xddf2"), "{}", back.events[1]);
+
+        // A multisig's call is the call it made.
+        let by_multisig = Tx::Multisig { account: Address::Multisig([6; 32]), tx: Box::new(evm_call(input.clone())), signatures: Vec::new() };
+        assert_eq!(Checked::of(&landed(by_multisig, CommittedOutcome::Returned(Vec::new()), Vec::new())).call.map(|call| call.input), Some(to_hex(&input)));
+
+        // What is too long to keep says how long it was, and moves are still seen.
+        let long = log([5; 20], vec![transfer(), pad([1; 20]), pad([2; 20])], vec![0; MAX_KEPT]);
+        let checked = Checked::of(&landed(evm_call(vec![0; MAX_KEPT]), CommittedOutcome::Returned(Vec::new()), vec![long]));
+
+        assert!(checked.logs.is_empty() && checked.call.is_none());
+        assert!(checked.events[0].ends_with(&format!("{MAX_KEPT} bytes")), "{}", checked.events[0]);
+    }
+
+    #[test]
+    fn what_older_wallets_kept_still_reads() {
+        // A Checked and a Move as a wallet wrote them before calls and logs were kept: settings that
+        // fail to decode lose everything in them.
+        let old = serde_json::json!({
+            "height": 7, "time": 0, "final_": true, "done": true, "sender": "ed25519:0xaa", "nonce": 1,
+            "action": "Called evm:0x05 on the EVM",
+            "moves": [{ "token": "contract:0x05", "from": "ed25519:0xaa", "to": "ed25519:0xbb", "amount": "5" }],
+            "fee": "0", "events": ["log 32 bytes 32 bytes"],
+        });
+        let checked: Checked = serde_json::from_value(old).unwrap();
+
+        assert_eq!((checked.call.clone(), checked.logs.len()), (None, 0));
+        assert_eq!((checked.moves[0].id.clone(), checked.moves[0].standard.clone()), (None, None));
+
+        // And one kept with nothing new to say writes as it did.
+        let kept = serde_json::to_value(&checked).unwrap();
+
+        assert!(kept.get("call").is_none() && kept.get("logs").is_none() && kept["moves"][0].get("standard").is_none());
+    }
+
     #[test]
     fn events_read_in_a_line() {
         let event = Event {
@@ -577,5 +838,9 @@ mod tests {
         };
 
         assert_eq!(describe(&event), "Signed ed25519:0xababab…abab \"gm\" 3");
+
+        // A native event called log is no EVM log.
+        let named_log = Event { contract: Address::Contract([1; 32]), name: "log".to_string(), data: vec![TxCallArgumentType::Bytes(vec![1; 3])] };
+        assert_eq!(describe(&named_log), "log 3 bytes");
     }
 }

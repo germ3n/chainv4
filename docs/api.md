@@ -383,10 +383,20 @@ keeps one; on any other, 404.
 - `contract=…`: every event a contract emitted;
 - `contract=…&name=…`: one kind of them, such as `Transfer`;
 - `address=…`: every event, from any contract, with this address in its data, such as token
-  transfers to or from an account.
+  transfers to or from an account, and every EVM log with its EVM address in a topic, as an
+  ERC-20's `Transfer` names its parties: a secp256k1 account's or an EVM contract's own 20 bytes,
+  any other account's alias;
+- `topic=0x…`: every EVM log, from any contract, with this topic in any place. The first topic is
+  the keccak256 of its event's signature, so this finds an event by its signature: `Transfer` is
+  `0xddf252ad…b3ef`. An address is a topic too, as 12 zero bytes and its 20;
+- `contract=…&topic=0x…`: one contract's EVM logs with this topic.
 
-**Pages:** `limit` of them (50 by default, at most 500). `next` is the `cursor` for the next,
-older page, or `null` after the last.
+Anything else is refused with 400, a `topic` with `name` or `address` among them, and a topic that
+is not 32 bytes. Every EVM log has the name `log`, spelled so: names match by bytes. Addresses in a
+log's data, rather than its topics, are not found.
+
+**Pages:** `limit` of them (50 by default, at most 500), whichever way they are asked for. `next` is
+the `cursor` for the next, older page, or `null` after the last.
 
 **Each event** has its `contract`, `name` and `data`, the `tx` that emitted it, its `block` and
 `height`, the transaction's place in the block (`index`) and the event's place among the
@@ -398,6 +408,13 @@ transaction's events (`position`).
 - `catching_up_to` is the height the node is still moving that to, or `null` once it is there.
   It is below `indexed_from` while the node indexes older blocks, and briefly above it on a
   `latest-N` window, as the oldest block leaves.
+- `topics` is `true`: this node's index holds EVM logs' topics. **A client asking for a topic must
+  check it.** An older node leaves it out, and ignores what it does not know: it refuses `topic=`
+  alone with 400, and answers `contract=…&topic=…` with all that contract's events, unfiltered.
+  Its `address=…` leaves EVM logs out, with nothing to say so but this field's absence.
+
+An index from before topics starts over once, the first time a node opens it: see
+[Storage](storage.md#the-indexes).
 
 ### `POST /rpc`
 

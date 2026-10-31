@@ -328,6 +328,19 @@ holds of the coin and of each token.
 - **Final:** proven at a final block. Nothing can undo it.
 - **Proven:** proven at the tip, which a reorg could still undo.
 
+**EVM calls and logs in Activity.** A call's calldata and its logs read by name, by the ABI saved
+for the contract on the Contracts page, or one built in (see [Signing screens](#contracts)), each
+saying which read it; their bytes are kept with the proven transaction, and a click away. Only what
+is short is kept, 16 KB of hex for a call and for a transaction's logs; past that a line says how
+long it was. What was proven before bytes were kept shows as it did. An ERC-20's, ERC-721's or
+ERC-1155's transfer counts as a token's does: the node's event index finds those that name the
+account in their topics, which its address index cannot, and the light client proves them as any
+other. An account's EVM address is its own 20 bytes for secp256k1 and an alias for anything else.
+**A move from a contract the registry does not list is only shown as what its log claims,** as
+"Says you received", in a plain whole number. No move is ever added to a balance: those are what the
+light client proves. With a filter on, the list is what the address index finds, so a token's
+transfer naming the account only in a topic is not in it.
+
 **Activity:** for each address of the account in use, the node's address index lists the
 transactions that touched it (`GET /accounts/{address}/txs`), and the page merges them, newest
 first, or oldest with the order turned round. **All**, **Waiting** (not proven yet) and **Failed**
@@ -658,6 +671,13 @@ engine, from the address picked.
   the Send page.
 
 What a read answers comes from the node, as a dry run does: it is not proven.
+
+**Signing screens.** The offline signer, an EVM chain's review, a contract's review and a site's
+request read their call by name too: by an ABI saved here or one built in, as the signer talks to no
+node. What is read is a match, and says so; it is untrusted, so it is cut short and escaped, and
+goes below To, the value and the data's selector and size, which stay as they were, in a frame that
+takes no more of the screen than it may. What does not read leaves just those, with the raw data a
+click away. Amounts go in a token's decimals only on this chain, for a token the registry lists.
 
 ## MetaMask and hardware wallets
 

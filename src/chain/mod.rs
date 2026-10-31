@@ -1238,7 +1238,7 @@ impl Chain {
             Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers), genesis.vote_rewards())?),
             None => None,
         };
-        let events = index::stored_index(&*db, IndexKind::Events)?;
+        let events = index::events_up_to_date(&db, index::stored_index(&*db, IndexKind::Events)?, tip.header.height)?;
         let addresses = index::stored_index(&*db, IndexKind::Addresses)?;
         let snapshot = read_value::<SnapshotRecord>(&*db, Column::Meta, SNAPSHOT_KEY)?.map(|record| record.height);
         let bad_order: VecDeque<Hash> = read_value::<BadBlocks>(&*db, Column::Meta, BAD_KEY)?.unwrap_or_default().blocks.into();
@@ -1361,6 +1361,10 @@ impl Chain {
         state.put_value(Column::Meta, kind.low_end_key().to_vec(), &index::IndexedFrom { height: window.from });
         state.put_value(Column::Meta, kind.keep_key().to_vec(), &window.keep);
 
+        if kind == IndexKind::Events {
+            index::mark_events_schema(&state);
+        }
+
         match self.index_window(kind) {
             Some(_) => self.db.commit(state.take_changes())?,
             None => self.db.clear(kind.column(), state.take_changes())?,
@@ -1382,6 +1386,11 @@ impl Chain {
         let state = State::new(self.db.clone());
         state.delete(Column::Meta, kind.low_end_key().to_vec());
         state.delete(Column::Meta, kind.keep_key().to_vec());
+
+        if kind == IndexKind::Events {
+            index::forget_events_schema(&state);
+        }
+
         self.db.clear(kind.column(), state.take_changes())?;
 
         Ok(self.window(kind).take().is_some())

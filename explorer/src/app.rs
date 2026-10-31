@@ -67,6 +67,8 @@ fn retrying(store: &mut Store, asks: impl IntoIterator<Item = Ask>) {
 
 pub struct Explorer {
     settings: Settings,
+    /// What reads EVM calls and logs, each once.
+    reader: chainv4::abi::known::AbiReader,
     /// The node address being typed.
     address: String,
     wake: egui::Context,
@@ -138,6 +140,7 @@ impl Explorer {
             api,
             wake,
             store: Store::default(),
+            reader: chainv4::abi::known::AbiReader::default(),
             view: View::Overview,
             back: Vec::new(),
             ahead: Vec::new(),
@@ -978,6 +981,7 @@ impl Explorer {
         let palette = self.palette;
         let mut ctx = Ctx {
             store: &self.store,
+            reader: &self.reader,
             light: &mut self.light,
             api: &mut self.api,
             go: &mut go,

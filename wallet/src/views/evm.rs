@@ -239,7 +239,7 @@ impl<R: Send + 'static> Link<R> {
                     ui.label(RichText::new(format!("Pricing it on {chain}…")).color(palette.soft));
                 }
                 Stage::Priced(tx) => {
-                    review(ui, &palette, &pending.call, tx, pending.chain_id);
+                    review(ui, ctx, &pending.call, tx, pending.chain_id);
                     ui.horizontal_wrapped(|ui| {
                         let away = secret(ctx, &pending.from).is_none();
 
@@ -277,7 +277,7 @@ impl<R: Send + 'static> Link<R> {
                     }
                 }
                 Stage::Signer { tx, request, scan } => {
-                    review(ui, &palette, &pending.call, tx, pending.chain_id);
+                    review(ui, ctx, &pending.call, tx, pending.chain_id);
                     ui.label(RichText::new("On the offline signer, Sign, and read this code: it shows what it signs. Then read the signature it shows back, here.").color(palette.soft));
                     super::code(ui, &palette, &Message::MetaMask(request.clone()));
                     ui.add_space(8.0);
@@ -389,8 +389,10 @@ pub fn price(call: &Call, chain_id: u64, replies: &Value) -> Result<EthereumTx, 
     Ok(call.transaction(chain_id, nonce, gas + gas / 4 + 10_000, price * u256::new(2), tip))
 }
 
-/// What a transaction does, and the most it may cost.
-fn review(ui: &mut Ui, palette: &theme::Palette, call: &Call, tx: &EthereumTx, chain_id: u64) {
+/// What a transaction does, and the most it may cost. Its call reads by name below what is sure of
+/// it, and on another chain, its tokens' decimals are not known here, so its amounts stay plain.
+fn review(ui: &mut Ui, ctx: &Ctx, call: &Call, tx: &EthereumTx, chain_id: u64) {
+    let palette = ctx.palette;
     let coin = symbol(chain_id);
     super::row(ui, palette, "To", |ui| super::address(ui, palette, &to_hex(&call.to)));
 
@@ -398,6 +400,18 @@ fn review(ui: &mut Ui, palette: &theme::Palette, call: &Call, tx: &EthereumTx, c
         super::row(ui, palette, "Sends", |ui| {
             ui.label(format::amount(&call.value.to_string(), 18, coin));
         });
+    }
+
+    if !call.input.is_empty() {
+        super::row(ui, palette, "Data", |ui| {
+            ui.label(theme::mono(format!("{} · {} bytes", to_hex(&call.input[..call.input.len().min(4)]), call.input.len())));
+        });
+
+        if let Some(read) = ctx.reader.call(super::decoded::kept_for(ctx.settings, &call.to), &call.input) {
+            super::decoded::signing(ui, palette, None, &read);
+        }
+
+        super::decoded::raw(ui, palette, "evm data", &to_hex(&call.input));
     }
 
     super::row(ui, palette, "Fee, at most", |ui| {

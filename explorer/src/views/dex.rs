@@ -295,9 +295,14 @@ fn native_activity(event: &FoundEvent) -> Option<Activity> {
     Some(Activity { kind, a: asset(event, 0)?, b: asset(event, 1)?, amounts, height: event.height, tx: event.tx.clone(), block: event.block.clone() })
 }
 
+/// What asks the node's index for an EVM pair's logs.
+fn pair_logs(pool: &DexPool) -> EventQuery {
+    EventQuery::contract(&pool.share.to_string(), Some(chainv4::structs::event::EVM_LOG)).limited(EVENTS)
+}
+
 /// An EVM pair's trades, adds and removals, from its logs.
 fn evm_trades(ctx: &mut Ctx, pool: &DexPool) -> Vec<Activity> {
-    events_of(ctx, EventQuery::contract(&pool.share.to_string(), Some("LOG")).limited(EVENTS)).iter().filter_map(|event| evm_activity(pool, event)).collect()
+    events_of(ctx, pair_logs(pool)).iter().filter_map(|event| evm_activity(pool, event)).collect()
 }
 
 /// One of an EVM pair's logs, topics first and then its data, as a trade, add or removal.
@@ -529,7 +534,7 @@ fn prices(ctx: &mut Ctx, pool: &DexPool, native: &Option<String>, evm: bool) -> 
         (true, _) => {
             let sync = to_hex(&keccak(b"Sync(uint112,uint112)"));
 
-            events_of(ctx, EventQuery::contract(&pool.share.to_string(), Some("LOG")).limited(EVENTS))
+            events_of(ctx, pair_logs(pool))
                 .iter()
                 .filter(|event| event.data.first().is_some_and(|topic| topic.text() == sync))
                 .filter_map(|event| {

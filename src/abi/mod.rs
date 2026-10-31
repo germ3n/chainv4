@@ -15,6 +15,7 @@ use {
     crate::structs::u256::{i256, u256},
     r#macro::document,
     serde_json::Value,
+    std::cell::Cell,
     std::fmt,
 };
 
@@ -325,15 +326,43 @@ pub fn parse_signature(text: &str) -> Result<(Option<[u8; 4]>, Vec<AbiType>), St
 }
 
 #[document(
+    summary = "The topic of an event's signature, such as Transfer(address,address,uint256): its keccak256, written as a selector is, so uint is uint256 and spaces go. What a log's first topic is, and what the event index finds it by.",
+    category = "ABI",
+    returns = "The topic, or why the text is no signature.",
+)]
+pub fn signature_topic(text: &str) -> Result<[u8; 32], String> {
+    let (selector, types) = parse_signature(text)?;
+
+    selector.ok_or_else(|| format!("{text}: a signature names its event, such as Transfer(address,address,uint256)"))?;
+
+    let name = text.trim().split('(').next().unwrap_or_default();
+
+    Ok(keccak(format!("{name}{}", AbiType::Tuple(types)).as_bytes()))
+}
+
+#[document(
     summary = "Decodes values of these types from a call's result, a log's data, or a function's arguments, checking every offset and length against the bytes there are.",
     category = "ABI",
     returns = "The values, or why the bytes are not of the types.",
 )]
 pub fn decode_values(types: &[AbiType], data: &[u8]) -> Result<Vec<AbiValue>, String> {
-    decode_tuple(types, data, 0)
+    decode_tuple(types, data, 0, &Cell::new(usize::MAX))
 }
 
-fn decode_tuple(types: &[AbiType], data: &[u8], depth: usize) -> Result<Vec<AbiValue>, String> {
+/// As decode_values, with no more than this budget to spend on what comes out: a word a value and
+/// a byte a byte. Dynamic values may share their bytes, so without one, a few kilobytes of offsets
+/// all pointing at one long value decode to gigabytes. Honest bytes take about what they hold.
+/// Only what shows calldata to a person spends one: contracts decode without, as they always have.
+fn decode_within(types: &[AbiType], data: &[u8], budget: &Cell<usize>) -> Result<Vec<AbiValue>, String> {
+    decode_tuple(types, data, 0, budget)
+}
+
+/// Takes what a value costs from the budget, or says it has run out.
+fn spend(budget: &Cell<usize>, cost: usize) -> Result<(), String> {
+    budget.get().checked_sub(cost).map(|left| budget.set(left)).ok_or_else(|| "more values than its bytes honestly hold".to_string())
+}
+
+fn decode_tuple(types: &[AbiType], data: &[u8], depth: usize, budget: &Cell<usize>) -> Result<Vec<AbiValue>, String> {
     if depth > MAX_DEPTH {
         return Err("values nest too deep".to_string());
     }
@@ -345,9 +374,9 @@ fn decode_tuple(types: &[AbiType], data: &[u8], depth: usize) -> Result<Vec<AbiV
         let value = match ty.is_dynamic() {
             true => {
                 let offset = read_len(data, at)?;
-                decode_one(ty, data.get(offset..).ok_or("an offset past the end")?, depth)?
+                decode_one(ty, data.get(offset..).ok_or("an offset past the end")?, depth, budget)?
             }
-            false => decode_one(ty, data.get(at..).ok_or("ends early")?, depth)?,
+            false => decode_one(ty, data.get(at..).ok_or("ends early")?, depth, budget)?,
         };
         values.push(value);
         at += ty.head_size();
@@ -368,9 +397,14 @@ fn read_len(data: &[u8], at: usize) -> Result<usize, String> {
     usize::try_from(value).ok().filter(|len| *len <= data.len()).ok_or_else(|| "a length or offset past the end".to_string())
 }
 
-fn decode_one(ty: &AbiType, data: &[u8], depth: usize) -> Result<AbiValue, String> {
+fn decode_one(ty: &AbiType, data: &[u8], depth: usize, budget: &Cell<usize>) -> Result<AbiValue, String> {
     let word = word_at(data, 0);
-    let tail = |len: usize| -> Result<&[u8], String> { data.get(32..32 + len).ok_or_else(|| "ends early".to_string()) };
+    let tail = |len: usize| -> Result<&[u8], String> {
+        spend(budget, len)?;
+        data.get(32..32 + len).ok_or_else(|| "ends early".to_string())
+    };
+
+    spend(budget, 32)?;
 
     match ty {
         AbiType::Uint(bits) => {
@@ -405,16 +439,18 @@ fn decode_one(ty: &AbiType, data: &[u8], depth: usize) -> Result<AbiValue, Strin
                 return Err("an array longer than its bytes".to_string());
             }
 
-            decode_tuple(&vec![(**inner).clone(); len], &data[32..], depth + 1).map(AbiValue::Array)
+            spend(budget, len)?;
+            decode_tuple(&vec![(**inner).clone(); len], &data[32..], depth + 1, budget).map(AbiValue::Array)
         }
         AbiType::FixedArray(inner, len) => {
             if len.saturating_mul(32) > data.len() {
                 return Err("an array longer than its bytes".to_string());
             }
 
-            decode_tuple(&vec![(**inner).clone(); *len], data, depth + 1).map(AbiValue::Array)
+            spend(budget, *len)?;
+            decode_tuple(&vec![(**inner).clone(); *len], data, depth + 1, budget).map(AbiValue::Array)
         }
-        AbiType::Tuple(types) => decode_tuple(types, data, depth + 1).map(AbiValue::Tuple),
+        AbiType::Tuple(types) => decode_tuple(types, data, depth + 1, budget).map(AbiValue::Tuple),
     }
 }
 
@@ -730,9 +766,14 @@ impl AbiEvent {
         returns = "Its values in its parameters' order, or why the log is not one of it.",
     )]
     pub fn decode_log(&self, topics: &[[u8; 32]], data: &[u8]) -> Result<Vec<AbiValue>, String> {
+        self.decode_log_within(topics, data, &Cell::new(usize::MAX))
+    }
+
+    /// As decode_log, with a budget for what comes out, as decode_within has.
+    fn decode_log_within(&self, topics: &[[u8; 32]], data: &[u8], budget: &Cell<usize>) -> Result<Vec<AbiValue>, String> {
         let mut indexed = topics.iter().skip(usize::from(!self.anonymous));
         let unindexed: Vec<AbiType> = self.inputs.iter().filter(|param| !param.indexed).map(|param| param.ty.clone()).collect();
-        let mut data_values = decode_values(&unindexed, data)?.into_iter();
+        let mut data_values = decode_within(&unindexed, data, budget)?.into_iter();
 
         self.inputs
             .iter()
@@ -742,7 +783,7 @@ impl AbiEvent {
 
                     match param.ty.is_dynamic() || matches!(param.ty, AbiType::Tuple(_) | AbiType::FixedArray(..)) {
                         true => Ok(AbiValue::FixedBytes(topic.to_vec())),
-                        false => decode_one(&param.ty, topic, 0),
+                        false => decode_one(&param.ty, topic, 0, budget),
                     }
                 }
                 false => data_values.next().ok_or_else(|| "fewer values than the event's".to_string()),
@@ -756,6 +797,7 @@ impl AbiEvent {
     }
 }
 
+pub mod known;
 #[cfg(feature = "secp256k1")]
 pub mod multisig;
 #[cfg(test)]

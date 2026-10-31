@@ -584,18 +584,27 @@ fn send(ui: &mut Ui, ctx: &Ctx, palette: &theme::Palette, wanted: &Wanted, shown
         });
 
         if !wanted.input.is_empty() {
-            let decoded = kept
-                .and_then(|kept| chainv4::abi::Abi::parse(&kept.abi).ok())
-                .and_then(|abi| abi.function_for(&wanted.input).and_then(|function| function.decode_input(&wanted.input).ok().map(|values| format!("{}({})", function.name, function.show_inputs(&values)))));
-            super::row(ui, palette, "Calls", |ui| match decoded {
-                Some(decoded) => {
-                    ui.label(theme::mono(decoded).color(palette.ink));
+            // The site's call, read by the ABI kept for the contract or one built in, under what is
+            // sure of it: that there is data, and how much, stays whatever this reads as.
+            let read = ctx.reader.call(super::decoded::kept_for(ctx.settings, &to), &wanted.input);
+            let raw = theme::mono(format!("{} with {} bytes", to_hex(&wanted.input[..wanted.input.len().min(4)]), wanted.input.len())).color(palette.soft);
+
+            super::row(ui, palette, "Calls", |ui| match &read {
+                Some(_) => {
+                    ui.label(raw);
                 }
                 None => {
-                    ui.label(theme::mono(format!("{} with {} bytes", to_hex(&wanted.input[..wanted.input.len().min(4)]), wanted.input.len())).color(palette.soft))
-                        .on_hover_text("Keep the contract with its ABI on the Contracts page to see this by name.");
+                    ui.label(raw).on_hover_text("Keep the contract with its ABI on the Contracts page to see this by name.");
                 }
             });
+
+            if let Some(read) = &read {
+                let token = ctx.chain.tokens.get(&format!("evm:{}", to_hex(&to))).and_then(|token| Some((token.value.symbol.as_deref()?, token.value.decimals?)));
+
+                super::decoded::signing(ui, palette, token, read);
+            }
+
+            super::decoded::raw(ui, palette, "site's data", &to_hex(&wanted.input));
         }
     } else {
         super::row(ui, palette, "Code", |ui| {

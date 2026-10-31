@@ -2201,6 +2201,74 @@ fn events_are_listed_from_the_index() {
     assert_eq!((caught_up["indexed_from"].clone(), caught_up["catching_up_to"].clone()), (json!(0), Value::Null));
 }
 
+#[cfg(feature = "evm")]
+#[test]
+fn evm_logs_are_listed_by_their_topic_and_by_the_addresses_in_them() {
+    let authority = DevAuthority::dev_keypair();
+    let me = authority.public().address();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let word = |value: u64| crate::structs::u256::u256::from(value).to_be_bytes().to_vec();
+    let init = [from_hex(include_str!("../../contracts/evm/Counter.bin").trim()).unwrap(), word(5)].concat();
+    let counter = crate::vm::evm::create_address(&me, 0);
+
+    chain.keep_index(IndexKind::Events, None).unwrap();
+    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Evm(init) }, 0, FeeOffer::NONE, &authority)]);
+
+    let bump = |nonce: u64, by: u64| {
+        let input = [crate::crypto::secp256k1::keccak(b"bump(uint256)")[..4].to_vec(), word(by)].concat();
+
+        SignedTx::sign(Tx::EvmCall { to: counter, value: Amount::U128(0), input }, nonce, FeeOffer::NONE, &authority)
+    };
+    produce(&mut chain, vec![bump(1, 2)]);
+    produce(&mut chain, vec![bump(2, 3)]);
+
+    let bumped = to_hex(&crate::abi::signature_topic("Bumped(address,uint256)").unwrap());
+    let by_me = to_hex(&[vec![0; 12], crate::abi::evm_address(&me).to_vec()].concat());
+    let heights = |path: &str| ok(address, path)["events"].as_array().unwrap().iter().map(|event| event["height"].as_u64().unwrap()).collect::<Vec<_>>();
+
+    // By its signature, from any contract or from one, by the name the EVM gives logs too.
+    let listing = ok(address, &format!("/events?topic={bumped}"));
+
+    assert_eq!(listing["topics"], true, "a client can tell this node reads a topic it is given");
+    assert_eq!(listing["events"][0]["name"], "log");
+    assert_eq!(listing["events"][0]["data"][0], json!({ "type": "bytes", "value": bumped }));
+    assert_eq!(heights(&format!("/events?topic={bumped}")), [3, 2]);
+    assert_eq!(heights(&format!("/events?contract={counter}&topic={bumped}")), [3, 2]);
+    assert_eq!(heights(&format!("/events?contract={counter}&name=log")), [3, 2]);
+    assert!(heights(&format!("/events?contract={counter}&name=LOG")).is_empty(), "names match by bytes");
+    assert!(heights(&format!("/events?contract=evm:0x{}&topic={bumped}", "09".repeat(20))).is_empty());
+
+    // By the address in its topic, as the account it is and as that topic.
+    assert_eq!(heights(&format!("/events?address={me}")), [3, 2]);
+    assert_eq!(heights(&format!("/events?topic={by_me}")), [3, 2]);
+    assert!(heights(&format!("/events?address=secp256k1:0x{}", "09".repeat(20))).is_empty());
+
+    // A page at a time, within the same limits as any listing.
+    let first = ok(address, &format!("/events?address={me}&limit=1"));
+    let cursor = first["next"].as_str().unwrap();
+    let second = ok(address, &format!("/events?address={me}&limit=1&cursor={cursor}"));
+
+    assert_eq!((first["events"][0]["height"].clone(), second["events"][0]["height"].clone(), second["next"].clone()), (json!(3), json!(2), Value::Null));
+
+    let first = ok(address, &format!("/events?topic={bumped}&limit=1"));
+    let second = ok(address, &format!("/events?topic={bumped}&limit=1&cursor={}", first["next"].as_str().unwrap()));
+    assert_eq!(second["events"][0]["height"], 2);
+    assert_eq!(heights(&format!("/events?topic={bumped}&limit=0")).len(), 1, "at least one");
+
+    // What it cannot answer it refuses, rather than answering something else.
+    for bad in [
+        "/events?topic=0x01".to_string(),
+        "/events?topic=nope".to_string(),
+        format!("/events?contract={counter}&name=log&topic={bumped}"),
+        format!("/events?address={me}&topic={bumped}"),
+        format!("/events?name=log&topic={bumped}"),
+    ] {
+        assert_eq!(get(address, &bad).0, 400, "{bad}");
+    }
+}
+
 #[test]
 fn an_address_s_transactions_are_listed_from_the_index() {
     let authority = DevAuthority::dev_keypair();

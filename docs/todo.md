@@ -756,6 +756,13 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **EVM calls and logs read as hex, or as `log 32 bytes 32 bytes`.** Both apps read them by name
+  now, by every ABI shipped and the standard ERC-20's and ERC-721's in `src/abi/known.rs`, an ABI
+  pasted or saved first, saying which read them. ERC-20 and NFT transfers count as token moves, as
+  claims unless the registry lists the contract. The signing screens read their call too, under
+  the facts they showed. `GET /events` finds logs by topic and by the addresses in their topics; an
+  older index reads itself back once. The explorer's EVM pool activity and prices, which asked for
+  `LOG` and got nothing, show.
 - [x] **Several seed phrases in one wallet.** Accounts adds another, read or made new and written
   down, with its own account 0, on a signer or an online wallet, under the wallet's one password;
   each counts its accounts apart and matches a restore of it alone. Settings lists, names, shows

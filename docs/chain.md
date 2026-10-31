@@ -344,7 +344,7 @@ index lists the transaction under every contract that paid and everyone paid.
 what, and what it did. A light client checks them with `check_tx` and `check_receipt`.
 
 A node started with `--index-events` also indexes every event by its contract, by its contract
-and name, and by the addresses in its data, in the same commit; one started with
+and name, by the addresses in its data, and for an EVM log by its topics, in the same commit; one started with
 `--index-addresses` indexes every transaction under each address it touches. Blocks from before
 an index was turned on are read back from the stored receipts (see
 [Storage](storage.md#the-indexes)). The API lists them at `GET /events` and

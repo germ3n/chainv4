@@ -1,8 +1,8 @@
 //! One transaction: where it landed, what it was, what it cost and did, the events it emitted, and
-//! where its contracts went.
+//! where its contracts went. An EVM call's calldata and logs read by name, by chainv4::abi::known.
 
 use {
-    super::{Ctx, Facts, Look, hops},
+    super::{Ctx, Facts, Look, decoded, hops},
     crate::api::Ask,
     crate::format,
     crate::model::{Argument, EventView, Outcome, TxView},
@@ -194,13 +194,13 @@ pub(crate) fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Ou
             });
         }
 
-        // An EVM call's calldata, read by the ABI kept for whom it calls.
-        if let (Some(to), Some(input)) = (tx.tx["to"].as_str(), tx.tx["input"].as_str())
-            && let Some(decoded) = evm_call(ctx, to, input)
+        // An EVM call's calldata, read, a multisig's too: the input row above stays as it is.
+        let call = [&tx.tx, &tx.tx["tx"]].into_iter().find_map(|tx| Some((tx["to"].as_str()?, tx["input"].as_str()?)));
+
+        if let Some((to, input)) = call
+            && let Some(read) = decoded::call_of(ctx, to, input)
         {
-            facts.row("calls", |ui| {
-                ui.monospace(decoded);
-            });
+            facts.row("calls", |ui| decoded::call(ui, ctx, Some(to), &read));
         }
     });
 }
@@ -350,7 +350,7 @@ pub fn events(ui: &mut Ui, ctx: &mut Ctx, events: &[EventView]) {
             for event in events {
                 super::list_row(ui, look, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(widgets::strong(&event.name, 13.5).color(look.palette.ink));
+                        ui.label(widgets::strong(event_name(ctx, &event.contract, &event.name, &event.data), 13.5).color(look.palette.ink));
                         super::address(ui, ctx, &event.contract);
                     });
                     event_data(ui, ctx, &event.contract, &event.name, &event.data);
@@ -362,7 +362,7 @@ pub fn events(ui: &mut Ui, ctx: &mut Ctx, events: &[EventView]) {
                 for (index, event) in events.iter().enumerate() {
                     ui.monospace(index.to_string());
                     super::address(ui, ctx, &event.contract);
-                    ui.label(widgets::strong(&event.name, 13.0));
+                    ui.label(widgets::strong(event_name(ctx, &event.contract, &event.name, &event.data), 13.0));
                     event_data(ui, ctx, &event.contract, &event.name, &event.data);
                     super::row_end(ui);
                 }
@@ -371,11 +371,17 @@ pub fn events(ui: &mut Ui, ctx: &mut Ctx, events: &[EventView]) {
     }
 }
 
+/// What to call an event: its name, and for an EVM log something reads, its event's.
+pub fn event_name(ctx: &Ctx, contract: &str, name: &str, data: &[Argument]) -> String {
+    decoded::log_of(ctx, contract, name, data).map_or_else(|| name.to_string(), |read| read.name.clone())
+}
+
 /// An event's data in a row. A token's Transfer reads as who sent how much to whom, and its
-/// Approval as who let whom spend how much, in the token's units.
+/// Approval as who let whom spend how much, in the token's units. An EVM log reads by its ABI, an
+/// ERC-20's and an NFT's Transfer the same way, and says which ABI that was.
 pub fn event_data(ui: &mut Ui, ctx: &mut Ctx, contract: &str, name: &str, data: &[Argument]) {
-    if let Some(decoded) = evm_log(ctx, contract, name, data) {
-        ui.label(RichText::new(decoded).monospace());
+    if let Some(read) = decoded::log_of(ctx, contract, name, data) {
+        decoded::log(ui, ctx, contract, &read, data);
 
         return;
     }
@@ -393,31 +399,6 @@ pub fn event_data(ui: &mut Ui, ctx: &mut Ctx, contract: &str, name: &str, data: 
             }
         }
     });
-}
-
-/// An EVM log read by its contract's ABI, kept here: Bumped(by = 0x…, count = 8).
-fn evm_log(ctx: &Ctx, contract: &str, name: &str, data: &[Argument]) -> Option<String> {
-    if name != "log" || !contract.starts_with("evm:") {
-        return None;
-    }
-
-    let abi = ctx.abi(contract)?;
-    let bytes: Vec<Vec<u8>> = data.iter().map(|value| chainv4::structs::hex::from_hex(value.value.as_str()?)).collect::<Option<_>>()?;
-    let (log_data, topics) = bytes.split_last()?;
-    let topics: Vec<[u8; 32]> = topics.iter().map(|topic| topic.as_slice().try_into().ok()).collect::<Option<_>>()?;
-    let event = abi.event_for(&topics)?;
-
-    Some(event.show(&event.decode_log(&topics, log_data).ok()?))
-}
-
-/// An EVM call's calldata, read by the ABI kept for whom it calls: bump(by = 3).
-pub fn evm_call(ctx: &Ctx, to: &str, input: &str) -> Option<String> {
-    let abi = ctx.abi(to)?;
-    let input = chainv4::structs::hex::from_hex(input)?;
-    let function = abi.function_for(&input)?;
-    let values = function.decode_input(&input).ok()?;
-
-    Some(format!("{}({})", function.name, function.show_inputs(&values)))
 }
 
 /// A token standard Transfer or Approval: who, how they relate, whom, and the amount in the
@@ -460,6 +441,37 @@ mod tests {
             "tx": { "type": "approve_change", "version": 4, "change": change },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn an_evm_call_reads_by_name_and_its_raw_input_stays_beside_it() {
+        let (selector, types) = chainv4::abi::parse_signature("transfer(address,uint256)").unwrap();
+        let args = chainv4::abi::encode_values(&types, &[chainv4::abi::AbiValue::Address([0xab; 20]), chainv4::abi::AbiValue::Uint(chainv4::structs::u256::u256::new(5))]).unwrap();
+        let input = chainv4::structs::hex::to_hex(&[selector.unwrap().to_vec(), args].concat());
+        let view = |tx: Value| -> TxView {
+            serde_json::from_value(json!({
+                "id": "0x01", "sender": "ed25519:0x02", "nonce": 0, "signer": "0x03", "signature": "0x04",
+                "fee": { "gas_limit": 0, "max_price": "0", "tip": "0" },
+                "tx": tx,
+            }))
+            .unwrap()
+        };
+        let call = json!({ "type": "evm_call", "to": "evm:0x0505050505050505050505050505050505050505", "value": "0", "input": input });
+        let by_multisig = json!({ "type": "multisig", "account": "multisig:0x06", "tx": call.clone(), "signatures": [] });
+
+        for tx in [view(call), view(by_multisig)] {
+            let (text, _) = crate::views::render(&crate::store::Store::default(), &mut crate::light::Light::default(), 1_200.0, |ui, ctx| asked(ui, ctx, &tx, None));
+
+            for said in ["calls", "transfer", "value =", "read as ERC-20"] {
+                assert!(text.contains(said), "{said} in {text}");
+            }
+        }
+
+        // What reads as nothing shows as it did.
+        let unread = view(json!({ "type": "evm_call", "to": "evm:0x05", "value": "0", "input": "0xdeadbeef" }));
+        let (text, _) = crate::views::render(&crate::store::Store::default(), &mut crate::light::Light::default(), 1_200.0, |ui, ctx| asked(ui, ctx, &unread, None));
+
+        assert!(text.contains("0xdeadbeef") && !text.contains("calls"), "{text}");
     }
 
     #[test]

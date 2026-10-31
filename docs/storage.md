@@ -80,7 +80,20 @@ different ones. What they share is in `src/chain/index.rs`.
 **The event index** (`--index-events`, `src/chain/events.rs`) finds every event on the main chain:
 - **Once:** each event is stored once, under its contract, with its transaction, block, height and
   place.
-- **Pointers:** keys by contract and name, and by every address in its data, point at it.
+- **Pointers:** keys by contract and name, and by every address in its data, point at it. So do
+  keys by each of an EVM log's topics, on their own and under its contract, up to eight to a log. A
+  log's addresses are bytes, so a listing by address reads two places: those in events' values, and
+  the topic its EVM address makes, merged in order and paged by where an event sits.
+
+**An index from before topics** holds nothing by them, and catching up only ever reads below an
+index's low end, so left alone it would never find its older logs. Meta's `events_schema` says what
+the entries hold. When a node opens a database whose index lacks it, the index starts over: emptied
+in one atomic write, keeping the blocks it kept, its low end at the next block, and read back from
+the blocks' receipts in the background, newest first. No flag or rebuild is asked of anyone, and
+nothing is lost for good, but until it catches up older events are missing from the index, as
+`indexed_from` and `catching_up_to` say. A snapshot node's history still only reaches its pivot.
+Downgrading is the one trap: an older binary writes new blocks without topics and leaves the marker
+set, so after running one, turn the index off and on again.
 
 **The address index** (`--index-addresses`, `src/chain/addresses.rs`) finds every transaction
 that touched an address: what a wallet lists a history from, plain coin transfers to it included,

@@ -26,6 +26,8 @@ pub struct AccountState {
     /// The event name being typed, and the one the list shows.
     typing: String,
     named: String,
+    /// What an EVM contract's logs are filtered by, as they all have one name.
+    topic: events::TopicFilter,
     function: String,
     args: Vec<(String, String)>,
     /// The call last made.
@@ -72,6 +74,19 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
         widgets::pill(ui, kind, look.palette.soft);
     });
     super::copyable(ui, address);
+
+    // An address read from EVM calldata or a log goes by its 20 bytes, which name a contract at
+    // evm:0x… and a secp256k1 account at the same bytes; another account's alias says nothing back.
+    if let Some(bytes) = address.strip_prefix("evm:")
+        && store.failures.get(&Ask::Contract(address.to_string())).is_some_and(|failure| failure.status == 404)
+    {
+        let account = format!("secp256k1:{bytes}");
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("No contract here. These 20 bytes may be the account").small().color(look.palette.muted));
+            super::address(ui, ctx, &account);
+        });
+    }
 
     // The name it goes by, as the node says: it resolves to it now.
     if let Some(name) = store.accounts.get(address).and_then(|account| account.name.clone()) {
@@ -230,18 +245,34 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
             _ => super::section(ui, look, "Call a function read-only", |ui| read(ui, ctx, address, &contract.functions, state)),
         }
         let named = state.named.clone();
+        let evm = contract.engine == "evm";
+        let reader = ctx.reader;
+        // What the field held as this frame began: it changes once it is left.
+        let topic = state.topic.clone();
         super::section_with(
             ui,
             look,
             "Its events",
-            |ui| {
-                let field = ui.add(egui::TextEdit::singleline(&mut state.typing).hint_text("any name").desired_width(120.0));
+            |ui| match evm {
+                true => state.topic.field(ui, reader, if look.narrow { 140.0 } else { 180.0 }),
+                false => {
+                    let field = ui.add(egui::TextEdit::singleline(&mut state.typing).hint_text("any name").desired_width(120.0));
 
-                if field.lost_focus() {
-                    state.named = state.typing.trim().to_string();
+                    if field.lost_focus() {
+                        state.named = state.typing.trim().to_string();
+                    }
                 }
             },
-            |ui| events::list(ui, ctx, &EventQuery::contract(address, Some(&named))),
+            |ui| {
+                topic.said(ui, ctx);
+
+                let query = match &topic.topic {
+                    Some(topic) if evm => EventQuery::topic(topic, Some(address)),
+                    _ => EventQuery::contract(address, Some(&named)),
+                };
+
+                events::list(ui, ctx, &query);
+            },
         );
     }
 
@@ -263,7 +294,7 @@ fn evm(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState) {
                 ui.label(format!("{} functions and {} events, kept on this device; its logs and calls read by them.", abi.functions.len(), abi.events.len()));
 
                 if widgets::quiet(ui, &look.palette, "Forget it").clicked() {
-                    state.abi_typing = ctx.abi_text(address).unwrap_or_default();
+                    state.abi_typing = ctx.abi_text(address).map(str::to_string).unwrap_or_default();
                     ctx.set_abi(address, None);
                 }
             });

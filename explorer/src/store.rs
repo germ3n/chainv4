@@ -103,6 +103,8 @@ pub struct Listing<T> {
     pub indexed_from: u64,
     /// The height the node is still moving that to, if it is.
     pub catching_up_to: Option<u64>,
+    /// Whether the node's event index knows EVM logs' topics, as an older node's does not.
+    pub topics: bool,
     /// When the newest page last came, in milliseconds since the Unix epoch.
     pub refreshed: u64,
     /// What the node said of the page read last, under filters.
@@ -120,6 +122,7 @@ impl<T> Default for Listing<T> {
             next: None,
             indexed_from: 0,
             catching_up_to: None,
+            topics: false,
             refreshed: 0,
             answered: Answered::default(),
             pages: 0,
@@ -144,6 +147,7 @@ impl<T: Placed> Listing<T> {
         }
 
         self.pages += u32::from(older || self.pages == 0);
+        self.topics = page.topics;
 
         if older {
             let last = self.items.last().map(Placed::place);
@@ -665,6 +669,7 @@ pub(crate) mod tests {
             applied: None,
             scanned: 0,
             limited: false,
+            topics: false,
         }
     }
 

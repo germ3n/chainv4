@@ -273,11 +273,31 @@ Proof's fetch work offline.
   multisig, the transaction's id, nonce and offer, and each signature so far, checked over the
   bundle's chain. An EVM multisig's bundle, `chainv4-multisig-evm:…`, shows its chain, contract,
   call, digest and who signed.
-- **EVM calldata and logs,** read by chainv4's own contracts' ABIs, built in: ERC-20 (`Token.sol`),
-  ERC-721 (`Collectible`), ERC-1155 (`Items`), `Swap.sol`, the DEX's router, factory and pair,
-  `Gateway.sol` and `MultiSig.sol`. Or by an ABI pasted. A log takes its topics, one to a line, and
-  its data. An ERC-20's and an ERC-721's `Transfer` share a topic: the one whose topics fit is
-  read.
+- **EVM calldata and logs,** read by the ABIs built in: the standard ERC-20 and ERC-721, and every
+  contract in `contracts/evm`. Or by an ABI pasted. A log takes its topics, one to a line, and its
+  data. An ERC-20's and an ERC-721's `Transfer` share a topic: the one whose topics fit is read.
+
+**Find events** lists what the node's event index holds: EVM logs by a signature such as
+`Transfer(address,address,uint256)`, a built-in event's name or a topic, of one contract or any; or
+everything naming an address, in an event's values or a log's topics. A node too old to find by
+topic says so, and what it answered is not shown, as it would not be filtered.
+
+**EVM calls and logs everywhere.** A transaction's page, the account page's events and Find events
+read them the same way (`src/abi/known.rs`, shared with the wallet): names and typed values, not hex,
+which stays a click away:
+- **Which ABI:** the one kept for the contract goes first, and each says what read it: `read as
+  ERC-20`, which is only a match, or `read by the ABI kept for this contract`. Bytes past what a call
+  reads are said to be there.
+- **Addresses** open their pages. An address read from EVM bytes may be a contract or a secp256k1
+  account, so its page at `evm:0x…` links to the other where there is no contract.
+- **Amounts** of the contract's own token go in its decimals where known: the registry's, set by
+  hand, or what the contract says of itself through `eth_call`. Otherwise they are plain whole
+  numbers. An amount elsewhere, such as a router's, stays plain.
+- **Tokens moving:** an ERC-20's, ERC-721's or ERC-1155's transfer reads as who sent what to whom, as
+  a native token's does, saying it is only what the log claims unless the registry lists the
+  contract.
+- **Nested calls:** a `bytes` argument that reads exactly as a call shows it, a few levels down, as
+  a multisig's `execute` holds one. Bytes inside an array or a tuple are not looked into.
 
 **Convert:**
 - **Units:** the smallest unit to the coin and back, at the chain's decimals from `GET /status`.

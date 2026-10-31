@@ -1,13 +1,14 @@
 //! Decode: a raw signed transaction as the chain encodes it, with whether its signature checks on
 //! this chain; the wallet's codes and bundles, a swap's terms (ur:chainv4-swap), a multisig's
 //! transaction on its way round (chainv4-multisig:…) and an EVM multisig's
-//! (chainv4-multisig-evm:…); and EVM calldata and logs, by chainv4's own contracts' ABIs, built
-//! in, or one pasted.
+//! (chainv4-multisig-evm:…); and EVM calldata and logs, by the ABIs chainv4::abi::known builds in,
+//! or one pasted.
 
 use {
     crate::format,
     crate::views::{self, Ctx, View},
     chainv4::abi::Abi,
+    chainv4::abi::known::{KnownAbi, read_call, read_log},
     chainv4::abi::multisig::EvmBundle,
     chainv4::crypto::verifiable::Verifiable,
     chainv4::registry::multisig::MultisigBundle,
@@ -21,24 +22,6 @@ use {
     wincode::{SchemaRead, SchemaWrite, config::DefaultConfig},
 };
 
-/// The ABIs built in: chainv4's own EVM contracts, by what they are.
-const BUILT_IN: [(&str, &str); 9] = [
-    ("ERC-20 (Token.sol)", include_str!("../../../../contracts/evm/Token.abi")),
-    ("ERC-721 (Collectible)", include_str!("../../../../contracts/evm/Collectible.abi")),
-    ("ERC-1155 (Items)", include_str!("../../../../contracts/evm/Items.abi")),
-    ("Swap.sol", include_str!("../../../../contracts/evm/Swap.abi")),
-    ("DEX router", include_str!("../../../../contracts/evm/DexRouter.abi")),
-    ("DEX factory", include_str!("../../../../contracts/evm/DexFactory.abi")),
-    ("DEX pair", include_str!("../../../../contracts/evm/DexPair.abi")),
-    ("Gateway.sol", include_str!("../../../../contracts/evm/Gateway.abi")),
-    ("MultiSig.sol", include_str!("../../../../contracts/evm/MultiSig.abi")),
-];
-
-/// The ABIs built in, read.
-pub fn built_in() -> Vec<(&'static str, Abi)> {
-    BUILT_IN.iter().filter_map(|(name, json)| Abi::parse(json).ok().map(|abi| (*name, abi))).collect()
-}
-
 #[derive(Default)]
 pub struct DecodeState {
     pub input: String,
@@ -49,8 +32,6 @@ pub struct DecodeState {
     /// Whether calldata and logs are read by the ABI pasted rather than the ones built in.
     pub own_abi: bool,
     pub abi: String,
-    /// The built-in ABIs, read once they are needed.
-    built_in: Option<Vec<(&'static str, Abi)>>,
 }
 
 /// What a paste was.
@@ -172,39 +153,23 @@ pub struct Read {
     pub shown: String,
 }
 
-/// Calldata read by the first of the ABIs with a function of its selector that reads it.
-pub fn decode_call(abis: &[(&str, Abi)], input: &[u8]) -> Result<Read, String> {
+/// Calldata read by the ABI given, if any, and otherwise the first of those built in that reads it.
+pub fn decode_call(kept: Option<&Abi>, known: &[KnownAbi], input: &[u8]) -> Result<Read, String> {
     let selector = input.get(..4).ok_or("calldata starts with a function's 4-byte selector")?;
 
-    for (contract, abi) in abis {
-        if let Some(function) = abi.function_for(input)
-            && let Ok(values) = function.decode_input(input)
-        {
-            return Ok(Read {
-                contract: contract.to_string(),
-                signature: function.signature(),
-                shown: format!("{}({})", function.name, function.show_inputs(&values)),
-            });
-        }
-    }
-
-    Err(format!("no ABI here has a function of selector {} that reads this calldata", to_hex(selector)))
+    read_call(kept, known, input)
+        .map(|read| Read { contract: read.by.label(), signature: read.signature.clone(), shown: read.shown() })
+        .ok_or_else(|| format!("no ABI here has a function of selector {} that reads this calldata", to_hex(selector)))
 }
 
-/// A log read by the first of the ABIs with an event of its first topic that reads it: an ERC-20's
-/// and an ERC-721's Transfer share a topic, and differ in which values are topics.
-pub fn decode_log(abis: &[(&str, Abi)], topics: &[[u8; 32]], data: &[u8]) -> Result<Read, String> {
+/// A log read by the ABI given, if any, and otherwise the first of those built in that reads it: an
+/// ERC-20's and an ERC-721's Transfer share a topic, and differ in which values are topics.
+pub fn decode_log(kept: Option<&Abi>, known: &[KnownAbi], topics: &[[u8; 32]], data: &[u8]) -> Result<Read, String> {
     let first = topics.first().ok_or("a log's first topic names its event")?;
 
-    for (contract, abi) in abis {
-        for event in abi.events.iter().filter(|event| !event.anonymous && event.topic() == *first) {
-            if let Ok(values) = event.decode_log(topics, data) {
-                return Ok(Read { contract: contract.to_string(), signature: event.signature(), shown: event.show(&values) });
-            }
-        }
-    }
-
-    Err(format!("no ABI here has an event of topic {} that reads this log", to_hex(first)))
+    read_log(kept, known, topics, data)
+        .map(|read| Read { contract: read.by.label(), signature: read.signature.clone(), shown: read.shown() })
+        .ok_or_else(|| format!("no ABI here has an event of topic {} that reads this log", to_hex(first)))
 }
 
 /// A log's topics, 32 bytes of hex each, one to a line or between commas or spaces.
@@ -279,10 +244,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DecodeState) {
         ui.add_space(6.0);
 
         match decode(&state.input) {
-            Ok(Decoded::Tx(signed)) => signed_tx(ui, ctx, state, &signed),
+            Ok(Decoded::Tx(signed)) => signed_tx(ui, ctx, &signed),
             Ok(Decoded::Swap(terms)) => swap(ui, ctx, &terms),
             Ok(Decoded::Bundle(bundle)) => multisig_bundle(ui, ctx, &bundle),
-            Ok(Decoded::EvmBundle(bundle)) => evm_bundle(ui, ctx, state, &bundle),
+            Ok(Decoded::EvmBundle(bundle)) => evm_bundle(ui, ctx, &bundle),
             Err(why) => super::outcome(ui, ctx, &Err(why)),
         }
     });
@@ -296,14 +261,21 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DecodeState) {
         if state.own_abi {
             ui.add(egui::TextEdit::multiline(&mut state.abi).hint_text("The contract's ABI JSON, as solc or Foundry writes it").font(egui::TextStyle::Monospace).desired_rows(3).desired_width(width));
         } else {
-            views::note(ui, look, format!("Built in: {}.", BUILT_IN.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")));
+            views::note(ui, look, format!("Built in: {}.", ctx.reader.known().iter().map(|abi| abi.name).collect::<Vec<_>>().join(", ")));
         }
 
-        let abis: Result<Vec<(&str, Abi)>, String> = match state.own_abi {
+        // The one pasted alone, parsed once, or those built in, which only fit.
+        let known = ctx.reader.known();
+        let pasted: Result<Option<std::rc::Rc<Abi>>, String> = match state.own_abi {
             true if state.abi.trim().is_empty() => Err("Paste an ABI to read by it.".to_string()),
-            true => Abi::parse(&state.abi).map(|abi| vec![("the ABI pasted", abi)]),
-            false => Ok(state.built_in.get_or_insert_with(built_in).clone()),
+            true => ctx.reader.abi(&state.abi).map(Some).ok_or_else(|| Abi::parse(&state.abi).err().unwrap_or_default()),
+            false => Ok(None),
         };
+        let abis = pasted.map(|pasted| {
+            let known: &[KnownAbi] = if pasted.is_some() { &[] } else { known };
+
+            (pasted, known)
+        });
 
         ui.add_space(6.0);
         views::facts(ui, look, "evm decode", |facts| {
@@ -312,7 +284,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DecodeState) {
             });
 
             if !state.calldata.trim().is_empty() {
-                let read = abis.clone().and_then(|abis| decode_call(&abis, &from_hex(state.calldata.trim()).ok_or("calldata is hex: 0x…")?));
+                let read = abis.clone().and_then(|(pasted, known)| decode_call(pasted.as_deref(), known, &from_hex(state.calldata.trim()).ok_or("calldata is hex: 0x…")?));
                 facts.row("calls", |ui| read_row(ui, ctx, &read));
             }
 
@@ -324,13 +296,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DecodeState) {
             });
 
             if !state.topics.trim().is_empty() {
-                let read = abis.clone().and_then(|abis| {
+                let read = abis.clone().and_then(|(pasted, known)| {
                     let data = match state.data.trim() {
                         "" => Vec::new(),
                         data => from_hex(data).ok_or("a log's data is hex: 0x…")?,
                     };
 
-                    decode_log(&abis, &topics(&state.topics)?, &data)
+                    decode_log(pasted.as_deref(), known, &topics(&state.topics)?, &data)
                 });
                 facts.row("emitted", |ui| read_row(ui, ctx, &read));
             }
@@ -352,7 +324,7 @@ fn read_row(ui: &mut Ui, ctx: &Ctx, read: &Result<Read, String>) {
 }
 
 /// A signed transaction: its envelope, whether its signature checks, and what it does.
-fn signed_tx(ui: &mut Ui, ctx: &mut Ctx, state: &mut DecodeState, signed: &SignedTx) {
+fn signed_tx(ui: &mut Ui, ctx: &mut Ctx, signed: &SignedTx) {
     let look = ctx.look;
     let id = signed.id(chain_hash(ctx)).to_string();
     let checks = signature_checks(signed, genesis(ctx).as_ref());
@@ -386,11 +358,9 @@ fn signed_tx(ui: &mut Ui, ctx: &mut Ctx, state: &mut DecodeState, signed: &Signe
             });
         }
 
-        // The calldata, read by chainv4's own ABIs too, which the tx page does not hold.
+        // The calldata, read as the tx page reads it.
         if let Tx::EvmCall { to, input, .. } = &signed.tx {
-            let mut abis: Vec<(&str, Abi)> = ctx.abi(&to.to_string()).map(|abi| ("the ABI kept for it", abi)).into_iter().collect();
-            abis.extend(state.built_in.get_or_insert_with(built_in).iter().cloned());
-            let read = decode_call(&abis, input);
+            let read = decode_call(ctx.abi(&to.to_string()).as_deref(), ctx.reader.known(), input);
             facts.row("calls", |ui| read_row(ui, ctx, &read));
         }
     });
@@ -524,10 +494,10 @@ fn multisig_bundle(ui: &mut Ui, ctx: &mut Ctx, bundle: &MultisigBundle) {
 
 /// An EVM multisig's call on its way round: the chain and contract, the call read by the ABIs, and
 /// who signed so far.
-fn evm_bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut DecodeState, bundle: &EvmBundle) {
+fn evm_bundle(ui: &mut Ui, ctx: &mut Ctx, bundle: &EvmBundle) {
     let look = ctx.look;
     let signers = bundle.signers();
-    let read = decode_call(state.built_in.get_or_insert_with(built_in), &bundle.data);
+    let read = decode_call(None, ctx.reader.known(), &bundle.data);
 
     ui.label(widgets::strong("An EVM multisig's call", 15.0).color(look.palette.ink));
     views::facts(ui, look, "evm bundle", |facts| {

@@ -234,6 +234,9 @@ pub struct Chain {
     pub receipts: HashMap<String, Proven<Landed>>,
     /// Transactions the node says touch an address, by address, newest first.
     pub mentions: HashMap<String, Vec<Mention>>,
+    /// What each of the node's indexes said of an address last, which mentions puts together.
+    by_address_index: HashMap<String, Vec<Mention>>,
+    by_event_index: HashMap<String, Vec<Mention>>,
     /// The chain's names, as the node said them, once it did; whether it has any, once known.
     pub names: Option<NamesConfig>,
     pub has_names: Option<bool>,
@@ -851,7 +854,8 @@ impl Chain {
             }
             Ask::History(address) => {
                 self.indexes_addresses = Some(true);
-                self.mentions.insert(address.clone(), mentions(&value["txs"], "id"));
+                self.by_address_index.insert(address.clone(), mentions(&value["txs"], "id"));
+                self.mentions.insert(address.clone(), together(self.by_address_index.get(address), self.by_event_index.get(address)));
 
                 Ok(())
             }
@@ -865,7 +869,8 @@ impl Chain {
             }
             Ask::Events(address) => {
                 self.indexes_events = Some(true);
-                self.mentions.insert(address.clone(), mentions(&value["events"], "tx"));
+                self.by_event_index.insert(address.clone(), mentions(&value["events"], "tx"));
+                self.mentions.insert(address.clone(), together(self.by_address_index.get(address), self.by_event_index.get(address)));
 
                 Ok(())
             }
@@ -1100,6 +1105,17 @@ fn mentions(list: &Value, id_field: &str) -> Vec<Mention> {
     found.dedup_by(|later, earlier| later.tx == earlier.tx);
 
     found
+}
+
+/// What both of a node's indexes list of an address, newest first, each transaction once.
+fn together(first: Option<&Vec<Mention>>, second: Option<&Vec<Mention>>) -> Vec<Mention> {
+    let mut all: Vec<Mention> = first.into_iter().chain(second).flatten().cloned().collect();
+    let mut seen = std::collections::HashSet::new();
+
+    all.sort_by_key(|mention| std::cmp::Reverse(mention.height));
+    all.retain(|mention| seen.insert(mention.tx.clone()));
+
+    all
 }
 
 fn id(client: &LightClient, text: &str) -> Option<Hash> {
@@ -1659,5 +1675,23 @@ mod tests {
         chainv4_ui::net::Client::direct().fetch(url.to_string(), None, move |answer| sent.send(answer).unwrap());
 
         serde_json::from_slice(&got.recv_timeout(Duration::from_secs(20)).unwrap().unwrap().bytes).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod mention_tests {
+    use super::*;
+
+    #[test]
+    fn what_both_indexes_list_of_an_address_comes_together_newest_first_each_once() {
+        let mention = |tx: &str, height: u64| Mention { tx: tx.to_string(), height };
+        let by_address = vec![mention("0x03", 9), mention("0x01", 2)];
+        let by_event = vec![mention("0x04", 11), mention("0x03", 9), mention("0x02", 5)];
+        let heights = |list: Vec<Mention>| list.iter().map(|mention| mention.height).collect::<Vec<_>>();
+
+        assert_eq!(heights(together(Some(&by_address), Some(&by_event))), [11, 9, 5, 2], "a token's transfer only the event index found goes in");
+        assert_eq!(heights(together(Some(&by_address), None)), [9, 2], "a node with one index lists what it lists");
+        assert_eq!(heights(together(None, Some(&by_event))), [11, 9, 5]);
+        assert!(together(None, None).is_empty());
     }
 }
