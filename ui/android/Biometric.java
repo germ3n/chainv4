@@ -10,18 +10,21 @@ import android.os.CancellationSignal;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.security.keystore.KeyProperties;
+import android.security.keystore.KeyInfo;
 import java.security.KeyStore;
 import java.util.Arrays;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
+import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.GCMParameterSpec;
 
 /**
  * Biometrics for an app that is a NativeActivity: a secret wrapped by an AES key in the Android
  * Keystore that opens only after a strong biometric check, which BiometricPrompt makes. A finger or
  * face enrolled after the key was made invalidates it for good, so someone who adds their own
- * cannot open what was kept.
+ * cannot open what was kept. A key is only made inside secure hardware: a wallet may depend on it
+ * alone, and says that a copy of its storage opens nothing.
  *
  * chainv4-ui calls available, start, take and forget through JNI. start shows the prompt on the
  * main thread and returns; what came of it waits for take, as the picker's does. ui/build-android.sh
@@ -109,7 +112,17 @@ public final class Biometric extends BiometricPrompt.AuthenticationCallback impl
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
 
             if (mode == ENROLL) {
-                cipher.init(Cipher.ENCRYPT_MODE, create(alias));
+                SecretKey key = create(alias);
+
+                if (!inSecureHardware(key)) {
+                    forget(alias);
+                    wipe(mode, data);
+                    finish(null, null, "this phone's Keystore is not in secure hardware, so a wallet cannot depend on it");
+
+                    return;
+                }
+
+                cipher.init(Cipher.ENCRYPT_MODE, key);
             } else {
                 SecretKey key = existing(alias);
 
@@ -180,6 +193,15 @@ public final class Biometric extends BiometricPrompt.AuthenticationCallback impl
         return generator.generateKey();
     }
 
+    /** Whether a key is kept in the phone's TEE or StrongBox, rather than by software. */
+    @SuppressWarnings("deprecation")
+    private static boolean inSecureHardware(SecretKey key) throws Exception {
+        SecretKeyFactory factory = SecretKeyFactory.getInstance(key.getAlgorithm(), STORE);
+        KeyInfo info = (KeyInfo) factory.getKeySpec(key, KeyInfo.class);
+
+        return info.isInsideSecureHardware();
+    }
+
     private static SecretKey existing(String alias) throws Exception {
         KeyStore store = KeyStore.getInstance(STORE);
         store.load(null);
@@ -199,7 +221,7 @@ public final class Biometric extends BiometricPrompt.AuthenticationCallback impl
         try {
             BiometricPrompt.Builder builder = new BiometricPrompt.Builder(activity)
                     .setTitle(title)
-                    .setNegativeButton("Use password", activity.getMainExecutor(), this);
+                    .setNegativeButton("Cancel", activity.getMainExecutor(), this);
 
             if (subtitle != null && !subtitle.isEmpty()) {
                 builder.setSubtitle(subtitle);
@@ -236,7 +258,7 @@ public final class Biometric extends BiometricPrompt.AuthenticationCallback impl
         finish(null, null, canceled ? "canceled" : String.valueOf(message));
     }
 
-    /** "Use password". */
+    /** "Cancel". */
     @Override
     public void onClick(DialogInterface dialog, int which) {
         wipe(mode, data);

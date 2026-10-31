@@ -756,6 +756,12 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **Real unlock modes for the wallet's vault.** Password only, biometric only (a random key only
+  hardware or a passkey keeps), or both required (HKDF of the password's stretch and a hardware
+  secret), chosen per wallet in Settings on Android, iOS and the browser. Lockout means restoring
+  from words: a hint and a typed yes first, refusal for what words cannot bring back, and the lock
+  screen says so, writes nothing, and can remove the wallet. Older builds fail closed and keep it
+  whole. Today's "either opens it" stays for wallets that have it, and is offered no more.
 - [x] **`Tx::Batch`: several steps under one signature, nonce and fee, all or nothing.** Transfers,
   contract and EVM calls, deploys, upgrades, names, burns and claims, 1 to 32, sharing one fuel limit, the
   receipt saying each step's result or which failed. Multisigs may send one. The CLI's `chainv4 send batch`,

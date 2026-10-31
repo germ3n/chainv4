@@ -245,7 +245,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
     let mut next = None;
 
     // What the check before signing came to: passed, it signs; the fingers or faces enrolled
-    // changed since, the wallet locks, for its password.
+    // changed since, the wallet locks.
     let mut confirmed = false;
 
     if let Some(came) = state.confirming.as_ref().and_then(Check::take) {
@@ -255,8 +255,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             Ok(_) => confirmed = true,
             Err(Failure::Canceled) => {}
             Err(Failure::Invalidated) => {
-                biometrics::turn_off(ctx.wake, ctx.settings);
-                *ctx.lock = Some(biometrics::CHANGED.to_string());
+                *ctx.lock = Some(biometrics::invalidated(ctx.wake, ctx.settings));
             }
             Err(Failure::Failed(why)) => *trouble = Some(why),
         }
@@ -371,8 +370,7 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             Ok(_) => confirmed = true,
             Err(Failure::Canceled) => {}
             Err(Failure::Invalidated) => {
-                biometrics::turn_off(ctx.wake, ctx.settings);
-                *ctx.lock = Some(biometrics::CHANGED.to_string());
+                *ctx.lock = Some(biometrics::invalidated(ctx.wake, ctx.settings));
             }
             Err(Failure::Failed(why)) => *trouble = Some(why),
         }
@@ -494,8 +492,7 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             Ok(_) => confirmed = true,
             Err(Failure::Canceled) => {}
             Err(Failure::Invalidated) => {
-                biometrics::turn_off(ctx.wake, ctx.settings);
-                *ctx.lock = Some(biometrics::CHANGED.to_string());
+                *ctx.lock = Some(biometrics::invalidated(ctx.wake, ctx.settings));
             }
             Err(Failure::Failed(why)) => *trouble = Some(why),
         }
@@ -678,8 +675,7 @@ fn bitcoin_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             Ok(_) => confirmed = true,
             Err(Failure::Canceled) => {}
             Err(Failure::Invalidated) => {
-                biometrics::turn_off(ctx.wake, ctx.settings);
-                *ctx.lock = Some(biometrics::CHANGED.to_string());
+                *ctx.lock = Some(biometrics::invalidated(ctx.wake, ctx.settings));
             }
             Err(Failure::Failed(why)) => *trouble = Some(why),
         }

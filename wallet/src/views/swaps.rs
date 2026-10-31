@@ -738,6 +738,12 @@ fn leg(ctx: &Ctx, form: &LegForm) -> Result<Leg, String> {
 
 /// An offer from the form, with a new secret kept beside it.
 fn offer(ctx: &Ctx, state: &SwapsState) -> Result<SwapRecord, String> {
+    // Its secret is kept in the book, and no words bring it back, so such a wallet cannot hold one:
+    // it is refused the way it is refused for one held already.
+    if ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| entry.guard().needs_hardware()) {
+        return Err("A swap you start keeps a secret here that your words cannot bring back, and this wallet opens only with biometrics. Answer someone else's offer, or switch it to a password only in Settings first.".to_string());
+    }
+
     let form = &state.form;
     let holder = ctx.holder().ok_or("pick an account first")?;
     let (first, second) = (leg(ctx, &form.pay)?, leg(ctx, &form.get)?);

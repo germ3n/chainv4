@@ -425,8 +425,7 @@ fn take_check(ctx: &mut Ctx, state: &mut DappState) -> bool {
         Ok(_) => still,
         Err(Failure::Canceled) => false,
         Err(Failure::Invalidated) => {
-            biometrics::turn_off(ctx.wake, ctx.settings);
-            *ctx.lock = Some(biometrics::CHANGED.to_string());
+            *ctx.lock = Some(biometrics::invalidated(ctx.wake, ctx.settings));
 
             false
         }

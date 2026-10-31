@@ -1063,6 +1063,7 @@ dependencies = [
  "android_logger",
  "block2 0.6.2",
  "chacha20poly1305",
+ "core-foundation 0.10.1",
  "dispatch2",
  "eframe",
  "egui",
@@ -1108,6 +1109,7 @@ dependencies = [
  "egui",
  "env_logger",
  "getrandom 0.4.3",
+ "hkdf",
  "image",
  "js-sys",
  "log",
@@ -1116,6 +1118,7 @@ dependencies = [
  "rqrr",
  "serde",
  "serde_json",
+ "sha2",
  "ur",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -2675,6 +2678,15 @@ name = "hexf-parse"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
+
+[[package]]
+name = "hkdf"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
+dependencies = [
+ "hmac",
+]
 
 [[package]]
 name = "hmac"

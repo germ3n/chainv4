@@ -12,6 +12,7 @@ mod bitcoin;
 mod chain;
 mod dapp;
 mod format;
+mod guard;
 mod hardware;
 mod history;
 mod keys;

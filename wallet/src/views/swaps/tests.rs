@@ -254,3 +254,22 @@ fn a_swap_s_steps_mark_what_is_done_the_one_now_and_the_rest_to_come() {
     // earliest open one as now's.
     assert_eq!(super::marks([true, true, false, true, false, false]), [Done, Done, Now, Done, Later, Later]);
 }
+
+#[test]
+fn a_wallet_that_needs_biometrics_starts_no_swap_as_its_words_would_not_bring_the_secret_back() {
+    use crate::{biometrics::fake, guard::{Guard, tagged}, vault::{Book, Vault, fresh_secret}};
+
+    fake::fresh();
+    let mut book = crate::views::drawn::two_phrases();
+    let mut holders = crate::keys::open(&book).unwrap();
+    let secret = fresh_secret().unwrap();
+    let vault = Vault::keyed(&secret).unwrap();
+    let entry = crate::app::WalletEntry { name: "Mine".to_string(), vault: vault.seal(&Book::default()).unwrap(), current: String::new(), biometric: tagged(Guard::Biometric, &fake::keep(&secret)), unprotected: false };
+    let mut world = crate::views::drawn::World { settings: crate::app::Settings::with_wallets(vec![entry]), vault: Some(vault), ..crate::views::drawn::World::default() };
+    let state = SwapsState::default();
+    let mut said = None;
+
+    crate::views::drawn::page_in(&mut world, &mut book, &mut holders, (360.0, 740.0), |_, ctx| said = Some(offer(ctx, &state)));
+
+    assert!(said.unwrap().err().unwrap().contains("words cannot bring back"));
+}

@@ -114,7 +114,7 @@ bundle() {
     <key>UIStatusBarStyleDefault</key><string>UIStatusBarStyleDefault</string>
     <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
     <key>NSCameraUsageDescription</key><string>To read the codes another device shows, such as a request to sign, and to take a photo you choose to send.</string>
-    <key>NSFaceIDUsageDescription</key><string>To unlock the wallet, and to confirm what you send, without typing your password.</string>
+    <key>NSFaceIDUsageDescription</key><string>To open the wallet, and to confirm what you send.</string>
     <key>NSLocalNetworkUsageDescription</key><string>To reach a chainv4 node on your own network.</string>
 </dict>
 </plist>

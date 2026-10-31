@@ -1,8 +1,14 @@
-//! Keys at rest. What app storage holds is sealed with a password: Argon2id stretches the password
-//! with a salt of its own into a key, and ChaCha20-Poly1305 seals the accounts with it under a
-//! fresh nonce each time they are saved. Without the password, the storage says nothing but how
-//! long the sealed accounts are. The key the password stretches to, the accounts opened, and the
-//! words are wiped from memory as they drop.
+//! Keys at rest. What app storage holds is sealed with a key, and ChaCha20-Poly1305 seals the
+//! accounts with it under a fresh nonce each time they are saved. Without that key, the storage says
+//! nothing but how long the sealed accounts are. The key, the accounts opened, and the words are
+//! wiped from memory as they drop.
+//!
+//! Where the key comes from is what `crate::guard` calls a wallet's guard. With a password, Argon2id
+//! stretches it with a salt of its own into the key. With biometrics alone, the key is random, and
+//! only hardware or a passkey keeps it. With both required, HKDF joins the stretched password and a
+//! random secret that hardware keeps, so neither alone gives the key, whatever else was copied.
+//! All of them look alike in storage, and an older build's stretching of any password opens neither
+//! of the last two: it says wrong password, and writes nothing.
 //!
 //! A vault holds a book: the wallet's seed phrases, when it has any, and its accounts, each one
 //! phrase's account of some number or a key brought in.
@@ -20,7 +26,9 @@ use {
     chainv4::crypto::keypair::{KeyType, Keypair, PublicKey},
     chainv4::crypto::mnemonic::{Phrase, Seed},
     chainv4::structs::hex::{from_hex, to_hex},
+    hkdf::Hkdf,
     serde::{Deserialize, Serialize},
+    sha2::Sha256,
     std::sync::OnceLock,
     zeroize::{Zeroize, Zeroizing},
 };
@@ -526,8 +534,21 @@ struct Stored {
     key: String,
 }
 
-/// An open vault: the key the password stretched to, kept while the wallet is unlocked, so it
-/// seals again after a change without asking for the password. Wiped as it drops.
+/// What sets the key of a wallet that needs both a password and hardware apart from any other key
+/// HKDF might make. Changing it would shut every such wallet for good, so it stays as written, and
+/// a new way of joining them takes a new version here and a new tag in `crate::guard`.
+const BOTH_INFO: &[u8] = b"chainv4 wallet vault key, from a stretched password and a hardware secret, version 1";
+
+/// A fresh secret for hardware to keep: 32 random bytes, wiped as they drop.
+pub fn fresh_secret() -> Result<Zeroizing<[u8; 32]>, String> {
+    let mut secret = Zeroizing::new([0; 32]);
+    getrandom::fill(&mut *secret).map_err(|err| format!("no randomness for a secret: {err}"))?;
+
+    Ok(secret)
+}
+
+/// An open vault: the key that seals it, kept while the wallet is unlocked, so it seals again after
+/// a change without asking for what opens it. Wiped as it drops.
 pub struct Vault {
     salt: [u8; 16],
     key: Zeroizing<[u8; 32]>,
@@ -548,6 +569,41 @@ impl Vault {
         })
     }
 
+    /// A new vault with biometrics alone: this secret is its key, as no password goes into it. Its
+    /// salt is its own and stretches nothing, so that an older build reads the vault's shape and
+    /// says wrong password. The secret must be one only hardware keeps: `fresh_secret`.
+    pub fn keyed(secret: &[u8; 32]) -> Result<Vault, String> {
+        let mut salt = [0; 16];
+        getrandom::fill(&mut salt).map_err(|err| format!("no randomness for a salt: {err}"))?;
+
+        Ok(Vault {
+            key: Zeroizing::new(*secret),
+            salt,
+            bare: false,
+        })
+    }
+
+    /// A new vault that needs both this password and this secret, which hardware keeps: the key
+    /// comes from them together, under a salt of its own. No password at all is refused, or the
+    /// secret would be all that guards it while the wallet says two things do.
+    pub fn both(password: &str, secret: &[u8; 32]) -> Result<Vault, String> {
+        let mut salt = [0; 16];
+        getrandom::fill(&mut salt).map_err(|err| format!("no randomness for a salt: {err}"))?;
+
+        Ok(Vault {
+            key: joined(password, secret, &salt)?,
+            salt,
+            bare: false,
+        })
+    }
+
+    /// Opens sealed accounts that need both a password and the secret hardware keeps.
+    pub fn open_both(sealed: &Sealed, password: &str, secret: &[u8; 32]) -> Result<(Vault, Book), String> {
+        let salt: [u8; 16] = bytes(&sealed.salt)?;
+
+        Vault::open_with_key(sealed, &*joined(password, secret, &salt)?)
+    }
+
     /// Whether it is sealed with no password: anyone who reads app storage opens it.
     pub fn bare(&self) -> bool {
         self.bare
@@ -563,12 +619,13 @@ impl Vault {
         Ok((vault, book))
     }
 
-    /// The key the password stretched to: what biometrics keep, to open the vault without it.
+    /// The key that seals it. A wallet whose biometrics are an alternative to its password keeps the
+    /// key the password stretched to behind them, which is why that wallet's are no added lock.
     pub fn key(&self) -> Zeroizing<[u8; 32]> {
         self.key.clone()
     }
 
-    /// Opens sealed accounts with the key a password stretched to, as biometrics keep it.
+    /// Opens sealed accounts with their key, as biometrics keep it.
     pub fn open_with_key(sealed: &Sealed, key: &[u8; 32]) -> Result<(Vault, Book), String> {
         let salt: [u8; 16] = bytes(&sealed.salt)?;
         let nonce: [u8; 12] = bytes(&sealed.nonce)?;
@@ -656,6 +713,23 @@ fn stretch(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
     Argon2::default()
         .hash_password_into(password.as_bytes(), salt, &mut *key)
         .map_err(|err| format!("could not stretch the password: {err}"))?;
+
+    Ok(key)
+}
+
+/// The key a password and a secret make together: the stretched password and the secret, as HKDF's
+/// input, under the vault's salt and `BOTH_INFO`.
+fn joined(password: &str, secret: &[u8; 32], salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>, String> {
+    if password.is_empty() {
+        return Err("this wallet needs its password as well".to_string());
+    }
+
+    let stretched = stretch(password, salt)?;
+    let mut input = Zeroizing::new([0; 64]);
+    input[..32].copy_from_slice(&*stretched);
+    input[32..].copy_from_slice(secret);
+    let mut key = Zeroizing::new([0; 32]);
+    Hkdf::<Sha256>::new(Some(salt), &*input).expand(BOTH_INFO, &mut *key).map_err(|err| format!("could not join the password and the secret: {err}"))?;
 
     Ok(key)
 }
@@ -1327,5 +1401,115 @@ mod tests {
         let mut unread = Book { phrases: vec![Words::new("not words".to_string(), String::new())], ..Book::default() };
 
         assert!(unread.add_phrase(Words::new(TEST.to_string(), String::new())).is_err(), "a list of phrases that would not open");
+    }
+
+    /// A book with the words alone, and a secret for hardware to keep.
+    fn guarded() -> (Book, Zeroizing<[u8; 32]>) {
+        (Book { phrases: vec![Words::new(TEST.to_string(), String::new())], ..Book::default() }, fresh_secret().unwrap())
+    }
+
+    #[test]
+    fn biometrics_alone_open_with_the_secret_and_nothing_stretched_from_any_password_opens_them() {
+        let (book, secret) = guarded();
+        let vault = Vault::keyed(&secret).unwrap();
+        let sealed = vault.seal(&book).unwrap();
+
+        assert_eq!(Vault::open_with_key(&sealed, &secret).unwrap().1, book);
+        assert!(!vault.bare(), "never marked as open to anyone");
+
+        // Storage alone, as it stands: the empty password an unprotected wallet is sealed with, a
+        // guess, the salt it holds taken for a key, and no secret at all.
+        assert_eq!(Vault::open(&sealed, "").err(), Some("wrong password".to_string()));
+        assert_eq!(Vault::open(&sealed, "correct horse").err(), Some("wrong password".to_string()));
+        assert!(Vault::open_with_key(&sealed, &[0; 32]).is_err());
+        assert!(Vault::open_with_key(&sealed, &stretch("", &bytes::<16>(&sealed.salt).unwrap()).unwrap()).is_err());
+        assert_ne!(*vault.key(), *stretch("", &vault.salt).unwrap(), "no key from an empty password");
+        assert_eq!(*vault.key(), *secret, "the fresh secret is the key, and nothing else goes into it");
+    }
+
+    #[test]
+    fn both_required_opens_only_with_both_whatever_else_was_copied() {
+        let (book, secret) = guarded();
+        let vault = Vault::both("correct horse", &secret).unwrap();
+        let sealed = vault.seal(&book).unwrap();
+
+        assert_eq!(Vault::open_both(&sealed, "correct horse", &secret).unwrap().1, book);
+
+        // The password without the secret: as an older build tries it, and with a wrong secret.
+        assert_eq!(Vault::open(&sealed, "correct horse").err(), Some("wrong password".to_string()));
+        assert!(Vault::open_both(&sealed, "correct horse", &[1; 32]).is_err());
+        // The secret without the password, as the key itself, and with a wrong or empty password.
+        assert!(Vault::open_with_key(&sealed, &secret).is_err());
+        assert!(Vault::open_both(&sealed, "wrong", &secret).is_err());
+        assert!(Vault::open_both(&sealed, "", &secret).is_err());
+        // The stretched password as the key, a copy of storage alone, and the empty password.
+        assert!(Vault::open_with_key(&sealed, &stretch("correct horse", &vault.salt).unwrap()).is_err());
+        assert_eq!(Vault::open(&sealed, "").err(), Some("wrong password".to_string()));
+
+        // It seals again as it opened, under the same two.
+        let (opened, _) = Vault::open_both(&sealed, "correct horse", &secret).unwrap();
+        let again = opened.seal(&book).unwrap();
+
+        assert_ne!(again.nonce, sealed.nonce, "a fresh nonce every time");
+        assert_eq!(Vault::open_both(&again, "correct horse", &secret).unwrap().1, book);
+    }
+
+    #[test]
+    fn both_required_refuses_to_be_made_with_no_password() {
+        assert!(Vault::both("", &[1; 32]).is_err());
+    }
+
+    #[test]
+    fn the_key_of_both_required_stays_what_it_was_written_as() {
+        // Changing how the two are joined shuts every such wallet for good, so its output is pinned.
+        let key = joined("correct horse", &[7; 32], &[9; 16]).unwrap();
+
+        assert_eq!(to_hex(&*key), PINNED_BOTH_KEY);
+
+        // And each input, and only HKDF's own domain, moves it.
+        assert_ne!(*joined("correct horsf", &[7; 32], &[9; 16]).unwrap(), *key);
+        assert_ne!(*joined("correct horse", &[8; 32], &[9; 16]).unwrap(), *key);
+        assert_ne!(*joined("correct horse", &[7; 32], &[8; 16]).unwrap(), *key);
+        assert_ne!(*key, *stretch("correct horse", &[9; 16]).unwrap());
+        assert_ne!(*key, [7; 32]);
+    }
+
+    const PINNED_BOTH_KEY: &str = "0x7c02c9a9326fa8064f722f671c377e3642381de6d85ffc3814ad3c408d4955e5";
+
+    #[test]
+    fn every_vault_made_takes_a_salt_and_key_of_its_own() {
+        let (book, secret) = guarded();
+        let (first, second) = (Vault::both("correct horse", &secret).unwrap(), Vault::both("correct horse", &secret).unwrap());
+
+        assert_ne!(first.salt, second.salt);
+        assert_ne!(*first.key(), *second.key(), "the same two make another key under another salt");
+        assert_ne!(Vault::keyed(&secret).unwrap().salt, Vault::keyed(&secret).unwrap().salt);
+        assert_ne!(*fresh_secret().unwrap(), *fresh_secret().unwrap());
+        assert_ne!(first.seal(&book).unwrap().sealed, second.seal(&book).unwrap().sealed);
+    }
+
+    #[test]
+    fn a_vault_with_a_password_or_none_is_made_and_read_as_it_always_was() {
+        // Sealed by hand as every build has: Argon2id's default, then the cipher, with no HKDF.
+        let salt = [3; 16];
+        let mut key = [0; 32];
+        Argon2::default().hash_password_into(b"correct horse", &salt, &mut key).unwrap();
+        let plain = br#"{"phrase":null,"accounts":[],"watch":false,"swaps":[]}"#;
+        let nonce = [5; 12];
+        let sealed = Sealed {
+            salt: to_hex(&salt),
+            nonce: to_hex(&nonce),
+            sealed: to_hex(&ChaCha20Poly1305::new(Key::from_slice(&key)).encrypt(Nonce::from_slice(&nonce), plain.as_slice()).unwrap()),
+        };
+        let (opened, book) = Vault::open(&sealed, "correct horse").unwrap();
+
+        assert_eq!(book, Book::default());
+        assert_eq!(*opened.key(), key, "and biometrics of today's kind keep this same key");
+        assert_eq!(unsealed(&opened, &opened.seal(&book).unwrap()), plain, "and it saves back to the byte");
+        assert_eq!(Vault::open_with_key(&sealed, &key).unwrap().1, book);
+
+        let none = Vault::create("").unwrap();
+        assert!(none.bare());
+        assert!(Vault::open(&none.seal(&book).unwrap(), "").unwrap().0.bare());
     }
 }

@@ -3,16 +3,22 @@
 //!
 //! - **Android:** an AES key in the Android Keystore wraps the secret. It opens only after a strong
 //!   biometric check, BiometricPrompt, and a fingerprint or face enrolled after it was made
-//!   invalidates it for good. The prompt is shown by a Java class the APK carries,
-//!   `ui/android/Biometric.java`, which `ui/build-android.sh` compiles in with the file picker.
+//!   invalidates it for good. It must be inside secure hardware, or none is made. The prompt is
+//!   shown by a Java class the APK carries, `ui/android/Biometric.java`, which
+//!   `ui/build-android.sh` compiles in with the file picker.
 //! - **The browser:** a passkey, through WebAuthn. Its PRF extension gives a key that only the
 //!   passkey's user verification releases, Touch ID, Windows Hello or a phone's unlock, and that
 //!   key wraps the secret. A browser or passkey without PRF cannot keep one.
-//! - **macOS:** Touch ID, through LocalAuthentication, before the secret is read from the login
-//!   Keychain. The fingers enrolled are remembered as they were, and once they change the secret is
-//!   forgotten, as on Android. The Keychain item itself is guarded by the login, not by Touch ID: an
-//!   unsigned app cannot ask the Keychain for that.
-//! - **Elsewhere:** none, and [`availability`] says so.
+//! - **iOS:** a Keychain item of this device alone, whose access control ties it to the faces or
+//!   fingers enrolled now, as `kSecAccessControlBiometryCurrentSet` does. The Secure Enclave enforces
+//!   that when it is read, the system showing the prompt itself: nothing here decides.
+//! - **macOS:** nothing new is kept, as an unsigned app cannot tie a Keychain item to Touch ID. What
+//!   was kept before still opens: Touch ID, through LocalAuthentication, before it is read from the
+//!   login Keychain, which is a check and no lock, and iOS reads what it kept that way too.
+//! - **Elsewhere:** none, and [`availability`] and [`bound`] say so.
+//!
+//! [`bound`] says whether a secret can be kept here so that only hardware or a passkey gives it back,
+//! and [`enroll`] keeps one only then, for wallets that depend on it.
 //!
 //! What a check comes to arrives later, through a callback, as the prompt is the system's own;
 //! the app is repainted when it does. The secret, and every copy of it on the way, is wiped from
@@ -76,8 +82,7 @@ pub struct Enrolled(pub String);
 pub enum Failure {
     /// The person turned the prompt down, or asked for the password instead.
     Canceled,
-    /// The fingers or faces enrolled changed since, or the key is gone: the secret is lost, and
-    /// the password is needed to keep it again.
+    /// The fingers or faces enrolled changed since, or the key is gone: the secret is lost for good.
     Invalidated,
     Failed(String),
 }
@@ -86,13 +91,81 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Failure::Canceled => write!(formatter, "canceled"),
-            Failure::Invalidated => write!(formatter, "the biometrics enrolled changed, so the password is needed again"),
+            Failure::Invalidated => write!(formatter, "the key biometrics kept is gone, as the fingers or faces enrolled changed"),
             Failure::Failed(why) => write!(formatter, "{why}"),
         }
     }
 }
 
-/// Whether biometrics can keep a secret here, and what they are called.
+/// Why a Mac keeps no new secrets: said plainly to whoever looks for them there.
+#[cfg(target_os = "macos")]
+const NOT_BOUND_HERE: &str = "on macOS this app is unsigned, so it cannot tie a key to Touch ID in hardware: Touch ID here would be a check and not a lock";
+
+/// Why a system without biometrics keeps none.
+#[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
+const NOT_BOUND_HERE: &str = "this system has no secure hardware the app can tie a key to";
+
+/// Whether a secret can be kept here so that only hardware or a passkey gives it back, and what the
+/// check is called. Asked at run time: a phone with no strong biometrics, or a browser whose passkeys
+/// have no PRF, says no. Only this may be depended on for a wallet to open at all.
+pub fn bound(ctx: &egui::Context) -> Availability {
+    #[cfg(target_os = "android")]
+    return android::availability(ctx);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = ctx;
+
+        web::bound()
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        let _ = ctx;
+
+        mac::availability()
+    }
+
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "ios")))]
+    {
+        let _ = ctx;
+
+        Availability::Unavailable(NOT_BOUND_HERE.to_string())
+    }
+}
+
+/// What the biometrics of a record are called, even where they cannot be asked for now.
+pub fn kind_of(enrolled: &Enrolled) -> Kind {
+    match enrolled.0.split(':').next() {
+        Some("passkey") => Kind::Passkey,
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        Some("ios" | "macos") => match mac::availability() {
+            Availability::Ready(kind) => kind,
+            Availability::Unavailable(_) => Kind::Biometrics,
+        },
+        _ => Kind::Biometrics,
+    }
+}
+
+/// Whether a record could have been made on this kind of device: one from any other never opens.
+pub fn kept_here(enrolled: &Enrolled) -> bool {
+    let tag = enrolled.0.split(':').next().unwrap_or_default();
+
+    if cfg!(target_os = "android") {
+        tag == "android"
+    } else if cfg!(target_arch = "wasm32") {
+        tag == "passkey"
+    } else if cfg!(target_os = "ios") {
+        tag == "ios" || tag == "macos"
+    } else if cfg!(target_os = "macos") {
+        tag == "macos"
+    } else {
+        false
+    }
+}
+
+/// Whether biometrics can be asked for here, and what they are called: of use to what was kept
+/// before [`bound`], as a Mac's Touch ID was.
 pub fn availability(ctx: &egui::Context) -> Availability {
     #[cfg(target_os = "android")]
     return android::availability(ctx);
@@ -119,8 +192,9 @@ pub fn availability(ctx: &egui::Context) -> Availability {
     }
 }
 
-/// Keeps a secret behind biometrics, after a check that the person is there: what to store comes
-/// to done. name says what it is for, in the prompt and, for a passkey, as its name.
+/// Keeps a secret so that only hardware or a passkey gives it back, after a check that the person is
+/// there where one can be made first: what to store comes to done. Refused wherever [`bound`] says
+/// no. name says what it is for, in the prompt and, for a passkey, as its name.
 pub fn enroll(ctx: &egui::Context, name: &str, secret: Secret, done: impl FnOnce(Result<Enrolled, Failure>) + Send + 'static) {
     let done = waking(ctx, done);
 
@@ -133,13 +207,16 @@ pub fn enroll(ctx: &egui::Context, name: &str, secret: Secret, done: impl FnOnce
         wasm_bindgen_futures::spawn_local(async move { done(web::enroll(&name, secret).await) });
     }
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    mac::enroll(name, secret, done);
+    #[cfg(target_os = "ios")]
+    {
+        let _ = name;
+        ios::enroll(secret, done);
+    }
 
-    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "ios")))]
     {
         let _ = (name, secret);
-        done(Err(Failure::Failed("this system has no biometrics the app can use".to_string())));
+        done(Err(Failure::Failed(NOT_BOUND_HERE.to_string())));
     }
 }
 
@@ -157,7 +234,13 @@ pub fn open(ctx: &egui::Context, enrolled: &Enrolled, reason: &str, done: impl F
         wasm_bindgen_futures::spawn_local(async move { done(web::open(&enrolled).await) });
     }
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_os = "ios")]
+    match enrolled.0.starts_with("ios:") {
+        true => ios::open(enrolled, reason, done),
+        false => mac::open(enrolled, reason, done),
+    }
+
+    #[cfg(target_os = "macos")]
     mac::open(enrolled, reason, done);
 
     #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
@@ -173,7 +256,17 @@ pub fn forget(ctx: &egui::Context, enrolled: &Enrolled) {
     #[cfg(target_os = "android")]
     android::forget(ctx, enrolled);
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_os = "ios")]
+    {
+        let _ = ctx;
+
+        match enrolled.0.starts_with("ios:") {
+            true => ios::forget(enrolled),
+            false => mac::forget(enrolled),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     {
         let _ = ctx;
         mac::forget(enrolled);
@@ -216,7 +309,7 @@ fn parts<'a>(enrolled: &'a Enrolled, tag: &str, count: usize) -> Result<Vec<&'a 
 }
 
 /// Fresh random bytes, as hex: a name for a key no other has.
-#[cfg_attr(not(any(target_os = "android", target_os = "macos", target_os = "ios")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "android", target_os = "ios", test)), allow(dead_code))]
 fn random_name() -> Result<String, Failure> {
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).map_err(|err| Failure::Failed(format!("no randomness: {err}")))?;
@@ -396,6 +489,46 @@ mod web {
         Some(get(&window.navigator(), "credentials")).filter(|credentials| !credentials.is_undefined())
     }
 
+    thread_local! {
+        /// What the browser says of PRF, once it has: None until then, or if it will not say.
+        static PRF: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+        static ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Asks once whether this browser's passkeys have PRF. Older browsers have no way of saying, and
+    /// are offered the choice: making the passkey then finds out, and leaves the wallet as it was.
+    fn ask_about_prf() {
+        if ASKED.with(|asked| asked.replace(true)) {
+            return;
+        }
+
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let class = get(&window, "PublicKeyCredential");
+        let Ok(ask) = get(&class, "getClientCapabilities").dyn_into::<Function>() else {
+            return;
+        };
+        let Some(promise) = ask.call0(&class).ok().and_then(|promise| promise.dyn_into::<Promise>().ok()) else {
+            return;
+        };
+
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(said) = JsFuture::from(promise).await {
+                PRF.with(|prf| prf.set(get(&said, "extension:prf").as_bool()));
+            }
+        });
+    }
+
+    pub(super) fn bound() -> Availability {
+        ask_about_prf();
+
+        match (availability(), PRF.with(std::cell::Cell::get)) {
+            (Availability::Ready(_), Some(false)) => Availability::Unavailable("this browser's passkeys cannot release a key (WebAuthn's PRF extension): use a recent Chrome, Edge or Safari, with the device's own passkeys".to_string()),
+            (said, _) => said,
+        }
+    }
+
     pub(super) fn availability() -> Availability {
         // Firefox refuses WebAuthn to extension pages, as a SecurityError.
         let protocol = web_sys::window().and_then(|window| window.location().protocol().ok()).unwrap_or_default();
@@ -535,8 +668,101 @@ mod web {
     }
 }
 
-/// Touch ID or Face ID, through LocalAuthentication, and the secret in the Keychain: the login
-/// Keychain on macOS, the app's own on iOS.
+/// What a Keychain answer means for a check of what iOS keeps: a prompt turned down is no failure,
+/// and an item not there is gone for good, as one tied to the faces or fingers enrolled reads as not
+/// found once they change. Anything else may pass, so it is said and tried again.
+#[cfg(any(target_os = "ios", test))]
+fn keychain_failure(code: i32, said: String) -> Failure {
+    const USER_CANCELED: i32 = -128;
+    const ITEM_NOT_FOUND: i32 = -25300;
+
+    match code {
+        USER_CANCELED => Failure::Canceled,
+        ITEM_NOT_FOUND => Failure::Invalidated,
+        _ => Failure::Failed(said),
+    }
+}
+
+/// A secret in the iOS Keychain, tied to the faces or fingers enrolled now, on this device alone. The
+/// Secure Enclave enforces the tie as the item is read, showing the prompt itself, so nothing is
+/// checked first here as on macOS. Written and read off the main thread, as reading waits for the
+/// person. Each secret is its own item, under a name no other has.
+#[cfg(target_os = "ios")]
+mod ios {
+    use {
+        super::{Enrolled, Failure, Secret},
+        core_foundation::base::TCFType,
+        core_foundation::string::{CFString, CFStringRef},
+        security_framework::access_control::{ProtectionMode, SecAccessControl},
+        security_framework::passwords::{self, AccessControlOptions, PasswordOptions},
+        zeroize::Zeroizing,
+    };
+
+    /// The Keychain service they are kept under, apart from what iOS kept the older way.
+    const SERVICE: &str = "org.chainv4.ui bound";
+
+    unsafe extern "C" {
+        /// What the system's prompt says. security-framework does not name it.
+        static kSecUseOperationPrompt: CFStringRef;
+    }
+
+    fn options(account: &str) -> PasswordOptions {
+        let mut options = PasswordOptions::new_generic_password(SERVICE, account);
+        options.use_protected_keychain();
+
+        options
+    }
+
+    pub(super) fn enroll(secret: Secret, done: impl FnOnce(Result<Enrolled, Failure>) + Send + 'static) {
+        std::thread::spawn(move || {
+            done((|| {
+                let account = super::random_name()?;
+                let control = SecAccessControl::create_with_protection(Some(ProtectionMode::AccessibleWhenPasscodeSetThisDeviceOnly), AccessControlOptions::BIOMETRY_CURRENT_SET.bits())
+                    .map_err(|err| Failure::Failed(format!("the Keychain cannot tie a secret to biometrics: {err}")))?;
+                let mut options = options(&account);
+                options.set_access_control(control);
+                passwords::set_generic_password_options(&*secret, options).map_err(|err| Failure::Failed(format!("the Keychain refused the secret: {err}")))?;
+
+                Ok(Enrolled(format!("ios:{account}")))
+            })())
+        });
+    }
+
+    pub(super) fn open(enrolled: &Enrolled, reason: &str, done: impl FnOnce(Result<Secret, Failure>) + Send + 'static) {
+        let account = match super::parts(enrolled, "ios", 1) {
+            Ok(parts) => parts[0].to_string(),
+            Err(failure) => return done(Err(failure)),
+        };
+        let reason = reason.to_string();
+
+        std::thread::spawn(move || {
+            let mut options = options(&account);
+
+            // SAFETY: a constant the Security framework defines for as long as the app runs. The
+            // field is deprecated only for how it exposes its types, and has no setter for this.
+            #[allow(deprecated)]
+            options.query.push((unsafe { CFString::wrap_under_get_rule(kSecUseOperationPrompt) }, CFString::new(&reason).into_CFType()));
+
+            done(match passwords::generic_password(options) {
+                Ok(bytes) => {
+                    let bytes = Zeroizing::new(bytes);
+
+                    super::secret(&bytes).ok_or_else(|| Failure::Failed("the Keychain item is damaged".to_string()))
+                }
+                Err(err) => Err(super::keychain_failure(err.code(), err.to_string())),
+            });
+        });
+    }
+
+    pub(super) fn forget(enrolled: &Enrolled) {
+        if let Ok(parts) = super::parts(enrolled, "ios", 1) {
+            let _ = passwords::delete_generic_password_options(options(parts[0]));
+        }
+    }
+}
+
+/// Touch ID or Face ID, through LocalAuthentication, and what was kept in the Keychain before
+/// `ios` and `bound`: the login Keychain on macOS, the app's own on iOS. It keeps nothing new.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod mac {
     use {
@@ -610,19 +836,6 @@ mod mac {
         unsafe { context.evaluatePolicy_localizedReason_reply(POLICY, &NSString::from_str(reason), &reply) };
     }
 
-    pub(super) fn enroll(name: &str, secret: Secret, done: impl FnOnce(Result<Enrolled, Failure>) + Send + 'static) {
-        check(&format!("turn on {} for {name}", named()), move |checked| {
-            done(checked.and_then(|state| {
-                let account = super::random_name()?;
-                let text = Zeroizing::new(super::hex(&*secret));
-                security_framework::passwords::set_generic_password(SERVICE, &account, text.as_bytes())
-                    .map_err(|err| Failure::Failed(format!("the Keychain refused the secret: {err}")))?;
-
-                Ok(Enrolled(format!("macos:{account}:{}", super::hex(&state))))
-            }))
-        });
-    }
-
     pub(super) fn open(enrolled: &Enrolled, reason: &str, done: impl FnOnce(Result<Secret, Failure>) + Send + 'static) {
         let parts = match super::parts(enrolled, "macos", 2) {
             Ok(parts) => parts,
@@ -657,6 +870,67 @@ mod mac {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_ios_answers_is_told_apart_as_gone_turned_down_or_worth_another_try() {
+        assert_eq!(keychain_failure(-128, "canceled".to_string()), Failure::Canceled);
+        assert_eq!(keychain_failure(-25300, "not found".to_string()), Failure::Invalidated);
+
+        for code in [-25293, -25308, -34018, -4] {
+            assert_eq!(keychain_failure(code, "said".to_string()), Failure::Failed("said".to_string()), "{code} may pass");
+        }
+    }
+
+    /// Only platforms that bind a key to hardware keep new secrets, and this test's platform says
+    /// why not in words, where it is one that does not.
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32", target_os = "ios")))]
+    #[test]
+    fn a_platform_that_cannot_bind_a_key_offers_nothing_and_says_why() {
+        use std::sync::mpsc;
+
+        let ctx = egui::Context::default();
+        let Availability::Unavailable(why) = bound(&ctx) else {
+            panic!("no new modes here");
+        };
+
+        assert!(!why.is_empty());
+        #[cfg(target_os = "macos")]
+        assert!(why.contains("unsigned") && why.contains("check and not a lock"), "{why}");
+
+        let (sent, got) = mpsc::channel();
+        enroll(&ctx, "Mine", Zeroizing::new([7; 32]), move |came| sent.send(came).unwrap());
+
+        assert!(matches!(got.recv().unwrap(), Err(Failure::Failed(said)) if said == why), "and enrolling is refused the same way");
+    }
+
+    #[test]
+    fn a_record_says_where_it_was_made_and_what_it_is_called() {
+        let passkey = Enrolled("passkey:00:01:02:03".to_string());
+        let android = Enrolled("android:a:00:01".to_string());
+        let ios = Enrolled("ios:00ff".to_string());
+
+        assert_eq!(kind_of(&passkey), Kind::Passkey);
+        assert_eq!(kind_of(&android), Kind::Biometrics);
+        assert!(parts(&ios, "ios", 1).is_ok());
+        assert!(parts(&ios, "macos", 2).is_err(), "and iOS's own is not read as the older kind");
+
+        // On this machine.
+        #[cfg(target_os = "macos")]
+        {
+            assert!(!kept_here(&passkey) && !kept_here(&android) && !kept_here(&ios));
+            assert!(kept_here(&Enrolled("macos:00:01".to_string())));
+        }
+    }
+
+    #[test]
+    fn a_record_tagged_for_a_wallet_that_needs_it_reads_as_from_elsewhere_to_any_older_build() {
+        // What an older build runs: it says the record is from elsewhere, and writes nothing.
+        for tag in ["biometric-v1", "both-v1"] {
+            for (platform, record, fields) in [("android", "android:a:00:01", 3), ("passkey", "passkey:00:01:02:03", 4), ("macos", "macos:00:01", 2)] {
+                assert!(parts(&Enrolled(format!("{tag}:{record}")), platform, fields).is_err());
+            }
+        }
+    }
 
     /// LocalAuthentication answers whether Touch ID can be used, without a prompt: ready on a Mac
     /// with a finger enrolled, and why not on one without, or on CI.

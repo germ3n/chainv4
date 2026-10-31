@@ -591,7 +591,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
     let short = balance.is_some_and(|balance| balance < draft.coin.saturating_add(most));
 
     // What the check before signing came to: passed, it signs; turned down, nothing; the fingers
-    // or faces enrolled changed since, the wallet locks, for its password.
+    // or faces enrolled changed since, the wallet locks.
     let mut confirmed = false;
 
     if let Some(came) = state.confirming.as_ref().and_then(Check::take) {
@@ -601,8 +601,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
             Ok(_) => confirmed = true,
             Err(chainv4_ui::biometric::Failure::Canceled) => {}
             Err(chainv4_ui::biometric::Failure::Invalidated) => {
-                biometrics::turn_off(ctx.wake, ctx.settings);
-                *ctx.lock = Some(biometrics::CHANGED.to_string());
+                *ctx.lock = Some(biometrics::invalidated(ctx.wake, ctx.settings));
             }
             Err(chainv4_ui::biometric::Failure::Failed(why)) => state.confirm_trouble = Some(why),
         }

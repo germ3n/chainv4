@@ -269,8 +269,7 @@ impl<R: Send + 'static> Link<R> {
                         Some(Ok(_)) => send = Some((**tx).clone()),
                         Some(Err(Failure::Canceled)) => next = Some(Stage::Priced(tx.clone())),
                         Some(Err(Failure::Invalidated)) => {
-                            biometrics::turn_off(ctx.wake, ctx.settings);
-                            *ctx.lock = Some(biometrics::CHANGED.to_string());
+                            *ctx.lock = Some(biometrics::invalidated(ctx.wake, ctx.settings));
                         }
                         Some(Err(Failure::Failed(why))) => next = Some(Stage::Done(Err(why))),
                         None => {}

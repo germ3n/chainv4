@@ -661,47 +661,124 @@ pub(crate) mod drawn {
         book
     }
 
+    /// What a drawn page works on besides its book: the settings it sees, the vault open, and why it
+    /// asked to lock.
+    #[derive(Default)]
+    pub struct World {
+        pub settings: Settings,
+        pub vault: Option<Vault>,
+        pub lock: Option<String>,
+        pub leave: bool,
+    }
+
+    /// A world of one wallet sealed with no password.
+    fn bare(holders: &[Holder]) -> World {
+        let vault = Vault::create("").unwrap();
+        let mut settings = Settings::default();
+        settings.wallets = vec![crate::app::WalletEntry {
+            name: "Mine".to_string(),
+            vault: vault.seal(&Book::default()).unwrap(),
+            current: holders.first().map(Holder::id).unwrap_or_default(),
+            biometric: None,
+            unprotected: true,
+        }];
+
+        World { settings, vault: Some(vault), ..World::default() }
+    }
+
     /// Draws a page twice, as a screen this wide and tall shows it, with this book, on a wallet
     /// sealed with no password. How wide it came out, and whether anything was marked to be sealed.
     pub fn page(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> (f32, bool) {
-        let (width, changed, _) = frames(book, holders, size, 2, |_, _| Vec::new(), draw);
+        page_in(&mut bare(holders), book, holders, size, draw)
+    }
+
+    /// As `page`, in this world.
+    pub fn page_in(world: &mut World, book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> (f32, bool) {
+        let (width, changed, _) = frames(world, book, holders, size, 2, |_, _| Vec::new(), draw);
 
         (width, changed)
     }
 
     /// Draws a page as page does, and says too each text the last frame drew and where.
     pub fn page_shown(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> (f32, bool, Vec<(String, egui::Rect)>) {
-        frames(book, holders, size, 2, |_, _| Vec::new(), draw)
+        frames(&mut bare(holders), book, holders, size, 2, |_, _| Vec::new(), draw)
     }
 
     /// As `page`: what it said, in the order it drew it.
     pub fn said(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> String {
-        said_of(frames(book, holders, size, 2, |_, _| Vec::new(), draw).2)
+        said_in(&mut bare(holders), book, holders, size, draw)
+    }
+
+    /// As `said`, in this world.
+    pub fn said_in(world: &mut World, book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> String {
+        said_of(frames(world, book, holders, size, 2, |_, _| Vec::new(), draw).2)
     }
 
     /// As `page`, with a finger tapping this text on the way: what it said once it took the tap.
     pub fn tap(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), text: &str, draw: impl FnMut(&mut Ui, &mut Ctx)) -> String {
-        let at = std::cell::Cell::new(egui::Pos2::ZERO);
-        let tap = |frame: usize, shapes: &[egui::epaint::ClippedShape]| {
-            let button = |pressed: bool| egui::Event::PointerButton { pos: at.get(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        tap_in(&mut bare(holders), book, holders, size, text, draw)
+    }
 
-            match frame {
+    /// As `tap`, in this world.
+    pub fn tap_in(world: &mut World, book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), text: &str, draw: impl FnMut(&mut Ui, &mut Ctx)) -> String {
+        said_of(frames(world, book, holders, size, 6, tapping(text), draw).2)
+    }
+
+    /// Draws what needs no page, such as the lock screen, a finger tapping a text on the way if one
+    /// is named: how wide it came out, and what it said.
+    pub fn screen(size: (f32, f32), tap: Option<&str>, draw: impl FnMut(&mut Ui)) -> (f32, String) {
+        let egui = egui::Context::default();
+        crate::theme::install_fonts(&egui);
+
+        let (width, shown) = match tap {
+            Some(text) => run(&egui, size, 6, tapping(text), draw),
+            None => run(&egui, size, 2, |_, _| Vec::new(), draw),
+        };
+
+        (width, said_of(shown))
+    }
+
+    /// A finger tapping this text, as a frame's input from what the one before it drew. A box over
+    /// the page draws nothing the frame it first sizes itself, so it looks for a frame longer.
+    fn tapping(text: &str) -> impl Fn(usize, &[egui::epaint::ClippedShape]) -> Vec<egui::Event> + '_ {
+        let at = std::cell::Cell::new(None);
+        let stage = std::cell::Cell::new(0);
+
+        move |frame: usize, shapes: &[egui::epaint::ClippedShape]| {
+            let button = |pressed: bool| egui::Event::PointerButton { pos: at.get().unwrap_or_default(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+
+            if frame == 0 {
+                return Vec::new();
+            }
+
+            stage.set(stage.get() + 1);
+
+            match stage.get() {
                 1 => {
                     let drawn = shapes.iter().find_map(|clipped| match &clipped.shape {
                         egui::epaint::Shape::Text(shape) if shape.galley.text() == text => Some(shape.galley.rect.translate(shape.pos.to_vec2()).center()),
                         _ => None,
                     });
-                    at.set(drawn.unwrap_or_else(|| panic!("no {text} to tap")));
 
-                    vec![egui::Event::PointerMoved(at.get())]
+                    match drawn {
+                        Some(found) => {
+                            at.set(Some(found));
+
+                            vec![egui::Event::PointerMoved(found)]
+                        }
+                        None if frame < 2 => {
+                            stage.set(0);
+
+                            Vec::new()
+                        }
+                        None => panic!("no {text} to tap"),
+                    }
                 }
                 2 => vec![button(true)],
                 3 => vec![button(false)],
                 _ => Vec::new(),
             }
-        };
-
-        said_of(frames(book, holders, size, 5, tap, draw).2)
+        }
     }
 
     /// What a frame drew, in order, a line each.
@@ -709,9 +786,44 @@ pub(crate) mod drawn {
         shown.into_iter().map(|(text, _)| format!("{text}\n")).collect()
     }
 
+    /// Draws this many times, each frame's input from what the one before it drew: how wide it came
+    /// out, and each text the last frame drew and where.
+    fn run(
+        egui: &egui::Context,
+        size: (f32, f32),
+        count: usize,
+        events: impl Fn(usize, &[egui::epaint::ClippedShape]) -> Vec<egui::Event>,
+        mut draw: impl FnMut(&mut Ui),
+    ) -> (f32, Vec<(String, egui::Rect)>) {
+        let mut width = 0.0_f32;
+        let mut shapes = Vec::new();
+
+        for frame in 0..count {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0, size.1))),
+                events: events(frame, &shapes),
+                ..egui::RawInput::default()
+            };
+            let mut output = egui.run_ui(input, |ui| {
+                draw(ui);
+                width = ui.min_rect().width();
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+
+        let shown = shapes.iter().filter_map(|clipped| match &clipped.shape {
+            egui::epaint::Shape::Text(shape) => Some((shape.galley.text().to_string(), shape.galley.rect.translate(shape.pos.to_vec2()))),
+            _ => None,
+        });
+
+        (width, shown.collect())
+    }
+
     /// Draws a page this many times, each frame's input from what the one before it drew: how wide it
-    /// came out, whether anything was marked to be sealed, and what the last frame said.
+    /// came out, whether anything was marked to be sealed, and each text the last frame drew and where.
     fn frames(
+        world: &mut World,
         book: &mut Book,
         holders: &mut Vec<Holder>,
         size: (f32, f32),
@@ -724,68 +836,40 @@ pub(crate) mod drawn {
         let palette = crate::theme::DARK;
         let (chain, coin) = (Chain::default(), Coin { symbol: "DEV".to_string(), decimals: 18 });
         let mut node = Node::new("http://127.0.0.1:1", Err("no client in a test".to_string()), egui.clone());
-        let vault = Vault::create("").unwrap();
-        let mut settings = Settings::default();
-        settings.wallets = vec![crate::app::WalletEntry {
-            name: "Mine".to_string(),
-            vault: vault.seal(&Book::default()).unwrap(),
-            current: holders.first().map(Holder::id).unwrap_or_default(),
-            biometric: None,
-            unprotected: true,
-        }];
-        let mut vault = Some(vault);
-        let (mut page, mut connect, mut changed, mut leave, mut lock) = (Page::Accounts, None, false, false, None);
+        let (mut page, mut connect, mut changed) = (Page::Accounts, None, false);
         #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
         let mut lights = crate::light::Lights::default();
         let reader = chainv4::abi::known::AbiReader::default();
-        let mut width = 0.0_f32;
-        let mut shapes = Vec::new();
-
-        for frame in 0..count {
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0, size.1))),
-                events: events(frame, &shapes),
-                ..egui::RawInput::default()
+        let (width, shown) = run(&egui, size, count, events, |ui| {
+            let mut ctx = Ctx {
+                palette: &palette,
+                reader: &reader,
+                chain: &chain,
+                node: &mut node,
+                holders: &mut *holders,
+                current: 0,
+                book: &mut *book,
+                coin: &coin,
+                settings: &mut world.settings,
+                now: 0,
+                page: &mut page,
+                connect: &mut connect,
+                changed: &mut changed,
+                vault: &mut world.vault,
+                leave: &mut world.leave,
+                lock: &mut world.lock,
+                wake: &egui,
+                faucet: None,
+                swap_contract: None,
+                dex: (None, None),
+                node_stops: None,
+                #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+                lights: &mut lights,
             };
-            let mut output = egui.run_ui(input, |ui| {
-                let mut ctx = Ctx {
-                    palette: &palette,
-                    reader: &reader,
-                    chain: &chain,
-                    node: &mut node,
-                    holders: &mut *holders,
-                    current: 0,
-                    book: &mut *book,
-                    coin: &coin,
-                    settings: &mut settings,
-                    now: 0,
-                    page: &mut page,
-                    connect: &mut connect,
-                    changed: &mut changed,
-                    vault: &mut vault,
-                    leave: &mut leave,
-                    lock: &mut lock,
-                    wake: &egui,
-                    faucet: None,
-                    swap_contract: None,
-                    dex: (None, None),
-                    node_stops: None,
-                    #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
-                    lights: &mut lights,
-                };
-                draw(ui, &mut ctx);
-                width = ui.min_rect().width();
-            });
-            output.textures_delta.clear();
-            shapes = output.shapes;
-        }
-
-        let shown = shapes.iter().filter_map(|clipped| match &clipped.shape {
-            egui::epaint::Shape::Text(shape) => Some((shape.galley.text().to_string(), shape.galley.rect.translate(shape.pos.to_vec2()))),
-            _ => None,
+            draw(ui, &mut ctx);
         });
 
-        (width, changed, shown.collect())
+        (width, changed, shown)
     }
 
     /// A phone upright, a phone on its side, and a desktop.

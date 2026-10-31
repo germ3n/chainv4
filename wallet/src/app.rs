@@ -1,4 +1,4 @@
-//! The wallet: vaults of accounts, each sealed with a password of its own, a node it talks to but
+//! The wallet: vaults of accounts, each sealed by what opens it, a node it talks to but
 //! never trusts, and the light client that checks everything the node says. Each frame takes what
 //! arrived, asks for what is due, and draws the page.
 
@@ -124,8 +124,17 @@ pub struct Settings {
     /// than have it walk every header since it last ran: off for any node until switched on, as a
     /// dishonest one could show a false history from that point.
     pub fast_resume: HashMap<String, bool>,
-    /// The wallets on this device, each its accounts sealed with a password of its own.
+    /// The wallets on this device, each its accounts sealed by what opens it (see crate::guard).
     pub wallets: Vec<WalletEntry>,
+    /// Records of biometrics no wallet uses any more, whose keys are not yet forgotten: those are
+    /// forgotten when settings saying so are read back, as the app starts, so a kill in between can
+    /// never leave settings on disk naming a key that went. Written only when there are any.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<String>,
+    /// Whether to write settings now, rather than when the app next saves: a vault was replaced or
+    /// a wallet removed. Never kept.
+    #[serde(skip)]
+    pub persist_now: bool,
     /// The wallet last opened, by its place among them.
     pub wallet: usize,
     /// Transactions this wallet sent that are not final yet, oldest first.
@@ -221,15 +230,16 @@ pub struct SavedContract {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletEntry {
     pub name: String,
-    /// Its seed phrase and accounts, sealed with its password.
+    /// Its seed phrase and accounts, sealed by what opens it.
     pub vault: Sealed,
     /// The account in use, by its first address.
     pub current: String,
-    /// Its vault's key, kept behind biometrics, as the platform keeps it: None while they are off.
+    /// What biometrics keep for it, as the platform keeps it, tagged when the wallet needs them to
+    /// open: None while it has none. See crate::guard, which reads what opens it from this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biometric: Option<String>,
     /// Whether it is sealed with no password, so it opens with a tap, and the lock screen says
-    /// anyone who reads app storage could.
+    /// anyone who reads app storage could. Never true of one that needs hardware.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unprotected: bool,
 }
@@ -253,6 +263,8 @@ impl Default for Settings {
             light: HashMap::new(),
             fast_resume: HashMap::new(),
             wallets: Vec::new(),
+            retired: Vec::new(),
+            persist_now: false,
             wallet: 0,
             sent: Vec::new(),
             checked: HashMap::new(),
@@ -286,6 +298,14 @@ impl Default for Settings {
             vault: None,
             current: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+impl Settings {
+    /// Settings of an online wallet holding these, for a test.
+    pub fn with_wallets(wallets: Vec<WalletEntry>) -> Settings {
+        Settings { role: Some(Role::Online), wallets, ..Settings::default() }
     }
 }
 
@@ -437,6 +457,7 @@ impl Wallet {
             .trim()
             .trim_end_matches('/')
             .to_string();
+        crate::biometrics::retire_all(&creation.egui_ctx, &mut settings);
         let palette = if settings.light_theme { LIGHT } else { DARK };
         announce(&settings.node);
         theme::install_fonts(&creation.egui_ctx);
@@ -541,7 +562,7 @@ impl Wallet {
         self.holders.iter().find(|holder| holder.id() == chosen).or_else(|| self.holders.first())
     }
 
-    /// Drops the keys, and asks for the password again.
+    /// Drops the keys, and asks for what opens it again.
     fn lock(&mut self) {
         self.vault = None;
         self.book = Book::default();
@@ -1120,7 +1141,15 @@ impl Wallet {
 }
 
 impl eframe::App for Wallet {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        // What changed what opens a wallet goes to disk at once, rather than when next saved.
+        if std::mem::take(&mut self.settings.persist_now)
+            && let Some(storage) = frame.storage_mut()
+        {
+            self.save(storage);
+            storage.flush();
+        }
+
         let time = ui.input(|input| input.time);
         let now = now_ms();
         self.take(now, time);

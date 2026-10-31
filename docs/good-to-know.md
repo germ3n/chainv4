@@ -420,11 +420,29 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   development-chain faucet, so such a chain no longer opens. `init` now writes none: make the
   chain again.
 - **An offline signer keeps a history of what it signed, sealed with its keys.** On by default, the last 200, in `Book.signed`, written only when there is any so a wallet without one stays as it was. An older build ignores it and loses it on its next save, and nothing else. It is a record of what was signed, not that it landed.
-- **Wallet biometrics keep the vault's key, not the password.** Each platform wraps the key the
+- **A wallet's guard is read from the record it always kept.** `WalletEntry::guard` says what opens
+  it: a `biometric` record tagged `biometric-v1:` or `both-v1:` needs hardware, any other is the older
+  alternative to a password, and none is a password or, if `unprotected`, nothing. There is no new
+  field, as an older build's save drops what it does not know, and that field would be the only way
+  to tell how the vault is keyed. An older build reads a tagged record as from elsewhere and writes
+  nothing, and every password is wrong to it. `Vault::both` joins the password's stretch and the
+  hardware secret with HKDF-SHA-256 under `BOTH_INFO`, whose output a test pins: changing it shuts
+  every such wallet. Never `Vault::open` a wallet that needs hardware: it says wrong password.
+- **`turn_off` does nothing for a wallet that needs hardware, and pages do not call it.** Every page
+  goes through `biometrics::invalidated`, which turns off today's kind as it always did and writes
+  nothing for one that needs them; `biometrics::enrolled` returns those even when they read as
+  unavailable, so a check fails rather than is skipped. A test scans the pages for this.
+- **A record is retired, not forgotten, when a vault is replaced.** `guard::adopt` puts it in
+  `Settings::retired`, and asks for settings to be written at once. Its key is forgotten as the app
+  next starts, once settings saying so were read back. Forgetting it first would strand a wallet
+  whose new settings never reached disk. eframe writes its file in place, not atomically, so a kill
+  during any save can still lose settings: it always could, and words are the way back.
+- **Older wallet biometrics keep the vault's key, not the password.** Each platform wraps the key the
   password stretched to: the Android Keystore, a passkey's PRF output, or the macOS Keychain after
   Touch ID. Changing the password turns them off, and so does a change in the fingers or faces
   enrolled. On macOS Touch ID is a check, not a lock on the key, as an unsigned app cannot tie a
-  Keychain item to biometry.
+  Keychain item to biometry. That is why macOS offers nothing new, and why iOS, which is signed, has a
+  module of its own in `ui/src/biometric.rs` rather than sharing macOS's.
 - **Reorg depth counts from the tip, not along the branch.** A heavier branch is followed when it
   splits off at most `max_reorg_depth` blocks below this node's tip, however long the branch is:
   a node that mined a few blocks of its own switches to a peer's chain that grew from below them.
@@ -438,7 +456,9 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   browsers require. Chrome stable no longer loads unpacked extensions from `--load-extension`;
   Chromium, or Developer mode's Load unpacked, does.
 - **A wallet may have no password.** It is sealed with an empty one and says so on its lock
-  screen; `WalletEntry::unprotected` marks it. Settings adds or removes one.
+  screen; `WalletEntry::unprotected` marks it. Settings adds or removes one, or makes it need
+  biometrics. A wallet with biometrics alone is not this: its key is random, and no empty password
+  opens it.
 - **Wallet secrets are zeroized.** `Vault`'s key, the opened vault's JSON, `Words`, typed
   passwords, words and keys (`chainv4_ui::secret::Typed`), and biometric secrets
   (`chainv4_ui::biometric::Secret`) are wiped as they drop; the Android glue overwrites Java's copy
@@ -614,8 +634,9 @@ voting finality it now goes back to the checkpoint and follows the node from the
   off iOS and wgpu on it, as does `ui`'s: a renderer feature for both would build glutin for iOS,
   which has no OpenGL to give it. iOS also leaves out rfd and nokhwa, which have no iOS side;
   `ui/src/files.rs` and `ui/src/camera.rs` have their own iOS modules on UIKit and AVFoundation,
-  and Face ID shares the macOS module, `mac`, the Keychain and LocalAuthentication being both
-  systems'.
+  and what Face ID keeps for a wallet needing it is `ui/src/biometric.rs`'s `ios`, a Keychain item
+  tied to the faces enrolled, which is compile-checked only so far. The older kind it reads shares
+  the macOS module, `mac`, the Keychain and LocalAuthentication being both systems'.
 - **iOS 27 runs apps through the scene lifecycle alone,** and stops one that does not adopt it at
   launch, which winit predates. The Info.plist names `Chainv4SceneDelegate`, a class
   `ui/src/ios.rs` registers before UIKit starts, which keeps the scene; winit's window, made

@@ -1,15 +1,21 @@
-//! The lock screen: which wallet, and its password. Or a wallet more: from new words, shown once and
+//! The lock screen: which wallet, and what opens it. Or a wallet more: from new words, shown once and
 //! three of them asked back, or from words written down before; or, online, a watch-only one, from
-//! an offline signer's account read off its screen. Each wallet is a vault of its own, with a
-//! password of its own. On its first launch, it asks whether this install is an offline signer. A
-//! wallet with biometrics on opens with them too: on Android and macOS the prompt shows as the
-//! screen does, and in the browser, which shows a passkey's only for a tap, at the button.
+//! an offline signer's account read off its screen. Each wallet is a vault of its own, opened its
+//! own way (see crate::guard). On its first launch, it asks whether this install is an offline
+//! signer. A wallet that opens with biometrics shows the prompt as the screen does, on the devices
+//! that can, and in the browser, which shows a passkey's only for a tap, at the button. One that
+//! needs both takes its password first.
+//!
+//! A wallet that needs hardware can lose it for good. Nothing here is written when it does: the
+//! screen says so, and that the words are the way back, and removing it stays possible with a typed
+//! yes alone, as nothing else can be given by then.
 
 use {
     crate::airgap::{Message, Pairing},
     crate::biometrics::{self, Check},
-    chainv4_ui::biometric::Failure,
+    chainv4_ui::biometric::{Availability, Failure, Kind},
     crate::app::{Role, Settings, WalletEntry},
+    crate::guard::{self, Guard},
     crate::theme::{self, Palette},
     crate::vault::{Book, Source, StoredAccount, Vault, Words},
     crate::views::scan::Scan,
@@ -23,9 +29,11 @@ pub use chainv4_ui::secret::{Typed, secret};
 pub enum Lock {
     /// What this install is, asked once.
     Role,
-    /// Asking for the password of the wallet picked, or its biometrics: the check under way, and
-    /// the wallet the prompt showed for by itself, so it shows once.
-    Locked { password: Typed, error: Option<String>, check: Option<Check>, prompted: Option<usize> },
+    /// Asking for what opens the wallet picked: the check under way, and the wallet the prompt
+    /// showed for by itself, so it shows once; the wallet found to have lost its hardware key, kept
+    /// here alone, as nothing is written when that happens; and, for one that needs hardware, being
+    /// removed, with its place and the yes typed.
+    Locked { password: Typed, error: Option<String>, check: Option<Check>, prompted: Option<usize>, gone: Option<usize>, removing: Option<(usize, String)> },
     /// Making a wallet: from new words, or from words written down before.
     Choose,
     New(Making),
@@ -70,13 +78,15 @@ pub enum Writing {
 }
 
 impl Lock {
-    /// Asking for a password, or biometrics, afresh.
+    /// Asking for what opens a wallet, afresh.
     pub fn locked() -> Lock {
         Lock::Locked {
             password: Typed::default(),
             error: None,
             check: None,
             prompted: None,
+            gone: None,
+            removing: None,
         }
     }
 
@@ -120,7 +130,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                 ui.add_space(8.0);
             }
         }
-        Lock::Locked { password, error, check, prompted } => {
+        Lock::Locked { password, error, check, prompted, gone, removing } => {
             if settings.wallets.len() > 1 {
                 theme::caps(ui, palette, "Wallet");
                 let shown = settings.wallets.get(settings.wallet).map(|entry| entry.name.clone()).unwrap_or_default();
@@ -136,35 +146,57 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             }
 
             theme::caps(ui, palette, "Unlock");
+            let guard = settings.wallets.get(settings.wallet).map_or(Guard::Password, WalletEntry::guard);
+            let kind = settings.wallets.get(settings.wallet).and_then(biometrics::kind_of).unwrap_or(Kind::Biometrics);
             let biometric = biometrics::enrolled(ui.ctx(), settings);
 
-            // What a check came to: the vault's key, opening it; or why not.
+            // A record made on another kind of device can never open here.
+            if guard.needs_hardware() && settings.wallets.get(settings.wallet).is_some_and(|entry| !biometrics::kept_here(entry)) {
+                *gone = Some(settings.wallet);
+            }
+
+            // What a check came to: what opens it, with the password if it needs that too; or why not.
             if let Some(came) = check.as_ref().and_then(Check::take) {
                 *check = None;
 
                 match came {
-                    Ok(key) => match settings.wallets.get(settings.wallet).map(|entry| Vault::open_with_key(&entry.vault, &key)) {
+                    Ok(secret) => match settings.wallets.get(settings.wallet).map(|entry| biometrics::open_entry(entry, password, &secret)) {
                         Some(Ok((vault, book))) => opened = Some(Opened { vault, book }),
                         Some(Err(why)) => *error = Some(why),
                         None => *error = Some("there is no such wallet".to_string()),
                     },
+                    // Turned down, it stays as it was, to try again.
                     Err(Failure::Canceled) => {}
-                    Err(Failure::Invalidated) => {
-                        biometrics::turn_off(ui.ctx(), settings);
-                        *error = Some(biometrics::CHANGED.to_string());
-                    }
+                    // Nothing is written, and the state is only here, for one that needs hardware.
+                    Err(Failure::Invalidated) if guard.needs_hardware() => *gone = Some(settings.wallet),
+                    Err(Failure::Invalidated) => *error = Some(biometrics::invalidated(ui.ctx(), settings)),
                     Err(Failure::Failed(why)) => *error = Some(why),
                 }
             }
 
-            if let Some((enrolled, kind)) = &biometric {
+            let lost = *gone == Some(settings.wallet);
+
+            if lost {
+                ui.colored_label(palette.bad, guard::gone(kind));
+                ui.add_space(6.0);
+            } else if guard.needs_hardware()
+                && let Availability::Unavailable(why) = biometrics::bound(ui.ctx())
+            {
+                ui.label(RichText::new(format!("Cannot be asked for right now: {why}. Trying again changes nothing here.")).small().color(palette.warn));
+                ui.add_space(4.0);
+            }
+
+            if guard != Guard::Both
+                && let Some((enrolled, kind)) = &biometric
+            {
                 let name = settings.wallets.get(settings.wallet).map(|entry| entry.name.clone()).unwrap_or_default();
                 // The browser shows a passkey's prompt only right after a tap.
-                let by_itself = !cfg!(target_arch = "wasm32") && *prompted != Some(settings.wallet) && opened.is_none();
+                let by_itself = !cfg!(target_arch = "wasm32") && *prompted != Some(settings.wallet) && opened.is_none() && !lost;
                 let tapped = theme::primary(ui, palette, &format!("Unlock with {}", kind.name()), check.is_none()).clicked();
 
                 if (by_itself || tapped) && check.is_none() {
                     *prompted = Some(settings.wallet);
+                    *error = None;
                     *check = Some(Check::start(ui.ctx(), enrolled, &format!("Unlock {name}")));
                 }
 
@@ -173,17 +205,21 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                 }
 
                 ui.add_space(6.0);
-                ui.label(RichText::new("Or its password:").small().color(palette.muted));
+
+                if guard == Guard::Either {
+                    ui.label(RichText::new("Or its password:").small().color(palette.muted));
+                }
             }
 
-            let unprotected = settings.wallets.get(settings.wallet).is_some_and(|entry| entry.unprotected);
-            let enter = match unprotected {
-                // No password to type: it opens with a tap.
-                true => {
-                    ui.label(RichText::new("This wallet has no password: anyone who can read this app's storage can open it. Set one in Settings.").small().color(palette.warn));
+            let unprotected = settings.wallets.get(settings.wallet).is_some_and(WalletEntry::opens_with_a_tap);
+            let enter = match (guard, unprotected) {
+                // Nothing to type: it has no password.
+                (Guard::Biometric, _) => false,
+                (_, true) => {
+                    ui.label(RichText::new("This wallet has no password: anyone who can read this app's storage can open it, biometrics or not. Settings can set a password, or make it need biometrics.").small().color(palette.warn));
                     false
                 }
-                false => {
+                (_, false) => {
                     let field = secret(ui, egui::TextEdit::singleline(&mut **password).password(true).hint_text("password").desired_width(f32::INFINITY));
 
                     field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
@@ -196,17 +232,35 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
 
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                let unlock = if unprotected { "Open" } else { "Unlock" };
+                match guard {
+                    Guard::Biometric => {}
+                    // The check comes after the password, so both are asked for together.
+                    Guard::Both => {
+                        let ready = !password.is_empty() && check.is_none();
+                        let tapped = theme::primary(ui, palette, &format!("Unlock with {}", kind.name()), ready).clicked();
 
-                if theme::primary(ui, palette, unlock, unprotected || !password.is_empty()).clicked() || enter {
-                    if unprotected {
-                        password.clear();
+                        if (tapped || enter) && ready
+                            && let Some((enrolled, _)) = &biometric
+                        {
+                            let name = settings.wallets.get(settings.wallet).map(|entry| entry.name.clone()).unwrap_or_default();
+                            *error = None;
+                            *check = Some(Check::start(ui.ctx(), enrolled, &format!("Unlock {name}")));
+                        }
                     }
+                    Guard::Bare | Guard::Password | Guard::Either => {
+                        let unlock = if unprotected { "Open" } else { "Unlock" };
 
-                    match settings.wallets.get(settings.wallet).map(|entry| Vault::open(&entry.vault, password)) {
-                        Some(Ok((vault, book))) => opened = Some(Opened { vault, book }),
-                        Some(Err(why)) => *error = Some(why),
-                        None => *error = Some("there is no such wallet".to_string()),
+                        if theme::primary(ui, palette, unlock, unprotected || !password.is_empty()).clicked() || enter {
+                            if unprotected {
+                                password.clear();
+                            }
+
+                            match settings.wallets.get(settings.wallet).map(|entry| Vault::open(&entry.vault, password)) {
+                                Some(Ok((vault, book))) => opened = Some(Opened { vault, book }),
+                                Some(Err(why)) => *error = Some(why),
+                                None => *error = Some("there is no such wallet".to_string()),
+                            }
+                        }
                     }
                 }
 
@@ -214,6 +268,49 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                     next = Some(Lock::Choose);
                 }
             });
+
+            if guard == Guard::Both && check.is_some() {
+                ui.label(RichText::new(format!("Waiting for {}…", kind.name())).small().color(palette.muted));
+            }
+
+            // Stuck with nothing left to give, it can still be taken off this device.
+            if guard.needs_hardware() {
+                if removing.as_ref().is_some_and(|(at, _)| *at != settings.wallet) {
+                    *removing = None;
+                }
+
+                ui.add_space(8.0);
+
+                match removing {
+                    None => {
+                        if theme::quiet(ui, palette, if lost { "Remove this wallet" } else { "It will not open" }).clicked() {
+                            *removing = Some((settings.wallet, String::new()));
+                        }
+                    }
+                    Some((at, yes)) => {
+                        if !lost {
+                            ui.label(RichText::new(guard::will_not_open(kind)).small().color(palette.soft));
+                            ui.add_space(4.0);
+                        }
+
+                        let name = settings.wallets.get(*at).map(|entry| entry.name.clone()).unwrap_or_default();
+                        ui.label(RichText::new(guard::removal_preview(&name)).color(palette.bad));
+                        ui.add(egui::TextEdit::singleline(yes).hint_text("type yes").desired_width(f32::INFINITY));
+                        let (mut remove, mut keep) = (false, false);
+                        ui.horizontal_wrapped(|ui| {
+                            remove = theme::primary(ui, palette, "Remove it", guard::confirmed(yes)).clicked();
+                            keep = theme::quiet(ui, palette, "Keep it").clicked();
+                        });
+
+                        if remove && guard::confirmed(yes) {
+                            guard::remove_wallet(settings, *at);
+                            next = Some(Lock::start(settings));
+                        } else if keep {
+                            *removing = None;
+                        }
+                    }
+                }
+            }
         }
         Lock::Choose => {
             let role = settings.role();
@@ -454,13 +551,13 @@ pub fn passphrase_field(ui: &mut Ui, palette: &Palette, passphrase: &mut Typed) 
 fn making_fields(ui: &mut Ui, palette: &Palette, making: &mut Making, wallets: usize, words: bool) {
     ui.add(egui::TextEdit::singleline(&mut making.name).hint_text(format!("name, such as Wallet {}", wallets + 1)).desired_width(f32::INFINITY));
     ui.add_space(4.0);
-    ui.label(RichText::new("A password seals the wallet on this device. Nothing opens it without it.").small().color(palette.muted));
+    ui.label(RichText::new("A password seals the wallet on this device. Nothing opens it without it. Settings can make it need biometrics instead, or as well.").small().color(palette.muted));
     secret(ui, egui::TextEdit::singleline(&mut *making.first).password(true).hint_text("password, or none").desired_width(f32::INFINITY));
     secret(ui, egui::TextEdit::singleline(&mut *making.second).password(true).hint_text("the same again").desired_width(f32::INFINITY));
 
     if making.first.is_empty() && making.second.is_empty() {
         ui.label(
-            RichText::new("With none, it opens with a tap, and so does it for anyone who can read this app's storage: a phone's backup, or malware. Fine for small sums; turn biometrics on, or set one later in Settings.")
+            RichText::new("With none, it opens with a tap, and so does it for anyone who can read this app's storage: a phone's backup, or malware. Fine for small sums. Settings can set one later, or make it need biometrics.")
                 .small()
                 .color(palette.warn),
         );
@@ -637,7 +734,7 @@ fn three_of(count: usize) -> [usize; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {super::*, crate::biometrics::fake};
 
     #[test]
     fn three_different_words_are_asked_back_and_checked() {
@@ -729,5 +826,240 @@ mod tests {
 
         assert!(holders[0].keys.is_empty(), "nothing to sign with");
         assert_eq!(holders[0].addresses(), signer.iter().map(|key| key.public().address()).collect::<Vec<_>>());
+    }
+
+    /// A wallet of each guard that needs hardware on a fresh fake device, with what opens it.
+    fn needing(guard: Guard) -> (Settings, Book) {
+        use crate::vault::fresh_secret;
+
+        fake::fresh();
+        let book = Book { phrases: vec![Words::new("test test test test test test test test test test test junk".to_string(), String::new())], ..Book::default() };
+        let secret = fresh_secret().unwrap();
+        let vault = match guard {
+            Guard::Both => Vault::both("correct horse", &secret).unwrap(),
+            _ => Vault::keyed(&secret).unwrap(),
+        };
+        let sealed = vault.seal(&book).unwrap();
+        let entry = WalletEntry { name: "Mine".to_string(), vault: sealed, current: String::new(), biometric: guard::tagged(guard, &fake::keep(&secret)), unprotected: false };
+
+        (Settings::with_wallets(vec![entry]), book)
+    }
+
+    /// Draws the lock screen, a finger tapping this text on the way if one is named: what it said,
+    /// how wide it came out, and the wallet it opened.
+    fn drawn_lock(size: (f32, f32), tap: Option<&str>, settings: &mut Settings, lock: &mut Lock) -> (String, f32, Option<Opened>) {
+        let mut opened = None;
+        let palette = theme::DARK;
+        let (width, said) = crate::views::drawn::screen(size, tap, |ui| {
+            if let Some(came) = show(ui, &palette, settings, lock) {
+                opened = Some(came);
+            }
+        });
+
+        (said, width, opened)
+    }
+
+    const PHONE: (f32, f32) = (360.0, 740.0);
+
+    #[test]
+    fn a_wallet_with_biometrics_alone_opens_with_them_and_asks_for_no_password() {
+        let (mut settings, book) = needing(Guard::Biometric);
+        let mut lock = Lock::locked();
+        let (said, _, opened) = drawn_lock(PHONE, None, &mut settings, &mut lock);
+
+        // The prompt showed by itself, and nothing is asked for that is not there.
+        assert!(!said.contains("password"), "{said}");
+        assert!(opened.is_some_and(|opened| opened.book == book));
+        assert_eq!(fake::device(|device| device.prompts), 1);
+    }
+
+    #[test]
+    fn a_wallet_needing_both_waits_for_its_password_and_a_wrong_one_is_wrong_even_past_the_check() {
+        let (mut settings, book) = needing(Guard::Both);
+        let mut lock = Lock::locked();
+        let (said, _, opened) = drawn_lock(PHONE, None, &mut settings, &mut lock);
+
+        assert!(said.contains("password"), "{said}");
+        assert!(opened.is_none());
+        assert_eq!(fake::device(|device| device.prompts), 0, "the check comes after the password");
+
+        let Lock::Locked { password, .. } = &mut lock else { unreachable!() };
+        *password = Typed::new("not it at all".to_string());
+        let (said, _, opened) = drawn_lock(PHONE, Some("Unlock with fingerprint or face"), &mut settings, &mut lock);
+
+        assert!(opened.is_none());
+        assert!(said.contains("wrong password"), "{said}");
+        assert_eq!(fake::device(|device| device.prompts), 1);
+
+        let Lock::Locked { password, .. } = &mut lock else { unreachable!() };
+        *password = Typed::new("correct horse".to_string());
+        let (_, _, opened) = drawn_lock(PHONE, Some("Unlock with fingerprint or face"), &mut settings, &mut lock);
+
+        assert!(opened.is_some_and(|opened| opened.book == book));
+    }
+
+    #[test]
+    fn a_prompt_turned_down_or_failing_is_no_lockout_and_writes_nothing() {
+        let (mut settings, _) = needing(Guard::Biometric);
+        let before = settings.wallets.clone();
+        let mut lock = Lock::locked();
+        fake::device(|device| device.answers.push(fake::Answer::Canceled));
+        let (said, _, opened) = drawn_lock(PHONE, None, &mut settings, &mut lock);
+
+        assert!(opened.is_none());
+        assert!(!said.contains("gone from this device"), "{said}");
+        assert!(said.contains("Unlock with fingerprint or face"), "there to try again: {said}");
+        assert!(matches!(&lock, Lock::Locked { gone: None, .. }));
+
+        fake::device(|device| device.answers.push(fake::Answer::Failed("too many tries")));
+        let (said, _, opened) = drawn_lock(PHONE, Some("Unlock with fingerprint or face"), &mut settings, &mut lock);
+
+        assert!(opened.is_none());
+        assert!(said.contains("too many tries") && !said.contains("gone from this device"), "{said}");
+        assert_eq!(settings.wallets, before);
+
+        // And it opens once it passes.
+        let (_, _, opened) = drawn_lock(PHONE, Some("Unlock with fingerprint or face"), &mut settings, &mut lock);
+
+        assert!(opened.is_some());
+    }
+
+    #[test]
+    fn a_lost_key_keeps_the_wallet_writes_nothing_says_why_and_removal_takes_a_typed_yes_alone() {
+        for guard in [Guard::Biometric, Guard::Both] {
+            let (mut settings, _) = needing(guard);
+            let before = settings.wallets.clone();
+            fake::lose_every_key();
+            let mut lock = Lock::locked();
+
+            if guard == Guard::Both {
+                let Lock::Locked { password, .. } = &mut lock else { unreachable!() };
+                *password = Typed::new("correct horse".to_string());
+                drawn_lock(PHONE, Some("Unlock with fingerprint or face"), &mut settings, &mut lock);
+            }
+
+            let (said, _, opened) = drawn_lock(PHONE, None, &mut settings, &mut lock);
+
+            assert!(opened.is_none(), "{guard:?}");
+            assert!(said.contains("gone from this device") && said.contains("Restore from words"), "{guard:?}: {said}");
+            assert!(said.contains("Adding a fingerprint or face"), "{guard:?}: and why: {said}");
+            assert_eq!(settings.wallets, before, "{guard:?}: nothing written");
+            assert!(settings.retired.is_empty() && !settings.persist_now, "{guard:?}");
+            assert!(fake::device(|device| device.forgotten.is_empty()), "{guard:?}");
+
+            // The way to restore stays there, and so does the way out.
+            assert!(said.contains("Add a wallet") && said.contains("Remove this wallet"), "{guard:?}: {said}");
+
+            let (said, _, _) = drawn_lock(PHONE, Some("Remove this wallet"), &mut settings, &mut lock);
+
+            assert!(said.contains("Mine, and every account and seed phrase sealed in it") && said.contains("out of reach for good"), "{guard:?}: {said}");
+
+            // A tap without a yes takes nothing; nor does anything else typed.
+            for typed in ["", "y", "yes please"] {
+                let Lock::Locked { removing: Some((_, yes)), .. } = &mut lock else { unreachable!() };
+                *yes = typed.to_string();
+                drawn_lock(PHONE, Some("Remove it"), &mut settings, &mut lock);
+
+                assert_eq!(settings.wallets.len(), 1, "{guard:?}: {typed:?}");
+            }
+
+            let Lock::Locked { removing: Some((_, yes)), .. } = &mut lock else { unreachable!() };
+            *yes = "yes".to_string();
+            drawn_lock(PHONE, Some("Remove it"), &mut settings, &mut lock);
+
+            assert!(settings.wallets.is_empty(), "{guard:?}");
+            assert_eq!(settings.retired, before[0].biometric.iter().cloned().collect::<Vec<_>>(), "{guard:?}");
+            assert!(settings.persist_now, "{guard:?}");
+            assert!(matches!(lock, Lock::Choose), "{guard:?}: on to making or restoring one");
+        }
+    }
+
+    #[test]
+    fn a_wallet_with_a_password_or_none_has_nothing_new_on_its_lock_screen() {
+        let phrase = Phrase::generate(12).unwrap();
+        let mut settings = Settings::with_wallets(Vec::new());
+        keep(&mut settings, "Mine".to_string(), Vault::create("correct horse").unwrap(), &phrase, String::new());
+        let mut lock = Lock::locked();
+        let (said, _, _) = drawn_lock(PHONE, None, &mut settings, &mut lock);
+
+        assert!(!said.contains("It will not open") && !said.contains("Remove"), "{said}");
+
+        let mut settings = Settings::with_wallets(Vec::new());
+        keep(&mut settings, "Open".to_string(), Vault::create("").unwrap(), &phrase, String::new());
+        let (said, _, _) = drawn_lock(PHONE, None, &mut settings, &mut Lock::locked());
+
+        assert!(said.contains("no password") && said.contains("need biometrics"), "the warning stays, and points on: {said}");
+    }
+
+    #[test]
+    fn a_wallet_left_with_either_keeps_opening_either_way_and_a_lost_key_falls_back_to_its_password() {
+        fake::fresh();
+        let phrase = Phrase::generate(12).unwrap();
+        let vault = Vault::create("correct horse").unwrap();
+        let enrolled = fake::keep(&vault.key());
+        let mut settings = Settings::with_wallets(Vec::new());
+        keep(&mut settings, "Mine".to_string(), vault, &phrase, String::new());
+        settings.wallets[0].biometric = Some(enrolled.0);
+
+        let (said, _, opened) = drawn_lock(PHONE, None, &mut settings, &mut Lock::locked());
+
+        assert!(opened.is_some(), "by biometrics, by itself");
+        assert!(said.contains("password"), "{said}");
+
+        let mut lock = Lock::locked();
+        let Lock::Locked { prompted, password, .. } = &mut lock else { unreachable!() };
+        *prompted = Some(0);
+        *password = Typed::new("correct horse".to_string());
+        assert!(drawn_lock(PHONE, Some("Unlock"), &mut settings, &mut lock).2.is_some(), "by its password");
+
+        fake::lose_every_key();
+        let (said, _, opened) = drawn_lock(PHONE, None, &mut settings, &mut Lock::locked());
+
+        assert!(opened.is_none());
+        assert!(said.contains("biometrics are off"), "{said}");
+        assert_eq!(settings.wallets[0].guard(), Guard::Password, "as it always did");
+        assert!(!said.contains("Remove this wallet"), "and it has its password, so nothing is stranded: {said}");
+    }
+
+    #[test]
+    fn where_biometrics_read_as_unavailable_a_wallet_that_needs_them_says_so_and_stays_as_it_was() {
+        let (mut settings, _) = needing(Guard::Biometric);
+        let before = settings.wallets.clone();
+        fake::device(|device| {
+            device.bound = chainv4_ui::biometric::Availability::Unavailable("no finger is enrolled".to_string());
+            device.answers.push(fake::Answer::Failed("no finger is enrolled"));
+        });
+        let (said, _, opened) = drawn_lock(PHONE, None, &mut settings, &mut Lock::locked());
+
+        assert!(opened.is_none());
+        assert!(said.contains("no finger is enrolled"), "{said}");
+        assert_eq!(settings.wallets, before);
+    }
+
+    #[test]
+    fn the_lock_screen_of_each_way_of_opening_draws_on_every_screen() {
+        for size in crate::views::drawn::SCREENS {
+            for guard in [Guard::Biometric, Guard::Both] {
+                let (mut settings, _) = needing(guard);
+                fake::lose_every_key();
+                let mut lock = Lock::locked();
+                let Lock::Locked { gone, removing, error, .. } = &mut lock else { unreachable!() };
+                *gone = Some(0);
+                *removing = Some((0, String::new()));
+                *error = Some("Something went wrong.".to_string());
+                let (_, width, _) = drawn_lock(size, None, &mut settings, &mut lock);
+
+                assert!(width <= size.0 + 0.5, "{guard:?}: {width} on a screen {} wide", size.0);
+
+                let (mut settings, _) = needing(guard);
+                let mut lock = Lock::locked();
+                let Lock::Locked { prompted, removing, .. } = &mut lock else { unreachable!() };
+                *prompted = Some(0);
+                *removing = Some((0, String::new()));
+                let (_, width, _) = drawn_lock(size, None, &mut settings, &mut lock);
+
+                assert!(width <= size.0 + 0.5, "{guard:?}: {width} on a screen {} wide", size.0);
+            }
+        }
     }
 }

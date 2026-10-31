@@ -214,8 +214,8 @@ trust. The explorer runs the same client and shows the balances it proved. See
 
 `wallet/` is a light wallet for the desktop, the browser, a Chrome or Firefox extension and
 Android, in egui. Its accounts come from a seed phrase, each with an Ed25519, an EdBlake and an
-Ethereum address; its keys are sealed with a password on the device, or opened with a fingerprint,
-Touch ID or a passkey, and it shows only what it proved itself:
+Ethereum address; its keys are sealed on the device with a password, with a fingerprint, Face ID or
+a passkey, or with both, and it shows only what it proved itself:
 
 ```sh
 cd wallet && cargo run --release -- --node http://127.0.0.1:8080

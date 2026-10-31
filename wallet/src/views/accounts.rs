@@ -41,6 +41,8 @@ pub struct AccountsState {
     /// The account whose key it asks about showing, the one whose key shows, and the one asked to
     /// be removed.
     asking_reveal: Option<usize>,
+    /// What opens the wallet, asked for before keys show when it needs hardware.
+    proving_reveal: crate::biometrics::Proof,
     revealing: Option<usize>,
     removing: Option<usize>,
     /// Reading a signer's account, on a watch-only sender.
@@ -127,7 +129,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
         None => {}
     }
 
-    theme::title(ui, &palette, "Accounts", "The keys this wallet holds, sealed with your password on this device.");
+    theme::title(ui, &palette, "Accounts", "The keys this wallet holds, sealed on this device.");
 
     if ctx.holders.is_empty() {
         theme::card(ui, &palette, |ui| {
@@ -295,14 +297,14 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
 
 /// Adding a further seed phrase: words written down before, with their passphrase if they had one,
 /// or new ones, written down and three of them asked back as a new wallet's are. It comes with its
-/// first account, and is sealed with this wallet's one password.
+/// first account, and is sealed with the rest of this wallet.
 fn more_words(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
     let palette = *ctx.palette;
 
     theme::card(ui, &palette, |ui| {
         let Some(more) = &mut state.more else {
             theme::caps(ui, &palette, "More words");
-            ui.label(RichText::new("This wallet can hold accounts from another seed phrase too, each counted on its own, as a restore of those words elsewhere counts them. All of them are sealed with this wallet's password.").small().color(palette.muted));
+            ui.label(RichText::new("This wallet can hold accounts from another seed phrase too, each counted on its own, as a restore of those words elsewhere counts them. All of them are sealed together, and open as this wallet does.").small().color(palette.muted));
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 // What an earlier try said of another way in says nothing of this one.
@@ -598,7 +600,8 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
 }
 
 /// Asks, in a box over the page, whether to show an account's private key, which anyone who sees it
-/// can spend from.
+/// can spend from. A wallet that needs hardware asks for what opens it too, as it would for its
+/// words: what such a wallet says it guards is not one tap away once it is open.
 fn reveal_question(ui: &mut Ui, ctx: &Ctx, state: &mut AccountsState) {
     let Some(index) = state.asking_reveal else {
         return;
@@ -611,6 +614,7 @@ fn reveal_question(ui: &mut Ui, ctx: &Ctx, state: &mut AccountsState) {
     let palette = *ctx.palette;
     let name = holder.name.clone();
     let mut answer = None;
+    let asks_proof = ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| entry.guard().needs_hardware());
 
     let modal = egui::Modal::new(ui.make_persistent_id("reveal key"))
         .frame(egui::Frame::new().fill(palette.card).stroke(egui::Stroke::new(1.0, palette.line)).corner_radius(12.0).inner_margin(egui::Margin::same(20)))
@@ -629,8 +633,14 @@ fn reveal_question(ui: &mut Ui, ctx: &Ctx, state: &mut AccountsState) {
                     .color(palette.muted),
             );
             ui.add_space(12.0);
+
+            if asks_proof {
+                state.proving_reveal.field(ui, ctx.settings, "the wallet's password");
+                state.proving_reveal.trouble(ui, &palette);
+            }
+
             ui.horizontal_wrapped(|ui| {
-                if theme::primary(ui, &palette, "Show them", true).clicked() {
+                if theme::primary(ui, &palette, "Show them", !asks_proof || state.proving_reveal.ready(ctx.settings)).clicked() {
                     answer = Some(true);
                 }
 
@@ -641,13 +651,26 @@ fn reveal_question(ui: &mut Ui, ctx: &Ctx, state: &mut AccountsState) {
         });
 
     match answer {
+        Some(true) if asks_proof => state.proving_reveal.start(ctx.wake, ctx.settings, &format!("Show the keys of {name}")),
         Some(true) => {
             state.revealing = Some(index);
             state.asking_reveal = None;
         }
-        Some(false) => state.asking_reveal = None,
-        None if modal.should_close() => state.asking_reveal = None,
+        Some(false) => {
+            state.asking_reveal = None;
+            state.proving_reveal = Default::default();
+        }
+        None if modal.should_close() => {
+            state.asking_reveal = None;
+            state.proving_reveal = Default::default();
+        }
         None => {}
+    }
+
+    if asks_proof && state.proving_reveal.take(ctx.settings).is_some() {
+        state.revealing = Some(index);
+        state.asking_reveal = None;
+        state.proving_reveal = Default::default();
     }
 }
 
@@ -704,6 +727,13 @@ fn add(ctx: &mut Ctx, state: &mut AccountsState, made: Result<Holder, String>) {
             return;
         }
     };
+
+    // No words bring back a key brought in, and a wallet needing hardware has only words to go back to.
+    if matches!(made.source, Source::Key { .. }) && ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| entry.guard().needs_hardware()) {
+        state.error = Some("This wallet opens only with biometrics, and if that is ever lost, only its words bring it back. They would not bring back a key brought in, so it holds none: switch it to a password only in Settings first.".to_string());
+
+        return;
+    }
 
     if let Some(held) = made.addresses().into_iter().find(|address| ctx.holders.iter().any(|holder| holder.addresses().contains(address))) {
         state.error = Some(format!("{} is in this wallet already", format::short(&held.to_string())));
@@ -1151,5 +1181,67 @@ mod tests {
         let back = new_account(&book, &holders, KeyType::Ed25519, from).unwrap();
 
         assert_eq!((back.number(), back.addresses()), (Some(0), gone));
+    }
+
+    /// A world of one wallet that needs biometrics alone, on a fresh fake device.
+    fn needing_biometrics(book: &Book) -> crate::views::drawn::World {
+        use crate::{biometrics::fake, guard::{Guard, tagged}, vault::{Vault, fresh_secret}};
+
+        fake::fresh();
+        let secret = fresh_secret().unwrap();
+        let vault = Vault::keyed(&secret).unwrap();
+        let entry = crate::app::WalletEntry { name: "Mine".to_string(), vault: vault.seal(book).unwrap(), current: String::new(), biometric: tagged(Guard::Biometric, &fake::keep(&secret)), unprotected: false };
+
+        crate::views::drawn::World { settings: crate::app::Settings::with_wallets(vec![entry]), vault: Some(vault), ..crate::views::drawn::World::default() }
+    }
+
+    #[test]
+    fn a_wallet_that_needs_biometrics_takes_no_key_its_words_cannot_bring_back() {
+        let mut book = crate::views::drawn::two_phrases();
+        let mut holders = keys::open(&book).unwrap();
+        let mut world = needing_biometrics(&book);
+        let mut state = AccountsState::default();
+        let mut once = Some(brought_in(Keypair::development()));
+        let (_, changed) = crate::views::drawn::page_in(&mut world, &mut book, &mut holders, (360.0, 740.0), |_, ctx| {
+            if let Some(made) = once.take() {
+                add(ctx, &mut state, Ok(made));
+            }
+        });
+
+        assert!(!changed);
+        assert_eq!(holders.len(), 2, "it stays out");
+        assert!(state.error.unwrap().contains("words"));
+    }
+
+    #[test]
+    fn a_wallet_that_needs_biometrics_asks_for_them_before_keys_show() {
+        use crate::biometrics::fake;
+
+        let mut book = crate::views::drawn::two_phrases();
+        let mut holders = keys::open(&book).unwrap();
+        let mut world = needing_biometrics(&book);
+        let mut state = AccountsState { asking_reveal: Some(0), ..AccountsState::default() };
+
+        fake::device(|device| device.answers.push(fake::Answer::Canceled));
+        crate::views::drawn::tap_in(&mut world, &mut book, &mut holders, (360.0, 740.0), "Show them", |ui, ctx| reveal_question(ui, ctx, &mut state));
+        assert_eq!((state.revealing, state.asking_reveal), (None, Some(0)), "turned down, they stay hidden");
+
+        crate::views::drawn::tap_in(&mut world, &mut book, &mut holders, (360.0, 740.0), "Show them", |ui, ctx| reveal_question(ui, ctx, &mut state));
+        assert_eq!((state.revealing, state.asking_reveal), (Some(0), None));
+
+        fake::lose_every_key();
+        let mut state = AccountsState { asking_reveal: Some(0), ..AccountsState::default() };
+        crate::views::drawn::tap_in(&mut world, &mut book, &mut holders, (360.0, 740.0), "Show them", |ui, ctx| reveal_question(ui, ctx, &mut state));
+        assert_eq!(state.revealing, None, "with its key gone, nothing shows");
+    }
+
+    #[test]
+    fn a_wallet_with_a_password_or_none_shows_keys_as_it_always_did() {
+        let mut book = crate::views::drawn::two_phrases();
+        let mut holders = keys::open(&book).unwrap();
+        let mut state = AccountsState { asking_reveal: Some(0), ..AccountsState::default() };
+        crate::views::drawn::tap(&mut book, &mut holders, (360.0, 740.0), "Show them", |ui, ctx| reveal_question(ui, ctx, &mut state));
+
+        assert_eq!((state.revealing, state.asking_reveal), (Some(0), None));
     }
 }

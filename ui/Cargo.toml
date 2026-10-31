@@ -76,6 +76,11 @@ objc2-local-authentication = { version = "0.3.2", default-features = false, feat
 block2 = "0.6.2"
 security-framework = "3.5.1"
 
+# On iOS a secret kept for a wallet that needs biometrics to open is a Keychain item tied to them,
+# and its query is written in Core Foundation's own terms.
+[target.'cfg(target_os = "ios")'.dependencies.core-foundation]
+version = "0.10"
+
 # Android runs an app in a NativeActivity: no Java of its own.
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15.1"

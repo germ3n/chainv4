@@ -1,14 +1,16 @@
 //! The wallet open: its name, its words, and removing it. Then which node to talk to, the proxy
 //! every request goes through, which chain to trust there, the light client's saved progress, and
-//! how the wallet keeps its keys: when it locks itself, the password that seals them, and the
-//! biometrics that may open them instead.
+//! how the wallet keeps its keys: when it locks itself, what opens it, and its password if it has
+//! one.
+
+mod opening;
 
 use {
     super::Ctx,
     crate::app::Role,
-    crate::biometrics::{self, Enrolling},
-    chainv4_ui::biometric::{self as platform, Availability, Failure},
+    crate::biometrics::{self, Proof},
     crate::format,
+    crate::guard::{self, Factors, Guard, confirmed},
     crate::lock::{self, Typed},
     crate::theme,
     crate::vault::{Vault, Words},
@@ -31,13 +33,15 @@ pub struct SettingsState {
     current: Typed,
     new: Typed,
     again: Typed,
-    /// What came of changing the password.
+    /// What came of changing the password, and a change under way on a wallet that also needs
+    /// hardware, waiting for its check.
     changed: Option<Result<String, String>>,
+    changing: Option<Proof>,
     /// The wallet's name, being typed.
     name: Option<String>,
-    /// Asking for the password before a phrase's words show, by its place, and which one shows:
-    /// one at a time.
-    asking_words: Option<(usize, Typed, Option<String>)>,
+    /// Asking for what opens the wallet before a phrase's words show, by its place, and which one
+    /// shows: one at a time.
+    asking_words: Option<(usize, Proof)>,
     showing_words: Option<usize>,
     /// Words typed for a wallet that has none.
     words: Typed,
@@ -48,11 +52,11 @@ pub struct SettingsState {
     removing_words: Option<RemovingWords>,
     /// Clearing what the signer signed, once asked whether it means to.
     clearing_signed: bool,
-    /// Asking for the password before the wallet is removed.
-    removing: Option<(Typed, Option<String>)>,
-    /// Biometrics being turned on, and what came of turning them on or off.
-    enrolling: Option<Enrolling>,
-    biometric_said: Option<Result<String, String>>,
+    /// Asking for what opens the wallet before it is removed.
+    removing: Option<Proof>,
+    /// A switch to another way of opening under way, and what came of the last.
+    switching: Option<opening::Switching>,
+    opening_said: Option<Result<String, String>>,
 }
 
 /// A signer's history of what it signed: whether to keep one, and clearing it, asked twice. It is
@@ -104,22 +108,26 @@ fn signed_history(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     });
 }
 
-/// Removing a further phrase: which, by its place, what is typed to confirm it, and the password.
+/// Removing a further phrase: which, by its place, what is typed to confirm it, and what opens the
+/// wallet.
 #[derive(Default)]
 struct RemovingWords {
     index: usize,
     confirm: String,
-    password: Typed,
+    proof: Proof,
     error: Option<String>,
 }
 
 impl SettingsState {
-    /// Puts away the words, if shown, the password asked for them, and a phrase's removal half asked.
+    /// Puts away the words, if shown, what was asked for them, a phrase's removal half asked, and a
+    /// switch half done, whose new key, unused, nothing names.
     pub fn hide(&mut self) {
         self.showing_words = None;
         self.asking_words = None;
         self.removing_words = None;
         self.clearing_signed = false;
+        self.switching = None;
+        self.changing = None;
     }
 }
 
@@ -162,7 +170,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
             ui.label(RichText::new(if ctx.settings.lock_after == 0 { "never, until you lock it" } else { "without input" }).small().color(palette.muted));
         });
 
-        biometric(ui, ctx, state);
+        opening::show(ui, ctx, state);
 
         if role == Role::Signer {
             your_chain(ui, ctx);
@@ -171,14 +179,26 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
 
         ui.add_space(10.0);
         theme::caps(ui, &palette, "Password");
+        let guard = ctx.settings.wallets.get(ctx.settings.wallet).map_or(Guard::Password, crate::app::WalletEntry::guard);
+
+        if guard == Guard::Biometric {
+            ui.label(RichText::new("This wallet has none: biometrics alone open it. Choosing to use a password, or to require both, is above.").small().color(palette.muted));
+
+            return;
+        }
 
         for (field, hint) in [(&mut state.current, "current password"), (&mut state.new, "new password"), (&mut state.again, "the new one again")] {
             crate::lock::secret(ui, egui::TextEdit::singleline(&mut **field).password(true).hint_text(hint).desired_width(f32::INFINITY));
         }
 
-        if theme::quiet(ui, &palette, "Change password").clicked() {
-            state.changed = Some(change_password(ctx, state));
+        if theme::quiet(ui, &palette, "Change password").clicked() && state.changing.is_none() {
+            match guard {
+                Guard::Both => start_changing_both(ctx, state),
+                _ => state.changed = Some(change_password(ctx, state)),
+            }
         }
+
+        finish_changing_both(ctx, state);
 
         match &state.changed {
             Some(Ok(done)) => {
@@ -523,36 +543,30 @@ fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         match &mut state.removing {
             None => {
                 if theme::quiet(ui, &palette, "Remove this wallet").clicked() {
-                    state.removing = Some((Typed::default(), None));
+                    state.removing = Some(Proof::default());
                 }
             }
-            Some((password, error)) => {
+            Some(proof) => {
                 ui.label(
                     RichText::new("Its words and keys leave this device. Without the words written down, or copies of its keys, what its accounts hold is out of reach for good.")
                         .color(palette.bad),
                 );
-                crate::lock::secret(ui, egui::TextEdit::singleline(&mut **password).password(true).hint_text("its password, to be sure").desired_width(f32::INFINITY));
-
-                if let Some(error) = error {
-                    ui.colored_label(palette.bad, error.as_str());
-                }
+                proof.field(ui, ctx.settings, "its password, to be sure");
+                proof.trouble(ui, &palette);
 
                 let mut keep = false;
                 ui.horizontal_wrapped(|ui| {
-                    if theme::primary(ui, &palette, "Remove it", !password.is_empty() || unprotected(ctx)).clicked() {
-                        match opens(ctx, password) {
-                            true => {
-                                biometrics::turn_off(ctx.wake, ctx.settings);
-                                ctx.settings.wallets.remove(ctx.settings.wallet);
-                                ctx.settings.wallet = 0;
-                                *ctx.leave = true;
-                            }
-                            false => *error = Some("not its password".to_string()),
-                        }
+                    if theme::primary(ui, &palette, "Remove it", proof.ready(ctx.settings)).clicked() {
+                        proof.start(ctx.wake, ctx.settings, &format!("Remove {named}"));
                     }
 
                     keep = theme::quiet(ui, &palette, "Keep it").clicked();
                 });
+
+                if proof.take(ctx.settings).is_some() {
+                    guard::remove_wallet(ctx.settings, ctx.settings.wallet);
+                    *ctx.leave = true;
+                }
 
                 if keep {
                     state.removing = None;
@@ -562,13 +576,13 @@ fn wallet(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     });
 }
 
-/// A phrase's words, once the password was typed, or the button that asks for it.
+/// A phrase's words, once what opens the wallet was given, or the button that asks for it.
 fn show_words(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState, index: usize) {
     let palette = *ctx.palette;
 
     if state.showing_words != Some(index) {
         if theme::quiet(ui, &palette, "Show the words").clicked() {
-            state.asking_words = Some((index, Typed::default(), None));
+            state.asking_words = Some((index, Proof::default()));
         }
 
         return;
@@ -657,7 +671,8 @@ fn several_words(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     }
 }
 
-/// What removing a phrase takes, shown first; then a typed yes and the password before it goes.
+/// What removing a phrase takes, shown first; then a typed yes and what opens the wallet before it
+/// goes.
 fn remove_words(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, index: usize) {
     let palette = *ctx.palette;
     let Some(removing) = &mut state.removing_words else {
@@ -694,50 +709,47 @@ fn remove_words(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState, index: us
     }
 
     ui.add(egui::TextEdit::singleline(&mut removing.confirm).hint_text("type yes").desired_width(f32::INFINITY));
-    crate::lock::secret(ui, egui::TextEdit::singleline(&mut *removing.password).password(true).hint_text("the wallet's password").desired_width(f32::INFINITY));
+    removing.proof.field(ui, ctx.settings, "the wallet's password");
+    removing.proof.trouble(ui, &palette);
 
     if let Some(error) = &removing.error {
         ui.colored_label(palette.bad, error.as_str());
     }
 
     let (mut go, mut keep) = (false, false);
-    let ready = confirmed(&removing.confirm) && (!removing.password.is_empty() || unprotected(ctx));
+    let ready = confirmed(&removing.confirm) && removing.proof.ready(ctx.settings);
     ui.horizontal_wrapped(|ui| {
         go = theme::primary(ui, &palette, "Remove them", ready).clicked();
         keep = theme::quiet(ui, &palette, "Keep them").clicked();
     });
 
     if go && ready {
-        match opens(ctx, &removing.password) {
-            true => match crate::keys::remove_phrase(ctx.book, ctx.holders, index) {
-                Ok(()) => {
-                    // The one in use moves to the first left if it went.
-                    if !ctx.holders.iter().any(|holder| holder.id() == ctx.settings.current()) {
-                        ctx.settings.set_current(ctx.holders.first().map(crate::keys::Holder::id).unwrap_or_default());
-                    }
+        removing.proof.start(ctx.wake, ctx.settings, "Remove these words");
+    }
 
-                    *ctx.changed = true;
-                    state.showing_words = None;
-                    state.naming_words = None;
-                    state.removing_words = None;
+    if removing.proof.take(ctx.settings).is_some() {
+        match crate::keys::remove_phrase(ctx.book, ctx.holders, index) {
+            Ok(()) => {
+                // The one in use moves to the first left if it went.
+                if !ctx.holders.iter().any(|holder| holder.id() == ctx.settings.current()) {
+                    ctx.settings.set_current(ctx.holders.first().map(crate::keys::Holder::id).unwrap_or_default());
                 }
-                Err(why) => removing.error = Some(why),
-            },
-            false => removing.error = Some("not the wallet's password".to_string()),
+
+                *ctx.changed = true;
+                state.showing_words = None;
+                state.naming_words = None;
+                state.removing_words = None;
+            }
+            Err(why) => removing.error = Some(why),
         }
     } else if keep {
         state.removing_words = None;
     }
 }
 
-/// Whether what was typed confirms a removal: yes, however it is written, and nothing else.
-fn confirmed(typed: &str) -> bool {
-    typed.trim().eq_ignore_ascii_case("yes")
-}
-
-/// Asks, in a box over the page, for the password before the words show.
+/// Asks, in a box over the page, for what opens the wallet before the words show.
 fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
-    let Some((index, password, error)) = &mut state.asking_words else {
+    let Some((index, proof)) = &mut state.asking_words else {
         return;
     };
     let index = *index;
@@ -757,16 +769,11 @@ fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
             ui.label(RichText::new("Anyone who sees them can take everything every account made from them holds, now and later.").color(palette.ink));
             ui.label(RichText::new("Show them only to write them down, with no one watching your screen and nothing recording it.").small().color(palette.muted));
             ui.add_space(8.0);
-            let field = crate::lock::secret(ui, egui::TextEdit::singleline(&mut **password).password(true).hint_text("the wallet's password").desired_width(f32::INFINITY));
-            let enter = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-
-            if let Some(error) = error {
-                ui.colored_label(palette.bad, error.as_str());
-            }
-
+            let enter = proof.field(ui, ctx.settings, "the wallet's password");
+            proof.trouble(ui, &palette);
             ui.add_space(12.0);
             ui.horizontal_wrapped(|ui| {
-                if theme::primary(ui, &palette, "Show them", !password.is_empty() || unprotected(ctx)).clicked() || enter {
+                if theme::primary(ui, &palette, "Show them", proof.ready(ctx.settings)).clicked() || enter {
                     answer = Some(true);
                 }
 
@@ -777,25 +784,29 @@ fn words_question(ui: &mut Ui, ctx: &Ctx, state: &mut SettingsState) {
         });
 
     match answer {
-        Some(true) => match opens(ctx, password) {
-            true => {
-                state.showing_words = Some(index);
-                state.asking_words = None;
-            }
-            false => *error = Some("not the wallet's password".to_string()),
-        },
-        Some(false) => state.asking_words = None,
-        None if modal.should_close() => state.asking_words = None,
+        Some(true) if proof.ready(ctx.settings) => proof.start(ctx.wake, ctx.settings, "Show the words"),
+        Some(true) => {}
+        Some(false) => {
+            state.asking_words = None;
+
+            return;
+        }
+        None if modal.should_close() => {
+            state.asking_words = None;
+
+            return;
+        }
         None => {}
+    }
+
+    if proof.take(ctx.settings).is_some() {
+        state.showing_words = Some(index);
+        state.asking_words = None;
     }
 }
 
-/// Whether the wallet open has no password.
-fn unprotected(ctx: &Ctx) -> bool {
-    ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| entry.unprotected)
-}
-
-/// Whether the password opens the wallet open.
+/// Whether the password opens the wallet open, for one with a password alone or with biometrics as
+/// an alternative.
 fn opens(ctx: &Ctx, password: &str) -> bool {
     ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| Vault::open(&entry.vault, password).is_ok())
 }
@@ -822,7 +833,8 @@ fn change_password(ctx: &mut Ctx, state: &mut SettingsState) -> Result<String, S
         entry.unprotected = none;
     }
 
-    // They kept the key the old password stretched to, which opens nothing now.
+    // They kept the key the old password stretched to, which opens nothing now. A wallet that needs
+    // hardware does not come this way.
     let had = ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| entry.biometric.is_some());
     biometrics::turn_off(ctx.wake, ctx.settings);
     state.current.clear();
@@ -835,92 +847,58 @@ fn change_password(ctx: &mut Ctx, state: &mut SettingsState) -> Result<String, S
     };
 
     Ok(match had {
-        true => format!("{sealed} Biometrics are off: turn them on again to use them with it."),
+        true => format!("{sealed} Biometrics are off: choose a mode above to use them again."),
         false => sealed.to_string(),
     })
 }
 
-/// Turning biometrics on or off for the wallet open: unlocking with them, and confirming each
-/// send with one more check.
-fn biometric(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
-    let palette = *ctx.palette;
-    ui.add_space(10.0);
-    theme::caps(ui, &palette, "Biometrics");
-
-    if let Some(came) = state.enrolling.as_ref().and_then(Enrolling::take) {
-        state.enrolling = None;
-        state.biometric_said = match came {
-            Ok(enrolled) => match ctx.settings.wallets.get_mut(ctx.settings.wallet) {
-                Some(entry) => {
-                    entry.biometric = Some(enrolled.0);
-
-                    Some(Ok("On: they unlock this wallet, and confirm each send.".to_string()))
-                }
-                None => {
-                    platform::forget(ctx.wake, &enrolled);
-
-                    Some(Err("the wallet is gone".to_string()))
-                }
-            },
-            Err(Failure::Canceled) => None,
-            Err(why) => Some(Err(why.to_string())),
-        };
+/// Asks for the password and the check of a wallet that needs both, once the new password will do.
+fn start_changing_both(ctx: &Ctx, state: &mut SettingsState) {
+    if state.new.len() < 8 {
+        state.changed = Some(Err("use at least 8 characters: this wallet needs its password".to_string()));
+    } else if state.new != state.again {
+        state.changed = Some(Err("the two new ones do not match".to_string()));
+    } else {
+        let mut proof = Proof::default();
+        proof.password = state.current.clone();
+        proof.start(ctx.wake, ctx.settings, "Change the password");
+        state.changing = Some(proof);
     }
+}
 
-    let on = ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| entry.biometric.is_some());
+/// The new password of a wallet that needs both, once the check gave back the secret it holds: its
+/// key made anew from the two, the vault sealed under it and opened again, before it replaces the
+/// old one. The secret stays what it was, so the same hardware key goes on opening it. Whatever
+/// fails leaves it as it was.
+fn finish_changing_both(ctx: &mut Ctx, state: &mut SettingsState) {
+    let Some(proof) = &mut state.changing else {
+        return;
+    };
 
-    match platform::availability(ctx.wake) {
-        Availability::Ready(kind) => {
-            ui.label(
-                RichText::new(format!(
-                    "Unlock this wallet with {} instead of its password, and confirm each send with one. The password still opens it, and is needed again if the fingerprints or faces here change.",
-                    kind.name()
-                ))
-                .small()
-                .color(palette.muted),
-            );
+    if let Some(proven) = proof.take(ctx.settings) {
+        state.changing = None;
+        let record = ctx.settings.wallets.get(ctx.settings.wallet).and_then(|entry| entry.biometric.clone());
+        let replaced = proven.secret.ok_or("the check gave no secret".to_string()).and_then(|secret| {
+            let (opened, sealed) = guard::sealed_anew(&Factors::Both(&state.new, &secret), ctx.book)?;
+            guard::adopt(ctx.settings, sealed, record)?;
+            *ctx.vault = Some(opened);
 
-            match (on, ctx.vault.as_ref()) {
-                (true, _) => {
-                    if theme::quiet(ui, &palette, &format!("Turn off {}", kind.name())).clicked() {
-                        biometrics::turn_off(ctx.wake, ctx.settings);
-                        state.biometric_said = Some(Ok("Off: the password unlocks this wallet.".to_string()));
-                    }
-                }
-                (false, Some(vault)) => {
-                    let name = ctx.settings.wallets.get(ctx.settings.wallet).map(|entry| entry.name.clone()).unwrap_or_default();
+            Ok(())
+        });
 
-                    if theme::quiet(ui, &palette, &format!("Turn on {}", kind.name())).clicked() && state.enrolling.is_none() {
-                        state.enrolling = Some(Enrolling::start(ctx.wake, &name, vault.key()));
-                    }
-                }
-                (false, None) => {}
-            }
+        state.changed = Some(replaced.map(|()| {
+            state.current.clear();
+            state.new.clear();
+            state.again.clear();
 
-            if state.enrolling.is_some() {
-                ui.label(RichText::new(format!("Waiting for {}…", kind.name())).small().color(palette.muted));
-            }
-        }
-        Availability::Unavailable(why) => {
-            if on {
-                // Turned on where they worked, such as before the fingerprints were removed.
-                if theme::quiet(ui, &palette, "Turn off biometrics").clicked() {
-                    biometrics::turn_off(ctx.wake, ctx.settings);
-                }
-            }
-
-            ui.label(RichText::new(format!("Not here: {why}.")).small().color(palette.muted));
-        }
-    }
-
-    match &state.biometric_said {
-        Some(Ok(said)) => {
-            ui.colored_label(palette.good, said);
-        }
-        Some(Err(why)) => {
-            ui.colored_label(palette.bad, why);
-        }
-        None => {}
+            "Sealed with the new password, and the same hardware key.".to_string()
+        }));
+    } else if let Some(why) = proof.error.take() {
+        state.changing = None;
+        state.changed = Some(Err(why));
+    } else if !proof.waiting() {
+        // Turned down: nothing happened.
+        state.changing = None;
     }
 }
 
@@ -1175,5 +1153,198 @@ mod tests {
         assert_eq!(state.node.as_deref(), Some("http://127.0.0.1:8090"), "the field starts at the node set");
         assert_eq!(state.proxy.as_deref(), Some("socks5h://127.0.0.1:9050"));
         assert_eq!((settings.node.as_str(), settings.proxy.as_str()), ("http://127.0.0.1:8090", "socks5h://127.0.0.1:9050"));
+    }
+
+    /// What opens every kind of wallet, for what asks for it on these pages.
+    mod guarded {
+        use {
+            super::*,
+            crate::app::{Settings, WalletEntry},
+            crate::biometrics::fake,
+            crate::vault::{Sealed, fresh_secret},
+            crate::views::drawn::{self, World},
+        };
+
+        const PHONE: (f32, f32) = (360.0, 740.0);
+
+        fn entry(vault: Sealed, biometric: Option<String>) -> WalletEntry {
+            WalletEntry { name: "Mine".to_string(), vault, current: String::new(), biometric, unprotected: false }
+        }
+
+        /// A wallet of this guard, open, with two phrases.
+        fn needing(guard: Guard) -> (World, Book, zeroize::Zeroizing<[u8; 32]>) {
+            fake::fresh();
+            let book = drawn::two_phrases();
+            let secret = fresh_secret().unwrap();
+            let vault = match guard {
+                Guard::Both => Vault::both("correct horse", &secret).unwrap(),
+                Guard::Biometric => Vault::keyed(&secret).unwrap(),
+                _ => Vault::create("correct horse").unwrap(),
+            };
+            let sealed = vault.seal(&book).unwrap();
+            let record = if guard.needs_hardware() { guard::tagged(guard, &fake::keep(&secret)) } else { None };
+
+            (World { settings: Settings::with_wallets(vec![entry(sealed, record)]), vault: Some(vault), ..World::default() }, book, secret)
+        }
+
+        #[test]
+        fn removing_a_wallet_asks_for_what_opens_it_and_nothing_less() {
+            for guard in [Guard::Password, Guard::Biometric, Guard::Both] {
+                let (mut world, mut book, _) = needing(guard);
+                let mut state = SettingsState::default();
+                let mut holders = crate::keys::open(&book).unwrap();
+                drawn::tap_in(&mut world, &mut book, &mut holders, PHONE, "Remove this wallet", |ui, ctx| wallet(ui, ctx, &mut state));
+                let said = drawn::said_in(&mut world, &mut book, &mut holders, PHONE, |ui, ctx| wallet(ui, ctx, &mut state));
+
+                assert!(said.contains("Remove it"), "{guard:?}: {said}");
+
+                // Turned down, or with the wrong password, it stays.
+                match guard {
+                    Guard::Biometric => fake::device(|device| device.answers.push(fake::Answer::Canceled)),
+                    _ => state.removing.as_mut().unwrap().password = Typed::new("not the password".to_string()),
+                }
+
+                drawn::tap_in(&mut world, &mut book, &mut holders, PHONE, "Remove it", |ui, ctx| wallet(ui, ctx, &mut state));
+                assert_eq!(world.settings.wallets.len(), 1, "{guard:?}");
+
+                state.removing.as_mut().unwrap().password = Typed::new("correct horse".to_string());
+                drawn::tap_in(&mut world, &mut book, &mut holders, PHONE, "Remove it", |ui, ctx| wallet(ui, ctx, &mut state));
+
+                assert!(world.settings.wallets.is_empty(), "{guard:?}");
+                assert!(world.leave, "{guard:?}");
+                assert_eq!(world.settings.retired.len(), usize::from(guard.needs_hardware()), "{guard:?}: its key forgotten once settings say so");
+            }
+        }
+
+        #[test]
+        fn the_words_show_only_for_what_opens_the_wallet() {
+            for guard in [Guard::Password, Guard::Biometric, Guard::Both] {
+                let (mut world, mut book, _) = needing(guard);
+                let mut state = SettingsState { asking_words: Some((0, Proof::default())), ..SettingsState::default() };
+                let mut holders = crate::keys::open(&book).unwrap();
+
+                match guard {
+                    Guard::Biometric => fake::device(|device| device.answers.push(fake::Answer::Failed("too many tries"))),
+                    _ => state.asking_words.as_mut().unwrap().1.password = Typed::new("not the password".to_string()),
+                }
+
+                let said = drawn::tap_in(&mut world, &mut book, &mut holders, PHONE, "Show them", |ui, ctx| words_question(ui, ctx, &mut state));
+
+                assert_eq!(state.showing_words, None, "{guard:?}: {said}");
+
+                state.asking_words.as_mut().unwrap().1.password = Typed::new("correct horse".to_string());
+                drawn::tap_in(&mut world, &mut book, &mut holders, PHONE, "Show them", |ui, ctx| words_question(ui, ctx, &mut state));
+
+                assert_eq!(state.showing_words, Some(0), "{guard:?}");
+                assert!(state.asking_words.is_none(), "{guard:?}");
+            }
+        }
+
+        #[test]
+        fn removing_a_phrase_takes_a_yes_and_what_opens_the_wallet() {
+            for guard in [Guard::Password, Guard::Biometric, Guard::Both] {
+                let (mut world, mut book, _) = needing(guard);
+                let mut holders = crate::keys::open(&book).unwrap();
+                let mut state = SettingsState { removing_words: Some(RemovingWords { index: 1, confirm: "yes".to_string(), ..RemovingWords::default() }), ..SettingsState::default() };
+
+                if guard == Guard::Biometric {
+                    fake::device(|device| device.answers.push(fake::Answer::Canceled));
+                } else {
+                    state.removing_words.as_mut().unwrap().proof.password = Typed::new("not it".to_string());
+                }
+
+                drawn::tap_in(&mut world, &mut book, &mut holders, PHONE, "Remove them", |ui, ctx| remove_words(ui, ctx, &mut state, 1));
+                assert_eq!(book.phrases.len(), 2, "{guard:?}");
+
+                state.removing_words.as_mut().unwrap().proof.password = Typed::new("correct horse".to_string());
+                drawn::tap_in(&mut world, &mut book, &mut holders, PHONE, "Remove them", |ui, ctx| remove_words(ui, ctx, &mut state, 1));
+                assert_eq!(book.phrases.len(), 1, "{guard:?}");
+            }
+        }
+
+        #[test]
+        fn changing_the_password_of_a_wallet_needing_both_keeps_the_hardware_key_and_checks_first() {
+            let (mut world, mut book, secret) = needing(Guard::Both);
+            let record = world.settings.wallets[0].biometric.clone();
+            let old = world.settings.wallets[0].clone();
+            let mut state = SettingsState::default();
+            let (type_in, new) = (|state: &mut SettingsState, current: &str, new: &str, again: &str| {
+                state.current = Typed::new(current.to_string());
+                state.new = Typed::new(new.to_string());
+                state.again = Typed::new(again.to_string());
+            }, "battery staple");
+
+            let draw = |world: &mut World, book: &mut Book, state: &mut SettingsState| drawn::tap_in(world, book, &mut Vec::new(), PHONE, "Change", |ui, ctx| {
+                if theme::quiet(ui, ctx.palette, "Change").clicked() {
+                    start_changing_both(ctx, state);
+                }
+
+                finish_changing_both(ctx, state);
+            });
+
+            // None at all is refused: it would no longer need both.
+            type_in(&mut state, "correct horse", "", "");
+            draw(&mut world, &mut book, &mut state);
+            assert!(state.changed.take().unwrap().unwrap_err().contains("at least 8"));
+
+            type_in(&mut state, "correct horse", new, "something else");
+            draw(&mut world, &mut book, &mut state);
+            assert!(state.changed.take().unwrap().unwrap_err().contains("do not match"));
+            assert_eq!(fake::device(|device| device.prompts), 0);
+
+            // The wrong current one, the check passing, and the check turned down.
+            type_in(&mut state, "not the password", new, new);
+            draw(&mut world, &mut book, &mut state);
+            assert!(state.changed.take().unwrap().is_err());
+            assert_eq!(world.settings.wallets[0], old);
+
+            type_in(&mut state, "correct horse", new, new);
+            fake::device(|device| device.answers.push(fake::Answer::Canceled));
+            draw(&mut world, &mut book, &mut state);
+            assert_eq!(world.settings.wallets[0], old, "turned down");
+
+            draw(&mut world, &mut book, &mut state);
+            assert!(state.changed.take().unwrap().is_ok());
+
+            let entry = &world.settings.wallets[0];
+
+            assert_eq!(entry.biometric, record, "the same record, and so the same key");
+            assert_ne!(entry.vault.salt, old.vault.salt, "under a salt of its own");
+            assert_eq!(Vault::open_both(&entry.vault, new, &secret).unwrap().1, book);
+            assert!(Vault::open_both(&entry.vault, "correct horse", &secret).is_err());
+            assert!(world.settings.retired.is_empty(), "nothing goes with it");
+            assert!(world.settings.persist_now);
+            assert_eq!(Vault::open_both(&world.vault.as_ref().unwrap().seal(&book).unwrap(), new, &secret).unwrap().1, book, "and what is open seals under it");
+        }
+
+        #[test]
+        fn a_wallet_with_biometrics_alone_has_no_password_to_change() {
+            let (mut world, mut book, _) = needing(Guard::Biometric);
+            let mut holders = Vec::new();
+            let mut state = SettingsState::default();
+            // Tall enough for the whole page, as what is off a screen is not drawn.
+            let said = drawn::said_in(&mut world, &mut book, &mut holders, (360.0, 6000.0), |ui, ctx| show(ui, ctx, &mut state));
+
+            assert!(!said.contains("Change password"), "{said}");
+            assert!(said.contains("This wallet has none"), "{said}");
+        }
+
+        #[test]
+        fn a_wallet_needing_both_is_never_offered_no_password_and_the_page_draws_on_every_screen() {
+            for size in drawn::SCREENS {
+                for guard in [Guard::Password, Guard::Biometric, Guard::Both] {
+                    let (mut world, mut book, _) = needing(guard);
+                    let mut holders = crate::keys::open(&book).unwrap();
+                    let mut state = SettingsState { removing: Some(Proof::default()), asking_words: Some((0, Proof::default())), ..SettingsState::default() };
+                    let (width, changed) = drawn::page_in(&mut world, &mut book, &mut holders, size, |ui, ctx| {
+                        wallet(ui, ctx, &mut state);
+                        words_question(ui, ctx, &mut state);
+                    });
+
+                    assert!(width <= size.0 + 0.5, "{guard:?}: {width} on a screen {} wide", size.0);
+                    assert!(!changed, "{guard:?}");
+                }
+            }
+        }
     }
 }
