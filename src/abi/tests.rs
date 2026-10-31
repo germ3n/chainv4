@@ -191,3 +191,58 @@ fn signatures_give_solidity_s_selectors_and_lists_give_none() {
     assert!(parse_signature("f(uint7)").is_err(), "no such type");
     assert!(parse_signature("f(uint256)[]").is_err(), "an array, not a list");
 }
+
+/// A bytes[] of this many elements, every offset at one long value.
+fn offsets_at_one_value(count: usize, long: usize) -> Vec<u8> {
+    let word = |value: usize| u256::from(value as u64).to_be_bytes();
+    let mut data = Vec::new();
+    data.extend(word(32));
+    data.extend(word(count));
+
+    for _ in 0..count {
+        data.extend(word(count * 32));
+    }
+
+    data.extend(word(long));
+    data.extend(vec![7u8; long]);
+
+    data
+}
+
+#[test]
+fn offsets_all_at_one_long_value_are_refused_rather_than_copied_out_each_time() {
+    // 328 KB, which would come out as 537 MB.
+    let attack = offsets_at_one_value(2_048, 262_144);
+
+    assert!(decode_values(&[ty("bytes[]")], &attack).is_err_and(|why| why.contains("honestly")));
+    // Two offsets at one short value still fit: what is refused is what grows.
+    assert_eq!(decode_values(&[ty("bytes[]")], &offsets_at_one_value(2, 32)).unwrap().len(), 1);
+}
+
+#[test]
+fn what_an_encoder_writes_always_decodes_within_its_room() {
+    let bytes = |size: usize| AbiValue::Bytes(vec![1; size]);
+    let word = AbiValue::Uint(u256::from(9u64));
+    let cases = [
+        ("uint256", word.clone()),
+        ("bytes", bytes(0)),
+        ("bytes", bytes(1)),
+        ("bytes", bytes(100_000)),
+        ("string", AbiValue::String("words".repeat(1_000))),
+        ("uint256[]", AbiValue::Array(Vec::new())),
+        ("uint256[]", AbiValue::Array(vec![word.clone(); 10_000])),
+        ("bytes[]", AbiValue::Array(vec![bytes(0); 5_000])),
+        ("bytes[]", AbiValue::Array(vec![bytes(1); 5_000])),
+        ("uint256[][]", AbiValue::Array(vec![AbiValue::Array(vec![word.clone(); 3]); 1_000])),
+        ("uint256[4]", AbiValue::Array(vec![word.clone(); 4])),
+        ("(uint256,bytes)[]", AbiValue::Array(vec![AbiValue::Tuple(vec![word.clone(), bytes(5)]); 1_000])),
+    ];
+
+    for (kind, value) in cases {
+        let types = [ty(kind)];
+        let values = [value];
+        let encoded = encode_values(&types, &values).unwrap();
+
+        assert_eq!(decode_values(&types, &encoded).as_deref(), Ok(&values[..]), "{kind}");
+    }
+}

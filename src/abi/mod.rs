@@ -346,13 +346,19 @@ pub fn signature_topic(text: &str) -> Result<[u8; 32], String> {
     returns = "The values, or why the bytes are not of the types.",
 )]
 pub fn decode_values(types: &[AbiType], data: &[u8]) -> Result<Vec<AbiValue>, String> {
-    decode_tuple(types, data, 0, &Cell::new(usize::MAX))
+    decode_tuple(types, data, 0, &Cell::new(room_for(data)))
+}
+
+/// What decoding these bytes may make: twice what they hold, and a little. Dynamic values may share
+/// their bytes, so with no limit, a few kilobytes of offsets all pointing at one long value decode to
+/// gigabytes, while fuel pays only for the bytes given. Encoders give each value bytes of its own, so
+/// what they write takes about what it holds. This is consensus: a contract's decode fails past it.
+fn room_for(data: &[u8]) -> usize {
+    data.len().saturating_mul(2).saturating_add(64)
 }
 
 /// As decode_values, with no more than this budget to spend on what comes out: a word a value and
-/// a byte a byte. Dynamic values may share their bytes, so without one, a few kilobytes of offsets
-/// all pointing at one long value decode to gigabytes. Honest bytes take about what they hold.
-/// Only what shows calldata to a person spends one: contracts decode without, as they always have.
+/// a byte a byte. What shows calldata to a person spends one of its own, smaller.
 fn decode_within(types: &[AbiType], data: &[u8], budget: &Cell<usize>) -> Result<Vec<AbiValue>, String> {
     decode_tuple(types, data, 0, budget)
 }

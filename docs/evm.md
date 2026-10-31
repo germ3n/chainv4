@@ -265,6 +265,8 @@ calldata, or types alone in parentheses for arguments, and `evm.decode` reads ei
 integers as their own types, addresses as the account behind them, arrays and tuples as tables.
 The EVM sees the Lua contract at its alias.
 
+**What decoding may make is limited:** twice the bytes it was given and a little, wherever a contract decodes, from Lua, WebAssembly or the EVM's way in to native contracts. Fuel pays for the bytes given, so without this, offsets all pointing at one long value would make gigabytes from kilobytes. What an encoder writes always fits, as it gives each value bytes of its own; bytes that share them past that fail like any others that do not read.
+
 **From WebAssembly,** the SDK's `evm_call(&address, value, &input)`, `abi_encode(signature,
 &values)` and `abi_decode(types, &data)` do the same; arrays and tuples have no value there.
 `contracts/examples/evm` bumps `Bridge`.

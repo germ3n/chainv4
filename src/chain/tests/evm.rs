@@ -1085,6 +1085,18 @@ function M.too_big()
     return evm.encode("(uint8)", 256)
 end
 
+-- A bytes[] with every offset at one long value, which fuel pays for only once.
+function M.shared()
+    local function word(number)
+        return evm.encode("(uint256)", u256(number))
+    end
+
+    local count, long = 2048, 262144
+    local bytes = word(32) .. word(count) .. string.rep(word(count * 32), count) .. word(long) .. string.rep("x", long)
+
+    return #evm.decode("(bytes[])", bytes)
+end
+
 return M
 "#;
 
@@ -1100,6 +1112,7 @@ fn lua_speaks_solidity_s_abi() {
         lua_call(&chain, user, "transfer", vec![TxCallArgumentType::Address(alice), TxCallArgumentType::U256(u256::new(5))]),
         next_nonce(lua_call(&chain, user, "round_trip", Vec::new()), &authority()),
         next_nonce(next_nonce(lua_call(&chain, user, "too_big", Vec::new()), &authority()), &authority()),
+        next_nonce(next_nonce(next_nonce(lua_call(&chain, user, "shared", Vec::new()), &authority()), &authority()), &authority()),
     ];
     let receipts = advance(&mut chain, calls);
     let expected = [
@@ -1125,6 +1138,7 @@ fn lua_speaks_solidity_s_abi() {
         receipts[1].result
     );
     assert!(matches!(&receipts[2].result, Err(failure) if failure.to_string().contains("uint8")), "{:?}", receipts[2].result);
+    assert!(matches!(&receipts[3].result, Err(failure) if failure.to_string().contains("honestly")), "fails like any bad bytes, and nothing more is made: {:?}", receipts[3].result);
 }
 
 #[cfg(feature = "swap")]

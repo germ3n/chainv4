@@ -756,6 +756,9 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **A small call could make every node allocate far more than it paid for.** `evm.decode` and its kin
+  copied out one long value for every offset pointing at it, for a fee on the input alone. What decoding may
+  make is limited by what it was given now. It needs every node at once.
 - [x] **EVM calls and logs read as hex, or as `log 32 bytes 32 bytes`.** Both apps read them by name
   now, by every ABI shipped and the standard ERC-20's and ERC-721's in `src/abi/known.rs`, an ABI
   pasted or saved first, saying which read them. ERC-20 and NFT transfers count as token moves, as

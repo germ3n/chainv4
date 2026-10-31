@@ -115,6 +115,10 @@ other pages explain each part in full; this one is the short list to keep in min
   late by up to 20 seconds, the slowest they ask with a stream open. Each open app holds one connection to
   the node, and a phone in the background keeps it until the system ends it. A stream that says
   nothing for 40 seconds is taken for dead, as the node says something every 15.
+- **ABI decoding is limited by consensus.** `decode_values` makes at most twice what it is given and a
+  little, as fuel pays only for the input and dynamic values may share their bytes: 328 KB of offsets at
+  one long value came to 537 MB, outside any VM's memory limit. It is a rule every node must apply alike,
+  so it goes out to all nodes at once.
 - **Read-only calls hold up the API.** `POST /call` runs a contract under the chain's fuel cap on
   the API's one thread, and every other request waits for it. Behind nginx, an address gets 5 a second; see
   [Docker](docker.md#what-is-exposed).
